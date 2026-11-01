@@ -1,0 +1,29 @@
+# Node / build çıktıları
+node_modules/
+dist/
+coverage/
+*.tsbuildinfo
+
+# Causoryn çalışma zamanı (izinli data-root örnekleri)
+.causoryn/
+.causoryn-runtime/
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+
+# Loglar
+*.log
+logs/
+
+# Ajan çalışma dizinleri (asla commit edilmez)
+out/
+
+# Ortam / sır dosyaları
+.env
+.env.*
+*.pem
+*.key
+
+# OS / editör
+Thumbs.db
+.DS_Store
