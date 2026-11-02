@@ -1,0 +1,10 @@
+{
+  "name": "@causoryn/indexing",
+  "version": "0.1.0",
+  "private": true,
+  "description": "IndexCoordinator: pipeline orkestrasyonu, invalidation ve atomik snapshot yayımlama (TŞ v2.1 §5, §9, §25/4-5).",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  }
+}

@@ -1,0 +1,13 @@
+{
+  "name": "@causoryn/mcp-server",
+  "version": "0.1.0",
+  "private": true,
+  "description": "MCP protokol adaptasyonu: input validation, authorization, rate/size limit ve Core application service yönlendirmesi (TŞ v2.1 §5, §10).",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.2"
+  }
+}

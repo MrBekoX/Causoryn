@@ -86,9 +86,12 @@ describe("edgeId", () => {
   });
 
   it("negatif: bilinmeyen edge türü DomainError fırlatır", () => {
-    expect(
-      domainErrorCode(() => edgeId({ ...baseEdge, kind: "CALLS_AT" })),
-    ).toBe("domain/unknown-edge-kind");
+    // Çalışma zamanı sınırında (MCP girdisi gibi) tip denetimini atlayan
+    // değer gelebilir; "CALLS_AT" kasıtlı olarak katalog dışıdır.
+    const hostileInput = { ...baseEdge, kind: "CALLS_AT" } as unknown as EdgeIdInput;
+    expect(domainErrorCode(() => edgeId(hostileInput))).toBe(
+      "domain/unknown-edge-kind",
+    );
   });
 
   it("negatif: boş from/to DomainError fırlatır", () => {

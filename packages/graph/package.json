@@ -1,0 +1,10 @@
+{
+  "name": "@causoryn/graph",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Graph sorgu ve traversal katmanı: immutable snapshot üzerinden deterministik okuma sorguları (TŞ v2.1 §8, §9, ADR-005).",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  }
+}

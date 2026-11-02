@@ -1,14 +1,20 @@
 /**
  * Vitest yapılandırması (TŞ v2.1 §6 — deterministik davranış, Vitest).
  *
- * Not: dosya kasıtlı olarak import'suz düz nesne export'udur. Bootstrapping
- * aşamasında vitest paketi proje `node_modules`'unda kurulu değilken (npm
- * install yapılmadan, `npx --no-install` ile) yapılandırmanın yüklenememesi
- * sorunu böylece önlenir; `defineConfig` yalnızca tip kolaylaştırıcıdır.
+ * Not: dosya kasıtlı olarak import'suz düz nesne export'udur; `defineConfig`
+ * yalnızca tip kolaylaştırıcıdır. Include desenleri Sprint-1 iskelet dilimiyle
+ * genişletildi: packages/, adapters/, integrations/ ve tests/ altındaki tüm
+ * *.test.ts dosyaları; node_modules/dist dışlanır.
  */
 const config = {
   test: {
-    include: ["packages/*/test/**/*.test.ts", "tests/**/*.test.ts"],
+    include: [
+      "packages/*/test/**/*.test.ts",
+      "adapters/*/test/**/*.test.ts",
+      "integrations/**/*.test.ts",
+      "tests/**/*.test.ts",
+    ],
+    exclude: ["**/node_modules/**", "**/dist/**"],
     environment: "node",
   },
 };

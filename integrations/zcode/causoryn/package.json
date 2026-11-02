@@ -1,0 +1,7 @@
+{
+  "name": "@causoryn/zcode-plugin",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Causoryn ZCode plugin paketi iskeleti — mcpServers + skills bağlaması (TŞ v2.1 §17, wiki/decisions.md K-002). Plugin içeriği Sprint-1 görev 8'de eklenir.",
+  "type": "module"
+}
