@@ -1,45 +1,30 @@
 /**
- * @causoryn/adapter-typescript — TypeScript Language Adapter paket iskeleti.
+ * @causoryn/adapter-typescript — TypeScript Language Adapter.
  *
  * Sorumluluk alanı (TŞ v2.1 §6, §7, §7.1, Sprint-1 görev 4): TypeScript
- * Compiler API ile AST üretimi, symbol resolution (hedef L2, seçili
- * framework L3), LanguageAdapter arayüzüne uyum. Adapter çıktısı
- * capabilities/unsupportedConstructs/coverageRatio/warnings taşır.
+ * Compiler API (Program + AST + TypeChecker) ile AST parse ve symbol
+ * resolution. Çıktı, `@causoryn/domain` şemalarının `createSnapshot`
+ * girdi sözleşmesiyle birebir uyumlu SnapshotNodeInput/SnapshotEdgeInput
+ * kümesidir; ID üretimi domain katmanına aittir (TŞ §8 invariant iii).
  *
  * Bağımlılık sınırı (wiki/architecture.md): adapter motoru çökertmez —
- * bir adapter'ın çalışamaması tüm motoru etkilemez (TŞ §5.1).
+ * tek dosyadaki parse hatası toplanıp `diagnostics` + `state: "partial"`
+ * olarak raporlanır; diğer dosyaların çıkarımı sürer (TŞ §5.1).
  *
- * Bu modül bir iskelet placeholder'ıdır: gerçek adapter Sprint-1 görev 4
- * diliminde yazılacaktır. ADR-010 uyarınca bu paket Done olarak beyan
- * EDİLMEZ.
+ * Resolution disiplini (TŞ §8): checker ile çözümlenen → `verified`,
+ * aday eşleşme → `heuristic`, çözülemeyen → `unresolved` ve uydurulmuş
+ * kenar YOK; dış hedefler açık `UnknownExternal` node'dur (invariant ii:
+ * dangling edge yok, dış kaynaklar açık node).
  */
 
-/** TypeScript adapter'ının Faz A dilimindeki mimari sözleşmesi. */
-export interface TypeScriptAdapterPackageContract {
-  readonly name: "@causoryn/adapter-typescript";
-  readonly role: "language-adapter";
-  readonly resolver: "typescript-compiler-api";
-  readonly targetLevels: readonly ["L1", "L2"];
-  readonly responsibilities: readonly [
-    "ast-parse",
-    "symbol-resolution",
-    "capability-and-coverage-reporting",
-  ];
-  readonly designSource: "TŞ v2.1 §6, §7, §7.1, §25/4";
-  readonly status: "scaffold";
-}
+export {
+  TS_ADAPTER_ANALYZER_ID,
+  TS_ADAPTER_VERSION,
+  type TypeScriptAdapterCapabilities,
+  type TypeScriptAdapterDiagnostic,
+  type TypeScriptAdapterInput,
+  type TypeScriptAdapterResult,
+  type TsAdapterSourceFile,
+} from "./types.js";
 
-/** Paketin statik sözleşmesi; gerçek adapter Sprint-1 görev 4'te gelir. */
-export const typescriptAdapterPackageContract: TypeScriptAdapterPackageContract = {
-  name: "@causoryn/adapter-typescript",
-  role: "language-adapter",
-  resolver: "typescript-compiler-api",
-  targetLevels: ["L1", "L2"],
-  responsibilities: [
-    "ast-parse",
-    "symbol-resolution",
-    "capability-and-coverage-reporting",
-  ],
-  designSource: "TŞ v2.1 §6, §7, §7.1, §25/4",
-  status: "scaffold",
-};
+export { analyzeTypeScriptProgram } from "./analyzer.js";

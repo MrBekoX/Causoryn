@@ -2,12 +2,14 @@
   "name": "@causoryn/storage-sqlite",
   "version": "0.1.0",
   "private": true,
-  "description": "SQLite + FTS5 graph store: tablolar, migration'lar ve atomik snapshot yayımlama (TŞ v2.1 §9).",
+  "description": "SQLite + FTS5 GraphRepository gerçeklemesi: tablolar, WAL, atomik snapshot yayımlama ve sembol arama (TŞ v2.1 §9).",
   "type": "module",
   "exports": {
     ".": "./src/index.ts"
   },
   "dependencies": {
+    "@causoryn/domain": "0.1.0",
+    "@causoryn/graph": "0.1.0",
     "better-sqlite3": "^13.0.3"
   }
 }

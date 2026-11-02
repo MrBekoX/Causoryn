@@ -1,52 +1,36 @@
 /**
- * @causoryn/graph — Graph sorgu katmanı paket iskeleti.
+ * @causoryn/graph — Graph depo katmanı (Faz A dilimi, sprint-1 görev 5).
  *
- * Sorumluluk alanı (TŞ v2.1 §8 + §9, ADR-005 Immutable Snapshots):
- * snapshot üzerinden okuma sorguları (map_system, find_symbols, traversal),
- * deterministik sıralama/cursor, coverage raporlama. Bu paket graph verisini
- * üretmez; yalnızca mevcut snapshot'ı sorgular.
- *
- * Bu modül bir iskelet placeholder'ıdır: gerçek implementasyon Sprint-1
- * görev 5 diliminde yazılacaktır. ADR-010 uyarınca bu paket Done olarak
- * beyan EDİLMEZ.
+ * GraphRepository sözleşmesi (TŞ v2.1 §8/§9, ADR-004/005): building →
+ * ready/partial atomik snapshot yayımlama, stale bayrağı, dangling/ID
+ * türetim denetimleri. Bellek içi gerçekleme referanstır; SQLite
+ * gerçekleme `packages/storage-sqlite` altındadır. Snapshot okuma
+ * sorguları/traversal bu paketin sonraki dilimlerinde gelir.
  */
-
-/** Graph sorgu paketinin Faz A dilimindeki mimari sözleşmesi. */
-export interface GraphPackageContract {
-  readonly name: "@causoryn/graph";
-  readonly role: "graph-queries";
-  readonly responsibilities: readonly [
-    "snapshot-read-queries",
-    "deterministic-traversal-and-cursors",
-    "coverage-reporting",
-  ];
-  readonly invariants: readonly [
-    "verified-edge-requires-evidence",
-    "no-dangling-edges",
-    "deterministic-ids",
-    "immutable-snapshot",
-    "same-input-same-graph-json",
-  ];
-  readonly designSource: "TŞ v2.1 §8, §9, ADR-004/005";
-  readonly status: "scaffold";
-}
-
-/** Paketin statik sözleşmesi; gerçek API Sprint-1 görev 5'te gelir. */
-export const graphPackageContract: GraphPackageContract = {
-  name: "@causoryn/graph",
-  role: "graph-queries",
-  responsibilities: [
-    "snapshot-read-queries",
-    "deterministic-traversal-and-cursors",
-    "coverage-reporting",
-  ],
-  invariants: [
-    "verified-edge-requires-evidence",
-    "no-dangling-edges",
-    "deterministic-ids",
-    "immutable-snapshot",
-    "same-input-same-graph-json",
-  ],
-  designSource: "TŞ v2.1 §8, §9, ADR-004/005",
-  status: "scaffold",
-};
+export { GraphRepositoryError } from "./errors.js";
+export { deriveBuildId } from "./build-id.js";
+export type { BuildIdInput } from "./build-id.js";
+export { finalizeSnapshotGraph } from "./finalize.js";
+export type { BuildContent, SnapshotMetaInput } from "./finalize.js";
+export {
+  nodeIdentityRelativePath,
+  requireNonEmptyField,
+  requireTimestamp,
+  validateEdgeIdentity,
+  validateEdgeShape,
+  validateEvidence,
+  validateNode,
+} from "./validation.js";
+export { InMemoryGraphRepository } from "./memory-repository.js";
+export type {
+  FileRecord,
+  GraphRepository,
+  PublishableState,
+  SnapshotBuildInfo,
+  SnapshotBuildInput,
+  SnapshotRead,
+  SymbolIndexEntry,
+  SymbolSearchHit,
+  SymbolSearchStore,
+  WorkspaceRecord,
+} from "./repository.js";

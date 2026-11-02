@@ -2,9 +2,12 @@
   "name": "@causoryn/graph",
   "version": "0.1.0",
   "private": true,
-  "description": "Graph sorgu ve traversal katmanı: immutable snapshot üzerinden deterministik okuma sorguları (TŞ v2.1 §8, §9, ADR-005).",
+  "description": "GraphRepository sözleşmesi ve bellek içi gerçekleme: building → ready/partial atomik snapshot yayımlama, stale bayrağı (TŞ v2.1 §8, §9, ADR-005).",
   "type": "module",
   "exports": {
     ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@causoryn/domain": "0.1.0"
   }
 }
