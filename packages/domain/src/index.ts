@@ -35,3 +35,26 @@ export type {
   EvidenceIdInput,
   NodeIdInput,
 } from "./ids.js";
+export {
+  EdgeKindSchema,
+  EvidenceSchema,
+  GraphEdgeSchema,
+  GraphNodeSchema,
+  GraphSnapshotMetaSchema,
+  NodeKindSchema,
+  ResolutionSchema,
+  SnapshotSchema,
+  SourceSpanSchema,
+} from "./graph-schema.js";
+export {
+  createSnapshot,
+  snapshotCanonicalJson,
+} from "./snapshot.js";
+export type {
+  NodeRef,
+  SnapshotEdgeInput,
+  SnapshotEvidenceInput,
+  SnapshotGraph,
+  SnapshotInput,
+  SnapshotNodeInput,
+} from "./snapshot.js";

@@ -1,41 +1,32 @@
 /**
- * @causoryn/workspace — Workspace Gateway paket iskeleti.
+ * @causoryn/workspace — Workspace Gateway: WorkspaceAccessPolicy.
  *
- * Sorumluluk alanı (TŞ v2.1 §5 Pipeline + §9, Sprint-1 görev 2):
- * trusted root doğrulaması (explicit authorization), file inventory,
- * ignore kuralları, symlink escape tespiti ve binary/size filtreleri.
- *
- * Bu modül bir iskelet placeholder'ıdır: gerçek implementasyon Sprint-1
- * görev 2'de (`WorkspaceAccessPolicy`) yazılacaktır. ADR-010 uyarınca
- * bu paket Done olarak beyan EDİLMEZ.
+ * Sorumluluk alanı (TŞ v2.1 §5 Pipeline + §9 + §19 + §20, Sprint-1 görev 2):
+ * trusted root doğrulaması (explicit authorization, default deny),
+ * gitignore benzeri minimal ignore eşleme, symlink/junction escape
+ * koruması (realpath canonicalization) ve binary/boyut filtreleri.
+ * Tüm kararlar deterministiktir; hata kodları TŞ §10.1'e eşlenecek şekilde
+ * `workspace/...` ad alanındadır (MCP eşlemesi mcp-server katmanında).
  */
 
-/** Workspace Gateway paketinin Faz A dilimindeki mimari sözleşmesi. */
-export interface WorkspacePackageContract {
-  readonly name: "@causoryn/workspace";
-  readonly role: "workspace-gateway";
-  readonly responsibilities: readonly [
-    "explicit-root-authorization",
-    "file-inventory",
-    "ignore-rules",
-    "symlink-escape-detection",
-    "binary-and-size-filters",
-  ];
-  readonly designSource: "TŞ v2.1 §5, §9, §25/2";
-  readonly status: "scaffold";
-}
+export type {
+  PolicyAllow,
+  PolicyDecision,
+  PolicyDeny,
+} from "./workspace-access-policy.js";
+export { WorkspaceAccessPolicy } from "./workspace-access-policy.js";
 
-/** Paketin statik sözleşmesi; gerçek API Sprint-1 görev 2'de gelir. */
-export const workspacePackageContract: WorkspacePackageContract = {
-  name: "@causoryn/workspace",
-  role: "workspace-gateway",
-  responsibilities: [
-    "explicit-root-authorization",
-    "file-inventory",
-    "ignore-rules",
-    "symlink-escape-detection",
-    "binary-and-size-filters",
-  ],
-  designSource: "TŞ v2.1 §5, §9, §25/2",
-  status: "scaffold",
-};
+export {
+  DEFAULT_BINARY_EXTENSIONS,
+  DEFAULT_IGNORE_PATTERNS,
+  DEFAULT_MAX_FILE_BYTES,
+  effectiveIgnorePatterns,
+  parseWorkspacePolicyConfig,
+  workspacePolicyConfigSchema,
+} from "./policy-config.js";
+export type { ParsedPolicyConfig, WorkspacePolicyConfig } from "./policy-config.js";
+
+export { WorkspacePolicyError } from "./policy-error.js";
+export type { PolicyErrorCode } from "./policy-error.js";
+
+export { findMatchingIgnorePattern, matchesIgnorePattern } from "./ignore-matcher.js";

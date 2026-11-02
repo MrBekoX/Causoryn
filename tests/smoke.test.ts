@@ -43,11 +43,11 @@ const PACKAGE_DIRS = [
 /**
  * Yalnızca iskelet (scaffold) paketleri: src/index.ts hâlâ sözleşme
  * placeholder'ıdır ve `status: "scaffold"` beyan etmek ZORUNDADIR (ADR-010
- * dürüstlük kuralı). `packages/domain` bu listede DEĞİLDİR — gerçek
- * implementasyondur (kendi unit testleri çalışır).
+ * dürüstlük kuralı). `packages/domain` ve `packages/workspace` bu listede
+ * DEĞİLDİR — gerçek implementasyondur (kendi unit testleri çalışır;
+ * workspace: Sprint-1 görev 2 WorkspaceAccessPolicy).
  */
 const SCAFFOLD_PACKAGE_DIRS = [
-  "packages/workspace",
   "packages/indexing",
   "packages/graph",
   "packages/storage-sqlite",
