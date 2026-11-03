@@ -173,7 +173,17 @@ function asJsonValue(value: unknown): JsonValue {
       const record = value as Record<string, unknown>;
       const out: Record<string, JsonValue> = {};
       for (const [key, child] of Object.entries(record)) {
-        out[key] = asJsonValue(child);
+        // `out[key] = value` yerine defineProperty: `key === "__proto__"`
+        // olduğunda normal atama Object.prototype'ın inherited setter'ına
+        // gider ve own anahtar sessizce düşer (veri kaybı). defineProperty
+        // setter çağırmaz; anahtar adı ne olursa olsun own data property
+        // olarak yazılır.
+        Object.defineProperty(out, key, {
+          configurable: true,
+          enumerable: true,
+          value: asJsonValue(child),
+          writable: true,
+        });
       }
       return out;
     }

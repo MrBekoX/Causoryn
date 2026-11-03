@@ -147,14 +147,21 @@ export function createCausorynMcpServer(context: CausorynContext): McpServer {
               errorEnvelope(requestId, context.config.workspaceId, null, error),
             );
           }
-          const message = error instanceof Error ? error.message : String(error);
-          context.logger(`tool ${registration.name} beklenmeyen hata: ${message}`);
+          // Ham hata mesajı (sürücü/kütüphane detayı: tablo adı, kimlik,
+          // mutlak yol…) YALNIZCA stderr loguna gider; istemciye requestId
+          // korelasyonlu genel mesaj döner (TŞ §10.1: stack/stack detayı
+          // sonuca girmez; iç detay sızması da aynı ilkeye tabidir).
+          const detail = error instanceof Error ? error.message : String(error);
+          context.logger(`tool ${registration.name} beklenmeyen hata: ${detail}`);
           return envelopeResult(
             errorEnvelope(
               requestId,
               context.config.workspaceId,
               null,
-              new CausorynToolError("INTERNAL_ERROR", message),
+              new CausorynToolError(
+                "INTERNAL_ERROR",
+                `Beklenmeyen iç hata; ayrıntılar sunucu loglarında (requestId: ${requestId})`,
+              ),
             ),
           );
         }

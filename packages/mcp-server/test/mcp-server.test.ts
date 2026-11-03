@@ -31,6 +31,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { sha256Hex, utf8Encode } from "@causoryn/domain";
+import type { GraphRepository } from "@causoryn/graph";
 import { describe, expect, it } from "vitest";
 
 import {
@@ -732,5 +733,80 @@ describe("MCP server — protokol düzeyi", () => {
         "INTERNAL_ERROR",
       ].sort(),
     );
+  });
+
+  it("güvenlik: INTERNAL_ERROR ham hata mesajını istemciye yansıtmaz; ayrıntı yalnızca stderr logdadır", async () => {
+    // Depodan fırlayan HAM Error (sürücü/kütüphane mesajı: tablo adı,
+    // mutlak yol gibi iç detaylar taşıyabilir) — CausorynToolError değil.
+    const SECRET =
+      "SQLITE_CONSTRAINT: table nodes has no column named kind at D:\\gizli\\yol\\index.sqlite";
+    const logs: string[] = [];
+    const throwingRepo = {
+      getLatestPublished: () => {
+        throw new Error(SECRET);
+      },
+    } as unknown as GraphRepository;
+    const context = createCausorynContext(
+      {
+        workspaceId: "default",
+        allowRoots: [FIXTURE_ROOT],
+        results: { maxNodes: 250, maxSymbols: 100 },
+        autoIndex: false,
+      },
+      { repository: throwingRepo, logger: (message) => logs.push(message) },
+    );
+    const pair = await connectClient(context);
+    try {
+      const result = await callTool(pair.client, "causoryn_workspace_summary");
+      const envelope = expectEnvelope(result);
+      expect(envelope.status).toBe("error");
+      const error = envelope.error as Record<string, unknown>;
+      expect(error.code).toBe("INTERNAL_ERROR");
+      expect(error.retryable).toBe(true);
+
+      const message = error.message as string;
+      // Ham sürücü/kütüphane mesajı ve içindeki iç detaylar istemciye sızmaz.
+      expect(message).not.toContain("SQLITE_CONSTRAINT");
+      expect(message).not.toContain("nodes");
+      expect(message).not.toContain("D:\\gizli");
+      // Genel mesaj, envelope'daki requestId ile korelasyonlu olur.
+      expect(message).toContain(envelope.requestId as string);
+      // Tam ayrıntı yalnızca enjekte edilen logger'a (stderr) gider.
+      const joined = logs.join("\n");
+      expect(joined).toContain("causoryn_workspace_summary");
+      expect(joined).toContain(SECRET);
+    } finally {
+      await pair.close();
+    }
+  });
+
+  it("güvenlik: Error olmayan fırlayan değer için de ham içerik istemciye sızdırılmaz", async () => {
+    const logs: string[] = [];
+    const throwingRepo = {
+      getLatestPublished: () => {
+        // Yalnızca Error olmayan değer fırlatan uygulama kodunu taklit eder.
+        throw "gizli-deger-42";
+      },
+    } as unknown as GraphRepository;
+    const context = createCausorynContext(
+      {
+        workspaceId: "default",
+        allowRoots: [FIXTURE_ROOT],
+        results: { maxNodes: 250, maxSymbols: 100 },
+        autoIndex: false,
+      },
+      { repository: throwingRepo, logger: (message) => logs.push(message) },
+    );
+    const pair = await connectClient(context);
+    try {
+      const result = await callTool(pair.client, "causoryn_workspace_summary");
+      const envelope = expectEnvelope(result);
+      const error = envelope.error as Record<string, unknown>;
+      expect(error.code).toBe("INTERNAL_ERROR");
+      expect(error.message).not.toContain("gizli-deger-42");
+      expect(logs.join("\n")).toContain("gizli-deger-42");
+    } finally {
+      await pair.close();
+    }
   });
 });
