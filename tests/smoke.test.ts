@@ -41,18 +41,14 @@ const PACKAGE_DIRS = [
 ] as const;
 
 /**
- * Yalnızca iskelet (scaffold) paketleri: src/index.ts hâlâ sözleşme
- * placeholder'ıdır ve `status: "scaffold"` beyan etmek ZORUNDADIR (ADR-010
- * dürüstlük kuralı). `packages/domain`, `packages/workspace`,
- * `packages/graph` ve `packages/storage-sqlite` bu listede DEĞİLDİR —
- * gerçek implementasyondur (kendi unit testleri çalışır; workspace:
- * Sprint-1 görev 2 WorkspaceAccessPolicy; graph + storage-sqlite: Sprint-1
- * görev 5 GraphRepository + SQLite adapter, atomik snapshot testleri).
+ * Yalnızca iskelet (scaffold) paketleri `status: "scaffold"` beyan eder
+ * (ADR-010 dürüstlük kuralı). Sprint-1 görev 6 ile `packages/indexing`
+ * (minimal pipeline) ve `packages/mcp-server` (MCP stdio server + 4 araç)
+ * gerçek implementasyona geçti; scaffold listesi boşaldı. Gerçek
+ * implementasyon paketleri: domain, workspace, graph, storage-sqlite,
+ * indexing, mcp-server (kendi unit/integration testleri çalışır).
  */
-const SCAFFOLD_PACKAGE_DIRS = [
-  "packages/indexing",
-  "packages/mcp-server",
-] as const;
+const SCAFFOLD_PACKAGE_DIRS: readonly string[] = [];
 
 function readJson(relativePath: string): Record<string, unknown> {
   const raw = readFileSync(resolveWithinRepo(relativePath), "utf8");
@@ -210,12 +206,18 @@ describe("monorepo dizin iskeleti", () => {
       expect(indexRaw, `${dir}/src/index.ts export içermiyor`).toContain("export ");
     }
     // İskelet dürüstlüğü: yalnızca scaffold paketler `status: "scaffold"`
-    // beyan eder (ADR-010); domain gerçek implementasyondur.
+    // beyan eder (ADR-010); diğer tüm çekirdek paketler gerçek
+    // implementasyondur ve scaffold statüsü TAŞIMAZ.
     for (const dir of SCAFFOLD_PACKAGE_DIRS) {
       const indexRaw = readText(`${dir}/src/index.ts`);
       expect(indexRaw, `${dir} scaffold statüsü beyan etmiyor`).toContain('"scaffold"');
     }
-    expect(readText("packages/domain/src/index.ts")).not.toContain('"scaffold"');
+    for (const dir of PACKAGE_DIRS) {
+      expect(
+        readText(`${dir}/src/index.ts`),
+        `${dir} hâlâ scaffold beyan ediyor`,
+      ).not.toContain('"scaffold"');
+    }
   });
 
   it("integration plugin paketi: package.json + README placeholder", () => {

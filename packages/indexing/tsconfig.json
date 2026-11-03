@@ -4,7 +4,14 @@
   "compilerOptions": {
     "composite": true,
     "rootDir": "src",
-    "outDir": "dist"
+    "outDir": "dist",
+    "types": ["node"]
   },
-  "include": ["src"]
+  "include": ["src"],
+  "references": [
+    { "path": "../domain" },
+    { "path": "../workspace" },
+    { "path": "../graph" },
+    { "path": "../../adapters/typescript" }
+  ]
 }
