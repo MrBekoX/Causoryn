@@ -1,12 +1,14 @@
 /**
- * Bağımlılıksız SHA-256 (FIPS 180-4).
+ * Saf TS SHA-256 (FIPS 180-4).
  *
- * Neden saf TS: deterministik ID üretimi (TŞ v2.1 §8 invariant iii) için
- * karma gerekir; `node:crypto` tip tanımları (@types/node) projede kurulu
- * olmadığından ve domain dilimi sıfır bağımlılık ilkesiyle tip-denetimden
- * geçmek zorunda olduğundan algoritma standart test vektörleriyle
- * kanıtlanarak burada uygulanır. Doğrulama: NIST FIPS 180-2 örnek vektörleri
- * (bkz. packages/domain/test/sha256.test.ts).
+ * Neden saf TS (güncel gerekçe — denetim bulgusu düzeltmesi): domain
+ * paketinin çalışma zamanı bağımlılığı sıfırdır (bağımlılık sınırı: core/
+ * domain yalnızca domain sözleşmelerine bağlıdır) ve algoritma NIST FIPS
+ * 180-2 örnek vektörleriyle kanıtlanmıştır (bkz.
+ * packages/domain/test/sha256.test.ts). `@types/node` artık kök
+ * devDependency olduğundan `node:crypto`'ya geçiş teknik olarak mümkündür;
+ * bu bir sadeleştirme kararıdır ve ayrı ADR'ye bırakılmıştır — davranış
+ * farkı yaratmadan (aynı özet, aynı vektörler) yapılabilir.
  */
 
 /** FIPS 180-4 §4.2.3 — ilk 64 asal sayının küp köklerinin kesir kısımları. */

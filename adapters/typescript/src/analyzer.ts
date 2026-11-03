@@ -135,9 +135,38 @@ function toPosix(p: string): string {
   return p.replace(/\\/g, "/");
 }
 
-/** Anahtar ad alanı: yol karşılaştırmaları için kanonik biçim. */
+/**
+ * Anahtar ad alanı: yol karşılaştırmaları için kanonik biçim.
+ *
+ * Denetim bulgusu düzeltmesi: `..`/`.` segmentleri ÇÖZÜMLLENİR. TS modül
+ * çözümleme adayları normalize edilmemiş segmentler taşıyabilir
+ * (`src/app/../lib/repo.ts` gibi); segmentler çözülmezse bellek-içi kaynak
+ * haritası eşleşemez ve NodeNext bağ Wagner "Cannot find module" üretir
+ * (diskteki kopyası olan fixture'da bu hata disk fallback'iyle maskelenir).
+ */
 function canonicalPath(p: string): string {
-  return toPosix(p).toLowerCase();
+  const posix = toPosix(p);
+  const lower = posix.toLowerCase();
+  const drivePrefix = /^[a-z]:/.test(lower) ? lower.slice(0, 2) : undefined;
+  const body = drivePrefix === undefined ? lower : lower.slice(2);
+  const isAbsolute = body.startsWith("/");
+  const segments: string[] = [];
+  for (const segment of body.split("/")) {
+    if (segment === "" || segment === ".") continue;
+    if (segment === "..") {
+      const last = segments[segments.length - 1];
+      if (last !== undefined && last !== "..") {
+        segments.pop();
+        continue;
+      }
+      if (!isAbsolute) segments.push("..");
+      continue;
+    }
+    segments.push(segment);
+  }
+  const joined = segments.join("/");
+  if (drivePrefix !== undefined) return `${drivePrefix}/${joined}`;
+  return isAbsolute ? `/${joined}` : joined;
 }
 
 function posixDirname(p: string): string {
@@ -396,14 +425,66 @@ export function analyzeTypeScriptProgram(
     fileExists: (path: string) => host.fileExists(path),
     readFile: (path: string) => host.readFile(path),
   };
+  // Bellek-içi kaynakların ata dizinleri: NodeNext çözümleyicisi aday
+  // dosyaya bakmadan önce dizin varlığını directoryExists ile sorar;
+  // bellek-içi dizinler diskte olmadığından ham yanıt "yok"tur ve çözümleme
+  // adaya hiç ulaşmadan düşer (denetim bulgusu kök nedeni — kanıt:
+  // minimal resolutionHost'ta çözülür, directoryExists eklenince düşer).
+  const memoryDirectories = new Set<string>();
+  for (const key of entries.keys()) {
+    let slash = key.indexOf("/");
+    while (slash > 0) {
+      memoryDirectories.add(key.slice(0, slash));
+      slash = key.indexOf("/", slash + 1);
+    }
+  }
   if (host.directoryExists !== undefined) {
     const baseDirectoryExists = host.directoryExists.bind(host);
-    resolutionHost.directoryExists = (path: string) => baseDirectoryExists(path);
+    resolutionHost.directoryExists = (path: string): boolean =>
+      memoryDirectories.has(canonicalPath(path)) || baseDirectoryExists(path);
   }
   if (host.realpath !== undefined) {
     const baseRealpath = host.realpath.bind(host);
-    resolutionHost.realpath = (path: string) => baseRealpath(path);
+    // Denetim bulgusu düzeltmesi: Node16/NodeNext çözümlemesi adayları
+    // realpath ile gerçekler; bellek-içi kaynakların diskte gerçek yolu
+    // olmadığından ham realpath onları reddeder. Map eşleşmesi varsa yol
+    // olduğu gibi onaylanır.
+    resolutionHost.realpath = (path: string): string => {
+      if (entries.has(canonicalPath(path))) return path;
+      // realpath yalnızca fileExists onayından sonra çağrılır; disk tarafında
+      // beklenmedik bir undefined durumunda kimlik düşüşü güvenlidir.
+      const real = baseRealpath(path);
+      return real === undefined ? path : real;
+    };
   }
+
+  // Denetim bulgusu düzeltmesi (modül çözümleme): TS'nin VARSAYILAN program
+  // çözümleyici, tamamen bellek-içi kaynak setlerinde göreli içe aktarımları
+  // host'a hiç modül adayı sorgulatmadan UNRESOLVED bırakabiliyor (kanıt:
+  // `fileExists` izi — yalnızca package.json/node_modules taraması; "Cannot
+  // find module" tanısı; diskte kopyası olan fixture'da disk fallback'i
+  // hatayı maskeler). Çözümleme kancaları, kanonik anahtarlı resolutionHost
+  // üzerinden ts.resolveModuleName çalıştırır; node_modules/lib dahil aynı
+  // semantik izlenir.
+  const resolveOne = (
+    moduleName: string,
+    containingFile: string,
+  ): ts.ResolvedModuleFull | undefined =>
+    ts.resolveModuleName(moduleName, containingFile, compilerOptions, resolutionHost)
+      .resolvedModule;
+  const resolveModuleNamesHook: ts.CompilerHost["resolveModuleNames"] = (
+    moduleNames,
+    containingFile,
+  ) => moduleNames.map((moduleName) => resolveOne(moduleName, containingFile));
+  const resolveModuleNameLiteralsHook: ts.CompilerHost["resolveModuleNameLiterals"] = (
+    moduleLiterals,
+    containingFile,
+  ) =>
+    moduleLiterals.map((literal) => ({
+      resolvedModule: resolveOne(literal.text, containingFile),
+    }));
+  host.resolveModuleNames = resolveModuleNamesHook;
+  host.resolveModuleNameLiterals = resolveModuleNameLiteralsHook;
 
   // 3) Program + TypeChecker (TŞ §7: TypeScript Compiler API).
   const rootNames = sortedEntries.map((entry) => entry.absoluteKey);
@@ -1021,8 +1102,12 @@ function ownRelativePathOf(
 }
 
 /**
- * Sembolü node kaydına çözer: 1) registry, 2) analiz seti içinde bildirim
- * (registry boşluğu kapanır), 3) undefined (dış/bilinmeyen).
+ * Sembolü node kaydına çözer: 0) import/namespace alias'ı hedef sembole
+ * çevrilir (çağrı yerindeki sembol import specifier sembolüdür; registry
+ * bildirim sembolüyle tuşlanır — alias çözümü olmadan analiz setindeki
+ * sınıf/fonksiyon hedefleri UnknownExternal'a düşer), 1) registry,
+ * 2) analiz seti içinde bildirim (registry boşluğu kapanır), 3) undefined
+ * (dış/bilinmeyen).
  */
 function resolveSymbolRecord(
   context: AnalysisContext,
@@ -1030,7 +1115,22 @@ function resolveSymbolRecord(
   symbol: ts.Symbol | undefined,
   declaration: ts.Declaration | undefined,
 ): NodeRecord | undefined {
-  const { registry } = context;
+  const { registry, checker } = context;
+
+  if (
+    symbol !== undefined &&
+    (symbol.flags & ts.SymbolFlags.Alias) !== 0
+  ) {
+    const aliased = checker.getAliasedSymbol(symbol);
+    if (aliased !== undefined && aliased !== symbol) {
+      return resolveSymbolRecord(
+        context,
+        entry,
+        aliased,
+        aliased.getDeclarations()?.[0],
+      );
+    }
+  }
 
   if (symbol !== undefined) {
     const hit = registry.get(symbol);
@@ -1038,7 +1138,7 @@ function resolveSymbolRecord(
   }
 
   if (declaration !== undefined && ownRelativePathOf(context, declaration) !== undefined) {
-    const derived = deriveNodeRecord(context, entry, declaration);
+    const derived = deriveNodeRecord(context, declaration);
     if (derived !== undefined) {
       if (symbol !== undefined) registry.set(symbol, derived);
       return derived;
@@ -1050,7 +1150,6 @@ function resolveSymbolRecord(
 /** Registry boşlukları için bildirimden node türetir (kurucu vb.). */
 function deriveNodeRecord(
   context: AnalysisContext,
-  entry: SourceEntry,
   declaration: ts.Declaration,
 ): NodeRecord | undefined {
   const { assembler } = context;
@@ -1077,11 +1176,22 @@ function deriveNodeRecord(
     kind = inferNodeKind(declaration);
   }
 
-  if (kind === undefined || qualifiedName === undefined) return undefined;
+  // Denetim bulgusu düzeltmesi: türetilen node kimliği bildirimin KENDİ
+  // dosyasına aittir; çağıran dosyaya değil. Aksi halde aynı sembol için
+  // çağıran dosya başına çoğaltma node'ları doğar. Guard (resolveSymbolRecord
+  // içindeki ownRelativePathOf denetimi) set-dışı bildirimi buraya sokmaz.
+  const declarationPath = ownRelativePathOf(context, declaration);
+  if (
+    kind === undefined ||
+    qualifiedName === undefined ||
+    declarationPath === undefined
+  ) {
+    return undefined;
+  }
   return assembler.ensureNode({
     kind,
     qualifiedName,
-    relativePath: entry.relativePath,
+    relativePath: declarationPath,
     language: LANGUAGE,
   });
 }
@@ -1201,10 +1311,16 @@ function emitCallEdge(
 
   const assembler = context.assembler;
   const checker = context.checker;
-  const signature = checker.getResolvedSignature(call);
+  // Denetim bulgusu düzeltmesi (instantiation): `new X()` için çözümlenen
+  // imza ctor üyesine/iç yapısına işaret eder; instantiation'ın modellediği
+  // hedef sınıfın KENDİSİ olduğundan sembol doğrudan ifadeden alınır.
+  // Import alias'ı resolveSymbolRecord içinde hedef sembole çevrilir.
+  const isNew = ts.isNewExpression(call);
+  const signature = isNew ? undefined : checker.getResolvedSignature(call);
   const declaration = signature?.declaration;
-  const targetSymbol =
-    declaration !== undefined
+  const targetSymbol = isNew
+    ? checker.getSymbolAtLocation(call.expression)
+    : declaration !== undefined
       ? checker.getSymbolAtLocation(ts.getNameOfDeclaration(declaration) ?? declaration)
       : checker.getSymbolAtLocation(call.expression);
 

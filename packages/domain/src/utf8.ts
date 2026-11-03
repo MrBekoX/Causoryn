@@ -1,11 +1,13 @@
 /**
- * Bağımlılıksız UTF-8 kodlayıcı.
+ * Saf TS UTF-8 kodlayıcı.
  *
- * Neden node:crypto/TextEncoder değil: paketin `@types/node` bağımlılığı
- * kurulu değil ve domain dilimi sıfır çalışma zamanı bağımlılığıyla
- * tip-denetime tabi tutulacak (TŞ v2.1 §6 — TypeScript strict). Kodlama
- * UTF-8 standartlarına göre elle uygulanır ve FIPS vektör testleriyle
- * doğrulanır.
+ * Neden TextEncoder değil (güncel gerekçe — denetim bulgusu düzeltmesi):
+ * domain paketi çalışma zamanı bağımlılığı olmadan, yalnızca lib ES tipleriyle
+ * tip-denetimden geçer; kodlama UTF-8 standartlarına göre elle uygulanır ve
+ * testlerle doğrulanır (bkz. packages/domain/test/utf8.test.ts).
+ * `@types/node` kurulu olduğundan TextEncoder/Buffer kullanımı teknik olarak
+ * mümkündür; sadeleştirme kararı sha256.ts başlığındaki ADR notuyla birlikte
+ * değerlendirilmelidir.
  */
 
 /**

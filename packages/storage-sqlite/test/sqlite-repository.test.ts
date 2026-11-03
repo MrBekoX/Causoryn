@@ -787,3 +787,31 @@ describe("SqliteGraphRepository — symbol_fts (temel)", () => {
     }
   });
 });
+
+describe("SqliteGraphRepository — timestamp sözleşmesi (memory gerçeklemesiyle uyum)", () => {
+  it("negatif: workspace.createdAt ISO-dışı değer reddedilir (graph/invalid-timestamp)", () => {
+    const repo = new SqliteGraphRepository(dbPath("ts-workspace.sqlite"));
+    expectRepoError("graph/invalid-timestamp", () => {
+      repo.registerWorkspace({
+        id: "ws_ts",
+        rootPath: "D:/fixture/x",
+        createdAt: "not-a-date",
+      });
+    });
+    repo.close();
+  });
+
+  it("negatif: file.updatedAt ISO-dışı değer reddedilir (graph/invalid-timestamp)", () => {
+    const repo = makeRepo("ts-file.sqlite");
+    expectRepoError("graph/invalid-timestamp", () => {
+      repo.upsertFile({
+        workspaceId: WS,
+        relativePath: "src/x.ts",
+        contentHash: "hash-x",
+        sizeBytes: 10,
+        updatedAt: "not-a-date",
+      });
+    });
+    repo.close();
+  });
+});

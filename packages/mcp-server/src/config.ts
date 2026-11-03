@@ -1,4 +1,3 @@
-import { canonicalJson, sha256Hex, utf8Encode, type JsonValue } from "@causoryn/domain";
 import { workspacePolicyConfigSchema, type WorkspacePolicyConfig } from "@causoryn/workspace";
 import { z } from "zod";
 
@@ -63,23 +62,8 @@ export function parseCausorynServerConfig(input: unknown): CausorynServerConfig 
   throw new CausorynConfigError(issues);
 }
 
-/**
- * Deterministik konfigürasyon karması — snapshot.configHash girdisi
- * (aynı konfigürasyon → aynı karma; TŞ §8 invariant vi).
- */
-export function configHashOf(config: CausorynServerConfig): string {
-  const hashInput: JsonValue = {
-    workspaceId: config.workspaceId,
-    allowRoots: [...config.allowRoots],
-    ignore: [...config.ignore],
-    extraIgnore: [...config.extraIgnore],
-    binaryExtensions: [...config.binaryExtensions],
-    extensionFilterMode: config.extensionFilterMode,
-    allowedExtensions: [...config.allowedExtensions],
-    maxFileBytes: config.maxFileBytes,
-    maxFiles: config.index.maxFiles,
-    maxNodes: config.results.maxNodes,
-    maxSymbols: config.results.maxSymbols,
-  };
-  return sha256Hex(utf8Encode(canonicalJson(hashInput)));
-}
+// Not (denetim bulgusu düzeltmesi): `configHashOf` buradan KALDIRILDI.
+// snapshot.configHash'in tek gerçeklemesi IndexService'tedir
+// (packages/indexing/src/index-service.ts — indeksi etkileyen konfigürasyon
+// alanlarıyla; results limitleri karmaya dahil edilmez). İki farklı "config
+// hash" tanımının yürürlükte kalması yerine tek yetkili gerçekleme korunur.

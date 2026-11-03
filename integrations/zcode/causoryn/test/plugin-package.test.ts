@@ -505,14 +505,16 @@ function readPluginFile(relativePath: string): string {
 
 describe("plugin manifest (.zcode-plugin/plugin.json)", () => {
   it("POZİTİF: geçerli JSON; zorunlu alanlar tam; mcpServers girdisi derlenmiş server dist girişine işaret eder", () => {
-    // Yayımlanan set server.ts'ten dinamik çıkarılır; çekirdek 4 araç
-    // (sprint-1 görev 6) her zaman listede olmalıdır.
+    // Yayımlanan set server.ts'ten dinamik çıkarılır; çekirdek 5 araç
+    // (sprint-1 görev 6-7: get_evidence görev 7 ile eklendi) her zaman
+    // listede olmalıdır.
     expect(PUBLISHED_TOOLS.length, "server.ts kayıtlı araçları çıkarılamadı").toBeGreaterThan(0);
     for (const core of [
       "causoryn_get_capabilities",
       "causoryn_workspace_summary",
       "causoryn_map_system",
       "causoryn_find_symbols",
+      "causoryn_get_evidence",
     ]) {
       expect(PUBLISHED_TOOLS, "çekirdek araç eksik: " + core).toContain(core);
     }
@@ -619,7 +621,7 @@ describe("skills/map-system/SKILL.md", () => {
 /* ------------------------------------------------------------------ */
 
 describe("README.md", () => {
-  it("POZİTİF: İngilizce tanıtım; kurulum, Node >= 24, kök beyanı, 4 araç, salt-okunur model", () => {
+  it("POZİTİF: İngilizce tanıtım; kurulum, Node >= 24, kök beyanı, 5 araç, salt-okunur model", () => {
     const issues = validateReadme(readPluginFile("README.md"));
     expect(issues, JSON.stringify(issues)).toEqual([]);
   });

@@ -43,7 +43,8 @@ const PACKAGE_DIRS = [
 /**
  * Yalnızca iskelet (scaffold) paketleri `status: "scaffold"` beyan eder
  * (ADR-010 dürüstlük kuralı). Sprint-1 görev 6 ile `packages/indexing`
- * (minimal pipeline) ve `packages/mcp-server` (MCP stdio server + 4 araç)
+ * (minimal pipeline) ve `packages/mcp-server` (MCP stdio server + 5 araç —
+ * get_evidence sprint-1 görev 7 ile eklendi)
  * gerçek implementasyona geçti; scaffold listesi boşaldı. Gerçek
  * implementasyon paketleri: domain, workspace, graph, storage-sqlite,
  * indexing, mcp-server (kendi unit/integration testleri çalışır).

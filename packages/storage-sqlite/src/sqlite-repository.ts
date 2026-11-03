@@ -178,7 +178,9 @@ export class SqliteGraphRepository
   registerWorkspace(record: WorkspaceRecord): void {
     requireNonEmptyField("workspace.id", record.id);
     requireNonEmptyField("workspace.rootPath", record.rootPath);
-    requireNonEmptyField("workspace.createdAt", record.createdAt);
+    // Denetim bulgusu düzeltmesi: memory gerçeklemesiyle aynı sözleşme —
+    // ISO çözümlenemeyen zaman damgası kalıcı depoya yazılamaz.
+    requireTimestamp("workspace.createdAt", record.createdAt);
     const exists = this.stmt(
       "SELECT 1 AS hit FROM workspaces WHERE id = ? LIMIT 1",
     ).get(record.id);
@@ -213,7 +215,8 @@ export class SqliteGraphRepository
     this.requireWorkspace(record.workspaceId);
     requireNonEmptyField("file.relativePath", record.relativePath);
     requireNonEmptyField("file.contentHash", record.contentHash);
-    requireNonEmptyField("file.updatedAt", record.updatedAt);
+    // Denetim bulgusu düzeltmesi: memory gerçeklemesiyle aynı sözleşme.
+    requireTimestamp("file.updatedAt", record.updatedAt);
     if (
       typeof record.sizeBytes !== "number" ||
       !Number.isInteger(record.sizeBytes) ||

@@ -31,7 +31,7 @@ export { SERVER_NAME, SERVER_VERSION, SCHEMA_VERSION, TOOL_NAMES } from "./versi
 export type { ToolName } from "./version.js";
 export { CAUSORYN_TOOL_ERROR_CODES, CausorynToolError } from "./errors.js";
 export type { CausorynToolErrorCode } from "./errors.js";
-export { parseCausorynServerConfig, configHashOf, causorynServerConfigSchema, CausorynConfigError } from "./config.js";
+export { parseCausorynServerConfig, causorynServerConfigSchema, CausorynConfigError } from "./config.js";
 export type { CausorynServerConfig } from "./config.js";
 export {
   EnvelopeSchema,

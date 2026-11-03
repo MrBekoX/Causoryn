@@ -481,3 +481,113 @@ describe("analyzeTypeScriptProgram — partial (hata izolasyonu)", () => {
     expect(brokenFile).toBeDefined();
   });
 });
+
+/* ------------------------------------------------------------------ */
+/* Denetim bulgusu: `new X()` instantiation çözümlemesi                */
+/* ------------------------------------------------------------------ */
+
+describe("analyzeTypeScriptProgram — instantiation (new X) çözümlemesi", () => {
+  const sources = [
+    {
+      relativePath: "src/lib/repo.ts",
+      content: [
+        "export class Repo {",
+        "  save(value: number): number {",
+        "    return value;",
+        "  }",
+        "}",
+        "",
+      ].join("\n"),
+    },
+    {
+      relativePath: "src/app/boot.ts",
+      content: [
+        'import { Repo } from "../lib/repo.js";',
+        "",
+        "export class Boot {",
+        "  start(): number {",
+        "    const repo = new Repo();",
+        "    return repo.save(1);",
+        "  }",
+        "}",
+        "",
+      ].join("\n"),
+    },
+  ];
+
+  const result = analyzeTypeScriptProgram({
+    workspaceId: "w_new_expr",
+    rootDir: FIXTURE_ROOT,
+    sources,
+  });
+
+  const edgeSummary = (): string =>
+    JSON.stringify(
+      result.edges.map(
+        (edge) =>
+          `${edge.kind} ${edge.from.qualifiedName}->${edge.to.kind}:${edge.to.qualifiedName}`,
+      ),
+    );
+
+  it("pozitif: başka dosyadan new Repo() → mevcut Class Repo node'una verified CALLS kenarı", () => {
+    const start = findNode(result, "Method", "Boot.start");
+    const repoClass = findNode(result, "Class", "Repo");
+    expect(repoClass.relativePath).toBe("src/lib/repo.ts");
+    const instantiations = result.edges.filter(
+      (edge) =>
+        edge.kind === "CALLS" &&
+        sameRef(edge.from, start) &&
+        sameRef(edge.to, repoClass),
+    );
+    expect(
+      instantiations.length,
+      `CALLS kenarları: ${edgeSummary()}`,
+    ).toBe(1);
+    expect(instantiations[0]?.resolution).toBe("verified");
+  });
+
+  it("negatif: analiz setindeki sınıf için UnknownExternal çoğaltma node'u üretilmez", () => {
+    const duplicated = result.nodes.filter(
+      (node) =>
+        node.kind === "UnknownExternal" && node.qualifiedName === "Repo",
+    );
+    expect(
+      duplicated,
+      `nodes: ${JSON.stringify(result.nodes.map(nodeKeyOf))}`,
+    ).toEqual([]);
+  });
+});
+
+describe("analyzeTypeScriptProgram — dış sınıf instantiation'ı (regresyon koruması)", () => {
+  const sources = [
+    {
+      relativePath: "src/external-user.ts",
+      content: [
+        "export class Wrapper {",
+        "  build(url: string): string {",
+        "    const parsed = new URL(url);",
+        "    return parsed.protocol;",
+        "  }",
+        "}",
+        "",
+      ].join("\n"),
+    },
+  ];
+
+  const result = analyzeTypeScriptProgram({
+    workspaceId: "w_new_ext",
+    rootDir: FIXTURE_ROOT,
+    sources,
+  });
+
+  it("lib.dom sınıfı (URL) hâlâ açık UnknownExternal'dır; sahte Class node'u icat edilmez", () => {
+    const calls = result.edges.filter((edge) => edge.kind === "CALLS");
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.to.kind).toBe("UnknownExternal");
+    expect(calls[0]?.to.qualifiedName).toBe("URL");
+    const fakeClass = result.nodes.filter(
+      (node) => node.kind === "Class" && node.qualifiedName === "URL",
+    );
+    expect(fakeClass).toEqual([]);
+  });
+});
