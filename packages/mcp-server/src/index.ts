@@ -5,7 +5,7 @@
  * Sorumluluk alanı (TŞ v2.1 §5 + §10): local stdio transport (ADR-003),
  * Zod input/output doğrulaması, authorization, SIZE limitleri
  * (results.maxNodes/maxSymbols, index.maxFiles, workspace.maxFileBytes) ve
- * ApplicationService yönlendirmesi. tools/list tam olarak 4 gerçek araç
+ * ApplicationService yönlendirmesi. tools/list tam olarak 5 gerçek araç
  * yayımlar; boş handler yayınlanmaz (ADR-010, wiki/mcp-tools.md).
  *
  * Kasıtlı kapsam dışı (dürüstlük beyanı): İSTEK HIZI (rate) limiti bu
@@ -24,8 +24,8 @@
  * - stdout YALNIZCA MCP stdio protokol trafiği; tüm loglar stderr.
  * - Bu paket parser/analysis detayı içermez; workspace/indexing/graph
  *   uygulama servislerini tüketir (wiki/architecture.md bağımlılık sınırı 3).
- * - Envelope hata kodları sabittir (TŞ §10.1 + tek proje uzantısı
- *   INVALID_ARGUMENT — bkz. errors.ts başlığı).
+ * - Envelope hata kodları sabittir (TŞ §10.1 + proje uzantıları
+ *   INVALID_ARGUMENT, EVIDENCE_NOT_FOUND — bkz. errors.ts başlığı).
  */
 export { SERVER_NAME, SERVER_VERSION, SCHEMA_VERSION, TOOL_NAMES } from "./version.js";
 export type { ToolName } from "./version.js";
@@ -51,13 +51,18 @@ export {
   workspaceSummary,
   mapSystem,
   findSymbols,
+  getEvidence,
   GetCapabilitiesInputSchema,
   WorkspaceSummaryInputSchema,
   MapSystemInputSchema,
   FindSymbolsInputSchema,
+  GetEvidenceInputSchema,
   CapabilitiesDataSchema,
   WorkspaceSummaryDataSchema,
   MapDataSchema,
   FindSymbolsDataSchema,
+  GetEvidenceDataSchema,
+  EvidenceRecordSchema,
+  EvidenceSpanSchema,
   AmbiguityDataSchema,
 } from "./services.js";

@@ -205,6 +205,7 @@ describe("stdio server — stdout saflığı ve protokol el sıkışması", () =
     expect(listResult.tools?.map((t) => t.name).sort()).toEqual([
       "causoryn_find_symbols",
       "causoryn_get_capabilities",
+      "causoryn_get_evidence",
       "causoryn_map_system",
       "causoryn_workspace_summary",
     ]);

@@ -14,7 +14,7 @@ export const SCHEMA_VERSION = "2.0";
 
 /**
  * Bu dilimde yayımlanan araçlar (TŞ §10.2 kataloğunun Faz A alt kümesi).
- * tools/list TAM OLARAK bu 4 aracı sunar; boş handler yayınlanmaz
+ * tools/list TAM OLARAK bu 5 aracı sunar; boş handler yayınlanmaz
  * (ADR-010, wiki/mcp-tools.md kuralı).
  */
 export const TOOL_NAMES = [
@@ -22,6 +22,7 @@ export const TOOL_NAMES = [
   "causoryn_workspace_summary",
   "causoryn_map_system",
   "causoryn_find_symbols",
+  "causoryn_get_evidence",
 ] as const;
 
 export type ToolName = (typeof TOOL_NAMES)[number];

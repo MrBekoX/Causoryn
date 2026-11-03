@@ -1,14 +1,17 @@
 /**
  * Sabit tool hata kodları (TŞ v2.1 §10.1) — Faz A diliminin kullandığı
- * alt küme + TEK proje uzantısı. Kodlar envelope.error.code ile taşınır;
+ * alt küme + İKİ proje uzantısı. Kodlar envelope.error.code ile taşınır;
  * stack trace MCP sonucuna yazılmaz (TŞ §10.1).
  *
  * Uzantı notu (dürüstlük): TŞ §10.1 sabit kod listesinde INVALID_ARGUMENT
- * YOKTUR. Görev sözleşmesi geçersiz araç girdisi için sabit bir envelope
- * kodu istediğinden INVALID_ARGUMENT proje uzantısı olarak eklenmiştir;
- * şema reddi SDK düzeyinde isError dönerken, şemayı geçen anlamsal
- * girdi hataları bu kodla raporlanır. TŞ listesine dönüş kararı
- * wiki/decisions.md'e ADR olarak işlenmelidir (wiki yazımı ajan dışı).
+ * ve EVIDENCE_NOT_FOUND YOKTUR. Görev sözleşmeleri (1) geçersiz araç
+ * girdisi, (2) causoryn_get_evidence'ta bulunamayan kimlik için sabit bir
+ * envelope kodu istediğinden ikisi proje uzantısı olarak eklenmiştir;
+ * şema reddi SDK düzeyinde isError dönerken, şemayı geçen anlamsal girdi
+ * hataları INVALID_ARGUMENT ile, snapshot'ta olmayan node/edge/evidence
+ * kimlikleri ise EVIDENCE_NOT_FOUND ile raporlanır. TŞ listesine dönüş
+ * kararı wiki/decisions.md'e ADR olarak işlenmelidir (wiki yazımı ajan
+ * dışı).
  */
 export const CAUSORYN_TOOL_ERROR_CODES = [
   "WORKSPACE_NOT_AUTHORIZED",
@@ -17,6 +20,7 @@ export const CAUSORYN_TOOL_ERROR_CODES = [
   "AMBIGUOUS_SYMBOL",
   "LIMIT_EXCEEDED",
   "INVALID_ARGUMENT",
+  "EVIDENCE_NOT_FOUND",
   "UNSUPPORTED_LANGUAGE",
   "INTERNAL_ERROR",
 ] as const;
@@ -55,6 +59,11 @@ export const TOOL_ERROR_GUIDANCE: Readonly<
   INVALID_ARGUMENT: {
     retryable: false,
     userAction: "geçersiz girdiyi düzeltip yeniden deneyin",
+  },
+  EVIDENCE_NOT_FOUND: {
+    retryable: false,
+    userAction:
+      "map_system/find_symbols çıktısındaki node/edge kimliklerini kullanın; eski bir snapshot kimliği sorgulandıysa refresh_index sonrası güncel kimlikle yeniden deneyin",
   },
   UNSUPPORTED_LANGUAGE: {
     retryable: false,

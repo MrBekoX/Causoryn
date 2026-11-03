@@ -1,6 +1,11 @@
 import { LATEST_PROTOCOL_VERSION } from "@modelcontextprotocol/sdk/types.js";
 import type { GraphRepository, SnapshotRead } from "@causoryn/graph";
-import { NODE_KINDS, type GraphNode, type SnapshotGraph } from "@causoryn/domain";
+import {
+  NODE_KINDS,
+  type Evidence,
+  type GraphNode,
+  type SnapshotGraph,
+} from "@causoryn/domain";
 import { INDEXED_ADAPTERS } from "@causoryn/indexing";
 import type { WorkspaceAccessPolicy } from "@causoryn/workspace";
 import { z } from "zod";
@@ -601,4 +606,193 @@ export function findSymbols(
       hits,
     },
   });
+}
+
+/* ------------------------------------------------------------------ */
+/* get_evidence                                                        */
+/* ------------------------------------------------------------------ */
+
+export const GetEvidenceInputSchema = z.strictObject({
+  workspaceId: z.string().min(1).optional(),
+  /**
+   * Sorgulanan graph kimliği (TŞ §10.2 "node/edge/finding IDs"): Faz A'da
+   * node:<hex> | edge:<hex> | evidence:<hex>; finding kimliği bu dilimde
+   * üretilmez (Faz B+ kapsamı).
+   */
+  id: z.string().min(1),
+});
+
+/** Kaynak span (TŞ §8 SourceSpan) — get_evidence çıktı bileşeni. */
+export const EvidenceSpanSchema = z.strictObject({
+  relativePath: z.string(),
+  startLine: z.number().int(),
+  endLine: z.number().int(),
+  sourceHash: z.string(),
+});
+
+/** Kanıt kaydı (TŞ §8 Evidence) — get_evidence çıktı bileşeni. */
+export const EvidenceRecordSchema = z.strictObject({
+  id: z.string(),
+  kind: z.string(),
+  span: EvidenceSpanSchema.optional(),
+  analyzerId: z.string(),
+  analyzerVersion: z.string(),
+  rationale: z.string(),
+});
+
+export const GetEvidenceDataSchema = z.strictObject({
+  id: z.string(),
+  /** Kimliğin snapshot'taki türü; node/edge bağlam alanlarını ayırt eder. */
+  idKind: z.enum(["node", "edge", "evidence"]),
+  /** idKind="node" için sorgulanan düğümün özeti. */
+  node: z
+    .strictObject({
+      id: z.string(),
+      kind: z.string(),
+      qualifiedName: z.string(),
+    })
+    .optional(),
+  /** idKind="edge" için kenarın uçları ve çözümleme düzeyi. */
+  edge: z
+    .strictObject({
+      id: z.string(),
+      from: z.string(),
+      to: z.string(),
+      kind: z.string(),
+      resolution: z.string(),
+    })
+    .optional(),
+  evidence: z.array(EvidenceRecordSchema),
+});
+
+function evidenceRecordOf(item: Evidence): z.infer<typeof EvidenceRecordSchema> {
+  return {
+    id: item.id,
+    kind: item.kind,
+    ...(item.span === undefined ? {} : { span: { ...item.span } }),
+    analyzerId: item.analyzerId,
+    analyzerVersion: item.analyzerVersion,
+    rationale: item.rationale,
+  };
+}
+
+function evidenceByIdOf(snapshot: SnapshotGraph): Map<string, Evidence> {
+  return new Map(snapshot.evidence.map((item) => [item.id, item]));
+}
+
+function sortedById(items: readonly Evidence[]): readonly Evidence[] {
+  return [...items].sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+}
+
+/**
+ * causoryn_get_evidence (TŞ §10.2 "Evidence Graph provenance"; sprint-1
+ * görev 7): verilen node/edge/evidence kimliğinin kanıt dizisini döndürür
+ * (relativePath, startLine/endLine, sourceHash, analyzerId, rationale).
+ *
+ * Semantik (Faz A sözleşmesi):
+ * - EDGE: kenarın kendi evidenceIds kayıtları (TŞ §8'de kanıt bağı kenar
+ *   üzerindedir; verified kenar ≥1 kanıt — invariant i).
+ * - NODE: komşu kenarların (from veya to = id) kanıtları; tekrarsız ve
+ *   kanıt ID'sine göre kanonik düzende. Komşusu olmayan düğüm (ör. boş
+ *   workspace'taki Workspace node'u) BOŞ dizi döndürür — kimlik mevcut
+ *   olduğundan EVIDENCE_NOT_FOUND değildir.
+ * - EVIDENCE: kanıt kaydının kendisi tek elemanlık dizi olarak döner.
+ * - Hiçbiri değilse sabit proje uzantısı kodu EVIDENCE_NOT_FOUND.
+ */
+export function getEvidence(
+  deps: ServiceDeps,
+  requestId: string,
+  input: z.infer<typeof GetEvidenceInputSchema>,
+): Envelope {
+  const workspaceId = input.workspaceId ?? deps.config.workspaceId;
+  requireAuthorizedWorkspace(deps, workspaceId);
+  const read = requireSnapshot(deps, workspaceId);
+  const snapshot = read.snapshot;
+  const id = input.id;
+
+  const envelopeBase = {
+    requestId,
+    workspaceId,
+    snapshotId: snapshot.meta.id,
+    coverage: coverageOf(snapshot),
+    warnings: staleWarningOf(read),
+  };
+
+  // 1) Node kimliği: komşu kenar kanıtları (deterministik, tekrarsız).
+  const node = snapshot.nodes.find((candidate) => candidate.id === id);
+  if (node !== undefined) {
+    const evidenceById = evidenceByIdOf(snapshot);
+    const seen = new Set<string>();
+    const items: Evidence[] = [];
+    for (const edge of snapshot.edges) {
+      if (edge.from !== id && edge.to !== id) continue;
+      for (const evidenceId of edge.evidenceIds) {
+        if (seen.has(evidenceId)) continue;
+        const record = evidenceById.get(evidenceId);
+        if (record === undefined) continue;
+        seen.add(evidenceId);
+        items.push(record);
+      }
+    }
+    return buildEnvelope({
+      ...envelopeBase,
+      status: envelopeStatusOf(read),
+      data: {
+        id,
+        idKind: "node",
+        node: {
+          id: node.id,
+          kind: node.kind,
+          qualifiedName: node.qualifiedName,
+        },
+        evidence: sortedById(items).map(evidenceRecordOf),
+      },
+    });
+  }
+
+  // 2) Edge kimliği: kenarın kendi kanıtları.
+  const edge = snapshot.edges.find((candidate) => candidate.id === id);
+  if (edge !== undefined) {
+    const evidenceById = evidenceByIdOf(snapshot);
+    const items = edge.evidenceIds
+      .map((evidenceId) => evidenceById.get(evidenceId))
+      .filter((record): record is Evidence => record !== undefined);
+    return buildEnvelope({
+      ...envelopeBase,
+      status: envelopeStatusOf(read),
+      data: {
+        id,
+        idKind: "edge",
+        edge: {
+          id: edge.id,
+          from: edge.from,
+          to: edge.to,
+          kind: edge.kind,
+          resolution: edge.resolution,
+        },
+        evidence: sortedById(items).map(evidenceRecordOf),
+      },
+    });
+  }
+
+  // 3) Evidence kimliğinin kendisi.
+  const record = snapshot.evidence.find((item) => item.id === id);
+  if (record !== undefined) {
+    return buildEnvelope({
+      ...envelopeBase,
+      status: envelopeStatusOf(read),
+      data: {
+        id,
+        idKind: "evidence",
+        evidence: [evidenceRecordOf(record)],
+      },
+    });
+  }
+
+  // 4) Bulunamayan kimlik → sabit hata kodu (görev sözleşmesi; TŞ §10.1
+  //    listesinde olmayan proje uzantısı — bkz. errors.ts başlığı).
+  throw new CausorynToolError(
+    "EVIDENCE_NOT_FOUND",
+    `kimlik yayınlanmış snapshot'ta bulunamadı: ${id}; node/edge kimliklerini map_system/find_symbols çıktısından alın`,
+  );
 }

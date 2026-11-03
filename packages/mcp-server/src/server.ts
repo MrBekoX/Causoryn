@@ -15,12 +15,15 @@ import {
   FindSymbolsDataSchema,
   FindSymbolsInputSchema,
   GetCapabilitiesInputSchema,
+  GetEvidenceDataSchema,
+  GetEvidenceInputSchema,
   MapDataSchema,
   MapSystemInputSchema,
   WorkspaceSummaryDataSchema,
   WorkspaceSummaryInputSchema,
   findSymbols,
   getCapabilities,
+  getEvidence,
   mapSystem,
   workspaceSummary,
 } from "./services.js";
@@ -28,7 +31,7 @@ import { SERVER_NAME, SERVER_VERSION } from "./version.js";
 
 /**
  * MCP protokol adaptasyonu (TŞ v2.1 §5/§10, ADR-003): SDK McpServer
- * üzerinden tam olarak 4 gerçek araç yayımlanır (tools/list boş handler
+ * üzerinden tam olarak 5 gerçek araç yayımlanır (tools/list boş handler
  * yayınlamaz — ADR-010). Her araç:
  * - Zod inputSchema (SDK girdiyi otomatik doğrular; şema reddi protokol
  *   düzeyinde isError sonucu döner),
@@ -102,10 +105,20 @@ function buildRegistrations(context: CausorynContext): readonly ToolRegistration
       handler: (requestId, args) =>
         findSymbols(context, requestId, args as z.infer<typeof FindSymbolsInputSchema>),
     },
+    {
+      name: "causoryn_get_evidence",
+      title: "Evidence provenance",
+      description:
+        "Node/edge/evidence kimliğinin kanıt dizisi: relativePath, startLine/endLine, sourceHash, analyzerId, rationale. Yayınlanmış snapshot'ta olmayan kimlik EVIDENCE_NOT_FOUND döndürür.",
+      inputSchema: GetEvidenceInputSchema,
+      outputSchema: envelopeOutputSchema(GetEvidenceDataSchema),
+      handler: (requestId, args) =>
+        getEvidence(context, requestId, args as z.infer<typeof GetEvidenceInputSchema>),
+    },
   ];
 }
 
-/** Context'i MCP McpServer'a bağlar; tam olarak 4 araç kaydeder. */
+/** Context'i MCP McpServer'a bağlar; tam olarak 5 araç kaydeder. */
 export function createCausorynMcpServer(context: CausorynContext): McpServer {
   const server = new McpServer(
     { name: SERVER_NAME, version: SERVER_VERSION },

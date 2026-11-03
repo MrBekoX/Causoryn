@@ -1,18 +1,25 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 
 /**
- * MCP server protokol düzeyi test üçlüleri (TŞ v2.1 §10, §25/6; sprint-1
- * görev 6). SDK 1.32.2 InMemoryTransport + Client ile:
- * - initialize + tools/list (tam olarak 4 araç; her biri inputSchema +
+ * MCP server protokol düzeyi test üçlüleri (TŞ v2.1 §10, §25/6-7; sprint-1
+ * görev 6-7). SDK 1.32.2 InMemoryTransport + Client ile:
+ * - initialize + tools/list (tam olarak 5 araç; her biri inputSchema +
  *   outputSchema taşır),
  * - her araç için pozitif tools/call (fixture workspace),
  * - negatif: yetkisiz workspace → WORKSPACE_NOT_AUTHORIZED, geçersiz
  *   argüman → INVALID_ARGUMENT, INDEX_NOT_READY, LIMIT_EXCEEDED,
- *   AMBIGUOUS_SYMBOL,
+ *   AMBIGUOUS_SYMBOL, bilinmeyen kimlik → EVIDENCE_NOT_FOUND,
  * - partial: boş workspace coverage.
+ *
+ * Sprint-1 görev 7 ENTİGRASYON KANITI: fixture graph'ından
+ * OrdersService.create → OrderRepository.save CALLS kenarı MCP araçlarıyla
+ * (find_symbols → map_system) bulunur; causoryn_get_evidence çıktısındaki
+ * span (relativePath + startLine/endLine + sourceHash) testin DISKTEN
+ * okuduğu fixture dosyasının gerçek içeriğiyle birebir doğrulanır
+ * (TŞ v2.1 §25/7, ADR-004 Evidence First).
  *
  * Envelope sözleşmesi (wiki/mcp-tools.md + TŞ §10.1): schemaVersion,
  * requestId, workspaceId, snapshotId, status, coverage, warnings, data,
@@ -23,6 +30,7 @@ import { fileURLToPath } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
+import { sha256Hex, utf8Encode } from "@causoryn/domain";
 import { describe, expect, it } from "vitest";
 
 import {
@@ -110,7 +118,7 @@ describe("MCP server — protokol düzeyi", () => {
     }
   });
 
-  it("tools/list: tam olarak 4 araç; her biri inputSchema + outputSchema taşır", async () => {
+  it("tools/list: tam olarak 5 araç; her biri inputSchema + outputSchema taşır", async () => {
     const pair = await connectClient(makeContext());
     try {
       const { tools } = await pair.client.listTools();
@@ -120,6 +128,7 @@ describe("MCP server — protokol düzeyi", () => {
         "causoryn_workspace_summary",
         "causoryn_map_system",
         "causoryn_find_symbols",
+        "causoryn_get_evidence",
       ]);
       for (const tool of tools) {
         expect(tool.inputSchema, `${tool.name} inputSchema yok`).toBeDefined();
@@ -306,6 +315,173 @@ describe("MCP server — protokol düzeyi", () => {
     }
   });
 
+  /** find_symbols ile tek isimli Method node'unun kimliğini çeker. */
+  async function symbolIdOf(client: Client, query: string): Promise<string> {
+    const result = await callTool(client, "causoryn_find_symbols", {
+      query,
+      kind: "Method",
+    });
+    const envelope = expectEnvelope(result);
+    const hits = (envelope.data as Record<string, unknown>).hits as Array<
+      Record<string, unknown>
+    >;
+    expect(hits.length, `${query} için tek isabet beklenirdi`).toBe(1);
+    return hits[0]?.symbolId as string;
+  }
+
+  it(
+    "pozitif get_evidence: OrdersService.create → OrderRepository.save CALLS kenarı kanıtı " +
+      "fixture dosyasının GERÇEK içeriğiyle doğrulanır (sprint-1 görev 7 entegrasyon kanıtı)",
+    async () => {
+      const pair = await connectClient(makeContext());
+      try {
+        // 1) Zincir uçları MCP üzerinden bulunur (TŞ v2.1 §25/4 zinciri).
+        const createId = await symbolIdOf(pair.client, "OrdersService.create");
+        const saveId = await symbolIdOf(pair.client, "OrderRepository.save");
+        expect(createId).not.toBe(saveId);
+
+        // 2) CALLS kenarı map_system (L3) üzerinden bulunur.
+        const map = await callTool(pair.client, "causoryn_map_system", {
+          level: "L3",
+          maxNodes: 250,
+        });
+        const mapEnvelope = expectEnvelope(map);
+        const mapEdges = (mapEnvelope.data as Record<string, unknown>)
+          .edges as Array<Record<string, unknown>>;
+        const callsEdge = mapEdges.find(
+          (edge) => edge.kind === "CALLS" && edge.from === createId && edge.to === saveId,
+        );
+        expect(
+          callsEdge,
+          "OrdersService.create → OrderRepository.save CALLS kenarı L3 haritada yok",
+        ).toBeDefined();
+        expect(callsEdge?.resolution).toBe("verified");
+        const edgeId = callsEdge?.id as string;
+
+        // 3) get_evidence: kenarın kanıt dizisi döner.
+        const result = await callTool(pair.client, "causoryn_get_evidence", { id: edgeId });
+        const envelope = expectEnvelope(result);
+        expect(envelope.status).toBe("ok");
+        expect(typeof envelope.snapshotId).toBe("string");
+        const data = envelope.data as Record<string, unknown>;
+        expect(data.id).toBe(edgeId);
+        expect(data.idKind).toBe("edge");
+        const edgeInfo = data.edge as Record<string, unknown>;
+        expect(edgeInfo.id).toBe(edgeId);
+        expect(edgeInfo.from).toBe(createId);
+        expect(edgeInfo.to).toBe(saveId);
+        expect(edgeInfo.kind).toBe("CALLS");
+        expect(edgeInfo.resolution).toBe("verified");
+
+        const evidence = data.evidence as Array<Record<string, unknown>>;
+        expect(evidence.length).toBeGreaterThanOrEqual(1);
+        const semantic = evidence.find((entry) => entry.kind === "semantic-symbol");
+        expect(semantic, "semantic-symbol kandı yok").toBeDefined();
+        expect(semantic?.analyzerId).toBe("ts-adapter");
+        expect(typeof semantic?.analyzerVersion).toBe("string");
+        expect((semantic?.rationale as string).length).toBeGreaterThan(0);
+        expect(semantic?.rationale as string).toContain("CALLS");
+        expect(semantic?.id as string).toMatch(/^evidence:[0-9a-f]{64}$/);
+
+        // 4) ENTİGRASYON KANITI: span, fixture dosyasının GERÇEK içeriğiyle
+        //    doğrulanır — test dosyayı DISKTEN okur (TŞ v2.1 §25/7).
+        const span = semantic?.span as Record<string, unknown>;
+        expect(span.relativePath).toBe("src/services/orders-service.ts");
+        const absolutePath = path.join(FIXTURE_ROOT, "src", "services", "orders-service.ts");
+        const content = readFileSync(absolutePath, "utf8");
+        // sourceHash dosya içeriğinin SHA-256 karmasıyla birebir eşleşir.
+        expect(span.sourceHash).toBe(sha256Hex(utf8Encode(content)));
+        const lines = content.split("\n");
+        const startLine = span.startLine as number;
+        const endLine = span.endLine as number;
+        expect(startLine).toBeGreaterThanOrEqual(1);
+        expect(endLine).toBeGreaterThanOrEqual(startLine);
+        expect(endLine).toBeLessThanOrEqual(lines.length);
+        const covered = lines.slice(startLine - 1, endLine).join("\n");
+        expect(
+          covered.includes("this.repository.save("),
+          `span satırları (${String(startLine)}-${String(endLine)}) çağrıyı içermeli: ${JSON.stringify(covered)}`,
+        ).toBe(true);
+      } finally {
+        await pair.close();
+      }
+    },
+  );
+
+  it("pozitif get_evidence: node kimliği komşu kenar kanıtlarını deterministik döndürür", async () => {
+    const pair = await connectClient(makeContext());
+    try {
+      const createId = await symbolIdOf(pair.client, "OrdersService.create");
+
+      const byNode = await callTool(pair.client, "causoryn_get_evidence", { id: createId });
+      const envelope = expectEnvelope(byNode);
+      expect(envelope.status).toBe("ok");
+      const data = envelope.data as Record<string, unknown>;
+      expect(data.id).toBe(createId);
+      expect(data.idKind).toBe("node");
+      const nodeInfo = data.node as Record<string, unknown>;
+      expect(nodeInfo.id).toBe(createId);
+      expect(nodeInfo.kind).toBe("Method");
+      expect(nodeInfo.qualifiedName).toBe("OrdersService.create");
+      expect(data.edge).toBeUndefined();
+
+      const evidence = data.evidence as Array<Record<string, unknown>>;
+      expect(evidence.length).toBeGreaterThanOrEqual(1);
+      // Node kanıtı komşu kenarlardan gelir: CONTAINS + CALLS kanıtları
+      // görünmeli (TŞ §8'de kanıt bağı kenar üzerindedir; düğüm kanıtı
+      // Faz A'da komşu kenar kanıtlarıyla tanımlanır).
+      const rationales = evidence.map((entry) => entry.rationale as string);
+      expect(rationales.some((text) => text.includes("CALLS"))).toBe(true);
+      expect(rationales.some((text) => text.includes("CONTAINS"))).toBe(true);
+      // Kanıt ID'leri tekrarsız ve deterministik düzende.
+      const ids = evidence.map((entry) => entry.id as string);
+      expect(new Set(ids).size).toBe(ids.length);
+      const sorted = [...ids].sort();
+      expect(ids).toEqual(sorted);
+
+      // Determinizm: aynı istek → aynı data (TŞ §8 invariant vi).
+      const repeat = await callTool(pair.client, "causoryn_get_evidence", { id: createId });
+      expect(expectEnvelope(repeat).data).toEqual(data);
+    } finally {
+      await pair.close();
+    }
+  });
+
+  it("negatif get_evidence: bilinmeyen kimlik → EVIDENCE_NOT_FOUND; yetkisiz workspace reddi", async () => {
+    const pair = await connectClient(makeContext());
+    try {
+      const result = await callTool(pair.client, "causoryn_get_evidence", {
+        id: "node:0000000000000000000000000000000000000000000000000000000000000000",
+      });
+      const envelope = expectEnvelope(result);
+      expect(envelope.status).toBe("error");
+      expect(envelope.snapshotId).toBeNull();
+      const error = envelope.error as Record<string, unknown>;
+      expect(error.code).toBe("EVIDENCE_NOT_FOUND");
+      expect(error.retryable).toBe(false);
+      expect((error.userAction as string).length).toBeGreaterThan(0);
+
+      // Kenar/evidence biçimli bilinmeyen kimlikler de aynı kodu verir.
+      const asEdge = await callTool(pair.client, "causoryn_get_evidence", {
+        id: "edge:yok",
+      });
+      expect((expectEnvelope(asEdge).error as Record<string, unknown>).code).toBe(
+        "EVIDENCE_NOT_FOUND",
+      );
+
+      // Workspace yetkisi kimlik aramasından ÖNCE denetlenir.
+      const authz = await callTool(pair.client, "causoryn_get_evidence", {
+        workspaceId: "baska-workspace",
+        id: "node:abc",
+      });
+      expect((expectEnvelope(authz).error as Record<string, unknown>).code).toBe(
+        "WORKSPACE_NOT_AUTHORIZED",
+      );
+    } finally {
+      await pair.close();
+    }
+  });
+
   it("negatif: yetkisiz workspace → WORKSPACE_NOT_AUTHORIZED", async () => {
     const pair = await connectClient(
       makeContext({ allowRoots: [] }),
@@ -339,6 +515,7 @@ describe("MCP server — protokol düzeyi", () => {
         causoryn_workspace_summary: {},
         causoryn_map_system: {},
         causoryn_find_symbols: { query: "x" },
+        causoryn_get_evidence: { id: "node:olmayan" },
       };
       for (const [name, args] of Object.entries(minimalArgs)) {
         const result = await callTool(pair.client, name, args);
@@ -486,6 +663,23 @@ describe("MCP server — protokol düzeyi", () => {
         const findData = findEnvelope.data as Record<string, unknown>;
         expect(findData.totalMatches).toBe(0);
         expect((findData.hits as unknown[]).length).toBe(0);
+
+        // partial get_evidence: Workspace node'u mevcuttur (kimlik bulunur)
+        // ama kenarsızdır → kanıt dizisi BOŞ döner; EVIDENCE_NOT_FOUND değildir.
+        const l0 = await callTool(pair.client, "causoryn_map_system", { level: "L0" });
+        const l0Data = expectEnvelope(l0).data as Record<string, unknown>;
+        const l0Nodes = l0Data.nodes as Array<Record<string, unknown>>;
+        expect(l0Nodes.length).toBe(1);
+        const workspaceId0 = l0Nodes[0]?.id as string;
+        const evidence = await callTool(pair.client, "causoryn_get_evidence", {
+          workspaceId: "empty",
+          id: workspaceId0,
+        });
+        const evidenceEnvelope = expectEnvelope(evidence);
+        expect(evidenceEnvelope.status).toBe("partial");
+        const evidenceData = evidenceEnvelope.data as Record<string, unknown>;
+        expect(evidenceData.idKind).toBe("node");
+        expect((evidenceData.evidence as unknown[]).length).toBe(0);
       } finally {
         await pair.close();
       }
@@ -520,10 +714,11 @@ describe("MCP server — protokol düzeyi", () => {
     expect(caught).toBeInstanceOf(Error);
   });
 
-  it("hata kodu seti sabittir (TŞ §10.1 + tek proje uzantısı INVALID_ARGUMENT)", () => {
-    // TŞ §10.1 listesinde INVALID_ARGUMENT YOKTUR; görev sözleşmesi geçersiz
-    // girdi için sabit bir envelope kodu istediği üzere proje uzantısı
-    // olarak dahil edilmiştir (bkz. src/errors.ts başlığı).
+  it("hata kodu seti sabittir (TŞ §10.1 + proje uzantıları INVALID_ARGUMENT, EVIDENCE_NOT_FOUND)", () => {
+    // TŞ §10.1 listesinde INVALID_ARGUMENT ve EVIDENCE_NOT_FOUND YOKTUR;
+    // görev sözleşmeleri geçersiz girdi ve bulunamayan kimlik için sabit
+    // envelope kodları istediğinden ikisi proje uzantısı olarak dahil
+    // edilmiştir (bkz. src/errors.ts başlığı).
     expect([...CAUSORYN_TOOL_ERROR_CODES].sort()).toEqual(
       [
         "WORKSPACE_NOT_AUTHORIZED",
@@ -532,6 +727,7 @@ describe("MCP server — protokol düzeyi", () => {
         "AMBIGUOUS_SYMBOL",
         "LIMIT_EXCEEDED",
         "INVALID_ARGUMENT",
+        "EVIDENCE_NOT_FOUND",
         "UNSUPPORTED_LANGUAGE",
         "INTERNAL_ERROR",
       ].sort(),
