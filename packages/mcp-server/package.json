@@ -1,0 +1,18 @@
+{
+  "name": "@causoryn/mcp-server",
+  "version": "0.1.0",
+  "private": true,
+  "description": "MCP protokol adaptasyonu: stdio server + 5 gerçek araç (get_capabilities, workspace_summary, map_system, find_symbols, get_evidence); Zod envelope doğrulaması, authorization, size limitleri; @modelcontextprotocol/sdk 1.32.2 (v1.x hattı — TŞ §6 SDK v2 hedefine yükseltme npm install yasağı nedeniyle yapılamadı; bkz. src/index.ts SDK sürüm notu) (TŞ v2.1 §5, §10).",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@causoryn/domain": "0.1.0",
+    "@causoryn/graph": "0.1.0",
+    "@causoryn/indexing": "0.1.0",
+    "@causoryn/workspace": "0.1.0",
+    "@modelcontextprotocol/sdk": "^1.32.2",
+    "zod": "^4.6.7"
+  }
+}

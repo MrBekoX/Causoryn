@@ -1,0 +1,13 @@
+{
+  "name": "@causoryn/workspace",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Workspace Gateway: trusted root doğrulaması, file inventory, ignore, symlink escape ve binary/size filtreleri (TŞ v2.1 §5, §9, §25/2).",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "zod": "^4.6.7"
+  }
+}

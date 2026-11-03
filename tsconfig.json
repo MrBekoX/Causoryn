@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json.schemastore.org/tsconfig",
+  "files": [],
+  "references": [
+    { "path": "packages/domain" },
+    { "path": "packages/workspace" },
+    { "path": "packages/indexing" },
+    { "path": "packages/graph" },
+    { "path": "packages/storage-sqlite" },
+    { "path": "packages/mcp-server" },
+    { "path": "adapters/typescript" }
+  ]
+}

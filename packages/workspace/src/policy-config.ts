@@ -1,0 +1,172 @@
+import path from "node:path";
+
+import { z } from "zod";
+
+import type { PolicyErrorCode } from "./policy-error.js";
+
+/**
+ * Workspace policy konfigürasyon şeması — TŞ v2.1 §20'deki `causoryn.config`
+ * örneğinin workspace dilimi. Varsayılanlar güvenlidir: `allowRoots: []`
+ * (explicit authorization, default deny) ve TŞ §20'deki default ignore
+ * listesi bire bir korunur.
+ */
+
+/** TŞ §20 workspace.ignore default listesi (bire bir). */
+export const DEFAULT_IGNORE_PATTERNS: readonly string[] = [
+  "**/.git/**",
+  "**/node_modules/**",
+  "**/bin/**",
+  "**/obj/**",
+  "**/dist/**",
+  "**/.env*",
+  "**/*.pem",
+];
+
+/** Binary (metin olmayan) uzantı default kara listesi; politika lower-case karşılaştırır. */
+export const DEFAULT_BINARY_EXTENSIONS: readonly string[] = [
+  ".png",
+  ".jpg",
+  ".jpeg",
+  ".gif",
+  ".ico",
+  ".bmp",
+  ".webp",
+  ".pdf",
+  ".zip",
+  ".tar",
+  ".gz",
+  ".7z",
+  ".rar",
+  ".exe",
+  ".dll",
+  ".so",
+  ".dylib",
+  ".bin",
+  ".o",
+  ".obj",
+  ".a",
+  ".lib",
+  ".class",
+  ".jar",
+  ".pyc",
+  ".wasm",
+  ".mp3",
+  ".mp4",
+  ".avi",
+  ".mov",
+  ".wav",
+  ".flac",
+  ".ttf",
+  ".otf",
+  ".woff",
+  ".woff2",
+  ".eot",
+  ".sqlite",
+  ".db",
+  ".doc",
+  ".docx",
+  ".xls",
+  ".xlsx",
+  ".ppt",
+  ".pptx",
+];
+
+/** TŞ §20 index.maxFileBytes default değeri. */
+export const DEFAULT_MAX_FILE_BYTES = 2_000_000;
+
+/**
+ * Uzantı biçimi: nokta ile başlar; ".ts" tek segment olduğu gibi ".d.ts",
+ * ".min.js" gibi çok segmentli uzantılar da geçerlidir (yorum-şema
+ * uyuşmazlığı giderildi). Sondaki/art arda nokta reddedilir. Not:
+ * checkFile eşlemesi `path.extname` (son segment) üzerinden yapılır; çok
+ * segmentli girişler tam sonek eşlemesi isteyen tüketiciler içindir.
+ */
+const extensionSchema = z
+  .string()
+  .regex(/^\.(?:[A-Za-z0-9]+\.)*[A-Za-z0-9]+$/, "uzantı '.x' veya '.a.b' biçiminde olmalı")
+  .transform((value) => value.toLowerCase());
+
+/** Null byte içeren herhangi bir yol/desen girdisi reddedilir (OWASP %00 bypass). */
+const noNullByte = (label: string) =>
+  z
+    .string()
+    .min(1, `${label} boş olamaz`)
+    .refine((value) => !value.includes("\0"), `${label} null byte içeremez`);
+
+export const workspacePolicyConfigSchema = z.strictObject({
+  /**
+   * Kullanıcı tarafından açıkça beyan edilen kök dizinler (TŞ §20: CLI /
+   * user-approval ile yönetilir; MCP isteği tek başına ekleyemez).
+   * Boş liste = her şey reddedilir. Kökler MUTLAK yol olmak zorundadır:
+   * göreli kök CWD'ye bağımlı olup determinizmi bozar (TŞ §6).
+   */
+  allowRoots: z
+    .array(
+      noNullByte("allowRoot elemanı").refine(
+        (value) => path.isAbsolute(value),
+        "allowRoot mutlak yol olmalıdır (göreli kök CWD'ye bağımlıdır)",
+      ),
+    )
+    .default([]),
+  /** Default ignore listesi; verilmemişse TŞ §20 listesi kullanılır. */
+  ignore: z.array(noNullByte("ignore deseni")).default([...DEFAULT_IGNORE_PATTERNS]),
+  /** Kullanıcı ignore'ları default'ların/ignore'un ÜZERİNE eklenir (birleşim). */
+  extraIgnore: z.array(noNullByte("extraIgnore deseni")).default([]),
+  /** Binary uzantı kara listesi (blacklist modunda kullanılır). */
+  binaryExtensions: z.array(extensionSchema).default([...DEFAULT_BINARY_EXTENSIONS]),
+  /** Uzantı filtresi modu: blacklist (default) veya whitelist. */
+  extensionFilterMode: z.enum(["blacklist", "whitelist"]).default("blacklist"),
+  /** Whitelist modunda izinli uzantılar; uzantısız dosya yalnızca "" ile izinli olur. */
+  allowedExtensions: z.array(extensionSchema).default([]),
+  /** Tek dosya üst sınırı (bayt); aşımı LIMIT_EXCEEDED (TŞ §19 kaynak tüketimi). */
+  maxFileBytes: z
+    .number()
+    .int("maxFileBytes tam sayı olmalı")
+    .positive("maxFileBytes pozitif olmalı")
+    .max(Number.MAX_SAFE_INTEGER, "maxFileBytes güvenli tam sayı aralığında olmalı")
+    .default(DEFAULT_MAX_FILE_BYTES),
+});
+
+/** Geçerli (default'ları uygulanmış) politika konfigürasyonu. */
+export type WorkspacePolicyConfig = z.infer<typeof workspacePolicyConfigSchema>;
+
+/** Etkin ignore listesi: ignore + extraIgnore birleşimi (sıra korunur). */
+export function effectiveIgnorePatterns(config: WorkspacePolicyConfig): readonly string[] {
+  return [...config.ignore, ...config.extraIgnore];
+}
+
+export type ParsedPolicyConfig =
+  | { readonly ok: true; readonly config: WorkspacePolicyConfig }
+  | {
+      readonly ok: false;
+      readonly code: Extract<PolicyErrorCode, "workspace/policy-invalid">;
+      readonly issues: readonly string[];
+    };
+
+function deepFreezeConfig(config: WorkspacePolicyConfig): WorkspacePolicyConfig {
+  const frozen = {
+    allowRoots: Object.freeze([...config.allowRoots]),
+    ignore: Object.freeze([...config.ignore]),
+    extraIgnore: Object.freeze([...config.extraIgnore]),
+    binaryExtensions: Object.freeze([...config.binaryExtensions]),
+    extensionFilterMode: config.extensionFilterMode,
+    allowedExtensions: Object.freeze([...config.allowedExtensions]),
+    maxFileBytes: config.maxFileBytes,
+  } as WorkspacePolicyConfig;
+  return Object.freeze(frozen);
+}
+
+/**
+ * Konfigürasyonu doğrular ve default'ları uygular; fırlatmaz — sonuç
+ * ayrıştırıcı birleşimdir (deterministik karar, TŞ §10.1 POLICY_INVALID).
+ */
+export function parseWorkspacePolicyConfig(input: unknown): ParsedPolicyConfig {
+  const result = workspacePolicyConfigSchema.safeParse(input);
+  if (result.success) {
+    return { ok: true, config: deepFreezeConfig(result.data) };
+  }
+  const issues = result.error.issues.map(
+    (issue) => `${issue.path.length > 0 ? issue.path.map(String).join(".") : "(kök)"}: ${issue.message}`,
+  );
+  return { ok: false, code: "workspace/policy-invalid", issues };
+}

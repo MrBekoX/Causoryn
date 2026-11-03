@@ -1,0 +1,13 @@
+{
+  "name": "@causoryn/domain",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Graph/Evidence domain sözleşmeleri, canonical JSON ve deterministik ID üretimi (TŞ v2.1 §8).",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "zod": "^4.6.7"
+  }
+}

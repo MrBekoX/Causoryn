@@ -1,0 +1,42 @@
+{
+  "name": "causoryn",
+  "version": "0.1.0",
+  "description": "Deterministic, local, LLM-free code analysis for ZCode: read-only workspace graphs, architecture mapping, symbol search and evidence provenance over a stdio MCP server.",
+  "description_i18n": {
+    "en": "Deterministic, local, LLM-free code analysis for ZCode: read-only workspace graphs, architecture mapping, symbol search and evidence provenance over a stdio MCP server."
+  },
+  "author": {
+    "name": "Causoryn"
+  },
+  "license": "UNLICENSED",
+  "keywords": [
+    "code-analysis",
+    "static-analysis",
+    "architecture-map",
+    "symbols",
+    "mcp",
+    "evidence"
+  ],
+  "userConfig": {
+    "config_json": {
+      "title": "Causoryn server config (JSON)",
+      "description": "JSON handed to the local Causoryn server as the CAUSORYN_CONFIG environment variable. Declare authorized workspace roots via allowRoots (read-only analysis; the manifest itself carries no sensitive values). Example: {\"allowRoots\":[\"C:/projects/my-app\"]}. The default denies all roots; workspace tools then answer WORKSPACE_NOT_AUTHORIZED until a root is authorized here.",
+      "type": "string",
+      "default": "{\"allowRoots\":[]}"
+    }
+  },
+  "skills": "skills",
+  "mcpServers": {
+    "causoryn": {
+      "type": "stdio",
+      "command": "node",
+      "args": [
+        "${CLAUDE_PLUGIN_ROOT}/../../../packages/mcp-server/dist/stdio.js"
+      ],
+      "cwd": "${CLAUDE_PROJECT_DIR}",
+      "env": {
+        "CAUSORYN_CONFIG": "${user_config.config_json}"
+      }
+    }
+  }
+}
