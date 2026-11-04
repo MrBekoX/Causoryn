@@ -158,7 +158,11 @@ describe("MCP server — protokol düzeyi", () => {
       const ts = adapters.find((a) => a.language === "typescript");
       expect(ts).toBeDefined();
       expect(ts?.analyzerId).toBe("ts-adapter");
-      expect(ts?.levels).toEqual({ astParse: "L1", symbolResolution: "L2", frameworkLinkers: "yok" });
+      expect(ts?.levels).toEqual({
+        astParse: "L1",
+        symbolResolution: "L2",
+        frameworkLinkers: "express+nextjs",
+      });
       const limits = data.limits as Record<string, unknown>;
       expect(limits.maxNodes).toBe(250);
       expect(limits.maxSymbols).toBe(100);
@@ -193,11 +197,37 @@ describe("MCP server — protokol düzeyi", () => {
       expect((edgesByKind.CONTAINS ?? 0)).toBeGreaterThan(0);
       const entrypoints = data.entrypoints as string[];
       expect(entrypoints).toContain("POST /orders");
-      // Framework tespiti Faz A'da boş; alan mevcut (TŞ §10.2 summary).
-      expect(Array.isArray(data.frameworks)).toBe(true);
+      // fixture-ts-orders framework-bağımsız Router taşır: framework etiketi
+      // yoktur (denetim bulgusu 1 regresyon pimi — alan mevcut, boş).
+      expect(data.frameworks).toEqual([]);
       const languages = data.languages as Array<Record<string, unknown>>;
       const tsLanguage = languages.find((l) => l.language === "typescript");
       expect((tsLanguage?.files as number)).toBeGreaterThan(0);
+    } finally {
+      await pair.close();
+    }
+  });
+
+  it("pozitif workspace_summary (framework): express fixture'ından frameworks türetilir", async () => {
+    // Denetim bulgusu 1: map_system/summary frameworks alanı hard-coded []
+    // idi; snapshot'taki framework öznitelikli Endpoint node'larından
+    // türetilmeli. Express fixture'ında diskte tip shim'i olmadığından
+    // TS7016 tanısı state'i partial yapar; framework kenarları buna rağmen
+    // üretilir (adapter davranışı — bulgu 2 sonrası receiver kapsamlı).
+    const expressRoot = path.join(REPO_ROOT, "examples", "fixture-ts-express");
+    const pair = await connectClient(
+      makeContext({ allowRoots: [expressRoot], workspaceId: "express-fx" }),
+    );
+    try {
+      const result = await callTool(pair.client, "causoryn_workspace_summary");
+      const envelope = expectEnvelope(result);
+      expect(envelope.workspaceId).toBe("express-fx");
+
+      const data = envelope.data as Record<string, unknown>;
+      expect(data.frameworks).toEqual(["express"]);
+      const entrypoints = data.entrypoints as string[];
+      expect(entrypoints).toContain("GET /products");
+      expect(entrypoints).toContain("GET /admin/stats");
     } finally {
       await pair.close();
     }

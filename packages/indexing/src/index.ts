@@ -13,7 +13,11 @@
  * Invalidation (FS watcher, 300–1000 ms debounce) sonraki dilimlere
  * aittir; bu dilimde yeniden indeksleme `runIndex` çağrısıyla yapılır.
  */
-import { TS_ADAPTER_ANALYZER_ID, TS_ADAPTER_VERSION } from "@causoryn/adapter-typescript";
+import {
+  TS_ADAPTER_ANALYZER_ID,
+  TS_ADAPTER_FRAMEWORK_LINKERS,
+  TS_ADAPTER_VERSION,
+} from "@causoryn/adapter-typescript";
 
 export { IndexingError } from "./errors.js";
 export type { IndexingErrorCode } from "./errors.js";
@@ -28,10 +32,22 @@ export type {
 } from "./index-service.js";
 
 /**
+ * Adapter linker beyanından türetilen metadata etiketi (denetim bulgusu 1
+ * düzeltmesi): hiçbiri yoksa "yok", varsa '+' ile birleşik linker
+ * kimlikleri (ör. "express+nextjs"). Sabit kopya TUTULMAZ — adapter'ın
+ * TS_ADAPTER_FRAMEWORK_LINKERS beyanıyla birlikte sürüklenir; aksi halde
+ * get_capabilities bayat "yok" değerini MCP yüzeyine taşır.
+ */
+const FRAMEWORK_LINKERS_LABEL =
+  TS_ADAPTER_FRAMEWORK_LINKERS.length === 0
+    ? "yok"
+    : TS_ADAPTER_FRAMEWORK_LINKERS.join("+");
+
+/**
  * Adapter yetenek beyanı (uygulama düzeyi metadata; TŞ §7).
- * `frameworkLinkers: "yok"` — Faz A'da L3 framework linker'ları aktif
- * değil; TS adapter yalnızca L1 (AST declaration/import) + L2 (TypeChecker
- * sembol çözümlemesi) + route kalıbı (ROUTES_TO) sağlar.
+ * TS adapter: L1 (AST declaration/import) + L2 (TypeChecker sembol
+ * çözümlemesi) + route kalıbı (ROUTES_TO); sprint-2 B3 ile framework
+ * linker'ları aktif — `frameworkLinkers` adapter beyanından türetilir.
  */
 export interface IndexedAdapterInfo {
   readonly language: "typescript";
@@ -40,12 +56,13 @@ export interface IndexedAdapterInfo {
   readonly levels: {
     readonly astParse: "L1";
     readonly symbolResolution: "L2";
-    readonly frameworkLinkers: "yok";
+    /** "yok" veya '+' ile birleşik aktif linker kimlikleri (ör. "express+nextjs"). */
+    readonly frameworkLinkers: string;
   };
   readonly source: "adapters/typescript";
 }
 
-/** Faz A'da kayıtlı dil adapter'ları (get_capabilities bu metadata'yı sunar). */
+/** Kayıtlı dil adapter'ları (get_capabilities bu metadata'yı sunar). */
 export const INDEXED_ADAPTERS: readonly IndexedAdapterInfo[] = [
   {
     language: "typescript",
@@ -54,7 +71,7 @@ export const INDEXED_ADAPTERS: readonly IndexedAdapterInfo[] = [
     levels: {
       astParse: "L1",
       symbolResolution: "L2",
-      frameworkLinkers: "yok",
+      frameworkLinkers: FRAMEWORK_LINKERS_LABEL,
     },
     source: "adapters/typescript",
   },

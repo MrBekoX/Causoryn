@@ -1,0 +1,13 @@
+{
+  "name": "@causoryn/adapter-csharp-roslyn",
+  "version": "0.1.0",
+  "private": true,
+  "description": "C#/.NET Language Adapter: Roslyn sidecar worker süreç yönetimi (TŞ v2.1 §7; sprint-2 B2).",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@causoryn/domain": "0.1.0"
+  }
+}

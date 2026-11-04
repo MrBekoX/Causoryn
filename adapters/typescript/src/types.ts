@@ -43,6 +43,53 @@ export interface TypeScriptAdapterInput {
   readonly sources: readonly TsAdapterSourceFile[];
 }
 
+/**
+ * Framework linker kimlikleri (sprint-2 B3). Her kimlik, `extractFrameworkEdges`
+ * kapısı üzerinden çalışan bir L3 linker geçişine karşılık gelir.
+ */
+export type FrameworkLinkerId = "express" | "nextjs";
+
+/**
+ * Aktif framework linker kimlikleri — `capabilities.frameworkLinkers` ile
+ * AYNI kaynak (denetim bulgusu 1 düzeltmesi: indexing metadata'sı buradan
+ * türetilir; ikinci sabit kopya tutulmaz, sürüklenme olmaz).
+ */
+export const TS_ADAPTER_FRAMEWORK_LINKERS: readonly FrameworkLinkerId[] = [
+  "express",
+  "nextjs",
+];
+
+/**
+ * `analyzeTypeScriptProgramWithFrameworks` çıktısı: TEK analiz koşumuyla
+ * ana sonuç + framework linker katkısı (denetim bulgusu 3 düzeltmesi —
+ * iki API'yi ayrı ayrı çağıran istemcinin 2x derleme maliyetini önler).
+ */
+export interface TypeScriptAnalysisRun {
+  readonly result: TypeScriptAdapterResult;
+  readonly framework: FrameworkEdgesResult;
+}
+
+/**
+ * Algılanan framework ve dayanağı. `basis` girdileri deterministiktir:
+ * sıralı ve yinelenmez (Express: import specifier + kaynak dosya;
+ * Next.js: dosya kuralı + kural dosyası).
+ */
+export interface FrameworkDetection {
+  readonly framework: FrameworkLinkerId;
+  readonly basis: readonly string[];
+}
+
+/** `extractFrameworkEdges` çıktısı: framework linker'larının katkısı. */
+export interface FrameworkEdgesResult {
+  readonly detections: readonly FrameworkDetection[];
+  /** Linker'ların ürettiği node'lar (şu an yalnızca Endpoint node'ları). */
+  readonly nodes: readonly SnapshotNodeInput[];
+  /** Linker'ların ürettiği/katkıda bulunduğu kenarlar (ROUTES_TO). */
+  readonly edges: readonly SnapshotEdgeInput[];
+  /** Bilinmeyen framework kalıpları için tanı notları. */
+  readonly diagnostics: readonly TypeScriptAdapterDiagnostic[];
+}
+
 /** Adapter yetenek beyanı (TŞ §7: "capabilities"). */
 export interface TypeScriptAdapterCapabilities {
   readonly astParse: true;
@@ -52,8 +99,8 @@ export interface TypeScriptAdapterCapabilities {
   readonly callEdges: true;
   /** Route tespiti: `<router>.<verb>("/path", handler)` çağrı kalıbı. */
   readonly routeDetection: "http-verb-call-pattern";
-  /** L3 framework linker'ları (Next.js/DI vb.) bu dilimde yok. */
-  readonly frameworkLinkers: false;
+  /** Aktif L3 framework linker'ları (sprint-2 B3: Express + Next.js App Router). */
+  readonly frameworkLinkers: readonly FrameworkLinkerId[];
 }
 
 /** Tek dosyadan toplanan tanı (parse/semantic). Satır 1 tabanlıdır. */

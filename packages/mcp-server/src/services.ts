@@ -267,6 +267,17 @@ export function workspaceSummary(
         },
       ]
     : [];
+  // Framework linker'ları (sprint-2 B3) Endpoint node'larına framework
+  // özniteliği yazar; özet bu özniteliklerden türetilir — hard-coded []
+  // değildir (denetim bulgusu 1 düzeltmesi).
+  const frameworks = [
+    ...new Set(
+      snapshot.nodes
+        .filter((node) => node.kind === "Endpoint")
+        .map((node) => node.attributes.framework)
+        .filter((value): value is string => typeof value === "string"),
+    ),
+  ].sort((a, b) => (a < b ? -1 : 1));
 
   return buildEnvelope({
     requestId,
@@ -285,9 +296,7 @@ export function workspaceSummary(
       evidenceCount: snapshot.evidence.length,
       fileCount: fileNodes.length,
       languages,
-      // Faz A'da framework linker'ı aktif değil: frameworks daima boş
-      // (get_capabilities levels.frameworkLinkers="yok" ile tutarlı).
-      frameworks: [],
+      frameworks,
       entrypoints,
       edgesByKind: countEdgesByKind(snapshot),
       resolutions: {

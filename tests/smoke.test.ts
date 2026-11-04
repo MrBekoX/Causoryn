@@ -146,7 +146,7 @@ describe("TypeScript çözüm sözleşmesi", () => {
     expect(field(options, "sourceMap")).toBe(true);
   });
 
-  it("kök tsconfig.json solution olarak 7 projeye referans verir", () => {
+  it("kök tsconfig.json solution olarak 8 projeye referans verir", () => {
     const solution = readJson("tsconfig.json");
     const references = field(solution, "references") as Array<
       Record<string, unknown>
@@ -160,6 +160,7 @@ describe("TypeScript çözüm sözleşmesi", () => {
       "packages/storage-sqlite",
       "packages/mcp-server",
       "adapters/typescript",
+      "adapters/csharp-roslyn",
     ]);
     for (const projectPath of paths) {
       expect(exists(`${projectPath}/tsconfig.json`)).toBe(true);

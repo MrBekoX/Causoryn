@@ -21,7 +21,8 @@ import { describe, expect, it } from "vitest";
  * oluşturulur ve her test sonunda silinir.
  */
 
-import { IndexService, IndexingError } from "../src/index.js";
+import { IndexService, IndexingError, INDEXED_ADAPTERS } from "../src/index.js";
+import { TS_ADAPTER_FRAMEWORK_LINKERS } from "@causoryn/adapter-typescript";
 import { WorkspaceAccessPolicy } from "@causoryn/workspace";
 import { InMemoryGraphRepository } from "@causoryn/graph";
 import { sha256Hex, utf8Encode } from "@causoryn/domain";
@@ -243,5 +244,25 @@ describe("IndexService — minimal pipeline (envanter → adapter → graph → 
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
+  });
+});
+
+/* ------------------------------------------------------------------ */
+/* Adapter metadata tutarlılığı (denetim bulgusu 1)                    */
+/* ------------------------------------------------------------------ */
+
+describe("INDEXED_ADAPTERS — adapter yetenek metadata'sı", () => {
+  it("frameworkLinkers metadata'sı adapter'ın aktif linker beyanıyla tutarlıdır", () => {
+    // B3 ile TS adapter framework linker'ları aktif oldu; metadata 'yok'
+    // kalmıştı ve get_capabilities üzerinden MCP yüzeyine bayat değer
+    // taşıyordu. Metadata artık adapter'ın TS_ADAPTER_FRAMEWORK_LINKERS
+    // beyanından türetilir (tek doğruluk kaynağı).
+    expect(INDEXED_ADAPTERS).toHaveLength(1);
+    const adapter = INDEXED_ADAPTERS[0] as (typeof INDEXED_ADAPTERS)[number];
+    expect(adapter.language).toBe("typescript");
+    expect(adapter.levels.frameworkLinkers).toBe("express+nextjs");
+    expect(adapter.levels.frameworkLinkers).toBe(
+      TS_ADAPTER_FRAMEWORK_LINKERS.join("+"),
+    );
   });
 });
