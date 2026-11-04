@@ -23,13 +23,16 @@ export const causorynServerConfigSchema = workspacePolicyConfigSchema.extend({
     // Not: zod v4 `.default({})` iç şemayı parse etmez — default değer
     // bütünsel verilmelidir (aksi halde maxFiles undefined kalır).
     .default({ maxFiles: 50_000 }),
-  /** Sonuç limitleri (TŞ §20 results.maxNodes; maxSymbols Faz A eklentisi). */
+  /** Sonuç limitleri (TŞ §20 results.maxNodes; maxSymbols Faz A, maxDepth
+   * sprint-2 B5: causoryn_get_symbol_context derinlik tavanı — TŞ §20
+   * resource budget "maxDepth" dilimi). */
   results: z
     .strictObject({
       maxNodes: z.number().int().positive().default(250),
       maxSymbols: z.number().int().positive().default(100),
+      maxDepth: z.number().int().positive().default(3),
     })
-    .default({ maxNodes: 250, maxSymbols: 100 }),
+    .default({ maxNodes: 250, maxSymbols: 100, maxDepth: 3 }),
   /** Başlangıçta otomatik indeksleme; false → araçlar INDEX_NOT_READY döner. */
   autoIndex: z.boolean().default(true),
 });

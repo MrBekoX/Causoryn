@@ -78,7 +78,15 @@ function makeService(
   });
 }
 
-describe("IndexService — minimal pipeline (envanter → adapter → graph → snapshot)", () => {
+// Zaman bütçesi: bu suite'teki testler IndexService.runIndex → TS Program
+// inşası (ts.createProgram) yürüten CPU-bağlı senkron testlerdir; İLK test
+// ayrıca TypeScript derleyicisinin soğuk başlangıcını üstlenir. Tüm suite
+// paralel worker'larla koştiğinde kontansiyon bu testleri vitest varsayılan
+// 5000ms limitinin üzerine taşıyabilir (vitest 5, limiti aşan senkron testi
+// assertion'lar geçse de reddeder). framework-linkers.test.ts ve
+// job-manager.test.ts ile aynı kural: açık 30s limiti — assertion
+// gevşetmesi yoktur, yalnızca yük altı çalışma bütçesi.
+describe("IndexService — minimal pipeline (envanter → adapter → graph → snapshot)", { timeout: 30_000 }, () => {
   it("pozitif: fixture indekslenir; Workspace node + CONTAINS + verified CALLS zinciri snapshot'ta", () => {
     const repository = new InMemoryGraphRepository();
     const service = makeService(repository);

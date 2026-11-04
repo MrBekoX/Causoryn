@@ -12,6 +12,9 @@
  *
  * Invalidation (FS watcher, 300–1000 ms debounce) sonraki dilimlere
  * aittir; bu dilimde yeniden indeksleme `runIndex` çağrısıyla yapılır.
+ * Sprint-2 B6: `IndexJobManager`, refresh_index tool'u için `runIndex`
+ * pipeline'ını in-process async iş olarak sarmalar (TŞ §10.2
+ * causoryn_refresh_index "Yeni snapshot işi").
  */
 import {
   TS_ADAPTER_ANALYZER_ID,
@@ -30,6 +33,14 @@ export type {
   IndexRunResult,
   IndexServiceOptions,
 } from "./index-service.js";
+export { IndexJobManager } from "./job-manager.js";
+export type {
+  IndexJobError,
+  IndexJobManagerOptions,
+  IndexJobMode,
+  IndexJobRecord,
+  IndexJobStatus,
+} from "./job-manager.js";
 
 /**
  * Adapter linker beyanından türetilen metadata etiketi (denetim bulgusu 1

@@ -202,11 +202,17 @@ describe("stdio server — stdout saflığı ve protokol el sıkışması", () =
 
     expect(listMsg.id).toBe(2);
     const listResult = listMsg.result as { tools?: Array<{ name?: string }> };
+    // Sprint-2 B6: causoryn_index_status + causoryn_refresh_index, B5:
+    // causoryn_get_symbol_context eklendi (TŞ §10.2 katalog büyümesi; liste
+    // alfabetik karşılaştırılır).
     expect(listResult.tools?.map((t) => t.name).sort()).toEqual([
       "causoryn_find_symbols",
       "causoryn_get_capabilities",
       "causoryn_get_evidence",
+      "causoryn_get_symbol_context",
+      "causoryn_index_status",
       "causoryn_map_system",
+      "causoryn_refresh_index",
       "causoryn_workspace_summary",
     ]);
 

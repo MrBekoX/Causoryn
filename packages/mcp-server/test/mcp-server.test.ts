@@ -31,6 +31,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { sha256Hex, utf8Encode } from "@causoryn/domain";
+import { InMemoryGraphRepository } from "@causoryn/graph";
 import type { GraphRepository } from "@causoryn/graph";
 import { describe, expect, it } from "vitest";
 
@@ -106,7 +107,15 @@ function expectEnvelope(result: CallToolResult): Record<string, unknown> {
   return (parsed as { success: true; data: Record<string, unknown> }).data;
 }
 
-describe("MCP server — protokol düzeyi", () => {
+// Zaman bütçesi: her test makeContext() ile autoIndex'li taze bir bağlam
+// kurar — yani her test tam bir TS Program inşası (IndexService.runIndex)
+// yürüten CPU-bağlı çalışmadır; İLK test (initialize) derleyicinin soğuk
+// başlangıcını da üstlenir. Suite paralel worker'larla koşarken
+// kontansiyon vitest varsayılan 5000ms limitini aşabilir (vitest 5, limiti
+// aşan senkron çalışmayı assertion'lar geçse de reddeder). job-manager.test.ts
+// ve framework-linkers.test.ts ile aynı kural: açık 30s limiti — assertion
+// gevşetmesi yoktur, yalnızca yük altı çalışma bütçesi.
+describe("MCP server — protokol düzeyi", { timeout: 30_000 }, () => {
   it("initialize: serverInfo causoryn@<sürüm> beyan eder", async () => {
     const pair = await connectClient(makeContext());
     try {
@@ -119,16 +128,21 @@ describe("MCP server — protokol düzeyi", () => {
     }
   });
 
-  it("tools/list: tam olarak 5 araç; her biri inputSchema + outputSchema taşır", async () => {
+  it("tools/list: tam olarak 8 araç; her biri inputSchema + outputSchema taşır", async () => {
     const pair = await connectClient(makeContext());
     try {
       const { tools } = await pair.client.listTools();
       expect(tools.map((t) => t.name).sort()).toEqual([...TOOL_NAMES].sort());
+      // Sıra TŞ §10.2 katalog sırasıdır: index_status + refresh_index
+      // sprint-2 B6 ile, get_symbol_context sprint-2 B5 ile eklendi.
       expect(TOOL_NAMES).toEqual([
         "causoryn_get_capabilities",
         "causoryn_workspace_summary",
+        "causoryn_index_status",
+        "causoryn_refresh_index",
         "causoryn_map_system",
         "causoryn_find_symbols",
+        "causoryn_get_symbol_context",
         "causoryn_get_evidence",
       ]);
       for (const tool of tools) {
@@ -745,11 +759,13 @@ describe("MCP server — protokol düzeyi", () => {
     expect(caught).toBeInstanceOf(Error);
   });
 
-  it("hata kodu seti sabittir (TŞ §10.1 + proje uzantıları INVALID_ARGUMENT, EVIDENCE_NOT_FOUND)", () => {
-    // TŞ §10.1 listesinde INVALID_ARGUMENT ve EVIDENCE_NOT_FOUND YOKTUR;
-    // görev sözleşmeleri geçersiz girdi ve bulunamayan kimlik için sabit
-    // envelope kodları istediğinden ikisi proje uzantısı olarak dahil
-    // edilmiştir (bkz. src/errors.ts başlığı).
+  it("hata kodu seti sabittir (TŞ §10.1 + proje uzantıları INVALID_ARGUMENT, EVIDENCE_NOT_FOUND, SYMBOL_NOT_FOUND)", () => {
+    // TŞ §10.1 listesinde INVALID_ARGUMENT, EVIDENCE_NOT_FOUND ve
+    // SYMBOL_NOT_FOUND YOKTUR; görev sözleşmeleri geçersiz girdi, bulunamayan
+    // node/edge/evidence kimliği (sprint-1 görev 7) ve bulunamayan sembol
+    // (sprint-2 B5 causoryn_get_symbol_context) için sabit envelope kodları
+    // istediğinden üçü proje uzantısı olarak dahil edilmiştir (bkz.
+    // src/errors.ts başlığı).
     expect([...CAUSORYN_TOOL_ERROR_CODES].sort()).toEqual(
       [
         "WORKSPACE_NOT_AUTHORIZED",
@@ -759,6 +775,7 @@ describe("MCP server — protokol düzeyi", () => {
         "LIMIT_EXCEEDED",
         "INVALID_ARGUMENT",
         "EVIDENCE_NOT_FOUND",
+        "SYMBOL_NOT_FOUND",
         "UNSUPPORTED_LANGUAGE",
         "INTERNAL_ERROR",
       ].sort(),
@@ -839,4 +856,590 @@ describe("MCP server — protokol düzeyi", () => {
       await pair.close();
     }
   });
+
+  /* ---------------------------------------------------------------- */
+  /* sprint-2 B6: causoryn_refresh_index + causoryn_index_status       */
+  /* ---------------------------------------------------------------- */
+
+  it("pozitif refresh_index: tools/call anında jobId döner; iş arka planda done olur ve map_system yeni snapshot'tan okur", async () => {
+    const context = makeContext();
+    const pair = await connectClient(context);
+    try {
+      // autoIndex'in yayımladığı ilk snapshot (revision sequence 1).
+      const before = await callTool(pair.client, "causoryn_workspace_summary");
+      const beforeEnvelope = expectEnvelope(before);
+      const initialSnapshotId = beforeEnvelope.snapshotId as string;
+
+      // refresh_index HEMEN döner: iş kuyrukta/koşuyor, snapshot henüz yok.
+      const refresh = await callTool(pair.client, "causoryn_refresh_index", {
+        mode: "full",
+      });
+      const refreshEnvelope = expectEnvelope(refresh);
+      expect(refreshEnvelope.status).toBe("ok");
+      expect(refreshEnvelope.snapshotId).toBeNull();
+      const refreshData = refreshEnvelope.data as Record<string, unknown>;
+      const jobId = refreshData.jobId as string;
+      expect(typeof jobId).toBe("string");
+      expect(refreshData.mode).toBe("full");
+      expect(refreshData.scope).toBeNull();
+      expect(["queued", "running"]).toContain(refreshData.status);
+
+      // Async kanıt: handler döndükten sonra iş bitene dek beklenir.
+      const final = await context.jobManager.waitForJob(jobId);
+      expect(final.status).toBe("done");
+
+      // index_status(jobId): Snapshot, stale, job progress, diagnostics
+      // (TŞ §10.2 index_status çıktı sözleşmesi).
+      const status = await callTool(pair.client, "causoryn_index_status", { jobId });
+      const statusEnvelope = expectEnvelope(status);
+      expect(statusEnvelope.status).toBe("ok");
+      const statusData = statusDataOf(statusEnvelope);
+      expect(statusData.jobId).toBe(jobId);
+      const job = statusData.job as Record<string, unknown>;
+      expect(job.status).toBe("done");
+      expect(job.snapshotState).toBe("ready");
+      expect(job.progressPercent).toBe(100);
+      expect(job.stale).toBe(false);
+      expect(job.error).toBeNull();
+
+      // Yeni snapshot yayımlandı: ID, revision sequence artışı nedeniyle
+      // ilk snapshot'tan farklıdır ve map_system ARTIK yeni snapshot'ı okur.
+      const latest = statusData.latestSnapshot as Record<string, unknown>;
+      expect(latest.snapshotId).toBe(job.snapshotId);
+      expect(job.snapshotId).not.toBe(initialSnapshotId);
+      const map = await callTool(pair.client, "causoryn_map_system", { level: "L3" });
+      const mapEnvelope = expectEnvelope(map);
+      expect(mapEnvelope.snapshotId).toBe(job.snapshotId);
+      const mapData = mapEnvelope.data as Record<string, unknown>;
+      const qualifiedNames = (mapData.nodes as Array<Record<string, unknown>>).map(
+        (n) => n.qualifiedName as string,
+      );
+      expect(qualifiedNames).toContain("OrdersService.create");
+    } finally {
+      await pair.close();
+    }
+  }, 30_000);
+
+  it("pozitif index_status: jobId verilmezse en son iş raporlanır", async () => {
+    const context = makeContext();
+    const pair = await connectClient(context);
+    try {
+      const refresh = await callTool(pair.client, "causoryn_refresh_index", { mode: "full" });
+      const jobId = (expectEnvelope(refresh).data as Record<string, unknown>).jobId as string;
+      await context.jobManager.waitForJob(jobId);
+
+      const status = await callTool(pair.client, "causoryn_index_status", {});
+      const statusData = statusDataOf(expectEnvelope(status));
+      expect(statusData.jobId).toBe(jobId);
+      expect((statusData.job as Record<string, unknown>).status).toBe("done");
+    } finally {
+      await pair.close();
+    }
+  }, 30_000);
+
+  it("negatif refresh_index: yetkisiz workspace → WORKSPACE_NOT_AUTHORIZED", async () => {
+    const pair = await connectClient(makeContext());
+    try {
+      const result = await callTool(pair.client, "causoryn_refresh_index", {
+        workspaceId: "baska-workspace",
+        mode: "full",
+      });
+      const envelope = expectEnvelope(result);
+      expect(envelope.status).toBe("error");
+      expect((envelope.error as Record<string, unknown>).code).toBe(
+        "WORKSPACE_NOT_AUTHORIZED",
+      );
+    } finally {
+      await pair.close();
+    }
+  });
+
+  it("negatif refresh_index: mode=incremental bu dilimde INVALID_ARGUMENT döner (Live Architecture B7)", async () => {
+    const pair = await connectClient(makeContext());
+    try {
+      const result = await callTool(pair.client, "causoryn_refresh_index", {
+        mode: "incremental",
+      });
+      const envelope = expectEnvelope(result);
+      expect(envelope.status).toBe("error");
+      expect((envelope.error as Record<string, unknown>).code).toBe("INVALID_ARGUMENT");
+    } finally {
+      await pair.close();
+    }
+  });
+
+  it("negatif index_status: bilinmeyen jobId → INVALID_ARGUMENT (sabit hata kodu)", async () => {
+    const pair = await connectClient(makeContext());
+    try {
+      const result = await callTool(pair.client, "causoryn_index_status", {
+        jobId: "job-yok",
+      });
+      const envelope = expectEnvelope(result);
+      expect(envelope.status).toBe("error");
+      const error = envelope.error as Record<string, unknown>;
+      expect(error.code).toBe("INVALID_ARGUMENT");
+      expect(JSON.stringify(error.message)).toContain("job-yok");
+    } finally {
+      await pair.close();
+    }
+  });
+
+  it("negatif refresh_index: scope bu dilimde desteklenmez → INVALID_ARGUMENT", async () => {
+    const pair = await connectClient(makeContext());
+    try {
+      const result = await callTool(pair.client, "causoryn_refresh_index", {
+        mode: "full",
+        scope: "src/services",
+      });
+      const envelope = expectEnvelope(result);
+      expect(envelope.status).toBe("error");
+      expect((envelope.error as Record<string, unknown>).code).toBe("INVALID_ARGUMENT");
+    } finally {
+      await pair.close();
+    }
+  });
+
+  it("partial index_status: boş workspace → iş done + snapshotState partial + envelope status partial", async () => {
+    const emptyRoot = mkdtempSync(path.join(tmpdir(), "causoryn-mcp-status-empty-"));
+    try {
+      const context = makeContext({ allowRoots: [emptyRoot] });
+      const pair = await connectClient(context);
+      try {
+        const refresh = await callTool(pair.client, "causoryn_refresh_index", {
+          mode: "full",
+        });
+        const jobId = (expectEnvelope(refresh).data as Record<string, unknown>)
+          .jobId as string;
+        await context.jobManager.waitForJob(jobId);
+
+        const status = await callTool(pair.client, "causoryn_index_status", { jobId });
+        const envelope = expectEnvelope(status);
+        expect(envelope.status).toBe("partial");
+        const statusData = statusDataOf(envelope);
+        const job = statusData.job as Record<string, unknown>;
+        expect(job.status).toBe("done");
+        expect(job.snapshotState).toBe("partial");
+        expect((job.warnings as string[]).length).toBeGreaterThanOrEqual(1);
+        const latest = statusData.latestSnapshot as Record<string, unknown>;
+        expect(latest.state).toBe("partial");
+      } finally {
+        await pair.close();
+      }
+    } finally {
+      rmSync(emptyRoot, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  it("index_status: iş ve snapshot hiç yokken (autoIndex=false) null alanlar + yönlendirici uyarı döner", async () => {
+    const pair = await connectClient(makeContext({ autoIndex: false }));
+    try {
+      const status = await callTool(pair.client, "causoryn_index_status", {});
+      const envelope = expectEnvelope(status);
+      expect(envelope.status).toBe("ok");
+      expect(envelope.snapshotId).toBeNull();
+      const statusData = statusDataOf(envelope);
+      expect(statusData.job).toBeNull();
+      expect(statusData.latestSnapshot).toBeNull();
+      expect(
+        (envelope.warnings as string[]).some((w) => w.includes("refresh_index")),
+      ).toBe(true);
+    } finally {
+      await pair.close();
+    }
+  });
+
+  /* ---------------------------------------------------------------- */
+  /* sprint-2 B5: causoryn_get_symbol_context                          */
+  /* ---------------------------------------------------------------- */
+
+  /** find_symbols üzerinden bir qualifiedName'un node kimliğini çözer. */
+  async function symbolIdByQualifiedName(
+    client: Client,
+    qualifiedName: string,
+  ): Promise<string> {
+    const found = await callTool(client, "causoryn_find_symbols", {
+      query: qualifiedName,
+    });
+    const hits = (expectEnvelope(found).data as Record<string, unknown>)
+      .hits as Array<Record<string, unknown>>;
+    const hit = hits.find((h) => h.qualifiedName === qualifiedName);
+    expect(hit, `find_symbols ${qualifiedName} döndürmedi`).toBeDefined();
+    return hit?.symbolId as string;
+  }
+
+  it("pozitif get_symbol_context: OrdersService.create relations + evidence dosya/satır taşır", async () => {
+    const pair = await connectClient(makeContext());
+    try {
+      const symbolId = await symbolIdByQualifiedName(
+        pair.client,
+        "OrdersService.create",
+      );
+
+      const result = await callTool(pair.client, "causoryn_get_symbol_context", {
+        symbolId,
+      });
+      const envelope = expectEnvelope(result);
+      expect(envelope.status).toBe("ok");
+      expect(envelope.snapshotId).not.toBeNull();
+
+      const data = envelope.data as Record<string, unknown>;
+      const symbol = data.symbol as Record<string, unknown>;
+      expect(symbol.id).toBe(symbolId);
+      expect(symbol.kind).toBe("Method");
+      expect(symbol.qualifiedName).toBe("OrdersService.create");
+
+      const nodes = data.nodes as Array<Record<string, unknown>>;
+      const idByQn = new Map(
+        nodes.map((n) => [n.qualifiedName as string, n.id as string]),
+      );
+      const edges = data.edges as Array<Record<string, unknown>>;
+
+      // CALLS: OrdersService.create → OrderRepository.save (verified; TŞ §25/4).
+      const calls = edges.find(
+        (e) =>
+          e.kind === "CALLS" &&
+          e.from === symbolId &&
+          e.to === idByQn.get("OrderRepository.save"),
+      );
+      expect(calls).toBeDefined();
+      expect(calls?.resolution).toBe("verified");
+      expect((calls?.evidenceIds as string[]).length).toBeGreaterThanOrEqual(1);
+
+      // CONTAINS: OrdersService → OrdersService.create (yön: Class → Method).
+      const contains = edges.find(
+        (e) =>
+          e.kind === "CONTAINS" &&
+          e.from === idByQn.get("OrdersService") &&
+          e.to === symbolId,
+      );
+      expect(contains).toBeDefined();
+
+      // Deterministik sıralama: kenarlar id kanonik, kanıtlar id sıralı,
+      // node'lar qualifiedName+id sıralı ve tekrarsız.
+      const edgeIds = edges.map((e) => e.id as string);
+      expect([...edgeIds].sort()).toEqual(edgeIds);
+      const nodeIds = nodes.map((n) => n.id as string);
+      expect(new Set(nodeIds).size).toBe(nodeIds.length);
+      expect(nodeIds).toContain(symbolId);
+      const evidence = data.evidence as Array<Record<string, unknown>>;
+      const evidenceIds = evidence.map((ev) => ev.id as string);
+      expect([...evidenceIds].sort()).toEqual(evidenceIds);
+      expect(new Set(evidenceIds).size).toBe(evidenceIds.length);
+
+      // CALLS kenarının kanıtı fixture dosyasının GERÇEK satırına işaret eder.
+      const callsEvidence = evidence.find((ev) =>
+        (calls?.evidenceIds as string[]).includes(ev.id as string),
+      );
+      expect(callsEvidence).toBeDefined();
+      const span = callsEvidence?.span as Record<string, unknown>;
+      expect(span.relativePath).toBe("src/services/orders-service.ts");
+      expect(span.startLine).toBeGreaterThan(0);
+
+      // Diskteki gerçek dosyanın ilgili satırı kanıt satır aralığıyla örtüşür
+      // (sprint-1 görev 7 entegrasyon kanıtı kalıbı).
+      const source = readFileSync(
+        path.join(FIXTURE_ROOT, "src", "services", "orders-service.ts"),
+        "utf8",
+      ).split("\n");
+      const lineText = source[(span.startLine as number) - 1] ?? "";
+      expect(lineText).toContain("repository.save");
+
+      // edgeKinds verilmediyse data.edgeKinds null'dır (tüm türler).
+      expect(data.edgeKinds).toBeNull();
+    } finally {
+      await pair.close();
+    }
+  });
+
+  it("pozitif get_symbol_context: depth büyütülünce context genişler ve üst katman node'ları gelir", async () => {
+    const pair = await connectClient(makeContext());
+    try {
+      const symbolId = await symbolIdByQualifiedName(
+        pair.client,
+        "OrdersService.create",
+      );
+      const one = await callTool(pair.client, "causoryn_get_symbol_context", {
+        symbolId,
+        depth: 1,
+      });
+      const oneData = expectEnvelope(one).data as Record<string, unknown>;
+      const oneQns = (oneData.nodes as Array<Record<string, unknown>>).map(
+        (n) => n.qualifiedName as string,
+      );
+
+      const two = await callTool(pair.client, "causoryn_get_symbol_context", {
+        symbolId,
+        depth: 2,
+      });
+      const twoEnvelope = expectEnvelope(two);
+      const twoData = twoEnvelope.data as Record<string, unknown>;
+      const twoQns = (twoData.nodes as Array<Record<string, unknown>>).map(
+        (n) => n.qualifiedName as string,
+      );
+
+      expect(twoData.depth).toBe(2);
+      expect(oneQns).toContain("OrderRepository.save");
+      // depth=2, depth=1'in katman 1 kümesini kapsar ve daha derin node'lar ekler.
+      for (const qn of oneQns) expect(twoQns).toContain(qn);
+      expect(twoQns.length).toBeGreaterThan(oneQns.length);
+    } finally {
+      await pair.close();
+    }
+  });
+
+  it("pozitif get_symbol_context: edgeKinds filtresi yalnızca istenen türdeki kenarları döndürür", async () => {
+    const pair = await connectClient(makeContext());
+    try {
+      const symbolId = await symbolIdByQualifiedName(
+        pair.client,
+        "OrdersService.create",
+      );
+      const result = await callTool(pair.client, "causoryn_get_symbol_context", {
+        symbolId,
+        edgeKinds: ["CALLS"],
+      });
+      const data = expectEnvelope(result).data as Record<string, unknown>;
+      const edges = data.edges as Array<Record<string, unknown>>;
+      expect(edges.length).toBeGreaterThanOrEqual(1);
+      for (const edge of edges) expect(edge.kind).toBe("CALLS");
+      // Filtre traversal'a da uygulanır: CALLS dışı komşular keşfedilmez.
+      const qns = (data.nodes as Array<Record<string, unknown>>).map(
+        (n) => n.qualifiedName as string,
+      );
+      expect(qns).toContain("OrderRepository.save");
+      expect(data.edgeKinds).toEqual(["CALLS"]);
+    } finally {
+      await pair.close();
+    }
+  });
+
+  it("negatif get_symbol_context: bilinmeyen kimlik/ad → SYMBOL_NOT_FOUND; geçersiz edgeKinds → INVALID_ARGUMENT", async () => {
+    const pair = await connectClient(makeContext());
+    try {
+      const unknownId = await callTool(pair.client, "causoryn_get_symbol_context", {
+        symbolId: "node:0000000000000000000000000000000000000000000000000000000000000000",
+      });
+      const unknownIdEnvelope = expectEnvelope(unknownId);
+      expect(unknownIdEnvelope.status).toBe("error");
+      const idError = unknownIdEnvelope.error as Record<string, unknown>;
+      expect(idError.code).toBe("SYMBOL_NOT_FOUND");
+      expect(idError.retryable).toBe(false);
+      expect((idError.userAction as string).length).toBeGreaterThan(0);
+
+      const unknownName = await callTool(pair.client, "causoryn_get_symbol_context", {
+        symbolId: "NoSuchSymbolAnywhere",
+      });
+      expect(
+        (expectEnvelope(unknownName).error as Record<string, unknown>).code,
+      ).toBe("SYMBOL_NOT_FOUND");
+
+      // Yetki denetimi kimlik aramasından ÖNCE gelir (tutarlılık).
+      const authz = await callTool(pair.client, "causoryn_get_symbol_context", {
+        workspaceId: "baska-workspace",
+        symbolId: "x",
+      });
+      expect(
+        (expectEnvelope(authz).error as Record<string, unknown>).code,
+      ).toBe("WORKSPACE_NOT_AUTHORIZED");
+
+      // edgeKinds şemayı geçer (string dizisi) ama EDGE_KINDS üyesi değilse
+      // anlamsal reddiyen INVALID_ARGUMENT'dır (sprint-1 kalıbı).
+      const symbolId = await symbolIdByQualifiedName(
+        pair.client,
+        "OrdersService.create",
+      );
+      const badKinds = await callTool(pair.client, "causoryn_get_symbol_context", {
+        symbolId,
+        edgeKinds: ["CALLS", "NO_SUCH_KIND"],
+      });
+      const badKindsEnvelope = expectEnvelope(badKinds);
+      const kindsError = badKindsEnvelope.error as Record<string, unknown>;
+      expect(kindsError.code).toBe("INVALID_ARGUMENT");
+      expect(JSON.stringify(kindsError.message)).toContain("NO_SUCH_KIND");
+    } finally {
+      await pair.close();
+    }
+  });
+
+  it("negatif get_symbol_context: depth results.maxDepth tavanını aşarsa LIMIT_EXCEEDED", async () => {
+    const context = makeContext({ results: { maxNodes: 250, maxSymbols: 100, maxDepth: 2 } });
+    const pair = await connectClient(context);
+    try {
+      const symbolId = await symbolIdByQualifiedName(
+        pair.client,
+        "OrdersService.create",
+      );
+      const result = await callTool(pair.client, "causoryn_get_symbol_context", {
+        symbolId,
+        depth: 3,
+      });
+      const envelope = expectEnvelope(result);
+      expect(envelope.status).toBe("error");
+      const error = envelope.error as Record<string, unknown>;
+      expect(error.code).toBe("LIMIT_EXCEEDED");
+      expect(JSON.stringify(error.message)).toContain("maxDepth");
+    } finally {
+      await pair.close();
+    }
+  });
+
+  it("negatif get_symbol_context: qualifiedName birden çok node'a tam eşleşirse AMBIGUOUS_SYMBOL + aday listesi", async () => {
+    const root = mkdtempSync(path.join(tmpdir(), "causoryn-ambiguous-symbol-"));
+    try {
+      mkdirSync(path.join(root, "src", "a"), { recursive: true });
+      mkdirSync(path.join(root, "src", "b"), { recursive: true });
+      writeFileSync(
+        path.join(root, "src", "a", "dup.ts"),
+        "export class Dup { ping(): number { return 1; } }\n",
+        "utf8",
+      );
+      writeFileSync(
+        path.join(root, "src", "b", "dup.ts"),
+        "export class Dup { pong(): number { return 2; } }\n",
+        "utf8",
+      );
+      const pair = await connectClient(makeContext({ allowRoots: [root] }));
+      try {
+        const result = await callTool(pair.client, "causoryn_get_symbol_context", {
+          symbolId: "Dup",
+        });
+        const envelope = expectEnvelope(result);
+        expect(envelope.status).toBe("error");
+        const error = envelope.error as Record<string, unknown>;
+        expect(error.code).toBe("AMBIGUOUS_SYMBOL");
+        const candidates = envelope.data as {
+          candidates?: Array<Record<string, unknown>>;
+        };
+        expect(candidates.candidates).toHaveLength(2);
+        const paths = (candidates.candidates ?? [])
+          .map((c) => c.relativePath as string)
+          .sort();
+        expect(paths).toEqual(["src/a/dup.ts", "src/b/dup.ts"]);
+        for (const candidate of candidates.candidates ?? []) {
+          expect(candidate.kind).toBe("Class");
+          expect(candidate.qualifiedName).toBe("Dup");
+          expect(typeof candidate.symbolId).toBe("string");
+        }
+      } finally {
+        await pair.close();
+      }
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("partial get_symbol_context: istenen derinlikte kesilir → truncated=true + depth uyarısı", async () => {
+    const pair = await connectClient(makeContext());
+    try {
+      const symbolId = await symbolIdByQualifiedName(
+        pair.client,
+        "OrdersService.create",
+      );
+      const result = await callTool(pair.client, "causoryn_get_symbol_context", {
+        symbolId,
+        depth: 1,
+      });
+      const envelope = expectEnvelope(result);
+      expect(envelope.status).toBe("ok");
+      const data = envelope.data as Record<string, unknown>;
+      expect(data.truncated).toBe(true);
+      expect(data.depth).toBe(1);
+      expect(
+        (envelope.warnings as string[]).some((w) => w.includes("depth")),
+      ).toBe(true);
+      // Kısmi sonuç yine de tutarlıdır: tüm kenar uçları nodes kümesindedir.
+      const nodeIds = new Set(
+        (data.nodes as Array<Record<string, unknown>>).map((n) => n.id as string),
+      );
+      for (const edge of data.edges as Array<Record<string, unknown>>) {
+        expect(nodeIds.has(edge.from as string)).toBe(true);
+        expect(nodeIds.has(edge.to as string)).toBe(true);
+      }
+    } finally {
+      await pair.close();
+    }
+  });
+
+  it("partial get_symbol_context: results.maxNodes tavanı → truncated + maxNodes uyarısı; kenar uçları nodes kümesinde kalır", async () => {
+    const context = makeContext({ results: { maxNodes: 4, maxSymbols: 100 } });
+    const pair = await connectClient(context);
+    try {
+      const symbolId = await symbolIdByQualifiedName(
+        pair.client,
+        "OrdersService.create",
+      );
+      const result = await callTool(pair.client, "causoryn_get_symbol_context", {
+        symbolId,
+        depth: 2,
+      });
+      const envelope = expectEnvelope(result);
+      expect(envelope.status).toBe("ok");
+      const data = envelope.data as Record<string, unknown>;
+      expect(data.truncated).toBe(true);
+      expect(
+        (envelope.warnings as string[]).some((w) => w.includes("maxNodes")),
+      ).toBe(true);
+      const nodeIds = new Set(
+        (data.nodes as Array<Record<string, unknown>>).map((n) => n.id as string),
+      );
+      expect(nodeIds.size).toBeLessThanOrEqual(4);
+      for (const edge of data.edges as Array<Record<string, unknown>>) {
+        expect(nodeIds.has(edge.from as string)).toBe(true);
+        expect(nodeIds.has(edge.to as string)).toBe(true);
+      }
+    } finally {
+      await pair.close();
+    }
+  });
+
+  it("get_symbol_context: aktif build varken eski snapshot stale=true uyarısıyla servis edilir", async () => {
+    const repository = new InMemoryGraphRepository();
+    const context = createCausorynContext(
+      {
+        workspaceId: "default",
+        allowRoots: [FIXTURE_ROOT],
+        results: { maxNodes: 250, maxSymbols: 100 },
+        autoIndex: true,
+      },
+      { repository },
+    );
+    // TŞ §9 stale semantiği: aynı/daha yüksek revizyon sırası için aktif
+    // building varken eski yayın stale=true döner (memory-repository isStale).
+    repository.beginBuild({
+      workspaceId: "default",
+      revision: { id: "working-tree", sequence: 2 },
+      configHash: "stale-context-test",
+      analyzerFingerprint: "test@0.0.0",
+      createdAt: "2026-11-02T00:00:00.000Z",
+    });
+    const pair = await connectClient(context);
+    try {
+      const symbolId = await symbolIdByQualifiedName(
+        pair.client,
+        "OrdersService.create",
+      );
+      const result = await callTool(pair.client, "causoryn_get_symbol_context", {
+        symbolId,
+      });
+      const envelope = expectEnvelope(result);
+      // Eski snapshot HÂLÂ servis edilir (TŞ §9: uzun indeks süresinde eski
+      // snapshot sorgulanabilmeli), stale uyarısı açıkça taşınır.
+      expect(envelope.status).toBe("ok");
+      expect(envelope.snapshotId).not.toBeNull();
+      expect(
+        (envelope.warnings as string[]).some((w) => w.includes("stale=true")),
+      ).toBe(true);
+      const data = envelope.data as Record<string, unknown>;
+      expect((data.symbol as Record<string, unknown>).qualifiedName).toBe(
+        "OrdersService.create",
+      );
+    } finally {
+      await pair.close();
+    }
+  });
 });
+
+/** index_status data alanını tipli sözlük olarak döndürür (yardımcı). */
+function statusDataOf(envelope: Record<string, unknown>): Record<string, unknown> {
+  return envelope.data as Record<string, unknown>;
+}

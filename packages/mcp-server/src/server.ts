@@ -17,22 +17,33 @@ import {
   GetCapabilitiesInputSchema,
   GetEvidenceDataSchema,
   GetEvidenceInputSchema,
+  GetSymbolContextDataSchema,
+  GetSymbolContextInputSchema,
+  IndexStatusDataSchema,
+  IndexStatusInputSchema,
   MapDataSchema,
   MapSystemInputSchema,
+  RefreshIndexDataSchema,
+  RefreshIndexInputSchema,
   WorkspaceSummaryDataSchema,
   WorkspaceSummaryInputSchema,
   findSymbols,
   getCapabilities,
   getEvidence,
+  getSymbolContext,
+  indexStatus,
   mapSystem,
+  refreshIndex,
   workspaceSummary,
 } from "./services.js";
 import { SERVER_NAME, SERVER_VERSION } from "./version.js";
 
 /**
  * MCP protokol adaptasyonu (TŞ v2.1 §5/§10, ADR-003): SDK McpServer
- * üzerinden tam olarak 5 gerçek araç yayımlanır (tools/list boş handler
- * yayınlamaz — ADR-010). Her araç:
+ * üzerinden tam olarak 8 gerçek araç yayımlanır (sprint-1: 5 çekirdek araç;
+ * sprint-2 B6: causoryn_index_status + causoryn_refresh_index; sprint-2 B5:
+ * causoryn_get_symbol_context; tools/list boş handler yayınlamaz — ADR-010).
+ * Her araç:
  * - Zod inputSchema (SDK girdiyi otomatik doğrular; şema reddi protokol
  *   düzeyinde isError sonucu döner),
  * - Zod outputSchema (SDK structuredContent'i envelope şemasıyla doğrular),
@@ -83,6 +94,26 @@ function buildRegistrations(context: CausorynContext): readonly ToolRegistration
         workspaceSummary(context, requestId, args as z.infer<typeof WorkspaceSummaryInputSchema>),
     },
     {
+      name: "causoryn_index_status",
+      title: "İndeks durumu",
+      description:
+        "Snapshot, stale, iş (job) ilerlemesi ve tanıları raporlar: jobId verilirse o iş, verilmezse en son iş; iş/snapshot yoksa null alanlar + yönlendirici uyarı döner.",
+      inputSchema: IndexStatusInputSchema,
+      outputSchema: envelopeOutputSchema(IndexStatusDataSchema),
+      handler: (requestId, args) =>
+        indexStatus(context, requestId, args as z.infer<typeof IndexStatusInputSchema>),
+    },
+    {
+      name: "causoryn_refresh_index",
+      title: "İndeks yenileme",
+      description:
+        "Yeni snapshot işi başlatır (mode: full; incremental Live Architecture dilimine aittir): çağrı anında jobId döner, iş arka planda koşar; causoryn_index_status ile izlenir. Yalnızca Causoryn izinli data-root'una yazar.",
+      inputSchema: RefreshIndexInputSchema,
+      outputSchema: envelopeOutputSchema(RefreshIndexDataSchema),
+      handler: (requestId, args) =>
+        refreshIndex(context, requestId, args as z.infer<typeof RefreshIndexInputSchema>),
+    },
+    {
       name: "causoryn_map_system",
       title: "Architecture Map",
       description:
@@ -106,6 +137,19 @@ function buildRegistrations(context: CausorynContext): readonly ToolRegistration
         findSymbols(context, requestId, args as z.infer<typeof FindSymbolsInputSchema>),
     },
     {
+      name: "causoryn_get_symbol_context",
+      title: "Sembol bağlamı",
+      description:
+        "Sembol node'u + istenen derinliğe kadar komşu kenarlar (edgeKinds filtreli, deterministik sıralı) + kanıt kayıtları; symbolId node kimliği veya qualifiedName kabul eder (belirsiz ad AMBIGUOUS_SYMBOL adayları döner).",
+      inputSchema: GetSymbolContextInputSchema,
+      outputSchema: envelopeOutputSchema(
+        // Hata yolu: AMBIGUOUS_SYMBOL data'sı aday listesi taşır (TŞ §10.3).
+        AmbiguityDataSchema.or(GetSymbolContextDataSchema),
+      ),
+      handler: (requestId, args) =>
+        getSymbolContext(context, requestId, args as z.infer<typeof GetSymbolContextInputSchema>),
+    },
+    {
       name: "causoryn_get_evidence",
       title: "Evidence provenance",
       description:
@@ -118,7 +162,7 @@ function buildRegistrations(context: CausorynContext): readonly ToolRegistration
   ];
 }
 
-/** Context'i MCP McpServer'a bağlar; tam olarak 5 araç kaydeder. */
+/** Context'i MCP McpServer'a bağlar; tam olarak 8 araç kaydeder. */
 export function createCausorynMcpServer(context: CausorynContext): McpServer {
   const server = new McpServer(
     { name: SERVER_NAME, version: SERVER_VERSION },

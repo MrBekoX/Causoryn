@@ -1,12 +1,19 @@
 import { LATEST_PROTOCOL_VERSION } from "@modelcontextprotocol/sdk/types.js";
 import type { GraphRepository, SnapshotRead } from "@causoryn/graph";
 import {
+  EDGE_KINDS,
   NODE_KINDS,
   type Evidence,
+  type GraphEdge,
   type GraphNode,
   type SnapshotGraph,
 } from "@causoryn/domain";
-import { INDEXED_ADAPTERS } from "@causoryn/indexing";
+import {
+  INDEXED_ADAPTERS,
+  IndexingError,
+  type IndexJobRecord,
+} from "@causoryn/indexing";
+import type { IndexJobManager } from "@causoryn/indexing";
 import type { WorkspaceAccessPolicy } from "@causoryn/workspace";
 import { z } from "zod";
 
@@ -35,6 +42,8 @@ export interface ServiceDeps {
   readonly config: CausorynServerConfig;
   readonly policy: WorkspaceAccessPolicy;
   readonly repository: GraphRepository;
+  /** Sprint-2 B6: causoryn_refresh_index / causoryn_index_status iş yönetimi. */
+  readonly jobManager: IndexJobManager;
 }
 
 /* ------------------------------------------------------------------ */
@@ -306,6 +315,272 @@ export function workspaceSummary(
       },
     },
   });
+}
+
+/* ------------------------------------------------------------------ */
+/* index_status (sprint-2 B6)                                          */
+/* ------------------------------------------------------------------ */
+
+export const IndexStatusInputSchema = z.strictObject({
+  workspaceId: z.string().min(1).optional(),
+  /**
+   * Sorgulanacak iş kimliği (TŞ §10.2 "jobId?"): verilmezse EN SON
+   * başlatılan iş raporlanır; hiç iş başlamadıysa job null döner.
+   */
+  jobId: z.string().min(1).optional(),
+});
+
+/** İş kaydı (TŞ §10.2 index_status çıktısı: job progress + diagnostics). */
+export const IndexJobRecordSchema = z.strictObject({
+  jobId: z.string(),
+  mode: z.enum(["full", "incremental"]),
+  scope: z.string().nullable(),
+  status: z.enum(["queued", "running", "done", "failed"]),
+  progressPercent: z.number().int().min(0).max(100),
+  createdAt: z.string(),
+  startedAt: z.string().nullable(),
+  finishedAt: z.string().nullable(),
+  snapshotId: z.string().nullable(),
+  snapshotState: z.enum(["ready", "partial"]).nullable(),
+  stale: z.boolean(),
+  fileCount: z.number().int().nonnegative().nullable(),
+  tsFileCount: z.number().int().nonnegative().nullable(),
+  diagnostics: z.array(
+    z.strictObject({
+      relativePath: z.string(),
+      code: z.string(),
+      message: z.string(),
+      line: z.number().int(),
+    }),
+  ),
+  warnings: z.array(z.string()),
+  error: z.strictObject({ code: z.string(), message: z.string() }).nullable(),
+});
+
+/** Güncel yayın (TŞ §10.2 index_status çıktısı: Snapshot + stale). */
+export const LatestSnapshotSchema = z.strictObject({
+  snapshotId: z.string(),
+  state: z.string(),
+  stale: z.boolean(),
+  nodeCount: z.number().int().nonnegative(),
+  edgeCount: z.number().int().nonnegative(),
+  evidenceCount: z.number().int().nonnegative(),
+});
+
+export const IndexStatusDataSchema = z.strictObject({
+  workspaceId: z.string(),
+  /** Sorgulanan (jobId verilmediyse en son) işin kimliği; iş yoksa null. */
+  jobId: z.string().nullable(),
+  job: IndexJobRecordSchema.nullable(),
+  latestSnapshot: LatestSnapshotSchema.nullable(),
+});
+
+function jobRecordOf(job: IndexJobRecord): z.infer<typeof IndexJobRecordSchema> {
+  return {
+    jobId: job.jobId,
+    mode: job.mode,
+    scope: job.scope,
+    status: job.status,
+    progressPercent: job.progressPercent,
+    createdAt: job.createdAt,
+    startedAt: job.startedAt,
+    finishedAt: job.finishedAt,
+    snapshotId: job.snapshotId,
+    snapshotState: job.snapshotState,
+    stale: job.stale,
+    fileCount: job.fileCount,
+    tsFileCount: job.tsFileCount,
+    diagnostics: job.diagnostics.map((item) => ({
+      relativePath: item.relativePath,
+      code: item.code,
+      message: item.message,
+      line: item.line,
+    })),
+    warnings: [...job.warnings],
+    error: job.error === null ? null : { code: job.error.code, message: job.error.message },
+  };
+}
+
+/**
+ * causoryn_index_status (TŞ §10.2 "Snapshot, stale, job progress,
+ * diagnostics"; sprint-2 B6). jobId verilirse o iş, verilmezse en son iş
+ * raporlanır; yanında güncel yayın (latestSnapshot) + stale bayrağı döner.
+ *
+ * Durum aracı olduğundan yayınlanmış snapshot yokluğunda HATA fırlatmaz
+ * (INDEX_NOT_READY sorgu araçlarının sözleşmesidir): job/latestSnapshot
+ * null döner ve envelope.warnings refresh_index'e yönlendirir.
+ * jobId verildiyse bilinmeyen kimlik sabit INVALID_ARGUMENT koduyla reddedilir
+ * (K-008 uzantı kodu; yeni kod eklenmedi).
+ */
+export function indexStatus(
+  deps: ServiceDeps,
+  requestId: string,
+  input: z.infer<typeof IndexStatusInputSchema>,
+): Envelope {
+  const workspaceId = input.workspaceId ?? deps.config.workspaceId;
+  requireAuthorizedWorkspace(deps, workspaceId);
+
+  let job: IndexJobRecord | undefined;
+  if (input.jobId !== undefined) {
+    job = deps.jobManager.status(input.jobId);
+    if (job === undefined) {
+      throw new CausorynToolError(
+        "INVALID_ARGUMENT",
+        `bilinmeyen jobId: ${input.jobId}; kayıt düşmüş (maxJobs) veya hiç böyle bir iş başlatılmadı — jobId'siz çağrı en son işi döndürür`,
+      );
+    }
+  } else {
+    job = deps.jobManager.latest();
+  }
+
+  const read = deps.repository.getLatestPublished(workspaceId);
+  const warnings = read === undefined
+    ? [
+        "yayınlanmış snapshot yok; refresh_index ile yeni snapshot işi başlatın",
+      ]
+    : staleWarningOf(read);
+
+  return buildEnvelope({
+    requestId,
+    workspaceId,
+    snapshotId: read?.snapshot.meta.id ?? job?.snapshotId ?? null,
+    // Durum aracı: yanıtın kendisi her zaman "ok"; snapshot durumu partial
+    // ise katalogla tutarlı biçimde "partial" taşınır.
+    status: read === undefined ? "ok" : envelopeStatusOf(read),
+    coverage: read === undefined ? null : coverageOf(read.snapshot),
+    warnings,
+    data: {
+      workspaceId,
+      jobId: job?.jobId ?? null,
+      job: job === undefined ? null : jobRecordOf(job),
+      latestSnapshot:
+        read === undefined
+          ? null
+          : {
+              snapshotId: read.snapshot.meta.id,
+              state: read.snapshot.meta.state,
+              stale: read.stale,
+              nodeCount: read.snapshot.nodes.length,
+              edgeCount: read.snapshot.edges.length,
+              evidenceCount: read.snapshot.evidence.length,
+            },
+    },
+  });
+}
+
+/* ------------------------------------------------------------------ */
+/* refresh_index (sprint-2 B6)                                         */
+/* ------------------------------------------------------------------ */
+
+export const RefreshIndexInputSchema = z.strictObject({
+  workspaceId: z.string().min(1).optional(),
+  /** TŞ §10.2 "mode": full = tam yeniden indeksleme; incremental B7 dilimi. */
+  mode: z.enum(["full", "incremental"]),
+  /** TŞ §10.2 "scope?": dar kapsamlı refresh; bu dilimde desteklenmez. */
+  scope: z.string().min(1).optional(),
+});
+
+/** Yeni iş kaydının başlangıç görünümü (TŞ §10.2 "Yeni snapshot işi"). */
+export const RefreshIndexDataSchema = z.strictObject({
+  jobId: z.string(),
+  mode: z.enum(["full", "incremental"]),
+  scope: z.string().nullable(),
+  status: z.enum(["queued", "running", "done", "failed"]),
+  progressPercent: z.number().int().min(0).max(100),
+  createdAt: z.string(),
+  startedAt: z.string().nullable(),
+});
+
+/**
+ * causoryn_refresh_index (TŞ §10.2 "Yeni snapshot işi"; sprint-2 B6).
+ *
+ * ASYNC sözleşmesi: çağrı işi kuyruğa alır ve ANINDA jobId döner (envelope
+ * snapshotId null — iş henüz snapshot üretmedi); iş in-process arka planda
+ * ilerler ve causoryn_index_status(jobId) ile izlenir.
+ *
+ * Yazma sınırı (wiki/mcp-tools.md yazma izin matrisi): indeks yalnızca
+ * Causoryn izinli data-root'una yazılır — kök, her çağrıda
+ * requireAuthorizedWorkspace ile allowRoot'a karşı yeniden doğrulanır ve
+ * JobManager ayrıca WorkspaceAccessPolicy.authorizeRoot ile senkron
+ * reddeder (yetkisiz kök iş kaydı AÇMAZ → WORKSPACE_NOT_AUTHORIZED).
+ *
+ * mode/scope: bu dilimde yalnızca mode="full" yürütülür; "incremental" ve
+ * scope Live Architecture (sprint-2 B7) dilimine aittir — sessizce yok
+ * saymak yerine açık INVALID_ARGUMENT reddi (ADR-010: çalışmayan şey
+ * Done yazılmaz; kod K-008 uzantı setinden).
+ */
+export function refreshIndex(
+  deps: ServiceDeps,
+  requestId: string,
+  input: z.infer<typeof RefreshIndexInputSchema>,
+): Envelope {
+  const workspaceId = input.workspaceId ?? deps.config.workspaceId;
+  const canonicalRoot = requireAuthorizedWorkspace(deps, workspaceId);
+  if (input.mode === "incremental") {
+    throw new CausorynToolError(
+      "INVALID_ARGUMENT",
+      "mode=incremental bu dilimde yürütülemiyor; incremental yeniden indeksleme Live Architecture (sprint-2 B7) diliminde gelecek",
+    );
+  }
+  if (input.scope !== undefined) {
+    throw new CausorynToolError(
+      "INVALID_ARGUMENT",
+      `scope dar kapsamlı yeniden indeksleme bu dilimde desteklenmiyor (${input.scope}); Live Architecture (sprint-2 B7) diliminde değerlendirilecek`,
+    );
+  }
+
+  let started: IndexJobRecord;
+  try {
+    started = deps.jobManager.refreshIndex(canonicalRoot, { mode: input.mode });
+  } catch (error) {
+    if (error instanceof IndexingError) {
+      throw indexingErrorToToolError(error, requestId);
+    }
+    throw error;
+  }
+
+  return buildEnvelope({
+    requestId,
+    workspaceId,
+    snapshotId: null,
+    status: "ok",
+    coverage: null,
+    warnings: [],
+    data: {
+      jobId: started.jobId,
+      mode: started.mode,
+      scope: started.scope,
+      status: started.status,
+      progressPercent: started.progressPercent,
+      createdAt: started.createdAt,
+      startedAt: started.startedAt,
+    },
+  });
+}
+
+/**
+ * IndexingError → sabit tool hata kodu eşlemesi (TŞ §10.1; kod tablosu
+ * packages/indexing/src/errors.ts başlığındaki belgelenen eşlemenin aynısı).
+ */
+function indexingErrorToToolError(
+  error: IndexingError,
+  requestId: string,
+): CausorynToolError {
+  switch (error.code) {
+    case "indexing/root-not-authorized":
+      return new CausorynToolError("WORKSPACE_NOT_AUTHORIZED", error.message);
+    case "indexing/path-denied":
+      return new CausorynToolError("PATH_DENIED", error.message);
+    case "indexing/limit-exceeded":
+      return new CausorynToolError("LIMIT_EXCEEDED", error.message);
+    case "indexing/unsupported-mode":
+      return new CausorynToolError("INVALID_ARGUMENT", error.message);
+    case "indexing/internal":
+      return new CausorynToolError(
+        "INTERNAL_ERROR",
+        `Beklenmeyen iç hata; ayrıntılar sunucu loglarında (requestId: ${requestId})`,
+      );
+  }
 }
 
 /* ------------------------------------------------------------------ */
@@ -617,6 +892,354 @@ export function findSymbols(
   });
 }
 
+/** Kaynak span (TŞ §8 SourceSpan) — get_evidence/get_symbol_context bileşeni. */
+export const EvidenceSpanSchema = z.strictObject({
+  relativePath: z.string(),
+  startLine: z.number().int(),
+  endLine: z.number().int(),
+  sourceHash: z.string(),
+});
+
+/** Kanıt kaydı (TŞ §8 Evidence) — kanıt taşıyan araçların çıktı bileşeni.
+ * get_symbol_context (B5) bu şemayı get_evidence tanımından ÖNCE kullandığı
+ * için tanım ortak bölgeye taşındı (const TDZ'si modül yükleme sırasını
+ * zorlar). */
+export const EvidenceRecordSchema = z.strictObject({
+  id: z.string(),
+  kind: z.string(),
+  span: EvidenceSpanSchema.optional(),
+  analyzerId: z.string(),
+  analyzerVersion: z.string(),
+  rationale: z.string(),
+});
+
+/* ------------------------------------------------------------------ */
+/* get_symbol_context (sprint-2 B5)                                    */
+/* ------------------------------------------------------------------ */
+
+export const GetSymbolContextInputSchema = z.strictObject({
+  workspaceId: z.string().min(1).optional(),
+  /**
+   * Sembol kimliği (TŞ §10.2 "symbolId"): yayımlanmış node kimliği
+   * ("node:<hex>") YA DA qualifiedName tam adı kabul edilir. Ad birden çok
+   * node'a tam eşleşirse AMBIGUOUS_SYMBOL + adaylar döner (TŞ §10.3
+   * requiresDisambiguation deseni; find_symbols ile aynı aday formu).
+   */
+  symbolId: z.string().min(1),
+  /**
+   * Kenar tür filtresi (TŞ §10.2 "edgeKinds?"): EDGE_KINDS alt kümesi.
+   * Şema düzeyinde string kabul edilir; EDGE_KINDS üyesi olmayan değer
+   * anlamsal reddiyen INVALID_ARGUMENT ile reddedilir (sprint-1 kalıbı:
+   * şemayı geçen anlamsal hatalar envelope kodu taşır).
+   */
+  edgeKinds: z.array(z.string().min(1)).optional(),
+  /** Traversal derinliği (TŞ §10.2 "depth?"): varsayılan 1; tavan
+   * results.maxDepth (TŞ §20 resource budget). */
+  depth: z.number().int().positive().optional(),
+});
+
+/** Context node kaydı (map_system node formuyla aynı alanlar). */
+export const SymbolContextNodeSchema = z.strictObject({
+  id: z.string(),
+  kind: z.string(),
+  qualifiedName: z.string(),
+  language: z.string().optional(),
+  location: z
+    .strictObject({
+      relativePath: z.string(),
+      startLine: z.number().int(),
+      endLine: z.number().int(),
+    })
+    .optional(),
+  relativePath: z.string().optional(),
+});
+
+/** Context kenar kaydı: uçlar + kanıt kimlikleri (TŞ §8 kanıt bağı kenarda). */
+export const SymbolContextEdgeSchema = z.strictObject({
+  id: z.string(),
+  from: z.string(),
+  to: z.string(),
+  kind: z.string(),
+  resolution: z.string(),
+  evidenceIds: z.array(z.string()),
+});
+
+export const GetSymbolContextDataSchema = z.strictObject({
+  workspaceId: z.string(),
+  /** Sorgulanan sembol node'u (context merkezi). */
+  symbol: SymbolContextNodeSchema,
+  /** Uygulanan traversal derinliği. */
+  depth: z.number().int().positive(),
+  /** Uygulanan kenar tür filtresi; verilmediyse null (tüm EDGE_KINDS). */
+  edgeKinds: z.array(z.string()).nullable(),
+  /** Derinlik/maxNodes sınırında kesildi mi (TŞ §20 truncated sözleşmesi). */
+  truncated: z.boolean(),
+  /** Context node sayısı (symbol dahil). */
+  totalNodes: z.number().int().nonnegative(),
+  /** Sembol + keşfedilen komşular; qualifiedName+id sıralı, tekrarsız. */
+  nodes: z.array(SymbolContextNodeSchema),
+  /** Context kenarları: uçları nodes kümesinde, id kanonik sırada. */
+  edges: z.array(SymbolContextEdgeSchema),
+  /** Kenarların kanıt kayıtları: tekrarsız, id sıralı (TŞ §10.2 evidence). */
+  evidence: z.array(EvidenceRecordSchema),
+});
+
+/**
+ * symbolId çözümleme (TŞ §10.2 "symbolId"): önce yayımlanmış node kimliği,
+ * bulunamazsa qualifiedName tam adı. Ad 0 node'a çözülürse SYMBOL_NOT_FOUND
+ * (K-008 uzantı kodu), >1 node'a çözülürse AMBIGUOUS_SYMBOL + adaylar
+ * (TŞ §10.3) fırlatır.
+ */
+function resolveSymbolNode(snapshot: SnapshotGraph, symbolId: string): GraphNode {
+  const byId = snapshot.nodes.find((node) => node.id === symbolId);
+  if (byId !== undefined) return byId;
+  const byName = snapshot.nodes.filter((node) => node.qualifiedName === symbolId);
+  if (byName.length === 0) {
+    throw new CausorynToolError(
+      "SYMBOL_NOT_FOUND",
+      `sembol yayınlanmış snapshot'ta bulunamadı: ${symbolId}; node kimliklerini map_system/find_symbols çıktısından alın`,
+    );
+  }
+  if (byName.length > 1) {
+    throw new CausorynToolError(
+      "AMBIGUOUS_SYMBOL",
+      `"${symbolId}" sorgusu ${String(byName.length)} farklı sembol düğümüne tam eşleşti; adaylardan birinin symbolId'sini kullanın veya kind/pathPrefix ile daraltın`,
+      // Aday formu find_symbols AmbiguityDataSchema ile birebir aynıdır
+      // (symbolId/qualifiedName/kind/relativePath); language gibi ek node
+      // alanları aday şemasına taşınmaz.
+      {
+        candidates: byName.map((node) => {
+          const hit = hitOf(node);
+          return {
+            symbolId: hit.symbolId,
+            qualifiedName: hit.qualifiedName,
+            kind: hit.kind,
+            ...(hit.relativePath === undefined
+              ? {}
+              : { relativePath: hit.relativePath }),
+          };
+        }),
+      },
+    );
+  }
+  return byName[0] as GraphNode;
+}
+
+/**
+ * causoryn_get_symbol_context (TŞ §10.2 "Code Explorer relations +
+ * evidence"; sprint-2 B5): sembol node'u + istenen derinliğe kadar komşu
+ * kenarlar (edgeKinds filtreli; filtre traversal'a da uygulanır) + her
+ * kenarın kanıt kayıtları.
+ *
+ * Determinizm (TŞ §8 invariant iv/vi): kenarlar id kanonik sırada toplanır
+ * ve döner; node'lar qualifiedName+id sıralı; kanıtlar id sıralı ve
+ * tekrarsız; BFS frontier sıralı işlenir — aynı giriş aynı yanıtı üretir.
+ *
+ * Tutarlılık sözleşmesi: dönen her kenarın uçları nodes kümesindedir
+ * (results.maxNodes tavanına ulaşıldığında yeni komşu eklenmez ve o
+ * node'un kenarları toplanmaz; kesme data.truncated + warnings ile
+ * raporlanır — TŞ §20 "Her analiz sonucu ... truncated sunar").
+ * Eski snapshot, build sürerken stale=true uyarısıyla servis edilir
+ * (TŞ §9; staleWarningOf).
+ */
+export function getSymbolContext(
+  deps: ServiceDeps,
+  requestId: string,
+  input: z.infer<typeof GetSymbolContextInputSchema>,
+): Envelope {
+  const workspaceId = input.workspaceId ?? deps.config.workspaceId;
+  requireAuthorizedWorkspace(deps, workspaceId);
+  const read = requireSnapshot(deps, workspaceId);
+  const snapshot = read.snapshot;
+
+  // 1) edgeKinds anlamsal doğrulama: her üye EDGE_KINDS'te olmalı.
+  let allowedKinds: ReadonlySet<string> | null = null;
+  if (input.edgeKinds !== undefined) {
+    const known = new Set<string>(EDGE_KINDS);
+    const invalid = input.edgeKinds.filter((kind) => !known.has(kind));
+    if (invalid.length > 0) {
+      throw new CausorynToolError(
+        "INVALID_ARGUMENT",
+        `geçersiz edgeKinds üyesi(leri): ${invalid.join(", ")}; edgeKinds EDGE_KINDS alt kümesi olmalı`,
+      );
+    }
+    allowedKinds = new Set(input.edgeKinds);
+  }
+
+  // 2) depth tavanı (config; TŞ §20 resource budget) → LIMIT_EXCEEDED.
+  const depth = input.depth ?? 1;
+  if (depth > deps.config.results.maxDepth) {
+    throw new CausorynToolError(
+      "LIMIT_EXCEEDED",
+      `depth=${String(depth)} results.maxDepth tavanını (${String(deps.config.results.maxDepth)}) aşıyor`,
+    );
+  }
+
+  // 3) Sembolü çöz (ID → qualifiedName; belirsizlik adaylarla reddedilir).
+  const start = resolveSymbolNode(snapshot, input.symbolId);
+
+  // 4) Komşuluk haritası: izinli kenarlar, snapshot id kanonik sırasında.
+  const incidentByNode = new Map<string, GraphEdge[]>();
+  for (const edge of snapshot.edges) {
+    if (allowedKinds !== null && !allowedKinds.has(edge.kind)) continue;
+    for (const endpoint of [edge.from, edge.to]) {
+      const list = incidentByNode.get(endpoint);
+      if (list === undefined) {
+        incidentByNode.set(endpoint, [edge]);
+      } else {
+        list.push(edge);
+      }
+    }
+  }
+
+  // 5) BFS: depth katman genişletme; frontier ve keşif sırası deterministik.
+  const visited = new Set<string>([start.id]);
+  const collectedEdgeIds = new Set<string>();
+  const collectedEdges: GraphEdge[] = [];
+  const maxNodes = deps.config.results.maxNodes;
+  let frontier: string[] = [start.id];
+  let cappedByMaxNodes = false;
+  for (let level = 0; level < depth; level += 1) {
+    const next: string[] = [];
+    for (const nodeId of frontier) {
+      // Cap'te node ya TAM genişletilir ya hiç girilmez: kenar uçları
+      // daima nodes kümesinde kalır (tutarlılık sözleşmesi).
+      if (visited.size >= maxNodes) {
+        cappedByMaxNodes = true;
+        break;
+      }
+      let nodeRejected = false;
+      for (const edge of incidentByNode.get(nodeId) ?? []) {
+        const other = edge.from === nodeId ? edge.to : edge.from;
+        if (!visited.has(other)) {
+          if (visited.size >= maxNodes) {
+            cappedByMaxNodes = true;
+            nodeRejected = true;
+            break;
+          }
+          visited.add(other);
+          next.push(other);
+        }
+        if (!collectedEdgeIds.has(edge.id)) {
+          collectedEdgeIds.add(edge.id);
+          collectedEdges.push(edge);
+        }
+      }
+      if (nodeRejected) break;
+    }
+    // Deterministik sonraki katman (id sıralı).
+    frontier = next.sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+    if (cappedByMaxNodes) break;
+  }
+
+  // 6) Kesme raporu: istenen depth'te duruldu ve keşfedilmemiş komşu kaldıysa
+  //    (veya maxNodes cap'i vurduysa) truncated=true + uyarı (TŞ §20).
+  let truncatedByDepth = false;
+  if (!cappedByMaxNodes) {
+    depthCheck: for (const nodeId of frontier) {
+      for (const edge of incidentByNode.get(nodeId) ?? []) {
+        const other = edge.from === nodeId ? edge.to : edge.from;
+        if (!visited.has(other)) {
+          truncatedByDepth = true;
+          break depthCheck;
+        }
+      }
+    }
+  }
+  const truncated = truncatedByDepth || cappedByMaxNodes;
+
+  // 7) Context node'ları: qualifiedName+id sıralı (map_system ile aynı kalıp).
+  const nodeById = new Map(snapshot.nodes.map((node) => [node.id, node]));
+  const contextNodes: GraphNode[] = [];
+  for (const id of visited) {
+    const node = nodeById.get(id);
+    if (node !== undefined) contextNodes.push(node);
+  }
+  contextNodes.sort((a, b) => {
+    if (a.qualifiedName !== b.qualifiedName) {
+      return a.qualifiedName < b.qualifiedName ? -1 : 1;
+    }
+    return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
+  });
+
+  // 8) Kenarların kanıtları: tekrarsız, id sıralı (get_evidence kalıbı).
+  const evidenceById = new Map(snapshot.evidence.map((item) => [item.id, item]));
+  const evidenceSet = new Set<string>();
+  const evidence: Evidence[] = [];
+  for (const edge of collectedEdges) {
+    for (const id of edge.evidenceIds) {
+      if (evidenceSet.has(id)) continue;
+      const record = evidenceById.get(id);
+      if (record === undefined) continue;
+      evidenceSet.add(id);
+      evidence.push(record);
+    }
+  }
+  evidence.sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+
+  const warnings = staleWarningOf(read);
+  if (cappedByMaxNodes) {
+    warnings.push(
+      `context results.maxNodes tavanıyla kesildi (${String(maxNodes)}); depth/edgeKinds ile daraltın`,
+    );
+  }
+  if (truncatedByDepth) {
+    warnings.push(
+      `context istenen depth=${String(depth)} sınırında kesildi; daha derin komşular mevcut (depth'i artırın, tavan results.maxDepth)`,
+    );
+  }
+
+  return buildEnvelope({
+    requestId,
+    workspaceId,
+    snapshotId: snapshot.meta.id,
+    status: envelopeStatusOf(read),
+    coverage: coverageOf(snapshot),
+    warnings,
+    data: {
+      workspaceId,
+      symbol: symbolNodeOf(start),
+      depth,
+      edgeKinds: allowedKinds === null ? null : [...allowedKinds].sort(),
+      truncated,
+      totalNodes: contextNodes.length,
+      nodes: contextNodes.map(symbolNodeOf),
+      edges: [...collectedEdges]
+        .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
+        .map((edge) => ({
+          id: edge.id,
+          from: edge.from,
+          to: edge.to,
+          kind: edge.kind,
+          resolution: edge.resolution,
+          evidenceIds: [...edge.evidenceIds],
+        })),
+      evidence: evidence.map(evidenceRecordOf),
+    },
+  });
+}
+
+/** Context node çıktı kaydı (map_system node formu). */
+function symbolNodeOf(node: GraphNode): z.infer<typeof SymbolContextNodeSchema> {
+  const relativePath = nodeIdentityRelativePath(node);
+  return {
+    id: node.id,
+    kind: node.kind,
+    qualifiedName: node.qualifiedName,
+    ...(node.language === undefined ? {} : { language: node.language }),
+    ...(node.location === undefined
+      ? {}
+      : {
+          location: {
+            relativePath: node.location.relativePath,
+            startLine: node.location.startLine,
+            endLine: node.location.endLine,
+          },
+        }),
+    ...(relativePath === undefined ? {} : { relativePath }),
+  };
+}
+
 /* ------------------------------------------------------------------ */
 /* get_evidence                                                        */
 /* ------------------------------------------------------------------ */
@@ -629,24 +1252,6 @@ export const GetEvidenceInputSchema = z.strictObject({
    * üretilmez (Faz B+ kapsamı).
    */
   id: z.string().min(1),
-});
-
-/** Kaynak span (TŞ §8 SourceSpan) — get_evidence çıktı bileşeni. */
-export const EvidenceSpanSchema = z.strictObject({
-  relativePath: z.string(),
-  startLine: z.number().int(),
-  endLine: z.number().int(),
-  sourceHash: z.string(),
-});
-
-/** Kanıt kaydı (TŞ §8 Evidence) — get_evidence çıktı bileşeni. */
-export const EvidenceRecordSchema = z.strictObject({
-  id: z.string(),
-  kind: z.string(),
-  span: EvidenceSpanSchema.optional(),
-  analyzerId: z.string(),
-  analyzerVersion: z.string(),
-  rationale: z.string(),
 });
 
 export const GetEvidenceDataSchema = z.strictObject({

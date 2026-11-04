@@ -1,15 +1,19 @@
 import { InMemoryGraphRepository } from "@causoryn/graph";
 import type { GraphRepository } from "@causoryn/graph";
-import { IndexService } from "@causoryn/indexing";
+import { IndexJobManager, IndexService } from "@causoryn/indexing";
 import { WorkspaceAccessPolicy } from "@causoryn/workspace";
 
 import { parseCausorynServerConfig, type CausorynServerConfig } from "./config.js";
 
 /**
  * Uygulama bağlamı: konfigürasyon → WorkspaceAccessPolicy → GraphRepository
- * → IndexService (+ isteğe bağlı otomatik ilk indeksleme). MCP handler'ları
- * yalnızca bu bağlamın uygulama servis arayüzlerini tüketir; parser detayı
- * bu pakete sızmaz (wiki/architecture.md sınır 3).
+ * → IndexService → IndexJobManager (+ isteğe bağlı otomatik ilk indeksleme).
+ * MCP handler'ları yalnızca bu bağlamın uygulama servis arayüzlerini tüketir;
+ * parser detayı bu pakete sızmaz (wiki/architecture.md sınır 3).
+ *
+ * IndexJobManager (sprint-2 B6): causoryn_refresh_index'in in-process async
+ * snapshot işlerini yönetir (TŞ §10.2); başlangıç autoIndex'i KAPSAMAZ —
+ * o, sunucu kullanılabilirlik koşulu olarak senkron koşmaya devam eder.
  *
  * Loglar her zaman enjekte edilen logger'a gider; stdio modunda bu
  * console.error'dur (stderr) — stdout YALNIZCA MCP protokolüdür (TŞ §10.1).
@@ -20,6 +24,7 @@ export interface CausorynContext {
   readonly policy: WorkspaceAccessPolicy;
   readonly repository: GraphRepository;
   readonly indexService: IndexService;
+  readonly jobManager: IndexJobManager;
   /** stderr'e yazan logger (stdio modunda console.error). */
   readonly logger: (message: string) => void;
 }
@@ -65,6 +70,13 @@ export function createCausorynContext(
     clock,
     limits: { maxFiles: config.index.maxFiles },
   });
+  // Sprint-2 B6: refresh_index işleri için yönetici; jobId per-manager
+  // monoton sayaçtır (işletim kaydı — snapshot determinizmine girmez).
+  const jobManager = new IndexJobManager({
+    indexService,
+    policy,
+    clock,
+  });
 
   if (config.autoIndex && config.allowRoots.length > 0) {
     const run = indexService.runIndex(config.allowRoots[0] as string);
@@ -73,5 +85,5 @@ export function createCausorynContext(
     );
   }
 
-  return { config, policy, repository, indexService, logger };
+  return { config, policy, repository, indexService, jobManager, logger };
 }
