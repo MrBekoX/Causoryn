@@ -1,5 +1,7 @@
 import Database from "better-sqlite3";
 
+import { applyWikiSchema } from "./wiki-schema.js";
+
 /**
  * SQLite şeması — TŞ v2.1 §9 tablo ailesinin Faz A dilimi (sprint-1
  * görev 5): workspaces, files, snapshots, nodes, edges, evidence +
@@ -23,13 +25,17 @@ import Database from "better-sqlite3";
  *   SQL metnine hiçbir değişken katılmaz (tarama ve denetim kolaylığı),
  *   veri yalnızca hazırlanmış ifade parametreleriyle bağlanır (bkz.
  *   sqlite-repository.ts).
- * - Şema sürümü PRAGMA user_version ile izlenir (Faz A dilimi için tek
- *   sürüm; ileride migration tablosuna geçilebilir — TŞ §9
+ * - Şema sürümü PRAGMA user_version ile izlenir (Faz A graph dilimi için
+ *   tek sürüm; ileride migration tablosuna geçilebilir — TŞ §9
  *   schema_migrations). Sürüm damgası DDL literalinin son satırıdır ve
  *   SCHEMA_VERSION sabitiyle birlikte güncellenmelidir.
+ * - Faz C2 (sprint-4 W2): SCHEMA_VERSION 2 — wiki dilimi DDL'i
+ *   (wiki-schema.ts, TŞ §16A.7) aynı migration transaction'ında uygulanır.
+ *   Graph tabloları olduğu gibi kalır; v1 damgalı veritabanları idempotent
+ *   DDL ile v2'ye yükselir.
  */
 
-export const SCHEMA_VERSION = 1;
+export const SCHEMA_VERSION = 2;
 
 /** Şemayı uygular (sürüm < SCHEMA_VERSION ise); DDL tamamen statiktir. */
 export function applySchema(db: Database.Database): void {
@@ -134,7 +140,8 @@ export function applySchema(db: Database.Database): void {
         node_id UNINDEXED,
         snapshot_sid UNINDEXED
       );
-      PRAGMA user_version = 1;
+      PRAGMA user_version = 2;
     `);
+    applyWikiSchema(db);
   })();
 }
