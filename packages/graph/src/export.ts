@@ -48,9 +48,12 @@ import { GraphRepositoryError } from "./errors.js";
  *   (savunma katmanı; geçerli snapshot'ta oluşmaz — TŞ §8 invariant ii)
  * - export/write-failed: yetkilendirilmiş hedefe yazma/taşıma hatası
  * - export/output-not-authorized: hedef dizin beyanlı output listesinde
- *   değil → MCP yüzeyinde YENİ uzantı kodu OUTPUT_NOT_AUTHORIZED olarak
- *   eşlenmelidir (gerekçe K-008/K-011 örüntüsü; mcp-server/errors.ts
- *   tablosuna ekleme + wiki/decisions.md ADR girişi orkestratör kalemidir)
+ *   değil → MCP yüzeyinde TŞ §10.1 SABİT kodu EXPORT_NOT_ALLOWED ile
+ *   eşlenir (takım denetimi kararı: YENİ uzantı kodu OUTPUT_NOT_AUTHORIZED
+ *   İSTENMEDİ — K-008 örüntüsünün önkoşulu "TŞ listesinde uygun kod yok"
+ *   sağlanmazdı; eşleme packages/mcp-server/src/services-architecture.ts'te,
+ *   test faz-c-tools.test.ts'te. wiki/decisions.md yönetişim ADR girişi
+ *   orkestratör kalemidir)
  * - export/output-path-denied: null byte / ayraç / ".." / realpath kaçışı
  *   → mevcut PATH_DENIED ile eşlenir (workspace karar kodu mesaj taşınır).
  */
@@ -466,9 +469,10 @@ export interface WriteDocumentationResult {
  * fırlatılır (graph paketi kendi `export/...` ad alanını kullanır; MCP
  * eşlemesi tek sabit kod okur):
  * - `export/output-not-authorized`: hedef dizin beyanlı output listesinde
- *   değil → MCP yüzeyinde OUTPUT_NOT_AUTHORIZED olarak eşlenir (YENİ uzantı
- *   kodu; gerekçe K-008/K-011 örüntüsü — mcp-server/errors.ts tablo girişi +
- *   wiki/decisions.md ADR kaydı orkestratör kalemidir).
+ *   değil → MCP yüzeyinde SABİT EXPORT_NOT_ALLOWED ile eşlenir (takım
+ *   denetimi kararı: YENİ uzantı kodu OUTPUT_NOT_AUTHORIZED İSTENMEDİ —
+ *   kodun adı ve TŞ §16 konusu bu senaryonun tam karşılığıdır; eşleme
+ *   services-architecture.ts'te, ADR kaydı orkestratör kalemidir).
  * - `export/output-path-denied`: null byte / ayraç / ".." / realpath kaçışı
  *   → mevcut PATH_DENIED ile eşlenir.
  * Workspace karar kodu hata mesajında ayrıca taşınır (ayrıştırma kaybı yok).

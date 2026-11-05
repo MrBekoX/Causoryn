@@ -42,8 +42,8 @@ import { GraphRepositoryError } from "../src/index.js";
  * geçerli çıktısı; Mermaid deterministik flowchart sözdizimi; HTML'de
  * escape + kısıtlayıcı CSP meta + harici kaynak/CDN/script YOK; yazma
  * katmanı izinli dizine atomik yazar.
- * Negatif: beyan edilmemiş output dizini → OUTPUT_NOT_AUTHORIZED eşleniği
- * (workspace/output-not-authorized → export/output-not-authorized); ".."
+ * Negatif: beyan edilmemiş output dizini → export/output-not-authorized
+ * (MCP eşlemesi TŞ §10.1 sabit EXPORT_NOT_ALLOWED); ".."
  * traversal reddi; ayraçlı dosya adı reddi; geçersiz format reddi.
  * Partial: boş graph → boş ama geçerli çıktı (dört format + yazma).
  *
@@ -481,7 +481,7 @@ describe("writeDocumentation (izinli output dizinine atomik yazma)", () => {
 /* ------------------------------------------------------------------ */
 
 describe("output yetkilendirmesi (negatif)", () => {
-  it("beyan edilmemiş output dizini OUTPUT_NOT_AUTHORIZED eşleniğiyle reddedilir", () => {
+  it("beyan edilmemiş output dizini export/output-not-authorized ile reddedilir (MCP eşlemesi EXPORT_NOT_ALLOWED)", () => {
     const snapshot = positiveGraph();
     const declared = makeTempDir("decl");
     const other = makeTempDir("other");
@@ -612,7 +612,7 @@ describe("determinizm (aynı girdi → aynı çıktı)", () => {
     const policy = OutputAccessPolicy.create([declared]);
     try {
       writeDocumentation({ snapshot: positiveGraph(), format: "json", outputDir: other }, policy);
-      expect.unreachable("OUTPUT_NOT_AUTHORIZED beklenmişti");
+      expect.unreachable("export/output-not-authorized beklenmişti");
     } catch (error) {
       expect(error).toBeInstanceOf(GraphRepositoryError);
       expect((error as GraphRepositoryError).code).toBe("export/output-not-authorized");

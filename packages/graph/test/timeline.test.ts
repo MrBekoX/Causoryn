@@ -985,6 +985,7 @@ describe("timeline git katmanı — geçici depo (salt-okunur)", () => {
     expect(Object.keys(graphIndex)).toContain("buildArchitectureTimeline");
     expect(Object.keys(graphIndex)).toContain("buildArchitectureTimelineFromGit");
     expect(Object.keys(graphIndex)).toContain("selectSampledIndices");
+    expect(Object.keys(graphIndex)).toContain("serializeSnapshotContentSet");
     expect(Object.keys(graphIndex)).toContain("TIMELINE_DEFAULTS");
     expect(Object.keys(graphIndex)).toContain("TIMELINE_CEILINGS");
   });

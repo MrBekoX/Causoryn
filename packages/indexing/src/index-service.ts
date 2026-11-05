@@ -636,8 +636,6 @@ export class IndexService {
       entries.map((entry) => [entry.relativePath, entry.contentHash]),
     );
 
-    this.syncInventoryRecords(entries);
-
     const createdAt = this.clock();
     const fingerprint = buildAnalyzerFingerprint({
       typescript:
@@ -661,6 +659,10 @@ export class IndexService {
       // Erken çıkış: analiz edilebilir dil kaynağı yok (orijinal davranış,
       // genelleştirilmiş uyarı; tek Workspace node'uyla partial publish).
       if (tsEntries.length === 0 && csEntries.length === 0) {
+        // Envanter mutabakatı: bu dalda adapter koşumu YOK, sıralama
+        // tehlikesi yok — build'e girmeden mutabakat yapılır (async yol
+        // sözleşmesiyle aynı mutabakat garantisi).
+        this.syncInventoryRecords(entries);
         warnings.push(
           "workspace analiz edilebilir TypeScript/TSX/C# kaynağı içermiyor; coverage sıfır (partial yayınlendi)",
         );
@@ -758,6 +760,13 @@ export class IndexService {
           nodeByKey,
         );
       }
+
+      // Envanter mutabakatı ADAPTER KOŞUMLARINDAN SONRA (async yolun B10
+      // sözleşmesiyle aynı sıralama — denetim bulgusu): adapter sözleşme
+      // dışı fırlatırsa files tablosu güncellenmez; aksi hâlde güncellenen
+      // envanter sonraki incremental koşumu "değişiklik yok" no-op'una
+      // itip bayat graph'ı korur.
+      this.syncInventoryRecords(entries);
 
       const state: PublishableState =
         tsState === "ready" && csState === "ready" && diagnostics.length === 0

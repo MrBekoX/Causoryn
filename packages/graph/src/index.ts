@@ -170,6 +170,7 @@ export {
   buildArchitectureTimelineFromGit,
   readTimelinePointFromGit,
   selectSampledIndices,
+  serializeSnapshotContentSet,
 } from "./timeline.js";
 export type {
   ArchitectureTimeline,

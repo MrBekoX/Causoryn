@@ -22,6 +22,8 @@ import {
   type CompareNode,
   type CompareNodeIdentity,
 } from "../src/compare.js";
+import { serializeSnapshotContentSet } from "../src/timeline.js";
+import { createSnapshot, type SnapshotGraph } from "@causoryn/domain";
 
 /**
  * causoryn_compare_architecture çekirdek testleri (sprint-3 C3, TŞ v2.1 §13).
@@ -748,5 +750,143 @@ describe("git okuma katmanı — geçici depo (salt-okunur cat-file/ls-tree)", (
     const diffFirst = diffContentSets(first, second);
     const diffSecond = diffContentSets(first, second);
     expect(JSON.stringify(diffFirst)).toBe(JSON.stringify(diffSecond));
+  });
+});
+
+/* ------------------------------------------------------------------ */
+/* Compare/timeline blob üreticisi (denetim bulgusu: üretici yoktu)     */
+/* ------------------------------------------------------------------ */
+
+describe("serializeSnapshotContentSet — .causoryn/architecture-snapshot.json üreticisi", () => {
+  // Denetim bulgusu (orta): compare/timeline'ın tükettiği blob sözleşmesini
+  // (CompareContentSet: kenar uçları {kind, qualifiedName} kimlik nesneleri)
+  // üreten hiçbir kod yoktu; tek JSON export yolu tam snapshot canonical
+  // JSON'u üretir ve uçları node-id string olduğu için blob okuyucu
+  // 'edge from ucu bir nesne değil' ile reddeder. Bu testler üreticinin
+  // çıktısının TÜKETİCİLERİN KENDİ doğrulamalarından geçtiğini kanıtlar.
+  const SPAN_A = {
+    relativePath: "src/orders/index.ts",
+    startLine: 1,
+    endLine: 20,
+    sourceHash: "sha256:blob-a",
+  };
+  const SPAN_B = {
+    relativePath: "src/orders/create.ts",
+    startLine: 5,
+    endLine: 25,
+    sourceHash: "sha256:blob-b",
+  };
+  const NODE_A = { kind: "Module" as const, qualifiedName: "app::orders", language: "typescript", location: SPAN_A, attributes: {} };
+  const NODE_B = { kind: "Function" as const, qualifiedName: "app::orders::create", language: "typescript", location: SPAN_B, attributes: {} };
+
+  function blobFixture(): SnapshotGraph {
+    return createSnapshot({
+      workspaceId: "ws_blob",
+      revision: { id: "rev-blob", sequence: 1 },
+      configHash: "confighash-blob",
+      analyzerFingerprint: "typescript-adapter@0.1.0",
+      state: "ready",
+      createdAt: "2026-11-05T09:00:00.000Z",
+      nodes: [NODE_A, NODE_B],
+      edges: [
+        {
+          kind: "CALLS",
+          from: NODE_A,
+          to: NODE_B,
+          resolution: "verified",
+          evidence: [
+            {
+              kind: "static-analysis",
+              span: SPAN_B,
+              analyzerId: "typescript-adapter",
+              analyzerVersion: "0.1.0",
+              rationale: "denetim bulgusu blob üreticisi",
+            },
+          ],
+        },
+      ],
+    });
+  }
+
+  it("ürettiği blob compare diff girdisi olarak sindirilir: uçlar {kind, qualifiedName} kimliği taşır, round-trip sıfır diff", () => {
+    const snapshot = blobFixture();
+    const blob = serializeSnapshotContentSet(snapshot);
+    const parsed = JSON.parse(blob) as CompareContentSet;
+
+    // Blob sözleşmesi: uçlar node-ID string DEĞİL, kimlik nesnesi.
+    expect(parsed.nodes).toHaveLength(2);
+    expect(parsed.edges).toHaveLength(1);
+    const edge = parsed.edges[0]!;
+    expect(typeof edge.from).toBe("object");
+    expect(edge.from.kind).toBe("Module");
+    expect(edge.from.qualifiedName).toBe("app::orders");
+    expect(edge.from.relativePath).toBe("src/orders/index.ts");
+    expect(edge.to.kind).toBe("Function");
+    expect(edge.to.qualifiedName).toBe("app::orders::create");
+    expect(edge.to.relativePath).toBe("src/orders/create.ts");
+    expect(edge.resolution).toBe("verified");
+
+    // Tüketici doğrulaması: aynı kümeyle diff → değişim yok.
+    const diff = diffContentSets(parsed, parsed);
+    expect(diff.added).toHaveLength(0);
+    expect(diff.removed).toHaveLength(0);
+    expect(diff.changed).toHaveLength(0);
+    expect(diff.unchangedNodeCount).toBe(2);
+    expect(diff.edges.added).toHaveLength(0);
+    expect(diff.edges.removed).toHaveLength(0);
+    expect(diff.edges.changed).toHaveLength(0);
+    expect(diff.edges.unchangedCount).toBe(1);
+  });
+
+  it("determinizm: node/edge girdi sırası karıştırılsa bile blob bit-bit aynı", () => {
+    const straight = serializeSnapshotContentSet(blobFixture());
+    const shuffled = createSnapshot({
+      workspaceId: "ws_blob",
+      revision: { id: "rev-blob", sequence: 1 },
+      configHash: "confighash-blob",
+      analyzerFingerprint: "typescript-adapter@0.1.0",
+      state: "ready",
+      createdAt: "2026-11-05T09:00:00.000Z",
+      nodes: [NODE_B, NODE_A],
+      edges: [
+        {
+          kind: "CALLS",
+          from: NODE_A,
+          to: NODE_B,
+          resolution: "verified",
+          evidence: [
+            {
+              kind: "static-analysis",
+              span: SPAN_B,
+              analyzerId: "typescript-adapter",
+              analyzerVersion: "0.1.0",
+              rationale: "denetim bulgusu blob üreticisi",
+            },
+          ],
+        },
+      ],
+    });
+    expect(serializeSnapshotContentSet(shuffled)).toBe(straight);
+    expect(serializeSnapshotContentSet(blobFixture())).toBe(straight);
+  });
+
+  it("negatif: bilinmeyen kenar ucu savunma katmanıyla compare/dangling-edge ile reddedilir", () => {
+    const snapshot = blobFixture();
+    const dangling: SnapshotGraph = {
+      meta: snapshot.meta,
+      nodes: snapshot.nodes,
+      edges: [
+        {
+          id: "edge:dangling",
+          from: "node:0000000000000000000000000000000000000000000000000000000000000000",
+          to: snapshot.edges[0]!.to,
+          kind: "CALLS",
+          resolution: "verified",
+          evidenceIds: snapshot.edges[0]!.evidenceIds,
+        },
+      ],
+      evidence: snapshot.evidence,
+    };
+    expectThrowsCode(() => serializeSnapshotContentSet(dangling), "compare/dangling-edge");
   });
 });

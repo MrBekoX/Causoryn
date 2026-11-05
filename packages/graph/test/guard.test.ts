@@ -929,16 +929,27 @@ function deepFreeze<T>(value: T): T {
 // ---------------------------------------------------------------------------
 
 describe("compileGuardGlob — ReDoS regresyonu (doğrusal eşleştirici)", () => {
-  it("`**/` çoklu grup × uzun eğik çizgili değer doğrusal sürede sonuçlanır", () => {
-    // 16 adet `**/` grubu = 32 wildcard (kota: 32, tam sınırda — geçerli);
-    // değer 5000 karakter. Önceki regex gerçeklemesi `(?:.*/)?` nicelenmiş
-    // grubu `.*` içerdiğinden bu girdide dakikalarca geri izliyordu
-    // (bağımsız ölçüm: 16 grup = 68 sn, 25 eğik çizgide 300+ sn bitmedi).
+  it("`**/` çoklu grup × uzun eğik çizgili değer doğrusal sürede sonuçlanır (ölçekleme argümanı)", () => {
+    // 16 adet `**/` grubu = 32 wildcard (kota: 32, tam sınırda — geçerli).
+    // Önceki regex gerçeklemesi `(?:.*/)?` nicelenmiş grubu `.*` içerdiğinden
+    // bu girdide dakikalarca geri izliyordu (bağımsız ölçüm: 16 grup = 68 sn,
+    // 25 eğik çizgide 300+ sn bitmedi).
+    //
+    // Ölçekleme argümanı (denetim önerisi; mutlak duvar-saati eşiği CI
+    // yükü altında flake eder): girdi 2x büyütülür. Doğrusal eşleştiricide
+    // süre ~2x kalır; geri izleme olsaydı 2x girdi 4x'in kat kat üstü
+    // süreyi zorunlu kılardı. Ratio eşiği blow-up'ı yakalar; 250ms taban
+    // ve 2000ms mutlak tavan CI gürültüsüne pay tanır.
     const glob = compileGuardGlob("**/".repeat(16) + "z");
-    const value = "a/".repeat(2500);
-    const startedAt = Date.now();
-    expect(glob.matches(value)).toBe(false);
-    expect(Date.now() - startedAt).toBeLessThan(1000);
+    const elapsedFor = (slashPairCount: number): number => {
+      const startedAt = Date.now();
+      expect(glob.matches("a/".repeat(slashPairCount))).toBe(false);
+      return Date.now() - startedAt;
+    };
+    const baseline = elapsedFor(2500);
+    const doubled = elapsedFor(5000);
+    expect(doubled).toBeLessThan(Math.max(baseline * 10, 250));
+    expect(doubled).toBeLessThan(2000);
   });
 
   it("çoklu `**/` gruplu desenler standart glob semantiğiyle eşleşir", () => {

@@ -1,6 +1,18 @@
 import path from "node:path";
 
-import type { CompareContentSet, CompareNode } from "./compare.js";
+import {
+  canonicalJson,
+  type GraphEdge,
+  type GraphNode,
+  type JsonValue,
+  type SnapshotGraph,
+} from "@causoryn/domain";
+
+import type {
+  CompareContentSet,
+  CompareNode,
+  CompareNodeIdentity,
+} from "./compare.js";
 import { API_SURFACE_NODE_KINDS, diffContentSets } from "./compare.js";
 import { GraphRepositoryError } from "./errors.js";
 import {
@@ -80,6 +92,84 @@ import {
 
 /** Revizyon noktası başına mimari snapshot blob'u (git yolu, '/' ayıracı). */
 export const TIMELINE_SNAPSHOT_BLOB_PATH = ".causoryn/architecture-snapshot.json";
+
+/** Node/edge dizilerini id'ye göre kanonik sıraya alır (determinizm). */
+function byGraphId<T extends { readonly id: string }>(a: T, b: T): number {
+  if (a.id < b.id) return -1;
+  if (a.id > b.id) return 1;
+  return 0;
+}
+
+/** GraphNode → CompareNode kaydı (blob sözleşmesi; kimlik + tanımlı alanlar). */
+function contentNodeOf(node: GraphNode): CompareNode {
+  const attributes = node.attributes;
+  return {
+    kind: node.kind,
+    qualifiedName: node.qualifiedName,
+    ...(node.location === undefined ? {} : { relativePath: node.location.relativePath }),
+    ...(node.language === undefined ? {} : { language: node.language }),
+    ...(Object.keys(attributes).length === 0 ? {} : { attributes }),
+  };
+}
+
+/**
+ * Kenar ucunu node kimliğine çözümler. Uç kimliği compareIdentityKey ile
+ * bire bir eşleşmek ZORUNDADIR (kind + qualifiedName + relativePath) —
+ * aksi hâlde compare'in dangling-edge doğrulaması kümeni reddeder.
+ */
+function contentIdentityOf(
+  nodesById: ReadonlyMap<string, GraphNode>,
+  nodeId: string,
+  edgeKind: string,
+): CompareNodeIdentity {
+  const node = nodesById.get(nodeId);
+  if (node === undefined) {
+    throw new GraphRepositoryError(
+      "compare/dangling-edge",
+      `Kenar ucu snapshot node'uyla eşleşmiyor (${edgeKind}): ${nodeId}`,
+    );
+  }
+  return {
+    kind: node.kind,
+    qualifiedName: node.qualifiedName,
+    ...(node.location === undefined ? {} : { relativePath: node.location.relativePath }),
+  };
+}
+
+/**
+ * Blob üreticisi (denetim bulgusu, orta): compare/timeline'ın tükettiği
+ * `.causoryn/architecture-snapshot.json` sözleşmesini (CompareContentSet)
+ * yayınlanmış bir SnapshotGraph'tan üretir. Tam snapshot canonical JSON'u
+ * kenar uçlarını node-id string olarak taşır ve blob okuyucusu tarafından
+ * reddedilir; bu fonksiyon uçları {kind, qualifiedName, relativePath}
+ * kimlik nesnelerine çözümler.
+ *
+ * Çıktı canonical JSON'dur: node/edge girdi sırasından bağımsız, bit-bit
+ * deterministik (TŞ §8 invariant vi). Saf fonksiyondur: saat okumaz, dosya
+ * sistemine dokunmaz. Blob'un deponun ilgili revizyonuna yazılıp
+ * commit'lenmesi KULLANICI sorumluluğundadır — motor kullanıcı workspace'ine
+ * asla yazmaz (TŞ kırmızı çizgi: workspace salt okunur); üretici, izinli
+ * export yazma katmanına verilecek içeriği hazırlar.
+ */
+export function serializeSnapshotContentSet(snapshot: SnapshotGraph): string {
+  const nodesById = new Map<string, GraphNode>();
+  for (const node of snapshot.nodes) {
+    nodesById.set(node.id, node);
+  }
+  const contentSet: CompareContentSet = {
+    nodes: [...snapshot.nodes].sort(byGraphId).map(contentNodeOf),
+    edges: [...snapshot.edges].sort(byGraphId).map((edge: GraphEdge) => ({
+      kind: edge.kind,
+      from: contentIdentityOf(nodesById, edge.from, edge.kind),
+      to: contentIdentityOf(nodesById, edge.to, edge.kind),
+      resolution: edge.resolution,
+    })),
+  };
+  // canonicalJson sınırı: CompareContentSet yapısısal olarak JSON'dur;
+  // readonly arayüzün index-signature'ı tsconfig katmanında yoktur
+  // (compare.ts'in attributes cast'iyle aynı serileştirme sınırı).
+  return canonicalJson(contentSet as unknown as JsonValue);
+}
 
 /** Uygulanan sınırlar; istek tavanı aşarsa tavana kırpılır (bkz. impact.ts). */
 export interface TimelineLimits {

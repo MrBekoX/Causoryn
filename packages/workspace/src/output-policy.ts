@@ -25,14 +25,15 @@ import path from "node:path";
  *      veya en derin mevcut ata + kalan segment) beyanlı dizin içinde kalmalı
  *      (CWE-59 symlink/junction escape reddi)
  *
- * MCP hata kodlarına eşleme (dürüstlük notu): `workspace/output-not-authorized`
- * TŞ §10.1 sabit kod listesinde YOKTUR ve OUTPUT_NOT_AUTHORIZED olarak yeni bir
- * MCP uzantı kodu gerektirir. Gerekçe K-008 (INVALID_ARGUMENT + EVIDENCE_NOT_FOUND)
- * ve K-011 (SYMBOL_NOT_FOUND) ile aynı örüntüdür: araç sözleşmesi sabit bir
- * envelope kodu istiyor, TŞ listesinde yok. C8 MCP araç kaydında
- * packages/mcp-server/src/errors.ts tablosuna (CAUSORYN_TOOL_ERROR_CODES +
- * TOOL_ERROR_GUIDANCE, retryable=false) eklenmesi ve wiki/decisions.md'e ADR
- * girişi işlenmesi orkestratöre aittir (bu ajan wiki/mcp-server yazamaz).
+ * MCP hata kodlarına eşleme (dürüstlük notu, denetim sonrası güncel):
+ * `workspace/output-not-authorized` TŞ §10.1 sabit kod listesinde YOKTUR;
+ * ancak bunun için YENİ bir uzantı kodu (OUTPUT_NOT_AUTHORIZED) İSTENMEDİ —
+ * takım denetimi kararıyla MCP yüzeyi bu reddi TŞ §10.1 SABİT kodu
+ * EXPORT_NOT_ALLOWED ile raporlar (export yazma yetkilendirmesinin adı ve
+ * TŞ §16 konusu tam karşılığıdır; "TŞ listesinde uygun kod yok" önkoşulu
+ * sağlanmaz). Eşleme packages/mcp-server/src/services-architecture.ts'te;
+ * yönetişim ADR kaydı (wiki/decisions.md) orkestratöre aittir (bu ajan
+ * wiki yazamaz).
  */
 
 const IS_WIN = process.platform === "win32";
