@@ -126,8 +126,19 @@ describe("stdio server — stdout saflığı ve protokol el sıkışması", () =
     });
 
     child.stdout?.setEncoding("utf8");
+    // NDJSON satır tamponu: tools/list yanıtı 16 araçla (her biri tam JSON
+    // Schema taşır) tek satırlık dev bir mesajdır ve socket chunk sınırında
+    // PARÇALANABİLİR. Chunk'lar "\n"e kadar biriktirilmeden JSON.parse
+    // yapılmaz; aksi halde parça satırlar çözümlenemez ve pending yanıt
+    // asla düşmez (sprint-3 C8 katalog büyümesinde yakalanan gerçek hata).
+    let stdoutBuffer = "";
     child.stdout?.on("data", (chunk: string) => {
-      for (const line of chunk.split("\n")) {
+      stdoutBuffer += chunk;
+      let newlineIndex = stdoutBuffer.indexOf("\n");
+      while (newlineIndex >= 0) {
+        const line = stdoutBuffer.slice(0, newlineIndex);
+        stdoutBuffer = stdoutBuffer.slice(newlineIndex + 1);
+        newlineIndex = stdoutBuffer.indexOf("\n");
         const trimmed = line.trim();
         if (trimmed.length === 0) continue;
         stdoutLines.push(trimmed);
@@ -203,10 +214,18 @@ describe("stdio server — stdout saflığı ve protokol el sıkışması", () =
     expect(listMsg.id).toBe(2);
     const listResult = listMsg.result as { tools?: Array<{ name?: string }> };
     // Sprint-2 B6: causoryn_index_status + causoryn_refresh_index, B5:
-    // causoryn_get_symbol_context, B4: causoryn_trace_execution eklendi
-    // (TŞ §10.2 katalog büyümesi; liste alfabetik karşılaştırılır).
+    // causoryn_get_symbol_context, B4: causoryn_trace_execution, sprint-3
+    // C8: Faz C'nin 7 aracı eklendi (TŞ §10.2 katalog büyümesi; liste
+    // alfabetik karşılaştırılır).
     expect(listResult.tools?.map((t) => t.name).sort()).toEqual([
+      "causoryn_analyze_impact",
+      "causoryn_architecture_timeline",
+      "causoryn_check_architecture",
+      "causoryn_compare_architecture",
+      "causoryn_export_documentation",
       "causoryn_find_symbols",
+      "causoryn_generate_onboarding",
+      "causoryn_get_agent_context",
       "causoryn_get_capabilities",
       "causoryn_get_evidence",
       "causoryn_get_symbol_context",

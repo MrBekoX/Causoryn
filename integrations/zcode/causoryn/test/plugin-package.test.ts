@@ -140,7 +140,12 @@ const TOOL_NAMES_FROM_SOURCE = extractToolNames(VERSION_TS);
  * s.9'dan birincil kaynak doğrulaması (sprint-2 takım denetimi). Bu listede
  * olmayan kodlar proje uzantısıdır: INVALID_ARGUMENT + EVIDENCE_NOT_FOUND
  * (K-008) ve SYMBOL_NOT_FOUND (sprint-2 B5; K-008'i genişleten ADR kaydı
- * wiki/decisions.md'e orkestratör tarafından işlenmelidir).
+ * wiki/decisions.md'e orkestratör tarafından işlenmelidir). POLICY_INVALID,
+ * INVALID_REVISION ve EXPORT_NOT_ALLOWED uzantı DEĞİLDİR: sprint-3 C8'de
+ * (guard policy + git revizyon + export output yetkilendirmesi araçları)
+ * kullanıldılar ama TŞ §10.1 sabit listesinin üyeleridirler — export yazma
+ * reddi için yeni uzantı kodu basmak K-008 örüntüsünün önkoşulunu ("TŞ
+ * listesinde uygun kod yok") ihlal ederdi (takım denetimi bulgusu).
  */
 const TSH_BASE_ERROR_CODES: ReadonlySet<string> = new Set([
   "WORKSPACE_NOT_AUTHORIZED",
@@ -802,9 +807,13 @@ describe("mcp-server katalog desenkron korumaları (sprint-2 takım denetimi)", 
     const extensions = [...PUBLISHED_ERROR_CODES].filter(
       (code) => !TSH_BASE_ERROR_CODES.has(code),
     );
-    // TŞ §10.1 taban setinde olmayan kodlar = proje uzantıları; K-008 ikisini,
-    // sprint-2 B5 üçüncüsünü (SYMBOL_NOT_FOUND) ekledi. Paket başlığı (index.ts)
-    // uzantı notu bu seti eksiksiz saymalıdır; aksi halde bayat kalır.
+    // TŞ §10.1 taban setinde olmayan kodlar = proje uzantıları; K-008 ilk
+    // ikisini, sprint-2 B5 üçüncüsünü (SYMBOL_NOT_FOUND) ekledi. POLICY_INVALID,
+    // INVALID_REVISION ve EXPORT_NOT_ALLOWED uzantı değildir: TŞ §10.1 taban
+    // listesindedirler (sprint-3 C8'de ilk kez kullanıldılar; takım denetimi
+    // bulgusu: export yazma reddi EXPORT_NOT_ALLOWED sabit koduyla raporlanır,
+    // OUTPUT_NOT_AUTHORIZED gibi uzantı koduyla DEĞİL). Paket başlığı
+    // (index.ts) uzantı notu bu seti eksiksiz saymalıdır; aksi halde bayat kalır.
     expect(extensions.sort()).toEqual([
       "EVIDENCE_NOT_FOUND",
       "INVALID_ARGUMENT",

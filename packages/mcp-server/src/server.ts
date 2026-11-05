@@ -39,14 +39,41 @@ import {
   traceExecution,
   workspaceSummary,
 } from "./services.js";
+import {
+  AnalyzeImpactDataSchema,
+  AnalyzeImpactInputSchema,
+  ArchitectureTimelineDataSchema,
+  ArchitectureTimelineInputSchema,
+  CheckArchitectureDataSchema,
+  CheckArchitectureInputSchema,
+  CompareArchitectureDataSchema,
+  CompareArchitectureInputSchema,
+  ExportDocumentationDataSchema,
+  ExportDocumentationInputSchema,
+  GenerateOnboardingDataSchema,
+  GenerateOnboardingInputSchema,
+  GetAgentContextDataSchema,
+  GetAgentContextInputSchema,
+  analyzeImpactTool,
+  architectureTimeline,
+  checkArchitecture,
+  compareArchitecture,
+  exportDocumentationTool,
+  generateOnboardingTool,
+  getAgentContext,
+} from "./services-architecture.js";
 import { SERVER_NAME, SERVER_VERSION } from "./version.js";
 
 /**
  * MCP protokol adaptasyonu (TŞ v2.1 §5/§10, ADR-003): SDK McpServer
- * üzerinden tam olarak 9 gerçek araç yayımlanır (sprint-1: 5 çekirdek araç;
+ * üzerinden tam olarak 16 gerçek araç yayımlanır (sprint-1: 5 çekirdek araç;
  * sprint-2 B6: causoryn_index_status + causoryn_refresh_index; sprint-2 B5:
  * causoryn_get_symbol_context; sprint-2 B4: causoryn_trace_execution;
- * tools/list boş handler yayınlamaz — ADR-010).
+ * sprint-3 C8: causoryn_analyze_impact, causoryn_check_architecture,
+ * causoryn_compare_architecture, causoryn_get_agent_context,
+ * causoryn_generate_onboarding, causoryn_export_documentation,
+ * causoryn_architecture_timeline; tools/list boş handler yayınlamaz —
+ * ADR-010).
  * Her araç:
  * - Zod inputSchema (SDK girdiyi otomatik doğrular; şema reddi protokol
  *   düzeyinde isError sonucu döner),
@@ -65,7 +92,7 @@ interface ToolRegistration {
   readonly description: string;
   readonly inputSchema: z.ZodType;
   readonly outputSchema: z.ZodType;
-  readonly handler: (requestId: string, args: unknown) => Envelope;
+  readonly handler: (requestId: string, args: unknown) => Envelope | Promise<Envelope>;
 }
 
 function envelopeResult(envelope: Envelope): CallToolResult {
@@ -167,6 +194,74 @@ function buildRegistrations(context: CausorynContext): readonly ToolRegistration
         traceExecution(context, requestId, args as z.infer<typeof TraceExecutionInputSchema>),
     },
     {
+      name: "causoryn_analyze_impact",
+      title: "Etki analizi",
+      description:
+        "Hedef sembollerden ters kenar BFS ile bounded etki yolları: certainty (direct|indirect|possible) ile resolution (verified|heuristic|unresolved) ayrı alanlardır; mutlak etki iddiası üretilmez. Çözülemeyen hedefler unresolvedTargets'ta raporlanır; sınırlar TŞ §20 tavanlarına kırpılır ve rationale ile açıkça raporlanır.",
+      inputSchema: AnalyzeImpactInputSchema,
+      outputSchema: envelopeOutputSchema(AnalyzeImpactDataSchema),
+      handler: (requestId, args) =>
+        analyzeImpactTool(context, requestId, args as z.infer<typeof AnalyzeImpactInputSchema>),
+    },
+    {
+      name: "causoryn_check_architecture",
+      title: "Architecture Guard",
+      description:
+        "Workspace kökündeki .causoryn/architecture.rules.yaml policy'sini yayınlanmış snapshot üzerinde değerlendirir (no-cycles Tarjan SCC + forbidden-dependency glob kuralları): TŞ §12 finding sözleşmesi {id, ruleId, severity, from, to, evidenceIds, suppression?, snapshotId}; baseline suppression (neden/sahip/tarih) bulguyu baskılar, policy'de karşılığı olmayan suppression orphanSuppressions'ta listelenir. Yalnızca bulgu raporlar; CI/çıkış kodu kararı vermez.",
+      inputSchema: CheckArchitectureInputSchema,
+      outputSchema: envelopeOutputSchema(CheckArchitectureDataSchema),
+      handler: async (requestId, args) =>
+        checkArchitecture(context, requestId, args as z.infer<typeof CheckArchitectureInputSchema>),
+    },
+    {
+      name: "causoryn_compare_architecture",
+      title: "Architecture Diff",
+      description:
+        "İki git ref'i (commit/tag/branch/sha veya working-tree) arasındaki mimari diff: node ek-çıkar-değişen kümeleri, belgeli confidence'lı rename eşleşmeleri, kenar değişimleri ve API yüzeyi değişimleri. Snapshot blob'ları salt-okunur git okumasıyla alınır (checkout/reset/clean yok); analiz edilemeyen revizyon INVALID_REVISION döndürür.",
+      inputSchema: CompareArchitectureInputSchema,
+      outputSchema: envelopeOutputSchema(CompareArchitectureDataSchema),
+      handler: async (requestId, args) =>
+        compareArchitecture(context, requestId, args as z.infer<typeof CompareArchitectureInputSchema>),
+    },
+    {
+      name: "causoryn_get_agent_context",
+      title: "AI Agent GPS",
+      description:
+        "Görev metnini yalnızca arama sorgusu olarak değerlendirip exact-symbol → graph-proximity → contract → freshness → fts ayaklarıyla sıralar: tokenBudget bütçesine kadar contextItems paketi (estimatedTokens, reason, evidence), omittedCount ve degrade ayaklar açıkça raporlanır. Görev metni çıktıya yazılmaz.",
+      inputSchema: GetAgentContextInputSchema,
+      outputSchema: envelopeOutputSchema(GetAgentContextDataSchema),
+      handler: (requestId, args) =>
+        getAgentContext(context, requestId, args as z.infer<typeof GetAgentContextInputSchema>),
+    },
+    {
+      name: "causoryn_generate_onboarding",
+      title: "Onboarding raporu",
+      description:
+        "beginner|intermediate|maintainer profiline göre yapısal onboarding verisi: giriş noktaları, ilk 5 yüksek merkezi modül, öğrenme sırası (döngüler SCC ile tek adımda), kritik akışlar, testler, bilinmeyen kenarlar ve riskli alanlar. Açıklayıcı doğal dil host modelin işidir; bu araç şablon gerekçe taşır.",
+      inputSchema: GenerateOnboardingInputSchema,
+      outputSchema: envelopeOutputSchema(GenerateOnboardingDataSchema),
+      handler: (requestId, args) =>
+        generateOnboardingTool(
+          context,
+          requestId,
+          args as z.infer<typeof GenerateOnboardingInputSchema>,
+        ),
+    },
+    {
+      name: "causoryn_export_documentation",
+      title: "Documentation export",
+      description:
+        "Yayımlanmış snapshot'ı json|markdown|mermaid|html formatında deterministik olarak dışa aktarır. Yazma YALNIZCA config output.allowedOutputDirs beyanlı dizinine atomiktir (.tmp + rename); beyanlı olmayan hedef EXPORT_NOT_ALLOWED, reddedilen dosya adı PATH_DENIED döndürür. HTML offline self-contained'dır: escaping + CSP, CDN/analytics yok.",
+      inputSchema: ExportDocumentationInputSchema,
+      outputSchema: envelopeOutputSchema(ExportDocumentationDataSchema),
+      handler: (requestId, args) =>
+        exportDocumentationTool(
+          context,
+          requestId,
+          args as z.infer<typeof ExportDocumentationInputSchema>,
+        ),
+    },
+    {
       name: "causoryn_get_evidence",
       title: "Evidence provenance",
       description:
@@ -176,10 +271,24 @@ function buildRegistrations(context: CausorynContext): readonly ToolRegistration
       handler: (requestId, args) =>
         getEvidence(context, requestId, args as z.infer<typeof GetEvidenceInputSchema>),
     },
+    {
+      name: "causoryn_architecture_timeline",
+      title: "Architecture Timeline",
+      description:
+        "Git refs listesi veya bounded history-range üzerinden mimari zaman çizgisi: deterministik eşit aralıklı sampling (maxRevisions; uçlar korunur, atlanan noktalar skipped listesinde açık), seçilen noktaların snapshot blob'ları salt-okunur git okumasıyla alınır ve ardışık diff özetleri raporlanır. Analiz edilemeyen noktalar/aralıklar AÇIK raporlanır; hiçbir sayı uydurulmaz.",
+      inputSchema: ArchitectureTimelineInputSchema,
+      outputSchema: envelopeOutputSchema(ArchitectureTimelineDataSchema),
+      handler: async (requestId, args) =>
+        architectureTimeline(
+          context,
+          requestId,
+          args as z.infer<typeof ArchitectureTimelineInputSchema>,
+        ),
+    },
   ];
 }
 
-/** Context'i MCP McpServer'a bağlar; tam olarak 9 araç kaydeder. */
+/** Context'i MCP McpServer'a bağlar; tam olarak 16 araç kaydeder. */
 export function createCausorynMcpServer(context: CausorynContext): McpServer {
   const server = new McpServer(
     { name: SERVER_NAME, version: SERVER_VERSION },
@@ -197,7 +306,7 @@ export function createCausorynMcpServer(context: CausorynContext): McpServer {
       async (args, extra) => {
         const requestId = String(extra.requestId);
         try {
-          const envelope = registration.handler(requestId, args);
+          const envelope = await registration.handler(requestId, args);
           return envelopeResult(envelope);
         } catch (error) {
           if (error instanceof CausorynToolError) {

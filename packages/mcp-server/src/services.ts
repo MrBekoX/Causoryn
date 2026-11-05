@@ -14,7 +14,7 @@ import {
   type IndexJobRecord,
 } from "@causoryn/indexing";
 import type { IndexJobManager } from "@causoryn/indexing";
-import type { WorkspaceAccessPolicy } from "@causoryn/workspace";
+import type { OutputAccessPolicy, WorkspaceAccessPolicy } from "@causoryn/workspace";
 import { z } from "zod";
 
 import { decodeCursor, encodeCursor } from "./cursor.js";
@@ -44,13 +44,31 @@ export interface ServiceDeps {
   readonly repository: GraphRepository;
   /** Sprint-2 B6: causoryn_refresh_index / causoryn_index_status iş yönetimi. */
   readonly jobManager: IndexJobManager;
+  /**
+   * Sprint-3 C6/C8: export çıktı yetkilendirmesi. Beyanlı output dizini yoksa
+   * null (default deny) — causoryn_export_documentation EXPORT_NOT_ALLOWED
+   * döner. CausorynContext bu alanı config.output.allowedOutputDirs'tan kurar.
+   */
+  readonly outputPolicy: OutputAccessPolicy | null;
+  /**
+   * stderr hedefli logger (CausorynContext.logger'dan yapısal gelir): graf
+   * sözleşme hataları INTERNAL_ERROR'a eşlenirken orijinal mesaj BURADA
+   * loglanır — istemciye genel mesaj gider, detay kaybolmaz (TŞ §10.1).
+   */
+  readonly logger: (message: string) => void;
 }
 
 /* ------------------------------------------------------------------ */
 /* Ortak yardımcılar                                                   */
 /* ------------------------------------------------------------------ */
 
-function requireAuthorizedWorkspace(deps: ServiceDeps, workspaceId: string): string {
+/**
+ * Yetki denetimi (TŞ §9/§20 explicit authorization): workspaceId yapılandırılmış
+ * tek workspace ile eşleşmeli ve allowRoots[0] her çağrıda politikaya karşı
+ * yeniden doğrulanmalıdır. Faz C servisleri (services-architecture.ts) de
+ * aynı sırayı izler: yetki ÖNCE, snapshot sonra.
+ */
+export function requireAuthorizedWorkspace(deps: ServiceDeps, workspaceId: string): string {
   if (workspaceId !== deps.config.workspaceId) {
     throw new CausorynToolError(
       "WORKSPACE_NOT_AUTHORIZED",
@@ -74,7 +92,8 @@ function requireAuthorizedWorkspace(deps: ServiceDeps, workspaceId: string): str
   return decision.canonicalRoot;
 }
 
-function requireSnapshot(deps: ServiceDeps, workspaceId: string): SnapshotRead {
+/** Yayımlanmış snapshot sözleşmesi: yoksa INDEX_NOT_READY (TŞ §10.1). */
+export function requireSnapshot(deps: ServiceDeps, workspaceId: string): SnapshotRead {
   const read = deps.repository.getLatestPublished(workspaceId);
   if (read === undefined) {
     throw new CausorynToolError(
@@ -85,7 +104,8 @@ function requireSnapshot(deps: ServiceDeps, workspaceId: string): SnapshotRead {
   return read;
 }
 
-function coverageOf(snapshot: SnapshotGraph): Coverage {
+/** Snapshot'tan coverage istatistiği (envelope.coverage; katalogla aynı tanım). */
+export function coverageOf(snapshot: SnapshotGraph): Coverage {
   const totalEdges = snapshot.edges.length;
   const unresolvedEdges = snapshot.edges.filter((edge) => edge.resolution === "unresolved").length;
   const resolvedEdges = totalEdges - unresolvedEdges;
@@ -101,7 +121,8 @@ function coverageOf(snapshot: SnapshotGraph): Coverage {
   };
 }
 
-function staleWarningOf(read: SnapshotRead): string[] {
+/** stale/partial uyarıları (envelope.warnings; TŞ §9 eski snapshot servisi). */
+export function staleWarningOf(read: SnapshotRead): string[] {
   const warnings: string[] = [];
   if (read.stale) {
     warnings.push("yayınlanmış snapshot bayat (stale=true); yeniden indeksleme önerilir");
@@ -114,7 +135,8 @@ function staleWarningOf(read: SnapshotRead): string[] {
   return warnings;
 }
 
-function envelopeStatusOf(read: SnapshotRead): "ok" | "partial" {
+/** Envelope status çözümü: snapshot meta.state partial ise "partial". */
+export function envelopeStatusOf(read: SnapshotRead): "ok" | "partial" {
   return read.snapshot.meta.state === "partial" ? "partial" : "ok";
 }
 

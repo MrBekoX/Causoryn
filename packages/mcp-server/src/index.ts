@@ -1,14 +1,14 @@
 /**
  * @causoryn/mcp-server — MCP protokol adaptasyonu paketi (Faz A dilimi,
  * sprint-1 görev 6; sprint-2 B6: causoryn_index_status +
- * causoryn_refresh_index, sprint-2 B5: causoryn_get_symbol_context
- * eklendi).
+ * causoryn_refresh_index, sprint-2 B5: causoryn_get_symbol_context,
+ * sprint-3 C8: Faz C'nin 7 çekirdek aracı eklendi).
  *
  * Sorumluluk alanı (TŞ v2.1 §5 + §10): local stdio transport (ADR-003),
  * Zod input/output doğrulaması, authorization, SIZE limitleri
  * (results.maxNodes/maxSymbols/maxDepth/maxPaths, index.maxFiles,
  * workspace.maxFileBytes) ve ApplicationService yönlendirmesi. tools/list
- * tam olarak 9 gerçek araç yayımlar; boş handler yayınlanmaz (ADR-010,
+ * tam olarak 16 gerçek araç yayımlar; boş handler yayınlanmaz (ADR-010,
  * wiki/mcp-tools.md).
  *
  * Kasıtlı kapsam dışı (dürüstlük beyanı): İSTEK HIZI (rate) limiti bu
@@ -29,10 +29,14 @@
  *   uygulama servislerini tüketir (wiki/architecture.md bağımlılık sınırı 3).
  * - Envelope hata kodları sabittir (TŞ §10.1 + ÜÇ proje uzantısı:
  *   INVALID_ARGUMENT + EVIDENCE_NOT_FOUND (K-008) ve SYMBOL_NOT_FOUND
- *   (sprint-2 B5 get_symbol_context) — bkz. errors.ts başlığı. K-008 karar
- *   kaydı (wiki/decisions.md) yalnızca ilk ikisini kapsar; SYMBOL_NOT_FOUND
- *   için K-008'i genişleten yeni ADR kaydının wiki/decisions.md'e
- *   işlenmesi orkestratöre aittir (wiki yazımı ajan dışı).
+ *   (sprint-2 B5 get_symbol_context) — bkz. errors.ts başlığı. Sprint-3 C8'in
+ *   guard/export/git-revision araçları YENİ uzantı kodu basmaz: POLICY_INVALID,
+ *   INVALID_REVISION ve EXPORT_NOT_ALLOWED TŞ §10.1 sabit listesinin
+ *   üyeleridir ve bu dilimde ilk kez kullanıldılar (takım denetimi bulgusu).
+ *   K-008 karar kaydı (wiki/decisions.md) yalnızca ilk ikisini kapsar;
+ *   SYMBOL_NOT_FOUND için K-008'i genişleten yeni ADR kaydının
+ *   wiki/decisions.md'e işlenmesi orkestratöre aittir (wiki yazımı ajan
+ *   dışı).
  */
 export { SERVER_NAME, SERVER_VERSION, SCHEMA_VERSION, TOOL_NAMES } from "./version.js";
 export type { ToolName } from "./version.js";
@@ -53,6 +57,31 @@ export { encodeCursor, decodeCursor } from "./cursor.js";
 export { createCausorynContext } from "./context.js";
 export type { CausorynContext, ContextOverrides } from "./context.js";
 export { createCausorynMcpServer } from "./server.js";
+export {
+  graphErrorToToolError,
+  analyzeImpactTool,
+  checkArchitecture,
+  compareArchitecture,
+  getAgentContext,
+  generateOnboardingTool,
+  exportDocumentationTool,
+  architectureTimeline,
+  AnalyzeImpactInputSchema,
+  AnalyzeImpactDataSchema,
+  CheckArchitectureInputSchema,
+  CheckArchitectureDataSchema,
+  GuardFindingSchema,
+  CompareArchitectureInputSchema,
+  CompareArchitectureDataSchema,
+  GetAgentContextInputSchema,
+  GetAgentContextDataSchema,
+  GenerateOnboardingInputSchema,
+  GenerateOnboardingDataSchema,
+  ExportDocumentationInputSchema,
+  ExportDocumentationDataSchema,
+  ArchitectureTimelineInputSchema,
+  ArchitectureTimelineDataSchema,
+} from "./services-architecture.js";
 export {
   getCapabilities,
   workspaceSummary,

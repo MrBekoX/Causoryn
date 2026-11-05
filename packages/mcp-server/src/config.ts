@@ -37,6 +37,19 @@ export const causorynServerConfigSchema = workspacePolicyConfigSchema.extend({
     .default({ maxNodes: 250, maxSymbols: 100, maxDepth: 3, maxPaths: 50 }),
   /** Başlangıçta otomatik indeksleme; false → araçlar INDEX_NOT_READY döner. */
   autoIndex: z.boolean().default(true),
+  /**
+   * Export çıktı beyanı (sprint-3 C6/C8; TŞ §16 "yalnızca explicit izinli
+   * output dizini, atomik write"). Default BOŞ listedir → default deny:
+   * causoryn_export_documentation EXPORT_NOT_ALLOWED döner, hiçbir
+   * dizine yazılmaz. Beyanlı dizinler diskte VAR OLMALIDIR (OutputAccessPolicy
+   * başlangıçta realpath doğrular; çözümlenemeyen beyan sunucuyu düşürür —
+   * güven kaynağı kurulamaz).
+   */
+  output: z
+    .strictObject({
+      allowedOutputDirs: z.array(z.string()).default([]),
+    })
+    .default({ allowedOutputDirs: [] }),
 });
 
 export type CausorynServerConfig = z.infer<typeof causorynServerConfigSchema>;
