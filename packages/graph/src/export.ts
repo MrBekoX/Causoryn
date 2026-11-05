@@ -88,11 +88,25 @@ function escapeHtml(value: string): string {
     .replace(/\|/g, "&#124;");
 }
 
-/** Markdown tablo hücresi kaçışı: GFM hücre ayracı ve satır sonları. */
+/**
+ * Markdown tablo hücresi kaçışı: GFM hücre ayracı, satır sonları ve
+ * link/HTML metakarakterleri. Hücre değerleri (dosya yolları, sembol adları,
+ * rationale) güvenilmez depo verisidir (TŞ §19): kaçırılmayan
+ * `![x](https://...)` dizgisi ağa erişimli GFM görüntüleyicide beacon/link,
+ * kaçırılmayan `<...>` ham inline HTML olarak işlenir. Backslash escape
+ * GFM'in ASCII noktalama kaçışıdır; içerik okunur kalır, sözdizimi bozulur.
+ */
 function escapeMarkdownCell(value: string): string {
   return value
     .replace(/\\/g, "\\\\")
     .replace(/\|/g, "\\|")
+    .replace(/!/g, "\\!")
+    .replace(/\[/g, "\\[")
+    .replace(/\]/g, "\\]")
+    .replace(/\(/g, "\\(")
+    .replace(/\)/g, "\\)")
+    .replace(/</g, "\\<")
+    .replace(/>/g, "\\>")
     .replace(/[\r\n\t]+/g, " ");
 }
 
@@ -486,6 +500,16 @@ export function writeDocumentation(
   const targetPath = decision.canonicalPath;
   const tmpPath = `${targetPath}.tmp`;
   try {
+    // Savunma derinliği (güvenlik bulgusu): kalan .tmp girdisi — özellikle
+    // output dizinine önceden konmuş bir sembolik bağ — yazmadan ÖNCE
+    // kaldırılır; böylece yazma bağın izini takip ederek beyanlı dizin
+    // dışına sızamaz. Yalnızca bağın kendisi kaldırılır; bağın hedefi
+    // dokunulmaz kalır. tmp yoksa unlink hatası yok sayılır.
+    try {
+      unlinkSync(tmpPath);
+    } catch {
+      // tmp yok: temizlik gereksiz; asıl yazma aşağıda.
+    }
     writeFileSync(tmpPath, content, "utf8");
     renameSync(tmpPath, targetPath);
   } catch (error) {

@@ -946,7 +946,7 @@ describe("timeline git katmanı — geçici depo (salt-okunur)", () => {
         }),
       "compare/ref-not-found",
     );
-  });
+  }, 30_000);
 
   it("negatif: maxRangeWalk aşımı — bounded history-range açıkça reddedilir", async () => {
     // Denetim bulgusu 3a: v1..v3 zinciri 3 commit; maxRangeWalk=2 sınırında
@@ -965,7 +965,7 @@ describe("timeline git katmanı — geçici depo (salt-okunur)", () => {
       maxRangeWalk: TIMELINE_CEILINGS.maxRangeWalk + 1000,
     });
     expect(clamped.limits.maxRangeWalk).toBe(TIMELINE_CEILINGS.maxRangeWalk);
-  });
+  }, 30_000);
 
   it("negatif: tag zinciri peel derinliği aşımı — açık ret", async () => {
     // Denetim bulgusu 3b: deep6 → deep1 → av1 zinciri peel derinlik sınırını

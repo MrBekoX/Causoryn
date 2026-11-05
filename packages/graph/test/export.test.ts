@@ -1,4 +1,13 @@
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
+import {
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+} from "node:fs";
+import { symlink as symlinkAsync, writeFile as writeFileAsync } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
@@ -285,6 +294,34 @@ describe("Markdown serializer", () => {
     expect(output).toContain("app::line break");
     expect(output).not.toContain("app::line\nbreak");
   });
+
+  it("hücredeki link/HTML metakarakterlerini kaçırır; kötü niyetli dosya adı beacon/link üretmez", () => {
+    // Güvenlik bulgusu (düşük): node.location.relativePath güvenilmez depo
+    // verisidir; '![a](https://evil/x).ts' gibi bir ad kaçırılmazsa ağa
+    // erişimli GFM görüntüleyicide beacon/link olarak işlenir (TŞ §16
+    // export güvenliği; §19 depo güvenilmez girdi sayılır).
+    const evil = createSnapshot({
+      workspaceId: WS,
+      revision: { id: "rev-md-link", sequence: 1 },
+      configHash: "confighash-md-link",
+      analyzerFingerprint: "typescript-adapter@0.1.0",
+      state: "ready",
+      createdAt: CREATED_AT,
+      nodes: [
+        nodeInput("Module", "app::md::beacon", "![a](https://evil/x).ts", 1, 2),
+        nodeInput("Function", 'app::x::<script>alert("xss")</script>', "src/x/pay.ts", 3, 9),
+      ],
+      edges: [],
+    });
+    const output = serializeDocumentationMarkdown(evil);
+    // Beacon/link dizgisi bozulmuş olmalı: hücrede GFM sözdizimi oluşamaz.
+    expect(output).not.toContain("![a](https://evil/x)");
+    // Ham inline HTML yok: <script> backslash kaçışlı görünür.
+    expect(output).not.toContain("<script>");
+    // Kaçış biçimi deterministiktir ve içerik okunur kalır:
+    expect(output).toContain("\\!\\[a\\]\\(https://evil/x\\).ts");
+    expect(output).toContain('app::x::\\<script\\>alert\\("xss"\\)\\</script\\>');
+  });
 });
 
 describe("Mermaid serializer (deterministik flowchart)", () => {
@@ -401,6 +438,41 @@ describe("writeDocumentation (izinli output dizinine atomik yazma)", () => {
       policy,
     );
     expect(existsSync(result.path)).toBe(true);
+  });
+
+  it("önceden konmuş <hedef>.tmp sembolik bağı İZLENMEZ; bağ kırılır, bağın dışarıdaki hedefi değişmez", async () => {
+    // Güvenlik bulgusu (düşük, savunma derinliği): hedef authorizeFile ile
+    // doğrulanır ama türetilen .tmp yeniden doğrulanmaz; output dizininde
+    // önceden var olan .tmp sembolik bağı yazmayı İZİNİ takip ederek beyanlı
+    // dizin dışına yönlendirebilir (TŞ §16 atomik yazma + §19 tehdit modeli).
+    const snapshot = positiveGraph();
+    const outputDir = makeTempDir("tmp-link");
+    const outsideDir = makeTempDir("tmp-link-outside");
+    const victimPath = path.join(outsideDir, "victim.txt");
+    // Test fixture sınırı: victim dosyası dış dizinin bir altıdır (bağın
+    // hedefi kasaca dizin DIŞI olduğundan emin olmak için bilinçli).
+    if (!victimPath.startsWith(outsideDir + path.sep)) {
+      throw new Error("fixture sınırı aşıldı: victim yolu dış dizinde değil");
+    }
+    await writeFileAsync(victimPath, "ESKI-ICERIK", "utf8");
+    const target = path.join(outputDir, EXPORT_DEFAULT_FILE_NAMES.json);
+    if (!target.startsWith(outputDir + path.sep)) {
+      throw new Error("fixture sınırı aşıldı: hedef yolu output dizininde değil");
+    }
+    await symlinkAsync(victimPath, `${target}.tmp`);
+
+    const policy = OutputAccessPolicy.create([outputDir]);
+    const result = writeDocumentation({ snapshot, format: "json", outputDir }, policy);
+
+    // Bağın dışarıdaki hedefi YENİDEN YAZILMAMIŞ olmalı.
+    expect(readFileSync(victimPath, "utf8")).toBe("ESKI-ICERIK");
+    // Hedef, izinli dizinde DÜZENLİ dosya olarak yazılmış olmalı.
+    expect(result.path).toBe(target);
+    expect(existsSync(target)).toBe(true);
+    expect(lstatSync(target).isSymbolicLink()).toBe(false);
+    expect(readFileSync(target, "utf8")).toBe(serializeDocumentation(snapshot, "json"));
+    // Atomik yazma sonrası tmp kalıntısı yok.
+    expect(readdirSync(outputDir)).toEqual([EXPORT_DEFAULT_FILE_NAMES.json]);
   });
 });
 

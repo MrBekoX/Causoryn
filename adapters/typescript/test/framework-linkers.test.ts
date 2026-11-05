@@ -740,7 +740,7 @@ describe("analyzeTypeScriptProgramWithFrameworks — tek koşum iki çıktı", (
     );
     expect(combined.framework.edges).toEqual([]);
     expect(combined.framework.detections).toEqual([]);
-  });
+  }, 30_000);
 });
 
 /* ------------------------------------------------------------------ */

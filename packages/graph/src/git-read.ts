@@ -357,11 +357,25 @@ export async function readGitTree(
       options,
     );
   } catch (error) {
-    if (error instanceof GraphRepositoryError && error.code === "compare/git-command-failed") {
-      throw new GraphRepositoryError(
-        "compare/ref-not-found",
-        `Ref çözümlenemedi: ${ref} — ${error.message}`,
-      );
+    if (error instanceof GraphRepositoryError) {
+      // Dürüst hata ayrıştırıcı (denetim bulgusu): ls-tree çıktısının spawn
+      // buffer sınırını aşması (Node: 'stdout maxBuffer length exceeded')
+      // ağaç boyutu sorunudur — ref bulunamadı olarak YANLIŞ etiketlenmez.
+      if (
+        error.code === "compare/git-command-failed" &&
+        /maxBuffer/i.test(error.message)
+      ) {
+        throw new GraphRepositoryError(
+          "compare/tree-too-large",
+          `Ağaç listesi tamamlanamadı: ls-tree çıktısı buffer sınırını aştı (ağaç çok büyük) — ${error.message}`,
+        );
+      }
+      if (error.code === "compare/git-command-failed") {
+        throw new GraphRepositoryError(
+          "compare/ref-not-found",
+          `Ref çözümlenemedi: ${ref} — ${error.message}`,
+        );
+      }
     }
     throw error;
   }

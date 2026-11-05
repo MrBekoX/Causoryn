@@ -648,6 +648,24 @@ describe("git okuma katmanı — geçici depo (salt-okunur cat-file/ls-tree)", (
     );
   });
 
+  it("negatif: ls-tree buffer sınırı (maxBuffer) aşımı ref-not-found olarak YANLIŞ etiketlenmez; tree-too-large döner", async () => {
+    // Güvenlik/denetim bulgusu (düşük): mapGitSpawnError her spawn hatasını
+    // compare/git-command-failed'a indirger; readGitTree bunu koşulsuz
+    // 'ref çözümlenemedi'ye yeniden etiketler. maxBuffer aşımı (küçük bir
+    // ağaçta bile kasıtlı küçük buffer ile tetiklenir) gerçek nedeni ağaç
+    // boyutudur — dürüst hata raporlama sözleşmesi compare/tree-too-large
+    // döndürmeli (TŞ §10.1 hata kodu tablosu; git-read.ts başlığındaki kod
+    // listesi).
+    await expectRejectsCode(
+      () => readGitTree(repoRoot, commit1Sha, { maxBufferBytes: 64 }),
+      "compare/tree-too-large",
+    );
+    // Normal koşumda aynı ref sorunsuz listelenir: sınır, kodun değil
+    // buffer'ın aşımı olduğunu ayrıştırmalı.
+    const entries = await readGitTree(repoRoot, commit1Sha);
+    expect(entries.length).toBeGreaterThan(0);
+  });
+
   it("negatif: beyaz liste dışı git komutları yürütülmeye gönderilmeden reddedilir", async () => {
     // checkout/reset/clean TŞ §13'te ismen yasaktır; status dahil beyaz liste
     // dışı her alt komut exec'e ULAŞMADAN reddedilir.
