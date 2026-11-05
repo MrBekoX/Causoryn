@@ -13,26 +13,30 @@ architecture questions without any model API, network service or credential.
   `.zcode-plugin/plugin.json`.
 - One routing skill: `skills/map-system/SKILL.md` teaches the host model when and how to
   call `causoryn_map_system`.
-- Five published tools (exactly what the compiled server registers — empty handlers are
+- Nine published tools (exactly what the compiled server registers — empty handlers are
   never advertised):
 
 | Tool | Purpose |
 | --- | --- |
 | `causoryn_get_capabilities` | Adapter levels (L0–L4), server limits, protocol revision, published tool list. Needs no snapshot. |
 | `causoryn_workspace_summary` | Project / language / entrypoint / edge-coverage summary derived from the published graph snapshot. |
+| `causoryn_index_status` | Index job status: latest (or given `jobId`) job progress, published snapshot, stale flag and diagnostics. |
+| `causoryn_refresh_index` | Starts a new snapshot indexing job (`mode: full`): returns a `jobId` immediately, the job runs in the background; writes only to the authorized Causoryn data root. |
 | `causoryn_map_system` | Architecture map pages at `level` L0–L3 with `filters`, `maxNodes` and `cursor` pagination. |
 | `causoryn_find_symbols` | Ranked symbol search over qualified names, with `AMBIGUOUS_SYMBOL` candidate disambiguation. |
+| `causoryn_get_symbol_context` | Symbol node + neighboring edges to the requested depth (`edgeKinds` filter, deterministic ordering) + evidence records; accepts a node id or a qualified name (ambiguous names return `AMBIGUOUS_SYMBOL` candidates). |
+| `causoryn_trace_execution` | Call-chain paths from an entrypoint (framework endpoint name like `POST /orders`, a symbol name or node id) over `CALLS` + `ROUTES_TO` edges with bounded deterministic DFS: per-edge resolution + evidence stay in separate fields, a chain carrying a heuristic edge is labeled `heuristic` (never presented as verified), chains stop at `unresolved` edges (status `partial`); `maxDepth`/`maxPaths` are config-capped and truncation is reported via `truncated` + warnings. |
 | `causoryn_get_evidence` | Evidence provenance (source file/line records) for a node or edge id. |
 
 All responses use the standard envelope: `schemaVersion, requestId, workspaceId,
 snapshotId, status, coverage, warnings, data, nextCursor`, with the fixed envelope
 error codes exported by the compiled server as `CAUSORYN_TOOL_ERROR_CODES`
 (`WORKSPACE_NOT_AUTHORIZED`, `PATH_DENIED`, `INDEX_NOT_READY`, `AMBIGUOUS_SYMBOL`,
-`LIMIT_EXCEEDED`, `INVALID_ARGUMENT`, `EVIDENCE_NOT_FOUND`, `UNSUPPORTED_LANGUAGE`,
-`INTERNAL_ERROR`). Of these, `INVALID_ARGUMENT` and `EVIDENCE_NOT_FOUND` are project
-extensions beyond the TŞ §10.1 base list (see the header note in
-`packages/mcp-server/src/errors.ts`); the set is exactly what the server can place in
-`envelope.error.code`.
+`LIMIT_EXCEEDED`, `INVALID_ARGUMENT`, `EVIDENCE_NOT_FOUND`, `SYMBOL_NOT_FOUND`,
+`UNSUPPORTED_LANGUAGE`, `INTERNAL_ERROR`). Of these, `INVALID_ARGUMENT`,
+`EVIDENCE_NOT_FOUND` and `SYMBOL_NOT_FOUND` are project extensions beyond the TŞ
+§10.1 base list (see the header note in `packages/mcp-server/src/errors.ts`); the set
+is exactly what the server can place in `envelope.error.code`.
 
 ## Requirements
 
@@ -108,6 +112,10 @@ Set **Causoryn server config (JSON)** in the plugin settings to, for example:
 
 ## Scope note
 
-Faz A publishes the five tools above. Later phases add impact analysis, preflight and
-wiki tooling per `wiki/mcp-tools.md`; this plugin's manifest and skill are updated only
-when those tools actually exist in the compiled server.
+Faz A publishes the five core tools above; sprint-2 Faz B adds `causoryn_index_status`
+and `causoryn_refresh_index` (index job management), `causoryn_get_symbol_context`
+(Code Explorer relations + evidence) and `causoryn_trace_execution` (bounded
+deterministic call-chain paths with per-edge resolution and evidence). Later phases add
+impact analysis, preflight and wiki tooling per `wiki/mcp-tools.md`; this plugin's
+manifest and skill are updated only when those tools actually exist in the compiled
+server.

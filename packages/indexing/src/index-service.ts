@@ -26,7 +26,7 @@ import { GraphRepositoryError, type GraphRepository, type PublishableState } fro
 import type { WorkspaceAccessPolicy } from "@causoryn/workspace";
 
 import { IndexingError } from "./errors.js";
-import { collectInventory } from "./inventory.js";
+import { collectInventory, type InventoryEntry } from "./inventory.js";
 
 /**
  * IndexService — minimal indeksleme pipeline'ı (TŞ v2.1 §9, §25/4-5;
@@ -85,6 +85,12 @@ export interface IndexRunResult {
   readonly state: PublishableState;
   readonly warnings: readonly string[];
   readonly diagnostics: readonly IndexDiagnostic[];
+  /**
+   * true: yeni snapshot yayımlandı. false: incremental no-op — değişiklik
+   * TS analizi için anlamlı değildi; graph korunup mevcut snapshot
+   * yeniden kullanıldı (yalnızca files tablosu tazelendi).
+   */
+  readonly published: boolean;
 }
 
 /** Adapter node girdisini graph kongresine uygun GraphNode'a çevirir. */
@@ -206,6 +212,113 @@ export class IndexService {
    * IndexingError ile reddedilir; hiçbir kısmi yayın yapılmaz.
    */
   runIndex(rootPath: string): IndexRunResult {
+    const prepared = this.prepareRun(rootPath);
+    return this.runPipeline(prepared.canonicalRoot, prepared.entries, prepared.tsEntries);
+  }
+
+  /**
+   * Incremental yeniden indeksleme (TŞ v2.1 §9 "Incremental pipeline";
+   * sprint-2 B7 Live Architecture).
+   *
+   * Karar yetkilisi DEĞİŞİKLİK KARMASIDIR (TŞ §9 "fingerprint" adımı),
+   * olay kümesi değil: envanter tam taranır, files tablosunun önceki
+   * karmalarıyla karşılaştırılır. TS analizi için anlamlı değişim yoksa
+   * (yalnızca TS-dışı dosya eklendi/değişti/touch edildi) graph KORUNUR,
+   * mevcut snapshot yeniden kullanılır ve yalnızca files tablosu
+   * tazelenir (published=false). TS kaynaklarında değişim varsa (ekleme,
+   * içerik değişimi, silme) tam deterministik pipeline'dan YENİ snapshot
+   * türetilip atomik yayımlanır — değişen dosyaların güncel içerikle
+   * yeniden analizi bu yayına akar (ask şartı 3).
+   *
+   * Dürüstlük notu: per-file parse önbelleği yoktur — TS adapter'ı
+   * program-geniş çözümleme yapar; bu dilimin incrementalliği change-set
+   * takibi + karma tabanlı no-op atlaması + mod seçimidir (ayrıntı
+   * WorkspaceWatcher sınıf başlığında).
+   *
+   * `changeSet` karar yetkilisi DEĞİLDİR: kayıt/izlenebilirlik içindir
+   * (IndexJobRecord.changeSet). Yetkisi olmayan bir olay kümesi geldiğinde
+   * bile karma karşılaştırması kaçan olayları yakalar (reconciliation
+   * davranışı, TŞ §9 "overflow ... reconciliation scan").
+   */
+  runIncrementalIndex(rootPath: string, changeSet: readonly string[] = []): IndexRunResult {
+    const prepared = this.prepareRun(rootPath);
+    // Önceki durum, files tablosu upsert'lerinden ÖNCE okunur: karar
+    // yetkilisi bu karşılaştırmadır (upsert'ler sonrası okuma her şeyi
+    // "değişmemiş" gösterirdi).
+    const previousHashes = new Map(
+      this.repository
+        .listFiles(this.workspaceId)
+        .map((record) => [record.relativePath, record.contentHash]),
+    );
+    const previousTsPaths = [...previousHashes.keys()].filter((relativePath) =>
+      TS_EXTENSIONS.has(path.extname(relativePath).toLowerCase()),
+    );
+    const changedTs = prepared.tsEntries.filter(
+      (entry) => previousHashes.get(entry.relativePath) !== entry.contentHash,
+    );
+    const deletedTs = previousTsPaths.filter(
+      (relativePath) => !prepared.tsEntries.some((entry) => entry.relativePath === relativePath),
+    );
+    const latest = this.repository.getLatestPublished(this.workspaceId);
+
+    // No-op koşulu: TS analizi için anlamlı değişim yok VE kullanılabilir
+    // bir yayın var (no-op yalnızca mevcut snapshot'ı yeniden kullanabilir).
+    if (
+      changedTs.length === 0 &&
+      deletedTs.length === 0 &&
+      latest !== undefined &&
+      (latest.snapshot.meta.state === "ready" || latest.snapshot.meta.state === "partial")
+    ) {
+      // Güvenlik bulgusu 3: no-op dalda da envanter mutabakatı — TS-dışı
+      // dosya silinmişse snapshot korunur ama files kaydı düşürülür.
+      const previousFilePaths = new Set(
+        this.repository
+          .listFiles(this.workspaceId)
+          .map((record) => record.relativePath),
+      );
+      const currentPaths = new Set(
+        prepared.entries.map((entry) => entry.relativePath),
+      );
+      const updatedAt = this.clock();
+      for (const entry of prepared.entries) {
+        this.repository.upsertFile({
+          workspaceId: this.workspaceId,
+          relativePath: entry.relativePath,
+          contentHash: entry.contentHash,
+          sizeBytes: entry.sizeBytes,
+          updatedAt,
+        });
+      }
+      for (const previousPath of previousFilePaths) {
+        if (!currentPaths.has(previousPath)) {
+          this.repository.deleteFile(this.workspaceId, previousPath);
+        }
+      }
+      return {
+        snapshotId: latest.snapshot.meta.id,
+        snapshot: latest.snapshot,
+        stale: latest.stale,
+        fileCount: prepared.entries.length,
+        tsFileCount: prepared.tsEntries.length,
+        state: latest.snapshot.meta.state,
+        warnings: [
+          "incremental no-op: TS analizi için anlamlı değişiklik yok; mevcut snapshot korundu, files tablosu tazelendi",
+          `değişiklik kümesi: ${changeSet.length === 0 ? "(boş)" : changeSet.join(", ")}`,
+        ],
+        diagnostics: [],
+        published: false,
+      };
+    }
+
+    return this.runPipeline(prepared.canonicalRoot, prepared.entries, prepared.tsEntries);
+  }
+
+  /** Ortak hazırlık: yetki + workspace kaydı + tam envanter (Discover). */
+  private prepareRun(rootPath: string): {
+    readonly canonicalRoot: string;
+    readonly entries: InventoryEntry[];
+    readonly tsEntries: InventoryEntry[];
+  } {
     const rootDecision = this.policy.authorizeRoot(rootPath);
     if (!rootDecision.allowed) {
       throw new IndexingError(
@@ -215,14 +328,35 @@ export class IndexService {
     }
     const canonicalRoot = rootDecision.canonicalRoot;
     this.ensureWorkspaceRegistered();
-
     const entries = collectInventory(this.policy, canonicalRoot, this.limits.maxFiles);
+    const tsEntries = entries.filter((entry) =>
+      TS_EXTENSIONS.has(path.extname(entry.relativePath).toLowerCase()),
+    );
+    return { canonicalRoot, entries, tsEntries };
+  }
+
+  /**
+   * Deterministik build+publish pipeline'ı (runIndex/runIncrementalIndex
+   * ortak gövdesi). Girdi aynıysa çıktı graph JSON'ı birebir aynıdır
+   * (TŞ §8 invariant vi); mod bilgisi graph meta'sına girmez.
+   */
+  private runPipeline(
+    canonicalRoot: string,
+    entries: InventoryEntry[],
+    tsEntries: InventoryEntry[],
+  ): IndexRunResult {
     const warnings: string[] = [];
     const contentHashByPath = new Map<string, string>(
       entries.map((entry) => [entry.relativePath, entry.contentHash]),
     );
-    const tsEntries = entries.filter((entry) =>
-      TS_EXTENSIONS.has(path.extname(entry.relativePath).toLowerCase()),
+
+    // Güvenlik bulgusu 3: silme mutabakatının temeli — upsert'lerden ÖNCE
+    // mevcut files tablosu okunur; envanterde karşılığı olmayan kayıtlar
+    // aşağıda düşürülür (TŞ §9 files tablosu = güncel envanter karşılığı).
+    const previousFilePaths = new Set(
+      this.repository
+        .listFiles(this.workspaceId)
+        .map((record) => record.relativePath),
     );
 
     // Envanter kayıtları (TŞ §9 files tablosu karşılığı).
@@ -235,6 +369,11 @@ export class IndexService {
         sizeBytes: entry.sizeBytes,
         updatedAt,
       });
+    }
+    for (const previousPath of previousFilePaths) {
+      if (!contentHashByPath.has(previousPath)) {
+        this.repository.deleteFile(this.workspaceId, previousPath);
+      }
     }
 
     const revision = { id: "working-tree", sequence: this.runCount + 1 };
@@ -284,6 +423,7 @@ export class IndexService {
           state: "partial",
           warnings,
           diagnostics: [],
+          published: true,
         };
       }
 
@@ -409,6 +549,7 @@ export class IndexService {
         state,
         warnings,
         diagnostics,
+        published: true,
       };
     } catch (error) {
       if (error instanceof IndexingError) {

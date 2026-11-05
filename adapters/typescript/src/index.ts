@@ -19,12 +19,21 @@
 
 export {
   TS_ADAPTER_ANALYZER_ID,
+  TS_ADAPTER_FRAMEWORK_LINKERS,
   TS_ADAPTER_VERSION,
+  type FrameworkDetection,
+  type FrameworkEdgesResult,
+  type FrameworkLinkerId,
   type TypeScriptAdapterCapabilities,
   type TypeScriptAdapterDiagnostic,
   type TypeScriptAdapterInput,
   type TypeScriptAdapterResult,
+  type TypeScriptAnalysisRun,
   type TsAdapterSourceFile,
 } from "./types.js";
 
-export { analyzeTypeScriptProgram } from "./analyzer.js";
+export {
+  analyzeTypeScriptProgram,
+  analyzeTypeScriptProgramWithFrameworks,
+  extractFrameworkEdges,
+} from "./analyzer.js";

@@ -257,6 +257,22 @@ export class SqliteGraphRepository
     }));
   }
 
+  /**
+   * Güvenlik bulgusu 3: silinen dosyanın files kaydını düşürür. SQL
+   * parametreli hazırlanmış ifadedir (kural: dış girdi asla SQL'e
+   * birleştirilmez); dönüş kayıt düşürüldü mü bilgisi taşır.
+   */
+  deleteFile(workspaceId: string, relativePath: string): boolean {
+    this.requireWorkspace(workspaceId);
+    requireNonEmptyField("file.relativePath", relativePath);
+    const result = this.runWrite(
+      `DELETE FROM files WHERE workspace_id = ? AND relative_path = ?`,
+      workspaceId,
+      relativePath,
+    );
+    return result.changes > 0;
+  }
+
   beginBuild(input: SnapshotBuildInput): SnapshotBuildInfo {
     this.requireWorkspace(input.workspaceId);
     requireNonEmptyField("build.revision.id", input.revision.id);

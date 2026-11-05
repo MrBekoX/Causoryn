@@ -91,10 +91,11 @@ const PUBLISHED_TOOLS = extractRegisteredTools(SERVER_TS);
 
 /**
  * Sabit envelope hata kodu seti — packages/mcp-server/src/errors.ts'teki
- * CAUSORYN_TOOL_ERROR_CODES dizisinden çıkarılır (TŞ §10.1 tabanı +
- * proje uzantıları INVALID_ARGUMENT / EVIDENCE_NOT_FOUND; bkz. errors.ts
- * başlığındaki dürüstlük notu). README hata kodu listesi bu canlı seti
- * eksiksiz kapsamalıdır (denetim bulgusu 2'nin bağlantı testi).
+ * CAUSORYN_TOOL_ERROR_CODES dizisinden çıkarılır (TŞ §10.1 tabanı + ÜÇ
+ * proje uzantısı: INVALID_ARGUMENT / EVIDENCE_NOT_FOUND (K-008) ve
+ * SYMBOL_NOT_FOUND (sprint-2 B5); bkz. errors.ts başlığındaki dürüstlük
+ * notu). README hata kodu listesi bu canlı seti eksiksiz kapsamalıdır
+ * (denetim bulgusu 2'nin bağlantı testi).
  */
 function extractErrorCodes(source: string): string[] {
   const block = source.match(
@@ -109,6 +110,58 @@ const ERRORS_TS = readFileSync(
   "utf8",
 );
 const PUBLISHED_ERROR_CODES = extractErrorCodes(ERRORS_TS);
+
+const INDEX_TS = readFileSync(
+  path.join(REPO_ROOT, "packages", "mcp-server", "src", "index.ts"),
+  "utf8",
+);
+const VERSION_TS = readFileSync(
+  path.join(REPO_ROOT, "packages", "mcp-server", "src", "version.ts"),
+  "utf8",
+);
+
+/**
+ * TOOL_NAMES kataloğu — packages/mcp-server/src/version.ts'ten çıkarılır
+ * (sprint-2 takım denetimi koruması): server.ts'te kaydedilen araçlar ve
+ * docstring'lerdeki araç sayıları bu katalogla desenkronize olmamalıdır.
+ */
+function extractToolNames(versionSource: string): string[] {
+  const block = versionSource.match(
+    /export const TOOL_NAMES = \[([\s\S]*?)\] as const/,
+  );
+  if (block === null) return [];
+  return [...block[1].matchAll(/"([a-z_]+)"/g)].map((m) => m[1] as string);
+}
+
+const TOOL_NAMES_FROM_SOURCE = extractToolNames(VERSION_TS);
+
+/**
+ * TŞ §10.1 taban hata kodu seti (18 kod) — raw/Causoryn_Teknik_Dokuman_v2.1.pdf
+ * s.9'dan birincil kaynak doğrulaması (sprint-2 takım denetimi). Bu listede
+ * olmayan kodlar proje uzantısıdır: INVALID_ARGUMENT + EVIDENCE_NOT_FOUND
+ * (K-008) ve SYMBOL_NOT_FOUND (sprint-2 B5; K-008'i genişleten ADR kaydı
+ * wiki/decisions.md'e orkestratör tarafından işlenmelidir).
+ */
+const TSH_BASE_ERROR_CODES: ReadonlySet<string> = new Set([
+  "WORKSPACE_NOT_AUTHORIZED",
+  "PATH_DENIED",
+  "INDEX_NOT_READY",
+  "AMBIGUOUS_SYMBOL",
+  "UNRESOLVED_FLOW",
+  "UNSUPPORTED_LANGUAGE",
+  "INVALID_REVISION",
+  "CONTRACT_PARSE_FAILED",
+  "POLICY_INVALID",
+  "STALE_PREFLIGHT",
+  "LIMIT_EXCEEDED",
+  "CANCELLED",
+  "EXPORT_NOT_ALLOWED",
+  "INTERNAL_ERROR",
+  "WIKI_PAGE_NOT_FOUND",
+  "WIKI_REVISION_NOT_AVAILABLE",
+  "WIKI_BROKEN_LINK",
+  "WIKI_NOTE_CONFLICT",
+]);
 
 /* ------------------------------------------------------------------ */
 /* Yardımcılar                                                         */
@@ -621,10 +674,17 @@ describe("skills/map-system/SKILL.md", () => {
 /* ------------------------------------------------------------------ */
 
 describe("README.md", () => {
-  it("POZİTİF: İngilizce tanıtım; kurulum, Node >= 24, kök beyanı, 5 araç, salt-okunur model", () => {
-    const issues = validateReadme(readPluginFile("README.md"));
-    expect(issues, JSON.stringify(issues)).toEqual([]);
-  });
+  // Başlıktaki araç sayısı KATALOĞTAN türetilir (denetim bulgusu: sabit
+  // '8 araç' yazısı B4/B5 katalog büyümelerinde bayat kalmıştı).
+  it(
+    "POZİTİF: İngilizce tanıtım; kurulum, Node >= 24, kök beyanı, yayımlanan " +
+      String(TOOL_NAMES_FROM_SOURCE.length) +
+      " araç, salt-okunur model",
+    () => {
+      const issues = validateReadme(readPluginFile("README.md"));
+      expect(issues, JSON.stringify(issues)).toEqual([]);
+    },
+  );
 
   it("NEGATİF: yayımlanmamış araç geri tırnakla tanıtılırsa reddedilir (ADR-010)", () => {
     // Mekanizma testi: hiçbir zaman yayımlanmayacak sentetik ad kullanılır.
@@ -647,13 +707,113 @@ describe("README.md", () => {
       PUBLISHED_ERROR_CODES.length,
       "errors.ts hata kodları çıkarılamadı",
     ).toBeGreaterThanOrEqual(8);
-    // TŞ §10.1 taban listesinde olmayan İKİ proje uzantısı (birincil kaynak
-    // doğrulaması: TŞ §10.1 listesinde ikisi de yoktur) README'de ve canlı
-    // sette bulunmalıdır.
+    // TŞ §10.1 taban listesinde olmayan ÜÇ proje uzantısı (birincil kaynak
+    // doğrulaması: TŞ §10.1 listesinde hiçbiri yoktur) README'de ve canlı
+    // sette bulunmalıdır: INVALID_ARGUMENT + EVIDENCE_NOT_FOUND (K-008) ve
+    // SYMBOL_NOT_FOUND (sprint-2 B5 get_symbol_context; K-008'i genişleten
+    // ADR kaydı orkestratör tarafından işlenmelidir).
     expect(PUBLISHED_ERROR_CODES).toContain("INVALID_ARGUMENT");
     expect(PUBLISHED_ERROR_CODES).toContain("EVIDENCE_NOT_FOUND");
+    expect(PUBLISHED_ERROR_CODES).toContain("SYMBOL_NOT_FOUND");
     const readme = readPluginFile("README.md");
     const missing = PUBLISHED_ERROR_CODES.filter((code) => !readme.includes(code));
     expect(missing, "README'de eksik hata kodları: " + missing.join(", ")).toEqual([]);
+  });
+});
+
+/* ------------------------------------------------------------------ */
+/* Denetim bulgusu korumaları (sprint-2 takım denetimi)                */
+/* ------------------------------------------------------------------ */
+
+describe("mcp-server katalog desenkron korumaları (sprint-2 takım denetimi)", () => {
+  it("BAĞLANTI: server.ts kayıtlı araçları version.ts TOOL_NAMES kataloğuyla birebir eşit", () => {
+    expect(TOOL_NAMES_FROM_SOURCE.length, "TOOL_NAMES çıkarılamadı").toBeGreaterThan(0);
+    // Kayıt ↔ katalog desenkronu: server.ts'e eklenen/çıkarılan her araç
+    // version.ts TOOL_NAMES'e de yansımalıdır (ve tersi). Karşılaştırma üye
+    // kümesi düzeyindedir: PUBLISHED_TOOLS alfabetik, TOOL_NAMES ise TŞ §10.2
+    // katalog sırasını taşır — sıra farklılığı bug değil, desenkron kümeyi bozar.
+    expect(PUBLISHED_TOOLS).toEqual([...TOOL_NAMES_FROM_SOURCE].sort());
+  });
+
+  it("NEGATİF: katalog desenkronu sentetik girdiyle yakalanır (koruma sinyali kanıtı)", () => {
+    // Desenkron senaryosu sentetik olarak kodlanır: katalog yalnızca eski
+    // aracı içeriyken kayıt setiyle eşitsizdir — birebir eşitlik korumasının
+    // bu durumda KIRILMASI gerekir (not.toEqual PASS = sinyal doğru).
+    const staleCatalog = extractToolNames(
+      'export const TOOL_NAMES = [\n  "causoryn_a",\n] as const;',
+    );
+    expect(staleCatalog).toEqual(["causoryn_a"]);
+    expect(staleCatalog).not.toEqual(["causoryn_a", "causoryn_b"]);
+  });
+
+  it("BAĞLANTI: docstring araç sayıları TOOL_NAMES büyüklüğüyle eşittir (bayat yorum koruması)", () => {
+    const expected = String(TOOL_NAMES_FROM_SOURCE.length);
+    const serverDoc = SERVER_TS.match(/tam olarak (\d+) gerçek araç/);
+    expect(serverDoc, "server.ts docstring araç sayısı bulunamadı").not.toBeNull();
+    expect(
+      serverDoc?.[1],
+      "server.ts 'tam olarak N gerçek araç' katalogla desenkron (B5/B6 katalog büyümelerinde docstring güncellenmedi)",
+    ).toBe(expected);
+    const serverRegister = SERVER_TS.match(/tam olarak (\d+) araç kaydeder/);
+    expect(
+      serverRegister,
+      "createCausorynMcpServer docstring araç sayısı bulunamadı",
+    ).not.toBeNull();
+    expect(
+      serverRegister?.[1],
+      "createCausorynMcpServer 'tam olarak N araç kaydeder' katalogla desenkron",
+    ).toBe(expected);
+    const indexDoc = INDEX_TS.match(/tam olarak (\d+) gerçek araç/);
+    expect(indexDoc, "index.ts docstring araç sayısı bulunamadı").not.toBeNull();
+    expect(
+      indexDoc?.[1],
+      "index.ts 'tam olarak N gerçek araç' katalogla desenkron",
+    ).toBe(expected);
+  });
+
+  it("BAĞLANTI: package.json description TOOL_NAMES kümesini ve sayısını yansıtır (bayat paket dokümanı koruması)", () => {
+    // Denetim bulgusu (iki bağımsız denetçi): description '8 gerçek araç'
+    // diyip causoryn_trace_execution'ı listelemiyordu — server.ts 9 araç
+    // kaydederken paket dokümanı bayat kaldı. Docstring koruması package.json
+    // DESCRIPTION'ını kapsamıyordu; bu test kapsamı kapatır.
+    const pkgJson = JSON.parse(
+      readFileSync(
+        path.join(REPO_ROOT, "packages", "mcp-server", "package.json"),
+        "utf8",
+      ),
+    ) as { description?: unknown };
+    expect(typeof pkgJson.description).toBe("string");
+    const description = pkgJson.description as string;
+    const count = String(TOOL_NAMES_FROM_SOURCE.length);
+    expect(
+      description,
+      "package.json description araç sayısı katalogla desenkron",
+    ).toContain(count + " gerçek araç");
+    const missing = TOOL_NAMES_FROM_SOURCE.filter(
+      (tool) => !description.includes(tool),
+    );
+    expect(
+      missing,
+      "package.json description'da eksik araçlar: " + missing.join(", "),
+    ).toEqual([]);
+  });
+
+  it("BAĞLANTI: hata kodu uzantıları mcp-server paket başlığında eksiksiz anılır (bayat uzantı notu koruması)", () => {
+    const extensions = [...PUBLISHED_ERROR_CODES].filter(
+      (code) => !TSH_BASE_ERROR_CODES.has(code),
+    );
+    // TŞ §10.1 taban setinde olmayan kodlar = proje uzantıları; K-008 ikisini,
+    // sprint-2 B5 üçüncüsünü (SYMBOL_NOT_FOUND) ekledi. Paket başlığı (index.ts)
+    // uzantı notu bu seti eksiksiz saymalıdır; aksi halde bayat kalır.
+    expect(extensions.sort()).toEqual([
+      "EVIDENCE_NOT_FOUND",
+      "INVALID_ARGUMENT",
+      "SYMBOL_NOT_FOUND",
+    ]);
+    for (const code of extensions) {
+      expect(INDEX_TS, `index.ts paket başlığı uzantıyı anmalı: ${code}`).toContain(
+        code,
+      );
+    }
   });
 });

@@ -553,3 +553,42 @@ describe("InMemoryGraphRepository — değişmezlik ve determinizm", () => {
     expect(snapshotCanonicalJson(graphA)).toBe(snapshotCanonicalJson(graphB));
   });
 });
+
+/* ------------------------------------------------------------------ */
+/* Güvenlik bulgusu 3: silinen dosyanın files kaydı düşürülebilir      */
+/* ------------------------------------------------------------------ */
+
+describe("InMemoryGraphRepository.deleteFile — güvenlik bulgusu 3", () => {
+  it("pozitif: kayıt düşürülür, true döner ve listFiles artık içermez", () => {
+    const repo = makeRepo();
+    repo.upsertFile({
+      workspaceId: WS,
+      relativePath: "src/orders/removed.ts",
+      contentHash: "hash-1",
+      sizeBytes: 10,
+      updatedAt: CREATED_AT,
+    });
+    repo.upsertFile({
+      workspaceId: WS,
+      relativePath: "src/orders/kept.ts",
+      contentHash: "hash-2",
+      sizeBytes: 12,
+      updatedAt: CREATED_AT,
+    });
+
+    const removed = repo.deleteFile(WS, "src/orders/removed.ts");
+    expect(removed).toBe(true);
+    const paths = repo.listFiles(WS).map((record) => record.relativePath);
+    expect(paths).toEqual(["src/orders/kept.ts"]);
+
+    // İkinci silme: kayıt yok → false (idempotent mutabakat için).
+    expect(repo.deleteFile(WS, "src/orders/removed.ts")).toBe(false);
+  });
+
+  it("negatif: bilinmeyen workspace graph/unknown-workspace ile reddedilir", () => {
+    const repo = makeRepo();
+    expect(() => repo.deleteFile("baska-ws", "src/x.ts")).toThrowError(
+      GraphRepositoryError,
+    );
+  });
+});

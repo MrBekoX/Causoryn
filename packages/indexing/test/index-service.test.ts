@@ -21,7 +21,8 @@ import { describe, expect, it } from "vitest";
  * oluşturulur ve her test sonunda silinir.
  */
 
-import { IndexService, IndexingError } from "../src/index.js";
+import { IndexService, IndexingError, INDEXED_ADAPTERS } from "../src/index.js";
+import { TS_ADAPTER_FRAMEWORK_LINKERS } from "@causoryn/adapter-typescript";
 import { WorkspaceAccessPolicy } from "@causoryn/workspace";
 import { InMemoryGraphRepository } from "@causoryn/graph";
 import { sha256Hex, utf8Encode } from "@causoryn/domain";
@@ -77,7 +78,15 @@ function makeService(
   });
 }
 
-describe("IndexService — minimal pipeline (envanter → adapter → graph → snapshot)", () => {
+// Zaman bütçesi: bu suite'teki testler IndexService.runIndex → TS Program
+// inşası (ts.createProgram) yürüten CPU-bağlı senkron testlerdir; İLK test
+// ayrıca TypeScript derleyicisinin soğuk başlangıcını üstlenir. Tüm suite
+// paralel worker'larla koştiğinde kontansiyon bu testleri vitest varsayılan
+// 5000ms limitinin üzerine taşıyabilir (vitest 5, limiti aşan senkron testi
+// assertion'lar geçse de reddeder). framework-linkers.test.ts ve
+// job-manager.test.ts ile aynı kural: açık 30s limiti — assertion
+// gevşetmesi yoktur, yalnızca yük altı çalışma bütçesi.
+describe("IndexService — minimal pipeline (envanter → adapter → graph → snapshot)", { timeout: 30_000 }, () => {
   it("pozitif: fixture indekslenir; Workspace node + CONTAINS + verified CALLS zinciri snapshot'ta", () => {
     const repository = new InMemoryGraphRepository();
     const service = makeService(repository);
@@ -240,6 +249,306 @@ describe("IndexService — minimal pipeline (envanter → adapter → graph → 
       // Bozuk dosyanın düğümü (File node) yine de envanterde var; sınıf
       // düğümü üretilmemiş olabilir.
       expect(qualifiedNames).toContain("src/broken.ts");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
+/* ------------------------------------------------------------------ */
+/* runIncrementalIndex — Live Architecture dilimi (sprint-2 B7, TŞ §9) */
+/* ------------------------------------------------------------------ */
+
+describe("IndexService.runIncrementalIndex — karma tabanlı incremental (sprint-2 B7)", { timeout: 30_000 }, () => {
+  const APP_V1 =
+    "export interface Order { id: string; total: number }\n" +
+    "export function createOrder(input: Order): Order { return { ...input } }\n";
+  const APP_V2 =
+    APP_V1 + 'export function exportedExtra(): string { return "extra"; }\n';
+
+  function makeTempService(
+    repository: InMemoryGraphRepository,
+    root: string,
+  ): IndexService {
+    const policy = WorkspaceAccessPolicy.create({ allowRoots: [root] });
+    return new IndexService({
+      workspaceId: "default",
+      policy,
+      repository,
+      clock: () => FIXED_NOW,
+      limits: { maxFiles: 50_000 },
+    });
+  }
+
+  /** Sınır denetimli fixture yazarı: tüm yollar kök içinde kalmak zorunda. */
+  function makeTempRoot(files: Record<string, string>): string {
+    const root = mkdtempSync(path.join(tmpdir(), "causoryn-incremental-"));
+    for (const [relativePath, content] of Object.entries(files)) {
+      if (relativePath.length === 0 || relativePath.includes("\0")) {
+        throw new Error(`fixture yolu geçersiz: ${relativePath}`);
+      }
+      const absolute = path.resolve(root, relativePath);
+      if (absolute === root || !absolute.startsWith(root + path.sep)) {
+        throw new Error(`fixture yolu kök dışına çıkıyor: ${relativePath}`);
+      }
+      mkdirSync(path.dirname(absolute), { recursive: true });
+      writeFileSync(absolute, content, "utf8");
+    }
+    return root;
+  }
+
+  it("pozitif: TS içerik değişimi → YENİ snapshot yayımlanır (published=true), değişen dosya yeniden analiz edilir", () => {
+    const root = makeTempRoot({ "src/app.ts": APP_V1 });
+    try {
+      const repository = new InMemoryGraphRepository();
+      const service = makeTempService(repository, root);
+      const first = service.runIndex(root);
+      expect(first.published).toBe(true);
+
+      writeFileSync(path.join(root, "src", "app.ts"), APP_V2, "utf8");
+      const second = service.runIncrementalIndex(root, ["src/app.ts"]);
+
+      expect(second.published).toBe(true);
+      expect(second.snapshotId).not.toBe(first.snapshotId);
+      expect(second.snapshot.meta.revision.sequence).toBe(
+        first.snapshot.meta.revision.sequence + 1,
+      );
+      // Değişen dosyanın YENİ sembolü graph'ta (yeniden analiz kanıtı).
+      expect(
+        second.snapshot.nodes.some((node) =>
+          node.qualifiedName.includes("exportedExtra"),
+        ),
+      ).toBe(true);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("pozitif (no-op): TS-dışı değişim → mevcut snapshot KORUNUR (published=false), files tablosu tazelenir", () => {
+    const root = makeTempRoot({ "src/app.ts": APP_V1 });
+    try {
+      const repository = new InMemoryGraphRepository();
+      const service = makeTempService(repository, root);
+      const first = service.runIndex(root);
+
+      writeFileSync(path.join(root, "README.md"), "# dok\n", "utf8");
+      const second = service.runIncrementalIndex(root, ["README.md"]);
+
+      expect(second.published).toBe(false);
+      expect(second.snapshotId).toBe(first.snapshotId);
+      expect(second.state).toBe("ready");
+      expect(
+        repository
+          .listFiles("default")
+          .some((file) => file.relativePath === "README.md"),
+      ).toBe(true);
+      expect(second.warnings.some((line) => line.includes("no-op"))).toBe(true);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("pozitif: silinen TS dosyası → rebuild; yeni snapshot dosya node'unu içermez", () => {
+    const root = makeTempRoot({
+      "src/app.ts": APP_V1,
+      "src/gone.ts": "export function leaving(): number { return 1; }\n",
+    });
+    try {
+      const repository = new InMemoryGraphRepository();
+      const service = makeTempService(repository, root);
+      const first = service.runIndex(root);
+      expect(
+        first.snapshot.nodes.some((node) =>
+          node.qualifiedName.includes("leaving"),
+        ),
+      ).toBe(true);
+
+      rmSync(path.join(root, "src", "gone.ts"));
+      const second = service.runIncrementalIndex(root, ["src/gone.ts"]);
+
+      expect(second.published).toBe(true);
+      expect(second.snapshotId).not.toBe(first.snapshotId);
+      expect(
+        second.snapshot.nodes.some((node) =>
+          node.qualifiedName.includes("leaving"),
+        ),
+      ).toBe(false);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("negatif: yetkisiz kök incremental'de de IndexingError ile reddedilir", () => {
+    const root = makeTempRoot({ "src/app.ts": APP_V1 });
+    try {
+      const policy = WorkspaceAccessPolicy.create({ allowRoots: [] });
+      const service = new IndexService({
+        workspaceId: "default",
+        policy,
+        repository: new InMemoryGraphRepository(),
+        clock: () => FIXED_NOW,
+        limits: { maxFiles: 50_000 },
+      });
+      let caught: unknown;
+      try {
+        service.runIncrementalIndex(root, ["src/app.ts"]);
+      } catch (error) {
+        caught = error;
+      }
+      expect(caught).toBeInstanceOf(IndexingError);
+      expect((caught as IndexingError).code).toBe("indexing/root-not-authorized");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("determinizm: aynı içerik için incremental rebuild ile ilk-kez full koşumun graph içeriği birebir aynıdır", () => {
+    // A: full(C1) → C2'ye değişim → incremental (rebuild)
+    const rootA = makeTempRoot({ "src/app.ts": APP_V1 });
+    // B: doğrudan full(C2)
+    const rootB = makeTempRoot({ "src/app.ts": APP_V2 });
+    try {
+      const repoA = new InMemoryGraphRepository();
+      const serviceA = makeTempService(repoA, rootA);
+      serviceA.runIndex(rootA);
+      writeFileSync(path.join(rootA, "src", "app.ts"), APP_V2, "utf8");
+      const viaIncremental = serviceA.runIncrementalIndex(rootA, ["src/app.ts"]);
+
+      const repoB = new InMemoryGraphRepository();
+      const serviceB = makeTempService(repoB, rootB);
+      const viaFull = serviceB.runIndex(rootB);
+
+      // Snapshot ID revision.sequence içerdiğinden farklıdır (koşum sayısı);
+      // graph İÇERİĞİ (node/edge/evidence) aynı girdiden birebir aynıdır.
+      // Workspace node'un rootPath attribute'u temp dizin adını taşır —
+      // karşılaştırma dışıdır (ortam yolu, içerik değil).
+      expect(viaIncremental.published).toBe(true);
+      expect(viaFull.published).toBe(true);
+      const stripWorkspace = (nodes: readonly { readonly kind: string }[]): readonly unknown[] =>
+        nodes.filter((node) => node.kind !== "Workspace");
+      expect(JSON.stringify(stripWorkspace(viaIncremental.snapshot.nodes))).toBe(
+        JSON.stringify(stripWorkspace(viaFull.snapshot.nodes)),
+      );
+      expect(JSON.stringify(viaIncremental.snapshot.edges)).toBe(
+        JSON.stringify(viaFull.snapshot.edges),
+      );
+      expect(JSON.stringify(viaIncremental.snapshot.evidence)).toBe(
+        JSON.stringify(viaFull.snapshot.evidence),
+      );
+    } finally {
+      rmSync(rootA, { recursive: true, force: true });
+      rmSync(rootB, { recursive: true, force: true });
+    }
+  });
+});
+
+/* ------------------------------------------------------------------ */
+/* Adapter metadata tutarlılığı (denetim bulgusu 1)                    */
+/* ------------------------------------------------------------------ */
+
+describe("INDEXED_ADAPTERS — adapter yetenek metadata'sı", () => {
+  it("frameworkLinkers metadata'sı adapter'ın aktif linker beyanıyla tutarlıdır", () => {
+    // B3 ile TS adapter framework linker'ları aktif oldu; metadata 'yok'
+    // kalmıştı ve get_capabilities üzerinden MCP yüzeyine bayat değer
+    // taşıyordu. Metadata artık adapter'ın TS_ADAPTER_FRAMEWORK_LINKERS
+    // beyanından türetilir (tek doğruluk kaynağı).
+    expect(INDEXED_ADAPTERS).toHaveLength(1);
+    const adapter = INDEXED_ADAPTERS[0] as (typeof INDEXED_ADAPTERS)[number];
+    expect(adapter.language).toBe("typescript");
+    expect(adapter.levels.frameworkLinkers).toBe("express+nextjs");
+    expect(adapter.levels.frameworkLinkers).toBe(
+      TS_ADAPTER_FRAMEWORK_LINKERS.join("+"),
+    );
+  });
+});
+
+/* ------------------------------------------------------------------ */
+/* Güvenlik bulgusu 3: silinen dosya files tablosundan düşürülmeli     */
+/* ------------------------------------------------------------------ */
+
+describe("IndexService silme mutabakatı — güvenlik bulgusu 3", { timeout: 30_000 }, () => {
+  function makeTmpWorkspace(): string {
+    const root = mkdtempSync(path.join(tmpdir(), "causoryn-del-"));
+    mkdirSync(path.join(root, "src"), { recursive: true });
+    writeFileSync(
+      path.join(root, "src", "a.ts"),
+      "export class A { ping(): number { return 1; } }\n",
+      "utf8",
+    );
+    writeFileSync(
+      path.join(root, "src", "b.ts"),
+      "export class B { pong(): number { return 2; } }\n",
+      "utf8",
+    );
+    writeFileSync(path.join(root, "notes.md"), "# notlar\n", "utf8");
+    return root;
+  }
+
+  /** allowRoot'u geçici kök olan servis (silme senaryoları kök-değişimlidir). */
+  function makeTmpService(repository: InMemoryGraphRepository, root: string, workspaceId: string): IndexService {
+    const policy = WorkspaceAccessPolicy.create({ allowRoots: [root] });
+    return new IndexService({
+      workspaceId,
+      policy,
+      repository,
+      clock: () => FIXED_NOW,
+      limits: { maxFiles: 50_000 },
+    });
+  }
+
+  it("full runIndex: silinen dosyanın files kaydı düşürülür (ghost kayıt yok)", () => {
+    const root = makeTmpWorkspace();
+    try {
+      const repository = new InMemoryGraphRepository();
+      const service = makeTmpService(repository, root, "del-full");
+      service.runIndex(root);
+      expect(repository.listFiles("del-full").length).toBe(3);
+
+      rmSync(path.join(root, "src", "a.ts"));
+      service.runIndex(root);
+
+      const paths = repository
+        .listFiles("del-full")
+        .map((record) => record.relativePath);
+      expect(paths).toEqual(["notes.md", "src/b.ts"]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("incremental (silinen TS): yeniden yayımlanır ve files kaydı düşürülür", () => {
+    const root = makeTmpWorkspace();
+    try {
+      const repository = new InMemoryGraphRepository();
+      const service = makeTmpService(repository, root, "del-inc");
+      service.runIndex(root);
+      rmSync(path.join(root, "src", "a.ts"));
+
+      const run = service.runIncrementalIndex(root, ["src/a.ts"]);
+      expect(run.published).toBe(true);
+      const paths = repository
+        .listFiles("del-inc")
+        .map((record) => record.relativePath);
+      expect(paths).toEqual(["notes.md", "src/b.ts"]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("incremental no-op (silinen TS-dışı): snapshot korunur ama files kaydı düşürülür", () => {
+    const root = makeTmpWorkspace();
+    try {
+      const repository = new InMemoryGraphRepository();
+      const service = makeTmpService(repository, root, "del-noop");
+      service.runIndex(root);
+      rmSync(path.join(root, "notes.md"));
+
+      const run = service.runIncrementalIndex(root, ["notes.md"]);
+      expect(run.published).toBe(false);
+      const paths = repository
+        .listFiles("del-noop")
+        .map((record) => record.relativePath);
+      expect(paths).toEqual(["src/a.ts", "src/b.ts"]);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

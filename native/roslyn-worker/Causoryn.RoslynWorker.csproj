@@ -1,0 +1,35 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Causoryn Roslyn sidecar worker (TŞ v2.1 §7 — C#/.NET ASP.NET Core satırı).
+    Sprint-2 / B1.
+
+    TFM gerekçesi (net10.0):
+    - Ortamda .NET SDK 10.0.400 kurulu; worker'ın kendi runtime'ı ile
+      dağıtım matriksine ekstra runtime yükü bindirmemesi için SDK ile aynı
+      hat hedeflenir (TŞ §7: "Roslyn binary/runtime gereksinimleri ayrı
+      dağıtım matrisinde belirtilir").
+    - Microsoft.CodeAnalysis.CSharp 5.0.0 net8.0/net9.0 lib'leri net10.0
+      runtime'ında uyumludur (ileri-uyumlu).
+
+    Protokol: stdin/stdout üzerinde satır başına tek JSON (native/roslyn-worker/PROTOCOL.md).
+    Kırmızı çizgi: stdout'ta YALNIZCA protokol satırları; tüm loglar stderr.
+  -->
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <RootNamespace>Causoryn.RoslynWorker</RootNamespace>
+    <AssemblyName>Causoryn.RoslynWorker</AssemblyName>
+    <Version>0.1.0</Version>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <NoWarn>$(NoWarn);CA1819</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.CodeAnalysis.CSharp" Version="5.0.0" />
+  </ItemGroup>
+
+</Project>

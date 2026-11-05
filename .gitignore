@@ -4,6 +4,11 @@ dist/
 coverage/
 *.tsbuildinfo
 
+# .NET derleme çıktıları (native/roslyn-worker)
+bin/
+obj/
+*.user
+
 # Causoryn çalışma zamanı (izinli data-root örnekleri)
 .causoryn/
 .causoryn-runtime/

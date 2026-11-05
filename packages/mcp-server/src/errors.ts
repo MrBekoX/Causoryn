@@ -1,17 +1,23 @@
 /**
  * Sabit tool hata kodları (TŞ v2.1 §10.1) — Faz A diliminin kullandığı
- * alt küme + İKİ proje uzantısı. Kodlar envelope.error.code ile taşınır;
+ * alt küme + ÜÇ proje uzantısı. Kodlar envelope.error.code ile taşınır;
  * stack trace MCP sonucuna yazılmaz (TŞ §10.1).
  *
- * Uzantı notu (dürüstlük): TŞ §10.1 sabit kod listesinde INVALID_ARGUMENT
- * ve EVIDENCE_NOT_FOUND YOKTUR. Görev sözleşmeleri (1) geçersiz araç
- * girdisi, (2) causoryn_get_evidence'ta bulunamayan kimlik için sabit bir
- * envelope kodu istediğinden ikisi proje uzantısı olarak eklenmiştir;
- * şema reddi SDK düzeyinde isError dönerken, şemayı geçen anlamsal girdi
- * hataları INVALID_ARGUMENT ile, snapshot'ta olmayan node/edge/evidence
- * kimlikleri ise EVIDENCE_NOT_FOUND ile raporlanır. TŞ listesine dönüş
- * kararı wiki/decisions.md'e ADR olarak işlenmelidir (wiki yazımı ajan
- * dışı).
+ * Uzantı notu (dürüstlük): TŞ §10.1 sabit kod listesinde INVALID_ARGUMENT,
+ * EVIDENCE_NOT_FOUND ve SYMBOL_NOT_FOUND YOKTUR. Görev sözleşmeleri
+ * (1) geçersiz araç girdisi, (2) causoryn_get_evidence'ta bulunamayan
+ * kimlik (sprint-1 görev 7), (3) causoryn_get_symbol_context'te
+ * bulunamayan sembol (sprint-2 B5) için sabit envelope kodları istediğinden
+ * üçü proje uzantısı olarak eklenmiştir; şema reddi SDK düzeyinde isError
+ * dönerken, şemayı geçen anlamsal girdi hataları INVALID_ARGUMENT ile,
+ * snapshot'ta olmayan node/edge/evidence kimlikleri EVIDENCE_NOT_FOUND ile,
+ * snapshot'ta olmayan sembol kimlik/adları SYMBOL_NOT_FOUND ile raporlanır.
+ *
+ * ADR durumu: K-008 karar kaydı (wiki/decisions.md) YALNIZCA ilk iki
+ * uzantıyı (INVALID_ARGUMENT + EVIDENCE_NOT_FOUND) karara bağlar;
+ * SYMBOL_NOT_FOUND henüz kayıtsızdır. wiki/decisions.md'e K-008'i genişleten
+ * yeni ADR girişinin işlenmesi orkestratöre aittir (wiki yazımı ajan dışı —
+ * sprint-2 takım denetimi bulgusu, commit öncesi süreç kalemi).
  */
 export const CAUSORYN_TOOL_ERROR_CODES = [
   "WORKSPACE_NOT_AUTHORIZED",
@@ -21,6 +27,7 @@ export const CAUSORYN_TOOL_ERROR_CODES = [
   "LIMIT_EXCEEDED",
   "INVALID_ARGUMENT",
   "EVIDENCE_NOT_FOUND",
+  "SYMBOL_NOT_FOUND",
   "UNSUPPORTED_LANGUAGE",
   "INTERNAL_ERROR",
 ] as const;
@@ -64,6 +71,11 @@ export const TOOL_ERROR_GUIDANCE: Readonly<
     retryable: false,
     userAction:
       "map_system/find_symbols çıktısındaki node/edge kimliklerini kullanın; eski bir snapshot kimliği sorgulandıysa refresh_index sonrası güncel kimlikle yeniden deneyin",
+  },
+  SYMBOL_NOT_FOUND: {
+    retryable: false,
+    userAction:
+      "map_system/find_symbols çıktısındaki symbolId değerlerini kullanın; eski bir snapshot kimliği sorgulandıysa refresh_index sonrası güncel kimlikle yeniden deneyin",
   },
   UNSUPPORTED_LANGUAGE: {
     retryable: false,

@@ -16,11 +16,16 @@ import {
 
 import {
   TS_ADAPTER_ANALYZER_ID,
+  TS_ADAPTER_FRAMEWORK_LINKERS,
   TS_ADAPTER_VERSION,
+  type FrameworkDetection,
+  type FrameworkEdgesResult,
+  type FrameworkLinkerId,
   type TypeScriptAdapterCapabilities,
   type TypeScriptAdapterDiagnostic,
   type TypeScriptAdapterInput,
   type TypeScriptAdapterResult,
+  type TypeScriptAnalysisRun,
   type TsAdapterSourceFile,
 } from "./types.js";
 
@@ -308,7 +313,7 @@ class GraphAssembler {
     resolution: Resolution;
     evidence: SnapshotEvidenceInput;
     ambiguity?: { readonly candidates: readonly string[]; readonly reason: string };
-  }): void {
+  }): EdgeRecord {
     const key = `${input.kind}::${input.from.key}::${input.to.key}`;
     let record = this.edges.get(key);
     if (record === undefined) {
@@ -324,6 +329,7 @@ class GraphAssembler {
     }
     const id = this.evidenceIdOf(input.evidence);
     record.evidence.set(id, input.evidence);
+    return record;
   }
 
   addWarning(message: string): void {
@@ -345,6 +351,22 @@ class GraphAssembler {
   }
 }
 
+/**
+ * Framework linker katkısı toplayıcı (sprint-2 B3). Linker'ların ürettiği
+ * detection/node/kenar/tanı notları buradan ayrıştırılır; böylece
+ * `extractFrameworkEdges` kapısı framework katkısını ana analizden
+ * bağımsız raporlayabilir.
+ */
+interface FrameworkCollection {
+  readonly detections: FrameworkDetection[];
+  /** Linker'ların dokunduğu node anahtarları (Endpoint node'ları). */
+  readonly nodeKeys: Set<string>;
+  /** Linker'ların ürettiği kenar kayıtları (ROUTES_TO). */
+  readonly edges: EdgeRecord[];
+  /** Bilinmeyen framework kalıpları için tanı notları. */
+  readonly diagnostics: TypeScriptAdapterDiagnostic[];
+}
+
 /** Analiz bağlamı: tüm geçiş fazları buradan paylaşır (modül-global yok). */
 interface AnalysisContext {
   readonly workspaceId: string;
@@ -356,15 +378,17 @@ interface AnalysisContext {
   readonly assembler: GraphAssembler;
   /** Bildirim sembolü → node kaydı (registry). */
   readonly registry: Map<ts.Symbol, NodeRecord>;
+  readonly framework: FrameworkCollection;
 }
 
 /* ------------------------------------------------------------------ */
 /* Ana analiz fonksiyonu                                               */
 /* ------------------------------------------------------------------ */
 
-export function analyzeTypeScriptProgram(
-  input: TypeScriptAdapterInput,
-): TypeScriptAdapterResult {
+/** Tek analiz koşusunun çıktısı: ana sonuç + framework linker katkısı. */
+type AnalysisRun = TypeScriptAnalysisRun;
+
+function runAnalysis(input: TypeScriptAdapterInput): AnalysisRun {
   if (input.workspaceId.trim().length === 0) {
     throw new DomainError("adapter/empty-workspace-id", "workspaceId boş olamaz");
   }
@@ -505,6 +529,12 @@ export function analyzeTypeScriptProgram(
     entryByRelativePath,
     assembler,
     registry: new Map<ts.Symbol, NodeRecord>(),
+    framework: {
+      detections: [],
+      nodeKeys: new Set<string>(),
+      edges: [],
+      diagnostics: [],
+    },
   };
 
   const diagnostics: TypeScriptAdapterDiagnostic[] = [];
@@ -590,6 +620,35 @@ export function analyzeTypeScriptProgram(
   for (const entry of sortedEntries) {
     runPhase(entry, (sourceFile) => extractImports(context, entry, sourceFile));
   }
+
+  /* Faz 2.5: framework linker'ları (sprint-2 B3, extractFrameworkEdges
+   * kapısı). Jenerik route fazından ÖNCE çalışır: framework Endpoint
+   * node'ları `framework` özniteliğiyle oluşur; jenerik faz aynı
+   * (kind, from, to) kenarını kanıt birleştirmeyle (aynı evidence ID)
+   * paylaşır. Framework olmayan projelerde bu faz sessizdir — Faz A
+   * davranışı bit-bit korunur. */
+  const expressDetection = detectExpressFramework(sortedEntries);
+  const nextDetection = detectNextAppRouterFramework(sortedEntries);
+  if (expressDetection !== undefined) {
+    context.framework.detections.push(expressDetection);
+    for (const entry of sortedEntries) {
+      runPhase(entry, (sourceFile) =>
+        collectExpressRoutes(context, entry, sourceFile),
+      );
+    }
+  }
+  if (nextDetection !== undefined) {
+    context.framework.detections.push(nextDetection);
+    for (const entry of sortedEntries) {
+      runPhase(entry, (sourceFile) =>
+        collectNextAppRouterRoutes(context, entry, sourceFile),
+      );
+    }
+  }
+  for (const diagnostic of context.framework.diagnostics) {
+    diagnostics.push(diagnostic);
+  }
+
   for (const entry of sortedEntries) {
     runPhase(entry, (sourceFile) =>
       extractCallsAndRoutes(context, entry, sourceFile),
@@ -597,26 +656,25 @@ export function analyzeTypeScriptProgram(
   }
 
   // 4) Kanonik düzende çıktı (TŞ §8 invariant iv/vi).
+  const byEdgeKey = (a: EdgeRecord, b: EdgeRecord): number => {
+    const aKey = edgeRecordKey(a);
+    const bKey = edgeRecordKey(b);
+    return aKey < bKey ? -1 : aKey > bKey ? 1 : 0;
+  };
   const nodeInputs = [...assembler.nodes.values()]
     .sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0))
     .map((record) => record.node);
 
   const edgeInputs: SnapshotEdgeInput[] = [...assembler.edges.values()]
-    .sort((a, b) => {
-      const aKey = `${a.kind}::${a.from.key}::${a.to.key}`;
-      const bKey = `${b.kind}::${b.from.key}::${b.to.key}`;
-      return aKey < bKey ? -1 : aKey > bKey ? 1 : 0;
-    })
-    .map((record) => ({
-      kind: record.kind,
-      from: record.from.ref,
-      to: record.to.ref,
-      resolution: record.resolution,
-      evidence: [...record.evidence.entries()]
-        .sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0))
-        .map((pair) => pair[1]),
-      ...(record.ambiguity === undefined ? {} : { ambiguity: record.ambiguity }),
-    }));
+    .sort(byEdgeKey)
+    .map(edgeRecordToInput);
+
+  // 5) Framework linker katkısı (extractFrameworkEdges kapısı çıktısı).
+  const frameworkNodes = [...context.framework.nodeKeys]
+    .sort((a, b) => (a < b ? -1 : a > b ? 1 : 0))
+    .map((key) => assembler.nodes.get(key))
+    .filter((record): record is NodeRecord => record !== undefined)
+    .map((record) => record.node);
 
   const totalEdges = edgeInputs.length;
   const verifiedEdges = edgeInputs.filter(
@@ -634,21 +692,80 @@ export function analyzeTypeScriptProgram(
     importEdges: true,
     callEdges: true,
     routeDetection: "http-verb-call-pattern",
-    frameworkLinkers: false,
+    frameworkLinkers: TS_ADAPTER_FRAMEWORK_LINKERS,
   };
 
   return {
-    analyzerId: TS_ADAPTER_ANALYZER_ID,
-    analyzerVersion: TS_ADAPTER_VERSION,
-    state: diagnostics.length > 0 ? "partial" : "ready",
-    capabilities,
-    coverageRatio,
-    unsupportedConstructs: UNSUPPORTED_CONSTRUCTS,
-    warnings: assembler.warnings,
-    diagnostics,
-    nodes: nodeInputs,
-    edges: edgeInputs,
+    result: {
+      analyzerId: TS_ADAPTER_ANALYZER_ID,
+      analyzerVersion: TS_ADAPTER_VERSION,
+      state: diagnostics.length > 0 ? "partial" : "ready",
+      capabilities,
+      coverageRatio,
+      unsupportedConstructs: UNSUPPORTED_CONSTRUCTS,
+      warnings: assembler.warnings,
+      diagnostics,
+      nodes: nodeInputs,
+      edges: edgeInputs,
+    },
+    framework: {
+      detections: [...context.framework.detections].sort((a, b) =>
+        a.framework < b.framework ? -1 : 1,
+      ),
+      nodes: frameworkNodes,
+      edges: [...context.framework.edges].sort(byEdgeKey).map(edgeRecordToInput),
+      diagnostics: [...context.framework.diagnostics].sort((a, b) => {
+        if (a.relativePath !== b.relativePath) {
+          return a.relativePath < b.relativePath ? -1 : 1;
+        }
+        if (a.code !== b.code) return a.code < b.code ? -1 : 1;
+        return a.message < b.message ? -1 : a.message > b.message ? 1 : 0;
+      }),
+    },
   };
+}
+
+/**
+ * TypeScript Language Adapter ana girişi: tam graph (framework kenarları
+ * dahil) döner.
+ */
+export function analyzeTypeScriptProgram(
+  input: TypeScriptAdapterInput,
+): TypeScriptAdapterResult {
+  return runAnalysis(input).result;
+}
+
+/**
+ * Framework linker kapısı (sprint-2 B3, TŞ §7 L3): Express route kayıtları
+ * ve Next.js App Router kural dosyaları için Endpoint node'ları + ROUTES_TO
+ * kenarlarını üretir ve yalnızca framework katkısını raporlar.
+ *
+ * Aynı analiz çekirdeğini koşturur (handler çözümlemesi TypeChecker
+ * dayanaklıdır); dönen kenarlar ana analizle aynı kimlik/evidence
+ * birleştirmesine tabidir. Framework tespiti yapılamayan girdilerde
+ * detections/nodes/edges/diagnostics boş döner (uydurma yasak).
+ *
+ * Hem ana sonucu hem framework katkısını isteyen istemciler iki ayrı çağrı
+ * yerine `analyzeTypeScriptProgramWithFrameworks` kullanmalıdır: her iki
+ * kapı da tüm analizi koşturur, ayrı çağrı 2x derleme maliyeti demektir
+ * (denetim bulgusu 3).
+ */
+export function extractFrameworkEdges(
+  input: TypeScriptAdapterInput,
+): FrameworkEdgesResult {
+  return runAnalysis(input).framework;
+}
+
+/**
+ * Birleşik giriş (denetim bulgusu 3 düzeltmesi): TEK analiz koşumuyla ana
+ * sonucu ve framework linker katkısını birlikte döndürür; `result` dilimi
+ * `analyzeTypeScriptProgram` ile, `framework` dilimi
+ * `extractFrameworkEdges` ile bit-bit eşdeğerdir.
+ */
+export function analyzeTypeScriptProgramWithFrameworks(
+  input: TypeScriptAdapterInput,
+): TypeScriptAnalysisRun {
+  return runAnalysis(input);
 }
 
 /* ------------------------------------------------------------------ */
@@ -681,6 +798,25 @@ function evidenceFor(
     analyzerId: TS_ADAPTER_ANALYZER_ID,
     analyzerVersion: TS_ADAPTER_VERSION,
     rationale,
+  };
+}
+
+/** Kenar kaydının sıralama anahtarı (kind::from::to). */
+function edgeRecordKey(record: EdgeRecord): string {
+  return `${record.kind}::${record.from.key}::${record.to.key}`;
+}
+
+/** Kenar kaydını SnapshotEdgeInput girdisine çevirir (kanonik kanıt sırası). */
+function edgeRecordToInput(record: EdgeRecord): SnapshotEdgeInput {
+  return {
+    kind: record.kind,
+    from: record.from.ref,
+    to: record.to.ref,
+    resolution: record.resolution,
+    evidence: [...record.evidence.entries()]
+      .sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0))
+      .map((pair) => pair[1]),
+    ...(record.ambiguity === undefined ? {} : { ambiguity: record.ambiguity }),
   };
 }
 
@@ -853,6 +989,22 @@ function classifyModuleSpecifier(
   return { status: "external", builtin: false };
 }
 
+/** Kaynak dosyadaki import/export-from module specifier'larını toplar. */
+function collectModuleSpecifiers(
+  sourceFile: ts.SourceFile,
+): Array<{ node: ts.StringLiteralLike; text: string }> {
+  const specifiers: Array<{ node: ts.StringLiteralLike; text: string }> = [];
+  for (const statement of sourceFile.statements) {
+    if (ts.isImportDeclaration(statement) || ts.isExportDeclaration(statement)) {
+      const moduleSpecifier = statement.moduleSpecifier;
+      if (moduleSpecifier !== undefined && ts.isStringLiteralLike(moduleSpecifier)) {
+        specifiers.push({ node: moduleSpecifier, text: moduleSpecifier.text });
+      }
+    }
+  }
+  return specifiers;
+}
+
 function extractImports(
   context: AnalysisContext,
   entry: SourceEntry,
@@ -865,15 +1017,7 @@ function extractImports(
     relativePath: entry.relativePath,
   });
 
-  const specifiers: Array<{ node: ts.StringLiteralLike; text: string }> = [];
-  for (const statement of sourceFile.statements) {
-    if (ts.isImportDeclaration(statement) || ts.isExportDeclaration(statement)) {
-      const moduleSpecifier = statement.moduleSpecifier;
-      if (moduleSpecifier !== undefined && ts.isStringLiteralLike(moduleSpecifier)) {
-        specifiers.push({ node: moduleSpecifier, text: moduleSpecifier.text });
-      }
-    }
-  }
+  const specifiers = collectModuleSpecifiers(sourceFile);
 
   for (const specifier of specifiers) {
     const record = classifyModuleSpecifier(context, entry.absoluteKey, specifier.text);
@@ -1210,12 +1354,21 @@ function inferNodeKind(declaration: ts.Declaration): NodeKind | undefined {
   return undefined;
 }
 
-/** `<x>.<verb>("/path", handler)` kalıbını Endpoint + ROUTES_TO'ya çevirir. */
+/**
+ * `<x>.<verb>("/path", handler)` kalıbını Endpoint + ROUTES_TO'ya çevirir.
+ *
+ * Sprint-2 B3 genelleştirme: `framework` verilirse (Express linker'ı)
+ * Endpoint `framework` özniteliği taşır ve katkı linker toplayıcısına
+ * yazılır. Kalıp önceden oluşturulmuşsa ensureNode/addEdge aynı node ve
+ * kenarı döndürür — kanıt birleştirilir, çift kayıt oluşmaz. Jenerik faz
+ * framework'süz çağırır; Faz A davranışı bit-bit korunur.
+ */
 function tryRoutePattern(
   context: AnalysisContext,
   entry: SourceEntry,
   sourceFile: ts.SourceFile,
   call: ts.CallExpression,
+  framework?: FrameworkLinkerId,
 ): boolean {
   const callee = call.expression;
   if (!ts.isPropertyAccessExpression(callee)) return false;
@@ -1233,8 +1386,14 @@ function tryRoutePattern(
     qualifiedName: `${verb} ${pathText}`,
     relativePath: entry.relativePath,
     language: LANGUAGE,
-    attributes: { method: verb, path: pathText },
+    attributes:
+      framework === undefined
+        ? { method: verb, path: pathText }
+        : { method: verb, path: pathText, framework },
   });
+  if (framework !== undefined) {
+    context.framework.nodeKeys.add(endpoint.key);
+  }
 
   const handlerArg = call.arguments[1];
   if (handlerArg === undefined) return true;
@@ -1254,20 +1413,31 @@ function tryRoutePattern(
     handlerDeclaration,
   );
 
-  if (handlerRecord !== undefined) {
-    assembler.addEdge({
+  /** ROUTES_TO ekler; framework linker koşusunda katkıyı toplayıcıya yazar. */
+  const addRouteEdge = (to: NodeRecord, evidence: SnapshotEvidenceInput): void => {
+    const record = assembler.addEdge({
       kind: "ROUTES_TO",
       from: endpoint,
-      to: handlerRecord,
+      to,
       resolution: "verified",
-      evidence: evidenceFor(
+      evidence,
+    });
+    if (framework !== undefined) {
+      context.framework.edges.push(record);
+    }
+  };
+
+  if (handlerRecord !== undefined) {
+    addRouteEdge(
+      handlerRecord,
+      evidenceFor(
         entry,
         sourceFile,
         call,
         "route-attribute",
         `ROUTES_TO: '${verb} ${pathText}' route kaydı ${handlerRecord.node.qualifiedName} handler'ına TypeChecker ile çözümlendi.`,
       ),
-    });
+    );
     return true;
   }
 
@@ -1277,19 +1447,16 @@ function tryRoutePattern(
       kind: "UnknownExternal",
       qualifiedName: handlerSymbol.getName(),
     });
-    assembler.addEdge({
-      kind: "ROUTES_TO",
-      from: endpoint,
-      to: externalHandler,
-      resolution: "verified",
-      evidence: evidenceFor(
+    addRouteEdge(
+      externalHandler,
+      evidenceFor(
         entry,
         sourceFile,
         call,
         "route-attribute",
         `ROUTES_TO: '${verb} ${pathText}' route kaydındaki handler analiz seti dışındaki ${handlerSymbol.getName()} sembolüne çözümlendi; açık UnknownExternal node kullanıldı.`,
       ),
-    });
+    );
     return true;
   }
 
@@ -1410,4 +1577,400 @@ function externalQualifiedName(
     return `${owner.name.text}.${symbol.getName()}`;
   }
   return symbol.getName();
+}
+
+/* ------------------------------------------------------------------ */
+/* Faz 2.5: framework linker'ları (sprint-2 B3, TŞ §7 L3)              */
+/*                                                                     */
+/* İki linker vardır ve ikisi de uydurma disiplinine tabidir:          */
+/* - Express : import specifier'ı tam "express" olan dosya varsa        */
+/*   framework algılanır; `<app|router>.<verb>("/path", handler)`       */
+/*   kayıtları jenerik route fazıyla AYNI shared helper üzerinden      */
+/*   Endpoint (framework öznitelikli) + ROUTES_TO üretir.              */
+/* - Next.js : App Router dosya kuralı (app/**\/route.ts fiil exportları,*/
+/*   app/**\/page.tsx default export). Yol türetimi yalnızca dosya     */
+/*   yolundan yapılır; handler sembolü TypeChecker/registry ile        */
+/*   çözümlenir; tanınmayan kalıpta node icat EDİLMEZ, tanı notu düşer.*/
+/* ------------------------------------------------------------------ */
+
+/** Express framework tespiti: herhangi bir dosyada tam "express" importu. */
+function detectExpressFramework(
+  entries: readonly SourceEntry[],
+): FrameworkDetection | undefined {
+  const basis: string[] = [];
+  for (const entry of entries) {
+    const sourceFile = entry.sourceFile;
+    if (sourceFile === undefined) continue;
+    for (const specifier of collectModuleSpecifiers(sourceFile)) {
+      if (specifier.text === "express") {
+        basis.push(`import:express@${entry.relativePath}`);
+        break;
+      }
+    }
+  }
+  if (basis.length === 0) return undefined;
+  return { framework: "express", basis: [...basis].sort() };
+}
+
+/**
+ * Next.js framework tespiti: App Router dosya kuralı. `app/` veya
+ * `src/app/` altındaki route/page kural dosyaları dayanak listelenir.
+ */
+function detectNextAppRouterFramework(
+  entries: readonly SourceEntry[],
+): FrameworkDetection | undefined {
+  const basis: string[] = [];
+  for (const entry of entries) {
+    if (nextAppConvention(entry.relativePath) !== undefined) {
+      basis.push(`file-convention:${entry.relativePath}`);
+    }
+  }
+  if (basis.length === 0) return undefined;
+  return { framework: "nextjs", basis: [...basis].sort() };
+}
+
+/**
+ * Dosya yolundan App Router kuralı türetir: `app/` (veya `src/app/`)
+ * segmentinden sonraki segmentler route yoludur; kök kural dosyası "/"
+ * olur. Dinamik segmentler (`[id]`) olduğu gibi korunur.
+ */
+function nextAppConvention(
+  relativePath: string,
+): { readonly kind: "route" | "page"; readonly routePath: string } | undefined {
+  const segments = toPosix(relativePath).split("/");
+  if (segments.length < 2) return undefined;
+  const appIndex =
+    segments[0] === "src" && segments[1] === "app"
+      ? 1
+      : segments[0] === "app"
+        ? 0
+        : -1;
+  if (appIndex < 0) return undefined;
+  const base = segments[segments.length - 1] ?? "";
+  const kind =
+    base === "route.ts" || base === "route.tsx"
+      ? "route"
+      : base === "page.ts" || base === "page.tsx"
+        ? "page"
+        : undefined;
+  if (kind === undefined) return undefined;
+  const routeSegments = segments.slice(appIndex + 1, -1);
+  const routePath =
+    routeSegments.length === 0 ? "/" : `/${routeSegments.join("/")}`;
+  return { kind, routePath };
+}
+
+/**
+ * Dosya içinde Express instance'ına bağlanan değişken adlarını toplar:
+ * `const x = express()`, `const x = express.Router()` ve `const x = Router()`
+ * (Router "express" specifier'ından isimli import edildiyse). Denetim
+ * bulgusu 2 düzeltmesi: framework etiketi yalnızca bu receiver'ların
+ * kayıtlarına yazılır — proje-geneli değil.
+ */
+function collectExpressInstanceVars(
+  sourceFile: ts.SourceFile,
+): ReadonlySet<string> {
+  const instanceVars = new Set<string>();
+  let defaultBinding: string | undefined;
+  const namedBindings = new Set<string>();
+
+  for (const statement of sourceFile.statements) {
+    if (!ts.isImportDeclaration(statement)) continue;
+    const moduleSpecifier = statement.moduleSpecifier;
+    if (
+      moduleSpecifier === undefined ||
+      !ts.isStringLiteralLike(moduleSpecifier) ||
+      moduleSpecifier.text !== "express"
+    ) {
+      continue;
+    }
+    const importClause = statement.importClause;
+    if (importClause === undefined) continue;
+    if (importClause.name !== undefined) {
+      defaultBinding = importClause.name.text;
+    }
+    const named = importClause.namedBindings;
+    if (named !== undefined && ts.isNamedImports(named)) {
+      for (const element of named.elements) {
+        namedBindings.add(element.name.text);
+      }
+    }
+  }
+  if (defaultBinding === undefined && namedBindings.size === 0) {
+    return instanceVars;
+  }
+
+  const visit = (node: ts.Node): void => {
+    if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name)) {
+      const initializer = node.initializer;
+      if (initializer !== undefined && ts.isCallExpression(initializer)) {
+        const callee = initializer.expression;
+        const isDefaultCall =
+          defaultBinding !== undefined &&
+          ts.isIdentifier(callee) &&
+          callee.text === defaultBinding;
+        const isDefaultRouterMember =
+          defaultBinding !== undefined &&
+          ts.isPropertyAccessExpression(callee) &&
+          ts.isIdentifier(callee.expression) &&
+          callee.expression.text === defaultBinding &&
+          callee.name.text === "Router";
+        const isNamedRouterCall =
+          ts.isIdentifier(callee) && namedBindings.has(callee.text);
+        if (isDefaultCall || isDefaultRouterMember || isNamedRouterCall) {
+          instanceVars.add(node.name.text);
+        }
+      }
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(sourceFile);
+  return instanceVars;
+}
+
+/**
+ * Express linker geçişi: yalnızca Express instance receiver'lı
+ * `<app|router>.<verb>("/path", handler)` kayıtları framework etiketiyle
+ * jenerik route helper'ına verilir (denetim bulgusu 2). Diğer verb kalıpları
+ * linker'dan geçmez; Faz A jenerik fazı bunları etiketsiz üretmeye devam
+ * eder. Cross-file receiver (import edilen app instance) bu dilimde
+ * modellenmez — jenerik üretim etkilenmez, yalnızca etiket eksik kalır.
+ */
+function collectExpressRoutes(
+  context: AnalysisContext,
+  entry: SourceEntry,
+  sourceFile: ts.SourceFile,
+): void {
+  const expressInstanceVars = collectExpressInstanceVars(sourceFile);
+  if (expressInstanceVars.size === 0) return;
+  const visit = (node: ts.Node): void => {
+    if (ts.isCallExpression(node)) {
+      const callee = node.expression;
+      if (
+        ts.isPropertyAccessExpression(callee) &&
+        ts.isIdentifier(callee.expression) &&
+        expressInstanceVars.has(callee.expression.text)
+      ) {
+        tryRoutePattern(context, entry, sourceFile, node, "express");
+      }
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(sourceFile);
+}
+
+/** Next.js linker geçişi: kural dosyasına göre route/page çıkarımı. */
+function collectNextAppRouterRoutes(
+  context: AnalysisContext,
+  entry: SourceEntry,
+  sourceFile: ts.SourceFile,
+): void {
+  const convention = nextAppConvention(entry.relativePath);
+  if (convention === undefined) return;
+  if (convention.kind === "route") {
+    collectNextRouteHandlers(context, entry, sourceFile, convention.routePath);
+  } else {
+    collectNextPageHandler(context, entry, sourceFile, convention.routePath);
+  }
+}
+
+function hasModifierOfKind(node: ts.Node, kind: ts.SyntaxKind): boolean {
+  const modifiers = ts.canHaveModifiers(node) ? ts.getModifiers(node) : undefined;
+  return modifiers?.some((modifier) => modifier.kind === kind) ?? false;
+}
+
+/** Bildirim satırı (1 tabanlı); dosya boşsa 1. Tanı notlarında kullanılır. */
+function firstStatementLine(
+  sourceFile: ts.SourceFile,
+): number {
+  const first = sourceFile.statements[0];
+  return first === undefined
+    ? 1
+    : sourceFile.getLineAndCharacterOfPosition(first.getStart(sourceFile)).line + 1;
+}
+
+/** Route/page kural dosyasındaki exportu Endpoint + ROUTES_TO'ya bağlar. */
+function emitNextRouteEdge(
+  context: AnalysisContext,
+  entry: SourceEntry,
+  sourceFile: ts.SourceFile,
+  anchor: ts.Node,
+  handlerRecord: NodeRecord,
+  method: string,
+  routePath: string,
+): void {
+  const endpoint = context.assembler.ensureNode({
+    kind: "Endpoint",
+    qualifiedName: `${method} ${routePath}`,
+    relativePath: entry.relativePath,
+    language: LANGUAGE,
+    attributes: { method, path: routePath, framework: "nextjs" },
+  });
+  context.framework.nodeKeys.add(endpoint.key);
+  const edge = context.assembler.addEdge({
+    kind: "ROUTES_TO",
+    from: endpoint,
+    to: handlerRecord,
+    resolution: "verified",
+    evidence: evidenceFor(
+      entry,
+      sourceFile,
+      anchor,
+      "route-attribute",
+      `ROUTES_TO: '${method} ${routePath}' Next.js App Router kural exportu (${entry.relativePath}) ${handlerRecord.node.qualifiedName} sembolüne TypeChecker ile çözümlendi.`,
+    ),
+  });
+  context.framework.edges.push(edge);
+}
+
+/**
+ * route.ts fiil exportları: `export function GET(...)` / `export const GET
+ * = ...` biçimindeki HTTP fiil adlı exportlar route handler'dır. Hiç tanınan
+ * fiil exportu yoksa kenar üretilmez ve tanı notu düşer (uydurma yasak).
+ */
+function collectNextRouteHandlers(
+  context: AnalysisContext,
+  entry: SourceEntry,
+  sourceFile: ts.SourceFile,
+  routePath: string,
+): void {
+  const { assembler } = context;
+  let verbExports = 0;
+
+  const handlerRecordOf = (name: ts.Identifier): NodeRecord | undefined => {
+    const symbol = context.checker.getSymbolAtLocation(name);
+    const declaration = symbol?.getDeclarations()?.[0];
+    return resolveSymbolRecord(context, entry, symbol, declaration);
+  };
+
+  for (const statement of sourceFile.statements) {
+    if (
+      ts.isFunctionDeclaration(statement) &&
+      hasModifierOfKind(statement, ts.SyntaxKind.ExportKeyword)
+    ) {
+      const name = statement.name;
+      if (name === undefined || !HTTP_VERBS.has(name.text.toLowerCase())) continue;
+      const record = handlerRecordOf(name);
+      if (record === undefined) {
+        assembler.addWarning(
+          `Next.js route handler çözümlenemedi: ${entry.relativePath} '${name.text}' (kenar üretilmedi)`,
+        );
+        continue;
+      }
+      verbExports += 1;
+      emitNextRouteEdge(
+        context,
+        entry,
+        sourceFile,
+        statement,
+        record,
+        name.text.toUpperCase(),
+        routePath,
+      );
+      continue;
+    }
+
+    if (
+      ts.isVariableStatement(statement) &&
+      hasModifierOfKind(statement, ts.SyntaxKind.ExportKeyword)
+    ) {
+      for (const declaration of statement.declarationList.declarations) {
+        if (!ts.isIdentifier(declaration.name)) continue;
+        if (!HTTP_VERBS.has(declaration.name.text.toLowerCase())) continue;
+        const record = handlerRecordOf(declaration.name);
+        if (record === undefined) {
+          assembler.addWarning(
+            `Next.js route handler çözümlenemedi: ${entry.relativePath} '${declaration.name.text}' (kenar üretilmedi)`,
+          );
+          continue;
+        }
+        verbExports += 1;
+        emitNextRouteEdge(
+          context,
+          entry,
+          sourceFile,
+          statement,
+          record,
+          declaration.name.text.toUpperCase(),
+          routePath,
+        );
+      }
+      continue;
+    }
+  }
+
+  if (verbExports === 0) {
+    context.framework.diagnostics.push({
+      relativePath: entry.relativePath,
+      code: "FRAMEWORK_PATTERN_UNKNOWN",
+      message: `Next.js App Router kural dosyası ('${entry.relativePath}') tanınan HTTP fiil exportu içermiyor (beklenen: export function GET|POST|... veya export const GET = ...); kenar üretilmedi, node icat edilmedi.`,
+      line: firstStatementLine(sourceFile),
+    });
+  }
+}
+
+/**
+ * page.tsx default exportu: `export default function Name(...)` /
+ * `export default Name` sembolü registry/TypeChecker ile çözümlenir ve
+ * `GET <routePath>` Endpoint'ine bağlanır. Anonim default export için sembol
+ * icat EDİLMEZ; tanı notu düşer.
+ */
+function collectNextPageHandler(
+  context: AnalysisContext,
+  entry: SourceEntry,
+  sourceFile: ts.SourceFile,
+  routePath: string,
+): void {
+  let handlerRecord: NodeRecord | undefined;
+  let anchor: ts.Node | undefined;
+  let defaultExportSeen = false;
+
+  for (const statement of sourceFile.statements) {
+    if (
+      (ts.isFunctionDeclaration(statement) || ts.isClassDeclaration(statement)) &&
+      hasModifierOfKind(statement, ts.SyntaxKind.DefaultKeyword)
+    ) {
+      defaultExportSeen = true;
+      anchor = statement;
+      const name = statement.name;
+      if (name !== undefined && ts.isIdentifier(name)) {
+        const symbol = context.checker.getSymbolAtLocation(name);
+        const declaration = symbol?.getDeclarations()?.[0];
+        handlerRecord = resolveSymbolRecord(context, entry, symbol, declaration);
+      }
+      break;
+    }
+    if (ts.isExportAssignment(statement)) {
+      defaultExportSeen = true;
+      anchor = statement;
+      if (ts.isIdentifier(statement.expression)) {
+        const symbol = context.checker.getSymbolAtLocation(statement.expression);
+        const declaration = symbol?.getDeclarations()?.[0];
+        handlerRecord = resolveSymbolRecord(context, entry, symbol, declaration);
+      }
+      break;
+    }
+  }
+
+  if (handlerRecord !== undefined && anchor !== undefined) {
+    emitNextRouteEdge(
+      context,
+      entry,
+      sourceFile,
+      anchor,
+      handlerRecord,
+      "GET",
+      routePath,
+    );
+    return;
+  }
+
+  context.framework.diagnostics.push({
+    relativePath: entry.relativePath,
+    code: "FRAMEWORK_PATTERN_UNKNOWN",
+    message: defaultExportSeen
+      ? `Next.js App Router sayfa dosyası ('${entry.relativePath}') isimsiz/anonim default export içeriyor; sembol icat edilmez, kenar üretilmedi.`
+      : `Next.js App Router sayfa dosyası ('${entry.relativePath}') tanınan default export içermiyor; kenar üretilmedi, node icat edilmedi.`,
+    line: firstStatementLine(sourceFile),
+  });
 }
