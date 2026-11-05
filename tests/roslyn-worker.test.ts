@@ -833,7 +833,10 @@ describe("bootstrapWorkerBinary (derleme regresyonu disiplini)", () => {
 /* Güvenlik bulgusu 4: worker yanıt bütçesi (maxNodes / RESPONSE_TRUNCATED) */
 /* ------------------------------------------------------------------ */
 
-describe("worker yanıt bütçesi — güvenlik bulgusu 4", () => {
+// Dotnet yokluğunda runWorker → spawnSync("dotnet") fail eder; ana suite'in
+// (describe.skipIf) meşru-skip disiplini burada da uygulanır (denetim
+// bulgusu 6; PROTOCOL.md §7: skip yalnızca dotnet yokluğunda meşrudur).
+describe.skipIf(!workerReady)("worker yanıt bütçesi — güvenlik bulgusu 4", () => {
   const fixtureFiles = FIXTURE_FILES.map((relativePath) => ({
     path: relativePath,
     content: fixture(relativePath),

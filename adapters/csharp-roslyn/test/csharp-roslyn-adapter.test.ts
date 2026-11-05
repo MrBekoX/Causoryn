@@ -58,24 +58,34 @@ const dotnetCheck = spawnSync("dotnet", ["--version"], {
   encoding: "utf8",
   shell: false,
 });
-if (dotnetCheck.status !== 0) {
-  throw new Error(
-    "dotnet SDK bulunamadı — adapters/csharp-roslyn kabul testleri koşulamadı (çalıştırılamadı olarak raporlanır)",
+/**
+ * Denetim bulgusu 5: dotnet YOKLUĞUNDA modül-düzey throw tüm dosyayı
+ * FAIL yapar (skip değil) — vitest "Test Files 1 failed" ile bizzat
+ * kanıtlandı. PROTOCOL.md §7 kuralı: skip YALNIZCA dotnet bulunamadığında
+ * meşrudur. Bu yüzden yokluk → stderr raporu + describe.skipIf; DERLEME
+ * regresyonu ise (dotnet varken) hâlâ açık Error → FAIL'tir (sessiz
+ * skip geçiştirmez).
+ */
+const dotnetAvailable = dotnetCheck.status === 0;
+if (!dotnetAvailable) {
+  console.error(
+    "[csharp-roslyn] dotnet SDK bulunamadı — B2 kabul testleri skip edilir (koşulamadı olarak raporlanır; PROTOCOL.md §7)",
   );
-}
-// Build serileştirme: tests/roslyn-worker.test.ts ve tests/cross-boundary
-// paralel fork'larda aynı `dotnet build` çağrısını yapar; eşzamanlı MSBuild
-// koşumları obj/ ara DLL'ine yarışır (CS2012 → exit=1, bizzat yeniden
-// üretildi) ve kaybeden suite FAIL'e düşer. Ortak kilitli builder: komut/
-// parametreler aynı, yalnızca yarış kaldırılır.
-const build = buildRoslynWorkerBinary();
-if (build.status !== 0 || !existsSync(WORKER_DLL)) {
-  // MSBuild hataları stdout'a yazılır; gerçek neden gizlenmesin.
-  throw new Error(
-    `worker derlemesi başarısız (exit=${String(build.status)}) — B2 testleri eski binary'ye karşı koşulmaz` +
-      (build.stderr ? ` [stderr]: ${build.stderr.slice(0, 400)}` : "") +
-      (build.stdout ? ` [stdout]: ${build.stdout.slice(-400)}` : ""),
-  );
+} else {
+  // Build serileştirme: tests/roslyn-worker.test.ts ve tests/cross-boundary
+  // paralel fork'larda aynı `dotnet build` çağrısını yapar; eşzamanlı MSBuild
+  // koşumları obj/ ara DLL'ine yarışır (CS2012 → exit=1, bizzat yeniden
+  // üretildi) ve kaybeden suite FAIL'e düşer. Ortak kilitli builder: komut/
+  // parametreler aynı, yalnızca yarış kaldırılır.
+  const build = buildRoslynWorkerBinary();
+  if (build.status !== 0 || !existsSync(WORKER_DLL)) {
+    // MSBuild hataları stdout'a yazılır; gerçek neden gizlenmesin.
+    throw new Error(
+      `worker derlemesi başarısız (exit=${String(build.status)}) — B2 testleri eski binary'ye karşı koşulmaz` +
+        (build.stderr ? ` [stderr]: ${build.stderr.slice(0, 400)}` : "") +
+        (build.stdout ? ` [stdout]: ${build.stdout.slice(-400)}` : ""),
+    );
+  }
 }
 
 function fixtureFiles(): Array<{ path: string; content: string }> {
@@ -96,7 +106,8 @@ const WORKER_ERROR_SCRIPT = `process.stdout.write(JSON.stringify({ id: 'analyze:
 /* Testler                                                             */
 /* ------------------------------------------------------------------ */
 
-describe("adapters/csharp-roslyn (sprint-2 B2)", () => {
+// Dotnet yokluğunda koşulamayan blok: meşru skip (PROTOCOL.md §7).
+describe.skipIf(!dotnetAvailable)("adapters/csharp-roslyn (sprint-2 B2)", () => {
   let positive: RoslynAdapterResult | null = null;
   let positiveDeterminismJson = "";
 
@@ -492,5 +503,42 @@ describe("worker-process yanıt sınırı (güvenlik bulgusu 4)", () => {
         ),
     });
     expect(outcome.status).toBe("ok");
+  });
+});
+
+/* ------------------------------------------------------------------ */
+/* Denetim bulgusu 9: status:"error" yanıtı için dürüst gerekçe metni  */
+/* ------------------------------------------------------------------ */
+
+describe("worker status:error fallback gerekçesi (denetim bulgusu 9)", () => {
+  it("sözleşmeye UYGUN hata yanıtı 'isteği reddetti' olarak raporlanır; 'aykırı' iddiası yoktur", async () => {
+    // Worker'ın LIMIT_EXCEEDED yanıtı protokol sözleşmesine UYGUNDUR
+    // (PROTOCOL.md §4 status:"error"); eski gerekçe metni "yanıt sözleşmeye
+    // aykırı" diyerek yanlış sebep bildiriyordu.
+    const result = await analyzeCSharpWorkspace({
+      workspaceId: "cap-error-probe",
+      files: fixtureFiles(),
+      options: {
+        requestTimeoutMs: 5_000,
+        spawnProcess: () =>
+          makeSyntheticChild(
+            JSON.stringify({
+              id: "analyze:cap-error-probe",
+              protocolVersion: "1",
+              status: "error",
+              error: {
+                code: "LIMIT_EXCEEDED",
+                message: "files sayısı sınırı aşıldı: 5001 > 5000",
+              },
+            }),
+          ),
+      },
+    });
+    expect(result.workerAvailable).toBe(false);
+    expect(result.state).toBe("partial");
+    const reasons = result.warnings.join("\n");
+    expect(reasons).toContain("isteği reddetti");
+    expect(reasons).toContain("LIMIT_EXCEEDED");
+    expect(reasons).not.toContain("sözleşmeye aykırı");
   });
 });

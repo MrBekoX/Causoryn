@@ -551,9 +551,17 @@ export async function analyzeCSharpWorkspace(
   }
 
   // 2) Graceful fallback — motor çökmez; L0/L1 + explicit warning.
+  // Denetim bulgusu 9: worker'ın PROTOCOL.md §4'e UYGUN status:"error"
+  // yanıtı (LIMIT_EXCEEDED vb.) "sözleşmeye aykırı" DEĞİLDİR — istek
+  // reddidir; gerekçe metni bunu dürüstçe ayırt eder (ayrıntı warnings'te).
+  const isWorkerRejection =
+    outcome.status === "ok" &&
+    skipped.some((line) => line.startsWith("worker hatası"));
   const reason =
     outcome.status === "ok"
-      ? "Roslyn worker kullanılamıyor (yanıt sözleşmeye aykırı)"
+      ? isWorkerRejection
+        ? 'Roslyn worker isteği reddetti (worker status:"error"); ayrıntı warnings\'te'
+        : "Roslyn worker kullanılamıyor (yanıt sözleşmeye aykırı)"
       : `Roslyn worker kullanılamıyor (${outcome.detail})`;
   return fallbackResult(entries, reason, outcome.stderr, skipped);
 }

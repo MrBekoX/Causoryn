@@ -2,7 +2,7 @@
   "name": "@causoryn/mcp-server",
   "version": "0.1.0",
   "private": true,
-  "description": "MCP protokol adaptasyonu: stdio server + 8 gerçek araç (get_capabilities, workspace_summary, index_status, refresh_index, map_system, find_symbols, get_symbol_context, get_evidence); Zod envelope doğrulaması, authorization, size limitleri; @modelcontextprotocol/sdk 1.32.2 (v1.x hattı — TŞ §6 SDK v2 hedefine yükseltme npm install yasağı nedeniyle yapılamadı; bkz. src/index.ts SDK sürüm notu) (TŞ v2.1 §5, §10).",
+  "description": "MCP protokol adaptasyonu: stdio server + 9 gerçek araç (causoryn_get_capabilities, causoryn_workspace_summary, causoryn_index_status, causoryn_refresh_index, causoryn_map_system, causoryn_find_symbols, causoryn_get_symbol_context, causoryn_trace_execution, causoryn_get_evidence); Zod envelope doğrulaması, authorization, size limitleri; @modelcontextprotocol/sdk 1.32.2 (v1.x hattı — TŞ §6 SDK v2 hedefine yükseltme npm install yasağı nedeniyle yapılamadı; bkz. src/index.ts SDK sürüm notu) (TŞ v2.1 §5, §10).",
   "type": "module",
   "exports": {
     ".": "./src/index.ts"

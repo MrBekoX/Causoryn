@@ -182,6 +182,11 @@ describe("MCP server — protokol düzeyi", { timeout: 30_000 }, () => {
       const limits = data.limits as Record<string, unknown>;
       expect(limits.maxNodes).toBe(250);
       expect(limits.maxSymbols).toBe(100);
+      // Denetim bulgusu 10: hata metinleri istemciyi "results.maxDepth/
+      // maxPaths tavanı"na yönlendirir (get_symbol_context/trace_execution
+      // LIMIT_EXCEEDED) — tavanlar get_capabilities üzerinden keşfedilebilmeli.
+      expect(limits.maxDepth).toBe(3);
+      expect(limits.maxPaths).toBe(50);
       expect(data.tools).toEqual([...TOOL_NAMES]);
       const protocol = data.protocol as Record<string, unknown>;
       expect(typeof protocol.revision).toBe("string");
@@ -965,6 +970,14 @@ describe("MCP server — protokol düzeyi", { timeout: 30_000 }, () => {
       const envelope = expectEnvelope(result);
       expect(envelope.status).toBe("error");
       expect((envelope.error as Record<string, unknown>).code).toBe("INVALID_ARGUMENT");
+      // Denetim bulgusu 2/8: B7 altyapısı BU DALDA geldi (IndexJobManager +
+      // WorkspaceWatcher incremental işletiyor) — reddin gerekçe metni
+      // bayat "gelecek" zaman taşıyamaz; dürüst hali: araç yüzeyi henüz
+      // açılmadı, altyapı hazır, şimdilik mode=full.
+      const message = (envelope.error as Record<string, unknown>).message as string;
+      expect(message).not.toContain("gelecek");
+      expect(message).toContain("araç yüzeyinde henüz");
+      expect(message).toContain("mode=full");
     } finally {
       await pair.close();
     }

@@ -170,6 +170,11 @@ export const CapabilitiesDataSchema = z.strictObject({
     maxFileBytes: z.number().int().positive(),
     maxNodes: z.number().int().positive(),
     maxSymbols: z.number().int().positive(),
+    // Denetim bulgusu 10: get_symbol_context/trace_execution LIMIT_EXCEEDED
+    // dayanağı olan tavanlar keşfedilebilir olmalı (hata metinleri istemciyi
+    // "results.maxDepth/maxPaths tavanı"na yönlendirir).
+    maxDepth: z.number().int().positive(),
+    maxPaths: z.number().int().positive(),
   }),
   tools: z.array(z.string()),
 });
@@ -217,6 +222,8 @@ export function getCapabilities(
         maxFileBytes: deps.config.maxFileBytes,
         maxNodes: deps.config.results.maxNodes,
         maxSymbols: deps.config.results.maxSymbols,
+        maxDepth: deps.config.results.maxDepth,
+        maxPaths: deps.config.results.maxPaths,
       },
       tools: [...TOOL_NAMES],
     },
@@ -474,9 +481,10 @@ export function indexStatus(
 
 export const RefreshIndexInputSchema = z.strictObject({
   workspaceId: z.string().min(1).optional(),
-  /** TŞ §10.2 "mode": full = tam yeniden indeksleme; incremental B7 dilimi. */
+  /** TŞ §10.2 "mode": full = tam yeniden indeksleme; incremental altyapıda
+   * (B7: IndexJobManager + WorkspaceWatcher) mevcut, araç yüzeyinde henüz açılmadı. */
   mode: z.enum(["full", "incremental"]),
-  /** TŞ §10.2 "scope?": dar kapsamlı refresh; bu dilimde desteklenmez. */
+  /** TŞ §10.2 "scope?": dar kapsamlı refresh; araç yüzeyinde henüz desteklenmez. */
   scope: z.string().min(1).optional(),
 });
 
@@ -504,10 +512,12 @@ export const RefreshIndexDataSchema = z.strictObject({
  * JobManager ayrıca WorkspaceAccessPolicy.authorizeRoot ile senkron
  * reddeder (yetkisiz kök iş kaydı AÇMAZ → WORKSPACE_NOT_AUTHORIZED).
  *
- * mode/scope: bu dilimde yalnızca mode="full" yürütülür; "incremental" ve
- * scope Live Architecture (sprint-2 B7) dilimine aittir — sessizce yok
- * saymak yerine açık INVALID_ARGUMENT reddi (ADR-010: çalışmayan şey
- * Done yazılmaz; kod K-008 uzantı setinden).
+ * mode/scope: bu dilimde araç yüzeyi yalnızca mode="full" yürütür.
+ * "incremental" ALTYAPIDA (sprint-2 B7: IndexJobManager + WorkspaceWatcher
+ * incremental iş açar ve işletir) MEVCUTTUR; bu araca açılmamıştır —
+ * istemcinin şimdilik yolu mode="full"dır. "scope" desteklenmez. İkisi de
+ * sessizce yok sayılmaz, açık INVALID_ARGUMENT reddedilir (ADR-010:
+ * çalışmayan şey Done yazılmaz; kod K-008 uzantı setinden).
  */
 export function refreshIndex(
   deps: ServiceDeps,
@@ -519,13 +529,13 @@ export function refreshIndex(
   if (input.mode === "incremental") {
     throw new CausorynToolError(
       "INVALID_ARGUMENT",
-      "mode=incremental bu dilimde yürütülemiyor; incremental yeniden indeksleme Live Architecture (sprint-2 B7) diliminde gelecek",
+      "mode=incremental bu araç yüzeyinde henüz açılmadı; incremental işletim altyapısı (Live Architecture B7: IndexJobManager + WorkspaceWatcher) hazırdır, bu araca açılım sonraki dilim kalemidir. Şimdilik mode=full kullanın",
     );
   }
   if (input.scope !== undefined) {
     throw new CausorynToolError(
       "INVALID_ARGUMENT",
-      `scope dar kapsamlı yeniden indeksleme bu dilimde desteklenmiyor (${input.scope}); Live Architecture (sprint-2 B7) diliminde değerlendirilecek`,
+      `scope dar kapsamlı yeniden indeksleme bu araç yüzeyinde desteklenmiyor (${input.scope}); tam yeniden indeksleme için mode=full kullanın`,
     );
   }
 

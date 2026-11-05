@@ -674,10 +674,17 @@ describe("skills/map-system/SKILL.md", () => {
 /* ------------------------------------------------------------------ */
 
 describe("README.md", () => {
-  it("POZİTİF: İngilizce tanıtım; kurulum, Node >= 24, kök beyanı, yayımlanan 8 araç, salt-okunur model", () => {
-    const issues = validateReadme(readPluginFile("README.md"));
-    expect(issues, JSON.stringify(issues)).toEqual([]);
-  });
+  // Başlıktaki araç sayısı KATALOĞTAN türetilir (denetim bulgusu: sabit
+  // '8 araç' yazısı B4/B5 katalog büyümelerinde bayat kalmıştı).
+  it(
+    "POZİTİF: İngilizce tanıtım; kurulum, Node >= 24, kök beyanı, yayımlanan " +
+      String(TOOL_NAMES_FROM_SOURCE.length) +
+      " araç, salt-okunur model",
+    () => {
+      const issues = validateReadme(readPluginFile("README.md"));
+      expect(issues, JSON.stringify(issues)).toEqual([]);
+    },
+  );
 
   it("NEGATİF: yayımlanmamış araç geri tırnakla tanıtılırsa reddedilir (ADR-010)", () => {
     // Mekanizma testi: hiçbir zaman yayımlanmayacak sentetik ad kullanılır.
@@ -762,6 +769,33 @@ describe("mcp-server katalog desenkron korumaları (sprint-2 takım denetimi)", 
       indexDoc?.[1],
       "index.ts 'tam olarak N gerçek araç' katalogla desenkron",
     ).toBe(expected);
+  });
+
+  it("BAĞLANTI: package.json description TOOL_NAMES kümesini ve sayısını yansıtır (bayat paket dokümanı koruması)", () => {
+    // Denetim bulgusu (iki bağımsız denetçi): description '8 gerçek araç'
+    // diyip causoryn_trace_execution'ı listelemiyordu — server.ts 9 araç
+    // kaydederken paket dokümanı bayat kaldı. Docstring koruması package.json
+    // DESCRIPTION'ını kapsamıyordu; bu test kapsamı kapatır.
+    const pkgJson = JSON.parse(
+      readFileSync(
+        path.join(REPO_ROOT, "packages", "mcp-server", "package.json"),
+        "utf8",
+      ),
+    ) as { description?: unknown };
+    expect(typeof pkgJson.description).toBe("string");
+    const description = pkgJson.description as string;
+    const count = String(TOOL_NAMES_FROM_SOURCE.length);
+    expect(
+      description,
+      "package.json description araç sayısı katalogla desenkron",
+    ).toContain(count + " gerçek araç");
+    const missing = TOOL_NAMES_FROM_SOURCE.filter(
+      (tool) => !description.includes(tool),
+    );
+    expect(
+      missing,
+      "package.json description'da eksik araçlar: " + missing.join(", "),
+    ).toEqual([]);
   });
 
   it("BAĞLANTI: hata kodu uzantıları mcp-server paket başlığında eksiksiz anılır (bayat uzantı notu koruması)", () => {
