@@ -140,6 +140,25 @@ export type {
   DegradedLeg,
   FileFreshness,
 } from "./agent-context.js";
+// Documentation export çekirdeği — sprint-3 C6 (TŞ §16). SAF serializer'lar
+// (json/markdown/mermaid/html) + OutputAccessPolicy ile yetkilendirilmiş
+// atomik yazma katmanı; MCP zarfı mcp-server katmanındadır (C8 kaydı).
+export {
+  EXPORT_DEFAULT_FILE_NAMES,
+  EXPORT_DOCUMENTATION_FORMATS,
+  exportDocumentationFormatSchema,
+  serializeDocumentation,
+  serializeDocumentationHtml,
+  serializeDocumentationJson,
+  serializeDocumentationMarkdown,
+  serializeDocumentationMermaid,
+  writeDocumentation,
+} from "./export.js";
+export type {
+  ExportDocumentationFormat,
+  WriteDocumentationInput,
+  WriteDocumentationResult,
+} from "./export.js";
 // Architecture Timeline çekirdeği — sprint-3 C7 (TŞ §13). Saf motor +
 // salt-okunur git spawn katmanı; MCP zarfı mcp-server katmanındadır.
 // Paket yüzeyi compare/impact/guard/agent-context kardeş düzeniyle bire bir.

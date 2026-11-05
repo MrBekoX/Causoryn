@@ -46,6 +46,11 @@ yanıt verirse:
 ```ts
 import { analyzeCSharpWorkspace } from "@causoryn/adapter-csharp-roslyn";
 import { createSnapshot } from "@causoryn/domain";
+// analyzerFingerprint fp2 kurgusu packages/indexing'ten gelir:
+import {
+  buildAnalyzerFingerprint,
+  extractRoslynRefPackContext,
+} from "@causoryn/indexing";
 
 const result = await analyzeCSharpWorkspace({
   workspaceId: "ws-1",
@@ -53,12 +58,36 @@ const result = await analyzeCSharpWorkspace({
   options: { requestTimeoutMs: 30_000 }, // workerDllPath/dotnetCommand da override edilebilir
 });
 
+// fp2 (aşağıdaki "KAPATILDI" bölümü): worker healthy yanıttan ref-pack
+// keşfi türetilir; keşif bilgisi yoksa nötr etiket kullanılır.
+const refPacks = result.workerAvailable
+  ? extractRoslynRefPackContext(result.warnings)
+  : null;
+const analyzerFingerprint = buildAnalyzerFingerprint({
+  typescript: null, // TS yoksa null
+  csharp: {
+    analyzerId: result.analyzerId,
+    version: result.analyzerVersion,
+    discovery: !result.workerAvailable
+      ? "worker-unavailable"
+      : refPacks === null
+        ? "discovery-unknown"
+        : "performed",
+    refPacks,
+    settings: {
+      dotnetCommand: "dotnet",
+      requestTimeoutMs: 30_000,
+      workerDllPath: "<etkin DLL yolu>",
+    },
+  },
+});
+
 // result.nodes / result.edges / result.evidence → createSnapshot girdisi:
 const snapshot = createSnapshot({
   workspaceId: "ws-1",
   revision: { id: "rev-1", sequence: 0 },
   configHash: "...",
-  analyzerFingerprint: `roslyn-worker@${result.analyzerVersion}`,
+  analyzerFingerprint,
   state: result.state,
   createdAt: "<ISO 8601>",
   nodes: result.nodes,
@@ -86,15 +115,48 @@ Pozitif test, sonucu gerçekten `createSnapshot`'a besleyerek domain
 uyumunu kanıtlar (dangling edge / verified-kenar-≥1-kanıt invariant'ları
 kurucuda zorlanır).
 
-## Açık borç — analyzerFingerprint kapsamı (sonraki dilim)
+## analyzerFingerprint ref-pack kapsamı — KAPATILDI (sprint-2 B9 + denetim takibi)
 
 PROTOCOL.md §6'nın belirttiği gibi, worker'ın otomatik ref-pack keşfi
 (DOTNET_ROOT / host / standart kurulum yolu) **referans DLL kümesine ve
 dolayısıyla semantiğe** dokunur: farklı makinelerde farklı .NET/ASP.NET
-Core pack sürümleri farklı çözümleme sonuçları üretebilir. Bu sürümde
-analyzerFingerprint yalnızca `roslyn-worker@<version>` kurgusudur; ref-pack
-sürümü/host bağlamı fingerprint'e DAHİL DEĞİLDİR → TŞ §8 invariant (vi) ("aynı
-kod+config+adapter versiyonu aynı Graph JSON") makineler arası tam
-taahhüt değildir. Borç: indexing/mcp-server entegrasyonu diliminde
-fingerprint kurgusuna ref-pack sürümleri + discovery kaynağı eklenmelidir
-(o zamana dek makineler arası Graph JSON eşitliği talep edilmemelidir).
+Core pack sürümleri farklı çözümleme sonuçları üretebilir. Bu borç,
+packages/indexing B9 diliminde **fp2 şemasıyla kapatıldı**
+(`packages/indexing/src/fingerprint.ts`).
+
+fp2 analyzerFingerprint sözleşmesi — "|" ile ayrılmış konumsal segmentler:
+
+    fp2|<ts-adapter>@<ver>|roslyn-worker@<ver>|refpack=<pack>@<sürüm>@<tfmDir>;...|refsrc=<kaynak>|opts=<sha256-16>
+
+- **adapter versiyonu**: koşuma katılan her adapter'ın id@versiyonu.
+- **refpack**: worker'ın GERÇEKTEN yüklediği ref pack sürümleri — worker
+  healthy yanıt warnings'inden türetilir (ReferenceResolver.cs:144 canonical
+  satırı `referans paketi yüklendi: <pack> <sürüm> (<tfmDir>)`). Pack hiç
+  bulunamadıysa `fallback-corelib` (System.Private.CoreLib runtime ref);
+  keşif bilgisi yoksa `unavailable` — hiçbir koşulda uydurma sürüm yazılmaz.
+- **refsrc**: discovery kaynağı — discovery="performed" iken tfmDir
+  `DOTNET_ROOT` altındaysa (dizin sınır ayıracı + Windows büyük/küçük harf
+  normalizasyonuyla) `env-dotnet-root`; aksi halde host/standart ayrımı
+  TS tarafından ayırt edilemez → dürüst genel etiket `worker-discovered`.
+  Keşif yapılamayan koşumlar nötr dürüst etiketler taşır:
+  `worker-unavailable` (worker hiç koşamadı), `discovery-unknown`
+  (worker HEALTHY ama yanıtta keşif bilgisi yok — varlık ile bilginin
+  aynı şey olmadığı denetim bulgusuyla ayrıştırıldı), `sync-run-degraded`
+  (senkron indexing köprüsü worker'ı hiç başlatmaz).
+- **opts**: IndexService'in C# adapter'a GEÇTİĞİ etkin ayarların
+  (dotnetCommand, requestTimeoutMs, workerDllPath) canonical JSON sha256
+  özeti (ilk 16 hex). Worker yanıt satır bütçesi (responseMaxChars)
+  adapter içindeki sabittir ve IndexService geçmez; geçilmeyen değer
+  hash'te "etkin ayar" gibi gösterilmez (bayat kopya riski — denetim
+  bulgusu).
+
+Sonuç: farklı ref-pack sürümü/kurulumu/ayarı → FARKLI fingerprint →
+makineler arası Graph JSON eşitliği artık yanlış taahhüt edilmez; aynı
+makinede aynı girdi → aynı fingerprint (determinizm korunur, TŞ §8
+invariant vi). Yüzey: `IndexService.runIndexAsync` (tam pipeline),
+`IndexJobManager` refresh işleri (B9 denetim düzeltmesiyle TAM pipeline'ı
+koşar), `INDEXED_ADAPTERS` (get_capabilities csharp kaydı). Not: C# L3
+route yeteneğinin adı (Protocol.cs CapabilitiesOut default) get_capabilities
+yüzey sözleşmesinde (üç levels alanı) yer almadığından INDEXED_ADAPTERS'te
+sabit kopyalanmaz; yüzeye ekleme mcp-server dilimine aittir. Doğrulama:
+`packages/indexing/test/index-service-csharp.test.ts`.

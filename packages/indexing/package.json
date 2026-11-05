@@ -2,12 +2,13 @@
   "name": "@causoryn/indexing",
   "version": "0.1.0",
   "private": true,
-  "description": "IndexCoordinator: dosya envanteri (WorkspaceAccessPolicy) → TS adapter → graph → atomik snapshot publish (TŞ v2.1 §5, §9, §25/4-5).",
+  "description": "IndexCoordinator: dosya envanteri (WorkspaceAccessPolicy) → dil adapter'ları (TypeScript + C# Roslyn worker) → graph → atomik snapshot publish (TŞ v2.1 §5, §7, §9, §25/4-5).",
   "type": "module",
   "exports": {
     ".": "./src/index.ts"
   },
   "dependencies": {
+    "@causoryn/adapter-csharp-roslyn": "0.1.0",
     "@causoryn/adapter-typescript": "0.1.0",
     "@causoryn/domain": "0.1.0",
     "@causoryn/graph": "0.1.0",

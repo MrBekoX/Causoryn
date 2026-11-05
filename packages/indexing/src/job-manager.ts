@@ -10,12 +10,16 @@ import {
 /**
  * IndexJobManager — snapshot iş yönetimi (TŞ v2.1 §10.2, sprint-2 B6).
  *
- * causoryn_refresh_index "Yeni snapshot işi" üretir; mevcut
- * envanter → adapter → graph → snapshot pipeline'ı (IndexService.runIndex)
- * bir iş olarak SARMALANIR, pipeline'ın kendisi değiştirilmez. İşler
+ * causoryn_refresh_index "Yeni snapshot işi" üretir; envanter → dil
+ * adapter'ları → graph → snapshot pipeline'ı bir iş olarak SARMALANIR.
+ * B9 denetim düzeltmesiyle işler TAM pipeline'ı koşturur:
+ * IndexService.runIndexAsync/runIncrementalIndexAsync await edilir —
+ * .cs'li workspace'lerde C# derin analizi (Roslyn worker) iş içinde
+ * yürür; senkron runIndex köprüsü (L0 + partial) yalnızca senkron
+ * çağıran tarafa (mcp-server autoIndex başlatma koşumu) aittir. İşler
  * in-process async koşar (TŞ §10.2 "Live Architecture" bağlamının Faz B
  * dilimi): `refreshIndex` çağrısı işi kuyruğa alıp anında döner, kuyruk
- * sırayla (job başına bir runIndex, eşzamanlılık yok) boşalır.
+ * sırayla (job başına bir iş, eşzamanlılık yok) boşalır.
  *
  * jobId tasarım karşısı (gerekçeli karar):
  * - Snapshot ID determinizmi korunur. Snapshot ID formülü yalnızca
@@ -35,11 +39,10 @@ import {
  *   en eski kayıt FIFO düşer; düşen jobId sonraki sorguda "bilinmeyen"
  *   sayılır (MCP katmanında INVALID_ARGUMENT).
  *
- * Progress semantiği (dürüstlük notu): Faz A/B6 pipeline'ı tek senkron
- * adımdır (IndexService.runIndex); ara yüzde (dosya başına) gözlemlenebilir
- * DEĞİLDİR. Bu dilimde progress yalnızca iş yaşam döngüsü aşamalarını
- * raporlar: queued=0 → running=50 → done=100; failed iş son yüzdeyi
- * korur. Dosya düzeyi yüzde, B7 incremental diliminin işidir.
+ * Progress semantiği (dürüstlük notu): pipeline tek iş adımıdır; ara yüzde
+ * (dosya başına) gözlemlenebilir DEĞİLDİR. Bu dilimde progress yalnızca iş
+ * yaşam döngüsü aşamalarını raporlar: queued=0 → running=50 → done=100;
+ * failed iş son yüzdeyi korur. Dosya düzeyi yüzde, sonraki dilim konusudur.
  *
  * Bu paket saat okumaz: tüm zaman damgaları enjekte edilen `clock`'tan
  * gelir (IndexService ile aynı determinizm ilkesi).
@@ -80,6 +83,8 @@ export interface IndexJobRecord {
   readonly stale: boolean;
   readonly fileCount: number | null;
   readonly tsFileCount: number | null;
+  /** Adapter'a verilen .cs dosya sayısı; koşarken/queued'da null (B9). */
+  readonly csFileCount: number | null;
   readonly diagnostics: readonly IndexDiagnostic[];
   readonly warnings: readonly string[];
   readonly error: IndexJobError | null;
@@ -160,9 +165,9 @@ export class IndexJobManager {
    * INVALID_ARGUMENT envelope'una çevirir). Kabul edilen istek kuyruğa
    * alınır ve kaydı anında döner (status "queued").
    *
-   * Sprint-2 B7: mode "incremental" desteklenir — IndexService.runIncrementalIndex
+   * Sprint-2 B7: mode "incremental" desteklenir — IndexService.runIncrementalIndexAsync
    * koşturulur; `changeSet` kayda taşınır (karar yetkilisi karma
-   * karşılaştırmasıdır, bkz. IndexService.runIncrementalIndex). `scope`
+   * karşılaştırmasıdır, bkz. IndexService.runIncrementalIndexAsync). `scope`
    * hâlâ desteklenmez (indexing/unsupported-mode).
    */
   refreshIndex(
@@ -209,6 +214,7 @@ export class IndexJobManager {
       stale: false,
       fileCount: null,
       tsFileCount: null,
+      csFileCount: null,
       diagnostics: [],
       warnings: [],
       error: null,
@@ -271,15 +277,22 @@ export class IndexJobManager {
     this.queue.push(jobId);
     if (this.draining) return;
     this.draining = true;
-    this.scheduler(() => this.drain());
+    // drain async'tir; scheduler callback'inin dönüşü kuyruk sahipliğiyle
+    // ilgisidir — işler drain içinde sırayla await edilir.
+    this.scheduler(() => {
+      void this.drain();
+    });
   }
 
-  private drain(): void {
+  private async drain(): Promise<void> {
     try {
+      // İşler SIRAYLA koşar: her iş tamamlanmadan (await) sonrakine
+      // geçilmez — "job başına bir iş, eşzamanlılık yok" sözleşmesi
+      // async pipeline ile de korunur.
       while (this.queue.length > 0) {
         const jobId = this.queue.shift() as string;
         try {
-          this.runJob(jobId);
+          await this.runJob(jobId);
         } catch (error) {
           // runJob her hatayı yakalar; buraya ulaşmak beklenmedik bir
           // kusurdur (ör. donmuş kayıt inşası) — işi güvenli biçimde
@@ -292,7 +305,15 @@ export class IndexJobManager {
     }
   }
 
-  private runJob(jobId: string): void {
+  /**
+   * İş koşumu (B9 denetim düzeltmesi): TAM pipeline — IndexService'in
+   * runIndexAsync/runIncrementalIndexAsync metotları await edilir. Böylece
+   * refresh_index ve watcher invalidasyonları .cs'li workspace'lerde C#
+   * derin analizini YÜRÜTÜR; senkron runIndex köprüsü (L0 + partial) yalnızca
+   * senkron çağıran tarafın (mcp-server autoIndex başlatma koşumu) kuralı
+   * olarak kalır.
+   */
+  private async runJob(jobId: string): Promise<void> {
     const current = this.records.get(jobId);
     const rootPath = this.roots.get(jobId);
     if (current === undefined || rootPath === undefined) return;
@@ -309,8 +330,8 @@ export class IndexJobManager {
     try {
       result =
         running.mode === "incremental"
-          ? this.indexService.runIncrementalIndex(rootPath, running.changeSet)
-          : this.indexService.runIndex(rootPath);
+          ? await this.indexService.runIncrementalIndexAsync(rootPath, running.changeSet)
+          : await this.indexService.runIndexAsync(rootPath);
     } catch (error) {
       const code = error instanceof IndexingError ? error.code : "indexing/internal";
       const message = error instanceof Error ? error.message : String(error);
@@ -338,6 +359,7 @@ export class IndexJobManager {
       stale: result.stale,
       fileCount: result.fileCount,
       tsFileCount: result.tsFileCount,
+      csFileCount: result.csFileCount,
       diagnostics: result.diagnostics,
       warnings: result.warnings,
       error: null,
