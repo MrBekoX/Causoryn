@@ -123,3 +123,46 @@ export type {
   GuardFinding,
   GuardFindingSuppression,
 } from "./guard.js";
+// Agent GPS çekirdeği — sprint-3 C4 (TŞ §15). Paket girişi yüzeyi C8 aracı
+// kaydı için zorunludur; generateOnboarding (index.ts:25) ve analyzeImpact
+// (index.ts:40) kardeş düzeniyle bire bir (denetim bulgusu 1).
+export {
+  AGENT_CONTEXT_LIMIT_CEILINGS,
+  generateAgentContext,
+} from "./agent-context.js";
+export type {
+  AgentContextAppliedLimits,
+  AgentContextInput,
+  AgentContextItem,
+  AgentContextLeg,
+  AgentContextResult,
+  AgentContextScores,
+  DegradedLeg,
+  FileFreshness,
+} from "./agent-context.js";
+// Architecture Timeline çekirdeği — sprint-3 C7 (TŞ §13). Saf motor +
+// salt-okunur git spawn katmanı; MCP zarfı mcp-server katmanındadır.
+// Paket yüzeyi compare/impact/guard/agent-context kardeş düzeniyle bire bir.
+export {
+  TIMELINE_CEILINGS,
+  TIMELINE_DEFAULTS,
+  TIMELINE_SNAPSHOT_BLOB_PATH,
+  buildArchitectureTimeline,
+  buildArchitectureTimelineFromGit,
+  readTimelinePointFromGit,
+  selectSampledIndices,
+} from "./timeline.js";
+export type {
+  ArchitectureTimeline,
+  ArchitectureTimelinePoint,
+  BuildArchitectureTimelineInput,
+  TimelineChangeSummary,
+  TimelineDiffInterval,
+  TimelineGitInput,
+  TimelineInterval,
+  TimelineLimits,
+  TimelinePointContent,
+  TimelinePointInput,
+  TimelineSamplingReport,
+  TimelineUnanalyzedInterval,
+} from "./timeline.js";
