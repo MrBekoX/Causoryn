@@ -4,9 +4,12 @@
  * Hem bellek içi hem SQLite gerçekleme bu tipi fırlatır; arayüzü tüketen
  * katmanlar (indexing, mcp-server) tek hata tipiyle çalışır. MCP hata
  * kodlarına eşleme mcp-server katmanındadır; bu paket `graph/...`
- * (sözleşme), `storage/...` (SQLite gerçeklemesine özgü) ve `guard/...`
+ * (sözleşme), `storage/...` (SQLite gerçeklemesine özgü), `guard/...`
  * (Architecture Guard policy/baseline doğrulama — guard-policy-schema.ts,
- * sabit tablolu kod listesi) ön eklerini üretir.
+ * sabit tablolu kod listesi), `compare/` + `timeline/` (mimari diff — bkz.
+ * compare.ts/timeline.ts INVALID_REVISION), `impact/`, `onboarding/`,
+ * `agent-context/` ve `export/` (documentation export — bkz. export.ts
+ * başlığı; MCP yüzeyinde EXPORT_NOT_ALLOWED) ön eklerini üretir.
  */
 export class GraphRepositoryError extends Error {
   constructor(
