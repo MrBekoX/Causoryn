@@ -815,3 +815,62 @@ describe("SqliteGraphRepository — timestamp sözleşmesi (memory gerçeklemesi
     repo.close();
   });
 });
+
+/* ------------------------------------------------------------------ */
+/* Güvenlik bulgusu 3: silinen dosyanın files kaydı düşürülebilir      */
+/* ------------------------------------------------------------------ */
+
+describe("SqliteGraphRepository.deleteFile — güvenlik bulgusu 3", () => {
+  it("pozitif: kayıt parametreli DELETE ile düşürülür, true döner", () => {
+    const repo = new SqliteGraphRepository(dbPath("delete-file.sqlite"));
+    try {
+      repo.registerWorkspace({
+        id: WS,
+        rootPath: "D:/fixture/orders",
+        createdAt: CREATED_AT,
+      });
+      // Parametre GÖRÜNÜMÜ: SQL enjeksiyonu görünümlü girdi bile
+      // hazırlanmış ifade parametresiyle bağlanır (mevcut suite kuralı).
+      const injectionish = "src/x'; DROP TABLE files; --";
+      repo.upsertFile({
+        workspaceId: WS,
+        relativePath: injectionish,
+        contentHash: "hash-1",
+        sizeBytes: 10,
+        updatedAt: CREATED_AT,
+      });
+      repo.upsertFile({
+        workspaceId: WS,
+        relativePath: "src/kept.ts",
+        contentHash: "hash-2",
+        sizeBytes: 12,
+        updatedAt: CREATED_AT,
+      });
+
+      expect(repo.deleteFile(WS, injectionish)).toBe(true);
+      const paths = repo.listFiles(WS).map((record) => record.relativePath);
+      expect(paths).toEqual(["src/kept.ts"]);
+      // Tablo hâlâ sağlam (DROP görünümlü girdi parametreye bağlandı).
+      expect(repo.deleteFile(WS, injectionish)).toBe(false);
+      expect(repo.listFiles(WS).length).toBe(1);
+    } finally {
+      repo.close();
+    }
+  });
+
+  it("negatif: bilinmeyen workspace GraphRepositoryError ile reddedilir", () => {
+    const repo = new SqliteGraphRepository(dbPath("delete-file-ws.sqlite"));
+    try {
+      repo.registerWorkspace({
+        id: WS,
+        rootPath: "D:/fixture/orders",
+        createdAt: CREATED_AT,
+      });
+      expect(() => repo.deleteFile("baska-ws", "src/x.ts")).toThrowError(
+        GraphRepositoryError,
+      );
+    } finally {
+      repo.close();
+    }
+  });
+});

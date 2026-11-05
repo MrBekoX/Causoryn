@@ -100,6 +100,14 @@ export interface GraphRepository {
   registerWorkspace(record: WorkspaceRecord): void;
   upsertFile(record: FileRecord): void;
   listFiles(workspaceId: string): readonly FileRecord[];
+  /**
+   * Güvenlik bulgusu 3: silinen kaynak dosyanın files kaydını düşürür
+   * (envanter mutabakatı). Dönüş: kayıt vardı ve silindi → true; kayıt
+   * yok → false (idempotent). Graph tam türetildiğinden ghost kayıt kenar
+   * üretmez; ama files/fingerprint metadata'sı bayat kalırdı (TŞ §9 files
+   * tablosu = güncel envanter karşılığı).
+   */
+  deleteFile(workspaceId: string, relativePath: string): boolean;
 
   beginBuild(input: SnapshotBuildInput): SnapshotBuildInfo;
   getBuild(buildId: string): SnapshotBuildInfo | undefined;

@@ -22,9 +22,12 @@ import { existsSync, readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { beforeAll, describe, expect, it } from "vitest";
+import { EventEmitter } from "node:events";
 import { createSnapshot } from "@causoryn/domain";
+import { buildRoslynWorkerBinary } from "../../../tests/roslyn-worker-build.js";
 import {
   analyzeCSharpWorkspace,
+  runWorkerAnalyze,
   type RoslynAdapterResult,
 } from "../src/index.js";
 
@@ -60,15 +63,18 @@ if (dotnetCheck.status !== 0) {
     "dotnet SDK bulunamadı — adapters/csharp-roslyn kabul testleri koşulamadı (çalıştırılamadı olarak raporlanır)",
   );
 }
-const build = spawnSync("dotnet", ["build", WORKER_DIR], {
-  encoding: "utf8",
-  timeout: 300_000,
-  maxBuffer: 16 * 1024 * 1024,
-  shell: false,
-});
+// Build serileştirme: tests/roslyn-worker.test.ts ve tests/cross-boundary
+// paralel fork'larda aynı `dotnet build` çağrısını yapar; eşzamanlı MSBuild
+// koşumları obj/ ara DLL'ine yarışır (CS2012 → exit=1, bizzat yeniden
+// üretildi) ve kaybeden suite FAIL'e düşer. Ortak kilitli builder: komut/
+// parametreler aynı, yalnızca yarış kaldırılır.
+const build = buildRoslynWorkerBinary();
 if (build.status !== 0 || !existsSync(WORKER_DLL)) {
+  // MSBuild hataları stdout'a yazılır; gerçek neden gizlenmesin.
   throw new Error(
-    `worker derlemesi başarısız (exit=${String(build.status)}) — B2 testleri eski binary'ye karşı koşulmaz`,
+    `worker derlemesi başarısız (exit=${String(build.status)}) — B2 testleri eski binary'ye karşı koşulmaz` +
+      (build.stderr ? ` [stderr]: ${build.stderr.slice(0, 400)}` : "") +
+      (build.stdout ? ` [stdout]: ${build.stdout.slice(-400)}` : ""),
   );
 }
 
@@ -340,5 +346,151 @@ describe("adapters/csharp-roslyn (sprint-2 B2)", () => {
         ],
       }),
     ).rejects.toThrowError(/iki kez verildi/);
+  });
+});
+
+/* ------------------------------------------------------------------ */
+/* Güvenlik bulgusu 1: worker spawn env sızıntısı                      */
+/* ------------------------------------------------------------------ */
+
+/** Stdout'a geçerli bir protokol yanıtı yazıp kapanan sentetik süreç. */
+function makeSyntheticChild(responseLine: string): ChildProcess {
+  const child = new EventEmitter() as unknown as ChildProcess;
+  const stdout = new EventEmitter();
+  const stderr = new EventEmitter();
+  const stdin = new EventEmitter();
+  let stdinEnded = false;
+  const childRecord = child as unknown as Record<string, unknown>;
+  childRecord.stdout = stdout;
+  childRecord.stderr = stderr;
+  childRecord.stdin = Object.assign(stdin, {
+    write: () => true,
+    end: () => {
+      stdinEnded = true;
+    },
+  });
+  childRecord.killed = false;
+  childRecord.exitCode = null;
+  childRecord.signalCode = null;
+  childRecord.kill = () => true;
+  void stdinEnded;
+  queueMicrotask(() => {
+    stdout.emit("data", Buffer.from(`${responseLine}\n`, "utf8"));
+  });
+  return child;
+}
+
+describe("worker-process env sınırlaması (güvenlik bulgusu 1)", () => {
+  it("spawn options yalnızca allowlist ortam taşır; parent gizli değişkenleri miraslanmaz", async () => {
+    const captured: Array<{
+      readonly command: string;
+      readonly args: readonly string[];
+      readonly options: { readonly stdio: ["pipe", "pipe", "pipe"]; readonly env: Readonly<Record<string, string>> };
+    }> = [];
+
+    // Sentineller: parent env'de "gizli" bir anahtar + dotnet'in ihtiyaç
+    // duyduğu DOTNET_ROOT. Test sonunda eski değerler geri konur.
+    const previousSecret = process.env["CAUSORYN_TEST_SECRET"];
+    const previousDotnetRoot = process.env["DOTNET_ROOT"];
+    process.env["CAUSORYN_TEST_SECRET"] = "token-abc-123";
+    process.env["DOTNET_ROOT"] = WORKER_DIR;
+    try {
+      const outcome = await runWorkerAnalyze({
+        dotnetCommand: "dotnet",
+        workerDllPath: WORKER_DLL,
+        requestPayload: { id: "env-probe" },
+        requestTimeoutMs: 5_000,
+        spawnProcess: (callbackCommand, callbackArgs, callbackOptions) => {
+          captured.push({
+            command: callbackCommand,
+            args: callbackArgs,
+            options: callbackOptions,
+          });
+          return makeSyntheticChild(
+            JSON.stringify({
+              id: "env-probe",
+              protocolVersion: "1",
+              status: "ready",
+            }),
+          );
+        },
+      });
+      expect(outcome.status).toBe("ok");
+
+      expect(captured).toHaveLength(1);
+      const spawnOptions = captured[0]?.options;
+      if (spawnOptions === undefined) {
+        throw new Error("spawn options yakalanamadı");
+      }
+      // Kırmızı kanıt: env TAMAMEN tanımsızdı (parent env aynen miraslanırdı).
+      expect(spawnOptions.env).toBeDefined();
+      // Allowlist dışı parent değişkeni (gizli anahtar) worker'a GEÇMEZ.
+      expect(spawnOptions.env["CAUSORYN_TEST_SECRET"]).toBeUndefined();
+      // dotnet çalışması için gerekenler korunur: PATH (çözümleme +
+      // runtime) ve ReferenceResolver'ın okuduğu DOTNET_ROOT.
+      expect(spawnOptions.env["PATH"]).toBeDefined();
+      expect(spawnOptions.env["DOTNET_ROOT"]).toBe(WORKER_DIR);
+    } finally {
+      if (previousSecret === undefined) delete process.env["CAUSORYN_TEST_SECRET"];
+      else process.env["CAUSORYN_TEST_SECRET"] = previousSecret;
+      if (previousDotnetRoot === undefined) delete process.env["DOTNET_ROOT"];
+      else process.env["DOTNET_ROOT"] = previousDotnetRoot;
+    }
+  });
+});
+
+/* ------------------------------------------------------------------ */
+/* Güvenlik bulgusu 4: worker yanıt satırı sınırı (adapter bacağı)     */
+/* ------------------------------------------------------------------ */
+
+describe("worker-process yanıt sınırı (güvenlik bulgusu 4)", () => {
+  it("responseMaxChars aşan tek yanıt satırı süreç kill + unavailable fallback üretir", async () => {
+    // Sınırı AŞAN ama GEÇERLİ JSON olan tek satır: bugünkü davranışta
+    // parse edilip "ok" döner (sınırsız buffer + sınırsız JSON.parse);
+    // düzeltmede sınır aşımı unavailable + "sınır" detayıdır.
+    const oversizedValidJson = JSON.stringify({
+      id: "cap-probe",
+      protocolVersion: "1",
+      status: "ready",
+      pad: "x".repeat(200),
+    });
+    expect(oversizedValidJson.length).toBeGreaterThan(64);
+
+    const killed: Array<boolean> = [];
+    const outcome = await runWorkerAnalyze({
+      dotnetCommand: "dotnet",
+      workerDllPath: WORKER_DLL,
+      requestPayload: { id: "cap-probe" },
+      requestTimeoutMs: 5_000,
+      responseMaxChars: 64,
+      spawnProcess: () => {
+        const child = makeSyntheticChild(oversizedValidJson);
+        const record = child as unknown as Record<string, unknown>;
+        record.kill = () => {
+          killed.push(true);
+          return true;
+        };
+        return child;
+      },
+    });
+
+    expect(outcome.status).toBe("unavailable");
+    expect(outcome.detail).toContain("sınır");
+    expect(killed.length).toBe(1); // süreç sonlandırıldı (kill kanıtı)
+  });
+
+  it("sınır altındaki yanıt normal ok ile döner (pozitif kontrol)", async () => {
+    const outcome = await runWorkerAnalyze({
+      dotnetCommand: "dotnet",
+      workerDllPath: WORKER_DLL,
+      requestPayload: { id: "cap-ok" },
+      requestTimeoutMs: 5_000,
+      responseMaxChars: 4_096,
+      spawnProcess: () =>
+        makeSyntheticChild(
+          JSON.stringify({ id: "cap-ok", protocolVersion: "1", status: "ready" }),
+        ),
+    });
+    expect(outcome.status).toBe("ok");
   });
 });

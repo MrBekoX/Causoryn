@@ -18,6 +18,7 @@ import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
+import { buildRoslynWorkerBinary } from "./roslyn-worker-build.js";
 import { fileURLToPath } from "node:url";
 import { beforeAll, describe, expect, it } from "vitest";
 
@@ -175,7 +176,7 @@ function findEdge(
 export function bootstrapWorkerBinary(io: {
   dotnetAvailable: boolean;
   dllExists: () => boolean;
-  runBuild: () => { status: number | null; stderr?: string };
+  runBuild: () => { status: number | null; stderr?: string; stdout?: string };
 }): { workerReady: boolean; skipReason: string | null } {
   if (!io.dotnetAvailable)
   {
@@ -189,9 +190,12 @@ export function bootstrapWorkerBinary(io: {
   const build = io.runBuild();
   if (build.status !== 0)
   {
+    // MSBuild/CSC hataları (CS2012, MSB3027…) stderr DEĞİL stdout'a yazılır;
+    // gerçek derleme nedeni görünmez olmasın diye her iki akış da taşınır.
     throw new Error(
       `worker derlemesi başarısız (dotnet build exit=${String(build.status)})` +
-        (build.stderr ? `: ${build.stderr.slice(0, 400)}` : "") +
+        (build.stderr ? ` [stderr]: ${build.stderr.slice(0, 400)}` : "") +
+        (build.stdout ? ` [stdout]: ${build.stdout.slice(-400)}` : "") +
         " — C# derleme regresyonu sessiz skip ile geçiştirilmez",
     );
   }
@@ -213,18 +217,12 @@ const dotnetCheck = spawnSync("dotnet", ["--version"], {
 const bootstrapResult = bootstrapWorkerBinary({
   dotnetAvailable: dotnetCheck.status === 0,
   dllExists: () => existsSync(WORKER_DLL),
-  runBuild: () => {
-    const build = spawnSync("dotnet", ["build", WORKER_DIR], {
-      encoding: "utf8",
-      timeout: 300_000,
-      maxBuffer: 16 * 1024 * 1024,
-      shell: false,
-    });
-    return {
-      status: build.status,
-      stderr: typeof build.stderr === "string" ? build.stderr : "",
-    };
-  },
+  // Build serileştirme (kırmızı kapı kök nedeni): cross-boundary.test.ts ve
+  // csharp-roslyn-adapter.test.ts paralel fork'larda AYNI `dotnet build`
+  // çağrısını yapar; eşzamanlı MSBuild koşumları obj/ ara DLL'ine yarışır
+  // (CS2012, bizzat yeniden üretildi) ve kaybeden suite'i FAIL'e düşürür.
+  // Ortak kilitli builder: komut/parametreler aynı, yalnızca yarış kaldırılır.
+  runBuild: () => buildRoslynWorkerBinary(),
 });
 const workerReady = bootstrapResult.workerReady;
 
@@ -829,4 +827,105 @@ describe("bootstrapWorkerBinary (derleme regresyonu disiplini)", () => {
     expect(result.workerReady).toBe(true);
     expect(result.skipReason).toBeNull();
   });
+});
+
+/* ------------------------------------------------------------------ */
+/* Güvenlik bulgusu 4: worker yanıt bütçesi (maxNodes / RESPONSE_TRUNCATED) */
+/* ------------------------------------------------------------------ */
+
+describe("worker yanıt bütçesi — güvenlik bulgusu 4", () => {
+  const fixtureFiles = FIXTURE_FILES.map((relativePath) => ({
+    path: relativePath,
+    content: fixture(relativePath),
+  }));
+
+  /** NodeKey karşılığı (WorkerAnalyzer.cs): kind\u001fqualified\u001frelPath. */
+  function nodeRefKey(node: {
+    kind: string;
+    qualifiedName: string;
+    relativePath?: string | null;
+  }): string {
+    return [node.kind, node.qualifiedName, node.relativePath ?? ""].join("\u001f");
+  }
+
+  it(
+    "pozitif: maxNodes aşımı → RESPONSE_TRUNCATED tanısı + status partial + dangling kenar yok",
+    () => {
+      // Fixture 4 dosya + namespace/class/method node'ları üretir: 5 node
+      // bütçesi kesinlikle aşılır (truncation kanıtlanır).
+      const truncationRun = runWorker([
+        {
+          id: "cap-1",
+          type: "analyze",
+          protocolVersion: "1",
+          maxNodes: 5,
+          files: fixtureFiles,
+        },
+      ]);
+      const line = truncationRun.lines[0];
+      expect(line).toBeDefined();
+      const response = parseLine(line as string);
+      expect(response.status).toBe("partial");
+      const diagnostics = response.diagnostics ?? [];
+      const truncated = diagnostics.find((d) => d.code === "RESPONSE_TRUNCATED");
+      expect(truncated).toBeDefined();
+      expect((truncated as { message: string }).message).toContain("maxNodes");
+
+      const nodes = response.nodes ?? [];
+      expect(nodes.length).toBeLessThanOrEqual(5);
+      expect(nodes.length).toBeGreaterThan(0);
+
+      // Dangling yok: her kenar ucu yayınlanan node kümesinde (createSnapshot
+      // dangling refine'ının worker karşılığı — kesim kenarları da düşürür).
+      const emitted = new Set(nodes.map(nodeRefKey));
+      for (const edge of response.edges ?? []) {
+        expect(emitted.has(nodeRefKey(edge.from))).toBe(true);
+        expect(emitted.has(nodeRefKey(edge.to))).toBe(true);
+      }
+    },
+    120_000,
+  );
+
+  it(
+    "negatif: maxNodes=0 ve sert tavan üstü → INVALID_ARGUMENT yanıtı",
+    () => {
+      // 250_001 = ProtocolConstants.MaxResponseNodes (250_000) + 1: sert
+      // tavan üstü istek reddi ( Protocol.cs'teki tavanla senkron).
+      for (const badMaxNodes of [0, -3, 250_001]) {
+        const badRun = runWorker([
+          {
+            id: "cap-bad",
+            type: "analyze",
+            protocolVersion: "1",
+            maxNodes: badMaxNodes,
+            files: fixtureFiles,
+          },
+        ]);
+        const line = badRun.lines[0];
+        expect(line).toBeDefined();
+        const response = parseLine(line as string);
+        expect(response.status).toBe("error");
+        expect(response.error?.code).toBe("INVALID_ARGUMENT");
+        expect(response.error?.message).toContain("maxNodes");
+      }
+    },
+    120_000,
+  );
+
+  it(
+    "pozitif: maxNodes verilmezse tam grafik yayınlanır (varsayılan davranış korundu)",
+    () => {
+      const fullRun = runWorker([
+        { id: "cap-full", type: "analyze", protocolVersion: "1", files: fixtureFiles },
+      ]);
+      const line = fullRun.lines[0];
+      expect(line).toBeDefined();
+      const response = parseLine(line as string);
+      // Fixture küçük: limit tanısı OLMADAN ready yayınlamalı (geriye dönük
+      // uyumluluk — mevcut roslyn-worker kabul testleriyle aynı davranış).
+      expect(response.status).toBe("ready");
+      expect(response.diagnostics ?? []).toEqual([]);
+    },
+    120_000,
+  );
 });

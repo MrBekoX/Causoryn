@@ -138,6 +138,18 @@ export class InMemoryGraphRepository implements GraphRepository {
     return records;
   }
 
+  /** Güvenlik bulgusu 3: envanter mutabakatı için kayıt düşürme. */
+  deleteFile(workspaceId: string, relativePath: string): boolean {
+    if (!this.workspaces.has(workspaceId)) {
+      throw new GraphRepositoryError(
+        "graph/unknown-workspace",
+        `Bilinmeyen workspace: ${workspaceId}`,
+      );
+    }
+    requireNonEmptyField("file.relativePath", relativePath);
+    return this.files.delete(fileKey(workspaceId, relativePath));
+  }
+
   beginBuild(input: SnapshotBuildInput): SnapshotBuildInfo {
     if (!this.workspaces.has(input.workspaceId)) {
       throw new GraphRepositoryError(

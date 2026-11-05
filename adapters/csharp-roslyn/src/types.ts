@@ -30,6 +30,14 @@ export const CSHARP_ROSLYN_ADAPTER_VERSION = "0.1.0";
 /** Tek analyze isteği için varsayılan üst sınır (TŞ §9 resource budget). */
 export const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
 
+/**
+ * Güvenlik bulgusu 4: tek yanıt satırı için varsayılan üst sınır (char).
+ * Protocol.cs MaxRequestLineChars'ın (64M) ayna değeridir — istek ve yanıt
+ * bacakları aynı bütçeyi paylaşır. Aşım → süreç kill + L0/L1 fallback
+ * (sınırsız buffer + sınırsız JSON.parse yerine).
+ */
+export const DEFAULT_RESPONSE_MAX_CHARS = 64 * 1024 * 1024;
+
 /** Default "dotnet" komutu — PATH'ten çözülür; opsiyonla override edilebilir. */
 export const DEFAULT_DOTNET_COMMAND = "dotnet";
 
@@ -48,10 +56,37 @@ export const WORKER_DLL_RELATIVE_PATH = join(
   "Causoryn.RoslynWorker.dll",
 );
 
+/**
+ * Worker alt sürecine geçilen ortam değişkeni allowlist'i (güvenlik
+ * bulgusu 1, savunma derinliği): stdio tek-kullanıcı modelinde worker
+ * parent'ın TÜM env'ini miraslamamalı — anahtar/token gibi allowlist dışı
+ * değerler süreç listesinden/çökme dump'ından okunabilir. Listenin amacı
+ * dotnet'in ÇALIŞMASI için gereken küçüktür:
+ * - PATH: çalıştırılabilir çözümleme + dotnet runtime konumu,
+ * - DOTNET_ROOT: ReferenceResolver'ın okuduğu tek açık değişken
+ *   (ReferenceResolver.cs CandidateDotNetRoots),
+ * - DOTNET_CLI_HOME, USERPROFILE, HOME: dotnet ilk-çalıştırma/nuget konumları,
+ * - SystemRoot, COMSPEC, TEMP, TMP: Windows yükleyici/süreç altyapısı.
+ */
+export const WORKER_ENV_ALLOWLIST = [
+  "PATH",
+  "DOTNET_ROOT",
+  "DOTNET_CLI_HOME",
+  "SystemRoot",
+  "COMSPEC",
+  "TEMP",
+  "TMP",
+  "USERPROFILE",
+  "HOME",
+] as const;
+
 export type SpawnFunction = (
   command: string,
   args: readonly string[],
-  options: { readonly stdio: ["pipe", "pipe", "pipe"] },
+  options: {
+    readonly stdio: ["pipe", "pipe", "pipe"];
+    readonly env: Readonly<Record<string, string>>;
+  },
 ) => ChildProcess;
 
 /** Adapter'a verilen tek kaynak dosya (bellek-içi, salt-okunur). */
@@ -68,6 +103,11 @@ export interface RoslynAdapterOptions {
   readonly dotnetCommand: string;
   /** Tek istek üst sınırı (ms); aşım → süreç kill + L0/L1 fallback. */
   readonly requestTimeoutMs: number;
+  /**
+   * Güvenlik bulgusu 4: tek yanıt satırı üst sınırı (char). Aşım → süreç
+   * kill + L0/L1 fallback. Varsayılan DEFAULT_RESPONSE_MAX_CHARS.
+   */
+  readonly responseMaxChars: number;
   /** Spawn enjeksiyonu (yalnızca testler); default node:child_process.spawn. */
   readonly spawnProcess?: SpawnFunction;
 }

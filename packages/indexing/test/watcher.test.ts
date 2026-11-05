@@ -135,6 +135,8 @@ function makeHarness(
     readonly logImpl?: (line: string) => void;
     /** Fırlatan onError seam'i (denetim bulgusu 1). */
     readonly onErrorImpl?: (error: Error) => void;
+    /** Güvenlik bulgusu 2: debounce max-wait bütçesi (test seam'i). */
+    readonly maxWaitMs?: number;
   } = {},
 ): Harness {
   const root = mkdtempSync(path.join(tmpdir(), "causoryn-watcher-"));
@@ -170,6 +172,7 @@ function makeHarness(
     workspaceId: "default",
     clock: () => FIXED_NOW,
     debounceMs: DEBOUNCE_MS,
+    ...(options.maxWaitMs === undefined ? {} : { maxWaitMs: options.maxWaitMs }),
     log: options.logImpl ?? ((line) => logs.push(line)),
     ...(options.onErrorImpl === undefined ? {} : { onError: options.onErrorImpl }),
     ...(options.watchFactory === undefined ? {} : { watchFactory: options.watchFactory }),
@@ -627,6 +630,60 @@ describe("WorkspaceWatcher — Live Architecture (sprint-2 B7)", { timeout: 30_0
         expect(done.status).toBe("done");
         const latest = harness.repository.getLatestPublished("default");
         expect(latest?.snapshot.meta.id).not.toBe(firstId);
+      } finally {
+        await cleanup(harness);
+      }
+    },
+  );
+});
+
+/* ------------------------------------------------------------------ */
+/* Güvenlik bulgusu 2: debounce max-wait liveness sınırı               */
+/* ------------------------------------------------------------------ */
+
+describe("WorkspaceWatcher — debounce max-wait (güvenlik bulgusu 2)", { timeout: 30_000 }, () => {
+  it(
+    "sürekli olay akışında max-wait sınırı flush'u geciktirmez; index tazeliği kaybolmaz",
+    async () => {
+      const harness = makeHarness({ maxWaitMs: 900 });
+      try {
+        await runInitialFullIndex(harness);
+        harness.watcher.start();
+
+        // Sürekli akış: her 60 ms'de İÇERİĞİ değişen olay (dev-server /
+        // build aracı profili). Trailing-edge debounce her olayda pencereyi
+        // sıfırlar; max-wait olmadan flush akış sürerken ASLA gelmez.
+        let version = 0;
+        const stream = setInterval(() => {
+          version += 1;
+          writeFileSync(
+            path.join(harness.root, "src", "app.ts"),
+            `${APP_V2}// v${String(version)}\n`,
+            "utf8",
+          );
+        }, 60);
+        try {
+          // maxWaitMs=900: akış sürerken (ilk yazımdan itibaren ≤ ~900 ms +
+          // koşum süresi) en az bir reindex işi AÇILMIŞ olmalı (liveness).
+          await waitFor(
+            () => harness.watcher.stats().jobsEnqueued >= 1,
+            "sürekli akışta debounce flush",
+            1_500,
+          );
+        } finally {
+          clearInterval(stream);
+        }
+        expect(harness.watcher.stats().jobsEnqueued).toBeGreaterThanOrEqual(1);
+
+        // Akış dursun da kuyruğun boşalmasını dürüstçe bekleyelim.
+        harness.watcher.stop();
+        await waitFor(() => {
+          const jobs = harness.manager.jobs();
+          return jobs.length > 0 && jobs.every((job) => job.status === "done");
+        }, "kuyruktaki işler bitti");
+        const latest = harness.repository.getLatestPublished("default");
+        expect(latest).toBeDefined();
+        expect(latest?.stale).toBe(false);
       } finally {
         await cleanup(harness);
       }

@@ -92,6 +92,23 @@ public static class WorkerAnalyzer
         private readonly Dictionary<string, EdgeRecord> _edges = new(StringComparer.Ordinal);
         private readonly HashSet<string> _warningSeen = new(StringComparer.Ordinal);
 
+        /**
+         * Güvenlik bulgusu 4: yanıt node bütçesi. _nodes.Count limitte
+         * kaldığında yeni node'lar ADMIT EDİLMEZ; admit edilmemiş uçlu
+         * kenarlar da eklenmez (dangling edge yok — worker çıktısı
+         * createSnapshot dangling refine'ından geçmek zorundadır).
+         * Truncated=true → yanıt RESPONSE_TRUNCATED tanısı alır ve
+         * status "partial" olur (sessiz kesim yoktur).
+         */
+        private readonly int _nodeLimit;
+
+        public bool Truncated { get; private set; }
+
+        public GraphAssembler(int nodeLimit)
+        {
+            _nodeLimit = nodeLimit;
+        }
+
         public List<string> Warnings { get; } = new();
 
         public NodeRecord EnsureNode(string kind, string qualifiedName, string? relativePath, Dictionary<string, object>? attributes)
@@ -120,6 +137,14 @@ public static class WorkerAnalyzer
                     Attributes = attributes ?? new Dictionary<string, object>(),
                 },
                 key);
+            if (_nodes.Count >= _nodeLimit)
+            {
+                // Limit dolu: kayıt EMİSİYONA GİRMEZ; referansı döner ki
+                // çağıran akış bozulmasın, ama AddEdge bu kaydı admit
+                // saymaz (dangling üretmez).
+                Truncated = true;
+                return record;
+            }
             _nodes.Add(key, record);
             return record;
         }
@@ -136,6 +161,14 @@ public static class WorkerAnalyzer
                 throw new ProtocolException(
                     ProtocolErrorCodes.InternalError,
                     $"TŞ §8 edge kataloğu dışı tür üretilemez: {kind}");
+            }
+
+            // Güvenlik bulgusu 4: ucu admit edilmemiş (limit aşımı) kenar
+            // yayınlanmaz — truncated kenar, dangling üretmemek için bilinçli
+            // düşüştür; Truncated zaten node reddinde işaretlenir.
+            if (!_nodes.ContainsKey(from.Key) || !_nodes.ContainsKey(to.Key))
+            {
+                return;
             }
 
             var key = $"{kind}\u001e{from.Key}\u001e{to.Key}";
@@ -275,7 +308,11 @@ public static class WorkerAnalyzer
     {
         ValidateRequest(request);
 
-        var assembler = new GraphAssembler();
+        // Güvenlik bulgusu 4: yanıt node bütçesi — istekteki opsiyonel
+        // maxNodes veya sert tavan (ProtocolConstants.MaxResponseNodes).
+        var nodeLimit = request.MaxNodes ?? ProtocolConstants.MaxResponseNodes;
+
+        var assembler = new GraphAssembler(nodeLimit);
         var warnings = assembler.Warnings;
 
         // 1) Kaynaklar: yol normalizasyonu, çakışma reddi, deterministik sıra.
@@ -480,6 +517,18 @@ public static class WorkerAnalyzer
         }
 
         // 7) Kanonik çıktı (TŞ §8 invariant iv/vi).
+        if (assembler.Truncated)
+        {
+            // Güvenlik bulgusu 4: sessiz kesim yok — tanı düşer, status
+            // aşağıdaki mevcut ifadeyle "partial" olur.
+            diagnostics.Add(new DiagnosticOut
+            {
+                RelativePath = string.Empty,
+                Code = "RESPONSE_TRUNCATED",
+                Message = $"yanıt node bütçesi aşıldı (maxNodes={nodeLimit.ToString(System.Globalization.CultureInfo.InvariantCulture)}); aşan node/kenarlar yayınlanmadı",
+                Line = 0,
+            });
+        }
         var edges = assembler.SortedEdges();
         var verified = edges.Count(e => e.Resolution == "verified");
         var coverageRatio = edges.Count == 0
@@ -548,6 +597,16 @@ public static class WorkerAnalyzer
             throw new ProtocolException(
                 ProtocolErrorCodes.LimitExceeded,
                 $"files sayısı sınırı aşıldı: {request.Files.Count} > {ProtocolConstants.MaxFileCount}");
+        }
+
+        // Güvenlik bulgusu 4: maxNodes aralık denetimi — null → sert tavan;
+        // 1..MaxResponseNodes dışı açık INVALID_ARGUMENT reddi (sessiz
+        // clamp yerine; ADR-010 açık red kültürü).
+        if (request.MaxNodes is < 1 or > ProtocolConstants.MaxResponseNodes)
+        {
+            throw new ProtocolException(
+                ProtocolErrorCodes.InvalidArgument,
+                $"maxNodes 1..{ProtocolConstants.MaxResponseNodes} aralığında olmalı; gelen: {request.MaxNodes?.ToString(System.Globalization.CultureInfo.InvariantCulture) ?? "null"}");
         }
 
         foreach (var file in request.Files)

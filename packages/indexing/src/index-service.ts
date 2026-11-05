@@ -269,6 +269,16 @@ export class IndexService {
       latest !== undefined &&
       (latest.snapshot.meta.state === "ready" || latest.snapshot.meta.state === "partial")
     ) {
+      // Güvenlik bulgusu 3: no-op dalda da envanter mutabakatı — TS-dışı
+      // dosya silinmişse snapshot korunur ama files kaydı düşürülür.
+      const previousFilePaths = new Set(
+        this.repository
+          .listFiles(this.workspaceId)
+          .map((record) => record.relativePath),
+      );
+      const currentPaths = new Set(
+        prepared.entries.map((entry) => entry.relativePath),
+      );
       const updatedAt = this.clock();
       for (const entry of prepared.entries) {
         this.repository.upsertFile({
@@ -278,6 +288,11 @@ export class IndexService {
           sizeBytes: entry.sizeBytes,
           updatedAt,
         });
+      }
+      for (const previousPath of previousFilePaths) {
+        if (!currentPaths.has(previousPath)) {
+          this.repository.deleteFile(this.workspaceId, previousPath);
+        }
       }
       return {
         snapshotId: latest.snapshot.meta.id,
@@ -335,6 +350,15 @@ export class IndexService {
       entries.map((entry) => [entry.relativePath, entry.contentHash]),
     );
 
+    // Güvenlik bulgusu 3: silme mutabakatının temeli — upsert'lerden ÖNCE
+    // mevcut files tablosu okunur; envanterde karşılığı olmayan kayıtlar
+    // aşağıda düşürülür (TŞ §9 files tablosu = güncel envanter karşılığı).
+    const previousFilePaths = new Set(
+      this.repository
+        .listFiles(this.workspaceId)
+        .map((record) => record.relativePath),
+    );
+
     // Envanter kayıtları (TŞ §9 files tablosu karşılığı).
     const updatedAt = this.clock();
     for (const entry of entries) {
@@ -345,6 +369,11 @@ export class IndexService {
         sizeBytes: entry.sizeBytes,
         updatedAt,
       });
+    }
+    for (const previousPath of previousFilePaths) {
+      if (!contentHashByPath.has(previousPath)) {
+        this.repository.deleteFile(this.workspaceId, previousPath);
+      }
     }
 
     const revision = { id: "working-tree", sequence: this.runCount + 1 };

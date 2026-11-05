@@ -44,6 +44,7 @@ import {
   CSHARP_ROSLYN_ADAPTER_VERSION,
   DEFAULT_DOTNET_COMMAND,
   DEFAULT_REQUEST_TIMEOUT_MS,
+  DEFAULT_RESPONSE_MAX_CHARS,
   WORKER_DLL_RELATIVE_PATH,
   WORKER_UNAVAILABLE_CAPABILITIES,
   type AnalyzeCSharpWorkspaceInput,
@@ -79,6 +80,7 @@ function resolveOptions(partial?: Partial<RoslynAdapterOptions>): RoslynAdapterO
     workerDllPath: partial?.workerDllPath ?? defaultWorkerDllPath(),
     dotnetCommand: partial?.dotnetCommand ?? DEFAULT_DOTNET_COMMAND,
     requestTimeoutMs: partial?.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS,
+    responseMaxChars: partial?.responseMaxChars ?? DEFAULT_RESPONSE_MAX_CHARS,
     ...(partial?.spawnProcess !== undefined ? { spawnProcess: partial.spawnProcess } : {}),
   };
 }
@@ -519,6 +521,7 @@ export async function analyzeCSharpWorkspace(
     workerDllPath: options.workerDllPath,
     requestPayload: request,
     requestTimeoutMs: options.requestTimeoutMs,
+    responseMaxChars: options.responseMaxChars,
     ...(options.spawnProcess !== undefined
       ? { spawnProcess: options.spawnProcess }
       : {}),

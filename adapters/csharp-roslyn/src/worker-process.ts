@@ -23,7 +23,27 @@
  * üzerinden taşınır.
  */
 import { spawn as defaultSpawn, type ChildProcess } from "node:child_process";
-import type { SpawnFunction } from "./types.js";
+import {
+  DEFAULT_RESPONSE_MAX_CHARS,
+  WORKER_ENV_ALLOWLIST,
+  type SpawnFunction,
+} from "./types.js";
+
+/**
+ * Worker alt sürecine geçilecek minimum ortamı kurar (güvenlik bulgusu 1):
+ * yalnızca WORKER_ENV_ALLOWLIST'teki parent değişkenleri taşınır; anahtar/
+ * token gibi allowlist dışı değerler süreç listesinden okunamaz.
+ */
+function buildWorkerEnv(): Record<string, string> {
+  const env: Record<string, string> = {};
+  for (const key of WORKER_ENV_ALLOWLIST) {
+    const value = process.env[key];
+    if (value !== undefined && value.length > 0) {
+      env[key] = value;
+    }
+  }
+  return env;
+}
 
 /** Worker koşum sonucu — analyzer katmanı buna göre fallback kararır. */
 export interface WorkerRunOutcome {
@@ -43,6 +63,11 @@ export interface RunWorkerAnalyzeInput {
   /** Tek analyze isteği (JSON'a serileştirilir; stdin'e tek satır yazılır). */
   readonly requestPayload: unknown;
   readonly requestTimeoutMs: number;
+  /**
+   * Güvenlik bulgusu 4: birikmiş yanıt buffer'ı için char üst sınırı.
+   * Tanımsızsa DEFAULT_RESPONSE_MAX_CHARS (64M — istek bütçesinin aynası).
+   */
+  readonly responseMaxChars?: number;
   /** Test enjeksiyonu; default node:child_process.spawn. */
   readonly spawnProcess?: SpawnFunction;
 }
@@ -79,7 +104,7 @@ export function runWorkerAnalyze(input: RunWorkerAnalyzeInput): Promise<WorkerRu
       child = spawnProcess(
         input.dotnetCommand,
         ["exec", input.workerDllPath],
-        { stdio: ["pipe", "pipe", "pipe"] },
+        { stdio: ["pipe", "pipe", "pipe"], env: buildWorkerEnv() },
       );
     } catch (error) {
       // spawnProcess enjeksiyonları senkron patlayabilir.
@@ -123,9 +148,27 @@ export function runWorkerAnalyze(input: RunWorkerAnalyzeInput): Promise<WorkerRu
     });
 
     child.stdout?.on("data", (chunk: Buffer) => {
+      // Güvenlik bulgusu 4: yanıt buffer bütçesi. Sembol yoğunluğu yüksek
+      // girdide tek yanıt satırı sınırsız büyüyemesin — buffer sınırı
+      // aşarsa süreç kill edilir ve L0/L1 fallback devreye girer
+      // (sınırsız buffer + sınırsız JSON.parse yerine).
+      const incoming = chunk.toString("utf8");
+      const responseMaxChars = input.responseMaxChars ?? DEFAULT_RESPONSE_MAX_CHARS;
+      if (buffer.length + incoming.length > responseMaxChars) {
+        finish(
+          {
+            status: "unavailable",
+            response: null,
+            stderr: stderrText,
+            detail: `worker yanıt satırı ${String(responseMaxChars)} karakter sınırını aştı; süreç sonlandırıldı — sonraki istek taze süreçle ve L0/L1 fallback ile yürütülür`,
+          },
+          child,
+        );
+        return;
+      }
       // Satır-bazlı framing: kısmi satır buffer'da KALIR; yalnızca "\n"
       // ile biten tam satır yanıt adayıdır.
-      buffer += chunk.toString("utf8");
+      buffer += incoming;
       const newlineIndex = buffer.indexOf("\n");
       if (newlineIndex < 0) return;
 

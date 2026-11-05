@@ -56,6 +56,7 @@ stderr ← [roslyn-worker] ...                   (loglar; protokolün parçası 
 | `files[].path` | string | **Zorunlu.** Workspace-relative POSIX yolu. Mutlak yol, `""`/`.`/`..` segmentleri reddedilir. Aynı yol iki kez verilemez. |
 | `files[].content` | string | **Zorunlu.** Tam kaynak kod. |
 | `referenceDirs` | string[] | Opsiyonel. Ek MetadataReference dizinleri (ör. NuGet DLL'leri). Mevcut olmayan dizin uyarı üretir, hata değil. |
+| `maxNodes` | tam sayı | Opsiyonel (güvenlik bulgusu 4). Yanıt node bütçesi; `1..MaxResponseNodes` aralığında olmalı, dışı `INVALID_ARGUMENT`. Verilmezse `MaxResponseNodes` uygulanır. |
 
 İstek nesnesinde bilinmeyen alan → `INVALID_ARGUMENT` (kesin şema reddi,
 Zod strictObject disipliniyle aynı).
@@ -67,6 +68,7 @@ Zod strictObject disipliniyle aynı).
 | `MaxRequestLineChars` | 64.000.000 char (UTF-8'de kötümser bayt üst sınırı; 64 MB bayt bütçesini aşamaz) | Satır newline'a kadar DISCARD edilir; `id: null` + `LIMIT_EXCEEDED` yanıtı yazılır, döngü devam eder. |
 | `MaxFileCount` | 5.000 dosya/istek | İstek reddedilir: `LIMIT_EXCEEDED`. |
 | `MaxFileContentBytes` | 2.000.000 bayt/dosya (TŞ §20 `maxFileBytes` ile uyumlu) | İstek reddedilir: `LIMIT_EXCEEDED`. |
+| `MaxResponseNodes` | 250.000 node/yanıt (güvenlik bulgusu 4; istek `maxNodes` ile altında seçilebilir) | Sert tavan ya da istek bütçesi dolunca aşan node'lar YAYINLANMAZ; uçları yayınlanmayan kenarlar da düşer (dangling yok). Yanıta `RESPONSE_TRUNCATED` tanısı düşer ve `status: "partial"` olur — sessiz kesim yoktur. |
 
 Sınırlar sabittir (protokol v1'de istekte yapılandırılamaz) ve aynı girdiye
 deterministik davranışı korur. Çalışma zamanı ayrıca parser/gezinme için

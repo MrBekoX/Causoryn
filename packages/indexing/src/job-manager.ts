@@ -322,6 +322,9 @@ export class IndexJobManager {
       });
       this.records.set(jobId, failed);
       this.settle(jobId);
+      // Güvenlik bulgusu 5: terminal kayıt sonrası saklama sınırı boşaltılır
+      // (yalnızca terminal kayıtlar düşürülür — bkz. evictOverflow).
+      this.evictOverflow();
       return;
     }
 
@@ -341,6 +344,7 @@ export class IndexJobManager {
     });
     this.records.set(jobId, done);
     this.settle(jobId);
+    this.evictOverflow();
   }
 
   private failSafely(jobId: string, error: unknown): void {
@@ -358,6 +362,7 @@ export class IndexJobManager {
       );
     }
     this.settle(jobId);
+    this.evictOverflow();
   }
 
   /** Bekleyen waiter'ları terminal kayıtla çözer. */
@@ -375,12 +380,27 @@ export class IndexJobManager {
     }
   }
 
-  /** maxJobs aşımında en eski kaydı FIFO düşürür; bekleyenleri reddeder. */
+  /**
+   * maxJobs aşımında en eski TERMINAL kaydı FIFO düşürür (güvenlik
+   * bulgusu 5). Kuyrukta bekleyen veya işletimde olan işler ASLA
+   * düşürülmez: kayıt düşürmek işi sessizce iptal ederdi (runJob kayıt
+   * yokken sessiz döner, iş koşum olmadan kaybolur). maxJobs bir kayıt
+   * SAKLAMA sınırıdır — geçici taşma kuyruk uzunluğuyla sınırlıdır ve
+   * işler terminal duruma gelirken boşaltılır (post-settle evict).
+   * Terminal kayıtların waiter'ları settle ile zaten çözülmüştür; reject
+   * dalı savunma amaçlı kalır.
+   */
   private evictOverflow(): void {
     while (this.records.size > this.maxJobs) {
-      const oldest = this.records.keys().next();
-      if (oldest.done === true) break;
-      const jobId = oldest.value;
+      let oldestTerminal: string | undefined;
+      for (const [jobId, record] of this.records) {
+        if (record.status === "done" || record.status === "failed") {
+          oldestTerminal = jobId;
+          break;
+        }
+      }
+      if (oldestTerminal === undefined) break;
+      const jobId = oldestTerminal;
       this.records.delete(jobId);
       this.roots.delete(jobId);
       const list = this.waiters.get(jobId);

@@ -30,6 +30,7 @@ import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { beforeAll, describe, expect, it } from "vitest";
+import { buildRoslynWorkerBinary } from "./roslyn-worker-build.js";
 
 import {
   createEdge,
@@ -146,16 +147,18 @@ if (!workerReady) {
 beforeAll(
   () => {
     if (!workerReady) return;
-    const build = spawnSync("dotnet", ["build", WORKER_DIR], {
-      encoding: "utf8",
-      timeout: 300_000,
-      maxBuffer: 16 * 1024 * 1024,
-      shell: false,
-    });
+    // Build serileştirme: roslyn-worker.test.ts ve csharp-roslyn-adapter
+    // paralel fork'larda aynı `dotnet build` çağrısını yapar; eşzamanlı
+    // MSBuild obj/ ara DLL'ine yarışır (CS2012 → exit=1, bizzat yeniden
+    // üretildi) ve kaybeden suite FAIL'e düşer. Ortak kilitli builder:
+    // komut/parametreler aynı, yalnızca yarış kaldırılır.
+    const build = buildRoslynWorkerBinary();
     if (build.status !== 0 || !existsSync(WORKER_DLL)) {
+      // MSBuild hataları stdout'a yazılır; gerçek neden gizlenmesin.
       throw new Error(
         `worker derlemesi başarısız (exit=${String(build.status)}) — B8 testleri eski binary'ye karşı koşulmaz` +
-          (typeof build.stderr === "string" ? `: ${build.stderr.slice(0, 400)}` : ""),
+          (build.stderr ? ` [stderr]: ${build.stderr.slice(0, 400)}` : "") +
+          (build.stdout ? ` [stdout]: ${build.stdout.slice(-400)}` : ""),
       );
     }
   },

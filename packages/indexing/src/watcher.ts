@@ -57,6 +57,17 @@ export const WATCHER_DEBOUNCE_MAX_MS = 1000;
 /** Varsayılan debounce: bandın ortası. */
 export const WATCHER_DEBOUNCE_DEFAULT_MS = 500;
 
+/**
+ * Güvenlik bulgusu 2: trailing-edge debounce'in LIVENESS üst sınırı.
+ * Her yeni olay pencereyi sıfırladığı için sürekli olay akışı (workspace'e
+ * yazan dev-server/build aracı) flushPending'i süresiz geciktirebilirdi
+ * ve pending kümesi sınırsız büyüyebilirdi. max-wait dolunca küme
+ * mutlaka flush'lanır: varsayılan debounce × 4 (500 ms → 2000 ms).
+ */
+export const WATCHER_MAX_WAIT_DEFAULT_MULTIPLIER = 4;
+/** maxWaitMs için üst sınır (makul bütçe; testler alt değer verir). */
+export const WATCHER_MAX_WAIT_MAX_MS = 60_000;
+
 /** Watcher yaşam döngüsü durumları. */
 export type WorkspaceWatcherState = "stopped" | "watching" | "degraded";
 
@@ -104,6 +115,14 @@ export interface WorkspaceWatcherOptions {
   readonly clock: () => string;
   /** TŞ §9 bandında [300,1000] tam sayı; dışı RangeError. Varsayılan 500. */
   readonly debounceMs?: number;
+  /**
+   * Güvenlik bulgusu 2: debounce max-wait liveness bütçesi (ms). Sürekli
+   * olay akışında trailing-edge pencere süresiz sıfırlanabildiğinden,
+   * pending kümesi İLK olayından itibaren bu süre dolunca mutlaka
+   * flush'lanır. Tam sayı, ≥ debounceMs ve ≤ 60_000; dışı RangeError.
+   * Varsayılan: debounceMs × 4.
+   */
+  readonly maxWaitMs?: number;
   /** Varsayılan: stderr'e tek satır yazar (kırmızı çizgi: stdout MCP'dir). */
   readonly log?: (line: string) => void;
   /** Degrade epizotunda çağrılır; watcher hatayı yine de kendi loglar. */
@@ -211,6 +230,7 @@ export class WorkspaceWatcher {
   private readonly workspaceId: string;
   private readonly clock: () => string;
   private readonly debounceMs: number;
+  private readonly maxWaitMs: number;
   private readonly log: (line: string) => void;
   private readonly onError: ((error: Error) => void) | undefined;
   private readonly watchFactory: WatchFactory;
@@ -221,6 +241,12 @@ export class WorkspaceWatcher {
   private timer: ReturnType<typeof setTimeout> | undefined;
   /** Debounce penceresindeki aday yollar (POSIX kök-göreceli). */
   private readonly pending = new Set<string>();
+  /**
+   * Güncel bekleyen kümenin İLK olayının monotonic ms damgası (Date.now;
+   * setTimeout ile aynı gerçek-zaman tabanı). max-wait liveness bütçesi
+   * bunun üzerinden ölçülür; flush/stop/degrade'de temizlenir.
+   */
+  private pendingSince: number | undefined;
   /** En son indekslenen durum: relativePath → contentHash (TŞ fingerprint). */
   private fingerprints = new Map<string, string>();
 
@@ -241,6 +267,17 @@ export class WorkspaceWatcher {
         `debounceMs TŞ §9 bandında olmalı: [${String(WATCHER_DEBOUNCE_MIN_MS)}, ${String(WATCHER_DEBOUNCE_MAX_MS)}] ms tam sayı; gelen: ${String(debounceMs)}`,
       );
     }
+    const maxWaitMs =
+      options.maxWaitMs ?? debounceMs * WATCHER_MAX_WAIT_DEFAULT_MULTIPLIER;
+    if (
+      !Number.isInteger(maxWaitMs) ||
+      maxWaitMs < debounceMs ||
+      maxWaitMs > WATCHER_MAX_WAIT_MAX_MS
+    ) {
+      throw new RangeError(
+        `maxWaitMs tam sayı olmalı ve [debounceMs, ${String(WATCHER_MAX_WAIT_MAX_MS)}] aralığında olmalı (≥ ${String(debounceMs)}); gelen: ${String(maxWaitMs)}`,
+      );
+    }
     this.rootPath = options.rootPath;
     this.policy = options.policy;
     this.jobManager = options.jobManager;
@@ -248,6 +285,7 @@ export class WorkspaceWatcher {
     this.workspaceId = options.workspaceId;
     this.clock = options.clock;
     this.debounceMs = debounceMs;
+    this.maxWaitMs = maxWaitMs;
     this.log = options.log ?? DEFAULT_LOG;
     this.onError = options.onError;
     this.watchFactory = options.watchFactory ?? defaultWatchFactory;
@@ -351,6 +389,7 @@ export class WorkspaceWatcher {
       this.handle = undefined;
     }
     this.pending.clear();
+    this.pendingSince = undefined;
     this.watcherState = "stopped";
   }
 
@@ -381,6 +420,9 @@ export class WorkspaceWatcher {
         return;
       }
       this.pending.add(decision.relativePath);
+      if (this.pendingSince === undefined) {
+        this.pendingSince = Date.now();
+      }
       this.scheduleDebounce();
     } catch (error) {
       this.errors += 1;
@@ -388,13 +430,25 @@ export class WorkspaceWatcher {
     }
   }
 
-  /** Trailing-edge debounce: her yeni olay pencereyi sıfırlar (TŞ §9). */
+  /**
+   * Trailing-edge debounce (TŞ §9) + max-wait liveness sınırı (güvenlik
+   * bulgusu 2): her yeni olay pencereyi debounceMs'e sıfırlar; ancak
+   * pendingSince'den bu yana maxWaitMs dolduysa gecikme min(debounce,
+   * kalan-max-wait)'e kırpılır — sürekli olay akışı flush'u süresiz
+   * geciktiremez, pending kümesi sınırsız büyüyemez.
+   */
   private scheduleDebounce(): void {
     if (this.timer !== undefined) clearTimeout(this.timer);
-    this.timer = setTimeout(() => {
-      this.timer = undefined;
-      this.flushPending();
-    }, this.debounceMs);
+    const pendingSince = this.pendingSince ?? Date.now();
+    const remainingMaxWait = this.maxWaitMs - (Date.now() - pendingSince);
+    const delay = Math.min(this.debounceMs, Math.max(0, remainingMaxWait));
+    this.timer = setTimeout(
+      () => {
+        this.timer = undefined;
+        this.flushPending();
+      },
+      delay,
+    );
     // Timer process'i tek başına ayakta tutmasın (in-process bileşen).
     this.timer.unref?.();
   }
@@ -404,9 +458,12 @@ export class WorkspaceWatcher {
     try {
       if (this.watcherState !== "watching") {
         this.pending.clear();
+        this.pendingSince = undefined;
         return;
       }
       if (this.pending.size === 0) return;
+      // Küme tüketildi: max-wait ölçümü yeni batch için sıfırlanır.
+      this.pendingSince = undefined;
       const candidates = [...this.pending].sort();
       this.pending.clear();
       const evaluated = candidates.map((relativePosix) => ({
@@ -542,6 +599,7 @@ export class WorkspaceWatcher {
       this.timer = undefined;
     }
     this.pending.clear();
+    this.pendingSince = undefined;
     if (this.handle !== undefined) {
       try {
         this.handle.close();

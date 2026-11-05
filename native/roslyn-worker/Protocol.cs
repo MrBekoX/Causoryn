@@ -56,6 +56,17 @@ public static class ProtocolConstants
 
     /** files[] tek girdisinin UTF-8 bayt üst sınırı (TŞ §20 maxFileBytes ile uyumlu). */
     public const int MaxFileContentBytes = 2_000_000;
+
+    /**
+     * Güvenlik bulgusu 4: tek yanıtta yayınlanan node sayısının sert üst
+     * sınırı (savunma derinliği — istek bacakındaki MaxRequestLineChars/
+     * MaxFileCount sınırlarının yanıt bacağı karşılığı). Sınır aşılırsa
+     * aşan node/kenarlar YAYINLANMAZ, yanıta RESPONSE_TRUNCATED tanısı
+     * düşer ve status "partial" olur (sessiz kesim yoktur). İstekteki
+     * opsiyonel "maxNodes" alanı bu tavanın ALTINDA bir bütçe seçebilir;
+     * üstünü istemek INVALID_ARGUMENT reddidir.
+     */
+    public const int MaxResponseNodes = 250_000;
 }
 
 /**
@@ -115,6 +126,14 @@ public sealed class WorkerRequest
 
     [JsonPropertyName("referenceDirs")]
     public List<string>? ReferenceDirs { get; set; }
+
+    /**
+     * Güvenlik bulgusu 4: opsiyonel yanıt node bütçesi. null →
+     * ProtocolConstants.MaxResponseNodes (sert tavan); tavan üstü veya
+     * <1 → INVALID_ARGUMENT. Testler küçük değerle kesimi kanıtlar.
+     */
+    [JsonPropertyName("maxNodes")]
+    public int? MaxNodes { get; set; }
 
     [JsonExtensionData]
     public Dictionary<string, JsonElement>? ExtensionData { get; set; }

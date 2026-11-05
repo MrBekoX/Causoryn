@@ -461,3 +461,96 @@ describe("INDEXED_ADAPTERS — adapter yetenek metadata'sı", () => {
     );
   });
 });
+
+/* ------------------------------------------------------------------ */
+/* Güvenlik bulgusu 3: silinen dosya files tablosundan düşürülmeli     */
+/* ------------------------------------------------------------------ */
+
+describe("IndexService silme mutabakatı — güvenlik bulgusu 3", { timeout: 30_000 }, () => {
+  function makeTmpWorkspace(): string {
+    const root = mkdtempSync(path.join(tmpdir(), "causoryn-del-"));
+    mkdirSync(path.join(root, "src"), { recursive: true });
+    writeFileSync(
+      path.join(root, "src", "a.ts"),
+      "export class A { ping(): number { return 1; } }\n",
+      "utf8",
+    );
+    writeFileSync(
+      path.join(root, "src", "b.ts"),
+      "export class B { pong(): number { return 2; } }\n",
+      "utf8",
+    );
+    writeFileSync(path.join(root, "notes.md"), "# notlar\n", "utf8");
+    return root;
+  }
+
+  /** allowRoot'u geçici kök olan servis (silme senaryoları kök-değişimlidir). */
+  function makeTmpService(repository: InMemoryGraphRepository, root: string, workspaceId: string): IndexService {
+    const policy = WorkspaceAccessPolicy.create({ allowRoots: [root] });
+    return new IndexService({
+      workspaceId,
+      policy,
+      repository,
+      clock: () => FIXED_NOW,
+      limits: { maxFiles: 50_000 },
+    });
+  }
+
+  it("full runIndex: silinen dosyanın files kaydı düşürülür (ghost kayıt yok)", () => {
+    const root = makeTmpWorkspace();
+    try {
+      const repository = new InMemoryGraphRepository();
+      const service = makeTmpService(repository, root, "del-full");
+      service.runIndex(root);
+      expect(repository.listFiles("del-full").length).toBe(3);
+
+      rmSync(path.join(root, "src", "a.ts"));
+      service.runIndex(root);
+
+      const paths = repository
+        .listFiles("del-full")
+        .map((record) => record.relativePath);
+      expect(paths).toEqual(["notes.md", "src/b.ts"]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("incremental (silinen TS): yeniden yayımlanır ve files kaydı düşürülür", () => {
+    const root = makeTmpWorkspace();
+    try {
+      const repository = new InMemoryGraphRepository();
+      const service = makeTmpService(repository, root, "del-inc");
+      service.runIndex(root);
+      rmSync(path.join(root, "src", "a.ts"));
+
+      const run = service.runIncrementalIndex(root, ["src/a.ts"]);
+      expect(run.published).toBe(true);
+      const paths = repository
+        .listFiles("del-inc")
+        .map((record) => record.relativePath);
+      expect(paths).toEqual(["notes.md", "src/b.ts"]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("incremental no-op (silinen TS-dışı): snapshot korunur ama files kaydı düşürülür", () => {
+    const root = makeTmpWorkspace();
+    try {
+      const repository = new InMemoryGraphRepository();
+      const service = makeTmpService(repository, root, "del-noop");
+      service.runIndex(root);
+      rmSync(path.join(root, "notes.md"));
+
+      const run = service.runIncrementalIndex(root, ["notes.md"]);
+      expect(run.published).toBe(false);
+      const paths = repository
+        .listFiles("del-noop")
+        .map((record) => record.relativePath);
+      expect(paths).toEqual(["src/a.ts", "src/b.ts"]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});

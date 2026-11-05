@@ -306,4 +306,32 @@ describe("IndexJobManager — refresh_index iş yönetimi (sprint-2 B6)", () => 
     // Aynı gerekçe: üç fixture koşumu + tam suite paralel yükü bütçesi
     // (beklenti gevşetmesi yok).
   }, 30_000);
+
+  it("güvenlik bulgusu 5: kuyruktaki iş evict edilmez — iş koşar, kayıt sonra düşer", async () => {
+    // Kırmızı kanıt: bugünkü evictOverflow KUYRUKTA bekleyen r1 kaydını
+    // düşürür; waitForJob reddedilir ve iş hiç koşmaz (sessiz iptal).
+    // Doğru davranış: maxJobs kayıt SAKLAMA sınırıdır — düşürme yalnızca
+    // terminal (done/failed) kayıtlara uygulanır; iş koşumu tamamlanır.
+    const harness = makeHarness({ maxJobs: 2 });
+    const r1 = harness.manager.refreshIndex(FIXTURE_ROOT, { mode: "full" });
+    const r2 = harness.manager.refreshIndex(FIXTURE_ROOT, { mode: "full" });
+    const r3 = harness.manager.refreshIndex(FIXTURE_ROOT, { mode: "full" });
+
+    const waiter = harness.manager.waitForJob(r1.jobId);
+    for (const task of harness.tasks.splice(0)) task();
+    const done1 = await waiter;
+
+    // İş KOŞTU ve snapshot yayımladı (sessiz iptal yok).
+    expect(done1.jobId).toBe(r1.jobId);
+    expect(done1.status).toBe("done");
+    expect(done1.snapshotId).not.toBeNull();
+    const published = harness.repository.getLatestPublished("default");
+    expect(published).toBeDefined();
+
+    // Kayıt saklama sınırı yine korunur: en eski DONE kayıt düşer.
+    expect(harness.manager.status(r1.jobId)).toBeUndefined();
+    expect(harness.manager.status(r2.jobId)).toBeDefined();
+    expect(harness.manager.status(r3.jobId)).toBeDefined();
+    expect(harness.manager.latest()?.jobId).toBe(r3.jobId);
+  }, 30_000);
 });
