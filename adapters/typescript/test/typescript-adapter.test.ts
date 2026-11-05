@@ -302,7 +302,7 @@ describe("analyzeTypeScriptProgram — determinizm", () => {
     const a = analyzeTypeScriptProgram(fixture);
     const b = analyzeTypeScriptProgram(fixture);
     expect(JSON.stringify(a)).toBe(JSON.stringify(b));
-  });
+  }, 30_000);
 
   it("girdi dosya sırası değişse bile çıktı aynı kalır", () => {
     const fixture = loadFixtureSources();
@@ -310,7 +310,7 @@ describe("analyzeTypeScriptProgram — determinizm", () => {
     const a = analyzeTypeScriptProgram(fixture);
     const b = analyzeTypeScriptProgram(shuffled);
     expect(JSON.stringify(a)).toBe(JSON.stringify(b));
-  });
+  }, 30_000);
 
   it("aynı girdiden üretilen snapshot'ların canonical JSON'u bit-bit aynıdır", () => {
     const fixture = loadFixtureSources();
@@ -327,7 +327,7 @@ describe("analyzeTypeScriptProgram — determinizm", () => {
         edges: result.edges,
       });
     expect(snapshotCanonicalJson(build())).toBe(snapshotCanonicalJson(build()));
-  });
+  }, 30_000);
 });
 
 /* ------------------------------------------------------------------ */

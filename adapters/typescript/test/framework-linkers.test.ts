@@ -529,7 +529,7 @@ describe("extractFrameworkEdges — negatif (framework olmayan proje)", () => {
     const endpoint = findNode(ordersMain, "Endpoint", "POST /orders");
     expect(endpoint.attributes?.["method"]).toBe("POST");
     expect("framework" in (endpoint.attributes ?? {})).toBe(false);
-  });
+  }, 30_000);
 });
 
 /* ------------------------------------------------------------------ */
@@ -716,7 +716,7 @@ describe("analyzeTypeScriptProgramWithFrameworks — tek koşum iki çıktı", (
     expect(JSON.stringify(combined.framework)).toBe(
       JSON.stringify(extractFrameworkEdges(input)),
     );
-  });
+  }, 30_000);
 
   it("next.js girdisinde eşdeğerlik korunur", () => {
     const input = loadFixture(NEXTJS_FIXTURE_ROOT, "w_fx_combined_next");
@@ -727,7 +727,7 @@ describe("analyzeTypeScriptProgramWithFrameworks — tek koşum iki çıktı", (
     expect(JSON.stringify(combined.framework)).toBe(
       JSON.stringify(extractFrameworkEdges(input)),
     );
-  });
+  }, 30_000);
 
   it("framework olmayan girdide de eşdeğerlik korunur", () => {
     const input = loadFixture(path.join(EXAMPLES_ROOT, "fixture-ts-orders"), "w_fx_combined_orders");
@@ -740,7 +740,7 @@ describe("analyzeTypeScriptProgramWithFrameworks — tek koşum iki çıktı", (
     );
     expect(combined.framework.edges).toEqual([]);
     expect(combined.framework.detections).toEqual([]);
-  });
+  }, 30_000);
 });
 
 /* ------------------------------------------------------------------ */

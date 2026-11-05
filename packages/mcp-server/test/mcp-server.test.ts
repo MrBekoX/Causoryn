@@ -128,14 +128,16 @@ describe("MCP server — protokol düzeyi", { timeout: 30_000 }, () => {
     }
   });
 
-  it("tools/list: tam olarak 9 araç; her biri inputSchema + outputSchema taşır", async () => {
+  it("tools/list: tam olarak 16 araç; her biri inputSchema + outputSchema taşır", async () => {
     const pair = await connectClient(makeContext());
     try {
       const { tools } = await pair.client.listTools();
       expect(tools.map((t) => t.name).sort()).toEqual([...TOOL_NAMES].sort());
       // Sıra TŞ §10.2 katalog sırasıdır: index_status + refresh_index
       // sprint-2 B6 ile, get_symbol_context sprint-2 B5 ile,
-      // trace_execution sprint-2 B4 ile eklendi.
+      // trace_execution sprint-2 B4 ile, Faz C'nin 7 aracı sprint-3 C8 ile
+      // eklendi (Faz C araçları trace_execution ile get_evidence arasında,
+      // architecture_timeline en sonda — PDF katalog sırası).
       expect(TOOL_NAMES).toEqual([
         "causoryn_get_capabilities",
         "causoryn_workspace_summary",
@@ -145,7 +147,14 @@ describe("MCP server — protokol düzeyi", { timeout: 30_000 }, () => {
         "causoryn_find_symbols",
         "causoryn_get_symbol_context",
         "causoryn_trace_execution",
+        "causoryn_analyze_impact",
+        "causoryn_check_architecture",
+        "causoryn_compare_architecture",
+        "causoryn_get_agent_context",
+        "causoryn_generate_onboarding",
+        "causoryn_export_documentation",
         "causoryn_get_evidence",
+        "causoryn_architecture_timeline",
       ]);
       for (const tool of tools) {
         expect(tool.inputSchema, `${tool.name} inputSchema yok`).toBeDefined();
@@ -766,13 +775,15 @@ describe("MCP server — protokol düzeyi", { timeout: 30_000 }, () => {
     expect(caught).toBeInstanceOf(Error);
   });
 
-  it("hata kodu seti sabittir (TŞ §10.1 + proje uzantıları INVALID_ARGUMENT, EVIDENCE_NOT_FOUND, SYMBOL_NOT_FOUND)", () => {
-    // TŞ §10.1 listesinde INVALID_ARGUMENT, EVIDENCE_NOT_FOUND ve
-    // SYMBOL_NOT_FOUND YOKTUR; görev sözleşmeleri geçersiz girdi, bulunamayan
-    // node/edge/evidence kimliği (sprint-1 görev 7) ve bulunamayan sembol
-    // (sprint-2 B5 causoryn_get_symbol_context) için sabit envelope kodları
-    // istediğinden üçü proje uzantısı olarak dahil edilmiştir (bkz.
-    // src/errors.ts başlığı).
+  it("hata kodu seti sabittir (TŞ §10.1 taban + üç proje uzantısı)", () => {
+    // TŞ §10.1 taban listesi + ÜÇ proje uzantısı: INVALID_ARGUMENT +
+    // EVIDENCE_NOT_FOUND (K-008; sprint-1 görev 7) ve SYMBOL_NOT_FOUND
+    // (sprint-2 B5 causoryn_get_symbol_context) — bkz. src/errors.ts
+    // başlığı. POLICY_INVALID, INVALID_REVISION ve EXPORT_NOT_ALLOWED uzantı
+    // DEĞİLDİR: TŞ §10.1 sabit listesindedirler ve sprint-3 C8'de (guard
+    // policy + git revizyon + export output yetkilendirmesi araçları) ilk
+    // kez kullanıldılar (takım denetimi bulgusu: export yazma reddi için
+    // yeni uzantı kodu basmak K-008 örüntüsünün önkoşulunu ihlal ederdi).
     expect([...CAUSORYN_TOOL_ERROR_CODES].sort()).toEqual(
       [
         "WORKSPACE_NOT_AUTHORIZED",
@@ -783,6 +794,9 @@ describe("MCP server — protokol düzeyi", { timeout: 30_000 }, () => {
         "INVALID_ARGUMENT",
         "EVIDENCE_NOT_FOUND",
         "SYMBOL_NOT_FOUND",
+        "POLICY_INVALID",
+        "INVALID_REVISION",
+        "EXPORT_NOT_ALLOWED",
         "UNSUPPORTED_LANGUAGE",
         "INTERNAL_ERROR",
       ].sort(),

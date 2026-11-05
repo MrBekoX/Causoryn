@@ -29,4 +29,15 @@ export type { ParsedPolicyConfig, WorkspacePolicyConfig } from "./policy-config.
 export { WorkspacePolicyError } from "./policy-error.js";
 export type { PolicyErrorCode } from "./policy-error.js";
 
+// Export çıktı yetkilendirmesi — sprint-3 C6 (TŞ §16 "yalnızca explicit
+// izinli output dizini"). WorkspaceAccessPolicy'den bilerek bağımsız,
+// ayrı beyanlı output kök listesiyle çalışır.
+export { OutputAccessPolicy, OutputPolicyError } from "./output-policy.js";
+export type {
+  OutputAllow,
+  OutputDecision,
+  OutputDeny,
+  OutputPolicyErrorCode,
+} from "./output-policy.js";
+
 export { findMatchingIgnorePattern, matchesIgnorePattern } from "./ignore-matcher.js";

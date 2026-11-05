@@ -452,7 +452,10 @@ describe("INDEXED_ADAPTERS — adapter yetenek metadata'sı", () => {
     // kalmıştı ve get_capabilities üzerinden MCP yüzeyine bayat değer
     // taşıyordu. Metadata artık adapter'ın TS_ADAPTER_FRAMEWORK_LINKERS
     // beyanından türetilir (tek doğruluk kaynağı).
-    expect(INDEXED_ADAPTERS).toHaveLength(1);
+    // B9 ile ikinci dil adapter'ı (csharp-roslyn) kaydedildi — kayıt
+    // sırası korunur: ilk giriş TS, ikinci C# (index-service-csharp.test.ts
+    // C# metadata sözleşmesini ayrıca doğrular).
+    expect(INDEXED_ADAPTERS).toHaveLength(2);
     const adapter = INDEXED_ADAPTERS[0] as (typeof INDEXED_ADAPTERS)[number];
     expect(adapter.language).toBe("typescript");
     expect(adapter.levels.frameworkLinkers).toBe("express+nextjs");
