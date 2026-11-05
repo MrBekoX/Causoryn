@@ -14,7 +14,10 @@
  * aittir; bu dilimde yeniden indeksleme `runIndex` çağrısıyla yapılır.
  * Sprint-2 B6: `IndexJobManager`, refresh_index tool'u için `runIndex`
  * pipeline'ını in-process async iş olarak sarmalar (TŞ §10.2
- * causoryn_refresh_index "Yeni snapshot işi").
+ * causoryn_refresh_index "Yeni snapshot işi"). Sprint-2 B7 (Live
+ * Architecture, TŞ §9): `WorkspaceWatcher` (node:fs.watch, policy süzgeci,
+ * debounce, fingerprint no-op skip, invalidation) + `IndexService.runIncrementalIndex`
+ * (karma tabanlı karar, atomik publish, eski snapshot stale=true).
  */
 import {
   TS_ADAPTER_ANALYZER_ID,
@@ -41,6 +44,20 @@ export type {
   IndexJobRecord,
   IndexJobStatus,
 } from "./job-manager.js";
+export {
+  hashWorkspaceFile,
+  WATCHER_DEBOUNCE_DEFAULT_MS,
+  WATCHER_DEBOUNCE_MAX_MS,
+  WATCHER_DEBOUNCE_MIN_MS,
+  WorkspaceWatcher,
+} from "./watcher.js";
+export type {
+  WatchFactory,
+  WatchHandle,
+  WorkspaceWatcherOptions,
+  WorkspaceWatcherState,
+  WorkspaceWatcherStats,
+} from "./watcher.js";
 
 /**
  * Adapter linker beyanından türetilen metadata etiketi (denetim bulgusu 1

@@ -1241,6 +1241,384 @@ function symbolNodeOf(node: GraphNode): z.infer<typeof SymbolContextNodeSchema> 
 }
 
 /* ------------------------------------------------------------------ */
+/* trace_execution (sprint-2 B4)                                       */
+/* ------------------------------------------------------------------ */
+
+export const TraceExecutionInputSchema = z.strictObject({
+  workspaceId: z.string().min(1).optional(),
+  /**
+   * Çağrı zincirinin başlangıç noktası (TŞ §10.2 "entrypoint"): yayımlanmış
+   * node kimliği ("node:<hex>") YA DA qualifiedName kabul edilir. Framework
+   * endpoint adları ("POST /orders" — B3 linker ROUTES_TO çıktıları) ve
+   * sembol adları bu yolla çözülür; ad birden çok node'a tam eşleşirse
+   * AMBIGUOUS_SYMBOL + adaylar, hiçbir node'a eşleşmezse SYMBOL_NOT_FOUND
+   * döner (get_symbol_context ile aynı çözümleme sözleşmesi).
+   */
+  entrypoint: z.string().min(1),
+  /**
+   * Yol uzunluğu sınırı — kenar sayısı (TŞ §20 resource budget "maxDepth").
+   * Şema 0'a izin verir; 0 anlamsal girdi hatasıdır → INVALID_ARGUMENT
+   * (görev sözleşmesi). Tavan results.maxDepth aşılırsa LIMIT_EXCEEDED.
+   */
+  maxDepth: z.number().int().min(0),
+  /**
+   * Döndürülecek azami yol sayısı (TŞ §20 resource budget "maxPaths").
+   * Şema 0'a izin verir; 0 → INVALID_ARGUMENT. Tavan results.maxPaths
+   * aşılırsa LIMIT_EXCEEDED. Sınır keşif sırasında vurulursa sonuç
+   * truncated=true + uyarıyla döner.
+   */
+  maxPaths: z.number().int().min(0),
+});
+
+/** Yol kenarı: resolution düzeyi KENDİ alanında taşınır (karıştırma yasak). */
+export const TracePathEdgeSchema = z.strictObject({
+  id: z.string(),
+  from: z.string(),
+  to: z.string(),
+  kind: z.string(),
+  resolution: z.string(),
+  evidenceIds: z.array(z.string()),
+});
+
+export const TracePathSchema = z.strictObject({
+  /** 0 tabanlı, deterministik DFS keşif sırası (aynı girdi → aynı sıra). */
+  index: z.number().int().nonnegative(),
+  /**
+   * Zincir etiketi: yolun EN ZAYIF kenar resolution'ı — tüm kenarlar
+   * verified ise "verified"; herhangi bir heuristic kenar varsa "heuristic";
+   * herhangi bir unresolved kenar varsa "unresolved". Kenar düzeyi
+   * resolution alanlarıyla KARIŞTIRILMAZ: heuristic kenarlı zincir
+   * "heuristic" işaretlenir, verified gibi sunulmaz (görev sözleşmesi;
+   * TŞ §4.2 "statik kanıt ve bilinmeyen edge'ler ayrı").
+   */
+  resolution: z.enum(["verified", "heuristic", "unresolved"]),
+  /** Zincir düğümleri; length === edges.length + 1, [0] entrypoint. */
+  nodeIds: z.array(z.string()),
+  /** Sıralı kenar listesi; resolution her kenarın kendi alanındadır. */
+  edges: z.array(TracePathEdgeSchema),
+  /**
+   * Yolun neden bittiği: "leaf" = gidecek yeni node kalmadı; "max-depth" =
+   * maxDepth sınırında duruldu ve gidecek komşu vardı; "unresolved-edge" =
+   * son kenar unresolved olduğundan zincir O NOKTADA bitti (ötesi
+   * genişletilmedi; kenar yolun içinde kalır).
+   */
+  stoppedReason: z.enum(["leaf", "max-depth", "unresolved-edge"]),
+});
+
+export const TraceExecutionDataSchema = z.strictObject({
+  workspaceId: z.string(),
+  /** Çözümlenen giriş node'u (endpoint veya sembol). */
+  entrypoint: SymbolContextNodeSchema,
+  /** Uygulanan sınırlar (doğrulanmış değerler). */
+  maxDepth: z.number().int().positive(),
+  maxPaths: z.number().int().positive(),
+  /** Döndürülen yol sayısı. */
+  pathCount: z.number().int().nonnegative(),
+  /** maxPaths veya maxDepth keşfi kestiyse true (TŞ §20 truncated sözleşmesi). */
+  truncated: z.boolean(),
+  paths: z.array(TracePathSchema),
+  /** Yollardaki tüm node'lar: qualifiedName+id sıralı, tekrarsız. */
+  nodes: z.array(SymbolContextNodeSchema),
+  /** Kenarların kanıt kayıtları: tekrarsız, id sıralı (get_symbol_context kalıbı). */
+  evidence: z.array(EvidenceRecordSchema),
+});
+
+/** Zincir etiketi: kenar resolution'larından en zayıf düzey. */
+function chainResolutionOf(
+  resolutions: readonly string[],
+): "verified" | "heuristic" | "unresolved" {
+  if (resolutions.includes("unresolved")) return "unresolved";
+  if (resolutions.includes("heuristic")) return "heuristic";
+  return "verified";
+}
+
+/** Yürüyüşün ürettiği ham yol kaydı. */
+interface TraceWalkPath {
+  readonly nodeIds: readonly string[];
+  readonly edges: readonly GraphEdge[];
+  readonly stoppedReason: "leaf" | "max-depth" | "unresolved-edge";
+}
+
+interface TraceWalkResult {
+  readonly paths: readonly TraceWalkPath[];
+  /** maxPaths sınırı dışında kaydedilmemiş en az bir yol vardı. */
+  readonly truncatedByPaths: boolean;
+  /** Bir node maxDepth sınırında, gidecek komşusu varken durduruldu. */
+  readonly truncatedByDepth: boolean;
+}
+
+/**
+ * Deterministik DFS basit-yol sayımı (TŞ §8 invariant iv/vi).
+ *
+ * - Çağrı zinciri kenarları: CALLS (çağrı) + ROUTES_TO (endpoint → handler;
+ *   endpoint entrypoint'leri graph'ta yalnızca B3 linker'ın ROUTES_TO
+ *   kenarıyla bağlanır — diğer kenar türleri zincire girmez).
+ * - Komşuluk snapshot'ın id kanonik sırasında kurulur; successor'lar o
+ *   sırada taranır → aynı girdi aynı yol kümesini ve sırasını üretir.
+ * - Döngü koruması: yol-başına visited kümesi (basit yollar; bir yol aynı
+ *   node'u iki kez içermez).
+ * - Unresolved kenar: zincir O NOKTADA biter — kenar yolun içinde kalır,
+ *   hedefinin çıkış kenarları genişletilmez (TŞ §4.2: bilinmeyen kenarlar
+ *   ayrı; uydurma devam yok). Heuristic kenar: zincir DEVAM eder ama yol
+ *   etiketi en zayıf düzeye düşer (chainResolutionOf).
+ * - maxPaths: kayıt anında sınır doluysa "kap dışında en az bir yol daha
+ *   vardı" notuyla keşif tamamen durur (truncatedByPaths) — kısmi sonuç
+ *   açıkça işaretlenir, sessiz kesme yapılmaz.
+ */
+function walkCallPaths(
+  snapshot: SnapshotGraph,
+  startId: string,
+  maxDepth: number,
+  maxPaths: number,
+): TraceWalkResult {
+  const outgoing = new Map<string, GraphEdge[]>();
+  for (const edge of snapshot.edges) {
+    if (edge.kind !== "CALLS" && edge.kind !== "ROUTES_TO") continue;
+    const list = outgoing.get(edge.from);
+    if (list === undefined) {
+      outgoing.set(edge.from, [edge]);
+    } else {
+      list.push(edge);
+    }
+  }
+
+  const paths: TraceWalkPath[] = [];
+  let truncatedByPaths = false;
+  let truncatedByDepth = false;
+
+  const tryRecord = (path: TraceWalkPath): boolean => {
+    if (paths.length >= maxPaths) {
+      // Sınır doluyken kaydedilecek YOL VARDI → kısmi sonuç açık işaretlenir.
+      truncatedByPaths = true;
+      return false;
+    }
+    paths.push(path);
+    return true;
+  };
+
+  const walk = (
+    currentId: string,
+    nodeIds: readonly string[],
+    edges: readonly GraphEdge[],
+    visited: ReadonlySet<string>,
+  ): void => {
+    if (truncatedByPaths) return;
+    const successors = (outgoing.get(currentId) ?? []).filter(
+      (edge) => !visited.has(edge.to),
+    );
+    if (edges.length >= maxDepth) {
+      if (successors.length > 0) truncatedByDepth = true;
+      tryRecord({
+        nodeIds,
+        edges,
+        stoppedReason: successors.length > 0 ? "max-depth" : "leaf",
+      });
+      return;
+    }
+    if (successors.length === 0) {
+      tryRecord({ nodeIds, edges, stoppedReason: "leaf" });
+      return;
+    }
+    for (const edge of successors) {
+      if (truncatedByPaths) return;
+      const nextEdges = [...edges, edge];
+      if (edge.resolution === "unresolved") {
+        tryRecord({
+          nodeIds: [...nodeIds, edge.to],
+          edges: nextEdges,
+          stoppedReason: "unresolved-edge",
+        });
+        continue;
+      }
+      walk(
+        edge.to,
+        [...nodeIds, edge.to],
+        nextEdges,
+        new Set([...visited, edge.to]),
+      );
+    }
+  };
+
+  walk(startId, [startId], [], new Set<string>([startId]));
+  return { paths, truncatedByPaths, truncatedByDepth };
+}
+
+/**
+ * causoryn_trace_execution (TŞ §10.2 "Execution Flow, olası çağrı yolları";
+ * sprint-2 B4): entrypoint'ten başlayan çağrı zincirlerini — CALLS ve
+ * ROUTES_TO kenarları üzerinde sınırlı, deterministik DFS ile — yol listesi
+ * olarak döndürür.
+ *
+ * Resolution disiplini (görev sözleşmesi): her kenarın resolution düzeyi
+ * KENDİ alanında taşınır (TracePathEdgeSchema.resolution); zincir etiketi
+ * (TracePathSchema.resolution) kenarlardan türetilen EN ZAYIF düzeydir ve
+ * ayrı bir alandır — heuristic kenarlı zincir "heuristic" işaretlenir,
+ * verified gibi sunulmaz. Unresolved kenara rastlayan zincir o noktada
+ * biter ve envelope status "partial" olur (TŞ §10.1 örneği: status
+ * "partial" + unresolved akış uyarısı).
+ *
+ * Determinizm (TŞ §8 invariant iv/vi): komşuluk + successor taraması
+ * snapshot id kanonik sırasında; node çıktıları qualifiedName+id sıralı;
+ * kanıtlar tekrarsız id sıralı — aynı girdi aynı yanıtı üretir.
+ * Sınırlar (TŞ §20): maxDepth/maxPaths config tavanlarıyla sınırlıdır
+ * (LIMIT_EXCEEDED); kesme data.truncated + warnings ile açık raporlanır.
+ */
+export function traceExecution(
+  deps: ServiceDeps,
+  requestId: string,
+  input: z.infer<typeof TraceExecutionInputSchema>,
+): Envelope {
+  const workspaceId = input.workspaceId ?? deps.config.workspaceId;
+  requireAuthorizedWorkspace(deps, workspaceId);
+  const read = requireSnapshot(deps, workspaceId);
+  const snapshot = read.snapshot;
+
+  // 1) Sınır doğrulama: 0 anlamsal girdi hatası; tavan aşımı LIMIT_EXCEEDED.
+  if (input.maxDepth === 0) {
+    throw new CausorynToolError(
+      "INVALID_ARGUMENT",
+      "maxDepth=0 geçersiz: en az 1 kenar derinlik gerekli (tavan results.maxDepth)",
+    );
+  }
+  if (input.maxPaths === 0) {
+    throw new CausorynToolError(
+      "INVALID_ARGUMENT",
+      "maxPaths=0 geçersiz: en az 1 yol gerekli (tavan results.maxPaths)",
+    );
+  }
+  if (input.maxDepth > deps.config.results.maxDepth) {
+    throw new CausorynToolError(
+      "LIMIT_EXCEEDED",
+      `maxDepth=${String(input.maxDepth)} results.maxDepth tavanını (${String(deps.config.results.maxDepth)}) aşıyor`,
+    );
+  }
+  if (input.maxPaths > deps.config.results.maxPaths) {
+    throw new CausorynToolError(
+      "LIMIT_EXCEEDED",
+      `maxPaths=${String(input.maxPaths)} results.maxPaths tavanını (${String(deps.config.results.maxPaths)}) aşıyor`,
+    );
+  }
+
+  // 2) Entrypoint çözümleme (ID → qualifiedName; belirsizlik adaylarla
+  //    reddedilir — get_symbol_context ile aynı sözleşme).
+  const start = resolveSymbolNode(snapshot, input.entrypoint);
+
+  // 3) Deterministik DFS yol sayımı.
+  const { paths, truncatedByPaths, truncatedByDepth } = walkCallPaths(
+    snapshot,
+    start.id,
+    input.maxDepth,
+    input.maxPaths,
+  );
+
+  // 4) Yollardaki node'lar: qualifiedName+id sıralı, tekrarsız
+  //    (get_symbol_context çıktı kalıbı).
+  const nodeById = new Map(snapshot.nodes.map((node) => [node.id, node]));
+  const usedNodeIds = new Set<string>();
+  for (const path of paths) {
+    for (const id of path.nodeIds) usedNodeIds.add(id);
+  }
+  const contextNodes: GraphNode[] = [];
+  for (const id of usedNodeIds) {
+    const node = nodeById.get(id);
+    if (node !== undefined) contextNodes.push(node);
+  }
+  contextNodes.sort((a, b) => {
+    if (a.qualifiedName !== b.qualifiedName) {
+      return a.qualifiedName < b.qualifiedName ? -1 : 1;
+    }
+    return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
+  });
+
+  // 5) Kenarların kanıtları: tekrarsız, id sıralı (get_symbol_context kalıbı).
+  const evidenceById = new Map(snapshot.evidence.map((item) => [item.id, item]));
+  const evidenceSeen = new Set<string>();
+  const evidence: Evidence[] = [];
+  for (const path of paths) {
+    for (const edge of path.edges) {
+      for (const id of edge.evidenceIds) {
+        if (evidenceSeen.has(id)) continue;
+        const record = evidenceById.get(id);
+        if (record === undefined) continue;
+        evidenceSeen.add(id);
+        evidence.push(record);
+      }
+    }
+  }
+  evidence.sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+
+  // 6) Durum + uyarılar: unresolved kenar zinciri tamamlanmadı gösterir →
+  //    status "partial" (görev sözleşmesi; TŞ §10.1 örneğiyle tutarlı).
+  const anyUnresolved = paths.some((path) =>
+    path.edges.some((edge) => edge.resolution === "unresolved"),
+  );
+  const unresolvedPathCount = paths.filter((path) =>
+    path.edges.some((edge) => edge.resolution === "unresolved"),
+  ).length;
+  const heuristicPathCount = paths.filter((path) =>
+    path.edges.some((edge) => edge.resolution === "heuristic"),
+  ).length;
+
+  const warnings = staleWarningOf(read);
+  if (anyUnresolved) {
+    warnings.push(
+      `${String(unresolvedPathCount)} yol unresolved kenarda durduruldu; bilinmeyen kenarlar verified/heuristic kenarlardan ayrı raporlanır ve zincir o noktada biter (TŞ §4.2)`,
+    );
+  }
+  if (heuristicPathCount > 0) {
+    warnings.push(
+      `${String(heuristicPathCount)} yol heuristic kenar içeriyor; bu yollar "heuristic" etiketlidir ve verified gibi sunulmaz`,
+    );
+  }
+  if (truncatedByPaths) {
+    warnings.push(
+      `yol sayısı maxPaths=${String(input.maxPaths)} sınırıyla kesildi; kesilmeyen yollar mevcut olabilir (maxPaths'i artırın, tavan results.maxPaths)`,
+    );
+  }
+  if (truncatedByDepth) {
+    warnings.push(
+      `zincir maxDepth=${String(input.maxDepth)} sınırında kesildi; daha derin devam mevcut (maxDepth'i artırın, tavan results.maxDepth)`,
+    );
+  }
+
+  const status: "ok" | "partial" =
+    read.snapshot.meta.state === "partial" || anyUnresolved ? "partial" : "ok";
+
+  return buildEnvelope({
+    requestId,
+    workspaceId,
+    snapshotId: snapshot.meta.id,
+    status,
+    coverage: coverageOf(snapshot),
+    warnings,
+    data: {
+      workspaceId,
+      entrypoint: symbolNodeOf(start),
+      maxDepth: input.maxDepth,
+      maxPaths: input.maxPaths,
+      pathCount: paths.length,
+      truncated: truncatedByPaths || truncatedByDepth,
+      paths: paths.map((path, index) => ({
+        index,
+        resolution: chainResolutionOf(path.edges.map((edge) => edge.resolution)),
+        nodeIds: [...path.nodeIds],
+        edges: path.edges.map((edge) => ({
+          id: edge.id,
+          from: edge.from,
+          to: edge.to,
+          kind: edge.kind,
+          resolution: edge.resolution,
+          evidenceIds: [...edge.evidenceIds],
+        })),
+        stoppedReason: path.stoppedReason,
+      })),
+      nodes: contextNodes.map(symbolNodeOf),
+      evidence: evidence.map(evidenceRecordOf),
+    },
+  });
+}
+
+/* ------------------------------------------------------------------ */
 /* get_evidence                                                        */
 /* ------------------------------------------------------------------ */
 

@@ -128,13 +128,14 @@ describe("MCP server — protokol düzeyi", { timeout: 30_000 }, () => {
     }
   });
 
-  it("tools/list: tam olarak 8 araç; her biri inputSchema + outputSchema taşır", async () => {
+  it("tools/list: tam olarak 9 araç; her biri inputSchema + outputSchema taşır", async () => {
     const pair = await connectClient(makeContext());
     try {
       const { tools } = await pair.client.listTools();
       expect(tools.map((t) => t.name).sort()).toEqual([...TOOL_NAMES].sort());
       // Sıra TŞ §10.2 katalog sırasıdır: index_status + refresh_index
-      // sprint-2 B6 ile, get_symbol_context sprint-2 B5 ile eklendi.
+      // sprint-2 B6 ile, get_symbol_context sprint-2 B5 ile,
+      // trace_execution sprint-2 B4 ile eklendi.
       expect(TOOL_NAMES).toEqual([
         "causoryn_get_capabilities",
         "causoryn_workspace_summary",
@@ -143,6 +144,7 @@ describe("MCP server — protokol düzeyi", { timeout: 30_000 }, () => {
         "causoryn_map_system",
         "causoryn_find_symbols",
         "causoryn_get_symbol_context",
+        "causoryn_trace_execution",
         "causoryn_get_evidence",
       ]);
       for (const tool of tools) {

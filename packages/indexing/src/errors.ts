@@ -8,11 +8,13 @@
  *   indexing/unsupported-mode    → INVALID_ARGUMENT
  *   indexing/internal            → INTERNAL_ERROR
  *
- * `indexing/unsupported-mode` (sprint-2 B6): JobManager yalnızca "full"
- * iş türünü yürütür; "incremental" Live Architecture dilimidir (sprint-2
- * B7). Açık reddetme, sessizce full koşturma yerine tercih edilir
- * (ADR-010: çalışmayan şey Done yazılmaz). MCP yüzeyinde sabit uzantı
- * kodu INVALID_ARGUMENT'a eşlenir (K-008 gerekçesiyle mevcut tabloda).
+ * `indexing/unsupported-mode`: iş türü kataloğunun dışındaki istekler
+ * (ör. `scope` dar kapsamlı refresh; bilinmeyen mode) açıkça reddedilir —
+ * sessizce full koşturma yerine tercih edilir (ADR-010: çalışmayan şey
+ * Done yazılmaz). Sprint-2 B7 ile JobManager "incremental" iş türünü de
+ * yürütür (WorkspaceWatcher Live Architecture); "scope" hâlâ dışındadır.
+ * MCP yüzeyinde sabit uzantı kodu INVALID_ARGUMENT'a eşlenir (K-008
+ * gerekçesiyle mevcut tabloda).
  */
 export type IndexingErrorCode =
   | "indexing/root-not-authorized"

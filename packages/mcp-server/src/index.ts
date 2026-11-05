@@ -6,9 +6,9 @@
  *
  * Sorumluluk alanı (TŞ v2.1 §5 + §10): local stdio transport (ADR-003),
  * Zod input/output doğrulaması, authorization, SIZE limitleri
- * (results.maxNodes/maxSymbols/maxDepth, index.maxFiles,
+ * (results.maxNodes/maxSymbols/maxDepth/maxPaths, index.maxFiles,
  * workspace.maxFileBytes) ve ApplicationService yönlendirmesi. tools/list
- * tam olarak 8 gerçek araç yayımlar; boş handler yayınlanmaz (ADR-010,
+ * tam olarak 9 gerçek araç yayımlar; boş handler yayınlanmaz (ADR-010,
  * wiki/mcp-tools.md).
  *
  * Kasıtlı kapsam dışı (dürüstlük beyanı): İSTEK HIZI (rate) limiti bu
@@ -61,6 +61,7 @@ export {
   mapSystem,
   findSymbols,
   getSymbolContext,
+  traceExecution,
   getEvidence,
   GetCapabilitiesInputSchema,
   WorkspaceSummaryInputSchema,
@@ -69,6 +70,7 @@ export {
   MapSystemInputSchema,
   FindSymbolsInputSchema,
   GetSymbolContextInputSchema,
+  TraceExecutionInputSchema,
   GetEvidenceInputSchema,
   CapabilitiesDataSchema,
   WorkspaceSummaryDataSchema,
@@ -79,6 +81,9 @@ export {
   MapDataSchema,
   FindSymbolsDataSchema,
   GetSymbolContextDataSchema,
+  TraceExecutionDataSchema,
+  TracePathSchema,
+  TracePathEdgeSchema,
   SymbolContextNodeSchema,
   SymbolContextEdgeSchema,
   GetEvidenceDataSchema,

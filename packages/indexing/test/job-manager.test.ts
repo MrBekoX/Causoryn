@@ -16,8 +16,9 @@ import { describe, expect, it } from "vitest";
  * default setImmediate scheduler) koşar; çağrı anında jobId döner, iş
  * tamamlandığında done + snapshot yayınlanır. jobId sayaç tabanlıdır ve
  * snapshot ID'sinin girdisine KATILMAZ (determinizm invariant'ı).
- * Negatif: yetkisiz kök senkron reddedilir (iş kaydı AÇILMAZ); incremental
- * mode B7 dilimine aittir — indexing/unsupported-mode ile reddedilir.
+ * Negatif: yetkisiz kök senkron reddedilir (iş kaydı AÇILMAZ); scope
+ * dar kapsamlı refresh indexing/unsupported-mode ile reddedilir (mode
+ * "incremental" sprint-2 B7 ile desteklenir — ayrı pozitif test).
  * Partial: boş workspace → iş done + snapshotState partial + uyarı.
  *
  * Testler depoya YAZMAZ: fixture salt-okunur okunur (ADR-008); geçici
@@ -156,7 +157,10 @@ describe("IndexJobManager — refresh_index iş yönetimi (sprint-2 B6)", () => 
     const s1 = first.repository.getLatestPublished("default");
     const s2 = second.repository.getLatestPublished("default");
     expect(JSON.stringify(s1?.snapshot)).toBe(JSON.stringify(s2?.snapshot));
-  });
+    // Beklenti gevşetmesi DEĞİL: dosyanın ilk testindeki gibi tam suite
+    // paralel yükü altında fixture adapter koşumunun çalışma bütçesi
+    // (bkz. ilk testin 30_000'i ve açıklaması).
+  }, 30_000);
 
   it("pozitif: sayaç tabanlı jobId deterministiktir ve işler sırayla koşar", async () => {
     const harness = makeHarness();
@@ -176,7 +180,8 @@ describe("IndexJobManager — refresh_index iş yönetimi (sprint-2 B6)", () => 
     expect(f1.status).toBe("done");
     expect(f2.status).toBe("done");
     expect(harness.manager.latest()?.jobId).toBe("job-000002");
-  });
+    // Aynı gerekçe: tam suite paralel yükü bütçesi (beklenti gevşetmesi yok).
+  }, 30_000);
 
   it("negatif: yetkisiz kök senkron reddedilir ve iş kaydı AÇILMAZ", () => {
     const harness = makeHarness({ allowRoots: [] });
@@ -192,11 +197,11 @@ describe("IndexJobManager — refresh_index iş yönetimi (sprint-2 B6)", () => 
     expect(harness.tasks).toHaveLength(0);
   });
 
-  it("negatif: incremental mode bu dilimde reddedilir (indexing/unsupported-mode; B7 Live Architecture)", () => {
+  it("negatif: scope dar kapsamlı refresh reddedilir (indexing/unsupported-mode)", () => {
     const harness = makeHarness();
     let caught: unknown;
     try {
-      harness.manager.refreshIndex(FIXTURE_ROOT, { mode: "incremental" });
+      harness.manager.refreshIndex(FIXTURE_ROOT, { mode: "full", scope: "src" });
     } catch (error) {
       caught = error;
     }
@@ -204,6 +209,35 @@ describe("IndexJobManager — refresh_index iş yönetimi (sprint-2 B6)", () => 
     expect((caught as IndexingError).code).toBe("indexing/unsupported-mode");
     expect(harness.manager.latest()).toBeUndefined();
   });
+
+  it(
+    "pozitif: incremental iş changeSet ile koşar; kayıt changeSet taşır ve jobs() ile listelenir (sprint-2 B7)",
+    async () => {
+      const harness = makeHarness();
+      const full = harness.manager.refreshIndex(FIXTURE_ROOT, { mode: "full" });
+      for (const task of harness.tasks.splice(0)) task();
+      const fullDone = await harness.manager.waitForJob(full.jobId);
+
+      const incremental = harness.manager.refreshIndex(FIXTURE_ROOT, {
+        mode: "incremental",
+        changeSet: ["src/app.ts"],
+      });
+      expect(incremental.mode).toBe("incremental");
+      expect(incremental.changeSet).toEqual(["src/app.ts"]);
+
+      for (const task of harness.tasks.splice(0)) task();
+      const done = await harness.manager.waitForJob(incremental.jobId);
+      expect(done.status).toBe("done");
+      expect(done.mode).toBe("incremental");
+      // Fixture değişmedi: incremental karma karşılaştırması no-op verir,
+      // mevcut snapshot korunur (IndexService unit testleri ayrıca kanıtlar).
+      expect(done.snapshotId).toBe(fullDone.snapshotId);
+      expect(harness.manager.jobs().map((job) => job.jobId)).toEqual([
+        full.jobId,
+        incremental.jobId,
+      ]);
+    },
+  );
 
   it("negatif: waitForJob bilinmeyen jobId ile reddedilir", async () => {
     const harness = makeHarness();
@@ -269,5 +303,7 @@ describe("IndexJobManager — refresh_index iş yönetimi (sprint-2 B6)", () => 
     expect(harness.manager.status(r2.jobId)).toBeDefined();
     expect(harness.manager.status(r3.jobId)).toBeDefined();
     expect(harness.manager.latest()?.jobId).toBe(r3.jobId);
-  });
+    // Aynı gerekçe: üç fixture koşumu + tam suite paralel yükü bütçesi
+    // (beklenti gevşetmesi yok).
+  }, 30_000);
 });

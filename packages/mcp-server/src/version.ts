@@ -15,8 +15,9 @@ export const SCHEMA_VERSION = "2.0";
 /**
  * Yayımlanan araçlar (TŞ §10.2 katalog sırası). Sprint-1: 5 çekirdek araç;
  * sprint-2 B6: causoryn_index_status + causoryn_refresh_index; sprint-2 B5:
- * causoryn_get_symbol_context eklendi. tools/list TAM OLARAK bu 8 aracı
- * sunar; boş handler yayınlanmaz (ADR-010, wiki/mcp-tools.md kuralı).
+ * causoryn_get_symbol_context; sprint-2 B4: causoryn_trace_execution
+ * eklendi. tools/list TAM OLARAK bu 9 aracı sunar; boş handler yayınlanmaz
+ * (ADR-010, wiki/mcp-tools.md kuralı).
  */
 export const TOOL_NAMES = [
   "causoryn_get_capabilities",
@@ -26,6 +27,7 @@ export const TOOL_NAMES = [
   "causoryn_map_system",
   "causoryn_find_symbols",
   "causoryn_get_symbol_context",
+  "causoryn_trace_execution",
   "causoryn_get_evidence",
 ] as const;
 

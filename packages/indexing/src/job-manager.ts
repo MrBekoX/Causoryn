@@ -61,8 +61,13 @@ export interface IndexJobError {
 export interface IndexJobRecord {
   readonly jobId: string;
   readonly mode: IndexJobMode;
-  /** Bu dilimde hep null (scope desteklenmez; B7 incremental dilimi). */
+  /** Bu dilimde hep null (scope desteklenmez; sonraki dilim konusu). */
   readonly scope: string | null;
+  /**
+   * İşin tetiklendiği değişiklik kümesi (kök-göreceli POSIX yollar, sıralı).
+   * full işlerde de tetikleyici dosyalar taşınır; Watcher dışı çağrıda boş.
+   */
+  readonly changeSet: readonly string[];
   readonly status: IndexJobStatus;
   readonly progressPercent: number;
   readonly createdAt: string;
@@ -154,21 +159,30 @@ export class IndexJobManager {
    * anında reddedilir (MCP katmanı bunu WORKSPACE_NOT_AUTHORIZED /
    * INVALID_ARGUMENT envelope'una çevirir). Kabul edilen istek kuyruğa
    * alınır ve kaydı anında döner (status "queued").
+   *
+   * Sprint-2 B7: mode "incremental" desteklenir — IndexService.runIncrementalIndex
+   * koşturulur; `changeSet` kayda taşınır (karar yetkilisi karma
+   * karşılaştırmasıdır, bkz. IndexService.runIncrementalIndex). `scope`
+   * hâlâ desteklenmez (indexing/unsupported-mode).
    */
   refreshIndex(
     rootPath: string,
-    input: { readonly mode: IndexJobMode; readonly scope?: string },
+    input: {
+      readonly mode: IndexJobMode;
+      readonly scope?: string;
+      readonly changeSet?: readonly string[];
+    },
   ): IndexJobRecord {
-    if (input.mode !== "full") {
+    if (input.mode !== "full" && input.mode !== "incremental") {
       throw new IndexingError(
         "indexing/unsupported-mode",
-        `mode "${input.mode}" bu dilimde yürütülemiyor; incremental yeniden indeksleme Live Architecture (sprint-2 B7) diliminde gelecek`,
+        `mode "${input.mode as string}" desteklenmiyor (full | incremental)`,
       );
     }
     if (input.scope !== undefined) {
       throw new IndexingError(
         "indexing/unsupported-mode",
-        "scope dar kapsamlı yeniden indeksleme bu dilimde desteklenmiyor; Live Architecture (sprint-2 B7) diliminde değerlendirilecek",
+        "scope dar kapsamlı yeniden indeksleme desteklenmiyor; sonraki dilimde değerlendirilecek",
       );
     }
     const decision = this.policy.authorizeRoot(rootPath);
@@ -184,6 +198,7 @@ export class IndexJobManager {
       jobId,
       mode: input.mode,
       scope: null,
+      changeSet: Object.freeze([...(input.changeSet ?? [])].sort()),
       status: "queued",
       progressPercent: 0,
       createdAt: this.clock(),
@@ -216,6 +231,15 @@ export class IndexJobManager {
     return this.lastJobId === undefined
       ? undefined
       : this.records.get(this.lastJobId);
+  }
+
+  /**
+   * Güncel iş kayıtları (oluşturma sırasıyla). Evict edilen (maxJobs
+   * aşımı) kayıtlar listeye girmez; index_status listing ve testler için
+   * gözlemlenebilirlik yüzeyi (sprint-2 B7 watcher doğrulaması kullanır).
+   */
+  jobs(): readonly IndexJobRecord[] {
+    return [...this.records.values()];
   }
 
   /**
@@ -283,7 +307,10 @@ export class IndexJobManager {
 
     let result: IndexRunResult;
     try {
-      result = this.indexService.runIndex(rootPath);
+      result =
+        running.mode === "incremental"
+          ? this.indexService.runIncrementalIndex(rootPath, running.changeSet)
+          : this.indexService.runIndex(rootPath);
     } catch (error) {
       const code = error instanceof IndexingError ? error.code : "indexing/internal";
       const message = error instanceof Error ? error.message : String(error);
