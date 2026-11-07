@@ -45,7 +45,12 @@ function resolveLocalComponentsSchema(
   schemas: Record<string, unknown> | undefined,
 ): Record<string, unknown> | undefined {
   if (!ref.startsWith("#/components/schemas/") || schemas === undefined) return undefined;
-  const found = schemas[lastRefSegment(ref)];
+  const key = lastRefSegment(ref);
+  // Güvenlik (denetim bulgusu): yalnızca KENDİ alan — "#/components/schemas/__proto__"
+  // gibi işaretçiler prototip zincirine (Object.prototype) yürüyüp çözümlenmiş
+  // sayılamaz (Object.hasOwn).
+  if (!Object.hasOwn(schemas, key)) return undefined;
+  const found = schemas[key];
   return isPlainObject(found) ? found : undefined;
 }
 

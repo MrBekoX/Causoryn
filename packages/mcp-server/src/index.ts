@@ -93,6 +93,7 @@ export {
   preflightErrorToToolError,
   testPlanIdOf,
   DIFFERENTIATION_TOOL_ERROR_CODES_USED,
+  DIFFERENTIATION_TOOL_MAX_ITEMS,
   CheckContractsInputSchema,
   CheckContractsDataSchema,
   DetectContractDriftInputSchema,

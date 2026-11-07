@@ -57,16 +57,18 @@ function collectRefs(value: unknown, into: string[]): void {
   }
 }
 
-/** "#/a/b" işaretçisini kök nesnede çözer; ~ kaçışı çözülmez (belgeli dilim). */
+/** "#/a/b" işaretçisini kök nesnede çözer; ~ kaçışı çözülmez (belgeli dilim).
+ * Güvenlik (denetim bulgusu): yalnızca KENDİ alan üzerinden gezilir —
+ * "__proto__"/"constructor" gibi segmentler prototip zincirine yürüyemez
+ * (Object.hasOwn; aksi halde çözülemeyen $ref sessizce "resolved" sayılır). */
 function resolveLocalPointer(root: Record<string, unknown>, pointer: string): boolean {
   if (!pointer.startsWith("#/")) return false;
   let current: unknown = root;
   for (const rawSegment of pointer.slice(2).split("/")) {
     if (!isPlainObject(current) && !Array.isArray(current)) return false;
     if (isPlainObject(current)) {
-      const next = current[rawSegment];
-      if (next === undefined) return false;
-      current = next;
+      if (!Object.hasOwn(current, rawSegment)) return false;
+      current = current[rawSegment];
     } else {
       const index = Number(rawSegment);
       if (!Number.isInteger(index)) return false;

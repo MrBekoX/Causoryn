@@ -45,7 +45,11 @@ function resolveLocalComponent(
   if (!ref.startsWith(`#/components/${group}/`) || components === undefined) return undefined;
   const found = components[group];
   if (!isPlainObject(found)) return undefined;
-  const entry = found[lastRefSegment(ref)];
+  const key = lastRefSegment(ref);
+  // Güvenlik (denetim bulgusu): yalnızca KENDİ alan — "__proto__" gibi
+  // segmentler prototip zincirine yürüyüp çözümlenmiş sayılamaz (Object.hasOwn).
+  if (!Object.hasOwn(found, key)) return undefined;
+  const entry = found[key];
   return isPlainObject(entry) ? entry : undefined;
 }
 

@@ -270,6 +270,18 @@ const ImpactedEdgeSchema = z.strictObject({
   evidence: z.array(ContractEvidenceSpanSchema),
 });
 
+/**
+ * TŞ §19/§20 resource budget tavanı (güvenlik denetimi bulgusu): her eleman
+ * policy-kontrollü salt-okunur dosya okuma + parse (dosya başına 1 MiB kota)
+ * açar; contracts çifti başına 2 dosya + O(contracts×anchors) eşleştirme
+ * koşar ve checkContracts'taki Promise.all eşzamanlılığı bu tavanla sınırlı
+ * kalır. Wiki refs tavanı (WIKI_TOOL_MAX_LIMIT=200, services-wiki.ts) tek
+ * git cat-file çözümlemesi bütçesidir; dosya okuma+parse bütçesi daha dar
+ * tutulur. Dilim kararı: TŞ §10.2 bu dizilere sayı vermez; tek kullanıcılı
+ * stdio dilimi (TŞ §25/2) için 25 eleman.
+ */
+export const DIFFERENTIATION_TOOL_MAX_ITEMS = 25;
+
 /* ------------------------------------------------------------------ */
 /* D2 — causoryn_check_contracts                                       */
 /* ------------------------------------------------------------------ */
@@ -289,7 +301,8 @@ export const CheckContractsInputSchema = z.strictObject({
         target: z.string().min(1),
       }),
     )
-    .min(1),
+    .min(1)
+    .max(DIFFERENTIATION_TOOL_MAX_ITEMS),
   /** TŞ §10.2 "snapshotId?" — envelope çapası; yoksa en son yayınlanmış. */
   snapshotId: z.string().min(1).optional(),
 });
@@ -454,18 +467,25 @@ function evaluationOf(
 
 export const DetectContractDriftInputSchema = z.strictObject({
   workspaceId: z.string().min(1).optional(),
-  /** TŞ §10.2 "base": base sürümünün spec dosyaları (kök-göreceli). */
-  base: z.array(z.string().min(1)).min(1),
-  /** TŞ §10.2 "target": hedef sürümün spec dosyaları. */
-  target: z.array(z.string().min(1)).min(1),
+  /** TŞ §10.2 "base": base sürümünün spec dosyaları (kök-göreceli);
+   * her eleman 1 salt-okunur dosya okuma+parse açar → DIFFERENTIATION_TOOL_MAX_ITEMS tavanı. */
+  base: z.array(z.string().min(1)).min(1).max(DIFFERENTIATION_TOOL_MAX_ITEMS),
+  /** TŞ §10.2 "target": hedef sürümün spec dosyaları (aynı tavan). */
+  target: z.array(z.string().min(1)).min(1).max(DIFFERENTIATION_TOOL_MAX_ITEMS),
   /** TŞ §10.2 "scope?": raporu bu matchKey'lere daraltır (tam eşleşme). */
   scope: z.array(z.string().min(1)).min(1).optional(),
   /**
    * TŞ kataloğunda sayılmayan BELGELİ ek: tüketici/üretici ankraj taraması
    * için servis kaynak dosyaları. Verilmezse etki grafı boş kalır ve TÜM
    * değişiklikler unconsumedChanges'e düşer (unresolved consumers).
+   * Tavan: her eleman dosya okuma + ankraj taraması açar
+   * (DIFFERENTIATION_TOOL_MAX_ITEMS).
    */
-  anchorFiles: z.array(z.string().min(1)).min(1).optional(),
+  anchorFiles: z
+    .array(z.string().min(1))
+    .min(1)
+    .max(DIFFERENTIATION_TOOL_MAX_ITEMS)
+    .optional(),
 });
 
 export const DetectContractDriftDataSchema = z.strictObject({

@@ -49,6 +49,9 @@ import { describe, expect, it } from "vitest";
 
 import {
   CausorynToolError,
+  CheckContractsInputSchema,
+  DetectContractDriftInputSchema,
+  DIFFERENTIATION_TOOL_MAX_ITEMS,
   EnvelopeSchema,
   TOOL_NAMES,
   checkContracts,
@@ -336,6 +339,99 @@ describe("Faz D katalog büyümesi", { timeout: 60_000 }, () => {
         expect(tool?.outputSchema, `${name} outputSchema yok`).toBeDefined();
         expect((tool?.description ?? "").length).toBeGreaterThan(0);
       }
+    } finally {
+      await pair.close();
+    }
+  });
+});
+
+/* ------------------------------------------------------------------ */
+/* Şema bütçe tavanları (TŞ §19 resource budget; güvenlik denetimi)    */
+/* ------------------------------------------------------------------ */
+
+describe("Faz D sözleşme araçları — dizi girdisi bütçe tavanları", { timeout: 60_000 }, () => {
+  const pairOf = (base: string, target: string): { base: string; target: string } => ({
+    base,
+    target,
+  });
+  const files = (count: number): string[] =>
+    Array.from({ length: count }, () => "openapi.yaml");
+
+  it("checkContracts.contracts: tavan kabul edilir, tavan+1 şema reddedilir", () => {
+    const atLimit = {
+      contracts: Array.from({ length: DIFFERENTIATION_TOOL_MAX_ITEMS }, () =>
+        pairOf("openapi.yaml", "openapi-v2.yaml"),
+      ),
+    };
+    expect(CheckContractsInputSchema.safeParse(atLimit).success).toBe(true);
+    const overLimit = {
+      contracts: Array.from({ length: DIFFERENTIATION_TOOL_MAX_ITEMS + 1 }, () =>
+        pairOf("openapi.yaml", "openapi-v2.yaml"),
+      ),
+    };
+    expect(CheckContractsInputSchema.safeParse(overLimit).success).toBe(false);
+  });
+
+  it("detectContractDrift base/target/anchorFiles: tavan kabul, tavan+1 şema reddi", () => {
+    const parses = (
+      patch: Partial<Record<"base" | "target" | "anchorFiles", string[]>>,
+    ): boolean =>
+      DetectContractDriftInputSchema.safeParse({
+        base: files(1),
+        target: files(1),
+        ...patch,
+      }).success;
+    expect(
+      parses({
+        base: files(DIFFERENTIATION_TOOL_MAX_ITEMS),
+        target: files(1),
+        anchorFiles: files(DIFFERENTIATION_TOOL_MAX_ITEMS),
+      }),
+    ).toBe(true);
+    // Opsiyonellik korunur: tavan düzenlemesi anchorFiles'ı zorunlu kılamaz.
+    expect(parses({})).toBe(true);
+    expect(parses({ base: files(DIFFERENTIATION_TOOL_MAX_ITEMS + 1) })).toBe(false);
+    expect(parses({ target: files(DIFFERENTIATION_TOOL_MAX_ITEMS + 1) })).toBe(false);
+    expect(parses({ anchorFiles: files(DIFFERENTIATION_TOOL_MAX_ITEMS + 1) })).toBe(false);
+  });
+
+  it("tel düzeyi: tavan aşımı SDK şema reddiyle isError döner (kaynak-amplifikasyonu kapısı)", async () => {
+    const pair = await connectClient(makeContext(CONTRACT_FIXTURE));
+    try {
+      // Determinizm önkoşulu: tek çiftli geçerli çağrı autoIndex'i hazır
+      // kılar — tavan aşımı çağrısı INDEX_NOT_READY yarışıyla değil, YALNIZCA
+      // şema reddiyle isError dönmeli.
+      expectEnvelope(
+        await callTool(pair.client, "causoryn_check_contracts", {
+          contracts: [pairOf("openapi.yaml", "openapi-v2.yaml")],
+        }),
+      );
+      const overPairs = Array.from(
+        { length: DIFFERENTIATION_TOOL_MAX_ITEMS + 1 },
+        () => pairOf("openapi.yaml", "openapi-v2.yaml"),
+      );
+      expect(
+        (await callTool(pair.client, "causoryn_check_contracts", { contracts: overPairs }))
+          .isError,
+      ).toBe(true);
+      const overFiles = files(DIFFERENTIATION_TOOL_MAX_ITEMS + 1);
+      expect(
+        (
+          await callTool(pair.client, "causoryn_detect_contract_drift", {
+            base: overFiles,
+            target: ["openapi-v2.yaml"],
+          })
+        ).isError,
+      ).toBe(true);
+      expect(
+        (
+          await callTool(pair.client, "causoryn_detect_contract_drift", {
+            base: ["openapi.yaml"],
+            target: ["openapi-v2.yaml"],
+            anchorFiles: overFiles,
+          })
+        ).isError,
+      ).toBe(true);
     } finally {
       await pair.close();
     }

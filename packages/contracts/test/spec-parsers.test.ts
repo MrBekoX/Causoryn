@@ -157,6 +157,21 @@ describe("discoverOpenApiContracts", () => {
     expect(post?.resolvedRefs).toEqual([]);
     expect(out.diagnostics.some((d) => d.code === "contracts/openapi-ref-unresolved")).toBe(true);
   });
+
+  it("güvenlik: prototip-zincir işaretçisi #/components/schemas/__proto__ çözümlenemez sayılır (denetim bulgusu)", () => {
+    // Saldırı modeli: "__proto__" KENDİ alanı olmadığından bracket erişimi
+    // Object.prototype'a yürür; çözümlenemeyen $ref böylece sessizce
+    // "resolved" sayılıp certainty full kalmamalı (salt-okunur dürüstlük).
+    const protoRef = OPENAPI_SPEC.replace(
+      '"#/components/schemas/CreateOrderInput"',
+      '"#/components/schemas/__proto__"',
+    );
+    const out = discoverOpenApiContracts("ws-1", "docs/openapi.yaml", protoRef);
+    const post = out.contracts.find((c) => c.method === "POST");
+    expect(post?.certainty).toBe("partial");
+    expect(post?.resolvedRefs).toEqual([]);
+    expect(out.diagnostics.some((d) => d.code === "contracts/openapi-ref-unresolved")).toBe(true);
+  });
 });
 
 /* ------------------------------------------------------------------ */
@@ -236,6 +251,22 @@ describe("discoverAsyncApiContracts", () => {
     const publish = out.contracts.find((c) => c.channelDirection === "publish");
     expect(publish?.resolvedRefs).toEqual(["#/components/schemas/OrderCreated"]);
   });
+
+  it("güvenlik: prototip-zincir işaretçisi #/components/schemas/__proto__ çözümlenemez sayılır → certainty partial (denetim bulgusu)", () => {
+    // "__proto__" KENDİ alanı değildir: bracket erişimi Object.prototype'a
+    // yürüyüp çözümlenemeyen payload $ref'ini "resolved" saymamalı (dürüstlük).
+    const protoRef = ASYNCAPI_SPEC.replace(
+      '"#/components/schemas/OrderCreated"',
+      '"#/components/schemas/__proto__"',
+    );
+    const out = discoverAsyncApiContracts("ws-1", "events/asyncapi.yaml", protoRef);
+    const publish = out.contracts.find((c) => c.channelDirection === "publish");
+    expect(publish?.certainty).toBe("partial");
+    expect(publish?.resolvedRefs).toEqual([]);
+    expect(
+      out.diagnostics.some((d) => d.code === "contracts/asyncapi-payload-ref-unresolved"),
+    ).toBe(true);
+  });
 });
 
 /* ------------------------------------------------------------------ */
@@ -294,6 +325,18 @@ describe("discoverJsonSchemaContracts", () => {
     const dangling = SCHEMA_JSON.replace('"#/$defs/Address"', '"#/$defs/Missing"');
     const out = discoverJsonSchemaContracts("ws-1", "schemas/order.json", dangling);
     expect(out.contracts[0]?.certainty).toBe("partial");
+    expect(out.diagnostics.some((d) => d.code === "contracts/json-schema-ref-unresolved")).toBe(
+      true,
+    );
+  });
+
+  it("güvenlik: prototip-zincir işaretçisi #/__proto__ çözümlenemez sayılır → certainty partial (denetim bulgusu)", () => {
+    // "#/__proto__" kök nesnenin KENDİ alanı olmadığından çözülemez;
+    // bracket erişimiyle Object.prototype'a yürüyüp "resolved" sanılamaz.
+    const protoRef = SCHEMA_JSON.replace('"#/$defs/Address"', '"#/__proto__"');
+    const out = discoverJsonSchemaContracts("ws-1", "schemas/order.json", protoRef);
+    expect(out.contracts[0]?.certainty).toBe("partial");
+    expect(out.contracts[0]?.resolvedRefs).toEqual([]);
     expect(out.diagnostics.some((d) => d.code === "contracts/json-schema-ref-unresolved")).toBe(
       true,
     );
