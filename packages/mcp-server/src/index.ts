@@ -3,13 +3,13 @@
  * sprint-1 görev 6; sprint-2 B6: causoryn_index_status +
  * causoryn_refresh_index, sprint-2 B5: causoryn_get_symbol_context,
  * sprint-3 C8: Faz C'nin 7 çekirdek aracı, sprint-4 W5: Living Wiki'nin
- * 7 aracı — TŞ §16A.8).
+ * 7 aracı, sprint-5 D2-D6: Faz D'nin 5 farklılaştırma aracı — TŞ §16A.8).
  *
  * Sorumluluk alanı (TŞ v2.1 §5 + §10): local stdio transport (ADR-003),
  * Zod input/output doğrulaması, authorization, SIZE limitleri
  * (results.maxNodes/maxSymbols/maxDepth/maxPaths, index.maxFiles,
  * workspace.maxFileBytes) ve ApplicationService yönlendirmesi. tools/list
- * tam olarak 23 gerçek araç yayımlar; boş handler yayınlanmaz (ADR-010,
+ * tam olarak 28 gerçek araç yayımlar; boş handler yayınlanmaz (ADR-010,
  * wiki/mcp-tools.md).
  *
  * Kasıtlı kapsam dışı (dürüstlük beyanı): İSTEK HIZI (rate) limiti bu
@@ -83,6 +83,28 @@ export {
   ArchitectureTimelineInputSchema,
   ArchitectureTimelineDataSchema,
 } from "./services-architecture.js";
+export {
+  checkContracts,
+  detectContractDriftTool,
+  deriveTestPlan,
+  preflightChange,
+  traceBusinessFlow,
+  contractErrorToToolError,
+  preflightErrorToToolError,
+  testPlanIdOf,
+  DIFFERENTIATION_TOOL_ERROR_CODES_USED,
+  CheckContractsInputSchema,
+  CheckContractsDataSchema,
+  DetectContractDriftInputSchema,
+  DetectContractDriftDataSchema,
+  PreflightChangeInputSchema,
+  PreflightChangeDataSchema,
+  DeriveTestPlanInputSchema,
+  TestPlanDataSchema,
+  DeriveTestPlanDataSchema,
+  TraceBusinessFlowInputSchema,
+  TraceBusinessFlowDataSchema,
+} from "./services-differentiation.js";
 export {
   wikiBuild,
   wikiGetTree,

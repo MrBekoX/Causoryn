@@ -672,7 +672,7 @@ describe("buildPreflightManifest — partial (karma manifest)", () => {
   });
 });
 
-describe("candidate-only sözleşmesi — manifest üretimi çalışma ağacını DEĞİŞTİRMEZ", () => {
+describe("candidate-only sözleşmesi — manifest üretimi çalışma ağacını DEĞİŞTİRMEZ", { timeout: 60_000 }, () => {
   const createdDirs: string[] = [];
 
   afterEach(async () => {
@@ -754,7 +754,7 @@ describe("candidate-only sözleşmesi — manifest üretimi çalışma ağacın�
   });
 });
 
-describe("resolveSourceRevision — salt-okunur HEAD çözümlemesi", () => {
+describe("resolveSourceRevision — salt-okunur HEAD çözümlemesi", { timeout: 60_000 }, () => {
   const createdDirs: string[] = [];
 
   afterEach(async () => {

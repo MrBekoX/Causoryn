@@ -1944,8 +1944,9 @@ function partialSectionCountByPage(
  * "contract", contractId)) eşleşiyorsa taşınır; bir kayıt yalnızca hedef
  * taraf kimliğini taşır (D3 kuralı), bu yüzden base taraf sayfasına
  * daraltılan modified kaydı görünmez (belgeli sınır). Arka graph
- * çözümlenemediğinde YA DA iki yüzeyde de sözleşme kaydı yoksa []
- * döner ve envelope warnings'te DÜRÜST boşluk notu taşınır (degrade).
+ * çözümlenemediğinde [] + çözümleme başarısızlığı uyarısı döner; iki
+ * yüzeyde de sözleşme kaydı yoksa GERÇEK [] döner — boşluk notu taşımaz
+ * (K-013(7) gövdesi kesinleşti; boş yüzey boş sonucun gerçek halidir).
  * coverageDelta K-013 #3 gövdesiyle ({previous, current, reason?}) sayfa
  * bazlı raporlanır. Tarihi karşılaştırma İZOLE WikiSnapshot okumalarıyladır;
  * working tree değişmez (TŞ §16A.10).
@@ -2107,13 +2108,17 @@ export function wikiDiff(
     }
   }
 
-  // contractChanges (K-013 #7, sprint-5 D7): iki WikiSnapshot'ın arka graph
-  // snapshot'larının sözleşme node yüzeyleri diff edilir. Arka graph
-  // çözümlenemiyorsa YA DA iki yüzeyde de sözleşme kaydı yoksa [] + dürüst
-  // boşluk notu (uydurma kayıt yok; degrade). Sayfa daraltmasında kayıt,
-  // kendi contract sayfasına eşleşiyorsa taşınır (D3 kimlik kuralı gereği
-  // kayıt hedef taraf kimliğini taşır; base taraf sayfasına daraltılan
-  // modified kaydı görünmez — modül dokümanındaki belgeli sınır).
+  // contractChanges (K-013 #7, sprint-5 D7 — GÖVDE KESİNLEŞTİ): iki
+  // WikiSnapshot'ın arka graph snapshot'larının sözleşme node yüzeyleri
+  // diff edilir. Arka graph ÇÖZÜMLENEMEZSE [] + çözümleme başarısızlığı
+  // uyarısı döner (analiz edilemeyen durum açık raporlanır); İKİ YÜZEYDE DE
+  // kayıt yoksa GERÇEK [] sessiz döner — boşluk "degrade notu" taşımaz,
+  // çünkü {contractId, changeKind, summary} gövdesi artık kesindir
+  // (K-013(7)); boş yüzey boş sonucun gerçek halidir (uydurma kayıt yok).
+  // Sayfa daraltmasında kayıt, kendi contract sayfasına eşleşiyorsa taşınır
+  // (D3 kimlik kuralı gereği kayıt hedef taraf kimliğini taşır; base taraf
+  // sayfasına daraltılan modified kaydı görünmez — modül dokümanındaki
+  // belgeli sınır).
   const contractWarnings: string[] = [];
   let contractChanges: {
     contractId: string;
@@ -2146,11 +2151,6 @@ export function wikiDiff(
             wikiChildPageId(workspaceId, "contract", change.contractId) === pageScope,
         )
         .map((change) => ({ ...change }));
-    }
-    if (surfaceChanges.length === 0) {
-      contractWarnings.push(
-        "contractChanges boş: iki WikiSnapshot'ın graph sözleşme yüzeyinde de sözleşme kaydı yok (ApiContract/EventContract/SchemaContract/ContractVersion); kayıt geldiğinde {contractId, changeKind, summary} gövdesiyle doldurulur (K-013 #7)",
-      );
     }
   }
 

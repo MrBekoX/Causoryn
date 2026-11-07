@@ -40,7 +40,8 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
  * K-013 kararları (wiki/decisions.md): mode=full|incremental, cursor
  * default 50/max 200, bozuk link toPageId=null + diagnostics,
  * get_versions alias çözümlemesi git-read ile (çözülemeyen →
- * INVALID_REVISION), contractChanges Faz D'ye kadar [] + degrade notu.
+ * INVALID_REVISION), contractChanges K-013(7) gövdesiyle kesinleşti
+ * ({contractId, changeKind, summary}); boş yüzey GERÇEK [] döner.
  *
  * Her araç için pozitif + negatif + partial üçlüsü (sprint-1 kuralı).
  * Wiki yazımı YALNIZCA os.tmpdir() altındaki izinli data-root SQLite
@@ -180,9 +181,9 @@ afterEach(() => {
 /* ------------------------------------------------------------------ */
 
 describe("Wiki araç katalogu", { timeout: 60_000 }, () => {
-  it("TOOL_NAMES 23 araçtır; 7 Wiki aracı TŞ §16A.8 sırasıyla sondadır", () => {
-    expect(TOOL_NAMES).toHaveLength(23);
-    expect(TOOL_NAMES.slice(16)).toEqual([
+  it("TOOL_NAMES 28 araçtır; 7 Wiki aracı TŞ §16A.8 sırasıyla sondadır", () => {
+    expect(TOOL_NAMES).toHaveLength(28);
+    expect(TOOL_NAMES.slice(21)).toEqual([
       "causoryn_wiki_build",
       "causoryn_wiki_get_tree",
       "causoryn_wiki_get_page",
@@ -198,14 +199,14 @@ describe("Wiki araç katalogu", { timeout: 60_000 }, () => {
     try {
       const { tools } = await pair.client.listTools();
       const names = tools.map((tool) => tool.name);
-      for (const name of TOOL_NAMES.slice(16)) {
+      for (const name of TOOL_NAMES.slice(21)) {
         const tool = tools.find((entry) => entry.name === name);
         expect(tool, `${name} tools/list'te yok`).toBeDefined();
         expect(tool?.inputSchema).toBeDefined();
         expect(tool?.outputSchema).toBeDefined();
         expect((tool?.description ?? "").length).toBeGreaterThan(0);
       }
-      expect(names.length).toBe(23);
+      expect(names.length).toBe(28);
     } finally {
       await pair.close();
     }
@@ -1319,17 +1320,21 @@ describe("causoryn_wiki_diff", { timeout: 90_000 }, () => {
             entry.sectionKey === "summary",
         ),
       ).toBe(true);
-      // K-013 #7 (D7 sonrası): gövde kesinleşti; fixture graph'ında sözleşme
-      // kaydı OLMADIĞI için [] + dürüst boşluk notu taşınır (bayat "Faz D'ye
-      // kadar" iddiası değil — katman artık mevcut, kayıt yok).
+      // K-013 #7 (gövde kesinleşti): fixture graph'ında sözleşme kaydı
+      // OLMADIĞI için GERÇEK [] döner — boş yüzey artık "sözleşme kaydı yok"
+      // boşluk notu TAŞIMAZ (boş sonucun gerçek hali; K-013(7) gövdesi
+      // {contractId, changeKind, summary} kesindir). Arka graph çözümleme
+      // başarısızlığı uyarısı ayrı bir durumdur ve korunur.
       expect(data.contractChanges).toEqual([]);
       const warnings = diff.warnings as string[];
       expect(
         warnings.some((warning) => warning.includes("sözleşme kaydı yok")),
-      ).toBe(true);
+      ).toBe(false);
       expect(
-        warnings.some((warning) => warning.includes("K-013 #7")),
-      ).toBe(true);
+        warnings.some(
+          (warning) => warning.includes("K-013 #7") && warning.includes("kayıt geldiğinde"),
+        ),
+      ).toBe(false);
       expect(
         warnings.some((warning) => warning.includes("Faz D")),
       ).toBe(false);

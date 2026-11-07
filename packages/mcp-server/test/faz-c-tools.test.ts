@@ -293,16 +293,17 @@ describe("graphErrorToToolError — sabit eşleme birim testleri", () => {
 });
 
 describe("Faz C MCP yüzeyi — katalog", { timeout: 30_000 }, () => {
-  it("tools/list: tam olarak 23 araç (9 çekirdek + Faz C 7 + Wiki 7); TŞ §10.2 + §16A.8 katalog sırası", async () => {
+  it("tools/list: tam olarak 28 araç (9 çekirdek + Faz C 7 + Wiki 7 + Faz D 5); TŞ §10.2 + §16A.8 katalog sırası", async () => {
     const pair = await connectClient(makeContext());
     try {
       const { tools } = await pair.client.listTools();
       expect(tools.map((t) => t.name).sort()).toEqual([...TOOL_NAMES].sort());
-      expect(TOOL_NAMES).toHaveLength(23);
-      // Katalog sırası TŞ §10.2 PDF sırasını izler: analyze_impact
-      // trace_execution'dan sonra, architecture_timeline get_evidence'dan
-      // sonra gelir; Wiki'nin 7 aracı TŞ §16A.8 tablo sırasıyla katalog
-      // sonundadır (ara sıra atlanan araçlar henüz yayımlanmadı).
+      expect(TOOL_NAMES).toHaveLength(28);
+      // Katalog sırası TŞ §10.2 PDF sırasını izler: trace_business_flow
+      // trace_execution'dan sonra (sprint-5 D5), Faz D'nin diğer dört aracı
+      // export_documentation ile get_evidence arasında (sprint-5 D2/D3/D4/D6);
+      // architecture_timeline get_evidence'dan sonra gelir; Wiki'nin 7 aracı
+      // TŞ §16A.8 tablo sırasıyla katalog sonundadır.
       expect(TOOL_NAMES).toEqual([
         "causoryn_get_capabilities",
         "causoryn_workspace_summary",
@@ -312,12 +313,17 @@ describe("Faz C MCP yüzeyi — katalog", { timeout: 30_000 }, () => {
         "causoryn_find_symbols",
         "causoryn_get_symbol_context",
         "causoryn_trace_execution",
+        "causoryn_trace_business_flow",
         "causoryn_analyze_impact",
         "causoryn_check_architecture",
         "causoryn_compare_architecture",
         "causoryn_get_agent_context",
         "causoryn_generate_onboarding",
         "causoryn_export_documentation",
+        "causoryn_preflight_change",
+        "causoryn_check_contracts",
+        "causoryn_detect_contract_drift",
+        "causoryn_derive_test_plan",
         "causoryn_get_evidence",
         "causoryn_architecture_timeline",
         "causoryn_wiki_build",
