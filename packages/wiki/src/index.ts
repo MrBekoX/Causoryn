@@ -7,7 +7,7 @@
  * (TŞ §16A.7 wiki_* tabloları) eklenir.
  */
 
-export { WikiProjectionError } from "./errors.js";
+export { WikiProjectionError, WikiSearchError } from "./errors.js";
 
 export {
   WIKI_ROOT_CATEGORIES,
@@ -52,6 +52,26 @@ export {
 export type { CoverageDelta, WikiCoverageDeltaEntry } from "./coverage-delta.js";
 
 export {
+  BrokenLinkDiagnosticSchema,
+  WikiLinkDraftSchema,
+  WikiLinkKindSchema,
+  WikiLinkSchema,
+  buildWikiLinkIndex,
+  resolveWikiLinks,
+} from "./links.js";
+export type {
+  BrokenLinkDiagnostic,
+  WikiAliasEntry,
+  WikiLink,
+  WikiLinkDraft,
+  WikiLinkIndex,
+  WikiLinkKind,
+  WikiLinkResolution,
+  WikiLinkResolutionInput,
+  WikiPageTarget,
+} from "./links.js";
+
+export {
   wikiPageContentHash,
   wikiPageContentJsonValue,
   wikiProjectionCanonicalJson,
@@ -60,3 +80,48 @@ export {
 
 export { projectWiki, wikiSlugify } from "./projection.js";
 export type { WikiProjectionInput } from "./projection.js";
+
+export {
+  normalizeWikiSearchQuery,
+  escapeFtsPhrase,
+  buildWikiMatchExpression,
+} from "./search-query.js";
+
+export {
+  encodeWikiSearchCursor,
+  decodeWikiSearchCursor,
+} from "./search-cursor.js";
+
+export {
+  rankWikiSearchCandidates,
+} from "./search-ranking.js";
+export type {
+  WikiSearchCandidate,
+  WikiSearchRanking,
+  WikiSearchRankingOptions,
+} from "./search-ranking.js";
+
+export {
+  WIKI_SEARCH_MATCHED_FIELDS,
+  WikiSearchHitSchema,
+  WikiSearchMatchedFieldSchema,
+  WikiSearchResultSchema,
+  WikiSearchSkippedRankLegSchema,
+} from "./search-schema.js";
+export type {
+  WikiSearchHit,
+  WikiSearchMatchedField,
+  WikiSearchResult,
+  WikiSearchSkippedRankLeg,
+} from "./search-schema.js";
+
+export {
+  DEFAULT_WIKI_SEARCH_LIMIT,
+  MAX_WIKI_SEARCH_LIMIT,
+  WikiSearchStore,
+} from "./search-store.js";
+export type {
+  WikiSearchDatabase,
+  WikiSearchInput,
+  WikiSearchStatement,
+} from "./search-store.js";
