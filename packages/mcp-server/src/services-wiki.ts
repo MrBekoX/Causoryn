@@ -257,7 +257,7 @@ interface WikiErrorContext {
  * Ortam hata sınıfı (storage-corrupt / publish-failed / driver-error)
  * INTERNAL_ERROR'a eşlenirken ORİJİNAL mesaj deps.logger'a (stderr) yazılır.
  */
-function wikiErrorToToolError(
+export function wikiErrorToToolError(
   error: unknown,
   deps: ServiceDeps,
   context: WikiErrorContext = {},
@@ -297,6 +297,18 @@ function wikiErrorToToolError(
     }
     if (code === "wiki/snapshot-not-projectable") {
       return new CausorynToolError("INDEX_NOT_READY", errorText(error));
+    }
+    // Offline export çekirdeğinin yetkilendirme reddi kodları (güvenlik
+    // analizi bulgusu 3 — latent eşleme kapatıldı; kayıt packages/wiki
+    // errors.ts başlığı + export.ts hata kodu dokümantasyonunda).
+    // Öncül: services-architecture.ts export/output-* eşlemesi —
+    // EXPORT_NOT_ALLOWED TŞ §10.1 SABİT kodu, PATH_DENIED taban kod;
+    // yeni uzantı kodu İSTENMEZ (K-008 örüntüsü).
+    if (code === "wiki/output-not-authorized") {
+      return new CausorynToolError("EXPORT_NOT_ALLOWED", errorText(error));
+    }
+    if (code === "wiki/output-path-denied") {
+      return new CausorynToolError("PATH_DENIED", errorText(error));
     }
     // Revizyon çözümleme (git-read katmanı; K-013 #6).
     if (

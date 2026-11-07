@@ -236,13 +236,43 @@ function openWikiStores(
   // yeniden başlatmada dosya mevcutsa bağ dosya düzeyinde reddedilir;
   // dosya henüz yoksa denetim ilk açılışta imkânsızdır ve üst-dizin +
   // lex kontrelleri kalır).
+  //
+  // Güvenlik analizi bulgusu 1: (a) karşılaştırma TÜM allowRoots'a
+  // uygulanır — çok köklü beyanda yalnızca allowRoots[0] ile
+  // karşılaştırmak, üst dizinin allowRoots[1..] içindeki köke bağla
+  // çözüldüğü kaçışı kapmaz (lex kontrolün 202-213 çok köklü karşılığı);
+  // (b) realpath doğrulaması YAPILAMAZSA sessiz devam YOKTUR — güven
+  // kaynağı kurulamaz, sunucu başlamaz (openWikiStores disiplini; eski
+  // davranış yalnızca loglayıp devamsız denetimle başlıyordu).
+  const realTargets: string[] = [];
   try {
-    const realRoot = realpathSync(config.allowRoots[0] ?? parentDir);
-    const realTargets = [realpathSync(parentDir)];
+    realTargets.push(realpathSync(parentDir));
+  } catch (error) {
+    throw new CausorynConfigError([
+      `wiki.dataDbPath üst dizini gerçek yolu çözümlenemedi (güven kaynağı kurulamıyor; sessiz devam yoktur): ${parentDir} — ${errorText(error)}`,
+    ]);
+  }
+  try {
+    realTargets.push(realpathSync(declaredResolved));
+  } catch {
+    // Dosya henüz yok — üst dizin denetimi yeterli.
+  }
+  if (config.allowRoots.length === 0) {
+    // Kök karşılaştırması imkânsızdır; eski davranışla aynı şekilde
+    // (fallback kök = parentDir her zaman çakışırdı) beyan reddedilir —
+    // mesaj artık gerçek nedeni söyler.
+    throw new CausorynConfigError([
+      `wiki.dataDbPath beyanı için yetkili workspace kökü yok (allowRoots boş): ${declared}`,
+    ]);
+  }
+  for (const root of config.allowRoots) {
+    let realRoot: string;
     try {
-      realTargets.push(realpathSync(declaredResolved));
-    } catch {
-      // Dosya henüz yok — üst dizin denetimi yeterli.
+      realRoot = realpathSync(path.resolve(root));
+    } catch (error) {
+      throw new CausorynConfigError([
+        `wiki.dataDbPath doğrulanamadı — allowRoot gerçek yolu çözümlenemedi (güven kaynağı kurulamıyor; sessiz devam yoktur): ${root} — ${errorText(error)}`,
+      ]);
     }
     for (const realTarget of realTargets) {
       if (
@@ -254,11 +284,6 @@ function openWikiStores(
         ]);
       }
     }
-  } catch (error) {
-    if (error instanceof CausorynConfigError) throw error;
-    logger(
-      `wiki.dataDbPath realpath doğrulaması atlandı (yol çözümlenemedi): ${declared}`,
-    );
   }
 
   let store: SqliteWikiStore;

@@ -20,6 +20,7 @@ import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { canonicalJson, sha256Hex, utf8Encode } from "@causoryn/domain";
 import type { SqliteWikiStore } from "@causoryn/storage-sqlite";
 import { WikiStoreError } from "@causoryn/storage-sqlite";
+import { WikiProjectionError } from "@causoryn/wiki";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 /**
@@ -51,6 +52,8 @@ import {
   createCausorynMcpServer,
 } from "../src/index.js";
 import type { CausorynContext } from "../src/index.js";
+import { wikiErrorToToolError } from "../src/services-wiki.js";
+import type { ServiceDeps } from "../src/services.js";
 
 const REPO_ROOT = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -1370,5 +1373,84 @@ describe("causoryn_wiki_diff", { timeout: 90_000 }, () => {
     } finally {
       await pair.close();
     }
+  });
+});
+
+/* ------------------------------------------------------------------ */
+/* Güvenlik denetimi bulguları                                         */
+/* ------------------------------------------------------------------ */
+
+describe("güvenlik denetimi bulguları", { timeout: 60_000 }, () => {
+  it("negatif: çok köklü beyanda dataDbPath üst dizini allowRoots[1..] köküne junction ise sunucu başlamaz (symlink kaçışı çok köklü)", () => {
+    // Gerçek içerik allowRoots[1] kökÜNDE; beyanlı dataDbPath üst dizini
+    // lex kontrolün TÜM köklerine temiz (hiçbir kökün altında değil) AMA
+    // junction ile ikinci kök içine çözülür. Gerçek yol denetimi de
+    // TÜM allowRoots'u kapsamalıdır (lex kontrolün çok köklü karşılığı);
+    // tek kök (allowRoots[0]) karşılaştırması allowRoots[1..] kaçışını
+    // kapmaz. Windows'ta junction izinsiz kurulur ve realpathSync
+    // tarafından çözülür — iki sürecin göreceği gerçek yol budur.
+    const rootA = path.join(tempRoot, "ws-a");
+    const rootB = path.join(tempRoot, "ws-b");
+    mkdirSync(path.join(rootA, "src"), { recursive: true });
+    mkdirSync(path.join(rootB, "src"), { recursive: true });
+    writeFileSync(path.join(rootA, "src", "a.ts"), "export const a = 1;\n", "utf8");
+    writeFileSync(path.join(rootB, "src", "b.ts"), "export const b = 1;\n", "utf8");
+    const realData = path.join(rootB, "wiki-data");
+    mkdirSync(realData, { recursive: true });
+    const decoyParent = path.join(tempRoot, "decoy-data");
+    symlinkSync(realData, decoyParent, "junction");
+
+    // Kırmızı koşusunda (bug davranışı) context AÇILIR ve wiki SQLite
+    // bağlantısı junction içindeki hedefe açılır; handle açık kalırsa
+    // afterEach rmSync EPERM ile patlar. Context'i yakala, açık kaldıysa
+    // kapat, sonra beklentiyi doğrula (mevcut dosya disiplini).
+    let context: CausorynContext | undefined;
+    let caught: unknown;
+    try {
+      context = createCausorynContext(
+        {
+          workspaceId: "default",
+          allowRoots: [rootA, rootB],
+          autoIndex: false,
+          wiki: { dataDbPath: path.join(decoyParent, "wiki.sqlite") },
+        },
+        { clock: fixedClock },
+      );
+    } catch (error) {
+      caught = error;
+    }
+    context?.close();
+    expect(caught).toBeInstanceOf(CausorynConfigError);
+  });
+
+  it("wikiErrorToToolError: wiki/output-not-authorized → EXPORT_NOT_ALLOWED; wiki/output-path-denied → PATH_DENIED", () => {
+    // Latent eşleme: export çekirdeği (exportWikiOffline) bugün MCP
+    // yüzeyinden çağrılmıyor; view=wiki kablolandığında güvenlik reddi
+    // sinyali (yetkilendirme red kodları) INTERNAL_ERROR kovasına
+    // DÜŞMEMELİDİR. Öncül: services-architecture.ts export/output-*
+    // eşlemesi (EXPORT_NOT_ALLOWED/PATH_DENIED, K-008 örüntüsü — yeni
+    // uzantı kodu istenmez); kayıt packages/wiki errors.ts başlığı ve
+    // export.ts hata kodu dokümantasyonunda belgelenmiştir.
+    const deps = { logger: (): void => {} } as unknown as ServiceDeps;
+
+    const unauthorized = wikiErrorToToolError(
+      new WikiProjectionError(
+        "wiki/output-not-authorized",
+        "output dizini kullanıcının beyan ettiği output listesinde değil (explicit authorization, TŞ §16)",
+      ),
+      deps,
+    );
+    expect(unauthorized.code).toBe("EXPORT_NOT_ALLOWED");
+    expect(unauthorized.message).toContain("output dizini");
+
+    const denied = wikiErrorToToolError(
+      new WikiProjectionError(
+        "wiki/output-path-denied",
+        "dosya adı yol ayracı içeremez (alt dizin yazma izni yok)",
+      ),
+      deps,
+    );
+    expect(denied.code).toBe("PATH_DENIED");
+    expect(denied.message).toContain("yol ayracı");
   });
 });

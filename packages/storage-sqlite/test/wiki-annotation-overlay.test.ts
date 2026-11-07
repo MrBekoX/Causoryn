@@ -332,4 +332,94 @@ describe("SqliteWikiStore — annotation CAS ve kimlik disiplini", () => {
       store.close();
     });
   });
+
+  it("negatif: SELECT-then-INSERT yarış penceresi — kaybeden taraf wiki/duplicate-annotation görür (storage/driver-error değil)", () => {
+    withTempDb((dbPath) => {
+      registerWorkspace(dbPath, WS);
+      const store = new SqliteWikiStore(dbPath);
+      // Yarış simülasyonu (güvenlik analizi bulgusu): writeAnnotation'ın
+      // SELECT'i ile INSERT'i arasında başka bir süreç aynı id'yi yazıp
+      // commit etmiştir. Senkron JS'te gerçek iki süreç penceresi
+      // tetiklenemeyeceğinden test, store'un hazırlanmış SELECT ifadesinin
+      // get() dönüşünden (satır "yok" görüldükten) SONRA ayrı bir ham
+      // bağlantıdan aynı id'li satırı yazarak pencereyi BİRE BİR üretir:
+      // store'un SELECT'i boş döner, INSERT'i PK UNIQUE ihlali alır.
+      const raceDb = new Database(dbPath);
+      let raced = false;
+      const storeWithRace = store as unknown as {
+        stmt: (sql: string) => Database.Statement;
+      };
+      const originalStmt = storeWithRace.stmt.bind(store);
+      storeWithRace.stmt = (sql: string) => {
+        const statement = originalStmt(sql);
+        if (!raced && sql.includes("FROM wiki_annotations WHERE id = ?")) {
+          raced = true;
+          const originalGet = statement.get.bind(statement);
+          statement.get = (...getArgs: unknown[]) => {
+            const result = originalGet(...getArgs);
+            if (result === undefined) {
+              // Rakip süreç tam bu noktada aynı id'yi yazıp commit etti.
+              raceDb
+                .prepare(
+                  `INSERT INTO wiki_annotations
+                     (id, workspace_id, stable_page_id, section_key, author_kind,
+                      origin, verified, body, annotation_version, updated_at, position)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                     (SELECT COALESCE(MAX(position), 0) + 1 FROM wiki_annotations))`,
+                )
+                .run(
+                  "annot-race",
+                  WS,
+                  PAGE_ID,
+                  "summary",
+                  "human",
+                  null,
+                  null,
+                  "rakip süreç yazımı",
+                  0,
+                  T_ANNOT,
+                );
+            }
+            return result;
+          };
+        }
+        return statement;
+      };
+
+      let caught: unknown;
+      try {
+        store.writeAnnotation(WS, {
+          id: "annot-race",
+          stablePageId: PAGE_ID,
+          sectionKey: "dependencies",
+          authorKind: "human",
+          body: BODY_V0,
+          annotationVersion: 0,
+          updatedAt: T_ANNOT,
+        });
+      } catch (error) {
+        caught = error;
+      }
+
+      // Bütünlük okumaları: PK koruması devrededir — tabloda tek satır
+      // (rakip yazımı). Okumalar assertion'lardan ÖNCE yapılır; bağlantılar
+      // kapatılır (Windows: açık SQLite handle'ı tmp dizin silimini EPERM
+      // ile bloklar — bu dosyanın mevcut disiplini).
+      const count = (
+        raceDb
+          .prepare("SELECT COUNT(*) AS c FROM wiki_annotations")
+          .get() as { c: number }
+      ).c;
+      const stored = store.getAnnotation(WS, "annot-race");
+      raceDb.close();
+      store.close();
+
+      // Hata kodu sadakati: kaybeden taraf dürüst duplicate reddi görür —
+      // "storage/driver-error" (istemcide INTERNAL_ERROR) değil.
+      expect(caught).toBeInstanceOf(WikiStoreError);
+      expect((caught as WikiStoreError).code).toBe("wiki/duplicate-annotation");
+      expect(count).toBe(1);
+      expect(stored?.body).toBe("rakip süreç yazımı");
+    });
+  });
 });

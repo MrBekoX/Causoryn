@@ -1066,23 +1066,45 @@ export class SqliteWikiStore {
         `Aynı anotasyon kimliği zaten var: ${annotation.id}`,
       );
     }
-    this.runWrite(
-      `INSERT INTO wiki_annotations
-         (id, workspace_id, stable_page_id, section_key, author_kind,
-          origin, verified, body, annotation_version, updated_at, position)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-         (SELECT COALESCE(MAX(position), 0) + 1 FROM wiki_annotations))`,
-      annotation.id,
-      workspaceId,
-      annotation.stablePageId,
-      annotation.sectionKey,
-      annotation.authorKind,
-      annotation.origin === undefined ? null : annotation.origin,
-      annotation.verified === undefined ? null : annotation.verified ? 1 : 0,
-      annotation.body,
-      annotation.annotationVersion,
-      annotation.updatedAt,
-    );
+    try {
+      this.runWrite(
+        `INSERT INTO wiki_annotations
+           (id, workspace_id, stable_page_id, section_key, author_kind,
+            origin, verified, body, annotation_version, updated_at, position)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+           (SELECT COALESCE(MAX(position), 0) + 1 FROM wiki_annotations))`,
+        annotation.id,
+        workspaceId,
+        annotation.stablePageId,
+        annotation.sectionKey,
+        annotation.authorKind,
+        annotation.origin === undefined ? null : annotation.origin,
+        annotation.verified === undefined ? null : annotation.verified ? 1 : 0,
+        annotation.body,
+        annotation.annotationVersion,
+        annotation.updatedAt,
+      );
+    } catch (error) {
+      // Güvenlik analizi bulgusu 2: SELECT-then-INSERT arasında yarış
+      // penceresi vardır — iki süreç aynı data-root'a aynı anotasyon
+      // kimliğini yazarken SELECT her iki tarafta "yok" görebilir; PK
+      // UNIQUE ihlali alan kaybeden taraf dürüst wiki/duplicate-annotation
+      // kodu görmelidir (storage/driver-error'a sarılmak bütünlüğü
+      // DEĞİŞTİRMEZ — PK yine de yazımı reddeder — ama istemciye
+      // "beklenmeyen iç hata" sinyali verir). Mesaj formatı SQLite sabitidir
+      // ("UNIQUE constraint failed: <tablo>.<sütun>").
+      if (
+        error instanceof WikiStoreError &&
+        error.code === "storage/driver-error" &&
+        error.message.includes("UNIQUE constraint failed")
+      ) {
+        throw new WikiStoreError(
+          "wiki/duplicate-annotation",
+          `Aynı anotasyon kimliği zaten var (eşzamanlı yazım yarışı kaybedildi): ${annotation.id}`,
+        );
+      }
+      throw error;
+    }
   }
 
   listAnnotations(workspaceId: string): readonly WikiAnnotation[] {
