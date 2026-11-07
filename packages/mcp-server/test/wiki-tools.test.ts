@@ -20,7 +20,7 @@ import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { canonicalJson, sha256Hex, utf8Encode } from "@causoryn/domain";
 import type { SqliteWikiStore } from "@causoryn/storage-sqlite";
 import { WikiStoreError } from "@causoryn/storage-sqlite";
-import { WikiProjectionError } from "@causoryn/wiki";
+import { WikiProjectionError, decodeWikiSearchCursor, encodeWikiSearchCursor } from "@causoryn/wiki";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 /**
@@ -50,8 +50,10 @@ import {
   TOOL_NAMES,
   createCausorynContext,
   createCausorynMcpServer,
+  wikiDiff,
 } from "../src/index.js";
 import type { CausorynContext } from "../src/index.js";
+import { decodeCursor, encodeCursor } from "../src/cursor.js";
 import { wikiErrorToToolError } from "../src/services-wiki.js";
 import type { ServiceDeps } from "../src/services.js";
 
@@ -420,15 +422,44 @@ describe("causoryn_wiki_build", { timeout: 60_000 }, () => {
     }
   });
 
-  it("negatif: beyanlı SQLite dosyası workspace köküne sembolik bağ ise sunucu başlamaz (takım denetimi bulgusu 5)", () => {
+  it("negatif: beyanlı SQLite dosyası workspace köküne sembolik bağ ise sunucu başlamaz (takım denetimi bulgusu 5 — ayrıcalıksız junction yolu)", () => {
     // Gerçek içerik workspace kökÜNDE; beyanlı veri kökü yolu kök DIŞINDAN
-    // o dosyaya sembolik bağdır — yazım kaynak ağacına sızardı.
+    // kök içine çözülür — yazım kaynak ağacına sızardı.
     const wsRoot = path.join(tempRoot, "ws-symlink");
     mkdirSync(wsRoot, { recursive: true });
     const innerDb = path.join(wsRoot, "ic-gercek.sqlite");
     writeFileSync(innerDb, "", "utf8");
+
+    // Yol A (ayrıcalıksız, daima koşar — denetim bulgusu: dosya symlink'i
+    // Windows'ta ayrıcalık ister; junction/symlink dizin bağlantısı
+    // gerektirmez ve AYNI realpath kaçış yolunu üretir): beyanlı dosyanın
+    // üst dizini köke bağdır — realpath denetimi üst dizini kök içinde
+    // çözer ve reddeder.
+    const linkDir = path.join(tempRoot, "bagli-data");
+    symlinkSync(wsRoot, linkDir, "junction");
+    expect(() =>
+      createCausorynContext(
+        {
+          workspaceId: "default",
+          allowRoots: [wsRoot],
+          autoIndex: false,
+          wiki: { dataDbPath: path.join(linkDir, "wiki.sqlite") },
+        },
+        { clock: fixedClock },
+      ),
+    ).toThrow(CausorynConfigError);
+
+    // Yol B (ayrıcalık varsa — denetim bulgusu 5'in orijinal kurulumu):
+    // dosya düzeyi sembolik bağ. Ayrıcalıksız ortamda symlinkSync EPERM
+    // fırlatır; o durumda Yol A aynı güvenlik yolunu zaten kilitler.
     const linkPath = path.join(tempRoot, "dis-bagli.sqlite");
-    symlinkSync(innerDb, linkPath, "file");
+    try {
+      symlinkSync(innerDb, linkPath, "file");
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException | undefined)?.code;
+      if (code !== "EPERM" && code !== "EACCES") throw error;
+      return;
+    }
     expect(() =>
       createCausorynContext(
         {
@@ -1452,5 +1483,102 @@ describe("güvenlik denetimi bulguları", { timeout: 60_000 }, () => {
     );
     expect(denied.code).toBe("PATH_DENIED");
     expect(denied.message).toContain("yol ayracı");
+  });
+});
+
+/* ------------------------------------------------------------------ */
+/* Denetim bulguları — wikiDiff eksiksizliği + K-013 #2 mod disiplini  */
+/* ------------------------------------------------------------------ */
+
+/** Manual wiki snapshot yayınlar (diff testi için iki farklı bölüm seti). */
+function publishManualWikiSnapshot(
+  store: SqliteWikiStore,
+  wikiId: string,
+  sectionKeys: readonly string[],
+): void {
+  const pageId = "page-manual-s";
+  const sid = store.beginWikiBuild({
+    workspaceId: "default",
+    graphSnapshotId: `graph-${wikiId}`,
+    revisionRef: `rev-${wikiId}`,
+    templateVersion: "tpl-test",
+    createdAt: FIXED_NOW,
+  });
+  store.addWikiPage(sid, {
+    id: pageId,
+    kind: "overview",
+    parentId: null,
+    title: "Manual Page",
+    slug: "manual-page",
+    route: "/wiki/manual-page",
+    contentHash: `hash-${wikiId}`,
+    freshness: "fresh",
+    coverage: { status: "complete" },
+  });
+  for (const sectionKey of sectionKeys) {
+    store.addWikiPageSection(sid, {
+      id: `sec-${sectionKey}`,
+      pageId,
+      sectionKey,
+      generatedMarkdown: `# ${sectionKey}\n`,
+      evidenceRefs: [],
+      status: "ok",
+    });
+  }
+  store.publishWiki(sid, wikiId, "ready", FIXED_NOW);
+}
+
+describe("wikiDiff eksiksizliği + K-013 #2 mod disiplini", { timeout: 60_000 }, () => {
+  it("partial: base'de var olup target'ta SİLİNEN sectionKey de changedSections'a girer (wiki-spec §4.2.7 alan kümesi korunur)", () => {
+    const context = makeContext({ autoIndex: false });
+    const store = context.wikiStore as SqliteWikiStore;
+    // base: summary + extras — target: summary + added. 'added' hedefte
+    // yeni (mevcut davranış kapsar); 'extras' base'de var, hedefte SİLİNMİŞ.
+    publishManualWikiSnapshot(store, "wiki-manual-base", ["summary", "extras"]);
+    publishManualWikiSnapshot(store, "wiki-manual-target", ["summary", "added"]);
+    try {
+      const envelope = wikiDiff(context, "req-diff-removed-section", {
+        base: "wiki-manual-base",
+        target: "wiki-manual-target",
+      });
+      const data = envelope.data as Record<string, unknown>;
+      const changed = data.changedSections as { pageId: string; sectionKey: string }[];
+      expect(changed).toContainEqual({ pageId: "page-manual-s", sectionKey: "added" });
+      // Boşluk (denetim bulgusu): silinen bölüm de bir bölüm değişimidir —
+      // target.sections üzerinde tek yönlü gezmek bunları ATLIYORDU.
+      expect(changed).toContainEqual({ pageId: "page-manual-s", sectionKey: "extras" });
+    } finally {
+      context.close();
+    }
+  });
+
+  it("K-013 #2: mode değeri enum dışıysa wiki_build reddedilir (şema disiplini davranış kilidi)", async () => {
+    // K-013 #2: "wiki_build mode = full|incremental; geçersiz mod →
+    // INVALID_ARGUMENT". Girdi doğrulaması Zod inputSchema'dadır; bu test
+    // reddin GERÇEK yüzeyini (SDK şema reddi = protokol hatası) kilitler —
+    // enum dışı değerin handler'a ulaşmadığını kanıtlar.
+    const pair = await connectClient(makeContext());
+    try {
+      const result = await callTool(pair.client, "causoryn_wiki_build", {
+        mode: "gecersiz-mod",
+      });
+      expect(result.isError).toBe(true);
+      expect(result.structuredContent).toBeUndefined();
+    } finally {
+      await pair.close();
+    }
+  });
+
+  it("cursor codec çapraz uyumu: mcp ve wiki codec'leri aynı sürümlü {v,o} formatını paylaşır", () => {
+    // Denetim bulgusu: packages/wiki/src/search-cursor.ts, mcp-server
+    // cursor codec'inin bağımlılık sınırı gereği saf kopyasıdır; format
+    // eşliği yalnızca iki taraftaki aynı sabite dayanır. Bu çapraz test
+    // iki codec'in format sürümünü BİRLİKTE kilitler: bir taraf {v,o}
+    // şemasından saparsa test kırılır (sessiz ayrışma engellenir).
+    const mcpEncoded = encodeCursor(7);
+    expect(decodeWikiSearchCursor(mcpEncoded)).toBe(7);
+    const wikiEncoded = encodeWikiSearchCursor(9);
+    expect(decodeCursor(wikiEncoded)).toBe(9);
+    expect(mcpEncoded).not.toBe(wikiEncoded);
   });
 });

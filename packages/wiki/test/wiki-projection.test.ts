@@ -19,8 +19,14 @@ import {
   WIKI_ROOT_CATEGORIES,
   WIKI_TEMPLATE_VERSION,
   type WikiPage,
+  type WikiPageKind,
   type WikiProjection,
 } from "../src/index.js";
+import {
+  buildWikiRootCategorySections,
+  wikiBuildContext,
+  WIKI_ROOT_CATEGORY_TEMPLATES,
+} from "../src/projection.js";
 
 /**
  * WikiProjectionEngine — test üçlüsü (TŞ v2.1 §16A.1, §16A.5, §16A.7,
@@ -665,5 +671,30 @@ describe("WikiProjectionEngine — partial (adapter yetmezliği + belirsizlik)",
         ) as Parameters<typeof canonicalJson>[0],
       );
     expect(deltasJson()).toBe(deltasJson());
+  });
+});
+
+describe("kök kategori şablonları invariant", () => {
+  it("buildWikiRootCategorySections ile WIKI_ROOT_CATEGORY_TEMPLATES kategori başına sectionKey dizisi birebir eşittir (12/12 kapsam çift yönlü)", () => {
+    // Denetim bulgusu: buildWikiRootCategorySections switch'i (desteklenen
+    // kategori yolu) ile WIKI_ROOT_CATEGORY_TEMPLATES haritası
+    // (wikiUnsupportedRootSections — desteklenmeyen kategori yolu) iki
+    // yerde manuel senkronize tutulur; ayrışma durumunda iki yol farklı
+    // bölüm setleri üretirdi. Bu test iki yolun bölüm dizisini kilitler.
+    const ctx = wikiBuildContext(buildOrdersFixture());
+    const coveredKinds = new Set<WikiPageKind>();
+    for (const [kind, templateKeys] of WIKI_ROOT_CATEGORY_TEMPLATES) {
+      const drafts = buildWikiRootCategorySections(ctx, kind);
+      expect(
+        drafts.map((draft) => draft.sectionKey),
+        `kategori ${kind}: iki yolun sectionKey dizisi eşit değil`,
+      ).toEqual(templateKeys);
+      coveredKinds.add(kind);
+    }
+    // 12 kök kategorinin tamamı şablon haritasında kapsanır (çift yönlü).
+    for (const category of WIKI_ROOT_CATEGORIES) {
+      expect(coveredKinds.has(category.kind), `kategori ${category.kind} şablonsuz`).toBe(true);
+    }
+    expect(coveredKinds.size).toBe(WIKI_ROOT_CATEGORIES.length);
   });
 });

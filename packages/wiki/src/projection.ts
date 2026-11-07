@@ -1093,7 +1093,7 @@ export function wikiProjectionWarnings(
  * Desteklenmeyen kök kategoriler için sabit boş bölüm şablonları:
  * desteklenmeyen türde içerik ÜRETİLMEZ, yalnızca iskelet listelenir.
  */
-const WIKI_ROOT_CATEGORY_TEMPLATES: ReadonlyMap<WikiPageKind, readonly string[]> =
+export const WIKI_ROOT_CATEGORY_TEMPLATES: ReadonlyMap<WikiPageKind, readonly string[]> =
   new Map([
     ["overview", ["summary", "languages"]],
     ["architecture", ["layers"]],

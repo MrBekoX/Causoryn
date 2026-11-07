@@ -59,8 +59,14 @@ import { WIKI_ROOT_CATEGORIES, WIKI_TEMPLATE_VERSION } from "./taxonomy.js";
  *   Seçimde aşırı kapsama hash korumasıyla no-op'a düşer; küçük kaçırma
  *   YOKTUR (yukarıdaki kural alt sayfa içeriğinin tüm girdilerini kapsar).
  * - CONTENTHASH KORUMASI: seçilen sayfa yeniden üretilir; contentHash
- *   öncekiyle aynıysa sayfa no-op'tur (preserved) — kalıcı katmana
- *   YENİDEN YAZILMAZ (report.preservedPageIds, §16A.10).
+ *   öncekiyle aynıysa sayfa no-op'tur (preserved) — İÇERİK yeniden
+ *   üretilmez ve korunur (report.preservedPageIds, §16A.10). Kapsam notu
+ *   (denetim bulgusu): koruma İÇERİK anlamındadır; korunmuş sayfanın
+ *   bölüm/sürüm satırları yeni building WikiSnapshot'ına taşıyarak
+ *   YENİDEN YAZILIR (tek depo transaction'ı, TŞ §16A.5 madde 5 — snapshot
+ *   satırları snapshot'a özgüdür). Yani storage yazım hacmi full build'e
+ *   yakındır; invariant "bit-bit aynı içerik", "satır yazılmaz" DEĞİLDİR
+ *   (docs/implementation-status.md açık kalem 7).
  * - ATOMİK PUBLISH DİSLİPLİNİ: bu fonksiyon saf çekirdektir; yayımlama
  *   arayan katmandadır ve depo sözleşmesi (building satırı → tek
  *   transaction publish, TŞ §16A.5 madde 5) değişmeden kullanılır. Eski
@@ -640,7 +646,13 @@ export function projectWikiIncremental(
     }
   };
 
-  const pushPreserved = (pageId: string, identity?: Partial<WikiPage>): boolean => {
+  const pushPreserved = (
+    pageId: string,
+    // Denetim bulgusu (tip güvenliği): korunmuş sayfada ezilebilecek
+    // alanlar YALNIZCA görünen kimlik alanlarıdır — contentHash/freshness
+    // gibi koruma-sözleşmesi olan alanlar bu parametreyle ezilemez.
+    identity?: Pick<WikiPage, "parentId" | "title" | "slug" | "route">,
+  ): boolean => {
     const previousPage = previousPageById.get(pageId);
     if (previousPage === undefined) return false;
     pages.push({ ...previousPage, wikiSnapshotId, ...identity });

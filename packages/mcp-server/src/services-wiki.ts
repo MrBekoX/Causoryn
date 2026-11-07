@@ -771,21 +771,93 @@ async function wikiBuildIncremental(
   );
 
   const builtAt = deps.clock();
+  const { published, brokenLinks } = writeAndPublishWikiProjection({
+    deps,
+    wikiStore,
+    workspaceId,
+    projection: engine.projection,
+    resolution,
+    builtAt,
+  });
+
+  // Rapor (denetim bulgusu 3 kanıt yüzeyi): yalnızca motorun seçtiği
+  // pageId'ler yenilendi; preserved sayfalar önceki içerikle taşındı.
+  const regeneratedSet = new Set(engine.report.regeneratedPageIds);
+  const sectionsRegenerated = engine.projection.sections.filter(
+    (section) => regeneratedSet.has(section.pageId),
+  ).length;
+  const warnings: string[] = [
+    ...engine.projection.warnings,
+    ...downgradeWarnings,
+  ];
+  if (brokenLinks > 0) {
+    warnings.push(
+      `${String(brokenLinks)} Wiki linki hedefi çözümlenemedi; kayıtlar toPageId=null ile korundu ve brokenLinkDiagnostics üretildi (K-013 #4)`,
+    );
+  }
+
+  return buildEnvelope({
+    requestId,
+    workspaceId,
+    snapshotId: published.snapshot.id,
+    status: published.snapshot.status === "partial" ? "partial" : "ok",
+    coverage: coverageOf(graphRead.snapshot),
+    warnings,
+    data: {
+      wikiSnapshotId: published.snapshot.id,
+      graphSnapshotId: published.snapshot.graphSnapshotId,
+      revisionRef: published.snapshot.revisionRef,
+      status: published.snapshot.status,
+      mode: "incremental",
+      pagesRegenerated: engine.report.regeneratedPageIds.length,
+      sectionsRegenerated,
+      linksRegenerated: published.links.length,
+      brokenLinks,
+      warnings: [...warnings],
+    },
+  });
+}
+
+/**
+ * Projeksiyonu building WikiSnapshot satırlarına yazar ve publish eder —
+ * wikiBuildIncremental ile wikiBuildFull gövdelerindeki birebir kopyanın
+ * TEK noktaya alınması (denetim bulgusu: takım denetimi bulgusu 4'ün
+ * (publishWiki hatasında failWikiBuild) iki kopyada ayrı ayrı sürülmesi
+ * drift riskini kanıtlıyordu). Yürütme sırası ve semantik kopyayla
+ * birebirdir: beginWikiBuild → addWikiPage/addWikiPageSection/addWikiLink
+ * → sayfa sürümleri (linkSetHash) → FTS → publish durumu denetimi →
+ * publishWiki (builtAt yayın saati ayrı deps.clock() okumasıdır, eski
+ * davranışla aynı). Hata durumunda building satırı failed'a kapanır
+ * (K-013 #1); CausorynToolError olduğu gibi çıkar, wiki çekirdek hatası
+ * wikiErrorToToolError ile sabit koda eşlenir.
+ */
+function writeAndPublishWikiProjection(options: {
+  readonly deps: ServiceDeps;
+  readonly wikiStore: SqliteWikiStore;
+  readonly workspaceId: string;
+  readonly projection: WikiProjection;
+  readonly resolution: ReturnType<typeof resolveWikiLinks>;
+  readonly builtAt: string;
+}): {
+  readonly published: ReturnType<SqliteWikiStore["publishWiki"]>;
+  readonly brokenLinks: number;
+} {
+  const { deps, wikiStore, workspaceId, projection, resolution, builtAt } = options;
   const sid = runWiki(deps, () =>
     wikiStore.beginWikiBuild({
       workspaceId,
-      graphSnapshotId: engine.projection.snapshot.graphSnapshotId,
-      revisionRef: engine.projection.snapshot.revisionRef,
+      graphSnapshotId: projection.snapshot.graphSnapshotId,
+      revisionRef: projection.snapshot.revisionRef,
       templateVersion: WIKI_TEMPLATE_VERSION,
       createdAt: builtAt,
     }),
   );
 
   try {
-    for (const page of engine.projection.pages) {
+    for (const page of projection.pages) {
       wikiStore.addWikiPage(sid, toWikiPageInput(page));
     }
-    for (const section of engine.projection.sections) {
+    for (const section of projection.sections) {
       const sectionInput: WikiPageSectionInput = {
         id: section.id,
         pageId: section.pageId,
@@ -816,11 +888,11 @@ async function wikiBuildIncremental(
       list.push(link);
       linksByPage.set(link.fromPageId, list);
     }
-    for (const page of engine.projection.pages) {
+    for (const page of projection.pages) {
       const pageLinks = linksByPage.get(page.id) ?? [];
       const versionInput: WikiPageVersionInput = {
         pageId: page.id,
-        revisionRef: engine.projection.snapshot.revisionRef,
+        revisionRef: projection.snapshot.revisionRef,
         contentHash: page.contentHash,
         linkSetHash: linkSetHashOf(pageLinks),
         templateVersion: WIKI_TEMPLATE_VERSION,
@@ -828,9 +900,11 @@ async function wikiBuildIncremental(
       };
       wikiStore.addWikiPageVersion(sid, versionInput);
     }
-    wikiStore.indexWikiFts(sid, buildFtsDocs(engine.projection));
+    wikiStore.indexWikiFts(sid, buildFtsDocs(projection));
 
-    const publishStatus = engine.projection.snapshot.status;
+    // K-013 #1: projeksiyon durumu yalnızca ready/partial olabilir (kaynak
+    // graph ready/partial); publish sözleşmesi birebir eşlenir.
+    const publishStatus = projection.snapshot.status;
     if (publishStatus !== "ready" && publishStatus !== "partial") {
       throw new CausorynToolError(
         "INDEX_NOT_READY",
@@ -838,49 +912,18 @@ async function wikiBuildIncremental(
       );
     }
     const published = runWiki(deps, () =>
-      wikiStore.publishWiki(sid, engine.projection.snapshot.id, publishStatus, deps.clock()),
+      wikiStore.publishWiki(sid, projection.snapshot.id, publishStatus, deps.clock()),
     );
-
-    // Rapor (denetim bulgusu 3 kanıt yüzeyi): yalnızca motorun seçtiği
-    // pageId'ler yenilendi; preserved sayfalar önceki içerikle taşındı.
-    const regeneratedSet = new Set(engine.report.regeneratedPageIds);
-    const sectionsRegenerated = engine.projection.sections.filter(
-      (section) => regeneratedSet.has(section.pageId),
-    ).length;
-    const brokenLinks = resolution.brokenLinkDiagnostics.length;
-    const warnings: string[] = [
-      ...engine.projection.warnings,
-      ...downgradeWarnings,
-    ];
-    if (brokenLinks > 0) {
-      warnings.push(
-        `${String(brokenLinks)} Wiki linki hedefi çözümlenemedi; kayıtlar toPageId=null ile korundu ve brokenLinkDiagnostics üretildi (K-013 #4)`,
-      );
-    }
-
-    return buildEnvelope({
-      requestId,
-      workspaceId,
-      snapshotId: published.snapshot.id,
-      status: published.snapshot.status === "partial" ? "partial" : "ok",
-      coverage: coverageOf(graphRead.snapshot),
-      warnings,
-      data: {
-        wikiSnapshotId: published.snapshot.id,
-        graphSnapshotId: published.snapshot.graphSnapshotId,
-        revisionRef: published.snapshot.revisionRef,
-        status: published.snapshot.status,
-        mode: "incremental",
-        pagesRegenerated: engine.report.regeneratedPageIds.length,
-        sectionsRegenerated,
-        linksRegenerated: published.links.length,
-        brokenLinks,
-        warnings: [...warnings],
-      },
-    });
+    return {
+      published,
+      brokenLinks: resolution.brokenLinkDiagnostics.length,
+    };
   } catch (error) {
     // K-013 #1: building satırı failed'a kapanır (ayrı 'error' adı yok);
-    // yarım WikiSnapshot okuma yollarında asla görünmez.
+    // yarım WikiSnapshot okuma yollarında asla görünmez. Takım denetimi
+    // bulgusu 4: publishWiki hatası DAHİL — aksi halde building satırı
+    // açık kalır ve aynı graph snapshot için wiki/build-already-active
+    // kilidi kalıcılaşır (INDEX_NOT_READY telafi yolunu kapatır).
     try {
       wikiStore.failWikiBuild(sid, errorText(error));
     } catch (failError) {
@@ -964,134 +1007,51 @@ async function wikiBuildFull(
   );
 
   const builtAt = deps.clock();
-  const sid = runWiki(deps, () =>
-    wikiStore.beginWikiBuild({
-      workspaceId,
-      graphSnapshotId: projection.snapshot.graphSnapshotId,
-      revisionRef: projection.snapshot.revisionRef,
-      templateVersion: WIKI_TEMPLATE_VERSION,
-      createdAt: builtAt,
-    }),
-  );
+  const { published, brokenLinks } = writeAndPublishWikiProjection({
+    deps,
+    wikiStore,
+    workspaceId,
+    projection,
+    resolution,
+    builtAt,
+  });
 
-  try {
-    for (const page of projection.pages) {
-      wikiStore.addWikiPage(sid, toWikiPageInput(page));
-    }
-    for (const section of projection.sections) {
-      const sectionInput: WikiPageSectionInput = {
-        id: section.id,
-        pageId: section.pageId,
-        sectionKey: section.sectionKey,
-        generatedMarkdown: section.generatedMarkdown,
-        evidenceRefs: section.evidenceRefs.map((ref) => ({ ...ref })),
-        status: section.status,
-      };
-      wikiStore.addWikiPageSection(sid, sectionInput);
-    }
-    for (const link of resolution.links) {
-      const linkInput: WikiLinkInput = {
-        id: link.id,
-        fromPageId: link.fromPageId,
-        toPageId: link.toPageId,
-        kind: link.kind,
-        resolution: link.resolution,
-        evidenceRefs: link.evidenceRefs.map((ref) => ({ ...ref })),
-      };
-      wikiStore.addWikiLink(sid, linkInput);
-    }
-    const linksByPage = new Map<
-      string,
-      { id: string; kind: string; toPageId: string | null; resolution: string }[]
-    >();
-    for (const link of resolution.links) {
-      const list = linksByPage.get(link.fromPageId) ?? [];
-      list.push(link);
-      linksByPage.set(link.fromPageId, list);
-    }
-    for (const page of projection.pages) {
-      const pageLinks = linksByPage.get(page.id) ?? [];
-      const versionInput: WikiPageVersionInput = {
-        pageId: page.id,
-        revisionRef: projection.snapshot.revisionRef,
-        contentHash: page.contentHash,
-        linkSetHash: linkSetHashOf(pageLinks),
-        templateVersion: WIKI_TEMPLATE_VERSION,
-        coverage: { status: page.coverage.status },
-      };
-      wikiStore.addWikiPageVersion(sid, versionInput);
-    }
-    wikiStore.indexWikiFts(sid, buildFtsDocs(projection));
-
-    // K-013 #1: projeksiyon durumu yalnızca ready/partial olabilir (kaynak
-    // graph ready/partial); publish sözleşmesi birebir eşlenir.
-    const publishStatus = projection.snapshot.status;
-    if (publishStatus !== "ready" && publishStatus !== "partial") {
-      throw new CausorynToolError(
-        "INDEX_NOT_READY",
-        `Wiki projeksiyonu publish edilemez durumda: ${publishStatus} (TŞ §9 publish kuralı)`,
-      );
-    }
-    const published = runWiki(deps, () =>
-      wikiStore.publishWiki(
-        sid,
-        projection.snapshot.id,
-        publishStatus,
-        deps.clock(),
-      ),
+  const warnings: string[] = [
+    ...(fallbackReason === undefined
+      ? []
+      : [incrementalFallbackWarning(fallbackReason)]),
+    ...projection.warnings,
+    ...downgradeWarnings,
+  ];
+  if (brokenLinks > 0) {
+    warnings.push(
+      `${String(brokenLinks)} Wiki linki hedefi çözümlenemedi; kayıtlar toPageId=null ile korundu ve brokenLinkDiagnostics üretildi (K-013 #4)`,
     );
-
-    const brokenLinks = resolution.brokenLinkDiagnostics.length;
-    const warnings: string[] = [
-      ...(fallbackReason === undefined
-        ? []
-        : [incrementalFallbackWarning(fallbackReason)]),
-      ...projection.warnings,
-      ...downgradeWarnings,
-    ];
-    if (brokenLinks > 0) {
-      warnings.push(
-        `${String(brokenLinks)} Wiki linki hedefi çözümlenemedi; kayıtlar toPageId=null ile korundu ve brokenLinkDiagnostics üretildi (K-013 #4)`,
-      );
-    }
-
-    return buildEnvelope({
-      requestId,
-      workspaceId,
-      snapshotId: published.snapshot.id,
-      status: published.snapshot.status === "partial" ? "partial" : "ok",
-      coverage: coverageOf(graphRead.snapshot),
-      warnings,
-      data: {
-        wikiSnapshotId: published.snapshot.id,
-        graphSnapshotId: published.snapshot.graphSnapshotId,
-        revisionRef: published.snapshot.revisionRef,
-        status: published.snapshot.status,
-        mode: "full",
-        ...(fallbackReason === undefined ? {} : { fallbackReason }),
-        pagesRegenerated: published.pages.length,
-        sectionsRegenerated: published.sections.length,
-        linksRegenerated: published.links.length,
-        brokenLinks,
-        // Takım denetimi bulgusu 8: data.warnings envelope uyarılarıyla
-        // aynı içerik taşır (wiki-spec §4.2.1 alanı daima-boş değildir).
-        warnings: [...warnings],
-      },
-    });
-  } catch (error) {
-    // K-013 #1: building satırı failed'a kapanır (ayrı 'error' adı yok);
-    // yarım WikiSnapshot okuma yollarında asla görünmez. Takım denetimi
-    // bulgusu 4: publishWiki hatası DAHİL — aksi halde building satırı
-    // açık kalır ve aynı graph snapshot için wiki/build-already-active
-    // kilidi kalıcılaşır (INDEX_NOT_READY telafi yolunu kapatır).
-    try {
-      wikiStore.failWikiBuild(sid, errorText(error));
-    } catch (failError) {
-      deps.logger(`wiki_build failWikiBuild başarısız: ${errorText(failError)}`);
-    }
-    if (error instanceof CausorynToolError) throw error;
-    throw wikiErrorToToolError(error, deps);
   }
+
+  return buildEnvelope({
+    requestId,
+    workspaceId,
+    snapshotId: published.snapshot.id,
+    status: published.snapshot.status === "partial" ? "partial" : "ok",
+    coverage: coverageOf(graphRead.snapshot),
+    warnings,
+    data: {
+      wikiSnapshotId: published.snapshot.id,
+      graphSnapshotId: published.snapshot.graphSnapshotId,
+      revisionRef: published.snapshot.revisionRef,
+      status: published.snapshot.status,
+      mode: "full",
+      ...(fallbackReason === undefined ? {} : { fallbackReason }),
+      pagesRegenerated: published.pages.length,
+      sectionsRegenerated: published.sections.length,
+      linksRegenerated: published.links.length,
+      brokenLinks,
+      // Takım denetimi bulgusu 8: data.warnings daima-boş DEĞİLDİR —
+      // envelope uyarılarıyla aynı içerik taşınır (wiki-spec §4.2.1).
+      warnings: [...warnings],
+    },
+  });
 }
 
 /* ------------------------------------------------------------------ */
@@ -2003,13 +1963,24 @@ export function wikiDiff(
     .filter((pageId) => !targetPageIds.has(pageId))
     .sort();
 
-  // changedSections: ortak sayfalarda bölüm içerik/kanıt/durum farkı.
+  // changedSections: ortak sayfalarda bölüm içerik/kanıt/durum farkı —
+  // İKİ YÖN: hedefte yeni/eklenen bölüm VE base'de var olup hedefte
+  // silinmiş bölüm (denetim bulgusu: tek yönlü target gezisi silinen
+  // sectionKey'leri atlıyordu; wiki-spec §4.2.7 changedSections şekli
+  // korunur — ayrı bir removedSections alanı TŞ §16A.4 kümesinde YOKTUR).
   const baseSectionsByPage = new Map<string, WikiSnapshotRead["sections"][number][]>();
   for (const section of base.sections) {
     if (!touchesScope(section.pageId)) continue;
     const list = baseSectionsByPage.get(section.pageId) ?? [];
     list.push(section);
     baseSectionsByPage.set(section.pageId, list);
+  }
+  const targetSectionsByPage = new Map<string, WikiSnapshotRead["sections"][number][]>();
+  for (const section of target.sections) {
+    if (!touchesScope(section.pageId)) continue;
+    const list = targetSectionsByPage.get(section.pageId) ?? [];
+    list.push(section);
+    targetSectionsByPage.set(section.pageId, list);
   }
   const changedSections: { pageId: string; sectionKey: string }[] = [];
   for (const section of target.sections) {
@@ -2022,13 +1993,26 @@ export function wikiDiff(
       changedSections.push({ pageId: section.pageId, sectionKey: section.sectionKey });
       continue;
     }
-    // Aynı şekilli iki depo okuması: JSON.stringify karşılaştırması
-    // deterministiktir (alan sırası depo okuma sözleşmesinden sabittir).
+    // Anahtar-sırasına duyarsız canonical karşılaştırma (denetim bulgusu:
+    // depo okuma sözleşmesindeki sabit alan sırasına dayanan varsayımın
+    // yerine savunma derinliği olarak canonicalJson kullanılır).
     const same =
       counterpart.generatedMarkdown === section.generatedMarkdown &&
       counterpart.status === section.status &&
-      JSON.stringify(counterpart.evidenceRefs) === JSON.stringify(section.evidenceRefs);
+      canonicalJson(
+        counterpart.evidenceRefs as unknown as Parameters<typeof canonicalJson>[0],
+      ) === canonicalJson(section.evidenceRefs as unknown as Parameters<typeof canonicalJson>[0]);
     if (!same) {
+      changedSections.push({ pageId: section.pageId, sectionKey: section.sectionKey });
+    }
+  }
+  for (const section of base.sections) {
+    if (!touchesScope(section.pageId)) continue;
+    if (!targetPageIds.has(section.pageId)) continue;
+    const counterpart = (targetSectionsByPage.get(section.pageId) ?? []).find(
+      (entry) => entry.sectionKey === section.sectionKey,
+    );
+    if (counterpart === undefined) {
       changedSections.push({ pageId: section.pageId, sectionKey: section.sectionKey });
     }
   }
