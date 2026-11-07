@@ -241,7 +241,7 @@ function makeGitFixtureWithoutBlobs(): GitFixture {
 }
 
 /* ------------------------------------------------------------------ */
-/* Katalog: 16 araç                                                    */
+/* Katalog: 23 araç (16 + Wiki 7)                                      */
 /* ------------------------------------------------------------------ */
 
 describe("graphErrorToToolError — sabit eşleme birim testleri", () => {
@@ -293,15 +293,16 @@ describe("graphErrorToToolError — sabit eşleme birim testleri", () => {
 });
 
 describe("Faz C MCP yüzeyi — katalog", { timeout: 30_000 }, () => {
-  it("tools/list: tam olarak 16 araç (9 çekirdek + Faz C 7); TŞ §10.2 katalog sırası", async () => {
+  it("tools/list: tam olarak 23 araç (9 çekirdek + Faz C 7 + Wiki 7); TŞ §10.2 + §16A.8 katalog sırası", async () => {
     const pair = await connectClient(makeContext());
     try {
       const { tools } = await pair.client.listTools();
       expect(tools.map((t) => t.name).sort()).toEqual([...TOOL_NAMES].sort());
-      expect(TOOL_NAMES).toHaveLength(16);
+      expect(TOOL_NAMES).toHaveLength(23);
       // Katalog sırası TŞ §10.2 PDF sırasını izler: analyze_impact
       // trace_execution'dan sonra, architecture_timeline get_evidence'dan
-      // sonra gelir (ara sıra atlanan araçlar henüz yayımlanmadı).
+      // sonra gelir; Wiki'nin 7 aracı TŞ §16A.8 tablo sırasıyla katalog
+      // sonundadır (ara sıra atlanan araçlar henüz yayımlanmadı).
       expect(TOOL_NAMES).toEqual([
         "causoryn_get_capabilities",
         "causoryn_workspace_summary",
@@ -319,6 +320,13 @@ describe("Faz C MCP yüzeyi — katalog", { timeout: 30_000 }, () => {
         "causoryn_export_documentation",
         "causoryn_get_evidence",
         "causoryn_architecture_timeline",
+        "causoryn_wiki_build",
+        "causoryn_wiki_get_tree",
+        "causoryn_wiki_get_page",
+        "causoryn_wiki_search",
+        "causoryn_wiki_get_links",
+        "causoryn_wiki_get_versions",
+        "causoryn_wiki_diff",
       ]);
       for (const tool of tools) {
         expect(tool.inputSchema, `${tool.name} inputSchema yok`).toBeDefined();

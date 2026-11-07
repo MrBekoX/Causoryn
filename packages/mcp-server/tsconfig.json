@@ -12,6 +12,8 @@
     { "path": "../domain" },
     { "path": "../workspace" },
     { "path": "../graph" },
-    { "path": "../indexing" }
+    { "path": "../indexing" },
+    { "path": "../storage-sqlite" },
+    { "path": "../wiki" }
   ]
 }

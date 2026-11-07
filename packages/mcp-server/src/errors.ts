@@ -26,6 +26,17 @@
  *   YENİ bir uzantı kodu (OUTPUT_NOT_AUTHORIZED) basmak K-008 örüntüsünün
  *   önkoşulunu ("TŞ listesinde uygun kod yok") ihlal ederdi — adı ve TŞ
  *   §16 konumu gereği EXPORT_NOT_ALLOWED tam karşılıktır.
+ * - WIKI_PAGE_NOT_FOUND: TŞ §10.1 SABİT listesinde ZATEN vardır (s.9,
+ *   birincil kaynak doğrulaması: plugin-package.test.ts
+ *   TSH_BASE_ERROR_CODES); sprint-4 W5'te (Faz C2 Living Wiki) İLK KEZ
+ *   kullanıldı — WikiSnapshot'ta olmayan sayfa/parentId/pageId kimlikleri
+ *   bu sabit kodla raporlanır (takım denetimi bulgusu: sayfa kimliği için
+ *   EVIDENCE_NOT_FOUND uzantı kodunu kullanmak K-008 örüntüsünün
+ *   önkoşulunu ihlal ederdi; TŞ listesinde bire bir kod vardı).
+ *   WIKI_REVISION_NOT_AVAILABLE ve WIKI_BROKEN_LINK TŞ sabit kodları bu
+ *   dilimde HÂLÂ kullanılmaz: revizyon çözümlemesi K-013 #6 ile
+ *   INVALID_REVISION'a, bozuk link ise hata değil veri yüzeyine
+ *   (brokenLinkDiagnostics, K-013 #4) gider.
  *
  * Uzantı notu (dürüstlük): TŞ §10.1 sabit kod listesinde INVALID_ARGUMENT,
  * EVIDENCE_NOT_FOUND ve SYMBOL_NOT_FOUND YOKTUR. Görev sözleşmeleri
@@ -57,6 +68,7 @@ export const CAUSORYN_TOOL_ERROR_CODES = [
   "POLICY_INVALID",
   "INVALID_REVISION",
   "EXPORT_NOT_ALLOWED",
+  "WIKI_PAGE_NOT_FOUND",
   "UNSUPPORTED_LANGUAGE",
   "INTERNAL_ERROR",
 ] as const;
@@ -120,6 +132,11 @@ export const TOOL_ERROR_GUIDANCE: Readonly<
     retryable: false,
     userAction:
       "hedef dizini sunucu config'inin output.allowedOutputDirs beyanına ekletin (explicit izinli output listesi, TŞ §16 export güvenliği)",
+  },
+  WIKI_PAGE_NOT_FOUND: {
+    retryable: false,
+    userAction:
+      "wiki_get_tree çıktısındaki pageId değerlerini kullanın; eski bir WikiSnapshot kimliği sorgulandıysa güncel snapshot ile yeniden deneyin",
   },
   UNSUPPORTED_LANGUAGE: {
     retryable: false,

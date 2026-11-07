@@ -13,7 +13,7 @@ architecture questions without any model API, network service or credential.
   `.zcode-plugin/plugin.json`.
 - One routing skill: `skills/map-system/SKILL.md` teaches the host model when and how to
   call `causoryn_map_system`.
-- Sixteen published tools (exactly what the compiled server registers — empty handlers are
+- Twenty-three published tools (exactly what the compiled server registers — empty handlers are
   never advertised):
 
 | Tool | Purpose |
@@ -34,6 +34,13 @@ architecture questions without any model API, network service or credential.
 | `causoryn_export_documentation` | Documentation export (`format` json/markdown/mermaid/html) of the published snapshot; writes ONLY to a directory declared in `output.allowedOutputDirs` via atomic `.tmp` + rename. Unauthorized target answers `EXPORT_NOT_ALLOWED` (fixed TŞ §10.1 code). HTML is offline self-contained: escaping + CSP, no CDN/analytics. |
 | `causoryn_get_evidence` | Evidence provenance (source file/line records) for a node or edge id. |
 | `causoryn_architecture_timeline` | Architecture timeline over git `refs` or a bounded history `range`: deterministic even-interval sampling (`maxRevisions`, ends preserved, skipped points listed explicitly) and per-interval diff summaries derived from the compare core; unanalyzable points/intervals are reported explicitly, no numbers are fabricated. |
+| `causoryn_wiki_build` | **The only writing wiki tool**: projects the published graph snapshot into a deterministic `WikiSnapshot` (page tree, bidirectional links + broken-link diagnostics, page versions, FTS index) and publishes it atomically into the SQLite file declared at `wiki.dataDbPath` — the ONLY writable target (the authorized Causoryn data root; never the source tree; undeclared servers deny writes). `mode: full | incremental` — incremental regenerates only the affected pages with contentHash protection and degrades to a graceful full rebuild with an explicit `fallbackReason` when incremental is unsupported (§16A.5). |
+| `causoryn_wiki_get_tree` | Wiki page tree (read-only): 12 root categories + child pages in taxonomy order with `childCount`, coverage/freshness, subtree `depth` cap and cursor/limit pagination; empty categories are listed as `no_data`, never filled in. |
+| `causoryn_wiki_get_page` | Single wiki page (read-only): generated-layer sections (with `sectionKey` filter + section pagination), `evidenceRefs` provenance, page-level `sourceRefs`, coverage and freshness. Overlay annotations are not served here (TŞ §16A.6: separate local UI/CLI flow with explicit user consent). |
+| `causoryn_wiki_search` | Wiki search (read-only): escaped multi-field FTS5 query ranked exact symbol/route > title > module > BM25 > graph proximity, with `matchedFields` + `evidenceIds` relevance explanation, snippets and cursor pagination. No embedding/vector score exists (the engine is LLM-free); the proximity leg is reported as skipped when no proximity data is provided. |
+| `causoryn_wiki_get_links` | Page links (read-only): outgoing + incoming (backlinks derived from the reverse index, never duplicated) with resolution + evidence; links whose target could not be resolved are preserved with `toPageId: null` and surfaced in `brokenLinkDiagnostics` (never silently dropped). |
+| `causoryn_wiki_get_versions` | Accessible git/snapshot revisions (read-only): the published wiki revision is `available` (per-page versions carry `contentHash`/`linkSetHash`/`templateVersion`/`coverage`); `refs` aliases (commit/tag/branch) are resolved via read-only git (`cat-file`, no checkout/reset/clean) — an unresolvable alias answers `INVALID_REVISION`, a resolved revision without a stored wiki build answers `not_available` with the reason. |
+| `causoryn_wiki_diff` | Wiki snapshot diff (read-only; the working tree is never touched): `addedPages`/`removedPages`, `changedSections`, `addedLinks`/`removedLinks`, per-page `coverageDelta` (`{previous, current, reason?}`) and `unresolvedDifferences`. `contractChanges` stays `[]` until the contracts phase and the degradation is reported in `warnings`. |
 
 All responses use the standard envelope: `schemaVersion, requestId, workspaceId,
 snapshotId, status, coverage, warnings, data, nextCursor`, with the fixed envelope
@@ -41,13 +48,14 @@ error codes exported by the compiled server as `CAUSORYN_TOOL_ERROR_CODES`
 (`WORKSPACE_NOT_AUTHORIZED`, `PATH_DENIED`, `INDEX_NOT_READY`, `AMBIGUOUS_SYMBOL`,
 `LIMIT_EXCEEDED`, `INVALID_ARGUMENT`, `EVIDENCE_NOT_FOUND`, `SYMBOL_NOT_FOUND`,
 `POLICY_INVALID`, `INVALID_REVISION`, `EXPORT_NOT_ALLOWED`,
-`UNSUPPORTED_LANGUAGE`, `INTERNAL_ERROR`). Of these, `INVALID_ARGUMENT`,
-`EVIDENCE_NOT_FOUND` and `SYMBOL_NOT_FOUND` are project extensions beyond the TŞ
-§10.1 base list, while `POLICY_INVALID`, `INVALID_REVISION` and
-`EXPORT_NOT_ALLOWED` are TŞ §10.1 base codes first exercised by the Faz C guard /
-git-revision / export-authorization tools (see the header note in
-`packages/mcp-server/src/errors.ts`); the set is exactly what the server can
-place in `envelope.error.code`.
+`WIKI_PAGE_NOT_FOUND`, `UNSUPPORTED_LANGUAGE`, `INTERNAL_ERROR`). Of these,
+`INVALID_ARGUMENT`, `EVIDENCE_NOT_FOUND` and `SYMBOL_NOT_FOUND` are project
+extensions beyond the TŞ §10.1 base list, while `POLICY_INVALID`,
+`INVALID_REVISION`, `EXPORT_NOT_ALLOWED` and `WIKI_PAGE_NOT_FOUND` are TŞ
+§10.1 base codes first exercised by the Faz C guard / git-revision /
+export-authorization tools and the Faz C2 wiki tools respectively (see the
+header note in `packages/mcp-server/src/errors.ts`); the set is exactly what
+the server can place in `envelope.error.code`.
 
 ## Requirements
 
@@ -112,6 +120,14 @@ Set **Causoryn server config (JSON)** in the plugin settings to, for example:
   exist; with no declaration (the default) every export answers
   `EXPORT_NOT_ALLOWED` and nothing is written (explicit output authorization,
   default deny — TŞ §16 export security).
+- `wiki.dataDbPath` (optional absolute path) declares the ONLY file
+  `causoryn_wiki_build` may write (the authorized Causoryn data root SQLite
+  database, TŞ §16A.8). The path must be absolute, its parent directory must
+  exist, and it must lie OUTSIDE the `allowRoots` workspace root (the source
+  tree is never written; violations refuse to start the server). With no
+  declaration (the default) `causoryn_wiki_build` answers `PATH_DENIED` and
+  the wiki read tools answer `INDEX_NOT_READY` — explicit data-root
+  authorization, default deny.
 - No credentials, tokens or API keys exist in this plugin — the engine is fully local.
 
 ## Security model
@@ -135,7 +151,8 @@ deterministic call-chain paths with per-edge resolution and evidence). Sprint-3
 Faz C added `causoryn_analyze_impact`, `causoryn_check_architecture`,
 `causoryn_compare_architecture`, `causoryn_get_agent_context`,
 `causoryn_generate_onboarding`, `causoryn_export_documentation` and
-`causoryn_architecture_timeline` (16 tools total). Later phases add preflight,
-contract drift and wiki tooling per `wiki/mcp-tools.md`; this plugin's manifest
-and skill are updated only when those tools actually exist in the compiled
-server.
+`causoryn_architecture_timeline`. Sprint-4 Faz C2 (Living Wiki, TŞ §16A)
+added the seven wiki tools with `causoryn_wiki_build` as the only writing tool
+(23 tools total). Later phases add preflight and contract drift tooling per
+`wiki/mcp-tools.md`; this plugin's manifest and skill are updated only when
+those tools actually exist in the compiled server.

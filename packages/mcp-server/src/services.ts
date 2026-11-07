@@ -14,6 +14,8 @@ import {
   type IndexJobRecord,
 } from "@causoryn/indexing";
 import type { IndexJobManager } from "@causoryn/indexing";
+import type { SqliteWikiStore } from "@causoryn/storage-sqlite";
+import type { WikiSearchStore } from "@causoryn/wiki";
 import type { OutputAccessPolicy, WorkspaceAccessPolicy } from "@causoryn/workspace";
 import { z } from "zod";
 
@@ -50,6 +52,18 @@ export interface ServiceDeps {
    * döner. CausorynContext bu alanı config.output.allowedOutputDirs'tan kurar.
    */
   readonly outputPolicy: OutputAccessPolicy | null;
+  /**
+   * Sprint-4 W5: wiki projeksiyon deposu + FTS arama yüzeyi. wiki.dataDbPath
+   * beyanı yoksa ikisi de null (default deny): wiki_build PATH_DENIED, wiki
+   * okuma araçları INDEX_NOT_READY döner.
+   */
+  readonly wikiStore: SqliteWikiStore | null;
+  readonly wikiSearch: WikiSearchStore | null;
+  /**
+   * Saat kaynağı (domain deseni): wiki_build builtAt buradan okur;
+   * CausorynContext.clock ile aynı örnek.
+   */
+  readonly clock: () => string;
   /**
    * stderr hedefli logger (CausorynContext.logger'dan yapısal gelir): graf
    * sözleşme hataları INTERNAL_ERROR'a eşlenirken orijinal mesaj BURADA

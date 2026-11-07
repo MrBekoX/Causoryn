@@ -667,6 +667,10 @@ Her araç için sprint kuralı geçerlidir: pozitif + negatif + partial test ü�
 
 ## 8. Açık konular (implementasyon öncesi karar bekler)
 
+> **KARARLANDI (2026-11-05):** Bu bölümdeki 7 açık konu **K-013** ile karara bağlanmıştır (wiki/decisions.md).
+> Aşağıdaki `[TASLAK ÖNERİ]` notları artık K-013 kararlarının ilk taslakları olarak okunur; çelişki halinde
+> K-013 geçerlidir.
+
 TŞ'de açık olmayan ve Faz C2 başında karara bağlanması gereken noktalar — bu dokümanda `[TASLAK ÖNERİ]` etiketiyle
 önerilmiştir, iddia olarak değil:
 

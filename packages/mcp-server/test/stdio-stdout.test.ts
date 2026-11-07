@@ -126,7 +126,7 @@ describe("stdio server — stdout saflığı ve protokol el sıkışması", () =
     });
 
     child.stdout?.setEncoding("utf8");
-    // NDJSON satır tamponu: tools/list yanıtı 16 araçla (her biri tam JSON
+    // NDJSON satır tamponu: tools/list yanıtı 23 araçla (her biri tam JSON
     // Schema taşır) tek satırlık dev bir mesajdır ve socket chunk sınırında
     // PARÇALANABİLİR. Chunk'lar "\n"e kadar biriktirilmeden JSON.parse
     // yapılmaz; aksi halde parça satırlar çözümlenemez ve pending yanıt
@@ -215,8 +215,8 @@ describe("stdio server — stdout saflığı ve protokol el sıkışması", () =
     const listResult = listMsg.result as { tools?: Array<{ name?: string }> };
     // Sprint-2 B6: causoryn_index_status + causoryn_refresh_index, B5:
     // causoryn_get_symbol_context, B4: causoryn_trace_execution, sprint-3
-    // C8: Faz C'nin 7 aracı eklendi (TŞ §10.2 katalog büyümesi; liste
-    // alfabetik karşılaştırılır).
+    // C8: Faz C'nin 7 aracı, sprint-4 W5: Living Wiki'nin 7 aracı eklendi
+    // (TŞ §10.2 + §16A.8 katalog büyümesi; liste alfabetik karşılaştırılır).
     expect(listResult.tools?.map((t) => t.name).sort()).toEqual([
       "causoryn_analyze_impact",
       "causoryn_architecture_timeline",
@@ -233,6 +233,13 @@ describe("stdio server — stdout saflığı ve protokol el sıkışması", () =
       "causoryn_map_system",
       "causoryn_refresh_index",
       "causoryn_trace_execution",
+      "causoryn_wiki_build",
+      "causoryn_wiki_diff",
+      "causoryn_wiki_get_links",
+      "causoryn_wiki_get_page",
+      "causoryn_wiki_get_tree",
+      "causoryn_wiki_get_versions",
+      "causoryn_wiki_search",
       "causoryn_workspace_summary",
     ]);
 

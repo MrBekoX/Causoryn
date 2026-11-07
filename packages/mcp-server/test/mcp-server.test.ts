@@ -128,16 +128,16 @@ describe("MCP server — protokol düzeyi", { timeout: 30_000 }, () => {
     }
   });
 
-  it("tools/list: tam olarak 16 araç; her biri inputSchema + outputSchema taşır", async () => {
+  it("tools/list: tam olarak 23 araç; her biri inputSchema + outputSchema taşır", async () => {
     const pair = await connectClient(makeContext());
     try {
       const { tools } = await pair.client.listTools();
       expect(tools.map((t) => t.name).sort()).toEqual([...TOOL_NAMES].sort());
-      // Sıra TŞ §10.2 katalog sırasıdır: index_status + refresh_index
-      // sprint-2 B6 ile, get_symbol_context sprint-2 B5 ile,
-      // trace_execution sprint-2 B4 ile, Faz C'nin 7 aracı sprint-3 C8 ile
-      // eklendi (Faz C araçları trace_execution ile get_evidence arasında,
-      // architecture_timeline en sonda — PDF katalog sırası).
+      // Sıra TŞ §10.2 katalog sırası + §16A.8 Wiki ekidir: index_status +
+      // refresh_index sprint-2 B6 ile, get_symbol_context sprint-2 B5 ile,
+      // trace_execution sprint-2 B4 ile, Faz C'nin 7 aracı sprint-3 C8 ile,
+      // Living Wiki'nin 7 aracı sprint-4 W5 ile eklendi (TŞ §16A.8 tablo
+      // sırası: wiki_build başta, wiki_diff sonda).
       expect(TOOL_NAMES).toEqual([
         "causoryn_get_capabilities",
         "causoryn_workspace_summary",
@@ -155,6 +155,13 @@ describe("MCP server — protokol düzeyi", { timeout: 30_000 }, () => {
         "causoryn_export_documentation",
         "causoryn_get_evidence",
         "causoryn_architecture_timeline",
+        "causoryn_wiki_build",
+        "causoryn_wiki_get_tree",
+        "causoryn_wiki_get_page",
+        "causoryn_wiki_search",
+        "causoryn_wiki_get_links",
+        "causoryn_wiki_get_versions",
+        "causoryn_wiki_diff",
       ]);
       for (const tool of tools) {
         expect(tool.inputSchema, `${tool.name} inputSchema yok`).toBeDefined();
@@ -784,6 +791,10 @@ describe("MCP server — protokol düzeyi", { timeout: 30_000 }, () => {
     // policy + git revizyon + export output yetkilendirmesi araçları) ilk
     // kez kullanıldılar (takım denetimi bulgusu: export yazma reddi için
     // yeni uzantı kodu basmak K-008 örüntüsünün önkoşulunu ihlal ederdi).
+    // WIKI_PAGE_NOT_FOUND aynı örüntüyledir: TŞ §10.1 sabit kodu, sprint-4
+    // W5'te (Faz C2 wiki araçları; WikiSnapshot'ta olmayan sayfa kimliği)
+    // İLK KEZ kullanıldı — takım denetimi bulgusuyla EVIDENCE_NOT_FOUND'dan
+    // düzeltildi.
     expect([...CAUSORYN_TOOL_ERROR_CODES].sort()).toEqual(
       [
         "WORKSPACE_NOT_AUTHORIZED",
@@ -797,6 +808,7 @@ describe("MCP server — protokol düzeyi", { timeout: 30_000 }, () => {
         "POLICY_INVALID",
         "INVALID_REVISION",
         "EXPORT_NOT_ALLOWED",
+        "WIKI_PAGE_NOT_FOUND",
         "UNSUPPORTED_LANGUAGE",
         "INTERNAL_ERROR",
       ].sort(),

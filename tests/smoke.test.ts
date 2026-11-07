@@ -146,12 +146,13 @@ describe("TypeScript çözüm sözleşmesi", () => {
     expect(field(options, "sourceMap")).toBe(true);
   });
 
-  it("kök tsconfig.json solution olarak 8 projeye referans verir", () => {
+  it("kök tsconfig.json solution olarak 9 projeye referans verir", () => {
     const solution = readJson("tsconfig.json");
     const references = field(solution, "references") as Array<
       Record<string, unknown>
     >;
     const paths = references.map((ref) => String(field(ref, "path")));
+    // Faz C2 (Living Wiki) ile packages/wiki çözüme eklendi.
     expect(paths).toEqual([
       "packages/domain",
       "packages/workspace",
@@ -159,6 +160,7 @@ describe("TypeScript çözüm sözleşmesi", () => {
       "packages/graph",
       "packages/storage-sqlite",
       "packages/mcp-server",
+      "packages/wiki",
       "adapters/typescript",
       "adapters/csharp-roslyn",
     ]);
@@ -187,11 +189,12 @@ describe("monorepo dizin iskeleti", () => {
     for (const dir of requiredDirs) {
       expect(exists(dir), `${dir} yok`).toBe(true);
     }
-    // TŞ §18 sonu ilkesi: Faz A'da olmaması gereken paketler OLMAMALI.
+    // Dilim sonu ilkesi (TŞ §18): henüz açılmamış dilim paketleri
+    // OLMAMALI. packages/wiki Faz C2 (Living Wiki) ile açıldı ve artık
+    // çözüm referansıdır; kalanlar sonraki dilimlere aittir.
     const forbidden = [
       "packages/contracts",
       "packages/preflight",
-      "packages/wiki",
       "packages/roslyn",
     ];
     for (const dir of forbidden) {
