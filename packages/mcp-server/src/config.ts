@@ -50,6 +50,23 @@ export const causorynServerConfigSchema = workspacePolicyConfigSchema.extend({
       allowedOutputDirs: z.array(z.string()).default([]),
     })
     .default({ allowedOutputDirs: [] }),
+  /**
+   * Wiki veri kökü beyanı (sprint-4 W5; TŞ §16A.8: wiki_build "yalnızca
+   * izinli Causoryn data-root'a yazar, kaynak dosyalara yazamaz"; TŞ §20
+   * CAUSORYN_DATA_DIR ilkesi). Beyan yazma hedefi SQLite dosyasının tam
+   * yoludur. Default beyansız → default deny: causoryn_wiki_build hiçbir
+   * yere yazamaz (PATH_DENIED), wiki okuma araçları INDEX_NOT_READY döner.
+   * Beyan başlangıçta doğrulanır: mutlak yol, üst dizin mevcut ve YETKİLİ
+   * WORKSPACE KÖKÜNÜN DIŞINDA olmalıdır (kaynak ağacına yazım yasak,
+   * ADR-008) — ihlal CausorynConfigError ile sunucuyu düşürür (güven
+   * kaynağı kurulamıyorsa sessiz devam yoktur; OutputAccessPolicy ile aynı
+   * disiplin).
+   */
+  wiki: z
+    .strictObject({
+      dataDbPath: z.string().min(1).optional(),
+    })
+    .default({}),
 });
 
 export type CausorynServerConfig = z.infer<typeof causorynServerConfigSchema>;

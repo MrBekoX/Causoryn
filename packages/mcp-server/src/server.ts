@@ -62,18 +62,42 @@ import {
   generateOnboardingTool,
   getAgentContext,
 } from "./services-architecture.js";
+import {
+  WikiBuildDataSchema,
+  WikiBuildInputSchema,
+  WikiDiffDataSchema,
+  WikiDiffInputSchema,
+  WikiGetLinksDataSchema,
+  WikiGetLinksInputSchema,
+  WikiGetPageDataSchema,
+  WikiGetPageInputSchema,
+  WikiGetTreeDataSchema,
+  WikiGetTreeInputSchema,
+  WikiGetVersionsDataSchema,
+  WikiGetVersionsInputSchema,
+  WikiSearchDataSchema,
+  WikiSearchInputSchema,
+  wikiBuild,
+  wikiDiff,
+  wikiGetLinks,
+  wikiGetPage,
+  wikiGetTree,
+  wikiGetVersions,
+  wikiSearch,
+} from "./services-wiki.js";
 import { SERVER_NAME, SERVER_VERSION } from "./version.js";
 
 /**
  * MCP protokol adaptasyonu (TŞ v2.1 §5/§10, ADR-003): SDK McpServer
- * üzerinden tam olarak 16 gerçek araç yayımlanır (sprint-1: 5 çekirdek araç;
+ * üzerinden tam olarak 23 gerçek araç yayımlanır (sprint-1: 5 çekirdek araç;
  * sprint-2 B6: causoryn_index_status + causoryn_refresh_index; sprint-2 B5:
  * causoryn_get_symbol_context; sprint-2 B4: causoryn_trace_execution;
  * sprint-3 C8: causoryn_analyze_impact, causoryn_check_architecture,
  * causoryn_compare_architecture, causoryn_get_agent_context,
  * causoryn_generate_onboarding, causoryn_export_documentation,
- * causoryn_architecture_timeline; tools/list boş handler yayınlamaz —
- * ADR-010).
+ * causoryn_architecture_timeline; sprint-4 W5 (Faz C2 Living Wiki, TŞ
+ * §16A.8): causoryn_wiki_build + 6 salt-okunur wiki aracı; tools/list boş
+ * handler yayınlamaz — ADR-010).
  * Her araç:
  * - Zod inputSchema (SDK girdiyi otomatik doğrular; şema reddi protokol
  *   düzeyinde isError sonucu döner),
@@ -285,10 +309,84 @@ function buildRegistrations(context: CausorynContext): readonly ToolRegistration
           args as z.infer<typeof ArchitectureTimelineInputSchema>,
         ),
     },
+    {
+      name: "causoryn_wiki_build",
+      title: "Wiki build",
+      description:
+        "Yayımlanmış graph snapshot'ından deterministik WikiSnapshot üretir ve YALNIZCA config wiki.dataDbPath ile beyanlı izinli Causoryn data-root SQLite dosyasına atomik publish ile yazar (kaynak workspace dosyalarına yazma yok; beyansız sunucuda default deny). Sayfa ağacı (TŞ §16A.1 taksonomisi; boş kategori no_data, uydurulmaz), çift yönlü linkler + broken-link diagnostics (K-013 #4), sayfa sürümleri ve wiki_fts aynı building satırına yazılır; aynı graph snapshot için ikinci build idempotent no-op raporlar. mode=full çalıştırır; incremental invalidation sonraki dilimdedir (açık ret).",
+      inputSchema: WikiBuildInputSchema,
+      outputSchema: envelopeOutputSchema(WikiBuildDataSchema),
+      handler: async (requestId, args) =>
+        wikiBuild(context, requestId, args as z.infer<typeof WikiBuildInputSchema>),
+    },
+    {
+      name: "causoryn_wiki_get_tree",
+      title: "Wiki sayfa ağacı",
+      description:
+        "Wiki sayfa ağacı hiyerarşisi (salt okunur): 12 kök kategori + alt sayfalar taksonomi sırasıyla, childCount + coverage/freshness ile; depth alt ağaç tavanı, parentId alt ağaç kökü, limit/cursor (K-013 #5) sayfalama. no_data kategoriler dolgusuz listelenir.",
+      inputSchema: WikiGetTreeInputSchema,
+      outputSchema: envelopeOutputSchema(WikiGetTreeDataSchema),
+      handler: (requestId, args) =>
+        wikiGetTree(context, requestId, args as z.infer<typeof WikiGetTreeInputSchema>),
+    },
+    {
+      name: "causoryn_wiki_get_page",
+      title: "Wiki sayfası",
+      description:
+        "Tek wiki sayfası (salt okunur): generated layer bölümleri (sectionKey filtresi + bölüm sayfalaması), evidenceRefs provenance, coverage/freshness ve tüm bölümlerden türetilen sourceRefs. Overlay anotasyonlar bu araçta dönmez (TŞ §16A.6: ayrı yerel UI/CLI akışı).",
+      inputSchema: WikiGetPageInputSchema,
+      outputSchema: envelopeOutputSchema(WikiGetPageDataSchema),
+      handler: (requestId, args) =>
+        wikiGetPage(context, requestId, args as z.infer<typeof WikiGetPageInputSchema>),
+    },
+    {
+      name: "causoryn_wiki_search",
+      title: "Wiki arama",
+      description:
+        "Wiki sayfa araması (salt okunur): kaçışlı çok alanlı FTS5 sorgu; sıralama exact sembol/route > başlık > modül > BM25 > graph yakınlığı; matchedFields + evidenceIds relevance açıklaması, snippet, cursor/limit sayfalama (K-013 #5). Embedding skoru yoktur (kırmızı çizgi #1); yakınlık ayağı verisi yoksa skippedRankLegs ile dürüst degrade.",
+      inputSchema: WikiSearchInputSchema,
+      outputSchema: envelopeOutputSchema(WikiSearchDataSchema),
+      handler: (requestId, args) =>
+        wikiSearch(context, requestId, args as z.infer<typeof WikiSearchInputSchema>),
+    },
+    {
+      name: "causoryn_wiki_get_links",
+      title: "Wiki bağlantıları",
+      description:
+        "Sayfanın outgoing + incoming (backlink) bağlantıları (salt okunur): resolution + evidence ile, linkKinds filtresi ve K-013 #5 sayfalama; toPageId=null kalan bozuk linkler brokenLinkDiagnostics ile raporlanır (K-013 #4: kayıt korunur, sessiz silinmez).",
+      inputSchema: WikiGetLinksInputSchema,
+      outputSchema: envelopeOutputSchema(WikiGetLinksDataSchema),
+      handler: (requestId, args) =>
+        wikiGetLinks(context, requestId, args as z.infer<typeof WikiGetLinksInputSchema>),
+    },
+    {
+      name: "causoryn_wiki_get_versions",
+      title: "Wiki sürümleri",
+      description:
+        "Erişilebilir Git/snapshot revizyonları (salt okunur): veri kökündeki yayımlanmış WikiSnapshot revizyonu available (pageId ile sayfa sürümü: contentHash/linkSetHash/templateVersion/coverage); refs commit/tag/branch alias'ları salt-okunur git-read (cat-file) ile çözülür — çözülemeyen alias INVALID_REVISION, revizyon kaydı olmayan çözümlenmiş ref not_available + gerekçe.",
+      inputSchema: WikiGetVersionsInputSchema,
+      outputSchema: envelopeOutputSchema(WikiGetVersionsDataSchema),
+      handler: async (requestId, args) =>
+        wikiGetVersions(
+          context,
+          requestId,
+          args as z.infer<typeof WikiGetVersionsInputSchema>,
+        ),
+    },
+    {
+      name: "causoryn_wiki_diff",
+      title: "Wiki diff",
+      description:
+        "İki WikiSnapshot arası sayfa farkları (salt okunur; working tree değişmez): addedPages/removedPages, changedSections, addedLinks/removedLinks, coverageDelta ({previous, current, reason?} — K-013 #3) ve unresolvedDifferences. contractChanges Faz D dilimine kadar [] döner ve degrade notu warnings'te taşınır (K-013 #7).",
+      inputSchema: WikiDiffInputSchema,
+      outputSchema: envelopeOutputSchema(WikiDiffDataSchema),
+      handler: (requestId, args) =>
+        wikiDiff(context, requestId, args as z.infer<typeof WikiDiffInputSchema>),
+    },
   ];
 }
 
-/** Context'i MCP McpServer'a bağlar; tam olarak 16 araç kaydeder. */
+/** Context'i MCP McpServer'a bağlar; tam olarak 23 araç kaydeder. */
 export function createCausorynMcpServer(context: CausorynContext): McpServer {
   const server = new McpServer(
     { name: SERVER_NAME, version: SERVER_VERSION },
