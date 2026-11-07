@@ -38,7 +38,9 @@ import {
   WIKI_TEMPLATE_VERSION,
   buildWikiLinkIndex,
   computeWikiCoverageDeltas,
+  deriveWikiSnapshotId,
   projectWiki,
+  projectWikiIncremental,
   resolveWikiLinks,
   type WikiLinkDraft,
   type WikiPageKind,
@@ -541,8 +543,11 @@ function toWikiPageInput(page: WikiProjection["pages"][number]): WikiPageInput {
 
 export const WikiBuildInputSchema = z.strictObject({
   workspaceId: z.string().min(1).optional(),
-  /** K-013 #2: mode = full | incremental. "incremental" bu araç yüzeyinde
-   * henüz yürütülmez (W6 incremental invalidation dilimi) — açık ret. */
+  /** K-013 #2: mode = full | incremental. incremental W6 motoruyla
+   * (projectWikiIncremental) yürütülür: yalnızca ilişkili pageId'ler
+   * yenilenir (TŞ §16A.5 madde 4); önceki WikiSnapshot/kaynak graph yoksa
+   * veya motor fallback kararı verirse (reconciliation) graceful full
+   * build + data.fallbackReason (denetim bulgusu 3/4). */
   mode: z.enum(["full", "incremental"]),
   /** TŞ §10.2 "scope?": bu dilimde desteklenmiyor (açık ret). */
   scope: z.string().min(1).optional(),
@@ -555,6 +560,14 @@ export const WikiBuildDataSchema = z.strictObject({
   graphSnapshotId: z.string(),
   revisionRef: z.string(),
   status: z.enum(["ready", "partial"]),
+  /**
+   * YÜRÜTÜLEN mod (K-013 #2 enum; denetim bulgusu 4): motor içi
+   * "full-rebuild" kararı yüzeyde mode="full" + fallbackReason olarak
+   * eşlenir — enum dışı değer yüzeye sızmaz.
+   */
+  mode: z.enum(["full", "incremental"]),
+  /** Yalnızca mode=full'a degrade edilmiş incremental isteğinde dolu. */
+  fallbackReason: z.string().optional(),
   pagesRegenerated: z.number().int().nonnegative(),
   sectionsRegenerated: z.number().int().nonnegative(),
   linksRegenerated: z.number().int().nonnegative(),
@@ -570,6 +583,14 @@ export const WikiBuildDataSchema = z.strictObject({
  *
  * - Kaynak: yalnızca ready/partial GraphSnapshot projeksiyona girer (TŞ §9);
  *   yayınlanmış graph yoksa INDEX_NOT_READY.
+ * - mode=full: tüm sayfalar yeniden üretilir.
+ * - mode=incremental (TŞ §16A.5 madde 4; W6 motoru
+ *   projectWikiIncremental): bölüm → sayfa eşlemesiyle yalnızca ilişkili
+ *   pageId'ler yenilenir; contentHash korunan sayfalar no-op'tur.
+ *   Önceki WikiSnapshot yok ya da önceki kaynak graph okunamıyorsa
+ *   graceful full build + data.fallbackReason (dürüst degrade; sessiz
+ *   yok sayma yok). Motor içi "full-rebuild" kararı yüzeyde mode="full"
+ *   + fallbackReason'a eşlenir (K-013 #2 enum disiplini; bulgusu 4).
  * - Sayfalar + bölümler + linkler + sayfa sürümleri + wiki_fts AYNI
  *   building satırına yazılır; publish tek transaction (TŞ §16A.5 madde 5);
  *   yazım hatasında failWikiBuild ile building satırı failed'a kapanır
@@ -588,12 +609,6 @@ export async function wikiBuild(
   const workspaceId = input.workspaceId ?? deps.config.workspaceId;
   requireAuthorizedWorkspace(deps, workspaceId);
 
-  if (input.mode === "incremental") {
-    throw new CausorynToolError(
-      "INVALID_ARGUMENT",
-      "mode=incremental bu araç yüzeyinde henüz yürütülmüyor; incremental invalidation (wiki/sprint-4.md W6: contentHash korunumlu sayfa yenileme) sonraki dilim kalemidir. Şimdilik mode=full kullanın",
-    );
-  }
   if (input.scope !== undefined) {
     throw new CausorynToolError(
       "INVALID_ARGUMENT",
@@ -604,18 +619,79 @@ export async function wikiBuild(
   const graphRead = requireSnapshot(deps, workspaceId);
   const wikiStore = requireWikiStoreForWrite(deps);
 
-  const projection = runWiki(deps, () =>
-    projectWiki(graphRead.snapshot, {
-      builtAt: deps.clock(),
-      ...(input.revision === undefined ? {} : { revisionRef: input.revision }),
-    }),
+  if (input.mode === "incremental") {
+    return wikiBuildIncremental(
+      deps,
+      requestId,
+      input,
+      workspaceId,
+      graphRead,
+      wikiStore,
+    );
+  }
+  return wikiBuildFull(
+    deps,
+    requestId,
+    input,
+    workspaceId,
+    graphRead,
+    wikiStore,
+    undefined,
   );
+}
 
-  // Idempotent no-op: aynı graph snapshot + templateVersion → aynı wiki
-  // kimliği (TŞ §16A.4 iki düzey sürüm); zaten yayımlanmışsa yeniden üretim
-  // gerekmez (UNIQUE publish çökmesi yerine dürüst rapor).
+/** Degrade uyarısının tek metni (testler /full-rebuild|tam yeniden build/ eşler). */
+function incrementalFallbackWarning(reason: string): string {
+  return `incremental build desteklenmedi → tam yeniden build (full-rebuild) yapıldı: ${reason}`;
+}
+
+/**
+ * mode=incremental yürütmesi (TŞ §16A.5 madde 4-6; denetim bulgusu 3).
+ * Önceki WikiSnapshot ve onun kaynak graph'ı çözülür; ikisi de elverişliyse
+ * W6 motoru (projectWikiIncremental) çalışır — preserved sayfaların satır
+ * içerikleri önceki snapshot ile bit-bit aynıdır (contentHash koruması).
+ * Elverişsizse graceful full build + fallbackReason.
+ */
+async function wikiBuildIncremental(
+  deps: ServiceDeps,
+  requestId: string,
+  input: z.infer<typeof WikiBuildInputSchema>,
+  workspaceId: string,
+  graphRead: Awaited<ReturnType<typeof requireSnapshot>>,
+  wikiStore: SqliteWikiStore,
+): Promise<Envelope> {
   const existing = wikiStore.getLatestPublishedWiki(workspaceId);
-  if (existing !== undefined && existing.snapshot.id === projection.snapshot.id) {
+  if (existing === undefined) {
+    return wikiBuildFull(
+      deps,
+      requestId,
+      input,
+      workspaceId,
+      graphRead,
+      wikiStore,
+      "mode=incremental istendi ancak workspace için yayımlanmış WikiSnapshot yok; ilk build full olarak yürütüldü",
+    );
+  }
+
+  const previousGraphRead = deps.repository.getSnapshot(
+    existing.snapshot.graphSnapshotId,
+  );
+  if (previousGraphRead === undefined) {
+    return wikiBuildFull(
+      deps,
+      requestId,
+      input,
+      workspaceId,
+      graphRead,
+      wikiStore,
+      `önceki WikiSnapshot'ın kaynak graph snapshot'ı okunamıyor (${existing.snapshot.graphSnapshotId}); TŞ §16A.5 gereği tam yeniden build gereklidir`,
+    );
+  }
+
+  // Idempotent no-op: aynı graph snapshot → aynı deterministik wiki
+  // kimliği (TŞ §16A.4); UNIQUE publish çökmesi yerine dürüst rapor.
+  const deterministicWikiId = deriveWikiSnapshotId(graphRead.snapshot.meta.id);
+  if (existing.snapshot.id === deterministicWikiId) {
     const brokenExisting = existing.links.filter((link) => link.toPageId === null).length;
     const idempotentWarnings = [
       `aynı graph snapshot için WikiSnapshot zaten yayımlanmış (${existing.snapshot.id}); idempotent no-op — sayfalar yeniden üretilmedi (TŞ §16A.4 deterministik türetim)`,
@@ -633,6 +709,224 @@ export async function wikiBuild(
         graphSnapshotId: existing.snapshot.graphSnapshotId,
         revisionRef: existing.snapshot.revisionRef,
         status: existing.snapshot.status,
+        mode: "incremental",
+        pagesRegenerated: 0,
+        sectionsRegenerated: 0,
+        linksRegenerated: 0,
+        brokenLinks: brokenExisting,
+        warnings: idempotentWarnings,
+      },
+    });
+  }
+
+  // W6 motoru: bölümler önceki projeksiyon okumasından, graph'lar
+  // kalıcı depo okumalarından gelir (TŞ §16A.5 madde 4: yalnızca ilişkili
+  // pageId'ler yenilenir; contentHash koruması motor sözleşmesidir).
+  const engine = runWiki(deps, () =>
+    projectWikiIncremental({
+      previous: projectionViewOf(existing),
+      previousGraph: previousGraphRead.snapshot,
+      nextGraph: graphRead.snapshot,
+      builtAt: deps.clock(),
+      ...(input.revision === undefined ? {} : { revisionRef: input.revision }),
+    }),
+  );
+  if (engine.report.mode === "full-rebuild") {
+    // Bulgusu 4 eşlemesi: motor içi "full-rebuild" → yüzeyde mode="full"
+    // + fallbackReason (enum dışı değer sızmaz).
+    return wikiBuildFull(
+      deps,
+      requestId,
+      input,
+      workspaceId,
+      graphRead,
+      wikiStore,
+      engine.report.reason,
+    );
+  }
+
+  const downgradeWarnings: string[] = [];
+  const drafts = buildLinkDrafts(graphRead.snapshot, engine.projection, downgradeWarnings);
+  const resolution = runWiki(deps, () =>
+    resolveWikiLinks(drafts, {
+      wikiSnapshotId: engine.projection.snapshot.id,
+      pages: engine.projection.pages.map((page) => ({
+        id: page.id,
+        slug: page.slug,
+        route: page.route,
+      })),
+    }),
+  );
+
+  const builtAt = deps.clock();
+  const sid = runWiki(deps, () =>
+    wikiStore.beginWikiBuild({
+      workspaceId,
+      graphSnapshotId: engine.projection.snapshot.graphSnapshotId,
+      revisionRef: engine.projection.snapshot.revisionRef,
+      templateVersion: WIKI_TEMPLATE_VERSION,
+      createdAt: builtAt,
+    }),
+  );
+
+  try {
+    for (const page of engine.projection.pages) {
+      wikiStore.addWikiPage(sid, toWikiPageInput(page));
+    }
+    for (const section of engine.projection.sections) {
+      const sectionInput: WikiPageSectionInput = {
+        id: section.id,
+        pageId: section.pageId,
+        sectionKey: section.sectionKey,
+        generatedMarkdown: section.generatedMarkdown,
+        evidenceRefs: section.evidenceRefs.map((ref) => ({ ...ref })),
+        status: section.status,
+      };
+      wikiStore.addWikiPageSection(sid, sectionInput);
+    }
+    for (const link of resolution.links) {
+      const linkInput: WikiLinkInput = {
+        id: link.id,
+        fromPageId: link.fromPageId,
+        toPageId: link.toPageId,
+        kind: link.kind,
+        resolution: link.resolution,
+        evidenceRefs: link.evidenceRefs.map((ref) => ({ ...ref })),
+      };
+      wikiStore.addWikiLink(sid, linkInput);
+    }
+    const linksByPage = new Map<
+      string,
+      { id: string; kind: string; toPageId: string | null; resolution: string }[]
+    >();
+    for (const link of resolution.links) {
+      const list = linksByPage.get(link.fromPageId) ?? [];
+      list.push(link);
+      linksByPage.set(link.fromPageId, list);
+    }
+    for (const page of engine.projection.pages) {
+      const pageLinks = linksByPage.get(page.id) ?? [];
+      const versionInput: WikiPageVersionInput = {
+        pageId: page.id,
+        revisionRef: engine.projection.snapshot.revisionRef,
+        contentHash: page.contentHash,
+        linkSetHash: linkSetHashOf(pageLinks),
+        templateVersion: WIKI_TEMPLATE_VERSION,
+        coverage: { status: page.coverage.status },
+      };
+      wikiStore.addWikiPageVersion(sid, versionInput);
+    }
+    wikiStore.indexWikiFts(sid, buildFtsDocs(engine.projection));
+
+    const publishStatus = engine.projection.snapshot.status;
+    if (publishStatus !== "ready" && publishStatus !== "partial") {
+      throw new CausorynToolError(
+        "INDEX_NOT_READY",
+        `Wiki projeksiyonu publish edilemez durumda: ${publishStatus} (TŞ §9 publish kuralı)`,
+      );
+    }
+    const published = runWiki(deps, () =>
+      wikiStore.publishWiki(sid, engine.projection.snapshot.id, publishStatus, deps.clock()),
+    );
+
+    // Rapor (denetim bulgusu 3 kanıt yüzeyi): yalnızca motorun seçtiği
+    // pageId'ler yenilendi; preserved sayfalar önceki içerikle taşındı.
+    const regeneratedSet = new Set(engine.report.regeneratedPageIds);
+    const sectionsRegenerated = engine.projection.sections.filter(
+      (section) => regeneratedSet.has(section.pageId),
+    ).length;
+    const brokenLinks = resolution.brokenLinkDiagnostics.length;
+    const warnings: string[] = [
+      ...engine.projection.warnings,
+      ...downgradeWarnings,
+    ];
+    if (brokenLinks > 0) {
+      warnings.push(
+        `${String(brokenLinks)} Wiki linki hedefi çözümlenemedi; kayıtlar toPageId=null ile korundu ve brokenLinkDiagnostics üretildi (K-013 #4)`,
+      );
+    }
+
+    return buildEnvelope({
+      requestId,
+      workspaceId,
+      snapshotId: published.snapshot.id,
+      status: published.snapshot.status === "partial" ? "partial" : "ok",
+      coverage: coverageOf(graphRead.snapshot),
+      warnings,
+      data: {
+        wikiSnapshotId: published.snapshot.id,
+        graphSnapshotId: published.snapshot.graphSnapshotId,
+        revisionRef: published.snapshot.revisionRef,
+        status: published.snapshot.status,
+        mode: "incremental",
+        pagesRegenerated: engine.report.regeneratedPageIds.length,
+        sectionsRegenerated,
+        linksRegenerated: published.links.length,
+        brokenLinks,
+        warnings: [...warnings],
+      },
+    });
+  } catch (error) {
+    // K-013 #1: building satırı failed'a kapanır (ayrı 'error' adı yok);
+    // yarım WikiSnapshot okuma yollarında asla görünmez.
+    try {
+      wikiStore.failWikiBuild(sid, errorText(error));
+    } catch (failError) {
+      deps.logger(`wiki_build failWikiBuild başarısız: ${errorText(failError)}`);
+    }
+    if (error instanceof CausorynToolError) throw error;
+    throw wikiErrorToToolError(error, deps);
+  }
+}
+
+/**
+ * mode=full çekirdeği (eski wikiBuild gövdesi). `fallbackReason` verildiğinde
+ * istek incremental'den degrade edilmiştir: uyarı + data.fallbackReason
+ * taşınır ve data.mode="full" yazılır (denetim bulgusu 3/4).
+ */
+async function wikiBuildFull(
+  deps: ServiceDeps,
+  requestId: string,
+  input: z.infer<typeof WikiBuildInputSchema>,
+  workspaceId: string,
+  graphRead: Awaited<ReturnType<typeof requireSnapshot>>,
+  wikiStore: SqliteWikiStore,
+  fallbackReason: string | undefined,
+): Promise<Envelope> {
+  const projection = runWiki(deps, () =>
+    projectWiki(graphRead.snapshot, {
+      builtAt: deps.clock(),
+      ...(input.revision === undefined ? {} : { revisionRef: input.revision }),
+    }),
+  );
+
+  // Idempotent no-op: aynı graph snapshot + templateVersion → aynı wiki
+  // kimliği (TŞ §16A.4 iki düzey sürüm); zaten yayımlanmışsa yeniden üretim
+  // gerekmez (UNIQUE publish çökmesi yerine dürüst rapor).
+  const existing = wikiStore.getLatestPublishedWiki(workspaceId);
+  if (existing !== undefined && existing.snapshot.id === projection.snapshot.id) {
+    const brokenExisting = existing.links.filter((link) => link.toPageId === null).length;
+    const idempotentWarnings = [
+      ...(fallbackReason === undefined
+        ? []
+        : [incrementalFallbackWarning(fallbackReason)]),
+      `aynı graph snapshot için WikiSnapshot zaten yayımlanmış (${existing.snapshot.id}); idempotent no-op — sayfalar yeniden üretilmedi (TŞ §16A.4 deterministik türetim)`,
+      ...wikiWarnings(deps, existing),
+    ];
+    return buildEnvelope({
+      requestId,
+      workspaceId,
+      snapshotId: existing.snapshot.id,
+      status: wikiEnvelopeStatus(existing),
+      coverage: coverageOf(graphRead.snapshot),
+      warnings: idempotentWarnings,
+      data: {
+        wikiSnapshotId: existing.snapshot.id,
+        graphSnapshotId: existing.snapshot.graphSnapshotId,
+        revisionRef: existing.snapshot.revisionRef,
+        status: existing.snapshot.status,
+        mode: "full",
+        ...(fallbackReason === undefined ? {} : { fallbackReason }),
         pagesRegenerated: 0,
         sectionsRegenerated: 0,
         linksRegenerated: 0,
@@ -737,6 +1031,9 @@ export async function wikiBuild(
 
     const brokenLinks = resolution.brokenLinkDiagnostics.length;
     const warnings: string[] = [
+      ...(fallbackReason === undefined
+        ? []
+        : [incrementalFallbackWarning(fallbackReason)]),
       ...projection.warnings,
       ...downgradeWarnings,
     ];
@@ -758,6 +1055,8 @@ export async function wikiBuild(
         graphSnapshotId: published.snapshot.graphSnapshotId,
         revisionRef: published.snapshot.revisionRef,
         status: published.snapshot.status,
+        mode: "full",
+        ...(fallbackReason === undefined ? {} : { fallbackReason }),
         pagesRegenerated: published.pages.length,
         sectionsRegenerated: published.sections.length,
         linksRegenerated: published.links.length,

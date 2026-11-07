@@ -2,10 +2,14 @@
  * Wiki projeksiyon hatası — TŞ v2.1 §16A, ADR-011 (Living Wiki as Graph
  * Projection).
  *
- * MCP hata kodlarına eşleme `packages/mcp-server` katmanındadır (W5); bu
- * paket yalnızca `wiki/...` ön ekli kodlar üretir (bağımlılık sınırı:
- * packages/wiki yalnızca @causoryn/domain'e bağlıdır, MCP türü import
- * etmez).
+ * MCP hata kodlarına eşleme `packages/mcp-server` katmanındadır (W5; denetim
+ * kaydı: export modülünün `wiki/output-not-authorized`/`wiki/output-path-denied`
+ * kodlarının EXPORT_NOT_ALLOWED/PATH_DENIED'e eşlenmesi henüz eklenmedi —
+ * view=wiki kablolandığında services-wiki.ts'te eklenmelidir); bu paket
+ * yalnızca `wiki/...` ön ekli kodlar üretir (bağımlılık sınırı güncel:
+ * packages/wiki @causoryn/domain + zod'a bağlıdır; export modülü W8 ile
+ * OutputAccessPolicy için @causoryn/workspace'a da bağlıdır — MCP türü
+ * import etmez).
  */
 export class WikiProjectionError extends Error {
   constructor(

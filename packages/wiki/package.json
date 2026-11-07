@@ -2,13 +2,14 @@
   "name": "@causoryn/wiki",
   "version": "0.1.0",
   "private": true,
-  "description": "WikiProjectionEngine: GraphSnapshot → WikiSnapshot deterministik projeksiyonu, TŞ §16A.1 sayfa taksonomisi, no_data dürüstlüğü ve coverageDelta (TŞ v2.1 §16A, ADR-011/012).",
+  "description": "WikiProjectionEngine: GraphSnapshot → WikiSnapshot deterministik projeksiyonu, TŞ §16A.1 sayfa taksonomisi, no_data dürüstlüğü, coverageDelta ve offline export (TŞ v2.1 §16A.9; ADR-011/012).",
   "type": "module",
   "exports": {
     ".": "./src/index.ts"
   },
   "dependencies": {
     "@causoryn/domain": "0.1.0",
+    "@causoryn/workspace": "0.1.0",
     "zod": "^4.6.7"
   }
 }

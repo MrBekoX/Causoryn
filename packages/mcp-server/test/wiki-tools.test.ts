@@ -267,14 +267,9 @@ describe("causoryn_wiki_build", { timeout: 60_000 }, () => {
     }
   });
 
-  it("negatif: mode=incremental INVALID_ARGUMENT; scope INVALID_ARGUMENT; yabancı workspace WORKSPACE_NOT_AUTHORIZED", async () => {
+  it("negatif: scope INVALID_ARGUMENT; yabancı workspace WORKSPACE_NOT_AUTHORIZED (mode=incremental artık geçerli moddur — denetim bulgusu 3; davranışı wiki-build-incremental.test.ts kanıtlar)", async () => {
     const pair = await connectClient(makeContext());
     try {
-      const incremental = expectErrorOf(
-        await callTool(pair.client, "causoryn_wiki_build", { mode: "incremental" }),
-      );
-      expect(incremental.code).toBe("INVALID_ARGUMENT");
-
       const scoped = expectErrorOf(
         await callTool(pair.client, "causoryn_wiki_build", {
           mode: "full",

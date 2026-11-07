@@ -313,7 +313,7 @@ function buildRegistrations(context: CausorynContext): readonly ToolRegistration
       name: "causoryn_wiki_build",
       title: "Wiki build",
       description:
-        "Yayımlanmış graph snapshot'ından deterministik WikiSnapshot üretir ve YALNIZCA config wiki.dataDbPath ile beyanlı izinli Causoryn data-root SQLite dosyasına atomik publish ile yazar (kaynak workspace dosyalarına yazma yok; beyansız sunucuda default deny). Sayfa ağacı (TŞ §16A.1 taksonomisi; boş kategori no_data, uydurulmaz), çift yönlü linkler + broken-link diagnostics (K-013 #4), sayfa sürümleri ve wiki_fts aynı building satırına yazılır; aynı graph snapshot için ikinci build idempotent no-op raporlar. mode=full çalıştırır; incremental invalidation sonraki dilimdedir (açık ret).",
+        "Yayımlanmış graph snapshot'ından deterministik WikiSnapshot üretir ve YALNIZCA config wiki.dataDbPath ile beyanlı izinli Causoryn data-root SQLite dosyasına atomik publish ile yazar (kaynak workspace dosyalarına yazma yok; beyansız sunucuda default deny). Sayfa ağacı (TŞ §16A.1 taksonomisi; boş kategori no_data, uydurulmaz), çift yönlü linkler + broken-link diagnostics (K-013 #4), sayfa sürümleri ve wiki_fts aynı building satırına yazılır; aynı graph snapshot için ikinci build idempotent no-op raporlar. mode=full tüm sayfaları yeniden üretir; mode=incremental (K-013 #2, TŞ §16A.5 madde 4) W6 motoruyla yalnızca ilişkili pageId'leri yeniler (contentHash koruması); önceki WikiSnapshot/kaynak graph yoksa veya motor fallback kararı verirse graceful full build + data.fallbackReason (data.mode yürütülen modu bildirir).",
       inputSchema: WikiBuildInputSchema,
       outputSchema: envelopeOutputSchema(WikiBuildDataSchema),
       handler: async (requestId, args) =>

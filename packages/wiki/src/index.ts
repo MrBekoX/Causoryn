@@ -81,6 +81,41 @@ export {
 export { projectWiki, wikiSlugify } from "./projection.js";
 export type { WikiProjectionInput } from "./projection.js";
 
+// W6 incremental invalidation (TŞ §16A.5; wiki/sprint-4.md W6) — motor +
+// deterministik graph diff + Zod rapor şemaları (denetim bulgusu 2/7:
+// paket girişinden tüketilebilirlik).
+export {
+  WikiGraphDiffSchema,
+  WikiIncrementalBuildReportSchema,
+  diffWikiGraphs,
+  projectWikiIncremental,
+} from "./incremental.js";
+export type {
+  WikiGraphDiff,
+  WikiIncrementalBuild,
+  WikiIncrementalBuildReport,
+  WikiIncrementalInput,
+} from "./incremental.js";
+export { deriveWikiSnapshotId } from "./projection.js";
+
+export {
+  WIKI_EXPORT_HTML_CSP,
+  WIKI_EXPORT_INDEX_HTML_NAME,
+  WIKI_EXPORT_INDEX_MD_NAME,
+  WIKI_EXPORT_MARKDOWN_DIR_NAME,
+  buildWikiExportFileSet,
+  exportWikiOffline,
+  serializeWikiHtml,
+  serializeWikiIndexMarkdown,
+  serializeWikiPageMarkdown,
+} from "./export.js";
+export type {
+  WikiExportFile,
+  WikiExportWrittenFile,
+  WikiOfflineExportInput,
+  WikiOfflineExportResult,
+} from "./export.js";
+
 export {
   normalizeWikiSearchQuery,
   escapeFtsPhrase,

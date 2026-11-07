@@ -81,20 +81,41 @@ const STRUCTURAL_NO_DATA_DETAIL: Partial<Record<WikiPageKind, string>> = {
   onboarding: "onboarding öğrenme patikası ayrı motor çıktısıdır",
 };
 
-interface SectionDraft {
+export interface WikiSectionDraft {
   readonly sectionKey: string;
   readonly markdown: string;
   readonly evidenceRefs: readonly EvidenceRef[];
   readonly status: WikiPageSectionStatus;
 }
 
-interface BuildContext {
+/**
+ * Bölüm şablonlarının paylaşılan build bağlamı — projectWiki ile W6
+ * incremental motorunun AYNI indeksler üzerinde çalışmasını garanti eder
+ * (TŞ §16A.5 madde 4: yalnızca ilişkili pageId'ler güncellenir).
+ */
+export interface WikiBuildContext {
   readonly graph: SnapshotGraph;
   readonly nodesById: ReadonlyMap<string, GraphNode>;
   readonly evidenceById: ReadonlyMap<string, Evidence>;
   readonly outEdges: ReadonlyMap<string, readonly GraphEdge[]>;
   readonly inEdges: ReadonlyMap<string, readonly GraphEdge[]>;
-  readonly warnings: string[];
+}
+
+/** SnapshotGraph → indekslenmiş build bağlamı (deterministik). */
+export function wikiBuildContext(graph: SnapshotGraph): WikiBuildContext {
+  const nodesById = new Map(graph.nodes.map((node) => [node.id, node]));
+  const evidenceById = new Map(graph.evidence.map((item) => [item.id, item]));
+  const outEdges = new Map<string, GraphEdge[]>();
+  const inEdges = new Map<string, GraphEdge[]>();
+  for (const edge of graph.edges) {
+    const fromList = outEdges.get(edge.from) ?? [];
+    fromList.push(edge);
+    outEdges.set(edge.from, fromList);
+    const toList = inEdges.get(edge.to) ?? [];
+    toList.push(edge);
+    inEdges.set(edge.to, toList);
+  }
+  return { graph, nodesById, evidenceById, outEdges, inEdges };
 }
 
 function requireNonEmpty(field: string, value: string): void {
@@ -135,17 +156,48 @@ function deterministicId(prefix: "page" | "section", parts: readonly unknown[]):
   return `${prefix}:${sha256Hex(utf8Encode(canonicalJson(parts as never)))}`;
 }
 
+/**
+ * §16A.1 pageId türetimi — kök kategori sayfası. Slug/başlık değişse bile
+ * kimlik korunur; W6 incremental motoru AYNI türetimi kullanır.
+ */
+export function wikiRootPageIdFor(
+  workspaceId: string,
+  categoryKey: string,
+  categoryKind: WikiPageKind,
+): string {
+  return deterministicId("page", [workspaceId, "root", categoryKey, categoryKind]);
+}
+
+/** §16A.1 pageId türetimi — node tabanlı alt sayfa. */
+export function wikiChildPageId(
+  workspaceId: string,
+  pageKind: WikiPageKind,
+  nodeId: string,
+): string {
+  return deterministicId("page", [workspaceId, "node", pageKind, nodeId]);
+}
+
+/**
+ * WikiSnapshot kimliği: kaynak graphSnapshotId + şablon sürümünden
+ * deterministik türetim (TŞ §16A.4 iki düzey sürüm; K-013).
+ */
+export function deriveWikiSnapshotId(graphSnapshotId: string): string {
+  return `wiki:${sha256Hex(
+    utf8Encode(canonicalJson([graphSnapshotId, WIKI_TEMPLATE_VERSION])),
+  )}`;
+}
+
 function resolutionLabel(resolution: string): string {
   return `[${resolution}]`;
 }
 
-function nodeDisplayName(ctx: BuildContext, nodeId: string): string {
+function nodeDisplayName(ctx: WikiBuildContext, nodeId: string): string {
   return ctx.nodesById.get(nodeId)?.qualifiedName ?? nodeId;
 }
 
 /** Kenar kümesinden span'lı kanıt referansları (kanonik: evidenceId sıralı). */
 function evidenceRefsForEdges(
-  ctx: BuildContext,
+  ctx: WikiBuildContext,
   edges: readonly GraphEdge[],
 ): EvidenceRef[] {
   const refs = new Map<string, EvidenceRef>();
@@ -182,12 +234,12 @@ function draft(
   status: WikiPageSectionStatus,
   markdown: string,
   evidenceRefs: readonly EvidenceRef[] = [],
-): SectionDraft {
+): WikiSectionDraft {
   return { sectionKey, status, markdown, evidenceRefs };
 }
 
 /** no_data bölümün tek gerçek yüzü: boş içerik, boş kanıt (§16A.1). */
-function emptyDraft(sectionKey: string): SectionDraft {
+function emptyDraft(sectionKey: string): WikiSectionDraft {
   return draft(sectionKey, "no_data", "", []);
 }
 
@@ -202,7 +254,7 @@ function sortedNodesOfKind(
 }
 
 function edgesOfKind(
-  ctx: BuildContext,
+  ctx: WikiBuildContext,
   kinds: readonly string[],
 ): GraphEdge[] {
   const kindSet = new Set(kinds);
@@ -211,7 +263,7 @@ function edgesOfKind(
     .sort((a, b) => byString(a.id, b.id));
 }
 
-function edgesFrom(ctx: BuildContext, nodeId: string, kinds?: readonly string[]): GraphEdge[] {
+function edgesFrom(ctx: WikiBuildContext, nodeId: string, kinds?: readonly string[]): GraphEdge[] {
   const list = ctx.outEdges.get(nodeId) ?? [];
   return kinds === undefined
     ? [...list].sort((a, b) => byString(a.id, b.id))
@@ -220,7 +272,7 @@ function edgesFrom(ctx: BuildContext, nodeId: string, kinds?: readonly string[])
         .sort((a, b) => byString(a.id, b.id));
 }
 
-function edgesTo(ctx: BuildContext, nodeId: string, kinds?: readonly string[]): GraphEdge[] {
+function edgesTo(ctx: WikiBuildContext, nodeId: string, kinds?: readonly string[]): GraphEdge[] {
   const list = ctx.inEdges.get(nodeId) ?? [];
   return kinds === undefined
     ? [...list].sort((a, b) => byString(a.id, b.id))
@@ -234,10 +286,10 @@ function edgesTo(ctx: BuildContext, nodeId: string, kinds?: readonly string[]): 
  * sürümlenir; TŞ §16A.7 "generated Markdown şablonları sabit sürümlenir").
  * ------------------------------------------------------------------------- */
 
-function buildRootSections(
-  ctx: BuildContext,
+export function buildWikiRootCategorySections(
+  ctx: WikiBuildContext,
   categoryKind: WikiPageKind,
-): SectionDraft[] {
+): WikiSectionDraft[] {
   switch (categoryKind) {
     case "overview": {
       const summary = buildOverviewSummary(ctx);
@@ -271,7 +323,7 @@ function buildRootSections(
   }
 }
 
-function buildOverviewSummary(ctx: BuildContext): SectionDraft {
+function buildOverviewSummary(ctx: WikiBuildContext): WikiSectionDraft {
   const workspaceNodes = sortedNodesOfKind(ctx.graph, ["Workspace", "Repository"]);
   const projectNodes = sortedNodesOfKind(ctx.graph, ["Project"]);
   if (workspaceNodes.length === 0 && projectNodes.length === 0) {
@@ -285,7 +337,7 @@ function buildOverviewSummary(ctx: BuildContext): SectionDraft {
   return draft("summary", "ok", lines.join("\n"));
 }
 
-function buildOverviewLanguages(ctx: BuildContext): SectionDraft {
+function buildOverviewLanguages(ctx: WikiBuildContext): WikiSectionDraft {
   const counts = new Map<string, number>();
   for (const node of ctx.graph.nodes) {
     if (node.language === undefined) continue;
@@ -310,7 +362,7 @@ const LAYER_KINDS: readonly { readonly level: number; readonly kinds: readonly s
   },
 ];
 
-function buildArchitectureLayers(ctx: BuildContext): SectionDraft {
+function buildArchitectureLayers(ctx: WikiBuildContext): WikiSectionDraft {
   const lines: string[] = [];
   for (const layer of LAYER_KINDS) {
     const counts = new Map<string, number>();
@@ -328,7 +380,7 @@ function buildArchitectureLayers(ctx: BuildContext): SectionDraft {
   return draft("layers", "ok", lines.join("\n"));
 }
 
-function buildModulesList(ctx: BuildContext): SectionDraft {
+function buildModulesList(ctx: WikiBuildContext): WikiSectionDraft {
   const modules = sortedNodesOfKind(ctx.graph, ["Module"]);
   if (modules.length === 0) return emptyDraft("modules");
   const lines = modules.map(
@@ -338,14 +390,14 @@ function buildModulesList(ctx: BuildContext): SectionDraft {
   return draft("modules", "ok", lines.join("\n"));
 }
 
-function buildEndpointsList(ctx: BuildContext): SectionDraft {
+function buildEndpointsList(ctx: WikiBuildContext): WikiSectionDraft {
   const endpoints = sortedNodesOfKind(ctx.graph, ["Endpoint"]);
   if (endpoints.length === 0) return emptyDraft("endpoints");
   const lines = endpoints.map((node) => `- ${node.qualifiedName}`);
   return draft("endpoints", "ok", lines.join("\n"));
 }
 
-function buildEventsList(ctx: BuildContext): SectionDraft {
+function buildEventsList(ctx: WikiBuildContext): WikiSectionDraft {
   const events = sortedNodesOfKind(ctx.graph, ["Event", "Topic", "Queue"]);
   if (events.length === 0) return emptyDraft("events");
   const lines = events.map(
@@ -354,7 +406,7 @@ function buildEventsList(ctx: BuildContext): SectionDraft {
   return draft("events", "ok", lines.join("\n"));
 }
 
-function buildSchemasList(ctx: BuildContext): SectionDraft {
+function buildSchemasList(ctx: WikiBuildContext): WikiSectionDraft {
   const counts = new Map<string, number>();
   for (const kind of ["Database", "Table", "Column"]) {
     const count = ctx.graph.nodes.filter((node) => node.kind === kind).length;
@@ -374,7 +426,7 @@ const CONTRACT_NODE_KINDS: readonly string[] = [
   "ContractVersion",
 ];
 
-function buildContractsList(ctx: BuildContext): SectionDraft {
+function buildContractsList(ctx: WikiBuildContext): WikiSectionDraft {
   const contracts = sortedNodesOfKind(ctx.graph, CONTRACT_NODE_KINDS);
   if (contracts.length === 0) return emptyDraft("contracts");
   const lines = contracts.map(
@@ -383,7 +435,7 @@ function buildContractsList(ctx: BuildContext): SectionDraft {
   return draft("contracts", "ok", lines.join("\n"));
 }
 
-function buildTestsList(ctx: BuildContext): SectionDraft {
+function buildTestsList(ctx: WikiBuildContext): WikiSectionDraft {
   const testNodes = sortedNodesOfKind(ctx.graph, ["Test"]);
   const testEdges = edgesOfKind(ctx, ["TESTS"]);
   if (testNodes.length === 0 && testEdges.length === 0) {
@@ -395,7 +447,7 @@ function buildTestsList(ctx: BuildContext): SectionDraft {
   return draft("tests", "ok", lines.join("\n"));
 }
 
-function buildUnresolvedReport(ctx: BuildContext): SectionDraft {
+function buildUnresolvedReport(ctx: WikiBuildContext): WikiSectionDraft {
   const unresolvedEdges = ctx.graph.edges
     .filter((edge) => edge.resolution === "unresolved")
     .sort((a, b) => byString(a.id, b.id));
@@ -425,11 +477,11 @@ function buildUnresolvedReport(ctx: BuildContext): SectionDraft {
  * Alt sayfa bölüm şablonları
  * ------------------------------------------------------------------------- */
 
-function buildChildSections(
-  ctx: BuildContext,
+export function buildWikiNodePageSections(
+  ctx: WikiBuildContext,
   pageKind: WikiPageKind,
   node: GraphNode,
-): SectionDraft[] {
+): WikiSectionDraft[] {
   switch (pageKind) {
     case "module": {
       const contains = edgesFrom(ctx, node.id, ["CONTAINS"]);
@@ -575,7 +627,8 @@ function buildChildSections(
  * Sayfa inşası
  * ------------------------------------------------------------------------- */
 
-interface PageDraft {
+/** materializeWikiPage çıktısı: sayfa + bölüm satırları (kanonik). */
+export interface WikiPageDraft {
   readonly page: WikiPage;
   readonly sections: readonly WikiPageSection[];
 }
@@ -587,7 +640,12 @@ interface PendingChild {
   readonly node: GraphNode;
 }
 
-const CHILD_SOURCES: readonly {
+/**
+ * Alt sayfa kaynakları: kategori anahtarı → node türleri → sayfa türü
+ * (projectWiki ile W6 incremental motorunun bölüm → sayfa eşlemesinin
+ * TEK kaynağı; TŞ §16A.5 madde 4).
+ */
+export const WIKI_CHILD_PAGE_SOURCES: readonly {
   readonly categoryKey: string;
   readonly kinds: readonly string[];
   readonly pageKind: WikiPageKind;
@@ -604,7 +662,7 @@ const CHILD_SOURCES: readonly {
 ];
 
 function sectionStatusSummary(
-  sections: readonly SectionDraft[],
+  sections: readonly WikiSectionDraft[],
 ): CoverageStatus {
   const statuses = sections.map((section) => section.status);
   if (statuses.every((status) => status === "no_data")) return "no_data";
@@ -612,7 +670,13 @@ function sectionStatusSummary(
   return "partial";
 }
 
-function materializePage(draftInput: {
+/**
+ * Bölüm taslaklarını kanonik WikiPage + WikiPageSection satırlarına
+ * çevirir (section id = sha256([pageId, sectionKey]); contentHash bölüm
+ * içeriklerinden; projectWiki ve W6 incremental motoru AYNI
+ * materializasyonu paylaşır).
+ */
+export function materializeWikiPage(draftInput: {
   pageId: string;
   wikiSnapshotId: string;
   kind: WikiPageKind;
@@ -620,10 +684,10 @@ function materializePage(draftInput: {
   title: string;
   slug: string;
   route: string;
-  sections: readonly SectionDraft[];
+  sections: readonly WikiSectionDraft[];
   coverageOverride?: CoverageStatus;
   coverageDetail?: string;
-}): PageDraft {
+}): WikiPageDraft {
   const sections: WikiPageSection[] = draftInput.sections.map((section) => ({
     id: deterministicId("section", [draftInput.pageId, section.sectionKey]),
     pageId: draftInput.pageId,
@@ -709,64 +773,37 @@ export function projectWiki(
     );
   }
 
-  // 3) İndeksler: node/edge/kanıt haritaları + uyarı biriktirici.
-  const nodesById = new Map(graph.nodes.map((node) => [node.id, node]));
-  const evidenceById = new Map(graph.evidence.map((item) => [item.id, item]));
-  const outEdges = new Map<string, GraphEdge[]>();
-  const inEdges = new Map<string, GraphEdge[]>();
-  for (const edge of graph.edges) {
-    const fromList = outEdges.get(edge.from) ?? [];
-    fromList.push(edge);
-    outEdges.set(edge.from, fromList);
-    const toList = inEdges.get(edge.to) ?? [];
-    toList.push(edge);
-    inEdges.set(edge.to, toList);
-  }
-  const warnings: string[] = [];
-  const ctx: BuildContext = {
-    graph,
-    nodesById,
-    evidenceById,
-    outEdges,
-    inEdges,
-    warnings,
-  };
+  // 3) İndeksler: node/edge/kanıt haritaları (paylaşılan build bağlamı —
+  //    W6 incremental motoru da aynı kurucuyu kullanır).
+  const ctx: WikiBuildContext = wikiBuildContext(graph);
 
-  const wikiSnapshotId = `wiki:${sha256Hex(
-    utf8Encode(canonicalJson([graph.meta.id, WIKI_TEMPLATE_VERSION])),
-  )}`;
+  const wikiSnapshotId = deriveWikiSnapshotId(graph.meta.id);
 
   const pages: WikiPage[] = [];
   const sections: WikiPageSection[] = [];
 
   // 4) Kök kategori sayfaları: taksonomi sırasıyla (§16A.1 ağacı).
-  const rootPageIds = new Map<string, string>();
   for (const category of WIKI_ROOT_CATEGORIES) {
-    const pageId = deterministicId("page", [
+    const pageId = wikiRootPageIdFor(
       graph.meta.workspaceId,
-      "root",
       category.key,
       category.kind,
-    ]);
-    rootPageIds.set(category.key, pageId);
+    );
 
-    const drafts: SectionDraft[] =
+    const drafts: WikiSectionDraft[] =
       supportedKinds.has(category.kind)
-        ? buildRootSections(ctx, category.kind)
-        : WIKI_ROOT_CATEGORY_TEMPLATES.get(category.kind)!.map(emptyDraft);
+        ? buildWikiRootCategorySections(ctx, category.kind)
+        : wikiUnsupportedRootSections(category.kind);
 
-    if (!supportedKinds.has(category.kind)) {
-      warnings.push(
-        `Kategori '${category.title}' (${category.kind}): sayfa türü bu adapter kümesi tarafından desteklenmiyor — unsupported`,
-      );
-    }
+    // Yapısal no_data detayı yalnızca DESTEKLENEN kategoriye girer:
+    // desteklenmeyen türde coverage.detail "desteklenmiyor" mesajıdır ve
+    // alttaki structural spread onu EZEMEZ (HEAD semantiği; denetim
+    // bulgusu 1 regresyon testi wiki-incremental.test.ts'te).
+    const structuralDetail = supportedKinds.has(category.kind)
+      ? wikiStructuralNoDataDetail(category.kind)
+      : undefined;
 
-    const structuralDetail =
-      !supportedKinds.has(category.kind)
-        ? undefined
-        : STRUCTURAL_NO_DATA_DETAIL[category.kind];
-
-    const materialized = materializePage({
+    const materialized = materializeWikiPage({
       pageId,
       wikiSnapshotId,
       kind: category.kind,
@@ -785,111 +822,36 @@ export function projectWiki(
     });
     pages.push(materialized.page);
     sections.push(...materialized.sections);
-
-    for (const section of materialized.sections) {
-      if (section.status === "partial") {
-        warnings.push(
-          `Sayfa '${category.title}' bölümü '${section.sectionKey}': çözülemeyen kenar içeriyor — partial`,
-        );
-      }
-    }
   }
 
-  // 5) Alt sayfalar: kategori kaynaklarından node eşlemesi (kanonik sıra).
-  const pendingChildren: PendingChild[] = [];
-  for (const source of CHILD_SOURCES) {
-    const category = WIKI_ROOT_CATEGORIES.find((entry) => entry.key === source.categoryKey);
-    if (category === undefined) {
-      throw new WikiProjectionError(
-        "wiki/internal",
-        `Taksonomi kategorisi bulunamadı: ${source.categoryKey}`,
-      );
-    }
-    if (!supportedKinds.has(category.kind)) {
-      // Desteklenmeyen kategoride alt sayfa üretilmez (veri uydurulmaz);
-      // uyarı kök kategori adımında zaten verildi.
-      continue;
-    }
-    for (const node of sortedNodesOfKind(graph, source.kinds)) {
-      pendingChildren.push({
-        categoryKey: category.key,
-        categorySlug: category.slug,
-        kind: source.pageKind,
-        node,
-      });
-    }
-  }
+  // 5) Alt sayfalar: kategori kaynaklarından node eşlemesi + slug çakışması
+  //    çözümü + kanonik sıra — paylaşılan planlayıcı (W6 aynı planı kullanır).
+  const childPlan = planWikiChildPages(graph, supportedKinds);
 
-  // 6) Slug çakışması çözümü: aynı route segmentine düşen alt sayfalara
-  //    node kimliğinden türetilen sonek eklenir (deterministik).
-  const slugGroups = new Map<string, PendingChild[]>();
-  for (const child of pendingChildren) {
-    const slug = wikiSlugify(child.node.qualifiedName);
-    const group = slugGroups.get(`${child.categoryKey}/${slug}`) ?? [];
-    group.push(child);
-    slugGroups.set(`${child.categoryKey}/${slug}`, group);
-  }
-  const slugByChild = new Map<PendingChild, string>();
-  for (const group of slugGroups.values()) {
-    if (group.length === 1) {
-      const only = group[0]!;
-      slugByChild.set(only, wikiSlugify(only.node.qualifiedName));
-      continue;
-    }
-    for (const child of group) {
-      slugByChild.set(child, `${wikiSlugify(child.node.qualifiedName)}-${child.node.id.slice(5, 13)}`);
-    }
-  }
-
-  // Alt sayfalar kanonik sırada: kategori sırası, sonra pageId.
-  const childPageIdOf = (child: PendingChild): string =>
-    deterministicId("page", [
-      graph.meta.workspaceId,
-      "node",
-      child.kind,
-      child.node.id,
-    ]);
-  const orderedChildren = [...pendingChildren]
-    .map((child) => ({ child, pageId: childPageIdOf(child) }))
-    .sort((a, b) => {
-      const categoryOrder = (key: string): number =>
-        WIKI_ROOT_CATEGORIES.findIndex((category) => category.key === key);
-      const orderDiff =
-        categoryOrder(a.child.categoryKey) - categoryOrder(b.child.categoryKey);
-      return orderDiff !== 0 ? orderDiff : byString(a.pageId, b.pageId);
-    });
-
-  for (const { child, pageId } of orderedChildren) {
-    const parentId = rootPageIds.get(child.categoryKey);
-    if (parentId === undefined) {
-      throw new WikiProjectionError(
-        "wiki/internal",
-        `Kök sayfa kimliği bulunamadı: ${child.categoryKey}`,
-      );
-    }
-    const slug = slugByChild.get(child) ?? wikiSlugify(child.node.qualifiedName);
-    const drafts = buildChildSections(ctx, child.kind, child.node);
-    const materialized = materializePage({
-      pageId,
+  for (const entry of childPlan) {
+    const drafts = buildWikiNodePageSections(ctx, entry.kind, entry.node);
+    const materialized = materializeWikiPage({
+      pageId: entry.pageId,
       wikiSnapshotId,
-      kind: child.kind,
-      parentId,
-      title: child.node.qualifiedName,
-      slug,
-      route: `/wiki/${child.categorySlug}/${slug}`,
+      kind: entry.kind,
+      parentId: entry.parentId,
+      title: entry.node.qualifiedName,
+      slug: entry.slug,
+      route: entry.route,
       sections: drafts,
     });
     pages.push(materialized.page);
     sections.push(...materialized.sections);
-
-    for (const section of materialized.sections) {
-      if (section.status === "partial") {
-        warnings.push(
-          `Sayfa '${materialized.page.title}' bölümü '${section.sectionKey}': çözülemeyen kenar içeriyor — partial`,
-        );
-      }
-    }
   }
+
+  // 6) Uyarılar: tek noktadan üretilir (W6 incremental motoru da AYNI
+  //    üreticiyi kullanır — canonical eşitlik için).
+  const warnings = wikiProjectionWarnings(
+    pages,
+    sections,
+    supportedKinds,
+    graph.meta.workspaceId,
+  );
 
   // 7) Snapshot üst verisi: K-013 (1) durum eşlemesi bire bir (graph state
   //    ready/partial → WikiSnapshot.status; hata bildirimi warnings ile).
@@ -924,6 +886,207 @@ export function projectWiki(
   }
 
   return deepFreeze(projection);
+}
+
+/* ---------------------------------------------------------------------------
+ * Paylaşılan planlayıcı ve uyarı üreticisi (W6 incremental invalidation;
+ * projectWiki ile AYNI kod — canonical eşitliğin tek kaynağı).
+ * ------------------------------------------------------------------------- */
+
+/** planWikiChildPages çıktısı: alt sayfanın tam kimlik planı. */
+export interface WikiChildPagePlanEntry {
+  readonly categoryKey: string;
+  readonly categorySlug: string;
+  readonly kind: WikiPageKind;
+  readonly node: GraphNode;
+  readonly pageId: string;
+  readonly parentId: string;
+  readonly slug: string;
+  readonly route: string;
+}
+
+/**
+ * Graph → alt sayfa planı (kanonik sıra: kategori sırası, sonra pageId).
+ * Slug çakışması çözümü dahil — projectWiki ile W6 incremental motoru
+ * AYNI planı kullanır; değişmeyen node'ların slug/route değerleri
+ * sürümler arasında korunur.
+ */
+export function planWikiChildPages(
+  graph: SnapshotGraph,
+  supportedKinds: ReadonlySet<WikiPageKind>,
+): readonly WikiChildPagePlanEntry[] {
+  // Kategori kaynaklarından node eşlemesi (kanonik sıra).
+  const pendingChildren: PendingChild[] = [];
+  for (const source of WIKI_CHILD_PAGE_SOURCES) {
+    const category = WIKI_ROOT_CATEGORIES.find((entry) => entry.key === source.categoryKey);
+    if (category === undefined) {
+      throw new WikiProjectionError(
+        "wiki/internal",
+        `Taksonomi kategorisi bulunamadı: ${source.categoryKey}`,
+      );
+    }
+    if (!supportedKinds.has(category.kind)) {
+      // Desteklenmeyen kategoride alt sayfa üretilmez (veri uydurulmaz);
+      // uyarı kök kategori adımında verilir.
+      continue;
+    }
+    for (const node of sortedNodesOfKind(graph, source.kinds)) {
+      pendingChildren.push({
+        categoryKey: category.key,
+        categorySlug: category.slug,
+        kind: source.pageKind,
+        node,
+      });
+    }
+  }
+
+  // Slug çakışması çözümü: aynı route segmentine düşen alt sayfalara
+  // node kimliğinden türetilen sonek eklenir (deterministik).
+  const slugGroups = new Map<string, PendingChild[]>();
+  for (const child of pendingChildren) {
+    const slug = wikiSlugify(child.node.qualifiedName);
+    const group = slugGroups.get(`${child.categoryKey}/${slug}`) ?? [];
+    group.push(child);
+    slugGroups.set(`${child.categoryKey}/${slug}`, group);
+  }
+  const slugByChild = new Map<PendingChild, string>();
+  for (const group of slugGroups.values()) {
+    if (group.length === 1) {
+      const only = group[0]!;
+      slugByChild.set(only, wikiSlugify(only.node.qualifiedName));
+      continue;
+    }
+    for (const child of group) {
+      slugByChild.set(child, `${wikiSlugify(child.node.qualifiedName)}-${child.node.id.slice(5, 13)}`);
+    }
+  }
+
+  // Alt sayfalar kanonik sırada: kategori sırası, sonra pageId.
+  return [...pendingChildren]
+    .map((child) => ({
+      child,
+      pageId: wikiChildPageId(graph.meta.workspaceId, child.kind, child.node.id),
+    }))
+    .sort((a, b) => {
+      const categoryOrder = (key: string): number =>
+        WIKI_ROOT_CATEGORIES.findIndex((category) => category.key === key);
+      const orderDiff =
+        categoryOrder(a.child.categoryKey) - categoryOrder(b.child.categoryKey);
+      return orderDiff !== 0 ? orderDiff : byString(a.pageId, b.pageId);
+    })
+    .map(({ child, pageId }) => {
+      const parentCategory = WIKI_ROOT_CATEGORIES.find(
+        (category) => category.key === child.categoryKey,
+      );
+      if (parentCategory === undefined) {
+        throw new WikiProjectionError(
+          "wiki/internal",
+          `Kök kategori bulunamadı: ${child.categoryKey}`,
+        );
+      }
+      const slug = slugByChild.get(child) ?? wikiSlugify(child.node.qualifiedName);
+      return {
+        categoryKey: child.categoryKey,
+        categorySlug: child.categorySlug,
+        kind: child.kind,
+        node: child.node,
+        pageId,
+        parentId: wikiRootPageIdFor(
+          graph.meta.workspaceId,
+          parentCategory.key,
+          parentCategory.kind,
+        ),
+        slug,
+        route: `/wiki/${child.categorySlug}/${slug}`,
+      };
+    });
+}
+
+/**
+ * Desteklenmeyen kök kategori için sabit boş bölüm şablonları:
+ * desteklenmeyen türde içerik ÜRETİLMEZ, yalnızca iskelet listelenir.
+ */
+export function wikiUnsupportedRootSections(
+  categoryKind: WikiPageKind,
+): WikiSectionDraft[] {
+  const template = WIKI_ROOT_CATEGORY_TEMPLATES.get(categoryKind);
+  if (template === undefined) {
+    throw new WikiProjectionError(
+      "wiki/internal",
+      `Desteklenmeyen kök kategori şablonu yok: ${categoryKind}`,
+    );
+  }
+  return template.map(emptyDraft);
+}
+
+/** Yapısal no_data kategorisi için dürüst degrade detayı (varsa). */
+export function wikiStructuralNoDataDetail(
+  categoryKind: WikiPageKind,
+): string | undefined {
+  return STRUCTURAL_NO_DATA_DETAIL[categoryKind];
+}
+
+/**
+ * Projeksiyon uyarılarının TEK üreticisi: desteklenmeyen kategori uyarıları
+ * (taksonomi sırasıyla, sayfa başına unsupported önce) + partial bölüm
+ * uyarıları (kökler taksonomi sırasıyla, alt sayfalar kategori+pageId
+ * sırasıyla). projectWiki ve W6 incremental motoru aynı diziyi üretir —
+ * canonical eşitlik uyarılar dahil korunur.
+ */
+export function wikiProjectionWarnings(
+  pages: readonly WikiPage[],
+  sections: readonly WikiPageSection[],
+  supportedKinds: ReadonlySet<WikiPageKind>,
+  workspaceId: string,
+): string[] {
+  const warnings: string[] = [];
+  const sectionsByPage = new Map<string, WikiPageSection[]>();
+  for (const section of sections) {
+    const list = sectionsByPage.get(section.pageId) ?? [];
+    list.push(section);
+    sectionsByPage.set(section.pageId, list);
+  }
+
+  for (const category of WIKI_ROOT_CATEGORIES) {
+    const pageId = wikiRootPageIdFor(workspaceId, category.key, category.kind);
+    if (!supportedKinds.has(category.kind)) {
+      warnings.push(
+        `Kategori '${category.title}' (${category.kind}): sayfa türü bu adapter kümesi tarafından desteklenmiyor — unsupported`,
+      );
+    }
+    for (const section of sectionsByPage.get(pageId) ?? []) {
+      if (section.status === "partial") {
+        warnings.push(
+          `Sayfa '${category.title}' bölümü '${section.sectionKey}': çözülemeyen kenar içeriyor — partial`,
+        );
+      }
+    }
+  }
+
+  const rootCategoryIndexByPageId = new Map<string, number>(
+    WIKI_ROOT_CATEGORIES.map((category, index) => [
+      wikiRootPageIdFor(workspaceId, category.key, category.kind),
+      index,
+    ]),
+  );
+  const children = pages
+    .filter((page) => page.parentId !== null)
+    .sort((a, b) => {
+      const orderA = rootCategoryIndexByPageId.get(a.parentId ?? "") ?? Number.MAX_SAFE_INTEGER;
+      const orderB = rootCategoryIndexByPageId.get(b.parentId ?? "") ?? Number.MAX_SAFE_INTEGER;
+      return orderA !== orderB ? orderA - orderB : byString(a.id, b.id);
+    });
+  for (const page of children) {
+    for (const section of sectionsByPage.get(page.id) ?? []) {
+      if (section.status === "partial") {
+        warnings.push(
+          `Sayfa '${page.title}' bölümü '${section.sectionKey}': çözülemeyen kenar içeriyor — partial`,
+        );
+      }
+    }
+  }
+
+  return warnings;
 }
 
 /**
