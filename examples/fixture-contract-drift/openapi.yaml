@@ -1,0 +1,58 @@
+openapi: 3.1.0
+info:
+  title: Orders Public API
+  version: 1.0.0
+paths:
+  /orders:
+    post:
+      operationId: createOrder
+      summary: Sipariş oluşturur
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateOrderInput"
+      responses:
+        "201":
+          description: created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Order"
+  /orders/{orderId}:
+    get:
+      operationId: getOrder
+      parameters:
+        - name: orderId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Order"
+components:
+  schemas:
+    CreateOrderInput:
+      type: object
+      required: [amount, currency]
+      properties:
+        amount:
+          type: number
+        currency:
+          type: string
+    Order:
+      type: object
+      required: [id, amount, currency]
+      properties:
+        id:
+          type: string
+        amount:
+          type: number
+        currency:
+          type: string

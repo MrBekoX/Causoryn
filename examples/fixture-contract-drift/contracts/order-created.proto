@@ -1,0 +1,21 @@
+// OrderCreated olay sozlesmesi (proto3).
+// BILINCLI olarak parser'in sinirli dilimi otesinde yapilar icerir:
+// map alani -> unknown serializer notu ile kismen tanima (T 11).
+syntax = "proto3";
+
+package causoryn.orders;
+
+message OrderCreatedEvent {
+  string order_id = 1;
+  int64 amount_minor = 2;
+  string currency = 3;
+  map<string, string> metadata = 4;
+}
+
+message OrderCreatedAck {
+  string event_id = 1;
+}
+
+service OrderEvents {
+  rpc OrderCreated (OrderCreatedEvent) returns (OrderCreatedAck);
+}

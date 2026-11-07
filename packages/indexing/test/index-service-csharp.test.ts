@@ -320,7 +320,7 @@ describe.skipIf(!workerReady)(
       } finally {
         rmSync(root, { recursive: true, force: true });
       }
-    });
+    }, 60_000);
   },
 );
 

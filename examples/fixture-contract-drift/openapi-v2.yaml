@@ -1,0 +1,78 @@
+openapi: 3.1.0
+info:
+  title: Orders Public API
+  version: 2.0.0
+paths:
+  /orders:
+    post:
+      operationId: createOrder
+      summary: Sipariş oluşturur (v2)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateOrderInput"
+      responses:
+        "201":
+          description: created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Order"
+    get:
+      operationId: listOrders
+      summary: "v2'de eklendi — backward-safe ekleme aday"
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OrderList"
+  /orders/{orderId}:
+    get:
+      operationId: getOrder
+      parameters:
+        - name: orderId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Order"
+components:
+  schemas:
+    CreateOrderInput:
+      # backward-safe malzeme (istek şeması): currency property'si KALIR,
+      # yalnızca zorunluluktan çıkar (required→optional — request için
+      # backward-safe; breaking örneği aşağıdaki Order şemasındadır).
+      type: object
+      required: [amount]
+      properties:
+        amount:
+          type: number
+        currency:
+          type: string
+        note:
+          type: string
+          description: "v2'de eklendi — backward-safe aday"
+    Order:
+      # breaking_candidate malzemesi (TŞ §11: zorunlu property silinmesi):
+      # yanıt şemasından zorunlu currency property'si tamamen SİLİNDİ.
+      type: object
+      required: [id, amount]
+      properties:
+        id:
+          type: string
+        amount:
+          type: number
+    OrderList:
+      type: array
+      items:
+        $ref: "#/components/schemas/Order"
