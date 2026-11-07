@@ -21,6 +21,9 @@ import { applySchema, SCHEMA_VERSION } from "./schema.js";
  *   eşitlik testlerle kanıtlanır (aynı girdi → aynı WikiSnapshot JSON).
  * - Overlay (TŞ §16A.6): wiki_annotations/wiki_aliases snapshot'a
  *   FK'LANMAZ; reindex (yeni wiki snapshot publish'i) üzerine yazamaz.
+ *   W7 ince bağlantı: anotasyon CAS güncellemesi (annotationVersion)
+ *   guarded UPDATE ile atomiktir; kimlik alanları (stablePageId/authorKind)
+ *   API'de yoktur ve değiştirilemez; silme yalnızca explicit id iledir.
  * - Güvenlik: TÜM girdiler hazırlanmış ifade parametreleriyle bağlanır;
  *   SQL metni yalnızca statik sabitlerden oluşur. Kullanıcı workspace'i
  *   salt okunurdur (ADR-008) — bu depo yalnızca izinli data-root'taki
@@ -231,7 +234,10 @@ export interface WikiAnnotation {
 }
 
 /** wiki_aliases — pageId + alias + source deterministik (sprint-4 W2);
- * candidateNewPageId/matchConfidence TŞ §16A.7 WikiPageAlias alanları. */
+ * candidateNewPageId/matchConfidence TŞ §16A.7 WikiPageAlias alanları.
+ * (W7 notu: WikiAnnotation tipleri DEĞİŞMEDİ; yalnızca getAnnotation/
+ * updateAnnotation/deleteAnnotation yöntemleri eklendi — mevcut
+ * wiki_annotations tablosunun KULLANIMI, şema değişikliği yoktur.) */
 export interface WikiAliasInput {
   pageId: string;
   alias: string;
@@ -540,6 +546,23 @@ interface WikiAnnotationRow {
   body: string;
   annotation_version: number;
   updated_at: string;
+}
+
+/** wiki_annotations satırı → okuma modeli (TŞ §16A.7 alan adları).
+ * W7: list/get/update yolları bu TEK eşlemeyi paylaşır — satır şekli
+ * üç okuma yolunda da bit-bit aynıdır. */
+function annotationFromRow(row: WikiAnnotationRow): WikiAnnotation {
+  return {
+    id: row.id,
+    stablePageId: row.stable_page_id,
+    sectionKey: row.section_key,
+    authorKind: row.author_kind,
+    ...(row.origin === null ? {} : { origin: row.origin }),
+    ...(row.verified === null ? {} : { verified: row.verified !== 0 }),
+    body: row.body,
+    annotationVersion: row.annotation_version,
+    updatedAt: row.updated_at,
+  };
 }
 
 interface WikiAliasRow {
@@ -1069,17 +1092,153 @@ export class SqliteWikiStore {
               verified, body, annotation_version, updated_at
        FROM wiki_annotations WHERE workspace_id = ? ORDER BY position`,
     ).all(workspaceId) as WikiAnnotationRow[];
-    return rows.map((row) => ({
-      id: row.id,
-      stablePageId: row.stable_page_id,
-      sectionKey: row.section_key,
-      authorKind: row.author_kind,
-      ...(row.origin === null ? {} : { origin: row.origin }),
-      ...(row.verified === null ? {} : { verified: row.verified !== 0 }),
-      body: row.body,
-      annotationVersion: row.annotation_version,
-      updatedAt: row.updated_at,
-    }));
+    return rows.map(annotationFromRow);
+  }
+
+  /**
+   * Tek anotasyonu workspace kapsamında okur (sprint-4 W7). Satır yoksa
+   * undefined döner (okuma sözleşmesi); satır başka workspace'teyse de
+   * undefined'dır — cross-workspace izolasyonunda satırın varlığı
+   * sızdırılmaz (wiki-spec §3.5: workspace/user storage ayrımı).
+   */
+  getAnnotation(workspaceId: string, id: string): WikiAnnotation | undefined {
+    this.requireWorkspace(workspaceId);
+    requireNonEmptyField("annotation.id", id);
+    const row = this.stmt(
+      `SELECT id, stable_page_id, section_key, author_kind, origin,
+              verified, body, annotation_version, updated_at
+       FROM wiki_annotations WHERE workspace_id = ? AND id = ? LIMIT 1`,
+    ).get(workspaceId, id) as WikiAnnotationRow | undefined;
+    return row === undefined ? undefined : annotationFromRow(row);
+  }
+
+  /**
+   * Optimistic concurrency CAS güncellemesi (TŞ §16A.6, sprint-4 W7).
+   * Sürüm koşulu guarded UPDATE ile TEK ATOMİK ifadede uygulanır:
+   * `WHERE ... AND annotation_version = ?` — changes=0 çakışmadır
+   * (wiki/annotation-conflict; MCP sabit karşılığı WIKI_NOTE_CONFLICT,
+   * TŞ §10.1 s.9 — yeni uzantı kodu açılmaz, K-008 örüntüsü).
+   *
+   * Kimlik alanları (stablePageId, authorKind) bu API'de YOKTUR ve
+   * değiştirilemez: rename/removed sonrası not yeniden hedeflenmez;
+   * orphan akışı overlay katmanında türetilmiş durumla çözülür.
+   * Patch alanlarında `undefined` = alan değişmez; `origin`/`verified`
+   * için `null` = alan temizlenir (SQL NULL). Boş patch sürümü yine de
+   * ilerletir (her yazma yeni sürümdür); içerik alanları korunur.
+   */
+  updateAnnotation(
+    workspaceId: string,
+    input: {
+      readonly id: string;
+      readonly expectedAnnotationVersion: number;
+      readonly body?: string;
+      readonly sectionKey?: string;
+      readonly origin?: string | null;
+      readonly verified?: boolean | null;
+    },
+    updatedAt: string,
+  ): WikiAnnotation {
+    this.requireWorkspace(workspaceId);
+    requireNonEmptyField("annotation.id", input.id);
+    requireNonNegativeInt(
+      "annotation.expectedAnnotationVersion",
+      input.expectedAnnotationVersion,
+    );
+    requireTimestamp("annotation.updatedAt", updatedAt);
+    if (input.body !== undefined && typeof input.body !== "string") {
+      throw new WikiStoreError(
+        "wiki/invalid-field",
+        "annotation.body metin olmalı",
+      );
+    }
+    if (input.sectionKey !== undefined) {
+      requireNonEmptyField("annotation.sectionKey", input.sectionKey);
+    }
+    if (input.origin !== undefined) {
+      requireOptionalText("annotation.origin", input.origin);
+    }
+    if (
+      input.verified !== undefined &&
+      input.verified !== null &&
+      typeof input.verified !== "boolean"
+    ) {
+      throw new WikiStoreError(
+        "wiki/invalid-field",
+        "annotation.verified boolean veya null olmalı",
+      );
+    }
+    const current = this.stmt(
+      `SELECT id, stable_page_id, section_key, author_kind, origin,
+              verified, body, annotation_version, updated_at
+       FROM wiki_annotations WHERE workspace_id = ? AND id = ? LIMIT 1`,
+    ).get(workspaceId, input.id) as WikiAnnotationRow | undefined;
+    if (current === undefined) {
+      throw new WikiStoreError(
+        "wiki/annotation-not-found",
+        `Anotasyon bulunamadı: ${input.id}`,
+      );
+    }
+    const result = this.runWrite(
+      `UPDATE wiki_annotations
+       SET body = ?, section_key = ?, origin = ?, verified = ?,
+           annotation_version = annotation_version + 1, updated_at = ?
+       WHERE workspace_id = ? AND id = ? AND annotation_version = ?`,
+      input.body ?? current.body,
+      input.sectionKey ?? current.section_key,
+      input.origin === undefined ? current.origin : input.origin,
+      input.verified === undefined
+        ? current.verified
+        : input.verified === null
+          ? null
+          : input.verified
+            ? 1
+            : 0,
+      updatedAt,
+      workspaceId,
+      input.id,
+      input.expectedAnnotationVersion,
+    );
+    if (result.changes !== 1) {
+      throw new WikiStoreError(
+        "wiki/annotation-conflict",
+        `Anotasyon sürüm çakışması (beklenen ${String(input.expectedAnnotationVersion)}, güncel ${String(current.annotation_version)}): ${input.id}`,
+      );
+    }
+    const updated = this.stmt(
+      `SELECT id, stable_page_id, section_key, author_kind, origin,
+              verified, body, annotation_version, updated_at
+       FROM wiki_annotations WHERE workspace_id = ? AND id = ? LIMIT 1`,
+    ).get(workspaceId, input.id) as WikiAnnotationRow | undefined;
+    if (updated === undefined) {
+      throw new WikiStoreError(
+        "wiki/annotation-not-found",
+        `Güncellenen anotasyon okunamadı: ${input.id}`,
+      );
+    }
+    return annotationFromRow(updated);
+  }
+
+  /**
+   * Anotasyonu explicit id ile siler (sprint-4 W7). Toplu/örtük silme
+   * API'si YOKTUR: reindex anotasyon satırlarına asla dokunmaz; silme
+   * yalnızca bu yöntemle, açık kimlikle yapılır (TŞ §16A.6: notlar
+   * silinmez; orphan akışında satır korunur). id yoksa (veya satır başka
+   * workspace'teyse) wiki/annotation-not-found.
+   */
+  deleteAnnotation(workspaceId: string, id: string): void {
+    this.requireWorkspace(workspaceId);
+    requireNonEmptyField("annotation.id", id);
+    const result = this.runWrite(
+      "DELETE FROM wiki_annotations WHERE workspace_id = ? AND id = ?",
+      workspaceId,
+      id,
+    );
+    if (result.changes !== 1) {
+      throw new WikiStoreError(
+        "wiki/annotation-not-found",
+        `Anotasyon bulunamadı: ${id}`,
+      );
+    }
   }
 
   /**
