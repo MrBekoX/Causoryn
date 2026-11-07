@@ -15,6 +15,14 @@
  * taşınması ve schema-id tabanlı eşleştirme D2/D3 dilimindedir (bkz.
  * match.ts kural 4, types.ts ServiceAnchor).
  *
+ * D2 dilimi: compatibility.ts — iki sözleşme sürümü arasında backward-safe
+ * / risk / breaking_candidate / unknown sınıflaması (saf çekirdek, belgeli
+ * kural kataloğu, her bulguda kural adı + eski/yeni satır kanıtı).
+ * D3 dilimi: contract-drift.ts — canonical diff sonuçlarını
+ * PRODUCES/CONSUMES_CONTRACT etki grafiine bağlar; breaking_candidate /
+ * risk / unknown AYRI alanlarda; K-013(7) contractChanges kaydının
+ * üreticisidir ({contractId, changeKind, summary}).
+ *
  * Paket LLM/embedding bağımlılığı İÇERMEZ; salt-okunur disiplin
  * WorkspaceAccessPolicy ile zorlanır; çekirdek saf ve deterministiktir.
  */
@@ -60,6 +68,27 @@ export { discoverProtobufContracts } from "./protobuf-discovery.js";
 
 export { scanServiceAnchors } from "./anchor-scan.js";
 export { matchContractEdges } from "./match.js";
+
+export {
+  checkContractCompatibility,
+  evaluateContractPair,
+} from "./compatibility.js";
+export type {
+  ContractChangeKind,
+  ContractCompatibilityClassification,
+  ContractCompatibilityFinding,
+  ContractCompatibilityReport,
+  ContractPairEvaluation,
+} from "./compatibility.js";
+
+export { detectContractDrift } from "./contract-drift.js";
+export type {
+  ContractChangeRecord,
+  ContractDriftInput,
+  ContractDriftItem,
+  ContractDriftResult,
+  ContractEdgeImpact,
+} from "./contract-drift.js";
 
 export {
   discoverContractsFromTexts,

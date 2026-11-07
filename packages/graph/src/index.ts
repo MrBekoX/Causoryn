@@ -52,6 +52,30 @@ export type {
   ImpactTruncatedBy,
   ImpactUnresolvedTarget,
 } from "./impact.js";
+// Business Flow çekirdeği — sprint-5 D5 (TŞ §14). Saf motordur; MCP zarfı
+// mcp-server katmanındadır. Paket girişi yüzeyi analyzeImpact kardeş
+// düzeniyle bire bir (takım denetimi bulgusu 3: export yüzeyi zorunludur).
+export {
+  BUSINESS_FLOW_EDGE_KINDS,
+  FLOW_LIMIT_CEILINGS,
+  traceBusinessFlow,
+} from "./business-flow.js";
+export type {
+  FlowAppliedLimits,
+  FlowCertainty,
+  FlowChainKind,
+  FlowEdgeDirection,
+  FlowEdgeRef,
+  FlowNodeRef,
+  FlowSeedRef,
+  FlowSegment,
+  FlowSegmentCounts,
+  FlowTrace,
+  FlowTruncatedBy,
+  FlowUnresolvedSeed,
+  TraceBusinessFlowInput,
+  TraceBusinessFlowResult,
+} from "./business-flow.js";
 export {
   API_SURFACE_NODE_KINDS,
   compareIdentityKey,
