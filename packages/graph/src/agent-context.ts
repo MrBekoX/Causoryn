@@ -1,4 +1,4 @@
-import type { GraphNode, SnapshotGraph } from "@causoryn/domain";
+import type { GraphNode, NodeKind, SnapshotGraph } from "@causoryn/domain";
 
 import { GraphRepositoryError } from "./errors.js";
 import type { SymbolSearchStore } from "./repository.js";
@@ -21,8 +21,10 @@ import { nodeIdentityRelativePath } from "./validation.js";
  * ayağı Test Intelligence dilimine aittir ve burada YOKTUR):
  *   1. exact-symbol    — birebir sembol eşleşmesi
  *   2. graph-proximity — birebir eşleşen sembolden bağlantı derinliği (BFS)
- *   3. contract        — kontrat yüzey sinyali (Faz D gelene kadar BOŞ:
- *                        verilmediğinde ayak atlanır, hata ÇIKMAZ)
+ *   3. contract        — kontrat yüzey sinyali (sprint-5 D7 ile GERÇEĞE
+ *                        BAĞLANDI: girdi kaynağı (a) açık contractSymbols
+ *                        ve (b) snapshot'ın sözleşme node yüzeyi — ikisinin
+ *                        birleşimi; hiçbiri yoksa ayak atlanır, hata ÇIKMAZ)
  *   4. freshness       — dosya updatedAt tazeliği (sıralama ayakı; tek başına
  *                        aday ÜRETMEZ)
  *   5. fts             — symbol_fts lexical eşleşme (depo verilmezse atlanır)
@@ -43,9 +45,13 @@ import { nodeIdentityRelativePath } from "./validation.js";
  *   exact/proximity/contract/fts'tir; freshness keşif YAPMAZ, yalnızca sıralar.
  * - contract: contractSymbols kümesindeki qualifiedName'ler arasında terminal
  *   alt tokenları görev tokenlarıyla KESİŞEN node'lara 1 puan (kontrat ilgisi
- *   görevle ilişkili olmak zorundadır). Faz D gerçek contract kayıtlarını
- *   getirene kadar çağıran bu alanı vermez → ayak degradedLegs'te raporlanır,
- *   sonuç üretimine engel olmaz.
+ *   görevle ilişkili olmak zorundadır). Küme iki kaynaktan BİRLEŞİR:
+ *   (a) çağıranın verdiği input.contractSymbols; (b) snapshot'ın SÖZLEŞME
+ *   NODE YÜZEYİ (AGENT_CONTEXT_CONTRACT_NODE_KINDS türlerindeki node'ların
+ *   qualifiedName'leri — D1/D2 sözleşme kayıtları grafiğe ingeste edildiğinde
+ *   ayak KENDİ KENDİNİ dolar ve degradedLegs'ten çıkar; sprint-5 D7,
+ *   K-013(7) sonrası). İki kaynak da boşsa ayak degradedLegs'te raporlanır,
+ *   sonuç üretimine engel olmaz (degrade davranış korunur).
  * - freshness: node'un location.relativePath'i fileFreshness eşlemesinde varsa
  *   skor; distinct updatedAt değerleri leksik DESC rank'lenir ve skor
  *   (distinctCount - rank) / distinctCount olur (en yeni = 1; ISO-8601 tek tip
@@ -99,6 +105,25 @@ const MAX_FTS_HITS = 50;
 /** Tek contextItem'ın taşıyacağı kanıt kimliği tavanı. */
 const MAX_ITEM_EVIDENCE_IDS = 8;
 
+/**
+ * Sözleşme node türleri (sprint-5 D7): contract ayakının SNAPSHOT
+ * kaynağı — bu türlerdeki node'ların qualifiedName'leri contractSymbols
+ * kümesine BİRLEŞİR (D1/D2 sözleşme kayıtları grafiğe geldiğinde ayak
+ * otomatik dolar). Küme wiki projeksiyonundaki sözleşme yüzeyiyle
+ * (packages/wiki projection.ts CONTRACT_NODE_KINDS) ve compare.ts
+ * API_SURFACE sözleşme alt kümesiyle aynıdır (TŞ §8 kataloğu).
+ */
+export const AGENT_CONTEXT_CONTRACT_NODE_KINDS: readonly NodeKind[] = [
+  "ApiContract",
+  "EventContract",
+  "SchemaContract",
+  "ContractVersion",
+];
+
+const AGENT_CONTEXT_CONTRACT_NODE_KIND_SET: ReadonlySet<string> = new Set(
+  AGENT_CONTEXT_CONTRACT_NODE_KINDS,
+);
+
 /** Sıralı ayak kimlikleri; LEG_ORDER sırası = öncelik sırası. */
 export type AgentContextLeg =
   | "exact-symbol"
@@ -134,7 +159,12 @@ export interface AgentContextInput {
   readonly tokenBudget?: number;
   /** graph-proximity BFS derinliği. Varsayılan 2, tavan 4. */
   readonly maxProximityDepth?: number;
-  /** Kontrat yüzey sembolleri (Faz D'ye kadar verilmez → ayak atlanır). */
+  /**
+   * Kontrat yüzey sembolleri (açık girdi; opsiyonel). Snapshot'ın sözleşme
+   * node yüzeyiyle (AGENT_CONTEXT_CONTRACT_NODE_KINDS) BİRLEŞİR — snapshot
+   * kayıtları tek başına ayak açmaya yeter (sprint-5 D7). İki kaynak da
+   * boşsa ayak atlanır (degradedLegs).
+   */
   readonly contractSymbols?: readonly string[];
   /** symbol_fts deposu (SQLite gerçeklemesi; yoksa ayak atlanır). */
   readonly symbolSearch?: SymbolSearchStore;
@@ -397,8 +427,18 @@ export function generateAgentContext(
 
   // 3) Ayak uygunluğu: girdisi olmayan ayaklar degrade edilir (hata değil).
   const degradedLegs: DegradedLeg[] = [];
+  // contract ayakının girdisi İKİ kaynağın BİRLEŞİMİDİR (sprint-5 D7):
+  // (a) açık input.contractSymbols, (b) snapshot'ın sözleşme node yüzeyi.
+  // Yüzey türetimi kanoniktir: node türüne göre seçim + qualifiedName'e
+  // göre sıralı-tekrarsız (girdi dizi sırasından bağımsızlık).
+  const snapshotContractSymbols = [...new Set(
+    snapshot.nodes
+      .filter((node) => AGENT_CONTEXT_CONTRACT_NODE_KIND_SET.has(node.kind))
+      .map((node) => node.qualifiedName),
+  )].sort(cmp);
   const contractProvided =
-    input.contractSymbols !== undefined && input.contractSymbols.length > 0;
+    (input.contractSymbols !== undefined && input.contractSymbols.length > 0) ||
+    snapshotContractSymbols.length > 0;
   const freshnessProvided =
     input.fileFreshness !== undefined && input.fileFreshness.length > 0;
   const ftsProvided = input.symbolSearch !== undefined;
@@ -406,7 +446,7 @@ export function generateAgentContext(
     degradedLegs.push({
       leg: "contract",
       reason:
-        "contract ayakı atlandı: contractSymbols verilmedi (Faz D contract katmanı gelene kadar boş; hata değildir)",
+        "contract ayakı atlandı: snapshot'ta sözleşme kaydı yok (ApiContract/EventContract/SchemaContract/ContractVersion yüzeyi boş) ve contractSymbols verilmedi (hata değildir)",
     });
   }
   if (!freshnessProvided) {
@@ -515,8 +555,12 @@ export function generateAgentContext(
   }
 
   // 7) contract ayakı: kontrat yüzeyinde görev tokenlarıyla kesişen semboller.
+  //    Küme = açık girdi ∪ snapshot sözleşme yüzeyi (kanonik birleşim).
   if (contractProvided) {
-    const contractSet = new Set(input.contractSymbols);
+    const contractSet = new Set<string>([
+      ...(input.contractSymbols ?? []),
+      ...snapshotContractSymbols,
+    ]);
     if (queryTokens.length === 0) {
       rationales.push(
         "contract: boş sorgu kümesi kontrat kesişimi üretmez (ayak koştu, katkı yok)",

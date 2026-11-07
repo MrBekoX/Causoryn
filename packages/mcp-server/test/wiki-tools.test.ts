@@ -17,10 +17,15 @@ import { fileURLToPath } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
-import { canonicalJson, sha256Hex, utf8Encode } from "@causoryn/domain";
+import { canonicalJson, nodeId, sha256Hex, utf8Encode } from "@causoryn/domain";
 import type { SqliteWikiStore } from "@causoryn/storage-sqlite";
 import { WikiStoreError } from "@causoryn/storage-sqlite";
-import { WikiProjectionError, decodeWikiSearchCursor, encodeWikiSearchCursor } from "@causoryn/wiki";
+import {
+  WikiProjectionError,
+  decodeWikiSearchCursor,
+  encodeWikiSearchCursor,
+  wikiChildPageId,
+} from "@causoryn/wiki";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 /**
@@ -1314,12 +1319,20 @@ describe("causoryn_wiki_diff", { timeout: 90_000 }, () => {
             entry.sectionKey === "summary",
         ),
       ).toBe(true);
-      // K-013 #7: contractChanges Faz D'ye kadar [] + dürüst degrade notu.
+      // K-013 #7 (D7 sonrası): gövde kesinleşti; fixture graph'ında sözleşme
+      // kaydı OLMADIĞI için [] + dürüst boşluk notu taşınır (bayat "Faz D'ye
+      // kadar" iddiası değil — katman artık mevcut, kayıt yok).
       expect(data.contractChanges).toEqual([]);
       const warnings = diff.warnings as string[];
       expect(
-        warnings.some((warning) => warning.includes("Faz D")),
+        warnings.some((warning) => warning.includes("sözleşme kaydı yok")),
       ).toBe(true);
+      expect(
+        warnings.some((warning) => warning.includes("K-013 #7")),
+      ).toBe(true);
+      expect(
+        warnings.some((warning) => warning.includes("Faz D")),
+      ).toBe(false);
       // Yeni sayfa coverageDelta'ı: previous no_data → current (K-013 #3
       // gövdesi: {previous, current, reason?}; 16A.4).
       const coverageDelta = data.coverageDelta as Array<Record<string, unknown>>;
@@ -1484,6 +1497,34 @@ describe("güvenlik denetimi bulguları", { timeout: 60_000 }, () => {
     expect(denied.code).toBe("PATH_DENIED");
     expect(denied.message).toContain("yol ayracı");
   });
+
+  it("wikiErrorToToolError: wiki/invalid-contract-surface → INVALID_ARGUMENT (K-013(7) assertSurface girdi ihlali; INTERNAL_ERROR kovasına düşmez)", () => {
+    // Takım denetimi bulgusu (sprint-5 D7): packages/wiki contract-changes
+    // çekirdeğinin assertSurface açık reddi ("wiki/invalid-contract-surface",
+    // contract-changes.ts assertSurface) girdi/şema ihlali sınıfıdır —
+    // wikiErrorToToolError girdi-ihlali listesinde eksikti ve ortam hata
+    // dalına ("Kalan kodlar ortam hata sınıfıdır") düşüp istemciye
+    // INTERNAL_ERROR + mesaj gizlemesi döndürüyordu. MCP yolunda bugün
+    // ulaşılamaz (yüzey wikiContractSurfaceOf'tan üretilir: node.id/
+    // qualifiedName domain NonEmptyString, contentHash sha256) — bu test
+    // savunma derinliği eşlemesini sabitler (K-008 örüntüsü: yeni uzantı
+    // kodu istenmez, mevcut INVALID_ARGUMENT sabit kodu).
+    const logged: string[] = [];
+    const deps = { logger: (message: string): void => { logged.push(message); } } as unknown as ServiceDeps;
+
+    const mapped = wikiErrorToToolError(
+      new WikiProjectionError(
+        "wiki/invalid-contract-surface",
+        "base sözleşme yüzeyi doğrulanamadı (wiki/invalid-contract-surface): contractId boş olmayan string olmalıdır",
+      ),
+      deps,
+    );
+    expect(mapped.code).toBe("INVALID_ARGUMENT");
+    // Girdi ihlali mesajı istemcye TAŞINIR (girdisini düzeltmelidir);
+    // mesaj gizlemesi YOKTUR ve stderr logger'a detay yazılmaz.
+    expect(mapped.message).toContain("contractId boş olmayan string olmalıdır");
+    expect(logged).toEqual([]);
+  });
 });
 
 /* ------------------------------------------------------------------ */
@@ -1528,6 +1569,112 @@ function publishManualWikiSnapshot(
   store.publishWiki(sid, wikiId, "ready", FIXED_NOW);
 }
 
+/* K-013 #7 (D7) — wiki_diff contractChanges test donanımı ------------------- */
+
+/** Sözleşme node tanımı (test yüzeyi; kimlik domain nodeId sözleşmesidir). */
+interface ContractNodeSpec {
+  readonly kind: "ApiContract" | "EventContract" | "SchemaContract";
+  readonly qualifiedName: string;
+  readonly relativePath: string;
+  readonly attributes: Readonly<Record<string, unknown>>;
+}
+
+/**
+ * Verilen sözleşme node'larını taşıyan graph snapshot'ını yayınlar ve
+ * yayınlanan snapshot kimliğini döndürür (InMemoryGraphRepository; workspace
+ * kaydı test sahibindedir).
+ */
+function publishContractGraph(
+  context: CausorynContext,
+  revisionId: string,
+  contracts: readonly ContractNodeSpec[],
+): string {
+  const repo = context.repository;
+  const build = repo.beginBuild({
+    workspaceId: "default",
+    revision: { id: revisionId, sequence: Number(revisionId.slice(-1)) },
+    configHash: "cfg-contract-changes",
+    analyzerFingerprint: "fp-contract-changes",
+    createdAt: FIXED_NOW,
+  });
+  for (const spec of contracts) {
+    repo.addNode(build.buildId, {
+      id: nodeId({
+        workspaceId: "default",
+        kind: spec.kind,
+        qualifiedName: spec.qualifiedName,
+        relativePath: spec.relativePath,
+      }),
+      kind: spec.kind,
+      qualifiedName: spec.qualifiedName,
+      location: {
+        relativePath: spec.relativePath,
+        startLine: 1,
+        endLine: 30,
+        sourceHash: `sha256:${spec.relativePath}`,
+      },
+      attributes: spec.attributes,
+    });
+  }
+  const published = repo.publish(build.buildId, "ready", FIXED_NOW);
+  return published.meta.id;
+}
+
+/**
+ * graphSnapshotId'ye bağlı WikiSnapshot yayınlar: overview sayfası + her
+ * verilen sözleşme node kimliği için contract sayfası (projection.ts
+ * CHILD_SOURCES "contract" pageKind türetimiyle aynı kimlik kuralı).
+ */
+function publishWikiForGraph(
+  store: SqliteWikiStore,
+  wikiId: string,
+  graphSnapshotId: string,
+  contractNodeIds: readonly string[],
+): void {
+  const sid = store.beginWikiBuild({
+    workspaceId: "default",
+    graphSnapshotId,
+    revisionRef: `rev-${wikiId}`,
+    templateVersion: "tpl-test",
+    createdAt: FIXED_NOW,
+  });
+  store.addWikiPage(sid, {
+    id: "page-manual-s",
+    kind: "overview",
+    parentId: null,
+    title: "Manual Page",
+    slug: "manual-page",
+    route: "/wiki/manual-page",
+    contentHash: `hash-${wikiId}`,
+    freshness: "fresh",
+    coverage: { status: "complete" },
+  });
+  for (const nodeIdValue of contractNodeIds) {
+    store.addWikiPage(sid, {
+      id: wikiChildPageId("default", "contract", nodeIdValue),
+      kind: "contract",
+      parentId: "page-manual-s",
+      title: `contract ${nodeIdValue}`,
+      slug: `contract-${nodeIdValue.slice(5, 17)}`,
+      route: `/wiki/contract-${nodeIdValue.slice(5, 17)}`,
+      contentHash: `hash-${nodeIdValue}`,
+      freshness: "fresh",
+      coverage: { status: "complete" },
+    });
+  }
+  store.publishWiki(sid, wikiId, "ready", FIXED_NOW);
+}
+
+/** Sözleşme node kimliği (publishContractGraph ile aynı türetim). */
+function contractNodeId(spec: ContractNodeSpec): string {
+  return nodeId({
+    workspaceId: "default",
+    kind: spec.kind,
+    qualifiedName: spec.qualifiedName,
+    relativePath: spec.relativePath,
+  });
+}
+
 describe("wikiDiff eksiksizliği + K-013 #2 mod disiplini", { timeout: 60_000 }, () => {
   it("partial: base'de var olup target'ta SİLİNEN sectionKey de changedSections'a girer (wiki-spec §4.2.7 alan kümesi korunur)", () => {
     const context = makeContext({ autoIndex: false });
@@ -1547,6 +1694,195 @@ describe("wikiDiff eksiksizliği + K-013 #2 mod disiplini", { timeout: 60_000 },
       // Boşluk (denetim bulgusu): silinen bölüm de bir bölüm değişimidir —
       // target.sections üzerinde tek yönlü gezmek bunları ATLIYORDU.
       expect(changed).toContainEqual({ pageId: "page-manual-s", sectionKey: "extras" });
+    } finally {
+      context.close();
+    }
+  });
+
+  it("K-013 #7 pozitif: iki WikiSnapshot'ın arka graph sözleşme yüzeyleri diff edilir (modified TARGET kimliği, removed BASE kimliği, added TARGET kimliği)", () => {
+    const context = makeContext({ autoIndex: false });
+    try {
+      // Workspace kaydı (autoIndex kapalı; InMemoryGraphRepository boştur).
+      context.repository.registerWorkspace({
+        id: "default",
+        rootPath: context.config.allowRoots[0] as string,
+        createdAt: FIXED_NOW,
+      });
+
+      const apiBase: ContractNodeSpec = {
+        kind: "ApiContract",
+        qualifiedName: "app.OrdersApi",
+        relativePath: "openapi.yaml",
+        attributes: { method: "post", route: "/orders" },
+      };
+      // Modified dalı kimlik seçimini kanıtlar: hedef sürüm FARKLI dosyada
+      // (relativePath kimliğe girer → farklı nodeId) ve FARKLI içerikte
+      // (attributes zorunlu alanla zenginleşti → içerik karması değişir).
+      const apiTarget: ContractNodeSpec = {
+        kind: "ApiContract",
+        qualifiedName: "app.OrdersApi",
+        relativePath: "openapi-v2.yaml",
+        attributes: { method: "post", route: "/orders", required: ["customerId"] },
+      };
+      const eventBase: ContractNodeSpec = {
+        kind: "EventContract",
+        qualifiedName: "app.OrderCreated",
+        relativePath: "asyncapi.yaml",
+        attributes: { topic: "order.created" },
+      };
+      const schemaTarget: ContractNodeSpec = {
+        kind: "SchemaContract",
+        qualifiedName: "table:customers",
+        relativePath: "db/001_create_customers.sql",
+        attributes: { table: "customers" },
+      };
+
+      const baseGraphId = publishContractGraph(context, "rev-cc-1", [apiBase, eventBase]);
+      const targetGraphId = publishContractGraph(context, "rev-cc-2", [apiTarget, schemaTarget]);
+
+      const store = context.wikiStore as SqliteWikiStore;
+      publishWikiForGraph(store, "wiki-cc-base", baseGraphId, [
+        contractNodeId(apiBase),
+        contractNodeId(eventBase),
+      ]);
+      publishWikiForGraph(store, "wiki-cc-target", targetGraphId, [
+        contractNodeId(apiTarget),
+        contractNodeId(schemaTarget),
+      ]);
+
+      const envelope = wikiDiff(context, "req-diff-contract-changes", {
+        base: "wiki-cc-base",
+        target: "wiki-cc-target",
+      });
+      const data = envelope.data as Record<string, unknown>;
+      const changes = data.contractChanges as Array<Record<string, unknown>>;
+
+      // Üç değişiklik: modified (TARGET kimliği) + added (TARGET kimliği) +
+      // removed (BASE kimliği — hedefte geçerli kimlik yok).
+      expect(changes).toHaveLength(3);
+      // Kanonik sıra: contractId kod noktası sırası (D3 compareChangeRecords).
+      const ids = changes.map((change) => change.contractId as string);
+      expect([...ids].sort()).toEqual(ids);
+      const byKind = (kind: string): Record<string, unknown> | undefined =>
+        changes.find((change) => change.changeKind === kind);
+      const modified = byKind("modified");
+      expect(modified).toEqual({
+        contractId: contractNodeId(apiTarget),
+        changeKind: "modified",
+        summary: expect.any(String),
+      });
+      expect(byKind("added")).toEqual({
+        contractId: contractNodeId(schemaTarget),
+        changeKind: "added",
+        summary: "table:customers added: hedef WikiSnapshot'ın graph sözleşme yüzeyinde yeni kayıt",
+      });
+      expect(byKind("removed")).toEqual({
+        contractId: contractNodeId(eventBase),
+        changeKind: "removed",
+        summary: "app.OrderCreated removed: hedef WikiSnapshot'ın graph sözleşme yüzeyinde kayıt yok",
+      });
+      // Modified summary içerik karması farkını taşır (base/target karma
+      // parçaları; uydurma özet değil, yüzey karmalarından türetim).
+      expect(String(modified?.summary)).toContain("app.OrdersApi modified:");
+      expect(String(modified?.summary)).toContain("(base=");
+      expect(String(modified?.summary)).toContain("→ target=");
+      // K-013(7) gövdesi TAM ÜÇ alan: fazla alan sızamaz.
+      for (const change of changes) {
+        expect(Object.keys(change).sort()).toEqual(["changeKind", "contractId", "summary"]);
+      }
+      // Değişiklik varken degrade notu TAŞINMAZ.
+      const warnings = envelope.warnings as string[];
+      expect(warnings.some((warning) => warning.includes("K-013 #7"))).toBe(false);
+    } finally {
+      context.close();
+    }
+  });
+
+  it("K-013 #7 partial: arka graph snapshot çözümlenemediğinde [] + dürüst not döner (degrade davranışı korunur)", () => {
+    const context = makeContext({ autoIndex: false });
+    const store = context.wikiStore as SqliteWikiStore;
+    // graph-wiki-manual-* kimlikli graph snapshot'ları repoda YOKTUR.
+    publishManualWikiSnapshot(store, "wiki-manual-base", ["summary"]);
+    publishManualWikiSnapshot(store, "wiki-manual-target", ["summary", "added"]);
+    try {
+      const envelope = wikiDiff(context, "req-diff-contract-unresolved", {
+        base: "wiki-manual-base",
+        target: "wiki-manual-target",
+      });
+      const data = envelope.data as Record<string, unknown>;
+      expect(data.contractChanges).toEqual([]);
+      const warnings = envelope.warnings as string[];
+      expect(
+        warnings.some((warning) => warning.includes("arka graph snapshot'ı çözümlenemedi")),
+      ).toBe(true);
+      expect(warnings.some((warning) => warning.includes("K-013 #7"))).toBe(true);
+    } finally {
+      context.close();
+    }
+  });
+
+  it("K-013 #7 pageScope: sözleşme sayfasına daraltma yalnızca o sözleşmenin kaydını taşır; sözleşme sayfası dışında boş kalır", () => {
+    const context = makeContext({ autoIndex: false });
+    try {
+      context.repository.registerWorkspace({
+        id: "default",
+        rootPath: context.config.allowRoots[0] as string,
+        createdAt: FIXED_NOW,
+      });
+      const apiBase: ContractNodeSpec = {
+        kind: "ApiContract",
+        qualifiedName: "app.OrdersApi",
+        relativePath: "openapi.yaml",
+        attributes: { method: "post" },
+      };
+      const apiTarget: ContractNodeSpec = {
+        kind: "ApiContract",
+        qualifiedName: "app.OrdersApi",
+        relativePath: "openapi-v2.yaml",
+        attributes: { method: "put" },
+      };
+      const schemaTarget: ContractNodeSpec = {
+        kind: "SchemaContract",
+        qualifiedName: "table:customers",
+        relativePath: "db/001_create_customers.sql",
+        attributes: { table: "customers" },
+      };
+      const baseGraphId = publishContractGraph(context, "rev-cc-3", [apiBase]);
+      const targetGraphId = publishContractGraph(context, "rev-cc-4", [apiTarget, schemaTarget]);
+      const store = context.wikiStore as SqliteWikiStore;
+      publishWikiForGraph(store, "wiki-cc-scoped-base", baseGraphId, [contractNodeId(apiBase)]);
+      publishWikiForGraph(store, "wiki-cc-scoped-target", targetGraphId, [
+        contractNodeId(apiTarget),
+        contractNodeId(schemaTarget),
+      ]);
+
+      // ApiContract'ın hedef tarafı sayfasına daraltma: yalnızca modified kaydı.
+      const apiPageScope = wikiChildPageId("default", "contract", contractNodeId(apiTarget));
+      const apiEnvelope = wikiDiff(context, "req-diff-scope-api", {
+        base: "wiki-cc-scoped-base",
+        target: "wiki-cc-scoped-target",
+        pageId: apiPageScope,
+      });
+      const apiChanges = (apiEnvelope.data as Record<string, unknown>)
+        .contractChanges as Array<Record<string, unknown>>;
+      expect(apiChanges).toHaveLength(1);
+      expect(apiChanges[0]).toMatchObject({
+        contractId: contractNodeId(apiTarget),
+        changeKind: "modified",
+      });
+
+      // Sözleşme sayfası olmayan overview sayfasına daraltma: sözleşme
+      // kaydı YOK (kaydın uydurulduğu sayfa eşlemesi yapılmaz).
+      const overviewEnvelope = wikiDiff(context, "req-diff-scope-overview", {
+        base: "wiki-cc-scoped-base",
+        target: "wiki-cc-scoped-target",
+        pageId: "page-manual-s",
+      });
+      expect(
+        (overviewEnvelope.data as Record<string, unknown>).contractChanges,
+      ).toEqual([]);
+      // pageId sözleşme sayfalarından birine değilse WIKI_PAGE_NOT_FOUND
+      // (sayfa daraltma sözleşmesi değişmedi).
     } finally {
       context.close();
     }

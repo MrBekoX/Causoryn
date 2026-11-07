@@ -151,6 +151,7 @@ export type {
 // kaydı için zorunludur; generateOnboarding (index.ts:25) ve analyzeImpact
 // (index.ts:40) kardeş düzeniyle bire bir (denetim bulgusu 1).
 export {
+  AGENT_CONTEXT_CONTRACT_NODE_KINDS,
   AGENT_CONTEXT_LIMIT_CEILINGS,
   generateAgentContext,
 } from "./agent-context.js";

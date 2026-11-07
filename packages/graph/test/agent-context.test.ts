@@ -39,6 +39,14 @@ import {
  * Partial: contract + FTS ayakları verilmediğinde degrade listesi raporlanır
  * ve kalan ayaklarla (exact/proximity/freshness) sonuç üretilir; FTS deposu
  * verildiğinde fts ayakı devreye girer.
+ *
+ * Sprint-5 D7 (K-013(7) sonrası): contract ayakının girdisi artık İKİ
+ * kaynaktan birleşir — (a) açık input.contractSymbols, (b) snapshot'ın
+ * SÖZLEŞME NODE YÜZEYİ (ApiContract/EventContract/SchemaContract/
+ * ContractVersion; D1/D2 sözleşme kayıtları grafiğe geldiğinde otomatik
+ * dolar). Kayıt varken ayak degradedLegs'ten ÇIKAR ve sıralamaya katkı
+ * yazar (öncelik K-012/TŞ §15: exact > proximity > CONTRACT > freshness >
+ * fts); kayıt yokken degrade davranışı KORUNUR (test bunu sabitler).
  */
 
 const WORKSPACE_ID = "ws_gps";
@@ -193,6 +201,75 @@ const FRESHNESS: readonly FileFreshness[] = [
   { relativePath: "src/orders/OrdersService.ts", updatedAt: "2026-11-04T10:00:00Z" },
   { relativePath: "src/orders/OrdersRepository.ts", updatedAt: "2026-11-03T09:00:00Z" },
   { relativePath: "src/customer/CustomerService.ts", updatedAt: "2026-01-01T00:00:00Z" },
+];
+
+/**
+ * D7 fixture'ı: D1/D2 sözleşme kayıtları grafiğe ingeste edilmiş snapshot —
+ * sözleşme yüzeyi (ApiContract/EventContract) node'ları İZOLEdir (kenarsız;
+ * proximity kirliliği yok) ve "orders" tokenlarıyla kesişen ada sahiptir.
+ */
+function buildSnapshotWithContracts(
+  state: SnapshotGraph["meta"]["state"] = "ready",
+): SnapshotGraph {
+  return createSnapshot({
+    workspaceId: WORKSPACE_ID,
+    revision: { id: "rev-1", sequence: 1 },
+    configHash: "cfg",
+    analyzerFingerprint: "fp",
+    state,
+    createdAt: "2026-11-05T00:00:00Z",
+    nodes: [
+      {
+        kind: "Class",
+        qualifiedName: "app.OrdersArchiver",
+        relativePath: "src/orders/OrdersArchiver.ts",
+        location: {
+          relativePath: "src/orders/OrdersArchiver.ts",
+          startLine: 1,
+          endLine: 30,
+          sourceHash: "hc1",
+        },
+      },
+      {
+        // Sözleşme yüzeyi: "orders" tokenı Class ile BİREBİR ortak →
+        // exact=1 + proximity seed eşitliği; contract ayakı BAĞI KIRAR.
+        kind: "ApiContract",
+        qualifiedName: "app.OrdersApi",
+        relativePath: "openapi.yaml",
+        location: {
+          relativePath: "openapi.yaml",
+          startLine: 1,
+          endLine: 40,
+          sourceHash: "hc2",
+        },
+      },
+      {
+        // "orders contract" sorgusunun "contract" tokenıyla kesişir; ama
+        // "orders" tokenıyla KESİŞMEZ (birebirlik: orders ≠ order).
+        kind: "EventContract",
+        qualifiedName: "app.OrderCreated",
+        relativePath: "asyncapi.yaml",
+      },
+      {
+        kind: "Class",
+        qualifiedName: "app.AuditLog",
+        relativePath: "src/audit/AuditLog.ts",
+        location: {
+          relativePath: "src/audit/AuditLog.ts",
+          startLine: 1,
+          endLine: 20,
+          sourceHash: "hc3",
+        },
+      },
+    ],
+    edges: [],
+  });
+}
+
+/** D7 contract-ayak testlerinin tazelik girdisi: Archiver dosyası EN TAZE. */
+const CONTRACT_FRESHNESS: readonly FileFreshness[] = [
+  { relativePath: "src/orders/OrdersArchiver.ts", updatedAt: "2026-11-05T09:00:00Z" },
+  { relativePath: "openapi.yaml", updatedAt: "2026-11-01T00:00:00Z" },
 ];
 
 function nodeByQualifiedName(snapshot: SnapshotGraph, qualifiedName: string): string {
@@ -457,6 +534,61 @@ describe("generateAgentContext — pozitif", () => {
     ).not.toContain("app.AuditLog");
   });
 
+  it("D7: snapshot'taki sözleşme kayıtları contract ayakını degrade listesinden çıkarır ve katkı yazar (contractSymbols'sız)", () => {
+    const snapshot = buildSnapshotWithContracts();
+    const result = generateAgentContext(snapshot, {
+      task: "orders contract değiştirilecek",
+      tokenBudget: 4096,
+      fileFreshness: CONTRACT_FRESHNESS,
+    });
+    // Ayak koştu: legsApplied'da, degradedLegs'te DEĞİL.
+    expect(result.legsApplied).toContain("contract");
+    expect(result.degradedLegs.map((l) => l.leg)).not.toContain("contract");
+    // ApiContract "app.OrdersApi": görev tokenlarıyla kesişir (orders) →
+    // contract katkısı 1. EventContract "app.OrderCreated": "orders"/
+    // "contract" tokenlarıyla KESİŞMEZ (orders ≠ order; birebirlik) → aday
+    // listesinde bile olmamalı (kontrat ilgisi görevle ilişkili olmak
+    // zorundadır — çekirdek sözleşmesi).
+    const api = result.contextItems.find(
+      (item) => item.qualifiedName === "app.OrdersApi",
+    );
+    expect(api?.legs).toContain("contract");
+    expect(api?.scores.contract).toBe(1);
+    expect(api?.scores.exact).toBe(1);
+    expect(
+      result.contextItems.map((i) => i.qualifiedName),
+    ).not.toContain("app.OrderCreated");
+  });
+
+  it("D7: sıralama önceliği K-012/TŞ §15 — CONTRACT, freshness'i (recency) yener", () => {
+    const snapshot = buildSnapshotWithContracts();
+    const result = generateAgentContext(snapshot, {
+      task: "orders",
+      tokenBudget: 4096,
+      fileFreshness: CONTRACT_FRESHNESS,
+    });
+    // "orders" sorgusu: OrdersArchiver (Class, exact=1, seed prox=1) ile
+    // OrdersApi (ApiContract, exact=1, seed prox=1) AYNI puandadır; tazelik
+    // Archiver lehine (1.0 vs 0.5) ama CONTRACT ayakı BAĞI KIRAR ve
+    // ApiContract'ı ÜSTE çıkarır (exact > proximity > CONTRACT > freshness).
+    const names = result.contextItems.map((item) => item.qualifiedName);
+    expect(names.indexOf("app.OrdersApi")).toBeLessThan(
+      names.indexOf("app.OrdersArchiver"),
+    );
+    const archiver = result.contextItems.find(
+      (item) => item.qualifiedName === "app.OrdersArchiver",
+    );
+    expect(archiver?.scores.freshness).toBe(1);
+    expect(archiver?.scores.contract).toBe(0);
+    const api = result.contextItems.find(
+      (item) => item.qualifiedName === "app.OrdersApi",
+    );
+    expect(api?.scores.freshness).toBe(0.5);
+    expect(api?.scores.contract).toBe(1);
+    // AuditLog sorguyla kesişmez → aday yok.
+    expect(names).not.toContain("app.AuditLog");
+  });
+
   it("FTS deposu verildiğinde fts ayakı koşar ve hit node'una katkı yazar", () => {
     const snapshot = buildSnapshot();
     const repoId = nodeByQualifiedName(snapshot, "app.OrdersRepository");
@@ -514,6 +646,28 @@ describe("generateAgentContext — negatif", () => {
     expect(result.contextItems).toEqual([]);
     expect(result.legsApplied).toContain("contract");
     expect(result.degradedLegs.map((l) => l.leg)).not.toContain("contract");
+  });
+
+  it("D7 unknown: snapshot sözleşme yüzeyi dolu ama görev tokenları hiçbir sözleşme sembolüyle kesişmiyorsa aday üretmez, hata çıkmaz", () => {
+    const snapshot = buildSnapshotWithContracts();
+    const result = generateAgentContext(snapshot, {
+      task: "zzzqqq bilinmeyen",
+      tokenBudget: 4096,
+    });
+    // Ayak koştu (yüzey dolu → degrade yok) ama görevle ilişki yok → katkı 0.
+    expect(result.legsApplied).toContain("contract");
+    expect(result.degradedLegs.map((l) => l.leg)).not.toContain("contract");
+    for (const item of result.contextItems) {
+      expect(item.scores.contract).toBe(0);
+      expect(item.legs).not.toContain("contract");
+    }
+    // Yüzeydeki hiçbir sözleşme node'u anlamsız sorguya aday olmaz.
+    expect(
+      result.contextItems.map((i) => i.qualifiedName),
+    ).not.toContain("app.OrdersApi");
+    expect(
+      result.contextItems.map((i) => i.qualifiedName),
+    ).not.toContain("app.OrderCreated");
   });
 
   it("tokenBudget=0 açık reddedilir (graph/agent-context-invalid-input)", () => {
@@ -581,7 +735,11 @@ describe("generateAgentContext — partial (degrade)", () => {
     });
 
     expect(result.degradedLegs.map((l) => l.leg)).toEqual(["contract", "fts"]);
-    expect(result.degradedLegs[0]?.reason).toContain("Faz D");
+    // D7 sonrası degrade gerekçesi: snapshot'ta sözleşme kaydı YOK ve
+    // contractSymbols verilmedi (K-013(7) kesinleşti; kayıt gelince ayak
+    // otomatik dolar — yukarıdaki D7 pozitif testleri bunu sabitler).
+    expect(result.degradedLegs[0]?.reason).toContain("sözleşme kaydı yok");
+    expect(result.degradedLegs[0]?.reason).toContain("contractSymbols");
     expect(result.degradedLegs[1]?.reason.length).toBeGreaterThan(0);
     expect(result.legsApplied).toEqual<readonly AgentContextLeg[]>([
       "exact-symbol",
@@ -591,6 +749,17 @@ describe("generateAgentContext — partial (degrade)", () => {
     // Degrade ayaklar hata değildir: kalan ayaklarla tam sonuç.
     expect(result.contextItems.length).toBe(6);
     expect(result.contextItems[0]?.qualifiedName).toBe("app.OrdersService");
+  });
+
+  it("D7: sözleşme kaydı OLMAYAN snapshot'ta contract ayağı degrade kalır (boş contractSymbols da ayak açmaz)", () => {
+    const snapshot = buildSnapshot();
+    const withEmptyInput = generateAgentContext(snapshot, {
+      task: "orders service değiştirilecek",
+      tokenBudget: 4096,
+      contractSymbols: [],
+    });
+    expect(withEmptyInput.degradedLegs.map((l) => l.leg)).toContain("contract");
+    expect(withEmptyInput.legsApplied).not.toContain("contract");
   });
 
   it("fileFreshness verilmezse freshness ayağı da degradedir; exact+proximity ayakları yeter", () => {

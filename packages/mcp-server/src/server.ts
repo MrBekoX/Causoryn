@@ -377,7 +377,7 @@ function buildRegistrations(context: CausorynContext): readonly ToolRegistration
       name: "causoryn_wiki_diff",
       title: "Wiki diff",
       description:
-        "İki WikiSnapshot arası sayfa farkları (salt okunur; working tree değişmez): addedPages/removedPages, changedSections, addedLinks/removedLinks, coverageDelta ({previous, current, reason?} — K-013 #3) ve unresolvedDifferences. contractChanges Faz D dilimine kadar [] döner ve degrade notu warnings'te taşınır (K-013 #7).",
+        "İki WikiSnapshot arası sayfa farkları (salt okunur; working tree değişmez): addedPages/removedPages, changedSections, addedLinks/removedLinks, coverageDelta ({previous, current, reason?} — K-013 #3) ve unresolvedDifferences. contractChanges ({contractId, changeKind, summary} — K-013 #7) iki WikiSnapshot'ın arka graph snapshot'larının sözleşme node yüzeyleri (ApiContract/EventContract/SchemaContract/ContractVersion) üzerinden hesaplanır; arka graph çözümlenemediğinde veya iki yüzeyde de sözleşme kaydı yoksa [] + dürüst not warnings'te döner.",
       inputSchema: WikiDiffInputSchema,
       outputSchema: envelopeOutputSchema(WikiDiffDataSchema),
       handler: (requestId, args) =>
