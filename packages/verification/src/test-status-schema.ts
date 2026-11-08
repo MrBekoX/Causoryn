@@ -28,6 +28,19 @@ import { z } from "zod";
 /** 64 karakter küçük hex sha256 (kanıt dosyası karması). */
 const SHA256_HEX = /^[0-9a-f]{64}$/;
 
+/**
+ * TŞ §20 kaynak bütçesi örüntüsü (wiki refs 200 tavanı ile aynı sayı):
+ * observedTestRun.testNames/evidenceIds dizi tavanı. Güvenlik analisti
+ * bulgusu: bağlanamayan her testNames üyesi rapor limitations'ına bir satır
+ * eklediğinden sınırsız dizi raporu girdiyle orantılı büyütür; tavan şema
+ * kapısında fail-closed engeller (sessiz kırpma yok — aşım açık reddedilir).
+ */
+export const OBSERVED_RUN_ARRAY_CEILING = 200;
+
+/** Tavan aşım mesajı (şema reddinde deterministik gerekçe). */
+const OBSERVED_RUN_ARRAY_CEILING_MESSAGE =
+  "en fazla 200 üye (TŞ §20 kaynak bütçesi; girdiyle orantılı rapor büyümesi engellenir)";
+
 /** Boş/blank redli non-boş string. */
 const nonBlank = z
   .string()
@@ -53,14 +66,22 @@ export const OBSERVED_TEST_RUN_SCHEMA = z.strictObject({
     .string()
     .regex(SHA256_HEX, "evidenceSha256 64 karakter küçük hex sha256 olmalı")
     .optional(),
-  evidenceIds: z.array(nonBlank).min(1).optional(),
+  evidenceIds: z
+    .array(nonBlank)
+    .min(1)
+    .max(OBSERVED_RUN_ARRAY_CEILING, OBSERVED_RUN_ARRAY_CEILING_MESSAGE)
+    .optional(),
   observedCount: z
     .number()
     .int("observedCount tam sayı olmalı")
     .min(1, "observedCount en az 1 olmalı; 0 koşum observed olamaz"),
   passedCount: z.number().int().min(0).optional(),
   failedCount: z.number().int().min(0).optional(),
-  testNames: z.array(nonBlank).min(1).optional(),
+  testNames: z
+    .array(nonBlank)
+    .min(1)
+    .max(OBSERVED_RUN_ARRAY_CEILING, OBSERVED_RUN_ARRAY_CEILING_MESSAGE)
+    .optional(),
 });
 
 /**

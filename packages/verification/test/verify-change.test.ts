@@ -1062,6 +1062,43 @@ describe("verifyChange — E3 test durumu dürüstlüğü", () => {
     ).toThrowError(VerificationError);
   });
 
+  it("negatif: observedTestRun.testNames/evidenceIds tavanı (200) aşarsa şema reddeder — girdiyle orantılı rapor büyümesi engellenir (TŞ §20 kaynak bütçesi)", () => {
+    const evidence = {
+      state: "observed" as const,
+      evidenceRef: "reports/vitest-summary.json",
+    };
+    // 201 testNames üyesi: kabul EDİLMEZ (bağlanamayan her üye limitations'a
+    // satır eklediğinden girdiyle orantılı rapor büyümesi güvenlik analisti
+    // bulgusudur; tavan şema kapısında fail-closed).
+    const largeNames = Array.from({ length: 201 }, (_, i) => `test:ad-${String(i)}`);
+    expect(
+      OBSERVED_TEST_RUN_SCHEMA.safeParse({
+        ...evidence,
+        observedCount: largeNames.length,
+        testNames: largeNames,
+      }).success,
+    ).toBe(false);
+    // 201 evidenceIds üyesi: kabul EDİLMEZ (rapor evidenceIds dizisi de
+    // girdiyle sınırsız büyüyemez).
+    const largeIds = Array.from({ length: 201 }, (_, i) => `ev-${String(i)}`);
+    expect(
+      OBSERVED_TEST_RUN_SCHEMA.safeParse({
+        ...evidence,
+        observedCount: largeIds.length,
+        evidenceIds: largeIds,
+      }).success,
+    ).toBe(false);
+    // Tavan İÇİNDE (200) uzunluk kabul edilir; meşru büyük koşum düşmez.
+    expect(
+      OBSERVED_TEST_RUN_SCHEMA.safeParse({
+        ...evidence,
+        observedCount: 200,
+        testNames: Array.from({ length: 200 }, (_, i) => `test:ad-${String(i)}`),
+        evidenceIds: Array.from({ length: 200 }, (_, i) => `ev-${String(i)}`),
+      }).success,
+    ).toBe(true);
+  });
+
   it("negatif (tip düzeyi): not_run koşumda 'passed' ve 'evidenceRef' üretimi imkânsız", () => {
     const report = verifyChange({
       baseSnapshot: base,

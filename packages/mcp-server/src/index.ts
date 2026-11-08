@@ -58,7 +58,10 @@ export type { Coverage, Envelope } from "./envelope.js";
 export { encodeCursor, decodeCursor } from "./cursor.js";
 export { createCausorynContext } from "./context.js";
 export type { CausorynContext, ContextOverrides } from "./context.js";
-export { PreflightManifestStore } from "./preflight-store.js";
+export {
+  PREFLIGHT_MANIFEST_STORE_LIMIT,
+  PreflightManifestStore,
+} from "./preflight-store.js";
 export { createCausorynMcpServer } from "./server.js";
 export {
   graphErrorToToolError,

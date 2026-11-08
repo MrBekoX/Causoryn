@@ -21,16 +21,41 @@ import type { PreflightManifest } from "@causoryn/preflight";
  *   metni causoryn_preflight_change'i önceleyen akışı söyler. Disk kalıcılığı
  *   bu dilimin kapsamı değildir (TŞ manifest'i yanıt gövdesi kaynaklıdır;
  *   kalıcı depo sonraki dilimlere aittir).
+ * - Depo TAVANLIDIR (PREFLIGHT_MANIFEST_STORE_LIMIT; TŞ §20 kaynak bütçesi
+ *   örüntüsü). Güvenlik analisti bulgusu: sınırsız Map uzun ömürlü sunucu
+ *   sürecinde manifest sayısıyla orantılı bellek büyümesine izin veriyordu;
+ *   tavan aşımında EN ESKİ kayıt FIFO dışarı atılır (reddetme yok — en yeni
+ *   her zaman tutulur; aynı preflightId'nin idempotent yeniden yazması evict
+ *   tetiklemez). Düşen bir preflightId yeniden put edilebilir; verify_change
+ *   tarafında düşmüş kimlik INVALID_ARGUMENT ile açıkça raporlanır.
  * - Depo KAYNAK AĞACINA VE İZİNLİ DATA-ROOT'A YAZMAZ (kırmızı çizgi 2):
  *   yalnızca bellekte Map anahtar-değer tutar.
  * - get yalnızca TAM anahtar eşleşmesiyle döner (önek/fuzzy çözümleme yok —
  *   uydurma kimlik eşlemesi yasaktır).
  */
+
+/** TŞ §20 kaynak bütçesi örüntüsü: depoda tutulan azami manifest sayısı. */
+export const PREFLIGHT_MANIFEST_STORE_LIMIT = 200;
+
 export class PreflightManifestStore {
   private readonly manifests = new Map<string, PreflightManifest>();
 
-  /** Manifesti anahtarlar; aynı preflightId idempotent olarak üzerine yazar. */
+  /**
+   * Manifesti anahtarlar; aynı preflightId idempotent olarak üzerine yazar.
+   * Tavan aşımında (distinct anahtar) en eski kayıt FIFO dışarı atılır —
+   * Map ekleme sırasını korur; mevcut anahtarın yeniden yazılması sırayı
+   * değiştirmez, dolayısıyla evict deterministiktir.
+   */
   put(manifest: PreflightManifest): void {
+    if (
+      !this.manifests.has(manifest.preflightId) &&
+      this.manifests.size >= PREFLIGHT_MANIFEST_STORE_LIMIT
+    ) {
+      const oldest = this.manifests.keys().next();
+      if (oldest.done !== true) {
+        this.manifests.delete(oldest.value);
+      }
+    }
     this.manifests.set(manifest.preflightId, manifest);
   }
 
