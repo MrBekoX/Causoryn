@@ -32,8 +32,6 @@ const HTTP_METHODS = ["get", "put", "post", "delete", "options", "head", "patch"
 
 type HttpMethod = (typeof HTTP_METHODS)[number];
 
-const METHOD_SET: ReadonlySet<string> = new Set(HTTP_METHODS);
-
 function lastRefSegment(ref: string): string {
   const segments = ref.split("/");
   const last = segments[segments.length - 1];
@@ -295,5 +293,3 @@ function compareCandidatesByEvidence(a: ContractCandidate, b: ContractCandidate)
     a.evidence.startLine - b.evidence.startLine
   );
 }
-
-export { METHOD_SET };

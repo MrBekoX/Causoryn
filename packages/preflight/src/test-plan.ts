@@ -707,7 +707,11 @@ export function deriveTestPlan(
     if (strengthGap !== 0) return strengthGap;
     const testGap = cmp(a.testNodeId, b.testNodeId);
     if (testGap !== 0) return testGap;
-    return cmp(a.candidateId, b.candidateId);
+    // Denetim bulgusu: candidateId bu sıralamada henüz ATANMAMIŞTIR (adım 12
+    // kimliği sıralamadan sonra verir — hepsi "") → cmp her zaman 0 dönerdi;
+    // ölü tie-break kaldırıldı, kalan eşitlikte stable-sort girdi sırasını
+    // korur (zaten ölü dalın davranışıyla aynı).
+    return 0;
   });
   let candidates = merged;
   if (merged.length > limits.maxCandidates) {

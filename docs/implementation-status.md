@@ -15,7 +15,7 @@
 
 ## Sprint 5 — Faz D: Differentiation (2026-11-08)
 
-> Kanıt: sprint-5 görev sonucu raporları d1–d7 + mcp (orkestratör doğrulamalı) + disk spot-check (bu oturum, 2026-11-08) + kapı sonuçları · TŞ v2.1 §11 (sözleşme keşfi/değerlendirme/drift), §14 (preflight), §15 (Test Intelligence), §10.1/§10.2 (araç yüzeyi + sabit hata kodları), §19 (kaynak tüketimi), §23 (Faz D planı) · K-013(7) (contractChanges gövdesi) · [wiki/sprint-5.md](../wiki/sprint-5.md)
+> Kanıt: sprint-5 görev sonucu raporları d1–d7 + mcp (orkestratör doğrulamalı) + disk spot-check (bu oturum, 2026-11-08) + kapı sonuçları · TŞ v2.1 §11 (sözleşme keşfi/değerlendirme/drift), §10.2/§10.3 (preflight; §14 Business Flow Intelligence'dır — düzeltme: denetim bulgusu), §15 (Test Intelligence), §10.1/§10.2 (araç yüzeyi + sabit hata kodları), §19 (kaynak tüketimi), §23 (Faz D planı) · K-013(7) (contractChanges gövdesi) · [wiki/sprint-5.md](../wiki/sprint-5.md)
 
 > İşaret kullanımı bu bölümde: **[D]** bu dokümanı yazan ajanın bu oturumda bizzat yaptığı disk doğrulamalarını (dosya okuma, `grep`, `node -e`, `git log/diff/status`); **[R]** orkestratör doğrulamalı görev raporlarını (görev süresinde koşulan kırmızı→yeşil kanıtlarıyla); **[K]** orkestratörün koşturduğu kapı sonuçlarını (`npm run test`/`typecheck`/`build`/`lint` — **tümü yeşil**) ve güvenlik-analizi sonucunu; **[S]** statik `it(`/`test(` sayımını belirtir (koşum değildir). Dürüstlük notu: bu dokümanı yazan ajan bu oturumda **hiçbir test süiti koşmadı**; tüm koşum kanıtı [R] görev raporları ve [K] orkestratör kapılarıdır, bizzat koşulan tek şey disk doğrulamalarıdır.
 

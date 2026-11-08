@@ -269,7 +269,7 @@ export interface TraceBusinessFlowResult {
   };
   /** Herhangi bir akış kırpıldı mı / maxFlows tavanı vuruldu mu. */
   readonly truncated: boolean;
-  /** Vurulan tavanlar; sabit kanonik sırada (maxFlows, maxHops). */
+  /** Vurulan tavanlar; sabit kanonik sırada (maxFlows, maxNodes, maxHops). */
   readonly truncatedBy: readonly FlowTruncatedBy[];
   readonly limits: FlowAppliedLimits;
   readonly rationales: readonly string[];

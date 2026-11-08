@@ -17,10 +17,19 @@
  *   kararıyla reddedildi (fail-closed; sprint-5 D4 — WorkspaceAccessPolicy
  *   kararının reddi sessizce düşürülmez, TŞ §10.3 "kodu kendisi
  *   değiştirmez" + salt-okunur workspace disiplini).
+ *
+ * Denetim bulgusu: kod kümesi docstring düzeyinde değil DERLEYİCİ düzeyinde
+ * sabittir — packages/contracts/src/errors.ts'teki ContractErrorCode union
+ * örüntüsüyle aynı disiplin.
  */
+export type PreflightErrorCode =
+  | "preflight/invalid-input"
+  | "preflight/snapshot-state"
+  | "preflight/file-not-authorized";
+
 export class PreflightError extends Error {
   constructor(
-    readonly code: string,
+    readonly code: PreflightErrorCode,
     message: string,
   ) {
     super(message);

@@ -110,6 +110,13 @@ export interface ContractDriftResult {
   readonly unconsumedChanges: readonly ContractChangeRecord[];
   /** D2 raporundan geçen, hiçbir çifte bağlanamayan bulgular. */
   readonly unattachedFindings: readonly ContractCompatibilityFinding[];
+  /**
+   * D2 uyumluluk raporunun çift değerlendirmeleri (raporun kendisi sonuçta
+   * ayrıca taşınmaz; scope daraltması gibi tüketenlerin İKİNCİ KEZ
+   * checkContractCompatibility koşmasın diye yeniden kullanılır — denetim
+   * bulgusu). Deterministik sıralı (matchKey).
+   */
+  readonly evaluations: readonly ContractPairEvaluation[];
   /** Sayaç özeti + dürüstlük notları (deterministik içerik). */
   readonly rationale: readonly string[];
 }
@@ -419,6 +426,7 @@ export function detectContractDrift(input: ContractDriftInput): ContractDriftRes
     impactedEdges: impactedEdges.sort(compareImpacts),
     unconsumedChanges: [...unconsumedChanges].sort(compareChangeRecords),
     unattachedFindings: report.unattachedFindings,
+    evaluations: report.evaluations,
     rationale,
   };
 }

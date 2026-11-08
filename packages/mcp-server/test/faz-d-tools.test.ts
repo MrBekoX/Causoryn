@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { readFileSync, readdirSync, rmSync } from "node:fs";
+import { mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { mkdtempSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -494,6 +494,43 @@ describe("causoryn_check_contracts", { timeout: 60_000 }, () => {
     }
   });
 
+  it("dürüstlük: kanonik olmayan spec yazımı ('./x') sessiz boş keşfe düşmez — kanonik kararla eşlenir (denetim bulgusu)", async () => {
+    // Hata modeli: readContractFiles policy'nin kanonik POSIX relativePath'ini
+    // taşır; './openapi.yaml' policy'den GEÇER (dosya okunur) ama ham girdiyle
+    // yapılan filter eşleşmez → boş keşif sessizce 'backward-safe' üretirdi.
+    const pair = await connectClient(makeContext(CONTRACT_FIXTURE));
+    try {
+      const canonical = expectEnvelope(
+        await callTool(pair.client, "causoryn_check_contracts", {
+          contracts: [
+            { name: "orders-public-api", base: "openapi.yaml", target: "openapi-v2.yaml" },
+          ],
+        }),
+      );
+      const dotted = expectEnvelope(
+        await callTool(pair.client, "causoryn_check_contracts", {
+          contracts: [
+            { name: "orders-public-api", base: "./openapi.yaml", target: "./openapi-v2.yaml" },
+          ],
+        }),
+      );
+      expect(dotted.status).toBe("ok");
+      // Aynı dosya çifti, farklı yazım → BİT-BİT AYNI değerlendirme (TŞ §8
+      // invariant vi; kanonik olmayan yazım boş keşfe indirgenemez).
+      expect(JSON.stringify(dotted.data)).toBe(JSON.stringify(canonical.data));
+      const data = dotted.data as Record<string, unknown>;
+      const evaluation = (data.pairs as Array<Record<string, unknown>>)[0] as Record<
+        string,
+        unknown
+      >;
+      // baseFile/targetFile kanonik kararla raporlanır (yazım normalize edilir).
+      expect(evaluation.baseFile).toBe("openapi.yaml");
+      expect(evaluation.targetFile).toBe("openapi-v2.yaml");
+    } finally {
+      await pair.close();
+    }
+  });
+
   it("pozitif (backward-safe): required→optional gevşemesi tek başına backward-safe sınıflanır", async () => {
     const pair = await connectClient(makeContext(CONTRACT_FIXTURE));
     try {
@@ -751,6 +788,47 @@ describe("causoryn_detect_contract_drift", { timeout: 60_000 }, () => {
       expect(emptyBase.isError).toBe(true);
     } finally {
       await pair.close();
+    }
+  });
+
+  it("unknown (araç yüzeyi): rename-only SQL hedefi unknown sınıflı drift üretir (çekirdek senaryosu yüzeye taşınır)", async () => {
+    // Fixture salt-okunurdur (ADR-008): rename hedefi os.tmpdir() altındaki
+    // geçici workspace'e kurulur ve test sonunda silinir. Sprint-5 çıkış
+    // kriteri olan 'unknown' ayağını GERÇEK unknown sınıflamasıyla çalıştırır.
+    const root = mkdtempSync(path.join(os.tmpdir(), "causoryn-fazd-drift-unknown-"));
+    try {
+      mkdirSync(path.join(root, "db"), { recursive: true });
+      writeFileSync(
+        path.join(root, "db", "001_create_orders.sql"),
+        readFileSync(path.join(CONTRACT_FIXTURE, "db", "001_create_orders.sql")),
+      );
+      writeFileSync(
+        path.join(root, "db", "003_rename_orders.sql"),
+        "-- v3: sadece rename tanima dilimi\nALTER TABLE orders RENAME COLUMN amount TO amount_minor;\n",
+        "utf8",
+      );
+      const pair = await connectClient(makeContext(root));
+      try {
+        const envelope = expectEnvelope(
+          await callTool(pair.client, "causoryn_detect_contract_drift", {
+            base: ["db/001_create_orders.sql"],
+            target: ["db/003_rename_orders.sql"],
+          }),
+        );
+        const data = envelope.data as Record<string, unknown>;
+        const unknowns = data.unknowns as Array<Record<string, unknown>>;
+        expect(unknowns).toHaveLength(1);
+        expect(unknowns[0]?.matchKey).toBe("sql SchemaContract table:orders");
+        const findings = unknowns[0]?.findings as Array<Record<string, unknown>>;
+        expect(findings.some((finding) => finding.ruleId === "column-renamed")).toBe(true);
+        // TEK ALAN disiplini: aynı çift başka sınıflama alanında tekrar etmez.
+        expect(data.breakingCandidates).toEqual([]);
+        expect(data.risks).toEqual([]);
+      } finally {
+        await pair.close();
+      }
+    } finally {
+      rmSync(root, { recursive: true, force: true });
     }
   });
 

@@ -372,16 +372,29 @@ export async function checkContracts(
       const files = await runDifferentiationAsync(deps.logger, () =>
         readContractFiles(root, deps.policy, [pair.base, pair.target]),
       );
+      // Denetim bulgusu: readContractFiles policy'nin KANONİK POSIX
+      // relativePath'ini taşır; ham kullanıcı girdisiyle filtre yapmak
+      // ('./openapi.yaml' gibi yazımlarda) dosya okunup parse edilse bile
+      // eşleşmezdi → sessiz boş keşif → uydurma 'backward-safe'. Eşleme
+      // policy kararının kanonik yoluyla yapılır; ret kararı
+      // readContractFiles içinde ContractDiscoveryError olarak fırlatıldığı
+      // için buraya yalnızca allowed kararlar ulaşır.
+      const baseDecision = deps.policy.checkFile(root, pair.base);
+      const targetDecision = deps.policy.checkFile(root, pair.target);
+      const baseRelative =
+        baseDecision.allowed && baseDecision.relativePath !== "." ? baseDecision.relativePath : pair.base;
+      const targetRelative =
+        targetDecision.allowed && targetDecision.relativePath !== "." ? targetDecision.relativePath : pair.target;
       const baseOutput: DiscoveryOutput = runDifferentiation(deps.logger, () =>
         discoverContractsFromTexts(
           workspaceId,
-          files.filter((file) => file.relativePath === pair.base),
+          files.filter((file) => file.relativePath === baseRelative),
         ),
       );
       const targetOutput: DiscoveryOutput = runDifferentiation(deps.logger, () =>
         discoverContractsFromTexts(
           workspaceId,
-          files.filter((file) => file.relativePath === pair.target),
+          files.filter((file) => file.relativePath === targetRelative),
         ),
       );
       const report = runDifferentiation(deps.logger, () =>
@@ -389,8 +402,8 @@ export async function checkContracts(
       );
       return {
         ...(pair.name === undefined ? {} : { name: pair.name }),
-        baseFile: pair.base,
-        targetFile: pair.target,
+        baseFile: baseRelative,
+        targetFile: targetRelative,
         classification: report.classification,
         evaluations: report.evaluations.map(evaluationOf),
         unattachedFindings: report.unattachedFindings.map(findingOf),
@@ -569,7 +582,10 @@ export async function detectContractDriftTool(
   if (input.scope !== undefined) {
     const scopedKeys = new Set(input.scope);
     const scopedContractIds = new Set<string>();
-    for (const evaluation of checkContractCompatibility(result.base, result.target).evaluations) {
+    // Denetim bulgusu: checkContractCompatibility çekirdek içinde (contract-
+    // drift.ts) zaten koştu; aynı girdiyi ikinci kez değerlendirmek yerine
+    // drift sonucunun evaluations alanından türetilir.
+    for (const evaluation of drift.evaluations) {
       if (!scopedKeys.has(evaluation.matchKey)) continue;
       if (evaluation.baseContractId !== undefined) scopedContractIds.add(evaluation.baseContractId);
       if (evaluation.targetContractId !== undefined) {

@@ -243,7 +243,11 @@ describe("matchContractEdges — tablo kuralı ve sınır kontrolleri", () => {
     expect(edges).toHaveLength(0);
   });
 
-  it("pozitif: verified ve heuristic aynı (from,to,kind) çiftinde çakışırsa verified kazanır", () => {
+  it("pozitif: verified ve heuristic aynı (from,to,kind) çiftinde ÇAKIŞIRSA verified kazanır ve kanıtlar birleşir (put merge dalı)", () => {
+    // Gerçek çakışma: AYNI sembol aynı sözleşmeyi iki yoldan eşler —
+    // exact tablo → verified (name-exact), büyük/küçük farkı → heuristic
+    // (name-similarity). İkisi de aynı (edgeKind, fromSymbol, toContractId)
+    // anahtarını üretir → merge dalı çalışır.
     const contract = sqlContract({ name: "orders", qualifiedName: "table:orders" });
     const exact: ServiceAnchor = {
       anchorKind: "table",
@@ -251,9 +255,30 @@ describe("matchContractEdges — tablo kuralı ve sınır kontrolleri", () => {
       table: "orders",
       evidence: { relativePath: "a.ts", startLine: 1, endLine: 1 },
     };
-    const edges = matchContractEdges([contract], [exact]);
+    const similar: ServiceAnchor = {
+      anchorKind: "table",
+      symbol: "repo",
+      table: "ORDERS",
+      evidence: { relativePath: "b.ts", startLine: 2, endLine: 2 },
+    };
+    const edges = matchContractEdges([contract], [exact, similar]);
+    // Çakışma TEK kenarda birleştirilir (ikinci kenar üretilmez).
     expect(edges).toHaveLength(1);
-    expect(edges[0]?.resolution).toBe("verified");
+    const edge = edges[0];
+    // verified > heuristic: kazanan exact ankrajın sınıflamasıdır.
+    expect(edge?.resolution).toBe("verified");
+    expect(edge?.matchBasis).toBe("name-exact");
+    // Kanıt birleşimi: kazanan kanıt zinciri (ankraj + sözleşme) + kaybedenin
+    // tekrarsız katkısı; sıra korunur.
+    expect(edge?.evidence).toEqual([
+      { relativePath: "a.ts", startLine: 1, endLine: 1 },
+      contract.evidence,
+      { relativePath: "b.ts", startLine: 2, endLine: 2 },
+    ]);
+    // Anchor sırası ters çevrilse bile kazanan/kanıt sırası DEĞİŞMEZ:
+    // verified her zaman kazanır ve kazanan kanıtı önce yazılır.
+    const reversed = matchContractEdges([contract], [similar, exact]);
+    expect(reversed).toEqual(edges);
   });
 
   it("pozitif: girdi sırası permütasyona karşı çıktı deterministiktir (kanonik sıralama)", () => {

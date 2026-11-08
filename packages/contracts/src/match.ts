@@ -62,22 +62,6 @@ function routesShapeEqual(a: string, b: string): boolean {
   return true;
 }
 
-/** Route literal'leri (param adları hariç) birebir eşit mi. */
-function routeLiteralsExact(a: string, b: string): boolean {
-  const sa = routeSegments(a);
-  const sb = routeSegments(b);
-  if (sa.length !== sb.length) return false;
-  for (let i = 0; i < sa.length; i += 1) {
-    const x = sa[i];
-    const y = sb[i];
-    if (x === undefined || y === undefined) return false;
-    if (isParamSegment(x) !== isParamSegment(y)) return false;
-    if (isParamSegment(x) && isParamSegment(y)) continue;
-    if (x !== y) return false;
-  }
-  return true;
-}
-
 function evidenceKey(span: ContractEvidenceSpan): string {
   return span.relativePath + ":" + String(span.startLine) + ":" + String(span.endLine);
 }
@@ -143,7 +127,10 @@ export function matchContractEdges(
         if (anchor.method === undefined || anchor.route === undefined) continue;
         if (anchor.method.toUpperCase() !== contract.method.toUpperCase()) continue;
 
-        if (routesShapeEqual(anchor.route, contract.route) && routeLiteralsExact(anchor.route, contract.route)) {
+        // Denetim bulgusu: routeLiteralsExact'in kabul kümesi routesShapeEqual
+        // ile birebir aynıdır (string eşitliği param-ness eşitliğini ima
+        // eder) — tek koşul yeterlidir, ikinci çağrı ölü ağırlıktı.
+        if (routesShapeEqual(anchor.route, contract.route)) {
           put({
             edgeKind: "PRODUCES_CONTRACT",
             fromSymbol: anchor.symbol,

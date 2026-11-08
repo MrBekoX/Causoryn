@@ -18,6 +18,7 @@
  * (candidateOnly sabit true; test manifest.test.ts ile kanıtlanır).
  */
 export { PreflightError } from "./errors.js";
+export type { PreflightErrorCode } from "./errors.js";
 export {
   TEST_PLAN_DEFAULTS,
   TEST_PLAN_LIMIT_CEILINGS,
