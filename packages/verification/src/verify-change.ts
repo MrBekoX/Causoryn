@@ -308,7 +308,7 @@ function testStatusOf(
   observed: NormalizedObservedRun | undefined,
 ): VerifyTestStatus {
   if (observed === undefined) {
-    return { status: "not_run", recommendedCount, observedCount: 0 };
+    return { state: "not_run", recommendedCount, observedCount: 0 };
   }
   const passedClaim =
     observed.passedCount !== undefined &&
@@ -318,7 +318,7 @@ function testStatusOf(
       ? { passed: true as const }
       : {};
   return {
-    status: "observed",
+    state: "observed",
     recommendedCount,
     observedCount: observed.observedCount,
     evidenceRef: observed.evidenceRef,
@@ -971,7 +971,10 @@ export function verifyChange(input: VerifyChangeInput): VerificationReport {
     verdictRationale: rationale,
     incompleteChecks,
     disclaimers,
-    findings: architecture.findings.filter((finding) => !finding.suppressed),
+    // TŞ §10.4 üst düzey alan adı bire bir: "architectureFindings" (PDF
+    // s.11; baskılanmamış bulgular — tüm kayıtlar checks.architecture'ta
+    // yönetişim görünürlüğüyle ayrıca taşınır).
+    architectureFindings: architecture.findings.filter((finding) => !finding.suppressed),
     contractDrift: contractDriftEntries,
     tests,
     unknowns: sortedUnique(unknowns),
@@ -1044,16 +1047,16 @@ function graphDiffCheckJsonValue(check: GraphDiffCheckResult): JsonValue {
 }
 
 function testStatusJsonValue(status: VerifyTestStatus): JsonValue {
-  if (status.status === "not_run") {
+  if (status.state === "not_run") {
     // E3: not_run dalında kanıt/passed alanları YAZILMAZ (fiziksel yokluk).
     return {
-      status: status.status,
+      state: status.state,
       recommendedCount: status.recommendedCount,
       observedCount: status.observedCount,
     };
   }
   return {
-    status: status.status,
+    state: status.state,
     recommendedCount: status.recommendedCount,
     observedCount: status.observedCount,
     evidenceRef: status.evidenceRef,
@@ -1143,7 +1146,13 @@ function reportBodyJsonValue(
     })),
     incompleteChecks: [...body.incompleteChecks],
     disclaimers: [...body.disclaimers],
-    findings: body.findings.map(findingJsonValue),
+    // TŞ §10.4 alan sadakati SERİLEŞEN yüzeyde de geçerlidir: bu gövde hem
+    // reportId karmasının hem serializeVerificationReport çıktısının
+    // kaynağıdır — üst düzey anahtar adı rapor nesnesiyle aynıdır
+    // ("architectureFindings"; sprint-6 takım denetimi 2. tur hizalaması:
+    // eski `findings` anahtarı nesne düzeyinde düzeltilmiş ama serileştirmede
+    // kalmıştı).
+    architectureFindings: body.architectureFindings.map(findingJsonValue),
     contractDrift: body.contractDrift.map((entry) => ({
       matchKey: entry.matchKey,
       contractId: entry.contractId,

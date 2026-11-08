@@ -216,8 +216,9 @@ describe("stdio server — stdout saflığı ve protokol el sıkışması", () =
     // Sprint-2 B6: causoryn_index_status + causoryn_refresh_index, B5:
     // causoryn_get_symbol_context, B4: causoryn_trace_execution, sprint-3
     // C8: Faz C'nin 7 aracı, sprint-4 W5: Living Wiki'nin 7 aracı, sprint-5
-    // D2-D6: Faz D'nin 5 aracı eklendi (TŞ §10.2 + §16A.8 katalog büyümesi;
-    // liste alfabetik karşılaştırılır).
+    // D2-D6: Faz D'nin 5 aracı, sprint-6 E1-E3: Faz E'nin causoryn_verify_
+    // change aracı eklendi (TŞ §10.2 + §16A.8 katalog büyümesi; liste
+    // alfabetik karşılaştırılır).
     expect(listResult.tools?.map((t) => t.name).sort()).toEqual([
       "causoryn_analyze_impact",
       "causoryn_architecture_timeline",
@@ -239,6 +240,7 @@ describe("stdio server — stdout saflığı ve protokol el sıkışması", () =
       "causoryn_refresh_index",
       "causoryn_trace_business_flow",
       "causoryn_trace_execution",
+      "causoryn_verify_change",
       "causoryn_wiki_build",
       "causoryn_wiki_diff",
       "causoryn_wiki_get_links",

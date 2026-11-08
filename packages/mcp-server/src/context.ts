@@ -18,6 +18,7 @@ import {
   parseCausorynServerConfig,
   type CausorynServerConfig,
 } from "./config.js";
+import { PreflightManifestStore } from "./preflight-store.js";
 
 /**
  * Uygulama bağlamı: konfigürasyon → WorkspaceAccessPolicy → GraphRepository
@@ -73,6 +74,14 @@ export interface CausorynContext {
   readonly wikiStore: SqliteWikiStore | null;
   /** Wiki FTS5 arama yüzeyi (sprint-4 W4 çekirdeği); wikiStore null ise null. */
   readonly wikiSearch: WikiSearchStore | null;
+  /**
+   * Sprint-6 Faz E: süreç-içi Preflight Manifest deposu. causoryn_preflight_
+   * change manifesti buraya kaydeder; causoryn_verify_change preflightId'yi
+   * buradan çözer (TŞ §1 ürün döngüsü Preflight → Verify). Bellek-içidir:
+   * sunucu yeniden başlatınca kayıtlar düşer, bilinmeyen kimlik
+   * INVALID_ARGUMENT ile reddedilir; kaynak ağaca/veri köküne yazma yoktur.
+   */
+  readonly preflightStore: PreflightManifestStore;
   /**
    * Saat kaynağı (domain deseni: motor saat okumaz, saat ENJEKTE edilir).
    * IndexService/jobManager ile aynı örnek; wiki_build builtAt buradan okur.
@@ -164,6 +173,7 @@ export function createCausorynContext(
     outputPolicy,
     wikiStore: wiki.store,
     wikiSearch: wiki.search,
+    preflightStore: new PreflightManifestStore(),
     clock,
     logger,
     close: wiki.close,

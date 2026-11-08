@@ -102,11 +102,16 @@ import {
   preflightChange,
   traceBusinessFlow,
 } from "./services-differentiation.js";
+import {
+  VerifyChangeDataSchema,
+  VerifyChangeInputSchema,
+  verifyChangeTool,
+} from "./services-verification.js";
 import { SERVER_NAME, SERVER_VERSION } from "./version.js";
 
 /**
  * MCP protokol adaptasyonu (TŞ v2.1 §5/§10, ADR-003): SDK McpServer
- * üzerinden tam olarak 28 gerçek araç yayımlanır (sprint-1: 5 çekirdek araç;
+ * üzerinden tam olarak 29 gerçek araç yayımlanır (sprint-1: 5 çekirdek araç;
  * sprint-2 B6: causoryn_index_status + causoryn_refresh_index; sprint-2 B5:
  * causoryn_get_symbol_context; sprint-2 B4: causoryn_trace_execution;
  * sprint-3 C8: causoryn_analyze_impact, causoryn_check_architecture,
@@ -116,9 +121,10 @@ import { SERVER_NAME, SERVER_VERSION } from "./version.js";
  * §16A.8): causoryn_wiki_build + 6 salt-okunur wiki aracı; sprint-5
  * D2-D6 (Faz D Differentiation): causoryn_trace_business_flow,
  * causoryn_preflight_change, causoryn_check_contracts,
- * causoryn_detect_contract_drift, causoryn_derive_test_plan; tools/list boş
- * handler yayınlamaz — ADR-010; causoryn_verify_change Agent Change Guard
- * Faz D diliminde yayımlanmaz).
+ * causoryn_detect_contract_drift, causoryn_derive_test_plan; sprint-6
+ * E1-E3 (Faz E Agent Change Guard): causoryn_verify_change —
+ * detect_contract_drift ile derive_test_plan arasında (TŞ §10.2 PDF s.10
+ * katalog satır sırası); tools/list boş handler yayınlamaz — ADR-010).
  * Her araç:
  * - Zod inputSchema (SDK girdiyi otomatik doğrular; şema reddi protokol
  *   düzeyinde isError sonucu döner),
@@ -355,6 +361,16 @@ function buildRegistrations(context: CausorynContext): readonly ToolRegistration
         ),
     },
     {
+      name: "causoryn_verify_change",
+      title: "Agent Change Guard",
+      description:
+        "Değişiklik sonrası mimari bütünlüğü tekrarlanabilir kurallarla DOĞRULAR; kod yazmaz, çalışma ağacını değiştirmez ve test ÇALIŞTIRMAZ (TŞ §10.4). Taban yayın (preflightId manifestinden veya baseSnapshot kimliğinden) ile working-tree projeksiyonunu dört denetimde değerlendirir: architecture (workspace kökündeki .causoryn/architecture.rules.yaml guard kuralları; dosya yoksa denetim not_evaluated), contracts (bu yüzeyden üretilemez — spec çifti girdide yoktur; istenirse not_evaluated), graph-diff (taban ↔ çalışma ağacı içerik farkı) ve test-plan (D6 adayları; koşum durumu dürüstlüğü: not_run varsayılan, observed yalnızca evidenceRef'li kanıtlı host kaydıyla — 'passed' iddiası yalnızca kanıt + gerçekten geçen rapor sayılarıyla mümkündür). Verdict sabit kural zincirinden gelir: no_findings | review_required | blocking_findings | inconclusive; no_findings güvenli/kod garantisi DEĞİLDİR ve her raporda dürüstlük uyarıları taşınır. Rapor byte-deterministiktir: aynı working-tree + aynı taban = bit-bit aynı rapor (sprint kapısı).",
+      inputSchema: VerifyChangeInputSchema,
+      outputSchema: envelopeOutputSchema(VerifyChangeDataSchema),
+      handler: (requestId, args) =>
+        verifyChangeTool(context, requestId, args as z.infer<typeof VerifyChangeInputSchema>),
+    },
+    {
       name: "causoryn_derive_test_plan",
       title: "Test planı adayları",
       description:
@@ -465,7 +481,7 @@ function buildRegistrations(context: CausorynContext): readonly ToolRegistration
   ];
 }
 
-/** Context'i MCP McpServer'a bağlar; tam olarak 28 araç kaydeder. */
+/** Context'i MCP McpServer'a bağlar; tam olarak 29 araç kaydeder. */
 export function createCausorynMcpServer(context: CausorynContext): McpServer {
   const server = new McpServer(
     { name: SERVER_NAME, version: SERVER_VERSION },

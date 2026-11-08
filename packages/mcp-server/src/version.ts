@@ -25,12 +25,13 @@ export const SCHEMA_VERSION = "2.0";
  * causoryn_wiki_search, causoryn_wiki_get_links, causoryn_wiki_get_versions,
  * causoryn_wiki_diff; sprint-5 D2-D6 (Faz D Differentiation, TŞ §10.2 PDF
  * katalog satır sırası): causoryn_trace_business_flow trace_execution'dan
- * sonra; causoryn_preflight_change, causoryn_check_contracts,
- * causoryn_detect_contract_drift ve causoryn_derive_test_plan
- * export_documentation ile get_evidence ARASINDA (katalog satırı sırası;
- * causoryn_verify_change Agent Change Guard bu dilimde yayımlanmaz — boş
- * handler yayınlama yasağı, ADR-010). tools/list TAM OLARAK bu 28 aracı
- * sunar; boş handler yayınlanmaz (ADR-010, wiki/mcp-tools.md kuralı).
+ * sonra; causoryn_preflight_change, causoryn_check_contracts ve
+ * causoryn_detect_contract_drift export_documentation ile get_evidence
+ * ARASINDA (katalog satırı sırası); sprint-6 E1-E3 (Faz E Agent Change
+ * Guard, TŞ §10.2 PDF s.10 katalog satırı): causoryn_verify_change
+ * detect_contract_drift ile derive_test_plan ARASINDA (katalog satır
+ * sırası; boş handler yayınlama yasağı, ADR-010). tools/list TAM OLARAK bu
+ * 29 aracı sunar; boş handler yayınlanmaz (ADR-010, wiki/mcp-tools.md kuralı).
  */
 export const TOOL_NAMES = [
   "causoryn_get_capabilities",
@@ -51,6 +52,7 @@ export const TOOL_NAMES = [
   "causoryn_preflight_change",
   "causoryn_check_contracts",
   "causoryn_detect_contract_drift",
+  "causoryn_verify_change",
   "causoryn_derive_test_plan",
   "causoryn_get_evidence",
   "causoryn_architecture_timeline",

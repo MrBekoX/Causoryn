@@ -357,8 +357,8 @@ describe("verifyChange — pozitif (değişmemiş manifest hedefleri)", () => {
     // test planı adayları türetilir; ancak durum daima not_run (test
     // koşucusu YOK — TŞ §10.4/§15).
     expect(report.checks.testPlan.recommendedCount).toBeGreaterThanOrEqual(1);
-    expect(report.checks.testPlan.run.status).toBe("not_run");
-    expect(report.tests.status).toBe("not_run");
+    expect(report.checks.testPlan.run.state).toBe("not_run");
+    expect(report.tests.state).toBe("not_run");
     expect(report.tests.recommendedCount).toBeGreaterThanOrEqual(1);
     expect(report.tests.observedCount).toBe(0);
 
@@ -374,8 +374,44 @@ describe("verifyChange — pozitif (değişmemiş manifest hedefleri)", () => {
     expect(report.limitations.length).toBeGreaterThanOrEqual(1);
   });
 
-  it("sprint kapısı: aynı girdi ile iki koşum byte-deterministik", () => {
-    const run1 = serializeVerificationReport(
+  it("TŞ §10.4 alan sadakati: üst düzey architectureFindings + tests.state taşınır (findings/tests.status sapması yok)", () => {
+    const report = verifyChange({
+      baseSnapshot: base,
+      targetSnapshot: target,
+      preflightId: manifest.preflightId,
+      resolvePreflight: (id) => (id === manifest.preflightId ? manifest : undefined),
+      guardPolicy: CLEAN_POLICY,
+      guardBaseline: EMPTY_BASELINE,
+      contractDrift: drift,
+    });
+    // TŞ §10.4 örnek yanıt (PDF s.11): üst düzey bulgu alanı
+    // "architectureFindings", koşum bloğu {"state": "not_run", ...} — alan
+    // adları bire bir taşınır (sprint-6 takım denetimi bulgusu: findings/
+    // tests.status sapması önceki sprintlerin alan-sadakat pratiğini
+    // ihlal ediyordu; identifiedTargets/impactCandidates örüntüsü).
+    expect("architectureFindings" in report).toBe(true);
+    expect("findings" in report).toBe(false);
+    expect("state" in report.tests).toBe(true);
+    expect("status" in report.tests).toBe(false);
+    expect(report.tests.state).toBe("not_run");
+    expect(report.checks.testPlan.run.state).toBe("not_run");
+    // Koşum bloğu TŞ alanlarıyla tam kapanır: state/recommendedCount/
+    // observedCount dışında alan yoktur (not_run dalı).
+    expect(Object.keys(report.tests).sort()).toEqual([
+      "observedCount",
+      "recommendedCount",
+      "state",
+    ]);
+  });
+
+  it("TŞ §10.4 alan sadakati (serialize yüzeyi): reportId gövdesi ve serializeVerificationReport çıktısı üst düzey architectureFindings taşır", () => {
+    // Sprint-6 takım denetimi 2. tur bulgusu: reportBodyJsonValue içindeki
+    // üst düzey JSON anahtarı eski `findings` olarak kalmıştı (özellik
+    // erişimi yeni adla, anahtar eski) — bu gövde hem reportId karmasının
+    // hem serializeVerificationReport çıktısının kaynağıdır; nesne düzeyi
+    // hizalama yalnızca rapor OBJESİNİ kapsıyordu, serialize yüzeyini
+    // DEĞİL. Bu test serialize çıktısının üst düzey anahtarlarını kilitler.
+    const serialized = serializeVerificationReport(
       verifyChange({
         baseSnapshot: base,
         targetSnapshot: target,
@@ -386,17 +422,40 @@ describe("verifyChange — pozitif (değişmemiş manifest hedefleri)", () => {
         contractDrift: drift,
       }),
     );
-    const run2 = serializeVerificationReport(
-      verifyChange({
-        baseSnapshot: target,
-        targetSnapshot: base,
-        preflightId: manifest.preflightId,
-        resolvePreflight: (id) => (id === manifest.preflightId ? manifest : undefined),
-        guardPolicy: CLEAN_POLICY,
-        guardBaseline: EMPTY_BASELINE,
-        contractDrift: drift,
-      }),
-    );
+    const parsed = JSON.parse(serialized) as Record<string, unknown>;
+    expect("architectureFindings" in parsed).toBe(true);
+    expect("findings" in parsed).toBe(false);
+    // Serialize gövdesindeki koşum bloğu da TŞ ayırıcısıyla (`state`)
+    // taşınır; eski `status` anahtarı koşum bloğunda yoktur.
+    expect("state" in (parsed.tests as object)).toBe(true);
+    expect("status" in (parsed.tests as object)).toBe(false);
+    // reportId, bu gövdenin canonical JSON SHA-256 karmasıdır: gövde anahtarı
+    // değiştiğinde kimlik de content-addressed olarak değişir (sabit değer
+    // beklenmez; biçim sözleşmesi test edilir).
+    expect(parsed.reportId).toMatch(/^verification:[0-9a-f]{64}$/);
+  });
+
+  it("sprint kapısı: aynı girdi ile iki koşum byte-deterministik", () => {
+    // Sprint-6 takım denetimi 2. tur bulgusu: run2'nin girdisi eski hâlde
+    // base/target TAKASLIYDI (base ve target ikisi de cleanTree() olduğundan
+    // içerik/kimlik eşit → takas nötrleşip test yine yeşile koşuyordu, ancak
+    // 'aynı girdi' sözüyle farklı referanslar karşılaştırılıyordu). Kapı
+    // sözleşmesi TŞ Faz E: AYNI working-tree + AYNI baseSnapshot → bit-bit
+    // aynı rapor; run2 girdisi run1 ile BİRE BİR aynıdır. Gerçek (diff'li)
+    // determinizm kanıtı paralel olarak faz-e MCP testindedir
+    // (faz-e-verify-change.test.ts: değişiklik sonrası verify×2).
+    const gateInput = {
+      baseSnapshot: base,
+      targetSnapshot: target,
+      preflightId: manifest.preflightId,
+      resolvePreflight: (id: string) =>
+        id === manifest.preflightId ? manifest : undefined,
+      guardPolicy: CLEAN_POLICY,
+      guardBaseline: EMPTY_BASELINE,
+      contractDrift: drift,
+    };
+    const run1 = serializeVerificationReport(verifyChange(gateInput));
+    const run2 = serializeVerificationReport(verifyChange(gateInput));
     expect(run2).toBe(run1);
     expect(run1).toBe(canonicalJson(JSON.parse(run1)));
     // Rapor saat damgası taşımaz: snapshot createdAt yalnızca kimlik
@@ -450,7 +509,7 @@ describe("verifyChange — pozitif (değişmemiş manifest hedefleri)", () => {
     expect(report.checks.architecture.findings[0]?.snapshotId).toBe(
       report.targetSnapshotId,
     );
-    expect(report.findings).toHaveLength(1);
+    expect(report.architectureFindings).toHaveLength(1);
     expect(report.verdict).toBe("blocking_findings");
   });
 
@@ -648,7 +707,7 @@ describe("verifyChange — partial", () => {
 
   it("observedTestRun kanıtla → observed; kanıtsız → invalid-input (iddia sayılmaz)", () => {
     const observed: ObservedTestRun = {
-      status: "observed",
+      state: "observed",
       evidenceRef: "reports/vitest-summary.json",
       evidenceSha256: "e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3",
       observedCount: 2,
@@ -660,7 +719,7 @@ describe("verifyChange — partial", () => {
       checks: ["test-plan", "graph-diff"],
       observedTestRun: observed,
     });
-    expect(report.tests.status).toBe("observed");
+    expect(report.tests.state).toBe("observed");
     expect(report.tests.observedCount).toBe(2);
 
     // Kanıtsız koşum iddiası: şema reddeder (E3 — evidenceRef zorunlu).
@@ -768,7 +827,7 @@ describe("verifyChange — E2 verdict semantiği", () => {
     expect(report.checks.architecture.findings[0]?.suppressed).toBe(true);
     // Baskılanmamış bulgu yok (findings boş) ama suppression sinyali verdict'i
     // no_findings'e düşürmez: baseline istisnası inceleme gerektirir.
-    expect(report.findings).toHaveLength(0);
+    expect(report.architectureFindings).toHaveLength(0);
     expect(report.verdict).toBe("review_required");
     expect(report.verdictRationale[0]?.rule).toBe(VERIFY_VERDICT_RULES.suppressedFinding);
     expect(report.disclaimers).toContain(NO_FINDINGS_CORE_DISCLAIMER);
@@ -902,7 +961,7 @@ describe("verifyChange — E3 test durumu dürüstlüğü", () => {
       changedSymbols: [SVC], // explicit kapsam: TEST adayı türesin
       checks: ["test-plan", "graph-diff"],
       observedTestRun: {
-        status: "observed",
+        state: "observed",
         evidenceRef: file.ref,
         evidenceSha256: file.sha256,
         observedCount: 2,
@@ -911,21 +970,21 @@ describe("verifyChange — E3 test durumu dürüstlüğü", () => {
         testNames: [TEST],
       },
     });
-    expect(report.tests.status).toBe("observed");
+    expect(report.tests.state).toBe("observed");
     // Union daraltması: observed dalının alanları yalnızca daraltmayla erişilir.
     const tests = report.tests;
-    if (tests.status !== "observed") {
-      throw new Error(`observed beklenmişti, gelen: ${String(tests.status)}`);
+    if (tests.state !== "observed") {
+      throw new Error(`observed beklenmişti, gelen: ${String(tests.state)}`);
     }
     expect(tests.evidenceRef).toBe(file.ref);
     expect(tests.evidenceSha256).toBe(file.sha256);
     expect(tests.observedCount).toBe(2);
     // 'passed' iddiası: rapor gerçekten geçiyor (failedCount 0, passedCount ≥1).
     expect(tests.passed).toBe(true);
-    expect(report.checks.testPlan.run.status).toBe("observed");
+    expect(report.checks.testPlan.run.state).toBe("observed");
     const run = report.checks.testPlan.run;
-    if (run.status !== "observed") {
-      throw new Error(`run observed beklenmişti, gelen: ${String(run.status)}`);
+    if (run.state !== "observed") {
+      throw new Error(`run observed beklenmişti, gelen: ${String(run.state)}`);
     }
     expect(run.passed).toBe(true);
     expect(run.evidenceRef).toBe(file.ref);
@@ -941,7 +1000,7 @@ describe("verifyChange — E3 test durumu dürüstlüğü", () => {
       changedSymbols: [SVC],
       checks: ["test-plan", "graph-diff"],
       observedTestRun: {
-        status: "observed",
+        state: "observed",
         evidenceRef: file.ref,
         evidenceSha256: file.sha256,
         observedCount: 2,
@@ -960,7 +1019,7 @@ describe("verifyChange — E3 test durumu dürüstlüğü", () => {
       targetSnapshot: base,
       checks: ["test-plan", "graph-diff"],
       observedTestRun: {
-        status: "observed",
+        state: "observed",
         evidenceRef: file.ref,
         evidenceSha256: file.sha256,
         observedCount: 3,
@@ -968,10 +1027,10 @@ describe("verifyChange — E3 test durumu dürüstlüğü", () => {
         failedCount: 2,
       },
     });
-    expect(report.tests.status).toBe("observed");
+    expect(report.tests.state).toBe("observed");
     const tests = report.tests;
-    if (tests.status !== "observed") {
-      throw new Error(`observed beklenmişti, gelen: ${String(tests.status)}`);
+    if (tests.state !== "observed") {
+      throw new Error(`observed beklenmişti, gelen: ${String(tests.state)}`);
     }
     expect(tests.failedCount).toBe(2);
     // Rapor başarısız: 'passed' iddiası üretilmez (anahtar fiziksel olarak yok;
@@ -984,7 +1043,7 @@ describe("verifyChange — E3 test durumu dürüstlüğü", () => {
     expect(OBSERVED_TEST_RUN_SCHEMA.safeParse({ observedCount: 2 }).success).toBe(false);
     expect(
       OBSERVED_TEST_RUN_SCHEMA.safeParse({
-        status: "observed",
+        state: "observed",
         evidenceRef: "   ",
         observedCount: 1,
       }).success,
@@ -1009,7 +1068,7 @@ describe("verifyChange — E3 test durumu dürüstlüğü", () => {
       targetSnapshot: base,
       checks: ["test-plan", "graph-diff"],
     });
-    expect(report.tests.status).toBe("not_run");
+    expect(report.tests.state).toBe("not_run");
     // Çalışma zamanı: not_run kaydında bu anahtarlar FİZİKSEL olarak yok.
     expect("passed" in report.tests).toBe(false);
     expect("evidenceRef" in report.tests).toBe(false);
@@ -1021,8 +1080,8 @@ describe("verifyChange — E3 test durumu dürüstlüğü", () => {
     // (E3 tip sözleşmesinin derleyici düzeyinde kanıtı).
     const illegal: VerifyTestStatus =
       // @ts-expect-error E3: not_run dalında 'passed' alanı tip düzeyinde yoktur
-      { status: "not_run", recommendedCount: 1, observedCount: 0, passed: true };
-    expect(illegal.status).toBe("not_run");
+      { state: "not_run", recommendedCount: 1, observedCount: 0, passed: true };
+    expect(illegal.state).toBe("not_run");
   });
 
   it("sprint kapısı: testler koşulmayan raporda 'geçti' kelimesi hiçbir test adayında geçmez", () => {
@@ -1031,8 +1090,8 @@ describe("verifyChange — E3 test durumu dürüstlüğü", () => {
       targetSnapshot: modified,
       checks: ["test-plan", "graph-diff"],
     });
-    expect(report.tests.status).toBe("not_run");
-    expect(report.checks.testPlan.run.status).toBe("not_run");
+    expect(report.tests.state).toBe("not_run");
+    expect(report.checks.testPlan.run.state).toBe("not_run");
     // Her adayın gerekçe metni 'geçti' İCERMEZ (koşum/sonuç iddiası yok).
     const candidatesJson = canonicalJson(
       report.checks.testPlan.candidates.map((candidate) => ({
@@ -1059,7 +1118,7 @@ describe("verifyChange — E3 test durumu dürüstlüğü", () => {
       changedSymbols: [SVC, REPO],
       checks: ["test-plan", "graph-diff"],
       observedTestRun: {
-        status: "observed",
+        state: "observed",
         evidenceRef: file.ref,
         evidenceSha256: file.sha256,
         observedCount: 1,
@@ -1075,7 +1134,7 @@ describe("verifyChange — E3 test durumu dürüstlüğü", () => {
     expect(observedEntry?.status).toBe("observed");
     expect(notRunEntry?.status).toBe("not_run");
     expect(notRunEntry?.testQualifiedName).toBe(TEST2);
-    expect(report.tests.status).toBe("observed");
+    expect(report.tests.state).toBe("observed");
   });
 
   it("partial: hiçbir adaya bağlanmayan testNames üyesi sessizce düşürülmez", () => {
@@ -1085,7 +1144,7 @@ describe("verifyChange — E3 test durumu dürüstlüğü", () => {
       targetSnapshot: base,
       checks: ["test-plan", "graph-diff"],
       observedTestRun: {
-        status: "observed",
+        state: "observed",
         evidenceRef: file.ref,
         evidenceSha256: file.sha256,
         observedCount: 1,

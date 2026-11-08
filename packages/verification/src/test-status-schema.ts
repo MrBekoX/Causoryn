@@ -46,7 +46,8 @@ const nonBlank = z
  * katmanında kurulur.
  */
 export const OBSERVED_TEST_RUN_SCHEMA = z.strictObject({
-  status: z.literal("observed"),
+  /** TŞ §10.4 koşum bloğu ayırıcısıyla aynı söz dağarcığı (`state`). */
+  state: z.literal("observed"),
   evidenceRef: nonBlank,
   evidenceSha256: z
     .string()
@@ -64,12 +65,14 @@ export const OBSERVED_TEST_RUN_SCHEMA = z.strictObject({
 
 /**
  * Rapor çıktısındaki koşum durumu — Zod refine ile dürüstlük invariantları:
+ * ayırıcı alan TŞ §10.4 örneğiyle birebir `state`'tir (PDF s.11: "tests":
+ * {"state":"not_run",...}; sprint-6 takım denetimi hizalaması);
  * evidenceRef observed'da zorunlu; not_run kanıtsızdır; passed iddiası
  * yalnızca observed + gerçekten geçen rapor sayılarıyla mümkündür.
  */
 export const TEST_RUN_STATUS_SCHEMA = z
   .strictObject({
-    status: z.enum(["not_run", "observed"]),
+    state: z.enum(["not_run", "observed"]),
     recommendedCount: z.number().int().min(0),
     observedCount: z.number().int().min(0),
     evidenceRef: nonBlank.optional(),
@@ -80,7 +83,7 @@ export const TEST_RUN_STATUS_SCHEMA = z
     failedCount: z.number().int().min(0).optional(),
   })
   .superRefine((value, ctx) => {
-    if (value.status === "observed") {
+    if (value.state === "observed") {
       if (value.evidenceRef === undefined || value.evidenceRef.trim().length === 0) {
         ctx.addIssue({
           code: "custom",
@@ -145,7 +148,7 @@ export const TEST_RUN_STATUS_SCHEMA = z
     }
     // passed iddiası: yalnızca observed + kanıtlı + rapor gerçekten geçiyor.
     if (value.passed !== undefined) {
-      if (value.status !== "observed") {
+      if (value.state !== "observed") {
         ctx.addIssue({
           code: "custom",
           path: ["passed"],

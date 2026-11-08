@@ -20,10 +20,13 @@ import type { SnapshotGraph } from "@causoryn/domain";
  * causoryn_verify_change rapor sözleşmesi — sprint-6 E1 (TŞ v2.1 §10.4).
  *
  * TŞ §10.4 yanıt gövdesinin bire bir karşılığı: baseSnapshotId,
- * targetSnapshotId, verdict, architectureFindings (bu sözleşmede
- * `findings`), contractDrift, tests {state/recommendedCount/observedCount},
- * unknowns, evidenceIds — artı E1'in "her check kendi sonucunu + kanıtlarını
- * taşır" sözleşmesi için `checks` bölümü.
+ * targetSnapshotId, verdict, architectureFindings, contractDrift, tests
+ * {state/recommendedCount/observedCount}, unknowns, evidenceIds — artı
+ * E1'in "her check kendi sonucunu + kanıtlarını taşır" sözleşmesi için
+ * `checks` bölümü. Alan sadakati (sprint-6 takım denetimi hizalaması):
+ * TŞ örneğindeki üst düzey `architectureFindings` ve koşum bloğunun
+ * `state` ayırıcısı IDENTİK taşınır (önceki `findings`/`tests.status`
+ * sapmaları kaldırıldı — identifiedTargets/impactCandidates örüntüsü).
  *
  * Dürüstlük sabitleri (TŞ §10.4 metni): "verdict değerleri no_findings |
  * review_required | blocking_findings | inconclusive olabilir. no_findings
@@ -102,9 +105,14 @@ export interface VerifyVerdictRule {
  * garantisi değildir" hükmünün rapor yüzeyindeki birebir karşılığı. HER
  * raporun `disclaimers` alanında bulunur (yalnızca no_findings'te değil:
  * dürüstlük notu verdict'ten bağımsızdır).
+ *
+ * Kelime seçimi bilinçlidir (sprint-6 kapısı, wiki/sprint-6.md): "testler
+ * koşulmadıysa rapor asla 'geçti' DEMEZ" — bu sabit ve tüm rapor dizgileri
+ * 'geçti' kökünü TAŞIMAZ (koşum iddiası yalnızca kanıtlı observed kaydıyla
+ * mümkündür; kapı testi ham substring aramasıdır).
  */
 export const NO_FINDINGS_CORE_DISCLAIMER =
-  "no_findings yalnızca kurallı kontrollerin temiz geçtiğini gösterir; kod doğruluğu veya güvenlik garantisi değildir; testler koşulmadıysa davranış değişimi doğrulanmamıştır";
+  "no_findings yalnızca kurallı kontrollerin sorunsuz sonuçlandığını gösterir; kod doğruluğu veya güvenlik garantisi değildir; testler koşulmadıysa davranış değişimi doğrulanmamıştır";
 
 /**
  * Tekil denetim durumu:
@@ -252,15 +260,23 @@ export interface VerificationReport {
    * garantisi değildir); not_run durumunda koşum dürüstlüğü kaydı eklenir.
    */
   readonly disclaimers: readonly string[];
-  /** Baskılanmamış architecture bulguları (TŞ architectureFindings). */
-  readonly findings: readonly GuardFinding[];
+  /**
+   * Baskılanmamış architecture bulguları — TŞ §10.4 örnek yanıtındaki üst
+   * düzey alan adıyla BİRE BİR ("architectureFindings", PDF s.11; sprint-6
+   * takım denetimi hizalaması: eski `findings` sapması kaldırıldı ve
+   * identifiedTargets/impactCandidates örüntüsündeki alan-sadakat
+   * pratiğine bağlandı). checks.architecture.findings bölümündeki
+   * baskılanmış kayıtlar dahil olmak üzere TÜM bulgular ayrıca
+   * checks.architecture altında yönetişim görünürlüğüyle taşınır.
+   */
+  readonly architectureFindings: readonly GuardFinding[];
   /** TŞ contractDrift: sınıflı drift kayıtları. */
   readonly contractDrift: readonly VerifyContractDriftEntry[];
   /**
-   * E3: TŞ §10.4 tests bloğu — koşum durumu dürüstlüğü (status:
-   * not_run|observed; observed'da evidenceRef zorunlu; passed iddiası
-   * yalnızca kanıtlı ve gerçekten geçen raporda; not_run dalında
-   * passed/evidenceRef tip düzeyinde yoktur).
+   * E3: TŞ §10.4 tests bloğu — koşum durumu dürüstlüğü (ayırıcı alan TŞ
+   * örneğiyle birebir `state`: not_run|observed; observed'da evidenceRef
+   * zorunlu; passed iddiası yalnızca kanıtlı ve gerçekten geçen raporda;
+   * not_run dalında passed/evidenceRef tip düzeyinde yoktur).
    */
   readonly tests: VerifyTestStatus;
   readonly unknowns: readonly string[];
@@ -296,7 +312,10 @@ export type VerifyFileAuthorizer = (
  * E3: tek test adayının koşum durumu. VARSAYILAN not_run'dır; observed
  * yalnızca kanıtlı koşum kaydının explicit testNames bağlamasıyla mümkündür
  * (bağlama testNodeId veya tam testQualifiedName ile birebir yapılır;
- * isim benzerliği/fuzzy eşleşme YOKTUR — uydurma kapsama yok).
+ * isim benzerliği/fuzzy eşleşme YOKTUR — uydurma kapsama yok). Alan adı
+ * bilinçli olarak `status`'tur: bu kayıt E3'ün kendi aday-başına yapısıdır
+ * ve TŞ §10.4 örneğinde sayılmaz; TŞ'nin bire bir taşıdığı alan yalnızca
+ * üst düzey tests bloğudur (orada ayırıcı `state`'dir).
  */
 export interface VerifyTestCandidateStatus {
   readonly candidateId: string;
@@ -306,25 +325,28 @@ export interface VerifyTestCandidateStatus {
 }
 
 /**
- * E3: koşum durumu — discriminated union. Dürüstlük sözleşmesi tip düzeyinde
- * sabittir: not_run dalında `passed` ve `evidenceRef` alanları YOKTUR
- * (üretimi derleyici hatasıdır); 'passed' iddiası yalnızca observed dalında
- * ve yalnızca `true` literal olarak mümkündür (başarısız rapor asla
- * passed:false ile temsil edilmez — sayılar passedCount/failedCount
- * taşır; iddia yalnızca kanıtlı ve gerçekten geçen raporda yapılır).
- * Şema düzeyinde karşılığı TEST_RUN_STATUS_SCHEMA.superRefine'dır
- * (test-status-schema.ts).
+ * E3: koşum durumu — discriminated union. AYIRICI ALAN ADI TŞ §10.4 alan
+ * sadakatiyle birebirdir: örnek yanıt gövdesi (PDF s.11) koşum bloğunu
+ * {"state": "not_run", ...} olarak taşır — sprint-6 takım denetimi
+ * bulgusunun hizalaması (tests.status sapması kaldırıldı). Dürüstlük
+ * sözleşmesi tip düzeyinde sabittir: not_run dalında `passed` ve
+ * `evidenceRef` alanları YOKTUR (üretimi derleyici hatasıdır); 'passed'
+ * iddiası yalnızca observed dalında ve yalnızca `true` literal olarak
+ * mümkündür (başarısız rapor asla passed:false ile temsil edilmez —
+ * sayılar passedCount/failedCount taşır; iddia yalnızca kanıtlı ve
+ * gerçekten geçen raporda yapılır). Şema düzeyinde karşılığı
+ * TEST_RUN_STATUS_SCHEMA.superRefine'dır (test-status-schema.ts).
  */
 export type VerifyTestStatus =
   | {
       /** Testler koşulmadı (varsayılan). */
-      readonly status: "not_run";
+      readonly state: "not_run";
       readonly recommendedCount: number;
       readonly observedCount: 0;
     }
   | {
       /** Host koşumu kanıtlı kayıtla doğrulandı (motor koşmaz — TŞ §10.4). */
-      readonly status: "observed";
+      readonly state: "observed";
       readonly recommendedCount: number;
       readonly observedCount: number;
       /**
@@ -350,11 +372,13 @@ export type VerifyTestStatus =
  * durumu YALNIZCA dosya/provenance kanıtıyla kabul edilir — evidenceRef
  * ZORUNLUDUR (OBSERVED_TEST_RUN_SCHEMA ile şema düzeyinde zorlanır);
  * kanıtsız koşum iddiası invalid-input ile reddedilir. Motor bu kaydı
- * DOĞRULAR, koşumu ASLA ÜRETMEZ (otomatik test koşucusu yasak).
+ * DOĞRULAR, koşumu ASLA ÜRETMEZ (otomatik test koşucusu yasak). Ayırıcı
+ * alan adı koşum çıktısıyla aynı söz dağarcığını taşır (`state` — TŞ §10.4
+ * koşum bloğu alan sadakati).
  */
 export interface ObservedTestRun {
   /** Sabit: bu bir koşum kaydıdır (not_run kaydı girdi olarak yoktur). */
-  readonly status: "observed";
+  readonly state: "observed";
   /** ZORUNLU: kök-göreceli rapor dosyası yolu veya doğrulanabilir rapor referansı. */
   readonly evidenceRef: string;
   /** Rapor dosyasının sha256 karması (dosya kanıtı: yol + hash). */
