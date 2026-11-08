@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "engine": {
+      "command": "node",
+      "args": [
+        "${PLUGIN_ROOT}/../../../packages/mcp-server/dist/mcp-server.mjs"
+      ],
+      "env": {
+        "CAUSORYN_CONFIG": "{\"allowRoots\":[]}"
+      }
+    }
+  }
+}

@@ -1,0 +1,12 @@
+{
+  "$schema": "https://antigravity.google/schemas/v1/plugin.json",
+  "name": "causoryn",
+  "displayName": "Causoryn",
+  "version": "0.1.0",
+  "description": "Local, evidence-backed codebase and change intelligence via MCP.",
+  "suggestedPrompts": [
+    "Map this workspace and show evidence for critical dependencies",
+    "Run a change preflight for the selected endpoint",
+    "Verify my working-tree changes against architecture contracts"
+  ]
+}

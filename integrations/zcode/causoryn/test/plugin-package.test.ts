@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -46,6 +46,9 @@ const PUBLISHED_TOOL_TOKEN_PATTERN = /`causoryn_[a-z_]+`/g;
 /** Kimlik bilgisi kalıpları — plugin manifest'inde YASAK (görev sözleşmesi). */
 const CREDENTIAL_PATTERN =
   /(api[_-]?key|secret|token|password|credential|bearer|private[_-]?key)/i;
+
+/** Resmî plugin adı deseni — zcode-guide:diagnosing-plugins §2 manifest şeması. */
+const OFFICIAL_NAME_PATTERN = /^[a-z0-9][a-z0-9._-]{0,127}$/;
 
 /** Manifest arg'ının taşıdığı server dist girişi (token + monorepo yolu). */
 function serverEntryArg(): string {
@@ -224,9 +227,11 @@ function fixtureManifest(overrides?: {
   readonly skills?: string;
   readonly configDefault?: string;
   readonly serverArg?: string;
+  readonly name?: string;
+  readonly commands?: string;
 }): Record<string, unknown> {
-  return {
-    name: "causoryn",
+  const manifest: Record<string, unknown> = {
+    name: overrides?.name ?? "causoryn",
     version: "0.1.0",
     description: "fixture manifest",
     skills: overrides?.skills ?? "skills",
@@ -245,6 +250,10 @@ function fixtureManifest(overrides?: {
       },
     },
   };
+  if (overrides?.commands !== undefined) {
+    manifest.commands = overrides.commands;
+  }
+  return manifest;
 }
 
 /* ------------------------------------------------------------------ */
@@ -271,6 +280,12 @@ function validateManifest(
   if (typeof root.name !== "string" || root.name.length === 0) {
     issues.push(issue("name", "string olmalı"));
   } else {
+    // Resmî plugin adı deseni (zcode-guide:diagnosing-plugins §2).
+    if (!OFFICIAL_NAME_PATTERN.test(root.name)) {
+      issues.push(
+        issue("name", "resmî desen ^[a-z0-9][a-z0-9._-]{0,127}$ ile eşleşmeli: " + String(root.name)),
+      );
+    }
     if (root.name !== path.basename(pluginDir)) {
       issues.push(
         issue("name", "dizin adıyla eşleşmeli (" + String(path.basename(pluginDir)) + ")"),
@@ -308,6 +323,39 @@ function validateManifest(
         issues.push(issue("skills", "dizin mevcut değil: " + String(root.skills)));
       } else if (!existsSync(path.join(skillsDir, "map-system", "SKILL.md"))) {
         issues.push(issue("skills", "skills/map-system/SKILL.md mevcut değil"));
+      }
+    }
+  }
+
+  // commands yüzeyi (opsiyonel; resmî şema commands/skills/hooks/mcpServers
+  // component path'lerini doğrular): bildirildiyse pakette mevcut dizin
+  // olmalı, mutlak yol veya kökten kaçış reddedilir.
+  if (root.commands !== undefined) {
+    if (typeof root.commands !== "string" || root.commands.length === 0) {
+      issues.push(issue("commands", "bildiriliyorsa dizin yolu (string) olmalı"));
+    } else {
+      let commandsDir: string | undefined;
+      try {
+        commandsDir = resolveWithinPluginRoot(pluginDir, root.commands);
+      } catch (error) {
+        issues.push(
+          issue(
+            "commands",
+            "plugin kökü dışına kaçıyor: " +
+              (error instanceof Error ? error.message : String(error)),
+          ),
+        );
+      }
+      if (
+        commandsDir !== undefined &&
+        (!existsSync(commandsDir) || !statSync(commandsDir).isDirectory())
+      ) {
+        issues.push(
+          issue(
+            "commands",
+            "bildirilen commands dizini pakette mevcut değil: " + String(root.commands),
+          ),
+        );
       }
     }
   }
@@ -530,6 +578,81 @@ function validateSkillDocument(text: string): readonly ValidationIssue[] {
     }
   }
   return issues;
+}
+
+/* ------------------------------------------------------------------ */
+/* Skills paket bütünlüğü validator'ı (F2)                             */
+/* ------------------------------------------------------------------ */
+
+/**
+ * skills/ paket bütünlüğü validator'ı (F2 güçlendirmesi) — paketteki HER
+ * skill dizini için genel sözleşme: SKILL.md mevcut, frontmatter name dizin
+ * adıyla eşleşir, açıklama boş değil, yalnızca yayımlanan araçlara geri
+ * tırnakla atıf yapılır (ADR-010). Dizine özgü derin sözleşme (map-system
+ * argüman/hata kodu tablosu) validateSkillDocument'te kalır; buradaki kural
+ * yeni bir skill eklendiğinde paketin sessizce bozulmasını engeller.
+ */
+function validateSkillBundle(skillsDir: string): readonly ValidationIssue[] {
+  const issues: ValidationIssue[] = [];
+  if (!existsSync(skillsDir) || !statSync(skillsDir).isDirectory()) {
+    return [issue("skills", "skills dizini mevcut değil: " + skillsDir)];
+  }
+  const skillDirs = readdirSync(skillsDir, { withFileTypes: true }).filter(
+    (entry) => entry.isDirectory() && !entry.name.startsWith("."),
+  );
+  if (skillDirs.length === 0) {
+    issues.push(issue("skills", "paket en az bir skill içermeli"));
+  }
+  for (const dir of skillDirs) {
+    const skillFile = path.join(skillsDir, dir.name, "SKILL.md");
+    if (!existsSync(skillFile)) {
+      issues.push(issue(dir.name, "SKILL.md mevcut değil"));
+      continue;
+    }
+    const text = readFileSync(skillFile, "utf8");
+    if (!text.startsWith("---")) {
+      issues.push(issue(dir.name + "/frontmatter", "YAML frontmatter ile başlamalı"));
+      continue;
+    }
+    const end = text.indexOf("---", 3);
+    if (end === -1) {
+      issues.push(issue(dir.name + "/frontmatter", "frontmatter kapanışı eksik"));
+      continue;
+    }
+    const frontmatter = text.slice(3, end);
+    const nameLine = new RegExp("^name:\\s*" + dir.name + "\\s*$", "m");
+    if (!nameLine.test(frontmatter)) {
+      issues.push(
+        issue(dir.name + "/frontmatter.name", '"' + dir.name + '" olmalı (dizin adıyla eşleşir)'),
+      );
+    }
+    if (!/^description:\s*\S/m.test(frontmatter)) {
+      issues.push(issue(dir.name + "/frontmatter.description", "boş olmayan açıklama olmalı"));
+    }
+    const referenced = [...text.matchAll(PUBLISHED_TOOL_TOKEN_PATTERN)].map((m) => m[0]);
+    if (referenced.length === 0) {
+      issues.push(issue(dir.name + "/body", "en az bir yayımlanmış Causoryn aracı anılmalı"));
+    }
+    for (const token of referenced) {
+      const name = token.slice(1, -1);
+      if (!PUBLISHED_TOOLS.includes(name)) {
+        issues.push(issue(dir.name + "/body", "yayımlanmamış araç anılıyor (ADR-010): " + name));
+      }
+    }
+  }
+  return issues;
+}
+
+/**
+ * README'de geri tırnakla anılan causoryn_* araç token'ları — sıralı benzersiz
+ * küme (F2 TOOL_NAMES↔README çapraz kontrolü için).
+ */
+function extractReadmeToolTokens(text: string): string[] {
+  return [
+    ...new Set(
+      [...text.matchAll(PUBLISHED_TOOL_TOKEN_PATTERN)].map((m) => m[0].slice(1, -1)),
+    ),
+  ].sort();
 }
 
 /* ------------------------------------------------------------------ */
@@ -852,5 +975,119 @@ describe("mcp-server katalog desenkron korumaları (sprint-2 takım denetimi)", 
         code,
       );
     }
+  });
+});
+
+/* ------------------------------------------------------------------ */
+/* F2 güçlendirmeleri — manifest şeması + skills paket bütünlüğü +     */
+/* TOOL_NAMES↔README çapraz kontrol                                    */
+/*                                                                     */
+/* Kanıt: sprint-7 F2 · TŞ §17.1 (pakette derlenmiş gerçek giriş;      */
+/* skills paket içinde kalır) · zcode-guide:diagnosing-plugins         */
+/* resmî manifest şeması (name regex, component path doğrulama,        */
+/* commands/skills/hook'lar opsiyonel yüzeyler) · wiki/mcp-tools.md    */
+/* ------------------------------------------------------------------ */
+
+describe("F2: skills paket bütünlüğü (generic)", () => {
+  it("POZİTİF: skills/ altındaki her skill dizini geçerli SKILL.md taşır", () => {
+    const issues = validateSkillBundle(path.join(PLUGIN_DIR, "skills"));
+    expect(issues, JSON.stringify(issues)).toEqual([]);
+  });
+
+  it("NEGATİF: SKILL.md eksik skill dizini sentetik ağaçta reddedilir", () => {
+    const tmpSkills = mkdtempSync(path.join(os.tmpdir(), "causoryn-skills-"));
+    try {
+      mkdirSync(path.join(tmpSkills, "broken-skill"), { recursive: true });
+      const issues = validateSkillBundle(tmpSkills);
+      expect(issues.map((i) => i.path)).toContain("broken-skill");
+    } finally {
+      rmSync(tmpSkills, { recursive: true, force: true });
+    }
+  });
+
+  it("NEGATİF: frontmatter name dizin adından farklıysa reddedilir", () => {
+    const tmpSkills = mkdtempSync(path.join(os.tmpdir(), "causoryn-skills-"));
+    try {
+      mkdirSync(path.join(tmpSkills, "renamed-skill"), { recursive: true });
+      writeFileSync(
+        path.join(tmpSkills, "renamed-skill", "SKILL.md"),
+        "---" +
+          "\nname: some-other-name" +
+          "\ndescription: fixture" +
+          "\n---" +
+          "\nbody",
+      );
+      const issues = validateSkillBundle(tmpSkills);
+      expect(
+        issues.some(
+          (i) =>
+            i.path === "renamed-skill/frontmatter.name" &&
+            i.message.includes("renamed-skill"),
+        ),
+        JSON.stringify(issues),
+      ).toBe(true);
+    } finally {
+      rmSync(tmpSkills, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("F2: manifest şeması güçlendirmeleri (resmî plugin.json sözleşmesi)", () => {
+  it("NEGATİF: commands yüzeyi bildirilir ama pakette yoksa reddedilir", () => {
+    // Resmî şemada commands opsiyonel bir component path'idir; bildirildiyse
+    // pakette mevcut olmalıdır (component path doğrulaması). Bu paket
+    // commands bildirmez — pozitif durum ayrı testtedir.
+    const issues = validateManifest(fixtureManifest({ commands: "commands" }), PLUGIN_DIR);
+    expect(issues.map((i) => i.path)).toContain("commands");
+  });
+
+  it("POZİTİF: manifest commands bildirmez → commands yüzeyi sorunsuz", () => {
+    const issues = validateManifest(
+      JSON.parse(readPluginFile(MANIFEST_REL)) as unknown,
+      PLUGIN_DIR,
+    );
+    expect(issues.some((i) => i.path.startsWith("commands"))).toBe(false);
+  });
+
+  it("GUARD/NEGATİF: name resmî regex desenine uymuyorsa reddedilir", () => {
+    // Resmî şema: name ^[a-z0-9][a-z0-9._-]{0,127}$ — büyük harf ve geçersiz
+    // karakter reddedilir.
+    const issues = validateManifest(fixtureManifest({ name: "Causoryn!" }), PLUGIN_DIR);
+    expect(issues.map((i) => i.path)).toContain("name");
+  });
+
+  it("GUARD/NEGATİF: skills mutlak yola işaret ederse reddedilir", () => {
+    // Resmî component path kuralı: mutlak yol reddedilir (plugin kökünden
+    // çıkar). resolveWithinPluginRoot bunu kaçış olarak raporlar.
+    const absolute = ["C:", "elsewhere", "skills"].join(SEPARATOR);
+    const issues = validateManifest(fixtureManifest({ skills: absolute }), PLUGIN_DIR);
+    expect(issues.map((i) => i.path)).toContain("skills");
+  });
+});
+
+describe("F2: TOOL_NAMES↔README çapraz kontrol", () => {
+  const catalog = [...TOOL_NAMES_FROM_SOURCE].sort();
+
+  it("BAĞLANTI: README geri tırnak araç kümesi TOOL_NAMES kataloğuyla birebir eşit", () => {
+    expect(TOOL_NAMES_FROM_SOURCE.length, "TOOL_NAMES çıkarılamadı").toBeGreaterThan(0);
+    const readme = readPluginFile("README.md");
+    const tokens = extractReadmeToolTokens(readme);
+    expect(tokens, "README backtick kümesi katalogla eşit değil").toEqual(catalog);
+  });
+
+  it("NEGATİF (mekanizma): README'den bir araç çıkarılırsa çapraz kontrol kırılır", () => {
+    // Koruma sinyali kanıtı: gerçek README'den ilk katalog aracının
+    // backtick'li anılımı silinir; küme eşitliği bu durumda KIRILMALIDIR.
+    const victim = catalog[0] as string;
+    const readme = readPluginFile("README.md");
+    const tampered = readme.split("`" + victim + "`").join("`causoryn_removed_tool`");
+    expect(extractReadmeToolTokens(tampered)).not.toEqual(catalog);
+  });
+
+  it("NEGATİF (mekanizma): README'ye yayımlanmamış araç eklenirse küme eşitliği kırılır", () => {
+    // ADR-010 mekanizma testi: hiçbir zaman yayımlanmayacak sentetik ad.
+    const readme = readPluginFile("README.md");
+    const tampered = readme + "\nUse `causoryn_tool_that_does_not_exist` please.\n";
+    expect(extractReadmeToolTokens(tampered)).not.toEqual(catalog);
   });
 });

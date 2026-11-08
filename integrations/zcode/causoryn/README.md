@@ -85,9 +85,14 @@ the server can place in `envelope.error.code`.
 1. Build the monorepo once: `npm install` (repo root) and `npm run build:bundle`
    (in `packages/mcp-server`) in the Causoryn checkout that contains this plugin under
    `integrations/zcode/causoryn`.
-2. In ZCode, open **Plugin Marketplace → Add → Add Plugin Marketplace** and add the
-   directory that contains this plugin (for local testing, a marketplace root with
-   `.claude-plugin/marketplace.json` listing `causoryn`).
+2. In ZCode, open **Settings → Plugin Management → Discover** and add the marketplace
+   root via the **+** button as a local directory: this repo's `integrations/zcode`
+   directory. Its `.claude-plugin/marketplace.json` (dev marketplace `causoryn-dev`)
+   lists `causoryn` with a relative directory source (`./causoryn`). ZCode exposes no
+   plugin CLI — verified in sprint-7 F2 (`zcode --help` / `zcode plugin --help` are
+   not available; the desktop app manages plugins in this GUI, per the official
+   `zcode-guide` diagnosing-plugins documentation) — so installation is a GUI step,
+   not a command.
 3. Install **causoryn** from the market list and keep it enabled.
 4. Configure the workspace root declaration (next section), then reload the plugin so
    the MCP server picks up the new config.
