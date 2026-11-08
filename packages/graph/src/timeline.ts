@@ -2,6 +2,11 @@ import path from "node:path";
 
 import {
   canonicalJson,
+  DomainError,
+  EDGE_KIND_SET,
+  RESOLUTION_SET,
+  sha256Hex,
+  utf8Encode,
   type GraphEdge,
   type GraphNode,
   type JsonValue,
@@ -13,7 +18,11 @@ import type {
   CompareNode,
   CompareNodeIdentity,
 } from "./compare.js";
-import { API_SURFACE_NODE_KINDS, diffContentSets } from "./compare.js";
+import {
+  API_SURFACE_NODE_KINDS,
+  compareIdentityKey,
+  diffContentSets,
+} from "./compare.js";
 import { GraphRepositoryError } from "./errors.js";
 import {
   assertValidGitRef,
@@ -21,6 +30,14 @@ import {
   runGit,
   type RunGitOptions,
 } from "./git-read.js";
+import {
+  GuardError,
+  parseArchitectureBaseline,
+  parseArchitecturePolicy,
+  type ArchitectureBaseline,
+  type ArchitecturePolicy,
+} from "./guard-policy-schema.js";
+import { findViolations } from "./guard.js";
 
 /**
  * causoryn_architecture_timeline çekirdeği (sprint-3 C7, TŞ v2.1 §13/§10).
@@ -68,12 +85,14 @@ import {
  *   ebeveyn) bulunur ve eskiden yeniye sıralanır. Uçlar dahildir.
  *   `from` zincirde bulunamazsa veya yürüyüş maxRangeWalk sınırını aşarsa
  *   açık `timeline/invalid-range` reddi verilir (sessiz kırpma yok).
- * - Kapsam notu: TŞ §13'teki tam trend göstergeleri (layer violations,
- *   cycles, public contract breaking candidates, module coupling, test
- *   impact adayları) revizyon başına guard/snapshot analizi gerektirir; bu
- *   çekirdek, görev kapsamı gereği compare çıktısından türeyen node/edge/API
- *   değişim sayılarını üretir (ihlal trendi sprint-6 E5 dilimi). Yine aynı
- *   bölüm gereği hiçbir ölçü tek "kalite skoruna" indirgenmez.
+ * - İhlal trendi (sprint-6 E5): TŞ §13 trend göstergelerinden cycles ve
+ *   layer violations (forbidden-dependency) dilimi bu çekirdekte
+ *   GERÇEKLEŞTİRİLDİ — seçilen her noktanın içerik kümesi C2 guard
+ *   kurallarıyla (`findViolations`) değerlendirilir; ihlal sayıları nokta
+ *   başına ölçülür ve metrik başına AYRI dizilerde (`series`) döner.
+ *   Yine aynı bölüm gereği hiçbir ölçü tek "kalite skoruna" indirgenmez;
+ *   kalan gösterge adayları (public contract breaking candidates, module
+ *   coupling, test impact adayları) bu dilimin kapsamı dışındadır.
  * - `granularity` (TŞ §10 girdisi) bu çekirdekte işlenmez; MCP zarfı dilimi
  *   nokta seçimine (commit/tag/milestone) bağlayacaktır.
  *
@@ -626,6 +645,512 @@ export function buildArchitectureTimeline(
 }
 
 // ---------------------------------------------------------------------------
+// İhlal trendi — sprint-6 E5 (TŞ §13 ihlal trend göstergeleri: cycles +
+// layer violations; kalite skoru tek sayıya indirgenmez)
+// ---------------------------------------------------------------------------
+
+/** Trend değerlendirmesinde policy blob'unun git yolu ('/' ayıracı). */
+export const TIMELINE_POLICY_BLOB_PATH = ".causoryn/architecture.rules.yaml";
+
+/** Trend değerlendirmesinde baseline (suppression) blob'unun git yolu. */
+export const TIMELINE_BASELINE_BLOB_PATH = ".causoryn/architecture.baseline.yaml";
+
+/** Trend metrikleri — C2 guard kural türleri (TŞ §12) ile bire bir. */
+export type TimelineTrendMetric = "no-cycles" | "forbidden-dependency";
+
+/** Spawn katmanının bir ref'ten okuduğu policy sonucu. */
+export type TimelineTrendPolicyResult =
+  | { readonly status: "ok"; readonly policy: ArchitecturePolicy }
+  | { readonly status: "missing" }
+  | { readonly status: "invalid"; readonly reason: string };
+
+/** Spawn katmanının bir ref'ten okuduğu baseline sonucu (yoksa boş baseline). */
+export type TimelineTrendBaselineResult =
+  | { readonly status: "ok"; readonly baseline: ArchitectureBaseline }
+  | { readonly status: "missing" }
+  | { readonly status: "invalid"; readonly reason: string };
+
+/** Tek trend noktası girdisi: içerik + o ref'in policy/baseline okuma sonucu. */
+export interface TimelineTrendPointInput {
+  readonly ref: string;
+  readonly content: TimelinePointContent;
+  readonly policy: TimelineTrendPolicyResult;
+  readonly baseline: TimelineTrendBaselineResult;
+}
+
+export interface BuildTimelineViolationTrendInput {
+  readonly points: readonly TimelineTrendPointInput[];
+}
+
+/** Tek noktanın trend değerlendirmesi: ölçüldü ya da ölçülemedi (+neden). */
+export type TimelineTrendPointEvaluation =
+  | {
+      readonly index: number;
+      readonly ref: string;
+      readonly status: "evaluated";
+      /** Değerlendirmede kullanılan policy kural sayısı. */
+      readonly evaluatedRules: number;
+      readonly noCyclesViolations: number;
+      readonly noCyclesSuppressed: number;
+      readonly forbiddenDependencyViolations: number;
+      readonly forbiddenDependencySuppressed: number;
+    }
+  | {
+      readonly index: number;
+      readonly ref: string;
+      readonly status: "unavailable";
+      readonly reason: string;
+    };
+
+/** Seri değeri: ölçülmüş sayı ya da null + neden (uydurma sayı yok). */
+export type TimelineTrendSeriesValue =
+  | {
+      readonly index: number;
+      readonly ref: string;
+      readonly count: number;
+    }
+  | {
+      readonly index: number;
+      readonly ref: string;
+      readonly count: null;
+      readonly reason: string;
+    };
+
+/** İki kullanılabilir (evaluated) nokta arasındaki gerçek ölçüm adımı. */
+export interface TimelineTrendStep {
+  readonly fromIndex: number;
+  readonly toIndex: number;
+  readonly fromRef: string;
+  readonly toRef: string;
+  readonly fromCount: number;
+  readonly toCount: number;
+  readonly direction: "increasing" | "decreasing" | "flat";
+}
+
+export interface TimelineTrendSeries {
+  readonly metric: TimelineTrendMetric;
+  /** Seçilmiş noktalarla hizalı değerler; eksik nokta null + neden taşır. */
+  readonly values: readonly TimelineTrendSeriesValue[];
+  /**
+   * Yalnızca İKİ ucu da evaluated olan nokta çiftlerinden gerçek ölçüm
+   * adımları; eksik nokta üzerinden yön UYDURULMAZ. fromIndex/toIndex
+   * seçilmiş konumları taşır — aradaki indekslerin atlandığı buradan
+   * okunabilir.
+   */
+  readonly steps: readonly TimelineTrendStep[];
+  /**
+   * Uç karşılaştırması: İLK ve SON kullanılabilir değerin yönü. Ara
+   * dalgalanmalar steps'tedir; kullanılabilir değer < 2 ise
+   * "undetermined" (uydurma yön yok).
+   */
+  readonly direction: "increasing" | "decreasing" | "flat" | "undetermined";
+}
+
+/**
+ * İhlal trendi çıktısı. Bilinçli olarak BİLEŞİK SKOR ALANI YOKTUR
+ * (TŞ §13: ölçüler kalite skoru olarak tek sayıya indirgenmez) — metrik
+ * başına ayrı dizi; nokta başına aktif + baskılanmış sayılar ayrı alanlar.
+ */
+export interface TimelineViolationTrend {
+  readonly evaluatedPoints: number;
+  readonly unavailablePoints: number;
+  readonly points: readonly TimelineTrendPointEvaluation[];
+  /** Metrik başına ayrı dizi; sıra sabittir: [no-cycles, forbidden-dependency]. */
+  readonly series: readonly TimelineTrendSeries[];
+}
+
+/** Trend dahil timeline çıktısı (spawn katmanı sözleşmesi). */
+export interface ArchitectureTimelineWithTrend extends ArchitectureTimeline {
+  readonly trend: TimelineViolationTrend;
+}
+
+/** Baseline blob'u olmayan ref'ler boş baseline ile değerlendirilir. */
+const EMPTY_TREND_BASELINE: ArchitectureBaseline = {
+  version: 1,
+  suppressions: [],
+};
+
+const TREND_METRICS: readonly TimelineTrendMetric[] = [
+  "no-cycles",
+  "forbidden-dependency",
+];
+
+/**
+ * İçerik kümesinin sentetik snapshot içerik karması: guard bulgu üretiminde
+ * snapshot.meta.id olarak kullanılır. Aynı içerik her zaman aynı kimliği
+ * üretir (kripto hash yalnızca kimlik türetimi içindir — bir ölçüm/skor
+ * değildir ve çıktıya taşınmaz).
+ */
+function contentSetHash(contentSet: CompareContentSet): string {
+  try {
+    return sha256Hex(utf8Encode(canonicalJson(contentSet as unknown as JsonValue)));
+  } catch (error) {
+    if (error instanceof DomainError) {
+      throw new GraphRepositoryError(
+        "compare/non-json-attribute",
+        `İçerik kümesi JSON'e serileştirilemiyor: ${error.message}`,
+      );
+    }
+    throw error;
+  }
+}
+
+/**
+ * CompareContentSet → sentetik SnapshotGraph (C2 `findViolations` girdisi).
+ * TEK yeniden kullanım ilkesi: node kimliği ve katalog doğrulaması
+ * compare'in kimlik işlevinden (`compareIdentityKey`) gelir; kural
+ * değerlendirmesi guard çekirdeğinden gelir — bu modül hiçbir kuralı veya
+ * kimliği yeniden uygulamaz. Kodlanmamış TypeError yerine coded
+ * GraphRepositoryError üretilir (TŞ §19: içerik güvenilmez girdidir).
+ */
+function convertContentSetToSnapshotGraph(
+  contentSet: CompareContentSet,
+): SnapshotGraph {
+  const shapeError = describeManifestShapeError(contentSet);
+  if (shapeError !== null) {
+    throw new GraphRepositoryError(
+      "timeline/trend-invalid-content",
+      `Trend içerik sözleşmesi bozuk: ${shapeError}`,
+    );
+  }
+  const nodeByKey = new Map<string, CompareNode>();
+  for (const node of contentSet.nodes) {
+    // compareIdentityKey aynı zamanda katalog türü + boş olmayan
+    // qualifiedName denetimini yapar (compare/unknown-node-kind,
+    // compare/empty-qualified-name).
+    const key = compareIdentityKey(node);
+    if (nodeByKey.has(key)) {
+      throw new GraphRepositoryError(
+        "compare/duplicate-node",
+        `Aynı içerik kümesinde tekrarlanan node kimliği: ${key}`,
+      );
+    }
+    nodeByKey.set(key, node);
+  }
+  const graphNodes: GraphNode[] = [...nodeByKey.entries()].map(([key, node]) => {
+    const relativePath = node.relativePath;
+    return {
+      id: key,
+      kind: node.kind,
+      qualifiedName: node.qualifiedName,
+      ...(node.language === undefined ? {} : { language: node.language }),
+      // Sentetik span: guard yalnızca location.relativePath'i okur (glob
+      // yol eşleşmesi); satır/hash alanları dolum (filler) değeridir ve
+      // hiçbir bulguya girmez.
+      ...(relativePath === undefined
+        ? {}
+        : {
+            location: {
+              relativePath,
+              startLine: 1,
+              endLine: 1,
+              sourceHash: "timeline-trend-synthetic",
+            },
+          }),
+      attributes: node.attributes ?? {},
+    };
+  });
+  const edgeKeys = new Set<string>();
+  const graphEdges: GraphEdge[] = [];
+  for (const edge of contentSet.edges) {
+    if (!EDGE_KIND_SET.has(edge.kind)) {
+      throw new GraphRepositoryError(
+        "compare/unknown-edge-kind",
+        `Bilinmeyen edge türü: ${String(edge.kind)}`,
+      );
+    }
+    if (!RESOLUTION_SET.has(edge.resolution)) {
+      throw new GraphRepositoryError(
+        "compare/unknown-resolution",
+        `Bilinmeyen resolution değeri: ${String(edge.resolution)}`,
+      );
+    }
+    const fromKey = compareIdentityKey(edge.from);
+    const toKey = compareIdentityKey(edge.to);
+    if (!nodeByKey.has(fromKey) || !nodeByKey.has(toKey)) {
+      throw new GraphRepositoryError(
+        "compare/dangling-edge",
+        `Kenar ucu kümedeki node ile eşleşmiyor (${edge.kind}): ${
+          nodeByKey.has(fromKey) ? toKey : fromKey
+        }`,
+      );
+    }
+    // Kenar kimliği compare sözleşmesiyle aynı: (kind, from, to); resolution
+    // kimliğe girmez (compare/duplicate-edge tanımı).
+    const edgeKey = canonicalJson([edge.kind, fromKey, toKey]);
+    if (edgeKeys.has(edgeKey)) {
+      throw new GraphRepositoryError(
+        "compare/duplicate-edge",
+        `Aynı içerik kümesinde tekrarlanan kenar kimliği: ${edgeKey}`,
+      );
+    }
+    edgeKeys.add(edgeKey);
+    graphEdges.push({
+      id: edgeKey,
+      from: fromKey,
+      to: toKey,
+      kind: edge.kind,
+      resolution: edge.resolution,
+      // İçerik kümesi sözleşmesi kanıt taşımaz; guard kanıt saymaz.
+      evidenceIds: [],
+    });
+  }
+  return {
+    meta: {
+      id: `timeline-trend:${contentSetHash(contentSet)}`,
+      workspaceId: "timeline-trend",
+      revision: { id: "timeline-trend", sequence: 0 },
+      configHash: "timeline-trend",
+      analyzerFingerprint: "timeline-trend",
+      state: "ready",
+      createdAt: "1970-01-01T00:00:00.000Z",
+    },
+    nodes: [...graphNodes].sort(byGraphId),
+    edges: [...graphEdges].sort(byGraphId),
+    evidence: [],
+  };
+}
+
+/** Tek trend noktasını değerlendirir; içerik/policy sözleşme ihlali coded
+ * 'unavailable' nedenine dönüşür (uydurma sayı yok), diğer hatalar ürün
+ * hatası olarak yükselir. */
+function evaluateTrendPoint(
+  index: number,
+  point: TimelineTrendPointInput,
+): TimelineTrendPointEvaluation {
+  assertValidGitRef(point.ref);
+  const base = { index, ref: point.ref };
+  if (point.content.status !== "analyzed") {
+    return { ...base, status: "unavailable", reason: point.content.reason };
+  }
+  if (point.policy.status === "missing") {
+    return {
+      ...base,
+      status: "unavailable",
+      reason: `policy-not-found: ${TIMELINE_POLICY_BLOB_PATH}`,
+    };
+  }
+  if (point.policy.status === "invalid") {
+    return {
+      ...base,
+      status: "unavailable",
+      reason: `policy-invalid: ${point.policy.reason}`,
+    };
+  }
+  if (point.baseline.status === "invalid") {
+    return {
+      ...base,
+      status: "unavailable",
+      reason: `baseline-invalid: ${point.baseline.reason}`,
+    };
+  }
+  try {
+    const snapshot = convertContentSetToSnapshotGraph(point.content.contentSet);
+    // TEK kural değerlendirme noktası: C2 guard çekirdeği.
+    const findings = findViolations(
+      snapshot,
+      point.policy.policy,
+      point.baseline.status === "ok" ? point.baseline.baseline : EMPTY_TREND_BASELINE,
+    );
+    let noCycles = 0;
+    let noCyclesSuppressed = 0;
+    let forbidden = 0;
+    let forbiddenSuppressed = 0;
+    for (const finding of findings) {
+      if (finding.ruleType === "no-cycles") {
+        if (finding.suppressed) noCyclesSuppressed += 1;
+        else noCycles += 1;
+      } else {
+        if (finding.suppressed) forbiddenSuppressed += 1;
+        else forbidden += 1;
+      }
+    }
+    return {
+      ...base,
+      status: "evaluated",
+      evaluatedRules: point.policy.policy.rules.length,
+      noCyclesViolations: noCycles,
+      noCyclesSuppressed,
+      forbiddenDependencyViolations: forbidden,
+      forbiddenDependencySuppressed: forbiddenSuppressed,
+    };
+  } catch (error) {
+    // İçerik sözleşmesini ihlal eden revizyon içeriği o noktayı ölçülemez
+    // yapar (diğer noktalar ve diff aralıkları etkilenmez); guard hataları
+    // (policy/baseline) üstte ayrı neden olarak ele alınmıştır; kalan
+    // hatalar ürün hatasıdır.
+    if (
+      error instanceof GraphRepositoryError &&
+      (error.code.startsWith("compare/") ||
+        error.code === "timeline/trend-invalid-content")
+    ) {
+      return {
+        ...base,
+        status: "unavailable",
+        reason: `${error.code}: ${error.message}`,
+      };
+    }
+    throw error;
+  }
+}
+
+/**
+ * Metrik başına ayrı seri: hizalı değerler + yalnızca gerçek ölçüm çiftleri
+ * üzerinden adımlar + uç karşılaştırması. Saf ve deterministiktir.
+ */
+function buildTrendSeries(
+  metric: TimelineTrendMetric,
+  evaluations: readonly TimelineTrendPointEvaluation[],
+): TimelineTrendSeries {
+  const values: TimelineTrendSeriesValue[] = evaluations.map((evaluation) => {
+    if (evaluation.status !== "evaluated") {
+      return {
+        index: evaluation.index,
+        ref: evaluation.ref,
+        count: null,
+        reason: evaluation.reason,
+      };
+    }
+    return {
+      index: evaluation.index,
+      ref: evaluation.ref,
+      count:
+        metric === "no-cycles"
+          ? evaluation.noCyclesViolations
+          : evaluation.forbiddenDependencyViolations,
+    };
+  });
+  const steps: TimelineTrendStep[] = [];
+  // previous yalnızca evaluated üyeye daraltılmış tip taşır (atanmadan önce
+  // status guard'ı geçilidir; union'a geri genişletme ölçüm alanlarına
+  // erişimi bozar).
+  let previous:
+    | Extract<TimelineTrendPointEvaluation, { status: "evaluated" }>
+    | undefined;
+  for (const evaluation of evaluations) {
+    if (evaluation.status !== "evaluated") {
+      // Zincir kırılmaz: sonraki evaluated nokta, sondaki evaluated noktayla
+      // eşleşir; atlama fromIndex/toIndex'te görünür ve eksik nokta
+      // values[]'te null + neden olarak ayrıca işaretlidir.
+      continue;
+    }
+    const current = evaluation;
+    const currentCount =
+      metric === "no-cycles"
+        ? current.noCyclesViolations
+        : current.forbiddenDependencyViolations;
+    if (previous !== undefined) {
+      const previousCount =
+        metric === "no-cycles"
+          ? previous.noCyclesViolations
+          : previous.forbiddenDependencyViolations;
+      steps.push({
+        fromIndex: previous.index,
+        toIndex: current.index,
+        fromRef: previous.ref,
+        toRef: current.ref,
+        fromCount: previousCount,
+        toCount: currentCount,
+        direction:
+          currentCount > previousCount
+            ? "increasing"
+            : currentCount < previousCount
+              ? "decreasing"
+              : "flat",
+      });
+    }
+    previous = current;
+  }
+  const available = values.filter(
+    (value): value is { index: number; ref: string; count: number } =>
+      value.count !== null,
+  );
+  let direction: TimelineTrendSeries["direction"] = "undetermined";
+  if (available.length >= 2) {
+    const first = available[0];
+    const last = available[available.length - 1];
+    if (first !== undefined && last !== undefined) {
+      direction =
+        last.count > first.count
+          ? "increasing"
+          : last.count < first.count
+            ? "decreasing"
+            : "flat";
+    }
+  }
+  return { metric, values, steps, direction };
+}
+
+/**
+ * Saf ihlal trendi çekirdeği (sprint-6 E5): seçilmiş milestone noktalarının
+ * içeriklerini C2 guard kurallarıyla nokta başına değerlendirir; sonuç
+ * nokta başına kayıtlar + metrik başına ayrı serilerdir. Saat/fs/spawn
+ * okumaz; aynı girdi her zaman aynı JSON'u üretir. Hiçbir bileşik "kalite
+ * skoru" üretilmez (TŞ §13 kırmızı çizgisi).
+ *
+ * Hata kodu (GraphRepositoryError.code):
+ * - timeline/trend-invalid-input: points dizisi bozuk veya ref tekrarlı.
+ * Nokta içi sözleşme ihlalleri hata DEĞİLDİR: o nokta coded 'unavailable'
+ * olur (manifest bozuk, policy yok/bozuk, katalog dışı tür vb.).
+ */
+export function buildTimelineViolationTrend(
+  input: BuildTimelineViolationTrendInput,
+): TimelineViolationTrend {
+  const points = input.points;
+  if (!Array.isArray(points)) {
+    throw new GraphRepositoryError(
+      "timeline/trend-invalid-input",
+      "points bir dizi olmalı",
+    );
+  }
+  if (points.length === 0) {
+    throw new GraphRepositoryError(
+      "timeline/trend-invalid-input",
+      "trend en az 1 nokta gerektirir (0 verildi)",
+    );
+  }
+  const seenRefs = new Set<string>();
+  for (const point of points) {
+    if (point === null || typeof point !== "object") {
+      throw new GraphRepositoryError(
+        "timeline/trend-invalid-input",
+        "her nokta bir nesne olmalı",
+      );
+    }
+    if (typeof point.ref !== "string" || point.ref.length === 0) {
+      throw new GraphRepositoryError(
+        "timeline/trend-invalid-input",
+        "nokta ref'i boş olmayan metin olmalı",
+      );
+    }
+    if (seenRefs.has(point.ref)) {
+      throw new GraphRepositoryError(
+        "timeline/trend-invalid-input",
+        `Ref iki kez verildi: ${point.ref}`,
+      );
+    }
+    seenRefs.add(point.ref);
+  }
+
+  const evaluations = points.map((point, index) =>
+    deepFreeze(evaluateTrendPoint(index, point)),
+  );
+  const trend = deepFreeze({
+    evaluatedPoints: evaluations.filter(
+      (evaluation) => evaluation.status === "evaluated",
+    ).length,
+    unavailablePoints: evaluations.filter(
+      (evaluation) => evaluation.status === "unavailable",
+    ).length,
+    points: evaluations,
+    series: TREND_METRICS.map((metric) =>
+      buildTrendSeries(metric, evaluations),
+    ),
+  });
+  return trend;
+}
+
+// ---------------------------------------------------------------------------
 // Spawn katmanı — C3 salt-okunur git yardımcıları (git-read.ts)
 // ---------------------------------------------------------------------------
 
@@ -807,6 +1332,72 @@ export async function readTimelinePointFromGit(
 }
 
 /**
+ * Bir ref'teki guard policy dosyasını salt-okunur okur. Blob yoksa
+ * `missing`; YAML/şema/glob çözümlemesi başarısızsa coded `invalid` döner
+ * (uydurma policy üretmez — nokta trend'de ölçülemez işaretlenir). Diğer
+ * git altyapı hataları ürün hatası olarak yükselir. Deterministik: aynı
+ * blob her zaman aynı sonucu üretir.
+ */
+export async function readTimelineTrendPolicyFromGit(
+  repoRoot: string,
+  ref: string,
+  options?: RunGitOptions,
+): Promise<TimelineTrendPolicyResult> {
+  let text: string;
+  try {
+    text = await readGitBlob(repoRoot, ref, TIMELINE_POLICY_BLOB_PATH, options);
+  } catch (error) {
+    if (
+      error instanceof GraphRepositoryError &&
+      error.code === "compare/blob-not-found"
+    ) {
+      return { status: "missing" };
+    }
+    throw error;
+  }
+  try {
+    return { status: "ok", policy: parseArchitecturePolicy(text) };
+  } catch (error) {
+    if (error instanceof GuardError) {
+      return { status: "invalid", reason: `${error.code}: ${error.message}` };
+    }
+    throw error;
+  }
+}
+
+/**
+ * Bir ref'teki baseline (suppression) dosyasını salt-okunur okur. Blob yoksa
+ * boş baseline ile değerlendirme geçerlidir (suppression yönetişim yüzeyi
+ * zorunlu değildir); bozuk blob coded `invalid` döner.
+ */
+export async function readTimelineTrendBaselineFromGit(
+  repoRoot: string,
+  ref: string,
+  options?: RunGitOptions,
+): Promise<TimelineTrendBaselineResult> {
+  let text: string;
+  try {
+    text = await readGitBlob(repoRoot, ref, TIMELINE_BASELINE_BLOB_PATH, options);
+  } catch (error) {
+    if (
+      error instanceof GraphRepositoryError &&
+      error.code === "compare/blob-not-found"
+    ) {
+      return { status: "missing" };
+    }
+    throw error;
+  }
+  try {
+    return { status: "ok", baseline: parseArchitectureBaseline(text) };
+  } catch (error) {
+    if (error instanceof GuardError) {
+      return { status: "invalid", reason: `${error.code}: ${error.message}` };
+    }
+    throw error;
+  }
+}
+
+/**
  * Yüzeysel şekil denetimi: katalog doğrulaması (türlerin EDGE/NODE_KIND
  * kataloğuna uyumu) BİLİNLİKLE yapılmaz — derin doğrulama tek kaynak olarak
  * compare.ts'in diffContentSets sözleşmesine devredilir; ihlal aralıkta
@@ -885,12 +1476,18 @@ function describeManifestShapeError(parsed: unknown): string | null {
  * Seçilmeyen noktaların içeriği OKUNMAZ (sampling maliyet sınırı); bunlar
  * çekirdeğe yapısal yer tutucu olarak geçer ve çıktıda yalnızca
  * `sampling.skipped` içinde ref'leriyle listelenir.
+ *
+ * Sprint-6 E5: seçilmiş her nokta için policy/baseline blob'ları da
+ * salt-okunur okunur ve içerik kümesi C2 guard kurallarıyla nokta başına
+ * değerlendirilir (`trend` bölümü — ihlal trendi; kalite skoru alanı YOK).
+ * Seçilmeyen noktalar trend'e girmez (trend hizalaması timeline noktalarıyla
+ * bire birdir).
  */
 export async function buildArchitectureTimelineFromGit(
   repoRoot: string,
   input: TimelineGitInput,
   options?: RunGitOptions,
-): Promise<ArchitectureTimeline> {
+): Promise<ArchitectureTimelineWithTrend> {
   if (!path.isAbsolute(repoRoot)) {
     throw new GraphRepositoryError(
       "compare/invalid-repo-root",
@@ -985,13 +1582,15 @@ export async function buildArchitectureTimelineFromGit(
   const selectedSet = new Set(selection);
 
   const points: TimelinePointInput[] = [];
+  const trendPoints: TimelineTrendPointInput[] = [];
   for (let index = 0; index < identifiers.length; index++) {
     const ref = identifiers[index];
     if (ref === undefined) continue; // imkânsız; savunma katmanı
     if (!selectedSet.has(index)) {
       // Örnekleme sınırı: içeriği OKUMA — yalnızca yapısal yer tutucu.
       // (Refs modunda ref'in varlığı seçimden ÖNCE zaten doğrulandı; burada
-      // yalnızca pahalı içerik okuması atlanır.)
+      // yalnızca pahalı içerik okuması atlanır. Trend de atlanan noktayı
+      // OKUMAZ: trend noktaları seçilmiş noktalarla hizalıdır.)
       points.push({
         ref,
         content: { status: "unanalyzed", reason: "skipped-by-sampling" },
@@ -1000,11 +1599,22 @@ export async function buildArchitectureTimelineFromGit(
     }
     const content = await readTimelinePointFromGit(repoRoot, ref, options);
     points.push({ ref, content });
+    // Sprint-6 E5: trend için policy/baseline blob'ları da aynı salt-okunur
+    // okuma sözleşmesiyle alınır (nokta başına 2 ek cat-file; yalnızca
+    // SEÇİLMİŞ noktalar için).
+    trendPoints.push({
+      ref,
+      content,
+      policy: await readTimelineTrendPolicyFromGit(repoRoot, ref, options),
+      baseline: await readTimelineTrendBaselineFromGit(repoRoot, ref, options),
+    });
   }
 
-  return buildArchitectureTimeline({
+  const base = buildArchitectureTimeline({
     points,
     maxRevisions,
     maxRangeWalk,
   });
+  const trend = buildTimelineViolationTrend({ points: trendPoints });
+  return deepFreeze({ ...base, trend });
 }

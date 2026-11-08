@@ -147,6 +147,19 @@ export type {
   GuardFinding,
   GuardFindingSuppression,
 } from "./guard.js";
+// Evidence zinciri çekirdeği — sprint-6 E4 (TŞ §16 "selection → get_evidence
+// → kaynak dosya/satır"). SAF helper; MCP zarfı mcp-server katmanındadır
+// (kardeş düzen: findViolations exportu + C8 aracı kaydı ilkesi).
+export { buildEvidenceChain, resolveFindingById } from "./evidence-chain.js";
+export type {
+  EvidenceChain,
+  EvidenceChainContextRef,
+  EvidenceChainLocation,
+  EvidenceChainRecord,
+  EvidenceChainTarget,
+  FindingChainRef,
+  ResolveFindingInput,
+} from "./evidence-chain.js";
 // Agent GPS çekirdeği — sprint-3 C4 (TŞ §15). Paket girişi yüzeyi C8 aracı
 // kaydı için zorunludur; generateOnboarding (index.ts:25) ve analyzeImpact
 // (index.ts:40) kardeş düzeniyle bire bir (denetim bulgusu 1).
@@ -184,23 +197,31 @@ export type {
   WriteDocumentationInput,
   WriteDocumentationResult,
 } from "./export.js";
-// Architecture Timeline çekirdeği — sprint-3 C7 (TŞ §13). Saf motor +
-// salt-okunur git spawn katmanı; MCP zarfı mcp-server katmanındadır.
-// Paket yüzeyi compare/impact/guard/agent-context kardeş düzeniyle bire bir.
+// Architecture Timeline çekirdeği — sprint-3 C7 (TŞ §13) + sprint-6 E5 ihlal
+// trendi. Saf motor + salt-okunur git spawn katmanı; MCP zarfı mcp-server
+// katmanındadır. Paket yüzeyi compare/impact/guard/agent-context kardeş
+// düzeniyle bire bir.
 export {
+  TIMELINE_BASELINE_BLOB_PATH,
   TIMELINE_CEILINGS,
   TIMELINE_DEFAULTS,
+  TIMELINE_POLICY_BLOB_PATH,
   TIMELINE_SNAPSHOT_BLOB_PATH,
   buildArchitectureTimeline,
   buildArchitectureTimelineFromGit,
+  buildTimelineViolationTrend,
   readTimelinePointFromGit,
+  readTimelineTrendBaselineFromGit,
+  readTimelineTrendPolicyFromGit,
   selectSampledIndices,
   serializeSnapshotContentSet,
 } from "./timeline.js";
 export type {
   ArchitectureTimeline,
   ArchitectureTimelinePoint,
+  ArchitectureTimelineWithTrend,
   BuildArchitectureTimelineInput,
+  BuildTimelineViolationTrendInput,
   TimelineChangeSummary,
   TimelineDiffInterval,
   TimelineGitInput,
@@ -209,5 +230,14 @@ export type {
   TimelinePointContent,
   TimelinePointInput,
   TimelineSamplingReport,
+  TimelineTrendBaselineResult,
+  TimelineTrendMetric,
+  TimelineTrendPointEvaluation,
+  TimelineTrendPointInput,
+  TimelineTrendPolicyResult,
+  TimelineTrendSeries,
+  TimelineTrendSeriesValue,
+  TimelineTrendStep,
   TimelineUnanalyzedInterval,
+  TimelineViolationTrend,
 } from "./timeline.js";

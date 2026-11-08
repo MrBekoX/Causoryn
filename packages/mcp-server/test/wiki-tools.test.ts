@@ -181,9 +181,11 @@ afterEach(() => {
 /* ------------------------------------------------------------------ */
 
 describe("Wiki araç katalogu", { timeout: 60_000 }, () => {
-  it("TOOL_NAMES 28 araçtır; 7 Wiki aracı TŞ §16A.8 sırasıyla sondadır", () => {
-    expect(TOOL_NAMES).toHaveLength(28);
-    expect(TOOL_NAMES.slice(21)).toEqual([
+  it("TOOL_NAMES 29 araçtır; 7 Wiki aracı TŞ §16A.8 sırasıyla sondadır", () => {
+    expect(TOOL_NAMES).toHaveLength(29);
+    // sprint-6 E1-E3 (Faz E) causoryn_verify_change katalog ortasına girdiği
+    // için Wiki bloğu 21→22 indeksine kayar (TŞ §16A.8 sırası korunur).
+    expect(TOOL_NAMES.slice(22)).toEqual([
       "causoryn_wiki_build",
       "causoryn_wiki_get_tree",
       "causoryn_wiki_get_page",
@@ -199,14 +201,14 @@ describe("Wiki araç katalogu", { timeout: 60_000 }, () => {
     try {
       const { tools } = await pair.client.listTools();
       const names = tools.map((tool) => tool.name);
-      for (const name of TOOL_NAMES.slice(21)) {
+      for (const name of TOOL_NAMES.slice(22)) {
         const tool = tools.find((entry) => entry.name === name);
         expect(tool, `${name} tools/list'te yok`).toBeDefined();
         expect(tool?.inputSchema).toBeDefined();
         expect(tool?.outputSchema).toBeDefined();
         expect((tool?.description ?? "").length).toBeGreaterThan(0);
       }
-      expect(names.length).toBe(28);
+      expect(names.length).toBe(29);
     } finally {
       await pair.close();
     }

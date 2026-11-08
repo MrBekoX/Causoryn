@@ -128,7 +128,7 @@ describe("MCP server — protokol düzeyi", { timeout: 30_000 }, () => {
     }
   });
 
-  it("tools/list: tam olarak 28 araç; her biri inputSchema + outputSchema taşır", async () => {
+  it("tools/list: tam olarak 29 araç; her biri inputSchema + outputSchema taşır", async () => {
     const pair = await connectClient(makeContext());
     try {
       const { tools } = await pair.client.listTools();
@@ -137,11 +137,13 @@ describe("MCP server — protokol düzeyi", { timeout: 30_000 }, () => {
       // refresh_index sprint-2 B6 ile, get_symbol_context sprint-2 B5 ile,
       // trace_execution sprint-2 B4 ile, Faz C'nin 7 aracı sprint-3 C8 ile,
       // Living Wiki'nin 7 aracı sprint-4 W5 ile, Faz D'nin 5 aracı sprint-5
-      // D2-D6 ile eklendi (TŞ §16A.8 tablo sırası: wiki_build başta,
-      // wiki_diff sonda; Faz D satırları TŞ §10.2 katalog sırasını izler —
-      // trace_business_flow trace_execution'dan sonra, preflight_change/
-      // check_contracts/detect_contract_drift/derive_test_plan
-      // export_documentation ile get_evidence arasında).
+      // D2-D6 ile, Faz E'nin causoryn_verify_change aracı sprint-6 E1-E3 ile
+      // eklendi (TŞ §16A.8 tablo sırası: wiki_build başta, wiki_diff sonda;
+      // Faz D/E satırları TŞ §10.2 katalog sırasını izler — trace_business_
+      // flow trace_execution'dan sonra, preflight_change/check_contracts/
+      // detect_contract_drift export_documentation ile get_evidence
+      // arasında, verify_change detect_contract_drift ile derive_test_plan
+      // arasında — PDF s.10 katalog satır sırası).
       expect(TOOL_NAMES).toEqual([
         "causoryn_get_capabilities",
         "causoryn_workspace_summary",
@@ -161,6 +163,7 @@ describe("MCP server — protokol düzeyi", { timeout: 30_000 }, () => {
         "causoryn_preflight_change",
         "causoryn_check_contracts",
         "causoryn_detect_contract_drift",
+        "causoryn_verify_change",
         "causoryn_derive_test_plan",
         "causoryn_get_evidence",
         "causoryn_architecture_timeline",

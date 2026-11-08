@@ -39,6 +39,7 @@ import {
   type ServiceDeps,
 } from "./services.js";
 import { graphErrorToToolError } from "./services-architecture.js";
+import type { VerificationServiceDeps } from "./services-verification.js";
 
 /**
  * Faz D uygulama servisleri (sprint-5 D2/D3/D4/D5/D6 — Differentiation
@@ -989,7 +990,7 @@ export const PreflightChangeDataSchema = PreflightManifestDataSchema.extend({
  * "Server yalnızca statik delili ifade eder", TŞ §11).
  */
 export async function preflightChange(
-  deps: ServiceDeps,
+  deps: VerificationServiceDeps,
   requestId: string,
   input: z.infer<typeof PreflightChangeInputSchema>,
 ): Promise<Envelope> {
@@ -1074,6 +1075,13 @@ export async function preflightChange(
       },
     }),
   );
+
+  // Sprint-6 Faz E: manifest süreç-içi PreflightManifestStore'a kaydedilir
+  // (preflightId çözümünün kaynağı — causoryn_verify_change). Yanıt gövdesi
+  // davranışı DEĞİŞMEZ: manifest yine yalnızca yanıt + depo; kaynak ağaca/
+  // veri köküne yazma yoktur (deps.preflightStore eski ServiceDeps
+  // gerçekleyen testlerde undefined olabilir — opsiyonel, sessiz geçilir).
+  deps.preflightStore?.put(manifest);
 
   const warnings = staleWarningOf(read);
   if (manifest.requiresDisambiguation) {

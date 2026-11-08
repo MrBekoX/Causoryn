@@ -277,12 +277,12 @@ function publishManualGraph(
 }
 
 /* ------------------------------------------------------------------ */
-/* Katalog — TOOL_NAMES 28 (TŞ §10.2 katalog sırası + §16A.8 Wiki eki)  */
+/* Katalog — TOOL_NAMES 29 (TŞ §10.2 katalog sırası + §16A.8 Wiki eki)  */
 /* ------------------------------------------------------------------ */
 
 describe("Faz D katalog büyümesi", { timeout: 60_000 }, () => {
-  it("TOOL_NAMES 28 araçtır; Faz D araçları TŞ §10.2 katalog sırasıyla girer", () => {
-    expect(TOOL_NAMES).toHaveLength(28);
+  it("TOOL_NAMES 29 araçtır; Faz D araçları TŞ §10.2 katalog sırasıyla girer", () => {
+    expect(TOOL_NAMES).toHaveLength(29);
     expect(TOOL_NAMES).toEqual([
       "causoryn_get_capabilities",
       "causoryn_workspace_summary",
@@ -302,12 +302,14 @@ describe("Faz D katalog büyümesi", { timeout: 60_000 }, () => {
       "causoryn_generate_onboarding",
       "causoryn_export_documentation",
       // sprint-5 D4/D2/D3/D6: preflight_change, check_contracts,
-      // detect_contract_drift, derive_test_plan — export_documentation ile
-      // get_evidence ARASINDA (TŞ §10.2 katalog satır sırası; verify_change
-      // Agent Change Guard bu dilimde YOKTUR).
+      // detect_contract_drift — export_documentation ile get_evidence
+      // ARASINDA (TŞ §10.2 katalog satır sırası). derive_test_plan'ın
+      // önüne sprint-6 E1-E3 (Faz E Agent Change Guard)
+      // causoryn_verify_change girer (PDF s.10 katalog satır sırası).
       "causoryn_preflight_change",
       "causoryn_check_contracts",
       "causoryn_detect_contract_drift",
+      "causoryn_verify_change",
       "causoryn_derive_test_plan",
       "causoryn_get_evidence",
       "causoryn_architecture_timeline",
@@ -325,7 +327,7 @@ describe("Faz D katalog büyümesi", { timeout: 60_000 }, () => {
     const pair = await connectClient(makeContext());
     try {
       const { tools } = await pair.client.listTools();
-      expect(tools).toHaveLength(28);
+      expect(tools).toHaveLength(29);
       for (const name of [
         "causoryn_check_contracts",
         "causoryn_detect_contract_drift",
