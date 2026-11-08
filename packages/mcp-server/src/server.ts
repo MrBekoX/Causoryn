@@ -394,7 +394,7 @@ function buildRegistrations(context: CausorynContext): readonly ToolRegistration
       name: "causoryn_architecture_timeline",
       title: "Architecture Timeline",
       description:
-        "Git refs listesi veya bounded history-range üzerinden mimari zaman çizgisi: deterministik eşit aralıklı sampling (maxRevisions; uçlar korunur, atlanan noktalar skipped listesinde açık), seçilen noktaların snapshot blob'ları salt-okunur git okumasıyla alınır ve ardışık diff özetleri raporlanır. Analiz edilemeyen noktalar/aralıklar AÇIK raporlanır; hiçbir sayı uydurulmaz.",
+        "Git refs listesi veya bounded history-range üzerinden mimari zaman çizgisi: deterministik eşit aralıklı sampling (maxRevisions; uçlar korunur, atlanan noktalar skipped listesinde açık), seçilen noktaların snapshot blob'ları salt-okunur git okumasıyla alınır ve ardışık diff özetleri raporlanır. Faz E evrim görünümü: milestone bazlı özetler + ihlal trendi (no-cycles/forbidden ihlal sayıları nokta başına ayrı raporlanır — kalite tek sayıya indirgenmez). Analiz edilemeyen noktalar/aralıklar AÇIK raporlanır; hiçbir sayı uydurulmaz.",
       inputSchema: ArchitectureTimelineInputSchema,
       outputSchema: envelopeOutputSchema(ArchitectureTimelineDataSchema),
       handler: async (requestId, args) =>
