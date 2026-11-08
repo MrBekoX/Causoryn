@@ -621,8 +621,10 @@ export function refreshIndex(
 /**
  * IndexingError → sabit tool hata kodu eşlemesi (TŞ §10.1; kod tablosu
  * packages/indexing/src/errors.ts başlığındaki belgelenen eşlemenin aynısı).
+ * TEK KOPYA ilkesi (denetim bulgusu): services-verification.ts aynı tabloyu
+ * buradan yeniden kullanır; kopyalama sapma riskiydi.
  */
-function indexingErrorToToolError(
+export function indexingErrorToToolError(
   error: IndexingError,
   requestId: string,
 ): CausorynToolError {

@@ -537,6 +537,61 @@ describe("verifyChange — pozitif (değişmemiş manifest hedefleri)", () => {
     ).toHaveLength(2);
     expect(blocking.checks.contracts.drift.filter((d) => d.compatibility === "risk")).toHaveLength(2);
     expect(blocking.verdict).toBe("blocking_findings");
+    // E2 kural kilidi (denetim bulgusu): blocking [0] karar verirken
+    // contract-risk (6. kural) da UYGULANMIŞ kurallar listesinde taşınır —
+    // öncelik zincirinin üye sapması bu yolda yakalanır.
+    expect(blocking.verdictRationale[0]?.rule).toBe("blocking-finding");
+    expect(blocking.verdictRationale.map((rule) => rule.rule)).toContain("contract-risk");
+  });
+
+  it("yalnızca risk drift → review_required + rationale[0] 'contract-risk' (E2 6. kural kilidi)", () => {
+    const riskOnly: ContractDriftResult = {
+      ...mixedDrift(),
+      breakingCandidates: [],
+    };
+    const report = verifyChange({
+      baseSnapshot: base,
+      targetSnapshot: base,
+      checks: ["contracts", "graph-diff"],
+      contractDrift: riskOnly,
+    });
+    expect(report.checks.contracts.drift).toHaveLength(2);
+    expect(
+      report.checks.contracts.drift.every((d) => d.compatibility === "risk"),
+    ).toBe(true);
+    expect(report.verdict).toBe("review_required");
+    // Karar doğrudan 6. kuradan gelir (api-surface tetiklenmez: taban=hedef).
+    expect(report.verdictRationale[0]?.rule).toBe("contract-risk");
+  });
+
+  it("Endpoint ekleme → apiSurfaceChanges + rationale[0] 'api-surface' + review_required (E2 7. kural kilidi)", () => {
+    const endpointAdded = buildSnapshot(
+      [
+        node("Class", SVC, SVC_PATH),
+        node("Class", REPO, REPO_PATH),
+        node("Test", TEST, TEST_PATH),
+        node("Test", TEST2, TEST2_PATH),
+        node("Endpoint", "App.POST /orders", "src/routes/orders.ts"),
+      ],
+      [
+        edge("CALLS", SVC_REF, REPO_REF, ["ev-svc-repo"]),
+        edge("TESTS", TEST_REF, SVC_REF, ["ev-test-svc"]),
+        edge("TESTS", TEST2_REF, REPO_REF, ["ev-test2-repo"]),
+      ],
+    );
+    const report = verifyChange({
+      baseSnapshot: cleanTree(),
+      targetSnapshot: endpointAdded,
+      checks: ["graph-diff"],
+    });
+    expect(report.checks.graphDiff.status).toBe("evaluated");
+    expect(report.checks.graphDiff.apiSurfaceChanges).toBe(1);
+    expect(report.verdict).toBe("review_required");
+    // Tek tetiklenen kural api-surface'tür (guard bulgusu yok; taban=hedef
+    // diff'i yalnızca endpoint eklemesi; diğer denetimler istenmedi).
+    expect(report.verdictRationale).toHaveLength(1);
+    expect(report.verdictRationale[0]?.rule).toBe("api-surface");
+    expect(report.verdictRationale[0]?.detail).toContain("1");
   });
 });
 
@@ -609,17 +664,21 @@ describe("verifyChange — negatif", () => {
     }
   });
 
-  it("bilinmeyen check adı → invalid-input", () => {
-    expect(() =>
+  it("bilinmeyen check adı → verification/invalid-input (kod düzeyi kilit)", () => {
+    try {
       verifyChange({
         baseSnapshot: base,
         targetSnapshot: base,
         checks: ["architecture", "no-such-check" as VerifyCheckName],
-      }),
-    ).toThrowError(VerificationError);
+      });
+      expect.unreachable("invalid-input beklenmişti");
+    } catch (error) {
+      expect(error).toBeInstanceOf(VerificationError);
+      expect((error as VerificationError).code).toBe("verification/invalid-input");
+    }
   });
 
-  it("building snapshot → verification/snapshot-state", () => {
+  it("building snapshot → verification/snapshot-state (kod düzeyi kilit)", () => {
     const building = createSnapshot({
       workspaceId: WS,
       revision: { id: "rev-verify", sequence: 1 },
@@ -630,9 +689,13 @@ describe("verifyChange — negatif", () => {
       nodes: [node("Class", SVC, SVC_PATH)],
       edges: [],
     });
-    expect(() =>
-      verifyChange({ baseSnapshot: building, targetSnapshot: base }),
-    ).toThrowError(VerificationError);
+    try {
+      verifyChange({ baseSnapshot: building, targetSnapshot: base });
+      expect.unreachable("snapshot-state beklenmişti");
+    } catch (error) {
+      expect(error).toBeInstanceOf(VerificationError);
+      expect((error as VerificationError).code).toBe("verification/snapshot-state");
+    }
   });
 });
 

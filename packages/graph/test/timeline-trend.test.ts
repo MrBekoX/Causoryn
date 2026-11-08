@@ -432,6 +432,24 @@ describe("timeline ihlal trendi çekirdeği — buildTimelineViolationTrend (saf
         }),
       "timeline/trend-invalid-input",
     );
+    // Biçimsiz ref (denetim bulgusu kilidi): assertValidGitRef'in
+    // compare/invalid-ref'i AÇIK ürün hatası olarak yükselir — sessiz
+    // 'unavailable' noktasına DÖNÜŞTÜRÜLMEZ ("trend hataları YUTMAZ"
+    // sözleşmesi ref biçim katmanında da geçerlidir).
+    expectThrowsCode(
+      () =>
+        buildTimelineViolationTrend({
+          points: [
+            {
+              ref: "-kotu-ref",
+              content: contentOf(setM1()),
+              policy: analyzedPolicy(),
+              baseline: noBaseline(),
+            },
+          ],
+        }),
+      "compare/invalid-ref",
+    );
   });
 
   it("determinizm: aynı girdi iki koşum birebir aynı JSON", () => {

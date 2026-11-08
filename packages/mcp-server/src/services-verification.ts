@@ -26,6 +26,7 @@ import type { ServiceDeps } from "./services.js";
 import {
   coverageOf,
   envelopeStatusOf,
+  indexingErrorToToolError,
   requireAuthorizedWorkspace,
   staleWarningOf,
 } from "./services.js";
@@ -127,42 +128,36 @@ export function verificationErrorToToolError(error: VerificationError): Causoryn
   }
 }
 
-/** IndexingError → sabit tool kodu (services.ts eşlemesinin aynısı). */
-function projectionIndexingErrorToToolError(error: IndexingError): CausorynToolError {
-  switch (error.code) {
-    case "indexing/root-not-authorized":
-      return new CausorynToolError("WORKSPACE_NOT_AUTHORIZED", error.message);
-    case "indexing/path-denied":
-      return new CausorynToolError("PATH_DENIED", error.message);
-    case "indexing/limit-exceeded":
-      return new CausorynToolError("LIMIT_EXCEEDED", error.message);
-    case "indexing/unsupported-mode":
-      return new CausorynToolError("INVALID_ARGUMENT", error.message);
-    case "indexing/internal":
-      return new CausorynToolError(
-        "INTERNAL_ERROR",
-        "Beklenmeyen iç hata; ayrıntılar sunucu loglarında",
-      );
+/**
+ * Paket hatalarını sabit tool kodlarına EŞLEYEN tek zincir (denetim bulgusu
+ * F6: indexing/* eşlemesi artık TEK yerde — services.ts indexingErrorToTool-
+ * Error yeniden kullanılır). Kodlanmamış yabancı hata olduğu gibi yükselir.
+ * Eşlenemeyen hata CausorynToolError DEĞİLDİR: server.ts catch-all'ı ona
+ * INTERNAL_ERROR verir — bu yüzden şema red sınıfı hatalar (GuardError vb.)
+ * buradan mutlaka geçmelidir; async reddi için bkz. loadGuardInputs çağrı
+ * yerindeki .catch(rethrowAsToolError).
+ */
+function rethrowAsToolError(error: unknown, requestId: string): never {
+  if (error instanceof VerificationError) {
+    throw verificationErrorToToolError(error);
   }
+  if (error instanceof IndexingError) {
+    throw indexingErrorToToolError(error, requestId);
+  }
+  if (error instanceof GuardError) {
+    // Guard policy/baseline şema reddi: guard/* kodlarının sabit eşlemesi
+    // (graphErrorToToolError → POLICY_INVALID; check_architecture sözleşmesi).
+    throw graphErrorToToolError(error);
+  }
+  throw error;
 }
 
-/** Paket hatalarını sabit tool kodlarına eşleyerek koşturur. */
-function runVerification<T>(work: () => T): T {
+/** Paket hatalarını sabit tool kodlarına eşleyerek koşturur (senkron). */
+function runVerification<T>(work: () => T, requestId: string): T {
   try {
     return work();
   } catch (error) {
-    if (error instanceof VerificationError) {
-      throw verificationErrorToToolError(error);
-    }
-    if (error instanceof IndexingError) {
-      throw projectionIndexingErrorToToolError(error);
-    }
-    if (error instanceof GuardError) {
-      // Guard policy/baseline şema reddi: guard/* kodlarının sabit eşlemesi
-      // (graphErrorToToolError → POLICY_INVALID; check_architecture sözleşmesi).
-      throw graphErrorToToolError(error);
-    }
-    throw error;
+    rethrowAsToolError(error, requestId);
   }
 }
 
@@ -567,11 +562,17 @@ export async function verifyChangeTool(
   // 4) Hedef projeksiyon: working-tree (atık depo; gerçek repo değişmez).
   const projection = projectWorkingTree(deps, canonicalRoot);
 
-  // 5) Guard girdisi (yalnızca architecture istendiyse yüklenir).
+  // 5) Guard girdisi (yalnızca architecture istendiyse yüklenir). Parse şema
+  //    reddi (bozuk YAML/şema → GuardError) runVerification sarmalının
+  //    DIŞINDA kaldığı için INTERNAL_ERROR'a düşüyordu (denetim bulgusu);
+  //    async red aynı tek eşleme zinciriyle POLICY_INVALID'a düşer
+  //    (check_architecture sözleşmesi; başlık sözü bu yolda da dürüsttür).
   const requestedChecks = input.checks ?? ["architecture", "contracts", "graph-diff", "test-plan"];
   const architectureRequested = requestedChecks.includes("architecture");
   const contractsRequested = requestedChecks.includes("contracts");
-  const guard = await loadGuardInputs(deps, canonicalRoot, architectureRequested);
+  const guard = await loadGuardInputs(deps, canonicalRoot, architectureRequested).catch(
+    (error: unknown) => rethrowAsToolError(error, requestId),
+  );
 
   // 6) Çekirdek çağrısı: saf verifyChange — kod yazmaz, test çalıştırmaz.
   const report: VerificationReport = runVerification(() =>
@@ -630,7 +631,8 @@ export async function verifyChangeTool(
             },
           }),
     }),
-  );
+  requestId);
+
 
   // 7) Envelope: taban yayın çapası + dürüstlük uyarıları.
   const warnings = staleWarningOf(baseRead);

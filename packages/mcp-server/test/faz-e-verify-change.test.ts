@@ -520,6 +520,42 @@ describe("causoryn_verify_change negatif yollar", () => {
       rmSync(root, { recursive: true, force: true });
     }
   }, 60_000);
+
+  it("NEGATİF: bozuk .causoryn/architecture.rules.yaml → POLICY_INVALID (INTERNAL_ERROR değil; check_architecture sözleşmesi)", async () => {
+    const root = mkdtempSync(path.join(os.tmpdir(), "causoryn-verify-pol-"));
+    try {
+      const fixture = writeFixture(root);
+      const pair = await connectClient(makeContext(fixture.root));
+      try {
+        const preflightResult = await callTool(pair.client, "causoryn_preflight_change", {
+          intent: "bozuk policy eşlemesi doğrulaması",
+          targetFiles: ["src/order-service.ts"],
+        });
+        const preflightId = preflightDataOf(preflightResult).preflightId as string;
+        // Guard policy'yi şema reddi (GuardError guard/policy-yaml-invalid)
+        // üretecek şekilde boz. services-verification.ts başlığı "şema reddi
+        // ise POLICY_INVALID fırlatılır (check_architecture sözleşmesiyle
+        // aynı)" sözü verir; söz bu yolda da dürüst olmalıdır.
+        writeFileSync(
+          path.join(fixture.root, ".causoryn", "architecture.rules.yaml"),
+          "version: 1\nrules: [ { bozuk-yaml",
+        );
+        const result = await callTool(pair.client, "causoryn_verify_change", {
+          preflightId,
+          checks: ["architecture"],
+        });
+        const error = expectErrorOf(result);
+        // check_architecture sözleşmesi: şema reddi POLICY_INVALID + düzeltici
+        // userAction (INTERNAL_ERROR değil — bulgu öncesi davranış buydu).
+        expect(error.code).toBe("POLICY_INVALID");
+        expect(String(error.userAction).length).toBeGreaterThan(0);
+      } finally {
+        await pair.close();
+      }
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  }, 60_000);
 });
 
 /* ------------------------------------------------------------------ */

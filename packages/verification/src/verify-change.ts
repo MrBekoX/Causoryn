@@ -926,7 +926,18 @@ export function verifyChange(input: VerifyChangeInput): VerificationReport {
       detail: "hiçbir bulgu/belirsizlik sinyali yok; tüm istenen denetimler evaluated",
     });
   } else {
-    verdict = verdictOfFirstRule(rationale[0] ?? { rule: VERIFY_VERDICT_RULES.cleanResolved, detail: "" });
+    // Savunma daraltması (denetim bulgusu): bu dal yalnızca
+    // rationale.length > 0 iken çalışır; `?? {...}` ölü bir fallback idi ve
+    // kullanılsaydı boş gerekçeli kural kaydı üretirdi — E2 sözleşmesi
+    // gereği uydurma kural kimliği ÜRETİLMEZ, coded açık ret verilir.
+    const primary = rationale[0];
+    if (primary === undefined) {
+      throw new VerificationError(
+        "verification/invalid-input",
+        "verdict rationale boş: karar kuralı türetilemez (uydurma kural kimliği üretilemez)",
+      );
+    }
+    verdict = verdictOfFirstRule(primary);
   }
 
   // E2 eksik denetim listesi: istenen denetimlerden not_evaluated veya
