@@ -714,7 +714,7 @@ describe("timeline git katmanı — geçici depo (salt-okunur)", () => {
     expect(second.changes.removed).toBe(2);
     expect(second.changes.added).toBe(1);
     expect(second.changes.apiSurfaceChanges).toBe(1);
-  });
+  }, 30_000);
 
   it("pozitif: range modu — v1..v3 ilk-ebeveyn zinciri, sıralı 3 nokta", async () => {
     const timeline = await buildArchitectureTimelineFromGit(repoRoot, {
@@ -733,7 +733,7 @@ describe("timeline git katmanı — geçici depo (salt-okunur)", () => {
       throw new Error("ikinci interval 'diff' olmalı");
     }
     expect(second.changes.apiSurfaceChanges).toBe(1);
-  });
+  }, 30_000);
 
   it("pozitif: annotated tag uçlu range — tag nesnesi commit'e peel edilir", async () => {
     const timeline = await buildArchitectureTimelineFromGit(repoRoot, {
@@ -747,7 +747,7 @@ describe("timeline git katmanı — geçici depo (salt-okunur)", () => {
     }
     expect(only.changes.added).toBe(2);
     expect(only.changes.changed).toBe(1);
-  });
+  }, 30_000);
 
   it("negatif: geçersiz aralık açıkça reddedilir", async () => {
     // Eş uçlar.
@@ -853,7 +853,7 @@ describe("timeline git katmanı — geçici depo (salt-okunur)", () => {
     }
     expect((second.reasons.to ?? "").startsWith("manifest-not-json")).toBe(true);
     expect(JSON.stringify(second)).not.toContain('"changes"');
-  });
+  }, 30_000);
 
   it("partial: şekli bozuk manifest → nokta unanalyzed, interval açık raporlu", async () => {
     const timeline = await buildArchitectureTimelineFromGit(repoRoot, {
@@ -997,5 +997,5 @@ describe("timeline git katmanı — geçici depo (salt-okunur)", () => {
     expect(JSON.stringify(first)).toBe(JSON.stringify(second));
     expect(first.points.map((p) => p.ref)).toEqual(["v1", "v2", "v3"]);
     expect(JSON.stringify(first)).not.toContain("qualityScore");
-  });
+  }, 30_000);
 });

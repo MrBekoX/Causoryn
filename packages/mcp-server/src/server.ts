@@ -368,7 +368,7 @@ function buildRegistrations(context: CausorynContext): readonly ToolRegistration
       name: "causoryn_get_evidence",
       title: "Evidence provenance",
       description:
-        "Node/edge/evidence kimliğinin kanıt dizisi: relativePath, startLine/endLine, sourceHash, analyzerId, rationale. Yayınlanmış snapshot'ta olmayan kimlik EVIDENCE_NOT_FOUND döndürür.",
+        "Node/edge/evidence/finding kimliğinin kanıt zinciri (TŞ §10.2 'node/edge/finding IDs'): her kayıt relativePath + startLine/endLine + sourceHash + analyzerId + rationale taşır; eksik alanlı eski kayıtlar partial=true + missingFields ile AÇIK işaretlenir, her kayıt bağlı graf bağlam referanslarını (contextRefs: katkı eden kenar / karşı uç node / bulgu) taşır ve chain özeti (targetKind/targetId/order/recordCount/partialCount/empty) deterministik düzene dair açık durum verir. finding:<sha256> kimlikleri snapshot'ta yaşamaz; workspace kökündeki .causoryn/architecture.rules.yaml policy'sinden deterministik türetilerek çözülür (check_architecture çıktısındaki kimlikleri kullanın). Policy yokluğu/bozukluğu POLICY_INVALID, türetilen bulgularla eşleşmeyen kimlik EVIDENCE_NOT_FOUND döndürür.",
       inputSchema: GetEvidenceInputSchema,
       outputSchema: envelopeOutputSchema(GetEvidenceDataSchema),
       handler: (requestId, args) =>

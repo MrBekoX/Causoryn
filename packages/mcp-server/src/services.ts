@@ -1,5 +1,19 @@
+import { readFileSync, statSync } from "node:fs";
+import path from "node:path";
+
 import { LATEST_PROTOCOL_VERSION } from "@modelcontextprotocol/sdk/types.js";
-import type { GraphRepository, SnapshotRead } from "@causoryn/graph";
+import {
+  buildEvidenceChain,
+  GuardError,
+  parseArchitectureBaseline,
+  parseArchitecturePolicy,
+  resolveFindingById,
+  type EvidenceChain,
+  type EvidenceChainRecord,
+  type GraphRepository,
+  type GuardFinding,
+  type SnapshotRead,
+} from "@causoryn/graph";
 import {
   EDGE_KINDS,
   NODE_KINDS,
@@ -946,10 +960,33 @@ export const EvidenceSpanSchema = z.strictObject({
   sourceHash: z.string(),
 });
 
+/** E4 zincir bağlam referansı (TŞ §16 "selection → get_evidence → kaynak
+ * dosya/satır"): kanıt kaydını taşıyan graf bağlamı — katkı eden kenar /
+ * karşı uç node / bulgu. location sourceHash TAŞIMAZ (taşıyıcı kaydın
+ * span'ı yetkili konum kanıtıdır). */
+export const EvidenceChainContextRefSchema = z.strictObject({
+  kind: z.enum(["node", "edge", "finding"]),
+  id: z.string(),
+  label: z.string(),
+  location: z
+    .strictObject({
+      relativePath: z.string(),
+      startLine: z.number().int(),
+      endLine: z.number().int(),
+    })
+    .optional(),
+});
+
 /** Kanıt kaydı (TŞ §8 Evidence) — kanıt taşıyan araçların çıktı bileşeni.
  * get_symbol_context (B5) bu şemayı get_evidence tanımından ÖNCE kullandığı
  * için tanım ortak bölgeye taşındı (const TDZ'si modül yükleme sırasını
- * zorlar). */
+ * zorlar).
+ *
+ * Sprint-6 E4 zenginleştirmesi (geriye uyumlu): partial/missingFields/
+ * contextRefs OPTIONAL alanlar olarak eklendi; mevcut alanlar aynen
+ * korunur ve alanları doldurmayan üreticilerin (get_symbol_context,
+ * trace_execution, analyze_impact, derive_test_plan) çıktısı DEĞİŞMEZ.
+ * Alanları yalnızca causoryn_get_evidence doldurur (zincir yüzeyi). */
 export const EvidenceRecordSchema = z.strictObject({
   id: z.string(),
   kind: z.string(),
@@ -957,6 +994,12 @@ export const EvidenceRecordSchema = z.strictObject({
   analyzerId: z.string(),
   analyzerVersion: z.string(),
   rationale: z.string(),
+  /** E4: eksik sözleşme alanı işareti (span'sız / rationale'suz eski kayıt). */
+  partial: z.boolean().optional(),
+  /** E4: alfabetik eksik alan listesi ("rationale" | "span"). */
+  missingFields: z.array(z.string()).optional(),
+  /** E4: bağlı graf bağlam referansları — (kind, id) bayt-artan, tekrarsız. */
+  contextRefs: z.array(EvidenceChainContextRefSchema).optional(),
 });
 
 /* ------------------------------------------------------------------ */
@@ -1681,17 +1724,58 @@ export function traceExecution(
 export const GetEvidenceInputSchema = z.strictObject({
   workspaceId: z.string().min(1).optional(),
   /**
-   * Sorgulanan graph kimliği (TŞ §10.2 "node/edge/finding IDs"): Faz A'da
-   * node:<hex> | edge:<hex> | evidence:<hex>; finding kimliği bu dilimde
-   * üretilmez (Faz B+ kapsamı).
+   * Sorgulanan graph kimliği (TŞ §10.2 "node/edge/finding IDs, limit?"):
+   * node:<hex> | edge:<hex> | evidence:<hex> | finding:<hex>.
+   *
+   * Sprint-6 E4: finding kimliği desteği EKLENDİ. Finding kimlikleri
+   * snapshot'ta yaşamaz (guard.ts: kimlik kural + ihlal kimliğinden
+   * türetilir); workspace kökündeki policy dosyasından deterministik
+   * türetilerek çözülür (resolveFindingById). Policy yokluğu/bozukluğu
+   * POLICY_INVALID, byte tavanı aşımı LIMIT_EXCEEDED (checkArchitecture
+   * semantiğiyle aynı), türetilen bulgularla eşleşmeyen kimlik ise
+   * EVIDENCE_NOT_FOUND'dır. Katalogdaki "limit?" alanı bu dilimde
+   * bilinçli olarak açılmadı (görev kapsamı dışı — açık karar).
    */
   id: z.string().min(1),
 });
 
+/** E4 finding özet bloğu (TŞ §12 finding sözleşmesinin zincir yüzü). */
+export const GetEvidenceFindingSchema = z.strictObject({
+  id: z.string(),
+  ruleId: z.string(),
+  ruleType: z.string(),
+  severity: z.string(),
+  /** İhlal kaynağı node'un qualifiedName'i (no-cycles'ta SCC temsilcisi). */
+  from: z.string(),
+  /** İhlal hedefi node'un qualifiedName'i. */
+  to: z.string(),
+  /** Baseline suppression eşleşti mi (yönetişim raporlaması). */
+  suppressed: z.boolean(),
+  /** Yalnızca no-cycles: SCC üyelerinin qualifiedName'leri (sıralı). */
+  cycle: z.array(z.string()).optional(),
+});
+
+/** E4 zincir özeti: deterministik düzen + AÇIK boş/partial durumu
+ * (TŞ §8 invariant vi; "kimlik bilinir ama kanıt yok" durumunun dürüst
+ * raporlanması — EVIDENCE_NOT_FOUND değildir). */
+export const EvidenceChainSummarySchema = z.strictObject({
+  targetKind: z.enum(["node", "edge", "evidence", "finding"]),
+  /** Çözülen hedefin kimliği (istekteki id ile birebir; takım denetimi
+   * bulgusu: finding dalında hangi bulgunun çözüldüğü açık taşınır). */
+  targetId: z.string(),
+  /** Kayıt sıralaması sözleşmesi: kanıt kimliği bayt-artan. */
+  order: z.literal("evidence-id-asc"),
+  recordCount: z.number().int().nonnegative(),
+  /** Eksik alanlı (partial) kayıt sayısı. */
+  partialCount: z.number().int().nonnegative(),
+  /** Zincir boş mu (bilinen kimlik, sıfır kanıt). */
+  empty: z.boolean(),
+});
+
 export const GetEvidenceDataSchema = z.strictObject({
   id: z.string(),
-  /** Kimliğin snapshot'taki türü; node/edge bağlam alanlarını ayırt eder. */
-  idKind: z.enum(["node", "edge", "evidence"]),
+  /** Kimliğin snapshot'taki türü; bağlam alanlarını ayırt eder. */
+  idKind: z.enum(["node", "edge", "evidence", "finding"]),
   /** idKind="node" için sorgulanan düğümün özeti. */
   node: z
     .strictObject({
@@ -1710,7 +1794,12 @@ export const GetEvidenceDataSchema = z.strictObject({
       resolution: z.string(),
     })
     .optional(),
+  /** idKind="finding" için bulgunun özeti (TŞ §12 sözleşmesinden). */
+  finding: GetEvidenceFindingSchema.optional(),
+  /** E4: zenginleştirilmiş kanıt zinciri (eski alanlar korunur). */
   evidence: z.array(EvidenceRecordSchema),
+  /** E4: zincir özeti — her yanıtta taşınır (açık boş/partial durumu). */
+  chain: EvidenceChainSummarySchema,
 });
 
 function evidenceRecordOf(item: Evidence): z.infer<typeof EvidenceRecordSchema> {
@@ -1724,27 +1813,201 @@ function evidenceRecordOf(item: Evidence): z.infer<typeof EvidenceRecordSchema> 
   };
 }
 
-function evidenceByIdOf(snapshot: SnapshotGraph): Map<string, Evidence> {
-  return new Map(snapshot.evidence.map((item) => [item.id, item]));
+/* ------------------------------------------------------------------ */
+/* get_evidence — E4 kanıt zinciri yardımcıları                         */
+/* ------------------------------------------------------------------ */
+
+/** Finding kimliği öneki (guard.ts makeFindingId sözleşmesi). */
+const FINDING_ID_PREFIX = "finding:";
+const EVIDENCE_POLICY_DIR = ".causoryn";
+const EVIDENCE_POLICY_FILE = "architecture.rules.yaml";
+const EVIDENCE_BASELINE_FILE = "architecture.baseline.yaml";
+
+/** Policy/baseline okuma sonucu: okundu, yok ya da bütçe aşımı. */
+type EvidencePolicyRead =
+  | { readonly status: "ok"; readonly text: string }
+  | { readonly status: "missing" }
+  | { readonly status: "too-large"; readonly bytes: number };
+
+/**
+ * Policy/baseline dosyasını TŞ §20 "dosya başına byte" bütçesiyle SENKRON
+ * okur (get_evidence senkron araç yüzeyini korur). Denetim iki katmandır
+ * (okuma öncesi stat + okuma sonrası byteLength — stat/read yarışına
+ * karşı savunma); checkArchitecture'ın readOptionalTextFile semantiğinin
+ * sync karşılığıdır.
+ */
+function readOptionalPolicyTextSync(
+  absolutePath: string,
+  maxBytes: number,
+): EvidencePolicyRead {
+  let statSize: number | undefined;
+  try {
+    statSize = statSync(absolutePath).size;
+  } catch {
+    return { status: "missing" };
+  }
+  if (statSize > maxBytes) {
+    return { status: "too-large", bytes: statSize };
+  }
+  let text: string;
+  try {
+    text = readFileSync(absolutePath, "utf8");
+  } catch {
+    return { status: "missing" };
+  }
+  const bytes = Buffer.byteLength(text, "utf8");
+  if (bytes > maxBytes) {
+    return { status: "too-large", bytes };
+  }
+  return { status: "ok", text };
 }
 
-function sortedById(items: readonly Evidence[]): readonly Evidence[] {
-  return [...items].sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+/**
+ * E4 finding dalı: finding kimliğini workspace policy'sinden
+ * DETERMİNİSTİK türeterek çözer (resolveFindingById → findViolations).
+ * Hata semantiği checkArchitecture ile birebir aynıdır: policy yokluğu/
+ * çözümleme reddi → POLICY_INVALID (sabit; guard/* eşlemesi), byte tavanı
+ * aşımı → LIMIT_EXCEEDED. Türetilen bulgularla eşleşmeyen kimlik →
+ * EVIDENCE_NOT_FOUND (deterministik lookup isabeti; uydurma yoktur).
+ */
+function resolveFindingFromWorkspace(
+  deps: ServiceDeps,
+  canonicalRoot: string,
+  snapshot: SnapshotGraph,
+  findingId: string,
+): GuardFinding {
+  const maxPolicyBytes = deps.config.maxFileBytes;
+  const policyRead = readOptionalPolicyTextSync(
+    path.join(canonicalRoot, EVIDENCE_POLICY_DIR, EVIDENCE_POLICY_FILE),
+    maxPolicyBytes,
+  );
+  if (policyRead.status === "too-large") {
+    throw new CausorynToolError(
+      "LIMIT_EXCEEDED",
+      `${EVIDENCE_POLICY_DIR}/${EVIDENCE_POLICY_FILE} ${String(policyRead.bytes)} byte ile config.maxFileBytes tavanını (${String(maxPolicyBytes)}) aşıyor (TŞ §20 dosya başına byte bütçesi); policy dosyasını küçültün veya kuralları bölün`,
+    );
+  }
+  if (policyRead.status !== "ok") {
+    throw new CausorynToolError(
+      "POLICY_INVALID",
+      `finding kimliği çözümlenemedi: policy dosyası bulunamadı ${EVIDENCE_POLICY_DIR}/${EVIDENCE_POLICY_FILE} (workspace köküne göre); finding kimlikleri workspace policy'sinden türetilir — kural dosyasını oluşturun veya kimlikleri causoryn_check_architecture çıktısından alın`,
+    );
+  }
+  const baselineRead = readOptionalPolicyTextSync(
+    path.join(canonicalRoot, EVIDENCE_POLICY_DIR, EVIDENCE_BASELINE_FILE),
+    maxPolicyBytes,
+  );
+  if (baselineRead.status === "too-large") {
+    throw new CausorynToolError(
+      "LIMIT_EXCEEDED",
+      `${EVIDENCE_POLICY_DIR}/${EVIDENCE_BASELINE_FILE} ${String(baselineRead.bytes)} byte ile config.maxFileBytes tavanını (${String(maxPolicyBytes)}) aşıyor (TŞ §20 dosya başına byte bütçesi); baseline dosyasını küçültün`,
+    );
+  }
+  let finding: GuardFinding;
+  try {
+    const policy = parseArchitecturePolicy(policyRead.text);
+    const baseline =
+      baselineRead.status === "ok"
+        ? parseArchitectureBaseline(baselineRead.text)
+        : { version: 1 as const, suppressions: [] };
+    const resolved = resolveFindingById({
+      snapshot,
+      policy,
+      baseline,
+      findingId,
+    });
+    if (resolved === undefined) {
+      throw new CausorynToolError(
+        "EVIDENCE_NOT_FOUND",
+        `finding kimliği workspace policy'sinden türetilen bulgularla eşleşmedi: ${findingId}; finding kimliklerini causoryn_check_architecture çıktısından alın (policy dosyası bulgu üretildikten sonra değişmiş olabilir)`,
+      );
+    }
+    finding = resolved;
+  } catch (error) {
+    // GuardError → POLICY_INVALID (graphErrorToToolError'ın guard/*
+    // eşlemesinin yerel karşılığı; servisler arası döngü import'undan
+    // kaçınmak için tek kod burada eşlenir).
+    if (error instanceof CausorynToolError) throw error;
+    if (error instanceof GuardError) {
+      throw new CausorynToolError("POLICY_INVALID", error.message);
+    }
+    throw error;
+  }
+  return finding;
+}
+
+/** Zincir kaydını çıktı formuna taşır (E4 alanlarıyla birlikte). */
+function chainRecordToOutput(
+  record: EvidenceChainRecord,
+): z.infer<typeof EvidenceRecordSchema> {
+  return {
+    id: record.id,
+    kind: record.kind,
+    ...(record.span === undefined ? {} : { span: { ...record.span } }),
+    analyzerId: record.analyzerId,
+    analyzerVersion: record.analyzerVersion,
+    rationale: record.rationale,
+    partial: record.partial,
+    missingFields: [...record.missingFields],
+    contextRefs: record.contextRefs.map((ref) => ({
+      kind: ref.kind,
+      id: ref.id,
+      label: ref.label,
+      ...(ref.location === undefined ? {} : { location: { ...ref.location } }),
+    })),
+  };
+}
+
+/** Zincir özetini çıktı formuna taşır (açık boş/partial durumu). */
+function chainSummaryToOutput(chain: EvidenceChain): z.infer<typeof EvidenceChainSummarySchema> {
+  return {
+    targetKind: chain.targetKind,
+    targetId: chain.targetId,
+    order: chain.order,
+    recordCount: chain.recordCount,
+    partialCount: chain.partialCount,
+    empty: chain.empty,
+  };
+}
+
+/**
+ * Savunma: hedef kimliği yukarıdaki dalda bulunduğu için zincir tanımsız
+ * olamaz; yine de tanımsızsa dürüst sabit kodla düş (INTERNAL_ERROR
+ * uydurulmaz).
+ */
+function requireChain(chain: EvidenceChain | undefined): EvidenceChain {
+  if (chain === undefined) {
+    throw new CausorynToolError(
+      "EVIDENCE_NOT_FOUND",
+      "kanıt zinciri üretilemedi: hedef kimliği yayınlanmış snapshot'ta bulunamadı",
+    );
+  }
+  return chain;
 }
 
 /**
  * causoryn_get_evidence (TŞ §10.2 "Evidence Graph provenance"; sprint-1
- * görev 7): verilen node/edge/evidence kimliğinin kanıt dizisini döndürür
- * (relativePath, startLine/endLine, sourceHash, analyzerId, rationale).
+ * görev 7; sprint-6 E4 zenginleştirmesi): verilen node/edge/evidence/
+ * finding kimliğinin KANIT ZİNCİRİNİ döndürür.
  *
- * Semantik (Faz A sözleşmesi):
+ * Semantik (Faz A tabanı korunur; E4 zenginleştirme):
  * - EDGE: kenarın kendi evidenceIds kayıtları (TŞ §8'de kanıt bağı kenar
- *   üzerindedir; verified kenar ≥1 kanıt — invariant i).
+ *   üzerindedir; verified kenar ≥1 kanıt — invariant i). Bağlam: kenarın
+ *   uç node'ları.
  * - NODE: komşu kenarların (from veya to = id) kanıtları; tekrarsız ve
- *   kanıt ID'sine göre kanonik düzende. Komşusu olmayan düğüm (ör. boş
- *   workspace'taki Workspace node'u) BOŞ dizi döndürür — kimlik mevcut
- *   olduğundan EVIDENCE_NOT_FOUND değildir.
- * - EVIDENCE: kanıt kaydının kendisi tek elemanlık dizi olarak döner.
+ *   kanıt kimliğine göre kanonik düzende. Bağlam: katkı eden kenar +
+ *   karşı uç node. Komşusu olmayan düğüm (ör. boş workspace'taki
+ *   Workspace node'u) BOŞ zincir döndürür (chain.empty=true) — kimlik
+ *   mevcut olduğundan EVIDENCE_NOT_FOUND değildir.
+ * - EVIDENCE: kanıt kaydının kendisi; bağlam: bu kanıtı kullanan kenarlar.
+ * - FINDING (E4, TŞ §10.2 "node/edge/finding IDs"): bulgu kimlikleri
+ *   snapshot'ta yaşamaz; workspace policy'sinden deterministik türetilir
+ *   (resolveFindingFromWorkspace). Policy yokluğu/bozukluğu POLICY_INVALID,
+ *   byte tavanı aşımı LIMIT_EXCEEDED (checkArchitecture semantiği), eşleşen
+ *   bulgu yoksa EVIDENCE_NOT_FOUND.
+ * - Eksik alanlar UYDURULMAZ: span'sız / rationale'suz eski kayıtlar
+ *   partial=true + missingFields ile AÇIK işaretlenir (TŞ §16 "kaynak
+ *   dosya/satır" akışı için dürüstlük).
  * - Hiçbiri değilse sabit proje uzantısı kodu EVIDENCE_NOT_FOUND.
  */
 export function getEvidence(
@@ -1753,7 +2016,7 @@ export function getEvidence(
   input: z.infer<typeof GetEvidenceInputSchema>,
 ): Envelope {
   const workspaceId = input.workspaceId ?? deps.config.workspaceId;
-  requireAuthorizedWorkspace(deps, workspaceId);
+  const canonicalRoot = requireAuthorizedWorkspace(deps, workspaceId);
   const read = requireSnapshot(deps, workspaceId);
   const snapshot = read.snapshot;
   const id = input.id;
@@ -1769,19 +2032,9 @@ export function getEvidence(
   // 1) Node kimliği: komşu kenar kanıtları (deterministik, tekrarsız).
   const node = snapshot.nodes.find((candidate) => candidate.id === id);
   if (node !== undefined) {
-    const evidenceById = evidenceByIdOf(snapshot);
-    const seen = new Set<string>();
-    const items: Evidence[] = [];
-    for (const edge of snapshot.edges) {
-      if (edge.from !== id && edge.to !== id) continue;
-      for (const evidenceId of edge.evidenceIds) {
-        if (seen.has(evidenceId)) continue;
-        const record = evidenceById.get(evidenceId);
-        if (record === undefined) continue;
-        seen.add(evidenceId);
-        items.push(record);
-      }
-    }
+    const chain = requireChain(
+      buildEvidenceChain({ snapshot, target: { kind: "node", id } }),
+    );
     return buildEnvelope({
       ...envelopeBase,
       status: envelopeStatusOf(read),
@@ -1793,7 +2046,8 @@ export function getEvidence(
           kind: node.kind,
           qualifiedName: node.qualifiedName,
         },
-        evidence: sortedById(items).map(evidenceRecordOf),
+        evidence: chain.records.map(chainRecordToOutput),
+        chain: chainSummaryToOutput(chain),
       },
     });
   }
@@ -1801,10 +2055,9 @@ export function getEvidence(
   // 2) Edge kimliği: kenarın kendi kanıtları.
   const edge = snapshot.edges.find((candidate) => candidate.id === id);
   if (edge !== undefined) {
-    const evidenceById = evidenceByIdOf(snapshot);
-    const items = edge.evidenceIds
-      .map((evidenceId) => evidenceById.get(evidenceId))
-      .filter((record): record is Evidence => record !== undefined);
+    const chain = requireChain(
+      buildEvidenceChain({ snapshot, target: { kind: "edge", id } }),
+    );
     return buildEnvelope({
       ...envelopeBase,
       status: envelopeStatusOf(read),
@@ -1818,29 +2071,64 @@ export function getEvidence(
           kind: edge.kind,
           resolution: edge.resolution,
         },
-        evidence: sortedById(items).map(evidenceRecordOf),
+        evidence: chain.records.map(chainRecordToOutput),
+        chain: chainSummaryToOutput(chain),
       },
     });
   }
 
-  // 3) Evidence kimliğinin kendisi.
+  // 3) Evidence kimliğinin kendisi; bağlam: kanıtı kullanan kenarlar.
   const record = snapshot.evidence.find((item) => item.id === id);
   if (record !== undefined) {
+    const chain = requireChain(
+      buildEvidenceChain({ snapshot, target: { kind: "evidence", id } }),
+    );
     return buildEnvelope({
       ...envelopeBase,
       status: envelopeStatusOf(read),
       data: {
         id,
         idKind: "evidence",
-        evidence: [evidenceRecordOf(record)],
+        evidence: chain.records.map(chainRecordToOutput),
+        chain: chainSummaryToOutput(chain),
       },
     });
   }
 
-  // 4) Bulunamayan kimlik → sabit hata kodu (görev sözleşmesi; TŞ §10.1
+  // 4) Finding kimliği (E4): workspace policy'sinden deterministik türetme;
+  //    yalnızca finding:<...> biçimli kimlikler bu dala girer — node/edge/
+  //    evidence sorguları workspace dosyalarına ASLA dokunmaz.
+  if (id.startsWith(FINDING_ID_PREFIX)) {
+    const finding = resolveFindingFromWorkspace(deps, canonicalRoot, snapshot, id);
+    const chain = requireChain(
+      buildEvidenceChain({ snapshot, target: { kind: "finding", finding } }),
+    );
+    return buildEnvelope({
+      ...envelopeBase,
+      status: envelopeStatusOf(read),
+      data: {
+        id,
+        idKind: "finding",
+        finding: {
+          id: finding.id,
+          ruleId: finding.ruleId,
+          ruleType: finding.ruleType,
+          severity: finding.severity,
+          from: finding.from,
+          to: finding.to,
+          suppressed: finding.suppressed,
+          ...(finding.cycle === undefined ? {} : { cycle: [...finding.cycle] }),
+        },
+        evidence: chain.records.map(chainRecordToOutput),
+        chain: chainSummaryToOutput(chain),
+      },
+    });
+  }
+
+  // 5) Bulunamayan kimlik → sabit hata kodu (görev sözleşmesi; TŞ §10.1
   //    listesinde olmayan proje uzantısı — bkz. errors.ts başlığı).
   throw new CausorynToolError(
     "EVIDENCE_NOT_FOUND",
-    `kimlik yayınlanmış snapshot'ta bulunamadı: ${id}; node/edge kimliklerini map_system/find_symbols çıktısından alın`,
+    `kimlik yayınlanmış snapshot'ta bulunamadı: ${id}; node/edge kimliklerini map_system/find_symbols, finding kimliklerini causoryn_check_architecture çıktısından alın`,
   );
 }

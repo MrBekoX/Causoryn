@@ -115,6 +115,7 @@ export function graphErrorToToolError(
     code === "timeline/insufficient-points" ||
     code === "timeline/duplicate-ref" ||
     code === "timeline/invalid-limit" ||
+    code === "timeline/trend-invalid-input" ||
     code === "export/invalid-format"
   ) {
     return new CausorynToolError("INVALID_ARGUMENT", error.message);
@@ -1140,6 +1141,67 @@ const TimelineIntervalSchema = z.union([
   }),
 ]);
 
+/* Sprint-6 E5 — ihlal trendi şemaları: TŞ §13 trend göstergelerinden
+ * cycles + layer violations dilimi. Bilinçli olarak BİLEŞİK SKOR ALANI
+ * YOKTUR (TŞ §13: ölçüler kalite skoru olarak tek sayıya indirgenmez);
+ * trendler metrik başına AYRI diziler halinde döner. */
+const TimelineTrendSeriesValueSchema = z.union([
+  z.strictObject({
+    index: z.number().int().nonnegative(),
+    ref: z.string(),
+    count: z.number().int().nonnegative(),
+  }),
+  z.strictObject({
+    index: z.number().int().nonnegative(),
+    ref: z.string(),
+    count: z.null(),
+    reason: z.string(),
+  }),
+]);
+
+const TimelineTrendStepSchema = z.strictObject({
+  fromIndex: z.number().int().nonnegative(),
+  toIndex: z.number().int().nonnegative(),
+  fromRef: z.string(),
+  toRef: z.string(),
+  fromCount: z.number().int().nonnegative(),
+  toCount: z.number().int().nonnegative(),
+  direction: z.enum(["increasing", "decreasing", "flat"]),
+});
+
+const TimelineTrendSeriesSchema = z.strictObject({
+  metric: z.enum(["no-cycles", "forbidden-dependency"]),
+  values: z.array(TimelineTrendSeriesValueSchema),
+  steps: z.array(TimelineTrendStepSchema),
+  direction: z.enum(["increasing", "decreasing", "flat", "undetermined"]),
+});
+
+const TimelineTrendPointSchema = z.union([
+  z.strictObject({
+    index: z.number().int().nonnegative(),
+    ref: z.string(),
+    status: z.literal("evaluated"),
+    evaluatedRules: z.number().int().nonnegative(),
+    noCyclesViolations: z.number().int().nonnegative(),
+    noCyclesSuppressed: z.number().int().nonnegative(),
+    forbiddenDependencyViolations: z.number().int().nonnegative(),
+    forbiddenDependencySuppressed: z.number().int().nonnegative(),
+  }),
+  z.strictObject({
+    index: z.number().int().nonnegative(),
+    ref: z.string(),
+    status: z.literal("unavailable"),
+    reason: z.string(),
+  }),
+]);
+
+const TimelineViolationTrendSchema = z.strictObject({
+  evaluatedPoints: z.number().int().nonnegative(),
+  unavailablePoints: z.number().int().nonnegative(),
+  points: z.array(TimelineTrendPointSchema),
+  series: z.array(TimelineTrendSeriesSchema),
+});
+
 const ArchitectureTimelineSchema = z.strictObject({
   requestedPoints: z.number().int().nonnegative(),
   analyzedPoints: z.number().int().nonnegative(),
@@ -1162,6 +1224,8 @@ const ArchitectureTimelineSchema = z.strictObject({
     maxRevisions: z.number().int().min(2),
     maxRangeWalk: z.number().int().min(2),
   }),
+  /** Sprint-6 E5: ihlal trendi (nokta başına C2 guard değerlendirmesi). */
+  trend: TimelineViolationTrendSchema,
 });
 
 export const ArchitectureTimelineDataSchema = z.strictObject({
@@ -1171,14 +1235,25 @@ export const ArchitectureTimelineDataSchema = z.strictObject({
 });
 
 /**
- * causoryn_architecture_timeline (TŞ §13 Timeline; C7): refs listesi veya
- * bounded history-range üzerinden mimari snapshot noktaları seçilir
- * (deterministik eşit aralıklı sampling; uçlar korunur), seçilen noktaların
- * `.causoryn/architecture-snapshot.json` blob'ları salt-okunur git okumasıyla
- * alınır ve ardışık diff özetleri compare çekirdeğinden türetilir. Analiz
- * edilemeyen noktalar/aralıklar AÇIK raporlanır; hiçbir sayı uydurulmaz
- * (TŞ §13; ölçüler tek kalite skoruna indirgenmez). Ref çözümlemesi
- * sampling'den ÖNCE yapılır: var olmayan ref asla sessizce atlanmaz.
+ * causoryn_architecture_timeline (TŞ §13 Timeline; C7 + sprint-6 E5 evrim):
+ * refs listesi veya bounded history-range üzerinden mimari snapshot
+ * noktaları seçilir (deterministik eşit aralıklı sampling; uçlar korunur),
+ * seçilen noktaların `.causoryn/architecture-snapshot.json` blob'ları
+ * salt-okunur git okumasıyla alınır ve ardışık diff özetleri compare
+ * çekirdeğinden türetilir. Analiz edilemeyen noktalar/aralıklar AÇIK
+ * raporlanır; hiçbir sayı uydurulmaz. Ref çözümlemesi sampling'den ÖNCE
+ * yapılır: var olmayan ref asla sessizce atlanmaz.
+ *
+ * Sprint-6 E5 (ihlal trendi): seçilmiş her noktanın içerik kümesi C2 guard
+ * kurallarıyla (no-cycles / forbidden-dependency — o ref'teki
+ * `.causoryn/architecture.rules.yaml` ve varsa
+ * `.causoryn/architecture.baseline.yaml` blob'larıyla) nokta başına
+ * değerlendirilir ve `trend` bölümünde raporlanır. Trendler metrik başına
+ * AYRI dizilerdir; nokta başına aktif + baskılanmış ihlal sayıları ayrı
+ * alanlardır; TŞ §13 gereği hiçbir bileşik "kalite skoru" üretilmez.
+ * Policy blob'u olmayan/bozuk ref'lerde trend noktası coded 'unavailable'
+ * olur (sıfır ihlal UYDURULMAZ); diff aralıkları (Sprint-3 davranışı)
+ * etkilenmez.
  */
 export async function architectureTimeline(
   deps: ServiceDeps,
