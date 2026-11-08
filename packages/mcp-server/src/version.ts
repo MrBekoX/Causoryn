@@ -23,12 +23,14 @@ export const SCHEMA_VERSION = "2.0";
  * sprint-4 W5 (Faz C2 Living Wiki, TŞ §16A.8 tablo sırası):
  * causoryn_wiki_build, causoryn_wiki_get_tree, causoryn_wiki_get_page,
  * causoryn_wiki_search, causoryn_wiki_get_links, causoryn_wiki_get_versions,
- * causoryn_wiki_diff eklendi. Sıra TŞ §10.2 PDF katalog sırasını izler:
- * Faz C araçları trace_execution ile get_evidence arasında,
- * architecture_timeline get_evidence'dan SONRADIR, Wiki araçları katalog
- * sonundadır (TŞ §16A.8: "Mevcut 22 tool korunur. Eklenen 7 tool").
- * tools/list TAM OLARAK bu 23 aracı sunar; boş handler yayınlanmaz (ADR-010,
- * wiki/mcp-tools.md kuralı).
+ * causoryn_wiki_diff; sprint-5 D2-D6 (Faz D Differentiation, TŞ §10.2 PDF
+ * katalog satır sırası): causoryn_trace_business_flow trace_execution'dan
+ * sonra; causoryn_preflight_change, causoryn_check_contracts,
+ * causoryn_detect_contract_drift ve causoryn_derive_test_plan
+ * export_documentation ile get_evidence ARASINDA (katalog satırı sırası;
+ * causoryn_verify_change Agent Change Guard bu dilimde yayımlanmaz — boş
+ * handler yayınlama yasağı, ADR-010). tools/list TAM OLARAK bu 28 aracı
+ * sunar; boş handler yayınlanmaz (ADR-010, wiki/mcp-tools.md kuralı).
  */
 export const TOOL_NAMES = [
   "causoryn_get_capabilities",
@@ -39,12 +41,17 @@ export const TOOL_NAMES = [
   "causoryn_find_symbols",
   "causoryn_get_symbol_context",
   "causoryn_trace_execution",
+  "causoryn_trace_business_flow",
   "causoryn_analyze_impact",
   "causoryn_check_architecture",
   "causoryn_compare_architecture",
   "causoryn_get_agent_context",
   "causoryn_generate_onboarding",
   "causoryn_export_documentation",
+  "causoryn_preflight_change",
+  "causoryn_check_contracts",
+  "causoryn_detect_contract_drift",
+  "causoryn_derive_test_plan",
   "causoryn_get_evidence",
   "causoryn_architecture_timeline",
   "causoryn_wiki_build",

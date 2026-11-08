@@ -37,6 +37,15 @@
  *   dilimde HÂLÂ kullanılmaz: revizyon çözümlemesi K-013 #6 ile
  *   INVALID_REVISION'a, bozuk link ise hata değil veri yüzeyine
  *   (brokenLinkDiagnostics, K-013 #4) gider.
+ * - CONTRACT_PARSE_FAILED: TŞ §10.1 SABİT listesinde ZATEN vardır (s.9,
+ *   birincil kaynak doğrulaması: plugin-package.test.ts
+ *   TSH_BASE_ERROR_CODES); sprint-5 Faz D'de (D2/D3 sözleşme araçları:
+ *   causoryn_check_contracts, causoryn_detect_contract_drift) İLK KEZ
+ *   kullanıldı — spec dosyasının parse/şema reddi (packages/contracts
+ *   ContractDiscoveryError "contracts/spec-yaml-invalid" |
+ *   "contracts/spec-json-invalid" | "contracts/spec-invalid" |
+ *   "contracts/unsupported-spec" kodlarının MCP eşlemesi). Yeni uzantı
+ *   kodu basılmaz: TŞ listesinde bire bir kod vardır (K-008 örüntüsü).
  *
  * Uzantı notu (dürüstlük): TŞ §10.1 sabit kod listesinde INVALID_ARGUMENT,
  * EVIDENCE_NOT_FOUND ve SYMBOL_NOT_FOUND YOKTUR. Görev sözleşmeleri
@@ -69,6 +78,7 @@ export const CAUSORYN_TOOL_ERROR_CODES = [
   "INVALID_REVISION",
   "EXPORT_NOT_ALLOWED",
   "WIKI_PAGE_NOT_FOUND",
+  "CONTRACT_PARSE_FAILED",
   "UNSUPPORTED_LANGUAGE",
   "INTERNAL_ERROR",
 ] as const;
@@ -137,6 +147,11 @@ export const TOOL_ERROR_GUIDANCE: Readonly<
     retryable: false,
     userAction:
       "wiki_get_tree çıktısındaki pageId değerlerini kullanın; eski bir WikiSnapshot kimliği sorgulandıysa güncel snapshot ile yeniden deneyin",
+  },
+  CONTRACT_PARSE_FAILED: {
+    retryable: false,
+    userAction:
+      "spec dosyasını (OpenAPI/AsyncAPI/JSON Schema/SQL/proto) düzeltin; kota aşımıysa dosyayı küçültün — desteklenen şema ve sınırlar get_capabilities belgelerindedir",
   },
   UNSUPPORTED_LANGUAGE: {
     retryable: false,

@@ -1,0 +1,38 @@
+asyncapi: 2.6.0
+info:
+  title: Orders Events
+  version: 1.0.0
+channels:
+  order-created-v1:
+    publish:
+      operationId: publishOrderCreated
+      message:
+        name: OrderCreated
+        payload:
+          $ref: "#/components/schemas/OrderCreated"
+  billing.invoice-created:
+    subscribe:
+      operationId: onInvoiceCreated
+      message:
+        payload:
+          $ref: "#/components/schemas/InvoiceCreated"
+components:
+  schemas:
+    OrderCreated:
+      type: object
+      required: [orderId, amountMinor]
+      properties:
+        orderId:
+          type: string
+        amountMinor:
+          type: integer
+        currency:
+          type: string
+    InvoiceCreated:
+      type: object
+      required: [invoiceId]
+      properties:
+        invoiceId:
+          type: string
+        orderId:
+          type: string

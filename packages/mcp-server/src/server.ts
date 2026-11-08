@@ -85,19 +85,40 @@ import {
   wikiGetVersions,
   wikiSearch,
 } from "./services-wiki.js";
+import {
+  CheckContractsDataSchema,
+  CheckContractsInputSchema,
+  DetectContractDriftDataSchema,
+  DetectContractDriftInputSchema,
+  DeriveTestPlanDataSchema,
+  DeriveTestPlanInputSchema,
+  PreflightChangeDataSchema,
+  PreflightChangeInputSchema,
+  TraceBusinessFlowDataSchema,
+  TraceBusinessFlowInputSchema,
+  checkContracts,
+  detectContractDriftTool,
+  deriveTestPlan,
+  preflightChange,
+  traceBusinessFlow,
+} from "./services-differentiation.js";
 import { SERVER_NAME, SERVER_VERSION } from "./version.js";
 
 /**
  * MCP protokol adaptasyonu (TŞ v2.1 §5/§10, ADR-003): SDK McpServer
- * üzerinden tam olarak 23 gerçek araç yayımlanır (sprint-1: 5 çekirdek araç;
+ * üzerinden tam olarak 28 gerçek araç yayımlanır (sprint-1: 5 çekirdek araç;
  * sprint-2 B6: causoryn_index_status + causoryn_refresh_index; sprint-2 B5:
  * causoryn_get_symbol_context; sprint-2 B4: causoryn_trace_execution;
  * sprint-3 C8: causoryn_analyze_impact, causoryn_check_architecture,
  * causoryn_compare_architecture, causoryn_get_agent_context,
  * causoryn_generate_onboarding, causoryn_export_documentation,
  * causoryn_architecture_timeline; sprint-4 W5 (Faz C2 Living Wiki, TŞ
- * §16A.8): causoryn_wiki_build + 6 salt-okunur wiki aracı; tools/list boş
- * handler yayınlamaz — ADR-010).
+ * §16A.8): causoryn_wiki_build + 6 salt-okunur wiki aracı; sprint-5
+ * D2-D6 (Faz D Differentiation): causoryn_trace_business_flow,
+ * causoryn_preflight_change, causoryn_check_contracts,
+ * causoryn_detect_contract_drift, causoryn_derive_test_plan; tools/list boş
+ * handler yayınlamaz — ADR-010; causoryn_verify_change Agent Change Guard
+ * Faz D diliminde yayımlanmaz).
  * Her araç:
  * - Zod inputSchema (SDK girdiyi otomatik doğrular; şema reddi protokol
  *   düzeyinde isError sonucu döner),
@@ -218,6 +239,20 @@ function buildRegistrations(context: CausorynContext): readonly ToolRegistration
         traceExecution(context, requestId, args as z.infer<typeof TraceExecutionInputSchema>),
     },
     {
+      name: "causoryn_trace_business_flow",
+      title: "Business Flow izi",
+      description:
+        "flowSeed'den (node kimliği veya tam qualifiedName) iş akışı zincirleri: ROUTES_TO/CALLS/PRODUCES_CONTRACT/CONSUMES_CONTRACT/CONTAINS kenarlarında bounded BFS + kontrat node'larında ters yön izleme. Her segment kendi certainty/resolution'ını ayrı alanlarda taşır; kopukluklar uydurma köprüyle DEĞİL gap segmentiyle raporlanır ve status partial olur; sınırlar TŞ §20 tavanlarıyla kırpılır ve truncated/rationale ile bildirilir. Belirsiz seed AMBIGUOUS_SYMBOL adaylarıyla, bilinmeyen seed SYMBOL_NOT_FOUND ile reddedilir (otomatik kesinleştirme yok).",
+      inputSchema: TraceBusinessFlowInputSchema,
+      outputSchema: envelopeOutputSchema(TraceBusinessFlowDataSchema),
+      handler: (requestId, args) =>
+        traceBusinessFlow(
+          context,
+          requestId,
+          args as z.infer<typeof TraceBusinessFlowInputSchema>,
+        ),
+    },
+    {
       name: "causoryn_analyze_impact",
       title: "Etki analizi",
       description:
@@ -284,6 +319,50 @@ function buildRegistrations(context: CausorynContext): readonly ToolRegistration
           requestId,
           args as z.infer<typeof ExportDocumentationInputSchema>,
         ),
+    },
+    {
+      name: "causoryn_preflight_change",
+      title: "Preflight Manifest",
+      description:
+        "intent + targetSymbols/targetFiles hedef kümesinden ADAY Preflight Manifest üretir: impactCandidates (certainty/resolution ayrı alanlar), contractChecks, testPlanId (gömülü D6 test planının içerik adresli referansı), limitations ve sourceRevision (salt-okunur dosya okumasıyla HEAD; komut çalıştırma yok). KOD YAZMAZ: candidateOnly sabit true'dur ve çalışma ağacı değişmez; sembole bağlanamayan hedef requiresDisambiguation + candidateTargets ile raporlanır (otomatik kesinleştirme yok, TŞ §10.3). Hedef dosyalar WorkspaceAccessPolicy kararı olmadan kullanılamaz (fail-closed).",
+      inputSchema: PreflightChangeInputSchema,
+      outputSchema: envelopeOutputSchema(PreflightChangeDataSchema),
+      handler: async (requestId, args) =>
+        preflightChange(context, requestId, args as z.infer<typeof PreflightChangeInputSchema>),
+    },
+    {
+      name: "causoryn_check_contracts",
+      title: "Sözleşme değerlendirmesi",
+      description:
+        "Sözleşme sürüm çiftlerini (contracts: {name?, base, target} spec dosyaları; WorkspaceAccessPolicy ile salt okunur keşif) checkContractCompatibility çekirdeğiyle değerlendirir: backward-safe/risk/breaking_candidate/unknown sınıflaması, kural adı + eski/yeni satır kanıtı taşıyan bulgular ve çift-bağlanamayan tanılar ayrı raporlanır. Sınıflama statik delildir: serializer/runtime davranışı bilinemediğinde unknown üretilir ve breaking delilini gizlemez (TŞ §11).",
+      inputSchema: CheckContractsInputSchema,
+      outputSchema: envelopeOutputSchema(CheckContractsDataSchema),
+      handler: (requestId, args) =>
+        checkContracts(context, requestId, args as z.infer<typeof CheckContractsInputSchema>),
+    },
+    {
+      name: "causoryn_detect_contract_drift",
+      title: "Contract Drift",
+      description:
+        "İki sürümün spec dosyaları (base/target) arasında canonical drift: K-013(7) contractChanges ({contractId, changeKind, summary}), breaking_candidate/risk/unknown AYRI alanlarda, PRODUCES_CONTRACT/CONSUMES_CONTRACT etki grafı (kenar resolution ASLA yükseltilmez; anchorFiles ile tüketici/üretici ankrajları taranır) ve tüketici kenarı bulunamayan değişiklikler unconsumedChanges'te dürüstçe raporlanır (unresolved consumers, TŞ §11). scope matchKey daraltmasıdır.",
+      inputSchema: DetectContractDriftInputSchema,
+      outputSchema: envelopeOutputSchema(DetectContractDriftDataSchema),
+      handler: (requestId, args) =>
+        detectContractDriftTool(
+          context,
+          requestId,
+          args as z.infer<typeof DetectContractDriftInputSchema>,
+        ),
+    },
+    {
+      name: "causoryn_derive_test_plan",
+      title: "Test planı adayları",
+      description:
+        "changeSet (changedSymbols/changedFiles) için deterministik test adayları: TESTS kenarları (direct), değişen çağrı noktalarından CALLS zincirleri (call-site) ve test-dosyası adlandırma bağlamı (naming; daima heuristic). Her aday reason + evidenceIds + matchLevel taşır; TESTS kenarı bilmeyen değişen semboller missingCoverageCandidates'tır. Test ÇALIŞTIRILMAZ ve 'geçti' iddiası ÜRETİLMEZ (TŞ §15); plan kimliği içerik adreslidir (testplan:<sha256>) ve preflight_change testPlanId'siyle bire bir eşleşir. preflightId girdisi bu dilimde çözümlenmez (açık INVALID_ARGUMENT).",
+      inputSchema: DeriveTestPlanInputSchema,
+      outputSchema: envelopeOutputSchema(DeriveTestPlanDataSchema),
+      handler: (requestId, args) =>
+        deriveTestPlan(context, requestId, args as z.infer<typeof DeriveTestPlanInputSchema>),
     },
     {
       name: "causoryn_get_evidence",
@@ -377,7 +456,7 @@ function buildRegistrations(context: CausorynContext): readonly ToolRegistration
       name: "causoryn_wiki_diff",
       title: "Wiki diff",
       description:
-        "İki WikiSnapshot arası sayfa farkları (salt okunur; working tree değişmez): addedPages/removedPages, changedSections, addedLinks/removedLinks, coverageDelta ({previous, current, reason?} — K-013 #3) ve unresolvedDifferences. contractChanges Faz D dilimine kadar [] döner ve degrade notu warnings'te taşınır (K-013 #7).",
+        "İki WikiSnapshot arası sayfa farkları (salt okunur; working tree değişmez): addedPages/removedPages, changedSections, addedLinks/removedLinks, coverageDelta ({previous, current, reason?} — K-013 #3) ve unresolvedDifferences. contractChanges ({contractId, changeKind, summary} — K-013 #7) iki WikiSnapshot'ın arka graph snapshot'larının sözleşme node yüzeyleri (ApiContract/EventContract/SchemaContract/ContractVersion) üzerinden hesaplanır; arka graph çözümlenemediğinde [] + çözümleme başarısızlığı uyarısı döner, iki yüzeyde de sözleşme kaydı yoksa gerçek [] döner (boşluk notu yok — K-013(7) gövdesi kesindir).",
       inputSchema: WikiDiffInputSchema,
       outputSchema: envelopeOutputSchema(WikiDiffDataSchema),
       handler: (requestId, args) =>
@@ -386,7 +465,7 @@ function buildRegistrations(context: CausorynContext): readonly ToolRegistration
   ];
 }
 
-/** Context'i MCP McpServer'a bağlar; tam olarak 23 araç kaydeder. */
+/** Context'i MCP McpServer'a bağlar; tam olarak 28 araç kaydeder. */
 export function createCausorynMcpServer(context: CausorynContext): McpServer {
   const server = new McpServer(
     { name: SERVER_NAME, version: SERVER_VERSION },

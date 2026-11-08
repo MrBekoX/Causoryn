@@ -51,6 +51,16 @@ export {
 } from "./coverage-delta.js";
 export type { CoverageDelta, WikiCoverageDeltaEntry } from "./coverage-delta.js";
 
+// K-013(7) kesinleşmesi (sprint-5 D7): wiki_diff contractChanges saf
+// çekirdeği — üretici sözleşme ContractChangeRecord (@causoryn/contracts
+// contract-drift.ts); wiki paketi MCP türü import etmez (saf kalır).
+export {
+  computeWikiContractChanges,
+  WIKI_CONTRACT_NODE_KINDS,
+  wikiContractSurfaceOf,
+} from "./contract-changes.js";
+export type { WikiContractNodeSurface } from "./contract-changes.js";
+
 export {
   BrokenLinkDiagnosticSchema,
   WikiLinkDraftSchema,
@@ -78,7 +88,7 @@ export {
   wikiProjectionContentHash,
 } from "./content-hash.js";
 
-export { projectWiki, wikiSlugify } from "./projection.js";
+export { projectWiki, wikiChildPageId, wikiRootPageIdFor, wikiSlugify } from "./projection.js";
 export type { WikiProjectionInput } from "./projection.js";
 
 // W6 incremental invalidation (TŞ §16A.5; wiki/sprint-4.md W6) — motor +

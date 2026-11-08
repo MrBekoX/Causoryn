@@ -1,0 +1,15 @@
+{
+  "name": "@causoryn/contracts",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Salt-okunur sözleşme keşfi: OpenAPI, AsyncAPI, SQL migration, JSON Schema ve protobuf kaynaklarından ApiContract/EventContract/SchemaContract node adayları ile PRODUCES/CONSUMES_CONTRACT kenar adayları (TŞ v2.1 §11).",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@causoryn/domain": "0.1.0",
+    "@causoryn/workspace": "0.1.0",
+    "yaml": "^2.9.1"
+  }
+}

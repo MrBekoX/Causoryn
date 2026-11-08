@@ -1036,7 +1036,17 @@ export const GetSymbolContextDataSchema = z.strictObject({
  * (K-008 uzantı kodu), >1 node'a çözülürse AMBIGUOUS_SYMBOL + adaylar
  * (TŞ §10.3) fırlatır.
  */
-function resolveSymbolNode(snapshot: SnapshotGraph, symbolId: string): GraphNode {
+/**
+ * Sembol çözümleme (node kimliği YA DA TAM qualifiedName): 0 eşleşme →
+ * SYMBOL_NOT_FOUND, >1 → AMBIGUOUS_SYMBOL + adaylar (find_symbols
+ * AmbiguityDataSchema formu). trace_execution/get_symbol_context B4/B5 ve
+ * sprint-5 Faz D causoryn_trace_business_flow (D5) ortak çözümleme
+ * sözleşmesidir: belirsiz ad otomatik kesinleştirilmez (TŞ §10.3).
+ */
+export function resolveSymbolNode(
+  snapshot: SnapshotGraph,
+  symbolId: string,
+): GraphNode {
   const byId = snapshot.nodes.find((node) => node.id === symbolId);
   if (byId !== undefined) return byId;
   const byName = snapshot.nodes.filter((node) => node.qualifiedName === symbolId);

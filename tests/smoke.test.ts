@@ -191,10 +191,11 @@ describe("monorepo dizin iskeleti", () => {
     }
     // Dilim sonu ilkesi (TŞ §18): henüz açılmamış dilim paketleri
     // OLMAMALI. packages/wiki Faz C2 (Living Wiki) ile açıldı ve artık
-    // çözüm referansıdır; kalanlar sonraki dilimlere aittir.
+    // çözüm referansıdır. packages/contracts + packages/preflight Faz D
+    // (sprint-5 D1/D4: sözleşme keşfi + preflight manifest) ile açıldı —
+    // yetkili dilimler yasak listesinde TUTULMAZ. packages/roslyn hâlâ
+    // açılmadı: Roslyn worker native/roslyn-worker altında yaşar.
     const forbidden = [
-      "packages/contracts",
-      "packages/preflight",
       "packages/roslyn",
     ];
     for (const dir of forbidden) {

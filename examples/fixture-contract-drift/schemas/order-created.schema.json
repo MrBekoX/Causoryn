@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.causoryn.local/order-created-v1.json",
+  "title": "OrderCreatedPayload",
+  "type": "object",
+  "required": ["orderId", "amountMinor"],
+  "properties": {
+    "orderId": { "type": "string" },
+    "amountMinor": { "type": "integer" },
+    "money": { "$ref": "#/$defs/Money" }
+  },
+  "$defs": {
+    "Money": {
+      "type": "object",
+      "required": ["currency"],
+      "properties": {
+        "amount": { "type": "number" },
+        "currency": { "type": "string" }
+      }
+    }
+  }
+}

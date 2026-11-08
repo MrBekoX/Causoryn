@@ -37,11 +37,14 @@ import {
   WikiSearchResultSchema,
   WIKI_TEMPLATE_VERSION,
   buildWikiLinkIndex,
+  computeWikiContractChanges,
   computeWikiCoverageDeltas,
   deriveWikiSnapshotId,
   projectWiki,
   projectWikiIncremental,
   resolveWikiLinks,
+  wikiChildPageId,
+  wikiContractSurfaceOf,
   type WikiLinkDraft,
   type WikiPageKind,
   type WikiProjection,
@@ -271,13 +274,23 @@ export function wikiErrorToToolError(
       : undefined;
   if (code !== undefined) {
     // Girdi/şema ihlalleri — istemci girdisini düzeltmelidir.
+    // wiki/invalid-contract-surface (sprint-5 D7, K-013(7)): packages/wiki
+    // contract-changes.ts assertSurface açık reddi — sözleşme yüzeyi
+    // kaydının zorunlu string alanları (contractId/nodeKind/qualifiedName/
+    // contentHash) boş veya eksik. MCP yolunda bugün ulaşılamazdır (yüzey
+    // wikiContractSurfaceOf'tan üretilir: node.id/qualifiedName domain
+    // NonEmptyString sözleşmesi, contentHash sha256) — eşleme savunma
+    // derinliğidir: ortam hata kovasına (INTERNAL_ERROR + mesaj gizlemesi)
+    // düşmek yerine girdi-ihlali sınıfında taşınır (K-008 örüntüsü; yeni
+    // uzantı kodu İSTENMEZ, mevcut INVALID_ARGUMENT sabit kodu).
     if (
       code === "wiki/invalid-field" ||
       code === "wiki/invalid-input" ||
       code === "wiki/empty-query" ||
       code === "wiki/invalid-cursor" ||
       code === "wiki/invalid-limit" ||
-      code === "wiki/invalid-coverage-delta"
+      code === "wiki/invalid-coverage-delta" ||
+      code === "wiki/invalid-contract-surface"
     ) {
       return new CausorynToolError("INVALID_ARGUMENT", errorText(error));
     }
@@ -1798,7 +1811,8 @@ export const WikiDiffInputSchema = z.strictObject({
   pageId: z.string().min(1).optional(),
 });
 
-/** K-013 #7 Faz D gövdesi: {contractId, changeKind, summary}. */
+/** K-013 #7 gövdesi (sprint-5 D7'de kesinleşti): {contractId, changeKind, summary}
+ * — üretici sözleşme packages/contracts contract-drift.ts ContractChangeRecord. */
 export const WikiContractChangeSchema = z.strictObject({
   contractId: z.string(),
   changeKind: z.enum(["added", "removed", "modified"]),
@@ -1817,7 +1831,8 @@ export const WikiDiffDataSchema = z.strictObject({
   ),
   addedLinks: z.array(WikiLinkSchema),
   removedLinks: z.array(WikiLinkSchema),
-  /** K-013 #7: Faz D'ye kadar hep [] — dürüst degrade notu warnings'te. */
+  /** K-013 #7 gövdesi (D7): arka graph sözleşme yüzeyleri diff'i; kayıt
+   * yoksa/arka graph çözümlenemediyse [] + dürüst not warnings'te. */
   contractChanges: z.array(WikiContractChangeSchema),
   /** K-013 #3 gövde: {previous, current, reason?}. */
   coverageDelta: z.array(
@@ -1917,11 +1932,24 @@ function partialSectionCountByPage(
  * causoryn_wiki_diff (TŞ §16A.4, §16A.8 "Revision/snapshot sayfa farkları;
  * salt okunur"): iki WikiSnapshot arasında addedPages/removedPages/
  * changedSections/addedLinks/removedLinks/contractChanges/coverageDelta/
- * unresolvedDifferences. contractChanges K-013 #7 gereği Faz D'ye kadar []
- * döner ve envelope warnings'te dürüst degrade notu taşınır. coverageDelta
- * K-013 #3 gövdesiyle ({previous, current, reason?}) sayfa bazlı raporlanır.
- * Tarihi karşılaştırma İZOLE WikiSnapshot okumalarıyladır; working tree
- * değişmez (TŞ §16A.10).
+ * unresolvedDifferences.
+ *
+ * contractChanges K-013 #7 gövdesiyle ({contractId, changeKind:
+ * added|removed|modified, summary} — üretici sözleşme packages/contracts
+ * contract-drift.ts ContractChangeRecord; saf çekirdek packages/wiki
+ * contract-changes.ts) İKİ WIKISNAPSHOT'IN ARKA GRAPH SNAPSHOT'LARININ
+ * sözleşme node yüzeyleri (ApiContract/EventContract/SchemaContract/
+ * ContractVersion — D1/D2 kayıtları) üzerinden hesaplanır. pageId
+ * daraltmasında kayıt, kendi contract sayfasına (wikiChildPageId(workspaceId,
+ * "contract", contractId)) eşleşiyorsa taşınır; bir kayıt yalnızca hedef
+ * taraf kimliğini taşır (D3 kuralı), bu yüzden base taraf sayfasına
+ * daraltılan modified kaydı görünmez (belgeli sınır). Arka graph
+ * çözümlenemediğinde [] + çözümleme başarısızlığı uyarısı döner; iki
+ * yüzeyde de sözleşme kaydı yoksa GERÇEK [] döner — boşluk notu taşımaz
+ * (K-013(7) gövdesi kesinleşti; boş yüzey boş sonucun gerçek halidir).
+ * coverageDelta K-013 #3 gövdesiyle ({previous, current, reason?}) sayfa
+ * bazlı raporlanır. Tarihi karşılaştırma İZOLE WikiSnapshot okumalarıyladır;
+ * working tree değişmez (TŞ §16A.10).
  */
 export function wikiDiff(
   deps: ServiceDeps,
@@ -2080,10 +2108,53 @@ export function wikiDiff(
     }
   }
 
-  const warnings = [
-    // K-013 #7: Faz D'ye kadar sözleşme farkı boş döner (dürüst degrade).
-    "contractChanges Faz D dilimine kadar boş döner (K-013 #7): sözleşme diff gövdesi {contractId, changeKind, summary} Faz D'de kesinleşecek",
-  ];
+  // contractChanges (K-013 #7, sprint-5 D7 — GÖVDE KESİNLEŞTİ): iki
+  // WikiSnapshot'ın arka graph snapshot'larının sözleşme node yüzeyleri
+  // diff edilir. Arka graph ÇÖZÜMLENEMEZSE [] + çözümleme başarısızlığı
+  // uyarısı döner (analiz edilemeyen durum açık raporlanır); İKİ YÜZEYDE DE
+  // kayıt yoksa GERÇEK [] sessiz döner — boşluk "degrade notu" taşımaz,
+  // çünkü {contractId, changeKind, summary} gövdesi artık kesindir
+  // (K-013(7)); boş yüzey boş sonucun gerçek halidir (uydurma kayıt yok).
+  // Sayfa daraltmasında kayıt, kendi contract sayfasına eşleşiyorsa taşınır
+  // (D3 kimlik kuralı gereği kayıt hedef taraf kimliğini taşır; base taraf
+  // sayfasına daraltılan modified kaydı görünmez — modül dokümanındaki
+  // belgeli sınır).
+  const contractWarnings: string[] = [];
+  let contractChanges: {
+    contractId: string;
+    changeKind: "added" | "removed" | "modified";
+    summary: string;
+  }[] = [];
+  const baseGraphRead = deps.repository.getSnapshot(base.snapshot.graphSnapshotId);
+  const targetGraphRead = deps.repository.getSnapshot(target.snapshot.graphSnapshotId);
+  if (baseGraphRead === undefined || targetGraphRead === undefined) {
+    const missingSide =
+      baseGraphRead === undefined
+        ? `base (${base.snapshot.graphSnapshotId})`
+        : `target (${target.snapshot.graphSnapshotId})`;
+    contractWarnings.push(
+      `contractChanges boş: ${missingSide} WikiSnapshot'ın arka graph snapshot'ı çözümlenemedi (yayımlanmış ready/partial graph yok); sözleşme yüzeyi karşılaştırılamadı (K-013 #7)`,
+    );
+  } else {
+    const surfaceChanges = runWiki(deps, () =>
+      computeWikiContractChanges(
+        wikiContractSurfaceOf(baseGraphRead.snapshot),
+        wikiContractSurfaceOf(targetGraphRead.snapshot),
+      ),
+    );
+    if (pageScope === undefined) {
+      contractChanges = [...surfaceChanges];
+    } else {
+      contractChanges = surfaceChanges
+        .filter(
+          (change) =>
+            wikiChildPageId(workspaceId, "contract", change.contractId) === pageScope,
+        )
+        .map((change) => ({ ...change }));
+    }
+  }
+
+  const warnings = [...contractWarnings];
 
   return buildEnvelope({
     requestId,
@@ -2102,7 +2173,7 @@ export function wikiDiff(
       changedSections,
       addedLinks,
       removedLinks,
-      contractChanges: [],
+      contractChanges,
       coverageDelta,
       unresolvedDifferences,
     },
