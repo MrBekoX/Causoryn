@@ -7,6 +7,9 @@
   "exports": {
     ".": "./src/index.ts"
   },
+  "scripts": {
+    "build:bundle": "node scripts/build-bundle.mjs"
+  },
   "dependencies": {
     "@causoryn/contracts": "0.1.0",
     "@causoryn/domain": "0.1.0",

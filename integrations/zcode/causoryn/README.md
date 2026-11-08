@@ -70,16 +70,21 @@ the server can place in `envelope.error.code`.
 
 - **Node.js >= 24** (the plugin launches the server with `node`; the monorepo targets
   the same engine via `engines`).
-- The compiled server entry of the Causoryn monorepo:
-  `packages/mcp-server/dist/stdio.js`. In this source layout the manifest resolves it as
-  `${CLAUDE_PLUGIN_ROOT}/../../../packages/mcp-server/dist/stdio.js` — run `npm run
-  build` in the monorepo root if the file is missing.
+- The compiled server bundle of the Causoryn monorepo:
+  `packages/mcp-server/dist/mcp-server.mjs`. In this source layout the manifest resolves
+  it as `${CLAUDE_PLUGIN_ROOT}/../../../packages/mcp-server/dist/mcp-server.mjs` — run
+  `npm run build:bundle` (in `packages/mcp-server`) if the file is missing. The bundle
+  keeps `better-sqlite3` external: the native `.node` binaries cannot be embedded in a
+  single file, so the build also copies the runtime (`lib/` + `prebuilds/`) next to the
+  bundle as `dist/node_modules/better-sqlite3/`; the artifact is honestly
+  "mcp-server.mjs + its vendored runtime", not a single file.
 - A workspace root you authorize (see below).
 
 ## Installation
 
-1. Build the monorepo once: `npm install` / `npm run build` in the Causoryn checkout
-   that contains this plugin under `integrations/zcode/causoryn`.
+1. Build the monorepo once: `npm install` (repo root) and `npm run build:bundle`
+   (in `packages/mcp-server`) in the Causoryn checkout that contains this plugin under
+   `integrations/zcode/causoryn`.
 2. In ZCode, open **Plugin Marketplace → Add → Add Plugin Marketplace** and add the
    directory that contains this plugin (for local testing, a marketplace root with
    `.claude-plugin/marketplace.json` listing `causoryn`).
@@ -87,9 +92,11 @@ the server can place in `envelope.error.code`.
 4. Configure the workspace root declaration (next section), then reload the plugin so
    the MCP server picks up the new config.
 
-A packaged (bundled) release would copy the compiled server into the plugin itself and
-rewrite the `args` path accordingly; this source-layout manifest intentionally points at
-the monorepo build output so Sprint-1 development stays a single source of truth.
+Since Sprint-7 F1 the manifest points at the esbuild bundle
+(`dist/mcp-server.mjs`, TŞ §17.1: "the plugin package's `scripts/mcp-server.mjs` must be
+genuinely compiled; it must not point at the root TS source"). The bundle and its vendored
+`better-sqlite3` runtime are build artifacts and are never committed; CI/release steps
+produce them.
 
 ## Workspace root declaration (allowRoots)
 
@@ -107,7 +114,7 @@ variable (JSON). The plugin wires it through user configuration:
   "causoryn": {
     "type": "stdio",
     "command": "node",
-    "args": ["${CLAUDE_PLUGIN_ROOT}/../../../packages/mcp-server/dist/stdio.js"],
+    "args": ["${CLAUDE_PLUGIN_ROOT}/../../../packages/mcp-server/dist/mcp-server.mjs"],
     "cwd": "${CLAUDE_PROJECT_DIR}",
     "env": { "CAUSORYN_CONFIG": "${user_config.config_json}" }
   }

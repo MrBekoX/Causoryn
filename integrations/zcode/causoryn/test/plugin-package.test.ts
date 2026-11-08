@@ -34,9 +34,11 @@ const USER_CONFIG_TOKEN_PREFIX = DOLLAR_BRACE + "user_config.";
 const DOT_DOT = "." + ".";
 const SEPARATOR = "/";
 
-/** Server dist girişi — görev sözleşmesi: packages/mcp-server/dist/stdio.js */
+/** Server dist girişi — sprint-7 F1: esbuild bundle (TŞ §17.1 "derlenmiş
+ * gerçek başlangıç noktası"; better-sqlite3 EXTERNAL + vendored runtime,
+ * ADR-010 dürüstlük). */
 const SERVER_ENTRY_SUFFIX = path.normalize(
-  ["packages", "mcp-server", "dist", "stdio.js"].join(SEPARATOR),
+  ["packages", "mcp-server", "dist", "mcp-server.mjs"].join(SEPARATOR),
 );
 
 const PUBLISHED_TOOL_TOKEN_PATTERN = /`causoryn_[a-z_]+`/g;
@@ -55,7 +57,7 @@ function serverEntryArg(): string {
     "packages",
     "mcp-server",
     "dist",
-    "stdio.js",
+    "mcp-server.mjs",
   ].join(SEPARATOR);
 }
 
@@ -82,6 +84,24 @@ const REPO_ROOT = path.resolve(
 const PLUGIN_DIR = path.join(REPO_ROOT, "integrations", "zcode", "causoryn");
 const MANIFEST_REL = path.join(".zcode-plugin", "plugin.json");
 const SKILL_REL_PATH = path.join("skills", "map-system", "SKILL.md");
+
+/**
+ * Sprint-7 F1: bundle artefaktı commit edilmez (kök .gitignore satır 3:
+ * dist/) — diskte VARSA manifest doğrulaması tam koşar; YOKSA disk-bağlı
+ * testler açık skip sebebiyle atlanır (yeşillik rastlantıya değil kurala
+ * bağlanır: üretilmemiş bundle "geçti" sayılmaz, ADR-010).
+ */
+const BUNDLE_ENTRY_PATH = path.join(
+  REPO_ROOT,
+  "packages",
+  "mcp-server",
+  "dist",
+  "mcp-server.mjs",
+);
+const BUNDLE_PRESENT = existsSync(BUNDLE_ENTRY_PATH);
+const BUNDLE_SKIP_REASON = BUNDLE_PRESENT
+  ? false
+  : "bundle yok — önce npm run build:bundle (packages/mcp-server)";
 
 const SERVER_TS = readFileSync(
   path.join(REPO_ROOT, "packages", "mcp-server", "src", "server.ts"),
@@ -353,7 +373,7 @@ function validateManifest(
             issues.push(
               issue(
                 "mcpServers.causoryn.args",
-                "dist girişi diskte mevcut değil (önce npm run build): " + resolved,
+                "dist girişi diskte mevcut değil (önce npm run build:bundle): " + resolved,
               ),
             );
           }
@@ -562,7 +582,10 @@ function readPluginFile(relativePath: string): string {
 /* ------------------------------------------------------------------ */
 
 describe("plugin manifest (.zcode-plugin/plugin.json)", () => {
-  it("POZİTİF: geçerli JSON; zorunlu alanlar tam; mcpServers girdisi derlenmiş server dist girişine işaret eder", () => {
+  it(
+    "POZİTİF: geçerli JSON; zorunlu alanlar tam; mcpServers girdisi derlenmiş server dist girişine işaret eder",
+    { skip: BUNDLE_SKIP_REASON },
+    () => {
     // Yayımlanan set server.ts'ten dinamik çıkarılır; çekirdek 5 araç
     // (sprint-1 görev 6-7: get_evidence görev 7 ile eklendi) her zaman
     // listede olmalıdır.
@@ -580,18 +603,23 @@ describe("plugin manifest (.zcode-plugin/plugin.json)", () => {
     const manifest: unknown = JSON.parse(readPluginFile(MANIFEST_REL)) as unknown;
     const issues = validateManifest(manifest, PLUGIN_DIR);
     expect(issues, JSON.stringify(issues)).toEqual([]);
-  });
+    },
+  );
 
-  it("BAĞLANTI: mcpServers yalnızca causoryn girdisini taşır; dist girişi diskte var", () => {
-    const manifest = asRecord(JSON.parse(readPluginFile(MANIFEST_REL)) as unknown);
-    expect(manifest).not.toBeUndefined();
-    const servers = asRecord(manifest?.mcpServers);
-    expect(servers?.causoryn).not.toBeUndefined();
-    expect(Object.keys(servers as Record<string, unknown>)).toEqual(["causoryn"]);
-    expect(existsSync(path.join(REPO_ROOT, "packages", "mcp-server", "dist", "stdio.js"))).toBe(
-      true,
-    );
-  });
+  it(
+    "BAĞLANTI: mcpServers yalnızca causoryn girdisini taşır; dist girişi diskte var",
+    { skip: BUNDLE_SKIP_REASON },
+    () => {
+      const manifest = asRecord(JSON.parse(readPluginFile(MANIFEST_REL)) as unknown);
+      expect(manifest).not.toBeUndefined();
+      const servers = asRecord(manifest?.mcpServers);
+      expect(servers?.causoryn).not.toBeUndefined();
+      expect(Object.keys(servers as Record<string, unknown>)).toEqual(["causoryn"]);
+      expect(
+        existsSync(path.join(REPO_ROOT, "packages", "mcp-server", "dist", "mcp-server.mjs")),
+      ).toBe(true);
+    },
+  );
 
   it("NEGATİF: eksik/yanlış zorunlu alanlar reddedilir", () => {
     const empty = validateManifest({}, PLUGIN_DIR);
