@@ -1,6 +1,6 @@
 # Implementation Status
 
-> Sprint durum tabloları: **Sprint 1 (Faz A: Foundation)**, **Sprint 2 (Faz B: Deep Mapping)**, **Sprint 3 (Faz C: Original Features)**, **Sprint 4 (Faz C2: Living Wiki)**, **Sprint 5 (Faz D: Differentiation)** ve **Sprint 6 (Faz E: Agent Change Guard)** · TŞ v2.1 §25, §7/§8/§9/§10/§11/§12/§13/§14/§15/§16/§16A/§23.
+> Sprint durum tabloları: **Sprint 1 (Faz A: Foundation)**, **Sprint 2 (Faz B: Deep Mapping)**, **Sprint 3 (Faz C: Original Features)**, **Sprint 4 (Faz C2: Living Wiki)**, **Sprint 5 (Faz D: Differentiation)**, **Sprint 6 (Faz E: Agent Change Guard)** ve **Sprint 7 (Faz F: Cross-host Release — final)** · TŞ v2.1 §25, §7/§8/§9/§10/§11/§12/§13/§14/§15/§16/§16A/§17/§22/§23.
 
 > **ADR-010 kuralı (TŞ):** Çalışmayan şey Done yazılmaz. Aşağıdaki tablolarda her durum, görevin kabul ölçütlerinin o anki diskteki ve rapordaki gerçek haline göre verilmiştir; eksik kalan her kalemin kendisi belirtilmiştir.
 
@@ -9,9 +9,66 @@
 | İşaret | Anlamı | Kimin doğrulaması |
 |---|---|---|
 | **[D]** | Bu doküman yazılırken bizzat diskte doğrulandı (dosya okuma, `grep`, `ls`, `git diff`) | Bu dokümanı yazan ajan |
-| **[R]** | Orkestratör tarafından doğrulanmış görev sonucu raporu (görev süresinde koşuldu) | Orkestratör |
+| **[R]** | Orkestratör tarafından doğrulanan görev sonucu raporu (görev süresinde koşuldu) | Orkestratör |
 | **[K]** | Kapı sonucu: `npm run test` / `typecheck` / `build` / `lint` — **orkestratör çalıştırdı, tümü yeşil**; bu dokümanı yazan ajan süiti tekrar koşmadı | Orkestratör |
 | **[S]** | Statik sayım: test dosyasındaki `it(`/`test(` bloklarının `grep` ile sayımı — **koşum sayısı değildir** | Bu dokümanı yazan ajan |
+
+## Sprint 7 — Faz F: Cross-host Release (2026-11-08/09, FİNAL)
+
+> Kanıt: TŞ v2.1 §17 (paketleme; §17.1 "Eklenti paketinde scripts/mcp-server.mjs gerçekten derlenmiş olmalı"), §22 (test stratejisi: cross-host smoke + security matrisi + "agy CLI yoksa çalıştırılmadı diye açıkça raporla" — PDF s.22-23'ten bu oturumda PyPDF2 ile okundu), §23 (Faz F kapısı: "18 modül + Living Wiki Done + release test matrisi + changelog") · wiki/sprint-7.md F1–F9 · sprint-7 görev sonucu raporları (orkestratör doğrulamalı) + bu oturumda bizzat koşulan `tests/release-docs.test.ts` (bkz. sprint kapısı) · [docs/security-pass.md](security-pass.md) · [docs/benchmarks.md](benchmarks.md) · [docs/compatibility-matrix.md](compatibility-matrix.md)
+
+> İşaret kullanımı bu bölümde: **[D]** bu dokümanı yazan ajanın bu oturumda bizzat yaptığı disk doğrulamalar (dosya okuma, `grep`, `git log/show`, PyPDF2 ile TŞ §22/§23 çıkarımı) **ve bizzat koştuğu test koşumları** (`tests/release-docs.test.ts` — önce 18 failed \| 4 passed kırmızı, dokümanlar yazılınca yeşil); **[R]** orkestratör doğrulamalı F1–F7 görev raporları; **[K]** orkestratör kapı sonuçları. Dürüstlük notu: bu oturumda **tam süit koşulmadı**; bizzat koşulan koşum `npx vitest run tests/release-docs.test.ts`'tir (22 test).
+
+### Sprint 7 görev tablosu
+
+| # | Görev | Durum | Kanıt |
+|---|---|---|---|
+| F1 | Paketleme: esbuild bundle `packages/mcp-server/dist/mcp-server.mjs` (external `better-sqlite3`; native `.node` gömülemez) + vendored runtime kopyası + deterministik `dist/bundle-manifest.json` | **Done** (belgeli sınırla) | **[R]** iki build bit-bit aynı; manifest 33 dosya sıralı sha256, `mcp-server.mjs` hash'i gerçek dosyayla birebir. **[D]** "tek dosya" iddiası dürüstçe YOK: artefakt `mcp-server.mjs + dist/node_modules/better-sqlite3/` (32 dosya) — host dokümanlarında ve security-pass'te açık kayıt (ADR-010); `tests/hosts-docs.test.ts` manifest sha256 karşıtlığı + prebuild varlığı bu oturumun doküman setiyle uyumlu. Commit: `806c719`. |
+| F2 | ZCode plugin: dev marketplace (`integrations/zcode/.claude-plugin/marketplace.json`) + manifest doğrulama + kurulum denemesi | **Done** (manifest-düzeyi; GUI kurulum koşulmadı) | **[D]** `plugin-dev-marketplace.test.ts` (338 satır) + `plugin-package.test.ts` (+243) diskte; marketplace.json `causoryn@0.1.0` birebir okundu. **[R]** ZCode CLI yok (kurulum desktop GUI adımıdır — README Installation bölümü); kırmızı kural 6 gereği kullanıcının gerçek kurulumuna dokunulmadı; manifest doğrulama testleri yeşil koşuldu. Commit: `88743fd`. |
+| F3 | Claude Code: `.mcp.json` örneği + `/mcp` smoke | **Done** | **[R]** `claude 2.1.319` gerçek CLI smoke: `CLAUDE_CONFIG_DIR` geçici dizine yönlendirilerek `add -s local` → `list` (causoryn ✔ Connected) → `remove`; kullanıcı `~/.claude.json`'a smoke ile ilgili bayt yazılmadı (yönlendirme kanıtı + dürüst kalıntı notu `docs/hosts/claude-code.md` §7a/7b'de). stdout doğrulaması: 2 satır saf JSON-RPC, tools/list → 29 araç. **[D]** `docs/hosts/claude-code.md` diskte; `tests/hosts-docs.test.ts` F3 blokları yeşil. |
+| F4 | Codex: `config.toml` / `codex mcp add` + `codex mcp list` smoke | **Done** | **[R]** `codex-cli 0.163.0` gerçek CLI smoke: `codex mcp add causoryn-smoke` → `list` (görünür) → `remove` → `list` (temizlik kanıtı); Codex'te local scope yoktur — geçici belirgin-adlı kayıt kullanıldı (kırmızı kural 6). stdout doğrulaması Claude ile aynı. **[D]** `docs/hosts/codex.md` diskte; F4 blokları yeşil. |
+| F5 | Antigravity: plugin.json + mcp.json (doküman örneği; agy CLI yoksa çalıştırılmadı diye açıkça raporla) | **Not Run** (artefaktlar hazır; kurulum/smoke koşulmadı) | **[D]** `agy` CLI yok — makine kanıtı `docs/hosts/antigravity.md`'de (Antigravity IDE kurulu; `agy --version` command not found; `command -v agy` boş). `plugin.json` + `mcp.json` TŞ §17.1'den birebir yazıldı ve `antigravity-plugin.test.ts` (495 satır; repo-düzeni çözümlemesi, bundle yoksa açık-sebepli skip) statik denetliyor. TŞ §22 kuralı uygulandı: **tüm kurulum/smoke komutları NOT RUN** (ADR-010: koşulmayan Done yazılmaz — kırmızı kural 5). TŞ §17.1 hedef düzeninin README/skills/vendor parçaları yok (açık kalem 3). |
+| F6 | Güvenlik turu: paketlenmiş bundle üzerinde TŞ §22 matrisi | **Done** (9/9 PASS) | **[R]** symlink/traversal, secret leakage (8 kalıplı statik tarama + canary self-test + davranışsal yemler), symlink TOCTOU, poisoned source comment, oversized files, malicious Git refs, network denied (netguard preload — netlog boş), offline HTML XSS/CSP, stdout disiplini (4 bağımsız spawn oturumu) — `npx vitest run tests/security-release/f6-security-release.test.ts` → **26/26**. Dürüst paketleme fidelity notu (default-lib .d.ts → global-referanslı kaynaklar partial) `docs/security-pass.md`'de. **[D]** `docs/security-pass.md` diskte birebir okundu. Commit: `9236cb7`. |
+| F7 | Performans benchmark: 1k dosya fixture | **Done** (ölçülen değerlerle) | **[R]** MCP protokol düzeyi medyanlar: workspace_summary 5.3 ms (<1000 ms hedef), sembol bağlamı 8.2 ms (<500 ms), 200-node map 5.7 ms (<2000 ms); cold index 5871.3 ms (sabit süre vaadi yok — TŞ §21). TŞ §21 açıkça "tasarım hedefi, gerçekleşmiş test sonucu değildir" der — hedef kolonu referans olarak raporlandı. **[D]** `docs/benchmarks.md` diskte; ortam/yöntem + yeniden üretim komutu kayıtlı. |
+| F8 | Docs: architecture.md, tool-contracts, compatibility matrisi, changelog; implementation-status final | **Done** | **[D] Bu oturumda ÜRETİLDİ ve testlendi:** `docs/architecture.md` (paket tablosu 12 workspace paketi + apps/visualizer + native/roslyn-worker + 2 entegrasyona genişletildi; bayat "oluşturulmayan paketler" paragrafı ve "7 proje" build notu güncellendi), `docs/tool-contracts.md` YENİ (29 aracın girdi/çıktı/tipik hata kodları özeti; küme ↔ `TOOL_NAMES` birebir), `docs/compatibility-matrix.md` YENİ (host × kurulum/smoke/stdout; Antigravity NOT RUN dürüst satır), `CHANGELOG.md` YENİ (Keep a Changelog; [0.1.0] 2026-11-09 + Unreleased 1.0.0 kapıları), bu bölüm. **Doğrulama testi failing-first koşuldu:** `npx vitest run tests/release-docs.test.ts` → önce **18 failed \| 4 passed** (dokümanlar yokken kırmızı görüldü) → dokümanlar yazılınca **yeşil** (ayrıntı aşağıda sprint kapısı). |
+| F9 | Sürüm etiketi: 0.1.0 public snapshot veya 1.0.0 | **Done** (karar: **0.1.0 public snapshot**) | **[D]** Karar bu oturumda verildi ve üç yüzeye işlendi: (1) kök `package.json` `version` alanı **0.1.0 olarak korundu** (değişiklik gerekmedi — karar bu değerin korunmasıdır; `SERVER_VERSION` ile birebir, testle sabit), (2) `CHANGELOG.md` [0.1.0] girişi + Unreleased'de 1.0.0 kapıları, (3) `docs/compatibility-matrix.md` motor kimliği. Gerekçe aşağıda "F9 sürüm kararı". Yayımlanmış `## [1.0.0]` başlığı YOK (negatif testle sabit — ADR-010). |
+
+### Sprint kapısı (F8) — hangi testlerle doğrulandı
+
+**[D] Bu oturumda bizzat koşuldu** (aynı komut, iki faz): `npx vitest run tests/release-docs.test.ts`
+
+1. **Kırmızı koşum (dokümanlar yazılmadan önce):** `Test Files 1 failed (1)`, **`Tests 18 failed | 4 passed (22)`** — 18 kırmızı, F8 teslimlerinin eksik listesiydi: tool-contracts küme eşitliği, compatibility host satırları, changelog 0.1.0 girişi, architecture yeni paketler, Sprint 7 bölümü vb. (failing-first kanıtı).
+2. **Yeşil koşum (dokümanlar yazıldıktan sonra):** aynı dosya **22/22 passed** — pozitif (tüm release dokümanları var; tool-contracts tablosu `TOOL_NAMES` ile küme eşitliği; compatibility 4 host satırı; changelog `## [0.1.0] - tarih`; kök version === `SERVER_VERSION`), negatif (yayımlanmamış araç reklamı yok; `refresh_index` incremental açık-reti korunuyor; Antigravity satırı NOT RUN ve PASS içermiyor; ZCode satırı manifest-düzeyi; `## [1.0.0]` başlığı yok; B7 hâlâ Partial; kök allowRoots/sır/tek-dosya iddiası yok), partial (ZCode README+marketplace ile belgeli 3-sayfalık docs/hosts durumu).
+3. **Tamamlayıcı (orkestratör/görev koşumları [R]):** `tests/hosts-docs.test.ts` (F1–F4 doküman/bundle yüzeyi), `tests/security-release/f6-security-release.test.ts` 26/26, `tests/bench-release/benchmark.test.ts` (docs yazma kapısıyla koşum 2026-11-08), plugin suite'leri. Tam süit (`npm run test`) bu oturumda TEKRAR KOŞULMADI — kök kapı koşumu orkestratördedir [K]; 1116-test referansı Sprint 6 kapanış koşumudur.
+
+### F9 sürüm kararı — gerekçe (ADR-010)
+
+**Karar: `0.1.0` public snapshot; 1.0.0 ilan edilmedi.** Sayım ve gerekçe:
+
+- **Sağlananlar:** 29/29 araç gerçek implementasyon (boş handler yok); release test matrisi VAR (F6 güvenlik 9/9 + F7 ölçümlü benchmark + host smoke dokümantasyonu + deterministik bundle); changelog VAR (F8). TŞ §23 Faz F kapısının "release test matrisi + changelog" ayakları karşılandı; "18 modül + Living Wiki Done" ayakları çekirdek yüzeyde karşılanmış durumda (belgeli sınırlar dışında).
+- **1.0.0'ı engelleyen dürüstlük kalemleri (sayım):**
+  1. Host koşum kapsamı 2/3: Antigravity kurulum/smoke koşulmadı (agy CLI yok — F5 Not Run; TŞ §23 Faz F "3 host kurulum testleri").
+  2. ZCode gerçek GUI kurulum/smoke koşulmadı (kırmızı kural 6 kısıtı; manifest doğrulama düzeyi).
+  3. Platform dağıtım doğrulaması yalnızca Windows x64 (TŞ §22 Release satırı: Windows/macOS/Linux x64/arm64).
+  4. MCP SDK 1.32.2 v1.x hattı — TŞ §6 SDK v2 hedefi değil (K-009; npm install kısıtı).
+  5. B7 Live Architecture Partial kalıntıları: per-file parse reuse yok; watcher MCP araca sarılmadı; `refresh_index mode=incremental` araç yüzeyinde açık ret.
+  6. `derive_test_plan` direct sinyali gerçek graph'ta dormant (adapter'lar TESTS kenarı üretmiyor).
+  7. OpenAPI keşfi yanıt-şeması drift'ini yüzeye taşımıyor (K-015(5)); TŞ §11 event versiyon kuralı uygulanmadı (K-015(4)); SQL rename → unknown (K-015(3)).
+  8. compare_architecture/architecture_timeline için `.causoryn/architecture-snapshot.json` blob üreticisi yok (elle yazılmış blob ile çalışır).
+  9. wiki_search sorgu filtreleri (pageKind/language/...) yüzeyde yok; WIKI_NOTE_CONFLICT TOOL_ERROR_GUIDANCE kaydı yok; incremental wiki yayımı link/FTS indekslerini tam graph'tan yeniden yazar.
+  10. Rate-limit/concurrency resource budget kapsam dışı (K-010); adanmış secret-scan script'i yok; npm audit 10 moderate dev-toolchain uyarısı açık.
+  11. E6 visualizer gerçek tarayıcı koşusu olmadan doğrulandı; viewer HTML'ini izinli output'a yazan MCP yüzeyi yok.
+  12. Bundle default-lib `.d.ts` taşımıyor → global-tanımlı identifier kullanan kaynaklar `partial`'a düşer (F6 fidelity notu).
+- **Sonuç:** 1.0.0, "tüm barajlar kapanmış" iması taşır; bu imanın 12 kalemi henüz doğru değil. ADR-010 gereği sürüm **0.1.0 public snapshot** olarak etiketlendi; 1.0.0 kapıları `CHANGELOG.md` [Unreleased] bölümünde somut kapanış kalemleri olarak listelenir. Kök `package.json` `version` alanı **değişmedi (0.1.0)** — kararın o alana düşen etkisi korunumdur.
+
+### Sprint 7 açık kalemleri (orkestratör/kullanıcıya notlar)
+
+1. **F5 Antigravity koşumu** [D]: agy CLI kurulduğunda `docs/hosts/antigravity.md`'deki NOT RUN listesi (`agy plugin validate --strict`, install, list, tool discovery → 29 araç, temsilî araç çağrıları, stdout-safi kontrolü) koşulup bu matris güncellenmelidir; TŞ §17.1 hedef düzeninin eksik parçaları (README, `scripts/mcp-server.mjs` vendor'ı, skills/agents/rules/hooks.json) ayrı dilim.
+2. **ZCode GUI kurulum + tools/list smoke** [D]: kırmızı kural 6 (kullanıcı kurulumuna dokunmama) gereği bu oturumda bilinçli olarak koşulmadı; kullanıcı onayıyla GUI adımları yürütülüp compatibility-matrix güncellenmelidir.
+3. **Commit/push + wiki kayıtları** (wiki yazma yasağı) [D]: `wiki/sprint-7.md` kutuları (F1–F9), `wiki/decisions.md` K-017 sürüm kararı girişi (öneri metni bu dokümanı yazan ajanın görev raporundadır), `wiki/log.md` dev girişleri ve F8 dokümanlarının commit'i orkestratördedir. Çalışma ağacı bu oturumun sonunda: yeni `docs/tool-contracts.md`, `docs/compatibility-matrix.md`, `CHANGELOG.md`, `tests/release-docs.test.ts` + düzenlenen `docs/architecture.md`, `docs/implementation-status.md`.
+4. **Cross-platform doğrulama** [D]: TŞ §22 Release satırındaki macOS/Linux/ARM hedefleri koşulmadı; dağıtım öncesi prebuild matris + bundle koşumu platform başına doğrulanmalıdır.
+5. **Bundle fidelity** [R→D]: F6'nın default-lib notu (`docs/security-pass.md` Dürüstlük 1) F8'e taşındı; kalıcı çözüm (lib dosyalarının bundle'a katılması veya doküman sınırlaması) sonraki dilim kararıdır.
+6. **Önceki sprintlerin hâlâ açık kalemleri** [D]: yukarıdaki F9 sayımının 5–11. maddeleri (B7 kalıntıları, TESTS kenarı, openapi yanıt-şeması, event kuralı, blob üreticisi, wiki yüzey boşlukları, rate-limit, secret-scan script, npm audit, visualizer MCP yüzeyi) sprint bazlı kanıtlarıyla aşağıdaki bölümlerde yaşar ve CHANGELOG [Unreleased] 1.0.0 kapılarına işlenmiştir.
 
 ## Sprint 6 — Faz E: Agent Change Guard (2026-11-08)
 
@@ -329,7 +386,12 @@ Orkestratör raporu [K]: analiz 2 bulgu üretti, ikisi giderildi ve kapılar yen
 ## İlgili sayfalar
 
 - [docs/architecture.md](architecture.md) — paket haritası ve bağımlılık sınırları
+- [docs/tool-contracts.md](tool-contracts.md) — 29 araç sözleşme özeti (TOOL_NAMES ile çapraz doğrulamalı)
+- [docs/compatibility-matrix.md](compatibility-matrix.md) — host × sonuç matrisi (not-run satırları dürüst)
+- [CHANGELOG.md](../CHANGELOG.md) — 0.1.0 public snapshot girişi + Unreleased 1.0.0 kapıları
+- [docs/security-pass.md](security-pass.md) — F6 paketlenmiş-bundle güvenlik turu
+- [docs/benchmarks.md](benchmarks.md) — F7 performans ölçümleri
 - [docs/BACKLOG.md](BACKLOG.md) — faz bağımlılık sıralaması (görev 11 çıktısı)
 - [docs/wiki-spec.md](wiki-spec.md) — Living Wiki tasarım sözleşmesi (görev 10 çıktısı)
 - [docs/adr/ADR-002-no-llm.md](adr/ADR-002-no-llm.md) — LLM'siz motor kararı
-- [wiki/sprint-1.md](../wiki/sprint-1.md) · [wiki/sprint-2.md](../wiki/sprint-2.md) · [wiki/sprint-3.md](../wiki/sprint-3.md) · [wiki/architecture.md](../wiki/architecture.md) · [wiki/decisions.md](../wiki/decisions.md)
+- [wiki/sprint-1.md](../wiki/sprint-1.md) · [wiki/sprint-2.md](../wiki/sprint-2.md) · [wiki/sprint-3.md](../wiki/sprint-3.md) · [wiki/sprint-7.md](../wiki/sprint-7.md) · [wiki/architecture.md](../wiki/architecture.md) · [wiki/decisions.md](../wiki/decisions.md)

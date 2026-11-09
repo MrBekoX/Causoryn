@@ -665,10 +665,17 @@ describe("WorkspaceWatcher — debounce max-wait (güvenlik bulgusu 2)", { timeo
         try {
           // maxWaitMs=900: akış sürerken (ilk yazımdan itibaren ≤ ~900 ms +
           // koşum süresi) en az bir reindex işi AÇILMIŞ olmalı (liveness).
+          // Bütçe: izole koşumda flush ~1 s'te gelir (maxWait + fs olay
+          // teslimi); paralel suite yükünde fs olay teslimi + timer jitter
+          // 1500 ms'lik eski pencereyi aşabildi (gözlenen kırmızı, suite
+          // 1.8× yavaşlama). Pencere yine de SONLUDUR: max-wait kırılırsa
+          // (trailing-edge süresiz sıfırlama bug'ı — asıl ayrımcılanan
+          // durum) akış sürerken flush ASLA gelmez ve bu bekleme 30 s
+          // test bütçesinde KIRMIZI düşer; ayrımcı güç korunur.
           await waitFor(
             () => harness.watcher.stats().jobsEnqueued >= 1,
             "sürekli akışta debounce flush",
-            1_500,
+            6_000,
           );
         } finally {
           clearInterval(stream);
