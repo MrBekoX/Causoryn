@@ -1,14 +1,17 @@
 # Causoryn'i Claude Code'a bağlama (stdio MCP)
 
-> Kanıt: `claude --version` → `2.1.319 (Claude Code)`; `claude mcp --help` ve
-> `claude mcp add --help` çıktıları (bu dokümandaki tüm komut sözdizimi 2026-11-08'de
-> bu sürümle doğrulandı). Bundle artifact: `packages/mcp-server/dist/mcp-server.mjs`
+> Kanıt: `claude --version` → `2.1.322 (Claude Code)`; `claude mcp --help` ve
+> `claude mcp add --help` çıktıları (sözdizimi ilk kez 2026-11-08'de 2.1.319 ile,
+> **2026-11-10'da 2.1.322 ile uçtan uca yeniden doğrulandı**: yönlendirilmiş geçici
+> config'de `mcp add` → `mcp list` `✔ Connected` → `mcp remove`; smoke öncesi/sonrası
+> `sha256sum ~/.claude.json` birebir aynı). Bundle artifact:
+> `packages/mcp-server/dist/mcp-server.mjs`
 > (F1 esbuild bundle; external `better-sqlite3` prebuilds `dist/node_modules/`
 > altındadır — "tek dosya" değil, `dist/` klasörünün bütününü dağıtın).
 > Doğrulama testi: `tests/hosts-docs.test.ts`.
 
 Causoryn, LLM çalıştırmayan yerel ve deterministik bir MCP motorudur. Bu kılavuz,
-`packages/mcp-server/dist/` altındaki stdio bundle'ını **Claude Code 2.1.319+**
+`packages/mcp-server/dist/` altındaki stdio bundle'ını **Claude Code 2.1.322+**
 sürümüne kaydeder. CLI yoksa `npm install -g @anthropic-ai/claude-code` ile kurulur.
 
 ## 0. Ön koşul: bundle'ı üret
@@ -73,12 +76,20 @@ Notlar:
 claude mcp list
 ```
 
-Beklenen: listede `causoryn` görünür ve health-check ✓ (connected) gösterir. Tek
-sunucunun detayı için:
+Beklenen: listede `causoryn` görünür ve health-check ✓ (connected) gösterir. `mcp list`,
+sunucu sürecini gerçekten başlatıp MCP handshake yapar — 2.1.322 canlı koşusunda
+`causoryn: node <repo-root>/packages/mcp-server/dist/mcp-server.mjs - ✔ Connected` döndü.
+Tek sunucunun detayı için:
 
 ```bash
 claude mcp get causoryn
 ```
+
+**Negatif davranış (2.1.322 canlı kanıt, 2026-11-10):** geçersiz komut yoluyla
+kayıtlı sunucu (`node Z:/definitely/not/here.mjs`) listede
+`✘ Failed to connect — CONNECTION_CLOSED` olarak raporlanır; host hatayı sessizce
+geçmez. `add` ise komutu doğrulamaz — kaydı kabul eder; hata yalnızca
+`list`/`get` health-check'inde ortaya çıkar.
 
 ## 4. Temizlik
 
@@ -112,7 +123,7 @@ claude mcp add causoryn -s local \
 
 ## 7. Smoke test protokolü (kullanıcı config'i temiz kalır)
 
-### 7a. Yönlendirilmiş protokol (önerilen; claude 2.1.319'da uçtan uca doğrulandı)
+### 7a. Yönlendirilmiş protokol (önerilen; claude 2.1.322'de 2026-11-10'da uçtan uca yeniden doğrulandı)
 
 `CLAUDE_CONFIG_DIR` ortam değişkeni claude'un TÜM config yazılarını geçici dizine
 yönlendirir; gerçek `~/.claude.json`'a smoke ile ilgili hiçbir bayt yazılmaz:

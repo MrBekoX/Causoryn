@@ -360,12 +360,24 @@ function validateManifest(
     }
   }
 
-  // mcpServers girdisi: stdio + node + server dist girişi.
+  // mcpServers girdisi: stdio + node + server dist girişi. Paket sözleşmesi
+  // katı tekilliktir: tam bir causoryn girdisi (env anahtarı katılığının
+  // örüntüsü) — fazladan server girdisi tamper penceresidir.
   const servers = asRecord(root.mcpServers);
   if (servers === undefined) {
     issues.push(issue("mcpServers", "server haritası (nesne) olmalı"));
   } else {
     const entry = asRecord(servers.causoryn);
+    if (Object.keys(servers).length !== 1) {
+      issues.push(
+        issue(
+          "mcpServers",
+          'tam bir server girdisi olmalı ("causoryn"; bulunan: ' +
+            String(Object.keys(servers).length) +
+            ")",
+        ),
+      );
+    }
     if (entry === undefined) {
       issues.push(issue("mcpServers.causoryn", "server girdisi olmalı"));
     } else {
@@ -607,6 +619,14 @@ function validateSkillBundle(skillsDir: string): readonly ValidationIssue[] {
     const skillFile = path.join(skillsDir, dir.name, "SKILL.md");
     if (!existsSync(skillFile)) {
       issues.push(issue(dir.name, "SKILL.md mevcut değil"));
+      continue;
+    }
+    if (!statSync(skillFile).isFile()) {
+      // Bozuk paket: SKILL.md adında dizin — existsSync tek başına yanıltır;
+      // readFileSync EISDIR ile çökmeden temiz şema reddi üret.
+      issues.push(
+        issue(dir.name + "/SKILL.md", "SKILL.md bir dosya değil (dizin olarak paketlenmiş)"),
+      );
       continue;
     }
     const text = readFileSync(skillFile, "utf8");
@@ -1030,6 +1050,23 @@ describe("F2: skills paket bütünlüğü (generic)", () => {
       rmSync(tmpSkills, { recursive: true, force: true });
     }
   });
+
+  it("NEGATİF: SKILL.md dosya değil dizin olarak paketlendiyse reddedilir (çökmez)", () => {
+    // Bozuk paket senaryosu: SKILL.md adında DİZİN. Validator çökmemeli;
+    // temiz bir şema reddi üretmelidir (existsSync tek başına yanıltır —
+    // dizin için de geçerlidir).
+    const tmpSkills = mkdtempSync(path.join(os.tmpdir(), "causoryn-skills-"));
+    try {
+      mkdirSync(path.join(tmpSkills, "dir-skill", "SKILL.md"), { recursive: true });
+      const issues = validateSkillBundle(tmpSkills);
+      expect(
+        issues.some((i) => i.path.startsWith("dir-skill")),
+        JSON.stringify(issues),
+      ).toBe(true);
+    } finally {
+      rmSync(tmpSkills, { recursive: true, force: true });
+    }
+  });
 });
 
 describe("F2: manifest şeması güçlendirmeleri (resmî plugin.json sözleşmesi)", () => {
@@ -1062,6 +1099,25 @@ describe("F2: manifest şeması güçlendirmeleri (resmî plugin.json sözleşme
     const absolute = ["C:", "elsewhere", "skills"].join(SEPARATOR);
     const issues = validateManifest(fixtureManifest({ skills: absolute }), PLUGIN_DIR);
     expect(issues.map((i) => i.path)).toContain("skills");
+  });
+
+  it("GUARD/NEGATİF: mcpServers fazladan server girdisi taşıyorsa reddedilir", () => {
+    // Paket sözleşmesi: bu plugin tam bir causoryn server girdisi taşır
+    // (BAĞLANTI testi gerçek dosyada ["causoryn"] kümesini zorlar). Validator
+    // da aynı katı tekil kuralı uygulamalıdır — aksi halde manifest'e
+    // sızdırılan ikinci bir server girdisi şema denetiminden geçer (env
+    // anahtarı katılığının birebir örüntüsü).
+    const tampered = fixtureManifest();
+    (tampered.mcpServers as Record<string, unknown>).second = {
+      type: "stdio",
+      command: "python3",
+      args: ["-c", "print('tamper')"],
+    };
+    const issues = validateManifest(tampered, PLUGIN_DIR);
+    expect(
+      issues.some((i) => i.path === "mcpServers" && i.message.includes("tam bir")),
+      JSON.stringify(issues),
+    ).toBe(true);
   });
 });
 

@@ -172,6 +172,20 @@ describe("docs/hosts/claude-code.md (F3)", () => {
     // kalıntısı (mcpServers: {} girdisi) açıkça belgelenmelidir.
     expect(text).toContain("kalıntı");
   });
+
+  it("kanıt satırı 2.1.322 doğrulamasını taşıyor (2026-11-10 yeniden koşu)", () => {
+    const text = readClaudeDoc();
+    expect(text).toContain("2.1.322");
+    expect(text).toContain("2026-11-10");
+  });
+
+  it("negatif davranış kanıtı: geçersiz komut yolu list'te Failed to connect yüzeyiyle raporlanır", () => {
+    const text = readClaudeDoc();
+    // 2.1.322 canlı koşu (2026-11-10): node Z:/definitely/not/here.mjs →
+    // "✘ Failed to connect — CONNECTION_CLOSED" (host, hatayı dürüst gösterir).
+    expect(text).toContain("Failed to connect");
+    expect(text).toContain("CONNECTION_CLOSED");
+  });
 });
 
 /** F4: Codex host kılavuzu. */
@@ -207,6 +221,22 @@ describe("docs/hosts/codex.md (F4)", () => {
   it("CAUSORYN_CONFIG env ilkesini belgeliyor (TŞ §20)", () => {
     const text = readCodexDoc();
     expect(text).toContain("CAUSORYN_CONFIG");
+  });
+
+  it("config.toml yeniden serileştirme uyarısı + yedek önerisi içeriyor (2026-11-10 canlı bulgu)", () => {
+    const text = readCodexDoc();
+    // 0.163.0 canlı koşu: add/remove TOML'u yeniden yazdı — komşu blokun
+    // env sırası ve sayı biçimi değişti (byte-değişmezlik YOK). Kırmızı
+    // kural 6 disiplini: smoke öncesi yedek, sonrası hash doğrulaması.
+    expect(text).toContain("yeniden serileştirir");
+    expect(text).toContain("yedek");
+  });
+
+  it("negatif davranış farkı belgeli: codex mcp list health-check yapmaz (claude'un aksine)", () => {
+    const text = readCodexDoc();
+    // 0.163.0 canlı koşu: geçersiz yol (node Z:/definitely/not/here.mjs)
+    // list'te enabled görünür — spawn doğrulaması YOK; dürüst sınırlar.
+    expect(text).toContain("health-check yapmaz");
   });
 });
 

@@ -97,6 +97,8 @@ Alanlar:
 1. **`--data-dir` YOK.** TŞ §17.1 örnek mcp.json'u `args: ["${PLUGIN_ROOT}/scripts/mcp-server.mjs", "--data-dir", "${PLUGIN_DATA}"]` gösterir; ancak **yayımlanan sunucu argv okumaz** — `packages/mcp-server/src/stdio.ts` konfigürasyonun tek kaynağı olarak yalnızca `CAUSORYN_CONFIG` ortam değişkenini okur (başka argv işleme kodu yoktur). `--data-dir` koymak sessizce etkisiz bir argüman olurdu. Wiki veri kökü bu yüzden `CAUSORYN_CONFIG.wiki.dataDbPath` ile beyan edilir (mutlak yol, workspace kökünün DIŞINDA; ihlal sunucuyu düşürür). Sapma test ile sabitlenmiştir (negatif test: `"--data-dir" argv TAŞIMAZ`).
 2. **`env` alanı doğrulanamayan tek alandır.** `env`, MCP stdio sunucu-config konvansiyonudur (ZCode plugin'inde aynı alan kullanılır), ancak Antigravity yükleyicisinin `env` çözümleyip çözümlemediği agy CLI olmadığından sınanamadı (NOT RUN). Desteklenmediği takdirde: `CAUSORYN_CONFIG`'u işletim sistemi düzeyinde ortam değişkeni olarak verin — sunucu env'siz de güvenli başlar (default deny; `WORKSPACE_NOT_AUTHORIZED`).
 
+**Çapraz host kuralı (TŞ §17.1, PDF s.19):** *"mcp.json'u farklı host'lara aynen kopyalama."* Bu kablolama Claude Code (`.mcp.json` → `docs/hosts/claude-code.md`) ve Codex (`.codex/config.toml` / `codex mcp add` → `docs/hosts/codex.md`) tarafına birebir taşınmaz; her host kendi token şemasıyla (`${PLUGIN_ROOT}` / `${CLAUDE_PLUGIN_ROOT}` / TOML mutlak yolları) ayrı yazılır.
+
 ## Kurulum adımları — doküman örneği, NOT RUN
 
 ```bash
@@ -118,6 +120,8 @@ agy plugin list
 ```
 
 Bu komutlar TŞ §17.1'deki cümlenin aynısıdır: *"Komutlar doküman örneğidir, bu doküman hazırlanırken çalıştırılmış değildir."* agy CLI kurulduğunda adım 1'den itibaren gerçek koşum yapılır; sonuçlar (hangi Antigravity sürümünün hangi manifest/MCP tanım kombinasyonunu istediği dahil — TŞ §17.1: eski belgeler `mcp_config.json` gösterir) aşağıdaki matrise işlenir.
+
+**Temizlik protokolü (kırmızı kural 6):** Bu adımlar koşulduğunda kullanıcının gerçek config'ine kalıcı değişiklik bırakılmaz: kurulum belirgin test kapsamında yapılır ve **smoke sonunda plugin kaldırılır** — agy kaldırma komutu CLI'da doğrulanınca smoke sonunda plugin kaldırılır; kaldırma komutunun gerçek adı bu makinede agy CLI olmadığından doğrulanamadı (NOT RUN). Bu disiplin, aynı Faz'daki claude (`claude mcp remove` → `docs/hosts/claude-code.md`) ve codex (`codex mcp remove` + yedek/hash disiplini → `docs/hosts/codex.md`) dokümanlarındaki temizlik adımlarının Antigravity karşılığıdır.
 
 ## Konfigürasyon: CAUSORYN_CONFIG
 
@@ -145,7 +149,7 @@ TŞ §17.4: ajanlar arası davranış eşitliği MCP tool schema + contract test
 
 ## Açık kalemler (F5 kapanmadı — Done ilan edilmez, ADR-010)
 
-1. **agy CLI kurulduğunda koşulacaklar (NOT RUN listesi):** `agy plugin validate --strict`, `agy plugin install`, `agy plugin list`, tool discovery (29 araç beklentisi), temsilî `map_system`/`preflight_change`/`verify_change` çağrıları, stdout-safi kontrolü (kural 4). Tümü tamamlanmadan F5 Done yazılamaz.
+1. **agy CLI kurulduğunda koşulacaklar (NOT RUN listesi):** `agy plugin validate --strict`, `agy plugin install`, `agy plugin list`, tool discovery (29 araç beklentisi), temsilî `map_system`/`preflight_change`/`verify_change` çağrıları, stdout-safi kontrolü (kural 4) ve kapanış temizliği: agy kaldırma komutu CLI'da doğrulanınca smoke sonunda plugin kaldırılır (kırmızı kural 6 — kullanıcı config'ine kalıcı değişiklik bırakılmaz). Tümü tamamlanmadan F5 Done yazılamaz.
 2. **F9 release paketlemesi:** F1 bundle'ın `integrations/antigravity/causoryn/scripts/mcp-server.mjs` (+ vendored `node_modules/better-sqlite3`) altına vendor edilmesi ve `args`'ın `${PLUGIN_ROOT}/scripts/mcp-server.mjs`'e taşınması; TŞ §17.1 hedef düzeninin tam karşılanması.
 3. **`env` çözümlemesi doğrulaması** ve kurulu Antigravity sürümünün `mcp_config.json` isteyip istemediğinin saptanması (TŞ §17.1 sürüm/yüzey farkı notu).
 4. Paketin kalan parçaları (`README.md`, `skills/`, `agents/`, `rules/`, `hooks.json`) — ayrı dilim.

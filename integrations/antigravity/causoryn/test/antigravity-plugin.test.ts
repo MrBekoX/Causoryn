@@ -166,7 +166,8 @@ function validatePluginManifest(value: unknown, label: string): AntigravityPlugi
  * - mcpServers.engine.command "node" (LLM yok, yerel süreç — kırmızı kural 1);
  * - args derlenmiş .mjs bundle'ı gösterir; src/*.ts işareti YASAK (§17.1);
  * - "--data-dir" YOK: yayımlanan stdio girişi argv okumaz
- *   (packages/mcp-server/src/stdio.ts:31-46 yalnızca CAUSORYN_CONFIG okur);
+ *   (packages/mcp-server/src/stdio.ts:22 process.env.CAUSORYN_CONFIG okur;
+ *   argv işlemeği yoktur — bulgu 7 kaynak gardı bunu canlı denetler);
  *   TŞ örneğindeki --data-dir sapması docs/hosts/antigravity.md'de belgelenir.
  */
 function validateMcpManifest(value: unknown, label: string): AntigravityMcpManifest {
@@ -491,5 +492,79 @@ describe("test kaynağı taraması (bulgu 5): PLUGIN_ROOT token'ı tek parça st
     const selfSource = readFileSync(fileURLToPath(import.meta.url), "utf8");
     expect(selfSource.includes(forbiddenLiteral)).toBe(false);
     expect(selfSource.includes('"$" + "{"')).toBe(true);
+  });
+});
+
+/* ------------------------------------------------------------------ */
+/* Takım denetimi 2. tur (2026-11-10): bulgu 6–8                       */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Bulgu 6 (medium): smoke dizisi temizlik protokolü İÇERMELİDİR — kırmızı
+ * kural 6: "smoke testler kullanıcının GERÇEK config'ine kalıcı değişiklik
+ * bırakmaz". Aynı Faz'daki claude (claude mcp remove) ve codex (codex mcp
+ * remove + yedek/hash disiplini) dokümanları temizliği belgeler;
+ * Antigravity dokümanı da belgelemelidir. agy CLI yok → kaldırma komutunun
+ * gerçek adı doğrulanamadı (NOT RUN); test yalnızca protokolün dokümanda
+ * beyan edildiğini denetler, koşum kanıtı ÜRETMEZ.
+ *
+ * TDD: bu iki test artefakt düzenlemesinden ÖNCE yazıldı ve kırmızı
+ * koşuldu (dokümanda temizlik protokolü yokken düşüyordu); ardından
+ * docs/hosts/antigravity.md'ye temizlik notu eklenerek yeşile getirildi.
+ */
+describe("docs/hosts/antigravity.md — smoke temizlik protokolü (kırmızı kural 6, denetim bulgu 6)", () => {
+  it("smoke dizisi kurulumun geri alınmasını belgeler: smoke sonunda plugin kaldırılır", () => {
+    expect(DOC_TEXT.includes("smoke sonunda plugin kaldırılır")).toBe(true);
+  });
+
+  it("kural 6 disiplini açık yazılır: kullanıcı config'ine kalıcı değişiklik bırakılmaz", () => {
+    expect(DOC_TEXT.includes("kalıcı değişiklik bırakılmaz")).toBe(true);
+  });
+});
+
+/**
+ * Bulgu 7 (low): mcp.json sapma notundaki kaynak atfı bayattı ("stdio.ts:31-46"
+ * → env okuması gerçekte stdio.ts:22'tedir; 31-46 default-fallback + context
+ * kurulumudur). Yorum düzeltildi; iddianin özü bu kaynak gardıyla canlı
+ * denetlenir — bayat satır numarasına değil, gerçek kaynağa bağlanır.
+ */
+describe("stdio kaynak gardı (denetim bulgu 7): mcp.json sapma notunun canlı temeli", () => {
+  const STDIO_SOURCE = readFileSync(
+    path.join(REPO_ROOT, "packages", "mcp-server", "src", "stdio.ts"),
+    "utf8",
+  );
+
+  it("stdio girişi konfigürasyonu yalnızca CAUSORYN_CONFIG env'sinden okur; argv işlemeği YOKTUR", () => {
+    expect(STDIO_SOURCE.includes("process.env.CAUSORYN_CONFIG")).toBe(true);
+    expect(STDIO_SOURCE.includes("process.argv")).toBe(false);
+  });
+});
+
+/**
+ * Bulgu 8 (low): negatif yüzey paritesi. ROOT_GRANT / SECRET /
+ * SINGLE_FILE_CLAIM taramaları claude-code.md ve codex.md'ye
+ * (tests/hosts-docs.test.ts:247-274) uygulanıyordu; docs/hosts/antigravity.md
+ * bu üçlü taramaya dahil değildi. Kalıplar tests/hosts-docs.test.ts:252-260
+ * ile BİREBİR aynı tutulur — üç host dokümanı aynı negatif yüzeyden geçer.
+ * İçerik bugünden temizdir (denetim de onayladı); test gelecekteki ihlali
+ * yakalayan gard olarak eklenir.
+ */
+describe("docs/hosts/antigravity.md — negatif yüzey taraması (denetim bulgu 8; claude/codex paritesi)", () => {
+  // Kök-düzey workspace yetkilendirmesi: allowRoots ["/"], ["C:/"], ["D:\\"]
+  // vb. yok (meşru alt-dizin örneği eşleşmez — TŞ §9/§25 en-dar-kapsam).
+  const ROOT_GRANT =
+    /allowRoots["']?\s*:\s*\[\s*["']?(\/|[A-Za-z]:[\/\\]?)["']?\s*\]/;
+  // Sır deseni: API anahtarı / token benzeri literal hiçbir örnekte yok.
+  const SECRET =
+    /(sk-[A-Za-z0-9]{16,}|ghp_[A-Za-z0-9]{20,}|Bearer [A-Za-z0-9._-]{20,})/;
+  // Yanlış paketleme iddiası: F1 "tek dosya" DEĞİLDİR (ADR-010); affirmatif
+  // "tek dosya dağıtım" iddiası geçemez, '"tek dosya" değil' inkârı eşleşmez.
+  const SINGLE_FILE_CLAIM =
+    /(tek[- ]dosya dağıt|single[- ]file (distribution|bundle))/i;
+
+  it("antigravity.md: kök allowRoots yetkisi, sır ve 'tek dosya' dağıtım iddiası YOK", () => {
+    expect(DOC_TEXT).not.toMatch(ROOT_GRANT);
+    expect(DOC_TEXT).not.toMatch(SECRET);
+    expect(DOC_TEXT).not.toMatch(SINGLE_FILE_CLAIM);
   });
 });
