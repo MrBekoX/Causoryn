@@ -2,6 +2,8 @@ import { existsSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { SERVER_VERSION, TOOL_NAMES } from "../packages/mcp-server/src/version.js";
+import { CLONE_MAX_ATTEMPTS } from "./security-release/helpers/bundle-client.js";
+import { buildFixtureModel } from "./bench-release/fixture.js";
 
 /**
  * Sprint-7 F8+F9 release dokümantasyon doğrulama testi.
@@ -409,5 +411,91 @@ describe("DENETİM DÖNGÜSÜ: medyan regex'i kelime-sınırlıdır (sentetik ka
     expect("110.7".includes("10.7")).toBe(true);
     expect(medianRegex("10.7").test("110.7 ms")).toBe(false);
     expect(medianRegex("10.7").test("10.7 ms")).toBe(true);
+  });
+});
+
+/**
+ * DENETİM DÖNGÜSÜ (güvenlik analisti bulgusu, düşük): docs/security-pass.md
+ * "korunan klon disiplini" satırı cloneBundleTo'nun yeniden deneme sayısını
+ * "3 denemeli" yazıyordu; kod 5'ti (tests/security-release/helpers/
+ * bundle-client.ts — "eski 3 denemelik" yorumu 3'ün bayat sayı olduğunu
+ * teyit eder). Kanıt dokümanındaki mekanizma doğruydu, sayı kodla
+ * uyuşmuyordu. Bu blok doküman iddiasını kodun yayımlanmış sabitiyle
+ * (CLONE_MAX_ATTEMPTS) çapraz pinler: deneme sayısı hangi yönde değişirse
+ * doküman + bu test birlikte güncellenmek zorundadır (ADR-010 — kanıt
+ * dokümanı kodun yayımlanan değerinden sapan bir sayı taşıyamaz).
+ */
+describe("DENETİM DÖNGÜSÜ: security-pass.md klon yeniden deneme sayısı kodla uyumlu", () => {
+  it("docs/security-pass.md cloneBundleTo 'N denemeli' iddiası CLONE_MAX_ATTEMPTS ile birebir", () => {
+    const text = readFileSync(
+      fileURLToPath(new URL("../docs/security-pass.md", import.meta.url)),
+      "utf8",
+    );
+    const claim = text.match(/cloneBundleTo[^\n]*?(\d+) denemeli/);
+    expect(claim, "korunan klon disiplini satırı 'N denemeli' iddiası taşımalı").not.toBeNull();
+    const statedAttempts = Number(claim?.[1]);
+    expect(Number.isNaN(statedAttempts), "iddia sayısal olmalı").toBe(false);
+    expect(statedAttempts).toBe(CLONE_MAX_ATTEMPTS);
+  });
+});
+
+/**
+ * DENETİM DÖNGÜSÜ (bağımsız denetçi bulguları, düşük): (1) docs/benchmarks.md
+ * fixture sha256 literali hiçbir testle sabitlenmemişti — benchmark.test.ts
+ * yalnızca koşum-içi determinizmi kanıtlıyor (modelAgain.hash ===
+ * report.fixtureHash; ikisi de yeniden hesaplanır), fixture üreticisi
+ * değişirse kanıt dokümanındaki literal sessizce bayatlıyordu
+ * (CLONE_MAX_ATTEMPTS piniyle aynı bayatlık sınıfı). Bu blok literali GERÇEK
+ * üretici çıktısıyla (buildFixtureModel(1000).hash) çapraz pinler; medyan ve
+ * soğuk indeks satırları da release-docs kapsamına alınır (benchmarks.md bu
+ * dosyada hiç okunmuyordu). (2) security-pass.md scanForCredentials satır
+ * aralığı CLONE_MAX_ATTEMPTS bloğu eklenince kaymıştı; aralık iddiası artık
+ * kaynak dilimin gerçekten tarayıcıyı gösterdiğinin kanıtıyla pinlenir
+ * (ADR-010: kanıt dokümanı kodun yayınlanan konumundan sapamaz).
+ */
+describe("DENETİM DÖNGÜSÜ: benchmarks.md fixture sha256 + security-pass.md satır aralığı", () => {
+  function readRepoDoc(relativeUrl: string): string {
+    return readFileSync(fileURLToPath(new URL(relativeUrl, import.meta.url)), "utf8");
+  }
+
+  it("docs/benchmarks.md fixture sha256 literali === buildFixtureModel(1000).hash (gerçek üretici çıktısı)", () => {
+    const claim = readRepoDoc("../docs/benchmarks.md").match(/sha256:\s*`([0-9a-f]{64})`/);
+    expect(claim, "benchmarks.md'de fixture sha256 literali bulunmalı").not.toBeNull();
+    expect(claim?.[1]).toBe(buildFixtureModel(1000).hash);
+  });
+
+  it("benchmarks.md medyan + soğuk indeks satırları 2026-11-10 pinli değerlerle aynı (11.8/13.0/10.7/16370.3)", () => {
+    // benchmarks.md birimi tablo BAŞLIĞINDA taşır ("Medyan (ms)"); hücreler
+    // çıplak sayıdır — bu yüzden pin kolon-biçimli hücre regex'i kullanır
+    // ("| <değer> |"), CHANGELOG'daki "N ms" medianRegex'inden farklıdır.
+    const benchMedianCell = (median: string): RegExp =>
+      new RegExp(`\\|\\s*${median.replace(".", "\\.")}\\s*\\|`);
+    const text = readRepoDoc("../docs/benchmarks.md");
+    expect(text).toMatch(benchMedianCell("11.8"));
+    expect(text).toMatch(benchMedianCell("13.0"));
+    expect(text).toMatch(benchMedianCell("10.7"));
+    expect(text).toContain("16370.3");
+  });
+
+  it("security-pass.md scanForCredentials satır aralığı bundle-client.ts'te gerçekten tarayıcıyı gösterir", () => {
+    const text = readRepoDoc("../docs/security-pass.md");
+    const claim = text.match(
+      /`scanForCredentials` \(`tests\/security-release\/helpers\/bundle-client\.ts:(\d+)-(\d+)`\)/,
+    );
+    expect(claim, "security-pass.md scanForCredentials satır aralığı taşımalı").not.toBeNull();
+    const start = Number(claim?.[1]);
+    const end = Number(claim?.[2]);
+    expect(start).toBeGreaterThan(0);
+    expect(end).toBeGreaterThanOrEqual(start);
+    const sourceLines = readRepoDoc(
+      "../tests/security-release/helpers/bundle-client.ts",
+    ).split("\n");
+    const referencedSlice = sourceLines.slice(start - 1, end).join("\n");
+    expect(referencedSlice, "aralık CREDENTIAL_PATTERNS tanımını içermeli").toContain(
+      "export const CREDENTIAL_PATTERNS",
+    );
+    expect(referencedSlice, "aralık scanForCredentials tanımını içermeli").toContain(
+      "export function scanForCredentials",
+    );
   });
 });

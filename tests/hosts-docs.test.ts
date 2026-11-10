@@ -56,6 +56,56 @@ function readCodexDoc(): string {
   return readFileSync(DOCS.codexDoc, "utf8");
 }
 
+/** Yeni bağımlılıksız senkron bekleme (denemeler arası; pencere kapanması). */
+function sleepSync(ms: number): void {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+/** readConsistentManifestPair'a verilen okuma çifti. */
+interface ManifestPairRead {
+  /** Manifest'te beyanlı mcp-server.mjs sha256'sı (yarım okumada undefined). */
+  readonly recorded: string | undefined;
+  /** Diskteki mcp-server.mjs'in gerçekte hesaplanan sha256'sı. */
+  readonly actual: string;
+  /** Tutarlılık kanıtlandıysa prebuild beyanı için tüm manifest girdileri. */
+  readonly manifestFiles: Record<string, string>;
+}
+
+/**
+ * Manifest↔bundle çift-okuması için torn-read guard'ı (denetim bulgusu:
+ * teorik flaky yüzeyi). Vitest paralel koşumda bundle.test.ts beforeAll'ı
+ * dist'i YERİNDE yeniden yazabilir (rmSync + parça parça yazım penceresi —
+ * cloneBundleTo docstring'inde belgelenen aynı yarış sınıfı); bu testin
+ * canlı okuması yarım manifest (JSON SyntaxError) veya yarım bundle (hash
+ * uyuşmazlığı) görebilir. Okuma çifti tutarlı gelene kadar kısa senkron
+ * beklemelerle yeniden denenir; denemeler tükenirse son hata fırlatılır.
+ * readPair enjekte edilebilir: dosyanın sonundaki sentetik testler
+ * yakınsamayı, okuma-hatası yeniden denemesini ve tükenmeyi kanıtlar.
+ */
+export function readConsistentManifestPair(
+  readPair: () => ManifestPairRead,
+  options: { readonly attempts?: number; readonly sleep?: (ms: number) => void } = {},
+): ManifestPairRead & { readonly recorded: string } {
+  const attempts = options.attempts ?? 3;
+  const sleep = options.sleep ?? sleepSync;
+  let lastError: unknown = undefined;
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    try {
+      const pair = readPair();
+      if (typeof pair.recorded === "string" && pair.recorded === pair.actual) {
+        return { recorded: pair.recorded, actual: pair.actual, manifestFiles: pair.manifestFiles };
+      }
+      lastError = new Error(
+        `manifest↔bundle sha256 uyuşmazlığı (koşut rebuild penceresi): manifest=${String(pair.recorded)} dosya=${pair.actual}`,
+      );
+    } catch (error) {
+      lastError = error;
+    }
+    if (attempt + 1 < attempts) sleep(1_500);
+  }
+  throw lastError instanceof Error ? lastError : new Error(String(lastError));
+}
+
 /**
  * F1 bundle artifact — taze-checkout'a dayanıklı yüzey (denetim bulgusu 3):
  * dist/ commit edilmediği için artifact testleri koşulludur (it.runIf);
@@ -96,21 +146,30 @@ describe("F1 bundle artifact (üretilebilirlik + koşullu determinizm)", () => {
   });
 
   it.runIf(artifactBuilt)(
-    "manifest sha256 == gerçek dosya sha256 (determinizm partial doğrulaması)",
+    "manifest sha256 == gerçek dosya sha256 (determinizm partial doğrulaması; torn-read guard'lı)",
     () => {
-      const manifest = JSON.parse(readFileSync(manifestPath, "utf8")) as {
-        files: Record<string, string>;
-      };
-      const recorded = manifest.files["mcp-server.mjs"];
+      // Koşut rebuild penceresine karşı guard (denetim bulgusu): vitest
+      // paralel koşumda bundle.test.ts beforeAll'ı dist'i yeniden yazabilir;
+      // yarım manifest (JSON SyntaxError) veya yarım bundle (hash
+      // uyuşmazlığı) okuması yeniden denenir — cloneBundleTo disipliniyle
+      // aynı yarış sınıfı; sentetik yakınsama testleri dosyanın sonunda.
+      const { recorded, actual, manifestFiles } = readConsistentManifestPair(() => {
+        const manifest = JSON.parse(readFileSync(manifestPath, "utf8")) as {
+          files: Record<string, string>;
+        };
+        return {
+          recorded: manifest.files["mcp-server.mjs"],
+          actual: createHash("sha256")
+            .update(readFileSync(DOCS.bundleEntry))
+            .digest("hex"),
+          manifestFiles: manifest.files,
+        };
+      });
       expect(recorded).toMatch(/^[0-9a-f]{64}$/);
-      expect(recorded).toBe(
-        createHash("sha256")
-          .update(readFileSync(DOCS.bundleEntry))
-          .digest("hex"),
-      );
+      expect(recorded).toBe(actual);
       // External native binding manifest'te beyanlı (esbuild .node gömemez — ADR-010):
       expect(
-        Object.keys(manifest.files).some((k) =>
+        Object.keys(manifestFiles).some((k) =>
           k.includes("prebuilds/win32-x64.node"),
         ),
       ).toBe(true);
@@ -271,5 +330,64 @@ describe("NEGATİF: host dokümanları yanlış/tehlikeli iddia taşımaz", () =
     expect(text).not.toMatch(ROOT_GRANT);
     expect(text).not.toMatch(SECRET);
     expect(text).not.toMatch(SINGLE_FILE_CLAIM);
+  });
+});
+
+/**
+ * Torn-read guard'ı sentetik kanıtı (denetim bulgusu: teorik flaky yüzeyi).
+ * Yarış penceresi (bundle.test.ts beforeAll rmSync + parça parça yazım)
+ * deterministik olarak zorlanamadığından guard'ın davranışı enjekte
+ * edilmiş okuma çiftleriyle kanıtlanır: uyuşmazlık → yeniden deneme →
+ * yakınsama; okuma hatası → yeniden deneme; deneme tükenmesi → explicit
+ * hata (cloneBundleTo'nun manifest-doğrulamalı klon disipliniyle aynı sınıf).
+ */
+describe("torn-read guard'ı: koşut rebuild penceresine karşı çift-okuma yakınsaması", () => {
+  it("birinci okuma yarım snapshot (uyuşmazlık), ikinci okuma tutarlı → ikinci çift döner; arada tam 1 bekleme", () => {
+    const reads: ManifestPairRead[] = [
+      {
+        recorded: "torn-hash",
+        actual: "fresh-hash",
+        manifestFiles: { "mcp-server.mjs": "torn-hash" },
+      },
+      {
+        recorded: "fresh-hash",
+        actual: "fresh-hash",
+        manifestFiles: { "mcp-server.mjs": "fresh-hash", "prebuilds/win32-x64.node": "native" },
+      },
+    ];
+    const sleeps: number[] = [];
+    const result = readConsistentManifestPair(
+      () => reads.shift() as ManifestPairRead,
+      { sleep: (ms) => sleeps.push(ms) },
+    );
+    expect(result.recorded).toBe("fresh-hash");
+    expect(result.manifestFiles["mcp-server.mjs"]).toBe("fresh-hash");
+    expect(sleeps).toEqual([1_500]);
+  });
+
+  it("yarım manifest (JSON SyntaxError) okuma hatası da yeniden deneme tetikler", () => {
+    let calls = 0;
+    const sleeps: number[] = [];
+    const result = readConsistentManifestPair(() => {
+      calls += 1;
+      if (calls === 1) throw new SyntaxError("Unexpected end of JSON input");
+      return { recorded: "stable", actual: "stable", manifestFiles: {} };
+    }, { sleep: (ms) => sleeps.push(ms) });
+    expect(result.recorded).toBe("stable");
+    expect(calls).toBe(2);
+    expect(sleeps).toEqual([1_500]);
+  });
+
+  it("denemeler tükenirse explicit hata fırlatır (tam attempts okuma, attempts-1 bekleme)", () => {
+    let calls = 0;
+    const sleeps: number[] = [];
+    expect(() => {
+      readConsistentManifestPair(() => {
+        calls += 1;
+        return { recorded: `r${String(calls)}`, actual: `a${String(calls)}`, manifestFiles: {} };
+      }, { attempts: 3, sleep: (ms) => sleeps.push(ms) });
+    }).toThrow(/uyuşmazlığı/);
+    expect(calls).toBe(3);
+    expect(sleeps).toEqual([1_500, 1_500]);
   });
 });

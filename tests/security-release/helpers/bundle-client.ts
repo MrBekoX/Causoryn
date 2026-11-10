@@ -114,9 +114,17 @@ function cloneMatchesManifest(destDir: string): boolean {
  * artıkları temizlenip kopya yenilenir. 5 deneme; denemeler arası kısa
  * senkron bekleme koşut rebuild penceresinin kapanmasına zaman tanır.
  */
+/**
+ * cloneBundleTo'nun yarış penceresine karşı yeniden deneme sayısı. Kanıt
+ * dokümanı (docs/security-pass.md "korunan klon disiplini" satırı) ve
+ * tests/release-docs.test.ts çapraz pini bu sabitle uyumlu kalmak
+ * zorundadır (ADR-010: kanıt dokümanı kodun yayımlanan değeriyle konuşur).
+ */
+export const CLONE_MAX_ATTEMPTS = 5;
+
 export function cloneBundleTo(destDir: string): string {
   const target = path.join(destDir, "mcp-server.mjs");
-  const maxAttempts = 5;
+  const maxAttempts = CLONE_MAX_ATTEMPTS;
   let lastError: unknown = undefined;
   for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
     try {

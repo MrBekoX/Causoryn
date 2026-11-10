@@ -378,9 +378,12 @@ function sha256File(absolutePath: string): string {
  * spawn ettiği TEK korunan klon anlık görüntüsünü okur.
  */
 function cloneBundleFile(relativeKey: string): string {
-  return relativeKey === "mcp-server.mjs"
-    ? path.join(bundleCloneDir, "mcp-server.mjs")
-    : path.join(bundleCloneDir, ...relativeKey.split("/"));
+  // mcp-server.mjs dahil TÜM anahtarlar aynı kurala çözülür: anahtar POSIX
+  // göreli yoldur, split("/") parçaları join edilir. (Denetim bulgusu: eski
+  // "mcp-server.mjs" ternary dalı genel dalle bayt-bayt aynı sonucu
+  // üretiyordu — path.join(dir, ..."mcp-server.mjs".split("/")) ===
+  // path.join(dir, "mcp-server.mjs") — ölü özelleştirme kaldırıldı.)
+  return path.join(bundleCloneDir, ...relativeKey.split("/"));
 }
 
 function cloneManifestPath(): string {
