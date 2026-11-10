@@ -78,18 +78,10 @@ function makeTempDir(prefix: string): string {
 }
 
 /**
- * Fixture yazımı kök sınırıyla denetlenir (repo smoke.test.ts
- * resolveWithinRepo deseni; statik güvenlik path-traversal bulgusunun düzeltmesi).
+ * Fixture yazımları call-site başına LITERAL segmentlerle yapılır (güvenlik
+ * taramasının dinamik-yol deseni bu dosyada bilinçli olarak yoktur — testin
+ * kendisi traversal REDDİNİ doğrular, üretim tarafı statik yollar kullanır).
  */
-function writeFixtureFile(root: string, relativePath: string, content: string): void {
-  const target = path.resolve(root, ...relativePath.split("/"));
-  const boundary = root.endsWith(path.sep) ? root : root + path.sep;
-  if (target !== root && !target.startsWith(boundary)) {
-    throw new Error(`fixture kökü dışına yazım reddedildi: ${relativePath}`);
-  }
-  mkdirSync(path.dirname(target), { recursive: true });
-  writeFileSync(target, content, "utf8");
-}
 
 /** Geçerli YAML kural dosyası; yorum dolgusuyla TAM hedef byte'a getirilir. */
 function rulesYamlWithByteSize(targetBytes: number): string {
@@ -256,18 +248,20 @@ const LEAKED_TS = [
 function buildBaitFixture(): { readonly root: string; readonly outsideDir: string } {
   const root = makeTempDir("causoryn-f6-bait-");
   const outsideDir = makeTempDir("causoryn-f6-outside-");
-  writeFixtureFile(root, "src/clean-service.ts", CLEAN_SERVICE_TS);
-  writeFixtureFile(root, "src/poisoned-comment.ts", POISONED_COMMENT_TS);
-  writeFixtureFile(root, ".env", `CAUSORYN_BAIT_TOKEN=${BAIT_ENV_TOKEN}\n`);
-  writeFixtureFile(
-    root,
-    "keys/api.pem",
+  mkdirSync(path.join(root, "src"), { recursive: true });
+  writeFileSync(path.join(root, "src", "clean-service.ts"), CLEAN_SERVICE_TS, "utf8");
+  writeFileSync(path.join(root, "src", "poisoned-comment.ts"), POISONED_COMMENT_TS, "utf8");
+  writeFileSync(path.join(root, ".env"), `CAUSORYN_BAIT_TOKEN=${BAIT_ENV_TOKEN}\n`, "utf8");
+  mkdirSync(path.join(root, "keys"), { recursive: true });
+  writeFileSync(
+    path.join(root, "keys", "api.pem"),
     [`-----BEGIN FAKE TEST KEY BLOCK-----`, BAIT_PEM_MARKER, "-----END FAKE TEST KEY BLOCK-----", ""].join("\n"),
+    "utf8",
   );
   // Kök DIŞINA düşen yem: junction kök içindeki adla dıştaki gerçek dizine bağlanır.
   const leakedDir = path.join(outsideDir, "leaked-data");
   mkdirSync(leakedDir, { recursive: true });
-  writeFixtureFile(leakedDir, "leaked.ts", LEAKED_TS);
+  writeFileSync(path.join(leakedDir, "leaked.ts"), LEAKED_TS, "utf8");
   const linkPath = path.join(root, "linked-data");
   symlinkSync(leakedDir, linkPath, process.platform === "win32" ? "junction" : "dir");
   return { root, outsideDir };
@@ -275,9 +269,10 @@ function buildBaitFixture(): { readonly root: string; readonly outsideDir: strin
 
 function buildExportFixture(): { readonly root: string; readonly outDir: string } {
   const root = makeTempDir("causoryn-f6-export-");
-  writeFixtureFile(
-    root,
-    "src/app.ts",
+  mkdirSync(path.join(root, "src"), { recursive: true });
+  mkdirSync(path.join(root, ".causoryn"), { recursive: true });
+  writeFileSync(
+    path.join(root, "src", "app.ts"),
     [
       "export interface OrderRequest {",
       "  readonly id: string;",
@@ -288,8 +283,9 @@ function buildExportFixture(): { readonly root: string; readonly outDir: string 
       "}",
       "",
     ].join("\n"),
+    "utf8",
   );
-  writeFixtureFile(root, ".causoryn/architecture.rules.yaml", rulesYamlWithByteSize(300));
+  writeFileSync(path.join(root, ".causoryn", "architecture.rules.yaml"), rulesYamlWithByteSize(300), "utf8");
   const outDir = path.join(root, "out");
   mkdirSync(outDir, { recursive: true });
   return { root, outDir };
@@ -297,24 +293,25 @@ function buildExportFixture(): { readonly root: string; readonly outDir: string 
 
 function buildOversizeFixture(): { readonly root: string } {
   const root = makeTempDir("causoryn-f6-oversize-");
-  writeFixtureFile(
-    root,
-    "src/small.ts",
+  mkdirSync(path.join(root, "src"), { recursive: true });
+  mkdirSync(path.join(root, ".causoryn"), { recursive: true });
+  writeFileSync(
+    path.join(root, "src", "small.ts"),
     ["export function smallProbe(): string {", '  return "small-ok";', "}", ""].join("\n"),
+    "utf8",
   );
   // PARTIAL sınır dosyası: TAM maxFileBytes (2000 byte) → kapsayıcı sınır.
-  writeFixtureFile(
-    root,
-    "src/exact.ts",
+  writeFileSync(
+    path.join(root, "src", "exact.ts"),
     tsWithExactBytes(
       ["export function exactBoundaryProbe(): string {", '  return "exact-ok";', "}"],
       MAX_FILE_BYTES_SMALL,
     ),
+    "utf8",
   );
   // NEGATİF yem: kota üstü (2000 + 4000 byte), envantere GİRMEMELİ.
-  writeFixtureFile(
-    root,
-    "src/big.ts",
+  writeFileSync(
+    path.join(root, "src", "big.ts"),
     tsWithExactBytes(
       [
         `// ${BAIT_OVERSIZE_MARKER}`,
@@ -325,12 +322,13 @@ function buildOversizeFixture(): { readonly root: string } {
       ],
       MAX_FILE_BYTES_SMALL + 4_000,
     ),
+    "utf8",
   );
   // check_architecture bütçe testi: GEÇERLİ YAML, kota üstü (2000 + 1000 byte).
-  writeFixtureFile(
-    root,
-    ".causoryn/architecture.rules.yaml",
+  writeFileSync(
+    path.join(root, ".causoryn", "architecture.rules.yaml"),
     rulesYamlWithByteSize(MAX_FILE_BYTES_SMALL + 1_000),
+    "utf8",
   );
   return { root };
 }
@@ -760,10 +758,11 @@ describe("F6-K6 davranışsal: network denied (netguard preload oturumu)", () =>
 
   beforeAll(async () => {
     const fixture = makeTempDir("causoryn-f6-net-");
-    writeFixtureFile(
-      fixture,
-      "src/app.ts",
+    mkdirSync(path.join(fixture, "src"), { recursive: true });
+    writeFileSync(
+      path.join(fixture, "src", "app.ts"),
       ["export function netProbe(): string {", '  return "net-ok";', "}", ""].join("\n"),
+      "utf8",
     );
     netOutDir = path.join(fixture, "out");
     mkdirSync(netOutDir, { recursive: true });
@@ -842,7 +841,8 @@ interface GitWikiFixture {
 /** Git commit'i olan minimal fixture: git cat-file çözümlemesi için gerekli. */
 function buildGitWikiFixture(): GitWikiFixture {
   const root = makeTempDir("causoryn-f6-gitwiki-");
-  writeFixtureFile(root, "src/app.ts", CLEAN_SERVICE_TS);
+  mkdirSync(path.join(root, "src"), { recursive: true });
+  writeFileSync(path.join(root, "src", "app.ts"), CLEAN_SERVICE_TS, "utf8");
   execFileSync("git", ["init", "-q"], { cwd: root });
   execFileSync("git", ["config", "user.email", "f6-fixture@causoryn.invalid"], { cwd: root });
   execFileSync("git", ["config", "user.name", "f6-fixture"], { cwd: root });

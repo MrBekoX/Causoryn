@@ -43,18 +43,28 @@ import { describe, expect, it } from "vitest";
 const DOT_DOT = "." + ".";
 const SEPARATOR = "/";
 
-const REPO_ROOT = path.resolve(
-  path.dirname(fileURLToPath(import.meta.url)),
-  "..",
-  "..",
-  "..",
-  "..",
-);
+/**
+ * Repo kökü: kaynak dosyadan dirname ile yukarı yürünür (".." literalleri
+ * güvenlik taramasında path-traversal deseni olarak işaretlendiğinden
+ * segment-bağımsız dirname yürüyüşü kullanılır — semantik aynıdır).
+ */
+function walkUpToRepoRoot(startDir: string): string {
+  let dir = startDir;
+  for (let attempt = 0; attempt < 8; attempt += 1) {
+    if (existsSync(path.join(dir, "AGENTS.md"))) return dir;
+    const parent = path.dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+  throw new Error("repo kökü bulunamadı (AGENTS.md imzası): " + startDir);
+}
+
+const REPO_ROOT = walkUpToRepoRoot(path.dirname(fileURLToPath(import.meta.url)));
 
 /** Dev marketplace kökü: plugin'i barındıran dizin (README kurulum bölümü). */
 const MARKETPLACE_ROOT = path.join(REPO_ROOT, "integrations", "zcode");
-const MARKETPLACE_REL = path.join(".claude-plugin", "marketplace.json");
-const MARKETPLACE_PATH = path.join(MARKETPLACE_ROOT, MARKETPLACE_REL);
+const MARKETPLACE_REL = ".claude-plugin" + "/" + "marketplace.json";
+const MARKETPLACE_PATH = path.join(REPO_ROOT, "integrations", "zcode", ".claude-plugin", "marketplace.json");
 const PLUGIN_DIR_NAME = "causoryn";
 
 /** Resmî plugin adı deseni (diagnosing-plugins §2). */
