@@ -188,9 +188,9 @@ function runBundleSession(
         params: { name: "causoryn_get_capabilities", arguments: {} },
       },
     ];
-    for (let index = 1; index <= requestCount; index += 1) {
-      pending.set(index, (message) => responses.set(index, message));
-    }
+    // pending kaydı YALNIZCA aşağıdaki allResponses kurulumunda yapılır:
+    // buradaki id'lerin üzerine aynı senkron blokta resolver yazıldığı için
+    // önceki kayıt döngüsü ölü koddur (denetim bulgusu, 2026-11-09).
     for (const message of messages) {
       child.stdin?.write(`${JSON.stringify(message)}\n`);
     }

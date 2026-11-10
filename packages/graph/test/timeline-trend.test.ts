@@ -530,7 +530,11 @@ describe("timeline ihlal trendi git katmanı — geçici depo (salt-okunur)", ()
     if ((await git(["tag", "--list"])).split("\n").filter((line) => line.length > 0).length !== 6) {
       throw new Error("test kurulumunda 6 tag bekleniyordu");
     }
-  }, 30_000);
+    // Hook bütçesi: timeline.test.ts:587 hook'uyla aynı kurulum sınıfı
+    // (~25 senkron git çağrısı); tam süitte 30 s vitest hookTimeout'unu
+    // aşabildiği GÖZLEMLENDİ (bu oturumda "Failed Suites — timeline-trend
+    // git katmanı", 2026-11-09). 120 s, kardeş dosyanın hook bütçesiyle aynı.
+  }, 120_000);
 
   afterAll(async () => {
     if (repoRoot !== undefined) {

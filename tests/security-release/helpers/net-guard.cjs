@@ -15,12 +15,26 @@
  *
  *   - Her engellenen çağrı, CAUSORYN_NETLOG ortam değişkeniyle gösterilen
  *     dosyaya bir JSON satırı olarak yazılır (kanıt).
- *   - Ardından hata FIRLATILIR: gizli bir dış bağlantı denemesi süreci
- *     görünür şekilde düşürür; "sessiz başarılı ağ erişimi" imkânsızlaşır.
+ *   - Ardından hata FIRLATILIR: SARILAN API'lerden gelen bir dış bağlantı
+ *     denemesi süreci görünür şekilde düşürür; bu API'ler üzerinden
+ *     "sessiz başarılı ağ erişimi" imkânsızlaşır.
  *
- * Test sonundaki doğrulama: netlog dosyası BOŞSA oturum boyunca tek bir
- * giden ağ çağrısı denemesi bile olmamıştır (TŞ §19 "Causoryn'den hiçbir
- * AI/API/telemetry çıkışı yok" davranışsal kanıtı).
+ * KAPSAM SINIRI (dürüstlük — güvenlik analizi bulgusu, 2026-11-09): guard
+ * yalnızca process-içi Node ağ API'lerini sarar; child_process SARMAZ.
+ * Preload aktifken execFile/spawn üzerinden dış komut çalıştırma bu guard
+ * tarafından engellenmez (davranışsal kanıt:
+ * tests/security-release/net-guard-boundary.test.ts). Bugünkü bundle'da
+ * process çalıştırma yüzeyi statik taramayla sabit hedeflerle sınırlıdır:
+ * execFile yalnızca sabit "git" hedefiyle allowlist'li subcommand'lar
+ * (GIT_ALLOWED_SUBCOMMANDS, graph/git-read.ts), spawn yalnızca
+ * "dotnet exec <workerDll>" (adapters/csharp-roslyn worker-process).
+ * Bugüne kadar pratik sızma yolu yoktur; yeni bir process çalıştırma
+ * yüzeyi eklenirse bu cümle ve boundary testi o değişiklikle birlikte
+ * güncellenmelidir.
+ *
+ * Test sonundaki doğrulama: netlog dosyası BOŞSA oturum boyunca sarılan
+ * API'lerden tek bir giden ağ çağrısı denemesi bile olmamıştır (TŞ §19
+ * "Causoryn'den hiçbir AI/API/telemetry çıkışı yok" davranışsal kanıtı).
  *
  * Yalnızca test altyapısıdır; üretim bundle'ına dahil edilmez. Dosya
  * kendisi hiçbir ağ erişimi yapmaz (yalnızca yerel dosyaya append yazar).

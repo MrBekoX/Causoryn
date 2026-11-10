@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import {
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -134,7 +135,13 @@ function readTextIfExist(absolutePath: string): string {
 
 /** dist altındaki TÜM dosyaları (binary dahil) metin olarak tarar. */
 function* iterateDistFiles(root: string): Generator<{ readonly relative: string; readonly text: string }> {
-  for (const entry of readdirSync(root, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
+  // Sıralama codepoint düzeninde: localeCompare, scripts/lib/list-files.mjs
+  // sözleşmesiyle aynı gerekçeyle (ICU locale bağımlılığı) bu branch'te
+  // yasaklanmıştır; tarama sırası test sonucunu değiştirmese de branch-içi
+  // sözleşme tek comparer'da toplanır (denetim bulgusu, 2026-11-09).
+  for (const entry of readdirSync(root, { withFileTypes: true }).sort((a, b) =>
+    a.name < b.name ? -1 : a.name > b.name ? 1 : 0,
+  )) {
     const absolute = path.join(root, entry.name);
     if (entry.isDirectory()) {
       yield* iterateDistFiles(absolute);
@@ -795,6 +802,10 @@ describe("F6-K6 davranışsal: network denied (netguard preload oturumu)", () =>
   it("NEGATİF: netlog BOŞ — oturum boyunca tek bir giden ağ çağrısı denemesi bile YOK", async () => {
     const s = requireSession(session);
     const exitCode = await s.close();
+    // Plumbing kanıtı: dosyanın VAR olduğu ayrıca doğrulanır — readTextIfExist
+    // "dosya yok" ile "log boş"u ayırt etmez; netlog silinmiş/taşınmış olsa
+    // iddia boşuna geçerdi (denetim bulgusu, 2026-11-09).
+    expect(existsSync(netLogPath as string), "netlog dosyası oluşturulmadı — netguard plumbing bozuk").toBe(true);
     const netLog = readTextIfExist(netLogPath as string);
     expect(netLog, `ağ denemesi kaydı: ${netLog}`).toBe("");
     expect(exitCode).toBe(0);

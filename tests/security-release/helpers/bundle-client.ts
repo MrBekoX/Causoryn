@@ -163,6 +163,8 @@ export interface BundleSession {
   readonly stderrLines: readonly string[];
   /** stdout+stderr birleşik metin (sızıntı taraması için). */
   sessionText(): string;
+  /** Alt sürecin OS pid'i (tanı testleri için; spawn başarısızsa -1). */
+  readonly childPid: number;
   /** Süreci kapatır ve exit code döner. */
   close(): Promise<number | null>;
 }
@@ -281,6 +283,7 @@ export async function startBundleSession(options: SessionOptions): Promise<Bundl
   child.stdin?.write(`${JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" })}\n`);
 
   return {
+    childPid: child.pid ?? -1,
     async call(method: string, params: Record<string, unknown>): Promise<JsonRpcMessage> {
       nextId += 1;
       const id = nextId;
@@ -306,6 +309,15 @@ export async function startBundleSession(options: SessionOptions): Promise<Bundl
     },
     close(): Promise<number | null> {
       return new Promise((resolve) => {
+        // Çocuk süreç çağrıdan ÖNCE öldüyse 'close' olayı tekrar ateşlenmez;
+        // yalnızca dinleyici eklemek promise'i sonsuza dek açık bırakırdı
+        // (denetim bulgusu: test/afterAll timeout'u yanıltıcı "timeout"
+        // hatasıyla dönerdi). exitCode/signalCode ile zaten-ölü durumu
+        // anında çözülür; sinyalle ölümde exitCode null'dur.
+        if (child.exitCode !== null || child.signalCode !== null) {
+          resolve(child.exitCode);
+          return;
+        }
         child.stdin?.end();
         child.on("close", (code) => resolve(code));
       });

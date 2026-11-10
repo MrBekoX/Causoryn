@@ -76,12 +76,13 @@ import {
   existsSync,
   mkdirSync,
   readFileSync,
-  readdirSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+
+import { listFiles } from "./lib/list-files.mjs";
 
 const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
 const PKG_DIR = path.resolve(SCRIPT_DIR, "..");
@@ -105,23 +106,6 @@ function assertExists(filePath, label) {
 
 function sha256(filePath) {
   return createHash("sha256").update(readFileSync(filePath)).digest("hex");
-}
-
-/** Sıralı, deterministik dosya listesi (göreli, POSIX ayraçlı). */
-function listFiles(rootDir, baseDir = rootDir) {
-  const entries = readdirSync(rootDir, { withFileTypes: true }).sort((a, b) =>
-    a.name.localeCompare(b.name),
-  );
-  const files = [];
-  for (const entry of entries) {
-    const fullPath = path.join(rootDir, entry.name);
-    if (entry.isDirectory()) {
-      files.push(...listFiles(fullPath, baseDir));
-    } else if (entry.isFile()) {
-      files.push(path.relative(baseDir, fullPath).split(path.sep).join("/"));
-    }
-  }
-  return files;
 }
 
 assertExists(path.join(PKG_DIR, "src", "stdio.ts"), "giriş noktası src/stdio.ts");

@@ -63,6 +63,8 @@ function medianOf(runs: readonly number[]): number {
 
 describe("F7 benchmark — pozitif", { timeout: 590_000 }, () => {
   it("1000 dosyalık fixture ile koşar; üç ölçüm N=3 medyan raporlanır; docs tablosu satırları render edilir", async () => {
+    // Depo yazım invariant'ının taban görüntüsü: koşum öncesi docs baytları.
+    const docsBefore = existsSync(DOCS_PATH) ? readFileSync(DOCS_PATH, "utf8") : null;
     const report = await runBenchmark({
       fileCount: 1000,
       runsPerMeasurement: 3,
@@ -122,8 +124,18 @@ describe("F7 benchmark — pozitif", { timeout: 590_000 }, () => {
         expect(written).toContain(id);
       }
     } else {
-      // Varsayılan koşum depoya yazmaz (ADR-008).
-      expect(process.env.CAUSORYN_BENCH_WRITE_DOCS).toBeUndefined();
+      // Varsayılan koşum depoya yazmaz (ADR-008). Gerçek invariant DISKTIR:
+      // yalnızca tam "1" yazım açar; "0"/"false" gibi değersiz setler de
+      // yazmaz ve docs dosyası koşum öncesi baytlarında kalır. Eski
+      // "env undefined" expect'i "0" set edildiğinde hatalı kırmızı
+      // üretir ve gerçek invariant'ı hiç denetlemezdi (denetim bulgusu,
+      // 2026-11-09).
+      expect(process.env.CAUSORYN_BENCH_WRITE_DOCS === "1").toBe(false);
+      if (docsBefore === null) {
+        expect(existsSync(DOCS_PATH)).toBe(false);
+      } else {
+        expect(readFileSync(DOCS_PATH, "utf8")).toBe(docsBefore);
+      }
     }
   });
 

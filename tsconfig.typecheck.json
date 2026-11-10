@@ -11,6 +11,7 @@
     "adapters/*/src/**/*.ts",
     "adapters/*/test/**/*.ts",
     "tests/**/*.ts",
-    "vitest.config.ts"
+    "vitest.config.ts",
+    "vitest.bench.config.ts"
   ]
 }

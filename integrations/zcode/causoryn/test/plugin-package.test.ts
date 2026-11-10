@@ -709,23 +709,23 @@ describe("plugin manifest (.zcode-plugin/plugin.json)", () => {
     "POZİTİF: geçerli JSON; zorunlu alanlar tam; mcpServers girdisi derlenmiş server dist girişine işaret eder",
     { skip: BUNDLE_SKIP_REASON },
     () => {
-    // Yayımlanan set server.ts'ten dinamik çıkarılır; çekirdek 5 araç
-    // (sprint-1 görev 6-7: get_evidence görev 7 ile eklendi) her zaman
-    // listede olmalıdır.
-    expect(PUBLISHED_TOOLS.length, "server.ts kayıtlı araçları çıkarılamadı").toBeGreaterThan(0);
-    for (const core of [
-      "causoryn_get_capabilities",
-      "causoryn_workspace_summary",
-      "causoryn_map_system",
-      "causoryn_find_symbols",
-      "causoryn_get_evidence",
-    ]) {
-      expect(PUBLISHED_TOOLS, "çekirdek araç eksik: " + core).toContain(core);
-    }
-    expect(new Set(PUBLISHED_TOOLS).size).toBe(PUBLISHED_TOOLS.length);
-    const manifest: unknown = JSON.parse(readPluginFile(MANIFEST_REL)) as unknown;
-    const issues = validateManifest(manifest, PLUGIN_DIR);
-    expect(issues, JSON.stringify(issues)).toEqual([]);
+      // Yayımlanan set server.ts'ten dinamik çıkarılır; çekirdek 5 araç
+      // (sprint-1 görev 6-7: get_evidence görev 7 ile eklendi) her zaman
+      // listede olmalıdır.
+      expect(PUBLISHED_TOOLS.length, "server.ts kayıtlı araçları çıkarılamadı").toBeGreaterThan(0);
+      for (const core of [
+        "causoryn_get_capabilities",
+        "causoryn_workspace_summary",
+        "causoryn_map_system",
+        "causoryn_find_symbols",
+        "causoryn_get_evidence",
+      ]) {
+        expect(PUBLISHED_TOOLS, "çekirdek araç eksik: " + core).toContain(core);
+      }
+      expect(new Set(PUBLISHED_TOOLS).size).toBe(PUBLISHED_TOOLS.length);
+      const manifest: unknown = JSON.parse(readPluginFile(MANIFEST_REL)) as unknown;
+      const issues = validateManifest(manifest, PLUGIN_DIR);
+      expect(issues, JSON.stringify(issues)).toEqual([]);
     },
   );
 

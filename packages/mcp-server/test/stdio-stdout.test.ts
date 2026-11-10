@@ -119,12 +119,13 @@ describe("stdio server — stdout saflığı ve protokol el sıkışması", () =
     // Kill güvenlik ağı: kaynak-spawn'lı çocuk (--experimental-transform-types
     // + ilk indeksleme) sıcak modül önbelleğinde ~2.6 s'te hazırken, soğuk
     // önbellek/paralel suite yükü altında 35 s ölçüldü (elle spawn
-    // enstrümantasyonu, 2026-11-09). 30 s'lik eski ağır, meşru yavaş
-    // başlangıcı hazır olmadan öldürüyordu; ağı hazır-olduktan-sonra-yanıt
-    // vermeyen gerçek askıda kalmayı yakalamak için 90 s'e taşındı.
+    // enstrümantasyonu, 2026-11-09); arka arkaya çift suite koşumunda 90 s
+    // bile sınırda kaldı (bu oturumda bir kez gözlemlendi). Ağ, hazır-
+    // olduktan-sonra-yanıt vermeyen GERÇEK askıyı yakalamak içindir — ürün
+    // başlangıç SLA'sı burada test edilmez; marj 150 s'e taşınmıştır.
     const killTimer = setTimeout(() => {
       child.kill("SIGKILL");
-    }, 90_000);
+    }, 150_000);
 
     const exitPromise = new Promise<number | null>((resolve, reject) => {
       child.on("error", reject);
@@ -285,5 +286,5 @@ describe("stdio server — stdout saflığı ve protokol el sıkışması", () =
     expect(exitCode).toBe(0);
     // Zaman aşımı kill ağırının (90 s) üzerinde: asıl iddia kümesi
     // DEĞİŞMEDİ — yalnızca soğuk başlangıç bütçesi gerçek ölçüme göre.
-  }, 120_000);
+  }, 180_000);
 });
