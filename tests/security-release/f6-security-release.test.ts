@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
   existsSync,
@@ -814,5 +815,134 @@ describe("F6-K6 davranışsal: network denied (netguard preload oturumu)", () =>
 
   it("stdout saflığı (netguard aktifken de TŞ §10.1 korunur)", () => {
     assertStdoutPurity(requireSession(session), 4);
+  });
+});
+
+/* ------------------------------------------------------------------ */
+/* K7 — malicious Git refs: DAVRANIŞSAL (bundle spawn, salt-okunur git) */
+/*                                                                      */
+/* 2026-11-10 güvenlik turu eklemesi: matris 6. satırının davranışsal    */
+/* kanıtı önceki turda kaynak-düzeyi suite'lerle (repository/wiki-tools) */
+/* sınırlıydı; bu blok AYNI kararların paketlenmiş bundle spawn'ında     */
+/* geçerliliğini kanıtlar. Kırmızı-yeteneği: POZİTİF dalın "ok" iddiası  */
+/* boş değildir — git'in çözemediği ref aynı araçta NEGATİF dalın        */
+/* kanıtladığı gibi INVALID_REVISION düşer; yani git-read çalışmasaydı   */
+/* pozitif dal kırmızıya düşerdi.                                        */
+/* ------------------------------------------------------------------ */
+
+interface GitWikiFixture {
+  readonly root: string;
+  readonly wikiDataDir: string;
+  readonly commitSha: string;
+}
+
+/** Git commit'i olan minimal fixture: git cat-file çözümlemesi için gerekli. */
+function buildGitWikiFixture(): GitWikiFixture {
+  const root = makeTempDir("causoryn-f6-gitwiki-");
+  writeFixtureFile(root, "src/app.ts", CLEAN_SERVICE_TS);
+  execFileSync("git", ["init", "-q"], { cwd: root });
+  execFileSync("git", ["config", "user.email", "f6-fixture@causoryn.invalid"], { cwd: root });
+  execFileSync("git", ["config", "user.name", "f6-fixture"], { cwd: root });
+  execFileSync("git", ["add", "."], { cwd: root });
+  execFileSync("git", ["commit", "-q", "-m", "f6: git-ref security fixture"], { cwd: root });
+  const commitSha = execFileSync("git", ["rev-parse", "HEAD"], { cwd: root, encoding: "utf8" }).trim();
+  // wiki.dataDbPath allowRoot DIŞINDA olmalı (context.ts yazım yasağı); üst
+  // dizin diskte VAR OLMALIDIR — makeTempDir bunu sağlar.
+  const wikiDataDir = makeTempDir("causoryn-f6-wikidata-");
+  return { root, wikiDataDir, commitSha };
+}
+
+function requireGitFixture(fixture: GitWikiFixture | undefined): GitWikiFixture {
+  if (fixture === undefined) throw new Error("git fixture kurulmadı (beforeAll başarısız)");
+  return fixture;
+}
+
+describe("F6-K7 davranışsal: malicious Git refs (bundle spawn, salt-okunur git)", () => {
+  let session: BundleSession | undefined;
+  let gitFixture: GitWikiFixture | undefined;
+
+  beforeAll(async () => {
+    gitFixture = buildGitWikiFixture();
+    session = await startBundleSession({
+      bundlePath: bundleClonePath,
+      cwd: bundleCloneDir,
+      config: {
+        workspaceId: "f6-gitwiki",
+        allowRoots: [requireGitFixture(gitFixture).root],
+        results: { maxNodes: 250, maxSymbols: 100 },
+        autoIndex: true,
+        wiki: { dataDbPath: path.join(gitFixture.wikiDataDir, "wiki-f6.sqlite") },
+      },
+    });
+  }, 120_000);
+
+  afterAll(async () => {
+    if (session !== undefined) await session.close();
+  }, 30_000);
+
+  it("POZİTİF: wiki_build çalışır; gerçek commit SHA `git cat-file -t` ile bundle içinde çözülür", async () => {
+    const build = await requireSession(session).call("tools/call", {
+      name: "causoryn_wiki_build",
+      arguments: { mode: "full" },
+    });
+    const buildData = okEnvelope(build).data as { wikiSnapshotId?: string };
+    expect(buildData.wikiSnapshotId).toMatch(/^wiki:/);
+
+    // SHA yalnızca git koşarsa çözülür ("working-tree" alias'ı git'siz çözülür;
+    // SHA ise execFile git cat-file yoludır — services-wiki.ts resolveRevisionAlias).
+    const sha = requireGitFixture(gitFixture).commitSha;
+    const message = await requireSession(session).call("tools/call", {
+      name: "causoryn_wiki_get_versions",
+      arguments: { refs: [sha] },
+    });
+    const data = okEnvelope(message).data as {
+      versions?: Array<{ revisionRef?: string; availability?: string }>;
+    };
+    const entry = (data.versions ?? []).find((version) => version.revisionRef === sha);
+    expect(entry, `SHA girişi yok: ${JSON.stringify(data)}`).toBeDefined();
+    expect(entry?.availability).toBe("not_available"); // çözümlendi ama veri kökünde tutulmuyor
+  }, 120_000);
+
+  it("POZİTİF: working-tree aliası tutulan revizyon olarak available döner", async () => {
+    const message = await requireSession(session).call("tools/call", {
+      name: "causoryn_wiki_get_versions",
+      arguments: { refs: ["working-tree"] },
+    });
+    const data = okEnvelope(message).data as {
+      versions?: Array<{ revisionRef?: string; availability?: string; wikiSnapshotId?: string | null }>;
+    };
+    const held = (data.versions ?? []).find((version) => version.revisionRef === "working-tree");
+    expect(held?.availability).toBe("available");
+    expect(String(held?.wikiSnapshotId)).toMatch(/^wiki:/);
+  }, 60_000);
+
+  it("NEGATİF: biçim bozuk ref'ler INVALID_REVISION (%2F kodlaması + shell metakarakteri)", async () => {
+    for (const evilRef of ["..%2Fevil", "main; rm -rf /"]) {
+      const message = await requireSession(session).call("tools/call", {
+        name: "causoryn_wiki_get_versions",
+        arguments: { refs: [evilRef] },
+      });
+      errorEnvelopeOf(message, "INVALID_REVISION");
+    }
+  }, 60_000);
+
+  it("NEGATİF: biçimi geçerli ama git'in çözemediği ref INVALID_REVISION (git koştu, sonuç dürüst)", async () => {
+    const message = await requireSession(session).call("tools/call", {
+      name: "causoryn_wiki_get_versions",
+      arguments: { refs: ["f6-mevcut-degil-branch"] },
+    });
+    errorEnvelopeOf(message, "INVALID_REVISION");
+  }, 60_000);
+
+  it("PARTIAL: traversal görünümlü ama REF_PATTERN'e uyan ref git çözümlemesinde düşer (desen allowlist'i [A-Za-z0-9._/-] ile sınırlı; over-deny yok)", async () => {
+    const message = await requireSession(session).call("tools/call", {
+      name: "causoryn_wiki_get_versions",
+      arguments: { refs: ["refs/heads/../../escape"] },
+    });
+    errorEnvelopeOf(message, "INVALID_REVISION");
+  }, 60_000);
+
+  it("stdout saflığı (TŞ §10.1): tam 8 yanıt satırı (initialize + 7 çağrı), hepsi geçerli JSON-RPC 2.0", () => {
+    assertStdoutPurity(requireSession(session), 8);
   });
 });

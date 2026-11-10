@@ -340,13 +340,10 @@ async function measureRow(
     readonly startSymbolId: string | null;
   },
 ): Promise<MeasurementRow> {
-  const args: Record<string, unknown> =
-    def.id === "graph_neighborhood_small"
-      ? { symbolId: ctx.startSymbolId ?? "<çözümlenemedi>", depth: 1 }
-      : def.id === "map_system_200"
-        ? { level: "L2", maxNodes: 200 }
-        : {};
-
+  // Guard önce: komşuluk ölçümü başlangıç sembolü olmadan yapılmaz; args
+  // kurulumu guard SONRASINA taşındı — ulaşılamaz yer tutucu fallback'i yok
+  // (denetim bulgusu, 2026-11-10). graph dalında ctx.startSymbolId buraya
+  // string olarak gelir; null ise fonksiyon yukarıda dönmüştür.
   if (def.id === "graph_neighborhood_small" && ctx.startSymbolId === null) {
     return {
       id: def.id,
@@ -359,6 +356,12 @@ async function measureRow(
       reason: "başlangıç sembolü çözümlenemedi — komşuluk ölçümü atlandı",
     };
   }
+  const args: Record<string, unknown> =
+    def.id === "graph_neighborhood_small"
+      ? { symbolId: ctx.startSymbolId, depth: 1 }
+      : def.id === "map_system_200"
+        ? { level: "L2", maxNodes: 200 }
+        : {};
 
   const invoke = async (callIndex: number): Promise<CallOutcome> => {
     if (ctx.fault?.measurementId === def.id) {

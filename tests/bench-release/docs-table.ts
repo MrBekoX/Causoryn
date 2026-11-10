@@ -103,8 +103,9 @@ export function renderBenchmarksDoc(report: BenchReport): string {
       `CPU: ${report.environment.cpuModel}, bellek: ${String(Math.round(report.environment.totalMemBytes / (1024 * 1024 * 1024)))} GB.`,
   );
   lines.push(
-    "- Yeniden üretim: `CAUSORYN_BENCH_WRITE_DOCS=1 npx vitest run tests/bench-release/benchmark.test.ts` " +
-      "(varsayılan vitest koşumu depoya yazmaz — ADR-008 salt-okunur test disiplini).",
+    "- Yeniden üretim: `CAUSORYN_BENCH_WRITE_DOCS=1 npm run bench` " +
+      "(config: `vitest.bench.config.ts`; varsayılan vitest koşumu `tests/bench-release/**`'ı " +
+      "dışlar ve depoya yazmaz — ADR-008 salt-okunur test disiplini).",
   );
   lines.push("");
   lines.push(`## Sonuçlar — koşum ${report.startedAt}`);

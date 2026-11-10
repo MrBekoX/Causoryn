@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -6,6 +7,7 @@ import { describe, expect, it } from "vitest";
 
 import { BenchFixtureError, buildFixtureModel, fixtureDiskHash, writeFixture } from "./fixture.js";
 import { runBenchmark } from "./benchmark.js";
+import type { BenchReport } from "./benchmark.js";
 import { renderBenchmarksDoc, writeBenchmarksDoc } from "./docs-table.js";
 
 /**
@@ -270,5 +272,86 @@ describe("F7 benchmark — partial", { timeout: 120_000 }, () => {
     expect(doc).toContain("not measured");
     expect(doc).toContain("ortam kesintisi simülasyonu");
     expect(doc).toContain("hedef aşıldı değil — ölçüm yok");
+  });
+});
+
+describe("F7 benchmark — docs yeniden üretim komutu sözleşmesi", { timeout: 180_000 }, () => {
+  /**
+   * Denetim bulgusu düzeltmesi (2026-11-10): docs/benchmarks.md'teki
+   * 'Yeniden üretim' komutu `npx vitest run tests/bench-release/...`
+   * (varsayılan config) idi — vitest.config.ts'teki `tests/bench-release/**`
+   * dışlaması nedeniyle SIFIR test çözümlüyordu (kanıt: `npx vitest list
+   * tests/bench-release/benchmark.test.ts` → boş çıkış; aynı dosya
+   * `--config vitest.bench.config.ts` ile 6 test listeler). Sözleşme:
+   * belgelenen komut GERÇEKTEN bench süitini koşmalıdır — ADR-010
+   * dürüstlük: ölçülebilirlik iddiası doğrulanabilir olmalıdır.
+   */
+
+  const VITEST_MJS = path.join(REPO_ROOT, "node_modules", "vitest", "vitest.mjs");
+  const BENCH_FILE = "tests/bench-release/benchmark.test.ts";
+
+  /** Render sözleşmesi testi için en küçük sentetik koşum raporu. */
+  function syntheticReport(): BenchReport {
+    return {
+      startedAt: "1970-01-01T00:00:00.000Z",
+      fileCount: 4,
+      fixtureEntryCount: 4,
+      fixtureHash: "test-hash",
+      coldIndexMs: 1,
+      indexState: "ready",
+      diagnosticCount: 0,
+      firstDiagnostics: [],
+      runsPerMeasurement: 3,
+      callDeadlineMs: 30_000,
+      timingMethod: "test",
+      environment: {
+        nodeVersion: process.version,
+        platform: `${os.platform()} ${os.release()} ${os.arch()}`,
+        cpuModel: "test-cpu",
+        totalMemBytes: os.totalmem(),
+      },
+      rows: [
+        {
+          id: "workspace_summary_warm",
+          tool: "causoryn_workspace_summary",
+          call: "{}",
+          targetMs: 1000,
+          runs: [1, 2, 3],
+          medianMs: 2,
+          status: "measured",
+          reason: null,
+        },
+      ],
+    };
+  }
+
+  it("docs'taki 'Yeniden üretim' satırı bench runner'ı gösterir; varsayılan config'e dayanan kırık komut kaldırılmıştır", () => {
+    const doc = renderBenchmarksDoc(syntheticReport());
+    const line = doc.split("\n").find((candidate) => candidate.startsWith("- Yeniden üretim:"));
+    expect(line, "docs'ta '- Yeniden üretim:' satırı bulunamadı").toBeDefined();
+    // Komut bench config'ini (`npm run bench` / vitest.bench.config.ts)
+    // göstermeli: varsayılan config tests/bench-release'i dışlar.
+    expect(line).toMatch(/npm run bench|vitest\.bench\.config\.ts/);
+    // Kırık desen (varsayılan config'te sıfır test çözümleyen komut) yok.
+    expect(line).not.toContain("npx vitest run tests/bench-release");
+    // Dışlamanın diskte varlığı — komutun neden bench config'i zorunlu
+    // kıldığının kanıtı (desen kaldırılırsa bu test kılavuzdur).
+    const defaultConfig = readFileSync(path.join(REPO_ROOT, "vitest.config.ts"), "utf8");
+    expect(defaultConfig).toContain("tests/bench-release/**");
+  });
+
+  it("davranış: bench config komutu benchmark dosyasını ÇÖZÜMLER, varsayılan config çözümlemez (vitest list)", () => {
+    const benchList = execFileSync(
+      process.execPath,
+      [VITEST_MJS, "list", BENCH_FILE, "--config", "vitest.bench.config.ts"],
+      { cwd: REPO_ROOT, encoding: "utf8" },
+    );
+    expect(benchList).toContain("tests/bench-release/benchmark.test.ts");
+
+    const defaultList = execFileSync(process.execPath, [VITEST_MJS, "list", BENCH_FILE], {
+      cwd: REPO_ROOT,
+      encoding: "utf8",
+    });
+    expect(defaultList).not.toContain("benchmark.test.ts");
   });
 });
