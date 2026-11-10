@@ -681,7 +681,13 @@ describe("timeline git katmanı — geçici depo (salt-okunur)", () => {
     }
     sha2 = shas[1];
     sha3 = shas[2];
-  }, 30_000);
+    // Hook bütçesi: kurulum ~20 senkron git çağrısı + 6 manifest yazımıdır;
+    // izole dosya süresi 14.9-18.0 s ölçülürken tam süitte hook 30 s
+    // vitest hookTimeout'unu aşabildi (gözlenen kırmızı: "Hook timed out
+    // in 30000ms" — 13 test koşulamadan skip; denetim oturumu 2026-11-09).
+    // Per-test 30_000 bütçeleri hook'u KAPSAMAZ; 120 s, f6 güvenlik
+    // turunun beforeAll bütçesiyle aynı sınıftadır. İddia değişmedi.
+  }, 120_000);
 
   afterAll(async () => {
     if (repoRoot !== undefined) {
@@ -875,7 +881,11 @@ describe("timeline git katmanı — geçici depo (salt-okunur)", () => {
     expect((interval.reasons.to ?? "").startsWith("manifest-invalid-shape")).toBe(
       true,
     );
-  });
+    // Git-katmanı bütçesi: bu describe'daki tüm gerçek git-işi yapan testler
+    // 30 s taşır (bkz. üstteki pozitifler + 949/968); 5 s vitest default'u
+    // paralel suite yükünde 2 revizyonluk analyze+compare işini kesebilir
+    // (gözlenen kırmızı, 2026-11-09). İddia kümesi değişmedi.
+  }, 30_000);
 
   it("negatif: manifest hiç olmayan revizyon → manifest-not-found ile unanalyzed", async () => {
     // av1 annotated tag'i v1 ile aynı commit'i gösterir; manifest'siz bir
@@ -907,7 +917,8 @@ describe("timeline git katmanı — geçici depo (salt-okunur)", () => {
     expect((interval.reasons.to ?? "").startsWith("manifest-not-found")).toBe(
       true,
     );
-  });
+    // Git-katmanı bütçesi konvansiyonu (commit-tree + branch + tam timeline).
+  }, 30_000);
 
   it("partial: relativePath türü bozuk manifest → unanalyzed; kodlanmamış TypeError kaçmaz", async () => {
     // Denetim bulgusu 1 (git yolu): güvenilmez depodan gelen manifest'te
@@ -932,7 +943,8 @@ describe("timeline git katmanı — geçici depo (salt-okunur)", () => {
       true,
     );
     expect(JSON.stringify(interval)).not.toContain('"changes"');
-  });
+    // Git-katmanı bütçesi konvansiyonu (v1+v6 iki revizyonluk analyze).
+  }, 30_000);
 
   it("negatif: refs modunda sampling'e takılan ref bile çözümlenemiyorsa açık hatadır", async () => {
     // Denetim bulgusu 2: yalnızca SEÇİLEN ref'ler doğrulanıyordu; aynı girdi
@@ -977,7 +989,8 @@ describe("timeline git katmanı — geçici depo (salt-okunur)", () => {
         }),
       "timeline/invalid-range",
     );
-  });
+    // Git-katmanı bütçesi konvansiyonu (951'deki maxRangeWalk kardeşiyle aynı).
+  }, 30_000);
 
   it("paket yüzeyi: timeline çekirdeği index.ts'ten export edilir", () => {
     // Denetim bulgusu 4: compare/impact/guard deseni gibi paket index'i

@@ -31,7 +31,7 @@
       "type": "stdio",
       "command": "node",
       "args": [
-        "${CLAUDE_PLUGIN_ROOT}/../../../packages/mcp-server/dist/stdio.js"
+        "${CLAUDE_PLUGIN_ROOT}/../../../packages/mcp-server/dist/mcp-server.mjs"
       ],
       "cwd": "${CLAUDE_PROJECT_DIR}",
       "env": {

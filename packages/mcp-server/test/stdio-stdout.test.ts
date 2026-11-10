@@ -116,13 +116,34 @@ describe("stdio server — stdout saflığı ve protokol el sıkışması", () =
       }
     };
 
+    // Kill güvenlik ağı: kaynak-spawn'lı çocuk (--experimental-transform-types
+    // + ilk indeksleme) sıcak modül önbelleğinde ~2.6 s'te hazırken, soğuk
+    // önbellek/paralel suite yükü altında 35 s ölçüldü (elle spawn
+    // enstrümantasyonu, 2026-11-09); arka arkaya çift suite koşumunda 90 s
+    // bile sınırda kaldı (bu oturumda bir kez gözlemlendi). Ağ, hazır-
+    // olduktan-sonra-yanıt vermeyen GERÇEK askıyı yakalamak içindir — ürün
+    // başlangıç SLA'sı burada test edilmez; marj 150 s'e taşınmıştır.
     const killTimer = setTimeout(() => {
       child.kill("SIGKILL");
-    }, 30_000);
+    }, 150_000);
 
     const exitPromise = new Promise<number | null>((resolve, reject) => {
       child.on("error", reject);
       child.on("close", (code) => resolve(code));
+    });
+
+    // Dürüst hızlı hata: çocuk 3 yanıtı vermeden kapandıysa (ör. kill
+    // ağırı vurduysa / başlangıçta çöktüyse) bekleyen yanıtlar REDDEDİLMELİ;
+    // aksi halde aşağıdaki Promise.all askıda kalır ve test, gerçek nedeni
+    // ("yanıtsız ölüm") gizleyerek tüm zaman aşımına sürüklenir (gözlenen
+    // 60 s timeout'un mekanizması). Yanıtlar geldiyse pending zaten boştur —
+    // etkisiz. Yerinde iade edilen reject, hata mesajındaki stdout/stderr
+    // dökümüyle kök nedeni görünür kılar.
+    child.on("close", () => {
+      for (const entry of pending.values()) {
+        entry.reject(new Error("child process yanıtsız kapandı"));
+      }
+      pending.clear();
     });
 
     child.stdout?.setEncoding("utf8");
@@ -263,5 +284,7 @@ describe("stdio server — stdout saflığı ve protokol el sıkışması", () =
     // Loglar stderr'de göründü; stdout'a sızmadı.
     expect(stderrLines.some((line) => line.includes(READY_MARKER))).toBe(true);
     expect(exitCode).toBe(0);
-  }, 60_000);
+    // Zaman aşımı kill ağırının (90 s) üzerinde: asıl iddia kümesi
+    // DEĞİŞMEDİ — yalnızca soğuk başlangıç bütçesi gerçek ölçüme göre.
+  }, 180_000);
 });
