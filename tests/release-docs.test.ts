@@ -58,6 +58,17 @@ function readDoc(name: keyof typeof DOC_PATHS): string {
 }
 
 /**
+ * Benchmark medyanını KELİME SINIRLI eşler (denetim bulgusu, düşük):
+ * düz substring `includes("5.3 ms")` sentetik "15.3 ms"i de yakalar ve
+ * `includes("10.7")` "110.7"yi de eşler. `(?<!\d)5\.3(?!\d) ms` deseni
+ * her iki yanlış-pozitifi dışarıda bırakır (Node 24 / V8 lookbehind).
+ */
+function medianRegex(median: string): RegExp {
+  const escaped = median.replace(".", "\\.");
+  return new RegExp(`(?<!\\d)${escaped}(?!\\d) ms`);
+}
+
+/**
  * tool-contracts.md sözleşme tablolarındaki `causoryn_*` araç adlarını çıkarır.
  * Yalnızca "## Çekirdek" ve "## Wiki" sözleşme bölümleri taranır; dosyanın
  * DIĞER tabloları (yazma izin matrisi vb.) bu ayrıştırıcıya girmez.
@@ -267,5 +278,136 @@ describe("F8: docs/implementation-status.md — Sprint 7 final bölümü", () =>
     expect(text).toContain("F9");
     expect(text).toContain("0.1.0");
     expect(text).toContain("Sprint 7 açık kalemleri");
+  });
+});
+
+/**
+ * F8 FİNAL turu (2026-11-10): Faz F'nin ikinci koşum dalgası
+ * (60735ff bundle, 1d2a450 host dokümanları, e3d0bc2 security/benchmark)
+ * host CLI sürümlerini, F6 test sayılarını ve F7 ölçüm medyanlarını
+ * GÜNCELLEDİ. Bu blok, b85ffff'te yazılan F8 dokümanlarının bayat
+ * iddialarla (claude 2.1.319, F6 26/26, 2026-11-08 medyanları) GERİ
+ * GELMEMESİNİ kilitleyen sürüm-kapısıdır. Pinlenen sayılar docs/benchmarks.md
+ * 2026-11-10 koşumu ve docs/security-pass.md final turuyla aynıdır; yeni bir
+ * benchmark/güvenlik turu bu değerleri değiştirirse bu test ve dokümanlar
+ * birlikte güncellenir.
+ */
+describe("F8 FİNAL turu (2026-11-10 yeniden doğrulama) — bayat iddia geri gelemez", () => {
+  it("compatibility-matrix final host koşumlarını yansıtır: güncel claude iddiası 2.1.322; bayat 'CLI 2.1.319' iddiası YOK (tarihsel anım serbest)", () => {
+    const text = readDoc("compatibility");
+    expect(text).toContain("2026-11-10");
+    expect(text).toContain("**2.1.322**");
+    const claudeRow = matrixRowFor(text, "Claude Code");
+    expect(claudeRow).toBeTruthy();
+    expect(claudeRow).toMatch(/2\.1\.322/);
+    expect(claudeRow).not.toMatch(/CLI 2\.1\.319/);
+  });
+
+  it("compatibility-matrix F6/F7 kanıtları final değerlerle güncel: 32/32 + 36/36 + 5 spawn oturumu + npm run bench + 2026-11-10 medyanları", () => {
+    const text = readDoc("compatibility");
+    expect(text).toContain("32/32");
+    expect(text).toContain("**36/36**");
+    expect(text).toContain("5 bağımsız spawn");
+    expect(text).toContain("npm run bench");
+    expect(text).toMatch(medianRegex("11.8"));
+    expect(text).toMatch(medianRegex("13.0"));
+    expect(text).toMatch(medianRegex("10.7"));
+  });
+
+  it("CHANGELOG [0.1.0] benchmark medyanları docs/benchmarks.md final koşumuyla aynı; bayat 2026-11-08 medyanları YOK", () => {
+    const text = readDoc("changelog");
+    expect(text).toMatch(medianRegex("11.8"));
+    expect(text).toMatch(medianRegex("13.0"));
+    expect(text).toMatch(medianRegex("10.7"));
+    expect(text).not.toMatch(medianRegex("5.3"));
+    expect(text).not.toMatch(medianRegex("8.2"));
+    expect(text).not.toMatch(medianRegex("5.7"));
+    expect(text).toContain("5 bağımsız spawn");
+    expect(text).not.toContain("4 bağımsız spawn");
+  });
+
+  it("implementation-status Sprint 7 final dal koşumlarını taşır: F6 32/32, F7 yeni medyan + cold index, claude 2.1.322, final commit'ler 60735ff/e3d0bc2", () => {
+    const text = readDoc("status");
+    expect(text).toContain("32/32");
+    expect(text).toContain("16370.3");
+    expect(text).toContain("11.8");
+    expect(text).toContain("2.1.322");
+    expect(text).toContain("60735ff");
+    expect(text).toContain("e3d0bc2");
+    expect(text).toContain("2026-11-10");
+  });
+
+  it("docs/architecture.md build sözleşmesi benchmark ayrışmasını beyan eder (npm run bench + tests/bench-release dışlaması)", () => {
+    const text = readDoc("architecture");
+    expect(text).toContain("npm run bench");
+    expect(text).toContain("tests/bench-release");
+  });
+});
+
+/**
+ * DENETİM DÖNGÜSÜ (bulgu, orta): implementation-status.md Sprint 7 açık
+ * kalemleri madde 6, "F9 sayımının 12 kaleminin CHANGELOG [Unreleased]
+ * 1.0.0 kapılarına işlendiğini" iddia eder. Bu blok o çapraz referansı
+ * pinler: [Unreleased] bölümü F9 sayımındaki HER kalemi bir bullet'ta
+ * taşımak zorundadır. Kırmızı koşum, eksik kalemlerin (wiki yüzey
+ * boşlukları, visualizer, bundle fidelity, per-file parse reuse, SQL
+ * rename) somut eksik listesiydi — dokümanlar güncellenince yeşile döner.
+ */
+describe("DENETİM DÖNGÜSÜ: CHANGELOG [Unreleased] 1.0.0 kapıları F9 sayımını eksiksiz kapsar", () => {
+  function unreleasedSection(): string {
+    const text = readDoc("changelog");
+    const start = text.indexOf("## [Unreleased]");
+    const end = text.indexOf("## [0.1.0]");
+    expect(start, "## [Unreleased] başlığı olmalı").toBeGreaterThanOrEqual(0);
+    expect(end, "## [0.1.0] başlığı olmalı").toBeGreaterThan(start);
+    return text.slice(start, end);
+  }
+
+  it("F9 kalemi 9 — wiki yüzey boşlukları: wiki_search filtreleri + WIKI_NOTE_CONFLICT kaydı + incremental yayım yeniden yazımı", () => {
+    const u = unreleasedSection();
+    expect(u).toMatch(/wiki_search|wiki arama/i);
+    expect(u).toMatch(/WIKI_NOTE_CONFLICT/);
+    expect(u).toMatch(/incremental wiki|link\/FTS/i);
+  });
+
+  it("F9 kalemi 11 — visualizer: gerçek tarayıcı koşusu + viewer HTML MCP yüzeyi", () => {
+    const u = unreleasedSection();
+    expect(u).toMatch(/visualizer/i);
+    expect(u).toMatch(/tarayıcı|MCP yüzeyi/i);
+  });
+
+  it("F9 kalemi 12 — bundle fidelity: default lib .d.ts → partial düşüşü", () => {
+    const u = unreleasedSection();
+    expect(u).toMatch(/default lib|\.d\.ts/i);
+  });
+
+  it("F9 kalem 5 alt kalemi — per-file parse reuse (B7) ve kalem 7 alt kalemi — K-015(3) SQL rename → unknown", () => {
+    const u = unreleasedSection();
+    expect(u).toMatch(/per-file parse reuse/i);
+    expect(u).toMatch(/SQL RENAME|rename/i);
+  });
+});
+
+/**
+ * DENETİM DÖNGÜSÜ (bulgu, düşük): medyan assertion'larının hassasiyeti.
+ * Eski yaklaşım düz substring'ti; "15.3 ms" dizesi "5.3 ms"i İÇERİR ve
+ * "110.7" dizesi "10.7"yi İÇERİR — yani gelecekteki meşru bir medyan
+ * yanlış kırmızıya düşerdi. Bu blok kusuru sentetik dizeyle kanıtlar ve
+ * medianRegex'in kelime-sınırlı davranışını pinler.
+ */
+describe("DENETİM DÖNGÜSÜ: medyan regex'i kelime-sınırlıdır (sentetik kanıt)", () => {
+  it("eski substring yaklaşımı '15.3 ms'i yanlış yakalardı; medianRegex yakalamaz", () => {
+    // Kusur kanıtı: includes tabanlı eski yaklaşım false-pozitif üretir.
+    expect("15.3 ms".includes("5.3 ms")).toBe(true);
+    // Düzeltilmiş davranış: kelime-sınırlı regex dışarıda bırakır.
+    expect(medianRegex("5.3").test("15.3 ms")).toBe(false);
+    expect(medianRegex("5.3").test("5.3 ms")).toBe(true);
+    expect(medianRegex("5.3").test("5.31 ms")).toBe(false);
+  });
+
+  it("eski substring '110.7'de '10.7'yi eşlerdi; medianRegex eşlemez", () => {
+    expect("110.7".includes("10.7")).toBe(true);
+    expect(medianRegex("10.7").test("110.7 ms")).toBe(false);
+    expect(medianRegex("10.7").test("10.7 ms")).toBe(true);
   });
 });

@@ -12,10 +12,13 @@ sürümleme [SemVer](https://semver.org/lang/tr/) ilkelerini izler.
 - ZCode GUI içi gerçek kurulum + tools/list smoke koşumu (kırmızı çizgi 6, kullanıcı kurulumunu bozmama kısıtıyla)
 - macOS/Linux/ARM dağıtım hedeflerinin doğrulanması (TŞ §22 Release satırı; bugüne dek yalnızca Windows x64 koşuldu)
 - MCP SDK v1.x → v2 hattına yükseltme (TŞ §6 hedefi; K-009 sapma kaydının kapatılması — npm install kısıtı nedeniyle bugüne dek 1.32.2)
-- `causoryn_refresh_index` araç yüzeyinde `mode=incremental` açılımı (watcher in-process altyapısı hâlâ açık ret veriyor)
+- `causoryn_refresh_index` araç yüzeyinde `mode=incremental` açılımı (watcher in-process altyapısı hâlâ açık ret veriyor) ve per-file parse reuse'un eklenmesi (B7 Partial kalıntısının tamamı — graph tutarlılığı bugün tam türetim zorluyor)
 - adapters/typescript + adapters/csharp-roslyn TESTS kenarı üretimi (derive_test_plan `direct` sinyali bugün gerçek graph'ta dormant)
-- OpenAPI keşfine yanıt-şeması drift'i eklenmesi (K-015(5) sadakat sınırı) ve TŞ §11 event versiyon uyumsuzluk kuralı (K-015(4))
+- OpenAPI keşfine yanıt-şeması drift'i eklenmesi (K-015(5) sadakat sınırı), TŞ §11 event versiyon uyumsuzluk kuralı (K-015(4)) ve SQL RENAME → `unknown` sınıflamasının netleştirilmesi (K-015(3))
 - compare_architecture/architecture_timeline için `.causoryn/architecture-snapshot.json` blob üreticisi (bugün elle yazılmış blob gerekiyor)
+- wiki_search sorgu filtrelerinin (pageKind/language/…) araç yüzeyine açılması, `WIKI_NOTE_CONFLICT` için TOOL_ERROR_GUIDANCE kaydı eklenmesi ve incremental wiki yayımında link/FTS indekslerinin tam graph'tan yeniden yazmasının daraltılması
+- E6 offline visualizer'ın gerçek tarayıcı koşusuyla doğrulanması ve viewer HTML'ini izinli output dizinine yazan MCP yüzeyi
+- Bundle fidelity: default lib (`.d.ts`) dosyalarının bundle'a katılması veya doküman sınırlaması (global-referanslı kaynaklar bugün `partial`'a düşüyor — docs/security-pass.md Dürüstlük 1)
 - Rate-limit/concurrency resource budget (K-010 kapsam dışı beyanı) ve adanmış secret-scan script'i
 - npm audit 10 moderate dev-toolchain uyarısının (minimatch) çözülmesi
 
@@ -72,19 +75,24 @@ Unreleased bölümünde ve `docs/implementation-status.md` Sprint 7 bölümünde
   (native .node gömülemez — ADR-010).
 - **Host entegrasyonları (F2–F5):** ZCode dev marketplace + plugin manifest
   doğrulaması; Claude Code `.mcp.json`/`claude mcp add` kılavuzu + gerçek
-  smoke koşumu (geçici config diziniyle, kullanıcı config'i temiz); Codex
+  smoke koşumu (geçici config diziniyle, kullanıcı config'i temiz —
+  **2.1.322 ile 2026-11-10'da uçtan uca yeniden doğrulandı**); Codex
   `config.toml`/`codex mcp add` kılavuzu + add→list→remove gerçek smoke
-  (temizlik kanıtlı); Antigravity plugin.json+mcp.json doküman örneği (agy CLI
+  (temizlik kanıtlı; config.toml yedek/geri yükleme disipliniyle 2026-11-10'da
+  yeniden koşuldu); Antigravity plugin.json+mcp.json doküman örneği (agy CLI
   yok — kurulum/smoke NOT RUN, ADR-010).
 - **Güvenlik turu (F6, TŞ §22):** paketlenmiş bundle üzerinde 9/9 PASS —
   symlink/traversal, secret leakage (statik canary + davranışsal yemler),
   symlink TOCTOU, poisoned source comment/prompt injection, oversized files,
-  malicious Git refs, network denied (netguard preload, sıfır ağ), offline
-  HTML XSS/CSP, stdout disiplini (4 bağımsız spawn oturumu).
+  malicious Git refs (bundle spawn'da davranışsal kanıt: gerçek commit SHA
+  `git cat-file` ile çözülür, kötü ref → `INVALID_REVISION`), network denied
+  (netguard preload, sıfır ağ), offline HTML XSS/CSP, stdout disiplini
+  (5 bağımsız spawn oturumu). F6 paketi 32/32 test; güvenlik suite'i toplamı
+  36/36 (2026-11-10 final turunda tümü yeniden koşuldu).
 - **Benchmark (F7, TŞ §21):** 1.000 dosya deterministik fixture üzerinde MCP
-  protokol düzeyi ölçümler — sıcak `workspace_summary` 5.3 ms, küçük sembol
-  bağlamı 8.2 ms, 200-node map 5.7 ms (medyan; TŞ §21 rakamları tasarım
-  hedefidir, sonuç değil).
+  protokol düzeyi ölçümler — sıcak `workspace_summary` 11.8 ms, küçük sembol
+  bağlamı 13.0 ms, 200-node map 10.7 ms (medyan; `npm run bench`, 2026-11-10
+  koşumu; TŞ §21 rakamları tasarım hedefidir, sonuç değil).
 
 ### Documentation
 

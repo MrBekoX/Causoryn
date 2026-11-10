@@ -103,7 +103,12 @@ TypeScript 7 native serisi bu aralıkta değildir.
 
 ## Build/typecheck/test sözleşmesi
 
-- `npm run test` → Vitest (packages/adapters/integrations/tests altındaki tüm `*.test.ts`)
+- `npm run test` → Vitest (packages/adapters/integrations/tests altındaki tüm
+  `*.test.ts`; **`tests/bench-release/**` hariçtir** — F7 benchmark duvar-saati
+  duyarlı performans ölçümüdür, doğruluk kapısı değil; paralel süit yükü altında
+  flaky-potansiyellidir)
+- `npm run bench` → yalnızca `tests/bench-release/` (`vitest.bench.config.ts`);
+  `docs/benchmarks.md` yenileme: `CAUSORYN_BENCH_WRITE_DOCS=1 npm run bench`
 - `npm run build` → `tsc -b` (kök solution `tsconfig.json` 9 doğrudan reference:
   6 core paket + wiki + 2 adapter; `contracts`/`preflight`/`verification` bu
   zincirle transitif derlenir; `apps/visualizer` ve `integrations/*` vitest/esbuild
