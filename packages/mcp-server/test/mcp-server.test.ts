@@ -199,6 +199,14 @@ describe("MCP server — protokol düzeyi", { timeout: 30_000 }, () => {
 
       const data = envelope.data as Record<string, unknown>;
       const adapters = data.adapters as Array<Record<string, unknown>>;
+      // M2: INDEXED_ADAPTERS'ten beş adapter görünür (TS + C# + python/go/rust).
+      expect(adapters.map((a) => a.language)).toEqual([
+        "typescript",
+        "csharp",
+        "python",
+        "go",
+        "rust",
+      ]);
       const ts = adapters.find((a) => a.language === "typescript");
       expect(ts).toBeDefined();
       expect(ts?.analyzerId).toBe("ts-adapter");
@@ -207,6 +215,25 @@ describe("MCP server — protokol düzeyi", { timeout: 30_000 }, () => {
         symbolResolution: "L2",
         frameworkLinkers: "express+nextjs",
       });
+      const py = adapters.find((a) => a.language === "python");
+      expect(py?.analyzerId).toBe("python-worker");
+      expect(py?.levels).toEqual({
+        astParse: "L1",
+        symbolResolution: "L2",
+        frameworkLinkers: "decorator-route-pattern (L3)",
+      });
+      const go = adapters.find((a) => a.language === "go");
+      expect(go?.analyzerId).toBe("go-worker");
+      // Dürüstlük: go worker semantik L2 çözümleme beyan ETMEZ.
+      expect((go?.levels as Record<string, unknown>)["symbolResolution"]).toContain(
+        "heuristic",
+      );
+      const rust = adapters.find((a) => a.language === "rust");
+      expect(rust?.analyzerId).toBe("rust-worker");
+      expect((rust?.levels as Record<string, unknown>)["symbolResolution"]).toBe(
+        "heuristic-heavy",
+      );
+      expect((rust?.levels as Record<string, unknown>)["frameworkLinkers"]).toContain("L3");
       const limits = data.limits as Record<string, unknown>;
       expect(limits.maxNodes).toBe(250);
       expect(limits.maxSymbols).toBe(100);

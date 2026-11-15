@@ -22,8 +22,18 @@
  * "|" ile ayrılmış konumsal segmentler:
  *
  *   fp2|ts-adapter@0.1.0|roslyn-worker@0.1.0|refpack=<pack>@<sürüm>@<tfmDir>;...|refsrc=<kaynak>|opts=<sha256-16>
+ *      [|python-worker@0.1.0|pystate=<durum>|pyopts=<sha256-16>
+ *       |go-worker@0.1.0|gostate=<durum>|goopts=<sha256-16>
+ *       |rust-worker@0.1.0|ruststate=<durum>|rustopts=<sha256-16>]  (M2)
  *
  * - adapter segmentleri: koşuma katılan her dil adapter'ının id@versiyonu.
+ * - M2 sidecar dil blokları (python/go/rust): ilgili dilin dosyası YOKSA
+ *   blok HİÇ yazılmaz — mevcut TS+C# fingerprint'i bit-bit korunur.
+ *   <lang>state: WorkerRunStatus (ready | worker-unavailable |
+ *   sync-run-degraded) — worker'ın koşup koşamadığı dürüstçe taşınır
+ *   (fp1 dersinin karşılığı: aynı fp, farklı graph uydurulmaz).
+ *   <lang>opts: IndexService'in adapter'a GEÇTİĞİ etkin ayarların canonical
+ *   JSON sha256 özeti (ilk 16 hex) — csharp opts kuralının aynısı.
  * - refpack: worker'ın GERÇEKTEN yüklediği ref pack'leri (worker yanıt
  *   warnings'inden türetilir — ReferenceResolver.cs:144 canonical satırı
  *   "referans paketi yüklendi: <pack> <sürüm> (<tfmDir>)"); pack hiç
@@ -208,11 +218,91 @@ export interface RoslynAdapterSettings {
   readonly workerDllPath: string;
 }
 
+/**
+ * IndexService'in Python adapter'a GEÇTİĞİ etkin ayarlar (M2; pyopts hash
+ * girdisi). Adapter'ın PythonAdapterOptions zorunlu alanlarının birebir
+ * karşılığıdır — hash'te YALNIZCA geçilen alanlar taşınır.
+ */
+export interface PythonIndexSettings {
+  readonly pythonCommand: string;
+  readonly requestTimeoutMs: number;
+  readonly workerScriptPath: string;
+  readonly responseMaxChars: number;
+}
+
+/**
+ * IndexService'in Go adapter'a GEÇTİĞİ etkin ayarlar (M2; goopts hash
+ * girdisi). goWorkerBinaryPath boş string = "go run" modu (adapter kuralı).
+ */
+export interface GoIndexSettings {
+  readonly goBinaryPath: string;
+  readonly goWorkerBinaryPath: string;
+  readonly workerDir: string;
+  readonly requestTimeoutMs: number;
+}
+
+/**
+ * IndexService'in Rust adapter'a GEÇTİĞİ etkin ayarlar (M2; rustopts hash
+ * girdisi). cargoHomeDir boş string = adapter default keşfi
+ * (resolveCargoHomeDir).
+ */
+export interface RustIndexSettings {
+  readonly workerDir: string;
+  readonly workerBinaryName: string;
+  readonly cargoHomeDir: string;
+  readonly requestTimeoutMs: number;
+  readonly responseMaxChars: number;
+  readonly cargoBuildTimeoutMs: number;
+}
+
+/**
+ * Sidecar worker tabanlı dillerin (python/go/rust; M2) koşum düzeyi
+ * worker durumu — csharp refsrc etiketlerinin karşılığı:
+ * - ready: worker healthy koştu, sembol katmanı üretildi.
+ * - worker-unavailable: worker başlatılamadı/yanıt veremedi → L0/L1
+ *   fallback (adapter içi; motor çökmez).
+ * - sync-run-degraded: senkron köprü worker'ı hiç başlatmadı.
+ */
+export type WorkerRunStatus = "ready" | "worker-unavailable" | "sync-run-degraded";
+
+/** Python adapter fingerprint bağlamı (M2). */
+export interface PythonFingerprintContext {
+  readonly analyzerId: string;
+  readonly version: string;
+  readonly status: WorkerRunStatus;
+  readonly settings: PythonIndexSettings;
+}
+
+/** Go adapter fingerprint bağlamı (M2). */
+export interface GoFingerprintContext {
+  readonly analyzerId: string;
+  readonly version: string;
+  readonly status: WorkerRunStatus;
+  readonly settings: GoIndexSettings;
+}
+
+/** Rust adapter fingerprint bağlamı (M2). */
+export interface RustFingerprintContext {
+  readonly analyzerId: string;
+  readonly version: string;
+  readonly status: WorkerRunStatus;
+  readonly settings: RustIndexSettings;
+}
+
 export interface AnalyzerFingerprintInput {
   /** TS adapter segmenti; workspace'te TS yoksa null. */
   readonly typescript: { readonly analyzerId: string; readonly version: string } | null;
   /** C# adapter segmenti; workspace'te .cs yoksa null. */
   readonly csharp: RoslynFingerprintContext | null;
+  /**
+   * Python adapter segmenti; workspace'te .py yoksa/tanımsızsa blok
+   * yazılmaz (M2; optional — mevcut TS+C# çağıranları etkilenmez).
+   */
+  readonly python?: PythonFingerprintContext | null;
+  /** Go adapter segmenti; workspace'te .go yoksa/tanımsızsa blok yazılmaz (M2). */
+  readonly go?: GoFingerprintContext | null;
+  /** Rust adapter segmenti; workspace'te .rs yoksa/tanımsızsa blok yazılmaz (M2). */
+  readonly rust?: RustFingerprintContext | null;
 }
 
 /** Ayarlar özeti: canonical JSON sha256 özetinin ilk 16 hex karakteri. */
@@ -226,9 +316,19 @@ function settingsHash(settings: RoslynAdapterSettings): string {
 }
 
 /**
- * fp2 analyzerFingerprint üretir. Segment sırası sabittir: şema, TS, C#,
- * refpack, refsrc, opts. Hiç adapter koşmadıysa yalnızca şema segmenti
- * kalır ("fp2").
+ * M2: IndexService'in yeni dil adapter'larına GEÇTİĞİ etkin ayarların
+ * özeti — csharp opts kuralının aynısı: hash'te YALNIZCA geçilen alanlar
+ * taşınır (geçilmeyen adapter içi sabit kopyalanmaz; bayatma riski yok).
+ */
+function workerSettingsHash(payload: JsonValue): string {
+  return sha256Hex(utf8Encode(canonicalJson(payload))).slice(0, 16);
+}
+
+/**
+ * fp2 analyzerFingerprint üretir. Segment sırası sabittir: şema, TS, C#
+ * (refpack, refsrc, opts), python (state, opts), go (state, opts), rust
+ * (state, opts). Hiç adapter koşmadıysa yalnızca şema segmenti kalır
+ * ("fp2").
  */
 export function buildAnalyzerFingerprint(input: AnalyzerFingerprintInput): string {
   const segments: string[] = [ANALYZER_FINGERPRINT_SCHEMA_VERSION];
@@ -274,6 +374,51 @@ export function buildAnalyzerFingerprint(input: AnalyzerFingerprintInput): strin
         break;
     }
     segments.push(`opts=${settingsHash(input.csharp.settings)}`);
+  }
+  // M2: sidecar worker dilleri — segment sırası sabittir (python, go,
+  // rust); her dil bloğu <id>@<sürüm> | <lang>state=<durum> |
+  // <lang>opts=<hash16>. Mevcut TS+C# fingerprint'i bit-bit korunur (yeni
+  // bloklar yalnızca ilgili dilin dosyaları varsa eklenir).
+  if (input.python ?? null) {
+    const python = input.python as PythonFingerprintContext;
+    segments.push(`${python.analyzerId}@${python.version}`);
+    segments.push(`pystate=${python.status}`);
+    segments.push(
+      `pyopts=${workerSettingsHash({
+        pythonCommand: python.settings.pythonCommand,
+        requestTimeoutMs: python.settings.requestTimeoutMs,
+        workerScriptPath: python.settings.workerScriptPath,
+        responseMaxChars: python.settings.responseMaxChars,
+      })}`,
+    );
+  }
+  if (input.go ?? null) {
+    const go = input.go as GoFingerprintContext;
+    segments.push(`${go.analyzerId}@${go.version}`);
+    segments.push(`gostate=${go.status}`);
+    segments.push(
+      `goopts=${workerSettingsHash({
+        goBinaryPath: go.settings.goBinaryPath,
+        goWorkerBinaryPath: go.settings.goWorkerBinaryPath,
+        workerDir: go.settings.workerDir,
+        requestTimeoutMs: go.settings.requestTimeoutMs,
+      })}`,
+    );
+  }
+  if (input.rust ?? null) {
+    const rust = input.rust as RustFingerprintContext;
+    segments.push(`${rust.analyzerId}@${rust.version}`);
+    segments.push(`ruststate=${rust.status}`);
+    segments.push(
+      `rustopts=${workerSettingsHash({
+        workerDir: rust.settings.workerDir,
+        workerBinaryName: rust.settings.workerBinaryName,
+        cargoHomeDir: rust.settings.cargoHomeDir,
+        requestTimeoutMs: rust.settings.requestTimeoutMs,
+        responseMaxChars: rust.settings.responseMaxChars,
+        cargoBuildTimeoutMs: rust.settings.cargoBuildTimeoutMs,
+      })}`,
+    );
   }
   return segments.join("|");
 }

@@ -455,7 +455,9 @@ describe("INDEXED_ADAPTERS — adapter yetenek metadata'sı", () => {
     // B9 ile ikinci dil adapter'ı (csharp-roslyn) kaydedildi — kayıt
     // sırası korunur: ilk giriş TS, ikinci C# (index-service-csharp.test.ts
     // C# metadata sözleşmesini ayrıca doğrular).
-    expect(INDEXED_ADAPTERS).toHaveLength(2);
+    // M2 ile python/go/rust sidecar kayıtları eklendi (toplam 5; ayrıntılı
+    // metadata sözleşmesi index-service-multilang.test.ts'te).
+    expect(INDEXED_ADAPTERS).toHaveLength(5);
     const adapter = INDEXED_ADAPTERS[0] as (typeof INDEXED_ADAPTERS)[number];
     expect(adapter.language).toBe("typescript");
     expect(adapter.levels.frameworkLinkers).toBe("express+nextjs");

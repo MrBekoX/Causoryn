@@ -18,6 +18,36 @@ import {
   type RoslynAdapterResult,
 } from "@causoryn/adapter-csharp-roslyn";
 import {
+  DEFAULT_GO_BINARY_PATH,
+  DEFAULT_REQUEST_TIMEOUT_MS as DEFAULT_GO_REQUEST_TIMEOUT_MS,
+  GO_ADAPTER_ID,
+  GO_ADAPTER_VERSION,
+  WORKER_DIR_RELATIVE_PATH as GO_WORKER_DIR_RELATIVE_PATH,
+  analyzeGoWorkspace,
+  type GoAdapterResult,
+} from "@causoryn/adapter-go";
+import {
+  DEFAULT_PYTHON_COMMAND,
+  DEFAULT_REQUEST_TIMEOUT_MS as DEFAULT_PY_REQUEST_TIMEOUT_MS,
+  DEFAULT_RESPONSE_MAX_CHARS as DEFAULT_PY_RESPONSE_MAX_CHARS,
+  PYTHON_WORKER_ADAPTER_ID,
+  PYTHON_WORKER_ADAPTER_VERSION,
+  WORKER_SCRIPT_RELATIVE_PATH,
+  analyzePythonWorkspace,
+  type PythonAdapterResult,
+} from "@causoryn/adapter-python";
+import {
+  DEFAULT_CARGO_BUILD_TIMEOUT_MS,
+  DEFAULT_REQUEST_TIMEOUT_MS as DEFAULT_RS_REQUEST_TIMEOUT_MS,
+  DEFAULT_RESPONSE_MAX_CHARS as DEFAULT_RS_RESPONSE_MAX_CHARS,
+  RUST_ADAPTER_ID,
+  RUST_ADAPTER_VERSION,
+  WORKER_BINARY_NAME,
+  defaultWorkerDir,
+  analyzeRustWorkspace,
+  type RustAdapterResult,
+} from "@causoryn/adapter-rust";
+import {
   canonicalJson,
   createEdge,
   evidenceId,
@@ -43,9 +73,13 @@ import { IndexingError } from "./errors.js";
 import {
   buildAnalyzerFingerprint,
   extractRoslynRefPackContext,
+  type GoIndexSettings,
+  type PythonIndexSettings,
   type RoslynAdapterSettings,
   type RoslynDiscoveryStatus,
   type RoslynRefPackContext,
+  type RustIndexSettings,
+  type WorkerRunStatus,
 } from "./fingerprint.js";
 import { collectInventory, type InventoryEntry } from "./inventory.js";
 
@@ -70,19 +104,22 @@ import { collectInventory, type InventoryEntry } from "./inventory.js";
  * - Bu paket saat okumaz: `createdAt`/`publishedAt` enjekte edilen
  *   `clock`'tan gelir (domain/repository ile aynı determinizm ilkesi).
  *
- * B9 çoklu dil sözleşmesi (iki koşum yolu):
+ * B9 çoklu dil sözleşmesi (iki koşum yolu) + M2 ile beş dil:
  * - `runIndexAsync` / `runIncrementalIndexAsync`: TAM pipeline — .cs
- *   dosyaları analyzeCSharpWorkspace'e yönlendirilir; TS + C# çıktıları
- *   TEK snapshot'a katılır (dangling yok — cross-boundary sözleşmesi).
- *   Worker kullanılamıyorsa adapter'ın L0/L1 fallback'i ile motor çökmez
- *   (partial + explicit warning).
- * - `runIndex` / `runIncrementalIndex` (SENKRON köprü): Roslyn worker
- *   async koştuğu için senkron imza C# derin analizini BEKLEYEMEZ; .cs'li
- *   workspace'te C# yalnızca L0 envanter düzeyinde (File node'ları,
- *   uydurma sembol/kenar yok) temsil edilir ve bu dürüstçe partial +
- *   explicit warning ile raporlanır (TŞ §7 "yalnızca kanıtlanabilen
- *   L0/L1 bilgisi sunulur"). Senkron yol hiçbir koşulda worker'ı
- *   başlatmaz — spawn çağrısı yalnızca adapter'ın async API'sindedir.
+ *   dosyaları analyzeCSharpWorkspace'e; .py/.go/.rs dosyaları
+ *   analyzePythonWorkspace/analyzeGoWorkspace/analyzeRustWorkspace'e
+ *   yönlendirilir; beş dilin çıktıları TEK snapshot'a katılır (dangling
+ *   yok — cross-boundary sözleşmesi). Bir worker kullanılamıyorsa o
+ *   adapter'ın L0/L1 fallback'i ile motor çökmez (partial + explicit
+ *   warning); diğer dillerin analizi yaşar.
+ * - `runIndex` / `runIncrementalIndex` (SENKRON köprü): Roslyn/python/go/
+ *   rust worker'lar async koştuğu için senkron imza derin analizi
+ *   BEKLEYEMEZ; TS dışındaki dil dosyaları yalnızca L0 envanter düzeyinde
+ *   (File node'ları, uydurma sembol/kenar yok) temsil edilir ve bu
+ *   dürüstçe partial + explicit warning ile raporlanır (TŞ §7 "yalnızca
+ *   kanıtlanabilen L0/L1 bilgisi sunulur"). Senkron yol hiçbir koşulda
+ *   worker başlatmaz — spawn çağrısı yalnızca adapter'ların async
+ *   API'sindedir.
  */
 /**
  * Pipeline sürümü; envanter evidence `analyzerVersion` alanına yazılır.
@@ -124,6 +161,39 @@ export type AnalyzeCSharpFunction = (
   input: AnalyzeCSharpWorkspaceInput,
 ) => Promise<RoslynAdapterResult>;
 
+/**
+ * Python adapter ayarları (IndexService düzeyi yapılandırma; MCP araç
+ * girdisi değildir; M2). Tanımsız alanlar adapter varsayılanlarına düşer
+ * (env override'ları dahil); etkin değerler fingerprint pyopts hash'ine
+ * girer.
+ */
+export interface PythonIndexOptions {
+  readonly pythonCommand?: string;
+  readonly requestTimeoutMs?: number;
+  readonly workerScriptPath?: string;
+}
+
+/**
+ * Go adapter ayarları (M2). goWorkerBinaryPath verilirse önceden
+ * derlenmiş binary modu ("go run" atlanır); env override'ları
+ * (CAUSORYN_GO_WORKER_BIN / CAUSORYN_GO_WORKER_DIR) option verilmediyse
+ * uygulanır.
+ */
+export interface GoIndexOptions {
+  readonly goBinaryPath?: string;
+  readonly goWorkerBinaryPath?: string;
+  readonly workerDir?: string;
+  readonly requestTimeoutMs?: number;
+}
+
+/** Rust adapter ayarları (M2); workerDir env override (CAUSORYN_RUST_WORKER_DIR) adapter default'u. */
+export interface RustIndexOptions {
+  readonly workerDir?: string;
+  readonly cargoHomeDir?: string;
+  readonly requestTimeoutMs?: number;
+  readonly cargoBuildTimeoutMs?: number;
+}
+
 export interface IndexServiceOptions {
   readonly workspaceId: string;
   readonly policy: WorkspaceAccessPolicy;
@@ -133,6 +203,12 @@ export interface IndexServiceOptions {
   readonly limits: IndexLimits;
   /** C# (roslyn worker) adapter ayarları; tanımsızsa defaults. */
   readonly csharp?: CsharpIndexOptions;
+  /** Python (stdlib ast sidecar) adapter ayarları; tanımsızsa defaults (M2). */
+  readonly python?: PythonIndexOptions;
+  /** Go (go/parser sidecar) adapter ayarları; tanımsızsa defaults (M2). */
+  readonly go?: GoIndexOptions;
+  /** Rust (syn sidecar) adapter ayarları; tanımsızsa defaults (M2). */
+  readonly rust?: RustIndexOptions;
 }
 
 /** Adapter tanı kaydının uygulama düzeyi karşılığı (parser detayı sızmaz). */
@@ -266,8 +342,54 @@ function toDiagnostic(diagnostic: RoslynAdapterDiagnostic): IndexDiagnostic {
   };
 }
 
+/**
+ * M2: senkron köprü L0 File node'larının analyzer provenance'ı — dilin
+ * kayıtlı sidecar adapter kimliği (INDEXED_ADAPTERS ile aynı sabitler).
+ */
+function l0LanguageAnalyzerId(language: string): string {
+  switch (language) {
+    case "python":
+      return PYTHON_WORKER_ADAPTER_ID;
+    case "go":
+      return GO_ADAPTER_ID;
+    case "rust":
+      return RUST_ADAPTER_ID;
+    default:
+      return "causoryn-indexing";
+  }
+}
+
+/** M2: L0 provenance sürümü — dil adapter sürüm sabiti. */
+function l0LanguageAnalyzerVersion(language: string): string {
+  switch (language) {
+    case "python":
+      return PYTHON_WORKER_ADAPTER_VERSION;
+    case "go":
+      return GO_ADAPTER_VERSION;
+    case "rust":
+      return RUST_ADAPTER_VERSION;
+    default:
+      return INDEXING_VERSION;
+  }
+}
+
+/** prepareRun çıktısı (pipeline girdisi; M2 ile beş dil kümesi taşır). */
+interface PreparedRun {
+  readonly canonicalRoot: string;
+  readonly entries: InventoryEntry[];
+  readonly tsEntries: InventoryEntry[];
+  readonly csEntries: InventoryEntry[];
+  readonly pyEntries: InventoryEntry[];
+  readonly goEntries: InventoryEntry[];
+  readonly rsEntries: InventoryEntry[];
+}
+
 const TS_EXTENSIONS = new Set([".ts", ".tsx"]);
 const CS_EXTENSIONS = new Set([".cs"]);
+/** M2: sidecar worker dil uzantıları (python/go/rust). */
+const PY_EXTENSIONS = new Set([".py"]);
+const GO_EXTENSIONS = new Set([".go"]);
+const RS_EXTENSIONS = new Set([".rs"]);
 
 /** src/ ve dist/ aynı derinlikte → iki derleme modunda da repo kökü. */
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
@@ -281,6 +403,12 @@ export class IndexService {
   private readonly configHash: string;
   /** C# adapter'a geçilen etkin ayarlar (opts fingerprint hash'i). */
   private readonly csharpSettings: RoslynAdapterSettings;
+  /** Python adapter'a geçilen etkin ayarlar (pyopts fingerprint hash'i; M2). */
+  private readonly pythonSettings: PythonIndexSettings;
+  /** Go adapter'a geçilen etkin ayarlar (goopts fingerprint hash'i; M2). */
+  private readonly goSettings: GoIndexSettings;
+  /** Rust adapter'a geçilen etkin ayarlar (rustopts fingerprint hash'i; M2). */
+  private readonly rustSettings: RustIndexSettings;
   /** C# analiz seam'i: prod analyzeCSharpWorkspace; testler stub enjekte eder. */
   private readonly analyzeCSharpFn: AnalyzeCSharpFunction;
   private workspaceRegistered = false;
@@ -323,6 +451,49 @@ export class IndexService {
     };
     // Yalnızca test enjeksiyonu; opts fingerprint hash'ine girmez.
     this.analyzeCSharpFn = csharpOptions.analyzeCSharp ?? analyzeCSharpWorkspace;
+    // M2: Python/Go/Rust etkin ayarları — açık option > ortam değişkeni
+    // (adapter override kuralıyla aynı) > adapter varsayılanı. Ortam
+    // değişkeni adları adapter'ların default çözümlemesiyle birebir:
+    // CAUSORYN_PYTHON_WORKER_SCRIPT, CAUSORYN_GO_WORKER_BIN,
+    // CAUSORYN_GO_WORKER_DIR, CAUSORYN_RUST_WORKER_DIR (rust default'u
+    // adapter'ın defaultWorkerDir'iyle çözülür). Fingerprint, GERÇEKTEN
+    // kullanılan yolları taşır.
+    const pythonOptions = options.python ?? {};
+    const envPythonScript = process.env["CAUSORYN_PYTHON_WORKER_SCRIPT"];
+    this.pythonSettings = {
+      pythonCommand: pythonOptions.pythonCommand ?? DEFAULT_PYTHON_COMMAND,
+      requestTimeoutMs: pythonOptions.requestTimeoutMs ?? DEFAULT_PY_REQUEST_TIMEOUT_MS,
+      workerScriptPath:
+        pythonOptions.workerScriptPath ??
+        (envPythonScript !== undefined && envPythonScript.trim().length > 0
+          ? envPythonScript
+          : join(REPO_ROOT, WORKER_SCRIPT_RELATIVE_PATH)),
+      responseMaxChars: DEFAULT_PY_RESPONSE_MAX_CHARS,
+    };
+    const goOptions = options.go ?? {};
+    const envGoWorkerBin = process.env["CAUSORYN_GO_WORKER_BIN"];
+    const envGoWorkerDir = process.env["CAUSORYN_GO_WORKER_DIR"];
+    this.goSettings = {
+      goBinaryPath: goOptions.goBinaryPath ?? DEFAULT_GO_BINARY_PATH,
+      goWorkerBinaryPath:
+        goOptions.goWorkerBinaryPath ??
+        (envGoWorkerBin !== undefined && envGoWorkerBin.trim().length > 0 ? envGoWorkerBin : ""),
+      workerDir:
+        goOptions.workerDir ??
+        (envGoWorkerDir !== undefined && envGoWorkerDir.trim().length > 0
+          ? envGoWorkerDir
+          : join(REPO_ROOT, GO_WORKER_DIR_RELATIVE_PATH)),
+      requestTimeoutMs: goOptions.requestTimeoutMs ?? DEFAULT_GO_REQUEST_TIMEOUT_MS,
+    };
+    const rustOptions = options.rust ?? {};
+    this.rustSettings = {
+      workerDir: rustOptions.workerDir ?? defaultWorkerDir(),
+      workerBinaryName: WORKER_BINARY_NAME,
+      cargoHomeDir: rustOptions.cargoHomeDir ?? "",
+      requestTimeoutMs: rustOptions.requestTimeoutMs ?? DEFAULT_RS_REQUEST_TIMEOUT_MS,
+      responseMaxChars: DEFAULT_RS_RESPONSE_MAX_CHARS,
+      cargoBuildTimeoutMs: rustOptions.cargoBuildTimeoutMs ?? DEFAULT_CARGO_BUILD_TIMEOUT_MS,
+    };
   }
 
   /**
@@ -338,12 +509,7 @@ export class IndexService {
    */
   runIndex(rootPath: string): IndexRunResult {
     const prepared = this.prepareRun(rootPath);
-    return this.runPipeline(
-      prepared.canonicalRoot,
-      prepared.entries,
-      prepared.tsEntries,
-      prepared.csEntries,
-    );
+    return this.runPipeline(prepared);
   }
 
   /**
@@ -354,12 +520,7 @@ export class IndexService {
    */
   async runIndexAsync(rootPath: string): Promise<IndexRunResult> {
     const prepared = this.prepareRun(rootPath);
-    return this.runPipelineAsync(
-      prepared.canonicalRoot,
-      prepared.entries,
-      prepared.tsEntries,
-      prepared.csEntries,
-    );
+    return this.runPipelineAsync(prepared);
   }
 
   /**
@@ -391,19 +552,14 @@ export class IndexService {
         changeSet,
       );
     }
-    return this.runPipeline(
-      prepared.canonicalRoot,
-      prepared.entries,
-      prepared.tsEntries,
-      prepared.csEntries,
-    );
+    return this.runPipeline(prepared);
   }
 
   /**
-   * TAM incremental pipeline (B9): TS + C# karma karşılaştırması; her iki
-   * dilde de anlamlı değişim yoksa mevcut snapshot korunur (published=false),
-   * varsa iki dilin tam analiziyle YENİ snapshot türetilir ve atomik
-   * yayımlanır.
+   * TAM incremental pipeline (B9 + M2): dil karma karşılaştırması (TS, C#,
+   * python, go, rust); hiçbir dilde anlamlı değişim yoksa mevcut snapshot
+   * korunur (published=false), varsa tüm dillerin tam analiziyle YENİ
+   * snapshot türetilir ve atomik yayımlanır.
    */
   async runIncrementalIndexAsync(
     rootPath: string,
@@ -425,19 +581,15 @@ export class IndexService {
         changeSet,
       );
     }
-    return this.runPipelineAsync(
-      prepared.canonicalRoot,
-      prepared.entries,
-      prepared.tsEntries,
-      prepared.csEntries,
-    );
+    return this.runPipelineAsync(prepared);
   }
 
   /**
    * Karma tabanlı değişim analizi (senkron + async ortak karar girdisi):
    * önceki files tablosu karmalarıyla güncel envanter karşılaştırılır.
-   * TS ve C# kümeleri birlikte değerlendirilir (ikisi de graph'a katkı
-   * verir); TS/CS-dışı dosyalar kararı etkilemez (bkz. noOpResult).
+   * Dil kümeleri (TS, C# ve M2 ile python/go/rust) birlikte değerlendirilir
+   * (hepsi graph'a katkı verir); dil-dışı dosyalar kararı etkilemez (bkz.
+   * noOpResult).
    */
   private analyzeChanges(entries: readonly InventoryEntry[]): boolean {
     const previousHashes = new Map(
@@ -445,30 +597,28 @@ export class IndexService {
         .listFiles(this.workspaceId)
         .map((record) => [record.relativePath, record.contentHash]),
     );
-    const tsEntries = entries.filter((entry) =>
-      TS_EXTENSIONS.has(path.extname(entry.relativePath).toLowerCase()),
+    const languageEntries = entries.filter((entry) =>
+      this.isLanguageSource(path.extname(entry.relativePath).toLowerCase()),
     );
-    const csEntries = entries.filter((entry) =>
-      CS_EXTENSIONS.has(path.extname(entry.relativePath).toLowerCase()),
-    );
-    const changedTs = tsEntries.filter(
+    const changedSources = languageEntries.filter(
       (entry) => previousHashes.get(entry.relativePath) !== entry.contentHash,
     );
-    const deletedTs = [...previousHashes.keys()].filter(
+    const deletedSources = [...previousHashes.keys()].filter(
       (relativePath) =>
-        TS_EXTENSIONS.has(path.extname(relativePath).toLowerCase()) &&
-        !tsEntries.some((entry) => entry.relativePath === relativePath),
+        this.isLanguageSource(path.extname(relativePath).toLowerCase()) &&
+        !languageEntries.some((entry) => entry.relativePath === relativePath),
     );
-    const changedCs = csEntries.filter(
-      (entry) => previousHashes.get(entry.relativePath) !== entry.contentHash,
-    );
-    const deletedCs = [...previousHashes.keys()].filter(
-      (relativePath) =>
-        CS_EXTENSIONS.has(path.extname(relativePath).toLowerCase()) &&
-        !csEntries.some((entry) => entry.relativePath === relativePath),
-    );
+    return changedSources.length > 0 || deletedSources.length > 0;
+  }
+
+  /** Uzantının dil pipeline kapsamında olup olmadığı (senkron + async ortak). */
+  private isLanguageSource(extension: string): boolean {
     return (
-      changedTs.length > 0 || deletedTs.length > 0 || changedCs.length > 0 || deletedCs.length > 0
+      TS_EXTENSIONS.has(extension) ||
+      CS_EXTENSIONS.has(extension) ||
+      PY_EXTENSIONS.has(extension) ||
+      GO_EXTENSIONS.has(extension) ||
+      RS_EXTENSIONS.has(extension)
     );
   }
 
@@ -526,12 +676,7 @@ export class IndexService {
   }
 
   /** Ortak hazırlık: yetki + workspace kaydı + tam envanter (Discover). */
-  private prepareRun(rootPath: string): {
-    readonly canonicalRoot: string;
-    readonly entries: InventoryEntry[];
-    readonly tsEntries: InventoryEntry[];
-    readonly csEntries: InventoryEntry[];
-  } {
+  private prepareRun(rootPath: string): PreparedRun {
     const rootDecision = this.policy.authorizeRoot(rootPath);
     if (!rootDecision.allowed) {
       throw new IndexingError(
@@ -548,7 +693,16 @@ export class IndexService {
     const csEntries = entries.filter((entry) =>
       CS_EXTENSIONS.has(path.extname(entry.relativePath).toLowerCase()),
     );
-    return { canonicalRoot, entries, tsEntries, csEntries };
+    const pyEntries = entries.filter((entry) =>
+      PY_EXTENSIONS.has(path.extname(entry.relativePath).toLowerCase()),
+    );
+    const goEntries = entries.filter((entry) =>
+      GO_EXTENSIONS.has(path.extname(entry.relativePath).toLowerCase()),
+    );
+    const rsEntries = entries.filter((entry) =>
+      RS_EXTENSIONS.has(path.extname(entry.relativePath).toLowerCase()),
+    );
+    return { canonicalRoot, entries, tsEntries, csEntries, pyEntries, goEntries, rsEntries };
   }
 
   /**
@@ -621,15 +775,18 @@ export class IndexService {
    * (adapter L0/L1 fallback node şemasıyla birebir: kind File, language
    * csharp, attributes.sourceHash) ve durum partial'a zorlanır.
    *
+   * M2: python/go/rust dosyaları için aynı köprü sözleşmesi geçerlidir —
+   * sidecar worker'lar async koşar; senkron yol onları SPAWN ETMEZ, L0
+   * envanter düzeyinde temsil eder ve bunu explicit warning + partial
+   * fingerprint etiketiyle (pystate/gostate/ruststate=sync-run-degraded)
+   * raporlar.
+   *
    * Girdi aynıysa çıktı graph JSON'ı birebir aynıdır (TŞ §8 invariant vi);
    * mod bilgisi graph meta'sına girmez.
    */
-  private runPipeline(
-    canonicalRoot: string,
-    entries: InventoryEntry[],
-    tsEntries: InventoryEntry[],
-    csEntries: InventoryEntry[],
-  ): IndexRunResult {
+  private runPipeline(prepared: PreparedRun): IndexRunResult {
+    const { canonicalRoot, entries, tsEntries, csEntries, pyEntries, goEntries, rsEntries } =
+      prepared;
     const warnings: string[] = [];
     const diagnostics: IndexDiagnostic[] = [];
     const contentHashByPath = new Map<string, string>(
@@ -652,13 +809,49 @@ export class IndexService {
               settings: this.csharpSettings,
             }
           : null,
+      python:
+        pyEntries.length > 0
+          ? {
+              analyzerId: PYTHON_WORKER_ADAPTER_ID,
+              version: PYTHON_WORKER_ADAPTER_VERSION,
+              status: "sync-run-degraded",
+              settings: this.pythonSettings,
+            }
+          : null,
+      go:
+        goEntries.length > 0
+          ? {
+              analyzerId: GO_ADAPTER_ID,
+              version: GO_ADAPTER_VERSION,
+              status: "sync-run-degraded",
+              settings: this.goSettings,
+            }
+          : null,
+      rust:
+        rsEntries.length > 0
+          ? {
+              analyzerId: RUST_ADAPTER_ID,
+              version: RUST_ADAPTER_VERSION,
+              status: "sync-run-degraded",
+              settings: this.rustSettings,
+            }
+          : null,
     });
     const opened = this.openBuild(fingerprint, createdAt, canonicalRoot);
 
     try {
       // Erken çıkış: analiz edilebilir dil kaynağı yok (orijinal davranış,
       // genelleştirilmiş uyarı; tek Workspace node'uyla partial publish).
-      if (tsEntries.length === 0 && csEntries.length === 0) {
+      // M2: kapsam beş dile genişletildi; uyarı metni mevcut testlerle
+      // kilitli olduğu için olduğu gibi korunmuştur (yalnızca hiçbir dil
+      // dosyası yokken bu dala girilir).
+      if (
+        tsEntries.length === 0 &&
+        csEntries.length === 0 &&
+        pyEntries.length === 0 &&
+        goEntries.length === 0 &&
+        rsEntries.length === 0
+      ) {
         // Envanter mutabakatı: bu dalda adapter koşumu YOK, sıralama
         // tehlikesi yok — build'e girmeden mutabakat yapılır (async yol
         // sözleşmesiyle aynı mutabakat garantisi).
@@ -761,6 +954,49 @@ export class IndexService {
         );
       }
 
+      // M2: python/go/rust senkron köprü — worker SPAWN EDİLMEZ; L0
+      // envanter düzeyi File node'ları (sourceHash attribute'lu) + explicit
+      // warning. csharp köprü sözleşmesinin birebir karşılığı.
+      const syncL0Languages: ReadonlyArray<{
+        readonly label: string;
+        readonly language: string;
+        readonly workerName: string;
+        readonly entries: InventoryEntry[];
+      }> = [
+        { label: "Python", language: "python", workerName: "python worker", entries: pyEntries },
+        { label: "Go", language: "go", workerName: "go worker", entries: goEntries },
+        { label: "Rust", language: "rust", workerName: "Rust worker", entries: rsEntries },
+      ];
+      let syncHasL0Language = csEntries.length > 0;
+      for (const l0 of syncL0Languages) {
+        if (l0.entries.length === 0) continue;
+        warnings.push(
+          `senkron koşum ${l0.label} derin sembol analizini yürütemez (${l0.workerName} async koşar): ${String(l0.entries.length)} dosya L0 envanter düzeyinde listelendi; tam birleşik analiz için runIndexAsync/refresh işi kullanın`,
+        );
+        const l0Nodes: SnapshotNodeInput[] = l0.entries.map((entry) => ({
+          kind: "File",
+          qualifiedName: entry.relativePath,
+          language: l0.language,
+          relativePath: entry.relativePath,
+          attributes: { sourceHash: entry.contentHash },
+        }));
+        syncHasL0Language = true;
+        this.addAdapterGraph(
+          opened.buildId,
+          opened.workspaceNode,
+          {
+            analyzerId: l0LanguageAnalyzerId(l0.language),
+            analyzerVersion: l0LanguageAnalyzerVersion(l0.language),
+            state: "partial",
+            nodes: l0Nodes,
+            edges: [],
+            evidence: [],
+          },
+          contentHashByPath,
+          nodeByKey,
+        );
+      }
+
       // Envanter mutabakatı ADAPTER KOŞUMLARINDAN SONRA (async yolun B10
       // sözleşmesiyle aynı sıralama — denetim bulgusu): adapter sözleşme
       // dışı fırlatırsa files tablosu güncellenmez; aksi hâlde güncellenen
@@ -769,7 +1005,10 @@ export class IndexService {
       this.syncInventoryRecords(entries);
 
       const state: PublishableState =
-        tsState === "ready" && csState === "ready" && diagnostics.length === 0
+        tsState === "ready" &&
+        csState === "ready" &&
+        !syncHasL0Language &&
+        diagnostics.length === 0
           ? "ready"
           : "partial";
 
@@ -795,22 +1034,22 @@ export class IndexService {
   }
 
   /**
-   * TAM pipeline (runIndexAsync/runIncrementalIndexAsync gövdesi; B9).
-   * .cs dosyaları analyzeCSharpWorkspace'e yönlendirilir; TS + C# çıktıları
-   * TEK build'e katılır (dangling yok — cross-boundary sözleşmesi). Worker
-   * kullanılamazsa adapter L0/L1'e düşer; partial + warning ile yayımlanır.
+   * TAM pipeline (runIndexAsync/runIncrementalIndexAsync gövdesi; B9+M2).
+   * .cs dosyaları analyzeCSharpWorkspace'e; .py/.go/.rs dosyaları ilgili
+   * analyzeXWorkspace'e yönlendirilir; beş dilin çıktısı TEK build'e
+   * katılır (dangling yok — cross-boundary sözleşmesi). Bir worker
+   * kullanılamazsa ilgili adapter L0/L1'e düşer (motor çökmez; diğer
+   * dillerin analizi yaşar); partial + explicit warning ile yayımlanır.
    *
-   * Fingerprint: worker healthy yanıttan ref-pack keşfi türetilir
-   * (extractRoslynRefPackContext) ve build'in analyzerFingerprint alanına
-   * yazılır — adapters/csharp-roslyn/README.md "Açık borç" sözleşmesinin
-   * fp2 kapanışı.
+   * Fingerprint: C# worker healthy yanıttan ref-pack keşfi türetilir
+   * (extractRoslynRefPackContext); python/go/rust worker durumları
+   * (ready/worker-unavailable) pystate/gostate/ruststate segmentlerine
+   * yazılır — build'in analyzerFingerprint alanı koşuma katılan beş
+   * analyzer'ı dürüstçe taşır.
    */
-  private async runPipelineAsync(
-    canonicalRoot: string,
-    entries: InventoryEntry[],
-    tsEntries: InventoryEntry[],
-    csEntries: InventoryEntry[],
-  ): Promise<IndexRunResult> {
+  private async runPipelineAsync(prepared: PreparedRun): Promise<IndexRunResult> {
+    const { canonicalRoot, entries, tsEntries, csEntries, pyEntries, goEntries, rsEntries } =
+      prepared;
     const warnings: string[] = [];
     const diagnostics: IndexDiagnostic[] = [];
     const contentHashByPath = new Map<string, string>(
@@ -877,6 +1116,86 @@ export class IndexService {
       warnings.push(...csharpResult.warnings);
     }
 
+    // M2: python/go/rust adapter koşumları (sıra sabittir: python, go,
+    // rust — INDEXED_ADAPTERS kayıt sırası). Graceful fallback ADAPTER
+    // İÇİNDEDİR: worker yoksa sonuç workerAvailable=false + L0/L1 File
+    // node'ları ile döner; motor çökmez, diğer dillerin analizi yaşar.
+    let pythonResult: PythonAdapterResult | undefined;
+    if (pyEntries.length > 0) {
+      pythonResult = await analyzePythonWorkspace({
+        workspaceId: this.workspaceId,
+        files: pyEntries.map((entry) => ({
+          path: entry.relativePath,
+          content: entry.content,
+        })),
+        options: {
+          pythonCommand: this.pythonSettings.pythonCommand,
+          requestTimeoutMs: this.pythonSettings.requestTimeoutMs,
+          workerScriptPath: this.pythonSettings.workerScriptPath,
+          responseMaxChars: this.pythonSettings.responseMaxChars,
+        },
+      });
+      for (const diagnostic of pythonResult.diagnostics) {
+        diagnostics.push(toDiagnostic(diagnostic));
+        warnings.push(
+          `tanı: ${diagnostic.relativePath}:${String(diagnostic.line)} ${diagnostic.code} ${diagnostic.message}`,
+        );
+      }
+      warnings.push(...pythonResult.warnings);
+    }
+    let goResult: GoAdapterResult | undefined;
+    if (goEntries.length > 0) {
+      goResult = await analyzeGoWorkspace({
+        workspaceId: this.workspaceId,
+        files: goEntries.map((entry) => ({
+          path: entry.relativePath,
+          content: entry.content,
+        })),
+        options: {
+          goBinaryPath: this.goSettings.goBinaryPath,
+          ...(this.goSettings.goWorkerBinaryPath.length > 0
+            ? { goWorkerBinaryPath: this.goSettings.goWorkerBinaryPath }
+            : {}),
+          workerDir: this.goSettings.workerDir,
+          requestTimeoutMs: this.goSettings.requestTimeoutMs,
+        },
+      });
+      for (const diagnostic of goResult.diagnostics) {
+        diagnostics.push(toDiagnostic(diagnostic));
+        warnings.push(
+          `tanı: ${diagnostic.relativePath}:${String(diagnostic.line)} ${diagnostic.code} ${diagnostic.message}`,
+        );
+      }
+      warnings.push(...goResult.warnings);
+    }
+    let rustResult: RustAdapterResult | undefined;
+    if (rsEntries.length > 0) {
+      rustResult = await analyzeRustWorkspace({
+        workspaceId: this.workspaceId,
+        files: rsEntries.map((entry) => ({
+          path: entry.relativePath,
+          content: entry.content,
+        })),
+        options: {
+          workerDir: this.rustSettings.workerDir,
+          workerBinaryName: this.rustSettings.workerBinaryName,
+          ...(this.rustSettings.cargoHomeDir.length > 0
+            ? { cargoHomeDir: this.rustSettings.cargoHomeDir }
+            : {}),
+          requestTimeoutMs: this.rustSettings.requestTimeoutMs,
+          responseMaxChars: this.rustSettings.responseMaxChars,
+          cargoBuildTimeoutMs: this.rustSettings.cargoBuildTimeoutMs,
+        },
+      });
+      for (const diagnostic of rustResult.diagnostics) {
+        diagnostics.push(toDiagnostic(diagnostic));
+        warnings.push(
+          `tanı: ${diagnostic.relativePath}:${String(diagnostic.line)} ${diagnostic.code} ${diagnostic.message}`,
+        );
+      }
+      warnings.push(...rustResult.warnings);
+    }
+
     // fp2 ref-pack keşfi: worker healthy koştuysa yanıt warnings'inden
     // türetilir; healthy yanıtta keşif bilgisi yoksa nötr "discovery-unknown"
     // etiketi kullanılır — worker'un VARLIĞI ile keşfin BİLİNMESİ aynı
@@ -890,6 +1209,16 @@ export class IndexService {
       refPacks = extractRoslynRefPackContext(csharpResult.warnings);
       discovery = refPacks === null ? "discovery-unknown" : "performed";
     }
+
+    // M2: sidecar worker durumları — koşuma katılan her dilin GERÇEK
+    // worker durumu fingerprint'e yazılır (fp1 dersi: worker'ın koşup
+    // koşamadığı graph'ı değiştirir; fp bunu dürüstçe taşımalıdır).
+    const pythonStatus: WorkerRunStatus =
+      pythonResult === undefined ? "ready" : pythonResult.workerAvailable ? "ready" : "worker-unavailable";
+    const goStatus: WorkerRunStatus =
+      goResult === undefined ? "ready" : goResult.workerAvailable ? "ready" : "worker-unavailable";
+    const rustStatus: WorkerRunStatus =
+      rustResult === undefined ? "ready" : rustResult.workerAvailable ? "ready" : "worker-unavailable";
 
     const createdAt = this.clock();
     const fingerprint = buildAnalyzerFingerprint({
@@ -907,6 +1236,33 @@ export class IndexService {
               settings: this.csharpSettings,
             }
           : null,
+      python:
+        pyEntries.length > 0
+          ? {
+              analyzerId: PYTHON_WORKER_ADAPTER_ID,
+              version: PYTHON_WORKER_ADAPTER_VERSION,
+              status: pythonStatus,
+              settings: this.pythonSettings,
+            }
+          : null,
+      go:
+        goEntries.length > 0
+          ? {
+              analyzerId: GO_ADAPTER_ID,
+              version: GO_ADAPTER_VERSION,
+              status: goStatus,
+              settings: this.goSettings,
+            }
+          : null,
+      rust:
+        rsEntries.length > 0
+          ? {
+              analyzerId: RUST_ADAPTER_ID,
+              version: RUST_ADAPTER_VERSION,
+              status: rustStatus,
+              settings: this.rustSettings,
+            }
+          : null,
     });
 
     // Envanter mutabakatı ADAPTER KOŞUMULARINDAN sonra (yukarıdaki sıralama
@@ -919,7 +1275,13 @@ export class IndexService {
       // Erken çıkış: analiz edilebilir dil kaynağı yok — senkron yolun
       // aynı dürüstlük sözleşmesi (denetim bulgusu): coverage sıfırken
       // 'ready' uydurulmaz; partial + explicit kapsam uyarıları yayımlanır.
-      if (tsEntries.length === 0 && csEntries.length === 0) {
+      if (
+        tsEntries.length === 0 &&
+        csEntries.length === 0 &&
+        pyEntries.length === 0 &&
+        goEntries.length === 0 &&
+        rsEntries.length === 0
+      ) {
         warnings.push(
           "workspace analiz edilebilir TypeScript/TSX/C# kaynağı içermiyor; coverage sıfır (partial yayınlendi)",
         );
@@ -979,6 +1341,27 @@ export class IndexService {
           nodeByKey,
         );
         if (csharpResult.state !== "ready") state = "partial";
+      }
+      // M2: python/go/rust çıktıları aynı addAdapterGraph sözleşmesiyle
+      // TEK build'e katılır (node kimliği çakışması açık hatadır; kenar
+      // uçları node haritasından çözülür — dangling yok).
+      for (const result of [pythonResult, goResult, rustResult]) {
+        if (result === undefined) continue;
+        this.addAdapterGraph(
+          opened.buildId,
+          opened.workspaceNode,
+          {
+            analyzerId: result.analyzerId,
+            analyzerVersion: result.analyzerVersion,
+            state: result.state,
+            nodes: result.nodes,
+            edges: result.edges,
+            evidence: result.evidence,
+          },
+          contentHashByPath,
+          nodeByKey,
+        );
+        if (result.state !== "ready") state = "partial";
       }
       if (tsState !== "ready") state = "partial";
       if (diagnostics.length > 0) state = "partial";
