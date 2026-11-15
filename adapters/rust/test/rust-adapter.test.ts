@@ -21,6 +21,7 @@
  * edilmez.
  */
 import { spawn, type ChildProcess } from "node:child_process";
+import { EventEmitter } from "node:events";
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -29,6 +30,8 @@ import { createSnapshot } from "@causoryn/domain";
 import { isCargoAvailable } from "../src/cargo.js";
 import {
   analyzeRustWorkspace,
+  runCargoBuild,
+  runWorkerAnalyze,
   type RustAdapterResult,
 } from "../src/index.js";
 import {
@@ -335,5 +338,169 @@ describe.skipIf(!cargoAvailable)("adapters/rust (M1)", () => {
         ],
       }),
     ).rejects.toThrowError(/iki kez verildi/);
+  });
+});
+
+/* ------------------------------------------------------------------ */
+/* worker-process birim davranışları (cargo gerektirmez)               */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Sentetik worker: önce verilen stderr parçalarını, sonra (istendiyse)
+ * geçerli protokol yanıtını stdout'a yazar; süreç kapanmaz (timeout
+ * penceresi canlı kalmalı — sınırsız birikim senaryosu).
+ */
+function makeFakeWorkerChild(io: {
+  stderrChunks?: string[];
+  stdoutResponseLine?: string;
+}): ChildProcess {
+  const child = new EventEmitter() as unknown as ChildProcess;
+  const stdout = new EventEmitter();
+  const stderr = new EventEmitter();
+  const stdin = new EventEmitter();
+  const record = child as unknown as Record<string, unknown>;
+  record.stdout = stdout;
+  record.stderr = stderr;
+  record.stdin = Object.assign(stdin, {
+    write: () => true,
+    end: () => {},
+  });
+  record.killed = false;
+  record.exitCode = null;
+  record.signalCode = null;
+  record.kill = () => true;
+  queueMicrotask(() => {
+    for (const chunk of io.stderrChunks ?? []) {
+      stderr.emit("data", Buffer.from(chunk, "utf8"));
+    }
+    if (io.stdoutResponseLine !== undefined) {
+      stdout.emit("data", Buffer.from(`${io.stdoutResponseLine}\n`, "utf8"));
+    }
+  });
+  return child;
+}
+
+describe("adapters/rust runWorkerAnalyze birim davranışları (cargo gerektirmez)", () => {
+  it("negatif: stderr bütçesi aşımı → süreç kill + unavailable (sınırsız stderr birikimi savunması)", async () => {
+    const killed: boolean[] = [];
+    const outcome = await runWorkerAnalyze({
+      workerDir: join(REPO_ROOT, "native", "rust-worker", "target", "debug"),
+      workerBinaryName: "causoryn-rust-worker.exe",
+      requestPayload: { id: "stderr-cap" },
+      requestTimeoutMs: 300,
+      stderrMaxChars: 64,
+      spawnProcess: () => {
+        const child = makeFakeWorkerChild({
+          stderrChunks: ["a".repeat(40), "b".repeat(40)],
+        });
+        const record = child as unknown as Record<string, unknown>;
+        record.kill = () => {
+          killed.push(true);
+          return true;
+        };
+        return child;
+      },
+    });
+    expect(outcome.status).toBe("unavailable");
+    expect(outcome.detail).toContain("sınırını aştı");
+    // Saklanan kuyruk bütçeye kırpılır: birikim sınırsız büyüyemez.
+    expect(outcome.stderr.length).toBeLessThanOrEqual(64);
+    expect(killed.length).toBe(1);
+  });
+
+  it("pozitif kontrol: bütçe altındaki stderr yanıtla birlikte taşınır", async () => {
+    const outcome = await runWorkerAnalyze({
+      workerDir: join(REPO_ROOT, "native", "rust-worker", "target", "debug"),
+      workerBinaryName: "causoryn-rust-worker.exe",
+      requestPayload: { id: "stderr-ok" },
+      requestTimeoutMs: 5_000,
+      stderrMaxChars: 4_096,
+      spawnProcess: () =>
+        makeFakeWorkerChild({
+          stderrChunks: ["[rust-worker] normal log\n"],
+          stdoutResponseLine: JSON.stringify({
+            id: "stderr-ok",
+            protocolVersion: "1",
+            status: "ready",
+          }),
+        }),
+    });
+    expect(outcome.status).toBe("ok");
+    expect(outcome.stderr).toContain("normal log");
+  });
+});
+
+/* ------------------------------------------------------------------ */
+/* runCargoBuild çıktı bütçesi (cargo gerektirmez — spawn enjeksiyonu)  */
+/* ------------------------------------------------------------------ */
+
+describe("runCargoBuild çıktı bütçesi (spawn enjeksiyonlu)", () => {
+  it("negatif: stdout bütçesi aşımı → süreç kill + status:null + açık spawnError", async () => {
+    const killed: boolean[] = [];
+    const outcome = await runCargoBuild({
+      manifestPath: "sahte/Cargo.toml",
+      timeoutMs: 5_000,
+      outputMaxChars: 64,
+      spawnFn: () => {
+        const child = makeFakeWorkerChild({});
+        // cargo akışında satır framing'i yoktur — büyük tek parça emit edilir.
+        const record = child as unknown as Record<string, unknown>;
+        record.kill = () => {
+          killed.push(true);
+          return true;
+        };
+        queueMicrotask(() => {
+          const stdout = record.stdout as EventEmitter;
+          stdout.emit("data", Buffer.from("x".repeat(100), "utf8"));
+        });
+        return child;
+      },
+    });
+    expect(outcome.status).toBeNull();
+    expect(outcome.spawnError).toContain("sınırını aştı");
+    expect(outcome.stdout.length).toBeLessThanOrEqual(64);
+    expect(killed.length).toBe(1);
+  });
+
+  it("negatif: stderr bütçesi aşımı → süreç kill + spawnError akış adını taşır", async () => {
+    const outcome = await runCargoBuild({
+      manifestPath: "sahte/Cargo.toml",
+      timeoutMs: 5_000,
+      outputMaxChars: 64,
+      spawnFn: () => {
+        const child = makeFakeWorkerChild({});
+        queueMicrotask(() => {
+          const stderr = (child as unknown as Record<string, unknown>)
+            .stderr as EventEmitter;
+          stderr.emit("data", Buffer.from("e".repeat(100), "utf8"));
+        });
+        return child;
+      },
+    });
+    expect(outcome.status).toBeNull();
+    expect(outcome.spawnError).toContain("stderr");
+    expect(outcome.spawnError).toContain("sınırını aştı");
+    expect(outcome.stderr.length).toBeLessThanOrEqual(64);
+  });
+
+  it("pozitif kontrol: bütçe altındaki koşum exit kodunu aynen taşır", async () => {
+    const outcome = await runCargoBuild({
+      manifestPath: "sahte/Cargo.toml",
+      timeoutMs: 5_000,
+      outputMaxChars: 4_096,
+      spawnFn: () => {
+        const child = makeFakeWorkerChild({});
+        queueMicrotask(() => {
+          const stdout = (child as unknown as Record<string, unknown>)
+            .stdout as EventEmitter;
+          stdout.emit("data", Buffer.from("derleme tamam\n", "utf8"));
+          child.emit("exit", 0, null);
+        });
+        return child;
+      },
+    });
+    expect(outcome.status).toBe(0);
+    expect(outcome.stdout).toContain("derleme tamam");
+    expect(outcome.spawnError).toBe("");
   });
 });

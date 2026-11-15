@@ -1338,7 +1338,7 @@ describe("worker-process env sınırlaması (M1-Go)", () => {
       readonly options: {
         readonly stdio: ["pipe", "pipe", "pipe"];
         readonly env: Readonly<Record<string, string>>;
-        readonly cwd: string;
+        readonly cwd?: string;
       };
     }> = [];
 
@@ -1391,7 +1391,7 @@ describe("worker-process env sınırlaması (M1-Go)", () => {
   it("binary-mode spawn: argüman dizisi boş", async () => {
     const captured: Array<{
       readonly args: readonly string[];
-      readonly cwd: string;
+      readonly cwd?: string | undefined;
     }> = [];
     await runGoWorkerAnalyze({
       goBinaryPath: GO_BINARY,
@@ -1459,5 +1459,145 @@ describe("worker-process env sınırlaması (M1-Go)", () => {
         ),
     });
     expect(outcome.status).toBe("ok");
+  });
+
+  /**
+   * Sentetik worker: önce verilen stderr parçalarını, sonra (istendiyse)
+   * geçerli protokol yanıtını stdout'a yazar; süreç kapanmaz (timeout
+   * penceresi canlı kalmalı — sınırsız birikim senaryosu).
+   */
+  function makeStderrChild(io: {
+    stderrChunks?: string[];
+    stdoutResponseLine?: string;
+    pid?: number;
+  }): ChildProcess {
+    const child = new EventEmitter() as unknown as ChildProcess;
+    const stdout = new EventEmitter();
+    const stderr = new EventEmitter();
+    const stdin = new EventEmitter();
+    const record = child as unknown as Record<string, unknown>;
+    record.stdout = stdout;
+    record.stderr = stderr;
+    record.stdin = Object.assign(stdin, {
+      write: () => true,
+      end: () => {},
+    });
+    record.pid = io.pid;
+    record.killed = false;
+    record.exitCode = null;
+    record.signalCode = null;
+    record.kill = () => true;
+    queueMicrotask(() => {
+      for (const chunk of io.stderrChunks ?? []) {
+        stderr.emit("data", Buffer.from(chunk, "utf8"));
+      }
+      if (io.stdoutResponseLine !== undefined) {
+        stdout.emit("data", Buffer.from(`${io.stdoutResponseLine}\n`, "utf8"));
+      }
+    });
+    return child;
+  }
+
+  it("negatif: stderr bütçesi aşımı → süreç kill + unavailable (sınırsız stderr birikimi savunması)", async () => {
+    const killed: boolean[] = [];
+    const outcome = await runGoWorkerAnalyze({
+      goBinaryPath: GO_BINARY,
+      goWorkerBinaryPath: "",
+      workerDir: WORKER_DIR,
+      requestPayload: { id: "stderr-cap" },
+      requestTimeoutMs: 300,
+      stderrMaxChars: 64,
+      spawnProcess: () => {
+        const child = makeStderrChild({
+          stderrChunks: ["a".repeat(40), "b".repeat(40)],
+        });
+        const record = child as unknown as Record<string, unknown>;
+        record.kill = () => {
+          killed.push(true);
+          return true;
+        };
+        return child;
+      },
+    });
+    expect(outcome.status).toBe("unavailable");
+    expect(outcome.detail).toContain("sınırını aştı");
+    // Saklanan kuyruk bütçeye kırpılır: birikim sınırsız büyüyemez.
+    expect(outcome.stderr.length).toBeLessThanOrEqual(64);
+    expect(killed.length).toBe(1);
+  });
+
+  it("pozitif kontrol: bütçe altındaki stderr yanıtla birlikte taşınır", async () => {
+    const outcome = await runGoWorkerAnalyze({
+      goBinaryPath: GO_BINARY,
+      goWorkerBinaryPath: "",
+      workerDir: WORKER_DIR,
+      requestPayload: { id: "stderr-ok" },
+      requestTimeoutMs: 5_000,
+      stderrMaxChars: 4_096,
+      spawnProcess: () =>
+        makeStderrChild({
+          stderrChunks: ["[go-worker] normal log\n"],
+          stdoutResponseLine: JSON.stringify({
+            id: "stderr-ok",
+            protocolVersion: "1",
+            status: "ready",
+          }),
+        }),
+    });
+    expect(outcome.status).toBe("ok");
+    expect(outcome.stderr).toContain("normal log");
+  });
+
+  it("timeout: go run modunda süreç sonlandırma AĞAÇ-KILL'dir — torun worker dahil (win32)", async () => {
+    if (process.platform !== "win32") {
+      // Ağaç-kill savunması win32'ye özeldir; diğer platformlarda mevcut
+      // doğrudan kill davranışı korunur (dal koşullaması testte de açık).
+      expect(true).toBe(true);
+      return;
+    }
+    const spawned: Array<{ command: string; args: readonly string[] }> = [];
+    const killed: boolean[] = [];
+    const outcome = await runGoWorkerAnalyze({
+      goBinaryPath: GO_BINARY,
+      goWorkerBinaryPath: "",
+      workerDir: WORKER_DIR,
+      requestPayload: { id: "tree-kill" },
+      requestTimeoutMs: 300,
+      spawnProcess: (command, args) => {
+        spawned.push({ command, args: [...args] });
+        const child = makeStderrChild({ pid: 4242 });
+        const record = child as unknown as Record<string, unknown>;
+        record.kill = () => {
+          killed.push(true);
+          return true;
+        };
+        return child;
+      },
+    });
+    expect(outcome.status).toBe("timeout");
+    // Doğrudan kill her koşulda uygulanır (ağaç-kill ek savunmadır).
+    expect(killed.length).toBe(1);
+    // İkinci spawn: LİTERAL "taskkill" + SADECE kendi çocuğumuzun sayısal
+    // pid'i (/T ağaç, /F zorla). Kullanıcı girdisi interpole edilmez.
+    expect(spawned.length).toBe(2);
+    expect(spawned[1]?.command).toBe("taskkill");
+    expect(spawned[1]?.args).toEqual(["/pid", "4242", "/T", "/F"]);
+  });
+
+  it("timeout: binary modda ağaç-kill YOKTUR — tek spawn, yalnızca doğrudan kill", async () => {
+    const spawned: Array<{ command: string }> = [];
+    const outcome = await runGoWorkerAnalyze({
+      goBinaryPath: GO_BINARY,
+      goWorkerBinaryPath: join(WORKER_BIN_DIR, "built-worker.exe"),
+      workerDir: WORKER_DIR,
+      requestPayload: { id: "tree-kill-binary" },
+      requestTimeoutMs: 300,
+      spawnProcess: (command) => {
+        spawned.push({ command });
+        return makeStderrChild({ pid: 4243 });
+      },
+    });
+    expect(outcome.status).toBe("timeout");
+    expect(spawned.length).toBe(1);
   });
 });

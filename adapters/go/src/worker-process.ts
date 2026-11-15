@@ -56,6 +56,39 @@ export interface WorkerRunOutcome {
   readonly detail: string;
 }
 
+/**
+ * go run modunda (goWorkerBinaryPath boşken) worker, go tool'unun TORUN
+ * sürecidir: doğrudan kill yalnızca `go` sürecini öldürür; derlenen
+ * analiz worker'ı stdin EOF/pipe hatasına kadar arka planda çalışmaya
+ * devam edebilir (tekrarlayan timeout'larda birikir — güvenlik bulgusu).
+ *
+ * win32 savunması: LİTERAL "taskkill" + /pid <KENDİ çocuğumuzun sayısal
+ * pid'i> /T (ağaç) /F (zorla). pid kullanıcı girdisi DEĞİLDİR (sistem
+ * tanımlı süreç tanıtıcısı); shell yoktur; komut/argümanların hiçbiri
+ * istek içeriğinden türetilmez (kırmızı çizgi 6). taskkill başlatılamazsa
+ * doğrudan kill zaten uygulanmıştır — bulgunun "kendinden sınırlı"
+ * davranışı yedek olarak korunur. Binary modunda çağrılmaz (worker
+ * doğrudan çocuktur; kill yeterlidir).
+ */
+function killProcessTree(spawnProcess: SpawnFunction, closing: ChildProcess): void {
+  if (process.platform !== "win32") return;
+  const pid = closing.pid;
+  if (pid === undefined) return;
+  try {
+    const killer = spawnProcess(
+      "taskkill", // LİTERAL komut — kırmızı çizgi 6
+      ["/pid", String(pid), "/T", "/F"],
+      { stdio: ["pipe", "pipe", "pipe"], env: buildWorkerEnv() },
+    );
+    killer.on("error", () => {}); // taskkill yoksa/hata verirse doğrudan kill yeterli
+    killer.once("exit", () => {
+      killer.removeAllListeners();
+    });
+  } catch {
+    // spawnProcess enjeksiyonları senkron patlayabilir; doğrudan kill uygulanmıştır.
+  }
+}
+
 export interface RunGoWorkerAnalyzeInput {
   readonly goBinaryPath: string;
   /** Boş değilse önceden derlenmiş binary modu (args boş dizi). */
@@ -67,6 +100,13 @@ export interface RunGoWorkerAnalyzeInput {
   readonly requestTimeoutMs: number;
   /** Tek yanıt satırı üst sınırı (char); aşım → kill + fallback. */
   readonly responseMaxChars?: number;
+  /**
+   * Birikmiş stderr için char üst sınırı; tanımsızsa 64M (yanıt
+   * bütçesinin aynası). Güvenlik bulgusu karşılığı: worker/go run
+   * stderr'i timeout penceresinde sınırsız birikemez — aşım → süreç
+   * kill + L0/L1 fallback; saklanan kuyruk baştan bütçeye kırpılır.
+   */
+  readonly stderrMaxChars?: number;
   /** Test enjeksiyonu; default node:child_process.spawn. */
   readonly spawnProcess?: SpawnFunction;
 }
@@ -92,6 +132,11 @@ export function runGoWorkerAnalyze(
         closing.signalCode === null
       ) {
         closing.kill();
+        // go run modunda torun worker da sonlandırılmalı (ağaç-kill);
+        // binary modunda doğrudan kill yeterlidir.
+        if (input.goWorkerBinaryPath.length === 0) {
+          killProcessTree(spawnProcess, closing);
+        }
       }
       closing?.removeAllListeners();
       closing?.stdout?.removeAllListeners();
@@ -153,7 +198,26 @@ export function runGoWorkerAnalyze(
     });
 
     child.stderr?.on("data", (chunk: Buffer) => {
-      stderrText += chunk.toString("utf8");
+      // Güvenlik bulgusu karşılığı: stderr, timeout penceresinde sınırsız
+      // birikemez — yanıt bütçesinin stderr karşılığı (go run derleme
+      // hataları dahil). Aşım → süreç kill + L0/L1 fallback; saklanan
+      // kuyruk baştan bütçeye kırpılır.
+      const incoming = chunk.toString("utf8");
+      const stderrMaxChars = input.stderrMaxChars ?? DEFAULT_RESPONSE_MAX_CHARS;
+      if (stderrText.length + incoming.length > stderrMaxChars) {
+        stderrText = (stderrText + incoming).slice(0, stderrMaxChars);
+        finish(
+          {
+            status: "unavailable",
+            response: null,
+            stderr: stderrText,
+            detail: `worker stderr çıktısı ${String(stderrMaxChars)} karakter sınırını aştı; süreç sonlandırıldı — sonraki istek taze süreçle ve L0/L1 fallback ile yürütülür`,
+          },
+          child,
+        );
+        return;
+      }
+      stderrText += incoming;
     });
 
     child.stdout?.on("data", (chunk: Buffer) => {

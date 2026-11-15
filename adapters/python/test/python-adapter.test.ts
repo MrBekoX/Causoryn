@@ -17,6 +17,7 @@
  * kullanıcı girdisi asla komut satırına interpole edilmez.
  */
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
+import { EventEmitter } from "node:events";
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -316,4 +317,87 @@ describe("adapters/python runWorkerAnalyze", () => {
     expect(outcome.response).toBeNull();
     expect(outcome.detail.length).toBeGreaterThan(0);
   }, 30_000);
+
+  /**
+   * Sentetik worker: önce verilen stderr parçalarını, sonra (istendiyse)
+   * geçerli protokol yanıtını stdout'a yazar; süreç kapanmaz (timeout
+   * penceresi canlı kalmalı — sınırsız birikim senaryosu).
+   */
+  function makeFakeWorkerChild(io: {
+    stderrChunks?: string[];
+    stdoutResponseLine?: string;
+  }): ChildProcess {
+    const child = new EventEmitter() as unknown as ChildProcess;
+    const stdout = new EventEmitter();
+    const stderr = new EventEmitter();
+    const stdin = new EventEmitter();
+    const record = child as unknown as Record<string, unknown>;
+    record.stdout = stdout;
+    record.stderr = stderr;
+    record.stdin = Object.assign(stdin, {
+      write: () => true,
+      end: () => {},
+    });
+    record.killed = false;
+    record.exitCode = null;
+    record.signalCode = null;
+    record.kill = () => true;
+    queueMicrotask(() => {
+      for (const chunk of io.stderrChunks ?? []) {
+        stderr.emit("data", Buffer.from(chunk, "utf8"));
+      }
+      if (io.stdoutResponseLine !== undefined) {
+        stdout.emit("data", Buffer.from(`${io.stdoutResponseLine}\n`, "utf8"));
+      }
+    });
+    return child;
+  }
+
+  it("negatif: stderr bütçesi aşımı → süreç kill + unavailable (sınırsız stderr birikimi savunması)", async () => {
+    const killed: boolean[] = [];
+    const outcome = await runWorkerAnalyze({
+      pythonCommand: "python",
+      workerScriptPath: WORKER_SCRIPT,
+      requestPayload: { id: "stderr-cap" },
+      requestTimeoutMs: 300,
+      stderrMaxChars: 64,
+      spawnProcess: () => {
+        const child = makeFakeWorkerChild({
+          stderrChunks: ["a".repeat(40), "b".repeat(40)],
+        });
+        const record = child as unknown as Record<string, unknown>;
+        record.kill = () => {
+          killed.push(true);
+          return true;
+        };
+        return child;
+      },
+    });
+    expect(outcome.status).toBe("unavailable");
+    expect(outcome.detail).toContain("sınırını aştı");
+    // Saklanan kuyruk bütçeye kırpılır: birikim sınırsız büyüyemez.
+    expect(outcome.stderr.length).toBeLessThanOrEqual(64);
+    expect(killed.length).toBe(1);
+  });
+
+  it("pozitif kontrol: bütçe altındaki stderr yanıtla birlikte taşınır", async () => {
+    const outcome = await runWorkerAnalyze({
+      pythonCommand: "python",
+      workerScriptPath: WORKER_SCRIPT,
+      requestPayload: { id: "stderr-ok" },
+      requestTimeoutMs: 5_000,
+      stderrMaxChars: 4_096,
+      spawnProcess: () =>
+        makeFakeWorkerChild({
+          stderrChunks: ["[python-worker] normal log\n"],
+          stdoutResponseLine: JSON.stringify({
+            id: "stderr-ok",
+            protocolVersion: "1",
+            status: "ready",
+          }),
+        }),
+    });
+    expect(outcome.status).toBe("ok");
+    expect(outcome.stderr).toContain("normal log");
+  });
 });

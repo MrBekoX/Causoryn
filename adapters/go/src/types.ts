@@ -88,7 +88,11 @@ export type SpawnFunction = (
   options: {
     readonly stdio: ["pipe", "pipe", "pipe"];
     readonly env: Readonly<Record<string, string>>;
-    readonly cwd: string;
+    /**
+     * Worker spawn'ında zorunlu (SABİT workerDir); ağaç-kill yardımcı
+     * spawn'ında (taskkill) anlamsızdır — opsiyoneldir.
+     */
+    readonly cwd?: string;
   },
 ) => ChildProcess;
 

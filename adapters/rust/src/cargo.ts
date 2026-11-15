@@ -17,7 +17,7 @@
  *      hiçbiri yoksa probe/build başarısız → adapter açık warning ile
  *      L0/L1'e düşer (motor çökmez).
  */
-import { spawn, spawnSync } from "node:child_process";
+import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { delimiter, join } from "node:path";
 
 /**
@@ -50,6 +50,28 @@ export const WORKER_ENV_ALLOWLIST = [
   "USERPROFILE",
   "HOME",
 ] as const;
+
+/**
+ * cargo build çıktı birikimi için varsayılan akış üst sınırı (char).
+ * Worker yanıt bütçesinin (DEFAULT_RESPONSE_MAX_CHARS, 64M) aynasıdır —
+ * güvenlik bulgusu karşılığı: build çıktısı timeout penceresinde
+ * sınırsız birikemez.
+ */
+export const DEFAULT_BUILD_OUTPUT_MAX_CHARS = 64 * 1024 * 1024;
+
+/**
+ * cargo build spawn enjeksiyonu imzası (yalnızca testler) — adapters/rust
+ * SpawnFunction deseninin cargo stdio'suna (ignore|pipe|pipe) uyarlanan
+ * karşılığı; default node:child_process.spawn.
+ */
+export type CargoSpawnFunction = (
+  command: string,
+  args: readonly string[],
+  options: {
+    readonly stdio: ["ignore", "pipe", "pipe"];
+    readonly env: Readonly<Record<string, string>>;
+  },
+) => ChildProcess;
 
 /**
  * Dizin güvenlik filtresi (savunma katmanı 2): boş/aşırı uzun değerler,
@@ -145,7 +167,18 @@ export interface CargoBuildOutcome {
 export function runCargoBuild(input: {
   manifestPath: string;
   timeoutMs: number;
+  /**
+   * Her çıktı akışı (stdout/stderr) için char üst sınırı; tanımsızsa 64M
+   * (worker yanıt bütçesinin aynası). Güvenlik bulgusu karşılığı: cargo
+   * build çıktısı timeout penceresinde sınırsız birikemez — aşım → süreç
+   * kill + status:null; saklanan kuyruk baştan bütçeye kırpılır.
+   */
+  outputMaxChars?: number;
+  /** Test enjeksiyonu; default node:child_process.spawn. */
+  spawnFn?: CargoSpawnFunction;
 }): Promise<CargoBuildOutcome> {
+  const spawnFn = input.spawnFn ?? spawn;
+  const outputMaxChars = input.outputMaxChars ?? DEFAULT_BUILD_OUTPUT_MAX_CHARS;
   return new Promise((resolveBuild) => {
     let settled = false;
     let stdoutText = "";
@@ -174,7 +207,7 @@ export function runCargoBuild(input: {
     }, input.timeoutMs);
 
     try {
-      child = spawn(
+      child = spawnFn(
         "cargo", // LİTERAL komut — kırmızı çizgi 6
         ["build", "--manifest-path", input.manifestPath],
         {
@@ -203,12 +236,29 @@ export function runCargoBuild(input: {
       });
     });
 
-    child.stdout?.on("data", (chunk: Buffer) => {
-      stdoutText += chunk.toString("utf8");
-    });
-    child.stderr?.on("data", (chunk: Buffer) => {
-      stderrText += chunk.toString("utf8");
-    });
+    /** Tek akış için bütçeli biriktirici (stdout/stderr ortak disiplin). */
+    const accumulate = (stream: "stdout" | "stderr") => (chunk: Buffer) => {
+      const incoming = chunk.toString("utf8");
+      const current = stream === "stdout" ? stdoutText : stderrText;
+      if (current.length + incoming.length > outputMaxChars) {
+        const capped = (current + incoming).slice(0, outputMaxChars);
+        if (stream === "stdout") stdoutText = capped;
+        else stderrText = capped;
+        child?.kill();
+        finish({
+          status: null,
+          stdout: stdoutText,
+          stderr: stderrText,
+          spawnError: `cargo build ${stream} çıktısı ${String(outputMaxChars)} karakter sınırını aştı; süreç sonlandırıldı`,
+        });
+        return;
+      }
+      if (stream === "stdout") stdoutText += incoming;
+      else stderrText += incoming;
+    };
+
+    child.stdout?.on("data", accumulate("stdout"));
+    child.stderr?.on("data", accumulate("stderr"));
 
     child.on("exit", (code: number | null) => {
       finish({

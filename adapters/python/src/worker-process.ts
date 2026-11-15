@@ -10,6 +10,8 @@
  *   Newline hiç gelmezse (yarı yanıt) buffer asla yanıt sayılmaz → timeout
  *   devreye girer → süreç kill edilir.
  * - Yanıt buffer bütçesi: sınır aşımı → süreç kill + L0/L1 fallback.
+ * - Stderr birikim bütçesi: aynı savunmanın stderr karşılığı — worker
+ *   log akışı timeout penceresinde sınırsız büyüyemez.
  * - stdin EPIPE: worker erken ölürse istek yazımı 'error' üretebilir;
  *   handler'sız error node sürecini çökertir (denetim bulgusu düzeltmesi)
  *   — hata bilinçli yutulur, exit handler fallback'i yürütür.
@@ -66,6 +68,13 @@ export interface RunWorkerAnalyzeInput {
   readonly requestTimeoutMs: number;
   /** Birikmiş yanıt buffer'ı için char üst sınırı; tanımsızsa 64M. */
   readonly responseMaxChars?: number;
+  /**
+   * Birikmiş stderr için char üst sınırı; tanımsızsa 64M (yanıt
+   * bütçesinin aynası). Güvenlik bulgusu karşılığı: worker stderr'i
+   * timeout penceresinde sınırsız birikemez — aşım → süreç kill +
+   * L0/L1 fallback; saklanan kuyruk baştan bütçeye kırpılır.
+   */
+  readonly stderrMaxChars?: number;
   /** Test enjeksiyonu; default node:child_process.spawn. */
   readonly spawnProcess?: SpawnFunction;
 }
@@ -144,7 +153,25 @@ export function runWorkerAnalyze(input: RunWorkerAnalyzeInput): Promise<WorkerRu
     });
 
     child.stderr?.on("data", (chunk: Buffer) => {
-      stderrText += chunk.toString("utf8");
+      // Güvenlik bulgusu karşılığı: stderr, timeout penceresinde sınırsız
+      // birikemez — yanıt bütçesinin stderr karşılığı. Aşım → süreç kill
+      // + L0/L1 fallback; saklanan kuyruk baştan bütçeye kırpılır.
+      const incoming = chunk.toString("utf8");
+      const stderrMaxChars = input.stderrMaxChars ?? DEFAULT_RESPONSE_MAX_CHARS;
+      if (stderrText.length + incoming.length > stderrMaxChars) {
+        stderrText = (stderrText + incoming).slice(0, stderrMaxChars);
+        finish(
+          {
+            status: "unavailable",
+            response: null,
+            stderr: stderrText,
+            detail: `worker stderr çıktısı ${String(stderrMaxChars)} karakter sınırını aştı; süreç sonlandırıldı — sonraki istek taze süreçle ve L0/L1 fallback ile yürütülür`,
+          },
+          child,
+        );
+        return;
+      }
+      stderrText += incoming;
     });
 
     child.stdout?.on("data", (chunk: Buffer) => {

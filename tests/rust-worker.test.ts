@@ -838,3 +838,190 @@ describe("bootstrapRustWorkerBinary (derleme regresyonu disiplini)", () => {
     expect(result.skipReason).toBeNull();
   });
 });
+
+/* ------------------------------------------------------------------ */
+/* Node bütçesi (RESPONSE_TRUNCATED) + sembol-yoğun girdi savunmaları  */
+/* (go/python node bütçesi deseninin rust karşılığı — güvenlik bulgusu)*/
+/* ------------------------------------------------------------------ */
+
+describe.skipIf(!workerReady)("rust-worker node bütçesi (PROTOCOL.md maxNodes)", () => {
+  let invalidById: Record<string, WorkerResponse> = {};
+  let truncatedResponse: WorkerResponse | null = null;
+  let truncatedLine = "";
+  let truncatedDeterminismLine = "";
+  /** 8000-kenarlı yoğun koşumun son ölçümü (fonksiyonel doğrulama için). */
+  let denseResponse: WorkerResponse | null = null;
+  /** min-of-3 ölçekleme oranı: t(8000) / t(1000) — duvar-saati gürültüsüne karşı. */
+  let denseScaleRatio = -1;
+
+  /** 13 node üreten küçük küme: File + 11 Function + 1 UnknownExternal. */
+  const budgetFile = {
+    path: "Budget/Budget.rs",
+    content:
+      Array.from({ length: 10 }, (_, i) => `fn target_0${i}() { }`).join("\n") +
+      "\nfn caller() {\n    missing_helper();\n}\n",
+  };
+
+  beforeAll(
+    async () => {
+      // 1) Geçersiz maxNodes reddiyeleri + üst sınır kabulü (tek koşum).
+      const invalidRequests = [
+        { id: "budget-zero", type: "analyze", maxNodes: 0, files: [budgetFile] },
+        { id: "budget-over", type: "analyze", maxNodes: 250001, files: [budgetFile] },
+        { id: "budget-float", type: "analyze", maxNodes: 1.5, files: [budgetFile] },
+        { id: "budget-bool", type: "analyze", maxNodes: true, files: [budgetFile] },
+        {
+          id: "budget-boundary-ok",
+          type: "analyze",
+          maxNodes: 250000,
+          files: [budgetFile],
+        },
+      ];
+      invalidById = {};
+      for (const line of (await runWorker(invalidRequests)).lines) {
+        const response = parseLine(line);
+        const key = typeof response.id === "string" ? response.id : "(id-yok)";
+        invalidById[key] = response;
+      }
+
+      // 2) Kırpma: 13 node'lu kümeye maxNodes 5 → RESPONSE_TRUNCATED.
+      const truncatedRequest = {
+        id: "budget-truncated",
+        type: "analyze",
+        maxNodes: 5,
+        files: [budgetFile],
+      };
+      truncatedLine = (await runWorker([truncatedRequest])).lines[0] ?? "";
+      truncatedResponse = truncatedLine ? parseLine(truncatedLine) : null;
+      truncatedDeterminismLine =
+        (await runWorker([truncatedRequest])).lines[0] ?? "";
+
+      // 3) Sembol-yoğun girdi: 8000 AYRI aynı-modül çağrısı → 8000 ayrı
+      //    kenar. push_edge doğrusal taramayla O(E²) yakar; indeksle O(E
+      //    log E) olmalı. Eşik MUTLAK DEĞİL: paralel CI yükünde duvar-saati
+      //    ölçümü 4x'e kadar şişer (gözlem: düzeltilmiş kodda bile yük
+      //    altında 10,2 sn / boşta 2,5 sn) ve küçük bir kontrol koşumu
+      //    yükü temsil etmez (gözlem: yük altında kontrol 53 ms, yoğun
+      //    10.387 ms). Ölçekleme oranı kullanılır: AYNI şekle sahip iki
+      //    yoğunluk (8000 / 1000) ardışık koşturulur; O(E²) ~16x oran
+      //    üretir, O(E log E) ~4-7x'te kalır. min-of-3, en az gürültülü
+      //    tekrarı seçer. Kırmızı kanıt: düzeltme öncesi aynı makinede
+      //    8000-kenarlı koşum 16,159 ms ölçülmüştü (1000'lik koşum
+      //    ~0,4 sn — oran ~40x).
+      const pad = (index: number): string => String(index).padStart(4, "0");
+      const symbol = (index: number): string =>
+        `dense_target_${pad(index)}_aabbccddeeff`;
+      const denseFile = (count: number): { path: string; content: string } => ({
+        path: "Dense/Dense.rs",
+        content:
+          Array.from({ length: count }, (_, i) => `fn ${symbol(i)}() { }`).join(
+            "\n",
+          ) +
+          `\nfn dense_caller() {\n${Array.from(
+            { length: count },
+            (_, i) => `    ${symbol(i)}();`,
+          ).join("\n")}\n}\n`,
+      });
+      const denseRequest = (count: number) => ({
+        id: `dense-calls-${count}`,
+        type: "analyze",
+        protocolVersion: "1",
+        files: [denseFile(count)],
+      });
+      const scaleRatios: number[] = [];
+      for (let rep = 0; rep < 3; rep += 1) {
+        const bigStart = Date.now();
+        const bigRun = await runWorker([denseRequest(8000)]);
+        const bigElapsed = Date.now() - bigStart;
+        const smallStart = Date.now();
+        await runWorker([denseRequest(1000)]);
+        const smallElapsed = Date.now() - smallStart;
+        scaleRatios.push(bigElapsed / Math.max(smallElapsed, 1));
+        if (rep === 0) {
+          denseResponse = bigRun.lines[0] ? parseLine(bigRun.lines[0]) : null;
+        }
+      }
+      denseScaleRatio = Math.min(...scaleRatios);
+    },
+    300_000,
+  );
+
+  it("negatif: maxNodes 0 ve 250001 → INVALID_ARGUMENT aralık mesajı", () => {
+    expect(invalidById["budget-zero"]?.status).toBe("error");
+    expect(invalidById["budget-zero"]?.error?.code).toBe("INVALID_ARGUMENT");
+    expect(invalidById["budget-zero"]?.error?.message).toContain("1..250000");
+    expect(invalidById["budget-over"]?.status).toBe("error");
+    expect(invalidById["budget-over"]?.error?.code).toBe("INVALID_ARGUMENT");
+    expect(invalidById["budget-over"]?.error?.message).toContain("250000");
+  });
+
+  it("negatif: maxNodes tam sayı değilse (float/bool) → INVALID_ARGUMENT", () => {
+    for (const id of ["budget-float", "budget-bool"]) {
+      expect(invalidById[id]?.error?.code).toBe("INVALID_ARGUMENT");
+      expect(invalidById[id]?.error?.message).toContain("tam sayı");
+    }
+  });
+
+  it("sınır: maxNodes 250000 (üst sınır) kabul edilir, kırpılmayan küme ready döner", () => {
+    expect(invalidById["budget-boundary-ok"]?.status).toBe("ready");
+    expect(invalidById["budget-boundary-ok"]?.diagnostics ?? []).toEqual([]);
+  });
+
+  it("partial: maxNodes 5 → RESPONSE_TRUNCATED + dangling kenar yok + evidence filtreli", () => {
+    const response = truncatedResponse;
+    expect(response?.status).toBe("partial");
+    expect(response?.nodes?.length).toBe(5);
+    const truncatedDiagnostic = (response?.diagnostics ?? []).find(
+      (diag) => diag.code === "RESPONSE_TRUNCATED",
+    );
+    expect(truncatedDiagnostic).toBeDefined();
+    expect(truncatedDiagnostic?.message).toContain("dangling yok");
+    // Dangling yok: her kenar ucunun node'u yayımlanmış kümede olmalı.
+    const published = new Set(
+      (response?.nodes ?? []).map(
+        (node) => `${node.kind}|${node.qualifiedName}|${node.relativePath ?? ""}`,
+      ),
+    );
+    for (const edge of response?.edges ?? []) {
+      for (const endpoint of [edge.from, edge.to]) {
+        expect(
+          published.has(
+            `${endpoint.kind}|${endpoint.qualifiedName}|${endpoint.relativePath ?? ""}`,
+          ),
+        ).toBe(true);
+      }
+    }
+    // Evidence, yalnızca yayımlanan kenarların taşıdığı kanıtlardan oluşur.
+    const edgeEvidence = new Set(
+      (response?.edges ?? []).flatMap((edge) =>
+        edge.evidence.map((ev) => JSON.stringify(ev)),
+      ),
+    );
+    const responseEvidence = (response?.evidence ?? []).map((ev) =>
+      JSON.stringify(ev),
+    );
+    expect(responseEvidence.length).toBeGreaterThan(0);
+    for (const ev of responseEvidence) {
+      expect(edgeEvidence.has(ev)).toBe(true);
+    }
+  });
+
+  it("determinizm: kırpılmış yanıt da birebir tekrarlanabilir", () => {
+    expect(truncatedDeterminismLine).toBe(truncatedLine);
+  });
+
+  it("yoğun girdi: 8000 ayrı çağrı tek koşumda tamamlanır (push_edge O(E²) savunması)", () => {
+    expect(denseResponse?.status).toBe("ready");
+    const callEdges = (denseResponse?.edges ?? []).filter(
+      (edge) => edge.kind === "CALLS" && edge.resolution === "verified",
+    );
+    expect(callEdges.length).toBe(8000);
+    // Ölçekleme eşiği (duvar-saati gürültüsüne karşı min-of-3): doğrusal
+    // tarama (O(E²)) 8000/1000 oranında ~16x+ ölçekler; indeksli erişim
+    // sabit maliyetler yüzünden ~4-7x'te kalır. Kırmızı kanıt: düzeltme
+    // öncesi aynı makinede 8000'lik koşum 16,159 ms, 1000'lik ~400 ms
+    // (oran ~40x) ölçülmüştü — bu eşik oranı o koşumda kırmızıya düşer.
+    expect(denseScaleRatio).toBeGreaterThan(0);
+    expect(denseScaleRatio).toBeLessThan(12);
+  }, 120_000);
+});

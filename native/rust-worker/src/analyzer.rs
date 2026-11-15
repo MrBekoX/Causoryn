@@ -28,7 +28,7 @@ use syn::spanned::Spanned;
 use syn::visit::Visit;
 use syn::{Attribute, Expr, Item, Lit};
 
-use crate::protocol::{ANALYZER_ID, ANALYZER_VERSION, ROUTE_DETECTION};
+use crate::protocol::{ANALYZER_ID, ANALYZER_VERSION, MAX_RESPONSE_NODES, ROUTE_DETECTION};
 use crate::sha256::sha256_hex;
 
 pub struct FileEntry {
@@ -79,6 +79,17 @@ struct EdgeRec {
     ambiguity: Option<Value>,
 }
 
+/// Kenar birleştirme anahtarı — (kind, from, to, resolution) dörtlüsü.
+/// Aynı anahtarlı kenarlar tek EdgeRec'te birleşir; kanonik çıktı sırası
+/// da bu anahtarla kurulur (analyze sonundaki sıralama ile aynı alanlar).
+#[derive(PartialEq, Eq, PartialOrd, Ord)]
+struct EdgeKey {
+    kind: &'static str,
+    from: NodeKey,
+    to: NodeKey,
+    resolution: &'static str,
+}
+
 /// Bu dilimde modellenmeyen yapılar — TŞ §7 unsupportedConstructs beyanı.
 const UNSUPPORTED_CONSTRUCTS: [&str; 6] = [
     // Metot çağrısının alıcı türü çözülmez: trait metodu hangi implementasyon
@@ -114,6 +125,10 @@ struct Tables {
     /// Bildirilen tipler: tip adı → node anahtarı (impl bağlama için).
     declared_types: BTreeMap<String, NodeKey>,
     edges: Vec<EdgeRec>,
+    /// EdgeKey → edges dizin konumu. push_edge'in her yeni kenarda tüm
+    /// edges dizisini doğrusal taraması (O(E²)) yerine BTreeMap araması
+    /// (O(E log E)) — sembol-yoğun girdide tek istek başına CPU savunması.
+    edge_index: BTreeMap<EdgeKey, usize>,
     evidence_seen: BTreeSet<String>,
     evidence: Vec<Value>,
     diagnostics: Vec<Diagnostic>,
@@ -185,23 +200,26 @@ fn push_edge(
     evidence: Value,
     ambiguity: Option<Value>,
 ) {
-    for existing in tables.edges.iter_mut() {
-        if existing.kind == kind
-            && existing.from == from
-            && existing.to == to
-            && existing.resolution == resolution
-        {
-            if !existing.evidence.contains(&evidence) {
-                existing.evidence.push(evidence);
-                existing.evidence.sort_by(|a, b| {
-                    let key_a = serde_json::to_string(a).unwrap_or_default();
-                    let key_b = serde_json::to_string(b).unwrap_or_default();
-                    key_a.cmp(&key_b)
-                });
-            }
-            return;
+    // Birleştirme araması BTreeMap indeksiyle: doğrusal tarama yok.
+    let key = EdgeKey {
+        kind,
+        from: from.clone(),
+        to: to.clone(),
+        resolution,
+    };
+    if let Some(&index) = tables.edge_index.get(&key) {
+        let existing = &mut tables.edges[index];
+        if !existing.evidence.contains(&evidence) {
+            existing.evidence.push(evidence);
+            existing.evidence.sort_by(|a, b| {
+                let key_a = serde_json::to_string(a).unwrap_or_default();
+                let key_b = serde_json::to_string(b).unwrap_or_default();
+                key_a.cmp(&key_b)
+            });
         }
+        return;
     }
+    tables.edge_index.insert(key, tables.edges.len());
     tables.edges.push(EdgeRec {
         kind,
         from,
@@ -976,7 +994,15 @@ fn round4(value: f64) -> f64 {
 }
 
 /// Tam analizi yürütür ve protokol yanıt Value'sunu üretir.
-pub fn analyze(id: &Value, files: &[FileEntry]) -> Value {
+/// max_nodes ≤ 0 ya da üst sınırın üstünde → MaxResponseNodes uygulanır
+/// (go worker Analyze clamp deseniyle aynı; protokol katmanı zaten
+/// doğrular — buradaki clamp savunma derinliğidir).
+pub fn analyze(id: &Value, files: &[FileEntry], max_nodes: usize) -> Value {
+    let budget = if max_nodes == 0 || max_nodes > MAX_RESPONSE_NODES {
+        MAX_RESPONSE_NODES
+    } else {
+        max_nodes
+    };
     let mut tables = Tables::default();
 
     // Pass 1: bildirimler (File node'ları her zaman üretilir — bozuk dosya
@@ -1046,7 +1072,33 @@ pub fn analyze(id: &Value, files: &[FileEntry]) -> Value {
     }
 
     // Kanonik çıktı düzeni (TŞ §8 invariant iv).
-    let nodes: Vec<Value> = tables.nodes.values().cloned().collect();
+    let mut nodes: Vec<Value> = tables.nodes.values().cloned().collect();
+    // Yanıt node bütçesi (go worker RESPONSE_TRUNCATED deseni): kanonik
+    // sırada ilk `budget` node yayınlanır; uçları yayınlanmayan kenarlar
+    // DÜŞER (dangling yok); evidence yalnızca yayımlanan kenarların
+    // taşıdığı kanıtlardan yeniden kurulur; aşım tanısı yazılır — sessiz
+    // kesim yoktur (bulgu: kırpılmış yanıt yerine tam L0/L1 degradesi).
+    if nodes.len() > budget {
+        let kept: BTreeSet<NodeKey> = tables.nodes.keys().take(budget).cloned().collect();
+        nodes.truncate(budget);
+        tables
+            .edges
+            .retain(|edge| kept.contains(&edge.from) && kept.contains(&edge.to));
+        let mut kept_evidence: Vec<Value> = Vec::new();
+        for edge in &tables.edges {
+            kept_evidence.extend(edge.evidence.iter().cloned());
+        }
+        tables.evidence = kept_evidence;
+        tables.diagnostics.push(Diagnostic {
+            relative_path: String::new(),
+            code: "RESPONSE_TRUNCATED".to_string(),
+            message: format!(
+                "yanıt node bütçesi ({budget}) aşıldı; {budget} node yayınlandı, uçları yayınlanmayan {} kenar düştü (dangling yok)",
+                tables.edge_index.len() - tables.edges.len()
+            ),
+            line: 0,
+        });
+    }
     tables.edges.sort_by(|a, b| {
         let key_a = (
             a.kind,

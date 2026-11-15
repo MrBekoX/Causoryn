@@ -26,6 +26,11 @@ pub const ROUTE_DETECTION: &str = "rust-attribute-macro-route-pattern";
 pub const MAX_REQUEST_LINE_BYTES: usize = 64_000_000;
 pub const MAX_FILE_COUNT: usize = 5_000;
 pub const MAX_FILE_CONTENT_BYTES: usize = 2_000_000;
+/// Yanıt node bütçesi (go worker MaxResponseNodes karşılığı; istek
+/// `maxNodes` ile altına çekilebilir — 1..MAX_RESPONSE_NODES, dışı
+/// INVALID_ARGUMENT). Aşan node'lar YAYINLANMAZ; uçları yayınlanmayan
+/// kenarlar da düşer (dangling yok); RESPONSE_TRUNCATED tanısı yazılır.
+pub const MAX_RESPONSE_NODES: usize = 250_000;
 
 pub struct ProtocolError {
     pub code: &'static str,
@@ -166,7 +171,10 @@ fn process_request(line: &str) -> Result<Value, ProtocolError> {
 
     // Kesin şema reddi (Zod strictObject disipliniyle aynı).
     for key in obj.keys() {
-        if !matches!(key.as_str(), "id" | "type" | "protocolVersion" | "files") {
+        if !matches!(
+            key.as_str(),
+            "id" | "type" | "protocolVersion" | "files" | "maxNodes"
+        ) {
             return Err(invalid(format!("bilinmeyen üst-düzey alan: '{key}'")));
         }
     }
@@ -188,6 +196,27 @@ fn process_request(line: &str) -> Result<Value, ProtocolError> {
             )));
         }
     }
+
+    // Yanıt node bütçesi (go worker main.go doğrulama deseni): tam sayı
+    // (bool DEĞİL — JSON true/false sayı değildir) ve 1..MAX_RESPONSE_NODES
+    // aralığında olmalıdır. Verilmezse analyzer MaxResponseNodes uygular.
+    let max_nodes = match obj.get("maxNodes") {
+        Some(value) => {
+            if value.is_boolean() || !(value.is_i64() || value.is_u64()) {
+                return Err(invalid("maxNodes tam sayı olmalıdır".to_string()));
+            }
+            let raw = value
+                .as_i64()
+                .ok_or_else(|| invalid("maxNodes tam sayı olmalıdır".to_string()))?;
+            if raw < 1 || raw > MAX_RESPONSE_NODES as i64 {
+                return Err(invalid(format!(
+                    "maxNodes 1..{MAX_RESPONSE_NODES} aralığında olmalıdır: {raw}"
+                )));
+            }
+            Some(raw as usize)
+        }
+        None => None,
+    };
 
     let files = obj
         .get("files")
@@ -251,5 +280,5 @@ fn process_request(line: &str) -> Result<Value, ProtocolError> {
     // sıralanır; analiz çıktısı kanonik anahtarla sıralanır.
     entries.sort_by(|a, b| a.path.cmp(&b.path));
 
-    Ok(analyzer::analyze(&id, &entries))
+    Ok(analyzer::analyze(&id, &entries, max_nodes.unwrap_or(0)))
 }

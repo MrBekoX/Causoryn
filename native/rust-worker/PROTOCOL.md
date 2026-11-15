@@ -62,6 +62,7 @@ stderr ← [rust-worker] ...                     (loglar; protokolün parçası 
 | `id` | string \| sayı | **Zorunlu.** Yanıtta birebir echo edilir. |
 | `type` | string | **Zorunlu.** Yalnızca `"analyze"` desteklenir. |
 | `protocolVersion` | string | Opsiyonel. Varsa `"1"` olmalıdır. |
+| `maxNodes` | tam sayı | Opsiyonel. Yanıt node bütçesi; `1..MaxResponseNodes` aralığında olmalı, dışı `INVALID_ARGUMENT`. Verilmezse `MaxResponseNodes` uygulanır. (bool kabul edilmez — JSON true/false sayı değildir.) |
 | `files` | dizi | **Zorunlu, en az 1.** Bellek-içi kaynak çantası. |
 | `files[].path` | string | **Zorunlu.** Workspace-relative POSIX yolu. Mutlak yol, `""`/`.`/`..` segmentleri reddedilir. Aynı yol iki kez verilemez. |
 | `files[].content` | string | **Zorunlu.** Tam kaynak kod. |
@@ -77,6 +78,7 @@ aynı şekilde reddedilir.
 | `MaxRequestLineBytes` | 64.000.000 bayt (UTF-8'de kötümser üst sınır) | Satır newline'a kadar DISCARD edilir; `id: null` + `LIMIT_EXCEEDED` yanıtı yazılır, döngü devam eder. |
 | `MaxFileCount` | 5.000 dosya/istek | İstek reddedilir: `LIMIT_EXCEEDED`. |
 | `MaxFileContentBytes` | 2.000.000 bayt/dosya (TŞ §20 `maxFileBytes` ile uyumlu) | İstek reddedilir: `LIMIT_EXCEEDED`. |
+| `MaxResponseNodes` | 250.000 node/yanıt (`maxNodes` ile altına çekilebilir) | Aşan node'lar YAYINLANMAZ; uçları yayınlanmayan kenarlar da düşer (dangling yok). Yanıta `RESPONSE_TRUNCATED` tanısı düşer ve `status: "partial"` olur — sessiz kesim yoktur. |
 
 Sınırlar sabittir (protokol v1'de istekte yapılandırılamaz) ve aynı
 girdiye deterministik davranışı korur.
@@ -109,8 +111,10 @@ Analiz tamamlandığında:
   "Parser başarısızsa yalnızca kanıtlanabilen bilgi sunulur"). Tanı kodları
   worker-analiz düzeyidir: `PARSE_ERROR` (syn parse hatası),
   `IMPL_UNKNOWN_TYPE` (bildirimi sette olmayan tipin impl'i modellenmez),
-  `MACRO_ITEM_SKIPPED` (makro ile tanımlı üst-düzey öğe atlanır).
-  `line` 1 tabanlıdır, bilinmiyorsa 0.
+  `MACRO_ITEM_SKIPPED` (makro ile tanımlı üst-düzey öğe atlanır),
+  `RESPONSE_TRUNCATED` (yanıt node bütçesi aşıldı — `maxNodes`/MaxResponseNodes;
+  uçları yayınlanmayan kenarlar düşer, dangling yok). `line` 1 tabanlıdır,
+  bilinmiyorsa 0.
 - `coverageRatio` = verified kenar / toplam kenar (4 ondalık; TS adapter
   kuralı). Kenar yoksa 0.
 - `evidence` = kenarların taşıdığı kanıtların küme içinde tekil (dedupe)
@@ -273,9 +277,18 @@ cargo bulunamadığında meşrudur (çalıştırılamadı olarak raporlanır):
 - **Negatif:** boş `files` / eksik `files` / `..` segmenti / mutlak yol /
   duplicate path / bilinmeyen üst-düzey alan / files[] bilinmeyen alan /
   eksik `id` / bilinmeyen `type` / bilinmeyen `protocolVersion` / bozuk
-  JSON → `INVALID_ARGUMENT` + id echo; bozuk satırdan sonra worker
+  JSON / `maxNodes` aralık dışı (0, 250001) ya da tam sayı değil (1.5,
+  true) → `INVALID_ARGUMENT` + id echo; bozuk satırdan sonra worker
   yaşamaya devam eder. Sınırlar: 3 MB içerik ve 5001 dosya →
   `LIMIT_EXCEEDED`.
 - **Partial:** sözdizimi hatası → `status:"partial"` + dosya/satır
   taşıyan tanılar; graph yine üretilir.
+- **Node bütçesi:** `maxNodes` aralık/tam-sayı reddiyeleri `INVALID_ARGUMENT`;
+  üst sınır (`250000`) kabul edilir; 13 node'lu kümeye `maxNodes: 5` →
+  5 node yayınlanır, uçları yayınlanmayan kenarlar düşer (dangling yok),
+  `RESPONSE_TRUNCATED` + `status:"partial"`, evidence yalnızca yayımlanan
+  kenarların kanıtlarından oluşur ve kırpılmış yanıt birebir
+  tekrarlanır. Sembol-yoğun girdi (8000 ayrı aynı-modül çağrı) tek
+  koşumda süre bütçesi içinde tamamlanır (push_edge BTreeMap indeksli —
+  O(E²) doğrusal tarama yok).
 - **Determinizm:** aynı istek iki koşuda birebir aynı yanıt satırı.
