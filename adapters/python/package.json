@@ -1,0 +1,13 @@
+{
+  "name": "@causoryn/adapter-python",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Python Language Adapter: stdlib ast sidecar worker süreç yönetimi (TŞ v2.1 §7; M1-Python).",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@causoryn/domain": "0.1.0"
+  }
+}

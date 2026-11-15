@@ -10,6 +10,9 @@
     { "path": "packages/mcp-server" },
     { "path": "packages/wiki" },
     { "path": "adapters/typescript" },
-    { "path": "adapters/csharp-roslyn" }
+    { "path": "adapters/csharp-roslyn" },
+    { "path": "adapters/rust" },
+    { "path": "adapters/python" },
+    { "path": "adapters/go" }
   ]
 }

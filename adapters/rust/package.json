@@ -1,0 +1,13 @@
+{
+  "name": "@causoryn/adapter-rust",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Rust Language Adapter: syn sidecar worker süreç yönetimi (TŞ v2.1 §7; native/rust-worker).",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@causoryn/domain": "0.1.0"
+  }
+}

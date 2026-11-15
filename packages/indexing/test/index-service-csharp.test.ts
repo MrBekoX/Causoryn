@@ -526,9 +526,12 @@ describe("IndexService.runIndex — senkron koşum C# derin analiz yürütmez (B
 /* get_capabilities yüzeyi: INDEXED_ADAPTERS metadata'sı                */
 /* ------------------------------------------------------------------ */
 
-describe("INDEXED_ADAPTERS — iki adapter kaydı (get_capabilities yüzeyi)", () => {
+describe("INDEXED_ADAPTERS — beş adapter kaydı (get_capabilities yüzeyi)", () => {
   it("csharp-roslyn kaydı gerçek yeteneklerle + TS kaydı değişmedi", () => {
-    expect(INDEXED_ADAPTERS).toHaveLength(2);
+    // M2 ile python/go/rust sidecar kayıtları eklendi (toplam 5; dil
+    // metadata sözleşmesi index-service-multilang.test.ts'te ayrıca
+    // doğrulanır). Kayıt sırası korunur: TS, C#, python, go, rust.
+    expect(INDEXED_ADAPTERS).toHaveLength(5);
     const ts = INDEXED_ADAPTERS.find((a) => a.language === "typescript");
     expect(ts).toBeDefined();
     expect(ts?.analyzerId).toBe("ts-adapter");
@@ -722,9 +725,12 @@ describe("runIndexAsync — boş workspace dürüstlüğü (denetim bulgusu B1)"
       const run = await service.runIndexAsync(root);
       expect(run.published).toBe(true);
       expect(run.snapshot.meta.state).toBe("partial");
+      // Uyarı metni beş dil kapsamını taşır (M2 denetim bulgusu: kapsam
+      // beş dile genişledi ama kullanıcıya yönelik erken-çıkış metni
+      // yalnızca TypeScript/TSX/C# sayıyordu — geride kalmıştı).
       expect(
         run.warnings.some((w) =>
-          w.includes("analiz edilebilir TypeScript/TSX/C# kaynağı içermiyor"),
+          w.includes("analiz edilebilir TypeScript/TSX/C#/Python/Go/Rust kaynağı içermiyor"),
         ),
       ).toBe(true);
       expect(run.warnings.some((w) => w.includes("README.md"))).toBe(true);

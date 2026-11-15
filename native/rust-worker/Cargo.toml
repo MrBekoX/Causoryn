@@ -1,0 +1,21 @@
+[package]
+name = "causoryn-rust-worker"
+version = "0.1.0"
+edition = "2021"
+description = "Causoryn Rust sidecar worker — syn 2 tabanlı yerel ve deterministik analiz (TŞ v2.1 §7; M1-Rust)."
+
+# Bağımlılık sözleşmesi (M1-Rust): yalnızca syn 2 (AST) + serde_json (JSON).
+# crates.io fetch, Roslyn worker'ın NuGet örüntüsünün karşılığıdır (SERBEST);
+# NPM kuralı NPM'e özgüdür — burada uygulanmaz. Başka hiçbir bağımlılık
+# (sha2, quote, clap vb.) eklenmez; SHA-256 src/sha256.rs'te bağımlılıksız
+# uygulanır ve kabul testleri Node crypto özetiyle birebir doğrular.
+# proc-macro2, syn'in KENDİ bağımlılığıdır — burada yalnızca "span-locations"
+# feature'u açılır (Span::start()/end() → evidence satır numaraları için
+# zorunlu; feature kapalıyken LineColumn bilgisi üretilmez).
+[dependencies]
+serde_json = "1"
+syn = { version = "2", features = ["full", "visit", "printing", "parsing", "extra-traits"] }
+proc-macro2 = { version = "1", features = ["span-locations"] }
+
+# debug profili adapter'ın beklenen binary konumudur:
+# native/rust-worker/target/debug/causoryn-rust-worker(.exe)

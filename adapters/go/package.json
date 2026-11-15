@@ -1,0 +1,13 @@
+{
+  "name": "@causoryn/adapter-go",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Go Language Adapter: go/parser + go/ast sidecar worker süreç yönetimi (TŞ v2.1 §7, §23 dil planı; M1-Go).",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@causoryn/domain": "0.1.0"
+  }
+}
