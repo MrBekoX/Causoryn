@@ -159,10 +159,40 @@ export interface CargoBuildOutcome {
 }
 
 /**
+ * cargo build zaman aşımında doğrudan cargo sürecinin ÖTESİNDE rustc/
+ * codegen TORUN süreçlerini de sonlandırır (win32): LİTERAL "taskkill" +
+ * /pid <KENDİ çocuğumuzun sayısal pid'i> /T (ağaç) /F (zorla) — go
+ * worker taskkill deseninin (adapters/go worker-process killProcessTree)
+ * cargo build karşılığı. Torunlar finite süreçlerdir (derleme bitince
+ * kendiliklerinden çıkarlar); ağaç-kill savunma derinliğidir. pid kullanıcı
+ * girdisi DEĞİLDİR; shell yoktur; argümanlar istek içeriğinden
+ * türetilmez (kırmızı çizgi 6). taskkill başlatılamazsa doğrudan kill
+ * zaten uygulanmıştır.
+ */
+function killBuildTree(spawnFn: CargoSpawnFunction, child: ChildProcess | null): void {
+  if (process.platform !== "win32") return;
+  const pid = child?.pid;
+  if (pid === undefined) return;
+  try {
+    const killer = spawnFn(
+      "taskkill", // LİTERAL komut — kırmızı çizgi 6
+      ["/pid", String(pid), "/T", "/F"],
+      { stdio: ["ignore", "pipe", "pipe"], env: buildToolEnv(CARGO_ENV_ALLOWLIST, null) },
+    );
+    killer.on("error", () => {}); // taskkill yoksa/hata verirse doğrudan kill yeterli
+    killer.once("exit", () => {
+      killer.removeAllListeners();
+    });
+  } catch {
+    // spawnFn enjeksiyonları senkron patlayabilir; doğrudan kill uygulanmıştır.
+  }
+}
+
+/**
  * cargo build'i LİTERAL "cargo" komutu + sabit argümanlarla çalıştırır
  * (shell yok; child env allowlist'li ve cargo-home PATH ön ekli).
- * Zaman aşımında süreç kill edilir ve status=null döner; çağıran bunu
- * "derlenemedi" olarak raporlar.
+ * Zaman aşımında süreç kill edilir (win32'de ağaç-kill ile) ve
+ * status=null döner; çağıran bunu "derlenemedi" olarak raporlar.
  */
 export function runCargoBuild(input: {
   manifestPath: string;
@@ -198,6 +228,9 @@ export function runCargoBuild(input: {
 
     const timer = setTimeout(() => {
       child?.kill();
+      // win32: rustc/codegen torun süreçleri de sonlandırılır (savunma
+      // derinliği; go worker taskkill deseni).
+      killBuildTree(spawnFn, child);
       finish({
         status: null,
         stdout: stdoutText,

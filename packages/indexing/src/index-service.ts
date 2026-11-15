@@ -842,9 +842,9 @@ export class IndexService {
     try {
       // Erken çıkış: analiz edilebilir dil kaynağı yok (orijinal davranış,
       // genelleştirilmiş uyarı; tek Workspace node'uyla partial publish).
-      // M2: kapsam beş dile genişletildi; uyarı metni mevcut testlerle
-      // kilitli olduğu için olduğu gibi korunmuştur (yalnızca hiçbir dil
-      // dosyası yokken bu dala girilir).
+      // M2 denetim bulgusu düzeltmesi: kapsam beş dile genişlediğinden
+      // uyarı metni de beş dili sayar (yalnızca hiçbir dil dosyası yokken
+      // bu dala girilir).
       if (
         tsEntries.length === 0 &&
         csEntries.length === 0 &&
@@ -857,7 +857,7 @@ export class IndexService {
         // sözleşmesiyle aynı mutabakat garantisi).
         this.syncInventoryRecords(entries);
         warnings.push(
-          "workspace analiz edilebilir TypeScript/TSX/C# kaynağı içermiyor; coverage sıfır (partial yayınlendi)",
+          "workspace analiz edilebilir TypeScript/TSX/C#/Python/Go/Rust kaynağı içermiyor; coverage sıfır (partial yayınlendi)",
         );
         for (const entry of entries) {
           warnings.push(`dosya envanterde ama dil adapter kapsamı dışında: ${entry.relativePath}`);
@@ -1283,7 +1283,7 @@ export class IndexService {
         rsEntries.length === 0
       ) {
         warnings.push(
-          "workspace analiz edilebilir TypeScript/TSX/C# kaynağı içermiyor; coverage sıfır (partial yayınlendi)",
+          "workspace analiz edilebilir TypeScript/TSX/C#/Python/Go/Rust kaynağı içermiyor; coverage sıfır (partial yayınlendi)",
         );
         for (const entry of entries) {
           warnings.push(`dosya envanterde ama dil adapter kapsamı dışında: ${entry.relativePath}`);

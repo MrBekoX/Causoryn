@@ -725,9 +725,12 @@ describe("runIndexAsync — boş workspace dürüstlüğü (denetim bulgusu B1)"
       const run = await service.runIndexAsync(root);
       expect(run.published).toBe(true);
       expect(run.snapshot.meta.state).toBe("partial");
+      // Uyarı metni beş dil kapsamını taşır (M2 denetim bulgusu: kapsam
+      // beş dile genişledi ama kullanıcıya yönelik erken-çıkış metni
+      // yalnızca TypeScript/TSX/C# sayıyordu — geride kalmıştı).
       expect(
         run.warnings.some((w) =>
-          w.includes("analiz edilebilir TypeScript/TSX/C# kaynağı içermiyor"),
+          w.includes("analiz edilebilir TypeScript/TSX/C#/Python/Go/Rust kaynağı içermiyor"),
         ),
       ).toBe(true);
       expect(run.warnings.some((w) => w.includes("README.md"))).toBe(true);

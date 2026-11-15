@@ -31,9 +31,14 @@ export const RUST_ADAPTER_VERSION = "0.1.0";
 export const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
 
 /**
- * Tek yanıt satırı için varsayılan üst sınır (char). Worker'ın
- * MaxRequestLineChars (64M) sabitinin ayna değeridir — istek ve yanıt
- * bacakları aynı bütçeyi paylaşır. Aşım → süreç kill + L0/L1 fallback.
+ * Tek yanıt satırı için varsayılan üst sınır (char) — 64 MiB
+ * (67.108.864). NOT (bayat yorum düzeltmesi): bu değer worker sabitinin
+ * BİREBİR aynası DEĞİLDİR — rust worker istek satırı üst sınırı
+ * MAX_REQUEST_LINE_BYTES = 64_000_000 desimaldir (protocol.rs), python
+ * worker'da 64 MiB'tır (worker.py MAX_REQUEST_LINE_BYTES). Amaç aynıdır
+ * (istek bütçesinin yanıt karşılığı; aşım → süreç kill + L0/L1
+ * fallback) ancak üç taraftaki sayısal değerler bilinçli olarak 64
+ * mertebesinde, birebir eşitlik iddiası OLMADAN seçilmiştir.
  */
 export const DEFAULT_RESPONSE_MAX_CHARS = 64 * 1024 * 1024;
 

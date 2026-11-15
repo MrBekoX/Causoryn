@@ -1,8 +1,10 @@
+import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, copyFileSync, rmSync, writeFileSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
-import { beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { isCargoAvailable } from "../../../adapters/rust/src/cargo.js";
 
 /**
  * M2 — Sprint-8 dilimi: Faz-1'de gelen üç dil adapter'ının (python, go,
@@ -57,6 +59,35 @@ const GO_TOOLCHAIN_EXE = "go";
 /** Sabit Go toolchain yolu (bu makinenin kanıtlanmış yolu; DATA amaçlı). */
 const GO_BINARY = existsSync(GO_TOOLCHAIN_EXE) ? GO_TOOLCHAIN_EXE : "go";
 const FIXED_NOW = "2026-11-15T00:00:00.000Z";
+
+/* ------------------------------------------------------------------ */
+/* Toolchain yoklamaları: pozitif 5-dil bloğu GERÇEK worker koşumları  */
+/* yapar — toolchain yokken 'ready' beklentisi SKIP değil FAIL olurdu. */
+/* Repo disiplini (go-adapter/python-adapter/rust-adapter testlerindeki*/
+/* skipIf + console.error örüntüsü): koşulamayan SKIP edilir.          */
+/* ------------------------------------------------------------------ */
+
+const pythonCheck = spawnSync("python", ["--version"], {
+  encoding: "utf8",
+  shell: false,
+});
+const pythonAvailable = pythonCheck.status === 0;
+const goCheck = spawnSync(GO_BINARY, ["version"], {
+  encoding: "utf8",
+  shell: false,
+});
+const goAvailable = goCheck.status === 0;
+const cargoAvailable = isCargoAvailable();
+const missingToolchains = [
+  pythonAvailable ? "" : "python",
+  goAvailable ? "" : "go",
+  cargoAvailable ? "" : "cargo",
+].filter((name) => name !== "");
+if (missingToolchains.length > 0) {
+  console.error(
+    `[index-service-multilang] toolchain bulunamadı (${missingToolchains.join(", ")}) — gerçek worker koşumu gerektiren pozitif/degrade testleri skip edilir (koşulamadı olarak raporlanır)`,
+  );
+}
 
 /** Uzantıya göre özyinelemeli kopya (csharp B9 testindeki desen). */
 function copyFixtureInto(srcDir: string, destRoot: string, prefix = ""): void {
@@ -179,7 +210,12 @@ describe("INDEXED_ADAPTERS — beş adapter kaydı (M2)", () => {
 /* Pozitif: 5 dil tek snapshot (gerçek worker koşumları)                */
 /* ------------------------------------------------------------------ */
 
-describe("IndexService.runIndexAsync — TS + C# + Python + Go + Rust TEK snapshot (M2 pozitif)", () => {
+// Pozitif blok ÜÇ GERÇEK worker koşumu gerektirir (python/go/cargo);
+// herhangi biri yoksa state 'partial' olur ve 'ready' beklentisi sert
+// kırılırdı — meşru skip (koşulamadı raporu) ile korunur.
+describe.skipIf(!(pythonAvailable && goAvailable && cargoAvailable))(
+  "IndexService.runIndexAsync — TS + C# + Python + Go + Rust TEK snapshot (M2 pozitif)",
+  () => {
   let mixedRoot = "";
   let firstRun: Awaited<ReturnType<IndexService["runIndexAsync"]>> | null = null;
   let secondCanonical = "";
@@ -199,6 +235,16 @@ describe("IndexService.runIndexAsync — TS + C# + Python + Go + Rust TEK snapsh
     },
     600_000,
   );
+
+  // Dosya başlığındaki sözleşme ("geçici kökler kurulur ve silinir"):
+  // beforeAll'ın kurdugu kök afterAll'da silinir (denetim bulgusu: bu
+  // blok kalmıyordu ve her tam süit koşumu os.tmpdir() altında bir
+  // causoryn-m2-mixed-* kalıntısı bırakıyordu).
+  afterAll(() => {
+    if (mixedRoot !== "") {
+      rmSync(mixedRoot, { recursive: true, force: true });
+    }
+  });
 
   it("tek snapshot: beş dilin node katmanı bir arada, ready yayımlandı", () => {
     expect(firstRun).not.toBeNull();
@@ -302,7 +348,17 @@ describe("IndexService.runIndexAsync — TS + C# + Python + Go + Rust TEK snapsh
     expect(firstCanonical.length).toBeGreaterThan(0);
     expect(secondCanonical).toBe(firstCanonical);
   });
+});
 
+/* ------------------------------------------------------------------ */
+/* Degrade: bir worker yok → diğerleri yaşar. gostate/ruststate=ready  */
+/* kanıtladığından go + cargo VARLIĞI gerektirir (python bilinçli      */
+/* sahte-yoktur); eksikse meşru skip.                                  */
+/* ------------------------------------------------------------------ */
+
+describe.skipIf(!(goAvailable && cargoAvailable))(
+  "IndexService.runIndexAsync — bir worker yok → diğerleri yaşar (M2 degrade)",
+  () => {
   it("negatif (bir worker yok → diğerleri yaşar): olmayan python komutu → Python L0/L1, TS+C#+Go+Rust dolu", async () => {
     const root = makeMixedRoot();
     try {
@@ -345,7 +401,13 @@ describe("IndexService.runIndexAsync — TS + C# + Python + Go + Rust TEK snapsh
       rmSync(root, { recursive: true, force: true });
     }
   }, 300_000);
+});
 
+/* Degrade-all: HİÇBİR toolchain gerektirmez — üç worker komutu bilinçli
+   'olmayan-*' adlardır, rust workerDir yoktur; TS analizi saf TS'tir. */
+describe(
+  "IndexService.runIndexAsync — üç yeni worker da yok (toolchain'siz koşar; M2 degrade)",
+  () => {
   it("negatif (üç yeni worker da yok): py/go/rs L0 File node'ları + explicit warning; TS ayakta; motor çökmez", async () => {
     const root = makeMixedRoot();
     try {

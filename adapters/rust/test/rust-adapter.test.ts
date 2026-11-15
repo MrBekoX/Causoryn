@@ -503,4 +503,60 @@ describe("runCargoBuild çıktı bütçesi (spawn enjeksiyonlu)", () => {
     expect(outcome.stdout).toContain("derleme tamam");
     expect(outcome.spawnError).toBe("");
   });
+
+  it("negatif: zaman aşımı → doğrudan kill + win32 AĞAÇ-KILL (torun rustc/codegen süreçleri)", async () => {
+    if (process.platform !== "win32") {
+      // Ağaç-kill savunması win32'ye özeldir; diğer platformlarda mevcut
+      // doğrudan kill davranışı korunur (dal koşullaması testte de açık).
+      expect(true).toBe(true);
+      return;
+    }
+    const spawned: Array<{ command: string; args: readonly string[] }> = [];
+    const killed: boolean[] = [];
+    const outcome = await runCargoBuild({
+      manifestPath: "sahte/Cargo.toml",
+      timeoutMs: 120,
+      spawnFn: (command, args) => {
+        spawned.push({ command, args: [...args] });
+        const child = makeFakeWorkerChild({});
+        const record = child as unknown as Record<string, unknown>;
+        record.pid = command === "cargo" ? 7777 : undefined;
+        record.kill = () => {
+          killed.push(true);
+          return true;
+        };
+        return child;
+      },
+    });
+    expect(outcome.status).toBeNull();
+    expect(outcome.spawnError).toContain("zaman aşımı");
+    // Doğrudan kill her koşulda uygulanır (ağaç-kill ek savunmadır).
+    expect(killed.length).toBe(1);
+    // İkinci spawn: LİTERAL "taskkill" + SADECE kendi çocuğumuzun sayısal
+    // pid'i (/T ağaç, /F zorla). rustc/codegen torun süreçleri finite'dir
+    // ama savunma derinliği go worker deseniyle sağlanır.
+    expect(spawned.length).toBe(2);
+    expect(spawned[0]?.command).toBe("cargo");
+    expect(spawned[1]?.command).toBe("taskkill");
+    expect(spawned[1]?.args).toEqual(["/pid", "7777", "/T", "/F"]);
+  }, 10_000);
+
+  it("pozitif kontrol: zaman aşımına uğramayan koşumda ağaç-kill çağrılmaz", async () => {
+    const spawned: Array<{ command: string }> = [];
+    const outcome = await runCargoBuild({
+      manifestPath: "sahte/Cargo.toml",
+      timeoutMs: 5_000,
+      spawnFn: (command) => {
+        spawned.push({ command });
+        const child = makeFakeWorkerChild({});
+        queueMicrotask(() => {
+          child.emit("exit", 0, null);
+        });
+        return child;
+      },
+    });
+    expect(outcome.status).toBe(0);
+    expect(spawned.length).toBe(1);
+    expect(spawned[0]?.command).toBe("cargo");
+  });
 });

@@ -39,3 +39,7 @@ out/
 # OS / editör
 Thumbs.db
 .DS_Store
+
+# Test bootstrap kilit dosyası (tests/rust-worker-build.ts koşum-içi kilit;
+# sert kill'de diskte kalabilir — untracked kalıntı olmasın)
+native/rust-worker/test-build.lock

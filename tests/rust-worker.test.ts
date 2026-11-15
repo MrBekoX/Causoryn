@@ -851,7 +851,7 @@ describe.skipIf(!workerReady)("rust-worker node bütçesi (PROTOCOL.md maxNodes)
   let truncatedDeterminismLine = "";
   /** 8000-kenarlı yoğun koşumun son ölçümü (fonksiyonel doğrulama için). */
   let denseResponse: WorkerResponse | null = null;
-  /** min-of-3 ölçekleme oranı: t(8000) / t(1000) — duvar-saati gürültüsüne karşı. */
+  /** min-of-4 ölçekleme oranı: t(8000) / t(1000) — duvar-saati gürültüsüne karşı. */
   let denseScaleRatio = -1;
 
   /** 13 node üreten küçük küme: File + 11 Function + 1 UnknownExternal. */
@@ -904,8 +904,9 @@ describe.skipIf(!workerReady)("rust-worker node bütçesi (PROTOCOL.md maxNodes)
       //    yükü temsil etmez (gözlem: yük altında kontrol 53 ms, yoğun
       //    10.387 ms). Ölçekleme oranı kullanılır: AYNI şekle sahip iki
       //    yoğunluk (8000 / 1000) ardışık koşturulur; O(E²) ~16x oran
-      //    üretir, O(E log E) ~4-7x'te kalır. min-of-3, en az gürültülü
-      //    tekrarı seçer. Kırmızı kanıt: düzeltme öncesi aynı makinede
+      //    üretir, O(E log E) ~4-7x'te kalır. min-of-4, en az gürültülü
+      //    tekrarı seçer (tek zamanlama-duyarlı assert'in flake
+      //    azaltımı). Kırmızı kanıt: düzeltme öncesi aynı makinede
       //    8000-kenarlı koşum 16,159 ms ölçülmüştü (1000'lik koşum
       //    ~0,4 sn — oran ~40x).
       const pad = (index: number): string => String(index).padStart(4, "0");
@@ -929,7 +930,7 @@ describe.skipIf(!workerReady)("rust-worker node bütçesi (PROTOCOL.md maxNodes)
         files: [denseFile(count)],
       });
       const scaleRatios: number[] = [];
-      for (let rep = 0; rep < 3; rep += 1) {
+      for (let rep = 0; rep < 4; rep += 1) {
         const bigStart = Date.now();
         const bigRun = await runWorker([denseRequest(8000)]);
         const bigElapsed = Date.now() - bigStart;
@@ -1016,7 +1017,7 @@ describe.skipIf(!workerReady)("rust-worker node bütçesi (PROTOCOL.md maxNodes)
       (edge) => edge.kind === "CALLS" && edge.resolution === "verified",
     );
     expect(callEdges.length).toBe(8000);
-    // Ölçekleme eşiği (duvar-saati gürültüsüne karşı min-of-3): doğrusal
+    // Ölçekleme eşiği (duvar-saati gürültüsüne karşı min-of-4): doğrusal
     // tarama (O(E²)) 8000/1000 oranında ~16x+ ölçekler; indeksli erişim
     // sabit maliyetler yüzünden ~4-7x'te kalır. Kırmızı kanıt: düzeltme
     // öncesi aynı makinede 8000'lik koşum 16,159 ms, 1000'lik ~400 ms
