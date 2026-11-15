@@ -146,13 +146,16 @@ describe("TypeScript çözüm sözleşmesi", () => {
     expect(field(options, "sourceMap")).toBe(true);
   });
 
-  it("kök tsconfig.json solution olarak 9 projeye referans verir", () => {
+  it("kök tsconfig.json solution olarak 12 projeye referans verir", () => {
     const solution = readJson("tsconfig.json");
     const references = field(solution, "references") as Array<
       Record<string, unknown>
     >;
     const paths = references.map((ref) => String(field(ref, "path")));
     // Faz C2 (Living Wiki) ile packages/wiki çözüme eklendi.
+    // M1-Python ile adapters/python (stdlib ast sidecar) çözüme eklendi.
+    // M1-Rust ile adapters/rust (syn 2 sidecar) çözüme eklendi.
+    // M1-Go ile adapters/go (stdlib go/parser sidecar) çözüme eklendi.
     expect(paths).toEqual([
       "packages/domain",
       "packages/workspace",
@@ -163,6 +166,9 @@ describe("TypeScript çözüm sözleşmesi", () => {
       "packages/wiki",
       "adapters/typescript",
       "adapters/csharp-roslyn",
+      "adapters/rust",
+      "adapters/python",
+      "adapters/go",
     ]);
     for (const projectPath of paths) {
       expect(exists(`${projectPath}/tsconfig.json`)).toBe(true);

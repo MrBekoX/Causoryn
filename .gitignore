@@ -9,6 +9,13 @@ bin/
 obj/
 *.user
 
+# Rust derleme çıktıları (native/rust-worker)
+native/rust-worker/target/
+
+# Python derleme çıktıları (native/python-worker)
+__pycache__/
+*.pyc
+
 # Causoryn çalışma zamanı (izinli data-root örnekleri)
 .causoryn/
 .causoryn-runtime/
