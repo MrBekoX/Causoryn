@@ -30,7 +30,13 @@ import { fileURLToPath } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
-import { sha256Hex, utf8Encode } from "@causoryn/domain";
+import {
+  createSnapshot,
+  sha256Hex,
+  utf8Encode,
+  type SnapshotGraph,
+  type SnapshotInput,
+} from "@causoryn/domain";
 import { InMemoryGraphRepository } from "@causoryn/graph";
 import type { GraphRepository } from "@causoryn/graph";
 import { describe, expect, it } from "vitest";
@@ -41,17 +47,14 @@ import {
   SERVER_NAME,
   SERVER_VERSION,
   TOOL_NAMES,
+  coverageOf,
   createCausorynContext,
   createCausorynMcpServer,
 } from "../src/index.js";
 import type { CausorynContext } from "../src/index.js";
 
-const REPO_ROOT = path.resolve(
-  path.dirname(fileURLToPath(import.meta.url)),
-  "..",
-  "..",
-  "..",
-);
+const PKG_DIR = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
+const REPO_ROOT = path.dirname(path.dirname(PKG_DIR));
 const FIXTURE_ROOT = path.join(REPO_ROOT, "examples", "fixture-ts-orders");
 
 interface ClientPair {
@@ -746,6 +749,7 @@ describe("MCP server — protokol düzeyi", { timeout: 30_000 }, () => {
         expect(summaryEnvelope.status).toBe("partial");
         expect((summaryEnvelope.warnings as unknown[]).length).toBeGreaterThanOrEqual(1);
         const summaryCoverage = summaryEnvelope.coverage as Record<string, unknown>;
+        expect(summaryCoverage.tier).toBe("L0");
         expect(summaryCoverage.resolvedEdges).toBe(0);
         expect(summaryCoverage.unresolvedEdges).toBe(0);
         const summaryData = summaryEnvelope.data as Record<string, unknown>;
@@ -757,6 +761,7 @@ describe("MCP server — protokol düzeyi", { timeout: 30_000 }, () => {
         expect(mapEnvelope.status).toBe("partial");
         expect((mapEnvelope.warnings as unknown[]).length).toBeGreaterThanOrEqual(1);
         const mapCoverage = mapEnvelope.coverage as Record<string, unknown>;
+        expect(mapCoverage.tier).toBe("L0");
         expect(mapCoverage.totalEdges).toBe(0);
         const mapData = mapEnvelope.data as Record<string, unknown>;
         expect(mapData.totalNodes).toBe(1);
@@ -824,7 +829,7 @@ describe("MCP server — protokol düzeyi", { timeout: 30_000 }, () => {
   it("hata kodu seti sabittir (TŞ §10.1 taban + üç proje uzantısı)", () => {
     // TŞ §10.1 taban listesi + ÜÇ proje uzantısı: INVALID_ARGUMENT +
     // EVIDENCE_NOT_FOUND (K-008; sprint-1 görev 7) ve SYMBOL_NOT_FOUND
-    // (sprint-2 B5 causoryn_get_symbol_context) — bkz. src/errors.ts
+    // (K-011; sprint-2 B4/B5 causoryn_get_symbol_context) — bkz. src/errors.ts
     // başlığı. POLICY_INVALID, INVALID_REVISION ve EXPORT_NOT_ALLOWED uzantı
     // DEĞİLDİR: TŞ §10.1 sabit listesindedirler ve sprint-3 C8'de (guard
     // policy + git revizyon + export output yetkilendirmesi araçları) ilk
@@ -1526,3 +1531,458 @@ describe("MCP server — protokol düzeyi", { timeout: 30_000 }, () => {
 function statusDataOf(envelope: Record<string, unknown>): Record<string, unknown> {
   return envelope.data as Record<string, unknown>;
 }
+
+/** Sentetik çok-dil SnapshotGraph'ı InMemoryGraphRepository'ye yayımlayıp Context kurar. */
+function contextWithPublishedSnapshot(
+  input: Omit<SnapshotInput, "state"> & { readonly state: "ready" | "partial" },
+): CausorynContext {
+  const normalizedNodes = input.nodes.map((n) =>
+    n.relativePath !== undefined && n.location === undefined
+      ? {
+          ...n,
+          location: {
+            relativePath: n.relativePath,
+            startLine: 1,
+            endLine: 1,
+            sourceHash: `sha256:${n.relativePath}`,
+          },
+        }
+      : n,
+  );
+  const snapshot: SnapshotGraph = createSnapshot({
+    ...input,
+    nodes: normalizedNodes,
+  });
+  const repository = new InMemoryGraphRepository();
+  repository.registerWorkspace({
+    id: input.workspaceId,
+    rootPath: FIXTURE_ROOT,
+    createdAt: input.createdAt,
+  });
+  const build = repository.beginBuild({
+    workspaceId: input.workspaceId,
+    revision: snapshot.meta.revision,
+    configHash: snapshot.meta.configHash,
+    analyzerFingerprint: snapshot.meta.analyzerFingerprint,
+    createdAt: snapshot.meta.createdAt,
+  });
+  for (const node of snapshot.nodes) {
+    repository.addNode(build.buildId, node);
+  }
+  for (const ev of snapshot.evidence) {
+    repository.addEvidence(build.buildId, ev);
+  }
+  for (const edge of snapshot.edges) {
+    repository.addEdge(build.buildId, edge);
+  }
+  repository.publish(build.buildId, input.state, "2026-11-18T00:00:01.000Z");
+  return createCausorynContext(
+    {
+      workspaceId: input.workspaceId,
+      allowRoots: [FIXTURE_ROOT],
+      results: { maxNodes: 250, maxSymbols: 100 },
+      autoIndex: false,
+    },
+    { repository, logger: () => {} },
+  );
+}
+
+describe(
+  "MCP server — yapısal annotations, dürüst açıklamalar ve çok-dil workspace_summary / coverageOf",
+  { timeout: 30_000 },
+  () => {
+    it("tools/list: 29 aracın tamamı yapısal annotations taşır (3 yazma aracı readOnlyHint=false, 26 araç readOnlyHint=true)", async () => {
+      const pair = await connectClient(makeContext({ autoIndex: false }));
+      try {
+        const { tools } = await pair.client.listTools();
+        expect(tools.length).toBe(29);
+        for (const tool of tools) {
+          expect(tool.annotations, `${tool.name} annotations eksik`).toBeDefined();
+          expect(tool.annotations?.destructiveHint, `${tool.name} destructiveHint`).toBe(false);
+          expect(tool.annotations?.openWorldHint, `${tool.name} openWorldHint`).toBe(false);
+          expect(typeof tool.annotations?.readOnlyHint, `${tool.name} readOnlyHint`).toBe(
+            "boolean",
+          );
+        }
+        const writeTools = tools
+          .filter((t) => t.annotations?.readOnlyHint === false)
+          .map((t) => t.name)
+          .sort();
+        expect(writeTools).toEqual([
+          "causoryn_export_documentation",
+          "causoryn_refresh_index",
+          "causoryn_wiki_build",
+        ]);
+        const readOnlyTools = tools
+          .filter((t) => t.annotations?.readOnlyHint === true)
+          .map((t) => t.name);
+        expect(readOnlyTools.length).toBe(26);
+      } finally {
+        await pair.close();
+      }
+    });
+
+    it("tools/list: refresh_index ve preflight_change açıklamaları süreç-içi bellek davranışını dürüstçe beyan eder", async () => {
+      const pair = await connectClient(makeContext({ autoIndex: false }));
+      try {
+        const { tools } = await pair.client.listTools();
+        const refreshTool = tools.find((t) => t.name === "causoryn_refresh_index");
+        expect(refreshTool?.description).toContain("InMemoryGraphRepository");
+        expect(refreshTool?.description).not.toContain(
+          "Yalnızca Causoryn izinli data-root'una yazar.",
+        );
+
+        const preflightTool = tools.find((t) => t.name === "causoryn_preflight_change");
+        expect(preflightTool?.description).toContain("PreflightManifestStore");
+        expect(preflightTool?.description).toContain("FIFO 200");
+      } finally {
+        await pair.close();
+      }
+    });
+
+    it("çok-dil workspace_summary ve coverageOf: Python ve C# sembol node'lu snapshot tier=L2 ve dil sayısını döner", async () => {
+      const pyContext = contextWithPublishedSnapshot({
+        workspaceId: "default",
+        revision: { id: "working-tree", sequence: 1 },
+        configHash: "cfg-py",
+        analyzerFingerprint: "py@0.1.0",
+        state: "ready",
+        createdAt: "2026-11-18T00:00:00.000Z",
+        nodes: [
+          { kind: "Workspace", qualifiedName: "default" },
+          {
+            kind: "File",
+            qualifiedName: "src/app.py",
+            relativePath: "src/app.py",
+            language: "python",
+          },
+          {
+            kind: "Function",
+            qualifiedName: "app.create_order",
+            relativePath: "src/app.py",
+            language: "python",
+          },
+          {
+            kind: "Function",
+            qualifiedName: "repo.save_order",
+            relativePath: "src/app.py",
+            language: "python",
+          },
+        ],
+        edges: [
+          {
+            kind: "CONTAINS",
+            from: { kind: "File", qualifiedName: "src/app.py", relativePath: "src/app.py" },
+            to: {
+              kind: "Function",
+              qualifiedName: "app.create_order",
+              relativePath: "src/app.py",
+            },
+            resolution: "verified",
+            evidence: [
+              {
+                kind: "ast-symbol",
+                span: {
+                  relativePath: "src/app.py",
+                  startLine: 1,
+                  endLine: 4,
+                  sourceHash: "sha256:py-app",
+                },
+                analyzerId: "python-worker",
+                analyzerVersion: "0.1.0",
+                rationale: "modül düzeyi def tanımı",
+              },
+            ],
+          },
+          {
+            kind: "CALLS",
+            from: {
+              kind: "Function",
+              qualifiedName: "app.create_order",
+              relativePath: "src/app.py",
+            },
+            to: {
+              kind: "Function",
+              qualifiedName: "repo.save_order",
+              relativePath: "src/app.py",
+            },
+            resolution: "heuristic",
+          },
+        ],
+      });
+
+      const pyPublished = pyContext.repository.getLatestPublished("default");
+      expect(pyPublished).toBeDefined();
+      expect(coverageOf(pyPublished!.snapshot)).toEqual({
+        tier: "L2",
+        resolvedEdges: 2,
+        unresolvedEdges: 0,
+        totalEdges: 2,
+        coverageRatio: 1,
+      });
+
+      const pyPair = await connectClient(pyContext);
+      try {
+        const result = await callTool(pyPair.client, "causoryn_workspace_summary");
+        const envelope = expectEnvelope(result);
+        const coverage = envelope.coverage as Record<string, unknown>;
+        expect(coverage.tier).toBe("L2");
+        expect(coverage.totalEdges).toBe(2);
+        expect(coverage.resolvedEdges).toBe(2);
+        expect(coverage.unresolvedEdges).toBe(0);
+        expect(coverage.coverageRatio).toBe(1);
+
+        const data = envelope.data as Record<string, unknown>;
+        expect(data.languages).toEqual([{ language: "python", files: 1 }]);
+      } finally {
+        await pyPair.close();
+      }
+
+      const csContext = contextWithPublishedSnapshot({
+        workspaceId: "default",
+        revision: { id: "working-tree", sequence: 1 },
+        configHash: "cfg-cs",
+        analyzerFingerprint: "cs@0.1.0",
+        state: "ready",
+        createdAt: "2026-11-18T00:00:00.000Z",
+        nodes: [
+          { kind: "Workspace", qualifiedName: "default" },
+          {
+            kind: "File",
+            qualifiedName: "src/OrdersController.cs",
+            relativePath: "src/OrdersController.cs",
+            language: "csharp",
+          },
+          {
+            kind: "Class",
+            qualifiedName: "Orders.OrdersController",
+            relativePath: "src/OrdersController.cs",
+            language: "csharp",
+          },
+        ],
+        edges: [],
+      });
+
+      const csPair = await connectClient(csContext);
+      try {
+        const result = await callTool(csPair.client, "causoryn_workspace_summary");
+        const envelope = expectEnvelope(result);
+        expect((envelope.coverage as Record<string, unknown>).tier).toBe("L2");
+        expect((envelope.data as Record<string, unknown>).languages).toEqual([
+          { language: "csharp", files: 1 },
+        ]);
+      } finally {
+        await csPair.close();
+      }
+    });
+
+    it("çok-dil workspace_summary ve coverageOf: Go ve Rust sembol node'lu snapshot tier=L1 döner (L2 uydurulmaz — ADR-010)", async () => {
+      const goContext = contextWithPublishedSnapshot({
+        workspaceId: "default",
+        revision: { id: "working-tree", sequence: 1 },
+        configHash: "cfg-go",
+        analyzerFingerprint: "go@0.1.0",
+        state: "ready",
+        createdAt: "2026-11-18T00:00:00.000Z",
+        nodes: [
+          { kind: "Workspace", qualifiedName: "default" },
+          {
+            kind: "File",
+            qualifiedName: "src/types-stub.ts",
+            relativePath: "src/types-stub.ts",
+            language: "typescript",
+          },
+          {
+            kind: "File",
+            qualifiedName: "cmd/main.go",
+            relativePath: "cmd/main.go",
+            language: "go",
+          },
+          {
+            kind: "Function",
+            qualifiedName: "main.HandleOrder",
+            relativePath: "cmd/main.go",
+            language: "go",
+          },
+        ],
+        edges: [],
+      });
+
+      const goPublished = goContext.repository.getLatestPublished("default");
+      expect(coverageOf(goPublished!.snapshot).tier).toBe("L1");
+
+      const goPair = await connectClient(goContext);
+      try {
+        const result = await callTool(goPair.client, "causoryn_workspace_summary");
+        const envelope = expectEnvelope(result);
+        expect((envelope.coverage as Record<string, unknown>).tier).toBe("L1");
+        expect((envelope.data as Record<string, unknown>).languages).toEqual([
+          { language: "typescript", files: 1 },
+          { language: "go", files: 1 },
+        ]);
+      } finally {
+        await goPair.close();
+      }
+
+      const rustContext = contextWithPublishedSnapshot({
+        workspaceId: "default",
+        revision: { id: "working-tree", sequence: 1 },
+        configHash: "cfg-rs",
+        analyzerFingerprint: "rs@0.1.0",
+        state: "ready",
+        createdAt: "2026-11-18T00:00:00.000Z",
+        nodes: [
+          { kind: "Workspace", qualifiedName: "default" },
+          {
+            kind: "File",
+            qualifiedName: "src/lib.rs",
+            relativePath: "src/lib.rs",
+            language: "rust",
+          },
+          {
+            kind: "Function",
+            qualifiedName: "orders::create",
+            relativePath: "src/lib.rs",
+            language: "rust",
+          },
+        ],
+        edges: [],
+      });
+
+      const rustPair = await connectClient(rustContext);
+      try {
+        const result = await callTool(rustPair.client, "causoryn_workspace_summary");
+        const envelope = expectEnvelope(result);
+        expect((envelope.coverage as Record<string, unknown>).tier).toBe("L1");
+        expect((envelope.data as Record<string, unknown>).languages).toEqual([
+          { language: "rust", files: 1 },
+        ]);
+      } finally {
+        await rustPair.close();
+      }
+    });
+
+    it("L0 degrade workspace_summary ve coverageOf: yalnızca Workspace + File (+ UnknownExternal) varken tier=L0 ve diller INDEXED_ADAPTERS sırasındadır", async () => {
+      const degradedContext = contextWithPublishedSnapshot({
+        workspaceId: "default",
+        revision: { id: "working-tree", sequence: 1 },
+        configHash: "cfg-l0",
+        analyzerFingerprint: "fallback@0.1.0",
+        state: "partial",
+        createdAt: "2026-11-18T00:00:00.000Z",
+        nodes: [
+          { kind: "Workspace", qualifiedName: "default" },
+          {
+            kind: "File",
+            qualifiedName: "cmd/main.go",
+            relativePath: "cmd/main.go",
+            language: "go",
+          },
+          {
+            kind: "File",
+            qualifiedName: "src/app.py",
+            relativePath: "src/app.py",
+            language: "python",
+          },
+          {
+            kind: "File",
+            qualifiedName: "src/Api.cs",
+            relativePath: "src/Api.cs",
+            language: "csharp",
+          },
+          {
+            kind: "File",
+            qualifiedName: "src/index.ts",
+            relativePath: "src/index.ts",
+            language: "typescript",
+          },
+          {
+            kind: "UnknownExternal",
+            qualifiedName: "external.dep",
+            language: "python",
+          },
+          {
+            kind: "UnknownExternal",
+            qualifiedName: "external.ts.dep",
+            language: "typescript",
+          },
+        ],
+        edges: [],
+      });
+
+      const degradedPublished = degradedContext.repository.getLatestPublished("default");
+      expect(coverageOf(degradedPublished!.snapshot).tier).toBe("L0");
+
+      const pair = await connectClient(degradedContext);
+      try {
+        const result = await callTool(pair.client, "causoryn_workspace_summary");
+        const envelope = expectEnvelope(result);
+        expect((envelope.coverage as Record<string, unknown>).tier).toBe("L0");
+        expect((envelope.data as Record<string, unknown>).languages).toEqual([
+          { language: "typescript", files: 1 },
+          { language: "csharp", files: 1 },
+          { language: "python", files: 1 },
+          { language: "go", files: 1 },
+        ]);
+      } finally {
+        await pair.close();
+      }
+    });
+
+    it("çok-dil deterministik sıralama: INDEXED_ADAPTERS sırası + katalog dışı UTF-16 artan sıra; fixture-ts-orders files=5 korunur", async () => {
+      const polyglotContext = contextWithPublishedSnapshot({
+        workspaceId: "default",
+        revision: { id: "working-tree", sequence: 1 },
+        configHash: "cfg-poly",
+        analyzerFingerprint: "poly@0.1.0",
+        state: "ready",
+        createdAt: "2026-11-18T00:00:00.000Z",
+        nodes: [
+          { kind: "Workspace", qualifiedName: "default" },
+          { kind: "File", qualifiedName: "src/lib.rs", relativePath: "src/lib.rs", language: "rust" },
+          { kind: "File", qualifiedName: "src/main.zig", relativePath: "src/main.zig", language: "zig" },
+          { kind: "File", qualifiedName: "src/a.py", relativePath: "src/a.py", language: "python" },
+          { kind: "File", qualifiedName: "src/b.py", relativePath: "src/b.py", language: "python" },
+          { kind: "File", qualifiedName: "src/App.java", relativePath: "src/App.java", language: "java" },
+          { kind: "File", qualifiedName: "src/index.ts", relativePath: "src/index.ts", language: "typescript" },
+          { kind: "File", qualifiedName: "cmd/main.go", relativePath: "cmd/main.go", language: "go" },
+          { kind: "File", qualifiedName: "src/Api.cs", relativePath: "src/Api.cs", language: "csharp" },
+          { kind: "File", qualifiedName: "README.md", relativePath: "README.md" },
+        ],
+        edges: [],
+      });
+
+      const polyPair = await connectClient(polyglotContext);
+      try {
+        const result = await callTool(polyPair.client, "causoryn_workspace_summary");
+        const envelope = expectEnvelope(result);
+        expect((envelope.coverage as Record<string, unknown>).tier).toBe("L0");
+        const data = envelope.data as Record<string, unknown>;
+        expect(data.fileCount).toBe(9);
+        expect(data.languages).toEqual([
+          { language: "typescript", files: 1 },
+          { language: "csharp", files: 1 },
+          { language: "python", files: 2 },
+          { language: "go", files: 1 },
+          { language: "rust", files: 1 },
+          { language: "java", files: 1 },
+          { language: "zig", files: 1 },
+        ]);
+      } finally {
+        await polyPair.close();
+      }
+
+      const tsPair = await connectClient(makeContext());
+      try {
+        const result = await callTool(tsPair.client, "causoryn_workspace_summary");
+        const envelope = expectEnvelope(result);
+        expect((envelope.coverage as Record<string, unknown>).tier).toBe("L2");
+        expect((envelope.data as Record<string, unknown>).languages).toEqual([
+          { language: "typescript", files: 5 },
+        ]);
+      } finally {
+        await tsPair.close();
+      }
+    });
+  },
+);

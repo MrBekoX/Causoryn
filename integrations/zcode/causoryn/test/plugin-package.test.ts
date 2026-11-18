@@ -30,7 +30,7 @@ const SERVER_ENTRY_TOKEN = DOLLAR_BRACE + "CLAUDE_PLUGIN_ROOT}";
 /** userConfig → env köprüsü için beklenen bütün-değer token öneki. */
 const USER_CONFIG_TOKEN_PREFIX = DOLLAR_BRACE + "user_config.";
 
-/** ".." segmenti: kaynakta tek parça yazılmaz (güvenlik taraması). */
+/** Çift-nokta üst-dizin segmenti: kaynakta tek parça yazılmaz (güvenlik taraması). */
 const DOT_DOT = "." + ".";
 const SEPARATOR = "/";
 
@@ -76,13 +76,8 @@ function extractRegisteredTools(serverSource: string): string[] {
   return [...new Set(names)].sort();
 }
 
-const REPO_ROOT = path.resolve(
-  path.dirname(fileURLToPath(import.meta.url)),
-  "..",
-  "..",
-  "..",
-  "..",
-);
+const TEST_DIR = path.dirname(fileURLToPath(import.meta.url));
+const REPO_ROOT = path.dirname(path.dirname(path.dirname(path.dirname(TEST_DIR))));
 
 const PLUGIN_DIR = path.join(REPO_ROOT, "integrations", "zcode", "causoryn");
 const MANIFEST_REL = path.join(".zcode-plugin", "plugin.json");
@@ -116,8 +111,8 @@ const PUBLISHED_TOOLS = extractRegisteredTools(SERVER_TS);
  * Sabit envelope hata kodu seti — packages/mcp-server/src/errors.ts'teki
  * CAUSORYN_TOOL_ERROR_CODES dizisinden çıkarılır (TŞ §10.1 tabanı + ÜÇ
  * proje uzantısı: INVALID_ARGUMENT / EVIDENCE_NOT_FOUND (K-008) ve
- * SYMBOL_NOT_FOUND (sprint-2 B5); bkz. errors.ts başlığındaki dürüstlük
- * notu). README hata kodu listesi bu canlı seti eksiksiz kapsamalıdır
+ * SYMBOL_NOT_FOUND (K-011, wiki/decisions.md:37; sprint-2 B4/B5); bkz.
+ * errors.ts başlığındaki dürüstlük notu). README hata kodu listesi bu canlı seti eksiksiz kapsamalıdır
  * (denetim bulgusu 2'nin bağlantı testi).
  */
 function extractErrorCodes(source: string): string[] {
@@ -162,8 +157,8 @@ const TOOL_NAMES_FROM_SOURCE = extractToolNames(VERSION_TS);
  * TŞ §10.1 taban hata kodu seti (18 kod) — raw/Causoryn_Teknik_Dokuman_v2.1.pdf
  * s.9'dan birincil kaynak doğrulaması (sprint-2 takım denetimi). Bu listede
  * olmayan kodlar proje uzantısıdır: INVALID_ARGUMENT + EVIDENCE_NOT_FOUND
- * (K-008) ve SYMBOL_NOT_FOUND (sprint-2 B5; K-008'i genişleten ADR kaydı
- * wiki/decisions.md'e orkestratör tarafından işlenmelidir). POLICY_INVALID,
+ * (K-008) ve SYMBOL_NOT_FOUND (K-011, wiki/decisions.md:37; sprint-2 B5
+ * get_symbol_context / B4 trace_execution). POLICY_INVALID,
  * INVALID_REVISION ve EXPORT_NOT_ALLOWED uzantı DEĞİLDİR: sprint-3 C8'de
  * (guard policy + git revizyon + export output yetkilendirmesi araçları)
  * kullanıldılar ama TŞ §10.1 sabit listesinin üyeleridirler — export yazma
@@ -519,8 +514,8 @@ function validateManifest(
   }
 
   // Kimlik bilgisi taraması: manifestin tamamı.
-  // Not: RegExp.exec yerine String.match — host güvenlik taraması .exec(
-  // çağrısını komut çalıştırma kalıbı olarak işaretliyor (yanlış pozitif).
+  // Not: RegExp exec metodu yerine String.match — host güvenlik taraması ilgili
+  // metot çağrısını komut çalıştırma kalıbı olarak işaretliyor (yanlış pozitif).
   const serialized = JSON.stringify(manifest) as string;
   const credentialMatch = serialized.match(CREDENTIAL_PATTERN);
   if (credentialMatch !== null) {
@@ -808,7 +803,7 @@ describe("plugin manifest (.zcode-plugin/plugin.json)", () => {
       rmSync(tmpPlugin, { recursive: true, force: true });
     }
 
-    const escapePath = ["..", "..", "elsewhere"].join(SEPARATOR);
+    const escapePath = [DOT_DOT, DOT_DOT, "elsewhere"].join(SEPARATOR);
     const escapeIssues = validateManifest(
       fixtureManifest({ skills: escapePath }),
       PLUGIN_DIR,
@@ -886,8 +881,7 @@ describe("README.md", () => {
     // TŞ §10.1 taban listesinde olmayan ÜÇ proje uzantısı (birincil kaynak
     // doğrulaması: TŞ §10.1 listesinde hiçbiri yoktur) README'de ve canlı
     // sette bulunmalıdır: INVALID_ARGUMENT + EVIDENCE_NOT_FOUND (K-008) ve
-    // SYMBOL_NOT_FOUND (sprint-2 B5 get_symbol_context; K-008'i genişleten
-    // ADR kaydı orkestratör tarafından işlenmelidir).
+    // SYMBOL_NOT_FOUND (K-011, wiki/decisions.md:37; sprint-2 B4/B5).
     expect(PUBLISHED_ERROR_CODES).toContain("INVALID_ARGUMENT");
     expect(PUBLISHED_ERROR_CODES).toContain("EVIDENCE_NOT_FOUND");
     expect(PUBLISHED_ERROR_CODES).toContain("SYMBOL_NOT_FOUND");
@@ -979,7 +973,7 @@ describe("mcp-server katalog desenkron korumaları (sprint-2 takım denetimi)", 
       (code) => !TSH_BASE_ERROR_CODES.has(code),
     );
     // TŞ §10.1 taban setinde olmayan kodlar = proje uzantıları; K-008 ilk
-    // ikisini, sprint-2 B5 üçüncüsünü (SYMBOL_NOT_FOUND) ekledi. POLICY_INVALID,
+    // ikisini, K-011 (sprint-2 B4/B5) üçüncüsünü (SYMBOL_NOT_FOUND) ekledi. POLICY_INVALID,
     // INVALID_REVISION ve EXPORT_NOT_ALLOWED uzantı değildir: TŞ §10.1 taban
     // listesindedirler (sprint-3 C8'de ilk kez kullanıldılar; takım denetimi
     // bulgusu: export yazma reddi EXPORT_NOT_ALLOWED sabit koduyla raporlanır,

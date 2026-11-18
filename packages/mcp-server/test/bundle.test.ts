@@ -43,12 +43,29 @@ import { TOOL_NAMES } from "../src/version.js";
  *   protokol akışı çalışır; determinizm: iki build bit-bit aynı çıktı.
  */
 
-const PKG_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const REPO_ROOT = path.resolve(PKG_DIR, "..", "..");
+const PKG_DIR = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
+const REPO_ROOT = path.dirname(path.dirname(PKG_DIR));
 const DIST_DIR = path.join(PKG_DIR, "dist");
 const BUNDLE_PATH = path.join(DIST_DIR, "mcp-server.mjs");
 const VENDOR_ROOT = path.join(DIST_DIR, "node_modules", "better-sqlite3");
 const MANIFEST_PATH = path.join(DIST_DIR, "bundle-manifest.json");
+const ANTIGRAVITY_SCRIPTS_DIR = path.join(
+  REPO_ROOT,
+  "integrations",
+  "antigravity",
+  "causoryn",
+  "scripts",
+);
+const ANTIGRAVITY_BUNDLE_PATH = path.join(ANTIGRAVITY_SCRIPTS_DIR, "mcp-server.mjs");
+const ANTIGRAVITY_VENDOR_ROOT = path.join(
+  ANTIGRAVITY_SCRIPTS_DIR,
+  "node_modules",
+  "better-sqlite3",
+);
+const ANTIGRAVITY_MANIFEST_PATH = path.join(
+  ANTIGRAVITY_SCRIPTS_DIR,
+  "bundle-manifest.json",
+);
 const BUILD_SCRIPT = path.join(PKG_DIR, "scripts", "build-bundle.mjs");
 const FIXTURE_ROOT = path.join(REPO_ROOT, "examples", "fixture-ts-orders");
 
@@ -417,4 +434,60 @@ describe("F1 bundle — determinizm", () => {
     expect(hashAfter).toBe(hashBefore);
     expect(manifestAfter).toBe(manifestBefore);
   }, 180_000);
+});
+
+describe("F1 bundle — Antigravity eklenti sahnelemesi (integrations/antigravity/causoryn/scripts)", () => {
+  it("POZİTİF: build-bundle çıktıları integrations/antigravity/causoryn/scripts/ altına dist/ ile bit-bit aynı sha256 ile sahnelenir", () => {
+    expect(
+      existsSync(ANTIGRAVITY_BUNDLE_PATH),
+      "integrations/antigravity/causoryn/scripts/mcp-server.mjs sahnelenmedi",
+    ).toBe(true);
+    expect(
+      existsSync(ANTIGRAVITY_MANIFEST_PATH),
+      "integrations/antigravity/causoryn/scripts/bundle-manifest.json sahnelenmedi",
+    ).toBe(true);
+    expect(
+      existsSync(path.join(ANTIGRAVITY_VENDOR_ROOT, "package.json")),
+      "sahnelenmiş better-sqlite3 package.json yok",
+    ).toBe(true);
+    expect(
+      existsSync(path.join(ANTIGRAVITY_VENDOR_ROOT, "lib", "index.js")),
+      "sahnelenmiş better-sqlite3 lib/index.js yok",
+    ).toBe(true);
+    expect(
+      existsSync(
+        path.join(ANTIGRAVITY_VENDOR_ROOT, "prebuilds", `win32-${process.arch}.node`),
+      ),
+      "sahnelenmiş better-sqlite3 win32 prebuild yok",
+    ).toBe(true);
+
+    expect(sha256(ANTIGRAVITY_BUNDLE_PATH)).toBe(sha256(BUNDLE_PATH));
+    expect(sha256(ANTIGRAVITY_MANIFEST_PATH)).toBe(sha256(MANIFEST_PATH));
+    expect(sha256(path.join(ANTIGRAVITY_VENDOR_ROOT, "package.json"))).toBe(
+      sha256(path.join(VENDOR_ROOT, "package.json")),
+    );
+    expect(sha256(path.join(ANTIGRAVITY_VENDOR_ROOT, "lib", "index.js"))).toBe(
+      sha256(path.join(VENDOR_ROOT, "lib", "index.js")),
+    );
+    expect(
+      sha256(
+        path.join(ANTIGRAVITY_VENDOR_ROOT, "prebuilds", `win32-${process.arch}.node`),
+      ),
+    ).toBe(sha256(path.join(VENDOR_ROOT, "prebuilds", `win32-${process.arch}.node`)));
+
+    const distManifest = JSON.parse(readFileSync(MANIFEST_PATH, "utf8")) as {
+      files?: Record<string, string>;
+    };
+    expect(Object.keys(distManifest.files ?? {}).length).toBe(33);
+    const stagedBundleText = readFileSync(ANTIGRAVITY_BUNDLE_PATH, "utf8");
+    expect(stagedBundleText.startsWith("/* eslint-disable */")).toBe(true);
+    const bundleBodyAfterBanner = stagedBundleText.slice(stagedBundleText.indexOf("\n") + 1);
+    expect(
+      /(\/\/|\/\*)\s*eslint-(disable|enable)\b/.test(bundleBodyAfterBanner),
+      "sahnelenmiş bundle gövdesinde eslint --fix bozulmasına veya uyarıya yol açacak iç eslint-disable direktifi kalmamalı",
+    ).toBe(false);
+    const buildScriptSource = readFileSync(BUILD_SCRIPT, "utf8");
+    expect(buildScriptSource).toContain("DÖRT çıktı");
+    expect(buildScriptSource).toContain("integrations/antigravity/causoryn/scripts/");
+  }, 60_000);
 });

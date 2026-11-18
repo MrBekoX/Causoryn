@@ -1,4 +1,5 @@
 import { existsSync, readFileSync } from "node:fs";
+import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { SERVER_VERSION, TOOL_NAMES } from "../packages/mcp-server/src/version.js";
@@ -497,5 +498,271 @@ describe("DENETİM DÖNGÜSÜ: benchmarks.md fixture sha256 + security-pass.md s
     expect(referencedSlice, "aralık scanForCredentials tanımını içermeli").toContain(
       "export function scanForCredentials",
     );
+  });
+});
+
+/**
+ * BAĞIMSIZ DENETİM DÖNGÜSÜ (2026-11-18): Sprint-8 çok-dil genişlemesi ve
+ * 2026-11-17/18 denetim turu sonrasında dokümanlar ile gerçek kod/bundle yüzeyi
+ * arasındaki bayatlıkları kapatan tam parite pinleri.
+ */
+describe("BAĞIMSIZ DENETİM DÖNGÜSÜ (2026-11-18): doküman↔kod tam parite pini", () => {
+  const DOT_DOT = "." + ".";
+  const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), DOT_DOT);
+  const OVERVIEW_PATH = path.join(REPO_ROOT, "docs", "project-overview.tr-en.md");
+  const SECURITY_PASS_PATH = path.join(REPO_ROOT, "docs", "security-pass.md");
+  const BUNDLE_MANIFEST_PATH = path.join(
+    REPO_ROOT,
+    "packages",
+    "mcp-server",
+    "dist",
+    "bundle-manifest.json",
+  );
+  const TSCONFIG_PATH = path.join(REPO_ROOT, "tsconfig.json");
+  const ANTIGRAVITY_TEST_PATH = path.join(
+    REPO_ROOT,
+    "integrations",
+    "antigravity",
+    "causoryn",
+    "test",
+    "antigravity-plugin.test.ts",
+  );
+
+  function sleepSyncLocal(ms: number): void {
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+  }
+
+  function readManifestBundleShaWithRetry(): string | null {
+    if (!existsSync(BUNDLE_MANIFEST_PATH)) return null;
+    let lastError: unknown;
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      try {
+        if (!existsSync(BUNDLE_MANIFEST_PATH)) return null;
+        const parsed = JSON.parse(readFileSync(BUNDLE_MANIFEST_PATH, "utf8")) as {
+          files?: Record<string, string>;
+        };
+        const sha = parsed.files?.["mcp-server.mjs"];
+        if (typeof sha === "string" && /^[0-9a-f]{64}$/.test(sha)) {
+          return sha;
+        }
+        lastError = new Error("bundle-manifest.json içinde geçerli mcp-server.mjs sha256 yok");
+      } catch (error) {
+        lastError = error;
+      }
+      if (attempt < 2) sleepSyncLocal(1_500);
+    }
+    throw lastError instanceof Error ? lastError : new Error(String(lastError));
+  }
+
+  it("docs/architecture.md: 5 dil adapter'ı, 4 native sidecar, 16 npm workspace paketi, 12 tsconfig referansı ve secret-scan kapısıyla senkron; bayat ifadeler yok", () => {
+    const text = readDoc("architecture");
+    for (const adapter of [
+      "`adapters/typescript`",
+      "`adapters/csharp-roslyn`",
+      "`adapters/python`",
+      "`adapters/go`",
+      "`adapters/rust`",
+    ]) {
+      expect(text).toContain(adapter);
+    }
+    for (const sidecar of [
+      "`native/roslyn-worker`",
+      "`native/python-worker`",
+      "`native/go-worker`",
+      "`native/rust-worker`",
+    ]) {
+      expect(text).toContain(sidecar);
+    }
+
+    const tsconfig = JSON.parse(readFileSync(TSCONFIG_PATH, "utf8")) as {
+      references?: Array<{ path?: string }>;
+    };
+    expect(tsconfig.references).toHaveLength(12);
+    expect(text).toMatch(/\b16\b[^\n]*workspace paket/i);
+    expect(text).toMatch(/tsconfig\.json[^\n]*\b12\b[^\n]*refer/i);
+
+    const rootPkg = JSON.parse(readFileSync(DOC_PATHS.rootPkg, "utf8")) as {
+      scripts?: Record<string, string>;
+    };
+    expect(rootPkg.scripts?.["secret-scan"]).toBe("node scripts/secret-scan.mjs");
+    expect(text).toContain("npm run secret-scan");
+    expect(text).toContain("mcp_config.json");
+    expect(text).toContain("scripts/mcp-server.mjs");
+
+    expect(text).not.toContain("9 doğrudan reference");
+    expect(text).not.toContain("TS+C# yönlendirme");
+  });
+
+  it("docs/tool-contracts.md: 10 alanlı envelope (error dahil), annotations/readOnlyHint, InMemoryGraphRepository, PreflightManifestStore ve export view açık reddi yazılı", () => {
+    const text = readDoc("toolContracts");
+    const envelopeHeadingIndex = text.indexOf("## Standart envelope");
+    const nextHeadingIndex = text.indexOf("\n## ", envelopeHeadingIndex + 1);
+    expect(envelopeHeadingIndex).toBeGreaterThanOrEqual(0);
+    const envelopeSection = text.slice(
+      envelopeHeadingIndex,
+      nextHeadingIndex > envelopeHeadingIndex ? nextHeadingIndex : text.length,
+    );
+    expect(envelopeSection).toContain("`error`");
+    expect(envelopeSection).toContain("annotations");
+    expect(envelopeSection).toContain("readOnlyHint");
+
+    expect(text).toContain("InMemoryGraphRepository");
+    expect(text).toContain("PreflightManifestStore");
+    expect(text).toMatch(/view[^\n]*INVALID_ARGUMENT|INVALID_ARGUMENT[^\n]*view/i);
+  });
+
+  it("docs/security-pass.md: bundle sha256 manifest ile birebir eşleşir ve child_process notu 4 sidecar + git-read.ts + cargo.ts yüzeyini açıklar", () => {
+    expect(existsSync(SECURITY_PASS_PATH)).toBe(true);
+    const text = readFileSync(SECURITY_PASS_PATH, "utf8");
+
+    const bundleClaim = text.match(/Bundle kimliği:[^\n]*`([0-9a-f]{64})`/);
+    expect(bundleClaim, "security-pass.md Bundle kimliği sha256 taşımalı").not.toBeNull();
+
+    const manifestSha = readManifestBundleShaWithRetry();
+    if (manifestSha !== null) {
+      expect(bundleClaim?.[1]).toBe(manifestSha);
+    }
+
+    expect(text).toContain("git-read.ts");
+    expect(text).toContain("cargo.ts");
+    expect(text).toContain("worker-process.ts");
+    for (const sidecarRef of ["csharp-roslyn", "python", "go", "rust"]) {
+      expect(text).toContain(sidecarRef);
+    }
+    expect(text).not.toContain("bundle'da 2 meşru kullanım vardır");
+  });
+
+  it("docs/project-overview.tr-en.md: yasak bayat iddialar, yanlış satır atıfları ve yazım hataları tamamen giderilmiş", () => {
+    expect(existsSync(OVERVIEW_PATH)).toBe(true);
+    const text = readFileSync(OVERVIEW_PATH, "utf8");
+
+    // 1) Python worker argümanları: -I yok, yalnız -B
+    expect(text).not.toContain("python -I -B");
+    expect(text).toContain("python -B");
+
+    // 2) SYMBOL_NOT_FOUND K-011 kaydı
+    expect(text).not.toContain("SYMBOL_NOT_FOUND kayıtsız");
+    expect(text).not.toContain("`SYMBOL_NOT_FOUND` kayıtsız");
+    expect(text).not.toMatch(/still ADR-uncovered|not yet ADR-covered/i);
+
+    // 3) ROUTES_TO beş dilde daima verified DEĞİL (C# heuristic, Go heuristic/unresolved olabilir)
+    expect(text).not.toMatch(/ROUTES_TO\s+\*\*?her dilde daima verified/i);
+    expect(text).not.toContain("ROUTES_TO edges are always verified + evidenced in all five languages");
+    expect(text).toContain("WorkerAnalyzer.cs:1475-1508");
+    expect(text).toContain("routes.go:120-170");
+
+    // 4) secret-scan mevcut
+    expect(text).not.toMatch(/adanmış secret-scan script(?:'i)? yok/i);
+    expect(text).not.toContain("no dedicated secret-scan script");
+    expect(text).toContain("scripts/secret-scan.mjs");
+    expect(text).toContain("npm run secret-scan");
+
+    // 5) C# frameworkLinkers: "yok" ("none" değil)
+    expect(text).not.toContain('frameworkLinkers: "none"');
+    expect(text).not.toContain('frameworkLinkers:"none"');
+    expect(text).toContain('"yok"');
+
+    // 6) Doğru kaynak satır atıfları
+    expect(text).not.toContain("snapshot.ts:8-21");
+    expect(text).not.toContain("validation.ts:10-14");
+    expect(text).toContain("ids.ts:147-161");
+    expect(text).toContain("snapshot.ts:22-35");
+    expect(text).toContain("snapshot.ts:379-397");
+    expect(text).toContain("validation.ts:23-27");
+    expect(text).not.toContain("docs/architecture.md:11-18");
+    expect(text).toContain("docs/architecture.md:13-22");
+    expect(text).not.toMatch(/docs\/tool-contracts\.md:40,\s*72/);
+    expect(text).toContain("docs/tool-contracts.md:45,72");
+    expect(text).toContain("docs/tool-contracts.md:45, 72");
+    expect(text).not.toContain("services.ts:696-712");
+    expect(text).toContain("services.ts:704-722,771-776");
+    expect(text).toContain("services.ts:704-722, 771-776");
+    expect(text).not.toContain("output-policy.ts:11-15, 27-48");
+
+    // 7) K-012 Phase C (Phase D değil) + cursor yazım hatası düzeltmesi
+    expect(text).not.toContain("Phase D added no fourth extension");
+    expect(text).toMatch(/K-012[^\n]*Phase C/);
+    expect(text).not.toContain("{v:1,o:<int> as base64url");
+    expect(text).toContain("{v:1,o:<int>}");
+    expect(text).not.toContain("wiki/index.md:5-27");
+    expect(text).toContain("wiki/index.md:5-28");
+  });
+
+  it("docs/project-overview.tr-en.md: TR ve EN bölümleri simetrik olarak 16 workspace paketi, MCP annotations, süreç-içi depolar ve Antigravity sahnelemesini taşır", () => {
+    const text = readFileSync(OVERVIEW_PATH, "utf8");
+    const splitMarker = "\n# English\n";
+    const splitIdx = text.indexOf(splitMarker);
+    expect(splitIdx, "TR / EN ayırıcı başlığı bulunmalı").toBeGreaterThan(0);
+
+    const trSection = text.slice(0, splitIdx);
+    const enSection = text.slice(splitIdx);
+
+    for (const half of [trSection, enSection]) {
+      expect(half).toContain("d197f21");
+      expect(half).toContain("4c9c188");
+      expect(half).toContain("typescript");
+      expect(half).toContain("esbuild");
+      expect(half).toContain("16");
+      expect(half).toContain("SCHEMA_VERSION");
+      expect(half).toContain("readOnlyHint");
+      expect(half).toContain("K-011");
+      expect(half).toContain("UNSUPPORTED_LANGUAGE");
+      expect(half).toContain("InMemoryGraphRepository");
+      expect(half).toContain("PreflightManifestStore");
+      expect(half).toContain("openWikiStores");
+      expect(half).toContain("mcp_config.json");
+      expect(half).toContain("mcp.json");
+      expect(half).toContain("scripts/mcp-server.mjs");
+      expect(half).toContain("NOT RUN");
+      expect(half).toContain("wiki/index.md:5-28");
+      expect(half).toContain("docs/architecture.md:13-22");
+      expect(half).toContain("output-policy.ts:11-48");
+      expect(half).toContain("services.ts:704-722");
+    }
+  });
+
+  it("CHANGELOG.md ve docs/implementation-status.md: secret-scan kapanış notu ve antigravity-plugin.test.ts satır sayısı diskle senkron", () => {
+    const changelog = readDoc("changelog");
+    const start = changelog.indexOf("## [Unreleased]");
+    const end = changelog.indexOf("## [0.1.0]");
+    const unreleased = changelog.slice(start, end);
+    expect(unreleased).toContain("Rate-limit/concurrency resource budget (K-010 kapsam dışı beyanı)");
+    expect(unreleased).toContain("scripts/secret-scan.mjs");
+
+    const status = readDoc("status");
+    const actualAntigravityTestLines = readFileSync(ANTIGRAVITY_TEST_PATH, "utf8")
+      .replace(/\r\n/g, "\n")
+      .replace(/\n$/, "")
+      .split("\n").length;
+    expect(status).toContain(`antigravity-plugin.test.ts\` (${String(actualAntigravityTestLines)} satır`);
+    expect(status).not.toContain("antigravity-plugin.test.ts` (495 satır");
+    expect(status).toContain("scripts/secret-scan.mjs");
+  });
+
+  it("docs/compatibility-matrix.md: Antigravity satırı $schema'sız plugin.json + mcp_config.json + mcp.json + README.md + sahnelenmiş scripts/mcp-server.mjs stdio el sıkışması gerçekliğiyle senkron; ilgili sayfalarda README.md kayıtlı", () => {
+    const text = readDoc("compatibility");
+    const row = matrixRowFor(text, "Antigravity");
+    expect(row).toBeTruthy();
+    expect(row).toContain("`plugin.json` (`$schema`'sız yerel yükleyici uyumlu)");
+    expect(row).toContain("`mcp_config.json`");
+    expect(row).toContain("`mcp.json`");
+    expect(row).toContain("`README.md`");
+    expect(row).toContain("sahnelenmiş `scripts/mcp-server.mjs`");
+    expect(row).toContain(
+      "doğrudan `stdio` el sıkışması (29 araç) `antigravity-plugin.test.ts` ile doğrulandı; `agy` CLI kurulum/smoke NOT RUN",
+    );
+    expect(row).not.toContain("TŞ §17.1'den birebir yazıldı ve statik testlerle denetlendi");
+
+    const antigravityReadmePath = path.join(
+      REPO_ROOT,
+      "integrations",
+      "antigravity",
+      "causoryn",
+      "README.md",
+    );
+    expect(existsSync(antigravityReadmePath)).toBe(true);
+    const relatedIdx = text.indexOf("## İlgili sayfalar");
+    expect(relatedIdx).toBeGreaterThanOrEqual(0);
+    expect(text.slice(relatedIdx)).toContain("`integrations/antigravity/causoryn/README.md`");
   });
 });

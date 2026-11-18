@@ -3,14 +3,17 @@
  *
  *   node scripts/build-bundle.mjs   (npm run build:bundle ile aynı)
  *
- * ÜÇ çıktı üretir (hepsi dist/ altında; kök .gitignore satır 3 dist/'i
- * kapsar — bundle artefaktı commit EDİLMEZ, yalnızca üretim kanıtlanır):
+ * DÖRT çıktı üretir (dist/ ve integrations/antigravity/causoryn/scripts/
+ * kök .gitignore kapsamındadır — derlenmiş bundle artefaktları commit EDİLMEZ,
+ * yalnızca deterministik üretim ve sahneleme kanıtlanır):
  *
  *   1. dist/mcp-server.mjs                    — esbuild bundle
  *   2. dist/node_modules/better-sqlite3/      — vendored çalışma zamanı
  *      (package.json + lib/** + prebuilds/**)
  *   3. dist/bundle-manifest.json              — her dosyanın sha256'ı
  *      (determinizm kanıtı: iki build bit-bit aynı manifest üretir)
+ *   4. integrations/antigravity/causoryn/scripts/ — aynı 3 çıktının
+ *      Antigravity eklenti köküne deterministik sahnelenmiş kopyası
  *
  * PAKETLEME KARARI (görev sözleşmesi + ADR-010 dürüstlük):
  *
@@ -93,6 +96,18 @@ const MANIFEST_PATH = path.join(DIST_DIR, "bundle-manifest.json");
 const VENDOR_PARENT = path.join(DIST_DIR, "node_modules");
 const VENDOR_DEST = path.join(VENDOR_PARENT, "better-sqlite3");
 const SQLITE_SRC = path.join(REPO_ROOT, "node_modules", "better-sqlite3");
+const ANTIGRAVITY_SCRIPTS_DIR = path.join(
+  REPO_ROOT,
+  "integrations",
+  "antigravity",
+  "causoryn",
+  "scripts",
+);
+const ANTIGRAVITY_VENDOR_DEST = path.join(
+  ANTIGRAVITY_SCRIPTS_DIR,
+  "node_modules",
+  "better-sqlite3",
+);
 
 /** Vendored kopyaya giren allowlist: yalnızca çalışma zamanı dosyaları. */
 const VENDOR_ENTRIES = ["package.json", "lib", "prebuilds"];
@@ -133,6 +148,7 @@ await build({
   // bu konuma bağımlı değildir; bundle smoke testi bunu kanıtlar.
   banner: {
     js: [
+      "/* eslint-disable */",
       'import { createRequire } from "node:module";',
       'import { fileURLToPath as __causorynFileURLToPath } from "node:url";',
       "const require = createRequire(import.meta.url);",
@@ -145,6 +161,23 @@ await build({
   legalComments: "none",
   logLevel: "warning",
 });
+
+// Sahnelenmiş scripts/mcp-server.mjs kök `eslint .` taramasına girdiğinde
+// gömülü bağımlılıklardaki iç `eslint-disable` / `eslint-enable` yorumları
+// ESLint v10 reportUnusedDisableDirectives altında uyarıya düşer ve
+// `eslint --fix` çalıştırılırsa dosyayı değiştirerek sha256 manifest
+// eşleşmesini bozar. İlk satırdaki dosya-düzeyi `/* eslint-disable */`
+// korunur; gövdedeki iç direktif yorumları manifest hesaplanmadan önce
+// deterministik biçimde etkisizleştirilir.
+const rawBundle = readFileSync(BUNDLE_PATH, "utf8");
+const firstNewline = rawBundle.indexOf("\n");
+if (firstNewline >= 0) {
+  const headerLine = rawBundle.slice(0, firstNewline + 1);
+  const sanitizedBody = rawBundle
+    .slice(firstNewline + 1)
+    .replace(/(\/\/|\/\*)\s*eslint-(disable|enable)\b/g, "$1 [bundled-lint-directive] $2");
+  writeFileSync(BUNDLE_PATH, headerLine + sanitizedBody, "utf8");
+}
 
 // --- 2) Vendored better-sqlite3 çalışma zamanı ----------------------------
 rmSync(VENDOR_DEST, { recursive: true, force: true });
@@ -170,7 +203,23 @@ for (const rel of listFiles(VENDOR_DEST)) {
 const manifest = `${JSON.stringify({ files }, null, 2)}\n`;
 writeFileSync(MANIFEST_PATH, manifest);
 
+// --- 4) Antigravity eklenti paketine deterministik sahneleme --------------
+// dist/ altındaki 33 dosyalık manifest ve artefakt düzeni birebir korunur;
+// aynı çıktılar integrations/antigravity/causoryn/scripts/ altına temizlenip
+// kopyalanır (.gitignore bu dizini kapsar; derlenmiş artefakt commit edilmez).
+rmSync(ANTIGRAVITY_SCRIPTS_DIR, { recursive: true, force: true });
+mkdirSync(ANTIGRAVITY_VENDOR_DEST, { recursive: true });
+cpSync(BUNDLE_PATH, path.join(ANTIGRAVITY_SCRIPTS_DIR, "mcp-server.mjs"));
+for (const entry of VENDOR_ENTRIES) {
+  cpSync(
+    path.join(VENDOR_DEST, entry),
+    path.join(ANTIGRAVITY_VENDOR_DEST, entry),
+    { recursive: true },
+  );
+}
+cpSync(MANIFEST_PATH, path.join(ANTIGRAVITY_SCRIPTS_DIR, "bundle-manifest.json"));
+
 const bundleHash = files["mcp-server.mjs"];
 console.error(
-  `[build:bundle] ok — dist/mcp-server.mjs sha256=${bundleHash} · vendored better-sqlite3 (${Object.keys(files).length - 1} dosya) · dist/bundle-manifest.json`,
+  `[build:bundle] ok — dist/mcp-server.mjs sha256=${bundleHash} · vendored better-sqlite3 (${Object.keys(files).length - 1} dosya) · dist/bundle-manifest.json · staged integrations/antigravity/causoryn/scripts/`,
 );

@@ -143,8 +143,25 @@ interface ToolRegistration {
   readonly description: string;
   readonly inputSchema: z.ZodType;
   readonly outputSchema: z.ZodType;
+  readonly annotations: {
+    readonly readOnlyHint: boolean;
+    readonly destructiveHint: boolean;
+    readonly openWorldHint: boolean;
+  };
   readonly handler: (requestId: string, args: unknown) => Envelope | Promise<Envelope>;
 }
+
+const READ_ONLY_TOOL_ANNOTATIONS = {
+  readOnlyHint: true,
+  destructiveHint: false,
+  openWorldHint: false,
+} as const;
+
+const WRITE_TOOL_ANNOTATIONS = {
+  readOnlyHint: false,
+  destructiveHint: false,
+  openWorldHint: false,
+} as const;
 
 function envelopeResult(envelope: Envelope): CallToolResult {
   return {
@@ -162,6 +179,7 @@ function buildRegistrations(context: CausorynContext): readonly ToolRegistration
         "Adapter düzeyleri (L0–L4), sunucu limitleri, protokol revizyonu ve yayımlanan araç listesini döndürür. Snapshot gerektirmez.",
       inputSchema: GetCapabilitiesInputSchema,
       outputSchema: envelopeOutputSchema(CapabilitiesDataSchema),
+      annotations: READ_ONLY_TOOL_ANNOTATIONS,
       handler: (requestId, args) =>
         getCapabilities(context, requestId, args as z.infer<typeof GetCapabilitiesInputSchema>),
     },
@@ -172,6 +190,7 @@ function buildRegistrations(context: CausorynContext): readonly ToolRegistration
         "Proje/framework/entrypoint/coverage özeti; tüm sayılar yayınlanmış graph snapshot'ından türetilir.",
       inputSchema: WorkspaceSummaryInputSchema,
       outputSchema: envelopeOutputSchema(WorkspaceSummaryDataSchema),
+      annotations: READ_ONLY_TOOL_ANNOTATIONS,
       handler: (requestId, args) =>
         workspaceSummary(context, requestId, args as z.infer<typeof WorkspaceSummaryInputSchema>),
     },
@@ -182,6 +201,7 @@ function buildRegistrations(context: CausorynContext): readonly ToolRegistration
         "Snapshot, stale, iş (job) ilerlemesi ve tanıları raporlar: jobId verilirse o iş, verilmezse en son iş; iş/snapshot yoksa null alanlar + yönlendirici uyarı döner.",
       inputSchema: IndexStatusInputSchema,
       outputSchema: envelopeOutputSchema(IndexStatusDataSchema),
+      annotations: READ_ONLY_TOOL_ANNOTATIONS,
       handler: (requestId, args) =>
         indexStatus(context, requestId, args as z.infer<typeof IndexStatusInputSchema>),
     },
@@ -189,9 +209,10 @@ function buildRegistrations(context: CausorynContext): readonly ToolRegistration
       name: "causoryn_refresh_index",
       title: "İndeks yenileme",
       description:
-        "Yeni snapshot işi başlatır (mode: full; incremental Live Architecture dilimine aittir): çağrı anında jobId döner, iş arka planda koşar; causoryn_index_status ile izlenir. Yalnızca Causoryn izinli data-root'una yazar.",
+        "Yeni snapshot işi başlatır (mode: full; incremental Live Architecture dilimine aittir): çağrı anında jobId döner, iş arka planda koşar; causoryn_index_status ile izlenir. Yalnızca Causoryn'in kendi graph deposuna (stdio sunucusunda süreç-içi InMemoryGraphRepository) yazar; kaynak workspace dosyalarına yazmaz (Rust/Go sidecar'ları derlenmemişse kendi toolchain target/cache dizinlerini kullanabilir).",
       inputSchema: RefreshIndexInputSchema,
       outputSchema: envelopeOutputSchema(RefreshIndexDataSchema),
+      annotations: WRITE_TOOL_ANNOTATIONS,
       handler: (requestId, args) =>
         refreshIndex(context, requestId, args as z.infer<typeof RefreshIndexInputSchema>),
     },
@@ -202,6 +223,7 @@ function buildRegistrations(context: CausorynContext): readonly ToolRegistration
         "L0–L3 düzeylerinde mimari harita: level/filters/maxNodes/cursor ile deterministik sıralı node+edge sayfaları; gerçek cursor sayfalama.",
       inputSchema: MapSystemInputSchema,
       outputSchema: envelopeOutputSchema(MapDataSchema),
+      annotations: READ_ONLY_TOOL_ANNOTATIONS,
       handler: (requestId, args) =>
         mapSystem(context, requestId, args as z.infer<typeof MapSystemInputSchema>),
     },
@@ -215,6 +237,7 @@ function buildRegistrations(context: CausorynContext): readonly ToolRegistration
         // Hata yolu: AMBIGUOUS_SYMBOL data'sı aday listesi taşır (TŞ §10.3).
         AmbiguityDataSchema.or(FindSymbolsDataSchema),
       ),
+      annotations: READ_ONLY_TOOL_ANNOTATIONS,
       handler: (requestId, args) =>
         findSymbols(context, requestId, args as z.infer<typeof FindSymbolsInputSchema>),
     },
@@ -228,6 +251,7 @@ function buildRegistrations(context: CausorynContext): readonly ToolRegistration
         // Hata yolu: AMBIGUOUS_SYMBOL data'sı aday listesi taşır (TŞ §10.3).
         AmbiguityDataSchema.or(GetSymbolContextDataSchema),
       ),
+      annotations: READ_ONLY_TOOL_ANNOTATIONS,
       handler: (requestId, args) =>
         getSymbolContext(context, requestId, args as z.infer<typeof GetSymbolContextInputSchema>),
     },
@@ -241,6 +265,7 @@ function buildRegistrations(context: CausorynContext): readonly ToolRegistration
         // Hata yolu: AMBIGUOUS_SYMBOL data'sı aday listesi taşır (TŞ §10.3).
         AmbiguityDataSchema.or(TraceExecutionDataSchema),
       ),
+      annotations: READ_ONLY_TOOL_ANNOTATIONS,
       handler: (requestId, args) =>
         traceExecution(context, requestId, args as z.infer<typeof TraceExecutionInputSchema>),
     },
@@ -251,6 +276,7 @@ function buildRegistrations(context: CausorynContext): readonly ToolRegistration
         "flowSeed'den (node kimliği veya tam qualifiedName) iş akışı zincirleri: ROUTES_TO/CALLS/PRODUCES_CONTRACT/CONSUMES_CONTRACT/CONTAINS kenarlarında bounded BFS + kontrat node'larında ters yön izleme. Her segment kendi certainty/resolution'ını ayrı alanlarda taşır; kopukluklar uydurma köprüyle DEĞİL gap segmentiyle raporlanır ve status partial olur; sınırlar TŞ §20 tavanlarıyla kırpılır ve truncated/rationale ile bildirilir. Belirsiz seed AMBIGUOUS_SYMBOL adaylarıyla, bilinmeyen seed SYMBOL_NOT_FOUND ile reddedilir (otomatik kesinleştirme yok).",
       inputSchema: TraceBusinessFlowInputSchema,
       outputSchema: envelopeOutputSchema(TraceBusinessFlowDataSchema),
+      annotations: READ_ONLY_TOOL_ANNOTATIONS,
       handler: (requestId, args) =>
         traceBusinessFlow(
           context,
@@ -265,6 +291,7 @@ function buildRegistrations(context: CausorynContext): readonly ToolRegistration
         "Hedef sembollerden ters kenar BFS ile bounded etki yolları: certainty (direct|indirect|possible) ile resolution (verified|heuristic|unresolved) ayrı alanlardır; mutlak etki iddiası üretilmez. Çözülemeyen hedefler unresolvedTargets'ta raporlanır; sınırlar TŞ §20 tavanlarına kırpılır ve rationale ile açıkça raporlanır.",
       inputSchema: AnalyzeImpactInputSchema,
       outputSchema: envelopeOutputSchema(AnalyzeImpactDataSchema),
+      annotations: READ_ONLY_TOOL_ANNOTATIONS,
       handler: (requestId, args) =>
         analyzeImpactTool(context, requestId, args as z.infer<typeof AnalyzeImpactInputSchema>),
     },
@@ -275,6 +302,7 @@ function buildRegistrations(context: CausorynContext): readonly ToolRegistration
         "Workspace kökündeki .causoryn/architecture.rules.yaml policy'sini yayınlanmış snapshot üzerinde değerlendirir (no-cycles Tarjan SCC + forbidden-dependency glob kuralları): TŞ §12 finding sözleşmesi {id, ruleId, severity, from, to, evidenceIds, suppression?, snapshotId}; baseline suppression (neden/sahip/tarih) bulguyu baskılar, policy'de karşılığı olmayan suppression orphanSuppressions'ta listelenir. Yalnızca bulgu raporlar; CI/çıkış kodu kararı vermez.",
       inputSchema: CheckArchitectureInputSchema,
       outputSchema: envelopeOutputSchema(CheckArchitectureDataSchema),
+      annotations: READ_ONLY_TOOL_ANNOTATIONS,
       handler: async (requestId, args) =>
         checkArchitecture(context, requestId, args as z.infer<typeof CheckArchitectureInputSchema>),
     },
@@ -285,6 +313,7 @@ function buildRegistrations(context: CausorynContext): readonly ToolRegistration
         "İki git ref'i (commit/tag/branch/sha veya working-tree) arasındaki mimari diff: node ek-çıkar-değişen kümeleri, belgeli confidence'lı rename eşleşmeleri, kenar değişimleri ve API yüzeyi değişimleri. Snapshot blob'ları salt-okunur git okumasıyla alınır (checkout/reset/clean yok); analiz edilemeyen revizyon INVALID_REVISION döndürür.",
       inputSchema: CompareArchitectureInputSchema,
       outputSchema: envelopeOutputSchema(CompareArchitectureDataSchema),
+      annotations: READ_ONLY_TOOL_ANNOTATIONS,
       handler: async (requestId, args) =>
         compareArchitecture(context, requestId, args as z.infer<typeof CompareArchitectureInputSchema>),
     },
@@ -295,6 +324,7 @@ function buildRegistrations(context: CausorynContext): readonly ToolRegistration
         "Görev metnini yalnızca arama sorgusu olarak değerlendirip exact-symbol → graph-proximity → contract → freshness → fts ayaklarıyla sıralar: tokenBudget bütçesine kadar contextItems paketi (estimatedTokens, reason, evidence), omittedCount ve degrade ayaklar açıkça raporlanır. Görev metni çıktıya yazılmaz.",
       inputSchema: GetAgentContextInputSchema,
       outputSchema: envelopeOutputSchema(GetAgentContextDataSchema),
+      annotations: READ_ONLY_TOOL_ANNOTATIONS,
       handler: (requestId, args) =>
         getAgentContext(context, requestId, args as z.infer<typeof GetAgentContextInputSchema>),
     },
@@ -305,6 +335,7 @@ function buildRegistrations(context: CausorynContext): readonly ToolRegistration
         "beginner|intermediate|maintainer profiline göre yapısal onboarding verisi: giriş noktaları, ilk 5 yüksek merkezi modül, öğrenme sırası (döngüler SCC ile tek adımda), kritik akışlar, testler, bilinmeyen kenarlar ve riskli alanlar. Açıklayıcı doğal dil host modelin işidir; bu araç şablon gerekçe taşır.",
       inputSchema: GenerateOnboardingInputSchema,
       outputSchema: envelopeOutputSchema(GenerateOnboardingDataSchema),
+      annotations: READ_ONLY_TOOL_ANNOTATIONS,
       handler: (requestId, args) =>
         generateOnboardingTool(
           context,
@@ -319,6 +350,7 @@ function buildRegistrations(context: CausorynContext): readonly ToolRegistration
         "Yayımlanmış snapshot'ı json|markdown|mermaid|html formatında deterministik olarak dışa aktarır. Yazma YALNIZCA config output.allowedOutputDirs beyanlı dizinine atomiktir (.tmp + rename); beyanlı olmayan hedef EXPORT_NOT_ALLOWED, reddedilen dosya adı PATH_DENIED döndürür. HTML offline self-contained'dır: escaping + CSP, CDN/analytics yok.",
       inputSchema: ExportDocumentationInputSchema,
       outputSchema: envelopeOutputSchema(ExportDocumentationDataSchema),
+      annotations: WRITE_TOOL_ANNOTATIONS,
       handler: (requestId, args) =>
         exportDocumentationTool(
           context,
@@ -330,9 +362,10 @@ function buildRegistrations(context: CausorynContext): readonly ToolRegistration
       name: "causoryn_preflight_change",
       title: "Preflight Manifest",
       description:
-        "intent + targetSymbols/targetFiles hedef kümesinden ADAY Preflight Manifest üretir: impactCandidates (certainty/resolution ayrı alanlar), contractChecks, testPlanId (gömülü D6 test planının içerik adresli referansı), limitations ve sourceRevision (salt-okunur dosya okumasıyla HEAD; komut çalıştırma yok). KOD YAZMAZ: candidateOnly sabit true'dur ve çalışma ağacı değişmez; sembole bağlanamayan hedef requiresDisambiguation + candidateTargets ile raporlanır (otomatik kesinleştirme yok, TŞ §10.3). Hedef dosyalar WorkspaceAccessPolicy kararı olmadan kullanılamaz (fail-closed).",
+        "intent + targetSymbols/targetFiles hedef kümesinden ADAY Preflight Manifest üretir: impactCandidates (certainty/resolution ayrı alanlar), contractChecks, testPlanId (gömülü D6 test planının içerik adresli referansı), limitations ve sourceRevision (salt-okunur dosya okumasıyla HEAD; komut çalıştırma yok). KOD YAZMAZ: candidateOnly sabit true'dur ve çalışma ağacı değişmez; üretilen manifest yanıt gövdesinde döner ve causoryn_verify_change(preflightId) çözümü için yalnızca süreç-içi PreflightManifestStore belleğinde (FIFO 200) tutulur — diske veya kaynak ağaca asla yazılmaz. Sembole bağlanamayan hedef requiresDisambiguation + candidateTargets ile raporlanır (otomatik kesinleştirme yok, TŞ §10.3). Hedef dosyalar WorkspaceAccessPolicy kararı olmadan kullanılamaz (fail-closed).",
       inputSchema: PreflightChangeInputSchema,
       outputSchema: envelopeOutputSchema(PreflightChangeDataSchema),
+      annotations: READ_ONLY_TOOL_ANNOTATIONS,
       handler: async (requestId, args) =>
         preflightChange(context, requestId, args as z.infer<typeof PreflightChangeInputSchema>),
     },
@@ -343,6 +376,7 @@ function buildRegistrations(context: CausorynContext): readonly ToolRegistration
         "Sözleşme sürüm çiftlerini (contracts: {name?, base, target} spec dosyaları; WorkspaceAccessPolicy ile salt okunur keşif) checkContractCompatibility çekirdeğiyle değerlendirir: backward-safe/risk/breaking_candidate/unknown sınıflaması, kural adı + eski/yeni satır kanıtı taşıyan bulgular ve çift-bağlanamayan tanılar ayrı raporlanır. Sınıflama statik delildir: serializer/runtime davranışı bilinemediğinde unknown üretilir ve breaking delilini gizlemez (TŞ §11).",
       inputSchema: CheckContractsInputSchema,
       outputSchema: envelopeOutputSchema(CheckContractsDataSchema),
+      annotations: READ_ONLY_TOOL_ANNOTATIONS,
       handler: (requestId, args) =>
         checkContracts(context, requestId, args as z.infer<typeof CheckContractsInputSchema>),
     },
@@ -353,6 +387,7 @@ function buildRegistrations(context: CausorynContext): readonly ToolRegistration
         "İki sürümün spec dosyaları (base/target) arasında canonical drift: K-013(7) contractChanges ({contractId, changeKind, summary}), breaking_candidate/risk/unknown AYRI alanlarda, PRODUCES_CONTRACT/CONSUMES_CONTRACT etki grafı (kenar resolution ASLA yükseltilmez; anchorFiles ile tüketici/üretici ankrajları taranır) ve tüketici kenarı bulunamayan değişiklikler unconsumedChanges'te dürüstçe raporlanır (unresolved consumers, TŞ §11). scope matchKey daraltmasıdır.",
       inputSchema: DetectContractDriftInputSchema,
       outputSchema: envelopeOutputSchema(DetectContractDriftDataSchema),
+      annotations: READ_ONLY_TOOL_ANNOTATIONS,
       handler: (requestId, args) =>
         detectContractDriftTool(
           context,
@@ -367,6 +402,7 @@ function buildRegistrations(context: CausorynContext): readonly ToolRegistration
         "Değişiklik sonrası mimari bütünlüğü tekrarlanabilir kurallarla DOĞRULAR; kod yazmaz, çalışma ağacını değiştirmez ve test ÇALIŞTIRMAZ (TŞ §10.4). Taban yayın (preflightId manifestinden veya baseSnapshot kimliğinden) ile working-tree projeksiyonunu dört denetimde değerlendirir: architecture (workspace kökündeki .causoryn/architecture.rules.yaml guard kuralları; dosya yoksa denetim not_evaluated), contracts (bu yüzeyden üretilemez — spec çifti girdide yoktur; istenirse not_evaluated), graph-diff (taban ↔ çalışma ağacı içerik farkı) ve test-plan (D6 adayları; koşum durumu dürüstlüğü: not_run varsayılan, observed yalnızca evidenceRef'li kanıtlı host kaydıyla — 'passed' iddiası yalnızca kanıt + gerçekten geçen rapor sayılarıyla mümkündür). Verdict sabit kural zincirinden gelir: no_findings | review_required | blocking_findings | inconclusive; no_findings güvenli/kod garantisi DEĞİLDİR ve her raporda dürüstlük uyarıları taşınır. Rapor byte-deterministiktir: aynı working-tree + aynı taban = bit-bit aynı rapor (sprint kapısı).",
       inputSchema: VerifyChangeInputSchema,
       outputSchema: envelopeOutputSchema(VerifyChangeDataSchema),
+      annotations: READ_ONLY_TOOL_ANNOTATIONS,
       handler: (requestId, args) =>
         verifyChangeTool(context, requestId, args as z.infer<typeof VerifyChangeInputSchema>),
     },
@@ -377,6 +413,7 @@ function buildRegistrations(context: CausorynContext): readonly ToolRegistration
         "changeSet (changedSymbols/changedFiles) için deterministik test adayları: TESTS kenarları (direct), değişen çağrı noktalarından CALLS zincirleri (call-site) ve test-dosyası adlandırma bağlamı (naming; daima heuristic). Her aday reason + evidenceIds + matchLevel taşır; TESTS kenarı bilmeyen değişen semboller missingCoverageCandidates'tır. Test ÇALIŞTIRILMAZ ve 'geçti' iddiası ÜRETİLMEZ (TŞ §15); plan kimliği içerik adreslidir (testplan:<sha256>) ve preflight_change testPlanId'siyle bire bir eşleşir. preflightId girdisi bu dilimde çözümlenmez (açık INVALID_ARGUMENT).",
       inputSchema: DeriveTestPlanInputSchema,
       outputSchema: envelopeOutputSchema(DeriveTestPlanDataSchema),
+      annotations: READ_ONLY_TOOL_ANNOTATIONS,
       handler: (requestId, args) =>
         deriveTestPlan(context, requestId, args as z.infer<typeof DeriveTestPlanInputSchema>),
     },
@@ -387,6 +424,7 @@ function buildRegistrations(context: CausorynContext): readonly ToolRegistration
         "Node/edge/evidence/finding kimliğinin kanıt zinciri (TŞ §10.2 'node/edge/finding IDs'): her kayıt relativePath + startLine/endLine + sourceHash + analyzerId + rationale taşır; eksik alanlı eski kayıtlar partial=true + missingFields ile AÇIK işaretlenir, her kayıt bağlı graf bağlam referanslarını (contextRefs: katkı eden kenar / karşı uç node / bulgu) taşır ve chain özeti (targetKind/targetId/order/recordCount/partialCount/empty) deterministik düzene dair açık durum verir. finding:<sha256> kimlikleri snapshot'ta yaşamaz; workspace kökündeki .causoryn/architecture.rules.yaml policy'sinden deterministik türetilerek çözülür (check_architecture çıktısındaki kimlikleri kullanın). Policy yokluğu/bozukluğu POLICY_INVALID, türetilen bulgularla eşleşmeyen kimlik EVIDENCE_NOT_FOUND döndürür.",
       inputSchema: GetEvidenceInputSchema,
       outputSchema: envelopeOutputSchema(GetEvidenceDataSchema),
+      annotations: READ_ONLY_TOOL_ANNOTATIONS,
       handler: (requestId, args) =>
         getEvidence(context, requestId, args as z.infer<typeof GetEvidenceInputSchema>),
     },
@@ -397,6 +435,7 @@ function buildRegistrations(context: CausorynContext): readonly ToolRegistration
         "Git refs listesi veya bounded history-range üzerinden mimari zaman çizgisi: deterministik eşit aralıklı sampling (maxRevisions; uçlar korunur, atlanan noktalar skipped listesinde açık), seçilen noktaların snapshot blob'ları salt-okunur git okumasıyla alınır ve ardışık diff özetleri raporlanır. Faz E evrim görünümü: milestone bazlı özetler + ihlal trendi (no-cycles/forbidden ihlal sayıları nokta başına ayrı raporlanır — kalite tek sayıya indirgenmez). Analiz edilemeyen noktalar/aralıklar AÇIK raporlanır; hiçbir sayı uydurulmaz.",
       inputSchema: ArchitectureTimelineInputSchema,
       outputSchema: envelopeOutputSchema(ArchitectureTimelineDataSchema),
+      annotations: READ_ONLY_TOOL_ANNOTATIONS,
       handler: async (requestId, args) =>
         architectureTimeline(
           context,
@@ -411,6 +450,7 @@ function buildRegistrations(context: CausorynContext): readonly ToolRegistration
         "Yayımlanmış graph snapshot'ından deterministik WikiSnapshot üretir ve YALNIZCA config wiki.dataDbPath ile beyanlı izinli Causoryn data-root SQLite dosyasına atomik publish ile yazar (kaynak workspace dosyalarına yazma yok; beyansız sunucuda default deny). Sayfa ağacı (TŞ §16A.1 taksonomisi; boş kategori no_data, uydurulmaz), çift yönlü linkler + broken-link diagnostics (K-013 #4), sayfa sürümleri ve wiki_fts aynı building satırına yazılır; aynı graph snapshot için ikinci build idempotent no-op raporlar. mode=full tüm sayfaları yeniden üretir; mode=incremental (K-013 #2, TŞ §16A.5 madde 4) W6 motoruyla yalnızca ilişkili pageId'leri yeniler (contentHash koruması); önceki WikiSnapshot/kaynak graph yoksa veya motor fallback kararı verirse graceful full build + data.fallbackReason (data.mode yürütülen modu bildirir).",
       inputSchema: WikiBuildInputSchema,
       outputSchema: envelopeOutputSchema(WikiBuildDataSchema),
+      annotations: WRITE_TOOL_ANNOTATIONS,
       handler: async (requestId, args) =>
         wikiBuild(context, requestId, args as z.infer<typeof WikiBuildInputSchema>),
     },
@@ -421,6 +461,7 @@ function buildRegistrations(context: CausorynContext): readonly ToolRegistration
         "Wiki sayfa ağacı hiyerarşisi (salt okunur): 12 kök kategori + alt sayfalar taksonomi sırasıyla, childCount + coverage/freshness ile; depth alt ağaç tavanı, parentId alt ağaç kökü, limit/cursor (K-013 #5) sayfalama. no_data kategoriler dolgusuz listelenir.",
       inputSchema: WikiGetTreeInputSchema,
       outputSchema: envelopeOutputSchema(WikiGetTreeDataSchema),
+      annotations: READ_ONLY_TOOL_ANNOTATIONS,
       handler: (requestId, args) =>
         wikiGetTree(context, requestId, args as z.infer<typeof WikiGetTreeInputSchema>),
     },
@@ -431,6 +472,7 @@ function buildRegistrations(context: CausorynContext): readonly ToolRegistration
         "Tek wiki sayfası (salt okunur): generated layer bölümleri (sectionKey filtresi + bölüm sayfalaması), evidenceRefs provenance, coverage/freshness ve tüm bölümlerden türetilen sourceRefs. Overlay anotasyonlar bu araçta dönmez (TŞ §16A.6: ayrı yerel UI/CLI akışı).",
       inputSchema: WikiGetPageInputSchema,
       outputSchema: envelopeOutputSchema(WikiGetPageDataSchema),
+      annotations: READ_ONLY_TOOL_ANNOTATIONS,
       handler: (requestId, args) =>
         wikiGetPage(context, requestId, args as z.infer<typeof WikiGetPageInputSchema>),
     },
@@ -441,6 +483,7 @@ function buildRegistrations(context: CausorynContext): readonly ToolRegistration
         "Wiki sayfa araması (salt okunur): kaçışlı çok alanlı FTS5 sorgu; sıralama exact sembol/route > başlık > modül > BM25 > graph yakınlığı; matchedFields + evidenceIds relevance açıklaması, snippet, cursor/limit sayfalama (K-013 #5). Embedding skoru yoktur (kırmızı çizgi #1); yakınlık ayağı verisi yoksa skippedRankLegs ile dürüst degrade.",
       inputSchema: WikiSearchInputSchema,
       outputSchema: envelopeOutputSchema(WikiSearchDataSchema),
+      annotations: READ_ONLY_TOOL_ANNOTATIONS,
       handler: (requestId, args) =>
         wikiSearch(context, requestId, args as z.infer<typeof WikiSearchInputSchema>),
     },
@@ -451,6 +494,7 @@ function buildRegistrations(context: CausorynContext): readonly ToolRegistration
         "Sayfanın outgoing + incoming (backlink) bağlantıları (salt okunur): resolution + evidence ile, linkKinds filtresi ve K-013 #5 sayfalama; toPageId=null kalan bozuk linkler brokenLinkDiagnostics ile raporlanır (K-013 #4: kayıt korunur, sessiz silinmez).",
       inputSchema: WikiGetLinksInputSchema,
       outputSchema: envelopeOutputSchema(WikiGetLinksDataSchema),
+      annotations: READ_ONLY_TOOL_ANNOTATIONS,
       handler: (requestId, args) =>
         wikiGetLinks(context, requestId, args as z.infer<typeof WikiGetLinksInputSchema>),
     },
@@ -461,6 +505,7 @@ function buildRegistrations(context: CausorynContext): readonly ToolRegistration
         "Erişilebilir Git/snapshot revizyonları (salt okunur): veri kökündeki yayımlanmış WikiSnapshot revizyonu available (pageId ile sayfa sürümü: contentHash/linkSetHash/templateVersion/coverage); refs commit/tag/branch alias'ları salt-okunur git-read (cat-file) ile çözülür — çözülemeyen alias INVALID_REVISION, revizyon kaydı olmayan çözümlenmiş ref not_available + gerekçe.",
       inputSchema: WikiGetVersionsInputSchema,
       outputSchema: envelopeOutputSchema(WikiGetVersionsDataSchema),
+      annotations: READ_ONLY_TOOL_ANNOTATIONS,
       handler: async (requestId, args) =>
         wikiGetVersions(
           context,
@@ -475,6 +520,7 @@ function buildRegistrations(context: CausorynContext): readonly ToolRegistration
         "İki WikiSnapshot arası sayfa farkları (salt okunur; working tree değişmez): addedPages/removedPages, changedSections, addedLinks/removedLinks, coverageDelta ({previous, current, reason?} — K-013 #3) ve unresolvedDifferences. contractChanges ({contractId, changeKind, summary} — K-013 #7) iki WikiSnapshot'ın arka graph snapshot'larının sözleşme node yüzeyleri (ApiContract/EventContract/SchemaContract/ContractVersion) üzerinden hesaplanır; arka graph çözümlenemediğinde [] + çözümleme başarısızlığı uyarısı döner, iki yüzeyde de sözleşme kaydı yoksa gerçek [] döner (boşluk notu yok — K-013(7) gövdesi kesindir).",
       inputSchema: WikiDiffInputSchema,
       outputSchema: envelopeOutputSchema(WikiDiffDataSchema),
+      annotations: READ_ONLY_TOOL_ANNOTATIONS,
       handler: (requestId, args) =>
         wikiDiff(context, requestId, args as z.infer<typeof WikiDiffInputSchema>),
     },
@@ -495,6 +541,7 @@ export function createCausorynMcpServer(context: CausorynContext): McpServer {
         description: registration.description,
         inputSchema: registration.inputSchema,
         outputSchema: registration.outputSchema,
+        annotations: registration.annotations,
       },
       async (args, extra) => {
         const requestId = String(extra.requestId);

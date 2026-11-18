@@ -132,16 +132,53 @@ export function requireSnapshot(deps: ServiceDeps, workspaceId: string): Snapsho
   return read;
 }
 
-/** Snapshot'tan coverage istatistiği (envelope.coverage; katalogla aynı tanım). */
+const L2_LANGUAGES: ReadonlySet<string> = new Set([
+  "typescript",
+  "csharp",
+  "python",
+]);
+const L1_LANGUAGES: ReadonlySet<string> = new Set(["go", "rust"]);
+const ADAPTER_LANGUAGE_ORDER: ReadonlyMap<string, number> = new Map(
+  INDEXED_ADAPTERS.map((adapter, index) => [adapter.language, index]),
+);
+
+function isAstOrSymbolNode(node: GraphNode): boolean {
+  return (
+    node.kind !== "Workspace" &&
+    node.kind !== "File" &&
+    node.kind !== "UnknownExternal"
+  );
+}
+
+/**
+ * Snapshot'tan coverage istatistiği (envelope.coverage; katalogla aynı tanım).
+ *
+ * Dürüstlük notu: `resolvedEdges = totalEdges - unresolvedEdges` (`verified + heuristic`
+ * toplamıdır); MCP envelope `coverage.coverageRatio` bu nedenle
+ * `(verified + heuristic) / totalEdges` iken, sidecar worker protokol çıktılarındaki
+ * `coverageRatio` `verified / totalEdges` oranıdır.
+ */
 export function coverageOf(snapshot: SnapshotGraph): Coverage {
   const totalEdges = snapshot.edges.length;
   const unresolvedEdges = snapshot.edges.filter((edge) => edge.resolution === "unresolved").length;
   const resolvedEdges = totalEdges - unresolvedEdges;
-  const hasTypeScriptNodes = snapshot.nodes.some((node) => node.language === "typescript");
+  const hasL2AstNodes = snapshot.nodes.some(
+    (node) =>
+      isAstOrSymbolNode(node) &&
+      typeof node.language === "string" &&
+      L2_LANGUAGES.has(node.language),
+  );
+  const hasL1AstNodes = snapshot.nodes.some(
+    (node) =>
+      isAstOrSymbolNode(node) &&
+      typeof node.language === "string" &&
+      L1_LANGUAGES.has(node.language),
+  );
+  const tier: Coverage["tier"] = hasL2AstNodes ? "L2" : hasL1AstNodes ? "L1" : "L0";
   const coverageRatio =
     totalEdges === 0 ? 0 : Math.round((resolvedEdges / totalEdges) * 10_000) / 10_000;
   return {
-    tier: hasTypeScriptNodes ? "L2" : "L0",
+    tier,
     resolvedEdges,
     unresolvedEdges,
     totalEdges,
@@ -320,19 +357,31 @@ export function workspaceSummary(
   const read = requireSnapshot(deps, workspaceId);
   const snapshot = read.snapshot;
   const fileNodes = snapshot.nodes.filter((node) => node.kind === "File");
-  const tsFileNodes = fileNodes.filter((node) => node.language === "typescript");
+  const languageCounts = new Map<string, number>();
+  for (const node of fileNodes) {
+    if (typeof node.language === "string" && node.language.length > 0) {
+      languageCounts.set(node.language, (languageCounts.get(node.language) ?? 0) + 1);
+    }
+  }
   const entrypoints = snapshot.nodes
     .filter((node) => node.kind === "Endpoint" || node.kind === "Handler")
     .map((node) => node.qualifiedName)
     .sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
-  const languages = tsFileNodes.some((node) => node.language === "typescript")
-    ? [
-        {
-          language: "typescript",
-          files: tsFileNodes.length,
-        },
-      ]
-    : [];
+  const languages = [...languageCounts.keys()]
+    .sort((a, b) => {
+      const rankA = ADAPTER_LANGUAGE_ORDER.get(a);
+      const rankB = ADAPTER_LANGUAGE_ORDER.get(b);
+      if (rankA !== undefined && rankB !== undefined) {
+        return rankA - rankB;
+      }
+      if (rankA !== undefined) return -1;
+      if (rankB !== undefined) return 1;
+      return a < b ? -1 : a > b ? 1 : 0;
+    })
+    .map((language) => ({
+      language,
+      files: languageCounts.get(language) ?? 0,
+    }));
   // Framework linker'ları (sprint-2 B3) Endpoint node'larına framework
   // özniteliği yazar; özet bu özniteliklerden türetilir — hard-coded []
   // değildir (denetim bulgusu 1 düzeltmesi).
@@ -557,7 +606,8 @@ export const RefreshIndexDataSchema = z.strictObject({
  * ilerler ve causoryn_index_status(jobId) ile izlenir.
  *
  * Yazma sınırı (wiki/mcp-tools.md yazma izin matrisi): indeks yalnızca
- * Causoryn izinli data-root'una yazılır — kök, her çağrıda
+ * Causoryn'in kendi graph deposuna (stdio sunucusunda süreç-içi
+ * InMemoryGraphRepository) yazılır; kaynak workspace dosyalarına yazılmaz — kök, her çağrıda
  * requireAuthorizedWorkspace ile allowRoot'a karşı yeniden doğrulanır ve
  * JobManager ayrıca WorkspaceAccessPolicy.authorizeRoot ile senkron
  * reddeder (yetkisiz kök iş kaydı AÇMAZ → WORKSPACE_NOT_AUTHORIZED).
@@ -1076,14 +1126,8 @@ export const GetSymbolContextDataSchema = z.strictObject({
 });
 
 /**
- * symbolId çözümleme (TŞ §10.2 "symbolId"): önce yayımlanmış node kimliği,
- * bulunamazsa qualifiedName tam adı. Ad 0 node'a çözülürse SYMBOL_NOT_FOUND
- * (K-008 uzantı kodu), >1 node'a çözülürse AMBIGUOUS_SYMBOL + adaylar
- * (TŞ §10.3) fırlatır.
- */
-/**
  * Sembol çözümleme (node kimliği YA DA TAM qualifiedName): 0 eşleşme →
- * SYMBOL_NOT_FOUND, >1 → AMBIGUOUS_SYMBOL + adaylar (find_symbols
+ * SYMBOL_NOT_FOUND (K-011), >1 → AMBIGUOUS_SYMBOL + adaylar (find_symbols
  * AmbiguityDataSchema formu). trace_execution/get_symbol_context B4/B5 ve
  * sprint-5 Faz D causoryn_trace_business_flow (D5) ortak çözümleme
  * sözleşmesidir: belirsiz ad otomatik kesinleştirilmez (TŞ §10.3).

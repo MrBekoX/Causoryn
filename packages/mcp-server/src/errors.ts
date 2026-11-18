@@ -59,11 +59,13 @@
  * Beyanlı olmayan output hedefi ise EXPORT_NOT_ALLOWED (sabit) ile
  * raporlanır — uzantı kodu gerektirmez.
  *
- * ADR durumu: K-008 karar kaydı (wiki/decisions.md) YALNIZCA ilk iki
- * uzantıyı (INVALID_ARGUMENT + EVIDENCE_NOT_FOUND) karara bağlar;
- * SYMBOL_NOT_FOUND henüz kayıtsızdır. wiki/decisions.md'e K-008'i
- * genişleten yeni ADR girişinin işlenmesi orkestratöre aittir (wiki yazımı
- * ajan dışı — sprint-2 takım denetimi bulgusu, commit öncesi süreç kalemi).
+ * ADR durumu: `INVALID_ARGUMENT` + `EVIDENCE_NOT_FOUND` K-008 ile,
+ * `SYMBOL_NOT_FOUND` ise K-011 (`wiki/decisions.md:37`) ile karara
+ * bağlanmıştır.
+ *
+ * Rezerve sabit kod notu: `UNSUPPORTED_LANGUAGE` kodu TŞ §10.1 sabit taban
+ * listesinden korunmuştur; mevcut dilimde adapter fallback mekanizması
+ * nedeniyle servislerce fırlatılmaz (rezerve sabit kod).
  */
 export const CAUSORYN_TOOL_ERROR_CODES = [
   "WORKSPACE_NOT_AUTHORIZED",
