@@ -22,11 +22,11 @@ Döngü **Discover → Preflight → Agent Edits → Verify → Explain**'dir (k
 
 | Adım | Causoryn'in rolü | Temsilci araçlar | Yazar mı? |
 |---|---|---|---|
-| Discover | Kanıtlı mimari/sembol bağlamı | `map_system`, `trace_*`, `get_agent_context` | Hayır |
+| Discover | Kanıtlı mimari/sembol bağlamı | `map_system`, `trace_execution`/`trace_business_flow`, `get_symbol_context`, `analyze_impact`, `get_agent_context` | Hayır |
 | Preflight | Aday manifest + mimari/kontrat denetimi | `preflight_change` (candidateOnly, kod yazmaz), `check_architecture`, `check_contracts` | Hayır |
 | Agent Edits | Düzenleme host modelde; Causoryn katılmaz | — | Hayır |
 | Verify | Çalışma ağacını dört denetimde doğrular; test ÇALIŞTIRMAZ | `verify_change`, `derive_test_plan`, `detect_contract_drift` | Hayır |
-| Explain | Kanıt zinciri + kalıcı bilgi yüzeyi | `get_evidence`, `wiki_*`, `export_documentation` | Yalnız `wiki_build`/`export_documentation` kendi data-root'una |
+| Explain | Kanıt zinciri + kalıcı bilgi yüzeyi | `get_evidence`, `wiki_*`, `export_documentation`, `compare_architecture` | Yalnız `wiki_build`/`export_documentation` kendi data-root'una |
 
 Kalıcı hafıza **Living Wiki**'dir: 18 çekirdek özelliğin yerine geçmez, çapraz kesen #19 katmanıdır, 7 araçla sunulur (kanıt: wiki/scope.md:5-37; wiki/mcp-tools.md:36-38).
 
@@ -202,11 +202,11 @@ Agent work is structured as **Discover → Preflight → Agent Edits → Verify 
 
 | Stage | Causoryn's role | Representative tools |
 |---|---|---|
-| Discover | Deterministic architecture map, symbol context, impact paths, context packs | `map_system`, `get_symbol_context`, `analyze_impact`, `get_agent_context` |
+| Discover | Deterministic architecture map, symbol context, impact paths, context packs | `map_system`, `trace_execution`, `trace_business_flow`, `get_symbol_context`, `analyze_impact`, `get_agent_context` |
 | Preflight | Candidate-only manifest of what a change would touch; writes no code | `preflight_change` (`candidateOnly` fixed `true`, `server.ts:333`) |
 | Agent Edits | Host model edits the tree; Causoryn stays read-only | — |
-| Verify | Re-checks the working tree under four audits; writes no code | `verify_change` (`server.ts:367`) |
-| Explain | Living wiki, deterministic exports, architecture diff/timeline | 7 `wiki_*` tools, `export_documentation`, `compare_architecture` |
+| Verify | Re-checks the working tree under four audits; writes no code | `verify_change`, `derive_test_plan`, `detect_contract_drift` (`server.ts:367`) |
+| Explain | Living wiki, deterministic exports, architecture diff/timeline | `get_evidence`, 7 `wiki_*` tools, `export_documentation`, `compare_architecture` |
 
 The honesty boundary is explicit: `derive_test_plan` proposes candidates from TESTS edges and call sites but never runs tests; `verify_change` never claims "tests passed" (verdict chain per K-016) (`server.ts:340-382`; `wiki/decisions.md:42`).
 
@@ -269,7 +269,7 @@ SQLite runs WAL, `foreign_keys=ON`, `synchronous=NORMAL`, `busy_timeout=5000`, w
 
 **Envelope**: every response is a `z.strictObject` with all ten fields present — `schemaVersion`, `requestId`, `workspaceId`, `snapshotId`, `status` (`ok|partial|error`), `coverage` (tier L0–L4, edge resolution counts, coverageRatio), `warnings`, `data`, `nextCursor`, `error` (`envelope.ts:24-55`). Errors travel *inside* the envelope (`isError=false`), never as protocol faults; stack traces never reach the client — unexpected failures return `INTERNAL_ERROR` with a generic message and `requestId`, raw detail goes to stderr only; `AMBIGUOUS_SYMBOL` carries candidates in `data` (`server.ts:135-137, 513-529`).
 
-**Error codes**: a fixed table of 15 codes with static `retryable` + `userAction` guidance; only `INDEX_NOT_READY` and `INTERNAL_ERROR` are retryable (`errors.ts:68-84, 93-164`). Governance: `INVALID_ARGUMENT`, `EVIDENCE_NOT_FOUND`, `SYMBOL_NOT_FOUND` are project extensions beyond the TŞ §10.1 list — K-008 covers the first two, `SYMBOL_NOT_FOUND` is recorded but not yet ADR-covered; later phases invented no new codes where fixed ones sufficed (K-012) (`errors.ts:7-66`; `wiki/decisions.md:34-38`).
+**Error codes**: a fixed table of 15 codes with static `retryable` + `userAction` guidance; only `INDEX_NOT_READY` and `INTERNAL_ERROR` are retryable (`errors.ts:68-84, 93-164`). Governance: `INVALID_ARGUMENT`, `EVIDENCE_NOT_FOUND`, `SYMBOL_NOT_FOUND` are project extensions beyond the TŞ §10.1 list — K-008 covers the first two, `SYMBOL_NOT_FOUND` is recorded but not yet ADR-covered; later phases invented no new codes where fixed ones sufficed (K-012); five further codes were selected from the TŞ §10.1 fixed list — POLICY_INVALID, INVALID_REVISION, EXPORT_NOT_ALLOWED, WIKI_PAGE_NOT_FOUND, CONTRACT_PARSE_FAILED — no new code was minted beyond these extensions (TR §5 mirror; `errors.ts:7-48`) (`errors.ts:7-66`; `wiki/decisions.md:34-38`).
 
 **Write-permission matrix** — exactly three tools write, each narrowly:
 
@@ -383,10 +383,10 @@ All decisions live in `wiki/decisions.md` (K-001..K-007 at :27-33; K-008..K-012 
 | 7 | F | 9/9 — `v0.1.0` tagged, 7-sprint plan complete | 1,266 |
 | 8 | unplanned multi-language expansion | 4/4 — Python/Go/Rust sidecars | 1,424 |
 
-(evidence: `wiki/sprint-1.md:4` through `sprint-8.md:4`.) The project wiki is 18 files — index, overview, scope, architecture, mcp-tools, roadmap, working-model, decisions, sprint-1..8, append-only log — mapped in `wiki/index.md:5-27`; host guides live in `docs/hosts/` (claude-code, codex, antigravity) and `integrations/zcode/causoryn/README.md`, verified on disk.
+(evidence: `wiki/sprint-1.md:4` through `sprint-8.md:4`.) The project wiki is 18 files — index, overview, scope, architecture, mcp-tools, roadmap, working-model, decisions, lessons, sprint-1..8, append-only log — mapped in `wiki/index.md:5-27`; host guides live in `docs/hosts/` (claude-code, codex, antigravity) and `integrations/zcode/causoryn/README.md`, verified on disk.
 
 **Host support** (`docs/compatibility-matrix.md:23-26, 39-47`): Claude Code ✔ real end-to-end handshake (CLI 2.1.322, `claude mcp list → ✔ Connected`; verified 2026-11-08 and 2026-11-10); Codex ✔ add→list→remove (CLI 0.163.0 — honestly noted: list performs no health check); ZCode ⚠ manifest-level validation only (GUI install deliberately not performed, red line 6); Antigravity ❌ NOT RUN (no `agy` CLI). Net: **2/3 real runs, 1/3 open**. All runs to date are Windows 10.0.26300 x64; every host runs the same bundle (`dist/mcp-server.mjs` + vendored better-sqlite3), engine id `causoryn@0.1.0`, stdio transport.
 
-**Open 1.0.0 gates** (`CHANGELOG.md:7-23`, held open per ADR-010): Antigravity install+smoke; ZCode in-GUI smoke; macOS/Linux/ARM validation; MCP SDK v1→v2 (closes K-009); `refresh_index mode=incremental`; TS/C# TESTS edges; OpenAPI drift; `wiki_search` filters; E6 browser run; bundle `.d.ts` fidelity; rate-limit budget; npm audit moderates. Until these close, 1.0.0 will not be declared.
+**Open 1.0.0 gates** (`CHANGELOG.md:7-23`, held open per ADR-010): Antigravity install+smoke; ZCode in-GUI smoke; macOS/Linux/ARM validation; MCP SDK v1→v2 (closes K-009); `refresh_index mode=incremental` + per-file parse reuse (B7); TS/C# TESTS edges; OpenAPI response-schema drift + event-version rule; `wiki_search` filters; E6 browser run; bundle `.d.ts` fidelity; rate-limit budget; npm audit moderates. Until these close, 1.0.0 will not be declared.
 
 **Overall assessment (ADR-010 discipline)**: the engine surface is solid — five gates ran green in-session, the security matrix is 9/9 with live re-verification, degradation is demonstrably graceful end to end, and the honesty mechanisms (resolution labels, the evidence requirement, immutable snapshots, explicit `partial` statuses) are enforced in code, not asserted in prose. The one new quality item this session surfaced — timeout-class parallel-suite flakiness, green in isolation — is reported here and recommended for the backlog. Everything not yet true is labeled as such; that is the project's defining discipline.
