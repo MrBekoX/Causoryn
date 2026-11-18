@@ -504,6 +504,48 @@ describe("worker-process yanıt sınırı (güvenlik bulgusu 4)", () => {
     });
     expect(outcome.status).toBe("ok");
   });
+
+  it("stderrMaxChars aşımı süreci sonlandırır, stderr çıktısını kırpar ve unavailable fallback üretir", async () => {
+    const killed: Array<boolean> = [];
+    const outcome = await runWorkerAnalyze({
+      dotnetCommand: "dotnet",
+      workerDllPath: WORKER_DLL,
+      requestPayload: { id: "stderr-cap-probe" },
+      requestTimeoutMs: 300,
+      stderrMaxChars: 64,
+      spawnProcess: () => {
+        const child = new EventEmitter() as unknown as ChildProcess;
+        const stdout = new EventEmitter();
+        const stderr = new EventEmitter();
+        const stdin = new EventEmitter();
+        const record = child as unknown as Record<string, unknown>;
+        record.stdout = stdout;
+        record.stderr = stderr;
+        record.stdin = Object.assign(stdin, {
+          write: () => true,
+          end: () => {},
+        });
+        record.killed = false;
+        record.exitCode = null;
+        record.signalCode = null;
+        record.kill = () => {
+          killed.push(true);
+          record.killed = true;
+          return true;
+        };
+        queueMicrotask(() => {
+          stderr.emit("data", Buffer.from("a".repeat(40), "utf8"));
+          stderr.emit("data", Buffer.from("b".repeat(40), "utf8"));
+        });
+        return child;
+      },
+    });
+
+    expect(outcome.status).toBe("unavailable");
+    expect(outcome.detail).toContain("worker stderr çıktısı 64 karakter sınırını aştı");
+    expect(outcome.stderr.length).toBeLessThanOrEqual(64);
+    expect(killed.length).toBe(1);
+  });
 });
 
 /* ------------------------------------------------------------------ */

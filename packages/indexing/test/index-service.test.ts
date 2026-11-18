@@ -25,6 +25,11 @@ import { IndexService, IndexingError, INDEXED_ADAPTERS } from "../src/index.js";
 import { TS_ADAPTER_FRAMEWORK_LINKERS } from "@causoryn/adapter-typescript";
 import { WorkspaceAccessPolicy } from "@causoryn/workspace";
 import { InMemoryGraphRepository } from "@causoryn/graph";
+import type {
+  SymbolIndexEntry,
+  SymbolSearchHit,
+  SymbolSearchStore,
+} from "@causoryn/graph";
 import { sha256Hex, utf8Encode } from "@causoryn/domain";
 
 const REPO_ROOT = path.resolve(
@@ -554,6 +559,145 @@ describe("IndexService silme mutabakatı — güvenlik bulgusu 3", { timeout: 30
         .listFiles("del-noop")
         .map((record) => record.relativePath);
       expect(paths).toEqual(["src/a.ts", "src/b.ts"]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
+/* ------------------------------------------------------------------ */
+/* Kalıcı depo uyumu: runCount başlangıcı, symbol_fts ve L0 yükseltme  */
+/* ------------------------------------------------------------------ */
+
+class SearchableInMemoryRepository
+  extends InMemoryGraphRepository
+  implements SymbolSearchStore
+{
+  readonly indexedBatches: Array<{
+    readonly snapshotId: string;
+    readonly entries: readonly SymbolIndexEntry[];
+  }> = [];
+
+  indexSymbols(snapshotId: string, entries: readonly SymbolIndexEntry[]): void {
+    this.indexedBatches.push({ snapshotId, entries: [...entries] });
+  }
+
+  searchSymbols(
+    query: string,
+    limit = 20,
+    snapshotId?: string,
+  ): readonly SymbolSearchHit[] {
+    const q = query.trim().toLowerCase();
+    const hits: SymbolSearchHit[] = [];
+    for (const batch of this.indexedBatches) {
+      if (snapshotId !== undefined && batch.snapshotId !== snapshotId) continue;
+      for (const entry of batch.entries) {
+        if (entry.symbol.toLowerCase().includes(q)) {
+          hits.push({
+            symbol: entry.symbol,
+            nodeId: entry.nodeId,
+            snapshotId: batch.snapshotId,
+          });
+          if (hits.length >= limit) return hits;
+        }
+      }
+    }
+    return hits;
+  }
+}
+
+describe("IndexService — kalıcı depo yeniden başlatma, symbol_fts ve L0 yükseltme", { timeout: 30_000 }, () => {
+  it("yeniden başlatma: mevcut yayınlanmış snapshot varsa runCount onun revision.sequence değerinden başlar", () => {
+    const repository = new InMemoryGraphRepository();
+    const firstService = makeService(repository);
+    const firstRun = firstService.runIndex(FIXTURE_ROOT);
+    expect(firstRun.snapshot.meta.revision.sequence).toBe(1);
+
+    const restartedService = makeService(repository);
+    const secondRun = restartedService.runIndex(FIXTURE_ROOT);
+    expect(secondRun.snapshot.meta.revision.sequence).toBe(2);
+    expect(secondRun.snapshotId).not.toBe(firstRun.snapshotId);
+  });
+
+  it("symbol_fts beslemesi: SymbolSearchStore destekleyen depoda publish sonrası sembol düğümleri indekslenir", async () => {
+    const repository = new SearchableInMemoryRepository();
+    const service = makeService(repository);
+
+    const syncRun = service.runIndex(FIXTURE_ROOT);
+    expect(repository.indexedBatches).toHaveLength(1);
+    expect(repository.indexedBatches[0]?.snapshotId).toBe(syncRun.snapshotId);
+
+    const nodesById = new Map(syncRun.snapshot.nodes.map((n) => [n.id, n]));
+    const syncEntries = repository.indexedBatches[0]?.entries ?? [];
+    expect(syncEntries.length).toBeGreaterThan(0);
+    for (const entry of syncEntries) {
+      const node = nodesById.get(entry.nodeId);
+      expect(node).toBeDefined();
+      expect(node?.kind).not.toBe("Workspace");
+      expect(node?.kind).not.toBe("File");
+      expect(node?.kind).not.toBe("UnknownExternal");
+      expect(entry.symbol).toBe(node?.qualifiedName);
+    }
+    expect(syncEntries.map((e) => e.symbol)).toContain("OrdersService");
+    expect(syncEntries.map((e) => e.symbol)).toContain("OrdersService.create");
+
+    const asyncRun = await service.runIndexAsync(FIXTURE_ROOT);
+    expect(repository.indexedBatches).toHaveLength(2);
+    expect(repository.indexedBatches[1]?.snapshotId).toBe(asyncRun.snapshotId);
+
+    const emptyRoot = mkdtempSync(path.join(tmpdir(), "causoryn-fts-empty-"));
+    try {
+      const emptyRepo = new SearchableInMemoryRepository();
+      const emptyPolicy = WorkspaceAccessPolicy.create({ allowRoots: [emptyRoot] });
+      const emptyService = new IndexService({
+        workspaceId: "empty-fts",
+        policy: emptyPolicy,
+        repository: emptyRepo,
+        clock: () => FIXED_NOW,
+        limits: { maxFiles: 50_000 },
+      });
+      emptyService.runIndex(emptyRoot);
+      expect(emptyRepo.indexedBatches).toHaveLength(0);
+    } finally {
+      rmSync(emptyRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("runIncrementalIndexAsync upgrade guard: sync-run-degraded L0 snapshot dosya değişmese de tam analize yükseltilir", async () => {
+    const root = mkdtempSync(path.join(tmpdir(), "causoryn-inc-upgrade-"));
+    try {
+      mkdirSync(path.join(root, "src"), { recursive: true });
+      writeFileSync(
+        path.join(root, "src", "app.ts"),
+        "export function greetOrder(): string { return 'ok'; }\n",
+        "utf8",
+      );
+      writeFileSync(
+        path.join(root, "src", "worker.py"),
+        "def compute_invoice(amount: int) -> int:\n    return amount * 2\n",
+        "utf8",
+      );
+      const repository = new InMemoryGraphRepository();
+      const policy = WorkspaceAccessPolicy.create({ allowRoots: [root] });
+      const service = new IndexService({
+        workspaceId: "upgrade-ws",
+        policy,
+        repository,
+        clock: () => FIXED_NOW,
+        limits: { maxFiles: 50_000 },
+      });
+
+      const syncRun = service.runIndex(root);
+      expect(syncRun.snapshot.meta.analyzerFingerprint).toContain("sync-run-degraded");
+
+      const upgraded = await service.runIncrementalIndexAsync(root);
+      expect(upgraded.published).toBe(true);
+      expect(upgraded.snapshotId).not.toBe(syncRun.snapshotId);
+      expect(upgraded.snapshot.meta.analyzerFingerprint).not.toContain("sync-run-degraded");
+
+      const repeatNoOp = await service.runIncrementalIndexAsync(root);
+      expect(repeatNoOp.published).toBe(false);
+      expect(repeatNoOp.snapshotId).toBe(upgraded.snapshotId);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

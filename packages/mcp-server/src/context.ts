@@ -1,9 +1,9 @@
 import Database from "better-sqlite3";
-import { realpathSync, statSync, type Stats } from "node:fs";
+import { lstatSync, realpathSync, statSync, type Stats } from "node:fs";
 import path from "node:path";
 
 import { GraphRepositoryError, InMemoryGraphRepository } from "@causoryn/graph";
-import type { GraphRepository } from "@causoryn/graph";
+import type { GraphRepository, SymbolSearchStore } from "@causoryn/graph";
 import { IndexJobManager, IndexService } from "@causoryn/indexing";
 import { OutputAccessPolicy, WorkspaceAccessPolicy } from "@causoryn/workspace";
 import {
@@ -59,6 +59,12 @@ export interface CausorynContext {
   readonly config: CausorynServerConfig;
   readonly policy: WorkspaceAccessPolicy;
   readonly repository: GraphRepository;
+  /**
+   * Agent GPS FTS5 sembol arama yüzeyi (TŞ §9/§15). storage.dataDbPath
+   * beyanlıysa (veya SymbolSearchStore destekleyen override verildiyse)
+   * doludur; varsayılan bellek-içi depoda null'dur.
+   */
+  readonly symbolSearch: SymbolSearchStore | null;
   readonly indexService: IndexService;
   readonly jobManager: IndexJobManager;
   /**
@@ -130,53 +136,306 @@ export function createCausorynContext(
     ((message: string): void => {
       console.error(message);
     });
-  const repository = overrides.repository ?? new InMemoryGraphRepository();
-  const indexService = new IndexService({
-    workspaceId: config.workspaceId,
-    policy,
-    repository,
-    clock,
-    limits: { maxFiles: config.index.maxFiles },
-  });
-  // Sprint-2 B6: refresh_index işleri için yönetici; jobId per-manager
-  // monoton sayaçtır (işletim kaydı — snapshot determinizmine girmez).
-  const jobManager = new IndexJobManager({
-    indexService,
-    policy,
-    clock,
-  });
+  const storage = openStorageRepository(config, overrides, clock, logger);
+  let wiki: ReturnType<typeof openWikiStores> | undefined;
+  try {
+    const repository = storage.repository;
+    const indexService = new IndexService({
+      workspaceId: config.workspaceId,
+      policy,
+      repository,
+      clock,
+      limits: { maxFiles: config.index.maxFiles },
+    });
+    // Sprint-2 B6: refresh_index işleri için yönetici; jobId per-manager
+    // monoton sayaçtır (işletim kaydı — snapshot determinizmine girmez).
+    const jobManager = new IndexJobManager({
+      indexService,
+      policy,
+      clock,
+    });
 
-  // Sprint-3 C6/C8: export çıktı yetkilendirmesi — explicit beyanlı liste
-  // (default [] → null politika = default deny, EXPORT_NOT_ALLOWED).
-  const outputPolicy =
-    config.output.allowedOutputDirs.length === 0
-      ? null
-      : OutputAccessPolicy.create([...config.output.allowedOutputDirs]);
+    // Sprint-3 C6/C8: export çıktı yetkilendirmesi — explicit beyanlı liste
+    // (default [] → null politika = default deny, EXPORT_NOT_ALLOWED).
+    const outputPolicy =
+      config.output.allowedOutputDirs.length === 0
+        ? null
+        : OutputAccessPolicy.create([...config.output.allowedOutputDirs]);
 
-  // Sprint-4 W5: wiki veri kökü — explicit beyan (default: null = default
-  // deny, TŞ §16A.8 yazma sınırı).
-  const wiki = openWikiStores(config, clock, logger);
+    // Sprint-4 W5: wiki veri kökü — explicit beyan (default: null = default
+    // deny, TŞ §16A.8 yazma sınırı).
+    wiki = openWikiStores(config, clock, logger);
 
-  if (config.autoIndex && config.allowRoots.length > 0) {
-    const run = indexService.runIndex(config.allowRoots[0] as string);
-    logger(
-      `index hazır: workspace=${config.workspaceId} snapshot=${run.snapshotId} files=${String(run.fileCount)} state=${run.state}`,
-    );
+    if (config.autoIndex && config.allowRoots.length > 0) {
+      const existing =
+        overrides.repository === undefined && config.storage.dataDbPath !== undefined
+          ? repository.getLatestPublished(config.workspaceId)
+          : undefined;
+      if (existing !== undefined) {
+        logger(
+          `kalıcı index yüklendi: workspace=${config.workspaceId} snapshot=${existing.snapshot.meta.id} state=${existing.snapshot.meta.state}`,
+        );
+      } else {
+        const run = indexService.runIndex(config.allowRoots[0] as string);
+        logger(
+          `index hazır: workspace=${config.workspaceId} snapshot=${run.snapshotId} files=${String(run.fileCount)} state=${run.state}`,
+        );
+      }
+    }
+
+    const activeWiki = wiki;
+    return {
+      config,
+      policy,
+      repository,
+      symbolSearch: storage.symbolSearch,
+      indexService,
+      jobManager,
+      outputPolicy,
+      wikiStore: activeWiki.store,
+      wikiSearch: activeWiki.search,
+      preflightStore: new PreflightManifestStore(),
+      clock,
+      logger,
+      close: (): void => {
+        try {
+          activeWiki.close();
+        } finally {
+          storage.close();
+        }
+      },
+    };
+  } catch (error) {
+    try {
+      wiki?.close();
+    } finally {
+      storage.close();
+    }
+    throw error;
+  }
+}
+
+/**
+ * storage.dataDbPath ve wiki.dataDbPath için ORTAK fail-closed güvenlik
+ * doğrulayıcısı (TŞ §9/§16A.8/§20 + ADR-008):
+ * - mutlak yol olmalı,
+ * - null byte içeremez,
+ * - allowRoots boş olamaz,
+ * - sözcüksel olarak tüm allowRoots dışında olmalı,
+ * - üst dizin diskte mevcut bir dizin olmalı,
+ * - üst dizinin (ve dosya mevcutsa dosyanın kendisinin) realpath'i TÜM
+ *   allowRoots realpath'lerinin kesinlikle dışında olmalı.
+ */
+function validateDataDbPath(
+  fieldName: "storage.dataDbPath" | "wiki.dataDbPath",
+  declared: string,
+  allowRoots: readonly string[],
+): string {
+  const issues: string[] = [];
+  if (!path.isAbsolute(declared)) {
+    issues.push(`${fieldName} mutlak yol olmalı: ${declared}`);
+  }
+  if (declared.includes("\0")) {
+    issues.push(`${fieldName} null byte içeremez`);
+  }
+  const declaredResolved = path.resolve(declared);
+  const stripWin32DevicePrefix = (value: string): string => {
+    if (process.platform !== "win32") return value;
+    if (value.startsWith("\\\\?\\UNC\\")) return `\\\\${value.slice(8)}`;
+    if (value.startsWith("\\\\?\\")) return value.slice(4);
+    return value;
+  };
+  const normalizeComparable = (value: string): string => {
+    const stripped = stripWin32DevicePrefix(value);
+    return process.platform === "win32" ? stripped.toLowerCase() : stripped;
+  };
+  const isSameOrInside = (targetComparable: string, rootComparable: string): boolean => {
+    if (targetComparable === rootComparable) return true;
+    const boundary = rootComparable.endsWith(path.sep)
+      ? rootComparable
+      : rootComparable + path.sep;
+    return targetComparable.startsWith(boundary);
+  };
+  const declaredComparable = normalizeComparable(declaredResolved);
+  for (const root of allowRoots) {
+    const rootComparable = normalizeComparable(path.resolve(root));
+    if (isSameOrInside(declaredComparable, rootComparable)) {
+      issues.push(
+        `${fieldName} yetkili workspace kökünün içinde olamaz (kaynak dosyalara yazım yasak, ADR-008): ${declared}`,
+      );
+      break;
+    }
+  }
+  if (issues.length > 0) {
+    throw new CausorynConfigError(issues);
+  }
+  if (allowRoots.length === 0) {
+    throw new CausorynConfigError([
+      `${fieldName} beyanı için yetkili workspace kökü yok (allowRoots boş): ${declared}`,
+    ]);
+  }
+  const parentDir = path.dirname(declaredResolved);
+  let parentStat: Stats;
+  try {
+    parentStat = statSync(parentDir);
+  } catch {
+    throw new CausorynConfigError([
+      `${fieldName} üst dizini mevcut değil: ${parentDir} (beyanlı dizinler diskte VAR OLMALIDIR — OutputAccessPolicy disiplini)`,
+    ]);
+  }
+  if (!parentStat.isDirectory()) {
+    throw new CausorynConfigError([
+      `${fieldName} üst dizini bir dizin değil: ${parentDir}`,
+    ]);
   }
 
+  const realTargets: string[] = [];
+  try {
+    realTargets.push(realpathSync(parentDir));
+  } catch (error) {
+    throw new CausorynConfigError([
+      `${fieldName} üst dizini gerçek yolu çözümlenemedi (güven kaynağı kurulamıyor; sessiz devam yoktur): ${parentDir} — ${errorText(error)}`,
+    ]);
+  }
+  // CWE-59 savunması: SQLite ana dosyası ve WAL/SHM/journal yan dosyaları için
+  // lstatSync + fail-closed realpathSync denetimi (sarkan symlink ve dizin reddi).
+  const sqliteArtifacts = [
+    declaredResolved,
+    `${declaredResolved}-wal`,
+    `${declaredResolved}-shm`,
+    `${declaredResolved}-journal`,
+  ];
+  for (const artifactPath of sqliteArtifacts) {
+    let artifactLstat: Stats | undefined;
+    try {
+      artifactLstat = lstatSync(artifactPath);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException | undefined)?.code !== "ENOENT") {
+        throw new CausorynConfigError([
+          `${fieldName} hedef/yan dosya durumu doğrulanamadı: ${artifactPath} — ${errorText(error)}`,
+        ]);
+      }
+    }
+    if (artifactLstat !== undefined) {
+      if (artifactLstat.isDirectory()) {
+        throw new CausorynConfigError([
+          `${fieldName} hedef/yan yolu bir dizin olamaz: ${artifactPath}`,
+        ]);
+      }
+      try {
+        const realArtifact = realpathSync(artifactPath);
+        realTargets.push(realArtifact);
+        realTargets.push(realpathSync(path.dirname(realArtifact)));
+      } catch (error) {
+        throw new CausorynConfigError([
+          `${fieldName} gerçek yolu çözümlenemedi (sarkan/kırık symlink reddedildi): ${artifactPath} — ${errorText(error)}`,
+        ]);
+      }
+    }
+  }
+  for (const root of allowRoots) {
+    let realRoot: string;
+    try {
+      realRoot = realpathSync(path.resolve(root));
+    } catch (error) {
+      throw new CausorynConfigError([
+        `${fieldName} doğrulanamadı — allowRoot gerçek yolu çözümlenemedi (güven kaynağı kurulamıyor; sessiz devam yoktur): ${root} — ${errorText(error)}`,
+      ]);
+    }
+    const realRootComparable = normalizeComparable(realRoot);
+    for (const realTarget of realTargets) {
+      const realTargetComparable = normalizeComparable(realTarget);
+      if (isSameOrInside(realTargetComparable, realRootComparable)) {
+        throw new CausorynConfigError([
+          `${fieldName} gerçek yolu workspace kökünün içinde (symlink kaçışı reddedildi): ${declared}`,
+        ]);
+      }
+    }
+  }
+  return declaredResolved;
+}
+
+function extractSymbolSearch(repository: GraphRepository): SymbolSearchStore | null {
+  if (
+    "searchSymbols" in repository &&
+    typeof (repository as { searchSymbols?: unknown }).searchSymbols === "function"
+  ) {
+    return repository as unknown as SymbolSearchStore;
+  }
+  return null;
+}
+
+function openStorageRepository(
+  config: CausorynServerConfig,
+  overrides: ContextOverrides,
+  clock: () => string,
+  logger: (message: string) => void,
+): {
+  readonly repository: GraphRepository;
+  readonly symbolSearch: SymbolSearchStore | null;
+  readonly close: () => void;
+} {
+  if (overrides.repository !== undefined) {
+    return {
+      repository: overrides.repository,
+      symbolSearch: extractSymbolSearch(overrides.repository),
+      close: (): void => {},
+    };
+  }
+  const declared = config.storage.dataDbPath;
+  if (declared === undefined) {
+    return {
+      repository: new InMemoryGraphRepository(),
+      symbolSearch: null,
+      close: (): void => {},
+    };
+  }
+  const resolvedStoragePath = validateDataDbPath(
+    "storage.dataDbPath",
+    declared,
+    config.allowRoots,
+  );
+  let sqliteRepo: SqliteGraphRepository;
+  try {
+    sqliteRepo = new SqliteGraphRepository(resolvedStoragePath);
+  } catch (error) {
+    throw new CausorynConfigError([
+      `storage.dataDbPath açılamadı: ${errorText(error)}`,
+    ]);
+  }
+  const declaredRoot = config.allowRoots[0];
+  if (declaredRoot !== undefined) {
+    try {
+      sqliteRepo.registerWorkspace({
+        id: config.workspaceId,
+        rootPath: declaredRoot,
+        createdAt: clock(),
+      });
+    } catch (error) {
+      if (
+        error instanceof GraphRepositoryError &&
+        error.code === "graph/duplicate-workspace"
+      ) {
+        // Zaten kayıtlı — idempotent.
+      } else {
+        sqliteRepo.close();
+        throw new CausorynConfigError([
+          `storage.dataDbPath workspace kaydı yazılamadı: ${errorText(error)}`,
+        ]);
+      }
+    }
+  }
+  logger(`storage veri kökü hazır: ${resolvedStoragePath}`);
   return {
-    config,
-    policy,
-    repository,
-    indexService,
-    jobManager,
-    outputPolicy,
-    wikiStore: wiki.store,
-    wikiSearch: wiki.search,
-    preflightStore: new PreflightManifestStore(),
-    clock,
-    logger,
-    close: wiki.close,
+    repository: sqliteRepo,
+    symbolSearch: sqliteRepo,
+    close: (): void => {
+      try {
+        sqliteRepo.close();
+      } catch (error) {
+        logger(`storage veri kökü kapatılamadı: ${errorText(error)}`);
+      }
+    },
   };
 }
 
@@ -199,102 +458,11 @@ function openWikiStores(
   if (declared === undefined) {
     return { store: null, search: null, close: (): void => {} };
   }
-  const issues: string[] = [];
-  if (!path.isAbsolute(declared)) {
-    issues.push(`wiki.dataDbPath mutlak yol olmalı: ${declared}`);
-  }
-  if (declared.includes("\0")) {
-    issues.push("wiki.dataDbPath null byte içeremez");
-  }
-  // Kaynak ağacına yazım yasağı (ADR-008 / TŞ §16A.8): beyanlı wiki
-  // veritabanı allowRoot köklerinin İÇİNDE olamaz (lex + gerçek yol).
-  const declaredResolved = path.resolve(declared);
-  for (const root of config.allowRoots) {
-    const rootResolved = path.resolve(root);
-    if (
-      declaredResolved === rootResolved ||
-      declaredResolved.startsWith(rootResolved + path.sep)
-    ) {
-      issues.push(
-        `wiki.dataDbPath yetkili workspace kökünün içinde olamaz (kaynak dosyalara yazım yasak, TŞ §16A.8): ${declared}`,
-      );
-      break;
-    }
-  }
-  if (issues.length > 0) {
-    throw new CausorynConfigError(issues);
-  }
-  const parentDir = path.dirname(declaredResolved);
-  let parentStat: Stats;
-  try {
-    parentStat = statSync(parentDir);
-  } catch {
-    throw new CausorynConfigError([
-      `wiki.dataDbPath üst dizini mevcut değil: ${parentDir} (beyanlı dizinler diskte VAR OLMALIDIR — OutputAccessPolicy disiplini)`,
-    ]);
-  }
-  if (!parentStat.isDirectory()) {
-    throw new CausorynConfigError([
-      `wiki.dataDbPath üst dizini bir dizin değil: ${parentDir}`,
-    ]);
-  }
-
-  // Gerçek yol sınırlaması: lex kontrolüne ek olarak kök/db üst dizini VE
-  // (varsa) beyanlı SQLite DOSYASININ kendisi realpath'lenir (takım
-  // denetimi bulgusu 5: dosya yolu bir sembolik bağla workspace köküne
-  // işaret ediyorsa yalnızca üst-dizin denetimi yazım sızmasını KAPMAZ —
-  // yeniden başlatmada dosya mevcutsa bağ dosya düzeyinde reddedilir;
-  // dosya henüz yoksa denetim ilk açılışta imkânsızdır ve üst-dizin +
-  // lex kontrelleri kalır).
-  //
-  // Güvenlik analizi bulgusu 1: (a) karşılaştırma TÜM allowRoots'a
-  // uygulanır — çok köklü beyanda yalnızca allowRoots[0] ile
-  // karşılaştırmak, üst dizinin allowRoots[1..] içindeki köke bağla
-  // çözüldüğü kaçışı kapmaz (lex kontrolün 202-213 çok köklü karşılığı);
-  // (b) realpath doğrulaması YAPILAMAZSA sessiz devam YOKTUR — güven
-  // kaynağı kurulamaz, sunucu başlamaz (openWikiStores disiplini; eski
-  // davranış yalnızca loglayıp devamsız denetimle başlıyordu).
-  const realTargets: string[] = [];
-  try {
-    realTargets.push(realpathSync(parentDir));
-  } catch (error) {
-    throw new CausorynConfigError([
-      `wiki.dataDbPath üst dizini gerçek yolu çözümlenemedi (güven kaynağı kurulamıyor; sessiz devam yoktur): ${parentDir} — ${errorText(error)}`,
-    ]);
-  }
-  try {
-    realTargets.push(realpathSync(declaredResolved));
-  } catch {
-    // Dosya henüz yok — üst dizin denetimi yeterli.
-  }
-  if (config.allowRoots.length === 0) {
-    // Kök karşılaştırması imkânsızdır; eski davranışla aynı şekilde
-    // (fallback kök = parentDir her zaman çakışırdı) beyan reddedilir —
-    // mesaj artık gerçek nedeni söyler.
-    throw new CausorynConfigError([
-      `wiki.dataDbPath beyanı için yetkili workspace kökü yok (allowRoots boş): ${declared}`,
-    ]);
-  }
-  for (const root of config.allowRoots) {
-    let realRoot: string;
-    try {
-      realRoot = realpathSync(path.resolve(root));
-    } catch (error) {
-      throw new CausorynConfigError([
-        `wiki.dataDbPath doğrulanamadı — allowRoot gerçek yolu çözümlenemedi (güven kaynağı kurulamıyor; sessiz devam yoktur): ${root} — ${errorText(error)}`,
-      ]);
-    }
-    for (const realTarget of realTargets) {
-      if (
-        realTarget === realRoot ||
-        realTarget.startsWith(realRoot + path.sep)
-      ) {
-        throw new CausorynConfigError([
-          `wiki.dataDbPath gerçek yolu workspace kökünün içinde (symlink kaçışı reddedildi): ${declared}`,
-        ]);
-      }
-    }
-  }
+  const declaredResolved = validateDataDbPath(
+    "wiki.dataDbPath",
+    declared,
+    config.allowRoots,
+  );
 
   let store: SqliteWikiStore;
   try {

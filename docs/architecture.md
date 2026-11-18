@@ -2,9 +2,9 @@
 
 > Kanıt: TŞ v2.1 §3, §5, §6, §8, §9, §10, §16A, §17, §25 · Ayna sayfa: [wiki/architecture.md](../wiki/architecture.md)
 > Bu sayfa kod yazan ajan/kullanıcı içindir: repodaki paketler ile TŞ'nin istediği mimari arasındaki eşlemeyi gösterir.
-> Durum notu: bu belge Sprint-8 çok-dil genişlemesi ve 2026-11-18 denetim senkronu
-> sonundaki kod halini yansıtır (`v0.1.0` public snapshot, HEAD `d197f21` + denetim
-> güncellemeleri; toplam **16 npm workspace paketi**: `10 packages/*` + `5 adapters/*`
+> Durum notu: bu belge Sprint-8 çok-dil genişlemesi ve 2026-11-18 denetim/mühendislik
+> güncellemeleri sonundaki kod halini yansıtır (`v0.1.0` public snapshot, HEAD `d197f21` + K-019/K-020
+> güncellemeleri; toplam **17 npm workspace paketi**: `11 packages/*` + `5 adapters/*`
 > + `1 integrations/zcode/causoryn`, ayrıca standalone `apps/visualizer`, 4 `native/*`
 > sidecar ve `integrations/antigravity/causoryn` eklenti dizini); durum kolonları
 > [docs/implementation-status.md](implementation-status.md) kanıtlarıyla ADR-010
@@ -26,16 +26,17 @@ AI/LLM bağımlılığı yoktur (ADR-002, bkz. [docs/adr/ADR-002-no-llm.md](adr/
 | Paket | Rol | TŞ kaynak | Durum |
 |---|---|---|---|
 | `packages/domain` | Graph/Evidence sözleşmeleri, Zod şemaları, canonical JSON, deterministik ID | §8 | Done: 27 node + 20 edge türü, verified kenar ≥1 evidence |
+| `packages/sidecar-ipc` | Ortak sidecar süreç IPC çekirdeği: satır-bazlı NDJSON framing, timeout, `responseMaxChars`/`stderrMaxChars` bütçeleri, `stdin` EPIPE yutma, allowlist env kurucu | §7 | Done (sıfır dış npm bağımlılığı; 4 sidecar adapter tarafından paylaşılır) |
 | `packages/workspace` | Workspace Gateway: trusted roots, inventory, ignore, symlink escape, binary/size filtresi, OutputAccessPolicy | §5, §9, §25/2 | Done (53 test; fail-closed policy) |
-| `packages/indexing` | IndexCoordinator: 5-dil pipeline orkestrasyonu (TS in-process + C#/Python/Go/Rust sidecar yönlendirme, `INDEXED_ADAPTERS` 5 kayıt), job manager, watcher (in-process), fingerprint fp2 | §9, §25/4-5 | Done; **B7 Partial kalıntısı**: per-file parse reuse yok, watcher MCP aracı değil, `refresh_index mode=incremental` açık ret |
-| `packages/graph` | Snapshot sorguları, traversal/cursor, impact, guard (policy DSL), compare/timeline (salt-okunur git), export/onboarding/agent-context, evidence chain | §8, §9, §12, §13, §15, §16 | Done (belgeli sınırlar: blob üreticisi yok — compare/timeline elle yazılmış blob ile çalışır) |
-| `packages/storage-sqlite` | SQLite + FTS5 store, migration, atomic snapshot + WikiStore (wiki_* şeması, FTS/alias indeksleri, annotation CAS) | §9, §16A.7 | Done |
+| `packages/indexing` | IndexCoordinator: 5-dil pipeline orkestrasyonu (TS in-process + C#/Python/Go/Rust sidecar yönlendirme, `INDEXED_ADAPTERS` 5 kayıt), job manager, watcher (in-process), fingerprint fp2, `symbol_fts` besleme | §9, §25/4-5 | Done; **B7 Partial kalıntısı**: per-file parse reuse yok ve watcher MCP aracı değil (`refresh_index mode=full\|incremental` aktif) |
+| `packages/graph` | Snapshot sorguları, traversal/cursor, impact, guard (policy DSL), compare/timeline (salt-okunur git), export (`json`/`markdown`/`mermaid`/`html`/`snapshot`), onboarding/agent-context, evidence chain | §8, §9, §12, §13, §15, §16 | Done (`format="snapshot"` ile `.causoryn/architecture-snapshot.json` üreticisi OutputAccessPolicy korumalı) |
+| `packages/storage-sqlite` | SQLite + FTS5 store (`SqliteGraphRepository` + `symbol_fts`), migration, atomic snapshot + WikiStore (wiki_* şeması, FTS/alias indeksleri, annotation CAS) | §9, §16A.7 | Done |
 | `packages/contracts` | Salt-okunur sözleşme keşfi: OpenAPI/AsyncAPI/SQL/JSON Schema/protobuf + parse güvenlik kotaları (1 MiB/derinlik/alias) + compatibility/drift çekirdeği | §11, §10.2 | Done (belgeli sınır: openapi keşfi yalnızca istek şeması — yanıt-şeması drift yüzeyde görünmez, K-015(5)) |
-| `packages/preflight` | candidate-only Preflight Manifest (candidateOnly sabit true — kod yazmaz) + derive_test_plan (direct/call-site/naming) | §10.2/§10.3, §15 | Done (belgeli sınır: adapter'lar TESTS kenarı üretmez → direct sinyal gerçek graph'ta dormant) |
+| `packages/preflight` | candidate-only Preflight Manifest (candidateOnly sabit true — kod yazmaz) + derive_test_plan (direct/call-site/naming) | §10.2/§10.3, §15 | Done (TS `Test` + `TESTS` kenarlarıyla `direct` sinyal aktif; C#/Python/Go/Rust sidecar'larda `TESTS` kenarı üretimi açık) |
 | `packages/verification` | verify_change saf çekirdeği: 4 denetim, 8-kuralı verdict zinciri, test durumu dürüstlüğü (not_run/observed+kanıt), byte-deterministik rapor | §10.4 | Done (E3 `passed` doğrulaması host beyanı üzerinden — K-016(3)) |
 | `packages/wiki` | Living Wiki projeksiyonu: link çözümleme (11 tür), FTS5 arama, incremental invalidation, annotation overlay (CAS), offline markdown+HTML export | §16A | Done (link-düzeyi invalidasyon sınırlı — mcp-server incremental yayımı indeksleri tam graph'tan yeniden yazar) |
-| `packages/mcp-server` | stdio transport, input validation, authorization, 29 araç kablolaması + MCP `annotations` (`readOnlyHint`), 10 alanlı envelope + sabit hata kodları, bundle girişi (F1) | §5, §10 | Done (`tools/list` TAM OLARAK 29 araç; SDK 1.32.2 v1.x — K-009 sapması) |
-| `adapters/typescript` | Compiler API AST + symbol resolution + framework linkers (Express/Next.js) (L1/L2) | §6, §7, §25/4 | Done (cross-file receiver etiket sınırı belgeli) |
+| `packages/mcp-server` | stdio transport, input validation, authorization, `storage.dataDbPath` kalıcı SQLite / varsayılan `InMemoryGraphRepository`, 29 araç kablolaması + MCP `annotations` (`readOnlyHint`), 10 alanlı envelope + sabit hata kodları, bundle girişi (F1) | §5, §10 | Done (`tools/list` TAM OLARAK 29 araç; SDK 1.32.2 v1.x — K-009 sapması) |
+| `adapters/typescript` | Compiler API AST + symbol resolution + framework linkers (Express/Next.js) + BDD `Test` node & `TESTS` kenarı çıkarımı (L1/L2/L3) | §6, §7, §15, §25/4 | Done (cross-file receiver etiket sınırı belgeli) |
 | `adapters/csharp-roslyn` | Roslyn worker TS adapter: spawn (`dotnet exec`), istek/yanıt, timeout, graceful fallback | §7 | Done (worker yok → L0/L1 + açık coverage) |
 | `adapters/python` | Python stdlib `ast` sidecar TS adapter: `python -B` spawn, satır-JSON protokol v1, timeout, L0/L1 fallback | §7, §23 | Done (`decorator-route-pattern (L3)`; aynı modül `verified`, import `heuristic`) |
 | `adapters/go` | Go `go/parser`+`go/ast` sidecar TS adapter: `go run` / `goWorkerBinaryPath`, 120 sn timeout, L0/L1 fallback | §7, §23 | Done (`heuristic-only (semantik L2 yok)`, `SymbolResolution:false`; L3 HTTP/router kayıtları) |
@@ -48,15 +49,15 @@ AI/LLM bağımlılığı yoktur (ADR-002, bkz. [docs/adr/ADR-002-no-llm.md](adr/
 | `integrations/zcode/causoryn` | ZCode plugin paketi: `.zcode-plugin/plugin.json` (mcpServers + userConfig) + skills + dev marketplace (`.claude-plugin/marketplace.json`) | §17, §25/8, K-002 | Done (manifest doğrulama; GUI kurulum koşulmadı — kırmızı kural 6) |
 | `integrations/antigravity/causoryn` | Antigravity eklenti dizini: `plugin.json` (`$schema`'sız yerel yükleyici uyumlu) + `mcp_config.json` (birincil yerel yükleyici tanımı) + `mcp.json` (TŞ §17.1 taşınabilir manifest) + `README.md` + `build:bundle` ile sahnelenen `scripts/mcp-server.mjs` (+ vendored `better-sqlite3`) | §17.1, §22 | Partial — doğrudan `stdio` spawn doğrulandı (29 araç); `agy` CLI yok: kurulum/smoke NOT RUN; `skills/`/`agents/`/`rules/`/`hooks.json` ayrı dilim |
 | `examples/fixture-ts-orders` · `examples/fixture-ts-express` · `examples/fixture-ts-nextjs` · `examples/fixture-csharp-orders` · `examples/fixture-contract-drift` · `examples/fixture-python-app` · `examples/fixture-go-app` · `examples/fixture-rust-app` | 8 deterministik dil ve sözleşme-drift fixture'ı (TS×3, C#, Python, Go, Rust, contract-drift) | §22, §25/4 | Done |
-| `tests/` | Entegrasyon + smoke + güvenlik (F6) + benchmark (F7) + secret-scan + host/release doküman doğrulama testleri (kök Vitest projesi) | §22 | Done (78 `*.test.ts` dosyası; varsayılan süit 77 dosya, `tests/bench-release` ayrık; detay implementation-status'ta) |
+| `tests/` | Entegrasyon + smoke + güvenlik (F6) + benchmark (F7) + secret-scan + CI iş akışı + host/release doküman doğrulama testleri (kök Vitest projesi) | §22 | Done (83 `*.test.ts` dosyası; varsayılan süit 82 dosya, `tests/bench-release` ayrık; detay implementation-status'ta) |
 
-Toplam monorepo envanteri: **16 npm workspace paketi** (`10 packages/*` + `5 adapters/*` +
-`1 integrations/zcode/causoryn`), standalone `apps/visualizer`, 4 `native/*` sidecar
-ve `integrations/antigravity/causoryn` eklenti dizini. TŞ §18 sonu ilkesi (ilk gün
-boş paket kurma yok) aynen işledi: `contracts`, `preflight`, `verification`, `wiki`
-ve dört sidecar worker, gerçek implementasyonla birlikte açıldı (Faz B1, C2, D, E ve
-Sprint-8); yukarıdaki tablo bu paketlerin bugünkü sorumluluklarını ve belgeli
-sınırlarını taşır.
+Toplam monorepo envanteri: **17 npm workspace paketi** (`11 packages/*` + `5 adapters/*` +
+`1 integrations/zcode/causoryn`), standalone `apps/visualizer`, 4 `native/*` sidecar,
+`.github/workflows/ci.yml` sürekli entegrasyon iş akışı ve `integrations/antigravity/causoryn`
+eklenti dizini. TŞ §18 sonu ilkesi (ilk gün boş paket kurma yok) aynen işledi: `sidecar-ipc`,
+`contracts`, `preflight`, `verification`, `wiki` ve dört sidecar worker, gerçek implementasyonla
+birlikte açıldı (Faz B1, C2, D, E, Sprint-8 ve K-020); yukarıdaki tablo bu paketlerin bugünkü
+sorumluluklarını ve belgeli sınırlarını taşır.
 
 ## Bağımlılık sınırları (değimez — TŞ §5.1)
 
@@ -123,8 +124,8 @@ TypeScript 7 native serisi bu aralıkta değildir.
   flaky-potansiyellidir)
 - `npm run bench` → yalnızca `tests/bench-release/` (`vitest.bench.config.ts`);
   `docs/benchmarks.md` yenileme: `CAUSORYN_BENCH_WRITE_DOCS=1 npm run bench`
-- `npm run build` → `tsc -b` (kök solution `tsconfig.json` 12 doğrudan referans:
-  7 paket (`domain`, `workspace`, `indexing`, `graph`, `storage-sqlite`,
+- `npm run build` → `tsc -b` (kök solution `tsconfig.json` 13 doğrudan referans:
+  8 paket (`domain`, `sidecar-ipc`, `workspace`, `indexing`, `graph`, `storage-sqlite`,
   `mcp-server`, `wiki`) + 5 dil adapter'ı (`typescript`, `csharp-roslyn`, `rust`,
   `python`, `go`); `contracts`/`preflight`/`verification` bu zincirle transitif
   derlenir; `apps/visualizer` ve `integrations/*` vitest/esbuild tarafından

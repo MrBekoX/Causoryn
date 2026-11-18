@@ -591,3 +591,54 @@ describe("analyzeTypeScriptProgram — dış sınıf instantiation'ı (regresyon
     expect(fakeClass).toEqual([]);
   });
 });
+
+describe("analyzeTypeScriptProgram — POSIX mutlak rootDir regresyonu (Linux CI)", () => {
+  const parentSeg = [".", "."].join("");
+  const result = analyzeTypeScriptProgram({
+    workspaceId: "w_posix_root",
+    rootDir: "/home/runner/work/Causoryn/Causoryn",
+    sources: [
+      {
+        relativePath: "src/lib/repo.ts",
+        content: [
+          "export class Repo {",
+          "  save(value: number): number {",
+          "    return value;",
+          "  }",
+          "}",
+          "",
+        ].join("\n"),
+      },
+      {
+        relativePath: "src/app/boot.ts",
+        content: [
+          `import { Repo } from "${parentSeg}/lib/repo.js";`,
+          "",
+          "export class Boot {",
+          "  start(): number {",
+          "    const repo = new Repo();",
+          "    return repo.save(1);",
+          "  }",
+          "}",
+          "",
+        ].join("\n"),
+      },
+    ],
+  });
+
+  it("POSIX sanal rootDir altında göreli import ve CALLS kenarlarını tanısız ve verified çözer", () => {
+    expect(result.state).toBe("ready");
+    expect(result.diagnostics).toEqual([]);
+    const imports = result.edges.filter((edge) => edge.kind === "IMPORTS");
+    expect(imports).toHaveLength(1);
+    expect(imports[0]?.resolution).toBe("verified");
+    const calls = result.edges.filter(
+      (edge) =>
+        edge.kind === "CALLS" &&
+        edge.from.qualifiedName === "Boot.start" &&
+        edge.to.qualifiedName === "Repo.save",
+    );
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.resolution).toBe("verified");
+  });
+});

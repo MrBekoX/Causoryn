@@ -10,12 +10,12 @@ sürümleme [SemVer](https://semver.org/lang/tr/) ilkelerini izler.
 
 - Antigravity host kurulum + smoke koşumu (öncül: `agy` CLI'nin makinede bulunması; TŞ §22 "agy CLI yoksa çalıştırılmadı diye açıkça raporla")
 - ZCode GUI içi gerçek kurulum + tools/list smoke koşumu (kırmızı çizgi 6, kullanıcı kurulumunu bozmama kısıtıyla)
-- macOS/Linux/ARM dağıtım hedeflerinin doğrulanması (TŞ §22 Release satırı; bugüne dek yalnızca Windows x64 koşuldu)
+- macOS/Linux/ARM dağıtım hedeflerinin doğrulanması (TŞ §22 Release satırı; bugüne dek yerel olarak yalnızca Windows x64 koşuldu; `.github/workflows/ci.yml` `ubuntu-latest` + `windows-latest` CI matrisi 2026-11-18 K-020 ile eklendi, macOS/ARM hâlâ açık)
 - MCP SDK v1.x → v2 hattına yükseltme (TŞ §6 hedefi; K-009 sapma kaydının kapatılması — npm install kısıtı nedeniyle bugüne dek 1.32.2)
-- `causoryn_refresh_index` araç yüzeyinde `mode=incremental` açılımı (watcher in-process altyapısı hâlâ açık ret veriyor) ve per-file parse reuse'un eklenmesi (B7 Partial kalıntısının tamamı — graph tutarlılığı bugün tam türetim zorluyor)
-- adapters/typescript + adapters/csharp-roslyn TESTS kenarı üretimi (derive_test_plan `direct` sinyali bugün gerçek graph'ta dormant)
+- `causoryn_refresh_index` araç yüzeyinde `mode=incremental` (2026-11-18 K-020 ile açıldı; watcher MCP araca sarılması hâlâ açık) ve per-file parse reuse'un eklenmesi (B7 Partial kalıntısı — graph tutarlılığı bugün değişimde tam türetim zorluyor)
+- adapters/csharp-roslyn (ve diğer sidecar dillerde) TESTS kenarı üretimi (`adapters/typescript` `Test` node + `TESTS` kenarı üretimi 2026-11-18 K-020 ile aktifleştirildi; C#/Python/Go/Rust'ta `derive_test_plan` `direct` sinyali hâlâ açık)
 - OpenAPI keşfine yanıt-şeması drift'i eklenmesi (K-015(5) sadakat sınırı), TŞ §11 event versiyon uyumsuzluk kuralı (K-015(4)) ve SQL RENAME → `unknown` sınıflamasının netleştirilmesi (K-015(3))
-- compare_architecture/architecture_timeline için `.causoryn/architecture-snapshot.json` blob üreticisi (bugün elle yazılmış blob gerekiyor)
+- compare_architecture/architecture_timeline için `.causoryn/architecture-snapshot.json` iş akışı otomasyonu (`causoryn_export_documentation(format="snapshot")` ile izinli `output.allowedOutputDirs` dizinine kanonik blob üreticisi 2026-11-18 K-020 ile eklendi; workspace içine otomatik yazma kırmızı çizgi 2 gereği yapılmaz)
 - wiki_search sorgu filtrelerinin (pageKind/language/…) araç yüzeyine açılması, `WIKI_NOTE_CONFLICT` için TOOL_ERROR_GUIDANCE kaydı eklenmesi ve incremental wiki yayımında link/FTS indekslerinin tam graph'tan yeniden yazmasının daraltılması
 - E6 offline visualizer'ın gerçek tarayıcı koşusuyla doğrulanması ve viewer HTML'ini izinli output dizinine yazan MCP yüzeyi
 - Bundle fidelity: default lib (`.d.ts`) dosyalarının bundle'a katılması veya doküman sınırlaması (global-referanslı kaynaklar bugün `partial`'a düşüyor — docs/security-pass.md Dürüstlük 1)

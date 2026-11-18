@@ -67,6 +67,22 @@ export const causorynServerConfigSchema = workspacePolicyConfigSchema.extend({
       dataDbPath: z.string().min(1).optional(),
     })
     .default({}),
+  /**
+   * Kalıcı graph/index veri kökü beyanı (TŞ §9 SQLite GraphRepository +
+   * symbol_fts; TŞ §20 CAUSORYN_DATA_DIR ilkesi; ADR-008 kaynak ağacı
+   * salt-okunurluğu). Beyan yazma hedefi SQLite dosyasının tam yoludur.
+   * Default beyansız → süreç-içi InMemoryGraphRepository kullanılır (diskte
+   * hiçbir yere yazılmaz). Beyan başlangıçta doğrulanır: mutlak yol, null
+   * byte yok, allowRoots dolu, üst dizin mevcut dizin ve hem sözcüksel hem
+   * gerçek yol (realpath) açısından TÜM yetkili workspace köklerinin
+   * DIŞINDA olmalıdır — ihlal CausorynConfigError ile sunucuyu düşürür
+   * (fail-closed; wiki.dataDbPath ile birebir aynı güvenlik sözleşmesi).
+   */
+  storage: z
+    .strictObject({
+      dataDbPath: z.string().min(1).optional(),
+    })
+    .default({}),
 });
 
 export type CausorynServerConfig = z.infer<typeof causorynServerConfigSchema>;

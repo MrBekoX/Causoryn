@@ -8,6 +8,7 @@
     ".": "./src/index.ts"
   },
   "dependencies": {
-    "@causoryn/domain": "0.1.0"
+    "@causoryn/domain": "0.1.0",
+    "@causoryn/sidecar-ipc": "0.1.0"
   }
 }

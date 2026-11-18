@@ -1034,27 +1034,33 @@ describe("MCP server — protokol düzeyi", { timeout: 30_000 }, () => {
     }
   });
 
-  it("negatif refresh_index: mode=incremental bu dilimde INVALID_ARGUMENT döner (Live Architecture B7)", async () => {
-    const pair = await connectClient(makeContext());
+  it("pozitif refresh_index: mode=incremental tamamlanır; değişimsiz workspace'te no-op uyarısıyla mevcut snapshot korunur", async () => {
+    const context = makeContext();
+    const initialSnapshotId = context.repository.getLatestPublished("default")?.snapshot.meta.id;
+    const pair = await connectClient(context);
     try {
       const result = await callTool(pair.client, "causoryn_refresh_index", {
         mode: "incremental",
       });
       const envelope = expectEnvelope(result);
-      expect(envelope.status).toBe("error");
-      expect((envelope.error as Record<string, unknown>).code).toBe("INVALID_ARGUMENT");
-      // Denetim bulgusu 2/8: B7 altyapısı BU DALDA geldi (IndexJobManager +
-      // WorkspaceWatcher incremental işletiyor) — reddin gerekçe metni
-      // bayat "gelecek" zaman taşıyamaz; dürüst hali: araç yüzeyi henüz
-      // açılmadı, altyapı hazır, şimdilik mode=full.
-      const message = (envelope.error as Record<string, unknown>).message as string;
-      expect(message).not.toContain("gelecek");
-      expect(message).toContain("araç yüzeyinde henüz");
-      expect(message).toContain("mode=full");
+      expect(envelope.status).toBe("ok");
+      const refreshData = envelope.data as Record<string, unknown>;
+      expect(refreshData.mode).toBe("incremental");
+      const jobId = refreshData.jobId as string;
+
+      await context.jobManager.waitForJob(jobId);
+
+      const status = await callTool(pair.client, "causoryn_index_status", { jobId });
+      const statusData = statusDataOf(expectEnvelope(status));
+      const job = statusData.job as Record<string, unknown>;
+      expect(job.status).toBe("done");
+      expect(job.mode).toBe("incremental");
+      expect(job.snapshotId).toBe(initialSnapshotId);
+      expect((job.warnings as string[]).some((w) => w.includes("incremental no-op"))).toBe(true);
     } finally {
       await pair.close();
     }
-  });
+  }, 30_000);
 
   it("negatif index_status: bilinmeyen jobId → INVALID_ARGUMENT (sabit hata kodu)", async () => {
     const pair = await connectClient(makeContext());

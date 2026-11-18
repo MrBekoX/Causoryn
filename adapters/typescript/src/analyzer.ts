@@ -149,11 +149,10 @@ function toPosix(p: string): string {
  * haritası eşleşemez ve NodeNext bağ Wagner "Cannot find module" üretir
  * (diskteki kopyası olan fixture'da bu hata disk fallback'iyle maskelenir).
  */
-function canonicalPath(p: string): string {
+function normalizePosixPath(p: string): string {
   const posix = toPosix(p);
-  const lower = posix.toLowerCase();
-  const drivePrefix = /^[a-z]:/.test(lower) ? lower.slice(0, 2) : undefined;
-  const body = drivePrefix === undefined ? lower : lower.slice(2);
+  const drivePrefix = /^[a-zA-Z]:/.test(posix) ? posix.slice(0, 2) : undefined;
+  const body = drivePrefix === undefined ? posix : posix.slice(2);
   const isAbsolute = body.startsWith("/");
   const segments: string[] = [];
   for (const segment of body.split("/")) {
@@ -172,6 +171,11 @@ function canonicalPath(p: string): string {
   const joined = segments.join("/");
   if (drivePrefix !== undefined) return `${drivePrefix}/${joined}`;
   return isAbsolute ? `/${joined}` : joined;
+}
+
+function canonicalPath(p: string): string {
+  const normalized = normalizePosixPath(p);
+  return ts.sys.useCaseSensitiveFileNames ? normalized : normalized.toLowerCase();
 }
 
 function posixDirname(p: string): string {
@@ -227,7 +231,9 @@ function normalizeRelativePath(raw: string): string {
 
 interface SourceEntry {
   readonly relativePath: string;
-  /** Kanonik sanal mutlak yol; compiler host anahtarları. */
+  /** Büyük/küçük harf koruyan normalize POSIX sanal yol (TS rootNames ve containingFile). */
+  readonly absolutePath: string;
+  /** Kanonik sanal mutlak yol; compiler host harita anahtarı. */
   readonly absoluteKey: string;
   readonly content: string;
   readonly sourceHash: string;
@@ -378,6 +384,10 @@ interface AnalysisContext {
   readonly assembler: GraphAssembler;
   /** Bildirim sembolü → node kaydı (registry). */
   readonly registry: Map<ts.Symbol, NodeRecord>;
+  /** Test callback fonksiyonu → Test node kaydı (yalnızca test-affinity dosyalar). */
+  readonly testCallbacks: Map<ts.Node, NodeRecord>;
+  /** BDD sarmalayıcı çağrıları (`describe`/`it`/`test`); sahte CALLS kenarı üretmez. */
+  readonly testBlockCalls: Set<ts.CallExpression>;
   readonly framework: FrameworkCollection;
 }
 
@@ -407,7 +417,8 @@ function runAnalysis(input: TypeScriptAdapterInput): AnalysisRun {
   const entryByRelativePath = new Map<string, SourceEntry>();
   for (const source of input.sources as readonly TsAdapterSourceFile[]) {
     const relativePath = normalizeRelativePath(source.relativePath);
-    const absoluteKey = canonicalPath(`${rootPosix}/${relativePath}`);
+    const absolutePath = normalizePosixPath(`${rootPosix}/${relativePath}`);
+    const absoluteKey = canonicalPath(absolutePath);
     if (entries.has(absoluteKey) || entryByRelativePath.has(relativePath)) {
       throw new DomainError(
         "adapter/duplicate-source-path",
@@ -416,6 +427,7 @@ function runAnalysis(input: TypeScriptAdapterInput): AnalysisRun {
     }
     const entry: SourceEntry = {
       relativePath,
+      absolutePath,
       absoluteKey,
       content: source.content,
       sourceHash: sha256Hex(utf8Encode(source.content)),
@@ -452,13 +464,12 @@ function runAnalysis(input: TypeScriptAdapterInput): AnalysisRun {
   // Bellek-içi kaynakların ata dizinleri: NodeNext çözümleyicisi aday
   // dosyaya bakmadan önce dizin varlığını directoryExists ile sorar;
   // bellek-içi dizinler diskte olmadığından ham yanıt "yok"tur ve çözümleme
-  // adaya hiç ulaşmadan düşer (denetim bulgusu kök nedeni — kanıt:
-  // minimal resolutionHost'ta çözülür, directoryExists eklenince düşer).
+  // adaya hiç ulaşmadan düşer (POSIX "/" kökünde ilk ayraç index 0'dır).
   const memoryDirectories = new Set<string>();
   for (const key of entries.keys()) {
     let slash = key.indexOf("/");
-    while (slash > 0) {
-      memoryDirectories.add(key.slice(0, slash));
+    while (slash >= 0) {
+      memoryDirectories.add(canonicalPath(slash === 0 ? "/" : key.slice(0, slash)));
       slash = key.indexOf("/", slash + 1);
     }
   }
@@ -511,7 +522,7 @@ function runAnalysis(input: TypeScriptAdapterInput): AnalysisRun {
   host.resolveModuleNameLiterals = resolveModuleNameLiteralsHook;
 
   // 3) Program + TypeChecker (TŞ §7: TypeScript Compiler API).
-  const rootNames = sortedEntries.map((entry) => entry.absoluteKey);
+  const rootNames = sortedEntries.map((entry) => entry.absolutePath);
   const program = ts.createProgram({ rootNames, options: compilerOptions, host });
   const checker = program.getTypeChecker();
   for (const sourceFile of program.getSourceFiles()) {
@@ -529,6 +540,8 @@ function runAnalysis(input: TypeScriptAdapterInput): AnalysisRun {
     entryByRelativePath,
     assembler,
     registry: new Map<ts.Symbol, NodeRecord>(),
+    testCallbacks: new Map<ts.Node, NodeRecord>(),
+    testBlockCalls: new Set<ts.CallExpression>(),
     framework: {
       detections: [],
       nodeKeys: new Set<string>(),
@@ -960,6 +973,195 @@ function extractDeclarations(
       continue;
     }
   }
+
+  if (isTestAffinityTypeScriptFile(entry.relativePath)) {
+    extractTestDefinitions(context, entry, sourceFile, fileNode, addContains);
+  }
+}
+
+const TEST_AFFINITY_MARKERS: readonly string[] = [".test", ".spec", ".tests"];
+const TEST_AFFINITY_SUFFIXES: readonly string[] = ["Tests", "Test", "Spec"];
+const BDD_MODIFIERS: ReadonlySet<string> = new Set(["only", "skip"]);
+
+/**
+ * Test-affinity TypeScript dosyası denetimi (preflight testAffinityBase +
+ * `__tests__` dizin segmenti uyumu). Üretim dosyalarındaki `test(...)` /
+ * `it(...)` çağrıları bu kapı sayesinde test bloğu olarak yorumlanmaz.
+ */
+function isTestAffinityTypeScriptFile(relativePath: string): boolean {
+  const segments = toPosix(relativePath).split("/");
+  if (segments.includes("node_modules")) return false;
+  const basename = segments[segments.length - 1] ?? "";
+  if (
+    basename.endsWith(".d.ts") ||
+    basename.endsWith(".d.mts") ||
+    basename.endsWith(".d.cts")
+  ) {
+    return false;
+  }
+  let stem: string | undefined;
+  for (const ext of [".tsx", ".ts", ".mts", ".cts"]) {
+    if (basename.length > ext.length && basename.endsWith(ext)) {
+      stem = basename.slice(0, basename.length - ext.length);
+      break;
+    }
+  }
+  if (stem === undefined) return false;
+  if (segments.slice(0, -1).includes("__tests__")) return true;
+  for (const marker of TEST_AFFINITY_MARKERS) {
+    if (stem.length > marker.length && stem.endsWith(marker)) return true;
+  }
+  for (const suffix of TEST_AFFINITY_SUFFIXES) {
+    if (stem.length > suffix.length && stem.endsWith(suffix)) return true;
+  }
+  return false;
+}
+
+interface BddBlockMatch {
+  readonly title: string;
+  readonly callback: ts.ArrowFunction | ts.FunctionExpression;
+}
+
+function extractStaticNonEmptyTitle(
+  arg: ts.Expression | undefined,
+): string | undefined {
+  if (arg === undefined) return undefined;
+  if (!ts.isStringLiteral(arg) && !ts.isNoSubstitutionTemplateLiteral(arg)) {
+    return undefined;
+  }
+  if (arg.text.trim().length === 0) return undefined;
+  return arg.text;
+}
+
+function findLastCallbackArgument(
+  args: readonly ts.Expression[],
+): ts.ArrowFunction | ts.FunctionExpression | undefined {
+  for (let index = args.length - 1; index >= 1; index -= 1) {
+    const candidate = args[index];
+    if (
+      candidate !== undefined &&
+      (ts.isArrowFunction(candidate) || ts.isFunctionExpression(candidate))
+    ) {
+      return candidate;
+    }
+  }
+  return undefined;
+}
+
+function isSuiteCallee(callee: ts.Expression): boolean {
+  if (ts.isIdentifier(callee)) return callee.text === "describe";
+  if (
+    ts.isPropertyAccessExpression(callee) &&
+    ts.isIdentifier(callee.expression) &&
+    callee.expression.text === "describe"
+  ) {
+    return BDD_MODIFIERS.has(callee.name.text);
+  }
+  return false;
+}
+
+function isTestCallee(callee: ts.Expression): boolean {
+  if (ts.isIdentifier(callee)) {
+    return callee.text === "it" || callee.text === "test";
+  }
+  if (
+    ts.isPropertyAccessExpression(callee) &&
+    ts.isIdentifier(callee.expression) &&
+    (callee.expression.text === "it" || callee.expression.text === "test")
+  ) {
+    return BDD_MODIFIERS.has(callee.name.text);
+  }
+  return false;
+}
+
+function matchSuiteCall(call: ts.CallExpression): BddBlockMatch | undefined {
+  if (!isSuiteCallee(call.expression) || call.arguments.length < 2) {
+    return undefined;
+  }
+  const title = extractStaticNonEmptyTitle(call.arguments[0]);
+  if (title === undefined) return undefined;
+  const callback = findLastCallbackArgument(call.arguments);
+  if (callback === undefined) return undefined;
+  return { title, callback };
+}
+
+function matchTestCall(call: ts.CallExpression): BddBlockMatch | undefined {
+  if (!isTestCallee(call.expression) || call.arguments.length < 2) {
+    return undefined;
+  }
+  const title = extractStaticNonEmptyTitle(call.arguments[0]);
+  if (title === undefined) return undefined;
+  const callback = findLastCallbackArgument(call.arguments);
+  if (callback === undefined) return undefined;
+  return { title, callback };
+}
+
+function extractTestDefinitions(
+  context: AnalysisContext,
+  entry: SourceEntry,
+  sourceFile: ts.SourceFile,
+  fileNode: NodeRecord,
+  addContains: (
+    from: NodeRecord,
+    to: NodeRecord,
+    node: ts.Node,
+    rationale: string,
+  ) => void,
+): void {
+  const { assembler, testCallbacks, testBlockCalls } = context;
+
+  const walk = (node: ts.Node, suiteChain: readonly string[]): void => {
+    if (ts.isCallExpression(node)) {
+      const suiteMatch = matchSuiteCall(node);
+      if (suiteMatch !== undefined) {
+        testBlockCalls.add(node);
+        const nextSuiteChain = [...suiteChain, suiteMatch.title];
+        walk(node.expression, suiteChain);
+        for (const arg of node.arguments) {
+          if (arg === suiteMatch.callback) {
+            walk(suiteMatch.callback.body, nextSuiteChain);
+          } else {
+            walk(arg, suiteChain);
+          }
+        }
+        return;
+      }
+
+      const testMatch = matchTestCall(node);
+      if (testMatch !== undefined) {
+        testBlockCalls.add(node);
+        const qualifiedName =
+          suiteChain.length > 0
+            ? `${suiteChain.join(" > ")} > ${testMatch.title}`
+            : testMatch.title;
+        const testRecord = assembler.ensureNode({
+          kind: "Test",
+          qualifiedName,
+          relativePath: entry.relativePath,
+          language: LANGUAGE,
+        });
+        addContains(
+          fileNode,
+          testRecord,
+          node,
+          `CONTAINS: ${entry.relativePath} dosyasındaki '${qualifiedName}' test tanımı AST span kanıtıyla eşlendi.`,
+        );
+        testCallbacks.set(testMatch.callback, testRecord);
+        walk(node.expression, suiteChain);
+        for (const arg of node.arguments) {
+          if (arg === testMatch.callback) {
+            walk(testMatch.callback.body, suiteChain);
+          } else {
+            walk(arg, suiteChain);
+          }
+        }
+        return;
+      }
+    }
+    ts.forEachChild(node, (child) => walk(child, suiteChain));
+  };
+
+  walk(sourceFile, []);
 }
 
 /* ------------------------------------------------------------------ */
@@ -1020,7 +1222,7 @@ function extractImports(
   const specifiers = collectModuleSpecifiers(sourceFile);
 
   for (const specifier of specifiers) {
-    const record = classifyModuleSpecifier(context, entry.absoluteKey, specifier.text);
+    const record = classifyModuleSpecifier(context, entry.absolutePath, specifier.text);
 
     if (record.status === "internal") {
       const targetFile = assembler.ensureNode({
@@ -1169,11 +1371,15 @@ function extractCallsAndRoutes(
   const visit = (node: ts.Node, caller: NodeRecord | undefined): void => {
     let currentCaller = caller;
 
-    if (
-      ts.isFunctionDeclaration(node) ||
-      ts.isMethodDeclaration(node) ||
-      ts.isArrowFunction(node) ||
-      ts.isFunctionExpression(node)
+    const testCaller = context.testCallbacks.get(node);
+    if (testCaller !== undefined) {
+      currentCaller = testCaller;
+    } else if (ts.isFunctionDeclaration(node) || ts.isMethodDeclaration(node)) {
+      const ref = callerRecordForFunctionLike(context, entry, node);
+      if (ref !== undefined) currentCaller = ref;
+    } else if (
+      (ts.isArrowFunction(node) || ts.isFunctionExpression(node)) &&
+      caller?.node.kind !== "Test"
     ) {
       const ref = callerRecordForFunctionLike(context, entry, node);
       if (ref !== undefined) currentCaller = ref;
@@ -1181,7 +1387,9 @@ function extractCallsAndRoutes(
 
     if (ts.isCallExpression(node)) {
       tryRoutePattern(context, entry, sourceFile, node);
-      emitCallEdge(context, entry, sourceFile, node, currentCaller);
+      if (!context.testBlockCalls.has(node)) {
+        emitCallEdge(context, entry, sourceFile, node, currentCaller);
+      }
     } else if (ts.isNewExpression(node)) {
       emitCallEdge(context, entry, sourceFile, node, currentCaller);
     }
@@ -1511,6 +1719,21 @@ function emitCallEdge(
         `CALLS: ${caller.node.qualifiedName} içindeki çağrı ifadesi TypeChecker ile ${registryHit.node.qualifiedName} sembolüne çözümlendi (verified).`,
       ),
     });
+    if (caller.node.kind === "Test" && registryHit.node.kind !== "Test") {
+      assembler.addEdge({
+        kind: "TESTS",
+        from: caller,
+        to: registryHit,
+        resolution: "verified",
+        evidence: evidenceFor(
+          entry,
+          sourceFile,
+          call,
+          "semantic-symbol",
+          `TESTS: ${caller.node.qualifiedName} testi içindeki çağrı ifadesi TypeChecker ile ${registryHit.node.qualifiedName} sembolüne çözümlendi (verified).`,
+        ),
+      });
+    }
     return;
   }
 

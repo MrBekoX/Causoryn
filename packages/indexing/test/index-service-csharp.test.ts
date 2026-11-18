@@ -567,30 +567,44 @@ describe("INDEXED_ADAPTERS — beş adapter kaydı (get_capabilities yüzeyi)", 
 
 describe("analyzerFingerprint fp2 şeması (birim)", () => {
   it("extractRoslynRefPackContext: ReferenceResolver.cs:144 formatını ayrıştırır", () => {
-    const context = extractRoslynRefPackContext([
-      "referans paketi yüklendi: Microsoft.AspNetCore.App.Ref 10.0.11 (C:\\Program Files\\dotnet\\packs\\Microsoft.AspNetCore.App.Ref\\10.0.11\\ref\\net10.0)",
-      "referans paketi yüklendi: Microsoft.NETCore.App.Ref 10.0.11 (C:\\Program Files\\dotnet\\packs\\Microsoft.NETCore.App.Ref\\10.0.11\\ref\\net10.0)",
-    ]);
-    expect(context).not.toBeNull();
-    expect(context?.packs).toHaveLength(2);
-    // Pack adına göre sıralı (deterministik fingerprint).
-    expect(context?.packs[0]?.pack).toBe("Microsoft.AspNetCore.App.Ref");
-    expect(context?.packs[0]?.version).toBe("10.0.11");
-    expect(context?.packs[1]?.pack).toBe("Microsoft.NETCore.App.Ref");
-    // DOTNET_ROOT tanımsız → host/standart keşif etiketi.
-    expect(context?.source).toBe("worker-discovered");
+    const original = process.env["DOTNET_ROOT"];
+    delete process.env["DOTNET_ROOT"];
+    try {
+      const context = extractRoslynRefPackContext([
+        "referans paketi yüklendi: Microsoft.AspNetCore.App.Ref 10.0.11 (C:\\Program Files\\dotnet\\packs\\Microsoft.AspNetCore.App.Ref\\10.0.11\\ref\\net10.0)",
+        "referans paketi yüklendi: Microsoft.NETCore.App.Ref 10.0.11 (C:\\Program Files\\dotnet\\packs\\Microsoft.NETCore.App.Ref\\10.0.11\\ref\\net10.0)",
+      ]);
+      expect(context).not.toBeNull();
+      expect(context?.packs).toHaveLength(2);
+      // Pack adına göre sıralı (deterministik fingerprint).
+      expect(context?.packs[0]?.pack).toBe("Microsoft.AspNetCore.App.Ref");
+      expect(context?.packs[0]?.version).toBe("10.0.11");
+      expect(context?.packs[1]?.pack).toBe("Microsoft.NETCore.App.Ref");
+      // DOTNET_ROOT tanımsız → host/standart keşif etiketi.
+      expect(context?.source).toBe("worker-discovered");
+    } finally {
+      if (original === undefined) delete process.env["DOTNET_ROOT"];
+      else process.env["DOTNET_ROOT"] = original;
+    }
   });
 
   it("extractRoslynRefPackContext: pack yoksa fallback-corelib, worker koşmadıysa null", () => {
-    const fallback = extractRoslynRefPackContext([
-      "Microsoft.NETCore.App.Ref pack bulunamadı; çalışma zamanı düşüşü: yalnızca System.Private.CoreLib.dll referansı eklendi.",
-    ]);
-    expect(fallback).not.toBeNull();
-    expect(fallback?.packs).toHaveLength(0);
-    expect(fallback?.source).toBe("worker-discovered");
+    const original = process.env["DOTNET_ROOT"];
+    delete process.env["DOTNET_ROOT"];
+    try {
+      const fallback = extractRoslynRefPackContext([
+        "Microsoft.NETCore.App.Ref pack bulunamadı; çalışma zamanı düşüşü: yalnızca System.Private.CoreLib.dll referansı eklendi.",
+      ]);
+      expect(fallback).not.toBeNull();
+      expect(fallback?.packs).toHaveLength(0);
+      expect(fallback?.source).toBe("worker-discovered");
 
-    expect(extractRoslynRefPackContext([])).toBeNull();
-    expect(extractRoslynRefPackContext(["ilgisiz uyarı"])).toBeNull();
+      expect(extractRoslynRefPackContext([])).toBeNull();
+      expect(extractRoslynRefPackContext(["ilgisiz uyarı"])).toBeNull();
+    } finally {
+      if (original === undefined) delete process.env["DOTNET_ROOT"];
+      else process.env["DOTNET_ROOT"] = original;
+    }
   });
 
   it("buildAnalyzerFingerprint: deterministik; ayar değişimi opts hash'ini değiştirir (opts = geçilen ayarlar)", () => {

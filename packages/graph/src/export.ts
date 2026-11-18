@@ -6,6 +6,7 @@ import { snapshotCanonicalJson, type SnapshotGraph } from "@causoryn/domain";
 import { OutputAccessPolicy } from "@causoryn/workspace";
 
 import { GraphRepositoryError } from "./errors.js";
+import { serializeSnapshotContentSet } from "./timeline.js";
 
 /**
  * causoryn_export_documentation çekirdeği — TŞ v2.1 §16 "Onboarding,
@@ -59,7 +60,13 @@ import { GraphRepositoryError } from "./errors.js";
  */
 
 /** Export formatları (görev sözleşmesi 2): MCP yüzeyindeki `format` alanı. */
-export const EXPORT_DOCUMENTATION_FORMATS = ["json", "markdown", "mermaid", "html"] as const;
+export const EXPORT_DOCUMENTATION_FORMATS = [
+  "json",
+  "markdown",
+  "mermaid",
+  "html",
+  "snapshot",
+] as const;
 
 export type ExportDocumentationFormat = (typeof EXPORT_DOCUMENTATION_FORMATS)[number];
 
@@ -74,6 +81,7 @@ export const EXPORT_DEFAULT_FILE_NAMES: Readonly<
   markdown: "causoryn-architecture.md",
   mermaid: "causoryn-architecture.mmd",
   html: "causoryn-architecture.html",
+  snapshot: "architecture-snapshot.json",
 };
 
 /* ------------------------------------------------------------------ */
@@ -410,6 +418,21 @@ export function serializeDocumentationHtml(snapshot: SnapshotGraph): string {
 }
 
 /* ------------------------------------------------------------------ */
+/* Snapshot ContentSet serializer (.causoryn/architecture-snapshot.json) */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Compare/timeline okuyucularının tükettiği kanonik CompareContentSet
+ * mimari snapshot blob'u. Dangling kenarları diğer export formatlarıyla
+ * tutarlı biçimde `export/dangling-edge` koduyla reddeder.
+ */
+export function serializeDocumentationSnapshot(snapshot: SnapshotGraph): string {
+  const ordered = canonicallyOrdered(snapshot);
+  assertNoDanglingEdges(ordered);
+  return serializeSnapshotContentSet(ordered);
+}
+
+/* ------------------------------------------------------------------ */
 /* Dispatcher                                                          */
 /* ------------------------------------------------------------------ */
 
@@ -434,6 +457,8 @@ export function serializeDocumentation(
       return serializeDocumentationMermaid(snapshot);
     case "html":
       return serializeDocumentationHtml(snapshot);
+    case "snapshot":
+      return serializeDocumentationSnapshot(snapshot);
   }
 }
 

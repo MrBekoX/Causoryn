@@ -13,6 +13,7 @@ import {
   type GraphRepository,
   type GuardFinding,
   type SnapshotRead,
+  type SymbolSearchStore,
 } from "@causoryn/graph";
 import {
   EDGE_KINDS,
@@ -58,6 +59,8 @@ export interface ServiceDeps {
   readonly config: CausorynServerConfig;
   readonly policy: WorkspaceAccessPolicy;
   readonly repository: GraphRepository;
+  /** Agent GPS FTS5 sembol arama yüzeyi (SQLite symbol_fts; yoksa/null ise degrade). */
+  readonly symbolSearch?: SymbolSearchStore | null;
   /** Sprint-2 B6: causoryn_refresh_index / causoryn_index_status iş yönetimi. */
   readonly jobManager: IndexJobManager;
   /**
@@ -580,8 +583,7 @@ export function indexStatus(
 
 export const RefreshIndexInputSchema = z.strictObject({
   workspaceId: z.string().min(1).optional(),
-  /** TŞ §10.2 "mode": full = tam yeniden indeksleme; incremental altyapıda
-   * (B7: IndexJobManager + WorkspaceWatcher) mevcut, araç yüzeyinde henüz açılmadı. */
+  /** TŞ §10.2 "mode": full = tam yeniden indeksleme; incremental = karma tabanlı artımlı indeksleme (ve senkron L0 yükseltmesi). */
   mode: z.enum(["full", "incremental"]),
   /** TŞ §10.2 "scope?": dar kapsamlı refresh; araç yüzeyinde henüz desteklenmez. */
   scope: z.string().min(1).optional(),
@@ -599,25 +601,23 @@ export const RefreshIndexDataSchema = z.strictObject({
 });
 
 /**
- * causoryn_refresh_index (TŞ §10.2 "Yeni snapshot işi"; sprint-2 B6).
+ * causoryn_refresh_index (TŞ §10.2 "Yeni snapshot işi"; sprint-2 B6 + B7).
  *
  * ASYNC sözleşmesi: çağrı işi kuyruğa alır ve ANINDA jobId döner (envelope
  * snapshotId null — iş henüz snapshot üretmedi); iş in-process arka planda
  * ilerler ve causoryn_index_status(jobId) ile izlenir.
  *
  * Yazma sınırı (wiki/mcp-tools.md yazma izin matrisi): indeks yalnızca
- * Causoryn'in kendi graph deposuna (stdio sunucusunda süreç-içi
- * InMemoryGraphRepository) yazılır; kaynak workspace dosyalarına yazılmaz — kök, her çağrıda
- * requireAuthorizedWorkspace ile allowRoot'a karşı yeniden doğrulanır ve
- * JobManager ayrıca WorkspaceAccessPolicy.authorizeRoot ile senkron
- * reddeder (yetkisiz kök iş kaydı AÇMAZ → WORKSPACE_NOT_AUTHORIZED).
+ * Causoryn'in kendi graph deposuna (varsayılan süreç-içi InMemoryGraphRepository
+ * veya storage.dataDbPath ile beyanlı SQLite veri kökü) yazılır; kaynak
+ * workspace dosyalarına yazılmaz — kök, her çağrıda requireAuthorizedWorkspace
+ * ile allowRoot'a karşı yeniden doğrulanır ve JobManager ayrıca
+ * WorkspaceAccessPolicy.authorizeRoot ile senkron reddeder (yetkisiz kök iş
+ * kaydı AÇMAZ → WORKSPACE_NOT_AUTHORIZED).
  *
- * mode/scope: bu dilimde araç yüzeyi yalnızca mode="full" yürütür.
- * "incremental" ALTYAPIDA (sprint-2 B7: IndexJobManager + WorkspaceWatcher
- * incremental iş açar ve işletir) MEVCUTTUR; bu araca açılmamıştır —
- * istemcinin şimdilik yolu mode="full"dır. "scope" desteklenmez. İkisi de
- * sessizce yok sayılmaz, açık INVALID_ARGUMENT reddedilir (ADR-010:
- * çalışmayan şey Done yazılmaz; kod K-008 uzantı setinden).
+ * mode/scope: mode="full" ve mode="incremental" desteklenir ("incremental"
+ * IndexService.runIncrementalIndexAsync koşturur). "scope" desteklenmez ve
+ * açık INVALID_ARGUMENT ile reddedilir (ADR-010; kod K-008 uzantı setinden).
  */
 export function refreshIndex(
   deps: ServiceDeps,
@@ -626,16 +626,10 @@ export function refreshIndex(
 ): Envelope {
   const workspaceId = input.workspaceId ?? deps.config.workspaceId;
   const canonicalRoot = requireAuthorizedWorkspace(deps, workspaceId);
-  if (input.mode === "incremental") {
-    throw new CausorynToolError(
-      "INVALID_ARGUMENT",
-      "mode=incremental bu araç yüzeyinde henüz açılmadı; incremental işletim altyapısı (Live Architecture B7: IndexJobManager + WorkspaceWatcher) hazırdır, bu araca açılım sonraki dilim kalemidir. Şimdilik mode=full kullanın",
-    );
-  }
   if (input.scope !== undefined) {
     throw new CausorynToolError(
       "INVALID_ARGUMENT",
-      `scope dar kapsamlı yeniden indeksleme bu araç yüzeyinde desteklenmiyor (${input.scope}); tam yeniden indeksleme için mode=full kullanın`,
+      `scope dar kapsamlı yeniden indeksleme bu araç yüzeyinde desteklenmiyor (${input.scope}); tam veya artımlı yeniden indeksleme için mode=full|incremental kullanın`,
     );
   }
 
@@ -713,12 +707,12 @@ export const MapSystemInputSchema = z.strictObject({
   cursor: z.string().min(1).optional(),
 });
 
-/** Harita düzeyi → node tür kümesi (TŞ §16 L0 repository … L3 method/type/endpoint). */
+/** Harita düzeyi → node tür kümesi (TŞ §16 L0 repository … L3 method/type/endpoint/test). */
 const MAP_LEVEL_KINDS: Readonly<Record<"L0" | "L1" | "L2" | "L3", readonly string[]>> = {
   L0: ["Workspace", "Repository", "Project"],
   L1: ["Module", "Package", "File", "Namespace", "Config"],
   L2: ["Class", "Interface", "Type"],
-  L3: ["Function", "Method", "Handler", "Endpoint"],
+  L3: ["Function", "Method", "Handler", "Endpoint", "Test"],
 };
 
 export const MapDataSchema = z.strictObject({

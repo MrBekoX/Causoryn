@@ -209,7 +209,7 @@ function buildRegistrations(context: CausorynContext): readonly ToolRegistration
       name: "causoryn_refresh_index",
       title: "İndeks yenileme",
       description:
-        "Yeni snapshot işi başlatır (mode: full; incremental Live Architecture dilimine aittir): çağrı anında jobId döner, iş arka planda koşar; causoryn_index_status ile izlenir. Yalnızca Causoryn'in kendi graph deposuna (stdio sunucusunda süreç-içi InMemoryGraphRepository) yazar; kaynak workspace dosyalarına yazmaz (Rust/Go sidecar'ları derlenmemişse kendi toolchain target/cache dizinlerini kullanabilir).",
+        'Yeni snapshot işi başlatır (mode="full" | "incremental"): çağrı anında jobId döner, iş arka planda koşar; causoryn_index_status ile izlenir. mode="incremental" kaynak dosya karmaları değişmediyse mevcut yayını korur (no-op), senkron L0 başlangıç snapshot\'ını ise tam çok-dilli analize yükseltir. Yalnızca Causoryn\'in kendi graph deposuna (varsayılan süreç-içi InMemoryGraphRepository veya isteğe bağlı storage.dataDbPath SQLite kalıcı veri kökü) yazar; kaynak workspace dosyalarına yazmaz (Rust/Go sidecar\'ları derlenmemişse kendi toolchain target/cache dizinlerini kullanabilir).',
       inputSchema: RefreshIndexInputSchema,
       outputSchema: envelopeOutputSchema(RefreshIndexDataSchema),
       annotations: WRITE_TOOL_ANNOTATIONS,
@@ -347,7 +347,7 @@ function buildRegistrations(context: CausorynContext): readonly ToolRegistration
       name: "causoryn_export_documentation",
       title: "Documentation export",
       description:
-        "Yayımlanmış snapshot'ı json|markdown|mermaid|html formatında deterministik olarak dışa aktarır. Yazma YALNIZCA config output.allowedOutputDirs beyanlı dizinine atomiktir (.tmp + rename); beyanlı olmayan hedef EXPORT_NOT_ALLOWED, reddedilen dosya adı PATH_DENIED döndürür. HTML offline self-contained'dır: escaping + CSP, CDN/analytics yok.",
+        "Yayımlanmış snapshot'ı desteklenen formatta (json|markdown|mermaid|html|snapshot — mevcut EXPORT_DOCUMENTATION_FORMATS kümesi) deterministik olarak dışa aktarır. Yazma YALNIZCA config output.allowedOutputDirs beyanlı dizinine atomiktir (.tmp + rename); beyanlı olmayan hedef EXPORT_NOT_ALLOWED, reddedilen dosya adı PATH_DENIED döndürür. HTML offline self-contained'dır: escaping + CSP, CDN/analytics yok.",
       inputSchema: ExportDocumentationInputSchema,
       outputSchema: envelopeOutputSchema(ExportDocumentationDataSchema),
       annotations: WRITE_TOOL_ANNOTATIONS,

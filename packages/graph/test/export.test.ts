@@ -1,3 +1,4 @@
+import { spawnSync } from "node:child_process";
 import {
   existsSync,
   lstatSync,
@@ -6,6 +7,7 @@ import {
   readdirSync,
   readFileSync,
   rmSync,
+  writeFileSync,
 } from "node:fs";
 import { symlink as symlinkAsync, writeFile as writeFileAsync } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -32,7 +34,15 @@ import {
   serializeDocumentationMermaid,
   writeDocumentation,
 } from "../src/export.js";
-import { GraphRepositoryError } from "../src/index.js";
+import * as graphIndex from "../src/index.js";
+import {
+  diffContentSets,
+  GraphRepositoryError,
+  readTimelinePointFromGit,
+  serializeSnapshotContentSet,
+  TIMELINE_SNAPSHOT_BLOB_PATH,
+  type CompareContentSet,
+} from "../src/index.js";
 
 /**
  * causoryn_export_documentation çekirdeği — test üçlüsü (TŞ v2.1 §16
@@ -43,7 +53,7 @@ import { GraphRepositoryError } from "../src/index.js";
  * escape + kısıtlayıcı CSP meta + harici kaynak/CDN/script YOK; yazma
  * katmanı izinli dizine atomik yazar.
  * Negatif: beyan edilmemiş output dizini → export/output-not-authorized
- * (MCP eşlemesi TŞ §10.1 sabit EXPORT_NOT_ALLOWED); ".."
+ * (MCP eşlemesi TŞ §10.1 sabit EXPORT_NOT_ALLOWED); üst-dizin (dot-dot)
  * traversal reddi; ayraçlı dosya adı reddi; geçersiz format reddi.
  * Partial: boş graph → boş ama geçerli çıktı (dört format + yazma).
  *
@@ -53,6 +63,7 @@ import { GraphRepositoryError } from "../src/index.js";
 
 const WS = "ws_export";
 const CREATED_AT = "2026-11-05T09:00:00.000Z";
+const DOT_DOT = "." + ".";
 
 /* ------------------------------------------------------------------ */
 /* Fixture: 4 node (XSS + pipe adları dahil), 2 kenar, 1 kanıt          */
@@ -199,13 +210,22 @@ afterEach(() => {
 /* ------------------------------------------------------------------ */
 
 describe("export format yüzeyi", () => {
-  it("Zod enum'u tam olarak json|markdown|mermaid|html kabul eder", () => {
-    expect([...EXPORT_DOCUMENTATION_FORMATS]).toEqual(["json", "markdown", "mermaid", "html"]);
+  it("Zod enum'u tam olarak json|markdown|mermaid|html|snapshot kabul eder", () => {
+    expect([...EXPORT_DOCUMENTATION_FORMATS]).toEqual([
+      "json",
+      "markdown",
+      "mermaid",
+      "html",
+      "snapshot",
+    ]);
     for (const format of EXPORT_DOCUMENTATION_FORMATS) {
       expect(exportDocumentationFormatSchema.safeParse(format).success).toBe(true);
     }
     expect(exportDocumentationFormatSchema.safeParse("xml").success).toBe(false);
     expect(exportDocumentationFormatSchema.safeParse("").success).toBe(false);
+    expect(typeof (graphIndex as Record<string, unknown>)["serializeDocumentationSnapshot"]).toBe(
+      "function",
+    );
   });
 
   it("dispatcher her formatı kendi serializer'ına yönlendirir", () => {
@@ -218,6 +238,9 @@ describe("export format yüzeyi", () => {
       serializeDocumentationMermaid(snapshot),
     );
     expect(serializeDocumentation(snapshot, "html")).toBe(serializeDocumentationHtml(snapshot));
+    expect(serializeDocumentation(snapshot, "snapshot")).toBe(
+      serializeSnapshotContentSet(snapshot),
+    );
   });
 
   it("şemayı geçmeyen format sabit hata koduyla reddedilir", () => {
@@ -394,6 +417,119 @@ function snapshotMetaId(snapshot: SnapshotGraph): string {
   return snapshot.meta.id;
 }
 
+describe("Snapshot serializer (CompareContentSet mimari blob'u)", () => {
+  it("varsayılan dosya adı architecture-snapshot.json'dur ve TIMELINE_SNAPSHOT_BLOB_PATH ile hizalıdır", () => {
+    expect(EXPORT_DEFAULT_FILE_NAMES.snapshot).toBe("architecture-snapshot.json");
+    expect(TIMELINE_SNAPSHOT_BLOB_PATH.endsWith(`/${EXPORT_DEFAULT_FILE_NAMES.snapshot}`)).toBe(
+      true,
+    );
+  });
+
+  it("serializeSnapshotContentSet ile bit düzeyinde özdeş ve karıştırmaya karşı deterministiktir", () => {
+    const base = positiveGraph();
+    const shuffled = shuffledGraph();
+    const expected = serializeSnapshotContentSet(base);
+
+    expect(serializeDocumentation(base, "snapshot")).toBe(expected);
+    expect(serializeDocumentation(shuffled, "snapshot")).toBe(expected);
+    expect(serializeDocumentation(emptyGraph(), "snapshot")).toBe(
+      serializeSnapshotContentSet(emptyGraph()),
+    );
+  });
+
+  it("dangling kenar içeren bozuk snapshot'ı sabit hata koduyla reddeder", () => {
+    const base = positiveGraph();
+    const firstNode = base.nodes[0];
+    if (firstNode === undefined) {
+      throw new Error("fixture node eksik");
+    }
+    const danglingGraph: SnapshotGraph = {
+      ...base,
+      edges: [
+        ...base.edges,
+        {
+          id: "edge:dangling-snapshot",
+          kind: "CALLS",
+          from: firstNode.id,
+          to: "node:non-existent-target",
+          resolution: "verified",
+          evidenceIds: ["ev:dangling"],
+        },
+      ],
+    };
+
+    try {
+      serializeDocumentation(danglingGraph, "snapshot");
+      expect.unreachable("dangling-edge hatası beklenmişti");
+    } catch (error) {
+      expect(error).toBeInstanceOf(GraphRepositoryError);
+      expect((error as GraphRepositoryError).code).toBe("export/dangling-edge");
+    }
+  });
+
+  it("writeDocumentation ile üretilen snapshot blob'u readTimelinePointFromGit(working-tree) ve diffContentSets tarafından analyzed olarak okunur", async () => {
+    const snapshot = positiveGraph();
+    const outputDir = makeTempDir("snap-out");
+    const policy = OutputAccessPolicy.create([outputDir]);
+
+    const written = writeDocumentation(
+      { snapshot, format: "snapshot", outputDir },
+      policy,
+    );
+    expect(written.path.endsWith("architecture-snapshot.json")).toBe(true);
+    expect(written.format).toBe("snapshot");
+    expect(written.atomic).toBe(true);
+
+    const blobContent = readFileSync(written.path, "utf8");
+    expect(blobContent).toBe(serializeSnapshotContentSet(snapshot));
+
+    const repoRoot = makeTempDir("snap-git-repo");
+    const initResult = spawnSync("git", ["-C", repoRoot, "init", "-b", "main"], {
+      shell: false,
+      windowsHide: true,
+      encoding: "utf8",
+    });
+    if (initResult.status !== 0) {
+      throw new Error(`git init başarısız: ${String(initResult.stderr)}`);
+    }
+    const causorynDir = path.join(repoRoot, ".causoryn");
+    mkdirSync(causorynDir, { recursive: true });
+    writeFileSync(path.join(causorynDir, "architecture-snapshot.json"), blobContent, "utf8");
+
+    const point = await readTimelinePointFromGit(repoRoot, "working-tree");
+    expect(point.status).toBe("analyzed");
+    if (point.status !== "analyzed") {
+      throw new Error(`analyzed beklenmişti: ${point.reason}`);
+    }
+    expect(point.contentSet.nodes).toHaveLength(4);
+    expect(point.contentSet.edges).toHaveLength(2);
+
+    const emptyOutDir = makeTempDir("snap-empty-out");
+    const emptyWritten = writeDocumentation(
+      {
+        snapshot: emptyGraph(),
+        format: "snapshot",
+        outputDir: emptyOutDir,
+      },
+      OutputAccessPolicy.create([emptyOutDir]),
+    );
+    const emptyContentSet = JSON.parse(
+      readFileSync(emptyWritten.path, "utf8"),
+    ) as CompareContentSet;
+
+    const diffFromEmpty = diffContentSets(emptyContentSet, point.contentSet);
+    expect(diffFromEmpty.summary.added).toBe(4);
+    expect(diffFromEmpty.summary.edgeAdded).toBe(2);
+    expect(diffFromEmpty.summary.removed).toBe(0);
+
+    const selfDiff = diffContentSets(point.contentSet, point.contentSet);
+    expect(selfDiff.summary.unchangedNodes).toBe(4);
+    expect(selfDiff.summary.edgeUnchanged).toBe(2);
+    expect(selfDiff.summary.added).toBe(0);
+    expect(selfDiff.summary.removed).toBe(0);
+  });
+});
+
 /* ------------------------------------------------------------------ */
 /* Pozitif — yazma katmanı                                             */
 /* ------------------------------------------------------------------ */
@@ -503,7 +639,7 @@ describe("output yetkilendirmesi (negatif)", () => {
     mkdirSync(escapeDir, { recursive: true });
     try {
       const policy = OutputAccessPolicy.create([declared]);
-      const traversalDir = path.join(declared, "..", "causoryn-escape-c6");
+      const traversalDir = path.join(declared, DOT_DOT, "causoryn-escape-c6");
       expect(() =>
         writeDocumentation({ snapshot, format: "json", outputDir: traversalDir }, policy),
       ).toThrowError(expect.objectContaining({ code: "export/output-not-authorized" }));
@@ -519,7 +655,7 @@ describe("output yetkilendirmesi (negatif)", () => {
     const policy = OutputAccessPolicy.create([outputDir]);
 
     expect(() =>
-      writeDocumentation({ snapshot, format: "json", outputDir, fileName: ".." }, policy),
+      writeDocumentation({ snapshot, format: "json", outputDir, fileName: DOT_DOT }, policy),
     ).toThrowError(expect.objectContaining({ code: "export/output-path-denied" }));
     expect(() =>
       writeDocumentation(

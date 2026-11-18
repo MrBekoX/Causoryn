@@ -66,7 +66,13 @@ import {
   type SnapshotNodeInput,
   type SourceSpan,
 } from "@causoryn/domain";
-import { GraphRepositoryError, type GraphRepository, type PublishableState } from "@causoryn/graph";
+import {
+  GraphRepositoryError,
+  type GraphRepository,
+  type PublishableState,
+  type SymbolIndexEntry,
+  type SymbolSearchStore,
+} from "@causoryn/graph";
 import type { WorkspaceAccessPolicy } from "@causoryn/workspace";
 
 import { IndexingError } from "./errors.js";
@@ -307,6 +313,15 @@ function nodeRefKey(ref: NodeRef): string {
   return canonicalJson([ref.kind, ref.qualifiedName, ref.relativePath ?? null]);
 }
 
+function isSymbolSearchStore(
+  repository: GraphRepository,
+): repository is GraphRepository & SymbolSearchStore {
+  return (
+    "indexSymbols" in repository &&
+    typeof (repository as { indexSymbols?: unknown }).indexSymbols === "function"
+  );
+}
+
 function toEvidence(workspaceId: string, input: {
   readonly kind: string;
   readonly span?: SourceSpan;
@@ -494,6 +509,44 @@ export class IndexService {
       responseMaxChars: DEFAULT_RS_RESPONSE_MAX_CHARS,
       cargoBuildTimeoutMs: rustOptions.cargoBuildTimeoutMs ?? DEFAULT_CARGO_BUILD_TIMEOUT_MS,
     };
+    this.runCount = this.readInitialRunCount();
+  }
+
+  /**
+   * Depoda yayımlanmış bir snapshot varsa revision.sequence değerini okur;
+   * kalıcı SQLite yeniden açılışlarında sequence sıfırlanmasını ve UNIQUE(id)
+   * çakışmasını önler. Kayıtlı olmayan workspace'lerde güvenli biçimde 0 döner.
+   */
+  private readInitialRunCount(): number {
+    if (this.workspaceId.trim().length === 0) return 0;
+    try {
+      const existing = this.repository.getLatestPublished(this.workspaceId);
+      return existing?.snapshot.meta.revision.sequence ?? 0;
+    } catch {
+      return 0;
+    }
+  }
+
+  /**
+   * Depo SymbolSearchStore destekliyorsa yayımlanan snapshot'ın sembol
+   * düğümlerini (Workspace/File/UnknownExternal hariç) symbol_fts tablosuna
+   * yazar (Agent GPS FTS5 ayağı, TŞ §9/§15).
+   */
+  private indexPublishedSymbols(snapshot: SnapshotGraph): void {
+    if (!isSymbolSearchStore(this.repository)) return;
+    const symbolEntries: SymbolIndexEntry[] = [];
+    for (const node of snapshot.nodes) {
+      if (
+        node.kind !== "Workspace" &&
+        node.kind !== "File" &&
+        node.kind !== "UnknownExternal"
+      ) {
+        symbolEntries.push({ symbol: node.qualifiedName, nodeId: node.id });
+      }
+    }
+    if (symbolEntries.length > 0) {
+      this.repository.indexSymbols(snapshot.meta.id, symbolEntries);
+    }
   }
 
   /**
@@ -568,8 +621,12 @@ export class IndexService {
     const prepared = this.prepareRun(rootPath);
     const change = this.analyzeChanges(prepared.entries);
     const latest = this.repository.getLatestPublished(this.workspaceId);
+    const degradedSyncSnapshot =
+      latest !== undefined &&
+      latest.snapshot.meta.analyzerFingerprint.includes("sync-run-degraded");
     if (
       !change &&
+      !degradedSyncSnapshot &&
       latest !== undefined &&
       (latest.snapshot.meta.state === "ready" || latest.snapshot.meta.state === "partial")
     ) {
@@ -864,6 +921,7 @@ export class IndexService {
         }
         const publishedAt = this.clock();
         const snapshot = this.repository.publish(opened.buildId, "partial", publishedAt);
+        this.indexPublishedSymbols(snapshot);
         this.runCount += 1;
         const stale = this.repository.getLatestPublished(this.workspaceId)?.stale ?? false;
         return {
@@ -1014,6 +1072,7 @@ export class IndexService {
 
       const publishedAt = this.clock();
       const snapshot = this.repository.publish(opened.buildId, state, publishedAt);
+      this.indexPublishedSymbols(snapshot);
       this.runCount += 1;
       const stale = this.repository.getLatestPublished(this.workspaceId)?.stale ?? false;
       return {
@@ -1290,6 +1349,7 @@ export class IndexService {
         }
         const publishedAt = this.clock();
         const snapshot = this.repository.publish(opened.buildId, "partial", publishedAt);
+        this.indexPublishedSymbols(snapshot);
         this.runCount += 1;
         const stale = this.repository.getLatestPublished(this.workspaceId)?.stale ?? false;
         return {
@@ -1368,6 +1428,7 @@ export class IndexService {
 
       const publishedAt = this.clock();
       const snapshot = this.repository.publish(opened.buildId, state, publishedAt);
+      this.indexPublishedSymbols(snapshot);
       this.runCount += 1;
       const stale = this.repository.getLatestPublished(this.workspaceId)?.stale ?? false;
       return {

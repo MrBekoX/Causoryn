@@ -1,0 +1,81 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: Verify (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - windows-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+          cache: npm
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: "10.0.x"
+
+      - name: Setup Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Setup Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: "native/go-worker/go.mod"
+          cache: false
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install dependencies
+        run: npm ci --ignore-scripts
+
+      - name: Build Roslyn worker
+        run: dotnet build native/roslyn-worker/Causoryn.RoslynWorker.csproj -c Debug
+
+      - name: Build Rust worker
+        run: cargo build --manifest-path native/rust-worker/Cargo.toml
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Build packages and adapters
+        run: npm run build
+
+      - name: Build MCP server bundle
+        run: npm run build:bundle --workspace packages/mcp-server
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Secret scan
+        run: npm run secret-scan
+
+      - name: Run test suite
+        run: npm test
