@@ -147,7 +147,7 @@ describe("policy konfigürasyon şeması (Zod, TŞ §20)", () => {
     expect(parseWorkspacePolicyConfig({ allowRoots: ["./repo"] }).ok).toBe(false);
     expect(parseWorkspacePolicyConfig({ allowRoots: ["../repo"] }).ok).toBe(false);
     expect(parseWorkspacePolicyConfig({ allowRoots: ["C:drive-relative"] }).ok).toBe(false);
-    expect(parseWorkspacePolicyConfig({ allowRoots: ["D:\\mutlak\\kok"] }).ok).toBe(true);
+    expect(parseWorkspacePolicyConfig({ allowRoots: [path.resolve("/mutlak/kok")] }).ok).toBe(true);
   });
 
   it("partial: ignore override edilir, extraIgnore eklenir", () => {

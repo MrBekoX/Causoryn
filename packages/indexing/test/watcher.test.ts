@@ -607,14 +607,15 @@ describe("WorkspaceWatcher — Live Architecture (sprint-2 B7)", { timeout: 30_0
 
         // Stub factory gerçek FS'yi izlemez: HER İKİ olay da seam üzerinden
         // verilir (OS zamanlamasından bağımsız, deterministik).
+        const nativeRel = path.join("src", "app.ts");
         writeFileSync(path.join(harness.root, "src", "app.ts"), APP_V2, "utf8");
-        listener?.("change", "src\\app.ts");
+        listener?.("change", nativeRel);
         await waitFor(() => statsOf(harness.watcher).jobsEnqueued >= 1, "ilk iş açılmadı");
         // Manuel scheduler: iş KUYRUKTA bekliyor, koşmadı — kritik pencere.
         expect(harness.manager.latest()?.status).toBe("queued");
 
         // OS straggler'i: AYNI içerik için ikinci olay, iş koşmadan gelir.
-        listener?.("change", "src\\app.ts");
+        listener?.("change", nativeRel);
         await waitFor(
           () => statsOf(harness.watcher).noOpSkipped >= 1,
           "straggler coalesce edilmedi: ikinci iş açıldı",

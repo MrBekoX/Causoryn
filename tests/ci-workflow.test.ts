@@ -129,6 +129,7 @@ describe(".github/workflows/ci.yml — CI sözleşmesi ve güvenlik kapıları",
     const setupGo = steps.find((step) => step.uses === "actions/setup-go@v7");
     expect(setupGo).toBeDefined();
     expect(setupGo?.with?.["go-version-file"]).toBe("native/go-worker/go.mod");
+    expect(setupGo?.with?.["cache"]).toBe(false);
 
     const setupRust = steps.find(
       (step) => step.uses === "dtolnay/rust-toolchain@stable",

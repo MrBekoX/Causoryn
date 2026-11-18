@@ -149,11 +149,10 @@ function toPosix(p: string): string {
  * haritası eşleşemez ve NodeNext bağ Wagner "Cannot find module" üretir
  * (diskteki kopyası olan fixture'da bu hata disk fallback'iyle maskelenir).
  */
-function canonicalPath(p: string): string {
+function normalizePosixPath(p: string): string {
   const posix = toPosix(p);
-  const lower = posix.toLowerCase();
-  const drivePrefix = /^[a-z]:/.test(lower) ? lower.slice(0, 2) : undefined;
-  const body = drivePrefix === undefined ? lower : lower.slice(2);
+  const drivePrefix = /^[a-zA-Z]:/.test(posix) ? posix.slice(0, 2) : undefined;
+  const body = drivePrefix === undefined ? posix : posix.slice(2);
   const isAbsolute = body.startsWith("/");
   const segments: string[] = [];
   for (const segment of body.split("/")) {
@@ -172,6 +171,11 @@ function canonicalPath(p: string): string {
   const joined = segments.join("/");
   if (drivePrefix !== undefined) return `${drivePrefix}/${joined}`;
   return isAbsolute ? `/${joined}` : joined;
+}
+
+function canonicalPath(p: string): string {
+  const normalized = normalizePosixPath(p);
+  return ts.sys.useCaseSensitiveFileNames ? normalized : normalized.toLowerCase();
 }
 
 function posixDirname(p: string): string {
@@ -227,7 +231,9 @@ function normalizeRelativePath(raw: string): string {
 
 interface SourceEntry {
   readonly relativePath: string;
-  /** Kanonik sanal mutlak yol; compiler host anahtarları. */
+  /** Büyük/küçük harf koruyan normalize POSIX sanal yol (TS rootNames ve containingFile). */
+  readonly absolutePath: string;
+  /** Kanonik sanal mutlak yol; compiler host harita anahtarı. */
   readonly absoluteKey: string;
   readonly content: string;
   readonly sourceHash: string;
@@ -411,7 +417,8 @@ function runAnalysis(input: TypeScriptAdapterInput): AnalysisRun {
   const entryByRelativePath = new Map<string, SourceEntry>();
   for (const source of input.sources as readonly TsAdapterSourceFile[]) {
     const relativePath = normalizeRelativePath(source.relativePath);
-    const absoluteKey = canonicalPath(`${rootPosix}/${relativePath}`);
+    const absolutePath = normalizePosixPath(`${rootPosix}/${relativePath}`);
+    const absoluteKey = canonicalPath(absolutePath);
     if (entries.has(absoluteKey) || entryByRelativePath.has(relativePath)) {
       throw new DomainError(
         "adapter/duplicate-source-path",
@@ -420,6 +427,7 @@ function runAnalysis(input: TypeScriptAdapterInput): AnalysisRun {
     }
     const entry: SourceEntry = {
       relativePath,
+      absolutePath,
       absoluteKey,
       content: source.content,
       sourceHash: sha256Hex(utf8Encode(source.content)),
@@ -456,13 +464,12 @@ function runAnalysis(input: TypeScriptAdapterInput): AnalysisRun {
   // Bellek-içi kaynakların ata dizinleri: NodeNext çözümleyicisi aday
   // dosyaya bakmadan önce dizin varlığını directoryExists ile sorar;
   // bellek-içi dizinler diskte olmadığından ham yanıt "yok"tur ve çözümleme
-  // adaya hiç ulaşmadan düşer (denetim bulgusu kök nedeni — kanıt:
-  // minimal resolutionHost'ta çözülür, directoryExists eklenince düşer).
+  // adaya hiç ulaşmadan düşer (POSIX "/" kökünde ilk ayraç index 0'dır).
   const memoryDirectories = new Set<string>();
   for (const key of entries.keys()) {
     let slash = key.indexOf("/");
-    while (slash > 0) {
-      memoryDirectories.add(key.slice(0, slash));
+    while (slash >= 0) {
+      memoryDirectories.add(canonicalPath(slash === 0 ? "/" : key.slice(0, slash)));
       slash = key.indexOf("/", slash + 1);
     }
   }
@@ -515,7 +522,7 @@ function runAnalysis(input: TypeScriptAdapterInput): AnalysisRun {
   host.resolveModuleNameLiterals = resolveModuleNameLiteralsHook;
 
   // 3) Program + TypeChecker (TŞ §7: TypeScript Compiler API).
-  const rootNames = sortedEntries.map((entry) => entry.absoluteKey);
+  const rootNames = sortedEntries.map((entry) => entry.absolutePath);
   const program = ts.createProgram({ rootNames, options: compilerOptions, host });
   const checker = program.getTypeChecker();
   for (const sourceFile of program.getSourceFiles()) {
@@ -1215,7 +1222,7 @@ function extractImports(
   const specifiers = collectModuleSpecifiers(sourceFile);
 
   for (const specifier of specifiers) {
-    const record = classifyModuleSpecifier(context, entry.absoluteKey, specifier.text);
+    const record = classifyModuleSpecifier(context, entry.absolutePath, specifier.text);
 
     if (record.status === "internal") {
       const targetFile = assembler.ensureNode({

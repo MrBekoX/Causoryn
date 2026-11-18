@@ -48,6 +48,7 @@ jobs:
         uses: actions/setup-go@v7
         with:
           go-version-file: "native/go-worker/go.mod"
+          cache: false
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
