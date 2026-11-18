@@ -19,7 +19,7 @@ sürümleme [SemVer](https://semver.org/lang/tr/) ilkelerini izler.
 - wiki_search sorgu filtrelerinin (pageKind/language/…) araç yüzeyine açılması, `WIKI_NOTE_CONFLICT` için TOOL_ERROR_GUIDANCE kaydı eklenmesi ve incremental wiki yayımında link/FTS indekslerinin tam graph'tan yeniden yazmasının daraltılması
 - E6 offline visualizer'ın gerçek tarayıcı koşusuyla doğrulanması ve viewer HTML'ini izinli output dizinine yazan MCP yüzeyi
 - Bundle fidelity: default lib (`.d.ts`) dosyalarının bundle'a katılması veya doküman sınırlaması (global-referanslı kaynaklar bugün `partial`'a düşüyor — docs/security-pass.md Dürüstlük 1)
-- Rate-limit/concurrency resource budget (K-010 kapsam dışı beyanı) ve adanmış secret-scan script'i
+- Rate-limit/concurrency resource budget (K-010 kapsam dışı beyanı) (adanmış secret-scan kapısı 2026-11-17/18 denetim turunda `scripts/secret-scan.mjs` / `npm run secret-scan` ile eklendi)
 - npm audit 10 moderate dev-toolchain uyarısının (minimatch) çözülmesi
 
 ## [0.1.0] - 2026-11-09

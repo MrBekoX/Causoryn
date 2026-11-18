@@ -1,9 +1,10 @@
 /**
  * Saf TS SHA-256 (FIPS 180-4).
  *
- * Neden saf TS (güncel gerekçe — denetim bulgusu düzeltmesi): domain
- * paketinin çalışma zamanı bağımlılığı sıfırdır (bağımlılık sınırı: core/
- * domain yalnızca domain sözleşmelerine bağlıdır) ve algoritma NIST FIPS
+ * Neden saf TS (güncel gerekçe — denetim bulgusu düzeltmesi): bu modülün dış
+ * bağımlılığı sıfırdır (@causoryn/domain paketi dışarıdan yalnızca zod
+ * kullanır; bağımlılık sınırı: core/domain yalnızca domain sözleşmelerine
+ * bağlıdır) ve algoritma NIST FIPS
  * 180-2 örnek vektörleriyle kanıtlanmıştır (bkz.
  * packages/domain/test/sha256.test.ts). `@types/node` artık kök
  * devDependency olduğundan `node:crypto`'ya geçiş teknik olarak mümkündür;

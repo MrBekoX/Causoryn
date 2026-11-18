@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "causoryn": {
+      "command": "node",
+      "args": [
+        "scripts/mcp-server.mjs"
+      ],
+      "env": {
+        "CAUSORYN_CONFIG": "{\"allowRoots\":[]}"
+      }
+    }
+  }
+}

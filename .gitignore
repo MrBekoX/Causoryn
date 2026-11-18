@@ -1,6 +1,7 @@
 # Node / build çıktıları
 node_modules/
 dist/
+integrations/antigravity/causoryn/scripts/
 coverage/
 *.tsbuildinfo
 

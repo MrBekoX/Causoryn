@@ -16,14 +16,12 @@
  * Kasıtlı kapsam dışı (dürüstlük beyanı): İSTEK HIZI (rate) limiti bu
  * dilimde YOKTUR — TŞ §19/§20'nin kaynak tüketimi sınırları bu dilimde
  * yalnızca boyut limitleriyle karşılanır. Rate limit sonraki dilimlere
- * aittir; karar kaydı wiki/decisions.md'e orkestratör tarafından
- * işlenmelidir (wiki yazımı bu pakete kapalıdır).
+ * aittir (K-010, wiki/decisions.md:36).
  *
  * SDK sürüm notu: TŞ §6 hedefi "resmî SDK v2 (@modelcontextprotocol/server)"
  * iken bu dilim KURULU @modelcontextprotocol/sdk 1.32.2 (v1.x hattı,
  * LATEST_PROTOCOL_VERSION 2025-11-25) ile yazılmıştır — npm install yasağı
- * nedeniyle sürüm yükseltmesi yapılmamıştır. Karar kaydı wiki/decisions.md
- * için orkestratöre bırakılmıştır.
+ * nedeniyle sürüm yükseltmesi yapılmamıştır (K-009, wiki/decisions.md:35).
  *
  * Kırmızı çizgiler (TŞ §10.1):
  * - stdout YALNIZCA MCP stdio protokol trafiği; tüm loglar stderr.
@@ -35,10 +33,9 @@
  *   guard/export/git-revision araçları YENİ uzantı kodu basmaz: POLICY_INVALID,
  *   INVALID_REVISION ve EXPORT_NOT_ALLOWED TŞ §10.1 sabit listesinin
  *   üyeleridir ve bu dilimde ilk kez kullanıldılar (takım denetimi bulgusu).
- *   K-008 karar kaydı (wiki/decisions.md) yalnızca ilk ikisini kapsar;
- *   SYMBOL_NOT_FOUND için K-008'i genişleten yeni ADR kaydının
- *   wiki/decisions.md'e işlenmesi orkestratöre aittir (wiki yazımı ajan
- *   dışı).
+ *   ADR durumu (wiki/decisions.md): INVALID_ARGUMENT + EVIDENCE_NOT_FOUND
+ *   K-008 ile, SYMBOL_NOT_FOUND ise K-011 (wiki/decisions.md:37) ile karara
+ *   bağlanmıştır).
  */
 export { SERVER_NAME, SERVER_VERSION, SCHEMA_VERSION, TOOL_NAMES } from "./version.js";
 export type { ToolName } from "./version.js";
@@ -149,6 +146,7 @@ export {
   WikiContractChangeSchema,
 } from "./services-wiki.js";
 export {
+  coverageOf,
   getCapabilities,
   workspaceSummary,
   indexStatus,

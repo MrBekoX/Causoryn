@@ -13,11 +13,16 @@ hızlı referansı içindir; uyuşmazlıkta kaynak şema esastır.
 
 ## Standart envelope (TŞ §10.1)
 
-Her yanıt: `schemaVersion` ("2.0") + `requestId` + `workspaceId` + `snapshotId` +
-`status` (ok | partial | error) + `coverage` + `warnings` + `data` + `nextCursor`.
+Her yanıt 10 alanlı `EnvelopeSchema` (`z.strictObject`) sözleşmesini eksiksiz taşır:
+`schemaVersion` ("2.0") + `requestId` + `workspaceId` + `snapshotId` +
+`status` (ok | partial | error) + `coverage` + `warnings` + `data` + `nextCursor` +
+`error` (10. alan; ok/partial durumunda `null`, hata durumunda `{code, message, retryable, userAction}`).
 Hata kodları TŞ §10.1 sabit seti + üç proje uzantısıdır
-(`packages/mcp-server/src/errors.ts` `CAUSORYN_TOOL_ERROR_CODES`, 15 kod);
-her hata `retryable` + `userAction` rehberi taşır. stdout yalnızca MCP protokol
+(`packages/mcp-server/src/errors.ts` `CAUSORYN_TOOL_ERROR_CODES`, 15 kod; uzantılar K-008/K-011 ile kayıtlı, `UNSUPPORTED_LANGUAGE` rezerve sabit koddur);
+her hata `retryable` + `userAction` rehberi taşır. Ayrıca `packages/mcp-server/src/server.ts`
+yayımlanan 29 aracın tamamında yapısal MCP `annotations` (`readOnlyHint`, `destructiveHint: false`, `openWorldHint: false`)
+sunar: yazma matrisindeki 3 araçta (`causoryn_refresh_index`, `causoryn_export_documentation`, `causoryn_wiki_build`)
+`readOnlyHint: false`, geri kalan 26 araçta `readOnlyHint: true` beyan edilir. stdout yalnızca MCP protokol
 trafiğidir; loglar `[causoryn]` önekiyle stderr'e gider (kırmızı kural 4).
 
 **Evrensel kodlar (tablodan ayrı):** `INTERNAL_ERROR` her araçta beklenmeyen hata
@@ -55,8 +60,8 @@ sabitler — bkz. `docs/implementation-status.md`).
 | `causoryn_compare_architecture` | `baseRef`, `targetRef` | İki git ref arası mimari diff: node ek/çıkar/değişen kümeleri, belgeli confidence'lı rename, kenar + API yüzeyi değişimleri; salt-okunur git okuma | `WORKSPACE_NOT_AUTHORIZED`, `INDEX_NOT_READY`, `INVALID_ARGUMENT`, `INVALID_REVISION`, `POLICY_INVALID`, `LIMIT_EXCEEDED` |
 | `causoryn_get_agent_context` | `task`, `candidateScope?`, `tokenBudget` (zorunlu) | exact-symbol → graph-proximity → contract → freshness → fts ayaklı bağlam paketi; `estimatedTokens`, `omittedCount`, degrade ayaklar açık | `WORKSPACE_NOT_AUTHORIZED`, `INDEX_NOT_READY`, `INVALID_ARGUMENT`, `LIMIT_EXCEEDED` |
 | `causoryn_generate_onboarding` | `audience` (beginner/intermediate/maintainer) | Yapısal onboarding verisi: giriş noktaları, ilk 5 merkezi modül, öğrenme sırası (SCC), kritik akışlar, riskli alanlar; doğal dil host modelin işidir | `WORKSPACE_NOT_AUTHORIZED`, `INDEX_NOT_READY`, `INVALID_ARGUMENT`, `LIMIT_EXCEEDED` |
-| `causoryn_export_documentation` | `format` (json/markdown/mermaid/html), `view`, `outputDir?` | Deterministik dışa aktarma; yazma YALNIZCA `output.allowedOutputDirs` beyanlı dizinine atomiktir (.tmp+rename); HTML offline self-contained (CSP, CDN yok) | `WORKSPACE_NOT_AUTHORIZED`, `INDEX_NOT_READY`, `INVALID_ARGUMENT`, `LIMIT_EXCEEDED`, `EXPORT_NOT_ALLOWED`, `PATH_DENIED` |
-| `causoryn_preflight_change` | `intent`, `targetSymbols?`/`targetFiles?`, `baseSnapshot?` | ADAY Preflight Manifest: impactCandidates (certainty/resolution ayrı), contractChecks, testPlanId, limitations, sourceRevision; **kod yazmaz** (candidateOnly sabit true) | `WORKSPACE_NOT_AUTHORIZED`, `INDEX_NOT_READY`, `AMBIGUOUS_SYMBOL`, `SYMBOL_NOT_FOUND`, `INVALID_ARGUMENT`, `LIMIT_EXCEEDED`, `PATH_DENIED` |
+| `causoryn_export_documentation` | `format` (json/markdown/mermaid/html), `outputDir` (zorunlu), `fileName?`, `view?` (`view` açık `INVALID_ARGUMENT` reddi) | Deterministik graph snapshot dışa aktarma; yazma YALNIZCA `output.allowedOutputDirs` beyanlı dizinine atomiktir (.tmp+rename); HTML offline self-contained (CSP, CDN yok) | `WORKSPACE_NOT_AUTHORIZED`, `INDEX_NOT_READY`, `INVALID_ARGUMENT`, `LIMIT_EXCEEDED`, `EXPORT_NOT_ALLOWED`, `PATH_DENIED` |
+| `causoryn_preflight_change` | `intent`, `targetSymbols?`/`targetFiles?`, `baseSnapshot?` | ADAY Preflight Manifest: impactCandidates (certainty/resolution ayrı), contractChecks, testPlanId, limitations, sourceRevision; **diske kod/veri yazmaz** (candidateOnly sabit true; manifest yalnızca süreç-içi `PreflightManifestStore` FIFO 200 bellekte tutulur) | `WORKSPACE_NOT_AUTHORIZED`, `INDEX_NOT_READY`, `AMBIGUOUS_SYMBOL`, `SYMBOL_NOT_FOUND`, `INVALID_ARGUMENT`, `LIMIT_EXCEEDED`, `PATH_DENIED` |
 | `causoryn_check_contracts` | `contracts?` ({name?, base, target} spec çiftleri), `snapshotId?` | backward-safe/risk/breaking_candidate/unknown sınıflaması; kural adı + eski/yeni satır kanıtı; çift-bağlanamayan tanılar ayrı | `WORKSPACE_NOT_AUTHORIZED`, `INDEX_NOT_READY`, `INVALID_ARGUMENT`, `LIMIT_EXCEEDED`, `PATH_DENIED`, `CONTRACT_PARSE_FAILED` |
 | `causoryn_detect_contract_drift` | `base`, `target`, `scope?`, `anchorFiles?` | Canonical drift: contractChanges ({contractId, changeKind, summary}), breaking/risk/unknown ayrı, PRODUCES/CONSUMES_CONTRACT etki grafı, `unconsumedChanges` (unresolved consumers) | `WORKSPACE_NOT_AUTHORIZED`, `INDEX_NOT_READY`, `INVALID_ARGUMENT`, `LIMIT_EXCEEDED`, `PATH_DENIED`, `CONTRACT_PARSE_FAILED` |
 | `causoryn_verify_change` | `preflightId?` / `baseSnapshot?` (en az biri), `target?` | Dört denetimli doğrulama raporu: architecture/contracts/graph-diff/test-plan; verdict sabit kural zincirinden: no_findings \| review_required \| blocking_findings \| inconclusive; test durumu `not_run` varsayılan (observed yalnızca evidenceRef+sha256 kanıtıyla); rapor byte-deterministik; **kod yazmaz, test çalıştırmaz** | `WORKSPACE_NOT_AUTHORIZED`, `INDEX_NOT_READY`, `INVALID_ARGUMENT`, `INVALID_REVISION`, `LIMIT_EXCEEDED`, `PATH_DENIED`, `POLICY_INVALID` |
@@ -78,20 +83,21 @@ sabitler — bkz. `docs/implementation-status.md`).
 
 ## Yazma izin matrisi (kırmızı çizgi 2)
 
-| Araç | Yazabileceği yer |
-|---|---|
-| `causoryn_refresh_index` | Yalnızca izinli Causoryn data-root (indeks/snapshot) |
-| `causoryn_export_documentation` | Yalnızca `output.allowedOutputDirs` beyanlı dizin (atomik) |
-| `causoryn_wiki_build` | Yalnızca `wiki.dataDbPath` beyanlı data-root SQLite (workspace dışı, mutlak yol) |
-| `causoryn_preflight_change` / `causoryn_verify_change` | **Hiçbir yere** — kod yazmaz, çalışma ağacı değişmez (candidateOnly/verify-only tip kilidi) |
-| Diğer tüm araçlar | Salt okunur (workspace hiçbir koşulda yazılmaz — ADR-008) |
+| Araç | MCP `readOnlyHint` | Yazabileceği yer / bellek-içi yan etki |
+|---|---|---|
+| `causoryn_refresh_index` | `false` | Yalnızca Causoryn kendi indeks deposu — varsayılan stdio kablolamasında süreç-içi `InMemoryGraphRepository` (`context.ts:133`; kaynak workspace salt-okunur taranır; Rust/Go sidecar ilk derlemeleri kendi toolchain `target`/cache dizinlerini kullanabilir) |
+| `causoryn_export_documentation` | `false` | Yalnızca `output.allowedOutputDirs` beyanlı dizin (atomik `.tmp` + rename; varsayılan `[]` → `EXPORT_NOT_ALLOWED`) |
+| `causoryn_wiki_build` | `false` | Yalnızca `wiki.dataDbPath` beyanlı data-root SQLite (workspace dışı, mutlak yol; ayrıca sunucu başlangıcında `openWikiStores` tanımlı `wiki.dataDbPath` üzerinde tekil workspace kaydını ilklendirir) |
+| `causoryn_preflight_change` / `causoryn_verify_change` | `true` | **Diske ve çalışma ağacına hiçbir yere yazmaz** (`candidateOnly` sabit `true`, verify-only tip kilidi); `preflight_change` ürettiği manifesti `verify_change(preflightId)` çözümü için yalnızca süreç-içi `PreflightManifestStore` belleğinde (FIFO tavan 200) tutar |
+| Diğer tüm araçlar (24 araç) | `true` | Salt okunur (workspace hiçbir koşulda yazılmaz — ADR-008) |
 
 ## Tekrar kullanma ilkesi
 
 `causoryn_refresh_index` WikiSnapshot'ı otomatik güncellemez; wiki yenileme
-`causoryn_wiki_build`'in kendisidir; `export_documentation(view)` snapshot
-görünümlerini dışa aktarır. Ayrı `wiki_refresh`/`wiki_export` aracı AÇILMAZ —
-wiki/mcp-tools.md katalog ilkesiyle aynıdır.
+`causoryn_wiki_build`'in kendisidir. `causoryn_export_documentation` bu dilimde her zaman
+yayımlanmış graph snapshot'ını dışa aktarır (`view` parametresi verildiğinde açık
+`INVALID_ARGUMENT` ile reddedilir — ADR-010). Ayrı `wiki_refresh`/`wiki_export`
+aracı AÇILMAZ — wiki/mcp-tools.md katalog ilkesiyle aynıdır.
 
 ## İlgili sayfalar
 

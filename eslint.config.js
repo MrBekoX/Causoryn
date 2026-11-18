@@ -13,6 +13,7 @@ export default tseslint.config(
     ignores: [
       "**/node_modules/**",
       "**/dist/**",
+      "integrations/antigravity/causoryn/scripts/**",
       "out/**",
       "raw/**",
       "wiki/**",

@@ -75,8 +75,9 @@ import type { VerificationServiceDeps } from "./services-verification.js";
  *   (TŞ §11 "(6) unresolved consumers" dürüstlük hükmü).
  * - causoryn_derive_test_plan: "changeSet/preflightId?" → `changeSet?`
  *   ({changedSymbols?, changedFiles?}); `preflightId?` BEYANLI ama bu dilimde
- *   ÇÖZÜMLENMEZ (manifest deposu tutulmaz) → şemayı geçen değer AÇIK
- *   INVALID_ARGUMENT ile reddedilir (ADR-010 sessiz yok sayma yok;
+ *   ÇÖZÜMLENMEZ (süreç-içi PreflightManifestStore yalnızca verify_change
+ *   içindir; derive_test_plan bu dilimde preflightId çözmez) → şemayı geçen
+ *   değer AÇIK INVALID_ARGUMENT ile reddedilir (ADR-010 sessiz yok sayma yok;
  *   candidateScope/focus/granularity açık-ret örüntüsü).
  *
  * SALT-OKUNUR disiplin (kırmızı çizgiler 2/3): sözleşme keşfi yalnızca
@@ -808,8 +809,10 @@ export const DeriveTestPlanInputSchema = z.strictObject({
     })
     .optional(),
   /**
-   * TŞ §10.2 "preflightId?": BEYANLI ama bu dilimde ÇÖZÜMLENMEZ (manifest
-   * deposu tutulmaz) — şemayı geçen değer açık INVALID_ARGUMENT ile reddedilir.
+   * TŞ §10.2 "preflightId?": BEYANLI ama bu dilimde ÇÖZÜMLENMEZ (süreç-içi
+   * PreflightManifestStore yalnızca verify_change içindir; derive_test_plan bu
+   * dilimde preflightId çözmez) — şemayı geçen değer açık INVALID_ARGUMENT ile
+   * reddedilir.
    */
   preflightId: z.string().min(1).optional(),
   /** TŞ §20 resource budget (çekirdek tavanları TEST_PLAN_LIMIT_CEILINGS). */
@@ -836,11 +839,12 @@ export function deriveTestPlan(
 
   const changeSet = input.changeSet;
   if (input.preflightId !== undefined) {
-    // Açık ret (uydurma çözümleme yok): manifest deposu bu dilimde yoktur.
+    // Açık ret (uydurma çözümleme yok): süreç-içi PreflightManifestStore
+    // yalnızca verify_change içindir; derive_test_plan bu dilimde preflightId çözmez.
     if (changeSet === undefined) {
       throw new CausorynToolError(
         "INVALID_ARGUMENT",
-        `preflightId bu araç yüzeyinde çözümlenemez (manifest deposu tutulmaz): ${input.preflightId} — değişiklik kümesini changeSet ile verin`,
+        `preflightId bu araç yüzeyinde çözümlenemez (süreç-içi PreflightManifestStore yalnızca verify_change içindir; derive_test_plan bu dilimde preflightId çözmez): ${input.preflightId} — değişiklik kümesini changeSet ile verin`,
       );
     }
     throw new CausorynToolError(
@@ -974,8 +978,9 @@ export const PreflightChangeDataSchema = PreflightManifestDataSchema.extend({
 /**
  * causoryn_preflight_change (TŞ §10.2/§10.3; sprint-5 D4): intent + hedef
  * kümesinden ADAY Preflight Manifest üretir. KOD YAZMAZ — candidateOnly
- * sabit true'dur ve manifest yalnızca yanıt gövdesinde yaşar (kaynak ağacına
- * hiçbir yazma yoktur; red çizgisi 2). Bileşim: analyzeImpact (packages/
+ * sabit true'dur ve manifest yanıt gövdesinde döner ve süreç-içi
+ * PreflightManifestStore'da (bellek-içi, FIFO 200; diske yazmaz) tutulur
+ * (kaynak ağacına hiçbir yazma yoktur; red çizgisi 2). Bileşim: analyzeImpact (packages/
  * graph) → impactCandidates; D6 deriveTestPlan → testPlanId + gömülü plan;
  * resolveSourceRevision (salt-okunur dosya okuması, komut çalıştırma yok) →
  * sourceRevision; hedef dosyalar WorkspaceAccessPolicy.checkFile kararı
