@@ -3,6 +3,7 @@
   "files": [],
   "references": [
     { "path": "packages/domain" },
+    { "path": "packages/sidecar-ipc" },
     { "path": "packages/workspace" },
     { "path": "packages/indexing" },
     { "path": "packages/graph" },

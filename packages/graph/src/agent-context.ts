@@ -585,7 +585,11 @@ export function generateAgentContext(
         "fts: boş sorgu kümesi için depo çağrısı yapılmadı (ayak koştu, katkı yok)",
       );
     } else {
-      const hits = input.symbolSearch.searchSymbols(input.task, MAX_FTS_HITS);
+      const hits = input.symbolSearch.searchSymbols(
+        input.task,
+        MAX_FTS_HITS,
+        snapshot.meta.id,
+      );
       const seen = new Set<string>();
       let rank = 0;
       let droppedUnknown = 0;

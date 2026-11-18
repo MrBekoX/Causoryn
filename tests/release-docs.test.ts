@@ -158,13 +158,15 @@ describe("NEGATİF: tool-contracts.md yayımlanmamış araç reklamlayamaz", () 
     expect(unknown).toEqual([]);
   });
 
-  it("causoryn_refresh_index incremental destekliyor gibi SUNULAMAZ (açık ret ADR-010 kaydı korunur)", () => {
+  it("causoryn_refresh_index full ve incremental modlarını, scope açık reddini ve B7 Partial sınırını belgeler (ADR-010)", () => {
     const text = readDoc("toolContracts");
     const row = text
       .split("\n")
       .find((l) => l.startsWith("| `causoryn_refresh_index`"));
     expect(row).toBeTruthy();
+    expect(row).toContain("full");
     expect(row).toContain("incremental");
+    expect(row).toContain("scope");
   });
 });
 
@@ -554,7 +556,7 @@ describe("BAĞIMSIZ DENETİM DÖNGÜSÜ (2026-11-18): doküman↔kod tam parite 
     throw lastError instanceof Error ? lastError : new Error(String(lastError));
   }
 
-  it("docs/architecture.md: 5 dil adapter'ı, 4 native sidecar, 16 npm workspace paketi, 12 tsconfig referansı ve secret-scan kapısıyla senkron; bayat ifadeler yok", () => {
+  it("docs/architecture.md: 5 dil adapter'ı, 4 native sidecar, 17 npm workspace paketi, 13 tsconfig referansı, sidecar-ipc ve secret-scan kapısıyla senkron; bayat ifadeler yok", () => {
     const text = readDoc("architecture");
     for (const adapter of [
       "`adapters/typescript`",
@@ -573,13 +575,16 @@ describe("BAĞIMSIZ DENETİM DÖNGÜSÜ (2026-11-18): doküman↔kod tam parite 
     ]) {
       expect(text).toContain(sidecar);
     }
+    expect(text).toContain("`packages/sidecar-ipc`");
+    expect(text).toContain("storage.dataDbPath");
+    expect(text).toContain(".github/workflows/ci.yml");
 
     const tsconfig = JSON.parse(readFileSync(TSCONFIG_PATH, "utf8")) as {
       references?: Array<{ path?: string }>;
     };
-    expect(tsconfig.references).toHaveLength(12);
-    expect(text).toMatch(/\b16\b[^\n]*workspace paket/i);
-    expect(text).toMatch(/tsconfig\.json[^\n]*\b12\b[^\n]*refer/i);
+    expect(tsconfig.references).toHaveLength(13);
+    expect(text).toMatch(/\b17\b[^\n]*workspace paket/i);
+    expect(text).toMatch(/tsconfig\.json[^\n]*\b13\b[^\n]*refer/i);
 
     const rootPkg = JSON.parse(readFileSync(DOC_PATHS.rootPkg, "utf8")) as {
       scripts?: Record<string, string>;
@@ -590,10 +595,11 @@ describe("BAĞIMSIZ DENETİM DÖNGÜSÜ (2026-11-18): doküman↔kod tam parite 
     expect(text).toContain("scripts/mcp-server.mjs");
 
     expect(text).not.toContain("9 doğrudan reference");
+    expect(text).not.toContain("12 doğrudan referans");
     expect(text).not.toContain("TS+C# yönlendirme");
   });
 
-  it("docs/tool-contracts.md: 10 alanlı envelope (error dahil), annotations/readOnlyHint, InMemoryGraphRepository, PreflightManifestStore ve export view açık reddi yazılı", () => {
+  it("docs/tool-contracts.md: 10 alanlı envelope (error dahil), annotations/readOnlyHint, InMemoryGraphRepository + storage.dataDbPath, snapshot formatı, PreflightManifestStore ve export view açık reddi yazılı", () => {
     const text = readDoc("toolContracts");
     const envelopeHeadingIndex = text.indexOf("## Standart envelope");
     const nextHeadingIndex = text.indexOf("\n## ", envelopeHeadingIndex + 1);
@@ -607,6 +613,8 @@ describe("BAĞIMSIZ DENETİM DÖNGÜSÜ (2026-11-18): doküman↔kod tam parite 
     expect(envelopeSection).toContain("readOnlyHint");
 
     expect(text).toContain("InMemoryGraphRepository");
+    expect(text).toContain("storage.dataDbPath");
+    expect(text).toContain("architecture-snapshot.json");
     expect(text).toContain("PreflightManifestStore");
     expect(text).toMatch(/view[^\n]*INVALID_ARGUMENT|INVALID_ARGUMENT[^\n]*view/i);
   });
@@ -675,8 +683,9 @@ describe("BAĞIMSIZ DENETİM DÖNGÜSÜ (2026-11-18): doküman↔kod tam parite 
     expect(text).toContain("docs/tool-contracts.md:45,72");
     expect(text).toContain("docs/tool-contracts.md:45, 72");
     expect(text).not.toContain("services.ts:696-712");
-    expect(text).toContain("services.ts:704-722,771-776");
-    expect(text).toContain("services.ts:704-722, 771-776");
+    expect(text).not.toContain("services.ts:704-722");
+    expect(text).toContain("services.ts:698-716,765-771");
+    expect(text).toContain("services.ts:698-716, 765-771");
     expect(text).not.toContain("output-policy.ts:11-15, 27-48");
 
     // 7) K-012 Phase C (Phase D değil) + cursor yazım hatası düzeltmesi
@@ -688,8 +697,8 @@ describe("BAĞIMSIZ DENETİM DÖNGÜSÜ (2026-11-18): doküman↔kod tam parite 
     expect(text).toContain("wiki/index.md:5-28");
   });
 
-  it("docs/project-overview.tr-en.md: TR ve EN bölümleri simetrik olarak 16 workspace paketi, MCP annotations, süreç-içi depolar ve Antigravity sahnelemesini taşır", () => {
-    const text = readFileSync(OVERVIEW_PATH, "utf8");
+  it("docs/project-overview.tr-en.md: TR ve EN bölümleri simetrik olarak 17 workspace paketi, sidecar-ipc, storage.dataDbPath, CI iş akışı, MCP annotations ve Antigravity sahnelemesini taşır", () => {
+    const text = readFileSync(OVERVIEW_PATH, "utf8").replace(/\r\n/g, "\n");
     const splitMarker = "\n# English\n";
     const splitIdx = text.indexOf(splitMarker);
     expect(splitIdx, "TR / EN ayırıcı başlığı bulunmalı").toBeGreaterThan(0);
@@ -702,7 +711,11 @@ describe("BAĞIMSIZ DENETİM DÖNGÜSÜ (2026-11-18): doküman↔kod tam parite 
       expect(half).toContain("4c9c188");
       expect(half).toContain("typescript");
       expect(half).toContain("esbuild");
-      expect(half).toContain("16");
+      expect(half).toContain("17");
+      expect(half).toContain("sidecar-ipc");
+      expect(half).toContain("storage.dataDbPath");
+      expect(half).toContain(".github/workflows/ci.yml");
+      expect(half).toContain("K-020");
       expect(half).toContain("SCHEMA_VERSION");
       expect(half).toContain("readOnlyHint");
       expect(half).toContain("K-011");
@@ -717,7 +730,7 @@ describe("BAĞIMSIZ DENETİM DÖNGÜSÜ (2026-11-18): doküman↔kod tam parite 
       expect(half).toContain("wiki/index.md:5-28");
       expect(half).toContain("docs/architecture.md:13-22");
       expect(half).toContain("output-policy.ts:11-48");
-      expect(half).toContain("services.ts:704-722");
+      expect(half).toContain("services.ts:698-716");
     }
   });
 

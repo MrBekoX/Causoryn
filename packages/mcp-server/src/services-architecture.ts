@@ -769,12 +769,12 @@ export const GetAgentContextDataSchema = z.strictObject({
  * causoryn_get_agent_context (TŞ §15 Agent GPS; C4): görev metnini YALNIZCA
  * arama sorgusu olarak değerlendirir; exact-symbol → graph-proximity →
  * contract → freshness → fts ayaklarıyla sıralar, tokenBudget bütçesine
- * kadar paketler (estimatedTokens = ceil(item JSON chars / 4)). Girdisi
- * olmayan ayaklar degradedLegs'te raporlanır (hata değildir). freshness
- * ayağı depo envanterinden (repository.listFiles → files.updatedAt,
- * TŞ §9) beslenir; fts ayağı bu dilimde symbol_fts deposu bağlanmadığından
- * degrade raporlanır. Prompt injection korunması: görev metni hiçbir item
- * reason'una interpole edilmez (çekirdek sözleşmesi).
+ * (estimatedTokens = ceil(item JSON chars / 4)). Girdisi olmayan ayaklar
+ * degradedLegs'te raporlanır (hata değildir). freshness ayağı depo
+ * envanterinden (repository.listFiles → files.updatedAt, TŞ §9) beslenir;
+ * fts ayağı symbolSearch (SQLite symbol_fts) bağlandığında aktifleşir,
+ * yoksa degrade raporlanır. Prompt injection korunması: görev metni hiçbir
+ * item reason'una interpole edilmez (çekirdek sözleşmesi).
  */
 export function getAgentContext(
   deps: ServiceDeps,
@@ -804,6 +804,7 @@ export function getAgentContext(
       ...(input.maxProximityDepth === undefined
         ? {}
         : { maxProximityDepth: input.maxProximityDepth }),
+      ...(deps.symbolSearch != null ? { symbolSearch: deps.symbolSearch } : {}),
       fileFreshness,
     }),
   );
@@ -1005,7 +1006,7 @@ export const ExportDocumentationInputSchema = z.strictObject({
 
 export const ExportDocumentationDataSchema = z.strictObject({
   path: z.string(),
-  format: z.enum(["json", "markdown", "mermaid", "html"]),
+  format: z.enum(EXPORT_DOCUMENTATION_FORMATS),
   bytes: z.number().int().positive(),
   atomic: z.literal(true),
 });

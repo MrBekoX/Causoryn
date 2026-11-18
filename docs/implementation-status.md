@@ -109,10 +109,10 @@ Not: orkestratör özetindeki kısa ifadelerden iki tanesi disk gerçeğiyle bir
   2. ZCode gerçek GUI kurulum/smoke koşulmadı (kırmızı kural 6 kısıtı; manifest doğrulama düzeyi).
   3. Platform dağıtım doğrulaması yalnızca Windows x64 (TŞ §22 Release satırı: Windows/macOS/Linux x64/arm64).
   4. MCP SDK 1.32.2 v1.x hattı — TŞ §6 SDK v2 hedefi değil (K-009; npm install kısıtı).
-  5. B7 Live Architecture Partial kalıntıları: per-file parse reuse yok; watcher MCP araca sarılmadı; `refresh_index mode=incremental` araç yüzeyinde açık ret.
-  6. `derive_test_plan` direct sinyali gerçek graph'ta dormant (adapter'lar TESTS kenarı üretmiyor).
+  5. B7 Live Architecture Partial kalıntıları: per-file parse reuse yok; watcher MCP araca sarılmadı (`refresh_index mode=incremental` 2026-11-18 K-020 turunda araç yüzeyinde açıldı; B7 per-file parse reuse + watcher yüzeyi nedeniyle Partial kalır).
+  6. `derive_test_plan` direct sinyali C#/Python/Go/Rust sidecar'larında dormant (`adapters/typescript` BDD `Test` node + `TESTS` kenarı üretimi 2026-11-18 K-020 turunda eklendi; diğer dillerde TESTS kenarı üretilmiyor).
   7. OpenAPI keşfi yanıt-şeması drift'ini yüzeye taşımıyor (K-015(5)); TŞ §11 event versiyon kuralı uygulanmadı (K-015(4)); SQL rename → unknown (K-015(3)).
-  8. compare_architecture/architecture_timeline için `.causoryn/architecture-snapshot.json` blob üreticisi yok (elle yazılmış blob ile çalışır).
+  8. compare_architecture/architecture_timeline için `.causoryn/architecture-snapshot.json` üreticisi: `causoryn_export_documentation(format="snapshot")` 2026-11-18 K-020 turunda eklendi (`OutputAccessPolicy` izinli çıktı dizinine atomik yazım; workspace içine otomatik yazma ADR-008 gereği yasaktır, git revizyonuna taşıma kullanıcı kontrolündedir).
   9. wiki_search sorgu filtreleri (pageKind/language/...) yüzeyde yok; WIKI_NOTE_CONFLICT TOOL_ERROR_GUIDANCE kaydı yok; incremental wiki yayımı link/FTS indekslerini tam graph'tan yeniden yazar.
   10. Rate-limit/concurrency resource budget kapsam dışı (K-010); adanmış secret-scan script'i (F9 karar anında yoktu; 2026-11-17/18 denetim turunda `scripts/secret-scan.mjs` / `npm run secret-scan` ile kapatıldı); npm audit 10 moderate dev-toolchain uyarısı açık.
   11. E6 visualizer gerçek tarayıcı koşusu olmadan doğrulandı; viewer HTML'ini izinli output'a yazan MCP yüzeyi yok.

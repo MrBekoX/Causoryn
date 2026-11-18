@@ -178,8 +178,8 @@ export type {
   DegradedLeg,
   FileFreshness,
 } from "./agent-context.js";
-// Documentation export çekirdeği — sprint-3 C6 (TŞ §16). SAF serializer'lar
-// (json/markdown/mermaid/html) + OutputAccessPolicy ile yetkilendirilmiş
+// Documentation export çekirdeği — sprint-3 C6 (TŞ §16) + K-020 snapshot formatı. SAF serializer'lar
+// (json/markdown/mermaid/html/snapshot) + OutputAccessPolicy ile yetkilendirilmiş
 // atomik yazma katmanı; MCP zarfı mcp-server katmanındadır (C8 kaydı).
 export {
   EXPORT_DEFAULT_FILE_NAMES,
@@ -190,6 +190,7 @@ export {
   serializeDocumentationJson,
   serializeDocumentationMarkdown,
   serializeDocumentationMermaid,
+  serializeDocumentationSnapshot,
   writeDocumentation,
 } from "./export.js";
 export type {

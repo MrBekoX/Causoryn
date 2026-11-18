@@ -165,6 +165,10 @@ export class SqliteGraphRepository
         );
       }
       applySchema(this.db);
+      const maxSid = this.db
+        .prepare("SELECT COALESCE(MAX(sid), 0) AS max_sid FROM snapshots")
+        .get() as { max_sid: number };
+      this.buildSerial = maxSid.max_sid;
     } catch (error) {
       this.db.close();
       throw error;
@@ -544,17 +548,30 @@ export class SqliteGraphRepository
       requireNonEmptyField("entry.symbol", entry.symbol);
       requireNonEmptyField("entry.nodeId", entry.nodeId);
     }
-    for (const entry of entries) {
-      this.runWrite(
-        "INSERT INTO symbol_fts (symbol, node_id, snapshot_sid) VALUES (?, ?, ?)",
-        entry.symbol,
-        entry.nodeId,
-        row.sid,
+    const insertTx = this.db.transaction(
+      (sid: number, items: readonly SymbolIndexEntry[]): void => {
+        for (const entry of items) {
+          this.stmt(
+            "INSERT INTO symbol_fts (symbol, node_id, snapshot_sid) VALUES (?, ?, ?)",
+          ).run(entry.symbol, entry.nodeId, sid);
+        }
+      },
+    );
+    try {
+      insertTx(row.sid, entries);
+    } catch (error) {
+      throw new GraphRepositoryError(
+        "storage/driver-error",
+        `SQLite yazma hatası: ${errorText(error)}`,
       );
     }
   }
 
-  searchSymbols(query: string, limit?: number): readonly SymbolSearchHit[] {
+  searchSymbols(
+    query: string,
+    limit?: number,
+    snapshotId?: string,
+  ): readonly SymbolSearchHit[] {
     const trimmed = requireNonEmptyField("query", query);
     const effectiveLimit = limit ?? DEFAULT_SEARCH_LIMIT;
     if (!Number.isInteger(effectiveLimit) || effectiveLimit < 1) {
@@ -563,22 +580,67 @@ export class SqliteGraphRepository
         `limit pozitif tam sayı olmalı: ${String(effectiveLimit)}`,
       );
     }
+    if (snapshotId !== undefined) {
+      requireNonEmptyField("snapshotId", snapshotId);
+    }
+    // Gömülü NUL byte (\0) SQLite C FTS5 ayrıştırıcısında dizgeyi kapanış
+    // tırnağından önce kesip "unterminated string" hatası ürettiğinden boşluğa
+    // normalize edilir; kalan metin boşsa isabet yoktur.
+    const sanitized = trimmed.replaceAll("\0", " ").trim();
+    if (sanitized.length === 0) {
+      return [];
+    }
     // Kullanıcı girdisi FTS ifade (phrase) sözdizimiyle sarmalanır ve
     // PARAMETRE olarak bağlanır; operatör metni MATCH diline katılmaz.
-    const phrase = `"${trimmed.replaceAll('"', '""')}"`;
-    const rows = this.stmt(
-      `SELECT symbol_fts.symbol AS symbol,
-              symbol_fts.node_id AS node_id,
-              snapshots.id AS snapshot_id
-       FROM symbol_fts JOIN snapshots ON snapshots.sid = symbol_fts.snapshot_sid
-       WHERE symbol_fts MATCH ? AND snapshots.state IN ('ready','partial')
-       ORDER BY symbol_fts.symbol, symbol_fts.node_id
-       LIMIT ?`,
-    ).all(phrase, effectiveLimit) as Array<{
+    const phrase = `"${sanitized.replaceAll('"', '""')}"`;
+    let rows: Array<{
       symbol: string;
       node_id: string;
       snapshot_id: string | null;
     }>;
+    try {
+      rows =
+        snapshotId !== undefined
+          ? (this.stmt(
+              `SELECT DISTINCT symbol_fts.symbol AS symbol,
+                      symbol_fts.node_id AS node_id,
+                      snapshots.id AS snapshot_id
+               FROM symbol_fts JOIN snapshots ON snapshots.sid = symbol_fts.snapshot_sid
+               WHERE symbol_fts MATCH ? AND snapshots.id = ? AND snapshots.state IN ('ready','partial')
+               ORDER BY symbol_fts.symbol, symbol_fts.node_id
+               LIMIT ?`,
+            ).all(phrase, snapshotId, effectiveLimit) as Array<{
+              symbol: string;
+              node_id: string;
+              snapshot_id: string | null;
+            }>)
+          : (this.stmt(
+              `SELECT matched.symbol AS symbol,
+                      matched.node_id AS node_id,
+                      snapshots.id AS snapshot_id
+               FROM (
+                 SELECT symbol_fts.symbol AS symbol,
+                        symbol_fts.node_id AS node_id,
+                        MAX(snapshots.sid) AS latest_sid
+                 FROM symbol_fts
+                 JOIN snapshots ON snapshots.sid = symbol_fts.snapshot_sid
+                 WHERE symbol_fts MATCH ? AND snapshots.state IN ('ready','partial')
+                 GROUP BY symbol_fts.symbol, symbol_fts.node_id
+               ) AS matched
+               JOIN snapshots ON snapshots.sid = matched.latest_sid
+               ORDER BY matched.symbol, matched.node_id
+               LIMIT ?`,
+            ).all(phrase, effectiveLimit) as Array<{
+              symbol: string;
+              node_id: string;
+              snapshot_id: string | null;
+            }>);
+    } catch (error) {
+      throw new GraphRepositoryError(
+        "storage/driver-error",
+        `SQLite FTS arama hatası: ${errorText(error)}`,
+      );
+    }
     return rows.map((row) => ({
       symbol: row.symbol,
       nodeId: row.node_id,

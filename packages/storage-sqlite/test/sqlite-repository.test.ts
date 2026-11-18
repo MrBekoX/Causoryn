@@ -249,6 +249,33 @@ describe("SqliteGraphRepository — şema ve bağlantı", () => {
     }
   });
 
+  it("yeniden açılan DB buildSerial sayacını MAX(sid) üzerinden başlatır (buildId tekrarı yok)", () => {
+    const file = dbPath("serial-persist.sqlite");
+    const first = new SqliteGraphRepository(file);
+    first.registerWorkspace({
+      id: WS,
+      rootPath: "D:/fixture/orders",
+      createdAt: CREATED_AT,
+    });
+    const { build: firstBuild } = buildOrderSnapshot(first, 1);
+    first.publish(firstBuild.buildId, "ready", PUBLISHED_AT);
+    first.close();
+
+    const second = new SqliteGraphRepository(file);
+    try {
+      const secondBuild = second.beginBuild({
+        workspaceId: WS,
+        revision: { id: "rev-1", sequence: 1 },
+        configHash: "cfg:001",
+        analyzerFingerprint: "ts-adapter@0.1.0",
+        createdAt: CREATED_AT,
+      });
+      expect(secondBuild.buildId).not.toBe(firstBuild.buildId);
+    } finally {
+      second.close();
+    }
+  });
+
   it("farklı şema sürümü reddedilir", () => {
     const file = dbPath("future.sqlite");
     const probe = new Database(file);
@@ -869,6 +896,60 @@ describe("SqliteGraphRepository.deleteFile — güvenlik bulgusu 3", () => {
       expect(() => repo.deleteFile("baska-ws", "src/x.ts")).toThrowError(
         GraphRepositoryError,
       );
+    } finally {
+      repo.close();
+    }
+  });
+});
+
+/* ------------------------------------------------------------------ */
+/* Security Analysis #2 — symbol_fts NUL byte ve tekilleştirme         */
+/* ------------------------------------------------------------------ */
+
+describe("SqliteGraphRepository.searchSymbols — NUL byte güvenliği ve tekilleştirme", () => {
+  it("NUL byte içeren sorgu SqliteError fırlatmaz; birden çok snapshot yayımında (symbol, nodeId) en güncel yayına tekilleştirilir", () => {
+    const repo = new SqliteGraphRepository(dbPath("fts-nul-dedup.sqlite"));
+    try {
+      repo.registerWorkspace({
+        id: WS,
+        rootPath: "D:/fixture/orders",
+        createdAt: CREATED_AT,
+      });
+      const snap1 = buildOrderSnapshot(repo, 1);
+      const pub1 = repo.publish(snap1.build.buildId, "ready", PUBLISHED_AT);
+      const targetNode = pub1.nodes.find((n) => n.kind !== "Workspace");
+      expect(targetNode).toBeDefined();
+      const nodeIdVal = targetNode!.id;
+
+      repo.indexSymbols(pub1.meta.id, [
+        { symbol: "OrdersService", nodeId: nodeIdVal },
+      ]);
+
+      const snap2 = buildOrderSnapshot(repo, 2);
+      const pub2 = repo.publish(snap2.build.buildId, "ready", PUBLISHED_AT_2);
+      repo.indexSymbols(pub2.meta.id, [
+        { symbol: "OrdersService", nodeId: nodeIdVal },
+      ]);
+
+      // 1) Çoklu snapshot yayımında aynı (symbol, nodeId) çifti tek satır döner (en güncel snapshotId).
+      const normalHits = repo.searchSymbols("OrdersService", 10);
+      expect(normalHits).toHaveLength(1);
+      expect(normalHits[0]?.nodeId).toBe(nodeIdVal);
+      expect(normalHits[0]?.snapshotId).toBe(pub2.meta.id);
+
+      // 1b) snapshotId parametresi verildiğinde yalnızca o snapshot'ın kayıtları döner (eski/silinmiş sembol sızmaz).
+      repo.indexSymbols(pub1.meta.id, [
+        { symbol: "LegacyDeletedSymbol", nodeId: "node:legacy" },
+      ]);
+      expect(repo.searchSymbols("LegacyDeletedSymbol", 10, pub2.meta.id)).toEqual([]);
+      expect(repo.searchSymbols("LegacyDeletedSymbol", 10, pub1.meta.id)).toEqual([
+        { symbol: "LegacyDeletedSymbol", nodeId: "node:legacy", snapshotId: pub1.meta.id },
+      ]);
+
+      // 2) NUL byte içeren sorgu C-string kesilmesiyle SqliteError ("unterminated string") fırlatmaz.
+      expect(() => repo.searchSymbols("Orders\0Service", 10)).not.toThrow();
+      // Yalnızca NUL + boşluk kalan sorgu boş dizi döner.
+      expect(repo.searchSymbols(" \0 \0 ", 10)).toEqual([]);
     } finally {
       repo.close();
     }

@@ -137,5 +137,9 @@ export interface SymbolSearchStore {
    * olabilir; arama yalnızca yayımlanmış satırları döndürür.
    */
   indexSymbols(snapshotId: string, entries: readonly SymbolIndexEntry[]): void;
-  searchSymbols(query: string, limit?: number): readonly SymbolSearchHit[];
+  searchSymbols(
+    query: string,
+    limit?: number,
+    snapshotId?: string,
+  ): readonly SymbolSearchHit[];
 }
