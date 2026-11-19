@@ -2,11 +2,11 @@
 
 > Kanıt: TŞ v2.1 §3, §5, §6, §8, §9, §10, §16A, §17, §25 · Ayna sayfa: [wiki/architecture.md](../wiki/architecture.md)
 > Bu sayfa kod yazan ajan/kullanıcı içindir: repodaki paketler ile TŞ'nin istediği mimari arasındaki eşlemeyi gösterir.
-> Durum notu: bu belge Sprint-8 çok-dil genişlemesi ve 2026-11-18 denetim/mühendislik
-> güncellemeleri sonundaki kod halini yansıtır (`v0.1.0` public snapshot, HEAD `d197f21` + K-019/K-020
-> güncellemeleri; toplam **17 npm workspace paketi**: `11 packages/*` + `5 adapters/*`
+> Durum notu: bu belge Sprint-8 çok-dil genişlemesi ve 2026-11-18/19 denetim/mühendislik
+> güncellemeleri sonundaki kod halini yansıtır (`v0.1.0` public snapshot, HEAD `d197f21` + K-019/K-020/K-021
+> güncellemeleri; toplam **18 npm workspace paketi**: `12 packages/*` + `5 adapters/*`
 > + `1 integrations/zcode/causoryn`, ayrıca standalone `apps/visualizer`, 4 `native/*`
-> sidecar ve `integrations/antigravity/causoryn` eklenti dizini); durum kolonları
+> sidecar, kök 4-host açık kaynak pazaryeri manifestleri ve `integrations/antigravity/causoryn` eklenti dizini); durum kolonları
 > [docs/implementation-status.md](implementation-status.md) kanıtlarıyla ADR-010
 > dürüstlük kuralına tabidir.
 
@@ -35,7 +35,8 @@ AI/LLM bağımlılığı yoktur (ADR-002, bkz. [docs/adr/ADR-002-no-llm.md](adr/
 | `packages/preflight` | candidate-only Preflight Manifest (candidateOnly sabit true — kod yazmaz) + derive_test_plan (direct/call-site/naming) | §10.2/§10.3, §15 | Done (TS `Test` + `TESTS` kenarlarıyla `direct` sinyal aktif; C#/Python/Go/Rust sidecar'larda `TESTS` kenarı üretimi açık) |
 | `packages/verification` | verify_change saf çekirdeği: 4 denetim, 8-kuralı verdict zinciri, test durumu dürüstlüğü (not_run/observed+kanıt), byte-deterministik rapor | §10.4 | Done (E3 `passed` doğrulaması host beyanı üzerinden — K-016(3)) |
 | `packages/wiki` | Living Wiki projeksiyonu: link çözümleme (11 tür), FTS5 arama, incremental invalidation, annotation overlay (CAS), offline markdown+HTML export | §16A | Done (link-düzeyi invalidasyon sınırlı — mcp-server incremental yayımı indeksleri tam graph'tan yeniden yazar) |
-| `packages/mcp-server` | stdio transport, input validation, authorization, `storage.dataDbPath` kalıcı SQLite / varsayılan `InMemoryGraphRepository`, 29 araç kablolaması + MCP `annotations` (`readOnlyHint`), 10 alanlı envelope + sabit hata kodları, bundle girişi (F1) | §5, §10 | Done (`tools/list` TAM OLARAK 29 araç; SDK 1.32.2 v1.x — K-009 sapması) |
+| `packages/mcp-server` | stdio transport, input validation, authorization, sıfır-ayar `--allow-cwd` + MCP `roots/list` + `--auto-data-dir`, `storage.dataDbPath` kalıcı SQLite / varsayılan `InMemoryGraphRepository`, 29 araç kablolaması + MCP `annotations` (`readOnlyHint`) + `outputSchemaProfile`, 10 alanlı envelope + sabit hata kodları, bundle girişi (F1) | §5, §10 | Done (`tools/list` TAM OLARAK 29 araç; SDK 1.32.2 v1.x — K-009 sapması) |
+| `packages/causoryn` | Yayınlanabilir açık kaynak çoklu-host CLI ve plugin dağıtım paketi (`causoryn` v0.1.0, `MIT`, sıfır dış npm `dependencies`): `causoryn mcp\|setup\|doctor`, `plugin-mcp-launcher.mjs`, `build-package.mjs` ile sahnelenen `dist/mcp-server.mjs` + `better-sqlite3` + `dist/typescript-lib/lib*.d.ts` + 4 `native/` worker + 4 `skills/` + 4 host plugin manifesti | §17, K-021 | Done (`npm pack` `.tgz` arşivinden izole 4-host `setup`/`doctor` + sıfır-ayar `stdio` E2E kanıtlı) |
 | `adapters/typescript` | Compiler API AST + symbol resolution + framework linkers (Express/Next.js) + BDD `Test` node & `TESTS` kenarı çıkarımı (L1/L2/L3) | §6, §7, §15, §25/4 | Done (cross-file receiver etiket sınırı belgeli) |
 | `adapters/csharp-roslyn` | Roslyn worker TS adapter: spawn (`dotnet exec`), istek/yanıt, timeout, graceful fallback | §7 | Done (worker yok → L0/L1 + açık coverage) |
 | `adapters/python` | Python stdlib `ast` sidecar TS adapter: `python -B` spawn, satır-JSON protokol v1, timeout, L0/L1 fallback | §7, §23 | Done (`decorator-route-pattern (L3)`; aynı modül `verified`, import `heuristic`) |
@@ -49,14 +50,16 @@ AI/LLM bağımlılığı yoktur (ADR-002, bkz. [docs/adr/ADR-002-no-llm.md](adr/
 | `integrations/zcode/causoryn` | ZCode plugin paketi: `.zcode-plugin/plugin.json` (mcpServers + userConfig) + skills + dev marketplace (`.claude-plugin/marketplace.json`) | §17, §25/8, K-002 | Done (manifest doğrulama; GUI kurulum koşulmadı — kırmızı kural 6) |
 | `integrations/antigravity/causoryn` | Antigravity eklenti dizini: `plugin.json` (`$schema`'sız yerel yükleyici uyumlu) + `mcp_config.json` (birincil yerel yükleyici tanımı) + `mcp.json` (TŞ §17.1 taşınabilir manifest) + `README.md` + `build:bundle` ile sahnelenen `scripts/mcp-server.mjs` (+ vendored `better-sqlite3`) | §17.1, §22 | Partial — doğrudan `stdio` spawn doğrulandı (29 araç); `agy` CLI yok: kurulum/smoke NOT RUN; `skills/`/`agents/`/`rules/`/`hooks.json` ayrı dilim |
 | `examples/fixture-ts-orders` · `examples/fixture-ts-express` · `examples/fixture-ts-nextjs` · `examples/fixture-csharp-orders` · `examples/fixture-contract-drift` · `examples/fixture-python-app` · `examples/fixture-go-app` · `examples/fixture-rust-app` | 8 deterministik dil ve sözleşme-drift fixture'ı (TS×3, C#, Python, Go, Rust, contract-drift) | §22, §25/4 | Done |
-| `tests/` | Entegrasyon + smoke + güvenlik (F6) + benchmark (F7) + secret-scan + CI iş akışı + host/release doküman doğrulama testleri (kök Vitest projesi) | §22 | Done (83 `*.test.ts` dosyası; varsayılan süit 82 dosya, `tests/bench-release` ayrık; detay implementation-status'ta) |
+| `tests/` | Entegrasyon + smoke + güvenlik (F6) + benchmark (F7) + secret-scan + CI iş akışı + açık kaynak dağıtım + host/release doküman doğrulama testleri (kök Vitest projesi) | §22 | Done (89 `*.test.ts` dosyası; varsayılan süit 88 dosya, `tests/bench-release` ayrık; detay implementation-status'ta) |
 
-Toplam monorepo envanteri: **17 npm workspace paketi** (`11 packages/*` + `5 adapters/*` +
+Toplam monorepo envanteri: **18 npm workspace paketi** (`12 packages/*` + `5 adapters/*` +
 `1 integrations/zcode/causoryn`), standalone `apps/visualizer`, 4 `native/*` sidecar,
+kök 4-host açık kaynak pazaryeri manifestleri (`marketplace.json`, `.claude-plugin/marketplace.json`,
+`.agents/plugins/marketplace.json`, `plugin.json` + `mcp_config.json`, `mcp.json`, `server.json`, `skills/`),
 `.github/workflows/ci.yml` sürekli entegrasyon iş akışı ve `integrations/antigravity/causoryn`
 eklenti dizini. TŞ §18 sonu ilkesi (ilk gün boş paket kurma yok) aynen işledi: `sidecar-ipc`,
-`contracts`, `preflight`, `verification`, `wiki` ve dört sidecar worker, gerçek implementasyonla
-birlikte açıldı (Faz B1, C2, D, E, Sprint-8 ve K-020); yukarıdaki tablo bu paketlerin bugünkü
+`causoryn`, `contracts`, `preflight`, `verification`, `wiki` ve dört sidecar worker, gerçek implementasyonla
+birlikte açıldı (Faz B1, C2, D, E, Sprint-8 ve K-020/K-021); yukarıdaki tablo bu paketlerin bugünkü
 sorumluluklarını ve belgeli sınırlarını taşır.
 
 ## Bağımlılık sınırları (değimez — TŞ §5.1)
@@ -124,15 +127,15 @@ TypeScript 7 native serisi bu aralıkta değildir.
   flaky-potansiyellidir)
 - `npm run bench` → yalnızca `tests/bench-release/` (`vitest.bench.config.ts`);
   `docs/benchmarks.md` yenileme: `CAUSORYN_BENCH_WRITE_DOCS=1 npm run bench`
-- `npm run build` → `tsc -b` (kök solution `tsconfig.json` 13 doğrudan referans:
-  8 paket (`domain`, `sidecar-ipc`, `workspace`, `indexing`, `graph`, `storage-sqlite`,
-  `mcp-server`, `wiki`) + 5 dil adapter'ı (`typescript`, `csharp-roslyn`, `rust`,
+- `npm run build` → `tsc -b` (kök solution `tsconfig.json` 14 doğrudan referans:
+  9 paket (`domain`, `sidecar-ipc`, `workspace`, `indexing`, `graph`, `storage-sqlite`,
+  `mcp-server`, `causoryn`, `wiki`) + 5 dil adapter'ı (`typescript`, `csharp-roslyn`, `rust`,
   `python`, `go`); `contracts`/`preflight`/`verification` bu zincirle transitif
   derlenir; `apps/visualizer` ve `integrations/*` vitest/esbuild tarafından
   derlenir; F1 bundle ayrı script: `npm run build:bundle --workspace packages/mcp-server`
   → `dist/mcp-server.mjs` + vendored `better-sqlite3` + `dist/bundle-manifest.json`
   + `integrations/antigravity/causoryn/scripts/` deterministik sahnelemesi — iki build
-  bit-bit aynı)
+  bit-bit aynı; açık kaynak dağıtım paketi sahnelemesi: `npm run build:package --workspace packages/causoryn`)
 - `npm run typecheck` → `tsc -p tsconfig.typecheck.json` (noEmit; src + test + config'ler)
 - `npm run lint` → ESLint flat config (typescript-eslint recommended; dist/node_modules/raw/wiki ignore)
 - `npm run secret-scan` → `node scripts/secret-scan.mjs` (7 üretim kökü üzerinde kimlik bilgisi, token ve private-key kalıbı taraması; eşleşmede veya eksik kökte exit 1)

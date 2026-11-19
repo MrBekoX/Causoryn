@@ -51,6 +51,7 @@ import {
   DEFAULT_RESPONSE_MAX_CHARS,
   defaultWorkerDir,
   defaultWorkerManifestPath,
+  defaultWritableRustTargetDir,
   RUST_ADAPTER_ID,
   RUST_ADAPTER_VERSION,
   WORKER_BINARY_NAME,
@@ -61,6 +62,8 @@ import {
   type RustAdapterOptions,
   type RustAdapterResult,
 } from "./types.js";
+
+export { defaultWritableRustTargetDir } from "./types.js";
 
 /** cargo-home override çözümlemesi (options.cargoHomeDir önceliklidir). */
 function resolveCargoHome(options: Partial<RustAdapterOptions> | undefined): string | null {
@@ -78,12 +81,17 @@ interface ResolvedRuntimeOptions {
   readonly responseMaxChars: number;
   readonly cargoBuildTimeoutMs: number;
   readonly hasSpawnInjection: boolean;
+  readonly hasExplicitWorkerDir: boolean;
 }
 
 function resolveOptions(
   partial?: Partial<RustAdapterOptions>,
 ): ResolvedRuntimeOptions {
   const cargoHome = resolveCargoHome(partial);
+  const envWorkerDir = process.env["CAUSORYN_RUST_WORKER_DIR"];
+  const hasExplicitWorkerDir =
+    partial?.workerDir !== undefined ||
+    (envWorkerDir !== undefined && envWorkerDir.trim().length > 0);
   const workerDir = partial?.workerDir ?? defaultWorkerDir();
   return {
     workerDir,
@@ -96,6 +104,7 @@ function resolveOptions(
     cargoBuildTimeoutMs:
       partial?.cargoBuildTimeoutMs ?? DEFAULT_CARGO_BUILD_TIMEOUT_MS,
     hasSpawnInjection: partial?.spawnProcess !== undefined,
+    hasExplicitWorkerDir,
   };
 }
 
@@ -138,6 +147,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 interface WorkerBinaryProbe {
   readonly available: boolean;
+  readonly workerDir: string;
   readonly detail: string;
 }
 
@@ -153,19 +163,78 @@ interface WorkerBinaryProbe {
 async function ensureWorkerBinary(
   options: ResolvedRuntimeOptions,
 ): Promise<WorkerBinaryProbe> {
-  const binaryPath = join(options.workerDir, options.workerBinaryName);
-  if (existsSync(binaryPath)) {
-    return { available: true, detail: "" };
+  if (options.hasExplicitWorkerDir) {
+    const binaryPath = join(options.workerDir, options.workerBinaryName);
+    if (existsSync(binaryPath)) {
+      return { available: true, workerDir: options.workerDir, detail: "" };
+    }
+
+    if (options.hasSpawnInjection) {
+      // Test enjeksiyonu: build yok — sahte süreç senaryosu doğrudan koşar.
+      return { available: true, workerDir: options.workerDir, detail: "" };
+    }
+
+    if (!isCargoAvailable()) {
+      return {
+        available: false,
+        workerDir: options.workerDir,
+        detail:
+          "cargo bulunamadı (PATH ve cargo-home öneklemesi) — Rust worker binary'si yok ve derlenemedi",
+      };
+    }
+
+    const build = await runCargoBuild({
+      manifestPath: defaultWorkerManifestPath(),
+      timeoutMs: options.cargoBuildTimeoutMs,
+    });
+    if (build.status !== 0) {
+      const tail =
+        build.spawnError ||
+        build.stderr.trim().slice(-300) ||
+        build.stdout.trim().slice(-300) ||
+        "(çıktı boş)";
+      return {
+        available: false,
+        workerDir: options.workerDir,
+        detail: `cargo build başarısız (exit=${String(build.status ?? "bilinmiyor")}): ${tail}`,
+      };
+    }
+    if (!existsSync(binaryPath)) {
+      // Dürüst ayrım: derleme BAŞARILI ama binary override edilen dizinde
+      // değil — "build başarısız" DEMEYİZ; gerçek sebep bildirilir.
+      return {
+        available: false,
+        workerDir: options.workerDir,
+        detail: `cargo build başarılı ama worker binary'si beklenen konumda yok: ${binaryPath} (workerDir override'ını kontrol edin)`,
+      };
+    }
+    return { available: true, workerDir: options.workerDir, detail: "" };
+  }
+
+  // hasExplicitWorkerDir === false:
+  // 1) Önce asset kökü içindeki <assetRoot>/native/rust-worker/target/debug/<bin> aranır.
+  const assetBinaryPath = join(options.workerDir, options.workerBinaryName);
+  if (existsSync(assetBinaryPath)) {
+    return { available: true, workerDir: options.workerDir, detail: "" };
+  }
+
+  // 2) Yoksa yazılabilir önbellekteki <cacheTargetDir>/debug/<bin> kontrol edilir.
+  const cacheTargetDir = defaultWritableRustTargetDir();
+  const cacheWorkerDir = join(cacheTargetDir, "debug");
+  const cacheBinaryPath = join(cacheWorkerDir, options.workerBinaryName);
+  if (existsSync(cacheBinaryPath)) {
+    return { available: true, workerDir: cacheWorkerDir, detail: "" };
   }
 
   if (options.hasSpawnInjection) {
-    // Test enjeksiyonu: build yok — sahte süreç senaryosu doğrudan koşar.
-    return { available: true, detail: "" };
+    return { available: true, workerDir: cacheWorkerDir, detail: "" };
   }
 
+  // 3) İkisi de yoksa cargo build yazılabilir CARGO_TARGET_DIR içine çalıştırılır.
   if (!isCargoAvailable()) {
     return {
       available: false,
+      workerDir: cacheWorkerDir,
       detail:
         "cargo bulunamadı (PATH ve cargo-home öneklemesi) — Rust worker binary'si yok ve derlenemedi",
     };
@@ -174,6 +243,7 @@ async function ensureWorkerBinary(
   const build = await runCargoBuild({
     manifestPath: defaultWorkerManifestPath(),
     timeoutMs: options.cargoBuildTimeoutMs,
+    targetDir: cacheTargetDir,
   });
   if (build.status !== 0) {
     const tail =
@@ -183,18 +253,18 @@ async function ensureWorkerBinary(
       "(çıktı boş)";
     return {
       available: false,
+      workerDir: cacheWorkerDir,
       detail: `cargo build başarısız (exit=${String(build.status ?? "bilinmiyor")}): ${tail}`,
     };
   }
-  if (!existsSync(binaryPath)) {
-    // Dürüst ayrım: derleme BAŞARILI ama binary override edilen dizinde
-    // değil — "build başarısız" DEMEYİZ; gerçek sebep bildirilir.
+  if (!existsSync(cacheBinaryPath)) {
     return {
       available: false,
-      detail: `cargo build başarılı ama worker binary'si beklenen konumda yok: ${binaryPath} (workerDir override'ını kontrol edin)`,
+      workerDir: cacheWorkerDir,
+      detail: `cargo build başarılı ama worker binary'si beklenen konumda yok: ${cacheBinaryPath}`,
     };
   }
-  return { available: true, detail: "" };
+  return { available: true, workerDir: cacheWorkerDir, detail: "" };
 }
 
 /* ------------------------------------------------------------------ */
@@ -574,7 +644,7 @@ export async function analyzeRustWorkspace(
   };
 
   const outcome: WorkerRunOutcome = await runWorkerAnalyze({
-    workerDir: options.workerDir,
+    workerDir: binaryProbe.workerDir,
     workerBinaryName: options.workerBinaryName,
     requestPayload: request,
     requestTimeoutMs: options.requestTimeoutMs,

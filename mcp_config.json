@@ -1,0 +1,16 @@
+{
+  "mcpServers": {
+    "causoryn": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "causoryn@0.1.0",
+        "mcp",
+        "--allow-cwd",
+        "--auto-data-dir",
+        "--client",
+        "antigravity"
+      ]
+    }
+  }
+}

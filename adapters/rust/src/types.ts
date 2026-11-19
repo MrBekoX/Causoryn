@@ -13,13 +13,14 @@
  * asla komut satırına gitmez — yalnızca stdin JSON'da taşınır.
  */
 import type { ChildProcess } from "node:child_process";
-import { dirname, join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import type {
   SnapshotEdgeInput,
   SnapshotEvidenceInput,
   SnapshotNodeInput,
 } from "@causoryn/domain";
+import { resolveCausorynAssetRoot } from "@causoryn/sidecar-ipc";
 
 /** TŞ §8 Evidence.analyzerId karşılığı — worker sabitiyle aynı. */
 export const RUST_ADAPTER_ID = "rust-worker";
@@ -44,14 +45,6 @@ export const DEFAULT_RESPONSE_MAX_CHARS = 64 * 1024 * 1024;
 
 /** Varsayılan cargo build üst sınırı (ilk derleme crates.io fetch'i dakikalar sürebilir). */
 export const DEFAULT_CARGO_BUILD_TIMEOUT_MS = 600_000;
-
-/** src/ ve dist/ aynı derinlikte → iki derleme modunda da repo kökü. */
-const REPO_ROOT = resolve(
-  dirname(fileURLToPath(import.meta.url)),
-  "..",
-  "..",
-  "..",
-);
 
 /**
  * Worker binary dizini repo-relative sabit bölümü. Ortam değişkeniyle
@@ -78,8 +71,7 @@ export const WORKER_MANIFEST_RELATIVE_PATH = join(
 );
 
 /**
- * Worker binary'nin TAM yolu repo kökünden türetilir; import.meta.dirname
- * eksikse (nadiren) boş kalır ve config override zorunlu olur. Override:
+ * Worker binary'nin TAM yolu dinamik asset kökünden türetilir. Override:
  * CAUSORYN_RUST_WORKER_DIR.
  */
 export function defaultWorkerDir(): string {
@@ -87,15 +79,31 @@ export function defaultWorkerDir(): string {
   if (override !== undefined && override.trim().length > 0) {
     return override;
   }
-  return join(REPO_ROOT, WORKER_DIR_RELATIVE_PATH);
+  return join(resolveCausorynAssetRoot(import.meta.url), WORKER_DIR_RELATIVE_PATH);
 }
 
 /**
- * Worker Cargo.toml TAM yolu — cargo build girdisi (sabit repo-içi yol;
+ * Worker Cargo.toml TAM yolu — cargo build girdisi (dinamik asset kökü;
  * kullanıcı girdisi değildir).
  */
 export function defaultWorkerManifestPath(): string {
-  return join(REPO_ROOT, WORKER_MANIFEST_RELATIVE_PATH);
+  return join(
+    resolveCausorynAssetRoot(import.meta.url),
+    WORKER_MANIFEST_RELATIVE_PATH,
+  );
+}
+
+/**
+ * Salt-okunur paket kurulumlarında cargo derleme çıktısı için yazılabilir
+ * hedef dizin. CAUSORYN_RUST_TARGET_DIR ile override edilebilir.
+ */
+export function defaultWritableRustTargetDir(
+  env?: NodeJS.ProcessEnv,
+): string {
+  return (
+    (env ?? process.env)["CAUSORYN_RUST_TARGET_DIR"]?.trim() ||
+    join(homedir(), ".causoryn", "cache", "rust-worker-target")
+  );
 }
 
 export type SpawnFunction = (

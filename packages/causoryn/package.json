@@ -1,0 +1,64 @@
+{
+  "name": "causoryn",
+  "version": "0.1.0",
+  "private": false,
+  "description": "Deterministic, local, LLM-free codebase and change intelligence MCP server and plugin for Antigravity, Claude Code, Codex, and ZCode (GLM).",
+  "type": "module",
+  "license": "MIT",
+  "author": {
+    "name": "Causoryn Contributors",
+    "url": "https://github.com/MrBekoX/Causoryn"
+  },
+  "homepage": "https://github.com/MrBekoX/Causoryn#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/MrBekoX/Causoryn.git",
+    "directory": "packages/causoryn"
+  },
+  "bugs": {
+    "url": "https://github.com/MrBekoX/Causoryn/issues"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "code-analysis",
+    "static-analysis",
+    "architecture-map",
+    "preflight",
+    "antigravity",
+    "claude-code",
+    "codex",
+    "zcode",
+    "glm"
+  ],
+  "engines": {
+    "node": ">=24"
+  },
+  "bin": {
+    "causoryn": "scripts/causoryn.mjs"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist/**",
+    "scripts/causoryn.mjs",
+    "scripts/plugin-mcp-launcher.mjs",
+    "native/**",
+    "skills/**",
+    ".claude-plugin/**",
+    ".zcode-plugin/**",
+    ".codex-plugin/**",
+    "plugin.json",
+    "mcp_config.json",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build:package": "node scripts/build-package.mjs"
+  },
+  "dependencies": {}
+}

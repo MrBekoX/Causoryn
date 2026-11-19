@@ -13,9 +13,14 @@
  */
 import type { ChildProcess } from "node:child_process";
 import { EventEmitter } from "node:events";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { pathToFileURL } from "node:url";
 import { describe, expect, it } from "vitest";
 import {
   buildAllowlistedWorkerEnv,
+  resolveCausorynAssetRoot,
   runLineJsonWorker,
   type SidecarSpawnOptions,
 } from "@causoryn/sidecar-ipc";
@@ -591,5 +596,148 @@ describe("runLineJsonWorker", () => {
     expect(outcome.stderr).toBe("uyarı: işğü — tamam\n");
     expect(JSON.stringify(outcome.response)).not.toContain("\uFFFD");
     expect(outcome.stderr).not.toContain("\uFFFD");
+  });
+});
+
+describe("resolveCausorynAssetRoot", () => {
+  it("CAUSORYN_ASSET_ROOT ortam değişkeni dolu olduğunda yürüyüş yapmadan trim+resolve edilmiş yolu döner", () => {
+    const tmpDir = mkdtempSync(path.join(os.tmpdir(), "causoryn-ipc-env-"));
+    try {
+      const overrideDir = path.join(tmpDir, "custom-assets");
+      const entryUrl = pathToFileURL(
+        path.join(tmpDir, "pkg", "dist", "mcp-server.mjs"),
+      ).href;
+
+      const resolved = resolveCausorynAssetRoot(entryUrl, {
+        env: { CAUSORYN_ASSET_ROOT: `  ${overrideDir}  ` },
+      });
+
+      expect(resolved).toBe(path.resolve(overrideDir));
+    } finally {
+      rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it("derinlik-1 paketlenmiş düzende (<tmp>/pkg/dist/mcp-server.mjs) <tmp>/pkg kökünü bulur", () => {
+    const tmpDir = mkdtempSync(path.join(os.tmpdir(), "causoryn-ipc-pkg-"));
+    try {
+      const pkgRoot = path.join(tmpDir, "pkg");
+      const distDir = path.join(pkgRoot, "dist");
+      const pythonWorkerDir = path.join(pkgRoot, "native", "python-worker");
+      mkdirSync(distDir, { recursive: true });
+      mkdirSync(pythonWorkerDir, { recursive: true });
+      writeFileSync(path.join(pythonWorkerDir, "worker.py"), "# worker\n", "utf8");
+
+      const entryUrl = pathToFileURL(path.join(distDir, "mcp-server.mjs")).href;
+      const resolved = resolveCausorynAssetRoot(entryUrl, { env: {} });
+
+      expect(resolved).toBe(pkgRoot);
+    } finally {
+      rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it("derinlik-3 monorepo düzeninde (<tmp>/repo/adapters/python/dist/analyzer.js) <tmp>/repo kökünü bulur", () => {
+    const tmpDir = mkdtempSync(path.join(os.tmpdir(), "causoryn-ipc-repo-"));
+    try {
+      const repoRoot = path.join(tmpDir, "repo");
+      const adapterDistDir = path.join(repoRoot, "adapters", "python", "dist");
+      const pythonWorkerDir = path.join(repoRoot, "native", "python-worker");
+      mkdirSync(adapterDistDir, { recursive: true });
+      mkdirSync(pythonWorkerDir, { recursive: true });
+      writeFileSync(path.join(pythonWorkerDir, "worker.py"), "# worker\n", "utf8");
+
+      const entryUrl = pathToFileURL(path.join(adapterDistDir, "analyzer.js")).href;
+      const resolved = resolveCausorynAssetRoot(entryUrl, { env: {} });
+
+      expect(resolved).toBe(repoRoot);
+    } finally {
+      rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it("native/python-worker/worker.py bulunamadığında klasik 3-seviye üst dizine düşer", () => {
+    const tmpDir = mkdtempSync(path.join(os.tmpdir(), "causoryn-ipc-fallback-"));
+    try {
+      const startDir = path.join(
+        tmpDir,
+        "isolated",
+        "adapters",
+        "python",
+        "dist",
+      );
+      mkdirSync(startDir, { recursive: true });
+
+      const entryUrl = pathToFileURL(path.join(startDir, "analyzer.js")).href;
+      const resolved = resolveCausorynAssetRoot(entryUrl, { env: {} });
+
+      expect(resolved).toBe(
+        path.dirname(path.dirname(path.dirname(startDir))),
+      );
+    } finally {
+      rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it("yalnızca boşluk içeren CAUSORYN_ASSET_ROOT ('   ') değerini yok sayıp dizin yürüyüşüne düşer", () => {
+    const tmpDir = mkdtempSync(
+      path.join(os.tmpdir(), "causoryn-ipc-whitespace-"),
+    );
+    try {
+      const pkgRoot = path.join(tmpDir, "pkg");
+      const distDir = path.join(pkgRoot, "dist");
+      const pythonWorkerDir = path.join(pkgRoot, "native", "python-worker");
+      mkdirSync(distDir, { recursive: true });
+      mkdirSync(pythonWorkerDir, { recursive: true });
+      writeFileSync(
+        path.join(pythonWorkerDir, "worker.py"),
+        "# worker\n",
+        "utf8",
+      );
+
+      const entryUrl = pathToFileURL(path.join(distDir, "mcp-server.mjs")).href;
+      const resolved = resolveCausorynAssetRoot(entryUrl, {
+        env: { CAUSORYN_ASSET_ROOT: "   " },
+      });
+
+      expect(resolved).toBe(pkgRoot);
+    } finally {
+      rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it("özel maxWalkDepth sınırına uyar: sığ sınırda fallback'e düşer, derin sınırda hedef kökü bulur", () => {
+    const tmpDir = mkdtempSync(path.join(os.tmpdir(), "causoryn-ipc-depth-"));
+    try {
+      const deepRoot = path.join(tmpDir, "deep-root");
+      const pythonWorkerDir = path.join(deepRoot, "native", "python-worker");
+      const nestedStartDir = path.join(deepRoot, "a", "b", "c", "d", "e");
+      mkdirSync(pythonWorkerDir, { recursive: true });
+      mkdirSync(nestedStartDir, { recursive: true });
+      writeFileSync(
+        path.join(pythonWorkerDir, "worker.py"),
+        "# worker\n",
+        "utf8",
+      );
+
+      const entryUrl = pathToFileURL(path.join(nestedStartDir, "entry.js")).href;
+
+      // Varsayılan maxWalkDepth=4 derinlik-5'teki deepRoot'a ulaşamaz → 3-seviye üst dizine (deepRoot/a/b) düşer.
+      expect(resolveCausorynAssetRoot(entryUrl, { env: {} })).toBe(
+        path.dirname(path.dirname(path.dirname(nestedStartDir))),
+      );
+
+      // Açık sığ maxWalkDepth=2 de ulaşamaz → 3-seviye üst dizine düşer.
+      expect(
+        resolveCausorynAssetRoot(entryUrl, { env: {}, maxWalkDepth: 2 }),
+      ).toBe(path.dirname(path.dirname(path.dirname(nestedStartDir))));
+
+      // Özel maxWalkDepth=5 derinlik-5'teki deepRoot'u bulur.
+      expect(
+        resolveCausorynAssetRoot(entryUrl, { env: {}, maxWalkDepth: 5 }),
+      ).toBe(deepRoot);
+    } finally {
+      rmSync(tmpDir, { recursive: true, force: true });
+    }
   });
 });

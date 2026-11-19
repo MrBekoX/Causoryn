@@ -18,7 +18,8 @@
  *      L0/L1'e düşer (motor çökmez).
  */
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
-import { delimiter, join } from "node:path";
+import { existsSync } from "node:fs";
+import { delimiter, dirname, join } from "node:path";
 
 /**
  * cargo build alt sürecine geçilen ortam değişkeni allowlist'i (savunma
@@ -38,6 +39,7 @@ export const CARGO_ENV_ALLOWLIST = [
   "HOME",
   "CARGO_HOME",
   "RUSTUP_HOME",
+  "CARGO_TARGET_DIR",
 ] as const;
 
 /** Worker alt süreci (yürütülebilir binary) için daraltılmış allowlist. */
@@ -70,6 +72,7 @@ export type CargoSpawnFunction = (
   options: {
     readonly stdio: ["ignore", "pipe", "pipe"];
     readonly env: Readonly<Record<string, string>>;
+    readonly shell?: false;
   },
 ) => ChildProcess;
 
@@ -120,6 +123,9 @@ export function buildToolEnv(
   for (const key of allowlist) {
     const value = process.env[key];
     if (value !== undefined && value.length > 0) {
+      if (key === "CARGO_TARGET_DIR" && !isSafeCommandPath(value)) {
+        continue;
+      }
       env[key] = value;
     }
   }
@@ -197,6 +203,8 @@ function killBuildTree(spawnFn: CargoSpawnFunction, child: ChildProcess | null):
 export function runCargoBuild(input: {
   manifestPath: string;
   timeoutMs: number;
+  /** Yazılabilir derleme hedef dizini (CARGO_TARGET_DIR); isSafeCommandPath ile doğrulanır. */
+  targetDir?: string;
   /**
    * Her çıktı akışı (stdout/stderr) için char üst sınırı; tanımsızsa 64M
    * (worker yanıt bütçesinin aynası). Güvenlik bulgusu karşılığı: cargo
@@ -207,6 +215,37 @@ export function runCargoBuild(input: {
   /** Test enjeksiyonu; default node:child_process.spawn. */
   spawnFn?: CargoSpawnFunction;
 }): Promise<CargoBuildOutcome> {
+  if (!isSafeCommandPath(input.manifestPath)) {
+    return Promise.resolve({
+      status: null,
+      stdout: "",
+      stderr: "",
+      spawnError: "cargo build reddedildi: geçersiz manifestPath yolu",
+    });
+  }
+  if (input.targetDir !== undefined && !isSafeCommandPath(input.targetDir)) {
+    return Promise.resolve({
+      status: null,
+      stdout: "",
+      stderr: "",
+      spawnError: "cargo build reddedildi: geçersiz CARGO_TARGET_DIR yolu",
+    });
+  }
+  const inheritedTargetDir = process.env["CARGO_TARGET_DIR"];
+  if (
+    input.targetDir === undefined &&
+    inheritedTargetDir !== undefined &&
+    inheritedTargetDir.length > 0 &&
+    !isSafeCommandPath(inheritedTargetDir)
+  ) {
+    return Promise.resolve({
+      status: null,
+      stdout: "",
+      stderr: "",
+      spawnError:
+        "cargo build reddedildi: geçersiz ortam CARGO_TARGET_DIR yolu",
+    });
+  }
   const spawnFn = input.spawnFn ?? spawn;
   const outputMaxChars = input.outputMaxChars ?? DEFAULT_BUILD_OUTPUT_MAX_CHARS;
   return new Promise((resolveBuild) => {
@@ -239,13 +278,26 @@ export function runCargoBuild(input: {
       });
     }, input.timeoutMs);
 
+    const childEnv = buildToolEnv(CARGO_ENV_ALLOWLIST, resolveCargoHomeDir());
+    if (input.targetDir !== undefined) {
+      childEnv["CARGO_TARGET_DIR"] = input.targetDir;
+    }
+
+    const useLocked =
+      input.targetDir !== undefined &&
+      existsSync(join(dirname(input.manifestPath), "Cargo.lock"));
+    const cargoArgs = useLocked
+      ? ["build", "--locked", "--manifest-path", input.manifestPath]
+      : ["build", "--manifest-path", input.manifestPath];
+
     try {
       child = spawnFn(
         "cargo", // LİTERAL komut — kırmızı çizgi 6
-        ["build", "--manifest-path", input.manifestPath],
+        cargoArgs,
         {
           stdio: ["ignore", "pipe", "pipe"],
-          env: buildToolEnv(CARGO_ENV_ALLOWLIST, resolveCargoHomeDir()),
+          env: childEnv,
+          shell: false,
         },
       );
     } catch (error) {

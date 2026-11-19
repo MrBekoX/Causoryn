@@ -1,0 +1,137 @@
+# Causoryn (`causoryn` v0.1.0)
+
+**Causoryn** is a **local, deterministic, LLM-free** codebase and change intelligence
+engine exposed over the Model Context Protocol (`stdio`). It constructs evidence-backed
+dependency, symbol, route, and contract graphs across your project while enforcing a
+strict **read-only workspace guarantee**: Causoryn never modifies your source tree and
+writes snapshots, Living Wiki SQLite databases, and exports strictly outside the analyzed
+workspace.
+
+## Requirements
+
+- **Node.js >= 24**
+- Optional language sidecar toolchains for multi-language L2/L3 depth (`dotnet`, `python`, `go`, `cargo`). TypeScript/JavaScript analysis runs in-process with bundled TypeScript `.d.ts` definitions; if an optional sidecar toolchain is unavailable on a machine, Causoryn degrades gracefully and honestly to L0/L1 file-level provenance (`causoryn doctor` inspects sidecar readiness).
+- Package architecture note (`ADR-010`): `causoryn` is a zero-compile multi-file runtime package (`dist/mcp-server.mjs` + vendored `better-sqlite3` prebuild binaries + `dist/typescript-lib/` + `native/` sidecar workers + canonical `skills/`), not a single-file JS bundle.
+
+---
+
+## Installation Across All 4 Supported Hosts
+
+You can install Causoryn either via the **interactive/scriptable CLI wizard (`npx causoryn setup`)**
+or via **each host's native Plugin Marketplace**.
+
+### Option A: One-Command CLI Setup (`npx causoryn setup`)
+
+```bash
+# Preview planned changes without writing any files
+npx causoryn@0.1.0 setup --all-detected --dry-run
+
+# Configure all detected hosts on your machine (creates .causoryn.backup files and stages a persistent ~/.causoryn/runtime copy)
+npx causoryn@0.1.0 setup --all-detected --yes
+
+# Or target specific hosts explicitly
+npx causoryn@0.1.0 setup --client antigravity --yes
+npx causoryn@0.1.0 setup --client claude-code --yes
+npx causoryn@0.1.0 setup --client codex --yes
+npx causoryn@0.1.0 setup --client zcode --yes
+
+# Verify installation health (read-only)
+npx causoryn@0.1.0 doctor
+
+# Cleanly remove Causoryn from a host (cleans up ~/.causoryn/runtime when no remaining host points to it)
+npx causoryn@0.1.0 setup --client claude-code --uninstall --yes
+```
+
+### Option B: Native Host Plugin Marketplaces
+
+1. **Antigravity** (`agy` / Antigravity IDE):
+   - Add the repository (`https://github.com/MrBekoX/Causoryn`) or extracted `causoryn` plugin folder containing `plugin.json` and `mcp_config.json`, or run `npx causoryn@0.1.0 setup --client antigravity --yes` (writes `~/.gemini/config/mcp_config.json`, updates `~/.gemini/antigravity/mcp_config.json` when present, and installs the 4 skills into `~/.gemini/config/skills/`).
+2. **Claude Code**:
+   - In Claude Code, register the GitHub marketplace and install the plugin:
+     ```text
+     /plugin marketplace add MrBekoX/Causoryn
+     /plugin install causoryn@causoryn
+     ```
+   - Or run `npx causoryn@0.1.0 setup --client claude-code --yes` (`~/.claude.json` + `~/.claude/skills/`).
+3. **Codex** (Codex CLI / Desktop):
+   - Add the repository marketplace (`.agents/plugins/marketplace.json` + `.codex-plugin/plugin.json`) via Codex plugin management, or run `npx causoryn@0.1.0 setup --client codex --yes` (`$CODEX_HOME/config.toml` `[mcp_servers.causoryn]` with `startup_timeout_sec = 30` + `~/.agents/skills/`).
+4. **ZCode (GLM)**:
+   - Open **Plugin Marketplace -> New / Discover**, add `https://github.com/MrBekoX/Causoryn` (uses root `marketplace.json` and `.zcode-plugin/plugin.json`), and install `causoryn`.
+   - Or run `npx causoryn@0.1.0 setup --client zcode --yes` (writes `~/.zcode/cli/config.json` `mcp.servers.causoryn` while preserving any existing `~/.agents/mcp.json` fallback servers, plus `~/.zcode/skills/`).
+
+---
+
+## Read-Only Workspace & Zero-Config Authorization
+
+- **Read-only workspace guarantee:** Causoryn never writes to your repository source tree (`ADR-008`). SQLite graph databases, Living Wiki stores, and exports are isolated under `~/.causoryn/workspaces/<slug>-<hash>/` (or `ZCODE_PLUGIN_DATA` / `--data-dir`).
+- **Zero-config CLI flags (`--allow-cwd --auto-data-dir`):** When launched inside a safe project directory, `--allow-cwd` authorizes that project root automatically; when launched by a desktop IDE from `$HOME`, filesystem root, or the plugin cache directory, Causoryn rejects unsafe roots and dynamically binds the active workspace via MCP `roots/list` (`notifications/roots/list_changed`).
+- **Explicit `CAUSORYN_CONFIG` (`allowRoots`):** Bare `node dist/mcp-server.mjs` without CLI flags preserves strict default-deny (`{"allowRoots":[]}`) until a project path such as `{"allowRoots":["/work/my-service"]}` is explicitly declared.
+
+---
+
+## Published MCP Tools (29 Tools — `TOOL_NAMES`)
+
+Every tool advertised below is genuinely implemented and registered by the compiled server (`ADR-010`):
+
+1. `causoryn_get_capabilities` — Adapter levels (L0–L3), server limits, protocol version, and published tool list.
+2. `causoryn_workspace_summary` — Language, project, entrypoint, and edge-resolution summary of the published snapshot.
+3. `causoryn_index_status` — Background/completed indexing job status, snapshot freshness, and diagnostics.
+4. `causoryn_refresh_index` — Starts a full or incremental workspace indexing job into the external data root.
+5. `causoryn_map_system` — Paginated L0–L3 architecture hierarchy map with kind/path filters and cursor pagination.
+6. `causoryn_find_symbols` — Deterministic ranked symbol lookup with candidate disambiguation.
+7. `causoryn_get_symbol_context` — Neighborhood graph and source-span evidence around a symbol or node ID.
+8. `causoryn_trace_execution` — Bounded deterministic call/route chain tracing with per-edge resolution.
+9. `causoryn_trace_business_flow` — Cross-component business and contract flow tracing with honest `gap` reporting.
+10. `causoryn_analyze_impact` — Reverse-edge BFS blast-radius analysis keeping `certainty` and `resolution` separate.
+11. `causoryn_check_architecture` — Evaluates `.causoryn/architecture.rules.yaml` (`no-cycles` SCC + forbidden dependencies).
+12. `causoryn_compare_architecture` — Read-only git ref architectural comparison (`baseRef` vs `targetRef`).
+13. `causoryn_get_agent_context` — Ranked, budget-bounded context retrieval across symbol, graph, contract, and FTS legs.
+14. `causoryn_generate_onboarding` — Structural onboarding guide (entrypoints, high-centrality modules, SCC learning order).
+15. `causoryn_export_documentation` — Atomic documentation export (`json`, `markdown`, `mermaid`, `html`, `snapshot`) to `output.allowedOutputDirs`.
+16. `causoryn_preflight_change` — Candidate-only pre-change impact, contract, and test-plan manifest (`candidateOnly: true`).
+17. `causoryn_check_contracts` — Static compatibility classification across OpenAPI, AsyncAPI, JSON Schema, SQL, and Protobuf pairs.
+18. `causoryn_detect_contract_drift` — Revision-to-revision contract drift and producer/consumer anchor impact detection.
+19. `causoryn_verify_change` — Deterministic post-change verification across `architecture`, `contracts`, `graph-diff`, and `test-plan`.
+20. `causoryn_derive_test_plan` — Content-addressed (`testplan:<sha256>`) candidate test plan without executing tests.
+21. `causoryn_get_evidence` — Source file, line span, hash, and analyzer provenance lookup for nodes and edges.
+22. `causoryn_architecture_timeline` — Sampled multi-revision architectural evolution over read-only git history.
+23. `causoryn_wiki_build` — Projects the published graph snapshot into a deterministic Living Wiki SQLite snapshot (`wiki.dataDbPath`).
+24. `causoryn_wiki_get_tree` — Paginated 12-category Living Wiki taxonomy tree with freshness and coverage metadata.
+25. `causoryn_wiki_get_page` — Section-paginated Living Wiki page reader with `evidenceRefs` and `sourceRefs`.
+26. `causoryn_wiki_search` — Escaped multi-field FTS5 search over Living Wiki pages.
+27. `causoryn_wiki_get_links` — Outgoing links, reverse-indexed backlinks, and `brokenLinkDiagnostics`.
+28. `causoryn_wiki_get_versions` — Read-only git/snapshot version availability for Living Wiki pages.
+29. `causoryn_wiki_diff` — Structural diff (`changedSections`, `coverageDelta`, `contractChanges`) between two Living Wiki snapshots.
+
+---
+
+## Envelope Error Codes (`CAUSORYN_TOOL_ERROR_CODES` & Specification Catalog)
+
+Active envelope error codes exported in `CAUSORYN_TOOL_ERROR_CODES` (15 codes):
+- `WORKSPACE_NOT_AUTHORIZED`
+- `PATH_DENIED`
+- `INDEX_NOT_READY`
+- `AMBIGUOUS_SYMBOL`
+- `LIMIT_EXCEEDED`
+- `INVALID_ARGUMENT`
+- `EVIDENCE_NOT_FOUND`
+- `SYMBOL_NOT_FOUND`
+- `POLICY_INVALID`
+- `INVALID_REVISION`
+- `EXPORT_NOT_ALLOWED`
+- `WIKI_PAGE_NOT_FOUND`
+- `CONTRACT_PARSE_FAILED`
+- `UNSUPPORTED_LANGUAGE`
+- `INTERNAL_ERROR`
+
+Reserved specification base identifiers not emitted as envelope errors in v0.1.0 (6 codes; 21 total catalog + extension identifiers):
+- `UNRESOLVED_FLOW`
+- `STALE_PREFLIGHT`
+- `CANCELLED`
+- `WIKI_REVISION_NOT_AVAILABLE`
+- `WIKI_BROKEN_LINK`
+- `WIKI_NOTE_CONFLICT`
+
+## License
+
+MIT

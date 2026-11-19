@@ -1,11 +1,11 @@
 {
-  "name": "causoryn",
+  "name": "causoryn-monorepo",
   "version": "0.1.0",
   "private": true,
   "_versionDecision": "F9 (Sprint 7, 2026-11-09): 0.1.0 public snapshot; 1.0.0 ilan edilmedi (ADR-010 — 12 dürüstlük kalemi açık; bkz. CHANGELOG.md [Unreleased] ve docs/implementation-status.md Sprint 7). Değer korunmuştur; SERVER_VERSION (packages/mcp-server/src/version.ts) ile birebir.",
   "description": "Causoryn — LLM çalıştırmayan, yerel ve deterministik kod analizi MCP motoru (TŞ v2.1).",
   "type": "module",
-  "license": "UNLICENSED",
+  "license": "MIT",
   "engines": {
     "node": ">=24"
   },
@@ -19,6 +19,7 @@
     "test:watch": "vitest",
     "bench": "vitest run --config vitest.bench.config.ts",
     "build": "tsc -b",
+    "build:package": "npm run build:package --workspace packages/causoryn",
     "typecheck": "tsc -p tsconfig.typecheck.json",
     "lint": "eslint .",
     "secret-scan": "node scripts/secret-scan.mjs"

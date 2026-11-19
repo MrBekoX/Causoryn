@@ -71,6 +71,9 @@ jobs:
       - name: Build MCP server bundle
         run: npm run build:bundle --workspace packages/mcp-server
 
+      - name: Build distribution package
+        run: npm run build:package --workspace packages/causoryn
+
       - name: Lint
         run: npm run lint
 

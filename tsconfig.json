@@ -9,6 +9,7 @@
     { "path": "packages/graph" },
     { "path": "packages/storage-sqlite" },
     { "path": "packages/mcp-server" },
+    { "path": "packages/causoryn" },
     { "path": "packages/wiki" },
     { "path": "adapters/typescript" },
     { "path": "adapters/csharp-roslyn" },

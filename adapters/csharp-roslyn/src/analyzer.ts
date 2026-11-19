@@ -36,8 +36,9 @@ import {
   type SnapshotNodeInput,
   type SourceSpan,
 } from "@causoryn/domain";
-import { dirname, join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { resolveCausorynAssetRoot } from "@causoryn/sidecar-ipc";
+import { existsSync } from "node:fs";
+import { join } from "node:path";
 import { runWorkerAnalyze, type WorkerRunOutcome } from "./worker-process.js";
 import {
   CSHARP_ROSLYN_ADAPTER_ID,
@@ -54,14 +55,11 @@ import {
   type RoslynAdapterResult,
 } from "./types.js";
 
-/** src/ ve dist/ aynı derinlikte → iki derleme modunda da repo kökü. */
-const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
-
 /**
- * Varsayılan worker DLL yolu: repo kökü + B1 build çıktısı. Config kuralı:
- * CAUSORYN_ROSLYN_WORKER_DLL ortam değişkeniyle ya da analyze seçenekleriyle
- * override edilebilir; komut satırına kullanıcı girdisi HİÇbir yolla
- * interpole edilmez (kırmızı çizgi 6).
+ * Varsayılan worker DLL yolu: dinamik asset kökü + paketlenmiş düz DLL ya da
+ * B1 build çıktısı. Config kuralı: CAUSORYN_ROSLYN_WORKER_DLL ortam
+ * değişkeniyle ya da analyze seçenekleriyle override edilebilir; komut
+ * satırına kullanıcı girdisi HİÇbir yolla interpole edilmez (kırmızı çizgi 6).
  */
 function defaultWorkerDllPath(): string
 {
@@ -71,7 +69,19 @@ function defaultWorkerDllPath(): string
     return override;
   }
 
-  return join(REPO_ROOT, WORKER_DLL_RELATIVE_PATH);
+  const assetRoot = resolveCausorynAssetRoot(import.meta.url);
+  const flatDllPath = join(
+    assetRoot,
+    "native",
+    "roslyn-worker",
+    "Causoryn.RoslynWorker.dll",
+  );
+  if (existsSync(flatDllPath))
+  {
+    return flatDllPath;
+  }
+
+  return join(assetRoot, WORKER_DLL_RELATIVE_PATH);
 }
 
 function resolveOptions(partial?: Partial<RoslynAdapterOptions>): RoslynAdapterOptions

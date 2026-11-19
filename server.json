@@ -1,0 +1,36 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.mrbekox/causoryn",
+  "title": "Causoryn",
+  "description": "Local, deterministic, LLM-free codebase and change intelligence MCP server.",
+  "version": "0.1.0",
+  "repository": {
+    "url": "https://github.com/MrBekoX/Causoryn",
+    "source": "github"
+  },
+  "packages": [
+    {
+      "registryType": "npm",
+      "identifier": "causoryn",
+      "version": "0.1.0",
+      "runtimeHint": "npx",
+      "transport": {
+        "type": "stdio"
+      },
+      "packageArguments": [
+        {
+          "type": "positional",
+          "value": "mcp"
+        },
+        {
+          "type": "named",
+          "name": "--allow-cwd"
+        },
+        {
+          "type": "named",
+          "name": "--auto-data-dir"
+        }
+      ]
+    }
+  ]
+}

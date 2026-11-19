@@ -1,0 +1,38 @@
+{
+  "name": "causoryn",
+  "version": "0.1.0",
+  "description": "Deterministic, local, LLM-free codebase and change intelligence for Codex: read-only workspace graphs, architecture maps, preflight checks, post-change verification, and living wiki.",
+  "author": {
+    "name": "Causoryn Contributors",
+    "url": "https://github.com/MrBekoX/Causoryn"
+  },
+  "homepage": "https://github.com/MrBekoX/Causoryn#readme",
+  "repository": "https://github.com/MrBekoX/Causoryn",
+  "license": "MIT",
+  "keywords": [
+    "mcp",
+    "code-analysis",
+    "static-analysis",
+    "architecture-map",
+    "preflight",
+    "codex"
+  ],
+  "skills": "./skills",
+  "mcpServers": "./.codex-plugin/mcp.json",
+  "interface": {
+    "displayName": "Causoryn",
+    "shortDescription": "Local, deterministic codebase and change intelligence via MCP.",
+    "developerName": "Causoryn Contributors",
+    "category": "Coding",
+    "capabilities": [
+      "Interactive",
+      "Read"
+    ],
+    "websiteURL": "https://github.com/MrBekoX/Causoryn",
+    "defaultPrompt": [
+      "Map this workspace and show evidence for critical dependencies",
+      "Run a change preflight for the selected endpoint",
+      "Verify my working-tree changes against architecture contracts"
+    ]
+  }
+}

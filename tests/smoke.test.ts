@@ -121,6 +121,7 @@ describe("kök package.json sözleşmesi", () => {
     const manifestPaths = [
       "package.json",
       ...PACKAGE_DIRS.map((dir) => `${dir}/package.json`),
+      "packages/causoryn/package.json",
       "adapters/typescript/package.json",
       "integrations/zcode/causoryn/package.json",
     ];
@@ -146,7 +147,7 @@ describe("TypeScript çözüm sözleşmesi", () => {
     expect(field(options, "sourceMap")).toBe(true);
   });
 
-  it("kök tsconfig.json solution olarak 13 projeye referans verir", () => {
+  it("kök tsconfig.json solution olarak 14 projeye referans verir", () => {
     const solution = readJson("tsconfig.json");
     const references = field(solution, "references") as Array<
       Record<string, unknown>
@@ -157,6 +158,7 @@ describe("TypeScript çözüm sözleşmesi", () => {
     // M1-Rust ile adapters/rust (syn 2 sidecar) çözüme eklendi.
     // M1-Go ile adapters/go (stdlib go/parser sidecar) çözüme eklendi.
     // K-020 ile packages/sidecar-ipc ortak sidecar IPC çekirdeği çözüme eklendi.
+    // K-021 ile packages/causoryn açık kaynak CLI/dağıtım paketi çözüme eklendi.
     expect(paths).toEqual([
       "packages/domain",
       "packages/sidecar-ipc",
@@ -165,6 +167,7 @@ describe("TypeScript çözüm sözleşmesi", () => {
       "packages/graph",
       "packages/storage-sqlite",
       "packages/mcp-server",
+      "packages/causoryn",
       "packages/wiki",
       "adapters/typescript",
       "adapters/csharp-roslyn",

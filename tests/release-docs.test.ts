@@ -556,7 +556,7 @@ describe("BAĞIMSIZ DENETİM DÖNGÜSÜ (2026-11-18): doküman↔kod tam parite 
     throw lastError instanceof Error ? lastError : new Error(String(lastError));
   }
 
-  it("docs/architecture.md: 5 dil adapter'ı, 4 native sidecar, 17 npm workspace paketi, 13 tsconfig referansı, sidecar-ipc ve secret-scan kapısıyla senkron; bayat ifadeler yok", () => {
+  it("docs/architecture.md: 5 dil adapter'ı, 4 native sidecar, 18 npm workspace paketi, 14 tsconfig referansı, sidecar-ipc, packages/causoryn ve secret-scan kapısıyla senkron; bayat ifadeler yok", () => {
     const text = readDoc("architecture");
     for (const adapter of [
       "`adapters/typescript`",
@@ -576,15 +576,16 @@ describe("BAĞIMSIZ DENETİM DÖNGÜSÜ (2026-11-18): doküman↔kod tam parite 
       expect(text).toContain(sidecar);
     }
     expect(text).toContain("`packages/sidecar-ipc`");
+    expect(text).toContain("`packages/causoryn`");
     expect(text).toContain("storage.dataDbPath");
     expect(text).toContain(".github/workflows/ci.yml");
 
     const tsconfig = JSON.parse(readFileSync(TSCONFIG_PATH, "utf8")) as {
       references?: Array<{ path?: string }>;
     };
-    expect(tsconfig.references).toHaveLength(13);
-    expect(text).toMatch(/\b17\b[^\n]*workspace paket/i);
-    expect(text).toMatch(/tsconfig\.json[^\n]*\b13\b[^\n]*refer/i);
+    expect(tsconfig.references).toHaveLength(14);
+    expect(text).toMatch(/\b18\b[^\n]*workspace paket/i);
+    expect(text).toMatch(/tsconfig\.json[^\n]*\b14\b[^\n]*refer/i);
 
     const rootPkg = JSON.parse(readFileSync(DOC_PATHS.rootPkg, "utf8")) as {
       scripts?: Record<string, string>;
@@ -697,7 +698,7 @@ describe("BAĞIMSIZ DENETİM DÖNGÜSÜ (2026-11-18): doküman↔kod tam parite 
     expect(text).toContain("wiki/index.md:5-28");
   });
 
-  it("docs/project-overview.tr-en.md: TR ve EN bölümleri simetrik olarak 17 workspace paketi, sidecar-ipc, storage.dataDbPath, CI iş akışı, MCP annotations ve Antigravity sahnelemesini taşır", () => {
+  it("docs/project-overview.tr-en.md: TR ve EN bölümleri simetrik olarak 18 workspace paketi, sidecar-ipc, packages/causoryn, storage.dataDbPath, CI iş akışı, MCP annotations ve Antigravity sahnelemesini taşır", () => {
     const text = readFileSync(OVERVIEW_PATH, "utf8").replace(/\r\n/g, "\n");
     const splitMarker = "\n# English\n";
     const splitIdx = text.indexOf(splitMarker);
@@ -711,11 +712,13 @@ describe("BAĞIMSIZ DENETİM DÖNGÜSÜ (2026-11-18): doküman↔kod tam parite 
       expect(half).toContain("4c9c188");
       expect(half).toContain("typescript");
       expect(half).toContain("esbuild");
-      expect(half).toContain("17");
+      expect(half).toContain("18");
       expect(half).toContain("sidecar-ipc");
+      expect(half).toContain("causoryn setup");
       expect(half).toContain("storage.dataDbPath");
       expect(half).toContain(".github/workflows/ci.yml");
       expect(half).toContain("K-020");
+      expect(half).toContain("K-021");
       expect(half).toContain("SCHEMA_VERSION");
       expect(half).toContain("readOnlyHint");
       expect(half).toContain("K-011");

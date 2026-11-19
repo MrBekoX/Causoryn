@@ -1,4 +1,5 @@
-import path, { dirname, join, resolve } from "node:path";
+import { existsSync } from "node:fs";
+import path, { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import {
@@ -215,6 +216,13 @@ export interface IndexServiceOptions {
   readonly go?: GoIndexOptions;
   /** Rust (syn sidecar) adapter ayarları; tanımsızsa defaults (M2). */
   readonly rust?: RustIndexOptions;
+  /**
+   * K-021: Aynı SQLite veri kökünü paylaşan çoklu süreç yarışlarında
+   * (graph/build-already-active ve graph/publish-failed) kaybeden build'i
+   * failBuild ile temizleyip yayımlanmış mevcut snapshot'a zarifçe düşer.
+   * Varsayılan false.
+   */
+  readonly tolerateConcurrentPublishRace?: boolean;
 }
 
 /** Adapter tanı kaydının uygulama düzeyi karşılığı (parser detayı sızmaz). */
@@ -406,8 +414,32 @@ const PY_EXTENSIONS = new Set([".py"]);
 const GO_EXTENSIONS = new Set([".go"]);
 const RS_EXTENSIONS = new Set([".rs"]);
 
-/** src/ ve dist/ aynı derinlikte → iki derleme modunda da repo kökü. */
-const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
+/**
+ * Dinamik sidecar asset kökü çözümleyicisi:
+ * 1) CAUSORYN_ASSET_ROOT ortam değişkeni doluysa mutlak yolunu döner,
+ * 2) import.meta.url dizininden yukarı 0..4 ata dizinde native/python-worker/worker.py
+ *    arar (monorepo derinlik-3 ve paketlenmiş bundle derinlik-1 düzenleri),
+ * 3) bulunamazsa 3-seviye üst ata dizine geri düşer.
+ */
+function resolveIndexingAssetRoot(): string {
+  const envAssetRoot = process.env["CAUSORYN_ASSET_ROOT"]?.trim();
+  if (envAssetRoot !== undefined && envAssetRoot.length > 0) {
+    return path.resolve(envAssetRoot);
+  }
+  const startDir = dirname(fileURLToPath(import.meta.url));
+  let current = startDir;
+  for (let depth = 0; depth <= 4; depth += 1) {
+    if (existsSync(join(current, "native", "python-worker", "worker.py"))) {
+      return current;
+    }
+    const parent = dirname(current);
+    if (parent === current) {
+      break;
+    }
+    current = parent;
+  }
+  return dirname(dirname(dirname(startDir)));
+}
 
 export class IndexService {
   private readonly workspaceId: string;
@@ -424,8 +456,12 @@ export class IndexService {
   private readonly goSettings: GoIndexSettings;
   /** Rust adapter'a geçilen etkin ayarlar (rustopts fingerprint hash'i; M2). */
   private readonly rustSettings: RustIndexSettings;
+  /** Rust workerDir yalnızca açıkça override edildiğinde adapter'a iletilir. */
+  private readonly hasExplicitRustWorkerDir: boolean;
   /** C# analiz seam'i: prod analyzeCSharpWorkspace; testler stub enjekte eder. */
   private readonly analyzeCSharpFn: AnalyzeCSharpFunction;
+  /** K-021: çoklu-süreç SQLite yarış kurtarma modu. */
+  private readonly tolerateConcurrentPublishRace: boolean;
   private workspaceRegistered = false;
   private runCount = 0;
 
@@ -435,6 +471,7 @@ export class IndexService {
     this.repository = options.repository;
     this.clock = options.clock;
     this.limits = options.limits;
+    this.tolerateConcurrentPublishRace = options.tolerateConcurrentPublishRace ?? false;
     const policyConfig = options.policy.config;
     const hashInput: JsonValue = {
       workspaceId: this.workspaceId,
@@ -448,16 +485,26 @@ export class IndexService {
       maxFileBytes: policyConfig.maxFileBytes,
     };
     this.configHash = sha256Hex(utf8Encode(canonicalJson(hashInput)));
+    const assetRoot = resolveIndexingAssetRoot();
     // Etkin C# ayarları: açık option > ortam değişkeni (worker DLL yolu) >
-    // adapter varsayılanı. Ortam değişkeni kuralı adapter ile aynıdır
-    // (CAUSORYN_ROSLYN_WORKER_DLL) — fingerprint gerçekten kullanılan
-    // DLL yolunu yansıtır. Bu sınıf yolu yalnızca adapter option'ına ve
-    // opts hash'ine taşır; süreç başlatma yalnızca adapter'dadır.
+    // düz paketlenmiş DLL > B1 build çıktısı varsayılanı. Ortam değişkeni
+    // kuralı adapter ile aynıdır (CAUSORYN_ROSLYN_WORKER_DLL) — fingerprint
+    // gerçekten kullanılan DLL yolunu yansıtır.
     const envWorkerDll = process.env["CAUSORYN_ROSLYN_WORKER_DLL"];
-    const defaultWorkerDll =
-      envWorkerDll !== undefined && envWorkerDll.trim().length > 0
-        ? envWorkerDll
-        : join(REPO_ROOT, WORKER_DLL_RELATIVE_PATH);
+    let defaultWorkerDll: string;
+    if (envWorkerDll !== undefined && envWorkerDll.trim().length > 0) {
+      defaultWorkerDll = envWorkerDll;
+    } else {
+      const flatWorkerDll = join(
+        assetRoot,
+        "native",
+        "roslyn-worker",
+        "Causoryn.RoslynWorker.dll",
+      );
+      defaultWorkerDll = existsSync(flatWorkerDll)
+        ? flatWorkerDll
+        : join(assetRoot, WORKER_DLL_RELATIVE_PATH);
+    }
     const csharpOptions = options.csharp ?? {};
     this.csharpSettings = {
       dotnetCommand: csharpOptions.dotnetCommand ?? DEFAULT_DOTNET_COMMAND,
@@ -482,7 +529,7 @@ export class IndexService {
         pythonOptions.workerScriptPath ??
         (envPythonScript !== undefined && envPythonScript.trim().length > 0
           ? envPythonScript
-          : join(REPO_ROOT, WORKER_SCRIPT_RELATIVE_PATH)),
+          : join(assetRoot, WORKER_SCRIPT_RELATIVE_PATH)),
       responseMaxChars: DEFAULT_PY_RESPONSE_MAX_CHARS,
     };
     const goOptions = options.go ?? {};
@@ -497,10 +544,13 @@ export class IndexService {
         goOptions.workerDir ??
         (envGoWorkerDir !== undefined && envGoWorkerDir.trim().length > 0
           ? envGoWorkerDir
-          : join(REPO_ROOT, GO_WORKER_DIR_RELATIVE_PATH)),
+          : join(assetRoot, GO_WORKER_DIR_RELATIVE_PATH)),
       requestTimeoutMs: goOptions.requestTimeoutMs ?? DEFAULT_GO_REQUEST_TIMEOUT_MS,
     };
     const rustOptions = options.rust ?? {};
+    this.hasExplicitRustWorkerDir =
+      rustOptions.workerDir !== undefined ||
+      Boolean(process.env["CAUSORYN_RUST_WORKER_DIR"]?.trim());
     this.rustSettings = {
       workerDir: rustOptions.workerDir ?? defaultWorkerDir(),
       workerBinaryName: WORKER_BINARY_NAME,
@@ -826,6 +876,217 @@ export class IndexService {
   }
 
   /**
+   * Eşzamanlı build/publish yarışında yayımlanmış snapshot üzerinden zarif
+   * sonuç üretir ve yerel sequence sayacını ileri hizalar.
+   */
+  private concurrentReuseResult(
+    latest: NonNullable<ReturnType<GraphRepository["getLatestPublished"]>>,
+    fileCount: number,
+    tsFileCount: number,
+    csFileCount: number,
+    warnings: readonly string[],
+    diagnostics: readonly IndexDiagnostic[],
+    raceWarning: string,
+  ): IndexRunResult {
+    this.runCount = Math.max(this.runCount, latest.snapshot.meta.revision.sequence);
+    return {
+      snapshotId: latest.snapshot.meta.id,
+      snapshot: latest.snapshot,
+      stale: latest.stale,
+      fileCount,
+      tsFileCount,
+      csFileCount,
+      state: latest.snapshot.meta.state === "ready" ? "ready" : "partial",
+      warnings: [...warnings, raceWarning],
+      diagnostics,
+      published: false,
+    };
+  }
+
+  /**
+   * Çoklu-süreç SQLite yarış modunda build açmadan hemen önce yayımlanmış
+   * en güncel snapshot'ı kontrol eder:
+   * - Birebir aynı dosya/karma + analyzerFingerprint + configHash kopyasıysa
+   *   `runCount = latest.sequence - 1` ile UNIQUE(id) tekilleştirmesini korur,
+   * - Aksi hâlde (başka süreç ilerledikten sonra dosyalar/ayarlar değiştiyse)
+   *   `runCount = latest.sequence` ile yayını `N + 1` olarak monotonik ilerletir.
+   */
+  private syncRunCountBeforeBuild(
+    entries: readonly InventoryEntry[],
+    analyzerFingerprint: string,
+  ): void {
+    if (!this.tolerateConcurrentPublishRace) return;
+    const latest = this.repository.getLatestPublished(this.workspaceId);
+    if (latest === undefined || latest.snapshot.meta.revision.sequence <= this.runCount) {
+      return;
+    }
+    if (this.matchesPublishedSnapshotInputs(entries, analyzerFingerprint, latest.snapshot)) {
+      this.runCount = latest.snapshot.meta.revision.sequence - 1;
+    } else {
+      this.runCount = latest.snapshot.meta.revision.sequence;
+    }
+  }
+
+  private matchesPublishedSnapshotInputs(
+    entries: readonly InventoryEntry[],
+    analyzerFingerprint: string,
+    snapshot: SnapshotGraph,
+  ): boolean {
+    if (snapshot.meta.configHash !== this.configHash) return false;
+    if (snapshot.meta.analyzerFingerprint !== analyzerFingerprint) return false;
+
+    const repoFiles = this.repository.listFiles(this.workspaceId);
+    if (repoFiles.length !== entries.length) return false;
+    const repoHashByPath = new Map(
+      repoFiles.map((record) => [record.relativePath, record.contentHash]),
+    );
+    const entryHashByPath = new Map<string, string>();
+    let languageEntryCount = 0;
+    for (const entry of entries) {
+      if (repoHashByPath.get(entry.relativePath) !== entry.contentHash) {
+        return false;
+      }
+      entryHashByPath.set(entry.relativePath, entry.contentHash);
+      if (this.isLanguageSource(path.extname(entry.relativePath).toLowerCase())) {
+        languageEntryCount += 1;
+      }
+    }
+
+    let snapshotFileNodeCount = 0;
+    for (const node of snapshot.nodes) {
+      if (node.kind !== "File") continue;
+      snapshotFileNodeCount += 1;
+      if (
+        node.location === undefined ||
+        entryHashByPath.get(node.location.relativePath) !== node.location.sourceHash
+      ) {
+        return false;
+      }
+    }
+    return snapshotFileNodeCount === languageEntryCount;
+  }
+
+  /**
+   * Build açar; tolerateConcurrentPublishRace aktifken graph/build-already-active
+   * yarışında mevcut yayımlanmış snapshot varsa ona zarifçe düşer.
+   */
+  private openBuildOrRecover(
+    entries: readonly InventoryEntry[],
+    analyzerFingerprint: string,
+    createdAt: string,
+    canonicalRoot: string,
+    fileCount: number,
+    tsFileCount: number,
+    csFileCount: number,
+    warnings: readonly string[],
+    diagnostics: readonly IndexDiagnostic[],
+  ):
+    | { readonly kind: "opened"; readonly opened: ReturnType<IndexService["openBuild"]> }
+    | { readonly kind: "reused"; readonly result: IndexRunResult } {
+    this.syncRunCountBeforeBuild(entries, analyzerFingerprint);
+    try {
+      return {
+        kind: "opened",
+        opened: this.openBuild(analyzerFingerprint, createdAt, canonicalRoot),
+      };
+    } catch (error) {
+      if (
+        this.tolerateConcurrentPublishRace &&
+        error instanceof GraphRepositoryError &&
+        (error.code === "graph/build-already-active" ||
+          (error.code === "storage/driver-error" &&
+            error.message.includes("snapshots.workspace_id")))
+      ) {
+        const latest = this.repository.getLatestPublished(this.workspaceId);
+        if (latest !== undefined) {
+          return {
+            kind: "reused",
+            result: this.concurrentReuseResult(
+              latest,
+              fileCount,
+              tsFileCount,
+              csFileCount,
+              warnings,
+              diagnostics,
+              "concurrent index build race (graph/build-already-active): reused existing published snapshot",
+            ),
+          };
+        }
+      }
+      throw error;
+    }
+  }
+
+  /**
+   * Build'i yayımlar; tolerateConcurrentPublishRace aktifken graph/publish-failed
+   * yarışında önce kaybeden build satırını failBuild ile temizler, ardından
+   * mevcut yayımlanmış snapshot varsa onu döner (yoksa normal hata yolu).
+   */
+  private finalizePublish(
+    buildId: string,
+    state: PublishableState,
+    fileCount: number,
+    tsFileCount: number,
+    csFileCount: number,
+    warnings: string[],
+    diagnostics: IndexDiagnostic[],
+  ): IndexRunResult {
+    const publishedAt = this.clock();
+    let snapshot: SnapshotGraph;
+    try {
+      snapshot = this.repository.publish(buildId, state, publishedAt);
+    } catch (error) {
+      if (
+        this.tolerateConcurrentPublishRace &&
+        error instanceof GraphRepositoryError &&
+        error.code === "graph/publish-failed"
+      ) {
+        try {
+          this.repository.failBuild(buildId, "concurrent snapshot publish race");
+        } catch {
+          // Build satırı zaten aktif değilse yutulur.
+        }
+        const latest = this.repository.getLatestPublished(this.workspaceId);
+        if (latest !== undefined) {
+          return this.concurrentReuseResult(
+            latest,
+            fileCount,
+            tsFileCount,
+            csFileCount,
+            warnings,
+            diagnostics,
+            "concurrent snapshot publish race (graph/publish-failed): reused existing published snapshot",
+          );
+        }
+        throw new IndexingError("indexing/internal", `graph deposu reddetti: ${error.message}`);
+      }
+      this.failBuild(buildId, error);
+    }
+    try {
+      this.indexPublishedSymbols(snapshot);
+    } catch (error) {
+      if (error instanceof GraphRepositoryError) {
+        throw new IndexingError("indexing/internal", `graph deposu reddetti: ${error.message}`);
+      }
+      throw error;
+    }
+    this.runCount += 1;
+    const stale = this.repository.getLatestPublished(this.workspaceId)?.stale ?? false;
+    return {
+      snapshotId: snapshot.meta.id,
+      snapshot,
+      stale,
+      fileCount,
+      tsFileCount,
+      csFileCount,
+      state,
+      warnings,
+      diagnostics,
+      published: true,
+    };
+  }
+
+  /**
    * SENKRON pipeline (runIndex/runIncrementalIndex gövdesi). C# derin
    * analizi YOKTUR: worker async koşar, senkron imza onu bekleyemez ve bu
    * yol worker'ı hiç başlatmaz — C# L0 File node'ları envanterden türetilir
@@ -894,8 +1155,24 @@ export class IndexService {
             }
           : null,
     });
-    const opened = this.openBuild(fingerprint, createdAt, canonicalRoot);
+    const buildAttempt = this.openBuildOrRecover(
+      entries,
+      fingerprint,
+      createdAt,
+      canonicalRoot,
+      entries.length,
+      tsEntries.length,
+      csEntries.length,
+      warnings,
+      diagnostics,
+    );
+    if (buildAttempt.kind === "reused") {
+      return buildAttempt.result;
+    }
+    const opened = buildAttempt.opened;
 
+    let finalState: PublishableState = "partial";
+    let emptyLanguageRun = false;
     try {
       // Erken çıkış: analiz edilebilir dil kaynağı yok (orijinal davranış,
       // genelleştirilmiş uyarı; tek Workspace node'uyla partial publish).
@@ -919,24 +1196,8 @@ export class IndexService {
         for (const entry of entries) {
           warnings.push(`dosya envanterde ama dil adapter kapsamı dışında: ${entry.relativePath}`);
         }
-        const publishedAt = this.clock();
-        const snapshot = this.repository.publish(opened.buildId, "partial", publishedAt);
-        this.indexPublishedSymbols(snapshot);
-        this.runCount += 1;
-        const stale = this.repository.getLatestPublished(this.workspaceId)?.stale ?? false;
-        return {
-          snapshotId: snapshot.meta.id,
-          snapshot,
-          stale,
-          fileCount: entries.length,
-          tsFileCount: 0,
-          csFileCount: 0,
-          state: "partial",
-          warnings,
-          diagnostics: [],
-          published: true,
-        };
-      }
+        emptyLanguageRun = true;
+      } else {
 
       const nodeByKey = new Map<string, GraphNode>();
       let tsState: "ready" | "partial" = "ready";
@@ -1062,34 +1323,38 @@ export class IndexService {
       // itip bayat graph'ı korur.
       this.syncInventoryRecords(entries);
 
-      const state: PublishableState =
+      finalState =
         tsState === "ready" &&
         csState === "ready" &&
         !syncHasL0Language &&
         diagnostics.length === 0
           ? "ready"
           : "partial";
-
-      const publishedAt = this.clock();
-      const snapshot = this.repository.publish(opened.buildId, state, publishedAt);
-      this.indexPublishedSymbols(snapshot);
-      this.runCount += 1;
-      const stale = this.repository.getLatestPublished(this.workspaceId)?.stale ?? false;
-      return {
-        snapshotId: snapshot.meta.id,
-        snapshot,
-        stale,
-        fileCount: entries.length,
-        tsFileCount: tsEntries.length,
-        csFileCount: csEntries.length,
-        state,
-        warnings,
-        diagnostics,
-        published: true,
-      };
+      }
     } catch (error) {
       this.failBuild(opened.buildId, error);
     }
+
+    if (emptyLanguageRun) {
+      return this.finalizePublish(
+        opened.buildId,
+        "partial",
+        entries.length,
+        0,
+        0,
+        warnings,
+        [],
+      );
+    }
+    return this.finalizePublish(
+      opened.buildId,
+      finalState,
+      entries.length,
+      tsEntries.length,
+      csEntries.length,
+      warnings,
+      diagnostics,
+    );
   }
 
   /**
@@ -1236,7 +1501,9 @@ export class IndexService {
           content: entry.content,
         })),
         options: {
-          workerDir: this.rustSettings.workerDir,
+          ...(this.hasExplicitRustWorkerDir
+            ? { workerDir: this.rustSettings.workerDir }
+            : {}),
           workerBinaryName: this.rustSettings.workerBinaryName,
           ...(this.rustSettings.cargoHomeDir.length > 0
             ? { cargoHomeDir: this.rustSettings.cargoHomeDir }
@@ -1324,13 +1591,30 @@ export class IndexService {
           : null,
     });
 
-    // Envanter mutabakatı ADAPTER KOŞUMULARINDAN sonra (yukarıdaki sıralama
-    // sözleşmesi); build açılışından önce.
-    this.syncInventoryRecords(entries);
+    const buildAttempt = this.openBuildOrRecover(
+      entries,
+      fingerprint,
+      createdAt,
+      canonicalRoot,
+      entries.length,
+      tsEntries.length,
+      csEntries.length,
+      warnings,
+      diagnostics,
+    );
+    if (buildAttempt.kind === "reused") {
+      return buildAttempt.result;
+    }
+    const opened = buildAttempt.opened;
 
-    const opened = this.openBuild(fingerprint, createdAt, canonicalRoot);
-
+    let finalState: PublishableState = "ready";
+    let emptyLanguageRun = false;
     try {
+      // Envanter mutabakatı ADAPTER KOŞUMULARINDAN ve build açılışından sonra:
+      // başka sürecin aktif build'i nedeniyle önceki snapshot'a düşülürse
+      // files tablosu yayımlanmamış karmalarla kirlenmez.
+      this.syncInventoryRecords(entries);
+
       // Erken çıkış: analiz edilebilir dil kaynağı yok — senkron yolun
       // aynı dürüstlük sözleşmesi (denetim bulgusu): coverage sıfırken
       // 'ready' uydurulmaz; partial + explicit kapsam uyarıları yayımlanır.
@@ -1347,24 +1631,8 @@ export class IndexService {
         for (const entry of entries) {
           warnings.push(`dosya envanterde ama dil adapter kapsamı dışında: ${entry.relativePath}`);
         }
-        const publishedAt = this.clock();
-        const snapshot = this.repository.publish(opened.buildId, "partial", publishedAt);
-        this.indexPublishedSymbols(snapshot);
-        this.runCount += 1;
-        const stale = this.repository.getLatestPublished(this.workspaceId)?.stale ?? false;
-        return {
-          snapshotId: snapshot.meta.id,
-          snapshot,
-          stale,
-          fileCount: entries.length,
-          tsFileCount: 0,
-          csFileCount: 0,
-          state: "partial",
-          warnings,
-          diagnostics: [],
-          published: true,
-        };
-      }
+        emptyLanguageRun = true;
+      } else {
 
       const nodeByKey = new Map<string, GraphNode>();
       let state: PublishableState = "ready";
@@ -1425,27 +1693,32 @@ export class IndexService {
       }
       if (tsState !== "ready") state = "partial";
       if (diagnostics.length > 0) state = "partial";
-
-      const publishedAt = this.clock();
-      const snapshot = this.repository.publish(opened.buildId, state, publishedAt);
-      this.indexPublishedSymbols(snapshot);
-      this.runCount += 1;
-      const stale = this.repository.getLatestPublished(this.workspaceId)?.stale ?? false;
-      return {
-        snapshotId: snapshot.meta.id,
-        snapshot,
-        stale,
-        fileCount: entries.length,
-        tsFileCount: tsEntries.length,
-        csFileCount: csEntries.length,
-        state,
-        warnings,
-        diagnostics,
-        published: true,
-      };
+      finalState = state;
+      }
     } catch (error) {
       this.failBuild(opened.buildId, error);
     }
+
+    if (emptyLanguageRun) {
+      return this.finalizePublish(
+        opened.buildId,
+        "partial",
+        entries.length,
+        0,
+        0,
+        warnings,
+        [],
+      );
+    }
+    return this.finalizePublish(
+      opened.buildId,
+      finalState,
+      entries.length,
+      tsEntries.length,
+      csEntries.length,
+      warnings,
+      diagnostics,
+    );
   }
 
   /**

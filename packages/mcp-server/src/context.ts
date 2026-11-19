@@ -146,6 +146,7 @@ export function createCausorynContext(
       repository,
       clock,
       limits: { maxFiles: config.index.maxFiles },
+      tolerateConcurrentPublishRace: config.storage.dataDbPath !== undefined,
     });
     // Sprint-2 B6: refresh_index işleri için yönetici; jobId per-manager
     // monoton sayaçtır (işletim kaydı — snapshot determinizmine girmez).

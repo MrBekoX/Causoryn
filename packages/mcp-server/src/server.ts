@@ -527,8 +527,19 @@ function buildRegistrations(context: CausorynContext): readonly ToolRegistration
   ];
 }
 
+export type OutputSchemaProfile = "full" | "omit";
+
+export interface CreateCausorynServerOptions {
+  readonly outputSchemaProfile?: OutputSchemaProfile;
+  readonly beforeToolCall?: (toolName: string) => void | Promise<void>;
+}
+
 /** Context'i MCP McpServer'a bağlar; tam olarak 29 araç kaydeder. */
-export function createCausorynMcpServer(context: CausorynContext): McpServer {
+export function createCausorynMcpServer(
+  context: CausorynContext,
+  options: CreateCausorynServerOptions = {},
+): McpServer {
+  const outputSchemaProfile: OutputSchemaProfile = options.outputSchemaProfile ?? "full";
   const server = new McpServer(
     { name: SERVER_NAME, version: SERVER_VERSION },
     { capabilities: { tools: {} } },
@@ -540,13 +551,17 @@ export function createCausorynMcpServer(context: CausorynContext): McpServer {
         title: registration.title,
         description: registration.description,
         inputSchema: registration.inputSchema,
-        outputSchema: registration.outputSchema,
+        ...(outputSchemaProfile === "full" ? { outputSchema: registration.outputSchema } : {}),
         annotations: registration.annotations,
       },
       async (args, extra) => {
         const requestId = String(extra.requestId);
         try {
+          await options.beforeToolCall?.(registration.name);
           const envelope = await registration.handler(requestId, args);
+          if (outputSchemaProfile === "omit") {
+            registration.outputSchema.parse(envelope);
+          }
           return envelopeResult(envelope);
         } catch (error) {
           if (error instanceof CausorynToolError) {
