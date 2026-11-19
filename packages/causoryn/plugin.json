@@ -1,0 +1,17 @@
+{
+  "name": "causoryn",
+  "displayName": "Causoryn",
+  "version": "0.1.0",
+  "description": "Local, evidence-backed codebase and change intelligence via MCP.",
+  "author": {
+    "name": "Causoryn Contributors",
+    "url": "https://github.com/MrBekoX/Causoryn"
+  },
+  "homepage": "https://github.com/MrBekoX/Causoryn#readme",
+  "repository": "https://github.com/MrBekoX/Causoryn",
+  "suggestedPrompts": [
+    "Map this workspace and show evidence for critical dependencies",
+    "Run a change preflight for the selected endpoint",
+    "Verify my working-tree changes against architecture contracts"
+  ]
+}

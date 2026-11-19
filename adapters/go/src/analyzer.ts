@@ -34,8 +34,8 @@ import {
   type SnapshotNodeInput,
   type SourceSpan,
 } from "@causoryn/domain";
-import { dirname, join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { resolveCausorynAssetRoot } from "@causoryn/sidecar-ipc";
+import { join } from "node:path";
 import { runGoWorkerAnalyze, type WorkerRunOutcome } from "./worker-process.js";
 import {
   DEFAULT_GO_BINARY_PATH,
@@ -52,21 +52,18 @@ import {
   type GoAdapterResult,
 } from "./types.js";
 
-/** src/ ve dist/ aynı derinlikte → iki derleme modunda da repo kökü. */
-const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
-
 /**
- * Varsayılan worker modül kökü: repo kökü + native/go-worker. Config kuralı:
- * CAUSORYN_GO_WORKER_DIR ortam değişkeniyle ya da analyze seçenekleriyle
- * override edilebilir; komut satırına kullanıcı girdisi HİÇbir yolla
- * interpole edilmez (kırmızı çizgi 6).
+ * Varsayılan worker modül kökü: dinamik asset kökü + native/go-worker. Config
+ * kuralı: CAUSORYN_GO_WORKER_DIR ortam değişkeniyle ya da analyze
+ * seçenekleriyle override edilebilir; komut satırına kullanıcı girdisi HİÇbir
+ * yolla interpole edilmez (kırmızı çizgi 6).
  */
 function defaultWorkerDir(): string {
   const override = process.env["CAUSORYN_GO_WORKER_DIR"];
   if (override !== undefined && override.trim().length > 0) {
     return override;
   }
-  return join(REPO_ROOT, WORKER_DIR_RELATIVE_PATH);
+  return join(resolveCausorynAssetRoot(import.meta.url), WORKER_DIR_RELATIVE_PATH);
 }
 
 /** Önceden derlenmiş binary modu: CAUSORYN_GO_WORKER_BIN (boşsa go run). */

@@ -99,6 +99,11 @@ yayımlanmış graph snapshot'ını dışa aktarır (`view` parametresi verildi�
 `INVALID_ARGUMENT` ile reddedilir — ADR-010). Ayrı `wiki_refresh`/`wiki_export`
 aracı AÇILMAZ — wiki/mcp-tools.md katalog ilkesiyle aynıdır.
 
+## Sıfır-ayar CLI ve `outputSchemaProfile` sözleşmesi (K-021)
+
+- **Programatik ve çıplak mod (`outputSchemaProfile: "full"`):** `createCausorynMcpServer(context)` ve sıfır argümanlı `node dist/mcp-server.mjs` varsayılan olarak 29 aracın tamamında tam JSON `outputSchema` yayınlar ve `CAUSORYN_CONFIG` yoksa `allowRoots: []` (default deny) uygular.
+- **CLI / Plugin modu (`causoryn mcp --allow-cwd --auto-data-dir [--client <id>]`):** Tel üzerinde `tools/list` yükünü azaltmak için varsayılan `outputSchemaProfile: "omit"` kullanılır (`CAUSORYN_MCP_OUTPUT_SCHEMA_PROFILE=full` ile açılabilir), ancak her yanıt sunucu içinde yine Zod `outputSchema.parse(envelope)` ile doğrulanır; güvenli proje `cwd` doğrudan bağlanır, masaüstü IDE'lerde uygunsuz `cwd` (`$HOME`, `/`, `PLUGIN_DIR`) reddedilip MCP `roots/list` üzerinden aktif çalışma alanı dinamik bağlanır ve veri dizini kaynak ağacının dışında (`~/.causoryn/workspaces/<slug>-<hash12>/`) otomatik hazırlanır.
+
 ## İlgili sayfalar
 
 - [docs/architecture.md](architecture.md) — paket haritası ve bağımlılık sınırları

@@ -2,6 +2,10 @@
 node_modules/
 dist/
 integrations/antigravity/causoryn/scripts/
+packages/causoryn/native/
+packages/causoryn/skills/
+packages/causoryn/LICENSE
+*.tgz
 coverage/
 *.tsbuildinfo
 

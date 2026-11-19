@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "causoryn": {
+      "command": "node",
+      "args": [
+        "scripts/plugin-mcp-launcher.mjs",
+        "--allow-cwd",
+        "--auto-data-dir",
+        "--client",
+        "antigravity"
+      ]
+    }
+  }
+}

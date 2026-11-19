@@ -1,0 +1,34 @@
+{
+  "name": "causoryn",
+  "version": "0.1.0",
+  "description": "Deterministic, local, LLM-free codebase and change intelligence for Claude Code: read-only workspace graphs, architecture maps, preflight checks, post-change verification, and living wiki.",
+  "author": {
+    "name": "Causoryn Contributors",
+    "url": "https://github.com/MrBekoX/Causoryn"
+  },
+  "homepage": "https://github.com/MrBekoX/Causoryn#readme",
+  "repository": "https://github.com/MrBekoX/Causoryn",
+  "license": "MIT",
+  "keywords": [
+    "mcp",
+    "code-analysis",
+    "static-analysis",
+    "architecture-map",
+    "preflight",
+    "claude-code"
+  ],
+  "skills": "./skills",
+  "mcpServers": {
+    "causoryn": {
+      "type": "stdio",
+      "command": "node",
+      "args": [
+        "${CLAUDE_PLUGIN_ROOT}/scripts/plugin-mcp-launcher.mjs",
+        "--allow-cwd",
+        "--auto-data-dir",
+        "--client",
+        "claude-code"
+      ]
+    }
+  }
+}

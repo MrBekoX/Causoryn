@@ -13,7 +13,10 @@
  *   kancası (örn. Go `go run` modunda ağaç-kill).
  */
 import { spawn as defaultSpawn, type ChildProcess } from "node:child_process";
+import { existsSync } from "node:fs";
+import path from "node:path";
 import { StringDecoder } from "node:string_decoder";
+import { fileURLToPath } from "node:url";
 
 /** Tek yanıt satırı ve stderr birikimi için varsayılan karakter bütçesi (64 MiB). */
 export const DEFAULT_RESPONSE_MAX_CHARS = 64 * 1024 * 1024;
@@ -60,6 +63,43 @@ export interface RunLineJsonWorkerInput {
   readonly spawnProcess?: SidecarSpawnFunction;
   /** Çalışmakta olan çocuk süreç sonlandırılırken çağrılan ek temizlik kancası. */
   readonly onKillChild?: (child: ChildProcess) => void;
+}
+
+export interface ResolveCausorynAssetRootOptions {
+  readonly maxWalkDepth?: number;
+  readonly env?: NodeJS.ProcessEnv;
+}
+
+/**
+ * Sidecar worker kaynaklarının kök dizinini (`native/` ağacını barındıran
+ * dizin) hem monorepo düzeninde (derinlik 3) hem de paketlenmiş tek-dosya
+ * bundle düzeninde (derinlik 1) çözümler.
+ */
+export function resolveCausorynAssetRoot(
+  importMetaUrl: string,
+  options?: ResolveCausorynAssetRootOptions,
+): string {
+  const env = options?.env ?? process.env;
+  const envOverride = env["CAUSORYN_ASSET_ROOT"];
+  if (envOverride !== undefined && envOverride.trim().length > 0) {
+    return path.resolve(envOverride.trim());
+  }
+
+  const startDir = path.dirname(fileURLToPath(importMetaUrl));
+  const maxWalkDepth = options?.maxWalkDepth ?? 4;
+  let dir = startDir;
+  for (let depth = 0; depth <= maxWalkDepth; depth += 1) {
+    if (existsSync(path.join(dir, "native", "python-worker", "worker.py"))) {
+      return dir;
+    }
+    const parent = path.dirname(dir);
+    if (parent === dir) {
+      break;
+    }
+    dir = parent;
+  }
+
+  return path.dirname(path.dirname(path.dirname(startDir)));
 }
 
 /**

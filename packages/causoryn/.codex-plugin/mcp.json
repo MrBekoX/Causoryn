@@ -1,0 +1,19 @@
+{
+  "mcpServers": {
+    "causoryn": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "--package",
+        "causoryn@0.1.0",
+        "causoryn",
+        "mcp",
+        "--allow-cwd",
+        "--auto-data-dir",
+        "--client",
+        "codex"
+      ],
+      "startup_timeout_sec": 30
+    }
+  }
+}

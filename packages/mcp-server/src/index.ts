@@ -60,6 +60,27 @@ export {
   PreflightManifestStore,
 } from "./preflight-store.js";
 export { createCausorynMcpServer } from "./server.js";
+export type { CreateCausorynServerOptions, OutputSchemaProfile } from "./server.js";
+export {
+  McpCliUsageError,
+  attachMcpRootsWorkspaceBinder,
+  buildWorkspaceAutoConfig,
+  createDynamicCausorynContext,
+  inspectProjectRootSafety,
+  isSafeProjectRoot,
+  parseMcpCliArgs,
+  resolveBaseDataDir,
+  resolveEffectiveOutputSchemaProfile,
+} from "./runtime-cli.js";
+export type {
+  AttachMcpRootsBinderOptions,
+  DynamicCausorynContext,
+  McpRootsWorkspaceBinder,
+  ParsedMcpCliArgs,
+  ProjectRootSafetyResult,
+  SafeProjectRootOptions,
+  WorkspaceAutoConfigOptions,
+} from "./runtime-cli.js";
 export {
   graphErrorToToolError,
   analyzeImpactTool,

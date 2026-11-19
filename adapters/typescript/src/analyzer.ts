@@ -448,7 +448,7 @@ function runAnalysis(input: TypeScriptAdapterInput): AnalysisRun {
     skipLibCheck: true,
     noEmit: true,
   };
-  const host = ts.createCompilerHost(compilerOptions, /*setParentNodes*/ true);
+  const host = createCompilerHostWithDefaultLib(compilerOptions);
   const baseFileExists = host.fileExists.bind(host);
   const baseReadFile = host.readFile.bind(host);
   host.fileExists = (path: string) =>
@@ -2196,4 +2196,148 @@ function collectNextPageHandler(
       : `Next.js App Router sayfa dosyası ('${entry.relativePath}') tanınan default export içermiyor; kenar üretilmedi, node icat edilmedi.`,
     line: firstStatementLine(sourceFile),
   });
+}
+
+/* ------------------------------------------------------------------ */
+/* Standalone TypeScript lib*.d.ts dizin çözümlemesi                   */
+/* ------------------------------------------------------------------ */
+
+function createCompilerHostWithDefaultLib(
+  compilerOptions: ts.CompilerOptions,
+): ts.CompilerHost {
+  const host = ts.createCompilerHost(compilerOptions, /*setParentNodes*/ true);
+  const resolvedLibDir = resolveTypeScriptLibDir();
+  if (resolvedLibDir !== undefined) {
+    host.getDefaultLibLocation = () => resolvedLibDir;
+    host.getDefaultLibFileName = (opts) =>
+      joinLibPosix(resolvedLibDir, ts.getDefaultLibFileName(opts));
+  }
+  return host;
+}
+
+type ProcessEnvMap = Readonly<Record<string, string | undefined>>;
+
+export interface ResolveTypeScriptLibDirOptions {
+  readonly importMetaUrl?: string;
+  readonly env?: ProcessEnvMap;
+}
+
+function readDefaultProcessEnv(): ProcessEnvMap {
+  const proc = (
+    globalThis as { readonly process?: { readonly env?: ProcessEnvMap } }
+  ).process;
+  return proc?.env ?? {};
+}
+
+function normalizeLibDirPosix(rawPath: string): string {
+  const posix = toPosix(rawPath);
+  if (posix === "/" || /^[a-zA-Z]:\/$/.test(posix)) {
+    return posix;
+  }
+  if (/^[a-zA-Z]:$/.test(posix)) {
+    return `${posix}/`;
+  }
+  return posix.replace(/\/+$/, "");
+}
+
+function joinLibPosix(base: string, child: string): string {
+  return base.endsWith("/") ? `${base}${child}` : `${base}/${child}`;
+}
+
+function parentLibPosixDir(dir: string): string {
+  if (dir === "/" || /^[a-zA-Z]:\/$/.test(dir)) {
+    return dir;
+  }
+  if (/^[a-zA-Z]:$/.test(dir)) {
+    return `${dir}/`;
+  }
+  const trimmed = dir.replace(/\/+$/, "");
+  const slashIdx = trimmed.lastIndexOf("/");
+  if (slashIdx < 0) {
+    return ".";
+  }
+  if (slashIdx === 0) {
+    return "/";
+  }
+  if (slashIdx === 2 && /^[a-zA-Z]:/.test(trimmed)) {
+    return `${trimmed.slice(0, 2)}/`;
+  }
+  return trimmed.slice(0, slashIdx);
+}
+
+function safeDecodeUriComponent(raw: string): string {
+  return raw.replace(/(?:%[0-9A-Fa-f]{2})+/g, (encodedRun) => {
+    try {
+      return decodeURIComponent(encodedRun);
+    } catch {
+      return encodedRun;
+    }
+  });
+}
+
+function fileUrlToPosixPath(urlOrPath: string): string {
+  if (!urlOrPath.startsWith("file://")) {
+    return normalizeLibDirPosix(ts.sys.resolvePath(urlOrPath));
+  }
+  const withoutScheme = urlOrPath.slice("file://".length);
+  const slashIdx = withoutScheme.indexOf("/");
+  if (slashIdx < 0) {
+    return "/";
+  }
+  const authority = safeDecodeUriComponent(withoutScheme.slice(0, slashIdx));
+  const decodedPath = safeDecodeUriComponent(withoutScheme.slice(slashIdx));
+  if (authority.length > 0 && authority !== "localhost") {
+    return normalizeLibDirPosix(`//${authority}${decodedPath}`);
+  }
+  if (/^\/[a-zA-Z]:(\/|$)/.test(decodedPath)) {
+    return normalizeLibDirPosix(decodedPath.slice(1));
+  }
+  return normalizeLibDirPosix(decodedPath);
+}
+
+/**
+ * Paketlenmiş (node_modules dışı) ve monorepo ortamlarında TypeScript
+ * yerleşik `lib.*.d.ts` dizinini çözümler (K-021 §5.2.B).
+ */
+export function resolveTypeScriptLibDir(
+  options?: ResolveTypeScriptLibDirOptions,
+): string | undefined {
+  const env = options?.env ?? readDefaultProcessEnv();
+  const override = env["CAUSORYN_TS_LIB_DIR"]?.trim();
+  if (override !== undefined && override.length > 0) {
+    const resolvedOverride = normalizeLibDirPosix(ts.sys.resolvePath(override));
+    if (
+      ts.sys.fileExists(joinLibPosix(resolvedOverride, "lib.es2022.full.d.ts"))
+    ) {
+      return resolvedOverride;
+    }
+  }
+
+  const metaUrl =
+    options?.importMetaUrl ??
+    (import.meta as { readonly url?: string }).url;
+  if (metaUrl === undefined || metaUrl.length === 0) {
+    return undefined;
+  }
+  const entryPath = fileUrlToPosixPath(metaUrl);
+  let dir = parentLibPosixDir(entryPath);
+  for (let depth = 0; depth <= 4; depth += 1) {
+    const candidates = [
+      joinLibPosix(dir, "typescript-lib"),
+      joinLibPosix(dir, "dist/typescript-lib"),
+      joinLibPosix(dir, "node_modules/typescript/lib"),
+    ];
+    for (const candidate of candidates) {
+      if (ts.sys.fileExists(joinLibPosix(candidate, "lib.es2022.full.d.ts"))) {
+        return candidate;
+      }
+    }
+    const parent = parentLibPosixDir(dir);
+    if (parent === dir) {
+      break;
+    }
+    dir = parent;
+  }
+
+  return undefined;
 }

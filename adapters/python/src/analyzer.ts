@@ -32,8 +32,8 @@ import {
   type SnapshotNodeInput,
   type SourceSpan,
 } from "@causoryn/domain";
-import { dirname, join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { resolveCausorynAssetRoot } from "@causoryn/sidecar-ipc";
+import { join } from "node:path";
 import { runWorkerAnalyze, type WorkerRunOutcome } from "./worker-process.js";
 import {
   DEFAULT_PYTHON_COMMAND,
@@ -50,11 +50,8 @@ import {
   type PythonAdapterResult,
 } from "./types.js";
 
-/** src/ ve dist/ aynı derinlikte → iki derleme modunda da repo kökü. */
-const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
-
 /**
- * Varsayılan worker script yolu: repo kökü + native/python-worker/worker.py.
+ * Varsayılan worker script yolu: dinamik asset kökü + native/python-worker/worker.py.
  * Config kuralı: CAUSORYN_PYTHON_WORKER_SCRIPT ortam değişkeniyle ya da
  * analyze seçenekleriyle override edilebilir; komut satırına kullanıcı
  * girdisi HİÇbir yolla interpole edilmez (kırmızı çizgi 6).
@@ -65,7 +62,7 @@ function defaultWorkerScriptPath(): string {
     return override;
   }
 
-  return join(REPO_ROOT, WORKER_SCRIPT_RELATIVE_PATH);
+  return join(resolveCausorynAssetRoot(import.meta.url), WORKER_SCRIPT_RELATIVE_PATH);
 }
 
 function resolveOptions(partial?: Partial<PythonAdapterOptions>): PythonAdapterOptions {

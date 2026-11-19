@@ -9,7 +9,7 @@
  * - Matris: ubuntu-latest + windows-latest, fail-fast: false.
  * - Sabitlenmiş resmi toolchain action'ları ve güvenli checkout.
  * - Native sidecar worker derlemeleri (Roslyn + Rust).
- * - 7 kalite kapısının eksiksiz ve doğru sırayla yürütülmesi.
+ * - 8 kalite kapısının eksiksiz ve doğru sırayla yürütülmesi.
  * - run: bloklarında güvenilmeyen ${{ github.event.pull_request ifade
  *   interpolasyonunun bulunmaması.
  */
@@ -137,7 +137,7 @@ describe(".github/workflows/ci.yml — CI sözleşmesi ve güvenlik kapıları",
     expect(setupRust).toBeDefined();
   });
 
-  it("native sidecar worker derlemelerini ve 7 kalite kapısının tamamını eksiksiz yürütür", () => {
+  it("native sidecar worker derlemelerini ve 8 kalite kapısının tamamını eksiksiz yürütür", () => {
     const { doc } = loadWorkflow();
     const runBlocks = collectAllSteps(doc)
       .map((step) => step.run)
@@ -161,6 +161,7 @@ describe(".github/workflows/ci.yml — CI sözleşmesi ve güvenlik kapıları",
       "npm run typecheck",
       "npm run build",
       "npm run build:bundle --workspace packages/mcp-server",
+      "npm run build:package --workspace packages/causoryn",
       "npm run lint",
       "npm run secret-scan",
       "npm test",

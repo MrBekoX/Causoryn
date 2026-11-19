@@ -14,6 +14,8 @@ export default tseslint.config(
       "**/node_modules/**",
       "**/dist/**",
       "integrations/antigravity/causoryn/scripts/**",
+      "packages/causoryn/native/**",
+      "packages/causoryn/skills/**",
       "out/**",
       "raw/**",
       "wiki/**",
