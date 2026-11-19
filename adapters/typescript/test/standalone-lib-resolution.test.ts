@@ -184,12 +184,13 @@ describe("resolveTypeScriptLibDir birim davranışları", () => {
     }
   });
 
-  it("bozuk yüzde dizisi (%ZZ) içeren file:// URL'lerde URIError fırlatmaz ve üst dizin yürüyüşünü sürdürür", () => {
+  it("bozuk yüzde dizisi (%ZZ / geçersiz UTF-8 %FF%FE) içeren file:// URL'lerde URIError fırlatmaz, üst dizindeki geçerli %XX dizilerini (%7E, %20, UTF-8) çözer ve yürüyüşü sürdürür", () => {
     const tmpDir = mkdtempSync(
       path.join(os.tmpdir(), "causoryn-tslib-percent-"),
     );
     try {
-      const tsLibDir = path.join(tmpDir, "typescript-lib");
+      const encodedParentDir = path.join(tmpDir, "RUNNER~1", "Masaüstü Dir");
+      const tsLibDir = path.join(encodedParentDir, "typescript-lib");
       mkdirSync(tsLibDir, { recursive: true });
       writeFileSync(
         path.join(tsLibDir, "lib.es2022.full.d.ts"),
@@ -197,8 +198,12 @@ describe("resolveTypeScriptLibDir birim davranışları", () => {
         "utf8",
       );
 
-      const baseFileUrl = pathToFileURL(tmpDir).href.replace(/\/+$/, "");
-      const malformedEntryUrl = `${baseFileUrl}/bad%ZZdir/mcp-server.mjs`;
+      const baseFileUrl = pathToFileURL(encodedParentDir).href.replace(
+        /\/+$/,
+        "",
+      );
+      expect(baseFileUrl).toContain("RUNNER%7E1");
+      const malformedEntryUrl = `${baseFileUrl}/bad%ZZdir%FF%FE/mcp-server.mjs`;
 
       expect(() =>
         resolveTypeScriptLibDir({

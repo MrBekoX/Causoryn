@@ -2265,6 +2265,16 @@ function parentLibPosixDir(dir: string): string {
   return trimmed.slice(0, slashIdx);
 }
 
+function safeDecodeUriComponent(raw: string): string {
+  return raw.replace(/(?:%[0-9A-Fa-f]{2})+/g, (encodedRun) => {
+    try {
+      return decodeURIComponent(encodedRun);
+    } catch {
+      return encodedRun;
+    }
+  });
+}
+
 function fileUrlToPosixPath(urlOrPath: string): string {
   if (!urlOrPath.startsWith("file://")) {
     return normalizeLibDirPosix(ts.sys.resolvePath(urlOrPath));
@@ -2274,14 +2284,8 @@ function fileUrlToPosixPath(urlOrPath: string): string {
   if (slashIdx < 0) {
     return "/";
   }
-  const authority = withoutScheme.slice(0, slashIdx);
-  const rawPathname = withoutScheme.slice(slashIdx);
-  let decodedPath: string;
-  try {
-    decodedPath = decodeURIComponent(rawPathname);
-  } catch {
-    decodedPath = rawPathname;
-  }
+  const authority = safeDecodeUriComponent(withoutScheme.slice(0, slashIdx));
+  const decodedPath = safeDecodeUriComponent(withoutScheme.slice(slashIdx));
   if (authority.length > 0 && authority !== "localhost") {
     return normalizeLibDirPosix(`//${authority}${decodedPath}`);
   }
