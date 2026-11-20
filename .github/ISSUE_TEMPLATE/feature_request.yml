@@ -1,0 +1,27 @@
+name: Feature request
+description: Propose a new capability, language adapter enhancement, or host integration
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Remember Causoryn's core boundaries (`ADR-002` / `ADR-008` / `ADR-010`): local & deterministic (no LLM/embedding dependencies), strictly read-only on analyzed workspaces, and honest evidence/coverage reporting.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem statement
+      description: What codebase or change-intelligence workflow is missing or difficult today?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: Describe the expected MCP tool contract, adapter behavior, or CLI experience.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Optional workarounds or alternative designs you considered.

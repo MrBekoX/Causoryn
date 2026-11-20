@@ -1,0 +1,144 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to build and publish (e.g. v0.2.0)"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    name: Build, Attest & Publish
+    runs-on: ubuntu-latest
+    environment: release
+    timeout-minutes: 30
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - name: Checkout release ref
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
+        with:
+          node-version: "24"
+          cache: npm
+          # Intentionally omit registry-url so actions/setup-node does not inject
+          # a static _authToken placeholder into .npmrc that conflicts with
+          # tokenless npm OIDC Trusted Publishing (ENEEDAUTH).
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@0f4a354dd5547a28c70b7853dbd95d5b67886e73 # v6
+        with:
+          dotnet-version: "10.0.x"
+
+      - name: Setup Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7
+        with:
+          python-version: "3.12"
+
+      - name: Setup Go
+        uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7
+        with:
+          go-version-file: "native/go-worker/go.mod"
+          cache: false
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
+
+      - name: Verify release tag matches packages/causoryn/package.json (fail-closed)
+        env:
+          RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+        run: |
+          node -e '
+            const fs = require("node:fs");
+            const tag = process.env.RELEASE_TAG ?? "";
+            if (!/^v\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(tag)) {
+              console.error("Invalid release tag format:", tag);
+              process.exit(1);
+            }
+            const pkg = JSON.parse(fs.readFileSync("packages/causoryn/package.json", "utf8"));
+            const expectedTag = `v${pkg.version}`;
+            if (tag !== expectedTag) {
+              console.error(`Tag mismatch: tag=${tag}, packages/causoryn/package.json version=${pkg.version}`);
+              process.exit(1);
+            }
+            console.log(`Release tag verified: ${tag}`);
+          '
+
+      - name: Install dependencies
+        run: npm ci --ignore-scripts
+
+      - name: Build Roslyn worker (deterministic Release)
+        run: dotnet build native/roslyn-worker/Causoryn.RoslynWorker.csproj -c Release -p:DebugType=none -p:ContinuousIntegrationBuild=true -p:SatelliteResourceLanguages=en
+
+      - name: Build Rust worker (locked)
+        run: cargo build --manifest-path native/rust-worker/Cargo.toml --locked
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Build packages and adapters
+        run: npm run build
+
+      - name: Build MCP server bundle
+        run: npm run build:bundle --workspace packages/mcp-server
+
+      - name: Build distribution package
+        run: npm run build:package --workspace packages/causoryn
+
+      - name: Verify distribution package readiness
+        run: node packages/causoryn/scripts/verify-package-ready.mjs
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Secret scan
+        run: npm run secret-scan
+
+      - name: Run tests
+        run: npm test
+
+      - name: Pack distribution tarball
+        working-directory: packages/causoryn
+        run: |
+          mkdir -p ../../release-artifacts
+          npm pack --pack-destination ../../release-artifacts
+
+      - name: Generate SHA256SUMS.txt and CycloneDX SBOM
+        run: node scripts/generate-sbom.mjs --artifacts-dir release-artifacts
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3
+        with:
+          subject-path: "release-artifacts/*.tgz"
+
+      - name: Publish to npm via OIDC Trusted Publishing
+        run: |
+          TGZ_FILE=$(ls -1 release-artifacts/*.tgz | head -n 1)
+          npm publish "$TGZ_FILE" --provenance --access public
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+        run: |
+          gh release create "$RELEASE_TAG" \
+            release-artifacts/*.tgz \
+            release-artifacts/SHA256SUMS.txt \
+            release-artifacts/causoryn-sbom.cdx.json \
+            --title "Causoryn $RELEASE_TAG" \
+            --generate-notes

@@ -1,5 +1,7 @@
 # Causoryn for ZCode
 
+> **Monorepo Development Fixture:** This directory (`integrations/zcode/causoryn`) is a local monorepo development/testing fixture. End users should install Causoryn via `npx causoryn@0.2.0 setup --client zcode --yes` or by adding the repository root marketplace (`https://github.com/MrBekoX/Causoryn`, root `marketplace.json`) in ZCode.
+
 > Evidence: TŞ v2.1 §17, §25/8 · wiki/decisions.md K-002 (ZCode as fourth host adapter) · wiki/mcp-tools.md (tool catalog) · packages/mcp-server (implemented tools)
 
 **Causoryn** is a local, deterministic, **LLM-free** code-analysis engine exposed to

@@ -221,25 +221,27 @@ describe("NEGATİF: compatibility-matrix.md koşulmayan hostu geçmiş sayamaz",
   });
 });
 
-describe("F9: sürüm kararı — 0.1.0 public snapshot (1.0.0 DEĞİL)", () => {
-  it("CHANGELOG.md Keep a Changelog formatında ve [0.1.0] - tarih girişli", () => {
+describe("F9 / K-022: sürüm kararı — 0.2.0 Pre-1.0 Public Preview (1.0.0 DEĞİL)", () => {
+  it("CHANGELOG.md Keep a Changelog formatında, [0.2.0] - tarih ve tarihsel [0.1.0] - tarih girişli", () => {
     const text = readDoc("changelog");
     expect(text).toContain("Keep a Changelog");
+    expect(text).toMatch(/^## \[0\.2\.0\] - \d{4}-\d{2}-\d{2}$/m);
     expect(text).toMatch(/^## \[0\.1\.0\] - \d{4}-\d{2}-\d{2}$/m);
   });
 
-  it("kök package.json version === SERVER_VERSION === 0.1.0 (karar üç yüzeyde tutarlı)", () => {
+  it("kök package.json version === SERVER_VERSION === 0.2.0 (karar üç yüzeyde tutarlı)", () => {
     const pkg = JSON.parse(readFileSync(DOC_PATHS.rootPkg, "utf8")) as {
       version?: string;
     };
-    expect(pkg.version).toBe("0.1.0");
+    expect(pkg.version).toBe("0.2.0");
     expect(pkg.version).toBe(SERVER_VERSION);
   });
 
-  it("karar gerekçesi CHANGELOG'da ADR-010 atfıyla yazılı", () => {
+  it("karar gerekçesi CHANGELOG'da ADR-010 ve K-022 atfıyla yazılı", () => {
     const text = readDoc("changelog");
     expect(text).toContain("ADR-010");
-    expect(text).toContain("0.1.0");
+    expect(text).toContain("0.2.0");
+    expect(text).toContain("K-022");
   });
 });
 
@@ -362,9 +364,9 @@ describe("DENETİM DÖNGÜSÜ: CHANGELOG [Unreleased] 1.0.0 kapıları F9 sayım
   function unreleasedSection(): string {
     const text = readDoc("changelog");
     const start = text.indexOf("## [Unreleased]");
-    const end = text.indexOf("## [0.1.0]");
+    const end = text.indexOf("## [0.2.0]");
     expect(start, "## [Unreleased] başlığı olmalı").toBeGreaterThanOrEqual(0);
-    expect(end, "## [0.1.0] başlığı olmalı").toBeGreaterThan(start);
+    expect(end, "## [0.2.0] başlığı olmalı").toBeGreaterThan(start);
     return text.slice(start, end);
   }
 
@@ -666,10 +668,11 @@ describe("BAĞIMSIZ DENETİM DÖNGÜSÜ (2026-11-18): doküman↔kod tam parite 
     expect(text).toContain("scripts/secret-scan.mjs");
     expect(text).toContain("npm run secret-scan");
 
-    // 5) C# frameworkLinkers: "yok" ("none" değil)
+    // 5) C# frameworkLinkers: "aspnet-core-route-attributes (L3)" (Track 2 K-022 güncellemesi)
     expect(text).not.toContain('frameworkLinkers: "none"');
     expect(text).not.toContain('frameworkLinkers:"none"');
-    expect(text).toContain('"yok"');
+    expect(text).not.toContain('frameworkLinkers: "yok"');
+    expect(text).toContain("aspnet-core-route-attributes (L3)");
 
     // 6) Doğru kaynak satır atıfları
     expect(text).not.toContain("snapshot.ts:8-21");
@@ -734,16 +737,19 @@ describe("BAĞIMSIZ DENETİM DÖNGÜSÜ (2026-11-18): doküman↔kod tam parite 
       expect(half).toContain("docs/architecture.md:13-22");
       expect(half).toContain("output-policy.ts:11-48");
       expect(half).toContain("services.ts:698-716");
+      expect(half).toContain("aspnet-core-route-attributes (L3)");
     }
   });
 
-  it("CHANGELOG.md ve docs/implementation-status.md: secret-scan kapanış notu ve antigravity-plugin.test.ts satır sayısı diskle senkron", () => {
+  it("CHANGELOG.md ve docs/implementation-status.md: secret-scan + npm audit (0 açık) kapanış notu ve antigravity-plugin.test.ts satır sayısı diskle senkron", () => {
     const changelog = readDoc("changelog");
     const start = changelog.indexOf("## [Unreleased]");
-    const end = changelog.indexOf("## [0.1.0]");
+    const end = changelog.indexOf("## [0.2.0]");
+    expect(end, "## [0.2.0] başlığı olmalı").toBeGreaterThan(start);
     const unreleased = changelog.slice(start, end);
     expect(unreleased).toContain("Rate-limit/concurrency resource budget (K-010 kapsam dışı beyanı)");
     expect(unreleased).toContain("scripts/secret-scan.mjs");
+    expect(unreleased).toMatch(/0\s+(?:güvenlik açığı|vulnerabilit)/i);
 
     const status = readDoc("status");
     const actualAntigravityTestLines = readFileSync(ANTIGRAVITY_TEST_PATH, "utf8")
@@ -753,6 +759,75 @@ describe("BAĞIMSIZ DENETİM DÖNGÜSÜ (2026-11-18): doküman↔kod tam parite 
     expect(status).toContain(`antigravity-plugin.test.ts\` (${String(actualAntigravityTestLines)} satır`);
     expect(status).not.toContain("antigravity-plugin.test.ts` (495 satır");
     expect(status).toContain("scripts/secret-scan.mjs");
+  });
+
+  it("K-022 açık kaynak yönetişim dosyaları, temiz doküman yüzeyi (0 kişisel yol) ve wiki paritesi sağlanmış", () => {
+    const governanceFiles = [
+      "SECURITY.md",
+      "CONTRIBUTING.md",
+      "CODE_OF_CONDUCT.md",
+      path.join(".github", "dependabot.yml"),
+      path.join(".github", "PULL_REQUEST_TEMPLATE.md"),
+      path.join(".github", "ISSUE_TEMPLATE", "bug_report.yml"),
+      path.join(".github", "ISSUE_TEMPLATE", "feature_request.yml"),
+      path.join(".github", "ISSUE_TEMPLATE", "config.yml"),
+    ];
+    for (const rel of governanceFiles) {
+      expect(existsSync(path.join(REPO_ROOT, rel)), `yönetişim dosyası eksik: ${rel}`).toBe(true);
+    }
+
+    if (existsSync(path.join(REPO_ROOT, "wiki"))) {
+      const sprint8 = readFileSync(path.join(REPO_ROOT, "wiki", "sprint-8.md"), "utf8");
+      expect(sprint8).not.toContain("Go L2+L3");
+      expect(sprint8).toContain("Go L1/heuristic+L3");
+
+      const decisions = readFileSync(path.join(REPO_ROOT, "wiki", "decisions.md"), "utf8");
+      expect(decisions).toContain("K-022");
+      const wikiLog = readFileSync(path.join(REPO_ROOT, "wiki", "log.md"), "utf8");
+      expect(wikiLog).toContain("K-022");
+    }
+
+    const zcodeMarketplace = JSON.parse(readFileSync(DOC_PATHS.zcodeMarketplace, "utf8")) as {
+      owner?: { name?: string; url?: string };
+      plugins?: Array<{ version?: string }>;
+    };
+    expect(zcodeMarketplace.owner?.name).toBe("Causoryn Contributors");
+    expect(zcodeMarketplace.plugins?.[0]?.version).toBe("0.2.0");
+
+    const rootReadme = readFileSync(path.join(REPO_ROOT, "README.md"), "utf8");
+    const pkgReadme = readFileSync(path.join(REPO_ROOT, "packages", "causoryn", "README.md"), "utf8");
+    for (const readme of [rootReadme, pkgReadme]) {
+      expect(readme).toContain("0.2.0");
+      expect(readme).toMatch(/Pre-1\.0 Public Preview/i);
+      expect(readme).not.toContain("single zero-compile npm package");
+      expect(readme).toContain("crates.io");
+      expect(readme).toContain("SECURITY.md");
+      expect(readme).toContain("CONTRIBUTING.md");
+      expect(readme).toContain("CODE_OF_CONDUCT.md");
+      expect(readme).toContain("THIRD-PARTY-NOTICES.md");
+    }
+
+    const userFacingDocs = [
+      "README.md",
+      path.join("packages", "causoryn", "README.md"),
+      "CHANGELOG.md",
+      path.join("docs", "compatibility-matrix.md"),
+      path.join("docs", "implementation-status.md"),
+      path.join("docs", "project-overview.tr-en.md"),
+      path.join("adapters", "go", "README.md"),
+      path.join("examples", "fixture-go-app", "README.md"),
+      path.join("integrations", "zcode", "causoryn", "README.md"),
+      path.join("integrations", "antigravity", "causoryn", "README.md"),
+    ];
+    const personalUser = "ber" + "ka";
+    const localRepoPathRe = new RegExp("D:[\\\\/]Cau" + "soryn", "i");
+    const localToolsPathRe = new RegExp("D:[\\\\/]to" + "ols", "i");
+    for (const rel of userFacingDocs) {
+      const text = readFileSync(path.join(REPO_ROOT, rel), "utf8");
+      expect(text, `${rel} kişisel kullanıcı adı içeremez`).not.toContain(personalUser);
+      expect(text, `${rel} yerel repo sürücü yolu içeremez`).not.toMatch(localRepoPathRe);
+      expect(text, `${rel} yerel tools sürücü yolu içeremez`).not.toMatch(localToolsPathRe);
+    }
   });
 
   it("docs/compatibility-matrix.md: Antigravity satırı $schema'sız plugin.json + mcp_config.json + mcp.json + README.md + sahnelenmiş scripts/mcp-server.mjs stdio el sıkışması gerçekliğiyle senkron; ilgili sayfalarda README.md kayıtlı", () => {

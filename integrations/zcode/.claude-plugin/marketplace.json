@@ -1,10 +1,14 @@
 {
   "name": "causoryn-dev",
-  "description": "Local development marketplace for the Causoryn ZCode plugin. Add this directory (integrations/zcode) via Settings -> Plugin Management -> Discover -> the + button as a local directory, then install causoryn from the list. Development and testing only; the plugin launches the compiled monorepo bundle (packages/mcp-server/dist/mcp-server.mjs, TŞ v2.1 §17.1).",
+  "owner": {
+    "name": "Causoryn Contributors",
+    "url": "https://github.com/MrBekoX/Causoryn"
+  },
+  "description": "Local development marketplace for the Causoryn ZCode plugin. Add this directory (integrations/zcode) via Settings -> Plugin Management -> Discover -> the + button as a local directory, then install causoryn from the list. Development and testing only; end users should install via `npx causoryn@0.2.0 setup --client zcode --yes` or the repository root `marketplace.json`.",
   "plugins": [
     {
       "name": "causoryn",
-      "version": "0.1.0",
+      "version": "0.2.0",
       "description": "Deterministic, local, LLM-free code analysis for ZCode: read-only workspace graphs, architecture mapping, symbol search and evidence provenance over a stdio MCP server.",
       "author": {
         "name": "Causoryn"

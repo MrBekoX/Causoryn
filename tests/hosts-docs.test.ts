@@ -27,6 +27,9 @@ const DOCS = {
   codexDoc: fileURLToPath(
     new URL("../docs/hosts/codex.md", import.meta.url),
   ),
+  antigravityDoc: fileURLToPath(
+    new URL("../docs/hosts/antigravity.md", import.meta.url),
+  ),
   bundleEntry: fileURLToPath(
     new URL("../packages/mcp-server/dist/mcp-server.mjs", import.meta.url),
   ),
@@ -54,6 +57,14 @@ function readCodexDoc(): string {
     true,
   );
   return readFileSync(DOCS.codexDoc, "utf8");
+}
+
+function readAntigravityDoc(): string {
+  expect(
+    existsSync(DOCS.antigravityDoc),
+    "docs/hosts/antigravity.md mevcut olmalı",
+  ).toBe(true);
+  return readFileSync(DOCS.antigravityDoc, "utf8");
 }
 
 /** Yeni bağımlılıksız senkron bekleme (denemeler arası; pencere kapanması). */
@@ -318,18 +329,49 @@ describe("NEGATİF: host dokümanları yanlış/tehlikeli iddia taşımaz", () =
   const SINGLE_FILE_CLAIM =
     /(tek[- ]dosya dağıt|single[- ]file (distribution|bundle))/i;
 
-  it("claude-code.md: kök allowRoots yetkisi, sır ve 'tek dosya' dağıtım iddiası YOK", () => {
+  it("claude-code.md: kök allowRoots yetkisi, sır, 'tek dosya' dağıtım iddiası ve kişisel/yerel makine yolu YOK", () => {
     const text = readClaudeDoc();
     expect(text).not.toMatch(ROOT_GRANT);
     expect(text).not.toMatch(SECRET);
     expect(text).not.toMatch(SINGLE_FILE_CLAIM);
+    expect(text).not.toMatch(/D:[\\/]Causoryn/i);
+    expect(text).not.toMatch(/D:[\\/]tools/i);
+    expect(text).not.toContain("ber" + "ka");
   });
 
-  it("codex.md: kök allowRoots yetkisi, sır ve 'tek dosya' dağıtım iddiası YOK", () => {
+  it("codex.md: kök allowRoots yetkisi, sır, 'tek dosya' dağıtım iddiası ve kişisel/yerel makine yolu YOK", () => {
     const text = readCodexDoc();
     expect(text).not.toMatch(ROOT_GRANT);
     expect(text).not.toMatch(SECRET);
     expect(text).not.toMatch(SINGLE_FILE_CLAIM);
+    expect(text).not.toMatch(/D:[\\/]Causoryn/i);
+    expect(text).not.toMatch(/D:[\\/]tools/i);
+    expect(text).not.toContain("ber" + "ka");
+  });
+
+  it("antigravity.md: kişisel/yerel makine yolu YOK ve bare stdio.ts vs packaged cli-stdio.ts ayrımı açık", () => {
+    const text = readAntigravityDoc();
+    expect(text).not.toMatch(/D:[\\/]Causoryn/i);
+    expect(text).not.toMatch(/D:[\\/]tools/i);
+    expect(text).not.toContain("ber" + "ka");
+    expect(text).toContain("cli-stdio.ts");
+    expect(text).toContain("--allow-cwd");
+    expect(text).toContain("--auto-data-dir");
+    expect(text).toContain("npx causoryn@0.2.0 setup");
+  });
+
+  it("K-021/K-022: claude-code.md ve codex.md 0.2.0 setup + 2026-11-19 güncel CLI kanıtlarını (claude 2.1.328, codex 0.169.0) taşır", () => {
+    const claudeText = readClaudeDoc();
+    expect(claudeText).toContain("npx causoryn@0.2.0 setup");
+    expect(claudeText).toContain("2.1.328");
+    expect(claudeText).toContain("2026-11-19");
+    expect(claudeText).toContain("plugin validate --strict");
+
+    const codexText = readCodexDoc();
+    expect(codexText).toContain("npx causoryn@0.2.0 setup");
+    expect(codexText).toContain("0.169.0");
+    expect(codexText).toContain("2026-11-19");
+    expect(codexText).toContain("plugin marketplace add");
   });
 });
 

@@ -194,7 +194,7 @@ function validatePluginManifest(value: unknown, label: string): AntigravityPlugi
     }
   }
   if (typeof rec.version !== "string" || !/^\d+\.\d+\.\d+$/.test(rec.version)) {
-    throw new Error(`${label}: "version" semver olmalı (TŞ §17.1 örneği 0.1.0)`);
+    throw new Error(`${label}: "version" semver olmalı (TŞ §17.1 örneği 0.2.0)`);
   }
   if (typeof rec.description !== "string" || rec.description.length === 0) {
     throw new Error(`${label}: "description" zorunlu (TŞ §17.1)`);
@@ -524,7 +524,7 @@ async function runMcpConfigHandshakeOnce(
         params: {
           protocolVersion: "2025-11-25",
           capabilities: {},
-          clientInfo: { name: "antigravity-plugin-smoke", version: "0.1.0" },
+          clientInfo: { name: "antigravity-plugin-smoke", version: "0.2.0" },
         },
       },
       { jsonrpc: "2.0", method: "notifications/initialized" },
@@ -597,7 +597,7 @@ describe("antigravity plugin.json (yerel yükleyici izinli alanlar + TŞ §17.1)
     const manifest = validatePluginManifest(parsed, "plugin.json");
     expect(manifest.name).toBe("causoryn");
     expect(manifest.displayName).toBe("Causoryn");
-    expect(manifest.version).toBe("0.1.0");
+    expect(manifest.version).toBe("0.2.0");
     expect(manifest.description).toBe(
       "Local, evidence-backed codebase and change intelligence via MCP.",
     );
@@ -770,7 +770,7 @@ describe("sahnelenmiş bundle bağlantısı + gerçek stdio el sıkışması (cw
   });
 
   it.skipIf(STAGED_BUNDLE_SKIP_REASON)(
-    "mcp_config.json command+args+env ile gerçek spawn: initialize (causoryn@0.1.0), tools/list (29 araç), get_capabilities (ok), workspace_summary (WORKSPACE_NOT_AUTHORIZED), saf JSON-RPC stdout",
+    "mcp_config.json command+args+env ile gerçek spawn: initialize (causoryn@0.2.0), tools/list (29 araç), get_capabilities (ok), workspace_summary (WORKSPACE_NOT_AUTHORIZED), saf JSON-RPC stdout",
     async () => {
       const localManifest = validateMcpManifest(
         parseJsonStrict(readMcpConfigJsonRaw(), "mcp_config.json"),
@@ -847,7 +847,7 @@ describe("negatif durumlar: bozuk/eksik/yasak manifest alanları açık reddedil
   });
 
   it("geçerli JSON ama zorunlu alan eksik veya sunucu anahtarı generic 'engine' → reddedilir", () => {
-    const missingName = { displayName: "Causoryn", version: "0.1.0" };
+    const missingName = { displayName: "Causoryn", version: "0.2.0" };
     expect(() => validatePluginManifest(missingName, "sentetik-plugin.json")).toThrowError(
       /"name"/,
     );
@@ -878,7 +878,7 @@ describe("negatif durumlar: bozuk/eksik/yasak manifest alanları açık reddedil
       $schema: "https://antigravity.google/schemas/v1/plugin.json",
       name: "causoryn",
       displayName: "Causoryn",
-      version: "0.1.0",
+      version: "0.2.0",
       description: "x",
       suggestedPrompts: [...EXPECTED_SUGGESTED_PROMPTS],
     };
@@ -889,7 +889,7 @@ describe("negatif durumlar: bozuk/eksik/yasak manifest alanları açık reddedil
     const withMcpServers = {
       name: "causoryn",
       displayName: "Causoryn",
-      version: "0.1.0",
+      version: "0.2.0",
       description: "x",
       suggestedPrompts: [...EXPECTED_SUGGESTED_PROMPTS],
       mcpServers: {},
@@ -901,7 +901,7 @@ describe("negatif durumlar: bozuk/eksik/yasak manifest alanları açık reddedil
     const withUnknownField = {
       name: "causoryn",
       displayName: "Causoryn",
-      version: "0.1.0",
+      version: "0.2.0",
       description: "x",
       suggestedPrompts: [...EXPECTED_SUGGESTED_PROMPTS],
       customUnknownKey: true,
@@ -913,7 +913,7 @@ describe("negatif durumlar: bozuk/eksik/yasak manifest alanları açık reddedil
     const wrongPrompts = {
       name: "causoryn",
       displayName: "Causoryn",
-      version: "0.1.0",
+      version: "0.2.0",
       description: "x",
       suggestedPrompts: ["tek prompt"],
     };

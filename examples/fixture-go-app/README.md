@@ -39,7 +39,7 @@ için gerekli değildir.
   - unresolved: `writeJSON → UnknownExternal ("w.Header")`,
     `writeJSON → UnknownExternal ("w.Header().Set")`,
     `main → UnknownExternal ("srv.ListenAndServe")` — uydurma hedef yok
-    (sunucu kaynak sınırları için `http.Server` literal'i statik güvenlik güvenlik
+    (sunucu kaynak sınırları için `http.Server` literal'i güvenlik denetimi
     bulgusu sonucu eklendi; selector çağrı tip çözümsüzdür).
 - **ROUTES_TO** (verified, route-registration): `"* /orders" → ordersHandler`,
   `"* /orders/create" → createOrderHandler`, `"* /health" → healthHandler`.
@@ -49,6 +49,6 @@ için gerekli değildir.
 ## Doğrulama
 
 ```bash
-"go" build ./...   # native/go-worker derleme kanıtı
+go build ./...   # native/go-worker derleme kanıtı (veya /path/to/go build ./...)
 npx vitest run adapters/go/test/go-adapter.test.ts   # kabul testleri (M1)
 ```

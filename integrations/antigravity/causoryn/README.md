@@ -1,5 +1,7 @@
 # Causoryn for Antigravity
 
+> **Monorepo Development Fixture:** This directory (`integrations/antigravity/causoryn`) is a local monorepo development/testing fixture for verifying staged bundle compatibility. End users should install Causoryn via `npx causoryn@0.2.0 setup --client antigravity --yes` or from the repository root (`https://github.com/MrBekoX/Causoryn`).
+
 > Evidence: TŞ v2.1 §17.1, §17.4, §22 · `docs/hosts/antigravity.md` · `packages/mcp-server` (29 published MCP tools)
 
 **Causoryn** is a local, deterministic, **LLM-free** codebase and change-intelligence engine exposed to Antigravity as a `stdio` MCP server (`causoryn`). It builds an evidence-backed dependency and contract graph over explicitly authorized workspace roots without calling external model APIs, embedding endpoints, or network services.
@@ -58,5 +60,5 @@ Both `mcp_config.json` and `mcp.json` ship with a strict **default-deny** config
 
 ## Verification Honesty (`agy` CLI Status: `NOT RUN`)
 
-- **Verified via direct `stdio` spawn:** Automated integration tests (`integrations/antigravity/causoryn/test/antigravity-plugin.test.ts`) spawn `node scripts/mcp-server.mjs` directly from this plugin directory using `mcp_config.json` (`command`, `args`, `env`), verifying `initialize` (`causoryn@0.1.0`), `tools/list` (all 29 tools), `causoryn_get_capabilities` (`ok`), `causoryn_workspace_summary` (`WORKSPACE_NOT_AUTHORIZED`), and `stdout` JSON-RPC purity.
+- **Verified via direct `stdio` spawn:** Automated integration tests (`integrations/antigravity/causoryn/test/antigravity-plugin.test.ts`) spawn `node scripts/mcp-server.mjs` directly from this plugin directory using `mcp_config.json` (`command`, `args`, `env`), verifying `initialize` (`causoryn@0.2.0`), `tools/list` (all 29 tools), `causoryn_get_capabilities` (`ok`), `causoryn_workspace_summary` (`WORKSPACE_NOT_AUTHORIZED`), and `stdout` JSON-RPC purity.
 - **`NOT RUN` via `agy` CLI (TŞ §22):** `agy CLI bulunamadı — bu hostta kurulum/smoke koşulmadı`. Because the `agy` command-line binary is not installed on this host machine, CLI lifecycle commands (`agy plugin validate --strict`, `agy plugin install`, `agy plugin list`) were **NOT RUN** and are documented as reference examples in `docs/hosts/antigravity.md`.

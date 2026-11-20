@@ -6,12 +6,12 @@ sürümleme [SemVer](https://semver.org/lang/tr/) ilkelerini izler.
 
 ## [Unreleased]
 
-**1.0.0 kapıları** (henüz sağlanmadı — ADR-010 gereği yayımlanmış sürüm ilan edilmez; bkz. [docs/implementation-status.md](docs/implementation-status.md) Sprint 7 bölümü ve F9 kararı):
+**1.0.0 kapıları** (henüz sağlanmadı — ADR-010 gereği 1.0.0 ilan edilmez; bkz. [docs/implementation-status.md](docs/implementation-status.md) Sprint 7 bölümü, F9 ve K-022 kararları):
 
 - Antigravity host kurulum + smoke koşumu (öncül: `agy` CLI'nin makinede bulunması; TŞ §22 "agy CLI yoksa çalıştırılmadı diye açıkça raporla")
 - ZCode GUI içi gerçek kurulum + tools/list smoke koşumu (kırmızı çizgi 6, kullanıcı kurulumunu bozmama kısıtıyla)
-- macOS/Linux/ARM dağıtım hedeflerinin doğrulanması (TŞ §22 Release satırı; bugüne dek yerel olarak yalnızca Windows x64 koşuldu; `.github/workflows/ci.yml` `ubuntu-latest` + `windows-latest` CI matrisi 2026-11-18 K-020 ile eklendi, macOS/ARM hâlâ açık)
-- MCP SDK v1.x → v2 hattına yükseltme (TŞ §6 hedefi; K-009 sapma kaydının kapatılması — npm install kısıtı nedeniyle bugüne dek 1.32.2)
+- macOS/Linux/ARM canlı host dağıtım doğrulaması (TŞ §22 Release satırı; `.github/workflows/ci.yml` `ubuntu-latest` + `windows-latest` + `macos-latest` CI matrisi K-020/K-022 ile eklendi; canlı macOS/ARM64 host smoke hâlâ açık)
+- MCP SDK v1.x → v2 hattına yükseltme (TŞ §6 hedefi; K-009 sapma kaydının kapatılması — bugüne dek 1.32.2)
 - `causoryn_refresh_index` araç yüzeyinde `mode=incremental` (2026-11-18 K-020 ile açıldı; watcher MCP araca sarılması hâlâ açık) ve per-file parse reuse'un eklenmesi (B7 Partial kalıntısı — graph tutarlılığı bugün değişimde tam türetim zorluyor)
 - adapters/csharp-roslyn (ve diğer sidecar dillerde) TESTS kenarı üretimi (`adapters/typescript` `Test` node + `TESTS` kenarı üretimi 2026-11-18 K-020 ile aktifleştirildi; C#/Python/Go/Rust'ta `derive_test_plan` `direct` sinyali hâlâ açık)
 - OpenAPI keşfine yanıt-şeması drift'i eklenmesi (K-015(5) sadakat sınırı), TŞ §11 event versiyon uyumsuzluk kuralı (K-015(4)) ve SQL RENAME → `unknown` sınıflamasının netleştirilmesi (K-015(3))
@@ -19,8 +19,71 @@ sürümleme [SemVer](https://semver.org/lang/tr/) ilkelerini izler.
 - wiki_search sorgu filtrelerinin (pageKind/language/…) araç yüzeyine açılması, `WIKI_NOTE_CONFLICT` için TOOL_ERROR_GUIDANCE kaydı eklenmesi ve incremental wiki yayımında link/FTS indekslerinin tam graph'tan yeniden yazmasının daraltılması
 - E6 offline visualizer'ın gerçek tarayıcı koşusuyla doğrulanması ve viewer HTML'ini izinli output dizinine yazan MCP yüzeyi
 - Bundle fidelity: default lib (`.d.ts`) dosyalarının bundle'a katılması veya doküman sınırlaması (çıplak `packages/mcp-server/dist/` 33-dosya F1 klonunda `.d.ts` yoktur; açık kaynak dağıtım paketi `packages/causoryn` içinde `dist/typescript-lib/lib*.d.ts` sahnelemesi ve `resolveTypeScriptLibDir` ile 2026-11-19 K-021'de `state: "ready"` kanıtlandı — docs/security-pass.md Dürüstlük 1)
-- Rate-limit/concurrency resource budget (K-010 kapsam dışı beyanı) (adanmış secret-scan kapısı 2026-11-17/18 denetim turunda `scripts/secret-scan.mjs` / `npm run secret-scan` ile eklendi)
-- npm audit 10 moderate dev-toolchain uyarısının (minimatch) çözülmesi
+- Rate-limit/concurrency resource budget (K-010 kapsam dışı beyanı) (adanmış secret-scan kapısı 2026-11-17/18'de `scripts/secret-scan.mjs` ile eklendi ve 2026-11-20 K-022'de 12 kök + kök dosyalarına genişletildi)
+- ~~npm audit 10 moderate dev-toolchain uyarısının (minimatch) çözülmesi~~ — **Kapatıldı (2026-11-20, K-022):** `eslint@10.15.0` ve `typescript-eslint@8.73.0` yükseltmesiyle `npm audit` **0 güvenlik açığı** (`0 vulnerabilities`) döndürür.
+
+## [0.2.0] - 2026-11-20
+
+### Sürüm kararı (K-022)
+
+**0.2.0 Pre-1.0 Public Preview** — **1.0.0 DEĞİL (ADR-010).** Uzak `v0.1.0`
+etiketi `4c9c188f` üzerinde kilitli kaldığından ve Sprint 8 çok-dil genişlemesi,
+K-019/K-020/K-021/K-022 teslimleriyle ürün yüzeyi anlamlı biçimde genişlediğinden
+yeni minor SemVer **`0.2.0`** yayımlandı (`package.json`, `packages/causoryn/package.json`,
+`SERVER_VERSION`, `server.json` ve 4 host pazaryeri manifesti senkron). Yukarıdaki
+`[Unreleased]` 1.0.0 kapıları kapanmadan `1.0.0` ilan edilmez.
+
+### Added
+
+- **Çok-dil derin analiz (Sprint 8, K-018):** `native/python-worker` (stdlib `ast`),
+  `native/go-worker` (stdlib `go/parser`), `native/rust-worker` (`syn` 2) sidecar'ları,
+  `adapters/{python,go,rust}`, 5-dil birleşik `INDEXED_ADAPTERS` ve dürüst resolution/tier
+  etiketleri (`workspace_summary.languages` + `coverageOf.tier` + 29 MCP aracı
+  `annotations`/`readOnlyHint`, K-019).
+- **Pre-1.0 mühendislik iyileştirmeleri (K-020):** opsiyonel kalıcı SQLite graph deposu
+  (`storage.dataDbPath`) + `symbol_fts` Agent GPS `fts` ayağı, `causoryn_refresh_index(mode="incremental")`,
+  TypeScript BDD `Test`/`TESTS` çıkarımı, `causoryn_export_documentation(format="snapshot")`,
+  ortak `@causoryn/sidecar-ipc` süreç çekirdeği ve GitHub Actions CI iş akışı.
+- **Açık kaynak çoklu-host dağıtım (`packages/causoryn`, K-021):** `causoryn` tek npm
+  paketi (`setup`/`doctor`/`mcp`), 4 host pazaryeri manifesti (Antigravity, Claude Code,
+  Codex, ZCode/GLM), 4 kanonik `skills/`, sıfır-ayar `--allow-cwd` + MCP `roots/list` +
+  `--auto-data-dir`, `dist/typescript-lib/lib*.d.ts` sahnelemesi ve `mcpName` + `server.json`
+  MCP Registry kimliği (`io.github.mrbekox/causoryn`).
+- **Açık kaynak yayın yönetişimi & tedarik zinciri (K-022):**
+  - `MIT` lisansı (`Causoryn Contributors`), `THIRD-PARTY-NOTICES.md` ve paketlenen
+    üçüncü taraf lisans metinleri (`licenses/`).
+  - `SECURITY.md`, `CONTRIBUTING.md`, `CODE_OF_CONDUCT.md`, `.github/ISSUE_TEMPLATE/*`,
+    `.github/PULL_REQUEST_TEMPLATE.md` ve `.github/dependabot.yml`.
+  - `.github/workflows/ci.yml`: tüm eylemler 40-karakter commit SHA'ya sabitlendi;
+    `ubuntu-latest` + `windows-latest` + `macos-latest` matrisi, deterministik Release
+    Roslyn derlemesi, `cargo build --locked` ve `verify-package-ready.mjs` eklendi.
+  - `.github/workflows/release.yml`: SHA-sabitli etiket/sürüm doğrulaması, `SHA256SUMS.txt`,
+    CycloneDX SBOM (`causoryn-sbom.cdx.json`), `actions/attest-build-provenance` ve
+    `NPM_TOKEN`'sız OIDC Trusted Publishing (`npm publish --provenance --access public`).
+  - `scripts/export-public-tree.mjs`: Seçenek 1 temiz kamuya açık repo dışa aktarıcısı
+    (`raw/`, `wiki/`, `docs/superpowers/` ve iç prompt dosyalarını dışlar, `.gitignore`
+    iç araç satırlarını temizler ve fail-closed sızıntı doğrulaması yapar).
+
+### Changed
+
+- C# `INDEXED_ADAPTERS` `frameworkLinkers` etiketi `"aspnet-core-route-attributes (L3)"`
+  olarak netleştirildi ve `docs/project-overview.tr-en.md` (TR & EN) senkronize edildi.
+- `README.md` ve `packages/causoryn/README.md` genel "zero-compile" ifadesi yerine
+  bileşen bazlı çalışma zamanı / derleme / çevrimdışı matrisine geçirildi (Go `go run`
+  ve Rust soğuk `cargo build --locked` `crates.io` davranışı açıkça belgeli).
+- `integrations/zcode/.claude-plugin/marketplace.json` `owner` alanı (`claude plugin validate --strict`
+  uyumu) ve dev-fixture uyarıları eklendi; tüm kullanıcıya dönük dokümanlardan yerel
+  makine yolları ve kişisel kullanıcı adı temizlendi.
+
+### Security
+
+- `scripts/secret-scan.mjs` 12 dizin kökü (`.github`, `.claude-plugin`, `.agents`, `docs`,
+  `skills` dahil) + 13 kök metin dosyasına ve genişletilmiş token/yerel-profil-yolu
+  desenlerine yükseltildi.
+- `eslint@10.15.0` ve `typescript-eslint@8.73.0` yükseltmesiyle `npm audit` **0 güvenlik
+  açığı** (`0 vulnerabilities`) seviyesine getirildi.
+- Deterministik Release Roslyn derlemesi (`-c Release -p:DebugType=none -p:ContinuousIntegrationBuild=true -p:SatelliteResourceLanguages=en`)
+  ile yerel makine PDB yollarının DLL içine sızması engellendi.
 
 ## [0.1.0] - 2026-11-09
 

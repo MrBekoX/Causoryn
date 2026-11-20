@@ -92,7 +92,7 @@ const result = await analyzeGoWorkspace({
   workspaceId: "ws-1",
   files: [{ path: "cmd/app/main.go", content: "package main ..." }],
   options: {
-    // goBinaryPath: "go",  // default "go" (PATH)
+    // goBinaryPath: "/path/to/go",  // default "go" (PATH)
     // goWorkerBinaryPath: "native/go-worker/bin/go-worker.exe", // binary modu
     requestTimeoutMs: 120_000,
   },
