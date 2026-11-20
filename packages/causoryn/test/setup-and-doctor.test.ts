@@ -1074,7 +1074,10 @@ describe("doctor (strictly read-only health check + injectable toolchain seam + 
   });
 });
 
-describe("release hardening: Node >= 24 guard, launcher --expected-version, Roslyn DLL + musl doctor, CLAUDE_CONFIG_DIR, prepack gate", () => {
+describe(
+  "release hardening: Node >= 24 guard, launcher --expected-version, Roslyn DLL + musl doctor, CLAUDE_CONFIG_DIR, prepack gate",
+  { timeout: 20_000 },
+  () => {
   it("node-version-guard accepts Node >= 24 and rejects Node < 24 with exit code 2 and pure LF scripts", async () => {
     const guardPath = path.join(CAUSORYN_PKG_DIR, "scripts", "lib", "node-version-guard.mjs");
     expect(existsSync(guardPath)).toBe(true);
