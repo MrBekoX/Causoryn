@@ -1,15 +1,17 @@
 # Causoryn Performans Benchmark — Faz F / Sprint 7 (F7)
 
-> Kanıt: raw/Causoryn_Teknik_Dokuman_v2.1.pdf §21 (s.22): "1.000 TS dosyası fixture üzerinde sıcak workspace_summary <1 sn, küçük graph neighborhood <500 ms, sınırlı 200 node map <2 sn". TŞ bu rakamları **tasarım hedefi** olarak verir ve açıkça şunu söyler: "bu rakamlar tasarım hedefi, gerçekleşmiş test sonucu değildir". Dolayısıyla aşağıdaki hedef kolonu **referans**tır, sonuç değil; tabloda yalnızca ölçülen değerler raporlanır.
+**Dil / Language:** Türkçe | [English](en/benchmarks.md)
+
+> Kanıt: `raw/Causoryn_Teknik_Dokuman_v2.1.pdf` §21 (s.22): "1.000 TS dosyası fixture üzerinde sıcak workspace_summary <1 sn, küçük graph neighborhood <500 ms, sınırlı 200 node map <2 sn". TŞ bu rakamları **tasarım hedefi** olarak verir ve açıkça şunu söyler: "bu rakamlar tasarım hedefi, gerçekleşmiş test sonucu değildir". Dolayısıyla aşağıdaki hedef kolonu **referans**tır, sonuç değil; tabloda yalnızca ölçülen değerler raporlanır.
 > ADR-010 dürüstlük kuralı: ölçülemeyen şey ölçülmüş yazılmaz — ortam kesintisi/deadline aşımı olan satır `not measured (<neden>)` olarak raporlanır.
 
 ## Ölçüm yöntemi
 
 - Fixture: deterministik sentetik TypeScript workspace, 1000 dosya (üretici: `tests/bench-release/fixture.ts`; aynı fileCount → bayt-bayt aynı içerik; sha256: `2b14c5ab89f5f1c2059f3152d5da6156d726d9d498343acd2fbf2aea64e8d958`).
-- MCP protokol düzeyi (@modelcontextprotocol/sdk InMemoryTransport üzerinde client.callTool); süre process.hrtime.bigint(); her ölçümde 1 warm-up çağrısı (ölçülmez) + N koşum; raporlanan değer medyan; çağrı başına deadline aşımı/istisnası satırı 'not measured' yapar.
+- MCP protokol düzeyi (`@modelcontextprotocol/sdk` `InMemoryTransport` üzerinde `client.callTool`); süre `process.hrtime.bigint()`; her ölçümde 1 warm-up çağrısı (ölçülmez) + N koşum; raporlanan değer medyan; çağrı başına deadline aşımı/istisnası satırı `'not measured'` yapar.
 - Koşum başına çağrı deadline'ı: 30000 ms.
 - Soğuk indeks (bilgi amaçlı): sabit süre vaadi yoktur (TŞ §21); ölçülen: 16370.3 ms (1000 dosya).
-- Snapshot durumu: ready; adapter tanısı (TŞ §21 parse_errors metriği): 0 (fixture tanısız; state=ready)
+- Snapshot durumu: ready; adapter tanısı (TŞ §21 parse_errors metriği): 0 (fixture tanısız; state=ready).
 - Ortam: node v24.16.0, win32 10.0.26300 x64, CPU: Intel(R) Core(TM) i7-10750H CPU @ 2.60GHz, bellek: 32 GB.
 - Yeniden üretim: `CAUSORYN_BENCH_WRITE_DOCS=1 npm run bench` (config: `vitest.bench.config.ts`; varsayılan vitest koşumu `tests/bench-release/**`'ı dışlar ve depoya yazmaz — ADR-008 salt-okunur test disiplini).
 
@@ -25,3 +27,11 @@
 
 - Ölçümler MCP protokol düzeyinde yapılmıştır: motor + input validasyonu + envelope üretimi çağrı süresinin tamamı içindedir.
 - Tek koşum içi değerler makine yüküne duyarlıdır; karşılaştırma için medyan kolonu esas alınır. Aynı girdi (fileCount + hash) her koşumda birebir aynı fixture'ı üretir — ölçüm gürültüsü yalnızca zamandan gelir.
+- Fixture bütünlüğü `tests/release-docs.test.ts` içinde `buildFixtureModel(1000).hash` çıktısıyla çapraz pinlenmiştir: üretici değişirse doküman literali sessizce bayatlayamaz.
+
+## İlgili sayfalar
+
+- [architecture.md](architecture.md) — build ve benchmark ayrışma sözleşmesi (`vitest.bench.config.ts`)
+- [compatibility-matrix.md](compatibility-matrix.md) — host uyumluluk ve performans kanıt özeti
+- [security-pass.md](security-pass.md) — F6 paketlenmiş bundle güvenlik matrisi
+- [implementation-status.md](implementation-status.md) — Sprint 7 F7 kanıt kaydı

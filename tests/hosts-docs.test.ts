@@ -30,6 +30,9 @@ const DOCS = {
   antigravityDoc: fileURLToPath(
     new URL("../docs/hosts/antigravity.md", import.meta.url),
   ),
+  zcodeDoc: fileURLToPath(
+    new URL("../docs/hosts/zcode.md", import.meta.url),
+  ),
   bundleEntry: fileURLToPath(
     new URL("../packages/mcp-server/dist/mcp-server.mjs", import.meta.url),
   ),
@@ -372,6 +375,23 @@ describe("NEGATİF: host dokümanları yanlış/tehlikeli iddia taşımaz", () =
     expect(codexText).toContain("0.169.0");
     expect(codexText).toContain("2026-11-19");
     expect(codexText).toContain("plugin marketplace add");
+  });
+
+  it("zcode.md: ZCode CLI setup (npx causoryn@0.2.0 setup --client zcode --yes), deneysel marketplace ve GUI NOT RUN dürüstlüğünü belgeler; kişisel yol/sır YOK", () => {
+    expect(existsSync(DOCS.zcodeDoc), "docs/hosts/zcode.md mevcut olmalı").toBe(true);
+    const zcodeText = readFileSync(DOCS.zcodeDoc, "utf8");
+    expect(zcodeText).not.toMatch(ROOT_GRANT);
+    expect(zcodeText).not.toMatch(SECRET);
+    expect(zcodeText).not.toMatch(SINGLE_FILE_CLAIM);
+    expect(zcodeText).not.toMatch(/D:[\\/]Causoryn/i);
+    expect(zcodeText).not.toMatch(/D:[\\/]tools/i);
+    expect(zcodeText).not.toContain("ber" + "ka");
+    expect(zcodeText).toContain("npx causoryn@0.2.0 setup --client zcode --yes");
+    expect(zcodeText).toContain(".zcode/cli/config.json");
+    expect(zcodeText).toContain("ZCODE_PLUGIN_ROOT");
+    expect(zcodeText).toContain("ZCODE_PROJECT_DIR");
+    expect(zcodeText).toContain("ZCODE_PLUGIN_DATA");
+    expect(zcodeText).toContain("NOT RUN");
   });
 });
 

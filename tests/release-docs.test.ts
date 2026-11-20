@@ -42,6 +42,17 @@ const DOC_PATHS = {
   antigravityDoc: fileURLToPath(
     new URL("../docs/hosts/antigravity.md", import.meta.url),
   ),
+  zcodeHostDoc: fileURLToPath(
+    new URL("../docs/hosts/zcode.md", import.meta.url),
+  ),
+  docsIndexTr: fileURLToPath(new URL("../docs/README.md", import.meta.url)),
+  docsIndexEn: fileURLToPath(new URL("../docs/en/README.md", import.meta.url)),
+  cliConfigTr: fileURLToPath(
+    new URL("../docs/cli-and-configuration.md", import.meta.url),
+  ),
+  langAnalyzersTr: fileURLToPath(
+    new URL("../docs/language-analyzers.md", import.meta.url),
+  ),
   zcodeReadme: fileURLToPath(
     new URL("../integrations/zcode/causoryn/README.md", import.meta.url),
   ),
@@ -115,15 +126,18 @@ describe("F8: release doküman envanteri — tüm dosyalar var", () => {
     expect(existsSync(DOC_PATHS.status)).toBe(true);
   });
 
-  it("docs/hosts/: claude-code.md + codex.md + antigravity.md mevcut", () => {
+  it("docs/hosts/: 4 host kılavuzu mevcut (claude-code.md, codex.md, antigravity.md, zcode.md)", () => {
     expect(existsSync(DOC_PATHS.claudeDoc)).toBe(true);
     expect(existsSync(DOC_PATHS.codexDoc)).toBe(true);
     expect(existsSync(DOC_PATHS.antigravityDoc)).toBe(true);
+    expect(existsSync(DOC_PATHS.zcodeHostDoc)).toBe(true);
   });
 
-  it("PARTIAL yüzey (dürüst durum): docs/hosts 3 sayfa iken matris 4 hostu kapsar; ZCode integrations README + dev marketplace ile belgeli", () => {
-    // ZCode'un host kılavuzu docs/hosts/ altında DEĞİLDİR: kurulum GUI adımıdır
-    // (CLI yok — F2 bulgusu) ve dokümanı integrations/zcode/causoryn/README.md'dir.
+  it("docs/ ana indeks, CLI/konfigürasyon, 5-dil analizör rehberleri ve ZCode marketplace belgeleri mevcut", () => {
+    expect(existsSync(DOC_PATHS.docsIndexTr)).toBe(true);
+    expect(existsSync(DOC_PATHS.docsIndexEn)).toBe(true);
+    expect(existsSync(DOC_PATHS.cliConfigTr)).toBe(true);
+    expect(existsSync(DOC_PATHS.langAnalyzersTr)).toBe(true);
     expect(existsSync(DOC_PATHS.zcodeReadme)).toBe(true);
     expect(existsSync(DOC_PATHS.zcodeMarketplace)).toBe(true);
     const marketplace = JSON.parse(
@@ -738,7 +752,11 @@ describe("BAĞIMSIZ DENETİM DÖNGÜSÜ (2026-11-18): doküman↔kod tam parite 
       expect(half).toContain("output-policy.ts:11-48");
       expect(half).toContain("services.ts:698-716");
       expect(half).toContain("aspnet-core-route-attributes (L3)");
+      expect(half).toContain("0.2.0");
+      expect(half).toContain("K-022");
     }
+    expect(text).not.toContain('SERVER_VERSION="0.1.0"');
+    expect(text).not.toMatch(/npm audit --json`?\s*→\s*\*\*9 moderate\*\*/);
   });
 
   it("CHANGELOG.md ve docs/implementation-status.md: secret-scan + npm audit (0 açık) kapanış notu ve antigravity-plugin.test.ts satır sayısı diskle senkron", () => {
@@ -855,5 +873,127 @@ describe("BAĞIMSIZ DENETİM DÖNGÜSÜ (2026-11-18): doküman↔kod tam parite 
     const relatedIdx = text.indexOf("## İlgili sayfalar");
     expect(relatedIdx).toBeGreaterThanOrEqual(0);
     expect(text.slice(relatedIdx)).toContain("`integrations/antigravity/causoryn/README.md`");
+  });
+
+  it("TR / EN tam dokümantasyon paritesi: 16 TR dokümanın her birinin docs/en/ karşılığı mevcut, kırık yerel markdown linki yok, EN tool-contracts 29 aracı ve EN security-pass/benchmarks pinli hashleri taşır", () => {
+    const bilingualPairs: ReadonlyArray<readonly [string, string]> = [
+      ["docs/README.md", "docs/en/README.md"],
+      ["docs/architecture.md", "docs/en/architecture.md"],
+      ["docs/cli-and-configuration.md", "docs/en/cli-and-configuration.md"],
+      ["docs/language-analyzers.md", "docs/en/language-analyzers.md"],
+      ["docs/tool-contracts.md", "docs/en/tool-contracts.md"],
+      ["docs/wiki-spec.md", "docs/en/wiki-spec.md"],
+      ["docs/compatibility-matrix.md", "docs/en/compatibility-matrix.md"],
+      ["docs/security-pass.md", "docs/en/security-pass.md"],
+      ["docs/benchmarks.md", "docs/en/benchmarks.md"],
+      ["docs/implementation-status.md", "docs/en/implementation-status.md"],
+      ["docs/BACKLOG.md", "docs/en/BACKLOG.md"],
+      ["docs/adr/ADR-002-no-llm.md", "docs/en/adr/ADR-002-no-llm.md"],
+      ["docs/hosts/claude-code.md", "docs/en/hosts/claude-code.md"],
+      ["docs/hosts/codex.md", "docs/en/hosts/codex.md"],
+      ["docs/hosts/antigravity.md", "docs/en/hosts/antigravity.md"],
+      ["docs/hosts/zcode.md", "docs/en/hosts/zcode.md"],
+    ];
+
+    const personalUser = "ber" + "ka";
+    const localRepoPathRe = new RegExp("D:[\\\\/]Cau" + "soryn", "i");
+    const localToolsPathRe = new RegExp("D:[\\\\/]to" + "ols", "i");
+
+    for (const [trRel, enRel] of bilingualPairs) {
+      const trAbs = path.join(REPO_ROOT, ...trRel.split("/"));
+      const enAbs = path.join(REPO_ROOT, ...enRel.split("/"));
+      expect(existsSync(trAbs), `TR doküman eksik: ${trRel}`).toBe(true);
+      expect(existsSync(enAbs), `EN doküman eksik: ${enRel}`).toBe(true);
+
+      for (const [docRel, docAbs] of [[trRel, trAbs], [enRel, enAbs]] as const) {
+        const content = readFileSync(docAbs, "utf8");
+        expect(content.trim().length, `${docRel} boş olamaz`).toBeGreaterThan(200);
+        expect(content, `${docRel} kişisel kullanıcı adı içeremez`).not.toContain(personalUser);
+        expect(content, `${docRel} yerel sürücü yolu içeremez`).not.toMatch(localRepoPathRe);
+        expect(content, `${docRel} yerel tools yolu içeremez`).not.toMatch(localToolsPathRe);
+        expect(content, `${docRel} 1.0.0 yayınlandı iddiası taşıyamaz`).not.toMatch(/^## \[1\.0\.0\]/m);
+
+        // Göreli markdown link kontrolü (kod blokları dışındaki [etiket](hedef) linkleri):
+        const strippedCode = content.replace(/```[\s\S]*?```/g, "");
+        const linkRe = /\[[^\]]+\]\(([^)#\s]+)(?:#[^)]*)?\)/g;
+        let m: RegExpExecArray | null;
+        while ((m = linkRe.exec(strippedCode)) !== null) {
+          const href = m[1] ?? "";
+          if (
+            href.length === 0 ||
+            href.startsWith("http://") ||
+            href.startsWith("https://") ||
+            href.startsWith("mailto:") ||
+            href.startsWith("file://")
+          ) {
+            continue;
+          }
+          const resolvedLink = path.resolve(path.dirname(docAbs), href);
+          expect(
+            existsSync(resolvedLink),
+            `${docRel} içinde kırık göreli link: (${href}) -> ${resolvedLink}`,
+          ).toBe(true);
+        }
+      }
+    }
+
+    // EN tool-contracts.md: 29 aracın tamamını içerir
+    const enToolsText = readFileSync(path.join(REPO_ROOT, "docs", "en", "tool-contracts.md"), "utf8");
+    const enListedTools: string[] = [];
+    let inEnContractSection = false;
+    for (const line of enToolsText.split(/\r?\n/)) {
+      if (line.startsWith("## ")) {
+        inEnContractSection = line.startsWith("## Core") || line.startsWith("## Wiki");
+        continue;
+      }
+      if (!inEnContractSection) continue;
+      const match = line.match(/^\|\s*`?(causoryn_[a-z_0-9]+)`?\s*\|/);
+      if (match?.[1]) enListedTools.push(match[1]);
+    }
+    expect(enListedTools).toHaveLength(TOOL_NAMES.length);
+    expect([...enListedTools].sort()).toEqual([...TOOL_NAMES].sort());
+
+    // TR ve EN tool-contracts.md: INDEXED_ADAPTERS gerçek runtime analyzerId kimliklerini taşır
+    const trToolsText = readDoc("toolContracts");
+    for (const toolsDoc of [trToolsText, enToolsText]) {
+      for (const runtimeId of [
+        "`ts-adapter`",
+        "`roslyn-worker`",
+        "`python-worker`",
+        "`go-worker`",
+        "`rust-worker`",
+        "`express+nextjs`",
+      ]) {
+        expect(toolsDoc).toContain(runtimeId);
+      }
+    }
+
+    // EN compatibility-matrix.md: 4 host + Antigravity NOT RUN dürüstlüğü
+    const enCompat = readFileSync(path.join(REPO_ROOT, "docs", "en", "compatibility-matrix.md"), "utf8");
+    for (const host of ["Claude Code", "Codex", "ZCode", "Antigravity"]) {
+      expect(matrixRowFor(enCompat, host), `EN matriste ${host} eksik`).toBeTruthy();
+    }
+    const enAntigravityRow = matrixRowFor(enCompat, "Antigravity");
+    expect(enAntigravityRow).toMatch(/NOT RUN/i);
+    expect(enAntigravityRow).not.toMatch(/PASS/i);
+
+    // EN security-pass.md: güncel bundle sha256 ve CLONE_MAX_ATTEMPTS
+    const enSec = readFileSync(path.join(REPO_ROOT, "docs", "en", "security-pass.md"), "utf8");
+    const manifestSha = readManifestBundleShaWithRetry();
+    if (manifestSha !== null) {
+      expect(enSec).toContain(manifestSha);
+    }
+
+    // EN benchmarks.md: gerçek fixture sha256 + medyanlar
+    const enBench = readFileSync(path.join(REPO_ROOT, "docs", "en", "benchmarks.md"), "utf8");
+    expect(enBench).toContain(buildFixtureModel(1000).hash);
+    expect(enBench).toContain("11.8");
+    expect(enBench).toContain("13.0");
+    expect(enBench).toContain("10.7");
+    expect(enBench).toContain("16370.3");
+
+    // EN implementation-status.md: B7 Partial kalır (ADR-010)
+    const enStatus = readFileSync(path.join(REPO_ROOT, "docs", "en", "implementation-status.md"), "utf8");
+    expect(enStatus).toMatch(/\|\s*B7\s*\|[^\n]*\*\*Partial\*\*/);
   });
 });

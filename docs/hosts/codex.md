@@ -1,5 +1,7 @@
 # Causoryn'i Codex CLI'a bağlama (stdio MCP)
 
+> **Dil / Language:** Türkçe · [English](../en/hosts/codex.md) · [Uyumluluk Matrisi](../compatibility-matrix.md)
+
 > Kanıt: **K-021/K-022 dağıtım (2026-11-19):** `codex --version` → `codex-cli 0.169.0` ile
 > `codex plugin marketplace add` (`.agents/plugins/marketplace.json`) + `codex mcp add/list` ve
 > `npx causoryn@0.2.0 setup --client codex` doğrulandı. **Tarihsel F4 monorepo bundle smoke kanıtı:**
@@ -14,8 +16,8 @@
 
 Causoryn, LLM çalıştırmayan yerel ve deterministik bir MCP motorudur (`causoryn@0.2.0`). Codex'te
 `claude mcp add`'teki gibi **proje/local scope seçeneği YOKTUR** — `codex mcp add`, sunucuyu
-kullanıcı-genel `~/.codex/config.toml` dosyasına yazar. Bu yüzden smoke/deneme kayıtları **belirgin
-bir adla** eklenip **remove ile kaldırılmalıdır**.
+kullanıcı-genel `~/.codex/config.toml` (veya `$CODEX_HOME/config.toml`) dosyasına yazar. Bu yüzden
+smoke/deneme kayıtları **belirgin bir adla** eklenip **remove ile kaldırılmalıdır**.
 
 ## 0. Son Kullanıcı Hızlı Kurulumu (Önerilen — K-021 / `v0.2.0`)
 
@@ -30,13 +32,31 @@ npx causoryn@0.2.0 setup --client codex --yes
 
 # Sağlık kontrolü (salt okunur)
 npx causoryn@0.2.0 doctor
+
+# Temiz kaldırma ([mcp_servers.causoryn] + 4 yönlendirme skill dosyası)
+npx causoryn@0.2.0 setup --client codex --uninstall --yes
 ```
+
+**`v0.2.0` `CODEX_HOME` ve `startup_timeout_sec = 30` ayrıntıları:**
+
+- **`CODEX_HOME` desteği:** Ortamda `CODEX_HOME` tanımlıysa hem `causoryn setup --client codex`
+  hem de `causoryn doctor`, MCP sunucu bloğunu `$CODEX_HOME/config.toml` içinde yönetir;
+  tanımsızsa varsayılan `~/.codex/config.toml` kullanılır (`resolveEffectiveCodexHomeDir`,
+  `packages/causoryn/src/setup.ts`). 4 kanonik yönlendirme skill dosyası (`causoryn`, `map-system`,
+  `preflight-change`, `verify-change`) ise `~/.agents/skills/` altına kurulur.
+- **Hedefli TOML yaması + `startup_timeout_sec = 30`:** `causoryn setup`, `codex mcp add`'in aksine
+  komşu TOML bloklarını yeniden serileştirmeden yalnızca `[mcp_servers.causoryn]` bölümünü günceller
+  (`upsertCodexMcpServer`), mevcut dosyadan atomik `.causoryn.backup` yedeği alır ve soğuk Node.js +
+  SQLite açılışı için `startup_timeout_sec = 30` değerini yazar.
 
 ### Seçenek 0B — Yerel Codex Plugin Pazaryeri
 
-Kök `.agents/plugins/marketplace.json` ve `.codex-plugin/plugin.json` manifestleri Codex plugin
-pazaryeriyle uyumludur (`2026-11-19`, `codex-cli 0.169.0` ile `codex plugin marketplace add` +
-`codex mcp add/list` doğrulandı).
+Kök `.agents/plugins/marketplace.json` ve paket içi `packages/causoryn/.codex-plugin/plugin.json`
+(+ `.codex-plugin/mcp.json`) manifestleri Codex plugin pazaryeriyle uyumludur (`2026-11-19`,
+`codex-cli 0.169.0` ile `codex plugin marketplace add` + `codex mcp add/list` doğrulandı):
+
+- `.agents/plugins/marketplace.json`, npm kaynağını (`source: { "source": "npm", "package": "causoryn", "version": "0.2.0" }`) ve kurulum politikasını `policy.installation: "AVAILABLE"`, `policy.authentication: "ON_INSTALL"` olarak beyan eder (Causoryn tamamen yerel ve LLM/API anahtarsız çalıştığından harici kimlik bilgisi gerekmez; Codex şeması kurulum anı onay akışı için `"ON_INSTALL"` değerini bekler).
+- `packages/causoryn/.codex-plugin/mcp.json`, sunucuyu `causoryn@0.2.0` paket pini, `--allow-cwd --auto-data-dir --client codex` bayrakları ve `"startup_timeout_sec": 30` ile tanımlar.
 
 ---
 
@@ -49,22 +69,25 @@ cd packages/mcp-server
 npm run build:bundle   # esbuild bundle + external native binding kopyası
 ```
 
-Çıktı sözleşmesi:
+Çıktı sözleşmesi (deterministik, 35 dosyalı `bundle-manifest.json`):
 
 ```
 packages/mcp-server/dist/
+├── bundle-manifest.json              ← 35 dosyanın sıralı sha256 özeti
 ├── mcp-server.mjs                    ← stdio giriş noktası
-└── node_modules/better-sqlite3/      ← external native modül (esbuild .node gömemez)
+├── mcp-server.mjs.LEGAL.txt          ← esbuild gömülü paket lisans bildirimleri
+└── node_modules/better-sqlite3/      ← external native modül (LICENSE + package.json + lib/ + prebuilds/)
 ```
 
 ### 2. Yöntem A — `config.toml` bloğu (elle düzenleme)
 
-`~/.codex/config.toml` içine (TOML):
+`~/.codex/config.toml` (veya `$CODEX_HOME/config.toml`) içine (TOML):
 
 ```toml
 [mcp_servers.causoryn]
 command = "node"
 args = ["/path/to/causoryn/packages/mcp-server/dist/mcp-server.mjs"]
+startup_timeout_sec = 30
 ```
 
 - `args` içindeki yol **mutlak** önerilir (Codex sunucuyu herhangi bir çalışma dizininden başlatır).
@@ -113,7 +136,7 @@ codex mcp remove causoryn
 ```
 
 `codex mcp list` çıktısında artık görünmemeli. **Smoke test disiplini**: kalıcı kayıt
-istenmiyorsanız add adını `causoryn-smoke` gibi belirgin yapın ve remove sonrası `codex mcp list`
+istemiyorsanız add adını `causoryn-smoke` gibi belirgin yapın ve remove sonrası `codex mcp list`
 çıktısını temizlik kanıtı olarak saklayın:
 
 ```bash
@@ -155,3 +178,9 @@ Causoryn sunucu süreci stdout'a **yalnızca MCP protokol trafiği** yazar; tüm
 önekiyle **stderr**'e gider — Codex'in JSON-RPC boru hattını log satırları bozmaz. Manuel doğrulama
 (2026-11-08, bundle `causoryn@0.1.0`; `causoryn@0.2.0` ile sürdürüldü): stdout 2 satır saf JSON-RPC
 (initialize + `tools/list` → **29 araç**); stderr yalnızca `[causoryn]` logları.
+
+## İlgili sayfalar
+
+- [English version](../en/hosts/codex.md)
+- [Uyumluluk Matrisi](../compatibility-matrix.md)
+- Diğer host kılavuzları: [Claude Code](claude-code.md) · [ZCode](zcode.md) · [Antigravity](antigravity.md)

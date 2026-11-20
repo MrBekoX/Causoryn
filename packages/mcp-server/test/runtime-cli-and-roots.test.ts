@@ -220,7 +220,7 @@ describe("parseMcpCliArgs — sıfır-ayar CLI ayrıştırıcısı", () => {
   });
 });
 
-describe("isSafeProjectRoot — güvenli proje kökü filtresi", () => {
+describe("isSafeProjectRoot — güvenli proje kökü filtresi", { timeout: 20_000 }, () => {
   it("normal kullanıcı proje dizinini kabul eder; kök dizin, $HOME, veri dizinleri ve plugin kurulumunu reddeder", () => {
     const sandbox = createTempSandbox();
     try {

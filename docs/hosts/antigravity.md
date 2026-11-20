@@ -1,5 +1,7 @@
 # Antigravity host entegrasyonu — plugin.json + mcp_config.json + mcp.json
 
+> **Dil / Language:** Türkçe · [English](../en/hosts/antigravity.md) · [Uyumluluk Matrisi](../compatibility-matrix.md)
+
 > Kanıt: raw/Causoryn_Teknik_Dokuman_v2.1.pdf (TŞ v2.1 §17.1 "Antigravity plugin (birincil paket)", §17.4 uyum/güven matrisi, §22 "agy CLI yoksa çalıştırılmadı diye açıkça raporla") · Antigravity yerleşik eklenti dokümantasyonu (`agy-customizations/docs/plugins.md`, `plugin/SKILL.md`) · `packages/causoryn` (K-021 tek dağıtım paketi) · `integrations/antigravity/causoryn/plugin.json` · `integrations/antigravity/causoryn/mcp_config.json` · `integrations/antigravity/causoryn/mcp.json` · `integrations/antigravity/causoryn/README.md` · `integrations/antigravity/causoryn/test/antigravity-plugin.test.ts`
 
 ## Son Kullanıcı Hızlı Kurulumu (Önerilen — K-021 / `v0.2.0`)
@@ -13,9 +15,12 @@ npx causoryn@0.2.0 setup --client antigravity --yes
 
 # Sağlık kontrolü (salt okunur)
 npx causoryn@0.2.0 doctor
+
+# Temiz kaldırma (mcpServers.causoryn + 4 yönlendirme skill dosyası)
+npx causoryn@0.2.0 setup --client antigravity --uninstall --yes
 ```
 
-Ya da doğrudan kök depodan (`https://github.com/MrBekoX/Causoryn`, kök `plugin.json` + `mcp_config.json`) kurun. Aşağıdaki `integrations/antigravity/causoryn/` bölümü, monorepo içi sahnelenmiş F1 bundle test fikstürünü ve TŞ §17.1 / §22 doğrulama kayıtlarını belgeler.
+Not: `~/.gemini/antigravity/mcp_config.json` ikincil konfigürasyon dosyası diskte mevcutsa `causoryn setup` ve `causoryn doctor` bu dosyayı da birincil `~/.gemini/config/mcp_config.json` ile senkronize biçimde günceller ve doğrular. Ya da doğrudan kök depodan (`https://github.com/MrBekoX/Causoryn`, kök `plugin.json` + `mcp_config.json`) kurun. Aşağıdaki `integrations/antigravity/causoryn/` bölümü, monorepo içi sahnelenmiş F1 bundle test fikstürünü ve TŞ §17.1 / §22 doğrulama kayıtlarını belgeler.
 
 ## Dürüstlük beyanı — NOT RUN (`agy` CLI) vs Doğrudan `stdio` Protokol Doğrulaması
 
@@ -38,7 +43,7 @@ TŞ §22 kuralı uygulanır: *"agy CLI yoksa çalıştırılmadı diye açıkça
 
 1. **agy CLI (Antigravity komut satırı aracı)** — CLI tabanlı `validate`/`install`/`list` akışı için gerekir; bu makinede YOK (`NOT RUN`). Yerleşik Antigravity eklenti yükleyicisi ise doğrudan eklenti dizinindeki `plugin.json` + `mcp_config.json` dosyalarını okur.
 2. **Node.js ≥ 24** (kök `package.json` → `engines.node`).
-3. **Derlenmiş ve sahnelenmiş bundle**: `npm run build:bundle --workspace packages/mcp-server` (script kök `package.json`'da YOK; yalnızca `packages/mcp-server/package.json` → `scripts.build:bundle` tanımlıdır — çıplak kök koşumu `Missing script` verir). Bu komut hem `packages/mcp-server/dist/` altında 33 girdili `bundle-manifest.json` + `mcp-server.mjs` + `node_modules/better-sqlite3/` üretir hem de adım 4 olarak aynı çıktıları deterministik biçimde `integrations/antigravity/causoryn/scripts/` altına temizleyip kopyalar (`scripts/mcp-server.mjs`, `scripts/node_modules/better-sqlite3/{package.json,lib,prebuilds}`, `scripts/bundle-manifest.json`; `.gitignore` ile sürüm kontrolü dışında tutulur). Dürüst paketleme iddiası (ADR-010): artefakt **tek dosya değildir** — `better-sqlite3` NATİF modüldür, `esbuild` native `.node` dosyasını gömemez; `mcp-server.mjs` + yanındaki vendored `node_modules/better-sqlite3` birlikte taşınır.
+3. **Derlenmiş ve sahnelenmiş bundle**: `npm run build:bundle --workspace packages/mcp-server` (script kök `package.json`'da YOK; yalnızca `packages/mcp-server/package.json` → `scripts.build:bundle` tanımlıdır — çıplak kök koşumu `Missing script` verir). Bu komut hem `packages/mcp-server/dist/` altında 35 girdili `bundle-manifest.json` + `mcp-server.mjs` + `mcp-server.mjs.LEGAL.txt` + `node_modules/better-sqlite3/` üretir hem de adım 4 olarak aynı çıktıları deterministik biçimde `integrations/antigravity/causoryn/scripts/` altına temizleyip kopyalar (`scripts/mcp-server.mjs`, `scripts/mcp-server.mjs.LEGAL.txt`, `scripts/node_modules/better-sqlite3/{LICENSE,package.json,lib,prebuilds}`, `scripts/bundle-manifest.json`; `.gitignore` ile sürüm kontrolü dışında tutulur). Dürüst paketleme iddiası (ADR-010): artefakt **tek dosya değildir** — `better-sqlite3` NATİF modüldür, `esbuild` native `.node` dosyasını gömemez; `mcp-server.mjs` + yanındaki vendored `node_modules/better-sqlite3` birlikte taşınır.
 
 ## Paket düzeni — TŞ §17.1 + Yerel Antigravity Yükleyicisi Çift Uyumluluk
 
@@ -196,4 +201,5 @@ TŞ §17.4: ajanlar arası davranış eşitliği MCP tool schema + contract test
 - `integrations/antigravity/causoryn/README.md` — kullanıcıya dönük kurulum ve güvenlik dokümanı
 - `integrations/antigravity/causoryn/test/antigravity-plugin.test.ts` — manifest şeması (`parseCausorynServerConfig`), sahnelenmiş `stdio` spawn, negatif ve dürüstlük testleri
 - `packages/mcp-server/scripts/build-bundle.mjs` — `dist/` üretimi + `integrations/antigravity/causoryn/scripts/` deterministik sahnelemesi
-- `docs/hosts/` diğer host sayfaları (`claude-code.md`, `codex.md`)
+- `docs/hosts/` diğer host sayfaları: [Claude Code](claude-code.md) · [Codex CLI](codex.md) · [ZCode](zcode.md)
+- [Uyumluluk Matrisi](../compatibility-matrix.md) · [English version](../en/hosts/antigravity.md)

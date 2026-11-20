@@ -1,6 +1,8 @@
 # Implementation Status
 
-> Sprint durum tabloları: **Sprint 1 (Faz A: Foundation)**, **Sprint 2 (Faz B: Deep Mapping)**, **Sprint 3 (Faz C: Original Features)**, **Sprint 4 (Faz C2: Living Wiki)**, **Sprint 5 (Faz D: Differentiation)**, **Sprint 6 (Faz E: Agent Change Guard)**, **Sprint 7 (Faz F: Cross-host Release — final)** ve **Sprint 8 (Çok-Dil Derin Analiz: Python/Go/Rust sidecar'ları + M2 entegrasyon)** · TŞ v2.1 §25, §7/§8/§9/§10/§11/§12/§13/§14/§15/§16/§16A/§17/§22/§23.
+**Dil / Language:** Türkçe | [English](en/implementation-status.md)
+
+> Sprint ve sürüm durum tabloları: **Sprint 1 (Faz A: Foundation)**, **Sprint 2 (Faz B: Deep Mapping)**, **Sprint 3 (Faz C: Original Features)**, **Sprint 4 (Faz C2: Living Wiki)**, **Sprint 5 (Faz D: Differentiation)**, **Sprint 6 (Faz E: Agent Change Guard)**, **Sprint 7 (Faz F: Cross-host Release — final)**, **Sprint 8 (Çok-Dil Derin Analiz: Python/Go/Rust sidecar'ları + M2 entegrasyon)** ve **K-019 / K-020 / K-021 / K-022 (`v0.2.0` Pre-1.0 Public Preview)** · TŞ v2.1 §25, §7/§8/§9/§10/§11/§12/§13/§14/§15/§16/§16A/§17/§22/§23.
 
 > **ADR-010 kuralı (TŞ):** Çalışmayan şey Done yazılmaz. Aşağıdaki tablolarda her durum, görevin kabul ölçütlerinin o anki diskteki ve rapordaki gerçek haline göre verilmiştir; eksik kalan her kalemin kendisi belirtilmiştir.
 
@@ -12,6 +14,36 @@
 | **[R]** | Orkestratör tarafından doğrulanan görev sonucu raporu (görev süresinde koşuldu) | Orkestratör |
 | **[K]** | Kapı sonucu: `npm run test` / `typecheck` / `build` / `lint` — **orkestratör çalıştırdı, tümü yeşil**; bu dokümanı yazan ajan süiti tekrar koşmadı | Orkestratör |
 | **[S]** | Statik sayım: test dosyasındaki `it(`/`test(` bloklarının `grep` ile sayımı — **koşum sayısı değildir** | Bu dokümanı yazan ajan |
+
+## K-020 / K-021 / K-022 — v0.2.0 Pre-1.0 Public Preview Güncel Durum (2026-11-18..20)
+
+> Kanıt: `wiki/decisions.md` `K-019`..`K-022` · [CHANGELOG.md](../CHANGELOG.md) `[0.2.0] - 2026-11-20` ve `[Unreleased]` · [security-pass.md](security-pass.md) · [compatibility-matrix.md](compatibility-matrix.md) · `.github/workflows/ci.yml` · `.github/workflows/release.yml` · `packages/causoryn/` · `scripts/secret-scan.mjs` · `scripts/generate-sbom.mjs` · `scripts/export-public-tree.mjs`.
+
+Sprint 8 sonrasında yürütülen dört mühendislik ve açık kaynak hazırlık turu (`K-019`..`K-022`), çekirdek 29 araç ve 5 dil analizörünün üzerine kalıcı depolama, çoklu-host CLI/plugin dağıtımı, tedarik zinciri kanıtlanabilirliği ve açık kaynak yönetişim yüzeyini eklemiş; uzak `v0.1.0` etiketi (`4c9c188f`) kilitli tutularak sürüm **`0.2.0` Pre-1.0 Public Preview** (`SERVER_VERSION === "0.2.0"`, **1.0.0 DEĞİL — ADR-010**) olarak yayımlanmıştır:
+
+| İzlek | Kapsam | Durum | Kanıt özeti |
+|---|---|---|---|
+| **K-019** (2026-11-18) | Bağımsız dış denetim kapanışı: 5-dil `ROUTES_TO` resolution doğruluğu (TS/Python/Rust `verified`; C# semantik `verified` veya bilinen-ad `heuristic`; Go aynı-paket `verified`, selector/tanımsız `heuristic`/`unresolved`), Antigravity `$schema`'sız `plugin.json` + `mcp_config.json` + `mcp.json` + `README.md` + `build:bundle` `scripts/mcp-server.mjs` sahnelemesi, 5-dil `workspace_summary.languages` & `coverageOf.tier` (`L2`/`L1`/`L0`), 29 araçta yapısal MCP `annotations` (`readOnlyHint`) | **Done** | **[D]** `WorkerAnalyzer.cs:1475-1508`, `routes.go:120-170`, `packages/mcp-server/src/server.ts:154-164,555`, `packages/mcp-server/src/services.ts:138-190,362-387`, `integrations/antigravity/causoryn/test/antigravity-plugin.test.ts` (1155 satır; canlı `stdio` el sıkışması — `agy` CLI kurulum/smoke `NOT RUN`). |
+| **K-020** (2026-11-18) | Pre-1.0 mühendislik iyileştirmeleri: opsiyonel kalıcı SQLite graph deposu (`storage.dataDbPath`, `allowRoots` dışı fail-closed `validateDataDbPath`, `MAX(sid)` ve `revision.sequence` yeniden başlatma sürekliliği) + `symbol_fts` Agent GPS `fts` ayağı; `causoryn_refresh_index(mode="incremental")` (`scope` açık ret ve `B7` per-file parse reuse / watcher MCP yüzeyi nedeniyle **Partial** kalır); TypeScript BDD `Test` node + `TESTS`/`CALLS` kenarı çıkarımı (`derive_test_plan` `direct` sinyali TS'te aktif); `causoryn_export_documentation(format="snapshot")` (`architecture-snapshot.json`, `OutputAccessPolicy`); ortak sıfır dış bağımlılıklı `@causoryn/sidecar-ipc`; GitHub Actions CI | **Done** | **[D]** `packages/mcp-server/src/context.ts:139-185,230-357`, `packages/mcp-server/test/sqlite-persistence.test.ts`, `packages/mcp-server/test/pre-1-0-e2e.test.ts`, `adapters/typescript/test/test-intelligence.test.ts`, `packages/sidecar-ipc/test/sidecar-ipc.test.ts`. |
+| **K-021** (2026-11-19) | Açık kaynak çoklu-host dağıtım (`packages/causoryn`): tek yayınlanabilir npm paketi (`"name": "causoryn"`, `MIT`, sıfır dış npm bağımlılığı), `causoryn setup\|doctor\|mcp` CLI (`_npx` → `~/.causoryn/runtime` atomik sahneleme, `.causoryn.backup` yedekleme), 4 host pazaryeri manifesti (Antigravity, Claude Code, Codex, ZCode/GLM) + 4 kanonik `skills/`, sıfır-ayar `--allow-cwd` + dinamik MCP `roots/list` (`notifications/roots/list_changed`) + `0o700` CWE-59 `--auto-data-dir` + çoklu-süreç SQLite yarış kurtarması, `dist/typescript-lib/lib*.d.ts` sahnelemesi (`resolveTypeScriptLibDir` ile izole `state: "ready"`), dinamik sidecar varlık kökü (`resolveCausorynAssetRoot`), Rust yazılabilir `~/.causoryn/cache/rust-worker-target` + `cargo build --locked`, `server.json` + `mcpName` (`io.github.mrbekox/causoryn`) | **Done** | **[D]** `packages/causoryn/package.json`, `packages/causoryn/test/setup-and-doctor.test.ts`, `packages/mcp-server/src/runtime-cli.ts`, `packages/mcp-server/test/runtime-cli-and-roots.test.ts`, `packages/indexing/test/multiprocess-race.test.ts`, `adapters/typescript/test/standalone-lib-resolution.test.ts`, `tests/open-source-distribution.test.ts`. |
+| **K-022** (2026-11-20) | Açık kaynak yayın yönetişimi, tedarik zinciri ve `v0.2.0` kapanışı: **`0.2.0` Pre-1.0 Public Preview** sürüm kararı (`v0.1.0` `4c9c188f`'te sabit; iç analizör protokol sürümleri kalıcı SQLite `analyzerFingerprint` uyumu için `0.1.0`'da korundu); `MIT` lisansı (`Causoryn Contributors`) + üretilen `THIRD-PARTY-NOTICES.md` ve `licenses/`; deterministik Release Roslyn derlemesi (`-c Release -p:DebugType=none -p:ContinuousIntegrationBuild=true -p:SatelliteResourceLanguages=en` — sıfır PDB yol sızıntısı); `SECURITY.md`, `CONTRIBUTING.md`, `CODE_OF_CONDUCT.md`, `.github/ISSUE_TEMPLATE/*`, `.github/PULL_REQUEST_TEMPLATE.md`, `.github/dependabot.yml`; Seçenek 1 temiz kamuya açık repo dışa aktarıcısı (`scripts/export-public-tree.mjs`); 40-karakter SHA-sabitli 3-OS `.github/workflows/ci.yml` (`ubuntu-latest`, `windows-latest`, `macos-latest`) + OIDC `.github/workflows/release.yml` (`SHA256SUMS.txt` + `scripts/generate-sbom.mjs` 13 bileşenli CycloneDX 1.5 SBOM + `actions/attest-build-provenance` + `NPM_TOKEN`'sız `npm publish --provenance --access public`); `runtime-cli.ts` hassas/sistem kök reddi + `git-read.ts` minimal env allowlist ve açma-sonrası `fstat`/TOCTOU doğrulaması + Node `>=24` muhafızı + `--expected-version` pini; `scripts/secret-scan.mjs` **13 kök + 13 kök metin dosyası** (0 eşleşme); `build-bundle.mjs` atomik yazım + ağır spawn testlerinde açık 20 sn timeout'lar (varsayılan süitte **89 test dosyası** + 1 bench dosyası, **`1600+` test**); `eslint@10.15.0` & `typescript-eslint@8.73.0` yükseltmesiyle `npm audit` = **0 güvenlik açığı (`0 vulnerabilities`)** | **Done** | **[D]** `package.json`, `packages/causoryn/THIRD-PARTY-NOTICES.md`, `.github/workflows/ci.yml`, `.github/workflows/release.yml`, `scripts/generate-sbom.mjs`, `scripts/export-public-tree.mjs`, `scripts/secret-scan.mjs`, `tests/ci-workflow.test.ts`, `tests/public-export.test.ts`, `tests/secret-scan.test.ts`, `tests/release-docs.test.ts`. |
+
+### v0.2.0 itibarıyla kalan dürüst 1.0.0 kapıları (ADR-010)
+
+`K-020`..`K-022` turları F9 sayımındaki `npm audit` (`0 vulnerabilities`), `secret-scan` (13 kök + 13 kök dosyası), 3-OS CI matrisi (`ubuntu`/`windows`/`macos`), `refresh_index(mode="incremental")`, TS `Test`/`TESTS`, `export_documentation(format="snapshot")` ve `packages/causoryn` `dist/typescript-lib/lib*.d.ts` kalemlerini teslim etmiştir. Buna karşılık [CHANGELOG.md](../CHANGELOG.md) `[Unreleased]` altındaki aşağıdaki barajlar kapanmadan `1.0.0` ilan edilmez:
+
+1. **Antigravity `agy` CLI canlı kurulum + smoke** (`agy` ikilisi kurulu makinede doğrulama; doğrudan `stdio` el sıkışması otomatize edildi, `agy` CLI adımları `NOT RUN`).
+2. **ZCode GUI içi gerçek kurulum + `tools/list` smoke** (kullanıcı kurulumunu bozmama kırmızı çizgisi 6 kapsamında açık).
+3. **Canlı macOS / Linux / ARM64 host smoke doğrulaması** (CI matrisi 3-OS çalışır; masaüstü/CLI ajan hostlarının macOS/ARM64 canlı duman testi açık).
+4. **MCP SDK v1.x (`1.32.2`) → v2 yükseltmesi** (`K-009` kapanışı).
+5. **B7 Live Architecture tam kapanışı:** per-file parse reuse ve FS watcher'ın MCP aracına sarılması (`B7` bu nedenle **Partial** kalır).
+6. **Diğer 4 dilde (`csharp`, `python`, `go`, `rust`) `Test`/`TESTS` çıkarımı** (`derive_test_plan` `direct` sinyali şu an yalnızca TypeScript'te aktiftir).
+7. **Sözleşme/drift sadakat sınırları:** OpenAPI yanıt-şeması drift'i (`K-015(5)`), event versiyon uyumsuzluk kuralı (`K-015(4)`) ve SQL `RENAME` sınıflaması (`K-015(3)`).
+8. **`.causoryn/architecture-snapshot.json` revizyon iş akışı otomasyonu** (üretici `export_documentation(format="snapshot")` hazır; kaynak ağaca otomatik yazma `ADR-008` gereği yapılmaz).
+9. **Living Wiki yüzey boşlukları:** `wiki_search` sorgu filtreleri (`pageKind`/`language`/…), `WIKI_NOTE_CONFLICT` `TOOL_ERROR_GUIDANCE` kaydı ve incremental wiki yayımında link/FTS daraltması.
+10. **E6 offline visualizer gerçek tarayıcı koşusu ve viewer HTML MCP çıktı yüzeyi.**
+11. **Çıplak F1 `packages/mcp-server/dist/` klonu `.d.ts` kapsam kararı** (`packages/causoryn` dağıtımında `dist/typescript-lib/` ile çözülmüştür; çıplak F1 dizini sınırı belgeli).
+12. **Rate-limit / concurrency resource budget (`K-010`).**
 
 ## Sprint 8 — Çok-Dil Derin Analiz: M1-Python · M1-Go · M1-Rust + M2 entegrasyon (2026-11-15/16, dal: `feat/multi-language-deep-analysis`)
 
@@ -114,7 +146,7 @@ Not: orkestratör özetindeki kısa ifadelerden iki tanesi disk gerçeğiyle bir
   7. OpenAPI keşfi yanıt-şeması drift'ini yüzeye taşımıyor (K-015(5)); TŞ §11 event versiyon kuralı uygulanmadı (K-015(4)); SQL rename → unknown (K-015(3)).
   8. compare_architecture/architecture_timeline için `.causoryn/architecture-snapshot.json` üreticisi: `causoryn_export_documentation(format="snapshot")` 2026-11-18 K-020 turunda eklendi (`OutputAccessPolicy` izinli çıktı dizinine atomik yazım; workspace içine otomatik yazma ADR-008 gereği yasaktır, git revizyonuna taşıma kullanıcı kontrolündedir).
   9. wiki_search sorgu filtreleri (pageKind/language/...) yüzeyde yok; WIKI_NOTE_CONFLICT TOOL_ERROR_GUIDANCE kaydı yok; incremental wiki yayımı link/FTS indekslerini tam graph'tan yeniden yazar.
-  10. Rate-limit/concurrency resource budget kapsam dışı (K-010); adanmış secret-scan script'i (F9 karar anında yoktu; 2026-11-17/18 denetim turunda `scripts/secret-scan.mjs` / `npm run secret-scan` ile kapatıldı); npm audit 10 moderate dev-toolchain uyarısı açık.
+  10. Rate-limit/concurrency resource budget kapsam dışı (K-010); adanmış secret-scan script'i (F9 karar anında yoktu; 2026-11-17/18 denetim turunda `scripts/secret-scan.mjs` / `npm run secret-scan` ile kapatıldı ve 2026-11-20 `K-022`'de 13 köke genişletildi); npm audit 10 moderate dev-toolchain uyarısı (F9 anında açıktı; 2026-11-20 `K-022`'de `eslint@10.15.0` + `typescript-eslint@8.73.0` ile **0 güvenlik açığına** kapatıldı).
   11. E6 visualizer gerçek tarayıcı koşusu olmadan doğrulandı; viewer HTML'ini izinli output'a yazan MCP yüzeyi yok.
   12. Bundle default-lib `.d.ts` taşımıyor → global-tanımlı identifier kullanan kaynaklar `partial`'a düşer (F6 fidelity notu).
 - **Sonuç:** 1.0.0, "tüm barajlar kapanmış" iması taşır; bu imanın 12 kalemi henüz doğru değil. ADR-010 gereği sürüm **0.1.0 public snapshot** olarak etiketlendi; 1.0.0 kapıları `CHANGELOG.md` [Unreleased] bölümünde somut kapanış kalemleri olarak listelenir. Kök `package.json` `version` alanı **değişmedi (0.1.0)** — kararın o alana düşen etkisi korunumdur.
@@ -130,7 +162,7 @@ Not: orkestratör özetindeki kısa ifadelerden iki tanesi disk gerçeğiyle bir
 
 ## Sprint 6 — Faz E: Agent Change Guard (2026-11-08)
 
-> Kanıt: sprint-6 görev sonucu raporları e1–e6 + mcp denetim turları (orkestratör doğrulamalı) + disk spot-check ve bu oturumda bizzat koşulan sprint-kapı testleri (2026-11-08) + kapı sonuçları · TŞ v2.1 §10.4 (verify_change; s.11), §13 (Impact/Diff/Timeline trendleri), §16 (Export/visualizer), §23 (Faz E planı) · K-015 · [wiki/sprint-6.md](../wiki/sprint-6.md)
+> Kanıt: sprint-6 görev sonucu raporları e1–e6 + mcp denetim turları (orkestratör doğrulamalı) + disk spot-check ve bu oturumda bizzat koşulan sprint-kapı testleri (2026-11-08) + kapı sonuçları · TŞ v2.1 §10.4 (verify_change; s.11), §13 (Impact/Diff/Timeline trendleri), §16 (Export/visualizer), §23 (Faz E planı) · K-015 · `wiki/sprint-6.md`
 
 > İşaret kullanımı bu bölümde: **[D]** bu dokümanı yazan ajanın bu oturumda bizzat yaptığı disk doğrulamalarını (dosya okuma, `grep`, `ls`, `git log/diff/status`) **ve bizzat koştuğu test koşumlarını** (7 test dosyası / 89 test — aşağıda sprint-kapısı bölümünde tek tek listeli) kapsar; **[R]** orkestratör doğrulamalı görev sonucu raporlarını (görev süresinde koşulan kırmızı→yeşil kanıtlarıyla); **[K]** orkestratörün koşturduğu kapı sonuçlarını (`npm run test`/`typecheck`/`build`/`lint` — **tümü yeşil**) ve güvenlik-analizi sonucunu; **[S]** statik `it(`/`test(` sayımını belirtir (koşum değildir). Dürüstlük notu: bu dokümanı yazan ajan bu oturumda **tam süiti tekrar koşmadı**; bizzat koştuğu koşumlar 7 test dosyasında 89 testtir ve GÜNCEL çalışma ağacında (commit bekleyen güvenlik-turu düzeltmeleri dahil) koşulmuştur.
 
@@ -183,7 +215,7 @@ Orkestratör raporu **[K]**: güvenlik analizi **2 bulgu** üretti; **tümü gid
 
 ## Sprint 5 — Faz D: Differentiation (2026-11-08)
 
-> Kanıt: sprint-5 görev sonucu raporları d1–d7 + mcp (orkestratör doğrulamalı) + disk spot-check (bu oturum, 2026-11-08) + kapı sonuçları · TŞ v2.1 §11 (sözleşme keşfi/değerlendirme/drift), §10.2/§10.3 (preflight; §14 Business Flow Intelligence'dır — düzeltme: denetim bulgusu), §15 (Test Intelligence), §10.1/§10.2 (araç yüzeyi + sabit hata kodları), §19 (kaynak tüketimi), §23 (Faz D planı) · K-013(7) (contractChanges gövdesi) · [wiki/sprint-5.md](../wiki/sprint-5.md)
+> Kanıt: sprint-5 görev sonucu raporları d1–d7 + mcp (orkestratör doğrulamalı) + disk spot-check (bu oturum, 2026-11-08) + kapı sonuçları · TŞ v2.1 §11 (sözleşme keşfi/değerlendirme/drift), §10.2/§10.3 (preflight; §14 Business Flow Intelligence'dır — düzeltme: denetim bulgusu), §15 (Test Intelligence), §10.1/§10.2 (araç yüzeyi + sabit hata kodları), §19 (kaynak tüketimi), §23 (Faz D planı) · K-013(7) (contractChanges gövdesi) · `wiki/sprint-5.md`
 
 > İşaret kullanımı bu bölümde: **[D]** bu dokümanı yazan ajanın bu oturumda bizzat yaptığı disk doğrulamalarını (dosya okuma, `grep`, `node -e`, `git log/diff/status`); **[R]** orkestratör doğrulamalı görev raporlarını (görev süresinde koşulan kırmızı→yeşil kanıtlarıyla); **[K]** orkestratörün koşturduğu kapı sonuçlarını (`npm run test`/`typecheck`/`build`/`lint` — **tümü yeşil**) ve güvenlik-analizi sonucunu; **[S]** statik `it(`/`test(` sayımını belirtir (koşum değildir). Dürüstlük notu: bu dokümanı yazan ajan bu oturumda **hiçbir test süiti koşmadı**; tüm koşum kanıtı [R] görev raporları ve [K] orkestratör kapılarıdır, bizzat koşulan tek şey disk doğrulamalarıdır.
 
@@ -243,7 +275,7 @@ Orkestratör raporu **[K]**: güvenlik analizi **2 bulgu** üretti; **tümü gid
 
 ## Sprint 4 — Faz C2: Living Wiki (2026-11-07)
 
-> Kanıt: sprint-4 görev sonucu raporları w1–w8 (orkestratör doğrulamalı) + disk spot-check ve bu oturumda bizzat koşulan TŞ §16A.10 kapı testleri (2026-11-07) + kapı sonuçları · TŞ v2.1 §16A (s.14–18), §10.1/§10.2 (araç yüzeyi + sabit hata kodları), §8/§9 (snapshot state/stale semantiği) · K-013 (wiki şema kararları) · [docs/wiki-spec.md](wiki-spec.md) §3.0–3.7 · [wiki/sprint-4.md](../wiki/sprint-4.md)
+> Kanıt: sprint-4 görev sonucu raporları w1–w8 (orkestratör doğrulamalı) + disk spot-check ve bu oturumda bizzat koşulan TŞ §16A.10 kapı testleri (2026-11-07) + kapı sonuçları · TŞ v2.1 §16A (s.14–18), §10.1/§10.2 (araç yüzeyi + sabit hata kodları), §8/§9 (snapshot state/stale semantiği) · K-013 (wiki şema kararları) · [docs/wiki-spec.md](wiki-spec.md) §3.0–3.7 · `wiki/sprint-4.md`
 
 > İşaret kullanımı bu bölümde: **[D]** bu dokümanı yazan ajanın bu oturumda bizzat yaptığı disk doğrulamalarını (dosya okuma, `grep`, `ls`, `node -e`, `git status/diff/log/show`); **[R]** orkestratör doğrulamalı görev raporlarını (görev süresinde koşulan kırmızı→yeşil kanıtlarıyla); **[K]** orkestratörün koşturduğu kapı sonuçlarını (`npm run test`/`typecheck`/`build`/`lint` — tümü yeşil) ve güvenlik-analizi sonucunu; **[S]** statik `it(`/`test(` sayımını belirtir (koşum değildir). Dürüstlük notu: bu dokümanı yazan ajan bu oturumda **tam süiti tekrar koşmadı**; bizzat koştuğu tek koşum TŞ §16A.10 kapı testleridir (iki overlay test dosyası, **24/24 passed** — aşağıdaki özel bölümde).
 
@@ -294,7 +326,7 @@ Orkestratör raporu **[K]**: güvenlik analizi **3 bulgu** üretti; **tümü gid
 
 ## Sprint 3 — Faz C: Original Features (2026-11-05)
 
-> Kanıt: sprint-3 görev sonucu raporları c1–c7, b9, mcp (orkestratör doğrulamalı) + disk spot-check ve bu oturumda bizzat koşulan test/kapı koşumları (2026-11-05) + kapı sonuçları · TŞ v2.1 §12 (Architecture Guard + policy DSL), §13 (Change Intelligence: Impact/Diff/Timeline), §15 (Agent GPS), §16 (Export/Onboarding), §10.2–§10.3 (araç yüzeyleri), §20 (resource budget), §23 (Faz C planı) · [wiki/sprint-3.md](../wiki/sprint-3.md)
+> Kanıt: sprint-3 görev sonucu raporları c1–c7, b9, mcp (orkestratör doğrulamalı) + disk spot-check ve bu oturumda bizzat koşulan test/kapı koşumları (2026-11-05) + kapı sonuçları · TŞ v2.1 §12 (Architecture Guard + policy DSL), §13 (Change Intelligence: Impact/Diff/Timeline), §15 (Agent GPS), §16 (Export/Onboarding), §10.2–§10.3 (araç yüzeyleri), §20 (resource budget), §23 (Faz C planı) · `wiki/sprint-3.md`
 
 > İşaret kullanımı bu bölümde: **[D]** bu dokümanı yazan ajanın bu oturumda bizzat yaptığı disk doğrulamalarını (dosya okuma, `grep`, `git log/diff/status`) **ve bizzat koştuğu test/kapı koşumlarını** kapsar; **[R]** orkestratör doğrulamalı görev raporlarını (görev süresinde koşulan kırmızı→yeşil kanıtlarıyla); **[K]** orkestratörün koşturduğu kapı sonuçlarını (`npm run test`/`typecheck`/`build`/`lint` — tümü yeşil) belirtir; **[S]** statik `it(`/`test(` sayımıdır (koşum değildir). Dürüstlük notu: bu dokümanı yazan ajan bu oturumda **tam süiti tekrar koşmadı** (orkestratör kapısı [K] + 8 hızlı Faz C test dosyasının bizzat koşumu [D]).
 
@@ -343,7 +375,7 @@ B9 ve takip eden dilimlerle kapananlar işaretlendi; kalanlar olduğu gibi korun
 
 ## Sprint 2 — Faz B: Deep Mapping (2026-11-05)
 
-> Kanıt: sprint-2 görev sonucu raporları b1–b8 (orkestratör doğrulamalı) + disk spot-check ve bu oturumda bizzat koşulan testler (2026-11-05) + kapı sonuçları · TŞ v2.1 §7 (adapter'lar), §9 (storage), §23 (Faz B planı) · [wiki/sprint-2.md](../wiki/sprint-2.md)
+> Kanıt: sprint-2 görev sonucu raporları b1–b8 (orkestratör doğrulamalı) + disk spot-check ve bu oturumda bizzat koşulan testler (2026-11-05) + kapı sonuçları · TŞ v2.1 §7 (adapter'lar), §9 (storage), §23 (Faz B planı) · `wiki/sprint-2.md`
 
 > İşaret kullanımı bu bölümde: **[D]** bu dokümanı yazan ajanın bu oturumda bizzat yaptığı disk doğrulamalarını (okuma, `grep`, `ls`, `git status`) **ve bizzat koştuğu test koşumlarını** kapsar; **[R]** orkestratör doğrulamalı görev raporlarını; **[K]** orkestratörün koşturduğu kapı sonuçlarını (test/typecheck/build/lint — tümü yeşil) belirtir.
 
@@ -388,7 +420,7 @@ Orkestratör raporu **[K]**: güvenlik analizi **5 bulgu** üretti; **tümü gid
 
 ## Sprint 1 — Faz A: Foundation
 
-> Kanıt: sprint-1 görev sonucu raporları (orkestratör doğrulamalı, t1–t8) + disk spot-check (bu oturum, 2026-11-03) + kapı sonuçları · TŞ v2.1 §25, ADR-010 · [wiki/sprint-1.md](../wiki/sprint-1.md)
+> Kanıt: sprint-1 görev sonucu raporları (orkestratör doğrulamalı, t1–t8) + disk spot-check (bu oturum, 2026-11-03) + kapı sonuçları · TŞ v2.1 §25, ADR-010 · `wiki/sprint-1.md`
 
 ## Sprint 1 görev tablosu
 
@@ -438,7 +470,7 @@ Orkestratör raporu [K]: analiz 2 bulgu üretti, ikisi giderildi ve kapılar yen
 
 1. **Commit planı**: HEAD `4eeb1e5`; görev-9 güvenlik düzeltmeleri (4 dosya: `snapshot.ts`, `snapshot-attributes.test.ts`, `server.ts`, `mcp-server.test.ts`) çalışma ağacında commit edilmemiş — commit/push orkestratör kalemidir.
 2. **wiki kayıtları** (wiki yazma yasağı nedeniyle görev ajanları yazamadı): `wiki/decisions.md`'e ADR/K girişleri — (a) `INVALID_ARGUMENT` + `EVIDENCE_NOT_FOUND` uzantı hata kodları (TŞ §10.1 18 kodluk taban listede yok; kanıt: `packages/mcp-server/src/errors.ts:6-26` + birincil kaynak doğrulaması), (b) SDK sürüm sapması (kurulu `@modelcontextprotocol/sdk` 1.32.2 / v1.x vs TŞ §6 SDK v2 hedefi; `packages/mcp-server/src/index.ts:17-21` beyanı), (c) rate-limit/concurrency limitlerinin Faz A kapsam dışı beyanı (TŞ §10 resource budget). `wiki/log.md`'e `dev` girişleri.
-3. **npm audit**: 10 moderate uyarı kalıyor — tek kök: `minimatch <11.0.1` (GHSA-g3hv-75wg-m249), yalnızca dev-toolchain (eslint 10 + typescript-eslint 8 transitive); önerilen `npm audit fix --force` eslint'i v4'e düşürür, uygulanmadı.
+3. **~~npm audit~~ → KAPANDI (2026-11-20, K-022)**: `eslint@10.15.0` ve `typescript-eslint@8.73.0` yükseltmesiyle `npm audit` **0 güvenlik açığı** (`0 vulnerabilities`) döndürür. (Sprint 1 anındaki orijinal kayıt: 10 moderate uyarı kalıyordu — tek kök `minimatch <11.0.1` GHSA-g3hv-75wg-m249, yalnızca dev-toolchain; o tarihte `npm audit fix --force` eslint'i v4'e düşürdüğünden uygulanmamıştı.)
 4. **Kapsam notları** (görev raporlarından [R]): t4 `heuristicCandidatePath` dalı testle kapsanmıyor; SQLite gerçekleme tek bağlantılı/senkron, eşzamanlı yazıcı sözleşmesi Faz A'da tanımlı değil, snapshot silme API'si yok (FTS5 temizliği gerektirir); `tests/smoke.test.ts`'teki "MCP stdio server + 4 araç" yorumu 5 araçla bayat (yalnızca yorum, assertion değil); `docs/wiki-spec.md` §8'de implementasyon öncesi karar bekleyen açık konular var.
 
 ## İlgili sayfalar
@@ -446,10 +478,10 @@ Orkestratör raporu [K]: analiz 2 bulgu üretti, ikisi giderildi ve kapılar yen
 - [docs/architecture.md](architecture.md) — paket haritası ve bağımlılık sınırları
 - [docs/tool-contracts.md](tool-contracts.md) — 29 araç sözleşme özeti (TOOL_NAMES ile çapraz doğrulamalı)
 - [docs/compatibility-matrix.md](compatibility-matrix.md) — host × sonuç matrisi (not-run satırları dürüst)
-- [CHANGELOG.md](../CHANGELOG.md) — 0.1.0 public snapshot girişi + Unreleased 1.0.0 kapıları
-- [docs/security-pass.md](security-pass.md) — F6 paketlenmiş-bundle güvenlik turu
+- [CHANGELOG.md](../CHANGELOG.md) — 0.2.0 Pre-1.0 Public Preview + 0.1.0 public snapshot girişi + Unreleased 1.0.0 kapıları
+- [docs/security-pass.md](security-pass.md) — F6 paketlenmiş-bundle güvenlik turu ve v0.2.0 savunma derinliği
 - [docs/benchmarks.md](benchmarks.md) — F7 performans ölçümleri
-- [docs/BACKLOG.md](BACKLOG.md) — faz bağımlılık sıralaması (görev 11 çıktısı)
+- [docs/BACKLOG.md](BACKLOG.md) — faz bağımlılık sıralaması ve güncel 1.0.0 kapıları
 - [docs/wiki-spec.md](wiki-spec.md) — Living Wiki tasarım sözleşmesi (görev 10 çıktısı)
 - [docs/adr/ADR-002-no-llm.md](adr/ADR-002-no-llm.md) — LLM'siz motor kararı
-- [wiki/sprint-1.md](../wiki/sprint-1.md) · [wiki/sprint-2.md](../wiki/sprint-2.md) · [wiki/sprint-3.md](../wiki/sprint-3.md) · [wiki/sprint-7.md](../wiki/sprint-7.md) · [wiki/architecture.md](../wiki/architecture.md) · [wiki/decisions.md](../wiki/decisions.md)
+- Tarihsel çalışma kayıtları: `wiki/sprint-1.md` · `wiki/sprint-2.md` · `wiki/sprint-3.md` · `wiki/sprint-7.md` · `wiki/sprint-8.md` · `wiki/architecture.md` · `wiki/decisions.md`
