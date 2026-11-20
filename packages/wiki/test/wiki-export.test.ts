@@ -1,4 +1,12 @@
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
@@ -211,7 +219,7 @@ describe("exportWikiOffline (pozitif)", () => {
     const result = exportWikiOffline({ projection, outputDir }, policy);
 
     expect(result.atomic).toBe(true);
-    expect(result.outputDir).toBe(outputDir);
+    expect(result.outputDir).toBe(realpathSync(outputDir));
     const writtenRelative = result.files.map((file) => file.relativePath);
     // index.html kökte; markdown klasörü index.md + sayfa başına .md taşır.
     expect(writtenRelative).toContain("index.html");

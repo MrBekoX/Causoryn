@@ -180,11 +180,25 @@ export class WorkspaceAccessPolicy {
     // 3) Leksik çözümleme: `..` ve mutlak yollar normalize edilir (OWASP: normalize before IO).
     //    `\\?\` aygıt önekleri path işlemlerinden ÖNCE sıyırılır (win32 path.resolve
     //    önekli yolu kökten farklı bir kimlik olarak görür).
+    //    Üst dizini OS symlink'i olan yetkili köklerde (örn. macOS `/var` → `/private/var`),
+    //    çağıranın verdiği `rootPath` altındaki mutlak aday yol önce `canonicalRoot`,
+    //    gerekirse yetkili `lexicalRoot` üzerinden göreli çözülüp `canonicalRoot`'a
+    //    bağlanır; ardından ignore + CWE-59 realpath containment aynı sıkılıkla koşar.
     const candidateNormalized = stripWin32DevicePrefix(candidatePath);
-    const absolute = path.isAbsolute(candidateNormalized)
+    let absolute = path.isAbsolute(candidateNormalized)
       ? path.resolve(candidateNormalized)
       : path.resolve(rootDecision.canonicalRoot, candidateNormalized);
-    const relative = path.relative(rootDecision.canonicalRoot, absolute);
+    let relative = path.relative(rootDecision.canonicalRoot, absolute);
+    if (isLexicalEscape(relative) && path.isAbsolute(candidateNormalized)) {
+      const lexicalRoot = path.resolve(stripWin32DevicePrefix(rootPath));
+      if (lexicalRoot !== rootDecision.canonicalRoot) {
+        const relativeFromCallerRoot = path.relative(lexicalRoot, absolute);
+        if (!isLexicalEscape(relativeFromCallerRoot)) {
+          relative = relativeFromCallerRoot;
+          absolute = path.resolve(rootDecision.canonicalRoot, relativeFromCallerRoot);
+        }
+      }
+    }
     if (isLexicalEscape(relative)) {
       return deny(
         "workspace/path-denied",

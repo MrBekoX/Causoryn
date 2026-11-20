@@ -312,6 +312,31 @@ describe("path traversal koruması (OWASP Path Traversal, TŞ §19)", () => {
     expectAllowed(policy.checkPath(root, path.join(root, "src", "code.ts")));
     rmSync(root, { recursive: true, force: true });
   });
+
+  it("partial: üst dizini symlink/junction olan kök altındaki mutlak yol (örn. macOS /var → /private/var) kabul edilir, dış traversal ve iç kaçış hâlâ reddedilir", () => {
+    const parent = makeRoot();
+    const realRoot = path.join(parent, "real-ws");
+    const aliasRoot = path.join(parent, "alias-ws");
+    const outside = path.join(parent, "outside");
+    mkdirSync(realRoot, { recursive: true });
+    mkdirSync(outside, { recursive: true });
+    writeFileSync(path.join(outside, "secret.txt"), "disari\n");
+    seedFixture(realRoot);
+    symlinkSync(realRoot, aliasRoot, "junction");
+    symlinkSync(outside, path.join(realRoot, "escape-link"), "junction");
+
+    const policy = policyFor(aliasRoot);
+    expect(expectAllowed(policy.checkPath(aliasRoot, path.join(aliasRoot, "src", "code.ts"))).relativePath).toBe(
+      "src/code.ts",
+    );
+    expect(denyOf(policy.checkPath(aliasRoot, path.join(aliasRoot, "..", "outside", "secret.txt"))).code).toBe(
+      "workspace/path-denied",
+    );
+    expect(denyOf(policy.checkPath(aliasRoot, path.join(aliasRoot, "escape-link", "secret.txt"))).code).toBe(
+      "workspace/path-denied",
+    );
+    rmSync(parent, { recursive: true, force: true });
+  });
 });
 
 /* ------------------------------------------------------------------ */

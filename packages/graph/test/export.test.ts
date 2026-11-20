@@ -6,6 +6,7 @@ import {
   mkdtempSync,
   readdirSync,
   readFileSync,
+  realpathSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
@@ -602,8 +603,8 @@ describe("writeDocumentation (izinli output dizinine atomik yazma)", () => {
 
     // Bağın dışarıdaki hedefi YENİDEN YAZILMAMIŞ olmalı.
     expect(readFileSync(victimPath, "utf8")).toBe("ESKI-ICERIK");
-    // Hedef, izinli dizinde DÜZENLİ dosya olarak yazılmış olmalı.
-    expect(result.path).toBe(target);
+    // Hedef, izinli dizinde DÜZENLİ dosya olarak yazılmış olmalı (kanonik realpath).
+    expect(result.path).toBe(path.join(realpathSync(outputDir), EXPORT_DEFAULT_FILE_NAMES.json));
     expect(existsSync(target)).toBe(true);
     expect(lstatSync(target).isSymbolicLink()).toBe(false);
     expect(readFileSync(target, "utf8")).toBe(serializeDocumentation(snapshot, "json"));
