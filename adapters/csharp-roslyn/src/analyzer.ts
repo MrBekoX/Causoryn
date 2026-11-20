@@ -81,6 +81,20 @@ function defaultWorkerDllPath(): string
     return flatDllPath;
   }
 
+  const releaseDllPath = join(
+    assetRoot,
+    "native",
+    "roslyn-worker",
+    "bin",
+    "Release",
+    "net10.0",
+    "Causoryn.RoslynWorker.dll",
+  );
+  if (existsSync(releaseDllPath))
+  {
+    return releaseDllPath;
+  }
+
   return join(assetRoot, WORKER_DLL_RELATIVE_PATH);
 }
 

@@ -11,7 +11,7 @@ import { fileURLToPath } from "node:url";
  * F6'ya uyarlanmış hâlidir: güvenlik oturumları RASTGELE istek dizisiyle
  * çalışır; tüm stdout/stderr satırları sızıntı taraması için toplanır.
  *
- * Komut yürütme disiplini (statik güvenlik güvenlik incelemesiyle uyumlu): her iki
+ * Komut yürütme disiplini (statik güvenlik kuralıyla uyumlu): her iki
  * süreç çağrısı da KABUK OLMADAN, argüman listesiyle yapılır (shell:false,
  * sabit Node yürütülebilir'i, tamsayı id'li protokol istekleri). Kullanıcı
  * girdisi hiçbir komut satırına birleştirilmez (TŞ §19 "No shell
@@ -29,6 +29,7 @@ export const REPO_ROOT = path.resolve(THIS_DIR, "..", "..", "..");
 const PKG_DIR = path.join(REPO_ROOT, "packages", "mcp-server");
 export const DIST_DIR = path.join(PKG_DIR, "dist");
 export const BUNDLE_PATH = path.join(DIST_DIR, "mcp-server.mjs");
+export const LEGAL_PATH = path.join(DIST_DIR, "mcp-server.mjs.LEGAL.txt");
 export const DIST_NODE_MODULES = path.join(DIST_DIR, "node_modules");
 export const MANIFEST_PATH = path.join(DIST_DIR, "bundle-manifest.json");
 export const BUILD_SCRIPT = path.join(PKG_DIR, "scripts", "build-bundle.mjs");
@@ -130,6 +131,7 @@ export function cloneBundleTo(destDir: string): string {
     try {
       if (
         !existsSync(BUNDLE_PATH) ||
+        !existsSync(LEGAL_PATH) ||
         !existsSync(path.join(DIST_NODE_MODULES, "better-sqlite3", "package.json"))
       ) {
         runBuildSync();
@@ -137,6 +139,7 @@ export function cloneBundleTo(destDir: string): string {
       // Yarım önceki denemenin artıkları üzerine değil temiz kopya.
       rmSync(path.join(destDir, "node_modules"), { recursive: true, force: true });
       copyFileSync(BUNDLE_PATH, target);
+      copyFileSync(LEGAL_PATH, path.join(destDir, "mcp-server.mjs.LEGAL.txt"));
       cpSync(DIST_NODE_MODULES, path.join(destDir, "node_modules"), { recursive: true });
       copyFileSync(MANIFEST_PATH, path.join(destDir, "bundle-manifest.json"));
       if (!cloneMatchesManifest(destDir)) {

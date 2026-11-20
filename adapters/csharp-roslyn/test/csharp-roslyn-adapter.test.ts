@@ -18,7 +18,8 @@
  * constant'larıdır; kullanıcı girdisi asla komut satırına interpole edilmez.
  */
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import os from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { beforeAll, describe, expect, it } from "vitest";
@@ -582,5 +583,87 @@ describe("worker status:error fallback gerekçesi (denetim bulgusu 9)", () => {
     expect(reasons).toContain("isteği reddetti");
     expect(reasons).toContain("LIMIT_EXCEEDED");
     expect(reasons).not.toContain("sözleşmeye aykırı");
+  });
+});
+
+/* ------------------------------------------------------------------ */
+/* Worker DLL çözümleme sırası: flat -> bin/Release -> bin/Debug       */
+/* ------------------------------------------------------------------ */
+
+describe("defaultWorkerDllPath çözümleme sırası (flat -> Release -> Debug)", () => {
+  it("düz paketli DLL yoksa bin/Release/net10.0 DLL'ini bin/Debug'a tercih eder; hiçbiri yoksa bin/Debug'a düşer", async () => {
+    const tmpRoot = mkdtempSync(join(os.tmpdir(), "causoryn-roslyn-dll-order-"));
+    const prevAssetRoot = process.env["CAUSORYN_ASSET_ROOT"];
+    const prevOverride = process.env["CAUSORYN_ROSLYN_WORKER_DLL"];
+    process.env["CAUSORYN_ASSET_ROOT"] = tmpRoot;
+    delete process.env["CAUSORYN_ROSLYN_WORKER_DLL"];
+
+    const captureWorkerPath = async (workspaceId: string): Promise<string> => {
+      const capturedArgs: Array<readonly string[]> = [];
+      await analyzeCSharpWorkspace({
+        workspaceId,
+        files: [{ path: "Program.cs", content: "class P {}" }],
+        options: {
+          requestTimeoutMs: 5_000,
+          spawnProcess: (_cmd, args) => {
+            capturedArgs.push(args);
+            return makeSyntheticChild(
+              JSON.stringify({
+                id: `analyze:${workspaceId}`,
+                protocolVersion: "1",
+                status: "ready",
+                coverageRatio: 1,
+                nodes: [],
+                edges: [],
+                evidence: [],
+              }),
+            );
+          },
+        },
+      });
+      return capturedArgs[0]?.[1] ?? "";
+    };
+
+    try {
+      const debugDll = join(
+        tmpRoot,
+        "native",
+        "roslyn-worker",
+        "bin",
+        "Debug",
+        "net10.0",
+        "Causoryn.RoslynWorker.dll",
+      );
+      const releaseDll = join(
+        tmpRoot,
+        "native",
+        "roslyn-worker",
+        "bin",
+        "Release",
+        "net10.0",
+        "Causoryn.RoslynWorker.dll",
+      );
+      const flatDll = join(tmpRoot, "native", "roslyn-worker", "Causoryn.RoslynWorker.dll");
+
+      // 1) Hiçbiri yokken Debug fallback
+      expect(await captureWorkerPath("order-fallback")).toBe(debugDll);
+
+      // 2) Hem Debug hem Release varken Release tercih edilir
+      mkdirSync(dirname(debugDll), { recursive: true });
+      writeFileSync(debugDll, "stub-debug", "utf8");
+      mkdirSync(dirname(releaseDll), { recursive: true });
+      writeFileSync(releaseDll, "stub-release", "utf8");
+      expect(await captureWorkerPath("order-release")).toBe(releaseDll);
+
+      // 3) Düz paketli DLL varken her ikisine tercih edilir
+      writeFileSync(flatDll, "stub-flat", "utf8");
+      expect(await captureWorkerPath("order-flat")).toBe(flatDll);
+    } finally {
+      if (prevAssetRoot === undefined) delete process.env["CAUSORYN_ASSET_ROOT"];
+      else process.env["CAUSORYN_ASSET_ROOT"] = prevAssetRoot;
+      if (prevOverride === undefined) delete process.env["CAUSORYN_ROSLYN_WORKER_DLL"];
+      else process.env["CAUSORYN_ROSLYN_WORKER_DLL"] = prevOverride;
+      rmSync(tmpRoot, { recursive: true, force: true });
+    }
   });
 });

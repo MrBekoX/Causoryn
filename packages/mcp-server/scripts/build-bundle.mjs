@@ -79,7 +79,7 @@ import {
   existsSync,
   mkdirSync,
   readFileSync,
-  rmSync,
+  renameSync,
   writeFileSync,
 } from "node:fs";
 import path from "node:path";
@@ -92,6 +92,7 @@ const PKG_DIR = path.resolve(SCRIPT_DIR, "..");
 const REPO_ROOT = path.resolve(PKG_DIR, "..", "..");
 const DIST_DIR = path.join(PKG_DIR, "dist");
 const BUNDLE_PATH = path.join(DIST_DIR, "mcp-server.mjs");
+const LEGAL_PATH = path.join(DIST_DIR, "mcp-server.mjs.LEGAL.txt");
 const MANIFEST_PATH = path.join(DIST_DIR, "bundle-manifest.json");
 const VENDOR_PARENT = path.join(DIST_DIR, "node_modules");
 const VENDOR_DEST = path.join(VENDOR_PARENT, "better-sqlite3");
@@ -109,8 +110,8 @@ const ANTIGRAVITY_VENDOR_DEST = path.join(
   "better-sqlite3",
 );
 
-/** Vendored kopyaya giren allowlist: yalnızca çalışma zamanı dosyaları. */
-const VENDOR_ENTRIES = ["package.json", "lib", "prebuilds"];
+/** Vendored kopyaya giren allowlist: yalnızca çalışma zamanı ve lisans dosyaları. */
+const VENDOR_ENTRIES = ["package.json", "LICENSE", "lib", "prebuilds"];
 
 function assertExists(filePath, label) {
   if (!existsSync(filePath)) {
@@ -123,11 +124,18 @@ function sha256(filePath) {
   return createHash("sha256").update(readFileSync(filePath)).digest("hex");
 }
 
+function writeFileAtomic(destPath, content) {
+  mkdirSync(path.dirname(destPath), { recursive: true });
+  const tmpPath = `${destPath}.tmp-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  writeFileSync(tmpPath, content);
+  renameSync(tmpPath, destPath);
+}
+
 assertExists(path.join(PKG_DIR, "src", "stdio.ts"), "giriş noktası src/stdio.ts");
 assertExists(SQLITE_SRC, "repo node_modules/better-sqlite3 (npm install gerekli)");
 
-// --- 1) Bundle ------------------------------------------------------------
-await build({
+// --- 1) Bundle (in-memory + atomik yazım: koşut testlerde ENOENT penceresi yok) ---
+const buildResult = await build({
   absWorkingDir: PKG_DIR,
   entryPoints: ["src/stdio.ts"],
   outfile: "dist/mcp-server.mjs",
@@ -135,6 +143,7 @@ await build({
   platform: "node",
   format: "esm",
   target: "node24",
+  write: false,
   // Görev sözleşmesindeki bayraklar: native .node gömülemez → EXTERNAL.
   external: ["better-sqlite3"],
   // ESM çıktısında CJS'ten çevrilen dinamik require'ları (ör. yaml →
@@ -158,9 +167,17 @@ await build({
   },
   sourcemap: false,
   minify: false,
-  legalComments: "none",
+  legalComments: "linked",
   logLevel: "warning",
 });
+
+const outputFiles = buildResult.outputFiles ?? [];
+const bundleOut = outputFiles.find((f) => path.resolve(f.path) === path.resolve(BUNDLE_PATH));
+const legalOut = outputFiles.find((f) => path.resolve(f.path) === path.resolve(LEGAL_PATH));
+if (!bundleOut || !legalOut) {
+  console.error("[build:bundle] esbuild beklenen mcp-server.mjs veya mcp-server.mjs.LEGAL.txt çıktısını üretmedi");
+  process.exit(1);
+}
 
 // Sahnelenmiş scripts/mcp-server.mjs kök `eslint .` taramasına girdiğinde
 // gömülü bağımlılıklardaki iç `eslint-disable` / `eslint-enable` yorumları
@@ -169,55 +186,63 @@ await build({
 // eşleşmesini bozar. İlk satırdaki dosya-düzeyi `/* eslint-disable */`
 // korunur; gövdedeki iç direktif yorumları manifest hesaplanmadan önce
 // deterministik biçimde etkisizleştirilir.
-const rawBundle = readFileSync(BUNDLE_PATH, "utf8");
+const rawBundle = bundleOut.text;
 const firstNewline = rawBundle.indexOf("\n");
-if (firstNewline >= 0) {
-  const headerLine = rawBundle.slice(0, firstNewline + 1);
-  const sanitizedBody = rawBundle
-    .slice(firstNewline + 1)
-    .replace(/(\/\/|\/\*)\s*eslint-(disable|enable)\b/g, "$1 [bundled-lint-directive] $2");
-  writeFileSync(BUNDLE_PATH, headerLine + sanitizedBody, "utf8");
-}
+const finalBundleText =
+  firstNewline >= 0
+    ? rawBundle.slice(0, firstNewline + 1) +
+      rawBundle
+        .slice(firstNewline + 1)
+        .replace(/(\/\/|\/\*)\s*eslint-(disable|enable)\b/g, "$1 [bundled-lint-directive] $2")
+    : rawBundle;
+const finalBundleBytes = Buffer.from(finalBundleText, "utf8");
+const finalLegalBytes = Buffer.from(legalOut.contents);
+
+writeFileAtomic(BUNDLE_PATH, finalBundleBytes);
+writeFileAtomic(LEGAL_PATH, finalLegalBytes);
 
 // --- 2) Vendored better-sqlite3 çalışma zamanı ----------------------------
-rmSync(VENDOR_DEST, { recursive: true, force: true });
 mkdirSync(VENDOR_DEST, { recursive: true });
 for (const entry of VENDOR_ENTRIES) {
   const source = path.join(SQLITE_SRC, entry);
   assertExists(source, `better-sqlite3 çalışma zamanı parçası ${entry}`);
-  cpSync(source, path.join(VENDOR_DEST, entry), { recursive: true });
+  cpSync(source, path.join(VENDOR_DEST, entry), { recursive: true, force: true });
 }
 
 // --- 3) Deterministik sha256 manifest -------------------------------------
 // Manifest YALNIZCA bu script'in kendi çıktılarını kapsar (mcp-server.mjs +
-// vendored node_modules/**). dist/'teki tsc çıktıları (npm run build)
-// kapsam dışıdır — aksi halde determinizm, bundle ile ilgisiz dosyalara
-// bağımlı kalırdı.
+// mcp-server.mjs.LEGAL.txt + vendored node_modules/**). dist/'teki tsc çıktıları
+// (npm run build) kapsam dışıdır — aksi halde determinizm, bundle ile ilgisiz
+// dosyalara bağımlı kalırdı.
 const files = {};
-files["mcp-server.mjs"] = sha256(BUNDLE_PATH);
+files["mcp-server.mjs"] = createHash("sha256").update(finalBundleBytes).digest("hex");
+files["mcp-server.mjs.LEGAL.txt"] = createHash("sha256").update(finalLegalBytes).digest("hex");
 for (const rel of listFiles(VENDOR_DEST)) {
   files[`node_modules/better-sqlite3/${rel}`] = sha256(
     path.join(VENDOR_DEST, ...rel.split("/")),
   );
 }
 const manifest = `${JSON.stringify({ files }, null, 2)}\n`;
-writeFileSync(MANIFEST_PATH, manifest);
+writeFileAtomic(MANIFEST_PATH, Buffer.from(manifest, "utf8"));
 
 // --- 4) Antigravity eklenti paketine deterministik sahneleme --------------
-// dist/ altındaki 33 dosyalık manifest ve artefakt düzeni birebir korunur;
-// aynı çıktılar integrations/antigravity/causoryn/scripts/ altına temizlenip
-// kopyalanır (.gitignore bu dizini kapsar; derlenmiş artefakt commit edilmez).
-rmSync(ANTIGRAVITY_SCRIPTS_DIR, { recursive: true, force: true });
+// dist/ altındaki deterministik manifest ve artefakt düzeni birebir korunur;
+// aynı çıktılar integrations/antigravity/causoryn/scripts/ altına atomik olarak
+// sahnelenir (.gitignore bu dizini kapsar; derlenmiş artefakt commit edilmez).
 mkdirSync(ANTIGRAVITY_VENDOR_DEST, { recursive: true });
-cpSync(BUNDLE_PATH, path.join(ANTIGRAVITY_SCRIPTS_DIR, "mcp-server.mjs"));
+writeFileAtomic(path.join(ANTIGRAVITY_SCRIPTS_DIR, "mcp-server.mjs"), finalBundleBytes);
+writeFileAtomic(path.join(ANTIGRAVITY_SCRIPTS_DIR, "mcp-server.mjs.LEGAL.txt"), finalLegalBytes);
 for (const entry of VENDOR_ENTRIES) {
   cpSync(
     path.join(VENDOR_DEST, entry),
     path.join(ANTIGRAVITY_VENDOR_DEST, entry),
-    { recursive: true },
+    { recursive: true, force: true },
   );
 }
-cpSync(MANIFEST_PATH, path.join(ANTIGRAVITY_SCRIPTS_DIR, "bundle-manifest.json"));
+writeFileAtomic(
+  path.join(ANTIGRAVITY_SCRIPTS_DIR, "bundle-manifest.json"),
+  Buffer.from(manifest, "utf8"),
+);
 
 const bundleHash = files["mcp-server.mjs"];
 console.error(

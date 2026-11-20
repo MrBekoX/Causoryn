@@ -4,6 +4,8 @@
       "command": "node",
       "args": [
         "scripts/plugin-mcp-launcher.mjs",
+        "--expected-version",
+        "0.2.0",
         "--allow-cwd",
         "--auto-data-dir",
         "--client",

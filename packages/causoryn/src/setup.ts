@@ -113,12 +113,13 @@ export function resolveEffectiveCodexHomeDir(
   homeDir: string,
   explicitCodexHomeDir?: string,
   explicitHomeProvided = false,
+  env: NodeJS.ProcessEnv = process.env,
 ): string {
   if (explicitCodexHomeDir !== undefined && explicitCodexHomeDir.trim().length > 0) {
     return path.resolve(explicitCodexHomeDir);
   }
-  if (!explicitHomeProvided) {
-    const envCodex = process.env["CODEX_HOME"];
+  if (!explicitHomeProvided || env !== process.env) {
+    const envCodex = env["CODEX_HOME"];
     if (envCodex !== undefined && envCodex.trim().length > 0) {
       return path.resolve(envCodex);
     }
@@ -126,12 +127,44 @@ export function resolveEffectiveCodexHomeDir(
   return path.join(homeDir, ".codex");
 }
 
-export function getHostSkillsDir(homeDir: string, client: HostClientId): string {
+export function resolveEffectiveClaudeConfigDir(
+  explicitClaudeConfigDir?: string,
+  explicitHomeProvided = false,
+  env: NodeJS.ProcessEnv = process.env,
+): string | null {
+  if (explicitClaudeConfigDir !== undefined && explicitClaudeConfigDir.trim().length > 0) {
+    return path.resolve(explicitClaudeConfigDir);
+  }
+  if (!explicitHomeProvided || env !== process.env) {
+    const envClaude = env["CLAUDE_CONFIG_DIR"];
+    if (envClaude !== undefined && envClaude.trim().length > 0) {
+      return path.resolve(envClaude);
+    }
+  }
+  return null;
+}
+
+export function getClaudeConfigFilePath(
+  homeDir: string,
+  claudeConfigDir?: string | null,
+): string {
+  return claudeConfigDir !== undefined && claudeConfigDir !== null
+    ? path.join(claudeConfigDir, ".claude.json")
+    : path.join(homeDir, ".claude.json");
+}
+
+export function getHostSkillsDir(
+  homeDir: string,
+  client: HostClientId,
+  claudeConfigDir?: string | null,
+): string {
   switch (client) {
     case "antigravity":
       return path.join(homeDir, ".gemini", "config", "skills");
     case "claude-code":
-      return path.join(homeDir, ".claude", "skills");
+      return claudeConfigDir !== undefined && claudeConfigDir !== null
+        ? path.join(claudeConfigDir, "skills")
+        : path.join(homeDir, ".claude", "skills");
     case "codex":
       return path.join(homeDir, ".agents", "skills");
     case "zcode":
@@ -142,6 +175,7 @@ export function getHostSkillsDir(homeDir: string, client: HostClientId): string 
 export function detectInstalledClients(
   homeDir: string,
   codexHomeDir: string,
+  claudeConfigDir?: string | null,
 ): HostClientId[] {
   const detected: HostClientId[] = [];
   if (
@@ -151,10 +185,11 @@ export function detectInstalledClients(
   ) {
     detected.push("antigravity");
   }
-  if (
-    existsSync(path.join(homeDir, ".claude.json")) ||
-    existsSync(path.join(homeDir, ".claude"))
-  ) {
+  const claudeDetected =
+    claudeConfigDir !== undefined && claudeConfigDir !== null
+      ? existsSync(claudeConfigDir) || existsSync(path.join(claudeConfigDir, ".claude.json"))
+      : existsSync(path.join(homeDir, ".claude.json")) || existsSync(path.join(homeDir, ".claude"));
+  if (claudeDetected) {
     detected.push("claude-code");
   }
   if (
@@ -511,6 +546,7 @@ function planCodexMcpConfig(params: {
 
 function planSkillsForClient(params: {
   readonly homeDir: string;
+  readonly claudeConfigDir: string | null;
   readonly client: HostClientId;
   readonly skillsSourceDir: string;
   readonly uninstall: boolean;
@@ -518,8 +554,9 @@ function planSkillsForClient(params: {
   readonly writes: FileWriteInstruction[];
   readonly removals: FileRemoveInstruction[];
 }): void {
-  const { homeDir, client, skillsSourceDir, uninstall, actions, writes, removals } = params;
-  const hostSkillsRoot = getHostSkillsDir(homeDir, client);
+  const { homeDir, claudeConfigDir, client, skillsSourceDir, uninstall, actions, writes, removals } =
+    params;
+  const hostSkillsRoot = getHostSkillsDir(homeDir, client, claudeConfigDir);
 
   for (const skillName of CANONICAL_SKILL_NAMES) {
     const destSkillDir = path.join(hostSkillsRoot, skillName);
@@ -582,10 +619,11 @@ function jsonContainsMarker(node: unknown, marker: string): boolean {
 function anyRemainingHostReferencesRuntime(params: {
   readonly homeDir: string;
   readonly codexHomeDir: string;
+  readonly claudeConfigDir: string | null;
   readonly runtimeDir: string;
   readonly projectedConfigs: ReadonlyMap<string, string>;
 }): boolean {
-  const { homeDir, codexHomeDir, runtimeDir, projectedConfigs } = params;
+  const { homeDir, codexHomeDir, claudeConfigDir, runtimeDir, projectedConfigs } = params;
   const runtimeMarker = normalizePathSlashes(path.resolve(runtimeDir));
 
   const readEffective = (filePath: string): string | null => {
@@ -604,7 +642,7 @@ function anyRemainingHostReferencesRuntime(params: {
   const jsonFiles = [
     path.join(homeDir, ".gemini", "config", "mcp_config.json"),
     path.join(homeDir, ".gemini", "antigravity", "mcp_config.json"),
-    path.join(homeDir, ".claude.json"),
+    getClaudeConfigFilePath(homeDir, claudeConfigDir),
     path.join(homeDir, ".zcode", "cli", "config.json"),
   ];
 
@@ -668,18 +706,31 @@ function writeFileAtomicWithBackup(instruction: FileWriteInstruction): void {
   renameSync(tmpPath, targetPath);
 }
 
-function buildExecutionPlan(options: SetupOptions): {
+type ExtendedSetupOptions = SetupOptions & {
+  readonly claudeConfigDir?: string | undefined;
+  readonly env?: NodeJS.ProcessEnv | undefined;
+};
+
+function buildExecutionPlan(options: ExtendedSetupOptions): {
   readonly homeDir: string;
   readonly codexHomeDir: string;
+  readonly claudeConfigDir: string | null;
   readonly packageRoot: string;
   readonly plan: PlannedExecution;
 } {
+  const effectiveEnv = options.env ?? process.env;
   const explicitHomeProvided = options.homeDir !== undefined;
   const homeDir = resolveEffectiveHomeDir(options.homeDir);
   const codexHomeDir = resolveEffectiveCodexHomeDir(
     homeDir,
     options.codexHomeDir,
     explicitHomeProvided,
+    effectiveEnv,
+  );
+  const claudeConfigDir = resolveEffectiveClaudeConfigDir(
+    options.claudeConfigDir,
+    explicitHomeProvided,
+    effectiveEnv,
   );
   const packageRoot = path.resolve(options.packageRoot ?? resolveDefaultPackageRoot());
   const uninstall = options.uninstall === true;
@@ -689,9 +740,9 @@ function buildExecutionPlan(options: SetupOptions): {
   if (options.clients !== undefined && options.clients.length > 0) {
     selectedClients = [...new Set(options.clients)];
   } else if (options.allDetected === true) {
-    selectedClients = detectInstalledClients(homeDir, codexHomeDir);
+    selectedClients = detectInstalledClients(homeDir, codexHomeDir, claudeConfigDir);
   } else {
-    const detected = detectInstalledClients(homeDir, codexHomeDir);
+    const detected = detectInstalledClients(homeDir, codexHomeDir, claudeConfigDir);
     selectedClients = detected.length > 0 ? detected : [...HOST_CLIENT_IDS];
   }
 
@@ -755,7 +806,7 @@ function buildExecutionPlan(options: SetupOptions): {
       case "claude-code": {
         planMcpServersJsonFile({
           client: "claude-code",
-          targetPath: path.join(homeDir, ".claude.json"),
+          targetPath: getClaudeConfigFilePath(homeDir, claudeConfigDir),
           cliScriptPath,
           uninstall,
           includeStdioType: true,
@@ -792,6 +843,7 @@ function buildExecutionPlan(options: SetupOptions): {
     if (installSkills) {
       planSkillsForClient({
         homeDir,
+        claudeConfigDir,
         client,
         skillsSourceDir,
         uninstall,
@@ -805,6 +857,7 @@ function buildExecutionPlan(options: SetupOptions): {
   return {
     homeDir,
     codexHomeDir,
+    claudeConfigDir,
     packageRoot,
     plan: {
       selectedClients,
@@ -818,10 +871,10 @@ function buildExecutionPlan(options: SetupOptions): {
   };
 }
 
-export async function runSetup(options: SetupOptions = {}): Promise<SetupResult> {
+export async function runSetup(options: ExtendedSetupOptions = {}): Promise<SetupResult> {
   const dryRun = options.dryRun === true;
   const uninstall = options.uninstall === true;
-  const { homeDir, codexHomeDir, packageRoot, plan } = buildExecutionPlan(options);
+  const { homeDir, codexHomeDir, claudeConfigDir, packageRoot, plan } = buildExecutionPlan(options);
 
   if (dryRun) {
     return {
@@ -894,6 +947,7 @@ export async function runSetup(options: SetupOptions = {}): Promise<SetupResult>
     const stillReferenced = anyRemainingHostReferencesRuntime({
       homeDir,
       codexHomeDir,
+      claudeConfigDir,
       runtimeDir: plan.targetRuntimeDir,
       projectedConfigs: plan.projectedConfigs,
     });

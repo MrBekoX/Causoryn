@@ -20,6 +20,8 @@ const RUNTIME_STAGE_ENTRIES = [
   "native",
   "skills",
   "LICENSE",
+  "THIRD-PARTY-NOTICES.md",
+  "licenses",
   "README.md",
   "plugin.json",
   "mcp_config.json",

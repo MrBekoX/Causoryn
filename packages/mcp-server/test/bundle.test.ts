@@ -47,6 +47,7 @@ const PKG_DIR = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const REPO_ROOT = path.dirname(path.dirname(PKG_DIR));
 const DIST_DIR = path.join(PKG_DIR, "dist");
 const BUNDLE_PATH = path.join(DIST_DIR, "mcp-server.mjs");
+const LEGAL_PATH = path.join(DIST_DIR, "mcp-server.mjs.LEGAL.txt");
 const VENDOR_ROOT = path.join(DIST_DIR, "node_modules", "better-sqlite3");
 const MANIFEST_PATH = path.join(DIST_DIR, "bundle-manifest.json");
 const ANTIGRAVITY_SCRIPTS_DIR = path.join(
@@ -57,6 +58,7 @@ const ANTIGRAVITY_SCRIPTS_DIR = path.join(
   "scripts",
 );
 const ANTIGRAVITY_BUNDLE_PATH = path.join(ANTIGRAVITY_SCRIPTS_DIR, "mcp-server.mjs");
+const ANTIGRAVITY_LEGAL_PATH = path.join(ANTIGRAVITY_SCRIPTS_DIR, "mcp-server.mjs.LEGAL.txt");
 const ANTIGRAVITY_VENDOR_ROOT = path.join(
   ANTIGRAVITY_SCRIPTS_DIR,
   "node_modules",
@@ -276,6 +278,14 @@ describe("F1 bundle — build artefaktı", () => {
       "vendored better-sqlite3 package.json yok",
     ).toBe(true);
     expect(
+      existsSync(path.join(VENDOR_ROOT, "LICENSE")),
+      "vendored better-sqlite3 LICENSE yok",
+    ).toBe(true);
+    expect(
+      existsSync(LEGAL_PATH),
+      "esbuild linked legal comments dosyası (mcp-server.mjs.LEGAL.txt) yok",
+    ).toBe(true);
+    expect(
       existsSync(path.join(VENDOR_ROOT, "lib", "index.js")),
       "vendored better-sqlite3 lib katmanı yok",
     ).toBe(true);
@@ -291,6 +301,14 @@ describe("F1 bundle — build artefaktı", () => {
     expect(manifest.files?.["mcp-server.mjs"], "manifest bundle hash'i yok").toMatch(
       /^[0-9a-f]{64}$/,
     );
+    expect(
+      manifest.files?.["mcp-server.mjs.LEGAL.txt"],
+      "manifest LEGAL.txt hash'i yok",
+    ).toMatch(/^[0-9a-f]{64}$/);
+    expect(
+      manifest.files?.[["node_modules", "better-sqlite3", "LICENSE"].join("/")],
+      "manifest better-sqlite3 LICENSE hash'i yok",
+    ).toMatch(/^[0-9a-f]{64}$/);
     expect(
       manifest.files?.[
         ["node_modules", "better-sqlite3", "lib", "index.js"].join("/")
@@ -425,13 +443,19 @@ describe("F1 bundle — klon-benzeri ortam (partial)", () => {
 });
 
 describe("F1 bundle — determinizm", () => {
-  it("DETERMİNİZM: iki ardışık build bit-bit aynı çıktı üretir (bundle + vendor manifest hash)", () => {
+  it("DETERMİNİZM: iki ardışık build bit-bit aynı çıktı üretir (bundle + LEGAL.txt + vendor manifest hash)", () => {
     const hashBefore = sha256(BUNDLE_PATH);
+    const legalHashBefore = sha256(LEGAL_PATH);
+    const licenseHashBefore = sha256(path.join(VENDOR_ROOT, "LICENSE"));
     const manifestBefore = readFileSync(MANIFEST_PATH, "utf8");
     runBuild();
     const hashAfter = sha256(BUNDLE_PATH);
+    const legalHashAfter = sha256(LEGAL_PATH);
+    const licenseHashAfter = sha256(path.join(VENDOR_ROOT, "LICENSE"));
     const manifestAfter = readFileSync(MANIFEST_PATH, "utf8");
     expect(hashAfter).toBe(hashBefore);
+    expect(legalHashAfter).toBe(legalHashBefore);
+    expect(licenseHashAfter).toBe(licenseHashBefore);
     expect(manifestAfter).toBe(manifestBefore);
   }, 180_000);
 });
@@ -443,12 +467,20 @@ describe("F1 bundle — Antigravity eklenti sahnelemesi (integrations/antigravit
       "integrations/antigravity/causoryn/scripts/mcp-server.mjs sahnelenmedi",
     ).toBe(true);
     expect(
+      existsSync(ANTIGRAVITY_LEGAL_PATH),
+      "integrations/antigravity/causoryn/scripts/mcp-server.mjs.LEGAL.txt sahnelenmedi",
+    ).toBe(true);
+    expect(
       existsSync(ANTIGRAVITY_MANIFEST_PATH),
       "integrations/antigravity/causoryn/scripts/bundle-manifest.json sahnelenmedi",
     ).toBe(true);
     expect(
       existsSync(path.join(ANTIGRAVITY_VENDOR_ROOT, "package.json")),
       "sahnelenmiş better-sqlite3 package.json yok",
+    ).toBe(true);
+    expect(
+      existsSync(path.join(ANTIGRAVITY_VENDOR_ROOT, "LICENSE")),
+      "sahnelenmiş better-sqlite3 LICENSE yok",
     ).toBe(true);
     expect(
       existsSync(path.join(ANTIGRAVITY_VENDOR_ROOT, "lib", "index.js")),
@@ -462,9 +494,13 @@ describe("F1 bundle — Antigravity eklenti sahnelemesi (integrations/antigravit
     ).toBe(true);
 
     expect(sha256(ANTIGRAVITY_BUNDLE_PATH)).toBe(sha256(BUNDLE_PATH));
+    expect(sha256(ANTIGRAVITY_LEGAL_PATH)).toBe(sha256(LEGAL_PATH));
     expect(sha256(ANTIGRAVITY_MANIFEST_PATH)).toBe(sha256(MANIFEST_PATH));
     expect(sha256(path.join(ANTIGRAVITY_VENDOR_ROOT, "package.json"))).toBe(
       sha256(path.join(VENDOR_ROOT, "package.json")),
+    );
+    expect(sha256(path.join(ANTIGRAVITY_VENDOR_ROOT, "LICENSE"))).toBe(
+      sha256(path.join(VENDOR_ROOT, "LICENSE")),
     );
     expect(sha256(path.join(ANTIGRAVITY_VENDOR_ROOT, "lib", "index.js"))).toBe(
       sha256(path.join(VENDOR_ROOT, "lib", "index.js")),
@@ -478,7 +514,8 @@ describe("F1 bundle — Antigravity eklenti sahnelemesi (integrations/antigravit
     const distManifest = JSON.parse(readFileSync(MANIFEST_PATH, "utf8")) as {
       files?: Record<string, string>;
     };
-    expect(Object.keys(distManifest.files ?? {}).length).toBe(33);
+    // mcp-server.mjs + mcp-server.mjs.LEGAL.txt + 33 better-sqlite3 dosyası (LICENSE dahil)
+    expect(Object.keys(distManifest.files ?? {}).length).toBe(35);
     const stagedBundleText = readFileSync(ANTIGRAVITY_BUNDLE_PATH, "utf8");
     expect(stagedBundleText.startsWith("/* eslint-disable */")).toBe(true);
     const bundleBodyAfterBanner = stagedBundleText.slice(stagedBundleText.indexOf("\n") + 1);

@@ -3,17 +3,21 @@
  * `packages/causoryn/scripts/build-package.mjs` — Dağıtım paketi sahneleyici (`K-021`).
  *
  * Görevleri:
- * 1. `SERVER_VERSION` (`0.1.0`) ile tüm kök ve paket içi manifestlerin sürüm
- *    eşliğini fail-closed doğrular.
- * 2. `packages/mcp-server/dist/{mcp-server.mjs,bundle-manifest.json,node_modules}`
- *    artefaktlarını `packages/causoryn/dist/` içine sahneler (`tsc` çıktılarını korur).
+ * 1. `SERVER_VERSION` (SemVer) ile tüm kök ve paket içi manifestlerin sürüm,
+ *    `mcpName`, MCP Registry `server.json` ve `--expected-version` eşliğini
+ *    fail-closed doğrular.
+ * 2. `packages/mcp-server/dist/{mcp-server.mjs,mcp-server.mjs.LEGAL.txt,bundle-manifest.json,node_modules}`
+ *    artefaktlarını `packages/causoryn/dist/` içine sahneler (`tsc` çıktılarını korur),
+ *    ardından `src/cli-stdio.ts` girişini `legalComments: "linked"` ile paketler.
  * 3. `node_modules/typescript/lib/lib*.d.ts` dosyalarını `packages/causoryn/dist/typescript-lib/`
  *    altına deterministik olarak kopyalar.
  * 4. `native/{python-worker,go-worker,rust-worker,roslyn-worker}` varlıklarını
- *    (`target/`, `obj/`, `test-build.lock`, `__pycache__`, `*.pdb`, `.mimosa/` hariç)
- *    `packages/causoryn/native/` altına sahneler.
- * 5. Kök `skills/` -> `packages/causoryn/skills/` ve kök `LICENSE` -> `packages/causoryn/LICENSE`
- *    kopyalarını oluşturur.
+ *    sahneler; `roslyn-worker` için `bin/`/`obj/`/`*.pdb`/`*.exe`/`*.resources.dll`
+ *    olmadan YALNIZCA 5 taşınabilir runtime dosyasını düz `native/roslyn-worker/`
+ *    altına fail-closed kopyalar ve deterministik/temiz binary taramasından geçirir.
+ * 5. Kök `skills/` -> `packages/causoryn/skills/`, kök `LICENSE` -> `packages/causoryn/LICENSE`,
+ *    `packages/causoryn/licenses/` ve deterministik `packages/causoryn/THIRD-PARTY-NOTICES.md`
+ *    dosyalarını üretir.
  */
 import { buildSync } from "esbuild";
 import { createHash } from "node:crypto";
@@ -30,15 +34,27 @@ import {
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
+import { scanRoslynBinaryClean } from "./verify-package-ready.mjs";
+
 const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
 const DEFAULT_PKG_DIR = path.dirname(SCRIPT_DIR);
 const DEFAULT_REPO_ROOT = path.dirname(path.dirname(DEFAULT_PKG_DIR));
+
+const SEMVER_PATTERN = /^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$/;
 
 const NATIVE_WORKER_DIRS = [
   "python-worker",
   "go-worker",
   "rust-worker",
   "roslyn-worker",
+];
+
+const ROSLYN_PORTABLE_RUNTIME_FILES = [
+  "Causoryn.RoslynWorker.dll",
+  "Causoryn.RoslynWorker.deps.json",
+  "Causoryn.RoslynWorker.runtimeconfig.json",
+  "Microsoft.CodeAnalysis.dll",
+  "Microsoft.CodeAnalysis.CSharp.dll",
 ];
 
 const EXCLUDED_NATIVE_DIR_NAMES = new Set([
@@ -57,10 +73,32 @@ const EXCLUDED_NATIVE_FILE_NAMES = new Set([
   "Thumbs.db",
 ]);
 
+const MIT_LICENSE_TEMPLATE = [
+  "Permission is hereby granted, free of charge, to any person obtaining a copy",
+  'of this software and associated documentation files (the "Software"), to deal',
+  "in the Software without restriction, including without limitation the rights",
+  "to use, copy, modify, merge, publish, distribute, sublicense, and/or sell",
+  "copies of the Software, and to permit persons to whom the Software is",
+  "furnished to do so, subject to the following conditions:",
+  "",
+  "The above copyright notice and this permission notice shall be included in all",
+  "copies or substantial portions of the Software.",
+  "",
+  'THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR',
+  "IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,",
+  "FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE",
+  "AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER",
+  "LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,",
+  "OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE",
+  "SOFTWARE.",
+].join("\n");
+
 function extractServerVersion(versionTsSource) {
   const match = versionTsSource.match(/export const SERVER_VERSION\s*=\s*"([^"]+)"/);
   if (!match || !match[1]) {
-    throw new Error("[build:package] packages/mcp-server/src/version.ts içinde SERVER_VERSION bulunamadı");
+    throw new Error(
+      "[build:package] packages/mcp-server/src/version.ts içinde SERVER_VERSION bulunamadı",
+    );
   }
   return match[1];
 }
@@ -80,16 +118,75 @@ function assertEqual(actual, expected, label) {
   }
 }
 
+function assertLauncherExpectedVersion(args, expectedVersion, label) {
+  if (!Array.isArray(args)) {
+    throw new Error(`[build:package] ${label} args dizisi eksik`);
+  }
+  const idx = args.indexOf("--expected-version");
+  if (idx < 0 || args[idx + 1] !== expectedVersion) {
+    throw new Error(
+      `[build:package] ${label} "--expected-version ${expectedVersion}" pini eksik veya uyuşmuyor`,
+    );
+  }
+}
+
 export function verifyManifestVersionParity(repoRoot, pkgDir) {
   const versionTsPath = path.join(repoRoot, "packages", "mcp-server", "src", "version.ts");
   const expectedVersion = extractServerVersion(readFileSync(versionTsPath, "utf8"));
-  assertEqual(expectedVersion, "0.1.0", "SERVER_VERSION");
+  if (!SEMVER_PATTERN.test(expectedVersion)) {
+    throw new Error(
+      `[build:package] SERVER_VERSION geçerli SemVer değil: "${expectedVersion}"`,
+    );
+  }
 
   const rootPkg = readJson(path.join(repoRoot, "package.json"));
   assertEqual(rootPkg.version, expectedVersion, "package.json#version");
 
   const distPkg = readJson(path.join(pkgDir, "package.json"));
   assertEqual(distPkg.version, expectedVersion, "packages/causoryn/package.json#version");
+
+  const serverJson = readJson(path.join(repoRoot, "server.json"));
+  assertEqual(serverJson.name, "io.github.mrbekox/causoryn", "server.json#name");
+  assertEqual(distPkg.mcpName, serverJson.name, "packages/causoryn/package.json#mcpName");
+  assertEqual(serverJson.version, expectedVersion, "server.json#version");
+  assertEqual(
+    serverJson.packages?.[0]?.version,
+    expectedVersion,
+    "server.json#packages[0].version",
+  );
+  assertEqual(
+    serverJson.packages?.[0]?.registryBaseUrl,
+    "https://registry.npmjs.org",
+    "server.json#packages[0].registryBaseUrl",
+  );
+
+  const serverPkgArgs = serverJson.packages?.[0]?.packageArguments;
+  if (!Array.isArray(serverPkgArgs) || serverPkgArgs.length === 0) {
+    throw new Error("[build:package] server.json#packages[0].packageArguments eksik veya boş");
+  }
+  for (const argSpec of serverPkgArgs) {
+    if (
+      argSpec?.type === "named" &&
+      (argSpec?.name === "--allow-cwd" || argSpec?.name === "--auto-data-dir")
+    ) {
+      throw new Error(
+        `[build:package] server.json packageArguments yasak 'named' bayrak içeriyor (${argSpec.name}); sabit 'positional' olmalı`,
+      );
+    }
+    if (argSpec?.type !== "positional" || typeof argSpec?.value !== "string" || argSpec.value.length === 0) {
+      throw new Error(
+        `[build:package] server.json packageArguments yalnızca sabit 'positional' bayraklar içermeli: ${JSON.stringify(argSpec)}`,
+      );
+    }
+  }
+  const positionalValues = serverPkgArgs.map((item) => item.value);
+  for (const requiredArg of ["mcp", "--allow-cwd", "--auto-data-dir"]) {
+    if (!positionalValues.includes(requiredArg)) {
+      throw new Error(
+        `[build:package] server.json packageArguments zorunlu konumsal bayrak eksik: ${requiredArg}`,
+      );
+    }
+  }
 
   for (const relMkt of [
     "marketplace.json",
@@ -126,15 +223,6 @@ export function verifyManifestVersionParity(repoRoot, pkgDir) {
     }
   }
 
-  const serverJson = readJson(path.join(repoRoot, "server.json"));
-  assertEqual(serverJson.name, "io.github.mrbekox/causoryn", "server.json#name");
-  assertEqual(serverJson.version, expectedVersion, "server.json#version");
-  assertEqual(
-    serverJson.packages?.[0]?.version,
-    expectedVersion,
-    "server.json#packages[0].version",
-  );
-
   for (const relPkgManifest of [
     path.join(".claude-plugin", "plugin.json"),
     path.join(".zcode-plugin", "plugin.json"),
@@ -143,7 +231,24 @@ export function verifyManifestVersionParity(repoRoot, pkgDir) {
   ]) {
     const doc = readJson(path.join(pkgDir, relPkgManifest));
     assertEqual(doc.version, expectedVersion, `packages/causoryn/${relPkgManifest}#version`);
+    if (
+      relPkgManifest === path.join(".claude-plugin", "plugin.json") ||
+      relPkgManifest === path.join(".zcode-plugin", "plugin.json")
+    ) {
+      assertLauncherExpectedVersion(
+        doc.mcpServers?.causoryn?.args,
+        expectedVersion,
+        `packages/causoryn/${relPkgManifest}#mcpServers.causoryn.args`,
+      );
+    }
   }
+
+  const pkgAgyMcp = readJson(path.join(pkgDir, "mcp_config.json"));
+  assertLauncherExpectedVersion(
+    pkgAgyMcp.mcpServers?.causoryn?.args,
+    expectedVersion,
+    "packages/causoryn/mcp_config.json#mcpServers.causoryn.args",
+  );
 
   const codexPkgMcp = readJson(path.join(pkgDir, ".codex-plugin", "mcp.json"));
   const codexArgs = codexPkgMcp.mcpServers?.causoryn?.args ?? [];
@@ -164,8 +269,11 @@ function copyNativeFiltered(srcDir, destDir, workerName) {
   for (const entry of entries) {
     if (entry.isDirectory()) {
       if (EXCLUDED_NATIVE_DIR_NAMES.has(entry.name)) continue;
-      // go-worker/bin yalnızca test sahte ikililerini barındırır
-      if (workerName === "go-worker" && entry.name === "bin") continue;
+      // go-worker/bin yalnızca test sahte ikililerini barındırır;
+      // roslyn-worker/bin kopyalanmaz — 5 taşınabilir dosya ayrıca düz sahnelenir.
+      if ((workerName === "go-worker" || workerName === "roslyn-worker") && entry.name === "bin") {
+        continue;
+      }
       copyNativeFiltered(
         path.join(srcDir, entry.name),
         path.join(destDir, entry.name),
@@ -180,16 +288,282 @@ function copyNativeFiltered(srcDir, destDir, workerName) {
       lower.endsWith(".pdb") ||
       lower.endsWith(".pyc") ||
       lower.endsWith(".pyo") ||
-      lower.endsWith(".user")
+      lower.endsWith(".user") ||
+      lower.endsWith(".resources.dll")
     ) {
       continue;
     }
-    // Roslyn portable DLL taşınır; Windows-özgü apphost .exe taşınmaz
+    // Roslyn portable DLL ayrıca düz sahnelenir; Windows-özgü apphost .exe taşınmaz
     if (workerName === "roslyn-worker" && lower.endsWith(".exe")) {
       continue;
     }
     copyFileSync(path.join(srcDir, entry.name), path.join(destDir, entry.name));
   }
+}
+
+function stageRoslynPortableRuntimeFlat(srcRoslynDir, destRoslynDir) {
+  const releaseDir = path.join(srcRoslynDir, "bin", "Release", "net10.0");
+  const debugDir = path.join(srcRoslynDir, "bin", "Debug", "net10.0");
+
+  let buildOutputDir = null;
+  if (existsSync(path.join(releaseDir, "Causoryn.RoslynWorker.dll"))) {
+    buildOutputDir = releaseDir;
+  } else if (existsSync(path.join(debugDir, "Causoryn.RoslynWorker.dll"))) {
+    buildOutputDir = debugDir;
+  }
+
+  if (buildOutputDir === null) {
+    throw new Error(
+      "[build:package] derlenmiş Causoryn.RoslynWorker.dll bulunamadı (bin/Release/net10.0 veya bin/Debug/net10.0). " +
+        "Önce `dotnet build native/roslyn-worker/Causoryn.RoslynWorker.csproj -c Release -p:DebugType=none -p:ContinuousIntegrationBuild=true -p:SatelliteResourceLanguages=en` çalıştırın.",
+    );
+  }
+
+  for (const fileName of ROSLYN_PORTABLE_RUNTIME_FILES) {
+    const srcFile = path.join(buildOutputDir, fileName);
+    if (!existsSync(srcFile)) {
+      throw new Error(
+        `[build:package] zorunlu Roslyn çalışma zamanı dosyası eksik (${fileName}): ${srcFile}`,
+      );
+    }
+  }
+
+  const workerDllPath = path.join(buildOutputDir, "Causoryn.RoslynWorker.dll");
+  scanRoslynBinaryClean(workerDllPath);
+
+  for (const fileName of ROSLYN_PORTABLE_RUNTIME_FILES) {
+    copyFileSync(path.join(buildOutputDir, fileName), path.join(destRoslynDir, fileName));
+  }
+
+  return buildOutputDir;
+}
+
+function normalizeLf(text) {
+  return text.replace(/\r\n/g, "\n").replace(/\r/g, "\n").trimEnd();
+}
+
+function resolveBundledNpmPackages(repoRoot, mcpServerPkgDir, metafile) {
+  const packageDirs = new Set();
+  const inputs = metafile?.inputs ?? {};
+  for (const inputKey of Object.keys(inputs)) {
+    const segments = inputKey.split("node_modules/");
+    if (segments.length <= 1) continue;
+    const tail = segments[segments.length - 1];
+    const pkgMatch = tail.match(/^(@[^/]+\/[^/]+|[^/]+)\//);
+    if (!pkgMatch) continue;
+    const prefix = `${segments.slice(0, -1).join("node_modules/")}node_modules/${pkgMatch[1]}`;
+    packageDirs.add(path.resolve(mcpServerPkgDir, prefix));
+  }
+  packageDirs.add(path.join(repoRoot, "node_modules", "better-sqlite3"));
+
+  const byKey = new Map();
+  for (const dir of [...packageDirs].sort()) {
+    const pkgJsonPath = path.join(dir, "package.json");
+    if (!existsSync(pkgJsonPath)) {
+      throw new Error(`[build:package] paket metadata dosyası bulunamadı: ${pkgJsonPath}`);
+    }
+    const pkgJson = JSON.parse(readFileSync(pkgJsonPath, "utf8"));
+    const name = String(pkgJson.name ?? "");
+    const version = String(pkgJson.version ?? "");
+    const license =
+      typeof pkgJson.license === "string"
+        ? pkgJson.license
+        : typeof pkgJson.license?.type === "string"
+          ? pkgJson.license.type
+          : "UNKNOWN";
+    const key = `${name}@${version}`;
+    if (byKey.has(key)) continue;
+
+    const licenseCandidate = ["LICENSE", "LICENSE.txt", "LICENSE.md", "LICENCE"].find((f) =>
+      existsSync(path.join(dir, f)),
+    );
+    if (!licenseCandidate) {
+      throw new Error(`[build:package] lisans dosyası bulunamadı (${key}): ${dir}`);
+    }
+    const licenseText = normalizeLf(readFileSync(path.join(dir, licenseCandidate), "utf8"));
+    const homepage =
+      typeof pkgJson.homepage === "string"
+        ? pkgJson.homepage
+        : typeof pkgJson.repository === "string"
+          ? pkgJson.repository
+          : typeof pkgJson.repository?.url === "string"
+            ? pkgJson.repository.url
+            : "";
+
+    byKey.set(key, {
+      name,
+      version,
+      license,
+      homepage,
+      licenseFile: licenseCandidate,
+      licenseText,
+    });
+  }
+
+  return [...byKey.values()].sort((a, b) =>
+    a.name < b.name ? -1 : a.name > b.name ? 1 : a.version < b.version ? -1 : a.version > b.version ? 1 : 0,
+  );
+}
+
+function parseRoslynDepsVersions(roslynDepsJsonPath) {
+  const deps = readJson(roslynDepsJsonPath);
+  const libraries = deps?.libraries ?? {};
+  const roslynPackages = [];
+  for (const key of Object.keys(libraries).sort()) {
+    if (key.startsWith("Microsoft.CodeAnalysis.")) {
+      const [name, version] = key.split("/");
+      roslynPackages.push({ name, version: version ?? "5.0.0" });
+    }
+  }
+  return roslynPackages;
+}
+
+function parseRustCargoLockCrates(cargoLockPath) {
+  if (!existsSync(cargoLockPath)) {
+    return [];
+  }
+  const raw = readFileSync(cargoLockPath, "utf8");
+  const blocks = raw.split(/\r?\n\[\[package\]\]\r?\n/).slice(1);
+  const crates = [];
+  for (const block of blocks) {
+    const nameMatch = block.match(/^name\s*=\s*"([^"]+)"/m);
+    const versionMatch = block.match(/^version\s*=\s*"([^"]+)"/m);
+    const sourceMatch = block.match(/^source\s*=\s*"([^"]+)"/m);
+    if (nameMatch && versionMatch && sourceMatch) {
+      crates.push({
+        name: nameMatch[1],
+        version: versionMatch[1],
+        source: sourceMatch[1],
+      });
+    }
+  }
+  return crates.sort((a, b) =>
+    a.name < b.name ? -1 : a.name > b.name ? 1 : a.version < b.version ? -1 : a.version > b.version ? 1 : 0,
+  );
+}
+
+function stageThirdPartyLicensesAndNotices({
+  repoRoot,
+  pkgDir,
+  mcpServerPkgDir,
+  metafile,
+  roslynDepsJsonPath,
+}) {
+  const tsDir = path.join(repoRoot, "node_modules", "typescript");
+  const sqliteDir = path.join(repoRoot, "node_modules", "better-sqlite3");
+  const licensesDestDir = path.join(pkgDir, "licenses");
+  rmSync(licensesDestDir, { recursive: true, force: true });
+  mkdirSync(licensesDestDir, { recursive: true });
+
+  const standaloneLicenseCopies = [
+    [path.join(tsDir, "LICENSE.txt"), path.join(licensesDestDir, "Apache-2.0.txt")],
+    [
+      path.join(tsDir, "ThirdPartyNoticeText.txt"),
+      path.join(licensesDestDir, "TypeScript-ThirdPartyNoticeText.txt"),
+    ],
+    [path.join(sqliteDir, "LICENSE"), path.join(licensesDestDir, "better-sqlite3-LICENSE.txt")],
+  ];
+  for (const [src, dest] of standaloneLicenseCopies) {
+    if (!existsSync(src)) {
+      throw new Error(`[build:package] zorunlu üçüncü-parti lisans dosyası eksik: ${src}`);
+    }
+    copyFileSync(src, dest);
+  }
+
+  const npmComponents = resolveBundledNpmPackages(repoRoot, mcpServerPkgDir, metafile);
+  const roslynComponents = parseRoslynDepsVersions(roslynDepsJsonPath);
+  const rustCrates = parseRustCargoLockCrates(
+    path.join(repoRoot, "native", "rust-worker", "Cargo.lock"),
+  );
+
+  const lines = [
+    "# Third-Party Software Notices and Licenses",
+    "",
+    "Causoryn is licensed under the MIT License (see `LICENSE`).",
+    "This published npm package bundles or redistributes the following third-party software components.",
+    "All copyright notices, license texts, and attributions below are preserved verbatim.",
+    "",
+    "Standalone full-text license and notice files shipped in `licenses/`:",
+    "- `licenses/Apache-2.0.txt` (Apache License 2.0 — TypeScript)",
+    "- `licenses/TypeScript-ThirdPartyNoticeText.txt` (TypeScript Third-Party Notices)",
+    "- `licenses/better-sqlite3-LICENSE.txt` (MIT License — better-sqlite3)",
+    "",
+    "---",
+    "",
+    "## 1. Bundled & Vendored JavaScript / Native Node.js Components",
+    "",
+  ];
+
+  for (const comp of npmComponents) {
+    lines.push(`### ${comp.name} (${comp.version}) — ${comp.license}`);
+    lines.push("");
+    if (comp.homepage.length > 0) {
+      lines.push(`- Homepage / Repository: ${comp.homepage}`);
+    }
+    if (comp.name === "typescript") {
+      lines.push(
+        "- Additional bundled notices: `licenses/Apache-2.0.txt`, `licenses/TypeScript-ThirdPartyNoticeText.txt`, and `dist/mcp-server.mjs.LEGAL.txt`",
+      );
+    }
+    lines.push("");
+    lines.push("```text");
+    lines.push(comp.licenseText);
+    lines.push("```");
+    lines.push("");
+  }
+
+  lines.push("### SQLite (embedded in better-sqlite3 prebuilt native addons) — Public Domain");
+  lines.push("");
+  lines.push("- Homepage: https://www.sqlite.org/copyright.html");
+  lines.push("");
+  lines.push("```text");
+  lines.push(
+    "All of the code and documentation in SQLite has been dedicated to the public domain by the authors.",
+  );
+  lines.push("```");
+  lines.push("");
+  lines.push("---");
+  lines.push("");
+  lines.push("## 2. Redistributed .NET / Roslyn Assemblies (`native/roslyn-worker/`)");
+  lines.push("");
+
+  for (const roslynPkg of roslynComponents) {
+    lines.push(`### ${roslynPkg.name} (${roslynPkg.version}) — MIT`);
+    lines.push("");
+    lines.push("- Upstream repository: https://github.com/dotnet/roslyn");
+    lines.push(
+      "- Upstream third-party notices: https://github.com/dotnet/roslyn/blob/main/ThirdPartyNotices.txt",
+    );
+    lines.push("");
+    lines.push("```text");
+    lines.push("The MIT License (MIT)");
+    lines.push("");
+    lines.push("Copyright (c) .NET Foundation and Contributors");
+    lines.push("Copyright (c) Microsoft Corporation. All rights reserved.");
+    lines.push("");
+    lines.push(MIT_LICENSE_TEMPLATE);
+    lines.push("```");
+    lines.push("");
+  }
+
+  lines.push("---");
+  lines.push("");
+  lines.push("## 3. Optional Local-Build Rust Sidecar Crates (`native/rust-worker/Cargo.lock`, Informational)");
+  lines.push("");
+  lines.push(
+    "Causoryn ships source files only for `native/rust-worker/` (no precompiled Rust binaries are bundled in this npm package).",
+  );
+  lines.push(
+    "When a user optionally builds the Rust sidecar locally with Cargo, the locked crates.io dependencies in `Cargo.lock` are:",
+  );
+  lines.push("");
+  for (const crate of rustCrates) {
+    lines.push(`- \`${crate.name}\` \`${crate.version}\` (crates.io — see upstream crate license in Cargo.lock / crates.io)`);
+  }
+  lines.push("");
+
+  const noticesPath = path.join(pkgDir, "THIRD-PARTY-NOTICES.md");
+  writeFileSync(noticesPath, `${lines.join("\n")}`, "utf8");
 }
 
 export function stageVerifiedBundleArtifacts(options) {
@@ -201,10 +575,12 @@ export function stageVerifiedBundleArtifacts(options) {
   mkdirSync(resolvedPkgDist, { recursive: true });
 
   const bundleSrc = path.join(resolvedMcpDist, "mcp-server.mjs");
+  const bundleLegalSrc = path.join(resolvedMcpDist, "mcp-server.mjs.LEGAL.txt");
   const bundleManifestSrc = path.join(resolvedMcpDist, "bundle-manifest.json");
   const vendorNodeModulesSrc = path.join(resolvedMcpDist, "node_modules");
 
   const destBundle = path.join(resolvedPkgDist, "mcp-server.mjs");
+  const destLegal = path.join(resolvedPkgDist, "mcp-server.mjs.LEGAL.txt");
   const destManifest = path.join(resolvedPkgDist, "bundle-manifest.json");
   const destVendorNodeModules = path.join(resolvedPkgDist, "node_modules");
   const pkgDistBoundary = resolvedPkgDist.endsWith(path.sep)
@@ -225,6 +601,11 @@ export function stageVerifiedBundleArtifacts(options) {
       }
 
       copyFileSync(bundleSrc, destBundle);
+      if (existsSync(bundleLegalSrc)) {
+        copyFileSync(bundleLegalSrc, destLegal);
+      } else {
+        rmSync(destLegal, { force: true });
+      }
       copyFileSync(bundleManifestSrc, destManifest);
       rmSync(destVendorNodeModules, { recursive: true, force: true });
       cpSync(vendorNodeModulesSrc, destVendorNodeModules, { recursive: true });
@@ -280,6 +661,7 @@ export function stageVerifiedBundleArtifacts(options) {
   }
 
   rmSync(destBundle, { force: true });
+  rmSync(destLegal, { force: true });
   rmSync(destManifest, { force: true });
   rmSync(destVendorNodeModules, { recursive: true, force: true });
   throw new Error(
@@ -320,7 +702,9 @@ export function stageCausorynPackage(options = {}) {
     throw new Error(`[build:package] cli-stdio giriş noktası bulunamadı: ${cliStdioEntry}`);
   }
   const pkgBundlePath = path.join(pkgDistDir, "mcp-server.mjs");
-  buildSync({
+  const pkgLegalPath = path.join(pkgDistDir, "mcp-server.mjs.LEGAL.txt");
+  rmSync(pkgLegalPath, { force: true });
+  const buildResult = buildSync({
     absWorkingDir: mcpServerPkgDir,
     entryPoints: ["src/cli-stdio.ts"],
     outfile: pkgBundlePath,
@@ -341,7 +725,8 @@ export function stageCausorynPackage(options = {}) {
     },
     sourcemap: false,
     minify: false,
-    legalComments: "none",
+    legalComments: "linked",
+    metafile: true,
     logLevel: "warning",
   });
   const rawPkgBundle = readFileSync(pkgBundlePath, "utf8");
@@ -358,6 +743,13 @@ export function stageCausorynPackage(options = {}) {
   pkgManifestObj.files["mcp-server.mjs"] = createHash("sha256")
     .update(readFileSync(pkgBundlePath))
     .digest("hex");
+  if (existsSync(pkgLegalPath)) {
+    pkgManifestObj.files["mcp-server.mjs.LEGAL.txt"] = createHash("sha256")
+      .update(readFileSync(pkgLegalPath))
+      .digest("hex");
+  } else {
+    delete pkgManifestObj.files["mcp-server.mjs.LEGAL.txt"];
+  }
   writeFileSync(pkgManifestPath, `${JSON.stringify(pkgManifestObj, null, 2)}\n`, "utf8");
 
   // 2) TypeScript lib*.d.ts -> packages/causoryn/dist/typescript-lib/
@@ -378,7 +770,7 @@ export function stageCausorynPackage(options = {}) {
     copyFileSync(path.join(tsLibSrcDir, dtsName), path.join(tsLibDestDir, dtsName));
   }
 
-  // 3) native/{python-worker,go-worker,rust-worker,roslyn-worker}
+  // 3) native/{python-worker,go-worker,rust-worker,roslyn-worker} + düz Roslyn runtime
   const pkgNativeDir = path.join(pkgDir, "native");
   rmSync(pkgNativeDir, { recursive: true, force: true });
   mkdirSync(pkgNativeDir, { recursive: true });
@@ -387,7 +779,11 @@ export function stageCausorynPackage(options = {}) {
     if (!existsSync(srcWorker)) {
       throw new Error(`[build:package] native worker bulunamadı: ${srcWorker}`);
     }
-    copyNativeFiltered(srcWorker, path.join(pkgNativeDir, workerName), workerName);
+    const destWorker = path.join(pkgNativeDir, workerName);
+    copyNativeFiltered(srcWorker, destWorker, workerName);
+    if (workerName === "roslyn-worker") {
+      stageRoslynPortableRuntimeFlat(srcWorker, destWorker);
+    }
   }
 
   // 4) Kök skills/ -> packages/causoryn/skills/
@@ -406,6 +802,19 @@ export function stageCausorynPackage(options = {}) {
   }
   copyFileSync(rootLicense, path.join(pkgDir, "LICENSE"));
 
+  // 6) Üçüncü-parti lisans dosyaları ve deterministik THIRD-PARTY-NOTICES.md
+  stageThirdPartyLicensesAndNotices({
+    repoRoot,
+    pkgDir,
+    mcpServerPkgDir,
+    metafile: buildResult.metafile,
+    roslynDepsJsonPath: path.join(
+      pkgNativeDir,
+      "roslyn-worker",
+      "Causoryn.RoslynWorker.deps.json",
+    ),
+  });
+
   return {
     version,
     typescriptLibFileCount: dtsFiles.length,
@@ -420,7 +829,7 @@ if (isDirectExecution) {
   try {
     const summary = stageCausorynPackage();
     console.error(
-      `[build:package] ok — causoryn@${summary.version} sahnelendi (ts-lib: ${String(summary.typescriptLibFileCount)} d.ts, native: 4 worker, skills: 4, LICENSE)`,
+      `[build:package] ok — causoryn@${summary.version} sahnelendi (ts-lib: ${String(summary.typescriptLibFileCount)} d.ts, native: 4 worker + flat Roslyn DLL, skills: 4, LICENSE + THIRD-PARTY-NOTICES.md)`,
     );
   } catch (error) {
     console.error(error instanceof Error ? error.message : String(error));

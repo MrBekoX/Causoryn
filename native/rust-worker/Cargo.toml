@@ -1,7 +1,9 @@
 [package]
 name = "causoryn-rust-worker"
+# Internal analyzer protocol version (locked to protocol::ANALYZER_VERSION & SQLite analyzerFingerprint; independent of causoryn package release version).
 version = "0.1.0"
 edition = "2021"
+license = "MIT"
 description = "Causoryn Rust sidecar worker — syn 2 tabanlı yerel ve deterministik analiz (TŞ v2.1 §7; M1-Rust)."
 
 # Bağımlılık sözleşmesi (M1-Rust): yalnızca syn 2 (AST) + serde_json (JSON).

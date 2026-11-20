@@ -1,5 +1,8 @@
+import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import {
   chmodSync,
+  copyFileSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -12,6 +15,7 @@ import {
 } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 
 import {
@@ -31,6 +35,9 @@ import {
   upsertCodexMcpServer,
   validateTomlStructure,
 } from "../src/index.js";
+import { isLinuxMusl } from "../src/doctor.js";
+
+const CAUSORYN_PKG_DIR = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 
 /**
  * Track 3 TDD Suite — `packages/causoryn` (`toml-patch`, `runtime-stage`,
@@ -67,19 +74,22 @@ function createFakePackageRoot(
     readonly includePrebuild?: boolean;
     readonly includeTsLib?: boolean;
     readonly includeNative?: boolean;
+    readonly includeRoslynDll?: boolean;
+    readonly prebuildFilename?: string;
   },
 ): string {
   const pkgRoot = path.join(baseDir, folderName);
   const includePrebuild = options?.includePrebuild ?? true;
   const includeTsLib = options?.includeTsLib ?? true;
   const includeNative = options?.includeNative ?? true;
+  const includeRoslynDll = options?.includeRoslynDll ?? true;
 
   mkdirSync(path.join(pkgRoot, "scripts"), { recursive: true });
   mkdirSync(path.join(pkgRoot, "dist"), { recursive: true });
 
   writeFileSync(
     path.join(pkgRoot, "package.json"),
-    JSON.stringify({ name: "causoryn", version: "0.1.0", type: "module" }, null, 2),
+    JSON.stringify({ name: "causoryn", version: "0.2.0", type: "module" }, null, 2),
     "utf8",
   );
   writeFileSync(
@@ -118,7 +128,7 @@ function createFakePackageRoot(
       "utf8",
     );
     writeFileSync(
-      path.join(prebuildsDir, `${process.platform}-${process.arch}.node`),
+      path.join(prebuildsDir, options?.prebuildFilename ?? `${process.platform}-${process.arch}.node`),
       "fake-binary",
       "utf8",
     );
@@ -161,6 +171,13 @@ function createFakePackageRoot(
       "<Project />\n",
       "utf8",
     );
+    if (includeRoslynDll) {
+      writeFileSync(
+        path.join(pkgRoot, "native", "roslyn-worker", "Causoryn.RoslynWorker.dll"),
+        "fake-roslyn-dll",
+        "utf8",
+      );
+    }
   }
 
   for (const skillName of CANONICAL_SKILL_NAMES) {
@@ -199,7 +216,7 @@ function snapshotTree(rootDir: string): string[] {
 describe("exports & metadata", () => {
   it("exports canonical package metadata and 4 host client ids", () => {
     expect(CAUSORYN_PACKAGE_NAME).toBe("causoryn");
-    expect(CAUSORYN_PACKAGE_VERSION).toBe("0.1.0");
+    expect(CAUSORYN_PACKAGE_VERSION).toBe("0.2.0");
     expect(HOST_CLIENT_IDS).toEqual(["antigravity", "claude-code", "codex", "zcode"]);
     expect(CANONICAL_SKILL_NAMES).toEqual([
       "causoryn",
@@ -936,7 +953,7 @@ describe("doctor (strictly read-only health check + injectable toolchain seam + 
 
     const versionExit = await runCli(["--version"], { io, homeDir: fakeHome });
     expect(versionExit).toBe(0);
-    expect(outChunks.join("").trim()).toBe("0.1.0");
+    expect(outChunks.join("").trim()).toBe("0.2.0");
 
     outChunks.length = 0;
     const setupExit = await runCli(
@@ -1053,6 +1070,495 @@ describe("doctor (strictly read-only health check + injectable toolchain seam + 
     if (process.platform !== "win32") {
       expect(statSync(claudeConfigPath).mode & 0o777).toBe(0o600);
       expect(statSync(`${claudeConfigPath}.causoryn.backup`).mode & 0o777).toBe(0o600);
+    }
+  });
+});
+
+describe("release hardening: Node >= 24 guard, launcher --expected-version, Roslyn DLL + musl doctor, CLAUDE_CONFIG_DIR, prepack gate", () => {
+  it("node-version-guard accepts Node >= 24 and rejects Node < 24 with exit code 2 and pure LF scripts", async () => {
+    const guardPath = path.join(CAUSORYN_PKG_DIR, "scripts", "lib", "node-version-guard.mjs");
+    expect(existsSync(guardPath)).toBe(true);
+
+    const guardMod = (await import(pathToFileURL(guardPath).href)) as {
+      assertSupportedNodeVersion: (
+        nodeVersion?: string,
+        minMajor?: number,
+      ) => { readonly ok: boolean; readonly major: number };
+    };
+    expect(guardMod.assertSupportedNodeVersion("24.0.0")).toEqual({ ok: true, major: 24 });
+    expect(guardMod.assertSupportedNodeVersion("25.1.0")).toEqual({ ok: true, major: 25 });
+
+    // Subprocess exit-2 check for Node 22
+    const rejectRun = spawnSync(
+      process.execPath,
+      [
+        "--input-type=module",
+        "-e",
+        `import { assertSupportedNodeVersion } from ${JSON.stringify(pathToFileURL(guardPath).href)}; assertSupportedNodeVersion("22.14.0", 24);`,
+      ],
+      { encoding: "utf8", shell: false },
+    );
+    expect(rejectRun.status).toBe(2);
+    expect(rejectRun.stdout).toBe("");
+    expect(rejectRun.stderr).toMatch(/Node\.js\s*>=\s*24|22\.14\.0/);
+
+    // Pure LF (zero CR 0x0d) on all published CLI/launcher scripts
+    for (const relScript of [
+      path.join("scripts", "causoryn.mjs"),
+      path.join("scripts", "plugin-mcp-launcher.mjs"),
+      path.join("scripts", "lib", "node-version-guard.mjs"),
+    ]) {
+      const rawBytes = readFileSync(path.join(CAUSORYN_PKG_DIR, relScript));
+      expect(rawBytes.includes(0x0d), `${relScript} contains CR (\\r) bytes`).toBe(false);
+    }
+  });
+
+  it("plugin-mcp-launcher enforces --expected-version (passes & strips matching flag, exits 2 on mismatch or missing value)", () => {
+    const sandbox = createTempDir("launcher-version");
+    const fakePkg = path.join(sandbox, "pkg");
+    mkdirSync(path.join(fakePkg, "scripts", "lib"), { recursive: true });
+    mkdirSync(path.join(fakePkg, "dist"), { recursive: true });
+
+    writeFileSync(
+      path.join(fakePkg, "package.json"),
+      JSON.stringify({ name: "causoryn", version: "0.2.0", type: "module" }, null, 2),
+      "utf8",
+    );
+    copyFileSync(
+      path.join(CAUSORYN_PKG_DIR, "scripts", "plugin-mcp-launcher.mjs"),
+      path.join(fakePkg, "scripts", "plugin-mcp-launcher.mjs"),
+    );
+    copyFileSync(
+      path.join(CAUSORYN_PKG_DIR, "scripts", "lib", "node-version-guard.mjs"),
+      path.join(fakePkg, "scripts", "lib", "node-version-guard.mjs"),
+    );
+    // Stub MCP server prints forwarded argv to stdout
+    writeFileSync(
+      path.join(fakePkg, "dist", "mcp-server.mjs"),
+      "process.stdout.write(JSON.stringify(process.argv.slice(2)));\n",
+      "utf8",
+    );
+
+    const launcher = path.join(fakePkg, "scripts", "plugin-mcp-launcher.mjs");
+
+    // 1) Matching --expected-version passes and is stripped before forwarding
+    const okRun = spawnSync(
+      process.execPath,
+      [launcher, "--expected-version", "0.2.0", "--allow-cwd", "--auto-data-dir", "--client", "claude-code"],
+      { encoding: "utf8", shell: false },
+    );
+    expect(okRun.status).toBe(0);
+    expect(JSON.parse(okRun.stdout)).toEqual([
+      "mcp",
+      "--allow-cwd",
+      "--auto-data-dir",
+      "--client",
+      "claude-code",
+    ]);
+
+    // 2) Matching --expected-version=0.2.0 inline syntax
+    const okInline = spawnSync(
+      process.execPath,
+      [launcher, "--expected-version=0.2.0", "--allow-cwd"],
+      { encoding: "utf8", shell: false },
+    );
+    expect(okInline.status).toBe(0);
+    expect(JSON.parse(okInline.stdout)).toEqual(["mcp", "--allow-cwd"]);
+
+    // 3) Mismatched --expected-version fails closed with exit 2
+    const mismatchRun = spawnSync(
+      process.execPath,
+      [launcher, "--expected-version", "9.9.9", "--allow-cwd"],
+      { encoding: "utf8", shell: false },
+    );
+    expect(mismatchRun.status).toBe(2);
+    expect(mismatchRun.stdout).toBe("");
+    expect(mismatchRun.stderr).toContain("9.9.9");
+    expect(mismatchRun.stderr).toContain("0.2.0");
+
+    // 4) Missing value for --expected-version fails closed with exit 2
+    const missingValRun = spawnSync(
+      process.execPath,
+      [launcher, "--expected-version"],
+      { encoding: "utf8", shell: false },
+    );
+    expect(missingValRun.status).toBe(2);
+    expect(missingValRun.stdout).toBe("");
+    expect(missingValRun.stderr).toContain("--expected-version");
+
+    const flagAsValRun = spawnSync(
+      process.execPath,
+      [launcher, "--expected-version", "--allow-cwd"],
+      { encoding: "utf8", shell: false },
+    );
+    expect(flagAsValRun.status).toBe(2);
+    expect(flagAsValRun.stdout).toBe("");
+    expect(flagAsValRun.stderr).toContain("--expected-version");
+  });
+
+  it("doctor flags missing compiled Causoryn.RoslynWorker.dll as unhealthy and checks linuxmusl prebuild via isLinuxMusl()", () => {
+    // 1) isLinuxMusl() unit checks
+    expect(isLinuxMusl("linux", () => ({ header: {} }))).toBe(true);
+    expect(isLinuxMusl("linux", () => ({ header: { glibcVersionRuntime: "" } }))).toBe(true);
+    expect(isLinuxMusl("linux", () => ({ header: { glibcVersionRuntime: "2.39" } }))).toBe(false);
+    expect(isLinuxMusl("win32", () => ({ header: {} }))).toBe(false);
+    expect(isLinuxMusl("darwin", () => ({ header: {} }))).toBe(false);
+
+    // 2) Missing Roslyn DLL -> nativeWorkersPresent = false, healthy = false
+    const sandbox = createTempDir("doctor-roslyn-musl");
+    const fakeHome = path.join(sandbox, "home");
+    const fakeCodexHome = path.join(fakeHome, ".codex");
+    mkdirSync(fakeHome, { recursive: true });
+    const noDllPkg = createFakePackageRoot(sandbox, "no-dll-pkg", {
+      includeRoslynDll: false,
+    });
+    const noDllReport = runDoctor({
+      homeDir: fakeHome,
+      codexHomeDir: fakeCodexHome,
+      packageRoot: noDllPkg,
+      nodeVersion: "24.16.0",
+      probeToolchain: () => ({ available: true, version: "1.0", detail: "ok" }),
+    });
+    expect(noDllReport.runtime.nativeWorkersPresent).toBe(false);
+    expect(noDllReport.runtime.ok).toBe(false);
+    expect(noDllReport.healthy).toBe(false);
+    expect(
+      noDllReport.runtime.missingPaths.some((p) => p.endsWith("Causoryn.RoslynWorker.dll")),
+    ).toBe(true);
+
+    // 3) Release DLL path accepted as valid compiled Roslyn worker
+    const releaseDllPath = path.join(
+      noDllPkg,
+      "native",
+      "roslyn-worker",
+      "bin",
+      "Release",
+      "net10.0",
+      "Causoryn.RoslynWorker.dll",
+    );
+    mkdirSync(path.dirname(releaseDllPath), { recursive: true });
+    writeFileSync(releaseDllPath, "fake-release-dll", "utf8");
+    const releaseDllReport = runDoctor({
+      homeDir: fakeHome,
+      codexHomeDir: fakeCodexHome,
+      packageRoot: noDllPkg,
+      nodeVersion: "24.16.0",
+      probeToolchain: () => ({ available: true, version: "1.0", detail: "ok" }),
+    });
+    expect(releaseDllReport.runtime.nativeWorkersPresent).toBe(true);
+    expect(releaseDllReport.runtime.ok).toBe(true);
+    expect(releaseDllReport.healthy).toBe(true);
+
+    // 4) Linux musl checks linuxmusl-x64.node instead of linux-x64.node
+    const glibcOnlyPkg = createFakePackageRoot(sandbox, "glibc-only-pkg", {
+      prebuildFilename: "linux-x64.node",
+    });
+    const muslMissingReport = runDoctor({
+      homeDir: fakeHome,
+      codexHomeDir: fakeCodexHome,
+      packageRoot: glibcOnlyPkg,
+      platform: "linux",
+      arch: "x64",
+      isMusl: true,
+      nodeVersion: "24.16.0",
+      probeToolchain: () => ({ available: true, version: "1.0", detail: "ok" }),
+    });
+    expect(muslMissingReport.runtime.sqlitePrebuildPresent).toBe(false);
+    expect(muslMissingReport.healthy).toBe(false);
+    expect(
+      muslMissingReport.runtime.missingPaths.some((p) => p.endsWith("linuxmusl-x64.node")),
+    ).toBe(true);
+
+    const muslPkg = createFakePackageRoot(sandbox, "musl-pkg", {
+      prebuildFilename: "linuxmusl-x64.node",
+    });
+    const muslOkReport = runDoctor({
+      homeDir: fakeHome,
+      codexHomeDir: fakeCodexHome,
+      packageRoot: muslPkg,
+      platform: "linux",
+      arch: "x64",
+      isMusl: true,
+      nodeVersion: "24.16.0",
+      probeToolchain: () => ({ available: true, version: "1.0", detail: "ok" }),
+    });
+    expect(muslOkReport.runtime.sqlitePrebuildPresent).toBe(true);
+    expect(muslOkReport.healthy).toBe(true);
+  });
+
+  it("setup, doctor, and runtime-stage respect CLAUDE_CONFIG_DIR and preserve THIRD-PARTY-NOTICES.md + licenses/", async () => {
+    const sandbox = createTempDir("claude-config-dir");
+    const fakeHome = path.join(sandbox, "home");
+    const fakeCodexHome = path.join(fakeHome, ".codex");
+    const customClaudeDir = path.join(sandbox, "custom-claude-cfg");
+    mkdirSync(customClaudeDir, { recursive: true });
+
+    const npxPkg = createFakePackageRoot(path.join(sandbox, "_npx", "ccdir"), "causoryn");
+    writeFileSync(path.join(npxPkg, "THIRD-PARTY-NOTICES.md"), "# Third-Party Notices\n", "utf8");
+    mkdirSync(path.join(npxPkg, "licenses"), { recursive: true });
+    writeFileSync(path.join(npxPkg, "licenses", "Apache-2.0.txt"), "Apache License 2.0\n", "utf8");
+
+    const envWithClaudeDir: NodeJS.ProcessEnv = {
+      ...process.env,
+      CLAUDE_CONFIG_DIR: customClaudeDir,
+    };
+
+    const setupResult = await runSetup({
+      homeDir: fakeHome,
+      codexHomeDir: fakeCodexHome,
+      packageRoot: npxPkg,
+      env: envWithClaudeDir,
+      allDetected: true,
+      yes: true,
+    });
+    expect(setupResult.applied).toBe(true);
+    expect(setupResult.selectedClients).toEqual(["claude-code"]);
+
+    // Configured under CLAUDE_CONFIG_DIR, NOT homeDir/.claude.json or homeDir/.claude/skills
+    expect(existsSync(path.join(customClaudeDir, ".claude.json"))).toBe(true);
+    expect(existsSync(path.join(fakeHome, ".claude.json"))).toBe(false);
+    for (const skillName of CANONICAL_SKILL_NAMES) {
+      expect(existsSync(path.join(customClaudeDir, "skills", skillName, "SKILL.md"))).toBe(true);
+      expect(existsSync(path.join(fakeHome, ".claude", "skills", skillName, "SKILL.md"))).toBe(
+        false,
+      );
+    }
+
+    // Persistent runtime staging preserves THIRD-PARTY-NOTICES.md + licenses/
+    const stagedRuntime = path.join(fakeHome, ".causoryn", "runtime");
+    expect(existsSync(path.join(stagedRuntime, "THIRD-PARTY-NOTICES.md"))).toBe(true);
+    expect(existsSync(path.join(stagedRuntime, "licenses", "Apache-2.0.txt"))).toBe(true);
+
+    // Doctor reads CLAUDE_CONFIG_DIR and reports aligned
+    const doctorReport = runDoctor({
+      homeDir: fakeHome,
+      codexHomeDir: fakeCodexHome,
+      packageRoot: npxPkg,
+      env: envWithClaudeDir,
+      nodeVersion: "24.16.0",
+      probeToolchain: () => ({ available: true, version: "1.0", detail: "ok" }),
+    });
+    expect(doctorReport.healthy).toBe(true);
+    expect(doctorReport.hosts["claude-code"].detected).toBe(true);
+    expect(doctorReport.hosts["claude-code"].configPath).toBe(
+      path.join(customClaudeDir, ".claude.json"),
+    );
+    expect(doctorReport.hosts["claude-code"].skillsDir).toBe(path.join(customClaudeDir, "skills"));
+    expect(doctorReport.hosts["claude-code"].aligned).toBe(true);
+    expect(doctorReport.hosts["claude-code"].status).toBe("ok");
+
+    // Uninstall cleans up CLAUDE_CONFIG_DIR entry and staged runtime
+    const uninstallResult = await runSetup({
+      homeDir: fakeHome,
+      codexHomeDir: fakeCodexHome,
+      packageRoot: npxPkg,
+      env: envWithClaudeDir,
+      clients: ["claude-code"],
+      uninstall: true,
+      yes: true,
+    });
+    expect(uninstallResult.runtimeCleanedUp).toBe(true);
+    expect(existsSync(stagedRuntime)).toBe(false);
+  });
+
+  it("verify-package-ready.mjs passes on valid staged package and fails closed on missing licenses, SHA drift, resource DLLs, user paths, mcpName mismatch, or CRLF scripts", async () => {
+    const verifyScriptPath = path.join(CAUSORYN_PKG_DIR, "scripts", "verify-package-ready.mjs");
+    expect(existsSync(verifyScriptPath)).toBe(true);
+    const verifyMod = (await import(pathToFileURL(verifyScriptPath).href)) as {
+      verifyPackageReady: (pkgDir: string) => { readonly ok: boolean; readonly verifiedFiles: number };
+    };
+
+    const buildReadyPkg = (name: string): string => {
+      const sandbox = createTempDir(`prepack-${name}`);
+      const pkgDir = path.join(sandbox, "causoryn");
+      mkdirSync(path.join(pkgDir, "dist", "node_modules", "better-sqlite3"), { recursive: true });
+      mkdirSync(path.join(pkgDir, "dist", "typescript-lib"), { recursive: true });
+      mkdirSync(path.join(pkgDir, "licenses"), { recursive: true });
+      mkdirSync(path.join(pkgDir, "native", "roslyn-worker"), { recursive: true });
+      mkdirSync(path.join(pkgDir, "scripts", "lib"), { recursive: true });
+
+      const bundleContent = "// bundle\n";
+      const sqliteLicContent = "MIT License\nCopyright (c) 2017 Joshua Wise\n";
+      const shaOf = (s: string): string =>
+        createHash("sha256").update(Buffer.from(s, "utf8")).digest("hex");
+
+      writeFileSync(
+        path.join(pkgDir, "package.json"),
+        JSON.stringify(
+          {
+            name: "causoryn",
+            mcpName: "io.github.mrbekox/causoryn",
+            version: "0.2.0",
+            type: "module",
+          },
+          null,
+          2,
+        ),
+        "utf8",
+      );
+      writeFileSync(path.join(pkgDir, "dist", "mcp-server.mjs"), bundleContent, "utf8");
+      writeFileSync(
+        path.join(pkgDir, "dist", "node_modules", "better-sqlite3", "LICENSE"),
+        sqliteLicContent,
+        "utf8",
+      );
+      writeFileSync(
+        path.join(pkgDir, "dist", "bundle-manifest.json"),
+        JSON.stringify(
+          {
+            files: {
+              "mcp-server.mjs": shaOf(bundleContent),
+              "node_modules/better-sqlite3/LICENSE": shaOf(sqliteLicContent),
+            },
+          },
+          null,
+          2,
+        ),
+        "utf8",
+      );
+      writeFileSync(path.join(pkgDir, "LICENSE"), "MIT License\n", "utf8");
+      writeFileSync(path.join(pkgDir, "dist", "index.js"), "export {};\n", "utf8");
+      writeFileSync(
+        path.join(pkgDir, "dist", "mcp-server.mjs.LEGAL.txt"),
+        "/*! legal notices */\n",
+        "utf8",
+      );
+      writeFileSync(
+        path.join(pkgDir, "dist", "typescript-lib", "lib.es2022.full.d.ts"),
+        "interface Array<T> {}\n",
+        "utf8",
+      );
+      writeFileSync(
+        path.join(pkgDir, "THIRD-PARTY-NOTICES.md"),
+        [
+          "# Third-Party Notices",
+          "Apache License",
+          "Gary Court",
+          "Anthropic, PBC",
+          "Colin McDonnell",
+          "Evgeny Poberezkin",
+          "Joshua Wise",
+          "Microsoft Corporation",
+        ].join("\n") + "\n",
+        "utf8",
+      );
+      writeFileSync(path.join(pkgDir, "licenses", "Apache-2.0.txt"), "Apache License\n", "utf8");
+      writeFileSync(
+        path.join(pkgDir, "licenses", "TypeScript-ThirdPartyNoticeText.txt"),
+        "Third Party\n",
+        "utf8",
+      );
+      writeFileSync(
+        path.join(pkgDir, "licenses", "better-sqlite3-LICENSE.txt"),
+        sqliteLicContent,
+        "utf8",
+      );
+      writeFileSync(
+        path.join(pkgDir, "native", "roslyn-worker", "Causoryn.RoslynWorker.dll"),
+        "clean-deterministic-roslyn-binary",
+        "utf8",
+      );
+      writeFileSync(
+        path.join(pkgDir, "native", "roslyn-worker", "Causoryn.RoslynWorker.deps.json"),
+        '{"runtimeTarget":{}}\n',
+        "utf8",
+      );
+      writeFileSync(
+        path.join(pkgDir, "native", "roslyn-worker", "Causoryn.RoslynWorker.runtimeconfig.json"),
+        '{"runtimeOptions":{}}\n',
+        "utf8",
+      );
+      writeFileSync(
+        path.join(pkgDir, "native", "roslyn-worker", "Microsoft.CodeAnalysis.dll"),
+        "roslyn-core-dll",
+        "utf8",
+      );
+      writeFileSync(
+        path.join(pkgDir, "native", "roslyn-worker", "Microsoft.CodeAnalysis.CSharp.dll"),
+        "roslyn-csharp-dll",
+        "utf8",
+      );
+      writeFileSync(path.join(pkgDir, "scripts", "causoryn.mjs"), "#!/usr/bin/env node\n", "utf8");
+      writeFileSync(
+        path.join(pkgDir, "scripts", "plugin-mcp-launcher.mjs"),
+        "#!/usr/bin/env node\n",
+        "utf8",
+      );
+      writeFileSync(
+        path.join(pkgDir, "scripts", "lib", "node-version-guard.mjs"),
+        "export function assertSupportedNodeVersion() {}\n",
+        "utf8",
+      );
+      return pkgDir;
+    };
+
+    // Positive
+    const okDir = buildReadyPkg("ok");
+    const res = verifyMod.verifyPackageReady(okDir);
+    expect(res.ok).toBe(true);
+    expect(res.verifiedFiles).toBe(2);
+
+    // Negative 1: SHA-256 mismatch
+    const badShaDir = buildReadyPkg("bad-sha");
+    writeFileSync(path.join(badShaDir, "dist", "mcp-server.mjs"), "// tampered\n", "utf8");
+    expect(() => verifyMod.verifyPackageReady(badShaDir)).toThrow(/SHA-256/i);
+
+    // Negative 2: missing notice entry
+    const badNoticeDir = buildReadyPkg("bad-notice");
+    writeFileSync(path.join(badNoticeDir, "THIRD-PARTY-NOTICES.md"), "Apache License\n", "utf8");
+    expect(() => verifyMod.verifyPackageReady(badNoticeDir)).toThrow(/Gary Court/i);
+
+    // Negative 3: stray localized *.resources.dll
+    const badResDllDir = buildReadyPkg("bad-res-dll");
+    mkdirSync(path.join(badResDllDir, "native", "roslyn-worker", "tr"), { recursive: true });
+    writeFileSync(
+      path.join(badResDllDir, "native", "roslyn-worker", "tr", "Microsoft.CodeAnalysis.resources.dll"),
+      "locale",
+      "utf8",
+    );
+    expect(() => verifyMod.verifyPackageReady(badResDllDir)).toThrow(/resources\.dll/i);
+
+    // Negative 4: embedded user path / .pdb in RoslynWorker.dll
+    const badPdbDir = buildReadyPkg("bad-pdb");
+    writeFileSync(
+      path.join(badPdbDir, "native", "roslyn-worker", "Causoryn.RoslynWorker.dll"),
+      "MZ...C:\\Users\\alice\\repo\\Causoryn.RoslynWorker.pdb",
+      "utf8",
+    );
+    expect(() => verifyMod.verifyPackageReady(badPdbDir)).toThrow(/Users|pdb/i);
+
+    // Negative 5: wrong mcpName
+    const badMcpNameDir = buildReadyPkg("bad-mcpname");
+    writeFileSync(
+      path.join(badMcpNameDir, "package.json"),
+      JSON.stringify({ name: "causoryn", mcpName: "io.github.other/wrong", version: "0.2.0" }),
+      "utf8",
+    );
+    expect(() => verifyMod.verifyPackageReady(badMcpNameDir)).toThrow(/mcpName/i);
+
+    // Negative 6: CRLF in scripts/causoryn.mjs
+    const badCrlfDir = buildReadyPkg("bad-crlf");
+    writeFileSync(
+      path.join(badCrlfDir, "scripts", "causoryn.mjs"),
+      "#!/usr/bin/env node\r\n",
+      "utf8",
+    );
+    expect(() => verifyMod.verifyPackageReady(badCrlfDir)).toThrow(/CRLF|\\r|LF/i);
+
+    // Negative 7: missing package root LICENSE, dist/index.js, mcp-server.mjs.LEGAL.txt, or Roslyn deps.json
+    for (const relMissing of [
+      "LICENSE",
+      path.join("dist", "index.js"),
+      path.join("dist", "mcp-server.mjs.LEGAL.txt"),
+      path.join("native", "roslyn-worker", "Causoryn.RoslynWorker.deps.json"),
+      path.join("native", "roslyn-worker", "Causoryn.RoslynWorker.runtimeconfig.json"),
+      path.join("native", "roslyn-worker", "Microsoft.CodeAnalysis.dll"),
+    ]) {
+      const badMissingDir = buildReadyPkg(`missing-${relMissing.replace(/[^a-z0-9]/gi, "-")}`);
+      rmSync(path.join(badMissingDir, relMissing));
+      expect(() => verifyMod.verifyPackageReady(badMissingDir), `missing ${relMissing} must fail`).toThrow(
+        /missing/i,
+      );
     }
   });
 });

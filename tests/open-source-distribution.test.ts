@@ -45,7 +45,8 @@ const MCP_SERVER_BUNDLE = path.join(REPO_ROOT, "packages", "mcp-server", "dist",
 
 const DOLLAR_BRACE = "$" + "{";
 const CLAUDE_PLUGIN_ROOT_TOKEN = DOLLAR_BRACE + "CLAUDE_PLUGIN_ROOT}";
-const CLAUDE_PROJECT_DIR_TOKEN = DOLLAR_BRACE + "CLAUDE_PROJECT_DIR}";
+const ZCODE_PLUGIN_ROOT_TOKEN = DOLLAR_BRACE + "ZCODE_PLUGIN_ROOT}";
+const ZCODE_PROJECT_DIR_TOKEN = DOLLAR_BRACE + "ZCODE_PROJECT_DIR}";
 
 const CREDENTIAL_PATTERN =
   /(api[_-]?key|secret|token|password|credential|bearer|private[_-]?key)/i;
@@ -129,11 +130,19 @@ function isCausorynPackageAlreadyStaged(): boolean {
     srcManifestPath,
     stagedBundlePath,
     stagedManifestPath,
+    path.join(PKG_DIR, "dist", "mcp-server.mjs.LEGAL.txt"),
     path.join(PKG_DIR, "dist", "node_modules", "better-sqlite3", "package.json"),
+    path.join(PKG_DIR, "dist", "node_modules", "better-sqlite3", "LICENSE"),
     path.join(PKG_DIR, "dist", "typescript-lib", "lib.es2022.full.d.ts"),
     path.join(PKG_DIR, "native", "python-worker", "worker.py"),
+    path.join(PKG_DIR, "native", "roslyn-worker", "Causoryn.RoslynWorker.dll"),
+    path.join(PKG_DIR, "native", "roslyn-worker", "Microsoft.CodeAnalysis.CSharp.dll"),
     path.join(PKG_DIR, "skills", "causoryn", "SKILL.md"),
     path.join(PKG_DIR, "LICENSE"),
+    path.join(PKG_DIR, "THIRD-PARTY-NOTICES.md"),
+    path.join(PKG_DIR, "licenses", "Apache-2.0.txt"),
+    path.join(PKG_DIR, "licenses", "TypeScript-ThirdPartyNoticeText.txt"),
+    path.join(PKG_DIR, "licenses", "better-sqlite3-LICENSE.txt"),
   ];
   for (const req of requiredPaths) {
     if (!existsSync(req)) {
@@ -244,7 +253,7 @@ function packAndUnpackCausorynTarball(sandbox: string): string {
     .pop();
   expect(tgzName).toBeDefined();
 
-  const tgzPath = path.join(packDest, tgzName ?? "causoryn-0.1.0.tgz");
+  const tgzPath = path.join(packDest, tgzName ?? `causoryn-${SERVER_VERSION}.tgz`);
   execFileSync("tar", ["-xzf", tgzPath, "-C", unpackRoot], {
     shell: false,
     stdio: ["ignore", "pipe", "pipe"],
@@ -447,8 +456,13 @@ describe("1. Canonical skills/ (YAML frontmatter + ADR-010 tool honesty)", () =>
   });
 });
 
-describe("2. Repo-root & packages/causoryn 4-host manifests (0.1.0 parity + zero credentials)", () => {
+describe("2. Repo-root & packages/causoryn 4-host manifests (0.2.0 parity + zero credentials)", () => {
   it("validates ZCode, Claude Code, Codex, Antigravity, and MCP Registry root manifests", () => {
+    expect(SERVER_VERSION).toBe("0.2.0");
+
+    const pkgJson = readJsonObject(path.join(PKG_DIR, "package.json"));
+    expect(pkgJson["version"]).toBe("0.2.0");
+
     const zcodeMkt = readJsonObject(path.join(REPO_ROOT, "marketplace.json"));
     expect(zcodeMkt["name"]).toBe("causoryn");
     const zcodePlugins = zcodeMkt["plugins"] as Array<Record<string, unknown>>;
@@ -460,17 +474,20 @@ describe("2. Repo-root & packages/causoryn 4-host manifests (0.1.0 parity + zero
     expect(zcodePlugins[0]?.["source"]).toEqual({
       source: "npm",
       package: "causoryn",
-      version: "0.1.0",
+      version: "0.2.0",
     });
 
     const claudeMkt = readJsonObject(
       path.join(REPO_ROOT, ".claude-plugin", "marketplace.json"),
     );
+    expect(claudeMkt["$schema"]).toBe(
+      "https://anthropic.com/claude-code/marketplace.schema.json",
+    );
     const claudePlugins = claudeMkt["plugins"] as Array<Record<string, unknown>>;
     expect(claudePlugins[0]?.["source"]).toEqual({
       source: "npm",
       package: "causoryn",
-      version: "0.1.0",
+      version: "0.2.0",
     });
 
     const codexMkt = readJsonObject(
@@ -481,7 +498,11 @@ describe("2. Repo-root & packages/causoryn 4-host manifests (0.1.0 parity + zero
     expect(codexPlugins[0]?.["source"]).toEqual({
       source: "npm",
       package: "causoryn",
-      version: "0.1.0",
+      version: "0.2.0",
+    });
+    expect(codexPlugins[0]?.["policy"]).toEqual({
+      installation: "AVAILABLE",
+      authentication: "ON_INSTALL",
     });
 
     const rootAgyPlugin = readJsonObject(path.join(REPO_ROOT, "plugin.json"));
@@ -498,7 +519,7 @@ describe("2. Repo-root & packages/causoryn 4-host manifests (0.1.0 parity + zero
     expect(agyServers["causoryn"]?.["command"]).toBe("npx");
     expect(agyServers["causoryn"]?.["args"]).toEqual([
       "-y",
-      "causoryn@0.1.0",
+      "causoryn@0.2.0",
       "mcp",
       "--allow-cwd",
       "--auto-data-dir",
@@ -509,22 +530,36 @@ describe("2. Repo-root & packages/causoryn 4-host manifests (0.1.0 parity + zero
     const rootMcp = readJsonObject(path.join(REPO_ROOT, "mcp.json"));
     const portableServers = rootMcp["mcpServers"] as Record<string, Record<string, unknown>>;
     expect(portableServers["causoryn"]?.["command"]).toBe("npx");
-    expect(portableServers["causoryn"]?.["args"]).toContain("causoryn@0.1.0");
+    expect(portableServers["causoryn"]?.["args"]).toContain("causoryn@0.2.0");
 
     const serverJson = readJsonObject(path.join(REPO_ROOT, "server.json"));
     expect(serverJson["name"]).toBe("io.github.mrbekox/causoryn");
-    expect(serverJson["version"]).toBe("0.1.0");
+    expect(pkgJson["mcpName"]).toBe(serverJson["name"]);
+    expect(serverJson["version"]).toBe("0.2.0");
+    expect(serverJson["websiteUrl"]).toBe("https://github.com/MrBekoX/Causoryn");
+    const serverPackages = serverJson["packages"] as Array<Record<string, unknown>>;
+    expect(serverPackages).toHaveLength(1);
+    expect(serverPackages[0]?.["version"]).toBe("0.2.0");
+    expect(serverPackages[0]?.["registryBaseUrl"]).toBe("https://registry.npmjs.org");
+    const pkgArgs = serverPackages[0]?.["packageArguments"] as Array<Record<string, unknown>>;
+    expect(pkgArgs).toEqual([
+      { type: "positional", value: "mcp" },
+      { type: "positional", value: "--allow-cwd" },
+      { type: "positional", value: "--auto-data-dir" },
+    ]);
   });
 
   it("validates all 6 package-internal manifests in packages/causoryn/", () => {
     const zcodePlugin = readJsonObject(path.join(PKG_DIR, ".zcode-plugin", "plugin.json"));
-    expect(zcodePlugin["version"]).toBe("0.1.0");
+    expect(zcodePlugin["version"]).toBe("0.2.0");
     expect(zcodePlugin["skills"]).toBe("skills");
     const zcodeServers = zcodePlugin["mcpServers"] as Record<string, Record<string, unknown>>;
     expect(zcodeServers["causoryn"]?.["command"]).toBe("node");
-    expect(zcodeServers["causoryn"]?.["cwd"]).toBe(CLAUDE_PROJECT_DIR_TOKEN);
+    expect(zcodeServers["causoryn"]?.["cwd"]).toBe(ZCODE_PROJECT_DIR_TOKEN);
     expect(zcodeServers["causoryn"]?.["args"]).toEqual([
-      `${CLAUDE_PLUGIN_ROOT_TOKEN}/scripts/plugin-mcp-launcher.mjs`,
+      `${ZCODE_PLUGIN_ROOT_TOKEN}/scripts/plugin-mcp-launcher.mjs`,
+      "--expected-version",
+      "0.2.0",
       "--allow-cwd",
       "--auto-data-dir",
       "--client",
@@ -532,11 +567,13 @@ describe("2. Repo-root & packages/causoryn 4-host manifests (0.1.0 parity + zero
     ]);
 
     const claudePlugin = readJsonObject(path.join(PKG_DIR, ".claude-plugin", "plugin.json"));
-    expect(claudePlugin["version"]).toBe("0.1.0");
+    expect(claudePlugin["version"]).toBe("0.2.0");
     const claudeServers = claudePlugin["mcpServers"] as Record<string, Record<string, unknown>>;
     expect(claudeServers["causoryn"]?.["command"]).toBe("node");
     expect(claudeServers["causoryn"]?.["args"]).toEqual([
       `${CLAUDE_PLUGIN_ROOT_TOKEN}/scripts/plugin-mcp-launcher.mjs`,
+      "--expected-version",
+      "0.2.0",
       "--allow-cwd",
       "--auto-data-dir",
       "--client",
@@ -544,7 +581,7 @@ describe("2. Repo-root & packages/causoryn 4-host manifests (0.1.0 parity + zero
     ]);
 
     const codexPlugin = readJsonObject(path.join(PKG_DIR, ".codex-plugin", "plugin.json"));
-    expect(codexPlugin["version"]).toBe("0.1.0");
+    expect(codexPlugin["version"]).toBe("0.2.0");
     expect(codexPlugin["mcpServers"]).toBe("./.codex-plugin/mcp.json");
     expect(codexPlugin["skills"]).toBe("./skills");
 
@@ -555,7 +592,7 @@ describe("2. Repo-root & packages/causoryn 4-host manifests (0.1.0 parity + zero
     expect(codexServers["causoryn"]?.["args"]).toEqual([
       "-y",
       "--package",
-      "causoryn@0.1.0",
+      "causoryn@0.2.0",
       "causoryn",
       "mcp",
       "--allow-cwd",
@@ -569,13 +606,15 @@ describe("2. Repo-root & packages/causoryn 4-host manifests (0.1.0 parity + zero
     for (const key of Object.keys(pkgAgyPlugin)) {
       expect(ALLOWED_ANTIGRAVITY_PLUGIN_KEYS.has(key)).toBe(true);
     }
-    expect(pkgAgyPlugin["version"]).toBe("0.1.0");
+    expect(pkgAgyPlugin["version"]).toBe("0.2.0");
 
     const pkgAgyMcp = readJsonObject(path.join(PKG_DIR, "mcp_config.json"));
     const pkgAgyServers = pkgAgyMcp["mcpServers"] as Record<string, Record<string, unknown>>;
     expect(pkgAgyServers["causoryn"]?.["command"]).toBe("node");
     expect(pkgAgyServers["causoryn"]?.["args"]).toEqual([
       "scripts/plugin-mcp-launcher.mjs",
+      "--expected-version",
+      "0.2.0",
       "--allow-cwd",
       "--auto-data-dir",
       "--client",
@@ -641,8 +680,8 @@ describe("4. build-package.mjs + isolated npm pack end-to-end verification", () 
       );
     };
 
-    writeDrifted("package.json", { name: "causoryn", version: "0.2.0" });
-    expect(() => mod.verifyManifestVersionParity(REPO_ROOT, fakePkgDir)).toThrow(/0\.1\.0/);
+    writeDrifted("package.json", { name: "causoryn", version: "0.9.9" });
+    expect(() => mod.verifyManifestVersionParity(REPO_ROOT, fakePkgDir)).toThrow(/0\.2\.0/);
   });
 
   it("verifies every file in bundle-manifest.json via SHA-256 and recovers from torn reads before failing closed", async () => {
@@ -744,27 +783,80 @@ describe("4. build-package.mjs + isolated npm pack end-to-end verification", () 
       const files = listAllFilesRelative(unpackedPkg);
 
       expect(files).toContain("dist/mcp-server.mjs");
+      expect(files).toContain("dist/mcp-server.mjs.LEGAL.txt");
       expect(files).toContain("dist/bundle-manifest.json");
       expect(files).toContain("dist/node_modules/better-sqlite3/package.json");
+      expect(files).toContain("dist/node_modules/better-sqlite3/LICENSE");
       expect(files).toContain("dist/typescript-lib/lib.es2022.full.d.ts");
+      expect(files).toContain("scripts/lib/node-version-guard.mjs");
       expect(files).toContain("native/python-worker/worker.py");
       expect(files).toContain("native/go-worker/cmd/worker/main.go");
       expect(files).toContain("native/rust-worker/Cargo.toml");
       expect(files).toContain("native/roslyn-worker/Causoryn.RoslynWorker.csproj");
+      expect(files).toContain("native/roslyn-worker/Causoryn.RoslynWorker.dll");
+      expect(files).toContain("native/roslyn-worker/Causoryn.RoslynWorker.deps.json");
+      expect(files).toContain("native/roslyn-worker/Causoryn.RoslynWorker.runtimeconfig.json");
+      expect(files).toContain("native/roslyn-worker/Microsoft.CodeAnalysis.dll");
+      expect(files).toContain("native/roslyn-worker/Microsoft.CodeAnalysis.CSharp.dll");
       expect(files).toContain("skills/causoryn/SKILL.md");
       expect(files).toContain("skills/map-system/SKILL.md");
       expect(files).toContain("skills/preflight-change/SKILL.md");
       expect(files).toContain("skills/verify-change/SKILL.md");
       expect(files).toContain("LICENSE");
+      expect(files).toContain("THIRD-PARTY-NOTICES.md");
+      expect(files).toContain("licenses/Apache-2.0.txt");
+      expect(files).toContain("licenses/TypeScript-ThirdPartyNoticeText.txt");
+      expect(files).toContain("licenses/better-sqlite3-LICENSE.txt");
 
-      // Excluded build artifacts must never leak into the npm tarball
+      // Excluded build artifacts, localized satellite DLLs, and sourcemaps must never leak into the npm tarball
       for (const rel of files) {
         expect(rel.includes("/target/")).toBe(false);
         expect(rel.includes("/obj/")).toBe(false);
+        expect(rel.startsWith("native/roslyn-worker/bin/")).toBe(false);
+        expect(rel.toLowerCase().endsWith(".resources.dll")).toBe(false);
         expect(rel.endsWith("test-build.lock")).toBe(false);
         expect(rel.includes("__pycache__")).toBe(false);
         expect(rel.endsWith(".pdb")).toBe(false);
+        expect(rel.startsWith("dist/") && rel.endsWith(".map")).toBe(false);
         expect(rel.includes(".mimosa/")).toBe(false);
+      }
+
+      // Pure LF line endings on executable scripts in the packed tarball
+      for (const relScript of [
+        "scripts/causoryn.mjs",
+        "scripts/plugin-mcp-launcher.mjs",
+        "scripts/lib/node-version-guard.mjs",
+      ]) {
+        const scriptBytes = readFileSync(path.join(unpackedPkg, relScript));
+        expect(scriptBytes.includes(0x0d), `${relScript} contains CR bytes in tarball`).toBe(false);
+      }
+
+      // Deterministic Release Roslyn DLL binary scan: zero local user paths or .pdb references
+      const roslynDllBytes = readFileSync(
+        path.join(unpackedPkg, "native", "roslyn-worker", "Causoryn.RoslynWorker.dll"),
+      );
+      const roslynLatin1 = roslynDllBytes.toString("latin1");
+      const roslynUtf16 = roslynDllBytes.toString("utf16le");
+      for (const forbiddenPattern of [/[A-Za-z]:\\Users\\/i, /\/Users\//, /\/home\//, /\.pdb\b/i]) {
+        expect(forbiddenPattern.test(roslynLatin1)).toBe(false);
+        expect(forbiddenPattern.test(roslynUtf16)).toBe(false);
+      }
+
+      // Third-party license notices verification
+      const noticesContent = readFileSync(path.join(unpackedPkg, "THIRD-PARTY-NOTICES.md"), "utf8");
+      for (const requiredAttribution of [
+        "Apache License",
+        "Gary Court",
+        "Anthropic, PBC",
+        "Colin McDonnell",
+        "Evgeny Poberezkin",
+        "Joshua Wise",
+        "Microsoft Corporation",
+        "Eemeli Aro",
+        "Stefan Terdell",
+        "SQLite",
+      ]) {
+        expect(noticesContent).toContain(requiredAttribution);
       }
 
       const isolatedEnv: NodeJS.ProcessEnv = {
@@ -774,6 +866,7 @@ describe("4. build-package.mjs + isolated npm pack end-to-end verification", () 
         CODEX_HOME: fakeCodexHome,
         CAUSORYN_CONFIG: '{"allowRoots":[]}',
       };
+      delete isolatedEnv["CLAUDE_CONFIG_DIR"];
 
       // 1. CLI setup in isolated fake home
       execFileSync(
@@ -807,10 +900,14 @@ describe("4. build-package.mjs + isolated npm pack end-to-end verification", () 
       const doctorJson = JSON.parse(doctorOut) as { healthy: boolean };
       expect(doctorJson.healthy).toBe(true);
 
-      // 3. Unpacked plugin-mcp-launcher.mjs over pure JSON-RPC stdio
+      // 3. Unpacked plugin-mcp-launcher.mjs over pure JSON-RPC stdio (with --expected-version)
       const launcherHandshake = await runStdioHandshake(
         process.execPath,
-        [path.join(unpackedPkg, "scripts", "plugin-mcp-launcher.mjs")],
+        [
+          path.join(unpackedPkg, "scripts", "plugin-mcp-launcher.mjs"),
+          "--expected-version",
+          SERVER_VERSION,
+        ],
         unpackedPkg,
         isolatedEnv,
       );

@@ -10,6 +10,10 @@ import { existsSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
+import { assertSupportedNodeVersion } from "./lib/node-version-guard.mjs";
+
+assertSupportedNodeVersion();
+
 const PKG_ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const rawArgs = process.argv.slice(2);
 

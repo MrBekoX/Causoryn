@@ -5,8 +5,10 @@ import path from "node:path";
 import { getPersistentRuntimeDir } from "./runtime-stage.js";
 import {
   detectInstalledClients,
+  getClaudeConfigFilePath,
   getHostSkillsDir,
   resolveDefaultPackageRoot,
+  resolveEffectiveClaudeConfigDir,
   resolveEffectiveCodexHomeDir,
   resolveEffectiveHomeDir,
 } from "./setup.js";
@@ -139,10 +141,55 @@ function checkNodeVersion(rawNodeVersion: string): DoctorNodeCheck {
   };
 }
 
+export function isLinuxMusl(
+  platform: NodeJS.Platform = process.platform,
+  getReport: () => unknown = () => process.report?.getReport?.(),
+): boolean {
+  if (platform !== "linux") {
+    return false;
+  }
+  try {
+    const report = getReport();
+    if (isPlainObject(report) && isPlainObject(report["header"])) {
+      const glibc = report["header"]["glibcVersionRuntime"];
+      return typeof glibc !== "string" || glibc.trim().length === 0;
+    }
+    return false;
+  } catch {
+    return false;
+  }
+}
+
+function resolveCompiledRoslynDllExists(pkgRoot: string): boolean {
+  const candidates = [
+    path.join(pkgRoot, "native", "roslyn-worker", "Causoryn.RoslynWorker.dll"),
+    path.join(
+      pkgRoot,
+      "native",
+      "roslyn-worker",
+      "bin",
+      "Release",
+      "net10.0",
+      "Causoryn.RoslynWorker.dll",
+    ),
+    path.join(
+      pkgRoot,
+      "native",
+      "roslyn-worker",
+      "bin",
+      "Debug",
+      "net10.0",
+      "Causoryn.RoslynWorker.dll",
+    ),
+  ];
+  return candidates.some((candidate) => existsSync(candidate));
+}
+
 function inspectRuntimeRoot(
   pkgRoot: string,
   platform: NodeJS.Platform,
   arch: string,
+  musl: boolean,
 ): {
   readonly bundlePresent: boolean;
   readonly sqlitePrebuildPresent: boolean;
@@ -155,13 +202,14 @@ function inspectRuntimeRoot(
   const bundlePresent = existsSync(bundlePath);
   if (!bundlePresent) missing.push(bundlePath);
 
+  const prebuildTarget = platform === "linux" && musl ? "linuxmusl" : platform;
   const prebuildPath = path.join(
     pkgRoot,
     "dist",
     "node_modules",
     "better-sqlite3",
     "prebuilds",
-    `${platform}-${arch}.node`,
+    `${prebuildTarget}-${arch}.node`,
   );
   const sqlitePrebuildPresent = existsSync(prebuildPath);
   if (!sqlitePrebuildPresent) missing.push(prebuildPath);
@@ -188,6 +236,10 @@ function inspectRuntimeRoot(
       missing.push(nativeFile);
     }
   }
+  if (!resolveCompiledRoslynDllExists(pkgRoot)) {
+    nativeWorkersPresent = false;
+    missing.push(path.join(pkgRoot, "native", "roslyn-worker", "Causoryn.RoslynWorker.dll"));
+  }
 
   return {
     bundlePresent,
@@ -203,15 +255,16 @@ function checkRuntime(
   homeDir: string,
   platform: NodeJS.Platform,
   arch: string,
+  musl: boolean,
 ): DoctorRuntimeCheck {
-  const primary = inspectRuntimeRoot(packageRoot, platform, arch);
+  const primary = inspectRuntimeRoot(packageRoot, platform, arch, musl);
   const candidateStaged = getPersistentRuntimeDir(homeDir);
   const hasStaged = existsSync(candidateStaged);
   let stagedRuntimeOk: boolean | null = null;
   const allMissing = [...primary.missingPaths];
 
   if (hasStaged) {
-    const stagedCheck = inspectRuntimeRoot(candidateStaged, platform, arch);
+    const stagedCheck = inspectRuntimeRoot(candidateStaged, platform, arch, musl);
     stagedRuntimeOk =
       stagedCheck.bundlePresent &&
       stagedCheck.sqlitePrebuildPresent &&
@@ -306,10 +359,11 @@ function inspectSingleHost(
   client: HostClientId,
   homeDir: string,
   codexHomeDir: string,
+  claudeConfigDir: string | null,
   detectedSet: ReadonlySet<HostClientId>,
 ): DoctorHostStatus {
   const detected = detectedSet.has(client);
-  const skillsDir = getHostSkillsDir(homeDir, client);
+  const skillsDir = getHostSkillsDir(homeDir, client, claudeConfigDir);
   const skills = inspectSkills(skillsDir);
 
   let configPath: string;
@@ -318,7 +372,7 @@ function inspectSingleHost(
       configPath = path.join(homeDir, ".gemini", "config", "mcp_config.json");
       break;
     case "claude-code":
-      configPath = path.join(homeDir, ".claude.json");
+      configPath = getClaudeConfigFilePath(homeDir, claudeConfigDir);
       break;
     case "codex":
       configPath = path.join(codexHomeDir, "config.toml");
@@ -493,25 +547,46 @@ function inspectSingleHost(
   };
 }
 
-export function runDoctor(options: DoctorOptions = {}): DoctorReport {
+type ExtendedDoctorOptions = DoctorOptions & {
+  readonly isMusl?: boolean | undefined;
+  readonly claudeConfigDir?: string | undefined;
+  readonly env?: NodeJS.ProcessEnv | undefined;
+};
+
+export function runDoctor(options: ExtendedDoctorOptions = {}): DoctorReport {
+  const effectiveEnv = options.env ?? process.env;
   const explicitHomeProvided = options.homeDir !== undefined;
   const homeDir = resolveEffectiveHomeDir(options.homeDir);
   const codexHomeDir = resolveEffectiveCodexHomeDir(
     homeDir,
     options.codexHomeDir,
     explicitHomeProvided,
+    effectiveEnv,
+  );
+  const claudeConfigDir = resolveEffectiveClaudeConfigDir(
+    options.claudeConfigDir,
+    explicitHomeProvided,
+    effectiveEnv,
   );
   const packageRoot = path.resolve(options.packageRoot ?? resolveDefaultPackageRoot());
   const nodeVersion = options.nodeVersion ?? process.versions.node;
   const platform = options.platform ?? process.platform;
   const arch = options.arch ?? process.arch;
+  const musl =
+    options.isMusl !== undefined
+      ? Boolean(options.isMusl)
+      : platform === "linux" && process.platform === "linux"
+        ? isLinuxMusl(platform)
+        : false;
   const probe = options.probeToolchain ?? defaultToolchainProbe;
 
   const nodeCheck = checkNodeVersion(nodeVersion);
-  const runtimeCheck = checkRuntime(packageRoot, homeDir, platform, arch);
+  const runtimeCheck = checkRuntime(packageRoot, homeDir, platform, arch, musl);
   const toolchains = probeSidecarToolchains(probe);
 
-  const detectedSet = new Set<HostClientId>(detectInstalledClients(homeDir, codexHomeDir));
+  const detectedSet = new Set<HostClientId>(
+    detectInstalledClients(homeDir, codexHomeDir, claudeConfigDir),
+  );
   const targetClients: readonly HostClientId[] =
     options.clients !== undefined && options.clients.length > 0
       ? [...new Set(options.clients)]
@@ -519,7 +594,13 @@ export function runDoctor(options: DoctorOptions = {}): DoctorReport {
 
   const hosts = {} as Record<HostClientId, DoctorHostStatus>;
   for (const client of HOST_CLIENT_IDS) {
-    hosts[client] = inspectSingleHost(client, homeDir, codexHomeDir, detectedSet);
+    hosts[client] = inspectSingleHost(
+      client,
+      homeDir,
+      codexHomeDir,
+      claudeConfigDir,
+      detectedSet,
+    );
   }
 
   const hostErrors = targetClients.some((c) => hosts[c].status === "error");

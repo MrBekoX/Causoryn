@@ -3,7 +3,8 @@
   "name": "io.github.mrbekox/causoryn",
   "title": "Causoryn",
   "description": "Local, deterministic, LLM-free codebase and change intelligence MCP server.",
-  "version": "0.1.0",
+  "version": "0.2.0",
+  "websiteUrl": "https://github.com/MrBekoX/Causoryn",
   "repository": {
     "url": "https://github.com/MrBekoX/Causoryn",
     "source": "github"
@@ -11,8 +12,9 @@
   "packages": [
     {
       "registryType": "npm",
+      "registryBaseUrl": "https://registry.npmjs.org",
       "identifier": "causoryn",
-      "version": "0.1.0",
+      "version": "0.2.0",
       "runtimeHint": "npx",
       "transport": {
         "type": "stdio"
@@ -23,12 +25,12 @@
           "value": "mcp"
         },
         {
-          "type": "named",
-          "name": "--allow-cwd"
+          "type": "positional",
+          "value": "--allow-cwd"
         },
         {
-          "type": "named",
-          "name": "--auto-data-dir"
+          "type": "positional",
+          "value": "--auto-data-dir"
         }
       ]
     }

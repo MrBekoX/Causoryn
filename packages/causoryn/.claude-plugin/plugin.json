@@ -1,6 +1,6 @@
 {
   "name": "causoryn",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Deterministic, local, LLM-free codebase and change intelligence for Claude Code: read-only workspace graphs, architecture maps, preflight checks, post-change verification, and living wiki.",
   "author": {
     "name": "Causoryn Contributors",
@@ -24,6 +24,8 @@
       "command": "node",
       "args": [
         "${CLAUDE_PLUGIN_ROOT}/scripts/plugin-mcp-launcher.mjs",
+        "--expected-version",
+        "0.2.0",
         "--allow-cwd",
         "--auto-data-dir",
         "--client",
