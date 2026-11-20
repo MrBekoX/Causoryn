@@ -1,7 +1,11 @@
 {
   "name": "causoryn",
-  "version": "0.1.0",
+  "mcpName": "io.github.mrbekox/causoryn",
+  "version": "0.2.0",
   "private": false,
+  "publishConfig": {
+    "access": "public"
+  },
   "description": "Deterministic, local, LLM-free codebase and change intelligence MCP server and plugin for Antigravity, Claude Code, Codex, and ZCode (GLM).",
   "type": "module",
   "license": "MIT",
@@ -45,8 +49,10 @@
   },
   "files": [
     "dist/**",
+    "!dist/**/*.map",
     "scripts/causoryn.mjs",
     "scripts/plugin-mcp-launcher.mjs",
+    "scripts/lib/**",
     "native/**",
     "skills/**",
     ".claude-plugin/**",
@@ -55,10 +61,13 @@
     "plugin.json",
     "mcp_config.json",
     "README.md",
-    "LICENSE"
+    "LICENSE",
+    "THIRD-PARTY-NOTICES.md",
+    "licenses/**"
   ],
   "scripts": {
-    "build:package": "node scripts/build-package.mjs"
+    "build:package": "node scripts/build-package.mjs",
+    "prepack": "node scripts/verify-package-ready.mjs"
   },
   "dependencies": {}
 }

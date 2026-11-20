@@ -5,6 +5,8 @@ integrations/antigravity/causoryn/scripts/
 packages/causoryn/native/
 packages/causoryn/skills/
 packages/causoryn/LICENSE
+packages/causoryn/THIRD-PARTY-NOTICES.md
+packages/causoryn/licenses/
 *.tgz
 coverage/
 *.tsbuildinfo
@@ -32,7 +34,7 @@ __pycache__/
 *.log
 logs/
 
-# Ajan çalışma dizinleri (asla commit edilmez)
+# Yerel geçici çıktı dizinleri (asla commit edilmez)
 out/
 
 # Ortam / sır dosyaları

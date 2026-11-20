@@ -1,8 +1,8 @@
 {
   "name": "causoryn-monorepo",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
-  "_versionDecision": "F9 (Sprint 7, 2026-11-09): 0.1.0 public snapshot; 1.0.0 ilan edilmedi (ADR-010 — 12 dürüstlük kalemi açık; bkz. CHANGELOG.md [Unreleased] ve docs/implementation-status.md Sprint 7). Değer korunmuştur; SERVER_VERSION (packages/mcp-server/src/version.ts) ile birebir.",
+  "_versionDecision": "K-022 (2026-11-20): 0.2.0 Pre-1.0 Public Preview (1.0.0 ilan edilmedi; uzak v0.1.0 etiketi 4c9c188f üzerinde kilitli kaldığından yeni minor SemVer'e yükseltildi — ADR-010, bkz. CHANGELOG.md). SERVER_VERSION ile birebir.",
   "description": "Causoryn — LLM çalıştırmayan, yerel ve deterministik kod analizi MCP motoru (TŞ v2.1).",
   "type": "module",
   "license": "MIT",
@@ -27,9 +27,9 @@
   "devDependencies": {
     "@types/better-sqlite3": "^9.6.0",
     "@types/node": "^24.19.2",
-    "eslint": "^10.14.0",
+    "eslint": "^10.15.0",
     "typescript": "5.9.3",
-    "typescript-eslint": "^8.72.1",
+    "typescript-eslint": "^8.73.0",
     "vitest": "5.0.5"
   },
   "dependencies": {

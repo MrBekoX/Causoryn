@@ -1,7 +1,8 @@
 {
   "name": "@causoryn/workspace",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
+  "license": "MIT",
   "description": "Workspace Gateway: trusted root doğrulaması, file inventory, ignore, symlink escape ve binary/size filtreleri (TŞ v2.1 §5, §9, §25/2).",
   "type": "module",
   "exports": {

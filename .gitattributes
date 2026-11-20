@@ -1,0 +1,29 @@
+# Enforce consistent LF line endings in repository and npm packages
+# (prevents Windows core.autocrlf from breaking POSIX shebangs such as
+# packages/causoryn/scripts/plugin-mcp-launcher.mjs).
+* text=auto eol=lf
+
+*.mjs text eol=lf
+*.cjs text eol=lf
+*.js text eol=lf
+*.ts text eol=lf
+*.mts text eol=lf
+*.cts text eol=lf
+*.sh text eol=lf
+*.json text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.md text eol=lf
+*.toml text eol=lf
+*.py text eol=lf
+*.go text eol=lf
+*.rs text eol=lf
+*.cs text eol=lf
+*.csproj text eol=lf
+
+*.node binary
+*.dll binary
+*.exe binary
+*.pdf binary
+*.png binary
+*.tgz binary

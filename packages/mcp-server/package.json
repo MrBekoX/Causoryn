@@ -1,7 +1,8 @@
 {
   "name": "@causoryn/mcp-server",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
+  "license": "MIT",
   "description": "MCP protokol adaptasyonu: stdio server + 29 gerçek araç (causoryn_get_capabilities, causoryn_workspace_summary, causoryn_index_status, causoryn_refresh_index, causoryn_map_system, causoryn_find_symbols, causoryn_get_symbol_context, causoryn_trace_execution, causoryn_trace_business_flow, causoryn_analyze_impact, causoryn_check_architecture, causoryn_compare_architecture, causoryn_get_agent_context, causoryn_generate_onboarding, causoryn_export_documentation, causoryn_preflight_change, causoryn_check_contracts, causoryn_detect_contract_drift, causoryn_verify_change, causoryn_derive_test_plan, causoryn_get_evidence, causoryn_architecture_timeline, causoryn_wiki_build, causoryn_wiki_get_tree, causoryn_wiki_get_page, causoryn_wiki_search, causoryn_wiki_get_links, causoryn_wiki_get_versions, causoryn_wiki_diff); Zod envelope doğrulaması, authorization, size limitleri; @modelcontextprotocol/sdk 1.32.2 (v1.x hattı — TŞ §6 SDK v2 hedefine yükseltme npm install yasağı nedeniyle yapılamadı; bkz. src/index.ts SDK sürüm notu) (TŞ v2.1 §5, §10, §11, §14, §15, §16A.8).",
   "type": "module",
   "exports": {
@@ -11,15 +12,15 @@
     "build:bundle": "node scripts/build-bundle.mjs"
   },
   "dependencies": {
-    "@causoryn/contracts": "0.1.0",
-    "@causoryn/domain": "0.1.0",
-    "@causoryn/graph": "0.1.0",
-    "@causoryn/indexing": "0.1.0",
-    "@causoryn/preflight": "0.1.0",
-    "@causoryn/storage-sqlite": "0.1.0",
-    "@causoryn/verification": "0.1.0",
-    "@causoryn/wiki": "0.1.0",
-    "@causoryn/workspace": "0.1.0",
+    "@causoryn/contracts": "0.2.0",
+    "@causoryn/domain": "0.2.0",
+    "@causoryn/graph": "0.2.0",
+    "@causoryn/indexing": "0.2.0",
+    "@causoryn/preflight": "0.2.0",
+    "@causoryn/storage-sqlite": "0.2.0",
+    "@causoryn/verification": "0.2.0",
+    "@causoryn/wiki": "0.2.0",
+    "@causoryn/workspace": "0.2.0",
     "@modelcontextprotocol/sdk": "^1.32.2",
     "better-sqlite3": "^13.0.3",
     "zod": "^4.6.7"

@@ -3,7 +3,7 @@
  */
 
 export const CAUSORYN_PACKAGE_NAME = "causoryn" as const;
-export const CAUSORYN_PACKAGE_VERSION = "0.1.0" as const;
+export const CAUSORYN_PACKAGE_VERSION = "0.2.0" as const;
 
 export const HOST_CLIENT_IDS = [
   "antigravity",

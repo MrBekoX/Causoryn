@@ -1,17 +1,18 @@
 {
   "name": "@causoryn/verification",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
+  "license": "MIT",
   "description": "Verify_change çekirdeği (sprint-6 E1, TŞ v2.1 §10.4): preflightId (D4 manifesti) veya taban snapshot ↔ çalışma ağacı projeksiyonu karşılaştırması; architecture (C2 guard kuralları), contracts (D2/D3 compatibility+drift), graph-diff (compare deseni) ve test-plan (D6 adayları + not_run/observed dürüstlük durumu) denetimlerini taşıyan byte-deterministik doğrulama raporu. no_findings güvenli/kod garantisi değildir (raporda sabit uyarı); test koşucusu çalıştırılmaz, observed yalnızca kanıtla kabul edilir. Saf çekirdek: fs/saat/rastgelelik okumaz, MCP türü import etmez.",
   "type": "module",
   "exports": {
     ".": "./src/index.ts"
   },
   "dependencies": {
-    "@causoryn/contracts": "0.1.0",
-    "@causoryn/domain": "0.1.0",
-    "@causoryn/graph": "0.1.0",
-    "@causoryn/preflight": "0.1.0",
+    "@causoryn/contracts": "0.2.0",
+    "@causoryn/domain": "0.2.0",
+    "@causoryn/graph": "0.2.0",
+    "@causoryn/preflight": "0.2.0",
     "zod": "^4.6.7"
   }
 }
