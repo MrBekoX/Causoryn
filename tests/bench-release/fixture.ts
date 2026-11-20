@@ -19,9 +19,9 @@ import { sha256Hex, utf8Encode } from "@causoryn/domain";
  * TypeChecker üzerinden CALLS kenarları (fixture-ts-orders deseniyle aynı
  * kanıt şekli). Son dosyada dışa bağlantı yoktur.
  *
- * Güvenlik (statik güvenlik kuralı): dinamik yol parçaları fs çağrısına girmeden
- * ÖNCE whitelist regex ile doğrulanır (SAFE_* kalıpları); kök os.tmpdir()
- * gerçek yolu içinde olmak ZORUNDADIR (FIXTURE_ROOT_OUTSIDE_TMPDIR);
+ * Güvenlik (statik güvenlik kuralı: whitelist + kök hapsi): dinamik yol parçaları
+ * fs çağrısına girmeden ÖNCE whitelist regex ile doğrulanır (SAFE_* kalıpları);
+ * kök os.tmpdir() gerçek yolu içinde olmak ZORUNDADIR (FIXTURE_ROOT_OUTSIDE_TMPDIR);
  * workspace'e (<repo-root>) yazım mimari olarak imkânsızdır.
  */
 

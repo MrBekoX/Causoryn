@@ -42,8 +42,10 @@ import type { OutputSchemaProfile } from "./server.js";
  * - Çıplak `node stdio.ts` / `node dist/mcp-server.mjs` (0 argüman) çağrısında
  *   eski davranış %100 korunur (`allowRoots: []` default deny + `"full"` şema).
  * - `$HOME`, dosya sistemi kökü (`/`, `C:\`), `~/.causoryn`, `ZCODE_PLUGIN_DATA`,
- *   `--data-dir` ve Causoryn eklenti/bundle kurulum dizinleri ASLA proje kökü
- *   olarak yetkilendirilmez.
+ *   `--data-dir`, Causoryn eklenti/bundle kurulum dizinleri, hassas kullanıcı
+ *   dizinleri (`~/.ssh`, `~/.aws`, `~/.gnupg`, `~/.kube`, `~/.claude`,
+ *   `~/.codex`, `~/.zcode`) ve OS sistem dizinleri ASLA proje kökü olarak
+ *   yetkilendirilmez.
  * - Analiz edilen kaynak ağaca tek bayt bile yazılmaz; `--auto-data-dir`
  *   dizinleri oluşturulmadan ÖNCE yetkili köklerin dışında kaldığı doğrulanır.
  */
@@ -316,17 +318,27 @@ function isInsideResolvedDirs(
 }
 
 /**
- * Bir dizinin `AGENTS.md` + `package.json` `"workspaces"` taşıyan monorepo
+ * Bir dizinin `package.json` `"workspaces"` + monorepo kaynak işaretleri
+ * (`AGENTS.md` veya `packages/` + `adapters/` dizinleri) taşıyan monorepo
  * kaynak kökü olup olmadığını denetler (kök plugin manifesti barındırsa bile
- * geliştirici monorepo kökü reddedilmez; ancak `node_modules`, `_npx` veya
- * yasaklı eklenti dizinleri içindeki Git klonları asla monorepo sayılmaz).
+ * geliştirici ve kamuya açık dışa aktarılmış monorepo kökü reddedilmez;
+ * ancak `node_modules`, `_npx` veya yasaklı eklenti dizinleri içindeki Git
+ * klonları asla monorepo sayılmaz).
  */
 function isMonorepoWorkspaceRoot(
   dirPath: string,
   forbiddenEntries: readonly ResolvedDirEntry[] = [],
 ): boolean {
   try {
-    if (!statSync(path.join(dirPath, "AGENTS.md")).isFile()) {
+    const hasAgentsMd =
+      existsSync(path.join(dirPath, "AGENTS.md")) &&
+      statSync(path.join(dirPath, "AGENTS.md")).isFile();
+    const hasMonorepoDirs =
+      existsSync(path.join(dirPath, "packages")) &&
+      statSync(path.join(dirPath, "packages")).isDirectory() &&
+      existsSync(path.join(dirPath, "adapters")) &&
+      statSync(path.join(dirPath, "adapters")).isDirectory();
+    if (!hasAgentsMd && !hasMonorepoDirs) {
       return false;
     }
     const pkgRaw = readFileSync(path.join(dirPath, "package.json"), "utf8");
@@ -478,6 +490,92 @@ function deriveForbiddenPluginDirs(
   return entries;
 }
 
+const SENSITIVE_HOME_SUBDIRS = [
+  ".ssh",
+  ".aws",
+  ".gnupg",
+  ".kube",
+  ".claude",
+  ".codex",
+  ".zcode",
+] as const;
+
+const POSIX_SYSTEM_DIRS = [
+  "/etc",
+  "/private/etc",
+  "/System",
+  "/usr",
+  "/proc",
+  "/sys",
+  "/root",
+] as const;
+
+const WINDOWS_FALLBACK_SYSTEM_DIRS = [
+  "C:\\Windows",
+  "C:\\Program Files",
+  "C:\\Program Files (x86)",
+  "C:\\ProgramData",
+] as const;
+
+const WINDOWS_SYSTEM_ENV_KEYS = [
+  "SystemRoot",
+  "WINDIR",
+  "ProgramFiles",
+  "ProgramFiles(x86)",
+  "ProgramData",
+] as const;
+
+function readEnvValue(env: NodeJS.ProcessEnv, key: string): string | undefined {
+  const direct = env[key];
+  if (direct !== undefined) return direct;
+  if (process.platform === "win32") {
+    const target = key.toLowerCase();
+    for (const [k, v] of Object.entries(env)) {
+      if (k.toLowerCase() === target) {
+        return v;
+      }
+    }
+  }
+  return undefined;
+}
+
+function deriveSensitiveUserDirs(homeDir: string): ResolvedDirEntry[] {
+  if (homeDir.trim().length === 0) return [];
+  return SENSITIVE_HOME_SUBDIRS.map((subdir) =>
+    toResolvedDirEntry(path.join(homeDir, subdir)),
+  );
+}
+
+function deriveSystemDirs(env: NodeJS.ProcessEnv): ResolvedDirEntry[] {
+  const rawDirs: string[] = [];
+  if (process.platform === "win32") {
+    for (const key of WINDOWS_SYSTEM_ENV_KEYS) {
+      const value = readEnvValue(env, key)?.trim();
+      if (value !== undefined && value.length > 0) {
+        rawDirs.push(value);
+      }
+    }
+    for (const fallback of WINDOWS_FALLBACK_SYSTEM_DIRS) {
+      rawDirs.push(fallback);
+    }
+  } else {
+    for (const dir of POSIX_SYSTEM_DIRS) {
+      rawDirs.push(dir);
+    }
+  }
+
+  const seen = new Set<string>();
+  const entries: ResolvedDirEntry[] = [];
+  for (const rawDir of rawDirs) {
+    if (rawDir.trim().length === 0) continue;
+    const comparable = normalizeComparablePath(rawDir);
+    if (seen.has(comparable)) continue;
+    seen.add(comparable);
+    entries.push(toResolvedDirEntry(rawDir));
+  }
+  return entries;
+}
+
 /**
  * Aday çalışma dizininin güvenli bir proje kökü olup olmadığını ayrıntılı
  * gerekçesiyle denetler.
@@ -490,9 +588,10 @@ export function inspectProjectRootSafety(
     return { safe: false, reason: "boş veya geçersiz yol" };
   }
 
+  const lexicalCandidate = path.resolve(candidatePath);
   let real: string;
   try {
-    real = stripWin32DevicePrefix(realpathSync(path.resolve(candidatePath)));
+    real = stripWin32DevicePrefix(realpathSync(lexicalCandidate));
     if (!statSync(real).isDirectory()) {
       return { safe: false, reason: `dizin değil: ${real}` };
     }
@@ -537,6 +636,18 @@ export function inspectProjectRootSafety(
   const forbiddenEntries = deriveForbiddenPluginDirs(rawHome, options);
   if (isInsideResolvedDirs(real, real, forbiddenEntries)) {
     return { safe: false, reason: "plugin-install-directory" };
+  }
+
+  // 5) Hassas kullanıcı kimlik/yapılandırma dizinleri (~/.ssh, ~/.aws, ~/.gnupg, ~/.kube, ~/.claude, ~/.codex, ~/.zcode)
+  const sensitiveEntries = deriveSensitiveUserDirs(rawHome);
+  if (isInsideResolvedDirs(lexicalCandidate, real, sensitiveEntries)) {
+    return { safe: false, reason: "sensitive-directory" };
+  }
+
+  // 6) OS sistem kök/sistem dizinleri (/etc, /private/etc, /System, /usr, /proc, /sys, /root, C:\Windows, Program Files, ProgramData)
+  const systemEntries = deriveSystemDirs(env);
+  if (isInsideResolvedDirs(lexicalCandidate, real, systemEntries)) {
+    return { safe: false, reason: "system-directory" };
   }
 
   // Adayın kendisi (veya monorepo olmayan üst atası) Causoryn plugin kurulumuysa reddet

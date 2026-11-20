@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, copyFileSync, rmSync, writeFileSync, readFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, copyFileSync, rmSync, writeFileSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
@@ -55,9 +55,8 @@ const CS_FIXTURE = path.join(REPO_ROOT, "examples", "fixture-csharp-orders");
 const PY_FIXTURE = path.join(REPO_ROOT, "examples", "fixture-python-app");
 const GO_FIXTURE = path.join(REPO_ROOT, "examples", "fixture-go-app");
 const RS_FIXTURE = path.join(REPO_ROOT, "examples", "fixture-rust-app");
-const GO_TOOLCHAIN_EXE = "go";
-/** Sabit Go toolchain yolu (bu makinenin kanıtlanmış yolu; DATA amaçlı). */
-const GO_BINARY = existsSync(GO_TOOLCHAIN_EXE) ? GO_TOOLCHAIN_EXE : "go";
+/** Çözümlenmiş Go çalıştırılabilir yolu: CAUSORYN_GO_BINARY veya PATH'teki "go". */
+const GO_BINARY = process.env["CAUSORYN_GO_BINARY"]?.trim() || "go";
 const FIXED_NOW = "2026-11-15T00:00:00.000Z";
 
 /* ------------------------------------------------------------------ */

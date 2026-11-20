@@ -1,5 +1,6 @@
 import { execFile as execFileCallback } from "node:child_process";
-import { lstat, readFile, readdir, realpath, stat } from "node:fs/promises";
+import { constants as fsConstants } from "node:fs";
+import { lstat, open, readdir, realpath, stat } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
 
@@ -35,6 +36,7 @@ import { GraphRepositoryError } from "./errors.js";
  * - compare/git-command-failed: git sıfır olmayan çıkış kodu döndü.
  * - compare/ref-not-found: doğrulanmış ref depoda çözümlenemedi.
  * - compare/blob-not-found: ref:path nesnesi okunamadı.
+ * - compare/blob-too-large: çalışma ağacı blob boyutu maxBufferBytes sınırını aştı.
  * - compare/tree-too-large: ağaç girişi sayısı sınırı aşıldı.
  * - compare/git-unexpected-output: git çıktısı beklenen biçimde değil.
  */
@@ -184,6 +186,47 @@ export function assertValidBlobPath(blobPath: string): string {
   return blobPath;
 }
 
+const GIT_ENV_ALLOWLIST = [
+  "PATH",
+  "SystemRoot",
+  "COMSPEC",
+  "TEMP",
+  "TMP",
+  "HOME",
+  "USERPROFILE",
+  "LANG",
+  "LC_ALL",
+  "TZ",
+] as const;
+
+/**
+ * Git alt sürecine geçilecek daraltılmış ortamı kurar: yalnızca temel çalışma
+ * değişkenleri (allowlist) korunur; üst süreçteki gizli anahtar/token'lar
+ * miraslanmaz ve sistem git yapılandırması ile etkileşimli istem zorla kapatılır.
+ */
+export function buildGitEnv(
+  sourceEnv: NodeJS.ProcessEnv = process.env,
+): Record<string, string> {
+  const env: Record<string, string> = {};
+  const lowerIndex =
+    process.platform === "win32"
+      ? new Map(Object.entries(sourceEnv).map(([k, v]) => [k.toLowerCase(), v]))
+      : null;
+
+  for (const key of GIT_ENV_ALLOWLIST) {
+    const raw =
+      sourceEnv[key] ??
+      (lowerIndex !== null ? lowerIndex.get(key.toLowerCase()) : undefined);
+    if (typeof raw === "string" && raw.length > 0) {
+      env[key] = raw;
+    }
+  }
+
+  env["GIT_CONFIG_NOSYSTEM"] = "1";
+  env["GIT_TERMINAL_PROMPT"] = "0";
+  return env;
+}
+
 export interface RunGitOptions {
   readonly timeoutMs?: number;
   readonly maxBufferBytes?: number;
@@ -239,6 +282,7 @@ export async function runGit(
       {
         shell: false,
         windowsHide: true,
+        env: buildGitEnv(process.env),
         timeout: options?.timeoutMs ?? DEFAULT_GIT_TIMEOUT_MS,
         maxBuffer: options?.maxBufferBytes ?? DEFAULT_MAX_BUFFER_BYTES,
       },
@@ -418,12 +462,151 @@ export async function readGitTree(
   return entries;
 }
 
+function isStrictlyWithinRealRoot(realRoot: string, realTarget: string): boolean {
+  const boundary = realRoot.endsWith(path.sep) ? realRoot : realRoot + path.sep;
+  if (process.platform === "win32") {
+    const rootLower = realRoot.toLowerCase();
+    const targetLower = realTarget.toLowerCase();
+    const boundaryLower = boundary.toLowerCase();
+    return targetLower !== rootLower && targetLower.startsWith(boundaryLower);
+  }
+  return realTarget !== realRoot && realTarget.startsWith(boundary);
+}
+
+async function readWorkingTreeBlob(
+  repoRoot: string,
+  blobPath: string,
+  maxBytes: number,
+): Promise<string> {
+  const resolved = assertResolvedWithinRepoRoot(repoRoot, blobPath);
+  const preLstat = await lstat(resolved).catch(() => undefined);
+  if (preLstat === undefined) {
+    throw new GraphRepositoryError(
+      "compare/blob-not-found",
+      `Çalışma ağacı dosyası bulunamadı: ${blobPath}`,
+    );
+  }
+  if (preLstat.isSymbolicLink()) {
+    throw new GraphRepositoryError(
+      "compare/invalid-blob-path",
+      `Blob yolu sembolik bağ (bağlar izlenmez): ${blobPath}`,
+    );
+  }
+  if (!preLstat.isFile()) {
+    throw new GraphRepositoryError(
+      "compare/invalid-blob-path",
+      `Blob yolu normal dosya değil: ${blobPath}`,
+    );
+  }
+
+  // Ara bileşenlerdeki bağlarla depo kökünden dışarı çıkışa karşı gerçek
+  // yol sınırlaması (lexical confinement tek başına yetmez).
+  const [realRoot, realResolved] = await Promise.all([
+    realpath(repoRoot),
+    realpath(resolved).catch(() => undefined),
+  ]);
+  if (
+    realResolved === undefined ||
+    !isStrictlyWithinRealRoot(realRoot, realResolved)
+  ) {
+    throw new GraphRepositoryError(
+      "compare/invalid-blob-path",
+      `Blob yolu sembolik bağ ile depo kökünden dışarı çıkıyor: ${blobPath}`,
+    );
+  }
+
+  const openFlags =
+    process.platform === "win32"
+      ? fsConstants.O_RDONLY
+      : fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0);
+
+  let handle;
+  try {
+    handle = await open(resolved, openFlags);
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException | undefined)?.code;
+    if (code === "ENOENT") {
+      throw new GraphRepositoryError(
+        "compare/blob-not-found",
+        `Çalışma ağacı dosyası bulunamadı: ${blobPath}`,
+      );
+    }
+    if (code === "ELOOP" || code === "EISDIR") {
+      throw new GraphRepositoryError(
+        "compare/invalid-blob-path",
+        `Blob yolu normal dosya olarak açılamadı: ${blobPath}`,
+      );
+    }
+    throw error;
+  }
+
+  try {
+    const openStat = await handle.stat();
+    if (!openStat.isFile()) {
+      throw new GraphRepositoryError(
+        "compare/invalid-blob-path",
+        `Açılan blob tanıtıcısı normal dosya değil: ${blobPath}`,
+      );
+    }
+    if (openStat.size > maxBytes) {
+      throw new GraphRepositoryError(
+        "compare/blob-too-large",
+        `Çalışma ağacı dosyası boyut sınırını aşıyor (${openStat.size} > ${maxBytes} bayt): ${blobPath}`,
+      );
+    }
+
+    // Açma sonrası TOCTOU doğrulaması: gerçek yol hâlâ depo kökünde ve
+    // açılan dosya tanıtıcısı aynı dosya düğümüne işaret ediyor olmalı.
+    const [postLstat, postReal] = await Promise.all([
+      lstat(resolved).catch(() => undefined),
+      realpath(resolved).catch(() => undefined),
+    ]);
+    if (
+      postLstat === undefined ||
+      postLstat.isSymbolicLink() ||
+      !postLstat.isFile() ||
+      postReal === undefined ||
+      !isStrictlyWithinRealRoot(realRoot, postReal) ||
+      (openStat.ino !== 0 &&
+        postLstat.ino !== 0 &&
+        (postLstat.dev !== openStat.dev || postLstat.ino !== openStat.ino))
+    ) {
+      throw new GraphRepositoryError(
+        "compare/invalid-blob-path",
+        `Blob yolu açma sonrası doğrulamadan geçemedi (TOCTOU/bağ değişimi): ${blobPath}`,
+      );
+    }
+
+    const chunkSize = Math.min(Math.max(maxBytes, 1), 64 * 1024);
+    const chunks: Buffer[] = [];
+    let totalBytes = 0;
+    while (true) {
+      const remainingAllowance = maxBytes - totalBytes + 1;
+      const toRead = Math.min(chunkSize, remainingAllowance);
+      const buf = Buffer.allocUnsafe(toRead);
+      const { bytesRead } = await handle.read(buf, 0, toRead, null);
+      if (bytesRead === 0) break;
+      totalBytes += bytesRead;
+      if (totalBytes > maxBytes) {
+        throw new GraphRepositoryError(
+          "compare/blob-too-large",
+          `Çalışma ağacı dosyası okuma sırasında boyut sınırını aştı (> ${maxBytes} bayt): ${blobPath}`,
+        );
+      }
+      chunks.push(buf.subarray(0, bytesRead));
+    }
+    return Buffer.concat(chunks, totalBytes).toString("utf8");
+  } finally {
+    await handle.close();
+  }
+}
+
 /**
  * Bir ref'teki tek bir blob'un metin içeriğini okur. `working-tree`
  * referansında izinli depo kökünden salt-okunur dosya okuması yapılır.
  * Sembolik bağlar her iki modda da izlenmez: son bileşeni bağ olan yol
  * reddedilir; ara bileşen bağlarıyla kök dışına kaçış realpath sınırlaması
- * ile engellenir.
+ * ve açma sonrası tanıtıcı doğrulamasıyla engellenir.
  */
 export async function readGitBlob(
   repoRoot: string,
@@ -435,37 +618,11 @@ export async function readGitBlob(
   assertValidBlobPath(blobPath);
   assertRepoRoot(repoRoot);
   if (ref === WORKING_TREE_REF) {
-    const resolved = assertResolvedWithinRepoRoot(repoRoot, blobPath);
-    const fileStat = await lstat(resolved).catch(() => undefined);
-    if (fileStat === undefined) {
-      throw new GraphRepositoryError(
-        "compare/blob-not-found",
-        `Çalışma ağacı dosyası bulunamadı: ${blobPath}`,
-      );
-    }
-    if (fileStat.isSymbolicLink()) {
-      throw new GraphRepositoryError(
-        "compare/invalid-blob-path",
-        `Blob yolu sembolik bağ (bağlar izlenmez): ${blobPath}`,
-      );
-    }
-    // Ara bileşenlerdeki bağlarla depo kökünden dışarı çıkışa karşı gerçek
-    // yol sınırlaması (lexical confinement tek başına yetmez).
-    const [realRoot, realResolved] = await Promise.all([
-      realpath(repoRoot),
-      realpath(resolved).catch(() => undefined),
-    ]);
-    if (
-      realResolved === undefined ||
-      realResolved === realRoot ||
-      !realResolved.startsWith(realRoot + path.sep)
-    ) {
-      throw new GraphRepositoryError(
-        "compare/invalid-blob-path",
-        `Blob yolu sembolik bağ ile depo kökünden dışarı çıkıyor: ${blobPath}`,
-      );
-    }
-    return readFile(resolved, "utf8");
+    const effectiveMaxBytes =
+      options?.maxBufferBytes !== undefined && Number.isFinite(options.maxBufferBytes)
+        ? Math.max(0, Math.floor(options.maxBufferBytes))
+        : DEFAULT_MAX_BUFFER_BYTES;
+    return readWorkingTreeBlob(repoRoot, blobPath, effectiveMaxBytes);
   }
   try {
     // Yalnızca blob türü okunur: ağaç yolunda 'cat-file blob' tür uyuşmazlığı

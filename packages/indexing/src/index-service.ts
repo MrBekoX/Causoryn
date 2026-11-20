@@ -133,13 +133,13 @@ import { collectInventory, type InventoryEntry } from "./inventory.js";
  * Manifest hizası (denetim bulgusu): bu sabit packages/indexing
  * package.json sürümüyle KİLİTLİDİR (test: index-service-csharp.test.ts
  * "INDEXING_VERSION packages/indexing manifest sürümüyle aynıdır") —
- * mcp-server iç workspace bağımlılıklarını exact "0.1.0" pinlediğinden
- * (packages/mcp-server/package.json:13) sürüm yükseltmesi manifest-first
+ * mcp-server iç workspace bağımlılıklarını exact manifest sürümüne pinlediğinden
+ * (packages/mcp-server/package.json) sürüm yükseltmesi manifest-first
  * yapılmalıdır; aksi halde npm çözümlemesi kırılır. Pipeline davranış
  * kimliği, bu sürümden bağımsız olarak analyzerFingerprint fp2 şemasıyla
  * taşınır (fp1→fp2 geçişi snapshot meta'da ayrışır).
  */
-export const INDEXING_VERSION = "0.1.0";
+export const INDEXING_VERSION = "0.2.0";
 
 /** Envanter/adaptasyon limitleri (TŞ §20 index bölümü). */
 export interface IndexLimits {

@@ -78,7 +78,7 @@ export function runWorkerAnalyze(
   input: RunWorkerAnalyzeInput,
 ): Promise<WorkerRunOutcome> {
   // Savunma: binary adı ve dizin güvenlik filtresinden geçmeli; aksi
-  // halde süreç hiç başlatılmaz (statik güvenlik bulgusu savunma katmanı).
+  // halde süreç hiç başlatılmaz (statik güvenlik kuralı: literal komut + sabit argüman).
   if (
     !isSafeBinaryPath(input.workerBinaryName) ||
     !isSafeBinaryPath(input.workerDir)

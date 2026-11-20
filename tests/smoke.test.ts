@@ -18,7 +18,7 @@ const repoRoot = path.resolve(
 
 /**
  * Tüm dosya erişimleri repo kökü ile sınırlanır: path traversal koruması —
- * hedef resolve edilir ve repo kökü altında kaldığı doğrulanır (statik güvenlik
+ * hedef resolve edilir ve repo kökü altında kaldığı doğrulanır (statik
  * güvenlik kuralı; Causoryn Workspace Gateway'in same-root ilkesinin ayna
  * görüntüsü, TŞ v2.1 §9/§25/2).
  */

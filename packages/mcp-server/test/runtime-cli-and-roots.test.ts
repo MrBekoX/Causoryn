@@ -307,6 +307,35 @@ describe("isSafeProjectRoot — güvenli proje kökü filtresi", () => {
           scriptPath: scriptInMono,
         }),
       ).toBe(true);
+
+      // Seçenek 1 kamuya açık dışa aktarım monorepo kökü (AGENTS.md yok,
+      // package.json workspaces + packages/ + adapters/ + kök plugin.json var):
+      const publicMonoDir = path.join(sandbox.fakeHome, "projects", "causoryn-public-export");
+      mkdirSync(path.join(publicMonoDir, "packages", "mcp-server", "src"), { recursive: true });
+      mkdirSync(path.join(publicMonoDir, "adapters", "typescript", "src"), { recursive: true });
+      writeFileSync(
+        path.join(publicMonoDir, "package.json"),
+        JSON.stringify({ name: "causoryn-monorepo", private: true, workspaces: ["packages/*", "adapters/*"] }),
+        "utf8",
+      );
+      writeFileSync(
+        path.join(publicMonoDir, "plugin.json"),
+        JSON.stringify({ name: "causoryn" }),
+        "utf8",
+      );
+      writeFileSync(
+        path.join(publicMonoDir, "mcp_config.json"),
+        JSON.stringify({ mcpServers: {} }),
+        "utf8",
+      );
+      const scriptInPublicMono = path.join(publicMonoDir, "packages", "mcp-server", "src", "stdio.ts");
+      writeFileSync(scriptInPublicMono, "// entry\n", "utf8");
+      expect(
+        isSafeProjectRoot(publicMonoDir, {
+          homeDir: sandbox.fakeHome,
+          scriptPath: scriptInPublicMono,
+        }),
+      ).toBe(true);
     } finally {
       sandbox.cleanup();
     }
@@ -379,6 +408,73 @@ describe("isSafeProjectRoot — güvenli proje kökü filtresi", () => {
           env: { ZCODE_PLUGIN_ROOT: zcodeEnvClone },
         }),
       ).toEqual({ safe: false, reason: "plugin-install-directory" });
+    } finally {
+      sandbox.cleanup();
+    }
+  });
+
+  it("hassas kullanıcı dizinlerini (~/.ssh, ~/.aws, ~/.gnupg, ~/.kube, ~/.claude, ~/.codex, ~/.zcode) sensitive-directory ve OS sistem dizinlerini system-directory gerekçesiyle reddeder; normal proje dizinleri kabul edilir", () => {
+    const sandbox = createTempSandbox();
+    try {
+      const sensitiveDirs = [
+        path.join(sandbox.fakeHome, ".ssh"),
+        path.join(sandbox.fakeHome, ".ssh", "keys"),
+        path.join(sandbox.fakeHome, ".aws"),
+        path.join(sandbox.fakeHome, ".gnupg"),
+        path.join(sandbox.fakeHome, ".kube"),
+        path.join(sandbox.fakeHome, ".claude"),
+        path.join(sandbox.fakeHome, ".claude", "projects"),
+        path.join(sandbox.fakeHome, ".codex"),
+        path.join(sandbox.fakeHome, ".zcode"),
+      ];
+
+      for (const dir of sensitiveDirs) {
+        mkdirSync(dir, { recursive: true });
+        expect(
+          inspectProjectRootSafety(dir, { homeDir: sandbox.fakeHome, env: {} }),
+          `hassas dizin reddedilmeli: ${dir}`,
+        ).toEqual({ safe: false, reason: "sensitive-directory" });
+        expect(isSafeProjectRoot(dir, { homeDir: sandbox.fakeHome, env: {} })).toBe(false);
+      }
+
+      // OS sistem dizinleri: platforma özgü gerçek sistem kökü + Windows env override
+      if (process.platform === "win32") {
+        const winSystemRoot = process.env["SystemRoot"] ?? "C:\\Windows";
+        if (existsSync(winSystemRoot)) {
+          expect(
+            inspectProjectRootSafety(winSystemRoot, { homeDir: sandbox.fakeHome }),
+          ).toEqual({ safe: false, reason: "system-directory" });
+          expect(isSafeProjectRoot(winSystemRoot, { homeDir: sandbox.fakeHome })).toBe(false);
+        }
+        const fakeSysRoot = path.join(sandbox.rootDir, "FakeWindows");
+        const fakeSysSub = path.join(fakeSysRoot, "System32");
+        mkdirSync(fakeSysSub, { recursive: true });
+        expect(
+          inspectProjectRootSafety(fakeSysRoot, {
+            homeDir: sandbox.fakeHome,
+            env: { SystemRoot: fakeSysRoot },
+          }),
+        ).toEqual({ safe: false, reason: "system-directory" });
+        expect(
+          inspectProjectRootSafety(fakeSysSub, {
+            homeDir: sandbox.fakeHome,
+            env: { SystemRoot: fakeSysRoot },
+          }),
+        ).toEqual({ safe: false, reason: "system-directory" });
+      } else if (existsSync("/etc")) {
+        expect(
+          inspectProjectRootSafety("/etc", { homeDir: sandbox.fakeHome, env: {} }),
+        ).toEqual({ safe: false, reason: "system-directory" });
+        expect(isSafeProjectRoot("/etc", { homeDir: sandbox.fakeHome, env: {} })).toBe(false);
+      }
+
+      // Pozitif kontrol: normal kullanıcı proje dizinleri kabul edilmeye devam eder.
+      expect(
+        inspectProjectRootSafety(sandbox.projectADir, { homeDir: sandbox.fakeHome, env: {} }).safe,
+      ).toBe(true);
+      expect(
+        inspectProjectRootSafety(sandbox.projectBDir, { homeDir: sandbox.fakeHome, env: {} }).safe,
+      ).toBe(true);
     } finally {
       sandbox.cleanup();
     }
@@ -940,6 +1036,94 @@ describe("DynamicCausorynContext + attachMcpRootsWorkspaceBinder — dinamik MCP
       } finally {
         await client.close();
         await server.close();
+        dynamicContext.close();
+      }
+    } finally {
+      sandbox.cleanup();
+    }
+  });
+
+  it("roots/list üzerinden gelen ~/.ssh, ~/.aws, ~/.claude ve OS sistem dizinlerini atlayıp ilk güvenli proje kökünü bağlar", async () => {
+    const sandbox = createTempSandbox();
+    try {
+      const sshDir = path.join(sandbox.fakeHome, ".ssh");
+      const awsDir = path.join(sandbox.fakeHome, ".aws");
+      const claudeDir = path.join(sandbox.fakeHome, ".claude");
+      mkdirSync(sshDir, { recursive: true });
+      mkdirSync(awsDir, { recursive: true });
+      mkdirSync(claudeDir, { recursive: true });
+
+      const systemDir =
+        process.platform === "win32"
+          ? (process.env["SystemRoot"] ?? "C:\\Windows")
+          : "/etc";
+
+      const dynamicContext = createDynamicCausorynContext(
+        createCausorynContext({ allowRoots: [], autoIndex: true }, { logger: () => {} }),
+      );
+      try {
+        const hookRef: { current?: (toolName: string) => Promise<void> } = {};
+        const server = createCausorynMcpServer(dynamicContext, {
+          outputSchemaProfile: "omit",
+          beforeToolCall: async (toolName) => {
+            await hookRef.current?.(toolName);
+          },
+        });
+
+        const binderLogs: string[] = [];
+        const binder = attachMcpRootsWorkspaceBinder(server, dynamicContext, {
+          allowCwd: true,
+          cwd: sshDir, // ~/.ssh -> sensitive-directory gerekçesiyle reddedilmeli!
+          autoDataDir: true,
+          dataDir: sandbox.dataDir,
+          client: "desktop",
+          homeDir: sandbox.fakeHome,
+          logger: (msg) => binderLogs.push(msg),
+        });
+        hookRef.current = binder.beforeToolCall;
+
+        expect(dynamicContext.config.allowRoots).toEqual([]);
+        expect(binderLogs.some((m) => m.includes("sensitive-directory"))).toBe(true);
+
+        const advertised = [
+          { uri: pathToFileURL(sshDir).href, name: "ssh" },
+          { uri: pathToFileURL(awsDir).href, name: "aws" },
+          { uri: pathToFileURL(claudeDir).href, name: "claude" },
+          ...(existsSync(systemDir)
+            ? [{ uri: pathToFileURL(systemDir).href, name: "os-system" }]
+            : []),
+          { uri: pathToFileURL(sandbox.projectADir).href, name: "alpha" },
+        ];
+
+        const client = new Client(
+          { name: "sensitive-roots-client", version: "1.0.0" },
+          { capabilities: { roots: { listChanged: true } } },
+        );
+        client.setRequestHandler(ListRootsRequestSchema, async () => ({
+          roots: advertised,
+        }));
+
+        const [clientTx, serverTx] = InMemoryTransport.createLinkedPair();
+        await server.connect(serverTx);
+        await client.connect(clientTx);
+
+        try {
+          const res = (await client.callTool({
+            name: "causoryn_workspace_summary",
+            arguments: { workspaceId: "alpha-service" },
+          })) as CallToolResult;
+          const env = res.structuredContent as { status?: string; workspaceId?: string };
+          expect(env.status, JSON.stringify({ env, binderLogs })).toBe("ok");
+          expect(env.workspaceId).toBe("alpha-service");
+          expect(binderLogs.some((m) => m.includes("sensitive-directory"))).toBe(true);
+          if (existsSync(systemDir)) {
+            expect(binderLogs.some((m) => m.includes("system-directory"))).toBe(true);
+          }
+        } finally {
+          await client.close();
+          await server.close();
+        }
+      } finally {
         dynamicContext.close();
       }
     } finally {

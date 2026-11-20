@@ -544,10 +544,10 @@ describe("INDEXED_ADAPTERS — beş adapter kaydı (get_capabilities yüzeyi)", 
     expect(cs?.analyzerId).toBe("roslyn-worker");
     expect(cs?.version).toBe("0.1.0");
     expect(cs?.source).toBe("adapters/csharp-roslyn");
-    // TŞ §7 seviye tablosu: C#/.NET → L2 + controller/minimal API L3.
+    // TŞ §7 seviye tablosu + K-019(1): C#/.NET → L2 + controller/minimal API L3.
     expect(cs?.levels.astParse).toBe("L1");
     expect(cs?.levels.symbolResolution).toBe("L2");
-    expect(cs?.levels.frameworkLinkers).toBe("yok");
+    expect(cs?.levels.frameworkLinkers).toBe("aspnet-core-route-attributes (L3)");
     // Denetim bulgusu: mcp-server get_capabilities yüzeyi yalnızca üç
     // levels alanını taşıyor (services.ts jobRecordOf/analytics map).
     // routeDetection alanı yüzeye ULAŞAMAYACAĞI için beyan edilmez
@@ -625,7 +625,7 @@ describe("analyzerFingerprint fp2 şeması (birim)", () => {
       settings: {
         dotnetCommand: "dotnet",
         requestTimeoutMs: 30_000,
-        workerDllPath: "<repo-root>\\native\\roslyn-worker\\bin\\Debug\\net10.0\\Causoryn.RoslynWorker.dll",
+        workerDllPath: "/workspace/native/roslyn-worker/bin/Debug/net10.0/Causoryn.RoslynWorker.dll",
       },
     };
     const a = buildAnalyzerFingerprint({

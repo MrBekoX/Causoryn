@@ -218,6 +218,14 @@ describe("MCP server — protokol düzeyi", { timeout: 30_000 }, () => {
         symbolResolution: "L2",
         frameworkLinkers: "express+nextjs",
       });
+      const cs = adapters.find((a) => a.language === "csharp");
+      expect(cs).toBeDefined();
+      expect(cs?.analyzerId).toBe("roslyn-worker");
+      expect(cs?.levels).toEqual({
+        astParse: "L1",
+        symbolResolution: "L2",
+        frameworkLinkers: "aspnet-core-route-attributes (L3)",
+      });
       const py = adapters.find((a) => a.language === "python");
       expect(py?.analyzerId).toBe("python-worker");
       expect(py?.levels).toEqual({

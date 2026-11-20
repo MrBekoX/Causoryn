@@ -509,8 +509,10 @@ describe("causoryn_wiki_build", { timeout: 60_000 }, () => {
 /* causoryn_wiki_get_tree                                              */
 /* ------------------------------------------------------------------ */
 
-async function connectWithWiki(): Promise<ClientPair> {
-  const pair = await connectClient(makeContext());
+async function connectWithWiki(
+  configOverrides: Record<string, unknown> = {},
+): Promise<ClientPair> {
+  const pair = await connectClient(makeContext(configOverrides));
   await buildWiki(pair.client);
   return pair;
 }
@@ -1067,29 +1069,45 @@ describe("causoryn_wiki_get_links", { timeout: 60_000 }, () => {
 
 describe("causoryn_wiki_get_versions", { timeout: 60_000 }, () => {
   it("pozitif: yayımlanmış wiki revisionRef'i available döner; working-tree alias git-read ile çözülür; bilinmeyen ref not_available + gerekçe taşır", async () => {
-    const pair = await connectWithWiki();
+    // .git içermeyen arşiv/ZIP indirmelerinde de deterministik çalışması için
+    // fixture kopyası os.tmpdir() altında kendi geçici git deposuna kurulur.
+    const gitFixtureRoot = mkdtempSync(
+      path.join(os.tmpdir(), "causoryn-wiki-versions-git-"),
+    );
     try {
-      const result = expectEnvelope(
-        await callTool(pair.client, "causoryn_wiki_get_versions", {
-          refs: ["working-tree", "HEAD"],
-        }),
-      );
-      expect(result.status).toBe("ok");
-      const data = result.data as Record<string, unknown>;
-      const versions = data.versions as Array<Record<string, unknown>>;
-      expect(versions.length).toBeGreaterThanOrEqual(2);
-      const held = versions.find(
-        (version) => version.revisionRef === "working-tree",
-      );
-      expect(held?.availability).toBe("available");
-      expect(String(held?.wikiSnapshotId)).toMatch(/^wiki:/);
-      expect(typeof held?.builtAt).toBe("string");
-      const headEntry = versions.find((version) => version.revisionRef === "HEAD");
-      expect(headEntry?.availability).toBe("not_available");
-      expect(String(headEntry?.notAvailableReason).length).toBeGreaterThan(0);
-      expect(headEntry?.wikiSnapshotId).toBeNull();
+      cpSync(FIXTURE_ROOT, gitFixtureRoot, { recursive: true });
+      git(gitFixtureRoot, "init");
+      git(gitFixtureRoot, "config", "user.email", "vitest@example.com");
+      git(gitFixtureRoot, "config", "user.name", "vitest");
+      git(gitFixtureRoot, "add", ".");
+      git(gitFixtureRoot, "commit", "-m", "init");
+
+      const pair = await connectWithWiki({ allowRoots: [gitFixtureRoot] });
+      try {
+        const result = expectEnvelope(
+          await callTool(pair.client, "causoryn_wiki_get_versions", {
+            refs: ["working-tree", "HEAD"],
+          }),
+        );
+        expect(result.status).toBe("ok");
+        const data = result.data as Record<string, unknown>;
+        const versions = data.versions as Array<Record<string, unknown>>;
+        expect(versions.length).toBeGreaterThanOrEqual(2);
+        const held = versions.find(
+          (version) => version.revisionRef === "working-tree",
+        );
+        expect(held?.availability).toBe("available");
+        expect(String(held?.wikiSnapshotId)).toMatch(/^wiki:/);
+        expect(typeof held?.builtAt).toBe("string");
+        const headEntry = versions.find((version) => version.revisionRef === "HEAD");
+        expect(headEntry?.availability).toBe("not_available");
+        expect(String(headEntry?.notAvailableReason).length).toBeGreaterThan(0);
+        expect(headEntry?.wikiSnapshotId).toBeNull();
+      } finally {
+        await pair.close();
+      }
     } finally {
-      await pair.close();
+      rmSync(gitFixtureRoot, { recursive: true, force: true });
     }
   });
 
@@ -1217,6 +1235,8 @@ function extendFixtureCopy(copyRoot: string): void {
 function git(cwd: string, ...args: string[]): string {
   return execFileSync("git", ["-C", cwd, ...args], {
     encoding: "utf8",
+    shell: false,
+    windowsHide: true,
     stdio: ["ignore", "pipe", "ignore"],
   });
 }

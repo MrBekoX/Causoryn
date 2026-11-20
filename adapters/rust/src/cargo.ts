@@ -7,8 +7,8 @@
  * sabit dizindir (cargo-home). Argümanlar tamamen sabittir:
  * ["build", "--manifest-path", <repo-içi sabit manifest yolu>] — shell
  * YOKTUR; kaynak içerikleri yalnızca stdin üzerinden taşınır (worker istek
- * gövdesinde). statik güvenlik bulgusu (değişken komut → spawn) için üç savunma
- * katmanı:
+ * gövdesinde). Statik güvenlik kuralı (literal komut + sabit argüman;
+ * değişken komut → spawn yasak) için üç savunma katmanı:
  *   1. Komut her yerde LİTERAL "cargo"; konum override'ı CAUSORYN_CARGO_HOME
  *      env'iyle PATH öneki olarak yapılır (yol filtresinden geçmek zorunda).
  *   2. isSafeDirPath: override dizininde kontrol/kabuk meta karakterleri

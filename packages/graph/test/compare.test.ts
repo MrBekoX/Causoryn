@@ -9,6 +9,7 @@ import { describe, expect, it, beforeAll, afterAll } from "vitest";
 import { GraphRepositoryError } from "../src/errors.js";
 import {
   assertValidGitRef,
+  buildGitEnv,
   readGitBlob,
   readGitTree,
   runGit,
@@ -750,6 +751,92 @@ describe("git okuma katmanı — geçici depo (salt-okunur cat-file/ls-tree)", (
     const diffFirst = diffContentSets(first, second);
     const diffSecond = diffContentSets(first, second);
     expect(JSON.stringify(diffFirst)).toBe(JSON.stringify(diffSecond));
+  });
+
+  it("güvenlik: buildGitEnv gizli ortam değişkenlerini ayıklar, minimal allowlist'i korur ve GIT_CONFIG_NOSYSTEM=1 + GIT_TERMINAL_PROMPT=0 zorlar", () => {
+    const filtered = buildGitEnv({
+      PATH: "/usr/bin:/bin",
+      SystemRoot: "C:\\Windows",
+      COMSPEC: "C:\\Windows\\System32\\cmd.exe",
+      TEMP: "/tmp",
+      TMP: "/tmp",
+      HOME: "/home/dev",
+      USERPROFILE: "C:\\Users\\dev",
+      LANG: "C.UTF-8",
+      LC_ALL: "C.UTF-8",
+      TZ: "UTC",
+      OPENAI_API_KEY: "sk-live-secret",
+      GITHUB_TOKEN: "ghp_secret_token",
+      AWS_SECRET_ACCESS_KEY: "aws-secret-key",
+      ANTHROPIC_API_KEY: "ant-secret-key",
+      GIT_CONFIG_NOSYSTEM: "0",
+      GIT_TERMINAL_PROMPT: "1",
+    });
+
+    expect(filtered["OPENAI_API_KEY"]).toBeUndefined();
+    expect(filtered["GITHUB_TOKEN"]).toBeUndefined();
+    expect(filtered["AWS_SECRET_ACCESS_KEY"]).toBeUndefined();
+    expect(filtered["ANTHROPIC_API_KEY"]).toBeUndefined();
+
+    expect(filtered["PATH"]).toBe("/usr/bin:/bin");
+    expect(filtered["SystemRoot"]).toBe("C:\\Windows");
+    expect(filtered["COMSPEC"]).toBe("C:\\Windows\\System32\\cmd.exe");
+    expect(filtered["TEMP"]).toBe("/tmp");
+    expect(filtered["TMP"]).toBe("/tmp");
+    expect(filtered["HOME"]).toBe("/home/dev");
+    expect(filtered["USERPROFILE"]).toBe("C:\\Users\\dev");
+    expect(filtered["LANG"]).toBe("C.UTF-8");
+    expect(filtered["LC_ALL"]).toBe("C.UTF-8");
+    expect(filtered["TZ"]).toBe("UTC");
+
+    expect(filtered["GIT_CONFIG_NOSYSTEM"]).toBe("1");
+    expect(filtered["GIT_TERMINAL_PROMPT"]).toBe("0");
+    expect(Object.keys(filtered).sort()).toEqual([
+      "COMSPEC",
+      "GIT_CONFIG_NOSYSTEM",
+      "GIT_TERMINAL_PROMPT",
+      "HOME",
+      "LANG",
+      "LC_ALL",
+      "PATH",
+      "SystemRoot",
+      "TEMP",
+      "TMP",
+      "TZ",
+      "USERPROFILE",
+    ]);
+  });
+
+  it("güvenlik: working-tree readGitBlob maxBufferBytes sınırını aşan dosyaları compare/blob-too-large ile ve normal dosya olmayan yolları compare/invalid-blob-path ile reddeder", async () => {
+    const wtRoot = await mkdtemp(path.join(tmpdir(), "causoryn-wt-blob-"));
+    try {
+      await mkdir(path.join(wtRoot, "src", "subdir"), { recursive: true });
+      await writeFile(path.join(wtRoot, "src", "small.ts"), "export const ok = 1;\n", "utf8");
+      await writeFile(path.join(wtRoot, "src", "oversized.ts"), "x".repeat(512), "utf8");
+
+      // Sınır içindeki normal dosya sorunsuz okunur.
+      const small = await readGitBlob(wtRoot, "working-tree", "src/small.ts", {
+        maxBufferBytes: 128,
+      });
+      expect(small).toBe("export const ok = 1;\n");
+
+      // Sınır aşımı: compare/blob-too-large ile reddedilir.
+      await expectRejectsCode(
+        () =>
+          readGitBlob(wtRoot, "working-tree", "src/oversized.ts", {
+            maxBufferBytes: 128,
+          }),
+        "compare/blob-too-large",
+      );
+
+      // Normal dosya olmayan yol (dizin): compare/invalid-blob-path ile reddedilir.
+      await expectRejectsCode(
+        () => readGitBlob(wtRoot, "working-tree", "src/subdir"),
+        "compare/invalid-blob-path",
+      );
+    } finally {
+      await rm(wtRoot, { recursive: true, force: true });
+    }
   });
 });
 

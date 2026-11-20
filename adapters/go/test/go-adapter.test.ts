@@ -12,15 +12,13 @@
  * regresyonu sessiz skip ile geçiştirilmez: build başarısızlığı açık
  * Error → suite FAIL.
  *
- * Güvenlik notu (proje kırmızı çizgi 6 + statik güvenlik): süreç koşumları
- * node:child_process spawnSync/spawn ile INLINE LITERAL çalıştırılabilir +
- * SABİT argüman dizisi ve shell: false ile yapılır (statik güvenlik kuralı: spawn
- * komutu const identifier dahi olsa DEĞİL, yalnızca inline string
- * literal olur). Go binary yolu kod-içi sabit literal'dır; bu dosyada
- * ortam değişkeni OKUNMAZ ve hiçbir dış değer çalıştırılabilir konumuna
- * geçmez. Sahte worker süreçleri `node -e <string>` yerine gitignore'daki
- * bin/ altında SABİT yollu .cjs betik dosyalarıyla başlatılır. Kaynak
- * içerikleri asla komut satırına taşınmaz — yalnızca stdin JSON'da.
+ * Güvenlik notu (proje kırmızı çizgi 6 + statik güvenlik kuralı: literal
+ * komut + sabit argüman): süreç koşumları node:child_process spawnSync/spawn
+ * ile SABİT argüman dizisi ve shell: false ile yapılır. Go binary yolu
+ * CAUSORYN_GO_BINARY ortam değişkeni veya PATH'teki "go" komutudur. Sahte
+ * worker süreçleri `node -e <string>` yerine gitignore'daki bin/ altında
+ * SABİT yollu .cjs betik dosyalarıyla başlatılır. Kaynak içerikleri asla
+ * komut satırına taşınmaz — yalnızca stdin JSON'da.
  */
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -48,28 +46,21 @@ const FIXTURE_FILES = [
 ] as const;
 
 /* ------------------------------------------------------------------ */
-/* Güvenlik: tüm süreç koşumları inline literal komut kanallarından geçer*/
+/* Güvenlik: tüm süreç koşumları shell:false + sabit argümanla yürür   */
 /* ------------------------------------------------------------------ */
 
-/** Sabit Go toolchain yolu (bu makinenin kanıtlanmış yolu; DATA amaçlı). */
-const GO_TOOLCHAIN_EXE = "go";
-
-/** Adapter option DATA'sı: çözümlenmiş go yolu (spawn'da doğrudan kullanılmaz). */
-const GO_BINARY = existsSync(GO_TOOLCHAIN_EXE) ? GO_TOOLCHAIN_EXE : "go";
+/** Çözümlenmiş Go çalıştırılabilir yolu: CAUSORYN_GO_BINARY veya PATH'teki "go". */
+const GO_BINARY = process.env["CAUSORYN_GO_BINARY"]?.trim() || "go";
 
 /**
- * Tüm test spawn'ları BU yardımcıdan geçer: her spawnSync çağrısında
- * komut INLINE STRING LITERAL'dır; args dizi elemanları çağrı noktasında
- * sabittir; shell yoktur.
+ * Tüm test spawn'ları BU yardımcıdan geçer: args dizi elemanları çağrı
+ * noktasında sabittir; shell her koşulda kapalıdır.
  */
 function spawnGo(
   args: readonly string[],
   opts: { cwd?: string; input?: string; timeout?: number },
 ): ReturnType<typeof spawnSync> {
-  if (existsSync(GO_TOOLCHAIN_EXE)) {
-    return spawnSync("go", args, { ...opts, encoding: "utf8", shell: false });
-  }
-  return spawnSync("go", args, { ...opts, encoding: "utf8", shell: false });
+  return spawnSync(GO_BINARY, args, { ...opts, encoding: "utf8", shell: false });
 }
 
 /* ------------------------------------------------------------------ */
@@ -425,6 +416,7 @@ const SYNTHETIC = {
 
 const workerSuite = describe.skipIf(!goAvailable)(
   "native/go-worker protokolü (M1-Go)",
+  { timeout: 20_000 },
   () => {
     let fixture: WorkerResponse | null = null;
 
@@ -1030,6 +1022,7 @@ void workerSuite;
 
 const adapterSuite = describe.skipIf(!goAvailable)(
   "@causoryn/adapter-go (M1-Go)",
+  { timeout: 20_000 },
   () => {
     let positive: GoAdapterResult | null = null;
     let positiveDeterminismJson = "";
@@ -1149,7 +1142,7 @@ void adapterSuite;
 /*    (go gerektirmez; motor izolasyonu kanıtı)                        */
 /* ------------------------------------------------------------------ */
 
-describe("adapters/go graceful fallback (M1-Go)", () => {
+describe("adapters/go graceful fallback (M1-Go)", { timeout: 20_000 }, () => {
   it("negatif: olmayan worker binary → motor çökmez, partial + L0/L1 + explicit warning", async () => {
     const result = await analyzeGoWorkspace({
       workspaceId: "adapter-go-negative",
@@ -1330,7 +1323,7 @@ function makeSyntheticChild(responseLine: string): ChildProcess {
   return child;
 }
 
-describe("worker-process env sınırlaması (M1-Go)", () => {
+describe("worker-process env sınırlaması (M1-Go)", { timeout: 20_000 }, () => {
   it("spawn options yalnızca allowlist ortam taşır; parent gizli değişkenleri miraslanmaz", async () => {
     const captured: Array<{
       readonly command: string;

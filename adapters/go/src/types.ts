@@ -105,9 +105,9 @@ export interface GoSourceFile {
 
 export interface GoAdapterOptions {
   /**
-   * go çalıştırılabilirinin yolu/adı. Default literal "go" (PATH); bu
-   * makinede toolchain go'de olabilir — testler
-   * explicit yol geçebilir. Değer kullanıcı girdisi DEĞİLDİR: config
+   * go çalıştırılabilirinin yolu/adı. Default literal "go" (PATH); özel
+   * kurulumlarda (ör. `/usr/local/go/bin/go` veya `C:/Program Files/Go/bin/go.exe`)
+   * açık yol verilebilir. Değer kullanıcı girdisi DEĞİLDİR: config
    * sabitidir ve komut satırına aynen geçirilir (interpolasyon yok).
    */
   readonly goBinaryPath?: string;

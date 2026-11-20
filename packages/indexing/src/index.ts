@@ -142,12 +142,11 @@ export interface IndexedAdapterInfo {
  * Kayıtlı dil adapter'ları (get_capabilities bu metadata'yı sunar).
  * B9 ile csharp-roslyn kaydı eklendi: TŞ §7 seviye tablosu uyarınca
  * C#/.NET → "Roslyn sidecar: L2 + controller/minimal API L3" — worker
- * astParse (L1) + symbolResolution (L2) + route katmanı (L3) üretir.
- * L3 route yeteneğinin adı ("aspnetcore-controller-attribute-and-minimal-
- * api-call-pattern") Protocol.cs CapabilitiesOut default'udur; yüzey
- * sözleşmesine girmediği için burada sabit kopyalanmaz — ayrıntı
- * adapters/csharp-roslyn/README.md'dedir. frameworkLinkers B1 diliminde
- * açıkça üretilmez (worker frameworkLinkers=false beyanı).
+ * astParse (L1) + symbolResolution (L2) + ASP.NET Core route katmanı (L3:
+ * controller öznitelikleri + minimal API Endpoint/ROUTES_TO, K-019(1))
+ * üretir; L3 route yeteneği Python/Go/Rust ile tutarlı biçimde
+ * `frameworkLinkers` alanında ("aspnet-core-route-attributes (L3)") taşınır.
+ * Ayrıntı adapters/csharp-roslyn/README.md'dedir.
  *
  * M2 ile python/go/rust sidecar adapter kayıtları eklendi (TŞ §7, §23
  * dil planı). Dürüstlük notları (worker CapabilitiesOut beyanlarıyla
@@ -184,7 +183,7 @@ export const INDEXED_ADAPTERS: readonly IndexedAdapterInfo[] = [
     levels: {
       astParse: "L1",
       symbolResolution: "L2",
-      frameworkLinkers: "yok",
+      frameworkLinkers: "aspnet-core-route-attributes (L3)",
     },
     source: "adapters/csharp-roslyn",
   },

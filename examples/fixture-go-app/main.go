@@ -60,7 +60,7 @@ func main() {
 	http.HandleFunc("/orders", ordersHandler)
 	http.HandleFunc("/orders/create", createOrderHandler)
 	http.HandleFunc("/health", healthHandler)
-	// Sunucu kaynak sınırları (statik güvenlik bulgusu): okuma/yazma zaman aşımları
+	// Sunucu kaynak sınırları (güvenlik kuralı): okuma/yazma zaman aşımları
 	// açık bir http.Server ile tanımlanır.
 	srv := &http.Server{
 		Addr:              ":8080",
