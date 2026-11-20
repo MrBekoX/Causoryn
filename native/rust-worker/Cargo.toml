@@ -16,7 +16,7 @@ description = "Causoryn Rust sidecar worker — syn 2 tabanlı yerel ve determin
 # zorunlu; feature kapalıyken LineColumn bilgisi üretilmez).
 [dependencies]
 serde_json = "1"
-syn = { version = "2", features = ["full", "visit", "printing", "parsing", "extra-traits"] }
+syn = { version = "3", features = ["full", "visit", "printing", "parsing", "extra-traits"] }
 proc-macro2 = { version = "1", features = ["span-locations"] }
 
 # debug profili adapter'ın beklenen binary konumudur:
