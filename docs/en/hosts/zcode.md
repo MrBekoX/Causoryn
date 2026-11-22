@@ -3,19 +3,19 @@
 > **Language / Dil:** [Türkçe](../../hosts/zcode.md) · English · [Compatibility Matrix](../compatibility-matrix.md)
 
 > Evidence: Technical Specification v2.1 §17, §22, §25/8 · K-002 (ZCode as fourth host adapter) ·
-> K-021/K-022 (`causoryn@0.2.0` CLI setup wizard + npm plugin marketplace) · `marketplace.json` ·
+> K-021/K-022 (`causoryn@0.2.1` CLI setup wizard + npm plugin marketplace) · `marketplace.json` ·
 > `packages/causoryn/.zcode-plugin/plugin.json` · `packages/causoryn/src/{setup.ts,doctor.ts}` ·
 > `integrations/zcode/causoryn/README.md` · Verification suites: `plugin-package.test.ts`,
 > `plugin-dev-marketplace.test.ts`, `packages/causoryn/test/setup-and-doctor.test.ts`,
 > `tests/open-source-distribution.test.ts`, `tests/hosts-docs.test.ts`.
 
-Causoryn is a local, deterministic, LLM-free MCP code-intelligence engine (`causoryn@0.2.0`). On
+Causoryn is a local, deterministic, LLM-free MCP code-intelligence engine (`causoryn@0.2.1`). On
 ZCode (GLM), it provides **two complementary installation surfaces**:
 
 1. **Primary CLI Setup (recommended):** One-command configuration of `~/.zcode/cli/config.json`
-   (`mcp.servers.causoryn`) + `~/.zcode/skills/` via `npx causoryn@0.2.0 setup --client zcode --yes`.
+   (`mcp.servers.causoryn`) + `~/.zcode/skills/` via `npx causoryn@0.2.1 setup --client zcode --yes`.
 2. **Experimental ZCode Plugin Marketplace:** Repository root `marketplace.json` (`source: "npm"`)
-   and packaged `.zcode-plugin/plugin.json` (guarded by `--expected-version 0.2.0`).
+   and packaged `.zcode-plugin/plugin.json` (guarded by `--expected-version 0.2.1`).
 
 ## Honesty Statement — Desktop GUI Installation (`NOT RUN`) vs Automated Schema & CLI Verification
 
@@ -27,27 +27,27 @@ ZCode (GLM), it provides **two complementary installation surfaces**:
 - **Automatically verified surfaces:** The root `marketplace.json`, packaged
   `packages/causoryn/.zcode-plugin/plugin.json`, monorepo dev fixture
   (`integrations/zcode/.claude-plugin/marketplace.json` + `integrations/zcode/causoryn/`), isolated
-  temporary-`$HOME` lifecycle of `npx causoryn@0.2.0 setup --client zcode --yes` / `doctor` /
+  temporary-`$HOME` lifecycle of `npx causoryn@0.2.1 setup --client zcode --yes` / `doctor` /
   `--uninstall`, and real packed `.tgz` `stdio` handshakes (all 29 tools) are verified end-to-end by
   `plugin-package.test.ts`, `plugin-dev-marketplace.test.ts`, `setup-and-doctor.test.ts`, and
   `open-source-distribution.test.ts`.
 
 ---
 
-## 1. Primary Setup — One-Command CLI (`npx causoryn@0.2.0 setup`)
+## 1. Primary Setup — One-Command CLI (`npx causoryn@0.2.1 setup`)
 
 ```bash
 # Preview planned changes without modifying any files (read-only)
-npx causoryn@0.2.0 setup --client zcode --dry-run
+npx causoryn@0.2.1 setup --client zcode --dry-run
 
 # Configure ~/.zcode/cli/config.json (mcp.servers.causoryn) + ~/.zcode/skills/
-npx causoryn@0.2.0 setup --client zcode --yes
+npx causoryn@0.2.1 setup --client zcode --yes
 
 # Read-only health & alignment check
-npx causoryn@0.2.0 doctor
+npx causoryn@0.2.1 doctor
 
 # Clean removal (removes mcp.servers.causoryn + 4 routing skills)
-npx causoryn@0.2.0 setup --client zcode --uninstall --yes
+npx causoryn@0.2.1 setup --client zcode --uninstall --yes
 ```
 
 ### What `causoryn setup --client zcode` configures (`packages/causoryn/src/setup.ts`)
@@ -88,7 +88,7 @@ npx causoryn@0.2.0 setup --client zcode --uninstall --yes
    with a `command` field) so no previously configured server is lost.
 4. **4 canonical routing skills (`~/.zcode/skills/`):** Installs `causoryn`, `map-system`,
    `preflight-change`, and `verify-change` under `~/.zcode/skills/<name>/SKILL.md`.
-5. **Clean uninstall (`--uninstall`):** `npx causoryn@0.2.0 setup --client zcode --uninstall --yes`
+5. **Clean uninstall (`--uninstall`):** `npx causoryn@0.2.1 setup --client zcode --uninstall --yes`
    deletes `mcp.servers.causoryn` (cleaning up empty `mcp.servers` / `mcp` wrapper objects when no
    other servers remain), removes the 4 Causoryn skill directories from `~/.zcode/skills/`, and
    removes `~/.causoryn/runtime` if no other host config references it.
@@ -100,7 +100,7 @@ npx causoryn@0.2.0 setup --client zcode --uninstall --yes
 The repository root `marketplace.json` can be added in the ZCode desktop UI (**Settings → Plugin
 Management → Discover → +**) via the GitHub repository (`https://github.com/MrBekoX/Causoryn`) or a
 local checkout; it declares an `npm` plugin source
-(`source: { "source": "npm", "package": "causoryn", "version": "0.2.0" }`) with bilingual `en`/`tr`
+(`source: { "source": "npm", "package": "causoryn", "version": "0.2.1" }`) with bilingual `en`/`tr`
 `description_i18n` metadata.
 
 The packaged `packages/causoryn/.zcode-plugin/plugin.json` wires `mcpServers.causoryn` as:
@@ -114,7 +114,7 @@ The packaged `packages/causoryn/.zcode-plugin/plugin.json` wires `mcpServers.cau
       "args": [
         "${ZCODE_PLUGIN_ROOT}/scripts/plugin-mcp-launcher.mjs",
         "--expected-version",
-        "0.2.0",
+        "0.2.1",
         "--allow-cwd",
         "--auto-data-dir",
         "--client",
@@ -129,7 +129,7 @@ The packaged `packages/causoryn/.zcode-plugin/plugin.json` wires `mcpServers.cau
 ### ZCode environment variables and safety boundaries
 
 - **`ZCODE_PLUGIN_ROOT`:** Read-only installation root of the ZCode plugin. `plugin-mcp-launcher.mjs`
-  validates `package.json` against `--expected-version 0.2.0` without spawning a nested `npx`
+  validates `package.json` against `--expected-version 0.2.1` without spawning a nested `npx`
   subprocess and loads `dist/mcp-server.mjs` directly. `deriveForbiddenPluginDirs`
   (`packages/mcp-server/src/runtime-cli.ts`) strictly blocks `ZCODE_PLUGIN_ROOT` and
   `~/.zcode/plugins` from ever being authorized as an analyzed project root.

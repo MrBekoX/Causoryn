@@ -35,7 +35,7 @@ Per-tool typical error codes in the tables below were compiled from two sources:
 
 | Tool | Inputs (primary fields) | Output (`data` summary) | Typical error codes |
 |---|---|---|---|
-| `causoryn_get_capabilities` | `workspace?` | Adapter capability levels L0–L4 across 5 languages (including C# `frameworkLinkers: "aspnet-core-route-attributes (L3)"`), server identity (`SERVER_VERSION = "0.2.0"`, `SCHEMA_VERSION = "2.0"`), server limits, protocol revision, and the 29 published tool names; requires no snapshot | `WORKSPACE_NOT_AUTHORIZED` |
+| `causoryn_get_capabilities` | `workspace?` | Adapter capability levels L0–L4 across 5 languages (including C# `frameworkLinkers: "aspnet-core-route-attributes (L3)"`), server identity (`SERVER_VERSION = "0.2.1"`, `SCHEMA_VERSION = "2.0"`), server limits, protocol revision, and the 29 published tool names; requires no snapshot | `WORKSPACE_NOT_AUTHORIZED` |
 | `causoryn_workspace_summary` | `workspaceId?` | Project, language, framework, entrypoint, and coverage summary derived strictly from the latest published `GraphSnapshot`; empty workspace returns `partial` | `WORKSPACE_NOT_AUTHORIZED`, `INDEX_NOT_READY`, `INVALID_ARGUMENT`, `LIMIT_EXCEEDED` |
 | `causoryn_index_status` | `jobId?` | Progress, snapshot ID, `stale` flag, and diagnostics for the specified (or latest) background index job; returns `null` fields + actionable warning if none exists | `WORKSPACE_NOT_AUTHORIZED`, `INVALID_ARGUMENT`, `LIMIT_EXCEEDED` |
 | `causoryn_refresh_index` | `mode` (`full` \| `incremental` — content-hash comparative refresh; B7 per-file parse reuse and file-watcher MCP surface remain open), `scope?` (explicitly rejected) | Returns `jobId` immediately while indexing runs asynchronously; writes **only** to Causoryn's authorized graph repository (`InMemoryGraphRepository` or `storage.dataDbPath` SQLite) | `WORKSPACE_NOT_AUTHORIZED`, `INVALID_ARGUMENT`, `LIMIT_EXCEEDED`, `PATH_DENIED` |
@@ -65,17 +65,17 @@ Per-tool typical error codes in the tables below were compiled from two sources:
 | `causoryn_wiki_build` | `workspaceId?`, `mode` (`full`\|`incremental`), `revision?`, `scope?` (explicitly rejected) | Projects the published `GraphSnapshot` into a deterministic `WikiSnapshot` and atomically publishes **only** to the authorized data-root SQLite (`wiki.dataDbPath` or `--auto-data-dir`); falls back gracefully to `full` + `fallbackReason` when incremental preconditions are unavailable | `WORKSPACE_NOT_AUTHORIZED`, `INDEX_NOT_READY`, `INVALID_ARGUMENT`, `PATH_DENIED`, `EXPORT_NOT_ALLOWED` |
 | `causoryn_wiki_get_tree` | `parentId?`, `depth?`, `limit?`, `cursor?` | 12-root-category hierarchy in taxonomy order with `childCount`, `coverage`, and `freshness`; empty categories remain `no_data` without filler prose | `WORKSPACE_NOT_AUTHORIZED`, `INDEX_NOT_READY`, `WIKI_PAGE_NOT_FOUND`, `INVALID_ARGUMENT` |
 | `causoryn_wiki_get_page` | `pageId`, `sections?` (`sectionKey` filter), `limit?`, `cursor?` | Single page: generated Markdown sections, `evidenceRefs` + deduplicated `sourceRefs` provenance, `coverage`, and `freshness`; overlay annotations are not returned on this MCP surface (§16A.6 local UI/CLI flow) | `WORKSPACE_NOT_AUTHORIZED`, `INDEX_NOT_READY`, `WIKI_PAGE_NOT_FOUND`, `INVALID_ARGUMENT` |
-| `causoryn_wiki_search` | `query`, `snapshotId?`, `limit?`, `cursor?` (extra filter fields return explicit `INVALID_ARGUMENT` in v0.2.0) | Phrase-escaped multi-column FTS5 search ranked by exact symbol/route > title > module > BM25 > graph proximity; returns `matchedFields`, `evidenceIds`, `snippet`, and `skippedRankLegs`; zero embeddings (Red Line 1) | `WORKSPACE_NOT_AUTHORIZED`, `INDEX_NOT_READY`, `INVALID_ARGUMENT`, `EVIDENCE_NOT_FOUND`, `LIMIT_EXCEEDED` |
+| `causoryn_wiki_search` | `query`, `snapshotId?`, `limit?`, `cursor?` (extra filter fields return explicit `INVALID_ARGUMENT` in v0.2.1) | Phrase-escaped multi-column FTS5 search ranked by exact symbol/route > title > module > BM25 > graph proximity; returns `matchedFields`, `evidenceIds`, `snippet`, and `skippedRankLegs`; zero embeddings (Red Line 1) | `WORKSPACE_NOT_AUTHORIZED`, `INDEX_NOT_READY`, `INVALID_ARGUMENT`, `EVIDENCE_NOT_FOUND`, `LIMIT_EXCEEDED` |
 | `causoryn_wiki_get_links` | `pageId`, `direction?`, `linkKinds?`, `limit?`, `cursor?` | `outgoing` + `incoming` (reverse-index backlinks) with `resolution` + `evidenceRefs`; unresolved targets preserved with `toPageId: null` + `brokenLinkDiagnostics` (K-013 #4) | `WORKSPACE_NOT_AUTHORIZED`, `INDEX_NOT_READY`, `WIKI_PAGE_NOT_FOUND`, `INVALID_ARGUMENT` |
 | `causoryn_wiki_get_versions` | `pageId?`, `refs?`, `limit?`, `cursor?` | Reports stored `WikiSnapshot` revisions as `available` (`contentHash`, `linkSetHash`, `templateVersion`, `coverage`); resolves Git branch/tag/commit aliases via read-only `git cat-file -t` (`working-tree` resolves without requiring `.git`) | `WORKSPACE_NOT_AUTHORIZED`, `INDEX_NOT_READY`, `WIKI_PAGE_NOT_FOUND`, `INVALID_ARGUMENT`, `INVALID_REVISION` |
 | `causoryn_wiki_diff` | `base`, `target`, `pageId?` | `addedPages`, `removedPages`, `changedSections`, `addedLinks`, `removedLinks`, `coverageDelta` (`{pageId, previous, current, reason?}`), `unresolvedDifferences`, and `contractChanges` (`{contractId, changeKind, summary}`, K-013 #7) | `WORKSPACE_NOT_AUTHORIZED`, `INDEX_NOT_READY`, `WIKI_PAGE_NOT_FOUND`, `INVALID_ARGUMENT`, `INVALID_REVISION`, `PATH_DENIED`, `LIMIT_EXCEEDED` |
 
-## Server Identity, 5-Language Capability Matrix & Fixed 15 Error Codes (v0.2.0)
+## Server Identity, 5-Language Capability Matrix & Fixed 15 Error Codes (v0.2.1)
 
 ### 1. Server Identity & Protocol Constants (`packages/mcp-server/src/version.ts`)
 
 - `SERVER_NAME = "causoryn"` — reported as `serverInfo.name` in the MCP `initialize` handshake.
-- `SERVER_VERSION = "0.2.0"` — Pre-1.0 Public Preview version (K-022; locked across root `package.json`, `packages/causoryn/package.json`, and `server.json`; per ADR-010, `1.0.0` is not declared while `[Unreleased]` 1.0.0 release gates remain open).
+- `SERVER_VERSION = "0.2.1"` — Pre-1.0 Public Preview version (K-022; locked across root `package.json`, `packages/causoryn/package.json`, and `server.json`; per ADR-010, `1.0.0` is not declared while `[Unreleased]` 1.0.0 release gates remain open).
 - `SCHEMA_VERSION = "2.0"` — populated in `envelope.schemaVersion` across all 29 tools.
 - `protocol.revision` — `LATEST_PROTOCOL_VERSION` re-exported from `@modelcontextprotocol/sdk`.
 
@@ -130,7 +130,7 @@ All domain, policy, and workspace errors travel inside `envelope.error` (`{ code
 
 ## Reuse Principle (No Duplicate Wiki Refresh/Export Tools)
 
-`causoryn_refresh_index` does not automatically rebuild the `WikiSnapshot` in v0.2.0; regenerating the Wiki projection is performed explicitly via `causoryn_wiki_build`. Likewise, `causoryn_export_documentation` currently exports the published `GraphSnapshot` (`json`, `markdown`, `mermaid`, `html`, `snapshot`), and passing `view` is explicitly rejected with `INVALID_ARGUMENT` (ADR-010: incomplete surfaces are never silently ignored). Separate `wiki_refresh` or `wiki_export` tools are intentionally **not** introduced, keeping the tool catalog locked at 22 + 7 = 29 tools.
+`causoryn_refresh_index` does not automatically rebuild the `WikiSnapshot` in v0.2.1; regenerating the Wiki projection is performed explicitly via `causoryn_wiki_build`. Likewise, `causoryn_export_documentation` currently exports the published `GraphSnapshot` (`json`, `markdown`, `mermaid`, `html`, `snapshot`), and passing `view` is explicitly rejected with `INVALID_ARGUMENT` (ADR-010: incomplete surfaces are never silently ignored). Separate `wiki_refresh` or `wiki_export` tools are intentionally **not** introduced, keeping the tool catalog locked at 22 + 7 = 29 tools.
 
 ## Zero-Config CLI, Dynamic Root Binding & `outputSchemaProfile` Contract (K-021)
 
@@ -153,7 +153,7 @@ All domain, policy, and workspace errors travel inside `envelope.error` (`{ code
 - [Architecture Overview](architecture.md) — monorepo package map and dependency boundaries
 - [CLI & Configuration](cli-and-configuration.md) — CLI flags, environment variables, and `CAUSORYN_CONFIG` reference
 - [Language Analyzers](language-analyzers.md) — 5-language AST/semantic adapters and resolution honesty
-- [Living Wiki Specification](wiki-spec.md) — Living Wiki Engine design contract and v0.2.0 status
+- [Living Wiki Specification](wiki-spec.md) — Living Wiki Engine design contract and v0.2.1 status
 - [Implementation Status](implementation-status.md) — phase-by-phase verification evidence
 - [Compatibility Matrix](compatibility-matrix.md) — host × verification result matrix
 - Historical/source references: `wiki/mcp-tools.md` · `packages/mcp-server/src/errors.ts`

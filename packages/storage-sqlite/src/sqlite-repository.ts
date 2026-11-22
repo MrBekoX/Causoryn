@@ -141,6 +141,10 @@ export class SqliteGraphRepository
 {
   private readonly db: Database.Database;
   private readonly statements = new Map<string, Database.Statement>();
+  private readonly buildPositions = new Map<
+    number,
+    { nodes: number; edges: number; evidence: number }
+  >();
   private buildSerial = 0;
 
   constructor(dbPath: string) {
@@ -176,7 +180,50 @@ export class SqliteGraphRepository
   }
 
   close(): void {
+    this.buildPositions.clear();
     this.db.close();
+  }
+
+  runInTransaction<T>(fn: () => T): T {
+    if (this.db.inTransaction) {
+      return fn();
+    }
+    const tx = this.db.transaction(fn);
+    try {
+      return tx();
+    } catch (error) {
+      // Rollback sonrasında bellek-içi pozisyon önbelleği sıfırlanır.
+      this.buildPositions.clear();
+      throw error;
+    }
+  }
+
+  private getBuildPositionCounter(sid: number): {
+    nodes: number;
+    edges: number;
+    evidence: number;
+  } {
+    let counter = this.buildPositions.get(sid);
+    if (counter === undefined) {
+      const maxNodes = (
+        this.stmt("SELECT COALESCE(MAX(position), 0) AS max_pos FROM nodes WHERE snapshot_sid = ?").get(
+          sid,
+        ) as { max_pos: number }
+      ).max_pos;
+      const maxEdges = (
+        this.stmt("SELECT COALESCE(MAX(position), 0) AS max_pos FROM edges WHERE snapshot_sid = ?").get(
+          sid,
+        ) as { max_pos: number }
+      ).max_pos;
+      const maxEvidence = (
+        this.stmt("SELECT COALESCE(MAX(position), 0) AS max_pos FROM evidence WHERE snapshot_sid = ?").get(
+          sid,
+        ) as { max_pos: number }
+      ).max_pos;
+      counter = { nodes: maxNodes, edges: maxEdges, evidence: maxEvidence };
+      this.buildPositions.set(sid, counter);
+    }
+    return counter;
   }
 
   registerWorkspace(record: WorkspaceRecord): void {
@@ -308,6 +355,7 @@ export class SqliteGraphRepository
       input.createdAt,
     );
     const row = this.requireBuildingRow(buildId);
+    this.buildPositions.set(row.sid, { nodes: 0, edges: 0, evidence: 0 });
     return this.buildInfo(row, 0, 0, 0);
   }
 
@@ -344,12 +392,13 @@ export class SqliteGraphRepository
       );
     }
     const location = node.location;
+    const counter = this.getBuildPositionCounter(row.sid);
+    const nextPos = counter.nodes + 1;
     this.runWrite(
       `INSERT INTO nodes
          (snapshot_sid, node_id, kind, qualified_name, language, relative_path,
           start_line, end_line, source_hash, attributes_json, position)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-         (SELECT COALESCE(MAX(position), 0) + 1 FROM nodes WHERE snapshot_sid = ?))`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       row.sid,
       node.id,
       node.kind,
@@ -360,8 +409,9 @@ export class SqliteGraphRepository
       location === undefined ? null : location.endLine,
       location === undefined ? null : location.sourceHash,
       canonicalJson(node.attributes as JsonValue),
-      row.sid,
+      nextPos,
     );
+    counter.nodes = nextPos;
   }
 
   addEvidence(buildId: string, evidence: Evidence): void {
@@ -373,12 +423,13 @@ export class SqliteGraphRepository
     ).get(row.sid, evidence.id);
     if (exists !== undefined) return;
     const span = evidence.span;
+    const counter = this.getBuildPositionCounter(row.sid);
+    const nextPos = counter.evidence + 1;
     this.runWrite(
       `INSERT INTO evidence
          (snapshot_sid, evidence_id, kind, relative_path, start_line, end_line,
           source_hash, analyzer_id, analyzer_version, rationale, position)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-         (SELECT COALESCE(MAX(position), 0) + 1 FROM evidence WHERE snapshot_sid = ?))`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       row.sid,
       evidence.id,
       evidence.kind,
@@ -389,8 +440,9 @@ export class SqliteGraphRepository
       evidence.analyzerId,
       evidence.analyzerVersion,
       evidence.rationale,
-      row.sid,
+      nextPos,
     );
+    counter.evidence = nextPos;
   }
 
   addEdge(buildId: string, edge: GraphEdge): void {
@@ -426,12 +478,13 @@ export class SqliteGraphRepository
             reason: edge.ambiguity.reason,
           });
     const evidenceIdsJson = canonicalJson([...edge.evidenceIds]);
+    const counter = this.getBuildPositionCounter(row.sid);
+    const nextPos = counter.edges + 1;
     this.runWrite(
       `INSERT INTO edges
          (snapshot_sid, edge_id, from_id, to_id, kind, resolution,
           evidence_ids_json, ambiguity_json, position)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?,
-         (SELECT COALESCE(MAX(position), 0) + 1 FROM edges WHERE snapshot_sid = ?))`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       row.sid,
       edge.id,
       edge.from,
@@ -440,8 +493,9 @@ export class SqliteGraphRepository
       edge.resolution,
       evidenceIdsJson,
       ambiguityJson,
-      row.sid,
+      nextPos,
     );
+    counter.edges = nextPos;
   }
 
   publish(
@@ -468,6 +522,7 @@ export class SqliteGraphRepository
           `Aktif build yok: ${buildId}`,
         );
       }
+      this.buildPositions.delete(row.sid);
       return graph;
     });
     try {
@@ -485,6 +540,9 @@ export class SqliteGraphRepository
 
   failBuild(buildId: string, reason: string): void {
     requireNonEmptyField("reason", reason);
+    const existing = this.stmt(
+      `SELECT sid FROM snapshots WHERE build_id = ? AND state = 'building' LIMIT 1`,
+    ).get(buildId) as { sid: number } | undefined;
     const result = this.runWrite(
       `UPDATE snapshots SET state = 'failed', failure_reason = ?
        WHERE build_id = ? AND state = 'building'`,
@@ -496,6 +554,9 @@ export class SqliteGraphRepository
         "graph/build-not-active",
         `Aktif build yok: ${buildId}`,
       );
+    }
+    if (existing !== undefined) {
+      this.buildPositions.delete(existing.sid);
     }
   }
 

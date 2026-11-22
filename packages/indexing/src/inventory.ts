@@ -54,19 +54,24 @@ export function collectInventory(
       const childRelative =
         nativeRelative === "" ? dirent.name : `${nativeRelative}${path.sep}${dirent.name}`;
       const childPosix = toPosixRelative(childRelative);
-      const pathDecision = policy.checkPath(canonicalRoot, childPosix);
-      if (!pathDecision.allowed) {
-        // Ignore/traversal/symlink kararı: dizinse alt ağaç budanır.
-        continue;
-      }
       if (dirent.isDirectory()) {
+        const dirDecision = policy.checkPath(canonicalRoot, childPosix);
+        if (!dirDecision.allowed) {
+          // Ignore/traversal/symlink kararı: dizinin alt ağacı budanır.
+          continue;
+        }
         walk(childRelative);
         continue;
       }
       if (!dirent.isFile()) {
+        // Symlink veya diğer girdiler için yol/sarmalama politikasını koru.
+        const entryDecision = policy.checkPath(canonicalRoot, childPosix);
+        if (!entryDecision.allowed) {
+          continue;
+        }
         continue;
       }
-      // 1) Açılıştan önce: uzantı + ignore + symlink kararları.
+      // 1) Açılıştan önce: checkFile kendi içinde checkPath (ignore + symlink) + uzantı + boyut uygular.
       const preDecision = policy.checkFile(canonicalRoot, childPosix);
       if (!preDecision.allowed) {
         continue;

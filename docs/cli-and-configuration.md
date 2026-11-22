@@ -4,7 +4,7 @@
 >
 > **Kanıt:** `packages/causoryn/src/{cli.ts,setup.ts,doctor.ts,runtime-stage.ts,types.ts}`, `packages/causoryn/scripts/{causoryn.mjs,plugin-mcp-launcher.mjs,lib/node-version-guard.mjs,verify-package-ready.mjs}`, `packages/mcp-server/src/{cli-stdio.ts,stdio.ts,runtime-cli.ts,config.ts,context.ts}`, `packages/workspace/src/policy-config.ts` (TŞ v2.1 §9, §10.1, §17, §20 · `ADR-008` · `K-021` · `K-022`).
 
-Bu kılavuz; `causoryn` (`v0.2.0` — Pre-1.0 Public Preview) komut satırı arayüzünü, ön-yükleme Node.js sürüm korumasını, plugin pazaryeri başlatıcısını, sıfır-ayar (`zero-config`) çalışma alanı güvenlik modelini, kaynak ağacı dışı (`out-of-tree`) veri dizini düzenini ve `CAUSORYN_CONFIG` şemasını kaynak kodla birebir eşleşecek şekilde belgeler.
+Bu kılavuz; `causoryn` (`v0.2.1` — Pre-1.0 Public Preview) komut satırı arayüzünü, ön-yükleme Node.js sürüm korumasını, plugin pazaryeri başlatıcısını, sıfır-ayar (`zero-config`) çalışma alanı güvenlik modelini, kaynak ağacı dışı (`out-of-tree`) veri dizini düzenini ve `CAUSORYN_CONFIG` şemasını kaynak kodla birebir eşleşecek şekilde belgeler.
 
 ---
 
@@ -80,7 +80,7 @@ Denetlenen dört katman:
 
 ### 1.4 `causoryn --version` ve `causoryn --help`
 
-- `causoryn --version` (`-v`, `version`): Paket sürümünü (`0.2.0`) `stdout`'a yazar ve `0` ile çıkar.
+- `causoryn --version` (`-v`, `version`): Paket sürümünü (`0.2.1`) `stdout`'a yazar ve `0` ile çıkar.
 - `causoryn --help` (`-h`, `help` veya argümansız `causoryn`): Yardım metnini `stdout`'a yazar ve `0` ile çıkar.
 
 ---
@@ -155,7 +155,7 @@ Causoryn analiz edilen proje ağacına **asla** tek bayt bile yazmaz. Kalıcı v
 
 - **Temel veri dizini önceliği (`resolveBaseDataDir`):** `--data-dir <mutlak-yol>` > `ZCODE_PLUGIN_DATA` > `~/.causoryn`.
 - **`mkdirSync` öncesi ve sonrası güvenlik doğrulaması:** Veri dizinleri oluşturulmadan **önce** tüm önek/ata dizinler taranır; sembolik bağlantılar (`CWE-59`; macOS sistem firmlink'leri `/var`, `/tmp`, `/etc` hariç), dangling symlink'ler ve yetkili `allowRoots` içine düşen yollar `CausorynConfigError` ile reddedilir. Oluşturma sonrasında `realpathSync` ile TOCTOU doğrulaması tekrarlanır.
-- **Geçici `_npx` çalışma zamanı sahnelemesi (`stagePersistentRuntime`):** `npx causoryn@0.2.0 setup` geçici bir `_npx`, `.npx` veya `os.tmpdir()` dizininden çalıştırıldığında paket içeriği `~/.causoryn/.runtime-stage-<pid>-<ts>` altına kopyalanıp atomik `renameSync` (hata anında `.runtime-prev-*` geri alma korumasıyla) ile `~/.causoryn/runtime` dizinine sahnelenir. Böylece npm önbelleği temizlense bile host konfigürasyonlarındaki giriş yolu kırılmaz.
+- **Geçici `_npx` çalışma zamanı sahnelemesi (`stagePersistentRuntime`):** `npx causoryn@0.2.1 setup` geçici bir `_npx`, `.npx` veya `os.tmpdir()` dizininden çalıştırıldığında paket içeriği `~/.causoryn/.runtime-stage-<pid>-<ts>` altına kopyalanıp atomik `renameSync` (hata anında `.runtime-prev-*` geri alma korumasıyla) ile `~/.causoryn/runtime` dizinine sahnelenir. Böylece npm önbelleği temizlense bile host konfigürasyonlarındaki giriş yolu kırılmaz.
 
 ---
 

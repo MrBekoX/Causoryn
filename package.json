@@ -1,6 +1,6 @@
 {
   "name": "causoryn-monorepo",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "private": true,
   "_versionDecision": "K-022 (2026-11-20): 0.2.0 Pre-1.0 Public Preview (1.0.0 ilan edilmedi; uzak v0.1.0 etiketi 4c9c188f üzerinde kilitli kaldığından yeni minor SemVer'e yükseltildi — ADR-010, bkz. CHANGELOG.md). SERVER_VERSION ile birebir.",
   "description": "Causoryn — LLM çalıştırmayan, yerel ve deterministik kod analizi MCP motoru (TŞ v2.1).",

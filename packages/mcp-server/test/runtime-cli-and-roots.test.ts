@@ -1669,4 +1669,75 @@ describe("stdio.ts — gerçek alt-süreç CLI modları ve geriye dönük uyumlu
       sandbox.cleanup();
     }
   });
+
+  it("v0.2.1: deferAutoIndex: true ile createCausorynContext senkron indekslemeden döner, arka plan işi başlatır ve waitForInitialIndex tamamlar", async () => {
+    const sandbox = createTempSandbox();
+    try {
+      const config = buildWorkspaceAutoConfig({
+        roots: [sandbox.projectADir],
+        autoDataDir: true,
+        dataDir: sandbox.dataDir,
+        homeDir: sandbox.fakeHome,
+      });
+      const ctx = createCausorynContext(config, { deferAutoIndex: true });
+      try {
+        // Başlatma anında senkron indeks yapılmaz ve iş henüz kuyruğa alınmaz (initialize bloklanmaz):
+        expect(ctx.jobManager.jobs().length).toBe(0);
+        expect(typeof ctx.startDeferredIndex).toBe("function");
+        expect(typeof ctx.waitForInitialIndex).toBe("function");
+        ctx.startDeferredIndex?.();
+        expect(ctx.jobManager.jobs().length).toBe(1);
+        await ctx.waitForInitialIndex?.(15_000);
+        const published = ctx.repository.getLatestPublished(ctx.config.workspaceId);
+        expect(published).toBeDefined();
+        expect(published?.snapshot.meta.state).toBe("ready");
+        expect(ctx.jobManager.jobs()[0]?.status).toBe("done");
+      } finally {
+        ctx.close();
+      }
+    } finally {
+      sandbox.cleanup();
+    }
+  });
+
+  it("v0.2.1: buildWorkspaceAutoConfig kök .gitignore desenlerini extraIgnore'a güvenli aktarır ve negasyonlu üst deseni aşırı-dışlamaz", () => {
+    const sandbox = createTempSandbox();
+    try {
+      mkdirSync(path.join(sandbox.projectADir, "backups"), { recursive: true });
+      writeFileSync(path.join(sandbox.projectADir, "backups", "dump.ts"), "export const dump = 1;\n");
+      mkdirSync(path.join(sandbox.projectADir, "deploy"), { recursive: true });
+      writeFileSync(path.join(sandbox.projectADir, "deploy", "keep.py"), "x = 1\n");
+      writeFileSync(
+        path.join(sandbox.projectADir, ".gitignore"),
+        [
+          "# yorum satiri",
+          "",
+          "backups/",
+          ".agent",
+          "deploy/*",
+          "!deploy/keep.py",
+        ].join("\n"),
+        "utf8",
+      );
+
+      const config = buildWorkspaceAutoConfig({
+        roots: [sandbox.projectADir],
+        autoDataDir: true,
+        dataDir: sandbox.dataDir,
+        homeDir: sandbox.fakeHome,
+      });
+      const ctx = createCausorynContext(config, { deferAutoIndex: true });
+      try {
+        expect(ctx.policy.checkPath(sandbox.projectADir, "backups/dump.ts").allowed).toBe(false);
+        expect(ctx.policy.checkPath(sandbox.projectADir, ".agent/notes.md").allowed).toBe(false);
+        // Negasyon istisnası taşıyan deploy/* aşırı-dışlanmamalı:
+        expect(ctx.policy.checkPath(sandbox.projectADir, "deploy/keep.py").allowed).toBe(true);
+        expect(ctx.policy.checkPath(sandbox.projectADir, "src/alpha.ts").allowed).toBe(true);
+      } finally {
+        ctx.close();
+      }
+    } finally {
+      sandbox.cleanup();
+    }
+  });
 });

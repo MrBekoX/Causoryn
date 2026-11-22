@@ -852,6 +852,95 @@ function assertDataDirAncestorsSafe(
   }
 }
 
+const MAX_GITIGNORE_BYTES = 256 * 1024;
+const MAX_GITIGNORE_PATTERNS = 500;
+
+/**
+ * Bir proje kökündeki `.gitignore` dosyasından salt-okunur, güvenli ve
+ * deterministik ignore desenleri okur (v0.2.1):
+ * - Symlink (CWE-59) veya > 256 KB dosyalar atlanır.
+ * - Yorum (`#`), boş satır ve `\0` içeren satırlar atlanır.
+ * - Negasyon (`!foo/...`) içeren bir dizin öneki varsa, aynı öneki hedefleyen
+ *   geniş desenler (`foo/*`, `foo/**`, `foo/`, `foo`) aşırı-dışlamayı önlemek
+ *   için atlanır.
+ */
+function readSafeGitignorePatterns(rootDir: string): string[] {
+  const gitignorePath = path.join(rootDir, ".gitignore");
+  try {
+    const st = lstatSync(gitignorePath);
+    if (st.isSymbolicLink() || !st.isFile() || st.size > MAX_GITIGNORE_BYTES) {
+      return [];
+    }
+    const raw = readFileSync(gitignorePath, "utf8");
+    const lines = raw.split(/\r?\n/);
+
+    const negatedTopSegments = new Set<string>();
+    const rawEntries: string[] = [];
+
+    for (const rawLine of lines) {
+      const trimmed = rawLine.trim();
+      if (trimmed.length === 0 || trimmed.startsWith("#") || trimmed.includes("\0")) {
+        continue;
+      }
+      if (trimmed.startsWith("!")) {
+        const rest = trimmed.slice(1).replace(/^\/+/, "").split("\\").join("/");
+        const firstSeg = rest.split("/")[0]?.trim();
+        if (firstSeg !== undefined && firstSeg.length > 0) {
+          negatedTopSegments.add(process.platform === "win32" ? firstSeg.toLowerCase() : firstSeg);
+        }
+        continue;
+      }
+      rawEntries.push(trimmed);
+    }
+
+    const patterns: string[] = [];
+    const seen = new Set<string>();
+    for (const entry of rawEntries) {
+      if (patterns.length >= MAX_GITIGNORE_PATTERNS) break;
+      const posix = entry.split("\\").join("/");
+      const stripped = posix.replace(/^\/+/, "");
+      const firstSeg = stripped.split("/")[0]?.trim() ?? "";
+      const comparableFirst = process.platform === "win32" ? firstSeg.toLowerCase() : firstSeg;
+      if (
+        comparableFirst.length > 0 &&
+        negatedTopSegments.has(comparableFirst) &&
+        (stripped === firstSeg ||
+          stripped === `${firstSeg}/` ||
+          stripped === `${firstSeg}/*` ||
+          stripped === `${firstSeg}/**`)
+      ) {
+        continue;
+      }
+      if (!seen.has(posix)) {
+        seen.add(posix);
+        patterns.push(posix);
+      }
+    }
+    return patterns;
+  } catch {
+    return [];
+  }
+}
+
+function mergeExtraIgnore(
+  baseExtraIgnore: unknown,
+  gitignorePatterns: readonly string[],
+): unknown {
+  if (gitignorePatterns.length === 0) {
+    return baseExtraIgnore;
+  }
+  const existing = Array.isArray(baseExtraIgnore) ? baseExtraIgnore : [];
+  const merged: unknown[] = [...existing];
+  const seen = new Set<string>(existing.filter((x): x is string => typeof x === "string"));
+  for (const pattern of gitignorePatterns) {
+    if (!seen.has(pattern)) {
+      seen.add(pattern);
+      merged.push(pattern);
+    }
+  }
+  return merged;
+}
+
 export interface WorkspaceAutoConfigOptions {
   readonly roots: readonly string[];
   readonly autoDataDir: boolean;
@@ -885,9 +974,13 @@ export function buildWorkspaceAutoConfig(
       : baseAllowRoots.map((entry) => String(entry));
 
   if (!options.autoDataDir || effectiveRoots.length === 0) {
+    const gitignorePatterns =
+      effectiveRoots.length > 0 ? readSafeGitignorePatterns(effectiveRoots[0] as string) : [];
+    const extraIgnore = mergeExtraIgnore(rawBase["extraIgnore"], gitignorePatterns);
     return parseCausorynServerConfig({
       ...rawBase,
       allowRoots: effectiveRoots,
+      ...(extraIgnore !== undefined ? { extraIgnore } : {}),
     });
   }
 
@@ -967,10 +1060,13 @@ export function buildWorkspaceAutoConfig(
   const baseStorage = isPlainObject(rawBase["storage"]) ? rawBase["storage"] : {};
   const baseWiki = isPlainObject(rawBase["wiki"]) ? rawBase["wiki"] : {};
   const baseOutput = isPlainObject(rawBase["output"]) ? rawBase["output"] : {};
+  const gitignorePatterns = readSafeGitignorePatterns(primaryRoot);
+  const extraIgnore = mergeExtraIgnore(rawBase["extraIgnore"], gitignorePatterns);
 
   const mergedConfig: Record<string, unknown> = {
     ...rawBase,
     allowRoots: effectiveRoots,
+    ...(extraIgnore !== undefined ? { extraIgnore } : {}),
     workspaceId: Object.hasOwn(rawBase, "workspaceId") ? rawBase["workspaceId"] : slug,
     storage: {
       ...baseStorage,
@@ -1047,6 +1143,12 @@ export function createDynamicCausorynContext(
     },
     get logger(): (message: string) => void {
       return active.logger;
+    },
+    startDeferredIndex(): void {
+      active.startDeferredIndex?.();
+    },
+    waitForInitialIndex(timeoutMs?: number): Promise<void> {
+      return active.waitForInitialIndex ? active.waitForInitialIndex(timeoutMs) : Promise.resolve();
     },
     close(): void {
       active.close();
@@ -1164,7 +1266,10 @@ export function attachMcpRootsWorkspaceBinder(
       ...(options.homeDir !== undefined ? { homeDir: options.homeDir } : {}),
       ...(options.env !== undefined ? { env: options.env } : {}),
     });
-    const nextContext = createCausorynContext(nextConfig, effectiveContextOverrides);
+    const nextContext = createCausorynContext(nextConfig, {
+      deferAutoIndex: true,
+      ...effectiveContextOverrides,
+    });
     dynamicContext.rebind(nextContext);
   };
 
@@ -1317,9 +1422,18 @@ export function attachMcpRootsWorkspaceBinder(
     await syncFromClientRoots(true);
   });
 
+  const NON_BLOCKING_BOOT_TOOLS: ReadonlySet<string> = new Set([
+    "causoryn_get_capabilities",
+    "causoryn_index_status",
+    "causoryn_refresh_index",
+  ]);
+
   return {
-    beforeToolCall: async (_toolName: string): Promise<void> => {
+    beforeToolCall: async (toolName: string): Promise<void> => {
       await syncFromClientRoots(false);
+      if (!NON_BLOCKING_BOOT_TOOLS.has(toolName)) {
+        await dynamicContext.waitForInitialIndex?.(15_000);
+      }
     },
     syncFromClientRoots,
   };

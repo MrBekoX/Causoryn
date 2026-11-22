@@ -484,7 +484,18 @@ export const IndexStatusDataSchema = z.strictObject({
   latestSnapshot: LatestSnapshotSchema.nullable(),
 });
 
+const MAX_JOB_DIAGNOSTICS_IN_RESPONSE = 50;
+const MAX_JOB_WARNINGS_IN_RESPONSE = 50;
+
 function jobRecordOf(job: IndexJobRecord): z.infer<typeof IndexJobRecordSchema> {
+  const truncatedDiagnostics = Math.max(0, job.diagnostics.length - MAX_JOB_DIAGNOSTICS_IN_RESPONSE);
+  const truncatedWarnings = Math.max(0, job.warnings.length - MAX_JOB_WARNINGS_IN_RESPONSE);
+  const warnings = job.warnings.slice(0, MAX_JOB_WARNINGS_IN_RESPONSE);
+  if (truncatedDiagnostics > 0 || truncatedWarnings > 0) {
+    warnings.push(
+      `[kısaltıldı] ${String(truncatedDiagnostics)} ek tanı ve ${String(truncatedWarnings)} ek uyarı yanıt bütçesi (max ${String(MAX_JOB_DIAGNOSTICS_IN_RESPONSE)}) nedeniyle kırpıldı`,
+    );
+  }
   return {
     jobId: job.jobId,
     mode: job.mode,
@@ -499,13 +510,13 @@ function jobRecordOf(job: IndexJobRecord): z.infer<typeof IndexJobRecordSchema> 
     stale: job.stale,
     fileCount: job.fileCount,
     tsFileCount: job.tsFileCount,
-    diagnostics: job.diagnostics.map((item) => ({
+    diagnostics: job.diagnostics.slice(0, MAX_JOB_DIAGNOSTICS_IN_RESPONSE).map((item) => ({
       relativePath: item.relativePath,
       code: item.code,
       message: item.message,
       line: item.line,
     })),
-    warnings: [...job.warnings],
+    warnings,
     error: job.error === null ? null : { code: job.error.code, message: job.error.message },
   };
 }
