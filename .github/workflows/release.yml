@@ -129,7 +129,7 @@ jobs:
       - name: Publish to npm via OIDC Trusted Publishing
         run: |
           TGZ_FILE=$(ls -1 release-artifacts/*.tgz | head -n 1)
-          npm publish "$TGZ_FILE" --provenance --access public
+          npm publish "./$TGZ_FILE" --provenance --access public
 
       - name: Create GitHub Release
         env:

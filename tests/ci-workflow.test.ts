@@ -309,7 +309,7 @@ describe(".github/workflows/release.yml — OIDC Trusted Publishing & provenance
     expect(joinedRuns).toContain("SHA256SUMS.txt");
     expect(joinedRuns).toContain("causoryn-sbom.cdx.json");
     expect(joinedRuns).toContain("gh release create");
-    expect(joinedRuns).toContain("npm publish");
+    expect(joinedRuns).toContain('npm publish "./$TGZ_FILE"');
     expect(joinedRuns).toContain("--provenance");
     expect(joinedRuns).toContain("--access public");
 
