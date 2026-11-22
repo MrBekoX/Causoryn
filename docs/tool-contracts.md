@@ -46,7 +46,7 @@ sabitler — bkz. `docs/implementation-status.md`).
 
 | Araç | Girdi (ana alanlar) | Çıktı (data özeti) | Tipik hata kodları |
 |---|---|---|---|
-| `causoryn_get_capabilities` | `workspace?` | Adapter düzeyleri L0–L4 (5 dil; C# `frameworkLinkers: "aspnet-core-route-attributes (L3)"`), sunucu kimliği (`SERVER_VERSION = "0.2.1"`, `SCHEMA_VERSION = "2.0"`), sunucu limitleri, protokol revizyonu, yayımlanan araç listesi; snapshot gerektirmez | `WORKSPACE_NOT_AUTHORIZED` |
+| `causoryn_get_capabilities` | `workspace?` | Adapter düzeyleri L0–L4 (5 dil; C# `frameworkLinkers: "aspnet-core-route-attributes (L3)"`), sunucu kimliği (`SERVER_VERSION = "0.2.2"`, `SCHEMA_VERSION = "2.0"`), sunucu limitleri, protokol revizyonu, yayımlanan araç listesi; snapshot gerektirmez | `WORKSPACE_NOT_AUTHORIZED` |
 | `causoryn_workspace_summary` | `workspaceId?` | Proje/framework/entrypoint/coverage özeti; sayılar yayınlanmış snapshot'tan türetilir; boş workspace `partial` | `WORKSPACE_NOT_AUTHORIZED`, `INDEX_NOT_READY`, `INVALID_ARGUMENT`, `LIMIT_EXCEEDED` |
 | `causoryn_index_status` | `jobId?` | Son (veya verilen) işin progress/snapshot/stale/tanıları; iş yoksa null + yönlendirici uyarı | `WORKSPACE_NOT_AUTHORIZED`, `INVALID_ARGUMENT`, `LIMIT_EXCEEDED` |
 | `causoryn_refresh_index` | `mode` (`full` \| `incremental` — içerik karması karşılaştırmalı yenileme; B7 per-file parse reuse ve watcher MCP yüzeyi açık), `scope?` (açık ret) | Anında `jobId`; iş arka planda koşar; yalnızca izinli graph deposuna (`InMemoryGraphRepository` veya `storage.dataDbPath` SQLite) yazar | `WORKSPACE_NOT_AUTHORIZED`, `INVALID_ARGUMENT`, `LIMIT_EXCEEDED`, `PATH_DENIED` |
@@ -60,7 +60,7 @@ sabitler — bkz. `docs/implementation-status.md`).
 | `causoryn_compare_architecture` | `baseRef`, `targetRef` | İki git ref arası mimari diff: node ek/çıkar/değişen kümeleri, belgeli confidence'lı rename, kenar + API yüzeyi değişimleri; salt-okunur git okuma | `WORKSPACE_NOT_AUTHORIZED`, `INDEX_NOT_READY`, `INVALID_ARGUMENT`, `INVALID_REVISION`, `POLICY_INVALID`, `LIMIT_EXCEEDED` |
 | `causoryn_get_agent_context` | `task`, `candidateScope?`, `tokenBudget` (zorunlu) | exact-symbol → graph-proximity → contract → freshness → fts ayaklı bağlam paketi (`storage.dataDbPath` SQLite ile `symbol_fts` `fts` ayağı aktif; bellek-içi depoda degrade raporlanır); `estimatedTokens`, `omittedCount`, degrade ayaklar açık | `WORKSPACE_NOT_AUTHORIZED`, `INDEX_NOT_READY`, `INVALID_ARGUMENT`, `LIMIT_EXCEEDED` |
 | `causoryn_generate_onboarding` | `audience` (beginner/intermediate/maintainer) | Yapısal onboarding verisi: giriş noktaları, ilk 5 merkezi modül, öğrenme sırası (SCC), kritik akışlar, riskli alanlar; doğal dil host modelin işidir | `WORKSPACE_NOT_AUTHORIZED`, `INDEX_NOT_READY`, `INVALID_ARGUMENT`, `LIMIT_EXCEEDED` |
-| `causoryn_export_documentation` | `format` (json/markdown/mermaid/html/snapshot), `outputDir` (zorunlu), `fileName?`, `view?` (`view` açık `INVALID_ARGUMENT` reddi) | Deterministik graph snapshot dışa aktarma (`snapshot` formatı `compare_architecture`/`architecture_timeline` için kanonik `architecture-snapshot.json` üretir); yazma YALNIZCA `output.allowedOutputDirs` beyanlı dizinine atomiktir (.tmp+rename); HTML offline self-contained (CSP, CDN yok) | `WORKSPACE_NOT_AUTHORIZED`, `INDEX_NOT_READY`, `INVALID_ARGUMENT`, `LIMIT_EXCEEDED`, `EXPORT_NOT_ALLOWED`, `PATH_DENIED` |
+| `causoryn_export_documentation` | `format` (json/markdown/mermaid/html/snapshot), `outputDir` (zorunlu), `fileName?`, `view?` (`architecture` [varsayılan] / `interactive` [yalnızca HTML] / `full`; `wiki` açık `INVALID_ARGUMENT` reddi), `options?` (`maxModules`, `pathPrefix`, `includeTests`), `annotations?` (fail-closed doğrulanmış Host-LLM anotasyonları) | Deterministik görsel mimari portalı/diyagramı veya ham snapshot dışa aktarma (`view="architecture"`: sıfır-JS katmanlı SVG HTML portalı, subgraph Mermaid, Architecture Brief Markdown, kompakt JSON + `architectureSummary.moduleIds`; `view="interactive"`: pan/zoom/arama/kanıt çekmeceli offline HTML; `view="full"`: ham döküm; `snapshot`: kanonik `architecture-snapshot.json`); yazma YALNIZCA `output.allowedOutputDirs` beyanlı dizinine atomiktir (.tmp+rename) | `WORKSPACE_NOT_AUTHORIZED`, `INDEX_NOT_READY`, `INVALID_ARGUMENT`, `LIMIT_EXCEEDED`, `EXPORT_NOT_ALLOWED`, `PATH_DENIED` |
 | `causoryn_preflight_change` | `intent`, `targetSymbols?`/`targetFiles?`, `baseSnapshot?` | ADAY Preflight Manifest: impactCandidates (certainty/resolution ayrı), contractChecks, testPlanId, limitations, sourceRevision; **diske kod/veri yazmaz** (candidateOnly sabit true; manifest yalnızca süreç-içi `PreflightManifestStore` FIFO 200 bellekte tutulur) | `WORKSPACE_NOT_AUTHORIZED`, `INDEX_NOT_READY`, `AMBIGUOUS_SYMBOL`, `SYMBOL_NOT_FOUND`, `INVALID_ARGUMENT`, `LIMIT_EXCEEDED`, `PATH_DENIED` |
 | `causoryn_check_contracts` | `contracts?` ({name?, base, target} spec çiftleri), `snapshotId?` | backward-safe/risk/breaking_candidate/unknown sınıflaması; kural adı + eski/yeni satır kanıtı; çift-bağlanamayan tanılar ayrı | `WORKSPACE_NOT_AUTHORIZED`, `INDEX_NOT_READY`, `INVALID_ARGUMENT`, `LIMIT_EXCEEDED`, `PATH_DENIED`, `CONTRACT_PARSE_FAILED` |
 | `causoryn_detect_contract_drift` | `base`, `target`, `scope?`, `anchorFiles?` | Canonical drift: contractChanges ({contractId, changeKind, summary}), breaking/risk/unknown ayrı, PRODUCES/CONSUMES_CONTRACT etki grafı, `unconsumedChanges` (unresolved consumers) | `WORKSPACE_NOT_AUTHORIZED`, `INDEX_NOT_READY`, `INVALID_ARGUMENT`, `LIMIT_EXCEEDED`, `PATH_DENIED`, `CONTRACT_PARSE_FAILED` |
@@ -81,12 +81,12 @@ sabitler — bkz. `docs/implementation-status.md`).
 | `causoryn_wiki_get_versions` | `pageId?`, `refs?`, sayfalama | Yayımlanmış WikiSnapshot revizyonu `available` (contentHash/linkSetHash/coverage); git alias'ları salt-okunur cat-file ile çözülür (`working-tree` `.git` olmadan da çözülür) | `WORKSPACE_NOT_AUTHORIZED`, `INDEX_NOT_READY`, `WIKI_PAGE_NOT_FOUND`, `INVALID_ARGUMENT`, `INVALID_REVISION` |
 | `causoryn_wiki_diff` | `base`, `target`, `pageId?` | added/removedPages, changedSections, link farkları, coverageDelta ({previous,current,reason?}), unresolvedDifferences, contractChanges (K-013 #7) | `WORKSPACE_NOT_AUTHORIZED`, `INDEX_NOT_READY`, `WIKI_PAGE_NOT_FOUND`, `INVALID_ARGUMENT`, `INVALID_REVISION`, `PATH_DENIED`, `LIMIT_EXCEEDED` |
 
-## Sunucu sürümü, 5-dil yetenek matrisi ve sabit 15 hata kodu (v0.2.1)
+## Sunucu sürümü, 5-dil yetenek matrisi ve sabit 15 hata kodu (v0.2.2)
 
 ### 1. Sunucu kimliği ve protokol sabitleri (`packages/mcp-server/src/version.ts`)
 
 - `SERVER_NAME = "causoryn"` — MCP `initialize` el sıkışmasındaki `serverInfo.name`.
-- `SERVER_VERSION = "0.2.1"` — Pre-1.0 Public Preview sürümü (K-022; kök `package.json`, `packages/causoryn/package.json` ve `server.json` ile kilitlidir; ADR-010 gereği açık 1.0.0 kapıları kapanmadan `1.0.0` ilan edilmez).
+- `SERVER_VERSION = "0.2.2"` — Pre-1.0 Public Preview sürümü (K-022; kök `package.json`, `packages/causoryn/package.json` ve `server.json` ile kilitlidir; ADR-010 gereği açık 1.0.0 kapıları kapanmadan `1.0.0` ilan edilmez).
 - `SCHEMA_VERSION = "2.0"` — 29 aracın tamamında `envelope.schemaVersion` alanı.
 - `protocol.revision` — `@modelcontextprotocol/sdk` üzerinden `LATEST_PROTOCOL_VERSION`.
 
@@ -142,9 +142,10 @@ Tüm iş-mantığı ve yetkilendirme hataları protokol hatası olarak değil, `
 ## Tekrar kullanma ilkesi
 
 `causoryn_refresh_index` WikiSnapshot'ı otomatik güncellemez; wiki yenileme
-`causoryn_wiki_build`'in kendisidir. `causoryn_export_documentation` bu dilimde her zaman
-yayımlanmış graph snapshot'ını dışa aktarır (`view` parametresi verildiğinde açık
-`INVALID_ARGUMENT` ile reddedilir — ADR-010). Ayrı `wiki_refresh`/`wiki_export`
+`causoryn_wiki_build`'in kendisidir. `causoryn_export_documentation` `v0.2.2` ile
+`view: "architecture" | "interactive" | "full"` görünümlerini ve fail-closed
+`annotations` alanını destekler; `view: "wiki"` Living Wiki dilimine ait olduğundan
+açık `INVALID_ARGUMENT` ile reddedilir (ADR-010). Ayrı `wiki_refresh`/`wiki_export`
 aracı AÇILMAZ — `wiki/mcp-tools.md` katalog ilkesiyle aynıdır.
 
 ## Sıfır-ayar CLI, dinamik kök bağlama ve `outputSchemaProfile` sözleşmesi (K-021)
@@ -168,7 +169,7 @@ aracı AÇILMAZ — `wiki/mcp-tools.md` katalog ilkesiyle aynıdır.
 - [docs/architecture.md](architecture.md) — paket haritası ve bağımlılık sınırları
 - [docs/cli-and-configuration.md](cli-and-configuration.md) — CLI bayrakları, ortam değişkenleri ve `CAUSORYN_CONFIG` şeması
 - [docs/language-analyzers.md](language-analyzers.md) — 5 dil analizörü ve çözümleme dürüstlüğü
-- [docs/wiki-spec.md](wiki-spec.md) — Living Wiki Engine tasarım ve v0.2.1 uygulama sözleşmesi
+- [docs/wiki-spec.md](wiki-spec.md) — Living Wiki Engine tasarım ve v0.2.2 uygulama sözleşmesi
 - [docs/implementation-status.md](implementation-status.md) — araç yüzeylerinin faz faz kanıtları
 - [docs/compatibility-matrix.md](compatibility-matrix.md) — host × sonuç matrisi
 - `wiki/mcp-tools.md` — katalog ve yazma izni ilkesi · `packages/mcp-server/src/errors.ts` — kod tablosu

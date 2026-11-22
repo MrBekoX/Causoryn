@@ -1,6 +1,6 @@
 {
   "name": "@causoryn/storage-sqlite",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "private": true,
   "license": "MIT",
   "description": "SQLite + FTS5 GraphRepository gerçeklemesi: tablolar, WAL, atomik snapshot yayımlama ve sembol arama (TŞ v2.1 §9).",
@@ -9,8 +9,8 @@
     ".": "./src/index.ts"
   },
   "dependencies": {
-    "@causoryn/domain": "0.2.1",
-    "@causoryn/graph": "0.2.1",
+    "@causoryn/domain": "0.2.2",
+    "@causoryn/graph": "0.2.2",
     "better-sqlite3": "^13.2.0"
   }
 }

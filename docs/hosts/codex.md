@@ -4,7 +4,7 @@
 
 > Kanıt: **K-021/K-022 dağıtım (2026-11-19):** `codex --version` → `codex-cli 0.169.0` ile
 > `codex plugin marketplace add` (`.agents/plugins/marketplace.json`) + `codex mcp add/list` ve
-> `npx causoryn@0.2.1 setup --client codex` doğrulandı. **Tarihsel F4 monorepo bundle smoke kanıtı:**
+> `npx causoryn@0.2.2 setup --client codex` doğrulandı. **Tarihsel F4 monorepo bundle smoke kanıtı:**
 > `codex --version` → `codex-cli 0.163.0`; `codex mcp --help`, `codex mcp add --help`,
 > `codex mcp list --help`, `codex mcp remove --help` çıktıları (sözdizimi 2026-11-08'de bu sürümle
 > doğrulandı; **2026-11-10'da aynı sürümle canlı smoke yeniden koşuldu**: `mcp add causoryn-smoke`
@@ -14,30 +14,30 @@
 > `dist/node_modules/` altında — `dist/` klasörünü bütün dağıtın). Doğrulama testi:
 > `tests/hosts-docs.test.ts`.
 
-Causoryn, LLM çalıştırmayan yerel ve deterministik bir MCP motorudur (`causoryn@0.2.1`). Codex'te
+Causoryn, LLM çalıştırmayan yerel ve deterministik bir MCP motorudur (`causoryn@0.2.2`). Codex'te
 `claude mcp add`'teki gibi **proje/local scope seçeneği YOKTUR** — `codex mcp add`, sunucuyu
 kullanıcı-genel `~/.codex/config.toml` (veya `$CODEX_HOME/config.toml`) dosyasına yazar. Bu yüzden
 smoke/deneme kayıtları **belirgin bir adla** eklenip **remove ile kaldırılmalıdır**.
 
-## 0. Son Kullanıcı Hızlı Kurulumu (Önerilen — K-021 / `v0.2.1`)
+## 0. Son Kullanıcı Hızlı Kurulumu (Önerilen — K-021 / `v0.2.2`)
 
-### Seçenek 0A — Tek Komut CLI (`npx causoryn@0.2.1 setup`)
+### Seçenek 0A — Tek Komut CLI (`npx causoryn@0.2.2 setup`)
 
 ```bash
 # Değişiklikleri önceden görmek için (salt okunur)
-npx causoryn@0.2.1 setup --client codex --dry-run
+npx causoryn@0.2.2 setup --client codex --dry-run
 
 # $CODEX_HOME/config.toml [mcp_servers.causoryn] + ~/.agents/skills/ kurulumu (.causoryn.backup yedeğiyle)
-npx causoryn@0.2.1 setup --client codex --yes
+npx causoryn@0.2.2 setup --client codex --yes
 
 # Sağlık kontrolü (salt okunur)
-npx causoryn@0.2.1 doctor
+npx causoryn@0.2.2 doctor
 
 # Temiz kaldırma ([mcp_servers.causoryn] + 4 yönlendirme skill dosyası)
-npx causoryn@0.2.1 setup --client codex --uninstall --yes
+npx causoryn@0.2.2 setup --client codex --uninstall --yes
 ```
 
-**`v0.2.1` `CODEX_HOME` ve `startup_timeout_sec = 30` ayrıntıları:**
+**`v0.2.2` `CODEX_HOME` ve `startup_timeout_sec = 30` ayrıntıları:**
 
 - **`CODEX_HOME` desteği:** Ortamda `CODEX_HOME` tanımlıysa hem `causoryn setup --client codex`
   hem de `causoryn doctor`, MCP sunucu bloğunu `$CODEX_HOME/config.toml` içinde yönetir;
@@ -55,8 +55,8 @@ Kök `.agents/plugins/marketplace.json` ve paket içi `packages/causoryn/.codex-
 (+ `.codex-plugin/mcp.json`) manifestleri Codex plugin pazaryeriyle uyumludur (`2026-11-19`,
 `codex-cli 0.169.0` ile `codex plugin marketplace add` + `codex mcp add/list` doğrulandı):
 
-- `.agents/plugins/marketplace.json`, npm kaynağını (`source: { "source": "npm", "package": "causoryn", "version": "0.2.1" }`) ve kurulum politikasını `policy.installation: "AVAILABLE"`, `policy.authentication: "ON_INSTALL"` olarak beyan eder (Causoryn tamamen yerel ve LLM/API anahtarsız çalıştığından harici kimlik bilgisi gerekmez; Codex şeması kurulum anı onay akışı için `"ON_INSTALL"` değerini bekler).
-- `packages/causoryn/.codex-plugin/mcp.json`, sunucuyu `causoryn@0.2.1` paket pini, `--allow-cwd --auto-data-dir --client codex` bayrakları ve `"startup_timeout_sec": 30` ile tanımlar.
+- `.agents/plugins/marketplace.json`, npm kaynağını (`source: { "source": "npm", "package": "causoryn", "version": "0.2.2" }`) ve kurulum politikasını `policy.installation: "AVAILABLE"`, `policy.authentication: "ON_INSTALL"` olarak beyan eder (Causoryn tamamen yerel ve LLM/API anahtarsız çalıştığından harici kimlik bilgisi gerekmez; Codex şeması kurulum anı onay akışı için `"ON_INSTALL"` değerini bekler).
+- `packages/causoryn/.codex-plugin/mcp.json`, sunucuyu `causoryn@0.2.2` paket pini, `--allow-cwd --auto-data-dir --client codex` bayrakları ve `"startup_timeout_sec": 30` ile tanımlar.
 
 ---
 
@@ -176,7 +176,7 @@ codex mcp add causoryn \
 
 Causoryn sunucu süreci stdout'a **yalnızca MCP protokol trafiği** yazar; tüm loglar `[causoryn]`
 önekiyle **stderr**'e gider — Codex'in JSON-RPC boru hattını log satırları bozmaz. Manuel doğrulama
-(2026-11-08, bundle `causoryn@0.1.0`; `causoryn@0.2.1` ile sürdürüldü): stdout 2 satır saf JSON-RPC
+(2026-11-08, bundle `causoryn@0.1.0`; `causoryn@0.2.2` ile sürdürüldü): stdout 2 satır saf JSON-RPC
 (initialize + `tools/list` → **29 araç**); stderr yalnızca `[causoryn]` logları.
 
 ## İlgili sayfalar

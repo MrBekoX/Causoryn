@@ -38,9 +38,9 @@ Perform code changes with your host environment's own editing and test-runner to
 ### 5. Verify & Explain (After Editing Code)
 1. Call `causoryn_verify_change` passing the `preflightId` from step 3 (or `baseSnapshot`) to compare the working tree against architecture guard rules (`architecture`), `graph-diff`, and `test-plan`.
 2. Run standalone policy checks via `causoryn_check_architecture` (`.causoryn/architecture.rules.yaml`) or git-ref diffs via `causoryn_compare_architecture` and `causoryn_architecture_timeline`.
-3. For onboarding, exports, and persistent architecture documentation:
+3. For onboarding, visual architecture portals, exports, and persistent documentation:
    - Structural onboarding guide: `causoryn_generate_onboarding`
-   - Authorized artifact export (`output.allowedOutputDirs` required): `causoryn_export_documentation`
+   - Visual architecture export (`output.allowedOutputDirs` required): `causoryn_export_documentation` — defaults to `view: "architecture"` (layered SVG zero-JS HTML portal, clean subgraph Mermaid, Architecture Brief Markdown, compact JSON blueprint with `architectureSummary.moduleIds`), supports `view: "interactive"` (HTML pan/zoom/search/evidence drawer) + fail-closed Host-LLM `annotations` (follow the `architecture-blueprint` skill), and `view: "full"` for raw audit dumps.
    - Living Wiki (`wiki.dataDbPath` in authorized data root): `causoryn_wiki_build`, `causoryn_wiki_get_tree`, `causoryn_wiki_get_page`, `causoryn_wiki_search`, `causoryn_wiki_get_links`, `causoryn_wiki_get_versions`, `causoryn_wiki_diff`.
 
 ## Envelope & Error Recovery Rules

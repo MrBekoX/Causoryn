@@ -347,7 +347,7 @@ function buildRegistrations(context: CausorynContext): readonly ToolRegistration
       name: "causoryn_export_documentation",
       title: "Documentation export",
       description:
-        "Yayımlanmış snapshot'ı desteklenen formatta (json|markdown|mermaid|html|snapshot — mevcut EXPORT_DOCUMENTATION_FORMATS kümesi) deterministik olarak dışa aktarır. Yazma YALNIZCA config output.allowedOutputDirs beyanlı dizinine atomiktir (.tmp + rename); beyanlı olmayan hedef EXPORT_NOT_ALLOWED, reddedilen dosya adı PATH_DENIED döndürür. HTML offline self-contained'dır: escaping + CSP, CDN/analytics yok.",
+        "Yayımlanmış snapshot'ı desteklenen formatta (json|markdown|mermaid|html|snapshot) ve görünümde (view: architecture [varsayılan — katmanlı görsel SVG/Mermaid/özet mimari + architectureSummary.moduleIds], interactive [yalnızca HTML etkileşimli offline portal: pan/zoom/arama/kanıt çekmecesi], full [ham snapshot dökümü]) deterministik olarak dışa aktarır. Opsiyonel `annotations` alanı, platformdaki LLM'in Causoryn MCP çıktılarından sentezlediği domain/modül/akış/tur/karar notlarını fail-closed doğrulayarak offline mimari portala gömer (Causoryn içinde sıfır LLM çağrısı). Yazma YALNIZCA output.allowedOutputDirs beyanlı dizine atomiktir (.tmp + rename); beyansız hedef EXPORT_NOT_ALLOWED, reddedilen ad PATH_DENIED döndürür. HTML tamamen offline ve CSP'lidir (CDN/analytics yok).",
       inputSchema: ExportDocumentationInputSchema,
       outputSchema: envelopeOutputSchema(ExportDocumentationDataSchema),
       annotations: WRITE_TOOL_ANNOTATIONS,

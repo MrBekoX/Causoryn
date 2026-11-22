@@ -7,6 +7,19 @@ import { OutputAccessPolicy } from "@causoryn/workspace";
 
 import { GraphRepositoryError } from "./errors.js";
 import { serializeSnapshotContentSet } from "./timeline.js";
+import type { ArchitectureAnnotations } from "./architecture-annotations.js";
+import {
+  EXPORT_DOCUMENTATION_VIEWS,
+  exportDocumentationViewSchema,
+  prepareArchitecture,
+  renderArchitectureMermaidFromPrepared,
+  serializeArchitectureHtmlFromPrepared,
+  serializeArchitectureJsonFromPrepared,
+  serializeArchitectureMarkdownFromPrepared,
+  serializeInteractiveArchitectureHtmlFromPrepared,
+  type ExportDocumentationView,
+} from "./architecture-export.js";
+import type { ArchitectureProjectionOptions } from "./architecture-projection.js";
 
 /**
  * causoryn_export_documentation çekirdeği — TŞ v2.1 §16 "Onboarding,
@@ -466,6 +479,17 @@ export function serializeDocumentation(
 /* Yazma katmanı (yetkilendirme + atomik write)                        */
 /* ------------------------------------------------------------------ */
 
+export interface WriteDocumentationArchitectureSummary {
+  readonly moduleCount: number;
+  readonly edgeCount: number;
+  readonly cycleCount: number;
+  readonly entrypointCount: number;
+  readonly contractCount: number;
+  readonly flowCount: number;
+  readonly annotated: boolean;
+  readonly moduleIds: readonly string[];
+}
+
 export interface WriteDocumentationInput {
   readonly snapshot: SnapshotGraph;
   readonly format: ExportDocumentationFormat;
@@ -473,6 +497,12 @@ export interface WriteDocumentationInput {
   readonly outputDir: string;
   /** SAF dosya adı (ayraçsız); verilmezse formatın varsayılan adı kullanılır. */
   readonly fileName?: string;
+  /** Export görünümü (`architecture` | `interactive` | `full`). */
+  readonly view?: ExportDocumentationView;
+  /** Mimari projeksiyon seçenekleri (yalnızca `architecture` / `interactive`). */
+  readonly options?: ArchitectureProjectionOptions;
+  /** Host-LLM kanıt-temelli mimari anotasyonları (yalnızca `architecture` / `interactive`). */
+  readonly annotations?: ArchitectureAnnotations;
 }
 
 export interface WriteDocumentationResult {
@@ -483,24 +513,26 @@ export interface WriteDocumentationResult {
   readonly bytes: number;
   /** Yazma daima atomiktir: `.tmp` + rename. */
   readonly atomic: true;
+  /** Uygulanan görünüm (belirtildiyse veya architecture/interactive seçildiyse). */
+  readonly view?: ExportDocumentationView;
+  /** Mimari projeksiyon özeti ve doğrulanmış `moduleIds` listesi (`architecture`/`interactive`). */
+  readonly architectureSummary?: WriteDocumentationArchitectureSummary;
 }
 
 /**
- * Yetkilendirilmiş atomik yazma: format doğrulanır → içerik SAF serializer
- * ile üretilir → hedef OutputAccessPolicy ile denetlenir (reddedilen hedefe
- * HİÇBİR dosya yazılmaz) → `.tmp` + rename ile atomik yazılır.
+ * Yetkilendirilmiş atomik yazma: format/view/options/annotations doğrulanır →
+ * içerik SAF serializer ile üretilir → hedef OutputAccessPolicy ile denetlenir
+ * (reddedilen hedefe HİÇBİR dosya yazılmaz) → `.tmp` + rename ile atomik yazılır.
  *
  * Yetkilendirme reddi GraphRepositoryError ile SABİT graph sözleşme koduyla
  * fırlatılır (graph paketi kendi `export/...` ad alanını kullanır; MCP
  * eşlemesi tek sabit kod okur):
  * - `export/output-not-authorized`: hedef dizin beyanlı output listesinde
- *   değil → MCP yüzeyinde SABİT EXPORT_NOT_ALLOWED ile eşlenir (takım
- *   denetimi kararı: YENİ uzantı kodu OUTPUT_NOT_AUTHORIZED İSTENMEDİ —
- *   kodun adı ve TŞ §16 konusu bu senaryonun tam karşılığıdır; eşleme
- *   services-architecture.ts'te, ADR kaydı orkestratör kalemidir).
+ *   değil → MCP yüzeyinde SABİT EXPORT_NOT_ALLOWED ile eşlenir.
  * - `export/output-path-denied`: null byte / ayraç / ".." / realpath kaçışı
  *   → mevcut PATH_DENIED ile eşlenir.
- * Workspace karar kodu hata mesajında ayrıca taşınır (ayrıştırma kaybı yok).
+ * - `export/invalid-view`, `export/invalid-options`, `export/invalid-annotations`
+ *   → MCP yüzeyinde `INVALID_ARGUMENT` ile eşlenir.
  */
 export function writeDocumentation(
   input: WriteDocumentationInput,
@@ -513,7 +545,94 @@ export function writeDocumentation(
       `Bilinmeyen export formatı: ${String(input.format)}; izinli değerler: ${EXPORT_DOCUMENTATION_FORMATS.join(", ")}`,
     );
   }
-  const content = serializeDocumentation(input.snapshot, parsedFormat.data);
+
+  let resolvedView: ExportDocumentationView | undefined;
+  if (input.view !== undefined) {
+    const parsedView = exportDocumentationViewSchema.safeParse(input.view);
+    if (!parsedView.success) {
+      throw new GraphRepositoryError(
+        "export/invalid-view",
+        `Bilinmeyen export görünümü: ${String(input.view)}; izinli değerler: ${EXPORT_DOCUMENTATION_VIEWS.join(", ")}`,
+      );
+    }
+    resolvedView = parsedView.data;
+  } else if (input.options !== undefined || input.annotations !== undefined) {
+    resolvedView = "architecture";
+  }
+
+  let content: string;
+  let architectureSummary: WriteDocumentationArchitectureSummary | undefined;
+
+  if (parsedFormat.data === "snapshot") {
+    if (input.options !== undefined || input.annotations !== undefined) {
+      throw new GraphRepositoryError(
+        "export/invalid-options",
+        "snapshot formatında options veya annotations kullanılamaz",
+      );
+    }
+    if (resolvedView !== undefined && resolvedView !== "full") {
+      throw new GraphRepositoryError(
+        "export/invalid-view",
+        `snapshot formatı yalnızca ham CompareContentSet üretir; view="${resolvedView}" desteklenmez`,
+      );
+    }
+    content = serializeDocumentationSnapshot(input.snapshot);
+  } else if (resolvedView === undefined || resolvedView === "full") {
+    if (input.options !== undefined || input.annotations !== undefined) {
+      throw new GraphRepositoryError(
+        "export/invalid-options",
+        'options veya annotations yalnızca view="architecture" veya view="interactive" ile kullanılabilir',
+      );
+    }
+    content = serializeDocumentation(input.snapshot, parsedFormat.data);
+  } else if (resolvedView === "interactive") {
+    if (parsedFormat.data !== "html") {
+      throw new GraphRepositoryError(
+        "export/invalid-view",
+        `view="interactive" yalnızca format="html" ile kullanılabilir (verilen: ${parsedFormat.data})`,
+      );
+    }
+    const prepared = prepareArchitecture(input.snapshot, input.options, input.annotations);
+    content = serializeInteractiveArchitectureHtmlFromPrepared(prepared);
+    architectureSummary = {
+      moduleCount: prepared.projection.summary.moduleCount,
+      edgeCount: prepared.projection.summary.moduleEdgeCount,
+      cycleCount: prepared.projection.summary.cycleCount,
+      entrypointCount: prepared.projection.summary.entrypointCount,
+      contractCount: prepared.projection.summary.contractCount,
+      flowCount: prepared.projection.summary.flowCount,
+      annotated: prepared.annotations !== undefined,
+      moduleIds: prepared.projection.modules.map((m) => m.id),
+    };
+  } else {
+    // resolvedView === "architecture"
+    const prepared = prepareArchitecture(input.snapshot, input.options, input.annotations);
+    switch (parsedFormat.data) {
+      case "json":
+        content = serializeArchitectureJsonFromPrepared(prepared);
+        break;
+      case "markdown":
+        content = serializeArchitectureMarkdownFromPrepared(prepared);
+        break;
+      case "mermaid":
+        content = renderArchitectureMermaidFromPrepared(prepared);
+        break;
+      case "html":
+        content = serializeArchitectureHtmlFromPrepared(prepared);
+        break;
+    }
+    architectureSummary = {
+      moduleCount: prepared.projection.summary.moduleCount,
+      edgeCount: prepared.projection.summary.moduleEdgeCount,
+      cycleCount: prepared.projection.summary.cycleCount,
+      entrypointCount: prepared.projection.summary.entrypointCount,
+      contractCount: prepared.projection.summary.contractCount,
+      flowCount: prepared.projection.summary.flowCount,
+      annotated: prepared.annotations !== undefined,
+      moduleIds: prepared.projection.modules.map((m) => m.id),
+    };
+  }
+
   const fileName = input.fileName ?? EXPORT_DEFAULT_FILE_NAMES[parsedFormat.data];
   const decision = policy.authorizeFile(input.outputDir, fileName);
   if (!decision.allowed) {
@@ -529,11 +648,6 @@ export function writeDocumentation(
   const targetPath = decision.canonicalPath;
   const tmpPath = `${targetPath}.tmp`;
   try {
-    // Savunma derinliği (güvenlik bulgusu): kalan .tmp girdisi — özellikle
-    // output dizinine önceden konmuş bir sembolik bağ — yazmadan ÖNCE
-    // kaldırılır; böylece yazma bağın izini takip ederek beyanlı dizin
-    // dışına sızamaz. Yalnızca bağın kendisi kaldırılır; bağın hedefi
-    // dokunulmaz kalır. tmp yoksa unlink hatası yok sayılır.
     try {
       unlinkSync(tmpPath);
     } catch {
@@ -557,5 +671,7 @@ export function writeDocumentation(
     format: parsedFormat.data,
     bytes: Buffer.byteLength(content, "utf8"),
     atomic: true,
+    ...(resolvedView === undefined ? {} : { view: resolvedView }),
+    ...(architectureSummary === undefined ? {} : { architectureSummary }),
   };
 }

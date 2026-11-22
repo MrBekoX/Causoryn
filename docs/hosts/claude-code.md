@@ -4,7 +4,7 @@
 
 > Kanıt: **K-021/K-022 dağıtım (2026-11-19):** `claude --version` → `2.1.328 (Claude Code)` ile
 > `claude plugin validate --strict` (kök `.claude-plugin/marketplace.json`) + `claude mcp list`
-> `√ Connected` ve `npx causoryn@0.2.1 setup --client claude-code` doğrulandı. **Tarihsel F3
+> `√ Connected` ve `npx causoryn@0.2.2 setup --client claude-code` doğrulandı. **Tarihsel F3
 > monorepo bundle smoke kanıtı:** `claude --version` → `2.1.322 (Claude Code)`; `claude mcp --help`
 > ve `claude mcp add --help` çıktıları (sözdizimi ilk kez 2026-11-08'de 2.1.319 ile, **2026-11-10'da
 > 2.1.322 ile uçtan uca yeniden doğrulandı**: yönlendirilmiş geçici config'de `mcp add` → `mcp list`
@@ -13,28 +13,28 @@
 > `better-sqlite3` prebuilds `dist/node_modules/` altındadır — "tek dosya" değil, `dist/` klasörünün
 > bütününü dağıtın). Doğrulama testi: `tests/hosts-docs.test.ts`.
 
-Causoryn, LLM çalıştırmayan yerel ve deterministik bir MCP motorudur (`causoryn@0.2.1`). CLI yoksa
+Causoryn, LLM çalıştırmayan yerel ve deterministik bir MCP motorudur (`causoryn@0.2.2`). CLI yoksa
 `npm install -g @anthropic-ai/claude-code` ile kurulur.
 
-## 0. Son Kullanıcı Hızlı Kurulumu (Önerilen — K-021 / `v0.2.1`)
+## 0. Son Kullanıcı Hızlı Kurulumu (Önerilen — K-021 / `v0.2.2`)
 
-### Seçenek 0A — Tek Komut CLI (`npx causoryn@0.2.1 setup`)
+### Seçenek 0A — Tek Komut CLI (`npx causoryn@0.2.2 setup`)
 
 ```bash
 # Değişiklikleri önceden görmek için (salt okunur)
-npx causoryn@0.2.1 setup --client claude-code --dry-run
+npx causoryn@0.2.2 setup --client claude-code --dry-run
 
 # ~/.claude.json + ~/.claude/skills/ kurulumu (.causoryn.backup yedeği ve kalıcı ~/.causoryn/runtime ile)
-npx causoryn@0.2.1 setup --client claude-code --yes
+npx causoryn@0.2.2 setup --client claude-code --yes
 
 # Sağlık kontrolü (salt okunur)
-npx causoryn@0.2.1 doctor
+npx causoryn@0.2.2 doctor
 
 # Temiz kaldırma (mcpServers.causoryn + 4 yönlendirme skill dosyası)
-npx causoryn@0.2.1 setup --client claude-code --uninstall --yes
+npx causoryn@0.2.2 setup --client claude-code --uninstall --yes
 ```
 
-**`v0.2.1` `CLAUDE_CONFIG_DIR` desteği:** Ortamda `CLAUDE_CONFIG_DIR` tanımlıysa hem
+**`v0.2.2` `CLAUDE_CONFIG_DIR` desteği:** Ortamda `CLAUDE_CONFIG_DIR` tanımlıysa hem
 `causoryn setup --client claude-code` hem de `causoryn doctor` varsayılan `~/.claude.json` ve
 `~/.claude/skills/` yerine `$CLAUDE_CONFIG_DIR/.claude.json` ve `$CLAUDE_CONFIG_DIR/skills/`
 yollarını kullanır (`resolveEffectiveClaudeConfigDir`, `packages/causoryn/src/setup.ts`). Böylece
@@ -47,12 +47,12 @@ yollarını kullanır (`resolveEffectiveClaudeConfigDir`, `packages/causoryn/src
 /plugin install causoryn@causoryn
 ```
 
-- **Pazaryeri ve sürüm kilidi (`--expected-version 0.2.1`):** Kök `.claude-plugin/marketplace.json`
-  (`source: { "source": "npm", "package": "causoryn", "version": "0.2.1" }`) ve paket içi
+- **Pazaryeri ve sürüm kilidi (`--expected-version 0.2.2`):** Kök `.claude-plugin/marketplace.json`
+  (`source: { "source": "npm", "package": "causoryn", "version": "0.2.2" }`) ve paket içi
   `packages/causoryn/.claude-plugin/plugin.json`, sunucuyu
-  `${CLAUDE_PLUGIN_ROOT}/scripts/plugin-mcp-launcher.mjs --expected-version 0.2.1 --allow-cwd --auto-data-dir --client claude-code`
+  `${CLAUDE_PLUGIN_ROOT}/scripts/plugin-mcp-launcher.mjs --expected-version 0.2.2 --allow-cwd --auto-data-dir --client claude-code`
   komutuyla başlatır. Başlatıcı betik (`plugin-mcp-launcher.mjs`), iç içe `npx` alt-süreci açmadan
-  kurulu plugin `package.json` dosyasındaki `version === "0.2.1"` eşitliğini (ve varsa
+  kurulu plugin `package.json` dosyasındaki `version === "0.2.2"` eşitliğini (ve varsa
   `CAUSORYN_EXPECTED_VERSION` ortam değişkeniyle tutarlılığını) denetler; sürüm uyuşmazlığında
   `stderr` üzerinden açık hata verip `exit 2` ile çıkar, doğrulama geçtiğinde `CAUSORYN_ASSET_ROOT`
   atayarak doğrudan `dist/mcp-server.mjs` modülünü yükler.
@@ -157,7 +157,7 @@ Scope belirtilmezse kayıtlı olduğu scope'tan kaldırır (`claude mcp remove -
 
 Causoryn sunucu süreci stdout'a **yalnızca MCP protokol trafiği** yazar; tüm loglar `[causoryn]`
 önekiyle **stderr**'e gider. Bu yüzden host tarafında hiçbir log satırı protokol akışını bozmaz.
-Manuel doğrulama (2026-11-08, bundle `causoryn@0.1.0`; `causoryn@0.2.1` ile sürdürüldü):
+Manuel doğrulama (2026-11-08, bundle `causoryn@0.1.0`; `causoryn@0.2.2` ile sürdürüldü):
 
 - stdout: 2 satır saf JSON-RPC (initialize yanıtı + `tools/list` → **29 araç**)
 - stderr: yalnızca `[causoryn] CAUSORYN_CONFIG tanımsız; ...` + hazır logu

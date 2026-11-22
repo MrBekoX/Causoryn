@@ -12,20 +12,20 @@
 > `integrations/antigravity/causoryn/README.md` ·
 > `integrations/antigravity/causoryn/test/antigravity-plugin.test.ts`
 
-## End-User Quick Setup (Recommended — K-021 / `v0.2.1`)
+## End-User Quick Setup (Recommended — K-021 / `v0.2.2`)
 
 ```bash
 # Preview planned changes without modifying any files (read-only)
-npx causoryn@0.2.1 setup --client antigravity --dry-run
+npx causoryn@0.2.2 setup --client antigravity --dry-run
 
 # Configure ~/.gemini/config/mcp_config.json + ~/.gemini/config/skills/ (with .causoryn.backup)
-npx causoryn@0.2.1 setup --client antigravity --yes
+npx causoryn@0.2.2 setup --client antigravity --yes
 
 # Read-only health & alignment check
-npx causoryn@0.2.1 doctor
+npx causoryn@0.2.2 doctor
 
 # Clean removal (removes mcpServers.causoryn + 4 routing skills)
-npx causoryn@0.2.1 setup --client antigravity --uninstall --yes
+npx causoryn@0.2.2 setup --client antigravity --uninstall --yes
 ```
 
 Note: When a secondary `~/.gemini/antigravity/mcp_config.json` file already exists on disk,
@@ -55,7 +55,7 @@ Spec §22 applies directly: *"If `agy` CLI is absent, explicitly report that it 
    `integrations/antigravity/causoryn/scripts/mcp-server.mjs` (+ vendored `better-sqlite3`) via
    `npm run build:bundle --workspace packages/mcp-server`, `antigravity-plugin.test.ts` spawns a
    real `child_process.spawn` session in `cwd: PLUGIN_DIR` using the exact `command` + `args` +
-   `env` from `mcp_config.json`: `initialize` → `causoryn@0.2.1`, `tools/list` → 29 tools,
+   `env` from `mcp_config.json`: `initialize` → `causoryn@0.2.2`, `tools/list` → 29 tools,
    `causoryn_get_capabilities` → `status: "ok"`, `causoryn_workspace_summary` →
    `WORKSPACE_NOT_AUTHORIZED`, and pure JSON-RPC 2.0 lines on `stdout`.
 2. **`agy` CLI install/smoke commands (`NOT RUN`):** The `agy plugin validate --strict`,
@@ -112,7 +112,7 @@ Spec §22 applies directly: *"If `agy` CLI is absent, explicitly report that it 
 {
   "name": "causoryn",
   "displayName": "Causoryn",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "Local, evidence-backed codebase and change intelligence via MCP.",
   "suggestedPrompts": [
     "Map this workspace and show evidence for critical dependencies",
@@ -128,7 +128,7 @@ Fields and why `$schema` is omitted:
 |---|---|---|
 | `name` | `causoryn` | Built-in loader globally unique key + Spec §17.1 |
 | `displayName` | `Causoryn` | Built-in loader UI title + Spec §17.1 |
-| `version` | `0.2.1` | Spec §17.1 + `packages/mcp-server/src/version.ts` (`SERVER_VERSION`) |
+| `version` | `0.2.2` | Spec §17.1 + `packages/mcp-server/src/version.ts` (`SERVER_VERSION`) |
 | `description` | `Local, evidence-backed codebase and change intelligence via MCP.` | Spec §17.1 |
 | `suggestedPrompts` | Three starter prompts from Spec §17.1 | Built-in loader card/detail UI + Spec §17.1 |
 
@@ -192,7 +192,7 @@ Field contract rules:
 - **Packaged distribution entrypoint (`packages/causoryn/dist/mcp-server.mjs`,
   `packages/mcp-server/src/cli-stdio.ts`):** Supports K-021 zero-config CLI flags (`--allow-cwd`,
   `--auto-data-dir`, `--data-dir`, `--client antigravity`) and dynamic desktop IDE MCP `roots/list`
-  workspace binding (`npx causoryn@0.2.1 setup --client antigravity --yes` wires this packaged
+  workspace binding (`npx causoryn@0.2.2 setup --client antigravity --yes` wires this packaged
   entrypoint).
 
 **Cross-host rule (Spec §17.1):** *"Never copy `mcp.json` verbatim across hosts."* Claude Code
@@ -252,7 +252,7 @@ CAUSORYN_CONFIG='{"allowRoots":["/path/to/your-project"],"wiki":{"dataDbPath":"/
 
 | Integration | Model usage | MCP installation | Conformance tests | Status on this machine |
 |---|---|---|---|---|
-| Antigravity | User-selected Antigravity model (Causoryn never selects or overrides models) | Plugin: `plugin.json` + `mcp_config.json` (built-in loader) + `mcp.json` (Spec §17.1) or `npx causoryn@0.2.1 setup --client antigravity --yes` | Direct `stdio` spawn verified (29 tools); `agy validate` / `install` / `list` | **NOT RUN — `agy` CLI not found** (direct `stdio` protocol handshake verified in automated tests) |
+| Antigravity | User-selected Antigravity model (Causoryn never selects or overrides models) | Plugin: `plugin.json` + `mcp_config.json` (built-in loader) + `mcp.json` (Spec §17.1) or `npx causoryn@0.2.2 setup --client antigravity --yes` | Direct `stdio` spawn verified (29 tools); `agy validate` / `install` / `list` | **NOT RUN — `agy` CLI not found** (direct `stdio` protocol handshake verified in automated tests) |
 
 Spec §17.4: Cross-host behavioral parity is guaranteed at the MCP tool schema and contract layer;
 host UI/permission equivalence is never claimed, and Causoryn cannot force a host model to invoke a

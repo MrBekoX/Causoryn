@@ -228,6 +228,7 @@ describe("exports & metadata", () => {
       "map-system",
       "preflight-change",
       "verify-change",
+      "architecture-blueprint",
     ]);
   });
 });

@@ -17,10 +17,27 @@ sürümleme [SemVer](https://semver.org/lang/tr/) ilkelerini izler.
 - OpenAPI keşfine yanıt-şeması drift'i eklenmesi (K-015(5) sadakat sınırı), TŞ §11 event versiyon uyumsuzluk kuralı (K-015(4)) ve SQL RENAME → `unknown` sınıflamasının netleştirilmesi (K-015(3))
 - compare_architecture/architecture_timeline için `.causoryn/architecture-snapshot.json` iş akışı otomasyonu (`causoryn_export_documentation(format="snapshot")` ile izinli `output.allowedOutputDirs` dizinine kanonik blob üreticisi 2026-11-18 K-020 ile eklendi; workspace içine otomatik yazma kırmızı çizgi 2 gereği yapılmaz)
 - wiki_search sorgu filtrelerinin (pageKind/language/…) araç yüzeyine açılması, `WIKI_NOTE_CONFLICT` için TOOL_ERROR_GUIDANCE kaydı eklenmesi ve incremental wiki yayımında link/FTS indekslerinin tam graph'tan yeniden yazmasının daraltılması
-- E6 offline visualizer'ın gerçek tarayıcı koşusuyla doğrulanması ve viewer HTML'ini izinli output dizinine yazan MCP yüzeyi
+- E6 offline visualizer'ın gerçek tarayıcı koşusuyla doğrulanması (`causoryn_export_documentation(format="html", view="interactive")` MCP yüzeyi v0.2.2'de açıldı)
 - Bundle fidelity: default lib (`.d.ts`) dosyalarının bundle'a katılması veya doküman sınırlaması (çıplak `packages/mcp-server/dist/` 33-dosya F1 klonunda `.d.ts` yoktur; açık kaynak dağıtım paketi `packages/causoryn` içinde `dist/typescript-lib/lib*.d.ts` sahnelemesi ve `resolveTypeScriptLibDir` ile 2026-11-19 K-021'de `state: "ready"` kanıtlandı — docs/security-pass.md Dürüstlük 1)
 - Rate-limit/concurrency resource budget (K-010 kapsam dışı beyanı) (adanmış secret-scan kapısı 2026-11-17/18'de `scripts/secret-scan.mjs` ile eklendi ve 2026-11-20 K-022'de 12 kök + kök dosyalarına genişletildi)
 - ~~npm audit 10 moderate dev-toolchain uyarısının (minimatch) çözülmesi~~ — **Kapatıldı (2026-11-20, K-022):** `eslint@10.15.0` ve `typescript-eslint@8.73.0` yükseltmesiyle `npm audit` **0 güvenlik açığı** (`0 vulnerabilities`) döndürür.
+
+## [0.2.2] - 2026-11-22
+
+### Added
+
+- **Visual Architecture Projection & Layered SVG Layout (`packages/graph`):** Adaptif dizin-ağacı modül kümeleme (`projectArchitecture`, varsayılan `maxModules: 32`, `UnknownExternal` gürültüsünü dışlayıp `externalSummary` içinde dürüstçe özetler, Tarjan SCC ile döngüsel bağımlılıkları tespit eder) ve sıfır-bağımlılıklı Sugiyama tarzı katmanlı SVG yerleşim + Bezier eğri yönlendirme motoru (`computeArchitectureLayout`, `renderArchitectureSvg`, `renderFlowStripSvg`).
+- **Multi-View Visual `causoryn_export_documentation` & Fail-Closed Host-LLM `annotations` (`packages/graph`, `packages/mcp-server`):**
+  - Varsayılan `view: "architecture"`: **sıfır-JS, katı offline CSP'li** (`default-src 'none'`) 5 sekmeli katmanlı SVG Offline Architecture Portalı (`html`), subgraph-gruplu render edilebilir `flowchart TB` (`mermaid`), gömülü Mermaid + modül/akış/kontrat/risk özeti (`markdown`) ve `meta.id` uyumlu kompakt blueprint (`json`) üretir; yanıt `data.architectureSummary.moduleIds` listesini döndürür.
+  - Opt-in `view: "interactive"` (yalnızca `format: "html"`): pan/zoom, anlık arama, dil/döngü/test filtreleri, 1-hop komşuluk vurgulu sağ Inspector Drawer, tıklanabilir kaynak-satır kanıtları ve Mermaid kopyalama içeren offline etkileşimli portal (`VIEWER_CSP_POLICY`, sıfır `innerHTML`, sıfır `fetch`/CDN).
+  - Opsiyonel fail-closed `annotations` (`title`, `architectureStyle`, `executiveSummary`, `domains`, `moduleNotes`, `flows`, `guidedTour`, `decisions`, `risks`): platformdaki Host LLM'in Causoryn MCP araçlarıyla keşfettiği mimari anlatıyı tüm `moduleId`/`nodeId`/`evidenceId`/`keyFiles` kimliklerini doğrulayarak portala gömer (Causoryn çekirdeği %100 LLM-free kalır — ADR-002).
+  - `view: "full"` ile eski ham snapshot dökümü geriye uyumlu korunur; 29 araç kataloğu sabit tutulur.
+- **Host-LLM Orkestrasyon Skill'i (`skills/architecture-blueprint/SKILL.md`):** Claude Code, Codex, Antigravity ve ZCode'daki platform LLM'ini 6 adımlı deterministik MCP keşif → blueprint → doğrulanmış anotasyon → görsel portal üretim akışına yönlendiren 5. kanonik skill (`CANONICAL_SKILL_NAMES` + 4 host kurulumuna dahil).
+
+### Performance & Fixed
+
+- **PRAGMA `data_version` korumalı SQLite snapshot önbelleği (`packages/storage-sqlite`, `packages/mcp-server`):** Sıcak okumalarda tam 80k+ satırlık snapshot yeniden kurulumunu önleyen sınırlı (max 4 giriş) `SnapshotGraph` önbelleği ve `startDeferredIndex()` içine ertelenmiş kalıcı snapshot yüklemesi (büyük tam-yığın repolarda sıcak sorgular ~100–300x hızlandı).
+- **Dinamik `causoryn doctor` paket sürümü (`packages/causoryn`):** `CAUSORYN_PACKAGE_VERSION` artık `packages/causoryn/package.json` dosyasından dinamik okunur.
 
 ## [0.2.1] - 2026-11-22
 

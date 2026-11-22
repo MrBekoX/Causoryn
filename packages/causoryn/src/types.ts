@@ -17,7 +17,7 @@ function readPackageVersion(): string {
   } catch {
     // Fallback aşağıda.
   }
-  return "0.2.1";
+  return "0.2.2";
 }
 
 export const CAUSORYN_PACKAGE_NAME = "causoryn" as const;
@@ -37,6 +37,7 @@ export const CANONICAL_SKILL_NAMES = [
   "map-system",
   "preflight-change",
   "verify-change",
+  "architecture-blueprint",
 ] as const;
 
 export type CanonicalSkillName = (typeof CANONICAL_SKILL_NAMES)[number];
