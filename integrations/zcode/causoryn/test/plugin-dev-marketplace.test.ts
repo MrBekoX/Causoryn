@@ -301,7 +301,7 @@ describe("dev marketplace (.claude-plugin/marketplace.json)", () => {
         plugins?: Array<{ version?: string }>;
       };
       expect(parsed.owner?.name).toBe("Causoryn Contributors");
-      expect(parsed.plugins?.[0]?.version).toBe("0.2.0");
+      expect(parsed.plugins?.[0]?.version).toBe("0.2.1");
     },
   );
 
