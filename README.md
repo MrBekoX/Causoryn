@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="Causoryn.png" alt="Causoryn — Local, deterministic, LLM-free code intelligence MCP server" width="760" />
+</p>
+
 # Causoryn (`v0.2.2` — Pre-1.0 Public Preview)
 
 **Causoryn** is an open-source, **local, deterministic, LLM-free** codebase and change intelligence engine exposed over the Model Context Protocol (`stdio`). It builds an evidence-backed dependency, symbol, route, contract, and test graph across your project (**TypeScript**, **C# / Roslyn**, **Python**, **Go**, **Rust**) and serves **29 structured MCP tools** to your AI coding agent — while enforcing a strict **read-only workspace guarantee** (`ADR-008`: zero bytes written to your repository source tree).

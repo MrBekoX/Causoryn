@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="https://raw.githubusercontent.com/MrBekoX/Causoryn/main/Causoryn.png" alt="Causoryn — Local, deterministic, LLM-free code intelligence MCP server" width="760" />
+</p>
+
 # Causoryn (`causoryn` v0.2.2 — Pre-1.0 Public Preview)
 
 **Causoryn** is a **local, deterministic, LLM-free** codebase and change intelligence
