@@ -1,5 +1,7 @@
 # Causoryn'i Claude Code'a bağlama (stdio MCP)
 
+> **Dil / Language:** Türkçe · [English](../en/hosts/claude-code.md) · [Uyumluluk Matrisi](../compatibility-matrix.md)
+
 > Kanıt: **K-021/K-022 dağıtım (2026-11-19):** `claude --version` → `2.1.328 (Claude Code)` ile
 > `claude plugin validate --strict` (kök `.claude-plugin/marketplace.json`) + `claude mcp list`
 > `√ Connected` ve `npx causoryn@0.2.0 setup --client claude-code` doğrulandı. **Tarihsel F3
@@ -27,7 +29,16 @@ npx causoryn@0.2.0 setup --client claude-code --yes
 
 # Sağlık kontrolü (salt okunur)
 npx causoryn@0.2.0 doctor
+
+# Temiz kaldırma (mcpServers.causoryn + 4 yönlendirme skill dosyası)
+npx causoryn@0.2.0 setup --client claude-code --uninstall --yes
 ```
+
+**`v0.2.0` `CLAUDE_CONFIG_DIR` desteği:** Ortamda `CLAUDE_CONFIG_DIR` tanımlıysa hem
+`causoryn setup --client claude-code` hem de `causoryn doctor` varsayılan `~/.claude.json` ve
+`~/.claude/skills/` yerine `$CLAUDE_CONFIG_DIR/.claude.json` ve `$CLAUDE_CONFIG_DIR/skills/`
+yollarını kullanır (`resolveEffectiveClaudeConfigDir`, `packages/causoryn/src/setup.ts`). Böylece
+çoklu profil ve izole CI/test ortamlarında kullanıcının birincil ev dizinine hiçbir bayt yazılmaz.
 
 ### Seçenek 0B — Yerel Claude Code Plugin Pazaryeri
 
@@ -35,6 +46,16 @@ npx causoryn@0.2.0 doctor
 /plugin marketplace add MrBekoX/Causoryn
 /plugin install causoryn@causoryn
 ```
+
+- **Pazaryeri ve sürüm kilidi (`--expected-version 0.2.0`):** Kök `.claude-plugin/marketplace.json`
+  (`source: { "source": "npm", "package": "causoryn", "version": "0.2.0" }`) ve paket içi
+  `packages/causoryn/.claude-plugin/plugin.json`, sunucuyu
+  `${CLAUDE_PLUGIN_ROOT}/scripts/plugin-mcp-launcher.mjs --expected-version 0.2.0 --allow-cwd --auto-data-dir --client claude-code`
+  komutuyla başlatır. Başlatıcı betik (`plugin-mcp-launcher.mjs`), iç içe `npx` alt-süreci açmadan
+  kurulu plugin `package.json` dosyasındaki `version === "0.2.0"` eşitliğini (ve varsa
+  `CAUSORYN_EXPECTED_VERSION` ortam değişkeniyle tutarlılığını) denetler; sürüm uyuşmazlığında
+  `stderr` üzerinden açık hata verip `exit 2` ile çıkar, doğrulama geçtiğinde `CAUSORYN_ASSET_ROOT`
+  atayarak doğrudan `dist/mcp-server.mjs` modülünü yükler.
 
 > **2026-11-19 canlı CLI kanıtı (`claude 2.1.328`):** Kök `.claude-plugin/marketplace.json`
 > üzerinde `claude plugin validate --strict` geçti ve kayıtlı sunucu `claude mcp list` çıktısında
@@ -53,16 +74,19 @@ cd packages/mcp-server
 npm run build:bundle   # esbuild tek-ÇIKIŞ bundle + external native binding kopyası
 ```
 
-Çıktı sözleşmesi (her yapıda aynı — deterministik):
+Çıktı sözleşmesi (her yapıda aynı — deterministik, 35 dosyalı `bundle-manifest.json`):
 
 ```
 packages/mcp-server/dist/
+├── bundle-manifest.json              ← 35 dosyanın sıralı sha256 özeti
 ├── mcp-server.mjs                    ← stdio giriş noktası (sağlam hash bundle-manifest.json'da)
-└── node_modules/better-sqlite3/      ← external native modül (esbuild .node gömemez)
+├── mcp-server.mjs.LEGAL.txt          ← esbuild gömülü paket lisans bildirimleri
+└── node_modules/better-sqlite3/      ← external native modül (LICENSE + package.json + lib/ + prebuilds/)
 ```
 
 `mcp-server.mjs`'i **yalnız başına taşımayın**; `dist/` klasörünü bütün olarak dağıtın (native
-`.node` prebuilds zorunludur).
+`.node` prebuilds ile `mcp-server.mjs.LEGAL.txt` ve `better-sqlite3/LICENSE` lisans dosyaları birlikte
+taşınır; `bundle-manifest.json` toplam 35 girdi içerir).
 
 ### 2. Yöntem A — proje-scoped `.mcp.json` (ekibe paylaşılabilir)
 
@@ -86,7 +110,7 @@ Proje kökünüze bir `.mcp.json` dosyası koyun:
 
 ### 3. Yöntem B — `claude mcp add` (local scope)
 
-`claude mcp add`'in default scope'u **local**'dir (`-s local` yazılı ya da yazılmasız kayıt,
+`claude mcp add`'in default scope'u **local**'dir (`-s local` veya `--scope local` ile kayıt,
 çalıştırıldığınız proje için `~/.claude.json` içine yazılır; diğer projeler etkilenmez):
 
 ```bash
@@ -184,3 +208,9 @@ smoke için kesin çözüm 8a'daki yönlendirmedir.
 
 Not: herhangi bir `claude` çağrısı, kullanıcının oturum telemetrisini (ör. `pluginUsage` sayaçları)
 kullanıcı genelinde güncelleyebilir; bu MCP kaydıyla ilgisiz, kaçınılmaz CLI davranışıdır.
+
+## İlgili sayfalar
+
+- [English version](../en/hosts/claude-code.md)
+- [Uyumluluk Matrisi](../compatibility-matrix.md)
+- Diğer host kılavuzları: [Codex CLI](codex.md) · [ZCode](zcode.md) · [Antigravity](antigravity.md)

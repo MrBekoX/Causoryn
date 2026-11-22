@@ -85,7 +85,17 @@ npx causoryn@0.2.0 setup --client claude-code --uninstall --yes
 - **Verify:** `causoryn_verify_change`, `causoryn_check_architecture` (`.causoryn/architecture.rules.yaml`)
 - **Explain & Living Wiki:** `causoryn_get_evidence`, `causoryn_compare_architecture`, `causoryn_architecture_timeline`, `causoryn_generate_onboarding`, `causoryn_export_documentation`, and 7 `causoryn_wiki_*` tools
 
-See [`packages/causoryn/README.md`](packages/causoryn/README.md), [`docs/architecture.md`](docs/architecture.md), [`docs/tool-contracts.md`](docs/tool-contracts.md), [`docs/compatibility-matrix.md`](docs/compatibility-matrix.md), and [`docs/project-overview.tr-en.md`](docs/project-overview.tr-en.md) for complete architecture and contract documentation.
+See [`packages/causoryn/README.md`](packages/causoryn/README.md) for the standalone npm package reference.
+
+---
+
+## Documentation (English & Türkçe)
+
+Full bilingual engineering, CLI, analyzer, security, and host documentation is available under `docs/`:
+
+- **[English Documentation Hub](docs/en/README.md)** — [Architecture](docs/en/architecture.md) · [CLI & Configuration](docs/en/cli-and-configuration.md) · [5-Language Analyzers](docs/en/language-analyzers.md) · [MCP Tool Contracts (29 Tools)](docs/en/tool-contracts.md) · [Living Wiki Spec](docs/en/wiki-spec.md) · [Compatibility Matrix](docs/en/compatibility-matrix.md) · [Security Audit](docs/en/security-pass.md) · [Benchmarks](docs/en/benchmarks.md) · [ADR-002: No-LLM](docs/en/adr/ADR-002-no-llm.md)
+- **[Türkçe Dokümantasyon Merkezi](docs/README.md)** — [Mimari Özeti](docs/architecture.md) · [CLI ve Konfigürasyon](docs/cli-and-configuration.md) · [5-Dil Analizörleri](docs/language-analyzers.md) · [MCP Araç Sözleşmeleri (29 Araç)](docs/tool-contracts.md) · [Living Wiki Belirtimi](docs/wiki-spec.md) · [Uyumluluk Matrisi](docs/compatibility-matrix.md) · [Güvenlik Denetimi](docs/security-pass.md) · [Performans Ölçümleri](docs/benchmarks.md) · [ADR-002: No-LLM](docs/adr/ADR-002-no-llm.md)
+- **[Bilingual Architecture & Project Overview (TR · EN)](docs/project-overview.tr-en.md)**
 
 ---
 

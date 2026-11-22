@@ -148,6 +148,14 @@ Reserved specification base identifiers not emitted as envelope errors in v0.2.0
 
 ---
 
+## Documentation (English & Türkçe)
+
+- **[English Documentation Hub](https://github.com/MrBekoX/Causoryn/blob/main/docs/en/README.md)** — [Architecture](https://github.com/MrBekoX/Causoryn/blob/main/docs/en/architecture.md) · [CLI & Configuration](https://github.com/MrBekoX/Causoryn/blob/main/docs/en/cli-and-configuration.md) · [5-Language Analyzers](https://github.com/MrBekoX/Causoryn/blob/main/docs/en/language-analyzers.md) · [MCP Tool Contracts](https://github.com/MrBekoX/Causoryn/blob/main/docs/en/tool-contracts.md) · [Compatibility Matrix](https://github.com/MrBekoX/Causoryn/blob/main/docs/en/compatibility-matrix.md)
+- **[Türkçe Dokümantasyon Merkezi](https://github.com/MrBekoX/Causoryn/blob/main/docs/README.md)** — [Mimari Özeti](https://github.com/MrBekoX/Causoryn/blob/main/docs/architecture.md) · [CLI ve Konfigürasyon](https://github.com/MrBekoX/Causoryn/blob/main/docs/cli-and-configuration.md) · [5-Dil Analizörleri](https://github.com/MrBekoX/Causoryn/blob/main/docs/language-analyzers.md) · [MCP Araç Sözleşmeleri](https://github.com/MrBekoX/Causoryn/blob/main/docs/tool-contracts.md) · [Uyumluluk Matrisi](https://github.com/MrBekoX/Causoryn/blob/main/docs/compatibility-matrix.md)
+- **[Bilingual Architecture & Project Overview (TR · EN)](https://github.com/MrBekoX/Causoryn/blob/main/docs/project-overview.tr-en.md)**
+
+---
+
 ## Governance, Security & License
 
 - **Security policy:** [SECURITY.md](https://github.com/MrBekoX/Causoryn/blob/main/SECURITY.md)
