@@ -22,7 +22,7 @@
     "@causoryn/wiki": "0.2.0",
     "@causoryn/workspace": "0.2.0",
     "@modelcontextprotocol/sdk": "^1.32.2",
-    "better-sqlite3": "^13.0.3",
+    "better-sqlite3": "^13.2.0",
     "zod": "^4.6.7"
   }
 }

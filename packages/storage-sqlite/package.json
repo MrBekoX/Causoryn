@@ -11,6 +11,6 @@
   "dependencies": {
     "@causoryn/domain": "0.2.0",
     "@causoryn/graph": "0.2.0",
-    "better-sqlite3": "^13.0.3"
+    "better-sqlite3": "^13.2.0"
   }
 }
