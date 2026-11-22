@@ -2,12 +2,18 @@ import { readFile, stat } from "node:fs/promises";
 import path from "node:path";
 
 import {
+  ArchitectureAnnotationsSchema,
+  ArchitectureProjectionOptionsSchema,
+  EXPORT_DOCUMENTATION_FORMATS,
+  EXPORT_DOCUMENTATION_VIEWS,
   GraphRepositoryError,
   GuardError,
   type ArchitectureTimeline,
+  type ExportDocumentationView,
   analyzeImpact,
   buildArchitectureTimelineFromGit,
   diffContentSets,
+  exportDocumentationViewSchema,
   findOrphanSuppressions,
   findViolations,
   generateAgentContext,
@@ -16,7 +22,6 @@ import {
   parseArchitecturePolicy,
   readTimelinePointFromGit,
   writeDocumentation,
-  EXPORT_DOCUMENTATION_FORMATS,
 } from "@causoryn/graph";
 import { z } from "zod";
 
@@ -60,12 +65,11 @@ import {
  *   intermediate/maintainer); `focus?` beyanlı ama çekirdekte karşılığı yok
  *   → açık INVALID_ARGUMENT reddi.
  * - causoryn_export_documentation: "format, view, output?" → `format`
- *   (json|markdown|mermaid|html; TŞ §16), `outputDir` (TŞ alan adı "output?"
- *   görev sözleşmesiyle "outputDir" olarak ALAN ADI SAPMASIYLA zorunludur:
- *   yazma yalnızca C6 OutputAccessPolicy beyanı üzerinden ve EXPLICIT beyan
- *   ilkesi gereği implicit yazma hedefi yoktur; sapma wiki kaydı
- *   orkestratör kalemidir), `fileName?`; `view?` beyanlı ama wiki görünümü
- *   Faz D dilimine aittir → açık ret.
+ *   (json|markdown|mermaid|html|snapshot; TŞ §16), `outputDir` (explicit
+ *   OutputAccessPolicy beyanı), `fileName?`, `view?` (`architecture`
+ *   varsayılan / `interactive` yalnızca HTML / `full` ham döküm; `wiki`
+ *   Living Wiki'ye ait olduğundan açık INVALID_ARGUMENT), `options?`,
+ *   `annotations?` (fail-closed Host-LLM anotasyonları, v0.2.2).
  * - causoryn_get_agent_context "task, candidateScope?, tokenBudget" →
  *   tokenBudget TŞ'de ?siz (ZORUNLU) olduğundan yüzey şeması da zorunludur
  *   (takım denetimi bulgusu); çekirdeğin default 2048 davranışı araç
@@ -116,7 +120,10 @@ export function graphErrorToToolError(
     code === "timeline/duplicate-ref" ||
     code === "timeline/invalid-limit" ||
     code === "timeline/trend-invalid-input" ||
-    code === "export/invalid-format"
+    code === "export/invalid-format" ||
+    code === "export/invalid-view" ||
+    code === "export/invalid-options" ||
+    code === "export/invalid-annotations"
   ) {
     return new CausorynToolError("INVALID_ARGUMENT", error.message);
   }
@@ -991,7 +998,7 @@ export function generateOnboardingTool(
 
 export const ExportDocumentationInputSchema = z.strictObject({
   workspaceId: z.string().min(1).optional(),
-  /** TŞ §10.2/§16 "format": json|markdown|mermaid|html. */
+  /** TŞ §10.2/§16 "format": json|markdown|mermaid|html|snapshot. */
   format: z.enum(EXPORT_DOCUMENTATION_FORMATS),
   /** Hedef çıktı dizini; config.output.allowedOutputDirs beyanında olmalıdır
    * (görev sözleşmesi: yazma yalnızca C6 output yetkilendirmesi üzerinden).
@@ -1000,8 +1007,27 @@ export const ExportDocumentationInputSchema = z.strictObject({
   outputDir: z.string().min(1),
   /** SAF dosya adı (ayraçsız); verilmezse formatın varsayılan adı kullanılır. */
   fileName: z.string().min(1).optional(),
-  /** TŞ §10.2 "view?": wiki görünümü Faz D dilimine aittir (açık ret). */
+  /** TŞ §10.2 "view?": `architecture` (varsayılan görsel/özet mimari görünümü),
+   * `interactive` (yalnızca HTML etkileşimli offline portal), `full` (ham
+   * snapshot dökümü). `wiki` görünümü ayrı Living Wiki diliminde olduğundan
+   * açık INVALID_ARGUMENT döndürür. */
   view: z.string().min(1).optional(),
+  /** Mimari projeksiyon seçenekleri (yalnızca `architecture` / `interactive`). */
+  options: ArchitectureProjectionOptionsSchema.optional(),
+  /** Host-LLM tarafından Causoryn MCP çıktılarından sentezlenen ve fail-closed
+   * doğrulanan mimari anotasyonlar (yalnızca `architecture` / `interactive`). */
+  annotations: ArchitectureAnnotationsSchema.optional(),
+});
+
+const ExportArchitectureSummarySchema = z.strictObject({
+  moduleCount: z.number().int().nonnegative(),
+  edgeCount: z.number().int().nonnegative(),
+  cycleCount: z.number().int().nonnegative(),
+  entrypointCount: z.number().int().nonnegative(),
+  contractCount: z.number().int().nonnegative(),
+  flowCount: z.number().int().nonnegative(),
+  annotated: z.boolean(),
+  moduleIds: z.array(z.string()),
 });
 
 export const ExportDocumentationDataSchema = z.strictObject({
@@ -1009,17 +1035,20 @@ export const ExportDocumentationDataSchema = z.strictObject({
   format: z.enum(EXPORT_DOCUMENTATION_FORMATS),
   bytes: z.number().int().positive(),
   atomic: z.literal(true),
+  view: z.enum(EXPORT_DOCUMENTATION_VIEWS).optional(),
+  architectureSummary: ExportArchitectureSummarySchema.optional(),
 });
 
 /**
  * causoryn_export_documentation (TŞ §16 Documentation Generator + export
- * güvenliği; C6): yayınlanmış snapshot'ı istenen formatta deterministik
- * serializer ile üretir ve YALNIZCA OutputAccessPolicy beyanlı output
- * dizinine atomik yazar (.tmp + rename). Beyanlı olmayan hedef (veya hiç
- * output beyanı olmaması) → TŞ §10.1 sabit EXPORT_NOT_ALLOWED (takım
- * denetimi bulgusu), yolu reddedilen dosya adı → PATH_DENIED. HTML:
- * offline self-contained, escaping + CSP, CDN/analytics yok (çekirdek
- * sözleşmesi). Yazma başarısızsa hedefte yarım dosya kalmaz.
+ * güvenliği; C6 + v0.2.2 görsel mimari portal & Host-LLM anotasyonları):
+ * yayınlanmış snapshot'ı istenen format ve görünümde deterministik serializer
+ * ile üretir ve YALNIZCA OutputAccessPolicy beyanlı output dizinine atomik
+ * yazar (.tmp + rename). Varsayılan `view="architecture"` katmanlı SVG/Mermaid
+ * mimari görünümü üretir (`html` sıfır-JS katı CSP'lidir); `view="interactive"`
+ * yalnızca HTML için etkileşimli offline portal (pan/zoom/arama/kanıt çekmecesi)
+ * sunar; `view="full"` ham snapshot dökümüdür. `annotations` alanındaki tüm
+ * moduleId/nodeId/evidenceId/keyFiles kimlikleri fail-closed doğrulanır.
  */
 export function exportDocumentationTool(
   deps: ServiceDeps,
@@ -1030,12 +1059,26 @@ export function exportDocumentationTool(
   requireAuthorizedWorkspace(deps, workspaceId);
   const read = requireSnapshot(deps, workspaceId);
 
+  let effectiveView: ExportDocumentationView | undefined;
   if (input.view !== undefined) {
-    throw new CausorynToolError(
-      "INVALID_ARGUMENT",
-      `view bu araç yüzeyinde henüz açılmadı (${input.view}); wiki görünümü Living Wiki dilimine aittir — bu dilimde export her zaman graph snapshot'ını dışa aktarır`,
-    );
+    if (input.view === "wiki") {
+      throw new CausorynToolError(
+        "INVALID_ARGUMENT",
+        'view="wiki" bu araç yüzeyinde desteklenmez; wiki görünümü Living Wiki araçlarına aittir (izinli view değerleri: architecture, interactive, full)',
+      );
+    }
+    const parsedView = exportDocumentationViewSchema.safeParse(input.view);
+    if (!parsedView.success) {
+      throw new CausorynToolError(
+        "INVALID_ARGUMENT",
+        `Bilinmeyen view: ${input.view}; izinli değerler: ${EXPORT_DOCUMENTATION_VIEWS.join(", ")}`,
+      );
+    }
+    effectiveView = parsedView.data;
+  } else if (input.format !== "snapshot") {
+    effectiveView = "architecture";
   }
+
   if (deps.outputPolicy === null) {
     // TŞ §10.1 sabit EXPORT_NOT_ALLOWED (takım denetimi bulgusu): beyansız
     // output listesi de export yazma reddinin tam karşılığıdır (default deny).
@@ -1053,6 +1096,9 @@ export function exportDocumentationTool(
         format: input.format,
         outputDir: input.outputDir,
         ...(input.fileName === undefined ? {} : { fileName: input.fileName }),
+        ...(effectiveView === undefined ? {} : { view: effectiveView }),
+        ...(input.options === undefined ? {} : { options: input.options }),
+        ...(input.annotations === undefined ? {} : { annotations: input.annotations }),
       },
       outputPolicy,
     ),

@@ -195,9 +195,87 @@ export {
 } from "./export.js";
 export type {
   ExportDocumentationFormat,
+  WriteDocumentationArchitectureSummary,
   WriteDocumentationInput,
   WriteDocumentationResult,
 } from "./export.js";
+// Mimari görsel projeksiyon, katmanlı SVG yerleşim, Host-LLM anotasyonları ve portal export'ları (v0.2.2)
+export {
+  ANNOTATION_LIMITS,
+  ArchitectureAnnotationsSchema,
+  ArchitectureDecisionAnnotationSchema,
+  ArchitectureDomainAnnotationSchema,
+  ArchitectureFlowAnnotationSchema,
+  ArchitectureFlowStepAnnotationSchema,
+  ArchitectureGuidedTourStepSchema,
+  ArchitectureModuleNoteAnnotationSchema,
+  ArchitectureRiskAnnotationSchema,
+  validateArchitectureAnnotations,
+} from "./architecture-annotations.js";
+export type {
+  ArchitectureAnnotations,
+  ArchitectureDecisionAnnotation,
+  ArchitectureDomainAnnotation,
+  ArchitectureFlowAnnotation,
+  ArchitectureGuidedTourStep,
+  ArchitectureModuleNoteAnnotation,
+  ArchitectureRiskAnnotation,
+  ValidatedArchitectureAnnotations,
+} from "./architecture-annotations.js";
+export {
+  ARCHITECTURE_DEFAULT_MAX_MODULES,
+  ARCHITECTURE_MAX_MODULES,
+  ARCHITECTURE_MIN_MODULES,
+  ArchitectureProjectionOptionsSchema,
+  projectArchitecture,
+} from "./architecture-projection.js";
+export type {
+  ArchitectureProjection,
+  ArchitectureProjectionOptions,
+  ArchitectureSummaryStats,
+  ExternalBoundarySummary,
+  ExternalTargetSummary,
+  ProjectedContract,
+  ProjectedCycle,
+  ProjectedEdgeKindCount,
+  ProjectedEntrypoint,
+  ProjectedEvidenceRecord,
+  ProjectedFlow,
+  ProjectedFlowStep,
+  ProjectedLanguageCount,
+  ProjectedModule,
+  ProjectedModuleCounts,
+  ProjectedModuleEdge,
+  ProjectedResolutionCounts,
+  ProjectedSymbolRef,
+  RiskHotspot,
+} from "./architecture-projection.js";
+export {
+  computeArchitectureLayout,
+  renderArchitectureSvg,
+  renderFlowStripSvg,
+} from "./architecture-layout.js";
+export type {
+  ArchitectureSvgLayout,
+  FlowStripStep,
+  LayoutBand,
+  PositionedModuleEdge,
+  PositionedModuleNode,
+  RenderArchitectureSvgOptions,
+} from "./architecture-layout.js";
+export {
+  ARCHITECTURE_INTERACTIVE_CSP,
+  ARCHITECTURE_ZERO_JS_CSP,
+  EXPORT_DOCUMENTATION_VIEWS,
+  exportDocumentationViewSchema,
+  prepareArchitecture,
+  serializeArchitectureHtml,
+  serializeArchitectureJson,
+  serializeArchitectureMarkdown,
+  serializeArchitectureMermaid,
+  serializeInteractiveArchitectureHtml,
+} from "./architecture-export.js";
+export type { ExportDocumentationView } from "./architecture-export.js";
 // Architecture Timeline çekirdeği — sprint-3 C7 (TŞ §13) + sprint-6 E5 ihlal
 // trendi. Saf motor + salt-okunur git spawn katmanı; MCP zarfı mcp-server
 // katmanındadır. Paket yüzeyi compare/impact/guard/agent-context kardeş

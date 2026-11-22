@@ -4,20 +4,20 @@
 
 > Kanıt: raw/Causoryn_Teknik_Dokuman_v2.1.pdf (TŞ v2.1 §17.1 "Antigravity plugin (birincil paket)", §17.4 uyum/güven matrisi, §22 "agy CLI yoksa çalıştırılmadı diye açıkça raporla") · Antigravity yerleşik eklenti dokümantasyonu (`agy-customizations/docs/plugins.md`, `plugin/SKILL.md`) · `packages/causoryn` (K-021 tek dağıtım paketi) · `integrations/antigravity/causoryn/plugin.json` · `integrations/antigravity/causoryn/mcp_config.json` · `integrations/antigravity/causoryn/mcp.json` · `integrations/antigravity/causoryn/README.md` · `integrations/antigravity/causoryn/test/antigravity-plugin.test.ts`
 
-## Son Kullanıcı Hızlı Kurulumu (Önerilen — K-021 / `v0.2.1`)
+## Son Kullanıcı Hızlı Kurulumu (Önerilen — K-021 / `v0.2.2`)
 
 ```bash
 # Değişiklikleri önceden görmek için (salt okunur)
-npx causoryn@0.2.1 setup --client antigravity --dry-run
+npx causoryn@0.2.2 setup --client antigravity --dry-run
 
 # ~/.gemini/config/mcp_config.json + ~/.gemini/config/skills/ kurulumu (.causoryn.backup yedeğiyle)
-npx causoryn@0.2.1 setup --client antigravity --yes
+npx causoryn@0.2.2 setup --client antigravity --yes
 
 # Sağlık kontrolü (salt okunur)
-npx causoryn@0.2.1 doctor
+npx causoryn@0.2.2 doctor
 
 # Temiz kaldırma (mcpServers.causoryn + 4 yönlendirme skill dosyası)
-npx causoryn@0.2.1 setup --client antigravity --uninstall --yes
+npx causoryn@0.2.2 setup --client antigravity --uninstall --yes
 ```
 
 Not: `~/.gemini/antigravity/mcp_config.json` ikincil konfigürasyon dosyası diskte mevcutsa `causoryn setup` ve `causoryn doctor` bu dosyayı da birincil `~/.gemini/config/mcp_config.json` ile senkronize biçimde günceller ve doğrular. Ya da doğrudan kök depodan (`https://github.com/MrBekoX/Causoryn`, kök `plugin.json` + `mcp_config.json`) kurun. Aşağıdaki `integrations/antigravity/causoryn/` bölümü, monorepo içi sahnelenmiş F1 bundle test fikstürünü ve TŞ §17.1 / §22 doğrulama kayıtlarını belgeler.
@@ -36,7 +36,7 @@ TŞ §22 kuralı uygulanır: *"agy CLI yoksa çalıştırılmadı diye açıkça
 
 **Dürüst doğrulama ayrımı (ADR-010, kırmızı kural 5):**
 
-1. **Doğrudan `stdio` protokol doğrulaması (OTOMATİK TESTTE KOŞULDU):** `npm run build:bundle --workspace packages/mcp-server` ile `integrations/antigravity/causoryn/scripts/mcp-server.mjs` (+ vendored `better-sqlite3`) sahnelendiğinde, `antigravity-plugin.test.ts` doğrudan eklenti kökünde (`cwd: PLUGIN_DIR`) `mcp_config.json` içindeki `command` + `args` + `env` ile gerçek `child_process.spawn` el sıkışması koşar: `initialize` → `causoryn@0.2.1`, `tools/list` → 29 araç, `causoryn_get_capabilities` → `status: "ok"`, `causoryn_workspace_summary` → `WORKSPACE_NOT_AUTHORIZED` ve `stdout` üzerinde yalnızca JSON-RPC 2.0 satırları doğrulanır.
+1. **Doğrudan `stdio` protokol doğrulaması (OTOMATİK TESTTE KOŞULDU):** `npm run build:bundle --workspace packages/mcp-server` ile `integrations/antigravity/causoryn/scripts/mcp-server.mjs` (+ vendored `better-sqlite3`) sahnelendiğinde, `antigravity-plugin.test.ts` doğrudan eklenti kökünde (`cwd: PLUGIN_DIR`) `mcp_config.json` içindeki `command` + `args` + `env` ile gerçek `child_process.spawn` el sıkışması koşar: `initialize` → `causoryn@0.2.2`, `tools/list` → 29 araç, `causoryn_get_capabilities` → `status: "ok"`, `causoryn_workspace_summary` → `WORKSPACE_NOT_AUTHORIZED` ve `stdout` üzerinde yalnızca JSON-RPC 2.0 satırları doğrulanır.
 2. **`agy` CLI kurulum/smoke komutları (NOT RUN):** Aşağıdaki `agy plugin validate --strict`, `agy plugin install` ve `agy plugin list` adımları TŞ §17.1'den alınmış **doküman örnekleridir; bu makinede `agy` CLI bulunmadığından hiçbiri çalıştırılmamıştır** (`NOT RUN`) ve hiçbir CLI/IDE kurulum kanıtı üretilmemiştir.
 
 ## Ön koşullar
@@ -68,7 +68,7 @@ TŞ §22 kuralı uygulanır: *"agy CLI yoksa çalıştırılmadı diye açıkça
 {
   "name": "causoryn",
   "displayName": "Causoryn",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "Local, evidence-backed codebase and change intelligence via MCP.",
   "suggestedPrompts": [
     "Map this workspace and show evidence for critical dependencies",
@@ -84,7 +84,7 @@ Alanlar ve `$schema` temizliği gerekçesi:
 |---|---|---|
 | `name` | `causoryn` | Yerel yükleyici global benzersiz anahtar + TŞ §17.1 |
 | `displayName` | `Causoryn` | Yerel yükleyici UI başlığı + TŞ §17.1 |
-| `version` | `0.2.1` | TŞ §17.1 + `packages/mcp-server/src/version.ts` (`SERVER_VERSION`) |
+| `version` | `0.2.2` | TŞ §17.1 + `packages/mcp-server/src/version.ts` (`SERVER_VERSION`) |
 | `description` | `Local, evidence-backed codebase and change intelligence via MCP.` | TŞ §17.1 |
 | `suggestedPrompts` | TŞ §17.1'deki üç prompt, birebir | Yerel yükleyici kart/detay görünümü + TŞ §17.1 |
 
@@ -137,7 +137,7 @@ Alanlar ve bilinçli sözleşme kuralları:
 
 **Çıplak `stdio.ts` vs Paketlenmiş `cli-stdio.ts` ayrımı (`--data-dir` / `--allow-cwd`):**
 - **Çıplak F1 monorepo girişi (`packages/mcp-server/src/stdio.ts`, bu `integrations/antigravity/causoryn/` fikstürünün kullandığı giriş):** argv okumaz — konfigürasyonun tek kaynağı yalnızca `CAUSORYN_CONFIG` ortam değişkenidir (`process.argv` işleme kodu yoktur; bu yüzden buradaki `mcp.json` içinde `--data-dir` bulunmaz ve wiki/graph veri kökü `CAUSORYN_CONFIG` üzerinden beyan edilir).
-- **Paketlenmiş dağıtım girişi (`packages/causoryn/dist/mcp-server.mjs`, `packages/mcp-server/src/cli-stdio.ts`):** K-021 ile son kullanıcı dağıtımı için sıfır-ayar CLI bayraklarını (`--allow-cwd`, `--auto-data-dir`, `--data-dir`, `--client antigravity`) ve masaüstü IDE dinamik MCP `roots/list` bağlamasını destekler (`npx causoryn@0.2.1 setup --client antigravity --yes` bu paketlenmiş girişi yapılandırır).
+- **Paketlenmiş dağıtım girişi (`packages/causoryn/dist/mcp-server.mjs`, `packages/mcp-server/src/cli-stdio.ts`):** K-021 ile son kullanıcı dağıtımı için sıfır-ayar CLI bayraklarını (`--allow-cwd`, `--auto-data-dir`, `--data-dir`, `--client antigravity`) ve masaüstü IDE dinamik MCP `roots/list` bağlamasını destekler (`npx causoryn@0.2.2 setup --client antigravity --yes` bu paketlenmiş girişi yapılandırır).
 
 **Çapraz host kuralı (TŞ §17.1, PDF s.19):** *"mcp.json'u farklı host'lara aynen kopyalama."* Bu kablolama Claude Code (`.mcp.json` → `docs/hosts/claude-code.md`) ve Codex (`.codex/config.toml` / `codex mcp add` → `docs/hosts/codex.md`) tarafına birebir taşınmaz; her host kendi token ve yol şemasıyla ayrı yazılır.
 
@@ -184,7 +184,7 @@ CAUSORYN_CONFIG='{"allowRoots":["/path/to/your-project"],"wiki":{"dataDbPath":"/
 
 | Entegrasyon | Model kullanımı | MCP kurulum | Uyum testleri | Bu makinedeki durum |
 |---|---|---|---|---|
-| Antigravity | Seçili Antigravity modeli (Causoryn model seçmez/ayarlamaz) | Plugin: `plugin.json` + `mcp_config.json` (yerel yükleyici) + `mcp.json` (TŞ §17.1) veya `npx causoryn@0.2.1 setup --client antigravity --yes` | Doğrudan `stdio` spawn doğrulandı (29 araç); `agy validate`/`install`/`list` | **NOT RUN — agy CLI bulunamadı** (doğrudan `stdio` protokol el sıkışması testte geçti) |
+| Antigravity | Seçili Antigravity modeli (Causoryn model seçmez/ayarlamaz) | Plugin: `plugin.json` + `mcp_config.json` (yerel yükleyici) + `mcp.json` (TŞ §17.1) veya `npx causoryn@0.2.2 setup --client antigravity --yes` | Doğrudan `stdio` spawn doğrulandı (29 araç); `agy validate`/`install`/`list` | **NOT RUN — agy CLI bulunamadı** (doğrudan `stdio` protokol el sıkışması testte geçti) |
 
 TŞ §17.4: ajanlar arası davranış eşitliği MCP tool schema + contract testleriyle sağlanır; host UI/permission özdeşliği iddia edilmez. Host modelin tool seçimi isteğe ve model yeteneğine bağlıdır; Causoryn çağrıları zorla çalıştıramaz.
 

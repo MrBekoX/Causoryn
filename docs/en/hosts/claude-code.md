@@ -4,7 +4,7 @@
 
 > Evidence: **K-021/K-022 distribution (`2026-11-19`):** `claude --version` → `2.1.328 (Claude Code)`
 > verified `claude plugin validate --strict` (repository root `.claude-plugin/marketplace.json`),
-> `claude mcp list` `√ Connected`, and `npx causoryn@0.2.1 setup --client claude-code`.
+> `claude mcp list` `√ Connected`, and `npx causoryn@0.2.2 setup --client claude-code`.
 > **Historical F3 monorepo bundle smoke evidence:** `claude --version` → `2.1.322 (Claude Code)`;
 > `claude mcp --help` and `claude mcp add --help` outputs (syntax first checked on `2026-11-08`
 > with `2.1.319`, **re-verified end-to-end on `2026-11-10` with `2.1.322`**: `mcp add` → `mcp list`
@@ -14,28 +14,28 @@
 > live under `dist/node_modules/` — not a standalone single file; distribute the entire `dist/`
 > directory). Verification test: `tests/hosts-docs.test.ts`.
 
-Causoryn is a local, deterministic, LLM-free MCP code-intelligence engine (`causoryn@0.2.1`). If
+Causoryn is a local, deterministic, LLM-free MCP code-intelligence engine (`causoryn@0.2.2`). If
 Claude Code is not installed yet, install it with `npm install -g @anthropic-ai/claude-code`.
 
-## 0. End-User Quick Setup (Recommended — K-021 / `v0.2.1`)
+## 0. End-User Quick Setup (Recommended — K-021 / `v0.2.2`)
 
-### Option 0A — One-Command CLI (`npx causoryn@0.2.1 setup`)
+### Option 0A — One-Command CLI (`npx causoryn@0.2.2 setup`)
 
 ```bash
 # Preview planned changes without modifying any files (read-only)
-npx causoryn@0.2.1 setup --client claude-code --dry-run
+npx causoryn@0.2.2 setup --client claude-code --dry-run
 
 # Configure ~/.claude.json + ~/.claude/skills/ (with .causoryn.backup and persistent ~/.causoryn/runtime)
-npx causoryn@0.2.1 setup --client claude-code --yes
+npx causoryn@0.2.2 setup --client claude-code --yes
 
 # Read-only health & alignment check
-npx causoryn@0.2.1 doctor
+npx causoryn@0.2.2 doctor
 
 # Clean removal (removes mcpServers.causoryn + 4 routing skills)
-npx causoryn@0.2.1 setup --client claude-code --uninstall --yes
+npx causoryn@0.2.2 setup --client claude-code --uninstall --yes
 ```
 
-**`v0.2.1` `CLAUDE_CONFIG_DIR` support:** When `CLAUDE_CONFIG_DIR` is set in the environment, both
+**`v0.2.2` `CLAUDE_CONFIG_DIR` support:** When `CLAUDE_CONFIG_DIR` is set in the environment, both
 `causoryn setup --client claude-code` and `causoryn doctor` target `$CLAUDE_CONFIG_DIR/.claude.json`
 and `$CLAUDE_CONFIG_DIR/skills/` instead of `~/.claude.json` and `~/.claude/skills/`
 (`resolveEffectiveClaudeConfigDir` in `packages/causoryn/src/setup.ts`). Multi-profile setups and
@@ -48,11 +48,11 @@ isolated CI/smoke runs never touch the user's primary home configuration.
 /plugin install causoryn@causoryn
 ```
 
-- **Marketplace manifest & `--expected-version 0.2.1` launcher guard:** The root
-  `.claude-plugin/marketplace.json` (`source: { "source": "npm", "package": "causoryn", "version": "0.2.1" }`)
+- **Marketplace manifest & `--expected-version 0.2.2` launcher guard:** The root
+  `.claude-plugin/marketplace.json` (`source: { "source": "npm", "package": "causoryn", "version": "0.2.2" }`)
   and packaged `packages/causoryn/.claude-plugin/plugin.json` launch the server via
-  `${CLAUDE_PLUGIN_ROOT}/scripts/plugin-mcp-launcher.mjs --expected-version 0.2.1 --allow-cwd --auto-data-dir --client claude-code`.
-  `plugin-mcp-launcher.mjs` verifies `package.json` `version === "0.2.1"` (and cross-checks
+  `${CLAUDE_PLUGIN_ROOT}/scripts/plugin-mcp-launcher.mjs --expected-version 0.2.2 --allow-cwd --auto-data-dir --client claude-code`.
+  `plugin-mcp-launcher.mjs` verifies `package.json` `version === "0.2.2"` (and cross-checks
   `CAUSORYN_EXPECTED_VERSION` if set) without spawning a nested `npx` child process, exits `2` with
   a diagnostic on `stderr` on any version mismatch, sets `CAUSORYN_ASSET_ROOT`, and imports
   `dist/mcp-server.mjs` directly while keeping `stdout` strictly reserved for MCP JSON-RPC frames.
@@ -160,7 +160,7 @@ When `-s` is omitted, Claude Code removes the server from whichever scope holds 
 The Causoryn server process writes **only MCP protocol frames** to `stdout`; all operational logs
 are emitted with the `[causoryn]` prefix on **`stderr`**, guaranteeing that log lines never corrupt
 the host JSON-RPC stream. Manual verification (`2026-11-08` on `causoryn@0.1.0`; preserved in
-`causoryn@0.2.1`):
+`causoryn@0.2.2`):
 
 - `stdout`: 2 lines of pure JSON-RPC (`initialize` response + `tools/list` → **29 tools**)
 - `stderr`: only `[causoryn]` default-deny startup notice + ready log

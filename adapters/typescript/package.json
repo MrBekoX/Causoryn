@@ -1,6 +1,6 @@
 {
   "name": "@causoryn/adapter-typescript",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "private": true,
   "license": "MIT",
   "description": "TypeScript/JS Language Adapter: Compiler API ile AST + symbol resolution (TŞ v2.1 §6, §7, §25/4).",
@@ -9,7 +9,7 @@
     ".": "./src/index.ts"
   },
   "dependencies": {
-    "@causoryn/domain": "0.2.1",
+    "@causoryn/domain": "0.2.2",
     "typescript": "5.9.3"
   }
 }

@@ -4,7 +4,7 @@
 >
 > **Evidence base:** `packages/causoryn/src/{cli.ts,setup.ts,doctor.ts,runtime-stage.ts,types.ts}`, `packages/causoryn/scripts/{causoryn.mjs,plugin-mcp-launcher.mjs,lib/node-version-guard.mjs,verify-package-ready.mjs}`, `packages/mcp-server/src/{cli-stdio.ts,stdio.ts,runtime-cli.ts,config.ts,context.ts}`, `packages/workspace/src/policy-config.ts` (TS v2.1 §9, §10.1, §17, §20 · `ADR-008` · `K-021` · `K-022`).
 
-This reference documents every `causoryn` (`v0.2.1` — Pre-1.0 Public Preview) CLI subcommand and flag, the pre-import Node.js `>= 24` runtime guard, the version-pinned plugin marketplace launcher, the zero-config workspace discovery and root-safety filter, the out-of-tree data directory layout, and the strict `CAUSORYN_CONFIG` JSON schema.
+This reference documents every `causoryn` (`v0.2.2` — Pre-1.0 Public Preview) CLI subcommand and flag, the pre-import Node.js `>= 24` runtime guard, the version-pinned plugin marketplace launcher, the zero-config workspace discovery and root-safety filter, the out-of-tree data directory layout, and the strict `CAUSORYN_CONFIG` JSON schema.
 
 ---
 
@@ -80,7 +80,7 @@ When invoked as `causoryn mcp`, `scripts/causoryn.mjs` hands off directly to `di
 
 ### 1.4 `causoryn --version` & `causoryn --help`
 
-- `causoryn --version` (`-v`, `version`): Prints `0.2.1` to `stdout` and exits `0`.
+- `causoryn --version` (`-v`, `version`): Prints `0.2.2` to `stdout` and exits `0`.
 - `causoryn --help` (`-h`, `help`, or bare `causoryn` with no arguments): Prints usage help to `stdout` and exits `0`.
 
 ---
@@ -154,7 +154,7 @@ Causoryn **never** writes a single byte into the analyzed repository source tree
 
 - **Base data directory precedence (`resolveBaseDataDir`):** `--data-dir <abs-path>` > `ZCODE_PLUGIN_DATA` > `~/.causoryn`.
 - **Pre-mkdir & post-mkdir symlink/containment guards:** Before calling `mkdirSync`, Causoryn walks every ancestor prefix (`assertDataDirAncestorsSafe`, `assertNotSymlinkDirectory`, `assertStrictlyOutsideWorkspaceRoots`) to reject symlinks (`CWE-59`, allowing macOS system firmlinks `/var`, `/tmp`, `/etc`), dangling links, and any path resolving inside `allowRoots`. After directory creation, `realpathSync` re-verifies containment against TOCTOU races.
-- **Persistent runtime staging (`stagePersistentRuntime`):** When `npx causoryn@0.2.1 setup` executes from an ephemeral `_npx`, `.npx`, or `os.tmpdir()` cache, it copies the runtime into `~/.causoryn/.runtime-stage-<pid>-<ts>` and atomically swaps it into `~/.causoryn/runtime` (rolling back `.runtime-prev-*` on failure) so host MCP configurations survive `_npx` cache eviction.
+- **Persistent runtime staging (`stagePersistentRuntime`):** When `npx causoryn@0.2.2 setup` executes from an ephemeral `_npx`, `.npx`, or `os.tmpdir()` cache, it copies the runtime into `~/.causoryn/.runtime-stage-<pid>-<ts>` and atomically swaps it into `~/.causoryn/runtime` (rolling back `.runtime-prev-*` on failure) so host MCP configurations survive `_npx` cache eviction.
 
 ---
 

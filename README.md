@@ -1,8 +1,8 @@
-# Causoryn (`v0.2.1` — Pre-1.0 Public Preview)
+# Causoryn (`v0.2.2` — Pre-1.0 Public Preview)
 
 **Causoryn** is an open-source, **local, deterministic, LLM-free** codebase and change intelligence engine exposed over the Model Context Protocol (`stdio`). It builds an evidence-backed dependency, symbol, route, contract, and test graph across your project (**TypeScript**, **C# / Roslyn**, **Python**, **Go**, **Rust**) and serves **29 structured MCP tools** to your AI coding agent — while enforcing a strict **read-only workspace guarantee** (`ADR-008`: zero bytes written to your repository source tree).
 
-> **Release status (`ADR-010`):** `v0.2.1` is a **Pre-1.0 Public Preview** (not `1.0.0`; historical `v0.1.0` remains frozen at `4c9c188f`). Remaining `1.0.0` gates are tracked transparently in [`CHANGELOG.md`](CHANGELOG.md).
+> **Release status (`ADR-010`):** `v0.2.2` is a **Pre-1.0 Public Preview** (not `1.0.0`; historical `v0.1.0` remains frozen at `4c9c188f`). Remaining `1.0.0` gates are tracked transparently in [`CHANGELOG.md`](CHANGELOG.md).
 
 ---
 
@@ -85,7 +85,7 @@ Running `causoryn_preflight_change` before editing `src/services/orders-service.
 
 ## Supported Hosts
 
-Causoryn ships as a multi-file npm distribution package (`causoryn` v`0.2.1`) and multi-host plugin repository supporting:
+Causoryn ships as a multi-file npm distribution package (`causoryn` v`0.2.2`) and multi-host plugin repository supporting:
 
 1. **Antigravity** (`agy` / Antigravity IDE)
 2. **Claude Code**
@@ -107,7 +107,7 @@ Causoryn is **not** a single-file JS bundle (`ADR-010`) — its runtime properti
 | **Go** (L1/heuristic + L3) | **Go 1.22+** (stdlib `go/parser`, zero external modules) | On-demand `go run` (or prebuilt `CAUSORYN_GO_WORKER_BIN`) | 100% offline |
 | **Rust** (L1/heuristic + L3) | **Rust / Cargo** (`syn` 2 sidecar) | On-demand `cargo build --locked` into `~/.causoryn/cache/rust-worker-target` | First cold build fetches 12 locked crates from `crates.io`; cached builds run offline |
 
-Missing optional sidecar toolchains (`dotnet`, `python`, `go`, `cargo`) never crash the server — they degrade honestly to L0/L1 file-level provenance (`npx causoryn@0.2.1 doctor` inspects sidecar readiness).
+Missing optional sidecar toolchains (`dotnet`, `python`, `go`, `cargo`) never crash the server — they degrade honestly to L0/L1 file-level provenance (`npx causoryn@0.2.2 doctor` inspects sidecar readiness).
 
 ---
 
@@ -117,22 +117,22 @@ Missing optional sidecar toolchains (`dotnet`, `python`, `go`, `cargo`) never cr
 
 ```bash
 # Preview planned changes without modifying any files
-npx causoryn@0.2.1 setup --all-detected --dry-run
+npx causoryn@0.2.2 setup --all-detected --dry-run
 
 # Configure all detected hosts (backs up existing configs to *.causoryn.backup and stages a persistent ~/.causoryn/runtime copy)
-npx causoryn@0.2.1 setup --all-detected --yes
+npx causoryn@0.2.2 setup --all-detected --yes
 
 # Or configure a specific host
-npx causoryn@0.2.1 setup --client antigravity --yes
-npx causoryn@0.2.1 setup --client claude-code --yes
-npx causoryn@0.2.1 setup --client codex --yes
-npx causoryn@0.2.1 setup --client zcode --yes
+npx causoryn@0.2.2 setup --client antigravity --yes
+npx causoryn@0.2.2 setup --client claude-code --yes
+npx causoryn@0.2.2 setup --client codex --yes
+npx causoryn@0.2.2 setup --client zcode --yes
 
 # Verify runtime, sidecars, and host config/skill alignment (100% read-only)
-npx causoryn@0.2.1 doctor
+npx causoryn@0.2.2 doctor
 
 # Uninstall cleanly from a host
-npx causoryn@0.2.1 setup --client claude-code --uninstall --yes
+npx causoryn@0.2.2 setup --client claude-code --uninstall --yes
 ```
 
 ### Option 2: Native Host Plugin Marketplaces
@@ -145,9 +145,9 @@ npx causoryn@0.2.1 setup --client claude-code --uninstall --yes
 - **ZCode (GLM):**
   Open **Settings → Plugin Management / Marketplace → Discover → + (New)**, enter `https://github.com/MrBekoX/Causoryn` (reads root `marketplace.json` + `.zcode-plugin/plugin.json`), and install `causoryn`.
 - **Codex:**
-  Register the repository marketplace (`.agents/plugins/marketplace.json` + `.codex-plugin/plugin.json`) or run `npx causoryn@0.2.1 setup --client codex --yes`.
+  Register the repository marketplace (`.agents/plugins/marketplace.json` + `.codex-plugin/plugin.json`) or run `npx causoryn@0.2.2 setup --client codex --yes`.
 - **Antigravity:**
-  Install from `https://github.com/MrBekoX/Causoryn` (`plugin.json` + `mcp_config.json`) or run `npx causoryn@0.2.1 setup --client antigravity --yes`.
+  Install from `https://github.com/MrBekoX/Causoryn` (`plugin.json` + `mcp_config.json`) or run `npx causoryn@0.2.2 setup --client antigravity --yes`.
 - **Standalone Skills (`skills.sh`):**
   ```bash
   npx skills add MrBekoX/Causoryn
@@ -160,7 +160,7 @@ npx causoryn@0.2.1 setup --client claude-code --uninstall --yes
 - **Discover:** `causoryn_map_system`, `causoryn_get_agent_context`, `causoryn_find_symbols`, `causoryn_get_symbol_context`, `causoryn_trace_execution`, `causoryn_trace_business_flow`
 - **Preflight:** `causoryn_preflight_change` (`candidateOnly: true`), `causoryn_analyze_impact`, `causoryn_check_contracts`, `causoryn_detect_contract_drift`, `causoryn_derive_test_plan`
 - **Verify:** `causoryn_verify_change`, `causoryn_check_architecture` (`.causoryn/architecture.rules.yaml`)
-- **Explain & Living Wiki:** `causoryn_get_evidence`, `causoryn_compare_architecture`, `causoryn_architecture_timeline`, `causoryn_generate_onboarding`, `causoryn_export_documentation`, and 7 `causoryn_wiki_*` tools
+- **Explain, Visual Architecture Portal & Living Wiki:** `causoryn_get_evidence`, `causoryn_compare_architecture`, `causoryn_architecture_timeline`, `causoryn_generate_onboarding`, `causoryn_export_documentation` (layered SVG offline HTML portals, subgraph Mermaid diagrams, Architecture Brief Markdown, and fail-closed Host-LLM `annotations` guided by the bundled `architecture-blueprint` skill), and 7 `causoryn_wiki_*` tools
 
 See [`packages/causoryn/README.md`](packages/causoryn/README.md) for the standalone npm package reference.
 

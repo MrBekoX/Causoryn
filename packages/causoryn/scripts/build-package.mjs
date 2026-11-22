@@ -794,6 +794,9 @@ export function stageCausorynPackage(options = {}) {
   const pkgSkillsDir = path.join(pkgDir, "skills");
   rmSync(pkgSkillsDir, { recursive: true, force: true });
   cpSync(rootSkillsDir, pkgSkillsDir, { recursive: true });
+  const stagedSkillCount = readdirSync(pkgSkillsDir, { withFileTypes: true }).filter((d) =>
+    d.isDirectory(),
+  ).length;
 
   // 5) Kök LICENSE -> packages/causoryn/LICENSE
   const rootLicense = path.join(repoRoot, "LICENSE");
@@ -818,6 +821,7 @@ export function stageCausorynPackage(options = {}) {
   return {
     version,
     typescriptLibFileCount: dtsFiles.length,
+    skillCount: stagedSkillCount,
   };
 }
 
@@ -829,7 +833,7 @@ if (isDirectExecution) {
   try {
     const summary = stageCausorynPackage();
     console.error(
-      `[build:package] ok — causoryn@${summary.version} sahnelendi (ts-lib: ${String(summary.typescriptLibFileCount)} d.ts, native: 4 worker + flat Roslyn DLL, skills: 4, LICENSE + THIRD-PARTY-NOTICES.md)`,
+      `[build:package] ok — causoryn@${summary.version} sahnelendi (ts-lib: ${String(summary.typescriptLibFileCount)} d.ts, native: 4 worker + flat Roslyn DLL, skills: ${String(summary.skillCount)}, LICENSE + THIRD-PARTY-NOTICES.md)`,
     );
   } catch (error) {
     console.error(error instanceof Error ? error.message : String(error));

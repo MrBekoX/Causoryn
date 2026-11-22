@@ -139,7 +139,7 @@ import { collectInventory, type InventoryEntry } from "./inventory.js";
  * kimliği, bu sürümden bağımsız olarak analyzerFingerprint fp2 şemasıyla
  * taşınır (fp1→fp2 geçişi snapshot meta'da ayrışır).
  */
-export const INDEXING_VERSION = "0.2.1";
+export const INDEXING_VERSION = "0.2.2";
 
 /** Envanter/adaptasyon limitleri (TŞ §20 index bölümü). */
 export interface IndexLimits {
