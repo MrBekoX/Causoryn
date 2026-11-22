@@ -3,19 +3,19 @@
 > **Dil / Language:** Türkçe · [English](../en/hosts/zcode.md) · [Uyumluluk Matrisi](../compatibility-matrix.md)
 
 > Kanıt: TŞ v2.1 §17, §22, §25/8 · K-002 (dördüncü host adaptörü olarak ZCode) · K-021/K-022
-> (`causoryn@0.2.0` CLI kurulum sihirbazı + npm plugin pazaryeri) · `marketplace.json` ·
+> (`causoryn@0.2.1` CLI kurulum sihirbazı + npm plugin pazaryeri) · `marketplace.json` ·
 > `packages/causoryn/.zcode-plugin/plugin.json` · `packages/causoryn/src/{setup.ts,doctor.ts}` ·
 > `integrations/zcode/causoryn/README.md` · Doğrulama testleri: `plugin-package.test.ts`,
 > `plugin-dev-marketplace.test.ts`, `packages/causoryn/test/setup-and-doctor.test.ts`,
 > `tests/open-source-distribution.test.ts`, `tests/hosts-docs.test.ts`.
 
-Causoryn, LLM çalıştırmayan yerel ve deterministik bir MCP kod istihbaratı motorudur (`causoryn@0.2.0`).
+Causoryn, LLM çalıştırmayan yerel ve deterministik bir MCP kod istihbaratı motorudur (`causoryn@0.2.1`).
 ZCode (GLM) ortamında **iki tamamlayıcı kurulum yüzeyi** sunar:
 
 1. **Birincil CLI kurulumu (önerilen):** `~/.zcode/cli/config.json` (`mcp.servers.causoryn`) +
-   `~/.zcode/skills/` üzerine tek komutla `npx causoryn@0.2.0 setup --client zcode --yes`.
+   `~/.zcode/skills/` üzerine tek komutla `npx causoryn@0.2.1 setup --client zcode --yes`.
 2. **Deneysel ZCode Plugin Pazaryeri:** Kök `marketplace.json` (`source: "npm"`) ve paket içi
-   `.zcode-plugin/plugin.json` (`--expected-version 0.2.0` başlatıcı kilidiyle).
+   `.zcode-plugin/plugin.json` (`--expected-version 0.2.1` başlatıcı kilidiyle).
 
 ## Dürüstlük Beyanı — Masaüstü GUI Kurulumu (`NOT RUN`) vs Otomatik Şema/CLI Doğrulaması
 
@@ -28,27 +28,27 @@ ZCode (GLM) ortamında **iki tamamlayıcı kurulum yüzeyi** sunar:
 - **Otomatik testlerle doğrulanan yüzeyler:** Kök `marketplace.json`, paket içi
   `packages/causoryn/.zcode-plugin/plugin.json`, monorepo geliştirici fikstürü
   (`integrations/zcode/.claude-plugin/marketplace.json` + `integrations/zcode/causoryn/`),
-  izole geçici `$HOME` altında `npx causoryn@0.2.0 setup --client zcode --yes` / `doctor` /
+  izole geçici `$HOME` altında `npx causoryn@0.2.1 setup --client zcode --yes` / `doctor` /
   `--uninstall` döngüsü ve gerçek `.tgz` paketinden `stdio` el sıkışması (29 araç)
   `plugin-package.test.ts`, `plugin-dev-marketplace.test.ts`, `setup-and-doctor.test.ts` ve
   `open-source-distribution.test.ts` ile uçtan uca doğrulanmıştır.
 
 ---
 
-## 1. Birincil Kurulum — Tek Komut CLI (`npx causoryn@0.2.0 setup`)
+## 1. Birincil Kurulum — Tek Komut CLI (`npx causoryn@0.2.1 setup`)
 
 ```bash
 # Değişiklikleri önceden görmek için (salt okunur)
-npx causoryn@0.2.0 setup --client zcode --dry-run
+npx causoryn@0.2.1 setup --client zcode --dry-run
 
 # ~/.zcode/cli/config.json (mcp.servers.causoryn) + ~/.zcode/skills/ kurulumu
-npx causoryn@0.2.0 setup --client zcode --yes
+npx causoryn@0.2.1 setup --client zcode --yes
 
 # Salt okunur sağlık ve hizalama kontrolü
-npx causoryn@0.2.0 doctor
+npx causoryn@0.2.1 doctor
 
 # Temiz kaldırma (mcp.servers.causoryn + 4 yönlendirme skill dosyası)
-npx causoryn@0.2.0 setup --client zcode --uninstall --yes
+npx causoryn@0.2.1 setup --client zcode --uninstall --yes
 ```
 
 ### CLI kurulumunun yaptıkları (`packages/causoryn/src/setup.ts`)
@@ -89,7 +89,7 @@ npx causoryn@0.2.0 setup --client zcode --uninstall --yes
    `mcp.servers` altına taşır — böylece mevcut MCP sunucularınız kaybolmaz.
 4. **4 kanonik yönlendirme skill dosyası (`~/.zcode/skills/`):** `causoryn`, `map-system`,
    `preflight-change` ve `verify-change` skill'leri `~/.zcode/skills/<ad>/SKILL.md` altına kurulur.
-5. **Kaldırma (`--uninstall`):** `npx causoryn@0.2.0 setup --client zcode --uninstall --yes` komutu
+5. **Kaldırma (`--uninstall`):** `npx causoryn@0.2.1 setup --client zcode --uninstall --yes` komutu
    `mcp.servers.causoryn` girdisini siler (başka sunucu kalmadıysa boş `mcp.servers` / `mcp`
    nesnelerini de temizler), `~/.zcode/skills/` altındaki 4 Causoryn skill klasörünü kaldırır ve
    başka hiçbir host `~/.causoryn/runtime` dizinine referans vermiyorsa sahnelenmiş runtime'ı da
@@ -101,7 +101,7 @@ npx causoryn@0.2.0 setup --client zcode --uninstall --yes
 
 Depo kökündeki `marketplace.json`, ZCode masaüstü arayüzünden (**Settings → Plugin Management →
 Discover → +**) GitHub deposu (`https://github.com/MrBekoX/Causoryn`) veya yerel dizin olarak
-eklenebilir; paketi `npm` kaynağından (`source: { "source": "npm", "package": "causoryn", "version": "0.2.0" }`)
+eklenebilir; paketi `npm` kaynağından (`source: { "source": "npm", "package": "causoryn", "version": "0.2.1" }`)
 ve Türkçe/İngilizce `description_i18n` alanlarıyla tanımlar.
 
 Paketlenen `packages/causoryn/.zcode-plugin/plugin.json` içindeki `mcpServers.causoryn` tanımı:
@@ -115,7 +115,7 @@ Paketlenen `packages/causoryn/.zcode-plugin/plugin.json` içindeki `mcpServers.c
       "args": [
         "${ZCODE_PLUGIN_ROOT}/scripts/plugin-mcp-launcher.mjs",
         "--expected-version",
-        "0.2.0",
+        "0.2.1",
         "--allow-cwd",
         "--auto-data-dir",
         "--client",
@@ -130,7 +130,7 @@ Paketlenen `packages/causoryn/.zcode-plugin/plugin.json` içindeki `mcpServers.c
 ### ZCode ortam değişkenleri ve güvenlik sınırları
 
 - **`ZCODE_PLUGIN_ROOT`:** Kurulu eklentinin salt okunur kök dizinidir. `plugin-mcp-launcher.mjs`
-  iç içe `npx` alt-süreci açmadan bu kök altındaki `package.json` dosyasının `--expected-version 0.2.0`
+  iç içe `npx` alt-süreci açmadan bu kök altındaki `package.json` dosyasının `--expected-version 0.2.1`
   ile eşleştiğini doğrular ve `dist/mcp-server.mjs` modülünü yükler. `deriveForbiddenPluginDirs`
   (`packages/mcp-server/src/runtime-cli.ts`), `ZCODE_PLUGIN_ROOT` ve `~/.zcode/plugins` dizinlerinin
   analiz edilecek bir proje kökü olarak yetkilendirilmesini kesin olarak engeller.

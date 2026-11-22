@@ -22,6 +22,17 @@ sürümleme [SemVer](https://semver.org/lang/tr/) ilkelerini izler.
 - Rate-limit/concurrency resource budget (K-010 kapsam dışı beyanı) (adanmış secret-scan kapısı 2026-11-17/18'de `scripts/secret-scan.mjs` ile eklendi ve 2026-11-20 K-022'de 12 kök + kök dosyalarına genişletildi)
 - ~~npm audit 10 moderate dev-toolchain uyarısının (minimatch) çözülmesi~~ — **Kapatıldı (2026-11-20, K-022):** `eslint@10.15.0` ve `typescript-eslint@8.73.0` yükseltmesiyle `npm audit` **0 güvenlik açığı** (`0 vulnerabilities`) döndürür.
 
+## [0.2.1] - 2026-11-22
+
+### Fixed
+
+- **Non-blocking MCP startup (`cli-stdio.ts`, `runtime-cli.ts`, `context.ts`):** `causoryn mcp --allow-cwd --auto-data-dir` artık büyük repolarda MCP `initialize` ve `tools/list` el sıkışmasından önce senkron indeksleme yapmaz (`deferAutoIndex: true` + `oninitialized` sonrası arka plan tam async indeksleme); büyük tam-yığın projelerde `initialize` süresi timeout yerine `< 500 ms` seviyesine indirildi.
+- **Gerçek-dünya build/venv/cache ignore + kök `.gitignore` uyumu (`packages/workspace`, `runtime-cli.ts`):** `.next`, `.nuxt`, `.svelte-kit`, `.turbo`, `.cache`, `.venv`, `venv`, `__pycache__`, `.pytest_cache`, `.mypy_cache`, `.ruff_cache`, `target`, `coverage`, `.vs`, `.dotnet`, `.dotnet-home`, `.codex-build` ve `.nupkg`/`.snupkg`/`.pdb` ikilileri varsayılan dışlamaya alındı; `buildWorkspaceAutoConfig` kök `.gitignore` desenlerini negasyon-güvenli biçimde `extraIgnore` ile birleştirir.
+- **Polyglot paylaşımlı dış düğüm birleştirme (`packages/indexing`):** İki veya daha fazla dil analizörü aynı `relativePath=null` dış/sanal düğümü (`UnknownExternal`, örn. `Request`) ürettiğinde snapshot oluşturma artık çökmez; kanonik düğüm paylaşılırken dosya-bağlı çakışmalar fail-closed reddedilmeye devam eder.
+- **O(1) SQLite pozisyon sayacı & toplu transaction yazımı (`packages/storage-sqlite`, `packages/graph`, `packages/indexing`):** `SqliteGraphRepository` içindeki `addNode`/`addEdge`/`addEvidence` O(N²) `MAX(position)` alt sorguları O(1) sayaçla değiştirildi ve toplu build/envanter yazımları `runInTransaction` ile tek atomik SQLite transaction'ında yürütülür.
+- **Yanıt bütçesi koruması (`packages/mcp-server`):** `causoryn_index_status` yanıtındaki `job.diagnostics` ve `job.warnings` dizileri büyük projelerde MCP bağlam penceresini taşmaması için 50 kayıt + kısaltma özeti ile sınırlandı.
+- **Release workflow (`release.yml`):** `npm publish "./$TGZ_FILE"` öneki ile yerel tarball yolunun npm tarafından GitHub repo kısayolu sanılması giderildi.
+
 ## [0.2.0] - 2026-11-20
 
 ### Sürüm kararı (K-022)

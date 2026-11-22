@@ -1,6 +1,6 @@
 {
   "name": "causoryn",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Deterministic, local, LLM-free code analysis for ZCode: read-only workspace graphs, architecture mapping, symbol search and evidence provenance over a stdio MCP server.",
   "description_i18n": {
     "en": "Deterministic, local, LLM-free code analysis for ZCode: read-only workspace graphs, architecture mapping, symbol search and evidence provenance over a stdio MCP server."

@@ -1,16 +1,16 @@
-# Causoryn Documentation Hub (`v0.2.0` — Pre-1.0 Public Preview)
+# Causoryn Documentation Hub (`v0.2.1` — Pre-1.0 Public Preview)
 
 > **Language:** [Türkçe](../README.md) | **English** · [Root README](../../README.md) · [Bilingual Project Overview (TR · EN)](../project-overview.tr-en.md)
 
 **Causoryn** is an open-source, **local, deterministic, LLM-free** (`ADR-002`) codebase and change intelligence engine exposed over the Model Context Protocol (`stdio`). It builds an evidence-backed **Unified Evidence & Knowledge Graph** across **TypeScript**, **C# / Roslyn**, **Python**, **Go**, and **Rust** repositories and serves **29 structured MCP tools** to AI coding agents — while enforcing a strict **read-only workspace guarantee** (`ADR-008`: zero bytes written into your source tree).
 
-> **Release honesty (`ADR-010`, `K-022`):** `v0.2.0` is a **Pre-1.0 Public Preview** (not `1.0.0`; historical `v0.1.0` remains frozen at `4c9c188f`). Remaining `1.0.0` gates are tracked transparently in [CHANGELOG.md](../../CHANGELOG.md) and [Implementation Status](implementation-status.md).
+> **Release honesty (`ADR-010`, `K-022`):** `v0.2.1` is a **Pre-1.0 Public Preview** (not `1.0.0`; historical `v0.1.0` remains frozen at `4c9c188f`). Remaining `1.0.0` gates are tracked transparently in [CHANGELOG.md](../../CHANGELOG.md) and [Implementation Status](implementation-status.md).
 
 ---
 
 ## Quick Navigation
 
-1. **Install in one command or audit an existing setup:** [CLI & Configuration Reference](cli-and-configuration.md) (`npx causoryn@0.2.0 setup` & `npx causoryn@0.2.0 doctor`)
+1. **Install in one command or audit an existing setup:** [CLI & Configuration Reference](cli-and-configuration.md) (`npx causoryn@0.2.1 setup` & `npx causoryn@0.2.1 doctor`)
 2. **Follow host-specific setup guides:** [Antigravity](hosts/antigravity.md) · [Claude Code](hosts/claude-code.md) · [Codex](hosts/codex.md) · [ZCode (GLM)](hosts/zcode.md)
 3. **Explore all 29 MCP tool schemas, envelopes, and error codes:** [MCP Tool Contracts](tool-contracts.md) and [Living Wiki Specification](wiki-spec.md)
 4. **Understand static resolution tiers (`L0`–`L3`) and sidecar boundaries:** [5-Language Analyzers & Sidecar Protocol](language-analyzers.md)
@@ -52,8 +52,8 @@
 |---|---|---|
 | [Security Audit (`security-pass.md`)](security-pass.md) | 9/9 threat matrix, F6 security suite (`net-guard.cjs` behavioral zero-network proof), `secret-scan`, CWE-59 symlink defenses, and bundle SHA-256 verification | [Güvenlik Denetimi](../security-pass.md) |
 | [Benchmarks (`benchmarks.md`)](benchmarks.md) | Deterministic 1,000-file fixture cold-index and warm MCP query latency medians (`11.8` / `13.0` / `10.7` ms) | [Performans Ölçümleri](../benchmarks.md) |
-| [Implementation Status (`implementation-status.md`)](implementation-status.md) | Evidence-backed phase-by-phase delivery matrix across Phases A–F, Sprints 1–8, and `v0.2.0` (`Done` / `Partial` — `ADR-010`) | [Uygulama Durumu](../implementation-status.md) |
-| [Engineering Backlog (`BACKLOG.md`)](BACKLOG.md) | Remaining `1.0.0` release gates and tracked post-`0.2.0` engineering items | [Teknik Backlog](../BACKLOG.md) |
+| [Implementation Status (`implementation-status.md`)](implementation-status.md) | Evidence-backed phase-by-phase delivery matrix across Phases A–F, Sprints 1–8, and `v0.2.1` (`Done` / `Partial` — `ADR-010`) | [Uygulama Durumu](../implementation-status.md) |
+| [Engineering Backlog (`BACKLOG.md`)](BACKLOG.md) | Remaining `1.0.0` release gates and tracked post-`0.2.1` engineering items | [Teknik Backlog](../BACKLOG.md) |
 | [ADR-002: No-LLM Strict Boundary (`adr/ADR-002-no-llm.md`)](adr/ADR-002-no-llm.md) | Architectural decision record prohibiting any LLM, embedding, or model API dependency inside Causoryn | [ADR-002 (TR)](../adr/ADR-002-no-llm.md) |
 
 ---

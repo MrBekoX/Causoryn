@@ -11,7 +11,7 @@ import type { PolicyErrorCode } from "./policy-error.js";
  * listesi bire bir korunur.
  */
 
-/** TŞ §20 workspace.ignore default listesi (bire bir). */
+/** TŞ §20 workspace.ignore default listesi + gerçek-dünya derleme/sanal-ortam/önbellek dizinleri. */
 export const DEFAULT_IGNORE_PATTERNS: readonly string[] = [
   "**/.git/**",
   "**/node_modules/**",
@@ -20,6 +20,23 @@ export const DEFAULT_IGNORE_PATTERNS: readonly string[] = [
   "**/dist/**",
   "**/.env*",
   "**/*.pem",
+  "**/.next/**",
+  "**/.nuxt/**",
+  "**/.svelte-kit/**",
+  "**/.turbo/**",
+  "**/.cache/**",
+  "**/.venv/**",
+  "**/venv/**",
+  "**/__pycache__/**",
+  "**/.pytest_cache/**",
+  "**/.mypy_cache/**",
+  "**/.ruff_cache/**",
+  "**/target/**",
+  "**/coverage/**",
+  "**/.vs/**",
+  "**/.dotnet/**",
+  "**/.dotnet-home/**",
+  "**/.codex-build/**",
 ];
 
 /** Binary (metin olmayan) uzantı default kara listesi; politika lower-case karşılaştırır. */
@@ -50,6 +67,9 @@ export const DEFAULT_BINARY_EXTENSIONS: readonly string[] = [
   ".jar",
   ".pyc",
   ".wasm",
+  ".nupkg",
+  ".snupkg",
+  ".pdb",
   ".mp3",
   ".mp4",
   ".avi",

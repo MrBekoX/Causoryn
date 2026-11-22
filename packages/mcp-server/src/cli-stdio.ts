@@ -25,6 +25,12 @@ import { SERVER_NAME, SERVER_VERSION } from "./version.js";
  * tüm loglar `console.error` ile STDERR'e gider (TŞ §10.1).
  */
 
+const NON_BLOCKING_BOOT_TOOLS: ReadonlySet<string> = new Set([
+  "causoryn_get_capabilities",
+  "causoryn_index_status",
+  "causoryn_refresh_index",
+]);
+
 function hasNonEmptyAllowRoots(value: unknown): boolean {
   if (value === null || typeof value !== "object" || Array.isArray(value)) {
     return false;
@@ -80,7 +86,9 @@ function main(): void {
           ...(cliArgs.client !== undefined ? { client: cliArgs.client } : {}),
           rawBaseConfig: parsed,
         });
-        activeContext = createDynamicCausorynContext(createCausorynContext(config));
+        activeContext = createDynamicCausorynContext(
+          createCausorynContext(config, { deferAutoIndex: true }),
+        );
       } else if (cliArgs.allowCwd) {
         const cwdSafety = inspectProjectRootSafety(process.cwd(), {
           ...(cliArgs.dataDir !== undefined ? { dataDir: cliArgs.dataDir } : {}),
@@ -93,7 +101,9 @@ function main(): void {
             ...(cliArgs.client !== undefined ? { client: cliArgs.client } : {}),
             rawBaseConfig: parsed,
           });
-          activeContext = createDynamicCausorynContext(createCausorynContext(config));
+          activeContext = createDynamicCausorynContext(
+            createCausorynContext(config, { deferAutoIndex: true }),
+          );
           activeContext.logger(
             `[causoryn] --allow-cwd ile güvenli çalışma alanı bağlandı: ${cwdSafety.canonicalRoot} (workspaceId=${activeContext.config.workspaceId})`,
           );
@@ -103,7 +113,9 @@ function main(): void {
             autoDataDir: false,
             rawBaseConfig: parsed,
           });
-          activeContext = createDynamicCausorynContext(createCausorynContext(fallbackConfig));
+          activeContext = createDynamicCausorynContext(
+            createCausorynContext(fallbackConfig, { deferAutoIndex: true }),
+          );
         }
         needsDynamicBinder = true;
       } else {
@@ -127,10 +139,15 @@ function main(): void {
 
   const server = createCausorynMcpServer(activeContext, {
     outputSchemaProfile,
-    ...(needsDynamicBinder
+    ...(cliArgs.hasCliActivation
       ? {
           beforeToolCall: async (toolName: string): Promise<void> => {
             await beforeToolCallHook?.(toolName);
+            if (toolName === "causoryn_index_status") {
+              activeContext.startDeferredIndex?.();
+            } else if (!NON_BLOCKING_BOOT_TOOLS.has(toolName)) {
+              await activeContext.waitForInitialIndex?.(15_000);
+            }
           },
         }
       : {}),
@@ -151,6 +168,19 @@ function main(): void {
     );
     beforeToolCallHook = binder.beforeToolCall;
   }
+
+  const previousOnInitialized = server.server.oninitialized;
+  server.server.oninitialized = (): void => {
+    previousOnInitialized?.();
+    if (cliArgs.hasCliActivation) {
+      // MCP initialize + olası anlık tools/list yanıtının event-loop blokajına
+      // yakalanmaması için arka plan ilk indeks kısa bir gecikmeyle başlar.
+      const bootTimer = setTimeout(() => {
+        activeContext.startDeferredIndex?.();
+      }, 100);
+      bootTimer.unref();
+    }
+  };
 
   const previousOnClose = server.server.onclose;
   server.server.onclose = (): void => {

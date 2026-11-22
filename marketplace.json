@@ -6,7 +6,7 @@
   },
   "metadata": {
     "description": "Official Causoryn plugin marketplace for ZCode (GLM): local, deterministic, LLM-free codebase and change intelligence MCP server.",
-    "version": "0.2.0"
+    "version": "0.2.1"
   },
   "plugins": [
     {
@@ -14,14 +14,14 @@
       "source": {
         "source": "npm",
         "package": "causoryn",
-        "version": "0.2.0"
+        "version": "0.2.1"
       },
       "description": "Deterministic, local, LLM-free codebase and change intelligence via MCP: read-only workspace graphs, architecture maps, impact analysis, preflight checks, post-change verification, and living wiki.",
       "description_i18n": {
         "en": "Deterministic, local, LLM-free codebase and change intelligence via MCP: read-only workspace graphs, architecture maps, impact analysis, preflight checks, post-change verification, and living wiki.",
         "tr": "MCP uzerinden deterministik, yerel, LLM-bagimsiz kod tabani ve degisiklik istihbarati: salt-okunur calisma alani grafikleri, mimari haritalama, etki analizi, preflight ve degisiklik dogrulama."
       },
-      "version": "0.2.0",
+      "version": "0.2.1",
       "author": {
         "name": "Causoryn Contributors",
         "url": "https://github.com/MrBekoX/Causoryn"

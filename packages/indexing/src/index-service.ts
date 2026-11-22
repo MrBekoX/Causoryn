@@ -139,7 +139,7 @@ import { collectInventory, type InventoryEntry } from "./inventory.js";
  * kimliği, bu sürümden bağımsız olarak analyzerFingerprint fp2 şemasıyla
  * taşınır (fp1→fp2 geçişi snapshot meta'da ayrışır).
  */
-export const INDEXING_VERSION = "0.2.0";
+export const INDEXING_VERSION = "0.2.1";
 
 /** Envanter/adaptasyon limitleri (TŞ §20 index bölümü). */
 export interface IndexLimits {
@@ -749,20 +749,22 @@ export class IndexService {
     );
     const currentPaths = new Set(entries.map((entry) => entry.relativePath));
     const updatedAt = this.clock();
-    for (const entry of entries) {
-      this.repository.upsertFile({
-        workspaceId: this.workspaceId,
-        relativePath: entry.relativePath,
-        contentHash: entry.contentHash,
-        sizeBytes: entry.sizeBytes,
-        updatedAt,
-      });
-    }
-    for (const previousPath of previousFilePaths) {
-      if (!currentPaths.has(previousPath)) {
-        this.repository.deleteFile(this.workspaceId, previousPath);
+    this.withTransaction(() => {
+      for (const entry of entries) {
+        this.repository.upsertFile({
+          workspaceId: this.workspaceId,
+          relativePath: entry.relativePath,
+          contentHash: entry.contentHash,
+          sizeBytes: entry.sizeBytes,
+          updatedAt,
+        });
       }
-    }
+      for (const previousPath of previousFilePaths) {
+        if (!currentPaths.has(previousPath)) {
+          this.repository.deleteFile(this.workspaceId, previousPath);
+        }
+      }
+    });
     return {
       snapshotId: latest.snapshot.meta.id,
       snapshot: latest.snapshot,
@@ -812,6 +814,10 @@ export class IndexService {
     return { canonicalRoot, entries, tsEntries, csEntries, pyEntries, goEntries, rsEntries };
   }
 
+  private withTransaction<T>(fn: () => T): T {
+    return this.repository.runInTransaction ? this.repository.runInTransaction(fn) : fn();
+  }
+
   /**
    * Envanter kayıtlarını files tablosuna yansıtır (TŞ §9 files tablosu =
    * güncel envanter karşılığı); silme mutabakatı güvenlik bulgusu 3.
@@ -827,20 +833,22 @@ export class IndexService {
         .map((record) => record.relativePath),
     );
     const updatedAt = this.clock();
-    for (const entry of entries) {
-      this.repository.upsertFile({
-        workspaceId: this.workspaceId,
-        relativePath: entry.relativePath,
-        contentHash: entry.contentHash,
-        sizeBytes: entry.sizeBytes,
-        updatedAt,
-      });
-    }
-    for (const previousPath of previousFilePaths) {
-      if (!contentHashByPath.has(previousPath)) {
-        this.repository.deleteFile(this.workspaceId, previousPath);
+    this.withTransaction(() => {
+      for (const entry of entries) {
+        this.repository.upsertFile({
+          workspaceId: this.workspaceId,
+          relativePath: entry.relativePath,
+          contentHash: entry.contentHash,
+          sizeBytes: entry.sizeBytes,
+          updatedAt,
+        });
       }
-    }
+      for (const previousPath of previousFilePaths) {
+        if (!contentHashByPath.has(previousPath)) {
+          this.repository.deleteFile(this.workspaceId, previousPath);
+        }
+      }
+    });
   }
 
   /** Build açar + Workspace node'unu ekler (her koşumun ortak başlangıcı). */
@@ -1226,20 +1234,22 @@ export class IndexService {
           );
         }
         warnings.push(...adapterResult.warnings);
-        this.addAdapterGraph(
-          opened.buildId,
-          opened.workspaceNode,
-          {
-            analyzerId: TS_ADAPTER_ANALYZER_ID,
-            analyzerVersion: TS_ADAPTER_VERSION,
-            state: tsState,
-            nodes: adapterResult.nodes,
-            edges: adapterResult.edges,
-            evidence: [],
-          },
-          contentHashByPath,
-          nodeByKey,
-        );
+        this.withTransaction(() => {
+          this.addAdapterGraph(
+            opened.buildId,
+            opened.workspaceNode,
+            {
+              analyzerId: TS_ADAPTER_ANALYZER_ID,
+              analyzerVersion: TS_ADAPTER_VERSION,
+              state: tsState,
+              nodes: adapterResult.nodes,
+              edges: adapterResult.edges,
+              evidence: [],
+            },
+            contentHashByPath,
+            nodeByKey,
+          );
+        });
       }
 
       let csState: "ready" | "partial" = "ready";
@@ -1637,60 +1647,62 @@ export class IndexService {
       const nodeByKey = new Map<string, GraphNode>();
       let state: PublishableState = "ready";
 
-      if (tsEntries.length > 0) {
-        this.addAdapterGraph(
-          opened.buildId,
-          opened.workspaceNode,
-          {
-            analyzerId: TS_ADAPTER_ANALYZER_ID,
-            analyzerVersion: TS_ADAPTER_VERSION,
-            state: tsState,
-            nodes: tsNodes,
-            edges: tsEdges,
-            evidence: [],
-          },
-          contentHashByPath,
-          nodeByKey,
-        );
-      }
-      if (csharpResult !== undefined) {
-        this.addAdapterGraph(
-          opened.buildId,
-          opened.workspaceNode,
-          {
-            analyzerId: csharpResult.analyzerId,
-            analyzerVersion: csharpResult.analyzerVersion,
-            state: csharpResult.state,
-            nodes: csharpResult.nodes,
-            edges: csharpResult.edges,
-            evidence: csharpResult.evidence,
-          },
-          contentHashByPath,
-          nodeByKey,
-        );
-        if (csharpResult.state !== "ready") state = "partial";
-      }
-      // M2: python/go/rust çıktıları aynı addAdapterGraph sözleşmesiyle
-      // TEK build'e katılır (node kimliği çakışması açık hatadır; kenar
-      // uçları node haritasından çözülür — dangling yok).
-      for (const result of [pythonResult, goResult, rustResult]) {
-        if (result === undefined) continue;
-        this.addAdapterGraph(
-          opened.buildId,
-          opened.workspaceNode,
-          {
-            analyzerId: result.analyzerId,
-            analyzerVersion: result.analyzerVersion,
-            state: result.state,
-            nodes: result.nodes,
-            edges: result.edges,
-            evidence: result.evidence,
-          },
-          contentHashByPath,
-          nodeByKey,
-        );
-        if (result.state !== "ready") state = "partial";
-      }
+      this.withTransaction(() => {
+        if (tsEntries.length > 0) {
+          this.addAdapterGraph(
+            opened.buildId,
+            opened.workspaceNode,
+            {
+              analyzerId: TS_ADAPTER_ANALYZER_ID,
+              analyzerVersion: TS_ADAPTER_VERSION,
+              state: tsState,
+              nodes: tsNodes,
+              edges: tsEdges,
+              evidence: [],
+            },
+            contentHashByPath,
+            nodeByKey,
+          );
+        }
+        if (csharpResult !== undefined) {
+          this.addAdapterGraph(
+            opened.buildId,
+            opened.workspaceNode,
+            {
+              analyzerId: csharpResult.analyzerId,
+              analyzerVersion: csharpResult.analyzerVersion,
+              state: csharpResult.state,
+              nodes: csharpResult.nodes,
+              edges: csharpResult.edges,
+              evidence: csharpResult.evidence,
+            },
+            contentHashByPath,
+            nodeByKey,
+          );
+          if (csharpResult.state !== "ready") state = "partial";
+        }
+        // M2: python/go/rust çıktıları aynı addAdapterGraph sözleşmesiyle
+        // TEK build'e katılır (relativePath'li node çakışması açık hatadır;
+        // kenar uçları node haritasından çözülür — dangling yok).
+        for (const result of [pythonResult, goResult, rustResult]) {
+          if (result === undefined) continue;
+          this.addAdapterGraph(
+            opened.buildId,
+            opened.workspaceNode,
+            {
+              analyzerId: result.analyzerId,
+              analyzerVersion: result.analyzerVersion,
+              state: result.state,
+              nodes: result.nodes,
+              edges: result.edges,
+              evidence: result.evidence,
+            },
+            contentHashByPath,
+            nodeByKey,
+          );
+          if (result.state !== "ready") state = "partial";
+        }
+      });
       if (tsState !== "ready") state = "partial";
       if (diagnostics.length > 0) state = "partial";
       finalState = state;
@@ -1734,11 +1746,17 @@ export class IndexService {
     contentHashByPath: ReadonlyMap<string, string>,
     nodeByKey: Map<string, GraphNode>,
   ): void {
-    // 1) Node'lar: iki dil TEK kimlik haritasında; çakışma açık hatadır
-    //    (cross-boundary sözleşmesi — nodeId language içermez).
+    // 1) Node'lar: iki dil TEK kimlik haritasında (cross-boundary sözleşmesi —
+    //    nodeId language içermez). relativePath taşımayan dış/sanal düğümler
+    //    (örn. UnknownExternal "Request", ExternalDependency, Endpoint) polyglot
+    //    repolarda birden fazla adapter tarafından meşru biçimde paylaşılır ve
+    //    kanonik düğüm yeniden kullanılır; dosya-bağlı çakışma hâlâ açık hatadır.
     for (const nodeInput of output.nodes) {
       const key = nodeRefKey(nodeInput);
       if (nodeByKey.has(key)) {
+        if (nodeInput.relativePath === undefined) {
+          continue;
+        }
         throw new IndexingError(
           "indexing/internal",
           `iki adapter aynı node kimliğini üretti: ${key}`,

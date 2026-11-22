@@ -125,6 +125,11 @@ export interface GraphRepository {
   getSnapshot(snapshotId: string): SnapshotRead | undefined;
   /** Varsayılan sorgu yolu: en son kullanılabilir snapshot (TŞ §9). */
   getLatestPublished(workspaceId: string): SnapshotRead | undefined;
+  /**
+   * Opsiyonel toplu yazma işlemi sarmalayıcısı (SQLite transaction): binlerce
+   * node/edge/evidence/file yazımını tek atomik commit'te yürütür.
+   */
+  runInTransaction?<T>(fn: () => T): T;
 }
 
 /**

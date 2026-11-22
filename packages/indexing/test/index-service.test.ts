@@ -702,4 +702,40 @@ describe("IndexService — kalıcı depo yeniden başlatma, symbol_fts ve L0 yü
       rmSync(root, { recursive: true, force: true });
     }
   });
+
+  it("v0.2.1 polyglot: iki dil adapter'ı aynı relativePath=null UnknownExternal düğümünü (örn. Request) ürettiğinde çökmez, kanonik düğümü paylaşır", async () => {
+    const root = mkdtempSync(path.join(tmpdir(), "causoryn-polyglot-ext-"));
+    try {
+      mkdirSync(path.join(root, "src"), { recursive: true });
+      writeFileSync(
+        path.join(root, "src", "client.ts"),
+        "export function sendReq() { return SharedExternalCall('/api'); }\n",
+        "utf8",
+      );
+      writeFileSync(
+        path.join(root, "src", "handler.py"),
+        "def handle():\n    return SharedExternalCall('/api')\n",
+        "utf8",
+      );
+      const repository = new InMemoryGraphRepository();
+      const policy = WorkspaceAccessPolicy.create({ allowRoots: [root] });
+      const service = new IndexService({
+        workspaceId: "polyglot-ws",
+        policy,
+        repository,
+        clock: () => FIXED_NOW,
+        limits: { maxFiles: 50_000 },
+      });
+
+      const run = await service.runIndexAsync(root);
+      expect(run.snapshot.nodes.some((n) => n.kind === "File" && n.location?.relativePath === "src/client.ts")).toBe(true);
+      expect(run.snapshot.nodes.some((n) => n.kind === "File" && n.location?.relativePath === "src/handler.py")).toBe(true);
+      const sharedExternal = run.snapshot.nodes.filter(
+        (n) => n.kind === "UnknownExternal" && n.qualifiedName === "SharedExternalCall",
+      );
+      expect(sharedExternal).toHaveLength(1);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
 });

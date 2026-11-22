@@ -1,6 +1,6 @@
 {
   "name": "@causoryn/domain",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "private": true,
   "license": "MIT",
   "description": "Graph/Evidence domain sözleşmeleri, canonical JSON ve deterministik ID üretimi (TŞ v2.1 §8).",

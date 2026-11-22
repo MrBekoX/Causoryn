@@ -955,3 +955,47 @@ describe("SqliteGraphRepository.searchSymbols — NUL byte güvenliği ve tekill
     }
   });
 });
+
+describe("v0.2.1 SqliteGraphRepository.runInTransaction ve O(1) position sayacı", () => {
+  it("toplu yazım tek transaction içinde çalışır, iç-içe çağrı güvenlidir ve rollback sonrası position sayacı tutarlı kalır", () => {
+    const repo = makeRepo("tx-batch.sqlite");
+    try {
+      const build = repo.beginBuild({
+        workspaceId: WS,
+        revision: { id: "rev-tx", sequence: 1 },
+        configHash: "cfg:tx",
+        analyzerFingerprint: "fp:tx",
+        createdAt: CREATED_AT,
+      });
+      const nodes = orderNodes();
+      const evidence = orderEvidence();
+      const edges = orderEdges(nodes);
+
+      // Rollback senaryosu: hata fırlatan transaction içindeki eklemeler geri alınmalı:
+      expect(() =>
+        repo.runInTransaction(() => {
+          repo.addNode(build.buildId, nodes[0]!);
+          throw new Error("bilincli-rollback");
+        }),
+      ).toThrow("bilincli-rollback");
+
+      expect(repo.getBuild(build.buildId)?.nodeCount).toBe(0);
+
+      // İç-içe runInTransaction + tam ekleme ve publish:
+      repo.runInTransaction(() => {
+        repo.runInTransaction(() => {
+          for (const n of nodes) repo.addNode(build.buildId, n);
+          for (const ev of evidence) repo.addEvidence(build.buildId, ev);
+          for (const ed of edges) repo.addEdge(build.buildId, ed);
+        });
+      });
+
+      const published = repo.publish(build.buildId, "ready", PUBLISHED_AT);
+      expect(published.nodes).toHaveLength(nodes.length);
+      expect(published.edges).toHaveLength(edges.length);
+      expect(published.evidence).toHaveLength(evidence.length);
+    } finally {
+      repo.close();
+    }
+  });
+});

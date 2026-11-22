@@ -1,4 +1,4 @@
-# Causoryn (`causoryn` v0.2.0 — Pre-1.0 Public Preview)
+# Causoryn (`causoryn` v0.2.1 — Pre-1.0 Public Preview)
 
 **Causoryn** is a **local, deterministic, LLM-free** codebase and change intelligence
 engine exposed over the Model Context Protocol (`stdio`). It constructs evidence-backed
@@ -7,7 +7,7 @@ strict **read-only workspace guarantee**: Causoryn never modifies your source tr
 writes snapshots, Living Wiki SQLite databases, and exports strictly outside the analyzed
 workspace.
 
-> **Release status (`ADR-010`):** `0.2.0` is a **Pre-1.0 Public Preview** (not `1.0.0`).
+> **Release status (`ADR-010`):** `0.2.1` is a **Pre-1.0 Public Preview** (not `1.0.0`).
 > Package architecture note: `causoryn` is a multi-file runtime package (`dist/mcp-server.mjs`
 > + vendored N-API v10 `better-sqlite3` prebuild binaries + `dist/typescript-lib/` +
 > `native/` sidecar workers + canonical `skills/`), not a single-file JS bundle.
@@ -32,7 +32,7 @@ workspace.
 
 If an optional language sidecar toolchain (`dotnet`, `python`, `go`, `cargo`) is unavailable
 on a machine, Causoryn degrades gracefully and honestly to L0/L1 file-level provenance
-(`npx causoryn@0.2.0 doctor` inspects sidecar readiness).
+(`npx causoryn@0.2.1 doctor` inspects sidecar readiness).
 
 ---
 
@@ -45,40 +45,40 @@ or via **each host's native Plugin Marketplace**.
 
 ```bash
 # Preview planned changes without writing any files
-npx causoryn@0.2.0 setup --all-detected --dry-run
+npx causoryn@0.2.1 setup --all-detected --dry-run
 
 # Configure all detected hosts on your machine (creates .causoryn.backup files and stages a persistent ~/.causoryn/runtime copy)
-npx causoryn@0.2.0 setup --all-detected --yes
+npx causoryn@0.2.1 setup --all-detected --yes
 
 # Or target specific hosts explicitly
-npx causoryn@0.2.0 setup --client antigravity --yes
-npx causoryn@0.2.0 setup --client claude-code --yes
-npx causoryn@0.2.0 setup --client codex --yes
-npx causoryn@0.2.0 setup --client zcode --yes
+npx causoryn@0.2.1 setup --client antigravity --yes
+npx causoryn@0.2.1 setup --client claude-code --yes
+npx causoryn@0.2.1 setup --client codex --yes
+npx causoryn@0.2.1 setup --client zcode --yes
 
 # Verify installation health (read-only)
-npx causoryn@0.2.0 doctor
+npx causoryn@0.2.1 doctor
 
 # Cleanly remove Causoryn from a host (cleans up ~/.causoryn/runtime when no remaining host points to it)
-npx causoryn@0.2.0 setup --client claude-code --uninstall --yes
+npx causoryn@0.2.1 setup --client claude-code --uninstall --yes
 ```
 
 ### Option B: Native Host Plugin Marketplaces
 
 1. **Antigravity** (`agy` / Antigravity IDE):
-   - Add the repository (`https://github.com/MrBekoX/Causoryn`) or extracted `causoryn` plugin folder containing `plugin.json` and `mcp_config.json`, or run `npx causoryn@0.2.0 setup --client antigravity --yes` (writes `~/.gemini/config/mcp_config.json`, updates `~/.gemini/antigravity/mcp_config.json` when present, and installs the 4 skills into `~/.gemini/config/skills/`).
+   - Add the repository (`https://github.com/MrBekoX/Causoryn`) or extracted `causoryn` plugin folder containing `plugin.json` and `mcp_config.json`, or run `npx causoryn@0.2.1 setup --client antigravity --yes` (writes `~/.gemini/config/mcp_config.json`, updates `~/.gemini/antigravity/mcp_config.json` when present, and installs the 4 skills into `~/.gemini/config/skills/`).
 2. **Claude Code**:
    - In Claude Code, register the GitHub marketplace and install the plugin:
      ```text
      /plugin marketplace add MrBekoX/Causoryn
      /plugin install causoryn@causoryn
      ```
-   - Or run `npx causoryn@0.2.0 setup --client claude-code --yes` (`~/.claude.json` + `~/.claude/skills/`).
+   - Or run `npx causoryn@0.2.1 setup --client claude-code --yes` (`~/.claude.json` + `~/.claude/skills/`).
 3. **Codex** (Codex CLI / Desktop):
-   - Add the repository marketplace (`.agents/plugins/marketplace.json` + `.codex-plugin/plugin.json`) via Codex plugin management, or run `npx causoryn@0.2.0 setup --client codex --yes` (`$CODEX_HOME/config.toml` `[mcp_servers.causoryn]` with `startup_timeout_sec = 30` + `~/.agents/skills/`).
+   - Add the repository marketplace (`.agents/plugins/marketplace.json` + `.codex-plugin/plugin.json`) via Codex plugin management, or run `npx causoryn@0.2.1 setup --client codex --yes` (`$CODEX_HOME/config.toml` `[mcp_servers.causoryn]` with `startup_timeout_sec = 30` + `~/.agents/skills/`).
 4. **ZCode (GLM)**:
    - Open **Plugin Marketplace -> New / Discover**, add `https://github.com/MrBekoX/Causoryn` (uses root `marketplace.json` and `.zcode-plugin/plugin.json`), and install `causoryn`.
-   - Or run `npx causoryn@0.2.0 setup --client zcode --yes` (writes `~/.zcode/cli/config.json` `mcp.servers.causoryn` while preserving any existing `~/.agents/mcp.json` fallback servers, plus `~/.zcode/skills/`).
+   - Or run `npx causoryn@0.2.1 setup --client zcode --yes` (writes `~/.zcode/cli/config.json` `mcp.servers.causoryn` while preserving any existing `~/.agents/mcp.json` fallback servers, plus `~/.zcode/skills/`).
 
 ---
 
@@ -145,7 +145,7 @@ Active envelope error codes exported in `CAUSORYN_TOOL_ERROR_CODES` (15 codes):
 - `UNSUPPORTED_LANGUAGE`
 - `INTERNAL_ERROR`
 
-Reserved specification base identifiers not emitted as envelope errors in v0.2.0 (6 codes; 21 total catalog + extension identifiers):
+Reserved specification base identifiers not emitted as envelope errors in v0.2.1 (6 codes; 21 total catalog + extension identifiers):
 - `UNRESOLVED_FLOW`
 - `STALE_PREFLIGHT`
 - `CANCELLED`

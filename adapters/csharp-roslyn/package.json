@@ -1,6 +1,6 @@
 {
   "name": "@causoryn/adapter-csharp-roslyn",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "private": true,
   "license": "MIT",
   "description": "C#/.NET Language Adapter: Roslyn sidecar worker süreç yönetimi (TŞ v2.1 §7; sprint-2 B2).",
@@ -9,7 +9,7 @@
     ".": "./src/index.ts"
   },
   "dependencies": {
-    "@causoryn/domain": "0.2.0",
-    "@causoryn/sidecar-ipc": "0.2.0"
+    "@causoryn/domain": "0.2.1",
+    "@causoryn/sidecar-ipc": "0.2.1"
   }
 }

@@ -46,7 +46,7 @@ sabitler — bkz. `docs/implementation-status.md`).
 
 | Araç | Girdi (ana alanlar) | Çıktı (data özeti) | Tipik hata kodları |
 |---|---|---|---|
-| `causoryn_get_capabilities` | `workspace?` | Adapter düzeyleri L0–L4 (5 dil; C# `frameworkLinkers: "aspnet-core-route-attributes (L3)"`), sunucu kimliği (`SERVER_VERSION = "0.2.0"`, `SCHEMA_VERSION = "2.0"`), sunucu limitleri, protokol revizyonu, yayımlanan araç listesi; snapshot gerektirmez | `WORKSPACE_NOT_AUTHORIZED` |
+| `causoryn_get_capabilities` | `workspace?` | Adapter düzeyleri L0–L4 (5 dil; C# `frameworkLinkers: "aspnet-core-route-attributes (L3)"`), sunucu kimliği (`SERVER_VERSION = "0.2.1"`, `SCHEMA_VERSION = "2.0"`), sunucu limitleri, protokol revizyonu, yayımlanan araç listesi; snapshot gerektirmez | `WORKSPACE_NOT_AUTHORIZED` |
 | `causoryn_workspace_summary` | `workspaceId?` | Proje/framework/entrypoint/coverage özeti; sayılar yayınlanmış snapshot'tan türetilir; boş workspace `partial` | `WORKSPACE_NOT_AUTHORIZED`, `INDEX_NOT_READY`, `INVALID_ARGUMENT`, `LIMIT_EXCEEDED` |
 | `causoryn_index_status` | `jobId?` | Son (veya verilen) işin progress/snapshot/stale/tanıları; iş yoksa null + yönlendirici uyarı | `WORKSPACE_NOT_AUTHORIZED`, `INVALID_ARGUMENT`, `LIMIT_EXCEEDED` |
 | `causoryn_refresh_index` | `mode` (`full` \| `incremental` — içerik karması karşılaştırmalı yenileme; B7 per-file parse reuse ve watcher MCP yüzeyi açık), `scope?` (açık ret) | Anında `jobId`; iş arka planda koşar; yalnızca izinli graph deposuna (`InMemoryGraphRepository` veya `storage.dataDbPath` SQLite) yazar | `WORKSPACE_NOT_AUTHORIZED`, `INVALID_ARGUMENT`, `LIMIT_EXCEEDED`, `PATH_DENIED` |
@@ -81,12 +81,12 @@ sabitler — bkz. `docs/implementation-status.md`).
 | `causoryn_wiki_get_versions` | `pageId?`, `refs?`, sayfalama | Yayımlanmış WikiSnapshot revizyonu `available` (contentHash/linkSetHash/coverage); git alias'ları salt-okunur cat-file ile çözülür (`working-tree` `.git` olmadan da çözülür) | `WORKSPACE_NOT_AUTHORIZED`, `INDEX_NOT_READY`, `WIKI_PAGE_NOT_FOUND`, `INVALID_ARGUMENT`, `INVALID_REVISION` |
 | `causoryn_wiki_diff` | `base`, `target`, `pageId?` | added/removedPages, changedSections, link farkları, coverageDelta ({previous,current,reason?}), unresolvedDifferences, contractChanges (K-013 #7) | `WORKSPACE_NOT_AUTHORIZED`, `INDEX_NOT_READY`, `WIKI_PAGE_NOT_FOUND`, `INVALID_ARGUMENT`, `INVALID_REVISION`, `PATH_DENIED`, `LIMIT_EXCEEDED` |
 
-## Sunucu sürümü, 5-dil yetenek matrisi ve sabit 15 hata kodu (v0.2.0)
+## Sunucu sürümü, 5-dil yetenek matrisi ve sabit 15 hata kodu (v0.2.1)
 
 ### 1. Sunucu kimliği ve protokol sabitleri (`packages/mcp-server/src/version.ts`)
 
 - `SERVER_NAME = "causoryn"` — MCP `initialize` el sıkışmasındaki `serverInfo.name`.
-- `SERVER_VERSION = "0.2.0"` — Pre-1.0 Public Preview sürümü (K-022; kök `package.json`, `packages/causoryn/package.json` ve `server.json` ile kilitlidir; ADR-010 gereği açık 1.0.0 kapıları kapanmadan `1.0.0` ilan edilmez).
+- `SERVER_VERSION = "0.2.1"` — Pre-1.0 Public Preview sürümü (K-022; kök `package.json`, `packages/causoryn/package.json` ve `server.json` ile kilitlidir; ADR-010 gereği açık 1.0.0 kapıları kapanmadan `1.0.0` ilan edilmez).
 - `SCHEMA_VERSION = "2.0"` — 29 aracın tamamında `envelope.schemaVersion` alanı.
 - `protocol.revision` — `@modelcontextprotocol/sdk` üzerinden `LATEST_PROTOCOL_VERSION`.
 
@@ -168,7 +168,7 @@ aracı AÇILMAZ — `wiki/mcp-tools.md` katalog ilkesiyle aynıdır.
 - [docs/architecture.md](architecture.md) — paket haritası ve bağımlılık sınırları
 - [docs/cli-and-configuration.md](cli-and-configuration.md) — CLI bayrakları, ortam değişkenleri ve `CAUSORYN_CONFIG` şeması
 - [docs/language-analyzers.md](language-analyzers.md) — 5 dil analizörü ve çözümleme dürüstlüğü
-- [docs/wiki-spec.md](wiki-spec.md) — Living Wiki Engine tasarım ve v0.2.0 uygulama sözleşmesi
+- [docs/wiki-spec.md](wiki-spec.md) — Living Wiki Engine tasarım ve v0.2.1 uygulama sözleşmesi
 - [docs/implementation-status.md](implementation-status.md) — araç yüzeylerinin faz faz kanıtları
 - [docs/compatibility-matrix.md](compatibility-matrix.md) — host × sonuç matrisi
 - `wiki/mcp-tools.md` — katalog ve yazma izni ilkesi · `packages/mcp-server/src/errors.ts` — kod tablosu

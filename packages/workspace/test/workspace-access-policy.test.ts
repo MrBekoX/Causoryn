@@ -722,3 +722,45 @@ describe("determinizm (TŞ §6)", () => {
     rmSync(root, { recursive: true, force: true });
   });
 });
+
+describe("v0.2.1 gerçek-dünya derleme/cache/venv dışlamaları", () => {
+  it("pozitif: .next, .venv, __pycache__, target, coverage, .dotnet-home, .codex-build ve .nupkg/.pdb varsayılan olarak reddedilir", () => {
+    const root = makeRoot();
+    try {
+      const dirs = [
+        ".next/server",
+        ".nuxt/dist",
+        ".venv/lib/python3.12",
+        "services/api/venv/lib",
+        "services/api/__pycache__",
+        ".pytest_cache/v",
+        "rust-crate/target/debug",
+        "coverage/lcov-report",
+        ".dotnet/packs",
+        ".dotnet-home/.nuget/packages",
+        ".codex-build/cache",
+      ];
+      for (const relDir of dirs) {
+        mkdirSync(path.join(root, relDir), { recursive: true });
+        writeFileSync(path.join(root, relDir, "sample.ts"), "export const x = 1;\n");
+      }
+      mkdirSync(path.join(root, "src"), { recursive: true });
+      writeFileSync(path.join(root, "src", "app.ts"), "export const ok = true;\n");
+      writeFileSync(path.join(root, "src", "pkg.nupkg"), "PK");
+      writeFileSync(path.join(root, "src", "app.pdb"), "PDB");
+
+      const policy = policyFor(root);
+      expect(expectAllowed(policy.checkFile(root, "src/app.ts")).relativePath).toBe("src/app.ts");
+      for (const relDir of dirs) {
+        expect(
+          denyOf(policy.checkPath(root, `${relDir}/sample.ts`)).code,
+          `${relDir} varsayılan ignore kapsamında reddedilmeli`,
+        ).toBe("workspace/path-denied");
+      }
+      expect(denyOf(policy.checkFile(root, "src/pkg.nupkg")).code).toBe("workspace/path-denied");
+      expect(denyOf(policy.checkFile(root, "src/app.pdb")).code).toBe("workspace/path-denied");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});

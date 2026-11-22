@@ -101,12 +101,31 @@ export interface CausorynContext {
    * sistemi kalan tanıtıcıları serbest bırakır.
    */
   readonly close: () => void;
+  /**
+   * v0.2.1: `deferAutoIndex: true` ile oluşturulan bağlamda arka plan ilk
+   * indeksleme işini idempotent olarak başlatır (MCP `oninitialized` sonrası
+   * çağrılır ki `initialize` / `tools/list` asla event loop blokajı yaşamasın).
+   */
+  readonly startDeferredIndex?: () => void;
+  /**
+   * v0.2.1: `deferAutoIndex: true` ile başlatılan arka plan ilk indeksleme
+   * işinin tamamlanmasını en fazla `timeoutMs` kadar bekler (timeout aşılırsa
+   * fırlatmaz; arka plan işi kesilmeden devam eder).
+   */
+  readonly waitForInitialIndex?: (timeoutMs?: number) => Promise<void>;
 }
 
 export interface ContextOverrides {
   readonly repository?: GraphRepository;
   readonly clock?: () => string;
   readonly logger?: (message: string) => void;
+  /**
+   * v0.2.1: true iken kalıcı snapshot yoksa senkron `runIndex()` çağırmak
+   * yerine `jobManager.refreshIndex(..., { mode: "full" })` ile non-blocking
+   * arka plan tam indeks başlatır — MCP `initialize` el sıkışması asla
+   * büyük repolar tarafından bloklanmaz.
+   */
+  readonly deferAutoIndex?: boolean;
 }
 
 /**
@@ -167,6 +186,8 @@ export function createCausorynContext(
     // deny, TŞ §16A.8 yazma sınırı).
     wiki = openWikiStores(config, clock, logger);
 
+    let initialBootJobId: string | undefined;
+    let deferredBootRoot: string | undefined;
     if (config.autoIndex && config.allowRoots.length > 0) {
       const existing =
         overrides.repository === undefined && config.storage.dataDbPath !== undefined
@@ -176,6 +197,8 @@ export function createCausorynContext(
         logger(
           `kalıcı index yüklendi: workspace=${config.workspaceId} snapshot=${existing.snapshot.meta.id} state=${existing.snapshot.meta.state}`,
         );
+      } else if (overrides.deferAutoIndex === true) {
+        deferredBootRoot = config.allowRoots[0] as string;
       } else {
         const run = indexService.runIndex(config.allowRoots[0] as string);
         logger(
@@ -183,6 +206,50 @@ export function createCausorynContext(
         );
       }
     }
+
+    const startDeferredIndex = (): void => {
+      if (deferredBootRoot === undefined || initialBootJobId !== undefined) return;
+      const rootToIndex = deferredBootRoot;
+      deferredBootRoot = undefined;
+      try {
+        const bootJob = jobManager.refreshIndex(rootToIndex, { mode: "full" });
+        initialBootJobId = bootJob.jobId;
+        logger(
+          `arka plan ilk index başlatıldı: workspace=${config.workspaceId} jobId=${bootJob.jobId}`,
+        );
+      } catch (error) {
+        logger(
+          `arka plan ilk index başlatılamadı: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    };
+
+    const waitForInitialIndex = async (timeoutMs = 15_000): Promise<void> => {
+      startDeferredIndex();
+      if (initialBootJobId === undefined) return;
+      const current = jobManager.status(initialBootJobId);
+      if (current === undefined || current.status === "done" || current.status === "failed") {
+        return;
+      }
+      const boundedMs = Number.isFinite(timeoutMs) && timeoutMs > 0 ? timeoutMs : 15_000;
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        await Promise.race([
+          jobManager.waitForJob(initialBootJobId).then(
+            () => undefined,
+            () => undefined,
+          ),
+          new Promise<void>((resolve) => {
+            timer = setTimeout(resolve, boundedMs);
+            timer.unref();
+          }),
+        ]);
+      } finally {
+        if (timer !== undefined) {
+          clearTimeout(timer);
+        }
+      }
+    };
 
     const activeWiki = wiki;
     return {
@@ -198,6 +265,8 @@ export function createCausorynContext(
       preflightStore: new PreflightManifestStore(),
       clock,
       logger,
+      startDeferredIndex,
+      waitForInitialIndex,
       close: (): void => {
         try {
           activeWiki.close();
