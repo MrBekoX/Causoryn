@@ -1,9 +1,27 @@
+import { readFileSync } from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+
 /**
  * Ortak tipler, sabitler ve hata sınıfları (`packages/causoryn`, K-021).
  */
 
+function readPackageVersion(): string {
+  try {
+    const dir = path.dirname(fileURLToPath(import.meta.url));
+    const pkgPath = path.resolve(dir, "..", "package.json");
+    const parsed = JSON.parse(readFileSync(pkgPath, "utf8")) as { version?: unknown };
+    if (typeof parsed.version === "string" && parsed.version.trim().length > 0) {
+      return parsed.version.trim();
+    }
+  } catch {
+    // Fallback aşağıda.
+  }
+  return "0.2.1";
+}
+
 export const CAUSORYN_PACKAGE_NAME = "causoryn" as const;
-export const CAUSORYN_PACKAGE_VERSION = "0.2.0" as const;
+export const CAUSORYN_PACKAGE_VERSION: string = readPackageVersion();
 
 export const HOST_CLIENT_IDS = [
   "antigravity",

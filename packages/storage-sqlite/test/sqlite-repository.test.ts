@@ -994,6 +994,40 @@ describe("v0.2.1 SqliteGraphRepository.runInTransaction ve O(1) position sayacı
       expect(published.nodes).toHaveLength(nodes.length);
       expect(published.edges).toHaveLength(edges.length);
       expect(published.evidence).toHaveLength(evidence.length);
+
+      // Read-through bellek önbelleği: ardışık okumalar aynı dondurulmuş SnapshotGraph referansını döner:
+      const read1 = repo.getLatestPublished(WS);
+      const read2 = repo.getLatestPublished(WS);
+      expect(read1?.snapshot).toBe(published);
+      expect(read2?.snapshot).toBe(published);
+    } finally {
+      repo.close();
+    }
+  });
+
+  it("dış bağlantı SQLite satırını değiştirdiğinde PRAGMA data_version önbelleği geçersiz kılar", () => {
+    const file = dbPath("cache-invalidation.sqlite");
+    const repo = new SqliteGraphRepository(file);
+    try {
+      repo.registerWorkspace({
+        id: WS,
+        rootPath: "D:/fixture/orders",
+        createdAt: CREATED_AT,
+      });
+      const built = buildOrderSnapshot(repo, 1);
+      const published = repo.publish(built.build.buildId, "ready", PUBLISHED_AT);
+      expect(repo.getLatestPublished(WS)?.snapshot).toBe(published);
+
+      // Başka bir bağlantıdan veritabanındaki snapshot kimliği bozulursa cache bayat dönmemeli:
+      const external = new Database(file);
+      try {
+        external.prepare("UPDATE snapshots SET id = 'snapshot:tampered' WHERE id = ?").run(published.meta.id);
+      } finally {
+        external.close();
+      }
+      expectRepoError("storage/corrupt-snapshot", () => {
+        repo.getLatestPublished(WS);
+      });
     } finally {
       repo.close();
     }
