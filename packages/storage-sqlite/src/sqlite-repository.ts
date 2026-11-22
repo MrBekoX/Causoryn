@@ -135,6 +135,13 @@ function parseJsonField(field: string, text: string): JsonValue {
 }
 
 const DEFAULT_SEARCH_LIMIT = 20;
+const MAX_PUBLISHED_CACHE_ENTRIES = 4;
+
+interface CachedPublishedSnapshot {
+  readonly id: string;
+  readonly dataVersion: number;
+  readonly graph: SnapshotGraph;
+}
 
 export class SqliteGraphRepository
   implements GraphRepository, SymbolSearchStore
@@ -145,6 +152,7 @@ export class SqliteGraphRepository
     number,
     { nodes: number; edges: number; evidence: number }
   >();
+  private readonly publishedCache = new Map<number, CachedPublishedSnapshot>();
   private buildSerial = 0;
 
   constructor(dbPath: string) {
@@ -181,7 +189,29 @@ export class SqliteGraphRepository
 
   close(): void {
     this.buildPositions.clear();
+    this.publishedCache.clear();
     this.db.close();
+  }
+
+  private currentDataVersion(): number {
+    const version = this.db.pragma("data_version", { simple: true });
+    return typeof version === "number" ? version : -1;
+  }
+
+  private cachePublished(sid: number, graph: SnapshotGraph): void {
+    if (this.publishedCache.has(sid)) {
+      this.publishedCache.delete(sid);
+    } else if (this.publishedCache.size >= MAX_PUBLISHED_CACHE_ENTRIES) {
+      const oldestKey = this.publishedCache.keys().next().value;
+      if (oldestKey !== undefined) {
+        this.publishedCache.delete(oldestKey);
+      }
+    }
+    this.publishedCache.set(sid, {
+      id: graph.meta.id,
+      dataVersion: this.currentDataVersion(),
+      graph,
+    });
   }
 
   runInTransaction<T>(fn: () => T): T {
@@ -523,6 +553,7 @@ export class SqliteGraphRepository
         );
       }
       this.buildPositions.delete(row.sid);
+      this.cachePublished(row.sid, graph);
       return graph;
     });
     try {
@@ -922,6 +953,15 @@ export class SqliteGraphRepository
         `Yayımlanmamış snapshot okunamaz: ${String(row.id)}`,
       );
     }
+    const cached = this.publishedCache.get(row.sid);
+    if (
+      cached !== undefined &&
+      row.id !== null &&
+      cached.id === row.id &&
+      cached.dataVersion === this.currentDataVersion()
+    ) {
+      return cached.graph;
+    }
     const graph = finalizeSnapshotGraph(
       this.metaOf(row, row.state),
       this.readBuildContent(row.sid),
@@ -932,6 +972,7 @@ export class SqliteGraphRepository
         `Snapshot kimliği satırla uyuşmuyor: ${String(row.id)} != ${graph.meta.id}`,
       );
     }
+    this.cachePublished(row.sid, graph);
     return graph;
   }
 

@@ -189,21 +189,23 @@ export function createCausorynContext(
     let initialBootJobId: string | undefined;
     let deferredBootRoot: string | undefined;
     if (config.autoIndex && config.allowRoots.length > 0) {
-      const existing =
-        overrides.repository === undefined && config.storage.dataDbPath !== undefined
-          ? repository.getLatestPublished(config.workspaceId)
-          : undefined;
-      if (existing !== undefined) {
-        logger(
-          `kalıcı index yüklendi: workspace=${config.workspaceId} snapshot=${existing.snapshot.meta.id} state=${existing.snapshot.meta.state}`,
-        );
-      } else if (overrides.deferAutoIndex === true) {
+      if (overrides.deferAutoIndex === true) {
         deferredBootRoot = config.allowRoots[0] as string;
       } else {
-        const run = indexService.runIndex(config.allowRoots[0] as string);
-        logger(
-          `index hazır: workspace=${config.workspaceId} snapshot=${run.snapshotId} files=${String(run.fileCount)} state=${run.state}`,
-        );
+        const existing =
+          overrides.repository === undefined && config.storage.dataDbPath !== undefined
+            ? repository.getLatestPublished(config.workspaceId)
+            : undefined;
+        if (existing !== undefined) {
+          logger(
+            `kalıcı index yüklendi: workspace=${config.workspaceId} snapshot=${existing.snapshot.meta.id} state=${existing.snapshot.meta.state}`,
+          );
+        } else {
+          const run = indexService.runIndex(config.allowRoots[0] as string);
+          logger(
+            `index hazır: workspace=${config.workspaceId} snapshot=${run.snapshotId} files=${String(run.fileCount)} state=${run.state}`,
+          );
+        }
       }
     }
 
@@ -212,6 +214,16 @@ export function createCausorynContext(
       const rootToIndex = deferredBootRoot;
       deferredBootRoot = undefined;
       try {
+        const existing =
+          overrides.repository === undefined && config.storage.dataDbPath !== undefined
+            ? repository.getLatestPublished(config.workspaceId)
+            : undefined;
+        if (existing !== undefined) {
+          logger(
+            `kalıcı index yüklendi: workspace=${config.workspaceId} snapshot=${existing.snapshot.meta.id} state=${existing.snapshot.meta.state}`,
+          );
+          return;
+        }
         const bootJob = jobManager.refreshIndex(rootToIndex, { mode: "full" });
         initialBootJobId = bootJob.jobId;
         logger(

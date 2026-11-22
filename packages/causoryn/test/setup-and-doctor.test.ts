@@ -216,7 +216,12 @@ function snapshotTree(rootDir: string): string[] {
 describe("exports & metadata", () => {
   it("exports canonical package metadata and 4 host client ids", () => {
     expect(CAUSORYN_PACKAGE_NAME).toBe("causoryn");
-    expect(CAUSORYN_PACKAGE_VERSION).toBe("0.2.0");
+    const expectedPkgVersion = (
+      JSON.parse(
+        readFileSync(path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "package.json"), "utf8"),
+      ) as { version: string }
+    ).version;
+    expect(CAUSORYN_PACKAGE_VERSION).toBe(expectedPkgVersion);
     expect(HOST_CLIENT_IDS).toEqual(["antigravity", "claude-code", "codex", "zcode"]);
     expect(CANONICAL_SKILL_NAMES).toEqual([
       "causoryn",
@@ -953,7 +958,12 @@ describe("doctor (strictly read-only health check + injectable toolchain seam + 
 
     const versionExit = await runCli(["--version"], { io, homeDir: fakeHome });
     expect(versionExit).toBe(0);
-    expect(outChunks.join("").trim()).toBe("0.2.0");
+    const pkgJsonVersion = (
+      JSON.parse(
+        readFileSync(path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "package.json"), "utf8"),
+      ) as { version: string }
+    ).version;
+    expect(outChunks.join("").trim()).toBe(pkgJsonVersion);
 
     outChunks.length = 0;
     const setupExit = await runCli(
