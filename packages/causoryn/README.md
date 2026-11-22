@@ -12,6 +12,13 @@ workspace.
 > + vendored N-API v10 `better-sqlite3` prebuild binaries + `dist/typescript-lib/` +
 > `native/` sidecar workers + canonical `skills/`), not a single-file JS bundle.
 
+## Why Causoryn?
+
+- **Zero LLM & zero API keys (`ADR-002`):** 100% deterministic static analysis — no embeddings, no token burn, no hallucinated call edges.
+- **Evidence-backed & honest (`ADR-010`):** Every graph edge carries its exact resolution (`verified`, `heuristic`, `unresolved`) and source-span evidence ID.
+- **Strictly read-only workspace (`ADR-008`):** Snapshots, SQLite indexes, and Living Wiki databases live outside your repository.
+- **Fast on warm snapshots (1,000 TS files):** `11.8 ms` `workspace_summary`, `13.0 ms` `get_symbol_context`, `10.7 ms` `map_system` ([benchmarks](https://github.com/MrBekoX/Causoryn/blob/main/docs/en/benchmarks.md)).
+
 ## Requirements & Component Runtime Matrix
 
 | Component | Runtime Requirement | Compilation | Offline Behavior |

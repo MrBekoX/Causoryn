@@ -6,6 +6,83 @@
 
 ---
 
+## Why Causoryn?
+
+AI coding agents typically explore large codebases with ad-hoc `grep` and partial file reads — missing downstream callers, breaking API/schema contracts, or skipping architecture boundaries.
+
+- **Zero LLM & zero API keys (`ADR-002`):** 100% deterministic static analysis — no embeddings, no token burn, no hallucinated call edges.
+- **Evidence-backed & honest (`ADR-010`):** Every graph edge reports its exact resolution (`verified`, `heuristic`, `unresolved`) and source-span evidence ID.
+- **Strictly read-only workspace (`ADR-008`):** Snapshots, SQLite indexes, and Living Wiki databases live outside your repository (`~/.causoryn/workspaces/...`).
+- **Built for the full change loop:** `Discover → Preflight → Edit → Verify → Explain` across 4 coding agent hosts.
+
+```mermaid
+flowchart LR
+  WS["Your Repository<br/>(Read-Only · ADR-008)"] --> AN["5-Language Analyzers<br/>TS · C#/Roslyn · Python · Go · Rust"]
+  AN --> DB["External Data Root<br/>SQLite Graph · FTS5 · Living Wiki"]
+  DB --> MCP["Causoryn MCP Server<br/>29 Structured Tools (stdio)"]
+  MCP --> AGENT["AI Coding Agent<br/>Claude Code · Codex · Antigravity · ZCode"]
+  AGENT -. "Discover → Preflight → Verify → Explain" .-> MCP
+```
+
+---
+
+## Measured Performance (1,000 TypeScript Files)
+
+Measured end-to-end over MCP protocol (`InMemoryTransport`, input validation + envelope serialization included) on the deterministic 1,000-file TypeScript fixture ([`docs/en/benchmarks.md`](docs/en/benchmarks.md)):
+
+| Benchmark | MCP Tool Call | Median Latency |
+|---|---|---|
+| Warm workspace summary | `causoryn_workspace_summary` | **11.8 ms** |
+| Local symbol neighborhood (`depth: 1`) | `causoryn_get_symbol_context` | **13.0 ms** |
+| Architecture map (`L2`, `maxNodes: 200`) | `causoryn_map_system` | **10.7 ms** |
+
+---
+
+## Real MCP Output Example (`examples/fixture-ts-orders`)
+
+Running `causoryn_preflight_change` before editing `src/services/orders-service.ts` returns deterministic, evidence-backed blast-radius candidates (trimmed for readability):
+
+```json
+{
+  "schemaVersion": "2.0",
+  "status": "ok",
+  "coverage": {
+    "tier": "L2",
+    "resolvedEdges": 30,
+    "unresolvedEdges": 1,
+    "totalEdges": 31,
+    "coverageRatio": 0.9677
+  },
+  "data": {
+    "intentLabel": "Add idempotencyKey parameter to createOrder",
+    "candidateOnly": true,
+    "identifiedTargets": [
+      { "kind": "File", "qualifiedName": "src/services/orders-service.ts", "origin": "file" }
+    ],
+    "impactCandidates": [
+      {
+        "kind": "File",
+        "qualifiedName": "src/routes/orders.ts",
+        "certainty": "direct",
+        "resolution": "verified",
+        "minDepth": 1,
+        "pathEvidenceIds": ["evidence:7d09d378..."]
+      },
+      {
+        "kind": "File",
+        "qualifiedName": "src/app.ts",
+        "certainty": "direct",
+        "resolution": "verified",
+        "minDepth": 1,
+        "pathEvidenceIds": ["evidence:7847f95a..."]
+      }
+    ]
+  }
+}
+```
+
+---
+
 ## Supported Hosts
 
 Causoryn ships as a multi-file npm distribution package (`causoryn` v`0.2.0`) and multi-host plugin repository supporting:

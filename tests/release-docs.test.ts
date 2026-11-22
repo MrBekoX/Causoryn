@@ -823,7 +823,14 @@ describe("BAĞIMSIZ DENETİM DÖNGÜSÜ (2026-11-18): doküman↔kod tam parite 
       expect(readme).toContain("CONTRIBUTING.md");
       expect(readme).toContain("CODE_OF_CONDUCT.md");
       expect(readme).toContain("THIRD-PARTY-NOTICES.md");
+      expect(readme).toContain("## Why Causoryn?");
+      expect(readme).toContain("11.8 ms");
+      expect(readme).toContain("13.0 ms");
+      expect(readme).toContain("10.7 ms");
     }
+    expect(rootReadme).toContain("```mermaid");
+    expect(rootReadme).toContain("examples/fixture-ts-orders");
+    expect(rootReadme).toContain("causoryn_preflight_change");
 
     const userFacingDocs = [
       "README.md",
