@@ -7,65 +7,85 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Release tag to build and publish (e.g. v0.2.0)"
+        description: "Release tag to build and publish (e.g. v0.2.3); workflow must be dispatched on that tag ref"
         required: true
         type: string
 
 permissions:
   contents: read
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
-  release:
-    name: Build, Attest & Publish
+  build-and-verify:
+    name: Build, Verify & Pack (Isolated)
     runs-on: ubuntu-latest
-    environment: release
     timeout-minutes: 30
     permissions:
-      contents: write
-      id-token: write
-      attestations: write
+      contents: read
     steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@aebdcf6156ab6691adf63218240e476564a1ed4c # v2.23.0
+        with:
+          egress-policy: audit
+          disable-sudo-and-containers: true
+
       - name: Checkout release ref
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+          fetch-depth: 0
 
       - name: Setup Node.js
-        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: "24"
-          cache: npm
-          # Intentionally omit registry-url so actions/setup-node does not inject
-          # a static _authToken placeholder into .npmrc that conflicts with
-          # tokenless npm OIDC Trusted Publishing (ENEEDAUTH).
+          # Hermetic SLSA build: intentionally omit cache (prevents Actions cache poisoning)
+          # and omit registry-url (no static .npmrc token placeholder).
 
       - name: Setup .NET
-        uses: actions/setup-dotnet@0f4a354dd5547a28c70b7853dbd95d5b67886e73 # v6
+        uses: actions/setup-dotnet@0f4a354dd5547a28c70b7853dbd95d5b67886e73 # v6.1.0
         with:
           dotnet-version: "10.0.x"
 
       - name: Setup Python
-        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.12"
 
       - name: Setup Go
-        uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7
+        uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
         with:
           go-version-file: "native/go-worker/go.mod"
           cache: false
 
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
+        uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # pinned-commit
 
-      - name: Verify release tag matches packages/causoryn/package.json (fail-closed)
+      - name: Verify release tag, main ancestry, and package version (fail-closed)
         env:
-          RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+          EVENT_NAME: ${{ github.event_name }}
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+          DISPATCH_TAG: ${{ inputs.tag }}
         run: |
           node -e '
+            const cp = require("node:child_process");
             const fs = require("node:fs");
-            const tag = process.env.RELEASE_TAG ?? "";
+            const eventName = process.env.EVENT_NAME ?? "";
+            const refType = process.env.REF_TYPE ?? "";
+            const tag = process.env.REF_NAME ?? "";
+            const dispatchTag = process.env.DISPATCH_TAG ?? "";
+            if (refType !== "tag") {
+              console.error(`Release must run on a tag ref (got ref_type=${refType}, ref_name=${tag})`);
+              process.exit(1);
+            }
+            if (eventName === "workflow_dispatch" && dispatchTag !== tag) {
+              console.error(`workflow_dispatch inputs.tag (${dispatchTag}) must match checked-out tag (${tag})`);
+              process.exit(1);
+            }
             if (!/^v\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(tag)) {
               console.error("Invalid release tag format:", tag);
               process.exit(1);
@@ -76,14 +96,19 @@ jobs:
               console.error(`Tag mismatch: tag=${tag}, packages/causoryn/package.json version=${pkg.version}`);
               process.exit(1);
             }
-            console.log(`Release tag verified: ${tag}`);
+            cp.execFileSync("git", ["rev-parse", "--verify", "refs/remotes/origin/main"], { stdio: "inherit" });
+            cp.execFileSync("git", ["merge-base", "--is-ancestor", "HEAD", "refs/remotes/origin/main"], { stdio: "inherit" });
+            console.log(`Release tag and main-branch ancestry verified: ${tag}`);
           '
 
       - name: Install dependencies
         run: npm ci --ignore-scripts
 
-      - name: Build Roslyn worker (deterministic Release)
-        run: dotnet build native/roslyn-worker/Causoryn.RoslynWorker.csproj -c Release -p:DebugType=none -p:ContinuousIntegrationBuild=true -p:SatelliteResourceLanguages=en
+      - name: Audit npm dependencies (high+)
+        run: npm audit --audit-level=high
+
+      - name: Build Roslyn worker (deterministic Release, locked)
+        run: dotnet build native/roslyn-worker/Causoryn.RoslynWorker.csproj -c Release -p:DebugType=none -p:ContinuousIntegrationBuild=true -p:SatelliteResourceLanguages=en -p:RestoreLockedMode=true
 
       - name: Build Rust worker (locked)
         run: cargo build --manifest-path native/rust-worker/Cargo.toml --locked
@@ -109,6 +134,9 @@ jobs:
       - name: Secret scan
         run: npm run secret-scan
 
+      - name: Verify public export leak gate
+        run: node scripts/export-public-tree.mjs --verify-temp --ref HEAD
+
       - name: Run tests
         run: npm test
 
@@ -118,27 +146,191 @@ jobs:
           mkdir -p ../../release-artifacts
           npm pack --pack-destination ../../release-artifacts
 
+      - name: Smoke-test packed tarball in isolated prefix (CLI + doctor + MCP initialize)
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          files=(release-artifacts/*.tgz)
+          if (( ${#files[@]} != 1 )); then
+            echo "Expected exactly 1 tarball in release-artifacts/, found ${#files[@]}" >&2
+            exit 1
+          fi
+          EXPECTED_VERSION="${RELEASE_TAG#v}"
+          EXPECTED_TGZ="release-artifacts/causoryn-${EXPECTED_VERSION}.tgz"
+          if [[ "${files[0]}" != "$EXPECTED_TGZ" ]]; then
+            echo "Tarball filename mismatch: expected ${EXPECTED_TGZ}, got ${files[0]}" >&2
+            exit 1
+          fi
+          ABS_TGZ="$(pwd)/${files[0]}"
+          SMOKE_DIR=$(mktemp -d)
+          trap 'rm -rf "$SMOKE_DIR"' EXIT
+          mkdir -p "$SMOKE_DIR/home" "$SMOKE_DIR/workspace"
+          (cd "$SMOKE_DIR" && npm install --no-audit --no-fund --ignore-scripts "$ABS_TGZ")
+          ACTUAL_VERSION=$(HOME="$SMOKE_DIR/home" "$SMOKE_DIR/node_modules/.bin/causoryn" --version | tr -d '\r\n')
+          if [[ "$ACTUAL_VERSION" != "$EXPECTED_VERSION" ]]; then
+            echo "CLI version mismatch: expected ${EXPECTED_VERSION}, got ${ACTUAL_VERSION}" >&2
+            exit 1
+          fi
+          HOME="$SMOKE_DIR/home" "$SMOKE_DIR/node_modules/.bin/causoryn" doctor --json
+          HOME="$SMOKE_DIR/home" SMOKE_BIN="$SMOKE_DIR/node_modules/.bin/causoryn" SMOKE_CWD="$SMOKE_DIR/workspace" node -e '
+            const cp = require("node:child_process");
+            const bin = process.env.SMOKE_BIN;
+            const cwd = process.env.SMOKE_CWD;
+            const initReq = JSON.stringify({
+              jsonrpc: "2.0",
+              id: 1,
+              method: "initialize",
+              params: {
+                protocolVersion: "2024-11-05",
+                capabilities: {},
+                clientInfo: { name: "release-smoke", version: "1.0.0" },
+              },
+            }) + "\n";
+            const child = cp.spawn(bin, ["mcp", "--allow-cwd", "--auto-data-dir"], {
+              cwd,
+              env: { ...process.env },
+              stdio: ["pipe", "pipe", "pipe"],
+            });
+            let out = "";
+            let err = "";
+            const timer = setTimeout(() => {
+              child.kill("SIGKILL");
+              console.error("MCP initialize smoke test timed out. stderr:", err);
+              process.exit(1);
+            }, 15000);
+            child.stderr.on("data", (d) => { err += d.toString("utf8"); });
+            child.stdout.on("data", (d) => {
+              out += d.toString("utf8");
+              for (const line of out.split(/\r?\n/)) {
+                if (!line.trim()) continue;
+                try {
+                  const msg = JSON.parse(line);
+                  if (msg.id === 1 && msg.result && msg.result.serverInfo) {
+                    clearTimeout(timer);
+                    child.kill("SIGTERM");
+                    console.log("MCP initialize smoke verified:", JSON.stringify(msg.result.serverInfo));
+                    process.exit(0);
+                  }
+                } catch {}
+              }
+            });
+            child.on("exit", (code) => {
+              clearTimeout(timer);
+              console.error("MCP server exited before initialize response. code=", code, "stderr=", err);
+              process.exit(1);
+            });
+            child.stdin.write(initReq);
+          '
+
       - name: Generate SHA256SUMS.txt and CycloneDX SBOM
         run: node scripts/generate-sbom.mjs --artifacts-dir release-artifacts
 
+      - name: Upload verified release artifacts
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-artifacts
+          path: release-artifacts/
+          retention-days: 5
+
+  attest-and-publish:
+    name: Attest & Publish (OIDC)
+    needs: build-and-verify
+    runs-on: ubuntu-latest
+    environment: release
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@aebdcf6156ab6691adf63218240e476564a1ed4c # v2.23.0
+        with:
+          egress-policy: audit
+          disable-sudo-and-containers: true
+
+      - name: Download verified release artifacts
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release-artifacts
+          path: release-artifacts
+
+      - name: Verify artifact checksums and tarball identity
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          (cd release-artifacts && sha256sum -c SHA256SUMS.txt)
+          files=(release-artifacts/*.tgz)
+          if (( ${#files[@]} != 1 )); then
+            echo "Expected exactly 1 tarball in release-artifacts/, found ${#files[@]}" >&2
+            exit 1
+          fi
+          EXPECTED_TGZ="release-artifacts/causoryn-${RELEASE_TAG#v}.tgz"
+          if [[ "${files[0]}" != "$EXPECTED_TGZ" ]]; then
+            echo "Tarball identity mismatch: expected ${EXPECTED_TGZ}, got ${files[0]}" >&2
+            exit 1
+          fi
+
+      - name: Setup Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "24"
+          # Intentionally omit cache and registry-url so actions/setup-node does not inject
+          # a static _authToken placeholder into .npmrc that conflicts with tokenless npm OIDC.
+
       - name: Attest build provenance
-        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3
+        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3.0.0
         with:
           subject-path: "release-artifacts/*.tgz"
 
       - name: Publish to npm via OIDC Trusted Publishing
-        run: |
-          TGZ_FILE=$(ls -1 release-artifacts/*.tgz | head -n 1)
-          npm publish "./$TGZ_FILE" --provenance --access public
-
-      - name: Create GitHub Release
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+          RELEASE_TAG: ${{ github.ref_name }}
         run: |
-          gh release create "$RELEASE_TAG" \
-            release-artifacts/*.tgz \
-            release-artifacts/SHA256SUMS.txt \
-            release-artifacts/causoryn-sbom.cdx.json \
-            --title "Causoryn $RELEASE_TAG" \
-            --generate-notes
+          set -euo pipefail
+          shopt -s nullglob
+          files=(release-artifacts/*.tgz)
+          if (( ${#files[@]} != 1 )); then
+            echo "Expected exactly 1 tarball to publish, found ${#files[@]}" >&2
+            exit 1
+          fi
+          TGZ_FILE="${files[0]}"
+          if [[ "$RELEASE_TAG" == *-* ]]; then
+            npm publish "./$TGZ_FILE" --provenance --access public --tag next
+          else
+            npm publish "./$TGZ_FILE" --provenance --access public
+          fi
+
+      - name: Create or update GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          if gh release view "$RELEASE_TAG" --repo "$GH_REPO" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" \
+              --repo "$GH_REPO" \
+              release-artifacts/*.tgz \
+              release-artifacts/SHA256SUMS.txt \
+              release-artifacts/causoryn-sbom.cdx.json \
+              --clobber
+          else
+            PRERELEASE_FLAG=()
+            if [[ "$RELEASE_TAG" == *-* ]]; then
+              PRERELEASE_FLAG+=(--prerelease)
+            fi
+            gh release create "$RELEASE_TAG" \
+              --repo "$GH_REPO" \
+              release-artifacts/*.tgz \
+              release-artifacts/SHA256SUMS.txt \
+              release-artifacts/causoryn-sbom.cdx.json \
+              --title "Causoryn $RELEASE_TAG" \
+              --generate-notes \
+              --verify-tag \
+              "${PRERELEASE_FLAG[@]}"
+          fi
