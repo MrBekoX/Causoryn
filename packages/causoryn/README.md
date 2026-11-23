@@ -1,23 +1,30 @@
+<p align="center">
+  <img src="https://raw.githubusercontent.com/MrBekoX/Causoryn/main/Causoryn.png" alt="Causoryn — Local, deterministic, LLM-free code intelligence MCP server" width="760" />
+</p>
+
 # Causoryn (`causoryn` v0.2.2 — Pre-1.0 Public Preview)
 
 **Causoryn** is a **local, deterministic, LLM-free** codebase and change intelligence
 engine exposed over the Model Context Protocol (`stdio`). It constructs evidence-backed
-dependency, symbol, route, and contract graphs across your project while enforcing a
-strict **read-only workspace guarantee**: Causoryn never modifies your source tree and
-writes snapshots, Living Wiki SQLite databases, and exports strictly outside the analyzed
-workspace.
+dependency, symbol, route, and contract graphs across your project, exports **offline
+visual architecture portals** (layered SVG HTML, interactive pan/zoom viewer, subgraph
+Mermaid, Architecture Brief Markdown, and fail-closed Host-LLM `annotations`), and ships
+**5 canonical agent skills** while enforcing a strict **read-only workspace guarantee**:
+Causoryn never modifies your source tree and writes snapshots, Living Wiki SQLite
+databases, and exports strictly outside the analyzed workspace.
 
 > **Release status (`ADR-010`):** `0.2.2` is a **Pre-1.0 Public Preview** (not `1.0.0`).
 > Package architecture note: `causoryn` is a multi-file runtime package (`dist/mcp-server.mjs`
 > + vendored N-API v10 `better-sqlite3` prebuild binaries + `dist/typescript-lib/` +
-> `native/` sidecar workers + canonical `skills/`), not a single-file JS bundle.
+> `native/` sidecar workers + 5 canonical `skills/`), not a single-file JS bundle.
 
 ## Why Causoryn?
 
 - **Zero LLM & zero API keys (`ADR-002`):** 100% deterministic static analysis — no embeddings, no token burn, no hallucinated call edges.
 - **Evidence-backed & honest (`ADR-010`):** Every graph edge carries its exact resolution (`verified`, `heuristic`, `unresolved`) and source-span evidence ID.
-- **Strictly read-only workspace (`ADR-008`):** Snapshots, SQLite indexes, and Living Wiki databases live outside your repository.
-- **Fast on warm snapshots (1,000 TS files):** `11.8 ms` `workspace_summary`, `13.0 ms` `get_symbol_context`, `10.7 ms` `map_system` ([benchmarks](https://github.com/MrBekoX/Causoryn/blob/main/docs/en/benchmarks.md)).
+- **Strictly read-only workspace (`ADR-008`):** Snapshots, SQLite indexes, Living Wiki databases, and exported architecture portals live outside your repository.
+- **Offline visual architecture portals (`v0.2.2`):** Zero-JS layered SVG HTML (`view: "architecture"`), interactive pan/zoom/search/Inspector portal (`view: "interactive"`), clean subgraph Mermaid, Architecture Brief Markdown, and fail-closed Host-LLM `annotations` guided by the bundled `architecture-blueprint` skill.
+- **Fast on warm snapshots (1,000 TS files):** `11.8 ms` `workspace_summary`, `13.0 ms` `get_symbol_context`, `10.7 ms` `map_system` ([benchmarks](https://github.com/MrBekoX/Causoryn/blob/main/docs/en/benchmarks.md)), with non-blocking startup (`< 500 ms` `initialize`) and `PRAGMA data_version`-guarded SQLite snapshot caching.
 
 ## Requirements & Component Runtime Matrix
 
