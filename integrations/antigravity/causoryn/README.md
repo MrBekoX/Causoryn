@@ -1,10 +1,10 @@
 # Causoryn for Antigravity
 
-> **Monorepo Development Fixture:** This directory (`integrations/antigravity/causoryn`) is a local monorepo development/testing fixture for verifying staged bundle compatibility. End users should install Causoryn via `npx causoryn@0.2.0 setup --client antigravity --yes` or from the repository root (`https://github.com/MrBekoX/Causoryn`).
+> **Monorepo Development Fixture:** This directory (`integrations/antigravity/causoryn`) is a local monorepo development/testing fixture for verifying staged bundle compatibility. End users can install Causoryn via `npx causoryn@0.2.2 setup --client antigravity --yes` or from the repository root (`https://github.com/MrBekoX/Causoryn`).
 
 > Evidence: TŞ v2.1 §17.1, §17.4, §22 · `docs/hosts/antigravity.md` · `packages/mcp-server` (29 published MCP tools)
 
-**Causoryn** is a local, deterministic, **LLM-free** codebase and change-intelligence engine exposed to Antigravity as a `stdio` MCP server (`causoryn`). It builds an evidence-backed dependency and contract graph over explicitly authorized workspace roots without calling external model APIs, embedding endpoints, or network services.
+**Causoryn** is a local, **LLM-free** codebase and change-intelligence engine exposed to Antigravity as a `stdio` MCP server (`causoryn`). Its structural analysis uses explicitly authorized workspace roots and fixed analysis rules. The optional `architecture-blueprint` skill in the distribution package guides the host model in providing `annotations` for an architecture export. The same snapshot and export inputs reproduce the same artifact. Regenerating the annotations in the host may produce different wording. [Antigravity host guide](../../../docs/en/hosts/antigravity.md)
 
 ## Requirements
 
@@ -42,7 +42,7 @@ Both `mcp_config.json` and `mcp.json` ship with a strict **default-deny** config
 ```
 
 - With `allowRoots: []`, workspace analysis tools fail closed with `WORKSPACE_NOT_AUTHORIZED` and index nothing.
-- To authorize a project workspace (strictly **read-only** analysis), set `CAUSORYN_CONFIG` to an absolute project directory (never authorize filesystem roots):
+- To authorize a project workspace for **read-only** analysis, set `CAUSORYN_CONFIG` to a JSON object with the absolute project path in `allowRoots`:
 
   ```bash
   CAUSORYN_CONFIG='{"allowRoots":["C:/projects/my-app"]}'
@@ -54,11 +54,11 @@ Both `mcp_config.json` and `mcp.json` ship with a strict **default-deny** config
 
 ## Security Guarantees
 
-- **Read-only (`salt-okunur`) workspace:** Causoryn never modifies, formats, checks out, resets, or cleans files inside your authorized source tree (ADR-008).
-- **LLM-free & offline:** Zero model SDKs, embeddings, or outbound network requests (ADR-002).
+- **Read-only (`salt-okunur`) analysis:** Causoryn reads the authorized source tree. SQLite writes go to the data root outside the workspace, and export writes require `output.allowedOutputDirs` (ADR-008).
+- **Analysis and rendering:** The MCP engine calls no model or embedding service. Setup and optional toolchain builds follow their own package retrieval rules. [Language analyzers](../../../docs/en/language-analyzers.md)
 - **Clean stdio protocol:** `stdout` emits only JSON-RPC 2.0 MCP messages; diagnostic logs write exclusively to `stderr`.
 
 ## Verification Honesty (`agy` CLI Status: `NOT RUN`)
 
-- **Verified via direct `stdio` spawn:** Automated integration tests (`integrations/antigravity/causoryn/test/antigravity-plugin.test.ts`) spawn `node scripts/mcp-server.mjs` directly from this plugin directory using `mcp_config.json` (`command`, `args`, `env`), verifying `initialize` (`causoryn@0.2.0`), `tools/list` (all 29 tools), `causoryn_get_capabilities` (`ok`), `causoryn_workspace_summary` (`WORKSPACE_NOT_AUTHORIZED`), and `stdout` JSON-RPC purity.
+- **Direct `stdio` spawn coverage:** With the bundle staged, `antigravity-plugin.test.ts` spawns `node scripts/mcp-server.mjs` from this directory using `mcp_config.json` (`command`, `args`, `env`). It asserts `initialize` against `SERVER_VERSION` (`0.2.2`), `tools/list` (29 tools), `causoryn_get_capabilities` (`ok`), `causoryn_workspace_summary` (`WORKSPACE_NOT_AUTHORIZED`), and JSON-RPC-only `stdout`.
 - **`NOT RUN` via `agy` CLI (TŞ §22):** `agy CLI bulunamadı — bu hostta kurulum/smoke koşulmadı`. Because the `agy` command-line binary is not installed on this host machine, CLI lifecycle commands (`agy plugin validate --strict`, `agy plugin install`, `agy plugin list`) were **NOT RUN** and are documented as reference examples in `docs/hosts/antigravity.md`.

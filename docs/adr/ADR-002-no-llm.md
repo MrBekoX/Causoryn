@@ -2,9 +2,9 @@
 
 > **Dil / Language:** **Türkçe** | [English](../en/adr/ADR-002-no-llm.md) · [Dokümantasyon Merkezi](../README.md)
 >
-> Kanıt: TŞ v2.1 §1 (Kırmızı çizgi), §3.1, §3.2, §19, §24 · `wiki/decisions.md` ADR-002 · `wiki/architecture.md`
-> Durum: **Kabul edildi** (şartnameden gelen değişmez mimari karar; `v0.2.0` Pre-1.0 Public Preview doğrulama kanıtlarıyla güncellendi)
-> Tarih: 2026-11-02 (ilk belgeleme), 2026-11-20 (`v0.2.0` doğrulama güncellemesi); karar TŞ v2.1'den (31.10.2026) gelir
+> Kanıt: TŞ v2.1 §1 (Kırmızı çizgi), §3.1, §3.2, §19, §24 · `wiki/decisions.md` ADR-002, K-023 · `wiki/architecture.md`
+> Durum: **Kabul edildi** (şartnameden gelen değişmez motor sınırı; `v0.2.2` Pre-1.0 Public Preview hibrit mimari sınırı `K-023` ve doğrulama kanıtlarıyla güncellendi)
+> Tarih: 2026-11-02 (ilk belgeleme), 2026-11-20 (`v0.2.0` doğrulaması), 2026-11-23 (`v0.2.2` / `K-023` hibrit sınır netleştirmesi); karar TŞ v2.1'den (31.10.2026) gelir
 
 ## Bağlam
 
@@ -46,7 +46,7 @@ yapmaz.
 ### Bu kararın kod ve dağıtım tarafındaki pratik sonuçları
 
 1. Graph kanıtı (`Evidence`) yalnızca dil analizörleri (TS Compiler API, C#
-   Roslyn, Python `ast`, Go `go/parser`, Rust `syn 2`), şema/konfigürasyon
+   Roslyn, Python `ast`, Go `go/parser`, Rust `syn 3`), şema/konfigürasyon
    ayrıştırıcıları ve doğrulanabilir dosya/commit kaynaklarından gelir; host
    model çıktısı asla `verified` evidence olarak indekslenemez (TŞ §3.2).
 2. Arama yetenekleri deterministik bileşenlerle kurulur: derleyici/AST
@@ -54,27 +54,51 @@ yapmaz.
 3. `packages/mcp-server` host modeline tek yönlü hizmet verir: `stdout`
    kanalında yalnızca MCP JSON-RPC protokolü taşınır, tüm loglar `stderr`'e
    yazılır (TŞ §10.1).
-4. `v0.2.0` monoreposundaki **18 npm workspace paketi + kök monorepo** (toplam
+4. `v0.2.2` monoreposundaki **18 npm workspace paketi + kök monorepo** (toplam
    19 `package.json`) genelinde çalışma zamanı ve derleme bağımlılıklarının
-   tamamı deterministik sistem kütüphaneleridir: `zod`,
+   analiz ve paketleme için gereken altyapı kütüphaneleridir: `zod`,
    `@modelcontextprotocol/sdk`, `better-sqlite3`, `yaml`, `typescript`,
    `esbuild` (ayrıca yayımlanan `packages/causoryn` paketi `"dependencies": {}`
    sıfır dış npm bağımlılığı beyan eder).
 
+### `v0.2.2` (`K-023`) Mimari Dışa Aktarım ve Opsiyonel Anotasyonlar
+
+`causoryn_export_documentation`, graph'taki statik kanıtla kendi başına bir portal
+üretir. Çağıran, isteğe bağlı `annotations` alanıyla özet, domain grupları, akışlar,
+tur, karar ve risk notları ekleyebilir. `architecture-blueprint` skill’i harici host
+LLM’ine bu girdiyi hazırlamada yol gösterir. Doğrulayıcı şemayı ve referansların
+ilgili graph veya projeksiyondaki varlığını ve aidiyetini denetler (`moduleId`,
+`nodeId`, `evidenceId`, `keyFiles`). Geçersiz girdi `INVALID_ARGUMENT` ile
+reddedilir. Serbest metnin doğruluğu çağıranın sorumluluğundadır.
+
+### Determinizmin Kapsamı
+
+Aynı renderer sürümü, metadata dahil aynı snapshot, format, görünüm, seçenekler
+ve anotasyon girdisi, desteklenen mimari çıktılarda bayt düzeyinde aynı sonucu
+üretir. Graph analizinin girdileri arasında dosya içeriği, çalışma alanı ve ignore
+ayarları, analizör ve araç zinciri sürümleri ile bunların kullanılabilirliği yer alır.
+Yeni build’ler `createdAt`, yayın zamanı ve revision gibi metadata alanlarını
+değiştirebilir. MCP `requestId`, indeks işi ilerlemesi ve gecikmeler çalışma zamanına
+bağlıdır. Opsiyonel host LLM anlatısı, renderer için değişken bir girdidir.
+Bkz. `packages/graph/test/architecture-export.test.ts` ve
+`packages/mcp-server/src/{context.ts,server.ts,services.ts}`.
+
 ## Gerekçe
 
-- **Determinizm:** Aynı giriş → bayt-bayt aynı Graph JSON (TŞ §8 invariant vi).
-  LLM çıktısı olasılıksaldır; graph veya kanıt üretimine girmesi determinizmi
-  ve tekrarlanabilirliği bozar.
+- **Çekirdek determinizmi:** Kanonik graph sıralaması ve kimlikleri eşdeğer
+  girdilerle tekrarlanabilir (TŞ §8 invariant vi). Dışa aktarımda anotasyonlar
+  renderer girdisidir. Graph’taki `verified` kanıtlar statik kaynaklardan gelir.
 - **Kanıt bütünlüğü (`ADR-004`):** Her `verified` kenarın dosya, satır aralığı
   ve SHA-256 `sourceHash` kaynaklı doğrulanabilir kanıtı vardır; model çıktısı
   bu standardı karşılayamaz.
-- **Gizlilik ve tehdit modeli:** Analiz tamamen yerel çalışır; kaynak kod üçüncü
-  taraf model API'sine veya telemetri servisine gönderilmez (TŞ §19).
-- **Sorumluluk ayrımı (TŞ §3.1):** Yorum ve planlama host modelde, ölçüm ve
-  kanıt Causoryn'dedir; iki katmanın sorumluluk alanı birbirine karışmaz.
+- **Gizlilik ve tehdit modeli:** Causoryn analizi yerelde yürütür ve kaynak kodu
+  model API’sine veya telemetri servisine göndermez (TŞ §19). Harici host’un
+  veri işleme davranışı kendi yapılandırmasına ve sağlayıcısına bağlıdır.
+- **Sorumluluk ayrımı (TŞ §3.1, K-023):** Semantik sentez ve anlatı host modelde,
+  statik ölçüm, fail-closed kanıt doğrulaması ve görsel yerleşim Causoryn'dedir;
+  iki katmanın sorumluluk alanı birbirine karışmaz.
 
-## Sonuçlar ve `v0.2.0` Doğrulama Kanıtları
+## Sonuçlar ve `v0.2.2` Doğrulama Kanıtları
 
 - **Dürüst kapsama (`ADR-010`):** Eksik statik çözümleme LLM tahminiyle
   doldurulmaz; `heuristic` (+ `ambiguity`), `unresolved` (`UnknownExternal`),
@@ -93,8 +117,9 @@ yapmaz.
   sunucu süreci `NODE_OPTIONS="--require .../net-guard.cjs"` preload kancasıyla
   başlatılır; süreç-içi tüm giden Node.js ağ API'leri (`dns`, `net`, `tls`,
   `http`, `https`, `fetch`, `WebSocket`) kayıt + anında red (`CAUSORYN_NETWORK_DENIED`)
-  davranışına çevrilir. 29 MCP aracının tamamı koşulduğunda `CAUSORYN_NETLOG`
-  dosyası **0 bayt** kalır. *(Dürüst kapsam sınırı: `net-guard.cjs` süreç-içi
+  davranışına çevrilir. F6 oturumu `tools/list` ile 29 kaydı keşfeder ve
+  `causoryn_workspace_summary` ile HTML dışa aktarımını çağırır. Bu oturumda
+  `CAUSORYN_NETLOG` **0 bayt** kalır. *(`net-guard.cjs` süreç-içi
   Node ağ API'lerini sarar; alt süreç çalıştırma yüzeyi statik komut
   allowlist'leriyle — salt-okunur `git` ve çevrimdışı sidecar'lar; Rust
   sidecar'da ise yalnızca ilk soğuk `cargo build --locked` derlemesinde kilitli

@@ -4,7 +4,9 @@
 >
 > **Evidence base:** `packages/indexing/src/{index.ts,index-service.ts,fingerprint.ts}`, `packages/sidecar-ipc/src/index.ts`, `adapters/{typescript,csharp-roslyn,python,go,rust}/src/*`, `native/{roslyn-worker,python-worker,go-worker,rust-worker}/PROTOCOL.md` (TS v2.1 §6, §7, §8, §9, §15, §23 · `ADR-004` · `ADR-010` · `K-018` · `K-019` · `K-020` · `K-021`).
 
-Causoryn unifies **TypeScript/JavaScript**, **C# (.NET / Roslyn)**, **Python**, **Go**, and **Rust** into a single deterministic **Unified Evidence & Knowledge Graph**. No language adapter ever invokes an LLM (`ADR-002`), and no statically unproven target is ever fabricated or promoted to `verified` (`ADR-004`, `ADR-010`, `K-018`).
+Causoryn combines analyses of **TypeScript/JavaScript**, **C# (.NET / Roslyn)**, **Python**, **Go**, and **Rust** in a single **Unified Evidence & Knowledge Graph**. Analyzers derive results from syntax, symbols, and supported framework rules without making model calls (`ADR-002`). `verified` edges require source evidence, and other matches carry their resolution status explicitly (`ADR-004`, `ADR-010`, `K-018`).
+
+Polyglot indexing merges pathless external or virtual nodes that share an ID across analyzers into a canonical record. File-bound collisions surface as errors (v0.2.1, `packages/indexing/src/index-service.ts`). Equivalent analysis depends on equivalent analyzer and toolchain conditions as well as file inputs and effective configuration. Missing runtimes, changed reference packs, or timeouts can change coverage and diagnostics.
 
 ---
 
@@ -18,7 +20,7 @@ Published by `causoryn_get_capabilities` directly from `INDEXED_ADAPTERS` (`pack
 | **C# / .NET** | `roslyn-worker` (`0.1.0`) | Sidecar (`adapters/csharp-roslyn` ↔ `native/roslyn-worker`) | `L1` | `L2` (Roslyn `SemanticModel` — full semantic sidecar) | `aspnet-core-route-attributes (L3)` (Controller `[Route]`/`[Http*]` + Minimal API `MapGet`/…) | `CONTAINS`, `CALLS`, `ROUTES_TO` (`importEdges: false`) |
 | **Python** | `python-worker` (`0.1.0`) | Sidecar (`adapters/python` ↔ `native/python-worker/worker.py`) | `L1` | `L2` (AST lexical/class scope; no full type inference) | `decorator-route-pattern (L3)` (FastAPI/Starlette `@app.get`/… + Flask `@app.route`) | `CONTAINS`, `CALLS`, `ROUTES_TO` (`importEdges: false`) |
 | **Go** | `go-worker` (`0.1.0`) | Sidecar (`adapters/go` ↔ `native/go-worker/cmd/worker`) | `L1` | `heuristic-only (semantik L2 yok)` (`symbolResolution: false`) | `http-router-registration (L3)` (`net/http` `Handle`/`HandleFunc` + `gin`/`echo`/`chi`) | `CONTAINS`, `CALLS`, `ROUTES_TO` (`importEdges: false`) |
-| **Rust** | `rust-worker` (`0.1.0`) | Sidecar (`adapters/rust` ↔ `native/rust-worker`) | `L1` | `heuristic-heavy` (`syn 2` AST + deterministic symbol table) | `attribute-macro-route (L3)` (Actix-Web / Axum / Rocket HTTP verb macros) | `CONTAINS`, `CALLS`, `ROUTES_TO` (`importEdges: false`) |
+| **Rust** | `rust-worker` (`0.1.0`) | Sidecar (`adapters/rust` ↔ `native/rust-worker`) | `L1` | `heuristic-heavy` (`syn 3.0.10` AST + deterministic symbol table) | `attribute-macro-route (L3)` (Actix-Web / Axum / Rocket HTTP verb macros) | `CONTAINS`, `CALLS`, `ROUTES_TO` (`importEdges: false`) |
 
 ### Capability Tiers (`L0` – `L3`) & Envelope `coverage.tier`
 
@@ -61,7 +63,7 @@ No analyzer in Causoryn ever guesses a plausible target symbol as `verified`, an
 - **Rust (`verified`):** Actix-Web, Axum, and Rocket attribute macros (`#[get("/path")]`, `#[post("/path")]`, etc.) attach directly to the target `fn` item, always emitting `verified` (`route-attribute`) edges.
 - **C# ASP.NET Core (`verified` or `heuristic`):** Controller `[Route]` + `[HttpGet]`/`[HttpPost]`/… attributes and Minimal API `MapGet`/`MapPost`/… calls (`WorkerAnalyzer.cs:1475-1508`) emit `verified` when Roslyn resolves the attribute/extension types to `Microsoft.AspNetCore.*`. When `Microsoft.AspNetCore.App.Ref` is unavailable on the host machine, they degrade honestly to **`heuristic` (+ `ambiguity`)** via the well-known-name rule.
 - **Go (`verified`, `heuristic`, or `unresolved`):** Across `net/http` (`Handle`, `HandleFunc` with method `"*"`) and `gin`/`echo`/`chi` verb registrations (`routes.go:120-170`), a same-package named handler function emits `verified`, a selector handler expression emits **`heuristic` or `unresolved`**, an unknown bare handler emits **`unresolved` (`UnknownExternal`)**, and an inline anonymous `func` literal preserves the `Endpoint` node without emitting a `ROUTES_TO` edge (recording an explicit warning).
-- **BDD Test Extraction (`Test` & `TESTS`):** The TypeScript analyzer extracts BDD test blocks as `Test` nodes and emits `verified` `TESTS` edges whenever a `Test` body calls a non-`Test` workspace symbol (`adapters/typescript/src/analyzer.ts:1722-1736`), powering the `direct` signal in `causoryn_derive_test_plan`. Sidecar `TESTS` edge extraction for C#, Python, Go, and Rust remains tracked as an open post-`0.2.0` item.
+- **BDD Test Extraction (`Test` & `TESTS`):** The TypeScript analyzer extracts BDD test blocks as `Test` nodes and emits `verified` `TESTS` edges whenever a `Test` body calls a non-`Test` workspace symbol (`adapters/typescript/src/analyzer.ts:1722-1736`), powering the `direct` signal in `causoryn_derive_test_plan`. Sidecar `TESTS` edge extraction for C#, Python, Go, and Rust remains tracked as an open item in `0.2.2`.
 
 ---
 
@@ -89,7 +91,7 @@ All four sidecar adapters (`csharp-roslyn`, `python`, `go`, `rust`) share the ze
 
 When an optional toolchain (`dotnet`, `python`, `go`, `cargo`) is absent, crashes, or times out, the server **never crashes**:
 - Affected files remain in the published snapshot as `sourceHash`-evidenced `File` nodes (`WORKER_UNAVAILABLE_CAPABILITIES`).
-- Snapshot state becomes `partial`, adapter `coverageRatio` reports `0`, and `warnings` records the exact fallback reason (inspectable anytime via `npx causoryn@0.2.0 doctor`).
+- Snapshot state becomes `partial`, adapter `coverageRatio` reports `0`, and `warnings` records the exact fallback reason (inspectable anytime via `npx causoryn@0.2.2 doctor`).
 
 ---
 
@@ -97,11 +99,11 @@ When an optional toolchain (`dotnet`, `python`, `go`, `cargo`) is absent, crashe
 
 | Component / Analyzer | Runtime Requirement | Compilation Model | Network / Offline Behavior |
 |---|---|---|---|
-| **TypeScript + Core SQLite** | **Node.js >= 24** | Zero-compile (`dist/mcp-server.mjs` + N-API v10 `better-sqlite3` prebuilds + bundled `dist/typescript-lib/lib*.d.ts`) | **100% offline** |
-| **C# / Roslyn** (`roslyn-worker`) | **.NET 10 runtime** (`dotnet exec`) | Precompiled deterministic Release `Causoryn.RoslynWorker.dll` (`Microsoft.CodeAnalysis.CSharp` `5.0.0`, zero `.pdb` or `.resources.dll` files) | **100% offline** |
-| **Python** (`python-worker`) | **Python 3.10+** (recommended / CI: **Python 3.11+ / 3.12**) | Zero-compile (`python -B worker.py`, pure stdlib `ast`, zero pip packages, zero `__pycache__` writes) | **100% offline** |
-| **Go** (`go-worker`) | **Go 1.22+** | On-demand local `go run ./cmd/worker` (cached in `GOCACHE`) or prebuilt `CAUSORYN_GO_WORKER_BIN` (pure stdlib `go/parser`; zero external modules in `go.mod`) | **100% offline** |
-| **Rust** (`rust-worker`) | **Rust / Cargo** (`edition = 2021`) | On-demand `cargo build --locked` into `~/.causoryn/cache/rust-worker-target` (or `CAUSORYN_RUST_TARGET_DIR`) | **Cold first build** fetches 12 locked crates (`syn 2`, `serde_json`, `proc-macro2`, etc.) from `crates.io`; all subsequent cached builds run **100% offline**. |
+| **TypeScript + Core SQLite** | **Node.js >= 24** | Zero-compile (`dist/mcp-server.mjs` + N-API v10 `better-sqlite3` prebuilds + bundled `dist/typescript-lib/lib*.d.ts`) | Local operation after setup |
+| **C# / Roslyn** (`roslyn-worker`) | **.NET 10 runtime** (`dotnet exec`) | Precompiled deterministic Release `Causoryn.RoslynWorker.dll` (`Microsoft.CodeAnalysis.CSharp` `5.12.0`, zero `.pdb` or `.resources.dll` files) | Local operation after setup |
+| **Python** (`python-worker`) | **Python 3.10+** (recommended / CI: **Python 3.11+ / 3.12**) | Zero-compile (`python -B worker.py`, pure stdlib `ast`, zero pip packages, zero `__pycache__` writes) | Local operation after setup |
+| **Go** (`go-worker`) | **Go 1.22+** | On-demand local `go run ./cmd/worker` (cached in `GOCACHE`) or prebuilt `CAUSORYN_GO_WORKER_BIN` (pure stdlib `go/parser`; zero external modules in `go.mod`) | Local operation after setup |
+| **Rust** (`rust-worker`) | **Rust / Cargo** (`edition = 2021`) | On-demand `cargo build --locked` into `~/.causoryn/cache/rust-worker-target` (or `CAUSORYN_RUST_TARGET_DIR`) | The first build may need network access to fetch uncached `Cargo.lock` dependencies (`syn 3`, `serde_json`, `proc-macro2`, etc.). A prebuilt worker binary runs locally. |
 
 ---
 
@@ -124,11 +126,11 @@ fp2|ts-adapter@0.1.0|roslyn-worker@0.1.0|refpack=<pack>@<version>@<tfmDir>;...|r
 
 ### 5.2 Why Internal Analyzer Protocol Versions Remain `0.1.0`
 
-While the distribution package (`causoryn`), MCP server (`SERVER_VERSION`), and indexing coordinator (`INDEXING_VERSION`) are at `0.2.0`, all five internal analyzer versions (`ts-adapter@0.1.0`, `roslyn-worker@0.1.0`, `python-worker@0.1.0`, `go-worker@0.1.0`, `rust-worker@0.1.0`, `Causoryn.RoslynWorker.csproj`, and `native/rust-worker/Cargo.toml`) intentionally remain pinned to **`0.1.0`**:
+While the distribution package (`causoryn`), MCP server (`SERVER_VERSION`), and indexing coordinator (`INDEXING_VERSION`) are at `0.2.2`, all five internal analyzer versions (`ts-adapter@0.1.0`, `roslyn-worker@0.1.0`, `python-worker@0.1.0`, `go-worker@0.1.0`, `rust-worker@0.1.0`, `Causoryn.RoslynWorker.csproj`, and `native/rust-worker/Cargo.toml`) intentionally remain pinned to **`0.1.0`**:
 
 1. `analyzerVersion` is hashed directly into every `Evidence` record (`evidenceId`) and embedded in `fp2` `analyzerFingerprint`.
 2. Bumping `analyzerVersion` on packaging-only releases when AST/semantic extraction semantics and NDJSON `protocolVersion: "1"` have not changed would needlessly invalidate every persisted SQLite graph cache and churn evidence hashes.
-3. Internal analyzer versions therefore version **analyzer extraction semantics**, independently of the `causoryn` `0.2.0` package release.
+3. Internal analyzer versions therefore version **analyzer extraction semantics**, independently of the `causoryn` `0.2.2` package release.
 
 ---
 

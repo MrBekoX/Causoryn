@@ -2,9 +2,9 @@
 
 > **Language:** [Türkçe](../README.md) | **English** · [Root README](../../README.md) · [Bilingual Project Overview (TR · EN)](../project-overview.tr-en.md)
 
-**Causoryn** is an open-source, **local, deterministic, LLM-free** (`ADR-002`) codebase and change intelligence engine exposed over the Model Context Protocol (`stdio`). It builds an evidence-backed **Unified Evidence & Knowledge Graph** across **TypeScript**, **C# / Roslyn**, **Python**, **Go**, and **Rust** repositories and serves **29 structured MCP tools** to AI coding agents — while enforcing a strict **read-only workspace guarantee** (`ADR-008`: zero bytes written into your source tree).
+**Causoryn** is a **local, LLM-free** static analysis MCP engine (`ADR-002`). It builds an evidence-backed graph for **TypeScript**, **C# / Roslyn**, **Python**, **Go**, and **Rust**. It serves **29 MCP tools** and **5 skills** with read-only workspace access (`ADR-008`). Visual architecture artifacts are reproducible with a fixed snapshot, options, and annotation input. The `architecture-blueprint` skill helps an external host supply optional annotations (`K-023`). [ADR-002](adr/ADR-002-no-llm.md)
 
-> **Release honesty (`ADR-010`, `K-022`):** `v0.2.2` is a **Pre-1.0 Public Preview** (not `1.0.0`; historical `v0.1.0` remains frozen at `4c9c188f`). Remaining `1.0.0` gates are tracked transparently in [CHANGELOG.md](../../CHANGELOG.md) and [Implementation Status](implementation-status.md).
+> **Release honesty (`ADR-010`, `K-022`, `K-023`):** `v0.2.2` is a **Pre-1.0 Public Preview** (not `1.0.0`; historical `v0.1.0` remains frozen at `4c9c188f`). Remaining `1.0.0` gates are tracked transparently in [CHANGELOG.md](../../CHANGELOG.md) and [Implementation Status](implementation-status.md).
 
 ---
 

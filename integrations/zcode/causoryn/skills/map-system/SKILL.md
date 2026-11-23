@@ -5,10 +5,9 @@ description: Route the host model to causoryn_map_system when it needs a read-on
 
 # map-system — Causoryn Architecture Map routing
 
-Causoryn is a **local, deterministic, LLM-free** code-analysis engine. This skill only
-**routes** the host model; it does not change the model or the engine. The engine never
-writes to the workspace (read-only) and requires **explicit root authorization** before
-any workspace query succeeds.
+Causoryn is a **local, deterministic, LLM-free** code-analysis engine. This skill routes
+the host model to `causoryn_map_system`, a read-only tool that requires explicit root
+authorization in the fixture's `allowRoots` configuration.
 
 ## When to call `causoryn_map_system`
 
@@ -62,7 +61,7 @@ rejections arrive as tool errors instead. Do not paraphrase codes — quote them
 
 ## Hard limits of this skill
 
-- The engine is read-only: never promise code changes, writes or LLM summarization from
-  Causoryn tools.
+- Use the map for structural facts and source evidence. Artifact exports require their own
+  output authorization.
 - Never invent node ids, qualified names or evidence: only cite what an envelope
   actually returned.

@@ -5,6 +5,10 @@
 > Evidence: `raw/Causoryn_Teknik_Dokuman_v2.1.pdf` §21 (p.22): "On a 1,000-TS-file fixture: warm `workspace_summary` < 1 s, small graph neighborhood < 500 ms, bounded 200-node map < 2 s." The specification explicitly defines these numbers as **design targets, not achieved test results**. Accordingly, the target column below is provided strictly as a **reference**, and only actually measured values are reported.
 > ADR-010 honesty rule: anything unmeasured is never reported as measured — any row hitting an environment interruption or call deadline is recorded as `not measured (<reason>)`.
 
+## v0.2.2 performance scope
+
+The F7 table records the synthetic fixture run on November 10, 2026. v0.2.1 moved initial indexing to a background job after MCP initialization and grouped SQLite bulk writes in transactions. v0.2.2 uses a bounded cache guarded by `PRAGMA data_version` for warm reads of published graphs. Architecture exports default to clustered views, with the raw dump available through `view="full"`. The F7 table below adds no new timings for these changes. [Release notes](../../CHANGELOG.md) · [Tool contracts](tool-contracts.md)
+
 ## Methodology
 
 - Fixture: deterministic synthetic TypeScript workspace, 1,000 files (generator: `tests/bench-release/fixture.ts`; identical `fileCount` → byte-for-byte identical content; sha256: `2b14c5ab89f5f1c2059f3152d5da6156d726d9d498343acd2fbf2aea64e8d958`).
@@ -26,7 +30,7 @@
 ## Notes
 
 - Measurements span the full MCP protocol call path: engine query execution, Zod input validation, and structured envelope serialization are all included in the elapsed time.
-- Individual sample runs are sensitive to host machine load; use the **Median (ms)** column for comparisons. Given the same `fileCount` and generator, the fixture is byte-identical on every run — variance comes solely from wall-clock scheduling.
+- Individual samples are sensitive to host machine load. Use the **Median (ms)** column for comparisons. The same `fileCount` and generator produce identical fixture bytes. Timing depends on the measurement environment.
 - The fixture SHA-256 literal is cross-pinned against `buildFixtureModel(1000).hash` in `tests/release-docs.test.ts` so the documented hash cannot silently drift if the generator changes.
 
 ## Related Pages

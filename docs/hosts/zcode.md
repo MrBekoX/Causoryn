@@ -28,8 +28,8 @@ ZCode (GLM) ortamında **iki tamamlayıcı kurulum yüzeyi** sunar:
 - **Otomatik testlerle doğrulanan yüzeyler:** Kök `marketplace.json`, paket içi
   `packages/causoryn/.zcode-plugin/plugin.json`, monorepo geliştirici fikstürü
   (`integrations/zcode/.claude-plugin/marketplace.json` + `integrations/zcode/causoryn/`),
-  izole geçici `$HOME` altında `npx causoryn@0.2.2 setup --client zcode --yes` / `doctor` /
-  `--uninstall` döngüsü ve gerçek `.tgz` paketinden `stdio` el sıkışması (29 araç)
+  izole geçici `$HOME` altında paketli `setup` / `doctor` / `--uninstall` döngüsü ve `.tgz`
+  paketinden `stdio` el sıkışması (29 araç)
   `plugin-package.test.ts`, `plugin-dev-marketplace.test.ts`, `setup-and-doctor.test.ts` ve
   `open-source-distribution.test.ts` ile uçtan uca doğrulanmıştır.
 
@@ -47,9 +47,11 @@ npx causoryn@0.2.2 setup --client zcode --yes
 # Salt okunur sağlık ve hizalama kontrolü
 npx causoryn@0.2.2 doctor
 
-# Temiz kaldırma (mcp.servers.causoryn + 4 yönlendirme skill dosyası)
+# Temiz kaldırma (mcp.servers.causoryn + 5 Causoryn skill’i)
 npx causoryn@0.2.2 setup --client zcode --uninstall --yes
 ```
+
+`architecture-blueprint`, ZCode’un MCP kanıtlarından isteğe bağlı `annotations` hazırlamasına rehberlik eder. Sunucu, aynı snapshot ve export girdileriyle tekrarlanabilir çıktı üretir. Anotasyonsuz export için doğrudan `causoryn_export_documentation` çağırın. [Mimari export sözleşmesi](../tool-contracts.md)
 
 ### CLI kurulumunun yaptıkları (`packages/causoryn/src/setup.ts`)
 
@@ -87,11 +89,11 @@ npx causoryn@0.2.2 setup --client zcode --uninstall --yes
    `causoryn setup`, `mcp.servers` ilk kez oluşturulurken `~/.agents/mcp.json` mevcutsa içindeki
    diğer sunucu kayıtlarını (`command` alanı olanlara `type: "stdio"` ekleyerek) otomatik olarak
    `mcp.servers` altına taşır — böylece mevcut MCP sunucularınız kaybolmaz.
-4. **4 kanonik yönlendirme skill dosyası (`~/.zcode/skills/`):** `causoryn`, `map-system`,
-   `preflight-change` ve `verify-change` skill'leri `~/.zcode/skills/<ad>/SKILL.md` altına kurulur.
+4. **Beş kanonik skill (`~/.zcode/skills/`).** Varsayılan kurulum `causoryn`, `map-system`,
+   `preflight-change`, `verify-change` ve `architecture-blueprint` skill’lerini `~/.zcode/skills/<ad>/SKILL.md` altına yerleştirir.
 5. **Kaldırma (`--uninstall`):** `npx causoryn@0.2.2 setup --client zcode --uninstall --yes` komutu
    `mcp.servers.causoryn` girdisini siler (başka sunucu kalmadıysa boş `mcp.servers` / `mcp`
-   nesnelerini de temizler), `~/.zcode/skills/` altındaki 4 Causoryn skill klasörünü kaldırır ve
+   nesnelerini de temizler), `~/.zcode/skills/` altındaki beş Causoryn skill klasörünü kaldırır ve
    başka hiçbir host `~/.causoryn/runtime` dizinine referans vermiyorsa sahnelenmiş runtime'ı da
    temizler.
 

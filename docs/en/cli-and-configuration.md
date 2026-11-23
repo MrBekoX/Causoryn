@@ -22,7 +22,7 @@ causoryn --help
 
 ### 1.1 `causoryn setup` — 4-Host Installer & Uninstaller
 
-Configures or removes Causoryn MCP server entries and the 4 canonical workflow skills (`causoryn`, `map-system`, `preflight-change`, `verify-change`) across all 4 supported hosts (`antigravity`, `claude-code`, `codex`, `zcode`) with atomic writes and automatic backups.
+Configures or removes Causoryn MCP server entries and the 5 canonical workflow skills (`causoryn`, `map-system`, `preflight-change`, `verify-change`, `architecture-blueprint`) across all 4 supported hosts (`antigravity`, `claude-code`, `codex`, `zcode`) with atomic writes and automatic backups.
 
 | Flag | Description |
 |---|---|
@@ -30,7 +30,7 @@ Configures or removes Causoryn MCP server entries and the 4 canonical workflow s
 | `--all-detected` | Targets only hosts detected on the current machine. When neither `--client` nor `--all-detected` is passed, detected hosts are selected (falling back to all 4 hosts if none are detected yet). |
 | `--dry-run` | Previews all planned operations (`create`, `update`, `remove`, `noop`) and any persistent runtime staging directory without writing or deleting any files. |
 | `--yes`, `-y` | Applies changes without interactive confirmation. In interactive TTY sessions without `--yes`, confirmation is prompted over `stderr` (`[y/N]`). |
-| `--skill` / `--no-skill` | Enables or disables installing/removing the 4 canonical `SKILL.md` directories (default: `--skill` enabled). |
+| `--skill` / `--no-skill` | Enables or disables installing/removing the 5 canonical `SKILL.md` directories (default: `--skill` enabled). |
 | `--uninstall` | Cleanly removes the `causoryn` MCP server registration and installed skills from selected hosts; deletes `~/.causoryn/runtime` automatically once no remaining host configuration references it. |
 | `--json` | Emits the structured `SetupResult` object as formatted JSON on `stdout`. |
 | `--help`, `-h` | Prints CLI usage and exits with `0`. |
@@ -61,7 +61,7 @@ Four audited subsystems:
 1. **Node.js runtime (`node`):** Verifies Node.js major version `>= 24`.
 2. **Package & staged runtime integrity (`runtime`):** Verifies `dist/mcp-server.mjs`, the OS/arch/libc-matched (`glibc` vs `linuxmusl`) `dist/node_modules/better-sqlite3/prebuilds/<target>-<arch>.node` binary, `dist/typescript-lib/lib.es2022.full.d.ts`, all 4 `native/` worker sources, and compiled `Causoryn.RoslynWorker.dll` (also verifying `~/.causoryn/runtime` when present).
 3. **Sidecar toolchains (`toolchains`):** Probes `dotnet --version`, `python --version` (with POSIX fallback to `python3 --version`), `go version`, and `cargo --version` using `shell: false`, a 5 s timeout, and an allowlisted child environment (`DOCTOR_PROBE_ENV_ALLOWLIST` + `PYTHONIOENCODING=utf-8`). Missing optional toolchains report `l0-l1-fallback` without marking the server unhealthy.
-4. **Host alignment (`hosts`):** Validates JSON/TOML syntax, checks whether the configured `causoryn` entrypoint exists on disk (`entrypointExists`), and checks all 4 skills (`ok`, `warn`, `not-configured`, `error`).
+4. **Host alignment (`hosts`):** Validates JSON/TOML syntax, checks whether the configured `causoryn` entrypoint exists on disk (`entrypointExists`), and checks all 5 canonical skills (`ok`, `warn`, `not-configured`, `error`).
 
 **Exit codes:** `0` = `healthy: true`, `1` = `healthy: false` (unsupported Node.js, missing core runtime artifact, or `error` on a targeted host), `2` = invalid CLI arguments.
 
@@ -109,6 +109,10 @@ Host marketplace manifests (`.claude-plugin/plugin.json`, `.zcode-plugin/plugin.
 - **Bare invocation (`node dist/mcp-server.mjs` with 0 CLI args):** Preserves strict default-deny (`allowRoots: []`) and `outputSchemaProfile: "full"`. Unless `CAUSORYN_CONFIG` declares `allowRoots`, workspace tools return `WORKSPACE_NOT_AUTHORIZED`.
 - **Zero-config invocation (`causoryn mcp --allow-cwd --auto-data-dir`):** Evaluates candidate workspace roots through `inspectProjectRootSafety`.
 
+With CLI activation, `autoIndex` enabled, and an authorized root, opening the published snapshot or starting the first full index is deferred until after MCP `initialize`. `causoryn_index_status` can start the job and report its state. Initial calls that need a snapshot may wait up to 15 seconds for the background job. Consult index status to establish readiness after the handshake. See `packages/mcp-server/src/{cli-stdio.ts,context.ts}`.
+
+Automatic workspace configuration merges supported patterns from the primary root’s `.gitignore` into `extraIgnore`. It reads at most 256 KiB and 500 patterns, skips symlinks, and omits broad top-level excludes that could conflict with negations. Pattern handling implements a subset of Git’s ignore semantics. [Language Analyzers](language-analyzers.md)
+
 ### 3.2 `inspectProjectRootSafety` — Rejected Unsafe Roots
 
 Every candidate path (from `process.cwd()` or an MCP `roots/list` `file://` URI) is canonicalized via `realpathSync` (stripping Win32 `\\?\` device prefixes) and **rejected fail-closed** if it matches any of the following rules:
@@ -134,7 +138,7 @@ When launched with `--allow-cwd` (and no explicit `--root` or `CAUSORYN_CONFIG.a
 
 ## 4. Out-of-Tree Data Directory Layout (`ADR-008`)
 
-Causoryn **never** writes a single byte into the analyzed repository source tree. All SQLite databases, exports, staged runtimes, and Cargo build artifacts live strictly outside authorized workspaces:
+Causoryn reads project files during source analysis. Persistent graph and wiki database paths must be outside the authorized workspace roots. The layout below shows the default data and build-cache locations. A custom `output.allowedOutputDirs` can authorize explicit exports to a directory that overlaps the workspace.
 
 ```text
 ~/.causoryn/                                    # Base dir (overridable via --data-dir or ZCODE_PLUGIN_DATA)
@@ -222,8 +226,8 @@ Causoryn **never** writes a single byte into the analyzed repository source tree
 | `results.maxSymbols` | `number` (positive int) | `100` | Maximum symbols returned by `causoryn_find_symbols`. |
 | `results.maxDepth` | `number` (positive int) | `3` | Maximum neighborhood traversal depth in `causoryn_get_symbol_context`. |
 | `results.maxPaths` | `number` (positive int) | `50` | Maximum execution paths returned by `causoryn_trace_execution`. |
-| `autoIndex` | `boolean` | `true` | When `true` and `allowRoots` is non-empty, loads an existing published SQLite snapshot or runs initial synchronous indexing at startup; when `false`, tools return `INDEX_NOT_READY` until `causoryn_refresh_index` runs. |
-| `output.allowedOutputDirs` | `string[]` | `[]` | Permitted directories for `causoryn_export_documentation`. Empty = `EXPORT_NOT_ALLOWED`. Declared directories must exist on disk at startup (`OutputAccessPolicy`). |
+| `autoIndex` | `boolean` | `true` | Uses an existing published snapshot if available for an authorized root. CLI activation defers first indexing until after MCP initialization. The bare configuration path can index synchronously. Set `false` to disable automatic indexing. |
+| `output.allowedOutputDirs` | `string[]` | `[]` | Existing directories and their descendants permitted for `causoryn_export_documentation`. Empty returns `EXPORT_NOT_ALLOWED`. The explicit allowlist is independent of `allowRoots` (`OutputAccessPolicy`). |
 | `storage.dataDbPath` | `string` (optional) | `undefined` (`InMemoryGraphRepository`) | Persistent SQLite graph + `symbol_fts` database path. Must be absolute, have an existing parent directory, and resolve strictly outside all `allowRoots` both lexically and via `realpathSync` (`ADR-008`). Enables `tolerateConcurrentPublishRace`. |
 | `wiki.dataDbPath` | `string` (optional) | `undefined` (`PATH_DENIED` / `INDEX_NOT_READY`) | Persistent Living Wiki SQLite (`SqliteWikiStore` + `wiki_fts`) database path. Subject to the same `ADR-008` containment checks as `storage.dataDbPath` and may share the same SQLite file. |
 

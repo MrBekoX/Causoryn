@@ -7,12 +7,12 @@
   <a href="https://github.com/MrBekoX/Causoryn/actions/workflows/ci.yml"><img src="https://github.com/MrBekoX/Causoryn/actions/workflows/ci.yml/badge.svg" alt="CI status" /></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-16a34a" alt="MIT License" /></a>
   <img src="https://img.shields.io/badge/node-%3E%3D24-339933" alt="Node.js >= 24" />
-  <img src="https://img.shields.io/badge/LLM--free-100%25%20deterministic-1d4ed8" alt="100% deterministic, zero LLM" />
+  <img src="https://img.shields.io/badge/MCP%20engine-LLM--free-1d4ed8" alt="LLM-free MCP engine" />
 </p>
 
 # Causoryn (`v0.2.2` — Pre-1.0 Public Preview)
 
-**Causoryn** is an open-source, **local, deterministic, LLM-free** codebase and change intelligence engine exposed over the Model Context Protocol (`stdio`). It builds an evidence-backed dependency, symbol, route, contract, and test graph across your project (**TypeScript**, **C# / Roslyn**, **Python**, **Go**, **Rust**), serves **29 structured MCP tools** and **5 canonical agent skills**, and generates **offline visual architecture portals** — while enforcing a strict **read-only workspace guarantee** (`ADR-008`: zero bytes written to your repository source tree).
+**Causoryn** is an open-source codebase and change intelligence platform with a **local, LLM-free MCP engine (`ADR-002`)**. It builds an evidence-backed dependency, symbol, route, contract, and test graph for **TypeScript**, **C# / Roslyn**, **Python**, **Go**, and **Rust**, and exposes **29 MCP tools** and **5 agent skills**. Source analysis is read-only (`ADR-008`). Architecture exports work with static evidence alone and accept optional caller-supplied `annotations` (`K-023`).
 
 > **Release status (`ADR-010`):** `v0.2.2` is a **Pre-1.0 Public Preview** (not `1.0.0`; historical `v0.1.0` remains frozen at `4c9c188f`). Remaining `1.0.0` gates are tracked transparently in [`CHANGELOG.md`](CHANGELOG.md).
 
@@ -22,36 +22,39 @@
 
 AI coding agents typically explore large codebases with ad-hoc `grep` and partial file reads — missing downstream callers, breaking API/schema contracts, or skipping architecture boundaries.
 
-- **Zero LLM & zero API keys (`ADR-002`):** 100% deterministic static analysis — no embeddings, no token burn, no hallucinated call edges.
-- **Evidence-backed & honest (`ADR-010`):** Every graph edge reports its exact resolution (`verified`, `heuristic`, `unresolved`) and source-span evidence ID.
-- **Strictly read-only workspace (`ADR-008`):** Snapshots, SQLite indexes, Living Wiki databases, and exported portals live outside your repository (`~/.causoryn/workspaces/<slug>-<hash>/`).
+- **LLM-free analysis (`ADR-002`):** The MCP server runs static analysis, search, verification, and export locally without model calls, model credentials, or embeddings. An external coding agent can use `architecture-blueprint` to supply optional architectural annotations.
+- **Evidence-backed results (`ADR-010`):** Edges carry `verified`, `heuristic`, or `unresolved` resolution labels. Every `verified` edge carries source evidence. Caller-supplied prose remains part of the export annotation layer.
+- **Read-only source analysis (`ADR-008`):** Persistent graph and wiki databases live outside the analyzed roots. Automatic configuration also puts exports outside the workspace. A custom `output.allowedOutputDirs` authorizes explicit exports and can include a directory in the workspace. [CLI & Configuration](docs/en/cli-and-configuration.md)
 - **Offline visual architecture portals (`v0.2.2`):** Layered SVG zero-JS HTML portals, interactive pan/zoom/filter/Inspector portals, clean subgraph Mermaid diagrams, and fail-closed Host-LLM `annotations`.
-- **Fast, non-blocking startup (`v0.2.1`–`v0.2.2`):** Deferred background indexing keeps MCP `initialize` responsive (`< 500 ms`), `.gitignore`-aware discovery skips build/venv noise, and `PRAGMA data_version`-guarded SQLite snapshot caching accelerates warm reads.
+- **Deferred startup (`v0.2.1`–`v0.2.2`):** The packaged stdio server defers automatic indexing until after MCP initialization. Automatic configuration reads supported patterns from the primary root’s `.gitignore`. The SQLite snapshot cache checks `PRAGMA data_version` before reusing a cached snapshot.
 - **Built for the full change loop:** `Discover → Preflight → Edit → Verify → Explain` across 4 coding agent hosts.
 
 ```mermaid
 flowchart LR
-  WS["Your Repository<br/>(Read-Only · ADR-008)"] --> AN["5-Language Analyzers<br/>TS · C#/Roslyn · Python · Go · Rust"]
+  WS["Your Repository<br/>(Read-Only · ADR-008)"] --> AN["Deterministic Zero-LLM Core<br/>TS · C#/Roslyn · Python · Go · Rust"]
   AN --> DB["External Data Root<br/>SQLite Graph · FTS5 · Living Wiki"]
   DB --> MCP["Causoryn MCP Server<br/>29 Tools · 5 Skills (stdio)"]
-  MCP --> AGENT["AI Coding Agent<br/>Claude Code · Codex · Antigravity · ZCode"]
-  MCP --> PORTAL["Offline Visual Portals<br/>SVG HTML · Interactive · Mermaid · Brief"]
-  AGENT -. "Discover → Preflight → Verify → Explain" .-> MCP
+  MCP <-->|"MCP evidence and optional annotations"| AGENT["Optional host workflow<br/>Claude Code · Codex · Antigravity · ZCode"]
+  MCP -->|"Fail-Closed Verification + Layout"| PORTAL["Offline Visual Portals<br/>SVG HTML · Interactive · Mermaid · Brief"]
 ```
 
 ---
 
-## Visual Architecture Portals & Host-LLM Synthesis (`v0.2.2`)
+## Visual Architecture Exports (`v0.2.2`)
 
-Causoryn never calls an LLM (`ADR-002`). Instead, the bundled **`architecture-blueprint`** skill guides your host coding agent (Claude Code, Codex, Antigravity, or ZCode) to explore your codebase through Causoryn's deterministic MCP tools and pass grounded `annotations` into `causoryn_export_documentation`. Every `moduleId`, `nodeId`, `evidenceId`, and per-module `keyFiles` path is verified fail-closed against the live snapshot before rendering.
+The architecture renderer produces byte-identical artifacts for the same snapshot (including metadata), format, view, options, and annotation input under the same renderer version. A new index build can change timestamps and revision metadata. MCP request IDs, job progress, and host-generated prose can vary between calls. See [ADR-002](docs/en/adr/ADR-002-no-llm.md) for the reproducibility boundary.
+
+`causoryn_export_documentation` can render directly from the graph. Callers may also supply structured `annotations` for domains, summaries, flows, tours, decisions, and risks. The optional `architecture-blueprint` skill guides a host LLM through this workflow. The renderer rejects malformed inputs and invalid graph references with `INVALID_ARGUMENT`. It checks the schema and graph membership of cited IDs and paths. The prose remains caller-provided.
 
 | Format & `view` | Generated Artifact | Key Capabilities & Offline Security |
 |---|---|---|
 | `html` · `view: "architecture"` *(default)* | `causoryn-architecture.html` | **Zero JS**, strict offline CSP (`default-src 'none'`), 5 pure-CSS tabs (Overview, Architecture Map, Flows, Modules & Dependencies, Risks & Contracts), layered Sugiyama SVG diagram, zoom presets, Tarjan SCC cycle highlights, inline SVG flow strips |
-| `html` · `view: "interactive"` | `causoryn-architecture-interactive.html` | Offline interactive viewer with mouse-wheel zoom & pan, live search, language/cycle/test filters, 1-hop neighborhood Inspector Drawer with source-line evidence, Copy Mermaid — **zero CDN, zero `fetch`, zero `innerHTML`** |
+| `html` · `view: "interactive"` | `causoryn-architecture.html` by default | Offline interactive viewer with zoom, pan, search, filters, evidence inspector, and Mermaid copy. Set `fileName` to keep both HTML views in the same directory. |
 | `mermaid` · `view: "architecture"` | `causoryn-architecture.mmd` | Adaptive directory-tree clustering (`maxModules`, default `32`), domain subgraphs, weighted cross-module call edges, cycle styling |
 | `markdown` · `view: "architecture"` | `causoryn-architecture.md` | Architecture Brief with executive summary, embedded Mermaid diagram, domain breakdown, critical flows, contracts & risks |
-| `json` · `view: "architecture"` / `snapshot` / `view: "full"` | `causoryn-architecture.json` / `architecture-snapshot.json` | Compact blueprint with `moduleIds` & `evidenceCatalog`, canonical git-diff snapshot, or legacy full raw export (`view: "full"`) |
+| `json` · `view: "architecture"` | `causoryn-architecture.json` | Compact blueprint with modules and `evidenceCatalog` |
+| `snapshot` · raw | `architecture-snapshot.json` | Canonical snapshot for Git-based architecture comparison |
+| `html`, `mermaid`, `markdown`, `json` · `view: "full"` | Raw graph artifact | Legacy node, edge, and evidence export |
 
 ### Bundled Canonical Skills (`skills/`)
 
@@ -67,7 +70,7 @@ Installing Causoryn via `npx causoryn@0.2.2 setup` or native host marketplaces s
 
 ## Measured Performance (1,000 TypeScript Files)
 
-Measured end-to-end over MCP protocol (`InMemoryTransport`, input validation + envelope serialization included) on the deterministic 1,000-file TypeScript fixture ([`docs/en/benchmarks.md`](docs/en/benchmarks.md)):
+Historical measurements from 2026-11-10 used `InMemoryTransport`, including input validation and MCP envelope serialization, on a deterministic 1,000-file TypeScript fixture. [Benchmarks](docs/en/benchmarks.md)
 
 | Benchmark | MCP Tool Call | Median Latency |
 |---|---|---|
@@ -144,7 +147,7 @@ Causoryn is **not** a single-file JS bundle (`ADR-010`) — its runtime properti
 | **C# / Roslyn** (L2 + L3) | **.NET 10 runtime** (`dotnet exec`) | Prebuilt deterministic Release Roslyn DLL (zero-compile) | 100% offline |
 | **Python** (L2 + L3) | **Python 3.10+** (`python -B`, stdlib `ast`) | Zero-compile | 100% offline |
 | **Go** (L1/heuristic + L3) | **Go 1.22+** (stdlib `go/parser`, zero external modules) | On-demand `go run` (or prebuilt `CAUSORYN_GO_WORKER_BIN`) | 100% offline |
-| **Rust** (L1/heuristic + L3) | **Rust / Cargo** (`syn` 2 sidecar) | On-demand `cargo build --locked` into `~/.causoryn/cache/rust-worker-target` | First cold build fetches 12 locked crates from `crates.io`; cached builds run offline |
+| **Rust** (L1/heuristic + L3) | **Rust / Cargo** (`syn` 3 sidecar) | On-demand `cargo build --locked` into `~/.causoryn/cache/rust-worker-target` | An uncached build can fetch locked crates from `crates.io`; a populated cache supports offline use |
 
 Missing optional sidecar toolchains (`dotnet`, `python`, `go`, `cargo`) never crash the server — they degrade honestly to L0/L1 file-level provenance (`npx causoryn@0.2.2 doctor` inspects sidecar readiness).
 

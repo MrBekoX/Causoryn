@@ -5,6 +5,10 @@
 > Kanıt: `raw/Causoryn_Teknik_Dokuman_v2.1.pdf` §21 (s.22): "1.000 TS dosyası fixture üzerinde sıcak workspace_summary <1 sn, küçük graph neighborhood <500 ms, sınırlı 200 node map <2 sn". TŞ bu rakamları **tasarım hedefi** olarak verir ve açıkça şunu söyler: "bu rakamlar tasarım hedefi, gerçekleşmiş test sonucu değildir". Dolayısıyla aşağıdaki hedef kolonu **referans**tır, sonuç değil; tabloda yalnızca ölçülen değerler raporlanır.
 > ADR-010 dürüstlük kuralı: ölçülemeyen şey ölçülmüş yazılmaz — ortam kesintisi/deadline aşımı olan satır `not measured (<neden>)` olarak raporlanır.
 
+## v0.2.2 performans kapsamı
+
+F7 tablosu 10 Kasım 2026'daki sentetik fixture koşumunu kaydeder. v0.2.1 başlangıç indekslemesini MCP başlatma sonrasındaki arka plan işine erteledi ve SQLite toplu yazımlarını transaction içinde yürütmeye başladı. v0.2.2, yayımlanmış grafiğin sıcak okumalarında `PRAGMA data_version` ile korunan sınırlı bir önbellek kullanır. Mimari dışa aktarmada kümelenmiş görünümler varsayılandır, ham döküm `view="full"` ile seçilir. Bu mekanizmaların hiçbiri için aşağıdaki F7 tablosuna yeni süre ölçümü eklenmemiştir. [Sürüm notları](../CHANGELOG.md) · [Araç sözleşmeleri](tool-contracts.md)
+
 ## Ölçüm yöntemi
 
 - Fixture: deterministik sentetik TypeScript workspace, 1000 dosya (üretici: `tests/bench-release/fixture.ts`; aynı fileCount → bayt-bayt aynı içerik; sha256: `2b14c5ab89f5f1c2059f3152d5da6156d726d9d498343acd2fbf2aea64e8d958`).
@@ -26,7 +30,7 @@
 ## Notlar
 
 - Ölçümler MCP protokol düzeyinde yapılmıştır: motor + input validasyonu + envelope üretimi çağrı süresinin tamamı içindedir.
-- Tek koşum içi değerler makine yüküne duyarlıdır; karşılaştırma için medyan kolonu esas alınır. Aynı girdi (fileCount + hash) her koşumda birebir aynı fixture'ı üretir — ölçüm gürültüsü yalnızca zamandan gelir.
+- Tek koşum içi değerler makine yüküne duyarlıdır. Karşılaştırma için medyan kolonu esas alınır. Sabit `fileCount` ve üretici aynı fixture baytlarını üretir. Süre, ölçüm ortamına bağlıdır.
 - Fixture bütünlüğü `tests/release-docs.test.ts` içinde `buildFixtureModel(1000).hash` çıktısıyla çapraz pinlenmiştir: üretici değişirse doküman literali sessizce bayatlayamaz.
 
 ## İlgili sayfalar

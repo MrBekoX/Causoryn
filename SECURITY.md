@@ -32,15 +32,15 @@ Include as much of the following as possible:
 
 ## Threat Model & Security Boundaries
 
-Causoryn is designed as a **local, deterministic, LLM-free** MCP code-analysis server. The following guarantees are security boundaries enforced by automated tests:
+Causoryn is a **local, LLM-free** MCP code-analysis server. Its automated security tests cover the following boundaries.
 
-1. **Read-only analyzed workspace (`ADR-008`):** Causoryn never writes to, modifies, formats, or cleans files inside any analyzed workspace root. Writes are restricted to explicitly authorized external paths (`storage.dataDbPath`, `wiki.dataDbPath`, `output.allowedOutputDirs`, or `--auto-data-dir` under `~/.causoryn/workspaces/`).
+1. **Read-only source analysis (`ADR-008`):** Analyzers read project files. Persistent graph and wiki databases must resolve outside `allowRoots`. Automatic setup places exports outside the workspace. Explicit export destinations follow `output.allowedOutputDirs`, which can authorize a location inside a workspace.
 2. **Explicit authorization & default deny:** Running the bare stdio server without CLI workspace flags defaults to `{"allowRoots":[]}` and fails closed with `WORKSPACE_NOT_AUTHORIZED`. Packaged CLI `--allow-cwd` rejects filesystem roots, `$HOME`, Causoryn's own data directory, and plugin cache directories.
 3. **Path containment & symlink/TOCTOU defense:** Workspace reads and authorized data/output writes enforce realpath containment, reject symlink/junction escapes, and check against dangling-symlink overwrites (CWE-59).
-4. **Read-only Git access:** Git operations use an explicit read-only allowlist (`cat-file`, `ls-tree`, `rev-parse`) via `execFile` without shell interpolation (`shell: false`). Mutating Git commands (`checkout`, `reset`, `clean`) are never executed.
-5. **Local & LLM-free runtime (`ADR-002`):** The runtime contains zero LLM SDKs, embedding clients, telemetry, or outbound network calls. (Note: the optional Rust sidecar runs `cargo build --locked` on first cold use, which may fetch its 12 locked crates from `crates.io` unless pre-cached.)
+4. **Read-only Git access:** Git operations use the explicit `cat-file` and `ls-tree` allowlist via `execFile` with `shell: false`.
+5. **Local & LLM-free analysis (`ADR-002`):** The engine has no model or embedding clients and sends no source code to a model or telemetry service. The optional Rust sidecar’s cold `cargo build --locked` may fetch locked crates. A connected host controls its own model calls and data handling. [ADR-002](docs/en/adr/ADR-002-no-llm.md)
 6. **Clean MCP `stdout` channel:** `stdout` emits only JSON-RPC 2.0 MCP frames; all diagnostic logs are written exclusively to `stderr`.
-7. **Static HTML export hardening:** Offline HTML documentation and visualizer outputs apply full escaping, restrictive Content Security Policy (CSP), and zero external CDN/script/analytics references.
+7. **Offline HTML exports:** Architecture and interactive HTML apply escaping and restrictive Content Security Policy (CSP), and use no external assets. The interactive view uses inline JavaScript. Optional annotations undergo schema and graph-reference validation. The caller is responsible for the accuracy of the prose. [Security audit](docs/en/security-pass.md)
 
 ## Out of Scope
 

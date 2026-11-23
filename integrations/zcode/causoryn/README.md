@@ -1,13 +1,10 @@
 # Causoryn for ZCode
 
-> **Monorepo Development Fixture:** This directory (`integrations/zcode/causoryn`) is a local monorepo development/testing fixture. End users should install Causoryn via `npx causoryn@0.2.0 setup --client zcode --yes` or by adding the repository root marketplace (`https://github.com/MrBekoX/Causoryn`, root `marketplace.json`) in ZCode.
+> **Monorepo Development Fixture:** This directory (`integrations/zcode/causoryn`) is a local monorepo development/testing fixture. End users can install Causoryn via `npx causoryn@0.2.2 setup --client zcode --yes` or by adding the repository root marketplace (`https://github.com/MrBekoX/Causoryn`, root `marketplace.json`) in ZCode.
 
 > Evidence: TŞ v2.1 §17, §25/8 · wiki/decisions.md K-002 (ZCode as fourth host adapter) · wiki/mcp-tools.md (tool catalog) · packages/mcp-server (implemented tools)
 
-**Causoryn** is a local, deterministic, **LLM-free** code-analysis engine exposed to
-ZCode as a stdio MCP server, packaged as this plugin. It builds a read-only graph of an
-authorized workspace (files, symbols, calls) with per-edge evidence, and answers
-architecture questions without any model API, network service or credential.
+**Causoryn** is a local, **LLM-free** code-analysis engine exposed to ZCode as a `stdio` MCP server. It builds a read-only graph of an authorized workspace (files, symbols, calls) with source evidence. The distribution package also provides `architecture-blueprint` for preparing optional caller-supplied `annotations`. With the same snapshot and export inputs the artifact is reproducible. Fresh host-model prose may vary. [ZCode host guide](../../../docs/en/hosts/zcode.md)
 
 ## What it provides
 
@@ -23,7 +20,7 @@ architecture questions without any model API, network service or credential.
 | `causoryn_get_capabilities` | Adapter levels (L0–L4), server limits, protocol revision, published tool list. Needs no snapshot. |
 | `causoryn_workspace_summary` | Project / language / entrypoint / edge-coverage summary derived from the published graph snapshot. |
 | `causoryn_index_status` | Index job status: latest (or given `jobId`) job progress, published snapshot, stale flag and diagnostics. |
-| `causoryn_refresh_index` | Starts a new snapshot indexing job (`mode: full`): returns a `jobId` immediately, the job runs in the background; writes only to the authorized Causoryn data root. |
+| `causoryn_refresh_index` | Starts a `full` or `incremental` snapshot indexing job and returns a `jobId`. The job runs in the background and writes only to the authorized Causoryn data root. |
 | `causoryn_map_system` | Architecture map pages at `level` L0–L3 with `filters`, `maxNodes` and `cursor` pagination. |
 | `causoryn_find_symbols` | Ranked symbol search over qualified names, with `AMBIGUOUS_SYMBOL` candidate disambiguation. |
 | `causoryn_get_symbol_context` | Symbol node + neighboring edges to the requested depth (`edgeKinds` filter, deterministic ordering) + evidence records; accepts a node id or a qualified name (ambiguous names return `AMBIGUOUS_SYMBOL` candidates). |
@@ -34,7 +31,7 @@ architecture questions without any model API, network service or credential.
 | `causoryn_compare_architecture` | Architecture diff between two git refs (`baseRef`/`targetRef`): added/removed/changed nodes, documented-confidence rename matching, edge changes and API-surface changes. Snapshot blobs are read via read-only git (cat-file; no checkout/reset/clean); an unanalyzable revision answers `INVALID_REVISION`. |
 | `causoryn_get_agent_context` | AI Agent GPS: the task text is used as a search query only (never echoed into output); ranked context package (`exact-symbol` → `graph-proximity` → `contract` → `freshness` → `fts` legs) with `tokenBudget`, `estimatedTokens`, `omittedCount` and explicitly reported degraded legs. |
 | `causoryn_generate_onboarding` | Onboarding data for `audience` beginner/intermediate/maintainer: entry points, top-5 high-centrality modules, learning order (cycles collapsed via SCC), critical flows, tests, unknown edges and risk areas — structural data with template rationales only. |
-| `causoryn_export_documentation` | Documentation export (`format` json/markdown/mermaid/html) of the published snapshot; writes ONLY to a directory declared in `output.allowedOutputDirs` via atomic `.tmp` + rename. Unauthorized target answers `EXPORT_NOT_ALLOWED` (fixed TŞ §10.1 code). HTML is offline self-contained: escaping + CSP, no CDN/analytics. |
+| `causoryn_export_documentation` | Exports the published snapshot (`json`, `markdown`, `mermaid`, `html`, or `snapshot`). For visual formats, `view: "architecture"` is the default, `"interactive"` is HTML-only, and `"full"` returns the raw graph. Optional `annotations` are validated against the projection. `format: "snapshot"` produces the comparison input and accepts only the raw view. Writes are atomic under `output.allowedOutputDirs`. Unauthorized directories return `EXPORT_NOT_ALLOWED`. |
 | `causoryn_preflight_change` | Candidate-only Preflight Manifest (TŞ §10.2/§10.3) from `intent` + `targetSymbols`/`targetFiles`: impact candidates (certainty and resolution in separate fields), `contractChecks`, `testPlanId` (content-addressed reference to the embedded derive-test-plan output), `limitations` and `sourceRevision` (read-only file-based HEAD resolution; no command execution). **It never writes code or touches the working tree** — `candidateOnly` is fixed `true`. Unresolvable targets are reported via `requiresDisambiguation` + `candidateTargets` (no automatic disambiguation); target files require a WorkspaceAccessPolicy allow decision (fail-closed). |
 | `causoryn_check_contracts` | Architecture contract evaluation (TŞ §11): reads contract spec version pairs (`contracts: [{name?, base, target}]`, read-only discovery behind WorkspaceAccessPolicy) and classifies each pair `backward-safe` / `risk` / `breaking_candidate` / `unknown` with rule-named findings carrying old/new line evidence. The verdict is static evidence only: where serializer/runtime behavior is unknowable, `unknown` is produced and never hides breaking evidence. |
 | `causoryn_detect_contract_drift` | Contract drift detection (TŞ §11) between two spec-file revisions (`base`/`target`, optional `scope` narrowing): K-013(7) `contractChanges` (`{contractId, changeKind, summary}`), breaking-candidate/risk/unknown items in separate fields, the `PRODUCES_CONTRACT`/`CONSUMES_CONTRACT` impact graph (edge resolution is never upgraded; consumer/producer anchors are scanned from `anchorFiles`) and changes without a consumer edge are honestly reported in `unconsumedChanges` (unresolved consumers). |
@@ -155,13 +152,11 @@ Set **Causoryn server config (JSON)** in the plugin settings to, for example:
 
 ## Security model
 
-- **Read-only workspace.** Causoryn never writes to your source tree; analysis writes
-  only to its own authorized data root outside the workspace (ADR-008).
+- **Read-only analysis.** Causoryn reads the authorized source tree. SQLite writes go to the data root outside the workspace, and export writes require `output.allowedOutputDirs` (ADR-008).
 - **Explicit root authorization.** Only roots listed in `allowRoots` are indexable;
   symlink escapes, ignore rules and size/binary filters are enforced by the workspace
   access policy (TŞ §9).
-- **No LLM anywhere.** The engine contains no model, embedding or network dependency
-  (ADR-002); the skill text only routes the host model, it cannot change it.
+- **LLM-free analysis and rendering.** The MCP server makes no model or embedding calls (ADR-002). The host model executes separately and can supply optional annotations.
 - **Clean stdio.** The server process writes only MCP protocol traffic to stdout; logs
   go to stderr.
 
@@ -183,6 +178,4 @@ Sprint-5 Faz D (Differentiation, TŞ §10.2/§11/§14/§15) added
 added `causoryn_verify_change` — the change-verification companion of the
 product cycle Discover → Preflight → Agent Edits → **Verify** → Explain: it
 writes no code, it only verifies, and it never runs tests (29 tools total).
-Later phases add further capabilities per `wiki/mcp-tools.md`; this plugin's
-manifest and skill are updated only when those tools actually exist in the
-compiled server.
+`v0.2.2` adds the visual architecture views and optional annotations to the existing export tool. The server still publishes 29 MCP tools. [Tool contracts](../../../docs/en/tool-contracts.md)

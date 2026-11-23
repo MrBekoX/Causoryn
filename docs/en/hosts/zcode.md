@@ -27,8 +27,8 @@ ZCode (GLM), it provides **two complementary installation surfaces**:
 - **Automatically verified surfaces:** The root `marketplace.json`, packaged
   `packages/causoryn/.zcode-plugin/plugin.json`, monorepo dev fixture
   (`integrations/zcode/.claude-plugin/marketplace.json` + `integrations/zcode/causoryn/`), isolated
-  temporary-`$HOME` lifecycle of `npx causoryn@0.2.2 setup --client zcode --yes` / `doctor` /
-  `--uninstall`, and real packed `.tgz` `stdio` handshakes (all 29 tools) are verified end-to-end by
+  temporary-`$HOME` lifecycle of packaged `setup` / `doctor` / `--uninstall`, and `.tgz`
+  `stdio` handshakes (all 29 tools) are covered by
   `plugin-package.test.ts`, `plugin-dev-marketplace.test.ts`, `setup-and-doctor.test.ts`, and
   `open-source-distribution.test.ts`.
 
@@ -46,9 +46,11 @@ npx causoryn@0.2.2 setup --client zcode --yes
 # Read-only health & alignment check
 npx causoryn@0.2.2 doctor
 
-# Clean removal (removes mcp.servers.causoryn + 4 routing skills)
+# Clean removal (removes mcp.servers.causoryn + 5 Causoryn skills)
 npx causoryn@0.2.2 setup --client zcode --uninstall --yes
 ```
+
+`architecture-blueprint` guides ZCode in drafting optional `annotations` from MCP evidence. The server renders repeatable output with the same snapshot and export inputs. To export without annotations, call `causoryn_export_documentation` directly. [Architecture export contract](../tool-contracts.md)
 
 ### What `causoryn setup --client zcode` configures (`packages/causoryn/src/setup.ts`)
 
@@ -86,11 +88,11 @@ npx causoryn@0.2.2 setup --client zcode --uninstall --yes
    is initialized for the first time and `~/.agents/mcp.json` exists, `causoryn setup` automatically
    copies existing `mcpServers` entries into `mcp.servers` (normalizing `type: "stdio"` on entries
    with a `command` field) so no previously configured server is lost.
-4. **4 canonical routing skills (`~/.zcode/skills/`):** Installs `causoryn`, `map-system`,
-   `preflight-change`, and `verify-change` under `~/.zcode/skills/<name>/SKILL.md`.
+4. **Five canonical skills (`~/.zcode/skills/`).** By default, setup installs `causoryn`,
+   `map-system`, `preflight-change`, `verify-change`, and `architecture-blueprint` under `~/.zcode/skills/<name>/SKILL.md`.
 5. **Clean uninstall (`--uninstall`):** `npx causoryn@0.2.2 setup --client zcode --uninstall --yes`
    deletes `mcp.servers.causoryn` (cleaning up empty `mcp.servers` / `mcp` wrapper objects when no
-   other servers remain), removes the 4 Causoryn skill directories from `~/.zcode/skills/`, and
+   other servers remain), removes the five Causoryn skill directories from `~/.zcode/skills/`, and
    removes `~/.causoryn/runtime` if no other host config references it.
 
 ---

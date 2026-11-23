@@ -6,7 +6,7 @@
 > (SnapshotNodeInput / SnapshotEdgeInput / SnapshotEvidenceInput — NodeRef
 > uçlu, ID'siz) birebir hizalıdır. Roslyn worker
 > (native/roslyn-worker/PROTOCOL.md) ile aynı kablolama desenidir; fark,
-> çözümleyicinin syn 2 (crates.io) olması ve aşağıdaki DÜRÜST ÇÖZÜM
+> çözümleyicinin `syn` 3 (crates.io, `Cargo.lock` sürümü `3.0.10`) olması ve aşağıdaki DÜRÜST ÇÖZÜM
 > SINIRLARIDIR.
 
 **Causoryn Rust sidecar worker** — LLM çalıştırmayan, yerel ve
@@ -23,8 +23,8 @@ workspace'ine HİÇBİR YAZMA yapmaz (ADR-008; analiz tamamen bellek-içindedir)
 - **Kodlama kuralı:** JSON anahtarları domain'deki alan adlarıyla aynıdır
   (camelCase); opsiyonel alanlar `null` yerine YOK olarak yazılır — tek
   istisna `id` alanıdır (hata yanıtlarında açıkça `null` taşınır).
-- **Bağımlılık sözleşmesi:** yalnızca `syn 2` (AST; `full`+`visit`
-  features) ve `serde_json` (JSON). SHA-256 bağımlılıksız uygulanır
+- **Bağımlılık sözleşmesi.** `syn` 3 AST analizi, `serde_json` JSON çerçeveleme ve
+  `proc-macro2` `span-locations` kaynak satırı kanıtı için kullanılır. SHA-256 bağımlılıksız uygulanır
   (`src/sha256.rs`) ve Node `crypto` özetiyle kabul testlerinde
   doğrulanır.
 

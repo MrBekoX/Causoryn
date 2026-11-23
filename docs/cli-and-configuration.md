@@ -22,7 +22,7 @@ causoryn --help
 
 ### 1.1 `causoryn setup` — 4-Host Kurulum ve Kaldırma Sihirbazı
 
-Desteklenen 4 host ortamı (`antigravity`, `claude-code`, `codex`, `zcode`) için MCP sunucu kayıtlarını ve 4 kanonik yönlendirme skill dosyasını (`causoryn`, `map-system`, `preflight-change`, `verify-change`) atomik ve yedekli olarak yapılandırır.
+Desteklenen 4 host ortamı (`antigravity`, `claude-code`, `codex`, `zcode`) için MCP sunucu kayıtlarını ve 5 kanonik yönlendirme skill dosyasını (`causoryn`, `map-system`, `preflight-change`, `verify-change`, `architecture-blueprint`) atomik ve yedekli olarak yapılandırır.
 
 | Bayrak | Açıklama |
 |---|---|
@@ -61,7 +61,7 @@ Denetlenen dört katman:
 1. **Node.js çalışma zamanı (`node`):** Çalışan Node.js ana sürümünün `>= 24` olduğunu doğrular.
 2. **Paket ve sahnelenmiş runtime bütünlüğü (`runtime`):** `dist/mcp-server.mjs`, platform/mimari/libc (`glibc` vs `linuxmusl`) uyumlu `dist/node_modules/better-sqlite3/prebuilds/<hedef>-<arch>.node`, `dist/typescript-lib/lib.es2022.full.d.ts`, 4 `native/` worker kaynağı ve derlenmiş `Causoryn.RoslynWorker.dll` varlığını (varsa `~/.causoryn/runtime` üzerinde de) kontrol eder.
 3. **Sidecar araç zincirleri (`toolchains`):** `dotnet --version`, `python --version` (POSIX'te `python` yoksa `python3 --version` fallback'i), `go version` ve `cargo --version` komutlarını `shell: false`, 5 sn zaman aşımı ve daraltılmış `DOCTOR_PROBE_ENV_ALLOWLIST` + `PYTHONIOENCODING=utf-8` ile yoklar. Eksik bir sidecar araç zinciri sunucuyu sağlıksız (`UNHEALTHY`) yapmaz; ilgili dil için dürüstçe `l0-l1-fallback` raporlar.
-4. **Host hizalaması (`hosts`):** Her host'un konfigürasyon sözdizimini (JSON/TOML), `causoryn` MCP giriş betiğinin diskte var olup olmadığını (`entrypointExists`) ve 4 skill dosyasını denetler (`ok`, `warn`, `not-configured`, `error`).
+4. **Host hizalaması (`hosts`):** Her host'un konfigürasyon sözdizimini (JSON/TOML), `causoryn` MCP giriş betiğinin diskte var olup olmadığını (`entrypointExists`) ve 5 kanonik skill dosyasını denetler (`ok`, `warn`, `not-configured`, `error`).
 
 **Çıkış kodları:** `0` = sağlıklı (`healthy: true`), `1` = Node.js, runtime veya hedeflenen host'lardan birinde `error` mevcut (`healthy: false`), `2` = geçersiz CLI argümanı.
 
@@ -110,6 +110,10 @@ Native plugin pazaryerleri (`.claude-plugin/plugin.json`, `.zcode-plugin/plugin.
 - **Çıplak başlatma (`node dist/mcp-server.mjs`, 0 argüman):** Geriye dönük uyumluluk ve güvenli varsayılan (`default-deny`) korunur. `CAUSORYN_CONFIG` verilmemişse `allowRoots: []` ve `outputSchemaProfile: "full"` ile başlar; tüm çalışma alanı araçları `WORKSPACE_NOT_AUTHORIZED` döner.
 - **Sıfır-ayar başlatma (`causoryn mcp --allow-cwd --auto-data-dir`):** Terminal tabanlı ajanlar proje dizininden başlatıldığında `process.cwd()` adayı `inspectProjectRootSafety` denetiminden geçirilir.
 
+CLI etkinleştirildiğinde `autoIndex` açık ve kök yetkiliyse ilk snapshot’ın yüklenmesi veya ilk tam indeksin başlatılması MCP `initialize` sonrasına ertelenir. `causoryn_index_status` ilk işi tetikleyebilir ve durumu raporlar. Snapshot gerektiren ilk araç çağrıları arka plan işini 15 saniyeye kadar bekleyebilir. `initialize` yanıtı indeksin hazır olduğu anlamına gelmez. Başlatma yolunu `packages/mcp-server/src/{cli-stdio.ts,context.ts}` tanımlar.
+
+Otomatik workspace konfigürasyonu, birincil kökteki `.gitignore` dosyasından desteklenen desenleri `extraIgnore` ile birleştirir. Okuma en çok 256 KiB ve 500 desene izin verir, sembolik bağlantıları atlar ve bir negasyonla çakışabilecek geniş üst dizin desenlerini içeri almaz. Eşleştirici Git ignore sözdiziminin bir alt kümesini destekler. [Dil Analizörleri](language-analyzers.md)
+
 ### 3.2 `inspectProjectRootSafety` — Reddedilen Güvensiz Kökler
 
 Bir aday dizin (`--allow-cwd` veya MCP `roots/list` `file://` URI'si) `realpathSync` ile gerçek yoluna çözümlenir (Windows `\\?\` önekleri temizlenir) ve aşağıdaki kategorilerden herhangi birine girerse **kesinlikle yetkilendirilmez**:
@@ -135,7 +139,7 @@ Masaüstü IDE'ler (Antigravity, ZCode GUI, Codex Desktop vb.) MCP sunucusunu ç
 
 ## 4. Kaynak Ağacı Dışı Veri Dizini Düzeni (`ADR-008`)
 
-Causoryn analiz edilen proje ağacına **asla** tek bayt bile yazmaz. Kalıcı veriler ve geçici derleme önbellekleri tamamen çalışma alanı dışında tutulur:
+Causoryn kaynak analizi sırasında proje dosyalarını salt okunur işler. Kalıcı graph ve wiki veritabanı yolları yetkili çalışma alanı köklerinin dışında olmalıdır. Aşağıdaki düzen varsayılan veri ve derleme önbelleği yollarını gösterir. Elle yapılandırılan `output.allowedOutputDirs`, çalışma alanıyla örtüşen bir dizinde de açıkça dışa aktarıma izin verebilir.
 
 ```text
 ~/.causoryn/                                    # Temel dizin (--data-dir veya ZCODE_PLUGIN_DATA ile değiştirilebilir)
@@ -223,8 +227,8 @@ Causoryn analiz edilen proje ağacına **asla** tek bayt bile yazmaz. Kalıcı v
 | `results.maxSymbols` | `number` (pozitif tam sayı) | `100` | `causoryn_find_symbols` sonuç tavanı. |
 | `results.maxDepth` | `number` (pozitif tam sayı) | `3` | `causoryn_get_symbol_context` komşuluk derinliği tavanı. |
 | `results.maxPaths` | `number` (pozitif tam sayı) | `50` | `causoryn_trace_execution` maksimum iz yolu tavanı. |
-| `autoIndex` | `boolean` | `true` | `true` ve `allowRoots` doluysa sunucu açılışında mevcut kalıcı snapshot'ı yükler ya da ilk senkron indekslemeyi çalıştırır; `false` ise `refresh_index` çağrılana dek `INDEX_NOT_READY` döner. |
-| `output.allowedOutputDirs` | `string[]` | `[]` | `causoryn_export_documentation` yazma hedefleri. Boşsa `EXPORT_NOT_ALLOWED` döner. Beyan edilen dizinler başlangıçta diskte var olmalıdır (`OutputAccessPolicy`). |
+| `autoIndex` | `boolean` | `true` | Yetkili kökte varsa mevcut kalıcı snapshot kullanılır. İlk indeks, CLI etkinse MCP başlatmasından sonraya ertelenir. Çıplak konfigürasyon yolunda indeksleme senkron çalışabilir. `false` ise otomatik indeks işi başlatılmaz. |
+| `output.allowedOutputDirs` | `string[]` | `[]` | `causoryn_export_documentation` için yazma izni olan mevcut dizinler ve alt dizinleri. Boşsa `EXPORT_NOT_ALLOWED` döner. Açık izin listesi `allowRoots`’tan bağımsızdır (`OutputAccessPolicy`). |
 | `storage.dataDbPath` | `string` (opsiyonel) | `undefined` (`InMemoryGraphRepository`) | Kalıcı SQLite graph + `symbol_fts` dosya yolu. Mutlak olmalı, üst dizini mevcut olmalı ve hem sözcüksel hem `realpath` olarak tüm `allowRoots` dışında kalmalıdır (`ADR-008`). Tanımlıysa çoklu-süreç yarış kurtarması (`tolerateConcurrentPublishRace`) açılır. |
 | `wiki.dataDbPath` | `string` (opsiyonel) | `undefined` (`PATH_DENIED` / `INDEX_NOT_READY`) | Living Wiki SQLite (`SqliteWikiStore` + `wiki_fts`) dosya yolu. `storage.dataDbPath` ile aynı güvenlik kurallarına tabidir ve aynı SQLite dosyasını paylaşabilir. |
 
