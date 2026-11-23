@@ -1,6 +1,7 @@
 import { Buffer } from "node:buffer";
 import {
   closeSync,
+  constants as fsConstants,
   fstatSync,
   lstatSync,
   openSync,
@@ -26,13 +27,13 @@ import {
 //   2. `.git/info/exclude` (yalnızca `.git` gerçek non-symlink dizinse; CWE-59)
 //   3. İç içe (nested) `.gitignore` dosyaları (sınırlı BFS yürüyüşü:
 //      derinlik <= 6, en fazla 64 dosya, en fazla 4.000 dizin, her desen kendi
-//      alt dizinine kapsamlandırılır, dosya-bazlı negasyon-güvenli)
+//      alt dizinine kapsamlandırılır, dirOnly `/` korunur, dosya-bazlı negasyon-güvenli)
 //   4. Akıllı `bin/` ayrımı (yalnızca çağıran açık `ignore` vermediğinde):
 //      TŞ §20 `DEFAULT_IGNORE_PATTERNS` dokunulmadan, auto-config içinde kaba
 //      `**/bin/**` yerine `**/bin/{Debug,Release,x64,x86,AnyCPU}/**` ve derinlik
 //      <= 4 sınırlı taramada bulunan `.csproj`/`.fsproj`/`.vbproj` dizinlerinin
-//      `<dir>/bin/**` desenleri konur; böylece Node (`bin/cli.ts`) ve Rust
-//      (`src/bin/main.rs`) kaynakları gizlenmez.
+//      en fazla 128 `<dir>/bin/**` deseni konur; böylece Node (`bin/cli.ts`) ve
+//      Rust (`src/bin/main.rs`) kaynakları gizlenmez.
 
 export const MAX_IGNORE_FILE_BYTES = 256 * 1024;
 export const MAX_NESTED_GITIGNORE_DEPTH = 6;
@@ -41,12 +42,19 @@ export const MAX_NESTED_WALK_DIRS = 4_000;
 export const MAX_DISCOVERED_IGNORE_PATTERNS = 1_000;
 export const MAX_CSPROJ_SCAN_DEPTH = 4;
 export const MAX_CSPROJ_SCAN_DIRS = 2_000;
+export const MAX_CSPROJ_BIN_PATTERNS = 128;
+export const MAX_LINES_PER_IGNORE_FILE = 4_000;
+export const MAX_NEGATED_ANCESTOR_DEPTH = 16;
+export const MAX_WILDCARDS_PER_PATTERN = 16;
 
 const MAX_NEGATED_MATCH_TARGETS = 64;
 const MAX_PATTERN_LENGTH = 512;
 const MAX_GLOBSTAR_SEGMENTS = 4;
 const IS_WIN = process.platform === "win32";
 const DOTNET_PROJECT_FILE_RE = /\.(?:csproj|fsproj|vbproj)$/i;
+
+const OPEN_READ_NOFOLLOW_FLAGS =
+  fsConstants.O_RDONLY | (typeof fsConstants.O_NOFOLLOW === "number" ? fsConstants.O_NOFOLLOW : 0);
 
 const SMART_BIN_SUBDIR_PATTERNS: readonly string[] = [
   "**/bin/Debug/**",
@@ -96,10 +104,45 @@ function isGitignoreFileName(name: string): boolean {
   return IS_WIN ? name.toLowerCase() === ".gitignore" : name === ".gitignore";
 }
 
+/**
+ * Bir dizin adının kapsamlı ignore deseni veya `<dir>/bin/**` kuralı üretiminde
+ * glob enjeksiyonu (`*`, `?`) veya yol kaçışı (`..`, `/`, `\`, `\0`) taşımadığını
+ * doğrular (SEC-08).
+ */
+export function isSafeIgnoreDirSegment(name: string): boolean {
+  if (name.length === 0 || name === "." || name === "..") {
+    return false;
+  }
+  for (let i = 0; i < name.length; i += 1) {
+    const ch = name[i];
+    if (ch === "*" || ch === "?" || ch === "\0" || ch === "/" || ch === "\\") {
+      return false;
+    }
+  }
+  return true;
+}
+
+function isSafeRelativeDirPosix(dirPosix: string): boolean {
+  if (dirPosix === "") return true;
+  return dirPosix.split("/").every((seg) => isSafeIgnoreDirSegment(seg));
+}
+
 function isRegularNonSymlinkDirectory(targetPath: string): boolean {
   try {
     const st = lstatSync(targetPath);
     return !st.isSymbolicLink() && st.isDirectory();
+  } catch {
+    return false;
+  }
+}
+
+function isVerifiedChildDirectory(absDir: string, canonicalRoot: string): boolean {
+  if (!isRegularNonSymlinkDirectory(absDir)) {
+    return false;
+  }
+  try {
+    const realDir = stripWin32DevicePrefix(realpathSync(absDir));
+    return isStrictlyInside(canonicalRoot, realDir);
   } catch {
     return false;
   }
@@ -116,8 +159,9 @@ function isRegularNonSymlinkFile(targetPath: string): boolean {
 
 /**
  * Tek bir normal (symlink olmayan), `canonicalRoot` içine sarmalanmış dosyayı
- * en fazla `maxBytes` bayt olacak şekilde salt-okunur okur (CWE-59 + TOCTOU
- * boyut koruması). Koşul sağlanmazsa `null` döner ve fırlatmaz.
+ * `O_NOFOLLOW` + `(dev, ino)` eşleşmesiyle en fazla `maxBytes` bayt olacak şekilde
+ * salt-okunur okur (CWE-59 + TOCTOU koruması, SEC-07). Koşul sağlanmazsa `null`
+ * döner ve fırlatmaz.
  */
 function readSafeRegularFileUtf8(
   filePath: string,
@@ -134,10 +178,13 @@ function readSafeRegularFileUtf8(
       return null;
     }
 
-    const fd = openSync(realFile, "r");
+    const fd = openSync(filePath, OPEN_READ_NOFOLLOW_FLAGS);
     try {
       const fdStat = fstatSync(fd);
       if (!fdStat.isFile() || fdStat.size > maxBytes) {
+        return null;
+      }
+      if (st.ino !== 0 && (fdStat.dev !== st.dev || fdStat.ino !== st.ino)) {
         return null;
       }
       const buf = Buffer.allocUnsafe(maxBytes + 1);
@@ -172,7 +219,10 @@ function scopeNestedPattern(
   body: string,
   hasLeadingSlash: boolean,
   dirOnly: boolean,
-): string {
+): string | null {
+  if (!isSafeRelativeDirPosix(subDirPosix)) {
+    return null;
+  }
   if (body === "**") {
     return `${subDirPosix}/**`;
   }
@@ -180,32 +230,29 @@ function scopeNestedPattern(
   const isAnchored = hasLeadingSlash || hasInternalSlash;
   if (isAnchored) {
     if (dirOnly) {
-      return body.endsWith("/**") ? `${subDirPosix}/${body}` : `${subDirPosix}/${body}/**`;
+      return body.endsWith("/**") ? `${subDirPosix}/${body}` : `${subDirPosix}/${body}/`;
     }
     return `${subDirPosix}/${body}`;
   }
   if (dirOnly) {
-    return `${subDirPosix}/**/${body}/**`;
+    return `${subDirPosix}/**/${body}/`;
   }
   return `${subDirPosix}/**/${body}`;
 }
 
-interface NegatedTarget {
-  readonly targetPath: string;
-  readonly isDir: boolean;
-  readonly ancestors: readonly string[];
+function hasWildcardChars(pattern: string): boolean {
+  return pattern.includes("*") || pattern.includes("?");
 }
 
-function wouldOverIgnoreNegatedTarget(
-  rawLocalPattern: string,
-  target: NegatedTarget,
-): boolean {
-  for (const ancestor of target.ancestors) {
-    if (matchesIgnorePattern(ancestor, true, rawLocalPattern)) {
-      return true;
+function countWildcards(pattern: string): number {
+  let count = 0;
+  for (let i = 0; i < pattern.length; i += 1) {
+    const ch = pattern[i];
+    if (ch === "*" || ch === "?") {
+      count += 1;
     }
   }
-  return matchesIgnorePattern(target.targetPath, target.isDir, rawLocalPattern);
+  return count;
 }
 
 function collapseConsecutiveGlobstars(posixPattern: string): string {
@@ -228,10 +275,49 @@ function countGlobstarSegments(posixPattern: string): number {
   return count;
 }
 
+interface NegatedTarget {
+  readonly targetPath: string;
+  readonly isDir: boolean;
+  readonly ancestors: readonly string[];
+  readonly rawNegPattern: string;
+  readonly hasWildcard: boolean;
+}
+
+function wouldOverIgnoreNegatedTarget(
+  rawLocalPattern: string,
+  body: string,
+  dirOnly: boolean,
+  target: NegatedTarget,
+): boolean {
+  for (const ancestor of target.ancestors) {
+    if (matchesIgnorePattern(ancestor, true, rawLocalPattern)) {
+      return true;
+    }
+  }
+  if (matchesIgnorePattern(target.targetPath, target.isDir, rawLocalPattern)) {
+    return true;
+  }
+  if (target.hasWildcard || target.isDir) {
+    if (matchesIgnorePattern(body, dirOnly, target.rawNegPattern)) {
+      return true;
+    }
+    const bodySegments = body.split("/").filter((s) => s.length > 0);
+    const maxAnc = Math.min(bodySegments.length - 1, MAX_NEGATED_ANCESTOR_DEPTH);
+    for (let i = 1; i <= maxAnc; i += 1) {
+      const anc = bodySegments.slice(0, i).join("/");
+      if (matchesIgnorePattern(anc, true, target.rawNegPattern)) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
 /**
- * Tek bir `.gitignore` veya `.git/info/exclude` dosyasının metnini negasyon-güvenli
- * ve deterministik biçimde ayrıştırır. `subDirPosix === ""` ise kök seviyesinde
- * tutar; aksi hâlde her deseni `<subDirPosix>` altına kapsamlandırır.
+ * Tek bir `.gitignore` veya `.git/info/exclude` dosyasının metnini negasyon-güvenli,
+ * satır/joker/derinlik tavanlı ve deterministik biçimde ayrıştırır.
+ * `subDirPosix === ""` ise kök seviyesinde tutar; aksi hâlde her deseni
+ * `<subDirPosix>` altına kapsamlandırır.
  */
 function parseSafeIgnoreFileContent(
   raw: string,
@@ -243,32 +329,61 @@ function parseSafeIgnoreFileContent(
   }
   const text = raw.startsWith("\uFEFF") ? raw.slice(1) : raw;
   const lines = text.split(/\r?\n/);
+  const lineLimit = Math.min(lines.length, MAX_LINES_PER_IGNORE_FILE);
 
   const negatedPrefixes = new Set<string>();
+  const seenNegatedPatterns = new Set<string>();
   const negatedTargets: NegatedTarget[] = [];
+  let negatedTargetsOverflowed = false;
   const rawEntries: string[] = [];
 
-  for (const rawLine of lines) {
+  for (let lineIdx = 0; lineIdx < lineLimit; lineIdx += 1) {
+    const rawLine = lines[lineIdx];
+    if (rawLine === undefined) continue;
     const trimmed = rawLine.trim();
     if (trimmed.length === 0 || trimmed.startsWith("#") || trimmed.includes("\0")) {
       continue;
     }
     if (trimmed.startsWith("!")) {
-      const rawNeg = trimmed.slice(1).split("\\").join("/");
+      const rawNeg = collapseConsecutiveGlobstars(
+        trimmed.slice(1).split("\\").join("/").replace(/\/{2,}/g, "/"),
+      );
       const isDir = rawNeg.endsWith("/");
-      const cleaned = rawNeg.replace(/^\/+/, "").replace(/\/+$/, "").replace(/\/{2,}/g, "/");
+      const cleaned = rawNeg.replace(/^\/+/, "").replace(/\/+$/, "");
       if (cleaned.length > 0 && cleaned.length <= MAX_PATTERN_LENGTH) {
         const segments = cleaned.split("/").filter((s) => s.length > 0);
         const ancestors: string[] = [];
-        for (let i = 1; i <= segments.length; i += 1) {
+        const maxPrefixSegs = Math.min(segments.length, MAX_NEGATED_ANCESTOR_DEPTH);
+        for (let i = 1; i <= maxPrefixSegs; i += 1) {
           const prefix = segments.slice(0, i).join("/");
           negatedPrefixes.add(comparableToken(prefix));
           if (i < segments.length) {
             ancestors.push(prefix);
           }
         }
-        if (negatedTargets.length < MAX_NEGATED_MATCH_TARGETS) {
-          negatedTargets.push({ targetPath: cleaned, isDir, ancestors });
+        negatedPrefixes.add(comparableToken(cleaned));
+
+        const negKey = comparableToken(rawNeg);
+        if (!seenNegatedPatterns.has(negKey)) {
+          seenNegatedPatterns.add(negKey);
+          const negHasWildcard = hasWildcardChars(rawNeg);
+          if (
+            negHasWildcard &&
+            (countWildcards(rawNeg) > MAX_WILDCARDS_PER_PATTERN ||
+              countGlobstarSegments(rawNeg) > MAX_GLOBSTAR_SEGMENTS)
+          ) {
+            negatedTargetsOverflowed = true;
+          } else if (negatedTargets.length < MAX_NEGATED_MATCH_TARGETS) {
+            negatedTargets.push({
+              targetPath: cleaned,
+              isDir,
+              ancestors,
+              rawNegPattern: rawNeg,
+              hasWildcard: negHasWildcard,
+            });
+          } else {
+            negatedTargetsOverflowed = true;
+          }
         }
       }
       continue;
@@ -278,6 +393,7 @@ function parseSafeIgnoreFileContent(
 
   const patterns: string[] = [];
   const seen = new Set<string>();
+  const seenNormalizedEntries = new Set<string>();
 
   for (const entry of rawEntries) {
     if (patterns.length >= maxPatterns) {
@@ -289,7 +405,16 @@ function parseSafeIgnoreFileContent(
     const posix = collapseConsecutiveGlobstars(
       entry.split("\\").join("/").replace(/\/{2,}/g, "/"),
     );
-    if (countGlobstarSegments(posix) > MAX_GLOBSTAR_SEGMENTS) {
+    // Yinelenen ham satırları negasyon/joker denetiminden ÖNCE O(1) ele (SEC-05).
+    if (seenNormalizedEntries.has(posix)) {
+      continue;
+    }
+    seenNormalizedEntries.add(posix);
+
+    if (
+      countGlobstarSegments(posix) > MAX_GLOBSTAR_SEGMENTS ||
+      countWildcards(posix) > MAX_WILDCARDS_PER_PATTERN
+    ) {
       continue;
     }
     const hasLeadingSlash = posix.startsWith("/");
@@ -306,6 +431,9 @@ function parseSafeIgnoreFileContent(
 
     if (negatedPrefixes.size > 0) {
       if (body === "*" || body === "**" || body === "**/*") {
+        continue;
+      }
+      if (negatedTargetsOverflowed && hasWildcardChars(posix)) {
         continue;
       }
       const baseTarget = body.endsWith("/**")
@@ -329,7 +457,7 @@ function parseSafeIgnoreFileContent(
       }
       let conflictsWithNegation = false;
       for (const target of negatedTargets) {
-        if (wouldOverIgnoreNegatedTarget(posix, target)) {
+        if (wouldOverIgnoreNegatedTarget(posix, body, dirOnly, target)) {
           conflictsWithNegation = true;
           break;
         }
@@ -339,15 +467,18 @@ function parseSafeIgnoreFileContent(
       }
     }
 
-    const finalPattern =
+    const scoped =
       subDirPosix === ""
         ? posix
-        : collapseConsecutiveGlobstars(
-            scopeNestedPattern(subDirPosix, body, hasLeadingSlash, dirOnly),
-          );
+        : scopeNestedPattern(subDirPosix, body, hasLeadingSlash, dirOnly);
+    if (scoped === null) {
+      continue;
+    }
+    const finalPattern = collapseConsecutiveGlobstars(scoped);
     if (
       finalPattern.length > MAX_PATTERN_LENGTH ||
-      countGlobstarSegments(finalPattern) > MAX_GLOBSTAR_SEGMENTS
+      countGlobstarSegments(finalPattern) > MAX_GLOBSTAR_SEGMENTS ||
+      countWildcards(finalPattern) > MAX_WILDCARDS_PER_PATTERN
     ) {
       continue;
     }
@@ -362,11 +493,11 @@ function parseSafeIgnoreFileContent(
 
 function readGitInfoExclude(canonicalRoot: string, maxPatterns: number): string[] {
   const gitDir = path.join(canonicalRoot, ".git");
-  if (!isRegularNonSymlinkDirectory(gitDir)) {
+  if (!isVerifiedChildDirectory(gitDir, canonicalRoot)) {
     return [];
   }
   const infoDir = path.join(gitDir, "info");
-  if (!isRegularNonSymlinkDirectory(infoDir)) {
+  if (!isVerifiedChildDirectory(infoDir, canonicalRoot)) {
     return [];
   }
   const excludeFile = path.join(infoDir, "exclude");
@@ -399,6 +530,9 @@ function scanDotnetProjectDirs(
     if (visitedDirs > MAX_CSPROJ_SCAN_DIRS) {
       break;
     }
+    if (current.depth > 0 && !isVerifiedChildDirectory(current.absDir, canonicalRoot)) {
+      continue;
+    }
 
     const dirents = readSortedDirents(current.absDir);
     let hasProjectFile = false;
@@ -413,7 +547,14 @@ function scanDotnetProjectDirs(
         }
         continue;
       }
-      if (current.depth < MAX_CSPROJ_SCAN_DEPTH && dirent.isDirectory()) {
+      if (
+        current.depth < MAX_CSPROJ_SCAN_DEPTH &&
+        dirent.isDirectory() &&
+        queue.length < MAX_CSPROJ_SCAN_DIRS
+      ) {
+        if (!isSafeIgnoreDirSegment(dirent.name)) {
+          continue;
+        }
         const childAbs = path.join(current.absDir, dirent.name);
         if (!isRegularNonSymlinkDirectory(childAbs)) {
           continue;
@@ -438,11 +579,13 @@ function scanDotnetProjectDirs(
 function buildRefinedDefaultIgnore(dotnetProjectDirs: readonly string[]): readonly string[] {
   const result: string[] = [];
   const seen = new Set<string>();
-  const pushUnique = (pattern: string): void => {
+  const pushUnique = (pattern: string): boolean => {
     if (!seen.has(pattern)) {
       seen.add(pattern);
       result.push(pattern);
+      return true;
     }
+    return false;
   };
 
   for (const pattern of DEFAULT_IGNORE_PATTERNS) {
@@ -450,8 +593,18 @@ function buildRefinedDefaultIgnore(dotnetProjectDirs: readonly string[]): readon
       for (const smartSubdir of SMART_BIN_SUBDIR_PATTERNS) {
         pushUnique(smartSubdir);
       }
+      let csprojBinCount = 0;
       for (const dirPosix of dotnetProjectDirs) {
-        pushUnique(dirPosix === "" ? "bin/**" : `${dirPosix}/bin/**`);
+        if (csprojBinCount >= MAX_CSPROJ_BIN_PATTERNS) {
+          break;
+        }
+        if (!isSafeRelativeDirPosix(dirPosix)) {
+          continue;
+        }
+        const rule = dirPosix === "" ? "bin/**" : `${dirPosix}/bin/**`;
+        if (pushUnique(rule)) {
+          csprojBinCount += 1;
+        }
       }
       continue;
     }
@@ -489,6 +642,7 @@ function collectNestedGitignorePatterns(
   const prunePatterns: string[] = [...initialPrunePatterns];
   const pruneSeen = new Set<string>(prunePatterns);
   const queue: WalkQueueItem[] = [{ absDir: canonicalRoot, relPosix: "", depth: 0 }];
+  const maxQueueSize = MAX_NESTED_WALK_DIRS + 1;
   let head = 0;
   let visitedDirs = 0;
   let nestedFilesRead = 0;
@@ -507,6 +661,9 @@ function collectNestedGitignorePatterns(
       visitedDirs += 1;
       if (visitedDirs > MAX_NESTED_WALK_DIRS) {
         break;
+      }
+      if (!isVerifiedChildDirectory(current.absDir, canonicalRoot)) {
+        continue;
       }
     }
 
@@ -548,9 +705,15 @@ function collectNestedGitignorePatterns(
       }
     }
 
-    if (current.depth < MAX_NESTED_GITIGNORE_DEPTH) {
+    if (current.depth < MAX_NESTED_GITIGNORE_DEPTH && queue.length < maxQueueSize) {
       for (const dirent of dirents) {
+        if (queue.length >= maxQueueSize) {
+          break;
+        }
         if (dirent.isSymbolicLink() || !dirent.isDirectory()) {
+          continue;
+        }
+        if (!isSafeIgnoreDirSegment(dirent.name)) {
           continue;
         }
         const childAbs = path.join(current.absDir, dirent.name);

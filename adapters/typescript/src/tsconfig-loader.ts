@@ -7,25 +7,33 @@ import type { TsAdapterSourceFile } from "./types.js";
 /**
  * Salt-okunur, güvenli `tsconfig.json` / `jsconfig.json` yükleyicisi (v0.2.3).
  *
- * Güvenlik sözleşmesi (ADR-008, CWE-59, prototype-pollution koruması):
+ * Güvenlik sözleşmesi (ADR-008, CWE-59, CWE-22, prototype-pollution, DoS koruması):
  * - Birincil kaynak: `input.configFiles` (WorkspaceAccessPolicy'den geçmiş,
  *   bellek-içi, %100 deterministik).
  * - Disk fallback (yalnızca `configFiles === undefined` ve `rootDirOnDisk`
- *   verildiğinde): `lstatSync` ile yol zincirindeki tüm symlink'ler reddedilir,
- *   `realpathSync` ile `rootDirOnDisk` sarmalaması doğrulanır, 256 KB boyut
- *   sınırı okuma öncesi ve sonrası (TOCTOU) uygulanır; hiçbir dosya yazılmaz.
+ *   verildiğinde): `lstatSync` ile yol zincirindeki tüm symlink'ler ve
+ *   `.git`/`.env*` segmentleri reddedilir, yalnızca `.json` dosyaları kabul
+ *   edilir, `realpathSync` ile `rootDirOnDisk` sarmalaması doğrulanır,
+ *   `openSync(O_RDONLY | O_NOFOLLOW)` + `fstatSync` (`dev`/`ino` + boyut) +
+ *   sınırlı `readSync` (≤ 256 KB + 1) ile TOCTOU-güvenli okunur; hiçbir dosya
+ *   yazılmaz.
  * - Ayrıştırma yalnızca resmi `ts.parseConfigFileTextToJson` ile yapılır
  *   (JSONC yorumları ve trailing comma destekli; eval / plugin çalıştırma YOK).
  * - Yalnızca güvenli compilerOptions alanları çıkarılır (`baseUrl`, `paths`,
  *   `jsx`, `moduleResolution`, `module`, `target`, `experimentalDecorators`,
  *   `verbatimModuleSyntax`). `__proto__`, `constructor`, `prototype` anahtarları
  *   reddedilir; `paths` Map + null-prototype nesnede tutulur (en fazla 200 girdi).
- * - `extends` zinciri kesinlikle `rootDir` içinde tutulur (en fazla derinlik 5,
- *   döngü tespiti, `..` kaçışı / mutlak yol / çıplak paket zarifçe ayrıştırılır).
+ * - `extends` zinciri kesinlikle `rootDir` içinde tutulur: dosya başına en fazla
+ *   16 `extends`, derinlik ≤ 5, döngü tespiti, parsed + resolved memoization,
+ *   global 128 ziyaret bütçesi (elmas DAG DoS koruması) ve 100 uyarı tavanı.
  */
 
 export const MAX_TSCONFIG_BYTES = 256 * 1024;
 export const MAX_EXTENDS_DEPTH = 5;
+export const MAX_EXTENDS_ENTRIES = 16;
+export const MAX_TOTAL_RESOLVE_VISITS = 128;
+export const MAX_TSCONFIG_WARNINGS = 100;
+export const MAX_SCOPED_CONFIGS = 64;
 export const MAX_PATHS_ENTRIES = 200;
 const MAX_PATH_TARGETS_PER_PATTERN = 16;
 const MAX_DISK_SCAN_DIRS = 64;
@@ -79,15 +87,36 @@ interface PartialSafeOptions {
   verbatimModuleSyntax?: boolean;
 }
 
+interface NodeFsStatMinimal {
+  isSymbolicLink(): boolean;
+  isFile(): boolean;
+  isDirectory(): boolean;
+  readonly size: number;
+  readonly dev?: number;
+  readonly ino?: number;
+}
+
 interface NodeFsMinimal {
-  lstatSync(path: string): {
-    isSymbolicLink(): boolean;
-    isFile(): boolean;
-    isDirectory(): boolean;
-    size: number;
+  readonly constants?: {
+    readonly O_RDONLY?: number;
+    readonly O_NOFOLLOW?: number;
   };
+  lstatSync(path: string): NodeFsStatMinimal;
   realpathSync(path: string): string;
-  readFileSync(path: string, encoding: "utf8"): string;
+  openSync(path: string, flags: number): number;
+  fstatSync(fd: number): NodeFsStatMinimal;
+  readSync(
+    fd: number,
+    buffer: Uint8Array,
+    offset: number,
+    length: number,
+    position: number | null,
+  ): number;
+  closeSync(fd: number): void;
+}
+
+interface TextDecoderMinimal {
+  decode(input?: Uint8Array): string;
 }
 
 function getNodeFs(): NodeFsMinimal | undefined {
@@ -104,19 +133,48 @@ function getNodeFs(): NodeFsMinimal | undefined {
     mod !== null &&
     typeof (mod as Partial<NodeFsMinimal>).lstatSync === "function" &&
     typeof (mod as Partial<NodeFsMinimal>).realpathSync === "function" &&
-    typeof (mod as Partial<NodeFsMinimal>).readFileSync === "function"
+    typeof (mod as Partial<NodeFsMinimal>).openSync === "function" &&
+    typeof (mod as Partial<NodeFsMinimal>).fstatSync === "function" &&
+    typeof (mod as Partial<NodeFsMinimal>).readSync === "function" &&
+    typeof (mod as Partial<NodeFsMinimal>).closeSync === "function"
   ) {
     return mod as NodeFsMinimal;
   }
   return undefined;
 }
 
+function decodeUtf8(bytes: Uint8Array): string {
+  const DecoderCtor = (
+    globalThis as {
+      readonly TextDecoder?: new (label?: string) => TextDecoderMinimal;
+    }
+  ).TextDecoder;
+  if (typeof DecoderCtor === "function") {
+    return new DecoderCtor("utf-8").decode(bytes);
+  }
+  let out = "";
+  for (let i = 0; i < bytes.length; i += 1) {
+    out += String.fromCharCode(bytes[i] ?? 0);
+  }
+  return out;
+}
+
 function toPosix(p: string): string {
   return p.replace(/\\/g, "/");
 }
 
+function stripWindowsExtendedPrefix(raw: string): string {
+  if (raw.startsWith("\\\\?\\UNC\\") || raw.startsWith("//?/UNC/")) {
+    return `//${raw.slice(8)}`;
+  }
+  if (raw.startsWith("\\\\?\\") || raw.startsWith("//?/")) {
+    return raw.slice(4);
+  }
+  return raw;
+}
+
 function normalizePosixAbsolute(p: string): string {
-  const posix = toPosix(p);
+  const posix = toPosix(stripWindowsExtendedPrefix(p));
   const drivePrefix = /^[a-zA-Z]:/.test(posix) ? posix.slice(0, 2) : undefined;
   const body = drivePrefix === undefined ? posix : posix.slice(2);
   const isAbsolute = body.startsWith("/");
@@ -139,8 +197,15 @@ function normalizePosixAbsolute(p: string): string {
   return isAbsolute ? `/${joined}` : joined;
 }
 
+function stripNonRootTrailingSlash(normalized: string): string {
+  if (normalized === "/" || /^[a-zA-Z]:\/$/.test(normalized)) {
+    return normalized;
+  }
+  return normalized.replace(/\/+$/, "");
+}
+
 function canonicalKey(p: string): string {
-  const normalized = normalizePosixAbsolute(p);
+  const normalized = stripNonRootTrailingSlash(normalizePosixAbsolute(p));
   return ts.sys.useCaseSensitiveFileNames ? normalized : normalized.toLowerCase();
 }
 
@@ -163,6 +228,16 @@ function validateRelativeConfigPath(raw: string): string | undefined {
   return posix;
 }
 
+function hasForbiddenDiskSegment(relativePath: string): boolean {
+  for (const segment of relativePath.split("/")) {
+    const lower = segment.toLowerCase();
+    if (lower === ".git" || lower.startsWith(".env")) {
+      return true;
+    }
+  }
+  return false;
+}
+
 function relativeDirPrefix(relativePath: string): string {
   const idx = relativePath.lastIndexOf("/");
   return idx < 0 ? "" : relativePath.slice(0, idx);
@@ -179,9 +254,11 @@ function isActiveProjectConfigFile(relativePath: string): boolean {
 }
 
 function joinPosixAbs(rootPosix: string, relativePath: string): string {
-  const cleanRoot = rootPosix.replace(/\/+$/, "");
-  if (relativePath === "") return cleanRoot === "" ? "/" : cleanRoot;
-  return `${cleanRoot}/${relativePath}`;
+  const cleanRoot = stripNonRootTrailingSlash(normalizePosixAbsolute(rootPosix));
+  if (relativePath === "") return cleanRoot;
+  return cleanRoot.endsWith("/")
+    ? `${cleanRoot}${relativePath}`
+    : `${cleanRoot}/${relativePath}`;
 }
 
 function resolveRelativeWithinRoot(
@@ -452,6 +529,31 @@ function extractSafeCompilerOptions(
   return out;
 }
 
+function isSafePathTargetWithinRoot(
+  effectiveBaseRel: string,
+  target: string,
+): boolean {
+  if (target.length === 0 || target.includes("\0")) return false;
+  // En fazla tek '*' joker karakterine izin verilir.
+  const firstStar = target.indexOf("*");
+  if (firstStar !== target.lastIndexOf("*")) return false;
+  // '*' sonrasındaki sonekte '..' segmenti boş/kısa joker ile kök kaçışına yol açar (SEC-03).
+  if (firstStar >= 0) {
+    const suffix = toPosix(target.slice(firstStar + 1));
+    if (suffix.split("/").includes("..")) return false;
+  }
+  const emptyProbe = resolveRelativeWithinRoot(
+    effectiveBaseRel,
+    target.replace(/\*/g, ""),
+  );
+  if (!emptyProbe.ok) return false;
+  const filledProbe = resolveRelativeWithinRoot(
+    effectiveBaseRel,
+    target.replace(/\*/g, "__wildcard__"),
+  );
+  return filledProbe.ok;
+}
+
 function sanitizePathsWithinRoot(
   configRelativePath: string,
   rootPosix: string,
@@ -459,13 +561,16 @@ function sanitizePathsWithinRoot(
   addWarning: (msg: string) => void,
 ): PartialSafeOptions {
   if (options.paths === undefined) return options;
-  const effectiveBaseAbs = options.baseUrl ?? options.pathsBasePath ?? rootPosix;
-  const cleanRoot = rootPosix.replace(/\/+$/, "");
+  const cleanRoot = stripNonRootTrailingSlash(normalizePosixAbsolute(rootPosix));
+  const rootPrefixWithSlash = cleanRoot.endsWith("/") ? cleanRoot : `${cleanRoot}/`;
+  const effectiveBaseAbs = stripNonRootTrailingSlash(
+    normalizePosixAbsolute(options.baseUrl ?? options.pathsBasePath ?? cleanRoot),
+  );
   const effectiveBaseRel =
     effectiveBaseAbs === cleanRoot
       ? ""
-      : effectiveBaseAbs.startsWith(`${cleanRoot}/`)
-        ? effectiveBaseAbs.slice(cleanRoot.length + 1)
+      : effectiveBaseAbs.startsWith(rootPrefixWithSlash)
+        ? effectiveBaseAbs.slice(rootPrefixWithSlash.length)
         : undefined;
   if (effectiveBaseRel === undefined) {
     addWarning(
@@ -479,9 +584,7 @@ function sanitizePathsWithinRoot(
   for (const [pattern, targets] of options.paths.entries()) {
     const safeTargets: string[] = [];
     for (const target of targets) {
-      const probe = target.replace(/\*/g, "__wildcard__");
-      const check = resolveRelativeWithinRoot(effectiveBaseRel, probe);
-      if (!check.ok) {
+      if (!isSafePathTargetWithinRoot(effectiveBaseRel, target)) {
         addWarning(
           `kök dışına çıkan tsconfig paths hedefi reddedildi: ${configRelativePath} ('${pattern}' -> '${target}')`,
         );
@@ -547,6 +650,65 @@ function mergeSafeOptions(
   return merged;
 }
 
+function readBoundedTextFromFd(
+  nodeFs: NodeFsMinimal,
+  targetPath: string,
+  leafStat: NodeFsStatMinimal,
+  relPath: string,
+  addWarning: (msg: string) => void,
+): string | undefined {
+  const openFlags =
+    (nodeFs.constants?.O_RDONLY ?? 0) | (nodeFs.constants?.O_NOFOLLOW ?? 0);
+  let fd: number;
+  try {
+    fd = nodeFs.openSync(targetPath, openFlags);
+  } catch {
+    return undefined;
+  }
+  try {
+    const fdStat = nodeFs.fstatSync(fd);
+    if (!fdStat.isFile()) return undefined;
+    if (fdStat.size > MAX_TSCONFIG_BYTES) {
+      addWarning(`tsconfig boyutu 256 KB sınırını aşıyor: ${relPath}`);
+      return undefined;
+    }
+    if (
+      leafStat.ino !== undefined &&
+      leafStat.ino !== 0 &&
+      (fdStat.ino !== leafStat.ino || fdStat.dev !== leafStat.dev)
+    ) {
+      addWarning(`tsconfig okuma sırasında değişti (TOCTOU): ${relPath}`);
+      return undefined;
+    }
+    const buf = new Uint8Array(MAX_TSCONFIG_BYTES + 1);
+    let totalRead = 0;
+    while (totalRead < buf.length) {
+      const bytesRead = nodeFs.readSync(
+        fd,
+        buf,
+        totalRead,
+        buf.length - totalRead,
+        null,
+      );
+      if (bytesRead <= 0) break;
+      totalRead += bytesRead;
+    }
+    if (totalRead > MAX_TSCONFIG_BYTES) {
+      addWarning(`tsconfig boyutu okuma sonrası 256 KB sınırını aşıyor: ${relPath}`);
+      return undefined;
+    }
+    return decodeUtf8(buf.subarray(0, totalRead));
+  } catch {
+    return undefined;
+  } finally {
+    try {
+      nodeFs.closeSync(fd);
+    } catch {
+      // Kapatma hatası yutulur.
+    }
+  }
+}
+
 function createDiskConfigReader(
   rootDirOnDisk: string,
   addWarning: (msg: string) => void,
@@ -554,7 +716,7 @@ function createDiskConfigReader(
   const nodeFs = getNodeFs();
   if (nodeFs === undefined) return undefined;
 
-  let rootStat: ReturnType<NodeFsMinimal["lstatSync"]>;
+  let rootStat: NodeFsStatMinimal;
   try {
     rootStat = nodeFs.lstatSync(rootDirOnDisk);
   } catch {
@@ -567,25 +729,37 @@ function createDiskConfigReader(
 
   let realRootPosix: string;
   try {
-    realRootPosix = normalizePosixAbsolute(nodeFs.realpathSync(rootDirOnDisk));
+    realRootPosix = stripNonRootTrailingSlash(
+      normalizePosixAbsolute(nodeFs.realpathSync(rootDirOnDisk)),
+    );
   } catch {
     return undefined;
   }
   const realRootKey = canonicalKey(realRootPosix);
-  const rootPrefixWithSlash = realRootKey === "/" ? "/" : `${realRootKey}/`;
-  const cleanRootNative = toPosix(rootDirOnDisk).replace(/\/+$/, "");
+  const rootPrefixWithSlash = realRootKey.endsWith("/") ? realRootKey : `${realRootKey}/`;
+  const cleanRootNative = stripNonRootTrailingSlash(
+    toPosix(stripWindowsExtendedPrefix(rootDirOnDisk)),
+  );
 
   return (rawRelPath: string): string | undefined => {
     const relPath = validateRelativeConfigPath(rawRelPath);
     if (relPath === undefined) return undefined;
+    if (!relPath.toLowerCase().endsWith(".json")) return undefined;
+    if (hasForbiddenDiskSegment(relPath)) {
+      addWarning(`yasaklı segment içeren tsconfig reddedildi: ${relPath}`);
+      return undefined;
+    }
 
     const segments = relPath.split("/");
     let currentPath = cleanRootNative;
+    let leafStat: NodeFsStatMinimal | undefined;
     for (let i = 0; i < segments.length; i += 1) {
       const seg = segments[i];
       if (seg === undefined) return undefined;
-      currentPath = `${currentPath}/${seg}`;
-      let stat: ReturnType<NodeFsMinimal["lstatSync"]>;
+      currentPath = currentPath.endsWith("/")
+        ? `${currentPath}${seg}`
+        : `${currentPath}/${seg}`;
+      let stat: NodeFsStatMinimal;
       try {
         stat = nodeFs.lstatSync(currentPath);
       } catch {
@@ -604,32 +778,30 @@ function createDiskConfigReader(
           addWarning(`tsconfig boyutu 256 KB sınırını aşıyor: ${relPath}`);
           return undefined;
         }
+        leafStat = stat;
       }
     }
+    if (leafStat === undefined) return undefined;
 
-    let realTargetPosix: string;
+    let realTargetRaw: string;
     try {
-      realTargetPosix = normalizePosixAbsolute(nodeFs.realpathSync(currentPath));
+      realTargetRaw = nodeFs.realpathSync(currentPath);
     } catch {
       return undefined;
     }
-    const realTargetKey = canonicalKey(realTargetPosix);
+    const realTargetKey = canonicalKey(realTargetRaw);
     if (!realTargetKey.startsWith(rootPrefixWithSlash)) {
       addWarning(`kök dışına çıkan tsconfig reddedildi (CWE-59): ${relPath}`);
       return undefined;
     }
 
-    let content: string;
-    try {
-      content = nodeFs.readFileSync(currentPath, "utf8");
-    } catch {
-      return undefined;
-    }
-    if (utf8Encode(content).byteLength > MAX_TSCONFIG_BYTES) {
-      addWarning(`tsconfig boyutu okuma sonrası 256 KB sınırını aşıyor: ${relPath}`);
-      return undefined;
-    }
-    return content;
+    return readBoundedTextFromFd(
+      nodeFs,
+      realTargetRaw,
+      leafStat,
+      relPath,
+      addWarning,
+    );
   };
 }
 
@@ -651,8 +823,14 @@ function collectCandidateDiskDirs(
       }
     }
   }
+  // Sığ monorepo kökleri derin alt dizinlerin gerisinde kesilmesin diye
+  // önce derinlik artan, eşitlikte sözlük sırasıyla sıralanır.
   return [...dirs]
-    .sort((a, b) => (a < b ? -1 : a > b ? 1 : 0))
+    .sort((a, b) => {
+      const depthDiff = segmentDepth(a) - segmentDepth(b);
+      if (depthDiff !== 0) return depthDiff;
+      return a < b ? -1 : a > b ? 1 : 0;
+    })
     .slice(0, MAX_DISK_SCAN_DIRS);
 }
 
@@ -662,6 +840,11 @@ function segmentDepth(dirPrefix: string): number {
 
 function isTsConfigBasename(relativePath: string): boolean {
   return relativeBasename(relativePath).toLowerCase() === "tsconfig.json";
+}
+
+interface ResolveOutcome {
+  readonly options: PartialSafeOptions | undefined;
+  readonly globallyCacheable: boolean;
 }
 
 /**
@@ -675,10 +858,11 @@ export function loadWorkspaceTsConfigs(
   rootDirOnDisk?: string,
   sourceRelativePaths?: readonly string[],
 ): LoadedTsConfigs {
-  const normalizedRoot = normalizePosixAbsolute(rootPosix).replace(/\/+$/, "");
+  const normalizedRoot = stripNonRootTrailingSlash(normalizePosixAbsolute(rootPosix));
   const warnings: string[] = [];
   const warningSeen = new Set<string>();
   const addWarning = (message: string): void => {
+    if (warnings.length >= MAX_TSCONFIG_WARNINGS) return;
     if (warningSeen.has(message)) return;
     warningSeen.add(message);
     warnings.push(message);
@@ -688,7 +872,6 @@ export function loadWorkspaceTsConfigs(
   let readDiskConfigSafe: ((relPath: string) => string | undefined) | undefined;
 
   if (configFiles !== undefined) {
-    // Determinizm: girdi sırasından bağımsız işleme için önce göreli yola göre sırala.
     const sortedInputs = [...configFiles].sort((a, b) =>
       a.relativePath < b.relativePath ? -1 : a.relativePath > b.relativePath ? 1 : 0,
     );
@@ -738,42 +921,95 @@ export function loadWorkspaceTsConfigs(
     return loaded;
   };
 
+  // SEC-02: JSONC parse + çözümlenmiş options memoization ve global ziyaret bütçesi.
+  const parsedCache = new Map<string, Record<string, unknown> | null>();
+  const resolvedGlobalCache = new Map<string, PartialSafeOptions | null>();
+  const resolvedDepthCache = new Map<string, PartialSafeOptions | null>();
+  let totalVisits = 0;
+
+  const getParsedConfig = (
+    entry: RawConfigEntry,
+    canonRel: string,
+  ): Record<string, unknown> | undefined => {
+    if (parsedCache.has(canonRel)) {
+      return parsedCache.get(canonRel) ?? undefined;
+    }
+    const parsed = ts.parseConfigFileTextToJson(entry.relativePath, entry.content);
+    if (parsed.error !== undefined || !isPlainRecord(parsed.config)) {
+      addWarning(`geçersiz tsconfig JSONC yoksayıldı: ${entry.relativePath}`);
+      parsedCache.set(canonRel, null);
+      return undefined;
+    }
+    checkPrototypeInjection(parsed.config, entry.relativePath, addWarning);
+    parsedCache.set(canonRel, parsed.config);
+    return parsed.config;
+  };
+
   const resolveConfigOptions = (
     entry: RawConfigEntry,
     depth: number,
     visited: ReadonlySet<string>,
-  ): PartialSafeOptions | undefined => {
+  ): ResolveOutcome => {
     if (depth > MAX_EXTENDS_DEPTH) {
       addWarning(
         `tsconfig extends derinlik sınırı (${String(MAX_EXTENDS_DEPTH)}) aşıldı: ${entry.relativePath}`,
       );
-      return undefined;
+      return { options: undefined, globallyCacheable: false };
     }
     const canonRel = canonicalRelKey(entry.relativePath);
     if (visited.has(canonRel)) {
       addWarning(
         `döngüsel tsconfig extends zinciri algılandı: ${entry.relativePath}`,
       );
-      return undefined;
+      return { options: undefined, globallyCacheable: false };
     }
 
-    const parsed = ts.parseConfigFileTextToJson(entry.relativePath, entry.content);
-    if (parsed.error !== undefined || !isPlainRecord(parsed.config)) {
-      addWarning(`geçersiz tsconfig JSONC yoksayıldı: ${entry.relativePath}`);
-      return undefined;
+    if (resolvedGlobalCache.has(canonRel)) {
+      return {
+        options: resolvedGlobalCache.get(canonRel) ?? undefined,
+        globallyCacheable: true,
+      };
     }
-    checkPrototypeInjection(parsed.config, entry.relativePath, addWarning);
+    const depthKey = `${canonRel}@${String(depth)}`;
+    if (resolvedDepthCache.has(depthKey)) {
+      return {
+        options: resolvedDepthCache.get(depthKey) ?? undefined,
+        globallyCacheable: false,
+      };
+    }
+
+    if (totalVisits >= MAX_TOTAL_RESOLVE_VISITS) {
+      addWarning(
+        `tsconfig extends ziyaret bütçesi (${String(MAX_TOTAL_RESOLVE_VISITS)}) aşıldı; kalan zincir kesildi`,
+      );
+      return { options: undefined, globallyCacheable: false };
+    }
+    totalVisits += 1;
+
+    const parsedConfig = getParsedConfig(entry, canonRel);
+    if (parsedConfig === undefined) {
+      resolvedGlobalCache.set(canonRel, null);
+      return { options: undefined, globallyCacheable: true };
+    }
 
     const dirPrefix = relativeDirPrefix(entry.relativePath);
     let accumulated: PartialSafeOptions = {};
+    let globallyCacheable = true;
 
-    const rawExtends = ownProperty(parsed.config, "extends");
+    const rawExtends = ownProperty(parsedConfig, "extends");
     const extendsList: string[] = [];
     if (typeof rawExtends === "string") {
       extendsList.push(rawExtends);
     } else if (Array.isArray(rawExtends)) {
       for (const item of rawExtends) {
-        if (typeof item === "string") extendsList.push(item);
+        if (typeof item !== "string") continue;
+        if (extendsList.length >= MAX_EXTENDS_ENTRIES) {
+          addWarning(
+            `tsconfig extends giriş sınırı (${String(MAX_EXTENDS_ENTRIES)}) aşıldı: ${entry.relativePath}`,
+          );
+          break;
+        }
+        extendsList.push(item);
       }
     }
 
@@ -790,8 +1026,7 @@ export function loadWorkspaceTsConfigs(
           continue;
         }
         if (!isRelativeExtendsSpec(spec)) {
-          // Çıplak node_modules paket extends (örn. @tsconfig/node22/...):
-          // ağ/dış bağımlılık olmadan zarifçe atlanır, yerel compilerOptions korunur.
+          // Çıplak node_modules paket extends zarifçe atlanır.
           continue;
         }
         const resolved = resolveRelativeWithinRoot(dirPrefix, spec);
@@ -801,13 +1036,16 @@ export function loadWorkspaceTsConfigs(
           );
           continue;
         }
-        const candidatePaths: string[] = [resolved.relativePath];
-        if (!resolved.relativePath.toLowerCase().endsWith(".json")) {
-          candidatePaths.push(
-            `${resolved.relativePath}.json`,
-            `${resolved.relativePath}/tsconfig.json`,
-          );
-        }
+        // Yalnızca .json adayları yoklanır (SEC-06); boş göreli yol kök `tsconfig.json`'dur.
+        const candidatePaths: string[] =
+          resolved.relativePath === ""
+            ? ["tsconfig.json"]
+            : resolved.relativePath.toLowerCase().endsWith(".json")
+              ? [resolved.relativePath]
+              : [
+                  `${resolved.relativePath}.json`,
+                  `${resolved.relativePath}/tsconfig.json`,
+                ];
         let parentEntry: RawConfigEntry | undefined;
         for (const candidate of candidatePaths) {
           if (candidate.length === 0) continue;
@@ -820,13 +1058,16 @@ export function loadWorkspaceTsConfigs(
           );
           continue;
         }
-        const parentOpts = resolveConfigOptions(
+        const parentOutcome = resolveConfigOptions(
           parentEntry,
           depth + 1,
           nextVisited,
         );
-        if (parentOpts !== undefined) {
-          accumulated = mergeSafeOptions(accumulated, parentOpts);
+        if (!parentOutcome.globallyCacheable) {
+          globallyCacheable = false;
+        }
+        if (parentOutcome.options !== undefined) {
+          accumulated = mergeSafeOptions(accumulated, parentOutcome.options);
         }
       }
     }
@@ -835,26 +1076,38 @@ export function loadWorkspaceTsConfigs(
       entry.relativePath,
       dirPrefix,
       normalizedRoot,
-      ownProperty(parsed.config, "compilerOptions"),
+      ownProperty(parsedConfig, "compilerOptions"),
       addWarning,
     );
-    return mergeSafeOptions(accumulated, ownOpts);
+    const merged = mergeSafeOptions(accumulated, ownOpts);
+    if (globallyCacheable) {
+      resolvedGlobalCache.set(canonRel, merged);
+    } else {
+      resolvedDepthCache.set(depthKey, merged);
+    }
+    return { options: merged, globallyCacheable };
   };
 
-  const activeEntries = [...rawByCanonRel.values()]
+  const sortedActiveEntries = [...rawByCanonRel.values()]
     .filter((entry) => isActiveProjectConfigFile(entry.relativePath))
     .sort((a, b) =>
       a.relativePath < b.relativePath ? -1 : a.relativePath > b.relativePath ? 1 : 0,
     );
+  const activeEntries = sortedActiveEntries.slice(0, MAX_SCOPED_CONFIGS);
+  if (sortedActiveEntries.length > MAX_SCOPED_CONFIGS) {
+    addWarning(
+      `aktif tsconfig/jsconfig sınırı (${String(MAX_SCOPED_CONFIGS)}) aşıldı; kalan yapılandırmalar kesildi`,
+    );
+  }
 
   const scopedConfigs: ScopedTsConfig[] = [];
   for (const entry of activeEntries) {
-    const rawResolved = resolveConfigOptions(entry, 0, new Set<string>());
-    if (rawResolved === undefined) continue;
+    const outcome = resolveConfigOptions(entry, 0, new Set<string>());
+    if (outcome.options === undefined) continue;
     const resolved = sanitizePathsWithinRoot(
       entry.relativePath,
       normalizedRoot,
-      rawResolved,
+      outcome.options,
       addWarning,
     );
     const dirPrefix = relativeDirPrefix(entry.relativePath);
@@ -974,7 +1227,7 @@ function compatibleModuleForResolution(
   return ts.ModuleKind.ESNext;
 }
 
-/** Program düzeyi `ts.CompilerOptions` nesnesini yüklenen kök config'ten üretir. */
+/** Program düzeyi `ts.CompilerOptions` nesnesini yüklenen config'lerden üretir. */
 export function buildProgramCompilerOptions(
   configs: readonly ScopedTsConfig[],
 ): ts.CompilerOptions {
@@ -1016,8 +1269,14 @@ export function buildProgramCompilerOptions(
       options["pathsBasePath"] = rootConfig.pathsBasePath;
     }
   }
-  if (rootConfig?.experimentalDecorators !== undefined) {
-    options.experimentalDecorators = rootConfig.experimentalDecorators;
+  // MEDIUM-5: Monorepo alt projesindeki `experimentalDecorators: true` program düzeyine taşınır.
+  const experimentalDecorators =
+    rootConfig?.experimentalDecorators ??
+    (configs.some((config) => config.experimentalDecorators === true)
+      ? true
+      : undefined);
+  if (experimentalDecorators !== undefined) {
+    options.experimentalDecorators = experimentalDecorators;
   }
   if (rootConfig?.verbatimModuleSyntax !== undefined) {
     options.verbatimModuleSyntax = rootConfig.verbatimModuleSyntax;
@@ -1026,12 +1285,21 @@ export function buildProgramCompilerOptions(
   return options;
 }
 
-/** Verilen `containingFile` kapsamı için izole `ts.CompilerOptions` üretir. */
+const scopedResolutionCache = new WeakMap<
+  ts.CompilerOptions,
+  WeakMap<ScopedTsConfig, ts.CompilerOptions>
+>();
+
+/** Verilen `containingFile` kapsamı için izole (önbellekli) `ts.CompilerOptions` üretir. */
 export function buildScopedResolutionOptions(
   programOptions: ts.CompilerOptions,
   scopedConfig: ScopedTsConfig | undefined,
 ): ts.CompilerOptions {
   if (scopedConfig === undefined) return programOptions;
+
+  let perProgram = scopedResolutionCache.get(programOptions);
+  const cached = perProgram?.get(scopedConfig);
+  if (cached !== undefined) return cached;
 
   const hasAliasOrBase =
     scopedConfig.paths !== undefined || scopedConfig.baseUrl !== undefined;
@@ -1063,6 +1331,12 @@ export function buildScopedResolutionOptions(
       scoped["pathsBasePath"] = scopedConfig.pathsBasePath;
     }
   }
+
+  if (perProgram === undefined) {
+    perProgram = new WeakMap<ScopedTsConfig, ts.CompilerOptions>();
+    scopedResolutionCache.set(programOptions, perProgram);
+  }
+  perProgram.set(scopedConfig, scoped);
   return scoped;
 }
 
@@ -1093,16 +1367,17 @@ const VIRTUAL_INDEX_CANDIDATES: readonly string[] = [
 /** Uzantısız veya .js/.mjs/.cjs/.jsx referansları için deterministik aday yolları üretir. */
 export function expandCandidatePaths(basePath: string): string[] {
   const candidates: string[] = [basePath];
-  if (basePath.endsWith(".js")) {
+  const lower = basePath.toLowerCase();
+  if (lower.endsWith(".js")) {
     const stem = basePath.slice(0, -3);
     candidates.push(`${stem}.ts`, `${stem}.tsx`, `${stem}.jsx`, `${stem}.mjs`, `${stem}.cjs`);
-  } else if (basePath.endsWith(".jsx")) {
+  } else if (lower.endsWith(".jsx")) {
     const stem = basePath.slice(0, -4);
     candidates.push(`${stem}.tsx`, `${stem}.ts`, `${stem}.js`);
-  } else if (basePath.endsWith(".mjs")) {
+  } else if (lower.endsWith(".mjs")) {
     const stem = basePath.slice(0, -4);
     candidates.push(`${stem}.mts`, `${stem}.ts`, `${stem}.js`);
-  } else if (basePath.endsWith(".cjs")) {
+  } else if (lower.endsWith(".cjs")) {
     const stem = basePath.slice(0, -4);
     candidates.push(`${stem}.cts`, `${stem}.ts`, `${stem}.js`);
   } else {
@@ -1210,15 +1485,18 @@ function resolveViaVirtualAlias(
     if (baseDir !== undefined) {
       for (const match of matchScopedPathPatterns(moduleName, scopedConfig.paths)) {
         for (const rawTarget of match.targets) {
+          // SEC-11: Fonksiyon ikamesi '$&' / "$'" özel kalıp genişlemesini önler.
           const substituted = rawTarget.includes("*")
-            ? rawTarget.replace("*", match.matchedStar)
+            ? rawTarget.replace("*", () => match.matchedStar)
             : rawTarget;
           const targetPosix = toPosix(substituted);
           if (targetPosix.startsWith("/") || /^[a-zA-Z]:/.test(targetPosix)) {
             continue;
           }
           const resolved = probeEntryInMemory(
-            `${baseDir}/${targetPosix}`,
+            baseDir.endsWith("/")
+              ? `${baseDir}${targetPosix}`
+              : `${baseDir}/${targetPosix}`,
             rootKeyWithSlash,
             entries,
           );
@@ -1236,7 +1514,9 @@ function resolveViaVirtualAlias(
     !/^[a-zA-Z]:/.test(moduleName)
   ) {
     return probeEntryInMemory(
-      `${scopedConfig.baseUrl}/${toPosix(moduleName)}`,
+      scopedConfig.baseUrl.endsWith("/")
+        ? `${scopedConfig.baseUrl}${toPosix(moduleName)}`
+        : `${scopedConfig.baseUrl}/${toPosix(moduleName)}`,
       rootKeyWithSlash,
       entries,
     );
@@ -1248,12 +1528,13 @@ function resolveViaVirtualAlias(
 /**
  * Her `containingFile` için en yakın ata `ScopedTsConfig` ile modül çözer;
  * Bundler fallback ve bellek-içi alias eşleşmesiyle uzantısız/alias importları
- * deterministik biçimde `verified` olarak çözümler.
+ * deterministik biçimde `verified` olarak çözümler ve kök dışına kaçışı engeller.
  */
 export function resolveScopedModuleName(params: {
   readonly moduleName: string;
   readonly containingFile: string;
   readonly rootPosix: string;
+  readonly allowedLibDir?: string;
   readonly programOptions: ts.CompilerOptions;
   readonly configs: readonly ScopedTsConfig[];
   readonly resolutionHost: ts.ModuleResolutionHost;
@@ -1266,20 +1547,53 @@ export function resolveScopedModuleName(params: {
     moduleName,
     containingFile,
     rootPosix,
+    allowedLibDir,
     programOptions,
     configs,
     resolutionHost,
     entries,
   } = params;
-  const rootKey = canonicalKey(rootPosix);
-  const rootKeyWithSlash = rootKey === "/" ? "/" : `${rootKey}/`;
-  const containingKey = canonicalKey(containingFile);
+  // SEC-10: Null-byte enjeksiyonuna karşı erken red.
+  if (moduleName.includes("\0")) return undefined;
+
+  const normalizedRoot = stripNonRootTrailingSlash(normalizePosixAbsolute(rootPosix));
+  const normalizedRootWithSlash = normalizedRoot.endsWith("/")
+    ? normalizedRoot
+    : `${normalizedRoot}/`;
+  const rootKey = canonicalKey(normalizedRoot);
+  const rootKeyWithSlash = rootKey.endsWith("/") ? rootKey : `${rootKey}/`;
+  const allowedLibKeyWithSlash =
+    allowedLibDir === undefined
+      ? undefined
+      : (() => {
+          const libKey = canonicalKey(allowedLibDir);
+          return libKey.endsWith("/") ? libKey : `${libKey}/`;
+        })();
+
+  // SEC-03: Çözümlenen dosya mutlaka workspace kökü veya TS lib dizini içinde kalmalıdır.
+  const isAllowedResolved = (
+    resolved: ts.ResolvedModuleFull | undefined,
+  ): ts.ResolvedModuleFull | undefined => {
+    if (resolved === undefined) return undefined;
+    const resolvedKey = canonicalKey(resolved.resolvedFileName);
+    if (resolvedKey.startsWith(rootKeyWithSlash)) return resolved;
+    if (
+      allowedLibKeyWithSlash !== undefined &&
+      resolvedKey.startsWith(allowedLibKeyWithSlash)
+    ) {
+      return resolved;
+    }
+    return undefined;
+  };
+
+  const normalizedContaining = normalizePosixAbsolute(containingFile);
+  const containingKey = canonicalKey(normalizedContaining);
   const containingEntry = entries.get(containingKey);
   const containingRel =
     containingEntry !== undefined
       ? containingEntry.relativePath
       : containingKey.startsWith(rootKeyWithSlash)
-        ? normalizePosixAbsolute(containingFile).slice(rootPosix.length + 1)
+        ? normalizedContaining.slice(normalizedRootWithSlash.length)
         : undefined;
 
   const scopedConfig =
@@ -1291,12 +1605,14 @@ export function resolveScopedModuleName(params: {
     scopedConfig,
   );
 
-  const primary = ts.resolveModuleName(
-    moduleName,
-    containingFile,
-    scopedOptions,
-    resolutionHost,
-  ).resolvedModule;
+  const primary = isAllowedResolved(
+    ts.resolveModuleName(
+      moduleName,
+      containingFile,
+      scopedOptions,
+      resolutionHost,
+    ).resolvedModule,
+  );
   if (primary !== undefined) return primary;
 
   if (scopedOptions.moduleResolution !== ts.ModuleResolutionKind.Bundler) {
@@ -1305,12 +1621,14 @@ export function resolveScopedModuleName(params: {
       module: ts.ModuleKind.ESNext,
       moduleResolution: ts.ModuleResolutionKind.Bundler,
     };
-    const bundlerResolved = ts.resolveModuleName(
-      moduleName,
-      containingFile,
-      bundlerOptions,
-      resolutionHost,
-    ).resolvedModule;
+    const bundlerResolved = isAllowedResolved(
+      ts.resolveModuleName(
+        moduleName,
+        containingFile,
+        bundlerOptions,
+        resolutionHost,
+      ).resolvedModule,
+    );
     if (bundlerResolved !== undefined) return bundlerResolved;
   }
 

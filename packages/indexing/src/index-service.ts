@@ -91,6 +91,7 @@ import {
 import {
   collectInventory,
   collectInventoryAsync,
+  yieldToEventLoop,
   type InventoryEntry,
 } from "./inventory.js";
 
@@ -428,19 +429,10 @@ const PY_EXTENSIONS = new Set([".py"]);
 const GO_EXTENSIONS = new Set([".go"]);
 const RS_EXTENSIONS = new Set([".rs"]);
 
-function isTsConfigFile(relativePath: string): boolean {
-  const base = path.posix.basename(relativePath).toLowerCase();
-  return (
-    base === "tsconfig.json" ||
-    base === "jsconfig.json" ||
-    /^tsconfig\..+\.json$/.test(base)
-  );
-}
+const TS_JS_CONFIG_FILE_PATTERN = /^(?:ts|js)config(?:\..+|-.*)?\.json$/i;
 
-function yieldToEventLoop(): Promise<void> {
-  return new Promise<void>((resolve) => {
-    setImmediate(resolve);
-  });
+function isTsConfigFile(relativePath: string): boolean {
+  return TS_JS_CONFIG_FILE_PATTERN.test(path.posix.basename(relativePath));
 }
 
 /**
@@ -736,13 +728,16 @@ export class IndexService {
     const relevantEntries = entries.filter((entry) =>
       this.isIndexRelevantFile(entry.relativePath),
     );
+    const relevantPaths = new Set(
+      relevantEntries.map((entry) => entry.relativePath),
+    );
     const changedSources = relevantEntries.filter(
       (entry) => previousHashes.get(entry.relativePath) !== entry.contentHash,
     );
     const deletedSources = [...previousHashes.keys()].filter(
       (relativePath) =>
         this.isIndexRelevantFile(relativePath) &&
-        !relevantEntries.some((entry) => entry.relativePath === relativePath),
+        !relevantPaths.has(relativePath),
     );
     return changedSources.length > 0 || deletedSources.length > 0;
   }

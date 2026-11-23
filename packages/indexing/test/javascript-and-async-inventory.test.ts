@@ -6,8 +6,11 @@ import { describe, expect, it } from "vitest";
 import {
   collectInventory,
   collectInventoryAsync,
+  IndexJobManager,
   IndexService,
   IndexingError,
+  WorkspaceWatcher,
+  type WatchHandle,
 } from "../src/index.js";
 import { WorkspaceAccessPolicy } from "@causoryn/workspace";
 import { InMemoryGraphRepository } from "@causoryn/graph";
@@ -240,6 +243,140 @@ describe("Track 1 — Non-Blocking collectInventoryAsync", { timeout: 30_000 }, 
       }
       expect(caught).toBeInstanceOf(IndexingError);
       expect((caught as IndexingError).code).toBe("indexing/limit-exceeded");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("SEC-07: bounded fd read rejects oversized files exceeding policy maxFileBytes in both sync and async inventory", async () => {
+    const root = makeTempWorkspace({
+      "small.js": "export const ok = 1;\n",
+      "huge.js": `export const big = "${"a".repeat(4096)}";\n`,
+    });
+
+    try {
+      const policy = WorkspaceAccessPolicy.create({
+        allowRoots: [root],
+        maxFileBytes: 512,
+      });
+      const auth = policy.authorizeRoot(root);
+      if (!auth.allowed) throw new Error(`Unexpected root denial: ${auth.reason}`);
+
+      const syncEntries = collectInventory(policy, auth.canonicalRoot, 100);
+      const asyncEntries = await collectInventoryAsync(policy, auth.canonicalRoot, 100, 1);
+
+      expect(syncEntries.map((e) => e.relativePath)).toEqual(["small.js"]);
+      expect(JSON.stringify(asyncEntries)).toBe(JSON.stringify(syncEntries));
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("MEDIUM-3: jsconfig.base.json and tsconfig-base.json pass through IndexService, trigger incremental invalidation, and trigger WorkspaceWatcher full rebuild", async () => {
+    const root = makeTempWorkspace({
+      "jsconfig.base.json": JSON.stringify({
+        compilerOptions: {
+          baseUrl: ".",
+          paths: { "~/*": ["./src/*"] },
+        },
+      }),
+      "jsconfig.json": JSON.stringify({
+        extends: "./jsconfig.base.json",
+      }),
+      "src/lib/calc.js": "export function double(n) { return n * 2; }\n",
+      "src/alt/calc.js": "export function double(n) { return n * 3; }\n",
+      "src/index.js": 'import { double } from "~/lib/calc";\nexport function run(x) { return double(x); }\n',
+    });
+
+    try {
+      const repo = new InMemoryGraphRepository();
+      const service = makeService(repo, root, "ws_jsconfig_base");
+      const first = await service.runIndexAsync(root);
+      expect(first.state).toBe("ready");
+
+      const byId1 = new Map(first.snapshot.nodes.map((n) => [n.id, n]));
+      expect(
+        first.snapshot.edges.some(
+          (e) =>
+            e.kind === "IMPORTS" &&
+            e.resolution === "verified" &&
+            byId1.get(e.from)?.qualifiedName === "src/index.js" &&
+            byId1.get(e.to)?.qualifiedName === "src/lib/calc.js",
+        ),
+      ).toBe(true);
+
+      // Edit jsconfig.base.json -> MUST invalidate incremental no-op and re-resolve to src/alt/calc.js!
+      writeFileSync(
+        path.join(root, "jsconfig.base.json"),
+        JSON.stringify({
+          compilerOptions: {
+            baseUrl: ".",
+            paths: { "~/lib/*": ["./src/alt/*"] },
+          },
+        }),
+        "utf8",
+      );
+      const second = await service.runIncrementalIndexAsync(root, ["jsconfig.base.json"]);
+      expect(second.published).toBe(true);
+      const byId2 = new Map(second.snapshot.nodes.map((n) => [n.id, n]));
+      expect(
+        second.snapshot.edges.some(
+          (e) =>
+            e.kind === "IMPORTS" &&
+            e.resolution === "verified" &&
+            byId2.get(e.from)?.qualifiedName === "src/index.js" &&
+            byId2.get(e.to)?.qualifiedName === "src/alt/calc.js",
+        ),
+      ).toBe(true);
+
+      // WorkspaceWatcher treats jsconfig.base.json and tsconfig-base.json as full-rebuild invalidation triggers.
+      const policy = WorkspaceAccessPolicy.create({ allowRoots: [root] });
+      const jobManager = new IndexJobManager({
+        indexService: service,
+        policy,
+        clock: () => FIXED_NOW,
+      });
+      let listener: ((event: string, filename: string | null) => void) | undefined;
+      const fakeHandle: WatchHandle = {
+        close: () => undefined,
+        on: () => undefined,
+      };
+      const watcher = new WorkspaceWatcher({
+        rootPath: root,
+        policy,
+        jobManager,
+        repository: repo,
+        workspaceId: "ws_jsconfig_base",
+        clock: () => FIXED_NOW,
+        debounceMs: 300,
+        maxWaitMs: 600,
+        log: () => undefined,
+        watchFactory: (_root, cb) => {
+          listener = cb;
+          return fakeHandle;
+        },
+      });
+      watcher.start();
+      try {
+        writeFileSync(
+          path.join(root, "tsconfig-base.json"),
+          JSON.stringify({ compilerOptions: { target: "ES2022" } }),
+          "utf8",
+        );
+        listener?.("change", "tsconfig-base.json");
+        const deadline = Date.now() + 5_000;
+        while (jobManager.jobs().length === 0 && Date.now() < deadline) {
+          await new Promise((resolve) => setTimeout(resolve, 25));
+        }
+        const jobs = jobManager.jobs();
+        expect(jobs.length).toBeGreaterThanOrEqual(1);
+        expect(jobs[jobs.length - 1]?.mode).toBe("full");
+        if (jobs[jobs.length - 1] !== undefined) {
+          await jobManager.waitForJob((jobs[jobs.length - 1] as { jobId: string }).jobId);
+        }
+      } finally {
+        watcher.stop();
+      }
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

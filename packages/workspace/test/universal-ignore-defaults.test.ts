@@ -7,6 +7,7 @@ import {
   DEFAULT_BINARY_EXTENSIONS,
   DEFAULT_IGNORE_PATTERNS,
   WorkspaceAccessPolicy,
+  matchesIgnorePattern,
   parseWorkspacePolicyConfig,
 } from "../src/index.js";
 
@@ -178,5 +179,49 @@ describe("v0.2.3 evrensel güvenli ignore ve binary varsayılanları", () => {
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
+  });
+});
+
+describe("v0.2.3 SEC-01 & SEC-05: polinomik glob eşleyici (ReDoS yok) ve önbellek dayanıklılığı", () => {
+  it("SEC-01: geri izleme patlaması üreten *a*a...*b desenini < 50 ms içinde deterministik eşler", () => {
+    const adversarial = `${"*a".repeat(25)}*b`;
+    const candidate = "a".repeat(45);
+
+    const t0 = performance.now();
+    expect(matchesIgnorePattern(candidate, false, adversarial)).toBe(false);
+    expect(matchesIgnorePattern(`dir/${candidate}`, false, `dir/${adversarial}`)).toBe(false);
+    const elapsedMs = performance.now() - t0;
+
+    expect(elapsedMs, `ReDoS şüphesi: ${elapsedMs.toFixed(1)} ms`).toBeLessThan(50);
+    expect(matchesIgnorePattern(`${candidate}b`, false, adversarial)).toBe(true);
+  });
+
+  it("SEC-01: RegExp özel karakterlerini literal olarak ve ** / dirOnly semantiğini bire bir korur", () => {
+    expect(matchesIgnorePattern("src/[id]/page.ts", false, "src/[id]/*.ts")).toBe(true);
+    expect(matchesIgnorePattern("src/i/page.ts", false, "src/[id]/*.ts")).toBe(false);
+    expect(matchesIgnorePattern("a+b(1)$^.{x}.ts", false, "a+b(1)$^.{x}.ts")).toBe(true);
+    expect(matchesIgnorePattern("frontend/build", true, "frontend/**/build/")).toBe(true);
+    expect(matchesIgnorePattern("frontend/build", false, "frontend/**/build/")).toBe(false);
+    expect(matchesIgnorePattern("frontend/a/b/build", true, "frontend/**/build/")).toBe(true);
+    expect(matchesIgnorePattern("x", false, "**")).toBe(true);
+    expect(matchesIgnorePattern("a/b/c", false, "**")).toBe(true);
+    expect(matchesIgnorePattern("pkg/dist", true, "pkg/dist/**")).toBe(true);
+    expect(matchesIgnorePattern("pkg/dist/a/b.js", false, "pkg/dist/**")).toBe(true);
+  });
+
+  it("SEC-05: 1500+ benzersiz desenle önbellek thrashing olmadan hızlı çalışır", () => {
+    const patterns: string[] = [];
+    for (let i = 0; i < 1_500; i += 1) {
+      patterns.push(`pkg-${String(i).padStart(4, "0")}/**/gen-*.tmp`);
+    }
+    const t0 = performance.now();
+    for (let round = 0; round < 3; round += 1) {
+      for (const p of patterns) {
+        expect(matchesIgnorePattern("src/app.ts", false, p)).toBe(false);
+      }
+    }
+    expect(matchesIgnorePattern("pkg-0750/sub/gen-1.tmp", false, patterns[750] as string)).toBe(true);
+    const elapsedMs = performance.now() - t0;
+    expect(elapsedMs).toBeLessThan(200);
   });
 });

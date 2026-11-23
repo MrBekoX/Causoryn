@@ -136,12 +136,13 @@ export interface WorkspaceWatcherOptions {
  * ve policy değişince bağımlı alanlar invalid edilir". Bu dosyalara dokunan
  * değişim kümesi FULL rebuild açar; diğerleri incremental işlettir.
  */
+const TS_JS_CONFIG_TRIGGER_PATTERN = /^(?:ts|js)config(?:\..+|-.*)?\.json$/i;
+
 function isInvalidationTrigger(relativePosix: string): boolean {
   const base = path.posix.basename(relativePosix).toLowerCase();
   return (
     base === "package.json" ||
-    base === "tsconfig.json" ||
-    /^tsconfig\.[^.]+\.json$/.test(base) ||
+    TS_JS_CONFIG_TRIGGER_PATTERN.test(base) ||
     base.endsWith(".sln") ||
     base.endsWith(".csproj")
   );

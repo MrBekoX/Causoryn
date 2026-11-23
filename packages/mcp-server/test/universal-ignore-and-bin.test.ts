@@ -12,16 +12,21 @@ import { describe, expect, it } from "vitest";
 
 import { WorkspaceAccessPolicy } from "@causoryn/workspace";
 
-import { buildWorkspaceAutoConfig } from "../src/index.js";
+import { CausorynConfigError, buildWorkspaceAutoConfig } from "../src/index.js";
 import {
+  MAX_CSPROJ_BIN_PATTERNS,
   MAX_CSPROJ_SCAN_DEPTH,
   MAX_CSPROJ_SCAN_DIRS,
   MAX_DISCOVERED_IGNORE_PATTERNS,
   MAX_IGNORE_FILE_BYTES,
+  MAX_LINES_PER_IGNORE_FILE,
+  MAX_NEGATED_ANCESTOR_DEPTH,
   MAX_NESTED_GITIGNORE_DEPTH,
   MAX_NESTED_GITIGNORE_FILES,
   MAX_NESTED_WALK_DIRS,
+  MAX_WILDCARDS_PER_PATTERN,
   discoverWorkspaceIgnoreConfig,
+  isSafeIgnoreDirSegment,
 } from "../src/workspace-ignore-discovery.js";
 
 /**
@@ -590,7 +595,7 @@ describe("v0.2.3 discoverWorkspaceIgnoreConfig — birim sözleşmesi, budama ve
 
       const discovered = discoverWorkspaceIgnoreConfig(ws.repoDir);
       expect(discovered.extraIgnore).toContain(".mimosa/");
-      expect(discovered.extraIgnore).toContain("frontend/**/tmp-out/**");
+      expect(discovered.extraIgnore).toContain("frontend/**/tmp-out/");
       expect(discovered.extraIgnore.some((p) => p.includes("mimosa-sentinel"))).toBe(false);
       expect(discovered.extraIgnore.some((p) => p.includes("nm-sentinel"))).toBe(false);
     } finally {
@@ -681,6 +686,236 @@ describe("v0.2.3 discoverWorkspaceIgnoreConfig — birim sözleşmesi, budama ve
       expect(discovered.refinedDefaultIgnore).not.toContain("sub/bin/**");
     } finally {
       ws.cleanup();
+    }
+  });
+});
+
+describe("v0.2.3 denetim düzeltme regresyonları (SEC-01/05/07/08/09, HIGH-1/3, MEDIUM-2)", () => {
+  it("SEC-01: 2 satırlık ReDoS .gitignore (!a*40 + *a*a...*b) < 50 ms içinde biter ve > 16 jokerli desen reddedilir", () => {
+    expect(MAX_WILDCARDS_PER_PATTERN).toBe(16);
+    expect(MAX_LINES_PER_IGNORE_FILE).toBe(4_000);
+    expect(MAX_NEGATED_ANCESTOR_DEPTH).toBe(16);
+    expect(MAX_CSPROJ_BIN_PATTERNS).toBe(128);
+
+    const ws = makeWorkspace("causoryn-sec01-");
+    try {
+      const target = "a".repeat(40);
+      const redosPattern = `${"*a".repeat(22)}*b`;
+      writeFileSync(
+        path.join(ws.repoDir, ".gitignore"),
+        `!${target}\n${redosPattern}\n`,
+        "utf8",
+      );
+
+      const t0 = performance.now();
+      const discovered = discoverWorkspaceIgnoreConfig(ws.repoDir);
+      const elapsedMs = performance.now() - t0;
+
+      expect(elapsedMs, `2 satırlık ReDoS .gitignore yavaşladı: ${elapsedMs.toFixed(1)} ms`).toBeLessThan(50);
+      expect(discovered.extraIgnore).not.toContain(redosPattern);
+    } finally {
+      ws.cleanup();
+    }
+  });
+
+  it("SEC-05 & HIGH-3: 256 KB yinelenen satırlar + 64 derin negasyon < 200 ms sürer; 4000 satır sınırı ve 128 .csproj tavanı uygulanır", () => {
+    const ws = makeWorkspace("causoryn-sec05-");
+    try {
+      const lines: string[] = [];
+      for (let i = 0; i < 64; i += 1) {
+        const deep = Array.from({ length: 24 }, (_, idx) => `d${String(idx)}`).join("/");
+        lines.push(`!${deep}/keep-${String(i).padStart(2, "0")}.ts`);
+      }
+      // ~245 KB yinelenen satırlar (4000 satır tavanının çok üstünde)
+      for (let i = 0; i < 12_000; i += 1) {
+        lines.push("dup-entry/*.tmp");
+      }
+      lines.push("after-line-cap-dir/");
+      const content = `${lines.join("\n")}\n`;
+      expect(Buffer.byteLength(content, "utf8")).toBeLessThanOrEqual(MAX_IGNORE_FILE_BYTES);
+      writeFileSync(path.join(ws.repoDir, ".gitignore"), content, "utf8");
+
+      const t0 = performance.now();
+      const discovered = discoverWorkspaceIgnoreConfig(ws.repoDir);
+      const elapsedMs = performance.now() - t0;
+
+      expect(elapsedMs, `256 KB .gitignore işleme süresi aşıldı: ${elapsedMs.toFixed(1)} ms`).toBeLessThan(200);
+      expect(discovered.extraIgnore).not.toContain("after-line-cap-dir/");
+    } finally {
+      ws.cleanup();
+    }
+
+    // 140 .csproj alt dizini -> refinedDefaultIgnore içinde en fazla 128 proje bin/** kuralı:
+    const wsCsproj = makeWorkspace("causoryn-csproj-cap-");
+    try {
+      for (let i = 0; i < 140; i += 1) {
+        const dirName = `svc-${String(i).padStart(3, "0")}`;
+        const dirPath = path.join(wsCsproj.repoDir, dirName);
+        mkdirSync(dirPath, { recursive: true });
+        writeFileSync(path.join(dirPath, "App.csproj"), "<Project />\n", "utf8");
+      }
+      const discovered = discoverWorkspaceIgnoreConfig(wsCsproj.repoDir);
+      const projectBinRules = (discovered.refinedDefaultIgnore ?? []).filter((p) =>
+        /^svc-\d{3}\/bin\/\*\*$/.test(p),
+      );
+      expect(projectBinRules.length).toBe(128);
+      expect(projectBinRules[0]).toBe("svc-000/bin/**");
+      expect(projectBinRules[127]).toBe("svc-127/bin/**");
+    } finally {
+      wsCsproj.cleanup();
+    }
+  });
+
+  it("HIGH-1: nested .gitignore dirOnly ('build/', '/local-dist/') normal dosyayı gizlemez ama dizin ve içeriğini reddeder", () => {
+    const ws = makeWorkspace("causoryn-dironly-");
+    try {
+      mkdirSync(path.join(ws.repoDir, "frontend", "sub", "build"), { recursive: true });
+      mkdirSync(path.join(ws.repoDir, "frontend-dir", "local-dist"), { recursive: true });
+      // Regular dosyalar (dizin DEĞİL!):
+      writeFileSync(path.join(ws.repoDir, "frontend", "build"), "#!/bin/sh\necho build\n", "utf8");
+      writeFileSync(path.join(ws.repoDir, "frontend", "local-dist"), "regular file\n", "utf8");
+      // Gerçek dizin altındaki dosyalar:
+      writeFileSync(path.join(ws.repoDir, "frontend", "sub", "build", "a.js"), "var a=1;\n", "utf8");
+      writeFileSync(path.join(ws.repoDir, "frontend-dir", "local-dist", "bundle.js"), "var b=1;\n", "utf8");
+
+      writeFileSync(
+        path.join(ws.repoDir, "frontend", ".gitignore"),
+        "build/\n/local-dist/\n",
+        "utf8",
+      );
+      writeFileSync(
+        path.join(ws.repoDir, "frontend-dir", ".gitignore"),
+        "/local-dist/\n",
+        "utf8",
+      );
+
+      const discovered = discoverWorkspaceIgnoreConfig(ws.repoDir);
+      expect(discovered.extraIgnore).toContain("frontend/**/build/");
+      expect(discovered.extraIgnore).toContain("frontend/local-dist/");
+      expect(discovered.extraIgnore).toContain("frontend-dir/local-dist/");
+
+      const { policy } = buildPolicy(ws);
+      // Normal dosyalar dirOnly kuralıyla GİZLENMEMELİ:
+      expect(policy.checkPath(ws.repoDir, "frontend/build").allowed).toBe(true);
+      expect(policy.checkPath(ws.repoDir, "frontend/local-dist").allowed).toBe(true);
+      // Gerçek dizin ve içeriği REDDEDİLMELİ:
+      expect(policy.checkPath(ws.repoDir, "frontend/sub/build").allowed).toBe(false);
+      expect(policy.checkPath(ws.repoDir, "frontend/sub/build/a.js").allowed).toBe(false);
+      expect(policy.checkPath(ws.repoDir, "frontend-dir/local-dist").allowed).toBe(false);
+      expect(policy.checkPath(ws.repoDir, "frontend-dir/local-dist/bundle.js").allowed).toBe(false);
+    } finally {
+      ws.cleanup();
+    }
+  });
+
+  it("MEDIUM-2: jokerli negasyon (!build/*.js, !*.ts) ve > 64 negasyon taşması aşırı-dışlamayı önler", () => {
+    const ws = makeWorkspace("causoryn-neg-wc-");
+    try {
+      mkdirSync(path.join(ws.repoDir, "build"), { recursive: true });
+      mkdirSync(path.join(ws.repoDir, "src"), { recursive: true });
+      mkdirSync(path.join(ws.repoDir, "logs"), { recursive: true });
+      writeFileSync(path.join(ws.repoDir, "build", "output.js"), "module.exports = 1;\n", "utf8");
+      writeFileSync(path.join(ws.repoDir, "src", "gen.ts"), "export const g = 1;\n", "utf8");
+      writeFileSync(path.join(ws.repoDir, "logs", "run.log"), "log\n", "utf8");
+      writeFileSync(
+        path.join(ws.repoDir, ".gitignore"),
+        [
+          "build/output.js",
+          "!build/*.js",
+          "src/gen.ts",
+          "!*.ts",
+          "logs/run.log",
+        ].join("\n"),
+        "utf8",
+      );
+
+      const { policy } = buildPolicy(ws);
+      expect(policy.checkPath(ws.repoDir, "build/output.js").allowed).toBe(true);
+      expect(policy.checkPath(ws.repoDir, "src/gen.ts").allowed).toBe(true);
+      expect(policy.checkPath(ws.repoDir, "logs/run.log").allowed).toBe(false);
+    } finally {
+      ws.cleanup();
+    }
+
+    // > 64 benzersiz negasyon taşması: jokerli pozitif kurallar muhafazakâr biçimde atlanır, literal kurallar korunur
+    const wsOverflow = makeWorkspace("causoryn-neg-ovf-");
+    try {
+      mkdirSync(path.join(wsOverflow.repoDir, "trash-dir"), { recursive: true });
+      writeFileSync(path.join(wsOverflow.repoDir, "keep-68.ts"), "export const k = 68;\n", "utf8");
+      writeFileSync(path.join(wsOverflow.repoDir, "other.ts"), "export const o = 1;\n", "utf8");
+      writeFileSync(path.join(wsOverflow.repoDir, "trash-dir", "drop.txt"), "drop\n", "utf8");
+
+      const negLines: string[] = [];
+      for (let i = 0; i < 70; i += 1) {
+        negLines.push(`!keep-${String(i).padStart(2, "0")}.ts`);
+      }
+      negLines.push("*.ts");
+      negLines.push("trash-dir/");
+      writeFileSync(path.join(wsOverflow.repoDir, ".gitignore"), `${negLines.join("\n")}\n`, "utf8");
+
+      const { policy } = buildPolicy(wsOverflow);
+      expect(policy.checkPath(wsOverflow.repoDir, "keep-68.ts").allowed).toBe(true);
+      expect(policy.checkPath(wsOverflow.repoDir, "other.ts").allowed).toBe(true);
+      expect(policy.checkPath(wsOverflow.repoDir, "trash-dir/drop.txt").allowed).toBe(false);
+    } finally {
+      wsOverflow.cleanup();
+    }
+  });
+
+  it("SEC-09: doğrulanmamış göreli allowRoots şema doğrulaması öncesi diskte yürünmez ve extraIgnore Object.hasOwn ile okunur", () => {
+    try {
+      buildWorkspaceAutoConfig({
+        roots: [],
+        autoDataDir: false,
+        rawBaseConfig: {
+          allowRoots: ["."],
+          extraIgnore: "invalid-not-an-array",
+        },
+      });
+      throw new Error("CausorynConfigError beklenmişti");
+    } catch (error) {
+      expect(error).toBeInstanceOf(CausorynConfigError);
+      const issues = (error as CausorynConfigError).issues;
+      expect(issues.some((i) => i.includes("allowRoots"))).toBe(true);
+      // Eğer "." diskte yürünseydi mergeExtraIgnore "invalid-not-an-array" değerini
+      // CWD .gitignore dizisiyle ezecekti ve extraIgnore doğrulama hatası kaybolacaktı!
+      expect(issues.some((i) => i.includes("extraIgnore"))).toBe(true);
+    }
+
+    // autoDataDir=true iken de göreli allowRoots reddedilmelidir:
+    expect(() =>
+      buildWorkspaceAutoConfig({
+        roots: [],
+        autoDataDir: true,
+        rawBaseConfig: { allowRoots: ["../other"] },
+      }),
+    ).toThrow(CausorynConfigError);
+  });
+
+  it("SEC-08: glob joker (*, ?) veya yol kaçışı içeren dizin adları isSafeIgnoreDirSegment tarafından reddedilir", () => {
+    for (const bad of ["", ".", "..", "*", "foo*bar", "a?b", "a\0b", "a/b", "a\\b"]) {
+      expect(isSafeIgnoreDirSegment(bad), `reddedilmeli: ${JSON.stringify(bad)}`).toBe(false);
+    }
+    for (const good of ["frontend", "pkg-01", ".config", "Api.Service_2"]) {
+      expect(isSafeIgnoreDirSegment(good), `kabul edilmeli: ${good}`).toBe(true);
+    }
+
+    if (process.platform !== "win32") {
+      const ws = makeWorkspace("causoryn-sec08-posix-");
+      try {
+        const evilDir = path.join(ws.repoDir, "evil*dir");
+        mkdirSync(evilDir, { recursive: true });
+        writeFileSync(path.join(evilDir, ".gitignore"), "secret/\n", "utf8");
+        writeFileSync(path.join(evilDir, "Evil.csproj"), "<Project />\n", "utf8");
+
+        const discovered = discoverWorkspaceIgnoreConfig(ws.repoDir);
+        expect(discovered.extraIgnore.some((p) => p.includes("evil*dir"))).toBe(false);
+        expect((discovered.refinedDefaultIgnore ?? []).some((p) => p.includes("evil*dir"))).toBe(
+          false,
+        );
+      } finally {
+        ws.cleanup();
+      }
     }
   });
 });

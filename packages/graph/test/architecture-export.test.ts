@@ -1,6 +1,7 @@
-import { mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 import { afterEach, describe, expect, it } from "vitest";
 
@@ -604,5 +605,48 @@ describe("writeDocumentation — view & annotations entegrasyonu", () => {
       fullPolicy,
     );
     expect(path.basename(fullHtml.path)).toBe("causoryn-architecture.html");
+  });
+
+  it("SEC-12: atomik geçici dosya yazımı exclusive flag='wx' kullanır ve mevcut hedef dosyayı artık .tmp bırakmadan temizce üzerine yazar", () => {
+    const snap = richFixture();
+    const outDir = makeTmp("atomic-wx");
+    const policy = OutputAccessPolicy.create([outDir]);
+    const ann = sampleAnnotations(snap);
+
+    // 1. İlk interactive export hedef dosyayı oluşturur
+    const first = writeDocumentation(
+      { snapshot: snap, format: "html", outputDir: outDir, view: "interactive" },
+      policy,
+    );
+    expect(first.atomic).toBe(true);
+    expect(path.basename(first.path)).toBe(EXPORT_INTERACTIVE_HTML_FILE_NAME);
+    expect(readFileSync(first.path, "utf8")).not.toContain("Layered Modular Monolith");
+
+    // 2. Artık .tmp dosyası varken ikinci yazma mevcut hedefi atomik ve temizce üzerine yazar
+    writeFileSync(`${first.path}.tmp`, "STALE-TMP-RESIDUE", "utf8");
+    const second = writeDocumentation(
+      {
+        snapshot: snap,
+        format: "html",
+        outputDir: outDir,
+        view: "interactive",
+        annotations: ann,
+      },
+      policy,
+    );
+    expect(second.atomic).toBe(true);
+    expect(second.path).toBe(first.path);
+    const updatedContent = readFileSync(second.path, "utf8");
+    expect(updatedContent).toContain("causoryn-portal-data");
+    expect(updatedContent).toContain("Layered Modular Monolith");
+    expect(updatedContent).not.toContain("STALE-TMP-RESIDUE");
+    expect(readdirSync(outDir)).toEqual([EXPORT_INTERACTIVE_HTML_FILE_NAME]);
+
+    // 3. SEC-12 TOCTOU koruması: export.ts geçici dosyayı { encoding: "utf8", flag: "wx" } ile açar
+    const exportSourcePath = fileURLToPath(new URL("../src/export.ts", import.meta.url));
+    const exportSource = readFileSync(exportSourcePath, "utf8");
+    expect(exportSource).toMatch(
+      /writeFileSync\(\s*tmpPath\s*,\s*content\s*,\s*\{\s*encoding:\s*"utf8"\s*,\s*flag:\s*"wx"\s*\}\s*\)/,
+    );
   });
 });

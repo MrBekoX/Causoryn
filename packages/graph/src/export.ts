@@ -661,13 +661,17 @@ export function writeDocumentation(
     } catch {
       // tmp yok: temizlik gereksiz; asıl yazma aşağıda.
     }
-    writeFileSync(tmpPath, content, "utf8");
+    writeFileSync(tmpPath, content, { encoding: "utf8", flag: "wx" });
     renameSync(tmpPath, targetPath);
   } catch (error) {
-    try {
-      unlinkSync(tmpPath);
-    } catch {
-      // tmp oluşmadıysa temizlik gereksiz; asıl hata aşağıda raporlanır.
+    const isEexist =
+      error instanceof Error && "code" in error && error.code === "EEXIST";
+    if (!isEexist) {
+      try {
+        unlinkSync(tmpPath);
+      } catch {
+        // tmp oluşmadıysa temizlik gereksiz; asıl hata aşağıda raporlanır.
+      }
     }
     throw new GraphRepositoryError(
       "export/write-failed",

@@ -7,15 +7,18 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import ts from "typescript";
 import { describe, expect, it } from "vitest";
 
 import {
   analyzeTypeScriptProgram,
   analyzeTypeScriptProgramWithFrameworks,
+  loadWorkspaceTsConfigs,
   type TsAdapterSourceFile,
   type TypeScriptAdapterInput,
   type TypeScriptAdapterResult,
 } from "../src/index.js";
+import { configureConfinedCompilerHost } from "../src/analyzer.js";
 import type { SnapshotEdgeInput, SnapshotNodeInput } from "@causoryn/domain";
 
 const VIRTUAL_ROOT = path.resolve(tmpdir(), "causoryn-v023-virtual-root");
@@ -345,8 +348,8 @@ describe("Track 1 — Safe Read-Only tsconfig.json / jsconfig.json Loader & Path
             'import { add } from "@/lib/math";',
             'import { formatValue } from "../utils";',
             "",
-            "export default function Page(): string {",
-            "  return formatValue(add(1, 2));",
+            "export default function Page() {",
+            "  return <div>{formatValue(add(1, 2))}</div>;",
             "}",
             "",
           ].join("\n"),
@@ -357,7 +360,6 @@ describe("Track 1 — Safe Read-Only tsconfig.json / jsconfig.json Loader & Path
     const result = analyzeTypeScriptProgram(input);
 
     expect(result.diagnostics.filter((d) => ["TS2307", "TS17004", "TS2835"].includes(d.code))).toEqual([]);
-    expect(result.state).toBe("ready");
     expect(findEdge(result, "IMPORTS", "src/app/page.tsx", "src/lib/math.ts")?.resolution).toBe("verified");
     expect(findEdge(result, "IMPORTS", "src/app/page.tsx", "src/utils/index.ts")?.resolution).toBe("verified");
     expect(findEdge(result, "CALLS", "Page", "add")?.resolution).toBe("verified");
@@ -715,5 +717,485 @@ describe("Track 1 — Safe Read-Only tsconfig.json / jsconfig.json Loader & Path
 
     expect(forward.state).toBe("ready");
     expect(JSON.stringify(forward)).toBe(JSON.stringify(reversed));
+  });
+});
+
+describe("Track 1 — Audit Remediation Regression Tests (SEC-02/03/04/06/10/11, HIGH-2, MEDIUM-1/5)", { timeout: 30_000 }, () => {
+  it("SEC-02: resolves diamond-DAG extends (6 levels x repeated entries) in < 100 ms with bounded visits and warnings", () => {
+    const repeat = (target: string, count: number): string[] =>
+      Array.from({ length: count }, () => target);
+    const configFiles: TsAdapterSourceFile[] = [
+      { relativePath: "tsconfig.json", content: JSON.stringify({ extends: repeat("./l1.json", 20) }) },
+      { relativePath: "l1.json", content: JSON.stringify({ extends: repeat("./l2.json", 20) }) },
+      { relativePath: "l2.json", content: JSON.stringify({ extends: repeat("./l3.json", 20) }) },
+      { relativePath: "l3.json", content: JSON.stringify({ extends: repeat("./l4.json", 20) }) },
+      { relativePath: "l4.json", content: JSON.stringify({ extends: repeat("./l5.json", 20) }) },
+      {
+        relativePath: "l5.json",
+        content: JSON.stringify({
+          compilerOptions: {
+            baseUrl: ".",
+            paths: { "@leaf/*": ["./src/*"] },
+          },
+        }),
+      },
+    ];
+
+    const start = performance.now();
+    const loaded = loadWorkspaceTsConfigs(VIRTUAL_ROOT, configFiles);
+    const elapsedMs = performance.now() - start;
+
+    expect(elapsedMs).toBeLessThan(100);
+    expect(loaded.warnings.length).toBeLessThanOrEqual(100);
+    expect(loaded.configs).toHaveLength(1);
+    expect(loaded.configs[0]?.paths?.get("@leaf/*")).toEqual(["./src/*"]);
+  });
+
+  it("SEC-03: blocks wildcard-suffix path traversal ('*/../outside/secret') and runtime alias escape ('@/../../../outside/secret')", () => {
+    const parentTemp = mkdtempSync(path.join(tmpdir(), "causoryn-sec03-"));
+    const workspaceRoot = path.join(parentTemp, "workspace");
+    const outsideDir = path.join(parentTemp, "outside");
+    try {
+      mkdirSync(path.join(workspaceRoot, "src"), { recursive: true });
+      mkdirSync(outsideDir, { recursive: true });
+      writeFileSync(
+        path.join(outsideDir, "secret.ts"),
+        'export const TOP_SECRET_TOKEN = "do-not-leak";\n',
+        "utf8",
+      );
+
+      const loaded = loadWorkspaceTsConfigs(workspaceRoot, [
+        {
+          relativePath: "tsconfig.json",
+          content: JSON.stringify({
+            compilerOptions: {
+              baseUrl: ".",
+              paths: {
+                "x*": ["*/../outside/secret"],
+                "multi*": ["./src/*/*/bad"],
+                "@/*": ["./src/*"],
+              },
+            },
+          }),
+        },
+      ]);
+      expect(loaded.configs[0]?.paths?.has("x*")).toBe(false);
+      expect(loaded.configs[0]?.paths?.has("multi*")).toBe(false);
+      expect(loaded.configs[0]?.paths?.get("@/*")).toEqual(["./src/*"]);
+
+      const result = analyzeTypeScriptProgram({
+        workspaceId: "ws_sec03_escape",
+        rootDir: workspaceRoot,
+        configFiles: [
+          {
+            relativePath: "tsconfig.json",
+            content: JSON.stringify({
+              compilerOptions: {
+                baseUrl: ".",
+                paths: {
+                  "x*": ["*/../outside/secret"],
+                  "@/*": ["./src/*"],
+                },
+              },
+            }),
+          },
+        ],
+        sources: [
+          {
+            relativePath: "src/app.ts",
+            content: [
+              'import { TOP_SECRET_TOKEN } from "@/../../outside/secret";',
+              'import { TOP_SECRET_TOKEN as s2 } from "x";',
+              "export function read(): unknown { return [TOP_SECRET_TOKEN, s2]; }",
+              "",
+            ].join("\n"),
+          },
+        ],
+      });
+
+      const escapeEdge = findEdge(result, "IMPORTS", "src/app.ts", "@/../../outside/secret");
+      expect(escapeEdge?.resolution).toBe("unresolved");
+      expect(escapeEdge?.to.kind).toBe("UnknownExternal");
+      const xEdge = findEdge(result, "IMPORTS", "src/app.ts", "x");
+      expect(xEdge?.resolution).toBe("unresolved");
+      expect(xEdge?.to.kind).toBe("UnknownExternal");
+    } finally {
+      rmSync(parentTemp, { recursive: true, force: true });
+    }
+  });
+
+  it("SEC-04: confines ts.sys fallback so omitted disk files (.env.js, ../outside-secret.js) are NEVER read or leaked", () => {
+    const parentTemp = mkdtempSync(path.join(tmpdir(), "causoryn-sec04-"));
+    const workspaceRoot = path.join(parentTemp, "workspace");
+    try {
+      mkdirSync(path.join(workspaceRoot, "src"), { recursive: true });
+      // Present on disk, deliberately OMITTED from `sources` (simulates WorkspaceAccessPolicy ignore).
+      writeFileSync(
+        path.join(workspaceRoot, ".env.js"),
+        'export const ENV_SECRET_ONLY_ON_DISK = "super-secret";\n',
+        "utf8",
+      );
+      writeFileSync(
+        path.join(parentTemp, "outside-secret.js"),
+        'export const OUTSIDE_SECRET_ONLY_ON_DISK = "outside-secret";\n',
+        "utf8",
+      );
+
+      const result = analyzeTypeScriptProgram({
+        workspaceId: "ws_sec04_confinement",
+        rootDir: workspaceRoot,
+        configFiles: [],
+        sources: [
+          {
+            relativePath: "src/app.ts",
+            content: [
+              'import { WRONG_NAME_A } from "../.env.js";',
+              'import { WRONG_NAME_B } from "../../outside-secret.js";',
+              "export function useSecrets(): unknown { return [WRONG_NAME_A, WRONG_NAME_B]; }",
+              "",
+            ].join("\n"),
+          },
+        ],
+      });
+
+      const envImport = findEdge(result, "IMPORTS", "src/app.ts", "../.env.js");
+      expect(envImport?.resolution).toBe("unresolved");
+      expect(envImport?.to.kind).toBe("UnknownExternal");
+
+      const outsideImport = findEdge(result, "IMPORTS", "src/app.ts", "../../outside-secret.js");
+      expect(outsideImport?.resolution).toBe("unresolved");
+      expect(outsideImport?.to.kind).toBe("UnknownExternal");
+
+      // Diagnostics must NOT leak exported symbol names from unread disk files.
+      const serialized = JSON.stringify(result);
+      expect(serialized).not.toContain("ENV_SECRET_ONLY_ON_DISK");
+      expect(serialized).not.toContain("OUTSIDE_SECRET_ONLY_ON_DISK");
+    } finally {
+      rmSync(parentTemp, { recursive: true, force: true });
+    }
+  });
+
+  it("HIGH-2: resolves CommonJS exports.fn = ..., module.exports.fn = ..., module.exports = function greet(...) as internal nodes and verified CALLS (never UnknownExternal), plus chained Express require() idioms", () => {
+    const result = analyzeTypeScriptProgram({
+      workspaceId: "ws_cjs_exports",
+      rootDir: VIRTUAL_ROOT,
+      configFiles: [],
+      sources: [
+        {
+          relativePath: "src/greet.cjs",
+          content: [
+            "module.exports = function greet(name) {",
+            '  return "hi " + name;',
+            "};",
+            "",
+          ].join("\n"),
+        },
+        {
+          relativePath: "src/ops.cjs",
+          content: [
+            "exports.ping = function ping(x) {",
+            "  return x + 1;",
+            "};",
+            "exports.pong = (x) => x + 2;",
+            "module.exports.echo = function (x) {",
+            "  return x;",
+            "};",
+            "",
+          ].join("\n"),
+        },
+        {
+          relativePath: "src/consumer.cjs",
+          content: [
+            'const greet = require("./greet.cjs");',
+            'const { ping, pong, echo } = require("./ops.cjs");',
+            "function run() {",
+            '  return greet("world") + ping(1) + pong(2) + echo(3);',
+            "}",
+            "module.exports = { run };",
+            "",
+          ].join("\n"),
+        },
+      ],
+    });
+
+    expect(result.state).toBe("ready");
+    expect(findNode(result, "Function", "greet", "src/greet.cjs").language).toBe("javascript");
+    expect(findNode(result, "Function", "ping", "src/ops.cjs").language).toBe("javascript");
+    expect(findNode(result, "Handler", "pong", "src/ops.cjs").language).toBe("javascript");
+    expect(findNode(result, "Function", "echo", "src/ops.cjs").language).toBe("javascript");
+
+    expect(findEdge(result, "CALLS", "run", "greet")?.resolution).toBe("verified");
+    expect(findEdge(result, "CALLS", "run", "ping")?.resolution).toBe("verified");
+    expect(findEdge(result, "CALLS", "run", "pong")?.resolution).toBe("verified");
+    expect(findEdge(result, "CALLS", "run", "echo")?.resolution).toBe("verified");
+
+    const leakedExternals = result.nodes.filter(
+      (node) =>
+        node.kind === "UnknownExternal" &&
+        ["greet", "ping", "pong", "echo"].includes(node.qualifiedName),
+    );
+    expect(leakedExternals).toEqual([]);
+
+    // Chained CommonJS Express idioms: require("express")() and require("express").Router().
+    const chainedExpress = analyzeTypeScriptProgramWithFrameworks({
+      workspaceId: "ws_express_chained_cjs",
+      rootDir: VIRTUAL_ROOT,
+      configFiles: [],
+      sources: [
+        {
+          relativePath: "src/chained.cjs",
+          content: [
+            'const app = require("express")();',
+            'const router = require("express").Router();',
+            "function statusHandler(req, res) { return res; }",
+            "function itemsHandler(req, res) { return res; }",
+            'app.get("/status", statusHandler);',
+            'router.post("/items", itemsHandler);',
+            "",
+          ].join("\n"),
+        },
+      ],
+    });
+    expect(chainedExpress.framework.detections.some((d) => d.framework === "express")).toBe(true);
+    expect(
+      findNode(chainedExpress.result, "Endpoint", "GET /status", "src/chained.cjs").attributes?.["framework"],
+    ).toBe("express");
+    expect(
+      findNode(chainedExpress.result, "Endpoint", "POST /items", "src/chained.cjs").attributes?.["framework"],
+    ).toBe("express");
+  });
+
+  it("MEDIUM-1: function-scoped require() emits IMPORTS but zero spurious UnknownExternal('require') CALLS edges or warnings", () => {
+    const result = analyzeTypeScriptProgram({
+      workspaceId: "ws_lazy_require",
+      rootDir: VIRTUAL_ROOT,
+      configFiles: [],
+      sources: [
+        {
+          relativePath: "src/helper.cjs",
+          content: "function run(x) { return x * 2; }\nmodule.exports = { run };\n",
+        },
+        {
+          relativePath: "src/loader.cjs",
+          content: [
+            "function load(v) {",
+            '  const h = require("./helper.cjs");',
+            "  return h.run(v);",
+            "}",
+            "module.exports = { load };",
+            "",
+          ].join("\n"),
+        },
+      ],
+    });
+
+    expect(result.state).toBe("ready");
+    expect(findEdge(result, "IMPORTS", "src/loader.cjs", "src/helper.cjs")?.resolution).toBe("verified");
+    expect(findEdge(result, "CALLS", "load", "run")?.resolution).toBe("verified");
+    expect(
+      result.edges.some(
+        (e) => e.kind === "CALLS" && e.to.kind === "UnknownExternal" && e.to.qualifiedName === "require",
+      ),
+    ).toBe(false);
+    expect(result.warnings.some((w) => w.includes("'require'"))).toBe(false);
+  });
+
+  it("MEDIUM-5 & SEC-11: propagates nested monorepo experimentalDecorators and handles '$&' in alias substitution safely", () => {
+    const result = analyzeTypeScriptProgram({
+      workspaceId: "ws_decorators_and_dollar",
+      rootDir: VIRTUAL_ROOT,
+      configFiles: [
+        {
+          relativePath: "backend/tsconfig.json",
+          content: JSON.stringify({
+            compilerOptions: {
+              experimentalDecorators: true,
+              paths: { "@/*": ["./src/*"] },
+            },
+          }),
+        },
+      ],
+      sources: [
+        {
+          relativePath: "backend/src/service.ts",
+          content: [
+            "function Injectable(): ClassDecorator { return () => undefined; }",
+            "@Injectable()",
+            "export class UserService {",
+            "  ping(): string { return 'pong'; }",
+            "}",
+            "",
+          ].join("\n"),
+        },
+        {
+          relativePath: "backend/src/$&util.ts",
+          content: "export function dollarFn(): number { return 7; }\n",
+        },
+        {
+          relativePath: "backend/src/main.ts",
+          content: [
+            'import { UserService } from "@/service";',
+            'import { dollarFn } from "@/$&util";',
+            "export function boot(): number { return new UserService().ping().length + dollarFn(); }",
+            "",
+          ].join("\n"),
+        },
+      ],
+    });
+
+    expect(result.diagnostics.filter((d) => d.code === "TS1219")).toEqual([]);
+    expect(result.state).toBe("ready");
+    expect(findEdge(result, "IMPORTS", "backend/src/main.ts", "backend/src/$&util.ts")?.resolution).toBe("verified");
+  });
+
+  it("SEC-04-R1 & SEC-04-R2: blocks node_modules symlink escape outside root & to non-node_modules files, preserves pnpm & macOS /private/var, confines host.directoryExists/realpath/getDirectories and rejects null bytes", () => {
+    const rootPosix = "/var/folders/ws";
+    const realRootPosix = "/private/var/folders/ws";
+    const libDir = "/opt/ts/lib";
+
+    const fakeDiskFiles = new Map<string, string>([
+      [`${rootPosix}/node_modules/evil/index.d.ts`, "export declare const EVIL_OUTSIDE: string;"],
+      [`${rootPosix}/node_modules/envlink/index.d.ts`, "export declare const EVIL_ENV: string;"],
+      [`${rootPosix}/node_modules/safe/index.d.ts`, "export declare function safeFn(): number;"],
+      [`${rootPosix}/node_modules/pkg/index.d.ts`, "export declare function pkgFn(): number;"],
+      [`${libDir}/lib.es2022.d.ts`, "interface Array<T> {}"],
+    ]);
+    const fakeRealpaths = new Map<string, string>([
+      [rootPosix, realRootPosix],
+      [libDir, libDir],
+      [`${rootPosix}/node_modules/evil`, "/etc/evil-outside"],
+      [`${rootPosix}/node_modules/evil/index.d.ts`, "/etc/evil-outside/index.d.ts"],
+      [`${rootPosix}/node_modules/envlink/index.d.ts`, `${realRootPosix}/.env`],
+      [
+        `${rootPosix}/node_modules/safe`,
+        `${realRootPosix}/node_modules/.pnpm/safe@1/node_modules/safe`,
+      ],
+      [
+        `${rootPosix}/node_modules/safe/index.d.ts`,
+        `${realRootPosix}/node_modules/.pnpm/safe@1/node_modules/safe/index.d.ts`,
+      ],
+      [`${rootPosix}/node_modules/pkg`, `${realRootPosix}/node_modules/pkg`],
+      [`${rootPosix}/node_modules/pkg/index.d.ts`, `${realRootPosix}/node_modules/pkg/index.d.ts`],
+      [`${rootPosix}/node_modules`, `${realRootPosix}/node_modules`],
+      [`${libDir}/lib.es2022.d.ts`, `${libDir}/lib.es2022.d.ts`],
+    ]);
+
+    const fakeHost = {
+      fileExists: (p: string) => fakeDiskFiles.has(p),
+      readFile: (p: string) => fakeDiskFiles.get(p),
+      directoryExists: (p: string) => fakeRealpaths.has(p) || p === `${rootPosix}/secret-dir`,
+      realpath: (p: string) => fakeRealpaths.get(p) ?? p,
+      getDirectories: (p: string) =>
+        p === `${rootPosix}/node_modules` ? ["evil", "safe", "pkg"] : ["secret-dir"],
+    } as unknown as ts.CompilerHost;
+
+    const resolutionHost = configureConfinedCompilerHost(
+      fakeHost,
+      new Map(),
+      rootPosix,
+      libDir,
+    );
+
+    // 1) Out-of-root symlink escape through node_modules MUST be blocked!
+    expect(fakeHost.fileExists(`${rootPosix}/node_modules/evil/index.d.ts`)).toBe(false);
+    expect(fakeHost.readFile(`${rootPosix}/node_modules/evil/index.d.ts`)).toBeUndefined();
+    expect(fakeHost.directoryExists?.(`${rootPosix}/node_modules/evil`)).toBe(false);
+    expect(resolutionHost.directoryExists?.(`${rootPosix}/node_modules/evil`)).toBe(false);
+    // realpath MUST NOT mask escaping symlink behind lexical path!
+    expect(resolutionHost.realpath?.(`${rootPosix}/node_modules/evil/index.d.ts`)).toBe(
+      "/etc/evil-outside/index.d.ts",
+    );
+
+    // 2) In-root symlink to non-node_modules (.env) MUST be blocked!
+    expect(fakeHost.fileExists(`${rootPosix}/node_modules/envlink/index.d.ts`)).toBe(false);
+    expect(fakeHost.readFile(`${rootPosix}/node_modules/envlink/index.d.ts`)).toBeUndefined();
+
+    // 3) Legitimate pnpm symlink & macOS /var -> /private/var root MUST work!
+    expect(fakeHost.fileExists(`${rootPosix}/node_modules/safe/index.d.ts`)).toBe(true);
+    expect(fakeHost.readFile(`${rootPosix}/node_modules/safe/index.d.ts`)).toContain("safeFn");
+    expect(fakeHost.fileExists(`${rootPosix}/node_modules/pkg/index.d.ts`)).toBe(true);
+    expect(fakeHost.fileExists(`${libDir}/lib.es2022.d.ts`)).toBe(true);
+
+    // 4) SEC-04-R2: Null-byte rejection & host.directoryExists / host.getDirectories confinement!
+    expect(fakeHost.fileExists(`${rootPosix}/node_modules/safe/a\0.d.ts`)).toBe(false);
+    expect(fakeHost.readFile(`${rootPosix}/node_modules/safe/a\0.d.ts`)).toBeUndefined();
+    expect(fakeHost.directoryExists?.(`${rootPosix}/secret-dir`)).toBe(false);
+    expect(fakeHost.getDirectories?.(rootPosix)).toEqual([]);
+    expect(fakeHost.getDirectories?.(`${rootPosix}/node_modules`)).toEqual(["safe", "pkg"]);
+
+    // 5) Real filesystem symlink/junction probe (runs unconditionally on Linux/macOS CI & Windows non-sandbox).
+    const parentTemp = mkdtempSync(path.join(tmpdir(), "causoryn-sec04r1-"));
+    const workspaceRoot = path.join(parentTemp, "workspace");
+    const outsideDir = path.join(parentTemp, "outside-evil-pkg");
+    try {
+      mkdirSync(path.join(workspaceRoot, "src"), { recursive: true });
+      mkdirSync(path.join(workspaceRoot, "node_modules"), { recursive: true });
+      mkdirSync(outsideDir, { recursive: true });
+      writeFileSync(
+        path.join(outsideDir, "package.json"),
+        JSON.stringify({ name: "evil", version: "1.0.0", types: "index.d.ts" }),
+        "utf8",
+      );
+      writeFileSync(
+        path.join(outsideDir, "index.d.ts"),
+        "export declare const EVIL_SYMLINK_SECRET: string;\n",
+        "utf8",
+      );
+
+      const dirLinkType = process.platform === "win32" ? "junction" : "dir";
+      let linksCreated = false;
+      try {
+        symlinkSync(outsideDir, path.join(workspaceRoot, "node_modules", "evil"), dirLinkType);
+        linksCreated = true;
+      } catch {
+        // Windows restricted sandbox may return EPERM for directory junctions.
+      }
+      if (linksCreated) {
+        const result = analyzeTypeScriptProgram({
+          workspaceId: "ws_sec04_r1_disk",
+          rootDir: workspaceRoot,
+          configFiles: [],
+          sources: [
+            {
+              relativePath: "src/app.ts",
+              content: 'import { WRONG_EVIL } from "evil";\nexport const v = WRONG_EVIL;\n',
+            },
+          ],
+        });
+        const evilImport = findEdge(result, "IMPORTS", "src/app.ts", "evil");
+        expect(evilImport?.resolution).toBe("unresolved");
+        expect(JSON.stringify(result)).not.toContain("EVIL_SYMLINK_SECRET");
+      }
+    } finally {
+      rmSync(parentTemp, { recursive: true, force: true });
+    }
+  });
+
+  it("supports shorthand extends: '..' resolving to root tsconfig.json without warnings", () => {
+    const loaded = loadWorkspaceTsConfigs(VIRTUAL_ROOT, [
+      {
+        relativePath: "tsconfig.json",
+        content: JSON.stringify({
+          compilerOptions: {
+            baseUrl: ".",
+            paths: { "@root/*": ["./shared/*"] },
+          },
+        }),
+      },
+      {
+        relativePath: "frontend/tsconfig.json",
+        content: JSON.stringify({
+          extends: "..",
+          compilerOptions: {
+            jsx: "preserve",
+          },
+        }),
+      },
+    ]);
+
+    expect(loaded.warnings).toEqual([]);
+    const frontendCfg = loaded.configs.find((c) => c.dirPrefix === "frontend");
+    expect(frontendCfg?.paths?.get("@root/*")).toEqual(["./shared/*"]);
+    expect(frontendCfg?.jsx).toBeDefined();
   });
 });

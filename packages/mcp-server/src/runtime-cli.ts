@@ -898,21 +898,30 @@ export function buildWorkspaceAutoConfig(
 
   const hasExplicitIgnore =
     Object.hasOwn(rawBase, "ignore") && rawBase["ignore"] !== undefined;
+  const baseExtraIgnore = Object.hasOwn(rawBase, "extraIgnore")
+    ? rawBase["extraIgnore"]
+    : undefined;
 
-  const baseAllowRoots = Array.isArray(rawBase["allowRoots"])
-    ? (rawBase["allowRoots"] as unknown[])
-    : [];
+  const baseAllowRoots =
+    Object.hasOwn(rawBase, "allowRoots") && Array.isArray(rawBase["allowRoots"])
+      ? (rawBase["allowRoots"] as unknown[])
+      : [];
   const effectiveRoots: string[] =
     options.roots.length > 0
       ? options.roots.map((r) => path.resolve(r))
       : baseAllowRoots.map((entry) => String(entry));
 
   if (!options.autoDataDir || effectiveRoots.length === 0) {
-    const discovery =
-      effectiveRoots.length > 0
-        ? discoverWorkspaceIgnoreConfig(effectiveRoots[0] as string, { hasExplicitIgnore })
-        : undefined;
-    const extraIgnore = mergeExtraIgnore(rawBase["extraIgnore"], discovery?.extraIgnore ?? []);
+    const firstRoot = effectiveRoots[0];
+    const canDiscoverPrimary =
+      firstRoot !== undefined &&
+      typeof firstRoot === "string" &&
+      path.isAbsolute(firstRoot) &&
+      !firstRoot.includes("\0");
+    const discovery = canDiscoverPrimary
+      ? discoverWorkspaceIgnoreConfig(firstRoot, { hasExplicitIgnore })
+      : undefined;
+    const extraIgnore = mergeExtraIgnore(baseExtraIgnore, discovery?.extraIgnore ?? []);
     return parseCausorynServerConfig({
       ...rawBase,
       allowRoots: effectiveRoots,
@@ -930,6 +939,9 @@ export function buildWorkspaceAutoConfig(
   }
 
   const canonicalRoots: string[] = effectiveRoots.map((root) => {
+    if (!path.isAbsolute(root) || root.includes("\0")) {
+      throw new CausorynConfigError([`allowRoot geçersiz veya mutlak yol değil: ${root}`]);
+    }
     try {
       const resolved = stripWin32DevicePrefix(realpathSync(path.resolve(root)));
       if (!statSync(resolved).isDirectory()) {
@@ -1000,7 +1012,7 @@ export function buildWorkspaceAutoConfig(
   const baseWiki = isPlainObject(rawBase["wiki"]) ? rawBase["wiki"] : {};
   const baseOutput = isPlainObject(rawBase["output"]) ? rawBase["output"] : {};
   const discovery = discoverWorkspaceIgnoreConfig(primaryRoot, { hasExplicitIgnore });
-  const extraIgnore = mergeExtraIgnore(rawBase["extraIgnore"], discovery.extraIgnore);
+  const extraIgnore = mergeExtraIgnore(baseExtraIgnore, discovery.extraIgnore);
 
   const mergedConfig: Record<string, unknown> = {
     ...rawBase,
