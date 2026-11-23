@@ -263,7 +263,7 @@ Full bilingual engineering documentation is organized by [Diátaxis](https://dia
 
 ## Development (Monorepo)
 
-Matches [`.github/workflows/ci.yml`](.github/workflows/ci.yml) (`ubuntu-latest`, `windows-latest`, `macos-latest`):
+Matches [`.github/workflows/ci.yml`](.github/workflows/ci.yml) (`ubuntu-latest`, `windows-latest`, `macos-15`):
 
 ```bash
 # Install dependencies with --ignore-scripts (blocks untrusted lifecycle scripts;

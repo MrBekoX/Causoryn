@@ -1,17 +1,23 @@
 version: 2
 updates:
   - package-ecosystem: "npm"
-    directories:
-      - "/"
-      - "/packages/*"
-      - "/adapters/*"
-      - "/integrations/*/*"
+    # npm workspaces monorepo with a single root package-lock.json:
+    # scanning from "/" lets Dependabot update root + workspace manifests together
+    # against the unified lockfile instead of creating EUSAGE lockfile drift.
+    directory: "/"
     schedule:
       interval: "weekly"
     cooldown:
       default-days: 7
       semver-major-days: 14
     open-pull-requests-limit: 5
+    ignore:
+      # TypeScript 7.0 (native Go rewrite) removes the legacy JS Compiler API
+      # (ts.createProgram / TypeChecker) required by adapters/typescript.
+      # Track TS 6.x/7.1+ programmatic API migration explicitly rather than via auto-PR.
+      - dependency-name: "typescript"
+        update-types:
+          - "version-update:semver-major"
     groups:
       dev-dependencies:
         dependency-type: "development"

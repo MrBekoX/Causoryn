@@ -6,11 +6,12 @@
  *   ve `.github/dependabot.yml` için geçerli YAML ayrıştırması.
  * - Ortak güvenlik kapıları: üst düzey salt-okunur `permissions: { contents: "read" }`,
  *   `concurrency`, `timeout-minutes`, `pull_request_target` yasağı, %100 40-karakter SHA
- *   sabitlemesi + değişmez semver yorumu (`# vX.Y.Z`) + repo `allowed_actions` uyumu,
+ *   sabitlemesi + izinli action depo listesi (`ALLOWED_ACTION_REPOS`) + değişmez semver
+ *   yorumu (`# vX.Y.Z`) — böylece Dependabot SHA güncellemeleri güvenli biçimde geçer,
  *   `persist-credentials: false`, Linux job'larında ilk adım `step-security/harden-runner`
  *   (Docker-dışı job'larda `disable-sudo-and-containers: true`; Docker tabanlı Scorecard'da
  *   container runtime korunur), ve `run:` bloklarında sıfır `${{ ... }}` interpolasyonu.
- * - CI (`ci.yml`): 3-OS matrisi, deterministik Release + RestoreLockedMode Roslyn + locked Rust,
+ * - CI (`ci.yml`): 3-OS matrisi (`ubuntu-latest`, `windows-latest`, sabit `macos-15`), deterministik Release + RestoreLockedMode Roslyn + locked Rust,
  *   `npm audit --audit-level=high`, cross-platform `export-public-tree.mjs --verify-temp` ve testler.
  * - Release (`release.yml`): korumalı `v*.*.*` etiket tabanlı iki-job izole CD (`build-and-verify`
  *   salt-okunur vs `attest-and-publish` OIDC/environment), hermetik derleme (`cache: npm` YOK),
@@ -51,26 +52,27 @@ const EXPECTED_WORKFLOW_FILES = [
   "security.yml",
 ] as const;
 
-const VERIFIED_ACTION_SHAS = {
-  checkout: "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
-  setupNode: "actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1",
-  setupDotnet: "actions/setup-dotnet@0f4a354dd5547a28c70b7853dbd95d5b67886e73",
-  setupPython: "actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0",
-  setupGo: "actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5",
-  rustToolchain: "dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca",
-  attestProvenance: "actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a",
-  codeqlInit: "github/codeql-action/init@1bd86f2fdb4b86187fa4059f16f31a3202acc9ea",
-  codeqlAnalyze: "github/codeql-action/analyze@1bd86f2fdb4b86187fa4059f16f31a3202acc9ea",
-  codeqlUploadSarif: "github/codeql-action/upload-sarif@1bd86f2fdb4b86187fa4059f16f31a3202acc9ea",
-  dependencyReview: "actions/dependency-review-action@bbc44d14a204704ccc493733616cd1e93a0321ec",
-  zizmor: "zizmorcore/zizmor-action@bd12b495c90993a4301c73398142281a61499af3",
-  scorecard: "ossf/scorecard-action@23f22cd43608bae7a1f1fa2603d7314dee9538a5",
-  hardenRunner: "step-security/harden-runner@aebdcf6156ab6691adf63218240e476564a1ed4c",
-  uploadArtifact: "actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9",
-  downloadArtifact: "actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333",
-} as const;
+const ALLOWED_ACTION_REPOS = new Set<string>([
+  "actions/checkout",
+  "actions/setup-node",
+  "actions/setup-dotnet",
+  "actions/setup-python",
+  "actions/setup-go",
+  "actions/upload-artifact",
+  "actions/download-artifact",
+  "actions/attest-build-provenance",
+  "actions/attest",
+  "actions/dependency-review-action",
+  "github/codeql-action/init",
+  "github/codeql-action/analyze",
+  "github/codeql-action/upload-sarif",
+  "dtolnay/rust-toolchain",
+  "zizmorcore/zizmor-action",
+  "ossf/scorecard-action",
+  "step-security/harden-runner",
+]);
 
-const ALLOWED_VERIFIED_USES = new Set<string>(Object.values(VERIFIED_ACTION_SHAS));
+const UNTAGGED_UPSTREAM_ACTION_REPOS = new Set<string>(["dtolnay/rust-toolchain"]);
 
 const SCORECARD_APPROVED_ACTION_REPOS = new Set<string>([
   "step-security/harden-runner",
@@ -80,7 +82,19 @@ const SCORECARD_APPROVED_ACTION_REPOS = new Set<string>([
   "github/codeql-action/upload-sarif",
 ]);
 
-const SHA_PINNED_USES_RE = /^[^@\s]+@[0-9a-f]{40}$/;
+const SHA_PINNED_USES_RE = /^([^@\s]+)@([0-9a-f]{40})$/;
+
+function parsePinnedUses(uses: string): { readonly repo: string; readonly sha: string } | null {
+  const match = SHA_PINNED_USES_RE.exec(uses);
+  if (!match || !match[1] || !match[2]) return null;
+  return { repo: match[1], sha: match[2] };
+}
+
+function usesPinnedAction(step: WorkflowStep | undefined, expectedRepo: string): boolean {
+  if (typeof step?.uses !== "string") return false;
+  const parsed = parsePinnedUses(step.uses);
+  return parsed !== null && parsed.repo === expectedRepo;
+}
 
 const DETERMINISTIC_ROSLYN_BUILD =
   "dotnet build native/roslyn-worker/Causoryn.RoslynWorker.csproj -c Release -p:DebugType=none -p:ContinuousIntegrationBuild=true -p:SatelliteResourceLanguages=en -p:RestoreLockedMode=true";
@@ -158,12 +172,19 @@ interface DependabotGroup {
   readonly "update-types"?: readonly string[];
 }
 
+interface DependabotIgnore {
+  readonly "dependency-name"?: string;
+  readonly versions?: readonly string[];
+  readonly "update-types"?: readonly string[];
+}
+
 interface DependabotUpdate {
   readonly "package-ecosystem"?: string;
   readonly directory?: string;
   readonly directories?: readonly string[];
   readonly schedule?: Readonly<Record<string, unknown>>;
   readonly cooldown?: DependabotCooldown;
+  readonly ignore?: readonly DependabotIgnore[];
   readonly groups?: Readonly<Record<string, DependabotGroup>>;
   readonly labels?: readonly string[];
 }
@@ -216,9 +237,13 @@ describe("Tüm GitHub Actions iş akışları — ortak tedarik zinciri güvenli
       ).toBeDefined();
 
       // Kayan major tag (# v7, # v4), hareketli dal (# stable) veya bilinmeyen ref (# pinned-commit)
-      // yorumları zizmor ref-version-mismatch bulgusu üretmemesi için kullanılmaz:
+      // yorumları zizmor ref-version-mismatch bulgusu üretmemesi için kullanılmaz;
+      // etiketli tüm action'larda değişmez semver yorumu (# vX.Y.Z) zorunludur:
       for (const line of raw.split(/\r?\n/)) {
-        if (!/^\s*-?\s*uses:\s*/.test(line)) continue;
+        const usesMatch = /^\s*-?\s*uses:\s*([^\s#]+)(?:\s*(#.*))?$/.exec(line);
+        if (!usesMatch) continue;
+        const usesRef = (usesMatch[1] ?? "").replace(/^(['"])(.*)\1$/, "$2");
+        const comment = usesMatch[2] ?? "";
         expect(line, `${label} kayan major tag yorumu kullanmamalı: ${line.trim()}`).not.toMatch(
           /#\s*v\d+\s*$/,
         );
@@ -228,6 +253,14 @@ describe("Tüm GitHub Actions iş akışları — ortak tedarik zinciri güvenli
         expect(line, `${label} bilinmeyen # pinned-commit yorumu kullanmamalı: ${line.trim()}`).not.toMatch(
           /#\s*pinned-commit\s*$/,
         );
+        const parsedRef = parsePinnedUses(usesRef);
+        expect(parsedRef, `${label} ham satırda 40-karakter SHA sabitlemesi zorunlu: ${line.trim()}`).not.toBeNull();
+        if (parsedRef && !UNTAGGED_UPSTREAM_ACTION_REPOS.has(parsedRef.repo)) {
+          expect(
+            comment,
+            `${label} değişmez semver yorumu (# vX.Y.Z) taşımalı: ${line.trim()}`,
+          ).toMatch(/^#\s*v\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?\s*$/);
+        }
       }
 
       const jobs = Object.entries(doc.jobs ?? {});
@@ -245,13 +278,14 @@ describe("Tüm GitHub Actions iş akışları — ortak tedarik zinciri güvenli
         const hasLinux =
           runsOn.includes("ubuntu") ||
           (job.strategy?.matrix?.os ?? []).some((osName) => osName.includes("ubuntu"));
-        const usesDockerAction = steps.some((s) => s.uses === VERIFIED_ACTION_SHAS.scorecard);
+        const usesDockerAction = steps.some((s) => usesPinnedAction(s, "ossf/scorecard-action"));
 
         if (hasLinux) {
           const firstStep = steps[0];
-          expect(firstStep?.uses, `${jobLabel} ilk adım harden-runner olmalı`).toBe(
-            VERIFIED_ACTION_SHAS.hardenRunner,
-          );
+          expect(
+            usesPinnedAction(firstStep, "step-security/harden-runner"),
+            `${jobLabel} ilk adım SHA-sabitli step-security/harden-runner olmalı`,
+          ).toBe(true);
           expect(firstStep?.with?.["egress-policy"], `${jobLabel} egress-policy: audit`).toBe("audit");
           expect(
             firstStep?.with?.["disable-sudo"],
@@ -280,15 +314,14 @@ describe("Tüm GitHub Actions iş akışları — ortak tedarik zinciri güvenli
 
         for (const step of steps) {
           if (typeof step.uses === "string") {
-            expect(step.uses, `${jobLabel} SHA sabitlemesi zorunlu: ${step.uses}`).toMatch(
-              SHA_PINNED_USES_RE,
-            );
+            const parsedUses = parsePinnedUses(step.uses);
+            expect(parsedUses, `${jobLabel} 40-karakter SHA sabitlemesi zorunlu: ${step.uses}`).not.toBeNull();
             expect(
-              ALLOWED_VERIFIED_USES.has(step.uses),
+              parsedUses !== null && ALLOWED_ACTION_REPOS.has(parsedUses.repo),
               `${jobLabel} doğrulanmış repo allowlist dışı action kullanıyor: ${step.uses}`,
             ).toBe(true);
 
-            if (step.uses.startsWith("actions/checkout@")) {
+            if (parsedUses?.repo === "actions/checkout") {
               expect(
                 step.with?.["persist-credentials"],
                 `${jobLabel} checkout persist-credentials: false zorunlu`,
@@ -305,6 +338,28 @@ describe("Tüm GitHub Actions iş akışları — ortak tedarik zinciri güvenli
         }
       }
     }
+  });
+
+  it("SHA sabitleme ve izinli depo doğrulayıcısı Dependabot SHA güncellemelerini kabul eder, etiketsiz veya yabancı action'ları reddeder", () => {
+    const validBump = parsePinnedUses(
+      "actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8",
+    );
+    expect(validBump).toEqual({
+      repo: "actions/attest-build-provenance",
+      sha: "4d101475d8b20a2381f78447822ac1eab6504dd8",
+    });
+    expect(ALLOWED_ACTION_REPOS.has(validBump!.repo)).toBe(true);
+
+    // Kayan tag, kısa SHA veya büyük harfli SHA reddedilir:
+    expect(parsePinnedUses("actions/attest-build-provenance@v4")).toBeNull();
+    expect(parsePinnedUses("actions/checkout@main")).toBeNull();
+    expect(parsePinnedUses("actions/checkout@3d3c42e")).toBeNull();
+    expect(parsePinnedUses("actions/checkout@3D3C42E5AAC5BA805825DA76410C181273BA90B1")).toBeNull();
+
+    // İzinli olmayan üçüncü parti depo reddedilir:
+    const unlisted = parsePinnedUses("untrusted-org/some-action@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+    expect(unlisted).not.toBeNull();
+    expect(ALLOWED_ACTION_REPOS.has(unlisted!.repo)).toBe(false);
   });
 });
 
@@ -325,7 +380,7 @@ describe(".github/workflows/ci.yml — CI sözleşmesi ve SHA-sabitli güvenlik 
     expect(triggers?.["pull_request"]).toEqual({ branches: ["main"] });
   });
 
-  it("ubuntu-latest, windows-latest ve macos-latest üzerinde fail-fast: false matris tanımlar", () => {
+  it("ubuntu-latest, windows-latest ve sabitlenmiş macos-15 üzerinde fail-fast: false matris tanımlar", () => {
     const { doc } = loadWorkflow(CI_WORKFLOW_PATH, ".github/workflows/ci.yml");
     const jobs = Object.values(doc.jobs ?? {});
     expect(jobs.length).toBeGreaterThanOrEqual(1);
@@ -336,7 +391,7 @@ describe(".github/workflows/ci.yml — CI sözleşmesi ve SHA-sabitli güvenlik 
     expect(matrixJob?.strategy?.matrix?.os).toEqual([
       "ubuntu-latest",
       "windows-latest",
-      "macos-latest",
+      "macos-15",
     ]);
     expect(matrixJob?.["runs-on"]).toBe("${{ matrix.os }}");
   });
@@ -349,28 +404,28 @@ describe(".github/workflows/ci.yml — CI sözleşmesi ve SHA-sabitli güvenlik 
     );
     expect(usesSteps.length).toBeGreaterThanOrEqual(7);
 
-    const checkout = usesSteps.find((step) => step.uses === VERIFIED_ACTION_SHAS.checkout);
+    const checkout = usesSteps.find((step) => usesPinnedAction(step, "actions/checkout"));
     expect(checkout).toBeDefined();
     expect(checkout?.with).toEqual({ "persist-credentials": false });
 
-    const setupNode = usesSteps.find((step) => step.uses === VERIFIED_ACTION_SHAS.setupNode);
+    const setupNode = usesSteps.find((step) => usesPinnedAction(step, "actions/setup-node"));
     expect(setupNode).toBeDefined();
     expect(String(setupNode?.with?.["node-version"])).toBe("24");
 
-    const setupDotnet = usesSteps.find((step) => step.uses === VERIFIED_ACTION_SHAS.setupDotnet);
+    const setupDotnet = usesSteps.find((step) => usesPinnedAction(step, "actions/setup-dotnet"));
     expect(setupDotnet).toBeDefined();
     expect(setupDotnet?.with?.["dotnet-version"]).toBe("10.0.x");
 
-    const setupPython = usesSteps.find((step) => step.uses === VERIFIED_ACTION_SHAS.setupPython);
+    const setupPython = usesSteps.find((step) => usesPinnedAction(step, "actions/setup-python"));
     expect(setupPython).toBeDefined();
     expect(String(setupPython?.with?.["python-version"])).toBe("3.12");
 
-    const setupGo = usesSteps.find((step) => step.uses === VERIFIED_ACTION_SHAS.setupGo);
+    const setupGo = usesSteps.find((step) => usesPinnedAction(step, "actions/setup-go"));
     expect(setupGo).toBeDefined();
     expect(setupGo?.with?.["go-version-file"]).toBe("native/go-worker/go.mod");
     expect(setupGo?.with?.["cache"]).toBe(false);
 
-    const setupRust = usesSteps.find((step) => step.uses === VERIFIED_ACTION_SHAS.rustToolchain);
+    const setupRust = usesSteps.find((step) => usesPinnedAction(step, "dtolnay/rust-toolchain"));
     expect(setupRust).toBeDefined();
   });
 
@@ -493,7 +548,7 @@ describe(".github/workflows/release.yml — iki-job izole OIDC Trusted Publishin
     const buildSteps = doc.jobs?.["build-and-verify"]?.steps ?? [];
     const publishSteps = doc.jobs?.["attest-and-publish"]?.steps ?? [];
 
-    const checkout = buildSteps.find((step) => step.uses === VERIFIED_ACTION_SHAS.checkout);
+    const checkout = buildSteps.find((step) => usesPinnedAction(step, "actions/checkout"));
     expect(checkout).toBeDefined();
     expect(checkout?.with?.["persist-credentials"]).toBe(false);
     expect(checkout?.with?.["fetch-depth"]).toBe(0);
@@ -501,8 +556,8 @@ describe(".github/workflows/release.yml — iki-job izole OIDC Trusted Publishin
 
     // Hiçbir setup-node adımında cache veya registry-url yok ve setup-node@v7'de
     // package-manager-cache: false açıkça verilir (zizmor cache-poisoning & OIDC ENEEDAUTH kapalı):
-    const setupNodes = collectAllSteps(doc).filter(
-      (step) => step.uses === VERIFIED_ACTION_SHAS.setupNode,
+    const setupNodes = collectAllSteps(doc).filter((step) =>
+      usesPinnedAction(step, "actions/setup-node"),
     );
     expect(setupNodes.length).toBe(2);
     for (const sn of setupNodes) {
@@ -511,14 +566,18 @@ describe(".github/workflows/release.yml — iki-job izole OIDC Trusted Publishin
       expect(sn.with?.["registry-url"]).toBeUndefined();
     }
 
-    const upload = buildSteps.find((step) => step.uses === VERIFIED_ACTION_SHAS.uploadArtifact);
+    const upload = buildSteps.find((step) => usesPinnedAction(step, "actions/upload-artifact"));
     expect(upload?.with?.["name"]).toBe("release-artifacts");
 
-    const download = publishSteps.find((step) => step.uses === VERIFIED_ACTION_SHAS.downloadArtifact);
+    const download = publishSteps.find((step) => usesPinnedAction(step, "actions/download-artifact"));
     expect(download?.with?.["name"]).toBe("release-artifacts");
 
-    const attest = publishSteps.find((step) => step.uses === VERIFIED_ACTION_SHAS.attestProvenance);
-    expect(attest, "actions/attest-build-provenance SHA-sabitli adımı bulunmalı").toBeDefined();
+    const attest = publishSteps.find(
+      (step) =>
+        usesPinnedAction(step, "actions/attest-build-provenance") ||
+        usesPinnedAction(step, "actions/attest"),
+    );
+    expect(attest, "actions/attest-build-provenance (veya actions/attest) SHA-sabitli adımı bulunmalı").toBeDefined();
     expect(String(attest?.with?.["subject-path"] ?? "")).toContain("release-artifacts");
   });
 
@@ -557,12 +616,16 @@ describe(".github/workflows/release.yml — iki-job izole OIDC Trusted Publishin
         (s.run ?? "").includes('"initialize"'),
     );
     const sbomIdx = stepIndexMatching((s) => (s.run ?? "").includes("scripts/generate-sbom.mjs"));
-    const uploadIdx = stepIndexMatching((s) => s.uses === VERIFIED_ACTION_SHAS.uploadArtifact);
-    const downloadIdx = stepIndexMatching((s) => s.uses === VERIFIED_ACTION_SHAS.downloadArtifact);
+    const uploadIdx = stepIndexMatching((s) => usesPinnedAction(s, "actions/upload-artifact"));
+    const downloadIdx = stepIndexMatching((s) => usesPinnedAction(s, "actions/download-artifact"));
     const checksumIdx = stepIndexMatching((s) =>
       (s.run ?? "").includes("sha256sum -c SHA256SUMS.txt"),
     );
-    const attestIdx = stepIndexMatching((s) => s.uses === VERIFIED_ACTION_SHAS.attestProvenance);
+    const attestIdx = stepIndexMatching(
+      (s) =>
+        usesPinnedAction(s, "actions/attest-build-provenance") ||
+        usesPinnedAction(s, "actions/attest"),
+    );
     const publishIdx = stepIndexMatching(
       (s) =>
         (s.run ?? "").includes('npm publish "./$TGZ_FILE"') &&
@@ -675,8 +738,8 @@ describe(".github/workflows/security.yml — zizmor, Dependency Review ve çoklu
     expect(zizmorJob, "zizmor job tanımlı olmalı").toBeDefined();
     expect(zizmorJob?.permissions).toEqual({ contents: "read" });
 
-    const zizmorStep = (zizmorJob?.steps ?? []).find(
-      (step) => step.uses === VERIFIED_ACTION_SHAS.zizmor,
+    const zizmorStep = (zizmorJob?.steps ?? []).find((step) =>
+      usesPinnedAction(step, "zizmorcore/zizmor-action"),
     );
     expect(zizmorStep, "SHA-sabitli zizmor-action adımı bulunmalı").toBeDefined();
     expect(zizmorStep?.with?.["strict-collection"]).toBe(true);
@@ -694,8 +757,8 @@ describe(".github/workflows/security.yml — zizmor, Dependency Review ve çoklu
     expect(depJob?.if).toBe("github.event_name == 'pull_request'");
     expect(depJob?.permissions).toEqual({ contents: "read" });
 
-    const depStep = (depJob?.steps ?? []).find(
-      (step) => step.uses === VERIFIED_ACTION_SHAS.dependencyReview,
+    const depStep = (depJob?.steps ?? []).find((step) =>
+      usesPinnedAction(step, "actions/dependency-review-action"),
     );
     expect(depStep, "SHA-sabitli dependency-review-action adımı bulunmalı").toBeDefined();
     expect(depStep?.with?.["fail-on-severity"]).toBe("high");
@@ -768,10 +831,10 @@ describe(".github/workflows/codeql.yml — 5-dil SAST sözleşmesi", () => {
     ]);
 
     const steps = analyzeJob?.steps ?? [];
-    const goSetupIdx = steps.findIndex((step) => step.uses === VERIFIED_ACTION_SHAS.setupGo);
-    const initIdx = steps.findIndex((step) => step.uses === VERIFIED_ACTION_SHAS.codeqlInit);
+    const goSetupIdx = steps.findIndex((step) => usesPinnedAction(step, "actions/setup-go"));
+    const initIdx = steps.findIndex((step) => usesPinnedAction(step, "github/codeql-action/init"));
     const goBuildIdx = steps.findIndex((step) => (step.run ?? "").includes("go build ./..."));
-    const analyzeIdx = steps.findIndex((step) => step.uses === VERIFIED_ACTION_SHAS.codeqlAnalyze);
+    const analyzeIdx = steps.findIndex((step) => usesPinnedAction(step, "github/codeql-action/analyze"));
 
     expect(goSetupIdx).toBeGreaterThan(0);
     expect(initIdx).toBeGreaterThan(goSetupIdx);
@@ -832,21 +895,23 @@ describe(".github/workflows/scorecard.yml — OpenSSF Scorecard publish_results 
       ).toBe(true);
     }
 
-    const scorecardStep = steps.find((step) => step.uses === VERIFIED_ACTION_SHAS.scorecard);
+    const scorecardStep = steps.find((step) => usesPinnedAction(step, "ossf/scorecard-action"));
     expect(scorecardStep?.with?.["publish_results"]).toBe(true);
     expect(scorecardStep?.with?.["results_format"]).toBe("sarif");
     expect(scorecardStep?.with?.["results_file"]).toBe("results.sarif");
 
-    const uploadArtifactStep = steps.find((step) => step.uses === VERIFIED_ACTION_SHAS.uploadArtifact);
+    const uploadArtifactStep = steps.find((step) => usesPinnedAction(step, "actions/upload-artifact"));
     expect(uploadArtifactStep?.with?.["path"]).toBe("results.sarif");
 
-    const uploadSarifStep = steps.find((step) => step.uses === VERIFIED_ACTION_SHAS.codeqlUploadSarif);
+    const uploadSarifStep = steps.find((step) =>
+      usesPinnedAction(step, "github/codeql-action/upload-sarif"),
+    );
     expect(uploadSarifStep?.with?.["sarif_file"]).toBe("results.sarif");
   });
 });
 
 describe(".github/dependabot.yml — monorepo workspace kapsamı, cooldown ve gruplama sözleşmesi", () => {
-  it("4 ekosistemde >=7 günlük cooldown, npm monorepo directories kapsamı, geçerli disk yolları, patterns'lı groups ve github-actions semver-*-days yasağı uygular", () => {
+  it("4 ekosistemde >=7 günlük cooldown, tek kök npm workspace directory, TypeScript major koruması, geçerli disk yolları, patterns'lı groups ve github-actions semver-*-days yasağı uygular", () => {
     expect(existsSync(DEPENDABOT_PATH), ".github/dependabot.yml mevcut olmalı").toBe(true);
     const parsed = parse(readFileSync(DEPENDABOT_PATH, "utf8")) as DependabotDoc;
     expect(parsed.version).toBe(2);
@@ -854,14 +919,16 @@ describe(".github/dependabot.yml — monorepo workspace kapsamı, cooldown ve gr
     const updates = parsed.updates ?? [];
     const byEco = new Map(updates.map((u) => [u["package-ecosystem"], u]));
 
-    // npm monorepo workspace kapsamı:
+    // npm workspaces monorepo tek kök package-lock.json kullanır; bölünmüş directories
+    // alt-paketlerde lockfile senkronunu bozup `npm ci` EUSAGE hatasına yol açar:
     const npmCfg = byEco.get("npm");
-    expect(npmCfg?.directories).toEqual([
-      "/",
-      "/packages/*",
-      "/adapters/*",
-      "/integrations/*/*",
-    ]);
+    expect(npmCfg?.directory).toBe("/");
+    expect(npmCfg?.directories).toBeUndefined();
+    const tsIgnore = (npmCfg?.ignore ?? []).find(
+      (rule) => rule["dependency-name"] === "typescript",
+    );
+    expect(tsIgnore, "TypeScript 7.0 native Go Compiler API kırılması için major ignore kuralı bulunmalı").toBeDefined();
+    expect(tsIgnore?.["update-types"]).toContain("version-update:semver-major");
 
     for (const eco of ["npm", "cargo", "nuget", "github-actions"] as const) {
       const cfg = byEco.get(eco);
