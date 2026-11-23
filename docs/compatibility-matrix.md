@@ -1,8 +1,8 @@
-# Compatibility Matrix — Host × Sonuç (`v0.2.3` dağıtımı ve tarihsel smoke kanıtı, TŞ §22–§23)
+# Uyumluluk Matrisi — Host × Sonuç
 
 > **Dil / Language:** Türkçe · [English](en/compatibility-matrix.md)
 
-> Kanıt: `wiki/sprint-7.md` F2–F5 · `wiki/decisions.md` K-021/K-022 · [docs/hosts/claude-code.md](hosts/claude-code.md),
+> Kanıt: `wiki/sprint-7.md` F2–F5 · `wiki/decisions.md` K-021/K-022/K-025/K-026 · [docs/hosts/claude-code.md](hosts/claude-code.md),
 > [docs/hosts/codex.md](hosts/codex.md), [docs/hosts/zcode.md](hosts/zcode.md), [docs/hosts/antigravity.md](hosts/antigravity.md),
 > `integrations/zcode/causoryn/README.md` ·
 > TŞ v2.1 §22 (Cross-host smoke: "Antigravity plugin validate/list, Claude Code /mcp, Codex mcp
@@ -19,12 +19,12 @@ ve monorepo F1 bundle'ı (`packages/mcp-server/dist/mcp-server.mjs` + vendored
 `node_modules/better-sqlite3/`) aynı motoru çalıştırır (artefakt kasıtlı olarak tek dosya değildir —
 native `.node` gömülemez, ADR-010). Yerel canlı host doğrulama ortamı: Windows 10.0.26300 x64,
 Node ≥ 24; 3-OS GitHub Actions CI matrisi (`.github/workflows/ci.yml`: `ubuntu-latest`,
-`windows-latest`, `macos-latest`) K-022'de üç işletim sisteminin tamamında yeşil doğrulandı.
+`windows-latest`, `macos-latest`) K-022/K-025 güvenlik ve sızıntı kapılarıyla üç işletim sisteminin tamamında yeşil doğrulandı.
 
-## `v0.2.3` çalışma davranışı
+## Güncel çalışma davranışı (`v0.2.3`)
 
-- Dört host, Node.js ≥ 24 ile aynı MCP motorunu başlatır. Varsayılan paket kurulumu, `architecture-blueprint` dahil beş kanonik skill’i yükler. Paketli CLI’da ilk otomatik indeksleme el sıkışmasının ardından arka planda başlar. Snapshot hazır olana kadar `causoryn_index_status` ile işi izleyin. [CLI ve Konfigürasyon](cli-and-configuration.md)
-- Görsel export model çağrısı gerektirmez. İsteğe bağlı `annotations` alanını kullanıcı veya host modeli sağlayabilir. Aynı snapshot, format, görünüm, seçenekler ve anotasyonlar aynı artefaktı üretir. Host modelinin ayrı koşumlarda yazdığı metin değişebilir. [Mimari export sözleşmesi](tool-contracts.md)
+- Dört host, Node.js ≥ 24 ile aynı MCP motorunu başlatır. Varsayılan paket kurulumu, doğal dil tetiklemeli `architecture-blueprint` dahil beş kanonik skill’i yükler. Paketli CLI’da ilk otomatik indeksleme el sıkışmasının ardından arka planda başlar ve olay döngüsünü bloklamayan `collectInventoryAsync` taramasını kullanır. Snapshot hazır olana kadar `causoryn_index_status` ile işi izleyin. [CLI ve Konfigürasyon](cli-and-configuration.md)
+- Görsel export model çağrısı gerektirmez; `view="interactive"` varsayılan olarak `causoryn-architecture-interactive.html` dosyasına yazar. İsteğe bağlı `annotations` alanını kullanıcı veya host modeli sağlayabilir (`K-026` MCP Zod `.describe()` şema açıklamalarıyla rehberli). Aynı snapshot, format, görünüm, seçenekler ve anotasyonlar aynı artefaktı üretir; host modelinin ayrı koşumlarda yazdığı metin değişebilir. [Prompt ve Mimari Portal Rehberi](prompting-and-architecture-portals.md) · [Mimari export sözleşmesi](tool-contracts.md)
 - Etkileşimli HTML portalının CSP ve çıktı sınırları kaynak ve testlerde belgelenir. Bu matrisin canlı host sonuçları, aşağıdaki tarihsel koşumlara aittir. [Güvenlik turu](security-pass.md)
 
 ## Tarihsel host × sonuç matrisi (ilk koşum 2026-11-08 · F8 final 2026-11-10 · K-021/K-022 CLI doğrulaması 2026-11-19)
@@ -42,7 +42,7 @@ Node ≥ 24; 3-OS GitHub Actions CI matrisi (`.github/workflows/ci.yml`: `ubuntu
 |---|---|---|
 | F1 bundle determinizmi | ✅ İki build bit-bit aynı; manifest (35 dosya: `mcp-server.mjs`, `mcp-server.mjs.LEGAL.txt`, `node_modules/better-sqlite3/LICENSE` + runtime/prebuilds, sıralı sha256) `mcp-server.mjs` ile birebir — final turda (60735ff) ve K-022 lisans turunda doğrulandı, diskteki `dist/bundle-manifest.json` 35 girdiyle doğrulandı | `packages/mcp-server/test/bundle.test.ts`; `tests/hosts-docs.test.ts` manifest sha256 karşıtlığı |
 | K-021/K-022 `packages/causoryn` dağıtım paketi | ✅ `build-package.mjs` + `verify-package-ready.mjs` + izole `npm pack` `.tgz` E2E (4-host `setup`/`doctor` + `mcp` stdio el sıkışması + `THIRD-PARTY-NOTICES.md` / `licenses/`) | `tests/open-source-distribution.test.ts`; `packages/causoryn/test/setup-and-doctor.test.ts` |
-| 3-OS GitHub Actions CI matrisi (K-022) | ✅ `ubuntu-latest`, `windows-latest` ve `macos-latest` üzerinde Node 24 + .NET 10 + Python 3.12 + Go + Rust derleme, bundle, dağıtım paketi hazırlık kapısı, lint, secret-scan ve tam test paketi yeşil geçti | `.github/workflows/ci.yml` |
+| 3-OS GitHub Actions CI & K-025 tedarik zinciri | ✅ `ubuntu-latest`, `windows-latest` ve `macos-latest` üzerinde Node 24 + .NET 10 (`-p:RestoreLockedMode=true`) + Python 3.12 + Go + Rust (`--locked`) derleme, bundle, dağıtım paketi hazırlık kapısı, `npm audit --audit-level=high`, `export-public-tree.mjs --verify-temp --ref HEAD`, lint, secret-scan ve tam test paketi + ayrı `zizmor`, 5-dil CodeQL ve OpenSSF Scorecard iş akışları | `.github/workflows/{ci,security,codeql,scorecard,release}.yml`; `tests/ci-workflow.test.ts` |
 | F6 güvenlik turu (paketlenmiş bundle, TŞ §22 matrisi) | ✅ 9/9 satır PASS (traversal/symlink, secret leakage, TOCTOU, prompt injection, oversized, malicious refs, network denied, offline XSS/CSP, stdout disiplini); **final tur (e3d0bc2, 2026-11-10)**: tüm satırlar bağımsız oturumda yeniden koşuldu + matris 6. satırı bundle-düzeyi davranışsal kanıta yükseltildi (F6-K7: gerçek commit SHA `git cat-file` ile bundle içinde çözülür, 3 kötü ref → `INVALID_REVISION`) | `docs/security-pass.md`; `npx vitest run tests/security-release/f6-security-release.test.ts` → **32/32**; paketin tamamı `npx vitest run tests/security-release/` → **36/36** |
 | F7 performans (1k dosya fixture, MCP protokol düzeyi) | ✅ Medyanlar (**2026-11-10 final koşumu**): workspace_summary 11.8 ms, sembol bağlamı 13.0 ms, 200-node map 10.7 ms — TŞ §21 referans hedeflerinin içinde (hedef tasarım değeri, sonuç değil); ilk koşum 2026-11-08 daha düşük ölçtü (5.3/8.2/5.7 ms) — her iki koşum da hedeflerin çok altında | `docs/benchmarks.md`; `CAUSORYN_BENCH_WRITE_DOCS=1 npm run bench` (config: `vitest.bench.config.ts`; doğruluk kapısı `npm run test`'ten kasıtlı ayrıdır) |
 | Stdio stdout hijyeni (birim) | ✅ stdout yalnızca MCP protokolü; loglar `[causoryn]` önekiyle stderr | `packages/mcp-server/test/stdio-stdout.test.ts` |
@@ -74,6 +74,6 @@ Node ≥ 24; 3-OS GitHub Actions CI matrisi (`.github/workflows/ci.yml`: `ubuntu
 ## İlgili sayfalar
 
 - [docs/hosts/claude-code.md](hosts/claude-code.md) · [docs/hosts/codex.md](hosts/codex.md) · [docs/hosts/zcode.md](hosts/zcode.md) · [docs/hosts/antigravity.md](hosts/antigravity.md) · `integrations/zcode/causoryn/README.md` · `integrations/antigravity/causoryn/README.md`
-- [docs/security-pass.md](security-pass.md) · [docs/benchmarks.md](benchmarks.md) · [docs/tool-contracts.md](tool-contracts.md)
+- [docs/security-pass.md](security-pass.md) · [docs/benchmarks.md](benchmarks.md) · [docs/tool-contracts.md](tool-contracts.md) · [docs/prompting-and-architecture-portals.md](prompting-and-architecture-portals.md)
 - [docs/implementation-status.md](implementation-status.md) — Sprint 7/8 bölümleri ve F9/K-022 sürüm kararları
 - [English version](en/compatibility-matrix.md)

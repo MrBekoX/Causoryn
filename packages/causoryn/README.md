@@ -2,26 +2,27 @@
   <img src="https://raw.githubusercontent.com/MrBekoX/Causoryn/main/Causoryn.png" alt="Causoryn — Local, deterministic, LLM-free code intelligence MCP server" width="760" />
 </p>
 
-# Causoryn (`causoryn` v0.2.3 — Pre-1.0 Public Preview)
+# Causoryn
 
-**Causoryn** is a **local, LLM-free MCP engine (`ADR-002`)** for codebase and change
-analysis. It builds evidence-backed graphs, serves 29 tools over `stdio`, and ships
-5 canonical agent skills. Source analysis is read-only. Architecture exports can render from the
-graph alone or use optional caller-supplied `annotations` (`K-023`).
+**Causoryn** is a **local, deterministic, LLM-free MCP engine (`ADR-002`)** for codebase and change intelligence. It builds evidence-backed graphs for **TypeScript / JavaScript**, **C# / Roslyn**, **Python**, **Go**, and **Rust**, serves **29 MCP tools** over `stdio`, and ships **5 canonical agent skills** over read-only workspace analysis (`ADR-008`).
 
 > **Release status (`ADR-010`):** `0.2.3` is a **Pre-1.0 Public Preview** (not `1.0.0`).
 > Package architecture note: `causoryn` is a multi-file runtime package (`dist/mcp-server.mjs`
 > + vendored N-API v10 `better-sqlite3` prebuild binaries + `dist/typescript-lib/` +
-> `native/` sidecar workers + 5 canonical `skills/`), not a single-file JS bundle.
+> `native/` sidecar workers + 5 canonical `skills/`), not a single-file JS artifact.
+
+---
 
 ## Why Causoryn?
 
-- **LLM-free analysis (`ADR-002`):** Static analysis, search, verification, and export run locally without model calls, model credentials, or embeddings. The optional `architecture-blueprint` skill guides a host coding agent to supply `annotations`. The engine validates their schema and graph references. The prose remains caller-provided.
-- **Reproducible exports:** The same snapshot, including metadata, and identical format, view, options, and annotations produce byte-identical artifacts with the same renderer version. Build timestamps, MCP request IDs, job progress, and host-generated annotations can vary. [ADR-002](https://github.com/MrBekoX/Causoryn/blob/main/docs/en/adr/ADR-002-no-llm.md)
-- **Evidence-backed results (`ADR-010`):** Edges report `verified`, `heuristic`, or `unresolved` resolution. Every `verified` edge carries source evidence.
-- **Read-only source analysis (`ADR-008`):** SQLite graph and wiki databases stay outside analyzed roots. Automatic setup also places exports there. Custom export allowlists govern explicit export destinations independently of the analyzed roots.
-- **Offline visual architecture portals (`v0.2.2`–`v0.2.3`):** Zero-JS layered SVG HTML (`view: "architecture"`, default `causoryn-architecture.html`), interactive pan/zoom/search/Inspector portal (`view: "interactive"`, default `causoryn-architecture-interactive.html`), clean subgraph Mermaid, Architecture Brief Markdown, and fail-closed Host-LLM `annotations` guided by the bundled `architecture-blueprint` skill.
-- **Universal repository compatibility & warm snapshot reads (`v0.2.1`–`v0.2.3`):** Analyzes `.ts/.tsx/.mts/.cts` and `.js/.jsx/.mjs/.cjs` (ESM + CommonJS) with safe read-only `tsconfig.json`/`jsconfig.json` path-alias resolution, reads root `.gitignore`, `.git/info/exclude`, and nested `.gitignore`, preserves `bin/*.ts|js` and `src/bin/*.rs` while ignoring `.NET` `bin/` outputs, yields during async inventory scans, defers automatic indexing until after MCP initialization, and checks `PRAGMA data_version` before reusing cached SQLite snapshots. Historical medians on a 1,000-file TypeScript fixture were `11.8 ms` for `workspace_summary`, `13.0 ms` for `get_symbol_context`, and `10.7 ms` for `map_system`. [Benchmarks](https://github.com/MrBekoX/Causoryn/blob/main/docs/en/benchmarks.md)
+- **LLM-free analysis (`ADR-002`):** Static analysis, search, verification, and export run locally without model calls, model credentials, or embeddings. The bundled `architecture-blueprint` skill guides your host coding agent to supply optional `annotations`; Causoryn validates schema and graph references fail-closed while prose remains caller-provided.
+- **Reproducible exports:** The same snapshot (including metadata) with identical format, view, options, and annotations produces byte-identical artifacts under the same renderer version. Build timestamps, MCP request IDs, job progress, and host-generated annotations can vary ([ADR-002](https://github.com/MrBekoX/Causoryn/blob/main/docs/en/adr/ADR-002-no-llm.md)).
+- **Evidence-backed results (`ADR-010`):** Edges report `verified`, `heuristic`, or `unresolved` resolution. Every `verified` edge carries source-span evidence.
+- **Read-only source analysis (`ADR-008`):** SQLite graph and wiki databases live outside analyzed roots. Automatic setup also isolates exports outside your workspace; custom `output.allowedOutputDirs` governs explicit export destinations independently of analyzed roots.
+- **Offline visual architecture portals:** Zero-JS layered SVG HTML (`view: "architecture"`, default `causoryn-architecture.html`), interactive pan/zoom/search/Evidence Inspector portal (`view: "interactive"`, default `causoryn-architecture-interactive.html`), subgraph Mermaid diagrams, Architecture Brief Markdown, and fail-closed Host-LLM `annotations`.
+- **Universal repository compatibility & warm snapshot reads:** Analyzes `.ts/.tsx/.mts/.cts` and `.js/.jsx/.mjs/.cjs` (ESM + CommonJS) with read-only `tsconfig.json`/`jsconfig.json` path-alias resolution, honors root `.gitignore`, `.git/info/exclude`, and nested `.gitignore`, preserves `bin/*.ts|js` and `src/bin/*.rs` while ignoring `.NET` `bin/` outputs, yields during async inventory scans, defers automatic indexing until after MCP initialization, and checks `PRAGMA data_version` before reusing cached SQLite snapshots. Historical medians on a 1,000-file TypeScript fixture were `11.8 ms` for `workspace_summary`, `13.0 ms` for `get_symbol_context`, and `10.7 ms` for `map_system` ([Benchmarks](https://github.com/MrBekoX/Causoryn/blob/main/docs/en/benchmarks.md)).
+
+---
 
 ## Requirements & Component Runtime Matrix
 
@@ -34,61 +35,72 @@ graph alone or use optional caller-supplied `annotations` (`K-023`).
 | **Go** (L1/heuristic + L3) | **Go 1.22+** (stdlib `go/parser`) | On-demand `go run` (or `CAUSORYN_GO_WORKER_BIN`) | 100% offline |
 | **Rust** (L1/heuristic + L3) | **Rust / Cargo** (`syn` 3 sidecar) | On-demand `cargo build --locked` into `~/.causoryn/cache/rust-worker-target` | An uncached build can fetch locked crates from `crates.io`; a populated cache supports offline use |
 
-If an optional language sidecar toolchain (`dotnet`, `python`, `go`, `cargo`) is unavailable
-on a machine, Causoryn degrades gracefully and honestly to L0/L1 file-level provenance
-(`npx causoryn@0.2.3 doctor` inspects sidecar readiness).
+If an optional language sidecar toolchain (`dotnet`, `python`, `go`, `cargo`) is unavailable on a machine, Causoryn degrades gracefully and honestly to L0/L1 file-level provenance (`npx causoryn@latest doctor` inspects sidecar readiness).
 
 ---
 
 ## Installation Across All 4 Supported Hosts
 
-You can install Causoryn either via the **interactive/scriptable CLI wizard (`npx causoryn setup`)**
-or via **each host's native Plugin Marketplace**.
+You can install Causoryn either via the **interactive/scriptable CLI wizard (`npx causoryn setup`)** or via **each host's native Plugin Marketplace**.
 
 ### Option A: One-Command CLI Setup (`npx causoryn setup`)
 
 ```bash
 # Preview planned changes without writing any files
-npx causoryn@0.2.3 setup --all-detected --dry-run
+npx causoryn@latest setup --all-detected --dry-run
 
 # Configure all detected hosts on your machine (creates .causoryn.backup files and stages a persistent ~/.causoryn/runtime copy)
-npx causoryn@0.2.3 setup --all-detected --yes
+npx causoryn@latest setup --all-detected --yes
 
 # Or target specific hosts explicitly
-npx causoryn@0.2.3 setup --client antigravity --yes
-npx causoryn@0.2.3 setup --client claude-code --yes
-npx causoryn@0.2.3 setup --client codex --yes
-npx causoryn@0.2.3 setup --client zcode --yes
+npx causoryn@latest setup --client antigravity --yes
+npx causoryn@latest setup --client claude-code --yes
+npx causoryn@latest setup --client codex --yes
+npx causoryn@latest setup --client zcode --yes
 
 # Verify installation health (read-only)
-npx causoryn@0.2.3 doctor
+npx causoryn@latest doctor
 
 # Cleanly remove Causoryn from a host (cleans up ~/.causoryn/runtime when no remaining host points to it)
-npx causoryn@0.2.3 setup --client claude-code --uninstall --yes
+npx causoryn@latest setup --client claude-code --uninstall --yes
 ```
 
 ### Option B: Native Host Plugin Marketplaces
 
 1. **Antigravity** (`agy` / Antigravity IDE):
-   - Add the repository (`https://github.com/MrBekoX/Causoryn`) or extracted `causoryn` plugin folder containing `plugin.json` and `mcp_config.json`, or run `npx causoryn@0.2.3 setup --client antigravity --yes` (writes `~/.gemini/config/mcp_config.json`, updates `~/.gemini/antigravity/mcp_config.json` when present, and installs the 5 skills into `~/.gemini/config/skills/`).
+   - Add the repository (`https://github.com/MrBekoX/Causoryn`) or extracted `causoryn` plugin folder containing `plugin.json` and `mcp_config.json`, or run `npx causoryn@latest setup --client antigravity --yes` (writes `~/.gemini/config/mcp_config.json`, updates `~/.gemini/antigravity/mcp_config.json` when present, and installs the 5 skills into `~/.gemini/config/skills/`).
 2. **Claude Code**:
    - In Claude Code, register the GitHub marketplace and install the plugin:
      ```text
      /plugin marketplace add MrBekoX/Causoryn
      /plugin install causoryn@causoryn
      ```
-   - Or run `npx causoryn@0.2.3 setup --client claude-code --yes` (`~/.claude.json` + `~/.claude/skills/`).
+   - Or run `npx causoryn@latest setup --client claude-code --yes` (`~/.claude.json` + `~/.claude/skills/`).
 3. **Codex** (Codex CLI / Desktop):
-   - Add the repository marketplace (`.agents/plugins/marketplace.json` + `.codex-plugin/plugin.json`) via Codex plugin management, or run `npx causoryn@0.2.3 setup --client codex --yes` (`$CODEX_HOME/config.toml` `[mcp_servers.causoryn]` with `startup_timeout_sec = 30` + `~/.agents/skills/`).
+   - Add the repository marketplace (`.agents/plugins/marketplace.json` + `.codex-plugin/plugin.json`) via Codex plugin management, or run `npx causoryn@latest setup --client codex --yes` (`$CODEX_HOME/config.toml` `[mcp_servers.causoryn]` with `startup_timeout_sec = 30` + `~/.agents/skills/`).
 4. **ZCode (GLM)**:
    - Open **Plugin Marketplace -> New / Discover**, add `https://github.com/MrBekoX/Causoryn` (uses root `marketplace.json` and `.zcode-plugin/plugin.json`), and install `causoryn`.
-   - Or run `npx causoryn@0.2.3 setup --client zcode --yes` (writes `~/.zcode/cli/config.json` `mcp.servers.causoryn` while preserving any existing `~/.agents/mcp.json` fallback servers, plus `~/.zcode/skills/`).
+   - Or run `npx causoryn@latest setup --client zcode --yes` (writes `~/.zcode/cli/config.json` `mcp.servers.causoryn` while preserving any existing `~/.agents/mcp.json` fallback servers, plus `~/.zcode/skills/`).
+
+---
+
+## Example Prompts: Deterministic vs. Annotated
+
+- **Deterministic / Pure Structural (no `annotations`):**
+  - `"Use Causoryn to run a preflight impact and contract check before modifying src/services/orders-service.ts."`
+  - `"Export a purely structural, model-free interactive architecture diagram of this repo using Causoryn without annotations."`
+- **Host-LLM Annotated Interactive Portal (no skill name needed):**
+  - `"Create a comprehensive, evidence-grounded interactive architecture portal for this project using Causoryn."`
+  - `"Causoryn kullanarak bu projenin kapsamlı, kanıta dayalı etkileşimli mimari portalını oluştur."`
+
+Full prompting recipes and `annotations` contract reference:
+**[Prompting & Architecture Portals Guide (EN)](https://github.com/MrBekoX/Causoryn/blob/main/docs/en/prompting-and-architecture-portals.md)** · **[Prompt ve Mimari Portal Rehberi (TR)](https://github.com/MrBekoX/Causoryn/blob/main/docs/prompting-and-architecture-portals.md)**
 
 ---
 
 ## Read-Only Workspace & Zero-Config Authorization
 
-- **Storage and export paths:** Automatic setup uses `~/.causoryn/workspaces/<slug>-<hash>/` or the supported `ZCODE_PLUGIN_DATA` / `--data-dir` override. With manual configuration, keep `output.allowedOutputDirs` outside the source tree for an out-of-tree export workflow. [CLI & Configuration](https://github.com/MrBekoX/Causoryn/blob/main/docs/en/cli-and-configuration.md)
+- **Storage and export paths:** Automatic setup uses `~/.causoryn/workspaces/<slug>-<hash>/` or the supported `ZCODE_PLUGIN_DATA` / `--data-dir` override. With manual configuration, keep `output.allowedOutputDirs` outside the source tree for an out-of-tree export workflow ([CLI & Configuration](https://github.com/MrBekoX/Causoryn/blob/main/docs/en/cli-and-configuration.md)).
 - **Zero-config CLI flags (`--allow-cwd --auto-data-dir`):** When launched inside a safe project directory, `--allow-cwd` authorizes that project root automatically; when launched by a desktop IDE from `$HOME`, filesystem root, or the plugin cache directory, Causoryn rejects unsafe roots and dynamically binds the active workspace via MCP `roots/list` (`notifications/roots/list_changed`).
 - **Explicit `CAUSORYN_CONFIG` (`allowRoots`):** Bare `node dist/mcp-server.mjs` without CLI flags preserves strict default-deny (`{"allowRoots":[]}`) until a project path such as `{"allowRoots":["/work/my-service"]}` is explicitly declared.
 
@@ -161,8 +173,8 @@ Reserved specification base identifiers not emitted as envelope errors in v0.2.3
 
 ## Documentation (English & Türkçe)
 
-- **[English Documentation Hub](https://github.com/MrBekoX/Causoryn/blob/main/docs/en/README.md)** — [Architecture](https://github.com/MrBekoX/Causoryn/blob/main/docs/en/architecture.md) · [CLI & Configuration](https://github.com/MrBekoX/Causoryn/blob/main/docs/en/cli-and-configuration.md) · [5-Language Analyzers](https://github.com/MrBekoX/Causoryn/blob/main/docs/en/language-analyzers.md) · [MCP Tool Contracts](https://github.com/MrBekoX/Causoryn/blob/main/docs/en/tool-contracts.md) · [Compatibility Matrix](https://github.com/MrBekoX/Causoryn/blob/main/docs/en/compatibility-matrix.md)
-- **[Türkçe Dokümantasyon Merkezi](https://github.com/MrBekoX/Causoryn/blob/main/docs/README.md)** — [Mimari Özeti](https://github.com/MrBekoX/Causoryn/blob/main/docs/architecture.md) · [CLI ve Konfigürasyon](https://github.com/MrBekoX/Causoryn/blob/main/docs/cli-and-configuration.md) · [5-Dil Analizörleri](https://github.com/MrBekoX/Causoryn/blob/main/docs/language-analyzers.md) · [MCP Araç Sözleşmeleri](https://github.com/MrBekoX/Causoryn/blob/main/docs/tool-contracts.md) · [Uyumluluk Matrisi](https://github.com/MrBekoX/Causoryn/blob/main/docs/compatibility-matrix.md)
+- **[English Documentation Hub](https://github.com/MrBekoX/Causoryn/blob/main/docs/en/README.md)** — [Prompting & Architecture Portals](https://github.com/MrBekoX/Causoryn/blob/main/docs/en/prompting-and-architecture-portals.md) · [Architecture](https://github.com/MrBekoX/Causoryn/blob/main/docs/en/architecture.md) · [CLI & Configuration](https://github.com/MrBekoX/Causoryn/blob/main/docs/en/cli-and-configuration.md) · [5-Language Analyzers](https://github.com/MrBekoX/Causoryn/blob/main/docs/en/language-analyzers.md) · [MCP Tool Contracts](https://github.com/MrBekoX/Causoryn/blob/main/docs/en/tool-contracts.md) · [Compatibility Matrix](https://github.com/MrBekoX/Causoryn/blob/main/docs/en/compatibility-matrix.md)
+- **[Türkçe Dokümantasyon Merkezi](https://github.com/MrBekoX/Causoryn/blob/main/docs/README.md)** — [Prompt ve Mimari Portal Rehberi](https://github.com/MrBekoX/Causoryn/blob/main/docs/prompting-and-architecture-portals.md) · [Mimari Özeti](https://github.com/MrBekoX/Causoryn/blob/main/docs/architecture.md) · [CLI ve Konfigürasyon](https://github.com/MrBekoX/Causoryn/blob/main/docs/cli-and-configuration.md) · [5-Dil Analizörleri](https://github.com/MrBekoX/Causoryn/blob/main/docs/language-analyzers.md) · [MCP Araç Sözleşmeleri](https://github.com/MrBekoX/Causoryn/blob/main/docs/tool-contracts.md) · [Uyumluluk Matrisi](https://github.com/MrBekoX/Causoryn/blob/main/docs/compatibility-matrix.md)
 - **[Bilingual Architecture & Project Overview (TR · EN)](https://github.com/MrBekoX/Causoryn/blob/main/docs/project-overview.tr-en.md)**
 
 ---

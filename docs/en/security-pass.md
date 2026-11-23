@@ -1,12 +1,12 @@
-# Security Pass — `v0.2.3` Boundaries and Historical Spec §22 Matrix
+# Security Audit and Supply-Chain Boundaries
 
 **Language / Dil:** [Türkçe](../security-pass.md) | English
 
-> Evidence: `raw/Causoryn_Teknik_Dokuman_v2.1.pdf` p.22 §22 "Security: symlink/path traversal, secret leakage, symlink TOCTOU, poisoned source comment, oversized files, malicious Git refs, network denied" + p.21 §19 threat model + p.22 §20 safe configuration defaults · `wiki/sprint-7.md` F6 · `wiki/decisions.md` `K-008`/`K-011`/`K-012`/`K-014`/`K-015`/`K-016`/`K-021`/`K-022`/`K-024`.
+> Evidence: `raw/Causoryn_Teknik_Dokuman_v2.1.pdf` p.22 §22 "Security: symlink/path traversal, secret leakage, symlink TOCTOU, poisoned source comment, oversized files, malicious Git refs, network denied" + p.21 §19 threat model + p.22 §20 safe configuration defaults · `wiki/sprint-7.md` F6 · `wiki/decisions.md` `K-008`/`K-011`/`K-012`/`K-014`/`K-015`/`K-016`/`K-021`/`K-022`/`K-024`/`K-025`.
 
-## `v0.2.3` Security Boundaries
+## Current Runtime Security Boundaries (`v0.2.3`)
 
-**Bundle identity:** `packages/mcp-server/dist/mcp-server.mjs` SHA-256 `f467d15078f1938a914c1e5eda7f2bf36e40fa33e7473eaa0827fa495209decc`. `dist/bundle-manifest.json` records this hash and 35 entries including the native SQLite runtime. The hash identifies the local artifact. The F6 results below describe the dated test sessions in the matrix.
+**Bundle identity:** `packages/mcp-server/dist/mcp-server.mjs` SHA-256 `833bf422bab99ac70f3acb8f7e8a96b1d76918f69f872122cb40e5455855f92f`. `dist/bundle-manifest.json` records this hash and 35 entries including the native SQLite runtime. The hash identifies the local artifact. The F6 results below describe the dated test sessions in the matrix.
 
 - `causoryn_export_documentation` writes to destinations authorized by `output.allowedOutputDirs` using an exclusive `flag: "wx"` + `EEXIST`-guarded temporary file and atomic rename; `view="interactive"` defaults to `causoryn-architecture-interactive.html` so it never overwrites the zero-JS `causoryn-architecture.html`. `--auto-data-dir` puts exports outside the source tree. A manually authorized export directory may be inside that tree. An undeclared directory returns `EXPORT_NOT_ALLOWED`. An unsafe file name or path escape returns `PATH_DENIED`. See `packages/graph/src/export.ts`, `packages/workspace/src/output-policy.ts`, and `packages/mcp-server/src/runtime-cli.ts`.
 - **Universal compatibility defense-in-depth (`v0.2.3`, `K-024`):**
@@ -16,6 +16,23 @@
 - Optional `annotations` are text supplied by the user or host model. The server enforces the schema and size budgets and validates `moduleId`, `nodeId`, `evidenceId`, and `keyFiles` against the snapshot and projection. Invalid references return `INVALID_ARGUMENT`. Review the prose for factual accuracy. See `packages/graph/src/architecture-annotations.ts`.
 - The default `view="architecture"` HTML is script-free with a `default-src 'none'` CSP. Opt-in `view="interactive"` retains the offline boundary and permits a local embedded script. Display text is escaped, the data island is serialized safely, and the script uses no `innerHTML`, `fetch`, or CDN. See `packages/graph/src/architecture-export.ts`, `packages/graph/test/architecture-export.test.ts`, and `packages/mcp-server/test/architecture-export-tool.test.ts`.
 - The MCP analysis and rendering code makes no model API calls. Host model usage and network policy are controlled by the host. npm installation and a cold Rust worker `cargo build --locked` can access package sources. The historical Node `net-guard.cjs` evidence covers the exercised process and fixture paths. [Language analyzers](language-analyzers.md)
+
+## CI/CD and Supply-Chain Security Hardening (`K-025`)
+
+Alongside runtime and packaged-bundle controls, `K-025` hardens the full GitHub Actions pipeline and dependency lifecycle with layered supply-chain checks:
+
+1. **`.github/workflows/security.yml` — workflow static audit, PR dependency review, and multi-ecosystem vulnerability auditing:**
+   - **`zizmor` (`zizmorcore/zizmor-action`):** Fail-closed static security audit of all GitHub Actions workflows (`strict-collection: true`, `persona: regular`, `min-severity: medium`, `advanced-security: false`, `annotations: true`, `fail-on-no-inputs: true`).
+   - **PR Dependency Review (`actions/dependency-review-action`):** Runs on pull requests; fails closed on `high`+ advisories and denies modern SPDX copyleft licenses (`GPL-*`, `AGPL-*`, `LGPL-*`).
+   - **Multi-Ecosystem Vulnerability Audit (`dependency-audit`):** Runs `npm audit --audit-level=high` plus a fail-closed NuGet JSON audit (`dotnet restore native/roslyn-worker/Causoryn.RoslynWorker.csproj --locked-mode` + `dotnet list ... package --vulnerable --include-transitive --format json`) that fails closed on any severity, any `NU1900` audit warning, or absence of a live `api.nuget.org` advisory source (Rust `Cargo.lock` dependencies are locked via `cargo build --locked`, checked on PRs by `dependency-review-action`, and tracked by Dependabot `cargo`).
+2. **`.github/workflows/codeql.yml` — 5-language CodeQL v4 SAST:** Scans `javascript-typescript`, `python`, `csharp`, `actions` (`build-mode: none`), and `go` (`build-mode: manual` with `setup-go` → `init` → `go build ./...` → `analyze`) using `security-extended` queries and a fork-PR-safe SARIF `upload:` expression.
+3. **`.github/workflows/scorecard.yml` — OpenSSF Scorecard:** Executes `ossf/scorecard-action` (`publish_results: true`) and uploads SARIF via `github/codeql-action/upload-sarif`, restricted strictly to 5 approved 40-character SHA-pinned actions while keeping container runtime enabled for the Docker action.
+4. **`.github/workflows/release.yml` — 2-job SLSA supply-chain separation:**
+   - **`build-and-verify` (`contents: read`):** Runs on Linux with `step-security/harden-runner` (`egress-policy: audit`, `disable-sudo-and-containers: true`), `fetch-depth: 0` + `origin/main` ancestry check, hermetic `setup-node` (`package-manager-cache: false`), `npm ci --ignore-scripts`, `npm audit --audit-level=high`, deterministic `-p:RestoreLockedMode=true` Roslyn + `--locked` Rust builds, `export-public-tree.mjs --verify-temp --ref HEAD`, `npm test`, single-tarball `npm pack` + isolated deep MCP smoke (`--version`, `doctor --json`, `initialize`), CycloneDX 1.5 SBOM (`scripts/generate-sbom.mjs`), and `SHA256SUMS.txt`, uploading immutable `release-artifacts`.
+   - **`attest-and-publish` (`needs: build-and-verify`, `environment: release`, `id-token: write`, `attestations: write`, `contents: write`):** Executes zero build or test code; verifies `sha256sum -c SHA256SUMS.txt` before `actions/attest-build-provenance`, tokenless OIDC `npm publish "./$TGZ_FILE" --provenance --access public` (`--tag next` on prereleases; zero `NPM_TOKEN` / `NODE_AUTH_TOKEN` secrets), and idempotent `gh release create --verify-tag`.
+5. **`.github/workflows/ci.yml` — 3-OS locked build and public-export gate:** Runs across `ubuntu-latest`, `windows-latest`, and `macos-latest` with Linux `step-security/harden-runner`, locked NuGet restores (`-p:RestoreLockedMode=true` via `packages.lock.json`), `cargo build --locked`, `npm audit --audit-level=high`, and `node scripts/export-public-tree.mjs --verify-temp --ref HEAD`.
+6. **`.github/dependabot.yml` — supply-chain cooldown:** Covers 4 ecosystems (`npm` across monorepo directories `/`, `/packages/*`, `/adapters/*`, `/integrations/*/*`; `cargo` at `/native/rust-worker`; `nuget` at `/native/roslyn-worker`; `github-actions` at `/`; `native/go-worker` uses Go stdlib only with zero third-party `go.mod` dependencies) with a 7-day `default-days` supply-chain cooldown (14-day `semver-major-days` on SemVer ecosystems) and grouped updates.
+7. **Automated workflow regression pins (`tests/ci-workflow.test.ts`):** Continuously verifies 100% 40-char SHA pinning, allowlisted actions, read-only top-level permissions, `persist-credentials: false`, zero `${{ ... }}` interpolation inside `run:` blocks, `harden-runner`, `zizmor`, 5-language CodeQL, OpenSSF Scorecard constraints, 2-job SLSA release separation, and Dependabot cooldown/grouping.
 
 ## Historical F6 Scope and Methodology
 
@@ -77,6 +94,9 @@ npx vitest run tests/security-release/f6-security-release.test.ts   # → 32 pas
 # Full security-release suite (F6 + netguard boundary + client close)
 npx vitest run tests/security-release/                              # → 36 passed (36)
 
+# CI/CD, supply-chain, zizmor/CodeQL/Scorecard/SLSA & Dependabot contract tests
+npx vitest run tests/ci-workflow.test.ts
+
 # Production source, docs & workflow secret/profile-path scan (13 roots + 13 root files)
 npm run secret-scan                                                 # → exit 0, 0 matches
 
@@ -98,4 +118,4 @@ npx tsc -p tsconfig.typecheck.json --noEmit                                     
 - [compatibility-matrix.md](compatibility-matrix.md) — host × result matrix
 - [implementation-status.md](implementation-status.md) — phase-by-phase status and evidence log
 - [SECURITY.md](../../SECURITY.md) — security policy and vulnerability reporting process
-- Historical working records: `wiki/architecture.md` · `wiki/mcp-tools.md` · `wiki/sprint-7.md` · `wiki/decisions.md` (`ADR-010`, `K-008`, `K-021`, `K-022`)
+- Historical working records: `wiki/architecture.md` · `wiki/mcp-tools.md` · `wiki/sprint-7.md` · `wiki/decisions.md` (`ADR-010`, `K-008`, `K-021`, `K-022`, `K-024`, `K-025`)

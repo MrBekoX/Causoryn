@@ -2,13 +2,21 @@
 
 > **Language:** [Türkçe](../cli-and-configuration.md) | **English**
 >
-> **Evidence base:** `packages/causoryn/src/{cli.ts,setup.ts,doctor.ts,runtime-stage.ts,types.ts}`, `packages/causoryn/scripts/{causoryn.mjs,plugin-mcp-launcher.mjs,lib/node-version-guard.mjs,verify-package-ready.mjs}`, `packages/mcp-server/src/{cli-stdio.ts,stdio.ts,runtime-cli.ts,config.ts,context.ts}`, `packages/workspace/src/policy-config.ts` (TS v2.1 §9, §10.1, §17, §20 · `ADR-008` · `K-021` · `K-022`).
+> **Evidence base:** `packages/causoryn/src/{cli.ts,setup.ts,doctor.ts,runtime-stage.ts,types.ts}`, `packages/causoryn/scripts/{causoryn.mjs,plugin-mcp-launcher.mjs,lib/node-version-guard.mjs,verify-package-ready.mjs}`, `packages/mcp-server/src/{cli-stdio.ts,stdio.ts,runtime-cli.ts,config.ts,context.ts,workspace-ignore-discovery.ts}`, `packages/workspace/src/policy-config.ts` (TS v2.1 §9, §10.1, §17, §20 · `ADR-008` · `K-021`..`K-026`).
 
 This reference documents every `causoryn` (`v0.2.3` — Pre-1.0 Public Preview) CLI subcommand and flag, the pre-import Node.js `>= 24` runtime guard, the version-pinned plugin marketplace launcher, the zero-config workspace discovery and root-safety filter, the out-of-tree data directory layout, and the strict `CAUSORYN_CONFIG` JSON schema.
 
 ---
 
 ## 1. CLI Subcommands & Flags (`causoryn`)
+
+For quick setup and health verification, use `@latest` (exact version pinning such as `@0.2.3` is also supported for deterministic or CI environments):
+
+```bash
+npx causoryn@latest setup      # Installs the MCP server + all 5 canonical skills for detected hosts
+npx causoryn@latest doctor     # Read-only verification of Node.js >= 24, runtime, 4 sidecars & host configs
+# Optional exact version pin: npx causoryn@0.2.3 setup && npx causoryn@0.2.3 doctor
+```
 
 The `causoryn` binary (`packages/causoryn/scripts/causoryn.mjs`) exposes the following commands:
 
@@ -109,9 +117,9 @@ Host marketplace manifests (`.claude-plugin/plugin.json`, `.zcode-plugin/plugin.
 - **Bare invocation (`node dist/mcp-server.mjs` with 0 CLI args):** Preserves strict default-deny (`allowRoots: []`) and `outputSchemaProfile: "full"`. Unless `CAUSORYN_CONFIG` declares `allowRoots`, workspace tools return `WORKSPACE_NOT_AUTHORIZED`.
 - **Zero-config invocation (`causoryn mcp --allow-cwd --auto-data-dir`):** Evaluates candidate workspace roots through `inspectProjectRootSafety`.
 
-With CLI activation, `autoIndex` enabled, and an authorized root, opening the published snapshot or starting the first full index is deferred until after MCP `initialize`. `causoryn_index_status` can start the job and report its state. Initial calls that need a snapshot may wait up to 15 seconds for the background job. Consult index status to establish readiness after the handshake. See `packages/mcp-server/src/{cli-stdio.ts,context.ts}`.
+With CLI activation (`deferAutoIndex: true`), `autoIndex` enabled, and an authorized root, opening the published snapshot or starting the first full index is deferred until after the MCP `initialize` handshake so startup stays non-blocking even on large repositories. `causoryn_index_status` can start the job and report its state. Initial calls that need a snapshot may wait up to 15 seconds for the background job. Consult index status to establish readiness after the handshake. See `packages/mcp-server/src/{cli-stdio.ts,context.ts}`.
 
-Automatic workspace configuration (`packages/mcp-server/src/workspace-ignore-discovery.ts`, `v0.2.3`) merges supported patterns from the primary root’s `.gitignore`, `.git/info/exclude`, and depth/budget-bounded nested `.gitignore` files into `extraIgnore` (rejecting symlinks via `O_NOFOLLOW` + `(dev, ino)` verification and omitting broad directory patterns that could conflict with negations). When the caller does not supply an explicit `ignore` array, automatic configuration also replaces blunt `**/bin/**` with `.NET`-specific output globs (`**/bin/{Debug,Release,x64,x86,AnyCPU}/**` plus `<projDir>/bin/**` for detected `.csproj`/`.fsproj`/`.vbproj` projects), preserving `bin/*.ts|js` and Rust `src/bin/*.rs` sources. Pattern matching runs on a polynomial-time zero-RegExp two-pointer glob engine. [Language Analyzers](language-analyzers.md)
+Automatic workspace configuration (`buildWorkspaceAutoConfig` + `packages/mcp-server/src/workspace-ignore-discovery.ts`) merges supported patterns from the primary root’s `.gitignore`, `.git/info/exclude`, and depth/budget-bounded nested `.gitignore` files (depth ≤ 6, up to 64 files, up to 4,000 directories) into `extraIgnore` (rejecting symlinks via `O_NOFOLLOW` + `(dev, ino)` verification and omitting broad directory patterns that could conflict with negations). When the caller does not supply an explicit `ignore` array, `buildWorkspaceAutoConfig` also replaces blunt `**/bin/**` with `.NET`-specific output globs (`**/bin/{Debug,Release,x64,x86,AnyCPU}/**` plus `<projDir>/bin/**` for detected `.csproj`/`.fsproj`/`.vbproj` projects), preserving Node `bin/*.ts|js` and Rust `src/bin/*.rs` sources. Pattern matching runs on a polynomial-time zero-RegExp two-pointer glob engine (`ignore-matcher.ts`). [Language Analyzers](language-analyzers.md)
 
 ### 3.2 `inspectProjectRootSafety` — Rejected Unsafe Roots
 
@@ -147,18 +155,18 @@ Causoryn reads project files during source analysis. Persistent graph and wiki d
 │   ├── scripts/{causoryn.mjs,plugin-mcp-launcher.mjs,lib/node-version-guard.mjs}
 │   ├── dist/{mcp-server.mjs,bundle-manifest.json,node_modules/better-sqlite3,typescript-lib}
 │   ├── native/{roslyn-worker,python-worker,go-worker,rust-worker}
-│   └── skills/{causoryn,map-system,preflight-change,verify-change}
+│   └── skills/{causoryn,map-system,preflight-change,verify-change,architecture-blueprint}
 ├── workspaces/
 │   └── <slug>-<hash12>/                        # POSIX mode 0o700 (basename slug + first 12 hex of canonical SHA-256)
 │       ├── graph-<client>.sqlite               # storage.dataDbPath + wiki.dataDbPath (graph.sqlite when --client omitted)
-│       └── exports/                            # POSIX mode 0o700 (wired into output.allowedOutputDirs)
+│       └── exports/                            # POSIX mode 0o700 (wired into output.allowedOutputDirs; e.g., causoryn-architecture-interactive.html)
 └── cache/
     └── rust-worker-target/                     # Writable Rust sidecar target cache (CAUSORYN_RUST_TARGET_DIR)
 ```
 
 - **Base data directory precedence (`resolveBaseDataDir`):** `--data-dir <abs-path>` > `ZCODE_PLUGIN_DATA` > `~/.causoryn`.
 - **Pre-mkdir & post-mkdir symlink/containment guards:** Before calling `mkdirSync`, Causoryn walks every ancestor prefix (`assertDataDirAncestorsSafe`, `assertNotSymlinkDirectory`, `assertStrictlyOutsideWorkspaceRoots`) to reject symlinks (`CWE-59`, allowing macOS system firmlinks `/var`, `/tmp`, `/etc`), dangling links, and any path resolving inside `allowRoots`. After directory creation, `realpathSync` re-verifies containment against TOCTOU races.
-- **Persistent runtime staging (`stagePersistentRuntime`):** When `npx causoryn@0.2.3 setup` executes from an ephemeral `_npx`, `.npx`, or `os.tmpdir()` cache, it copies the runtime into `~/.causoryn/.runtime-stage-<pid>-<ts>` and atomically swaps it into `~/.causoryn/runtime` (rolling back `.runtime-prev-*` on failure) so host MCP configurations survive `_npx` cache eviction.
+- **Persistent runtime staging (`stagePersistentRuntime`):** When `npx causoryn@latest setup` (or pinned `npx causoryn@0.2.3 setup`) executes from an ephemeral `_npx`, `.npx`, or `os.tmpdir()` cache, it copies the runtime into `~/.causoryn/.runtime-stage-<pid>-<ts>` and atomically swaps it into `~/.causoryn/runtime` (rolling back `.runtime-prev-*` on failure) so host MCP configurations survive `_npx` cache eviction.
 
 ---
 
@@ -226,8 +234,8 @@ Causoryn reads project files during source analysis. Persistent graph and wiki d
 | `results.maxSymbols` | `number` (positive int) | `100` | Maximum symbols returned by `causoryn_find_symbols`. |
 | `results.maxDepth` | `number` (positive int) | `3` | Maximum neighborhood traversal depth in `causoryn_get_symbol_context`. |
 | `results.maxPaths` | `number` (positive int) | `50` | Maximum execution paths returned by `causoryn_trace_execution`. |
-| `autoIndex` | `boolean` | `true` | Uses an existing published snapshot if available for an authorized root. CLI activation defers first indexing until after MCP initialization. The bare configuration path can index synchronously. Set `false` to disable automatic indexing. |
-| `output.allowedOutputDirs` | `string[]` | `[]` | Existing directories and their descendants permitted for `causoryn_export_documentation`. Empty returns `EXPORT_NOT_ALLOWED`. The explicit allowlist is independent of `allowRoots` (`OutputAccessPolicy`). |
+| `autoIndex` | `boolean` | `true` | Uses an existing published snapshot if available for an authorized root. CLI activation (`deferAutoIndex`) defers first indexing until after MCP initialization. The bare configuration path can index synchronously. Set `false` to disable automatic indexing. |
+| `output.allowedOutputDirs` | `string[]` | `[]` | Existing directories and their descendants permitted for `causoryn_export_documentation` (`view: "interactive"` defaults to `causoryn-architecture-interactive.html`; `view: "architecture"` defaults to `causoryn-architecture.html`). Empty returns `EXPORT_NOT_ALLOWED`. The explicit allowlist is independent of `allowRoots` (`OutputAccessPolicy`). [Prompting & Portals](prompting-and-architecture-portals.md) |
 | `storage.dataDbPath` | `string` (optional) | `undefined` (`InMemoryGraphRepository`) | Persistent SQLite graph + `symbol_fts` database path. Must be absolute, have an existing parent directory, and resolve strictly outside all `allowRoots` both lexically and via `realpathSync` (`ADR-008`). Enables `tolerateConcurrentPublishRace`. |
 | `wiki.dataDbPath` | `string` (optional) | `undefined` (`PATH_DENIED` / `INDEX_NOT_READY`) | Persistent Living Wiki SQLite (`SqliteWikiStore` + `wiki_fts`) database path. Subject to the same `ADR-008` containment checks as `storage.dataDbPath` and may share the same SQLite file. |
 
@@ -262,6 +270,7 @@ Causoryn reads project files during source analysis. Persistent graph and wiki d
 ## Related Documentation
 
 - [Documentation Hub](README.md) · [Architecture Overview](architecture.md)
+- [Prompting & Architecture Portals Guide](prompting-and-architecture-portals.md)
 - [5-Language Analyzers & Sidecar Protocol](language-analyzers.md) · [MCP Tool Contracts](tool-contracts.md)
 - [Host Setup Guides: Antigravity](hosts/antigravity.md) · [Claude Code](hosts/claude-code.md) · [Codex](hosts/codex.md) · [ZCode (GLM)](hosts/zcode.md)
 - [Security Audit](security-pass.md) · [Host Compatibility Matrix](compatibility-matrix.md)

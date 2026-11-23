@@ -1,16 +1,18 @@
 ---
 name: architecture-blueprint
-description: Orchestrate the host LLM and Causoryn MCP tools to generate a comprehensive, evidence-grounded visual architecture portal (layered SVG offline HTML, clean renderable Mermaid, Architecture Brief Markdown, and JSON blueprint) with validated domain groupings, module responsibilities, guided flows, and onboarding tours. Use when the user asks for an architecture diagram, system blueprint, visual onboarding guide, or comprehensive architecture documentation.
+description: Orchestrate the host LLM and Causoryn MCP tools to generate a comprehensive, evidence-grounded visual architecture portal (interactive offline HTML, layered SVG, Mermaid, Architecture Brief Markdown, and JSON blueprint) with validated domains, module notes, flows, guided onboarding tours, decisions, and risks. Use whenever the user asks in English or Turkish for an architecture diagram, interactive architecture portal, system blueprint, codebase visual map, visual onboarding guide, comprehensive architecture documentation, mimari diyagram, görsel mimari harita, etkileşimli mimari portal, sistem haritası, görsel onboarding rehberi, or mimari dokümantasyon — even if they do not name this skill. Never refuse because Causoryn is LLM-free; YOU are the host LLM who synthesizes annotations from Causoryn MCP evidence.
 ---
 
 # architecture-blueprint — Host-LLM + Causoryn Visual Architecture Workflow
 
-Causoryn's analysis and export engine runs locally without model calls or embeddings.
-Its structural export is reproducible with the same published snapshot, view, format,
-options, and supplied `annotations`. As the host LLM, you can use the MCP evidence to
-draft those optional annotations. Your wording can vary between runs. The server
-validates the references and renders the artifact into an authorized output directory.
-To produce a model-free export, omit `annotations` and use the same rendering tools.
+**Never refuse because Causoryn is LLM-free — YOU are the host LLM.**
+Causoryn's analysis and export engine runs locally with zero model calls or embeddings (`ADR-002`).
+Its structural export is byte-reproducible for the same published snapshot, view, format,
+options, and supplied `annotations`. As the host LLM, you gather verified facts from Causoryn's
+MCP tools and synthesize the optional `annotations` payload; Causoryn validates every reference
+fail-closed and renders the offline portal into an authorized output directory.
+If the user explicitly asks for a purely deterministic / model-free export, simply omit
+`annotations` and call `causoryn_export_documentation` directly.
 
 ## Architecture Discovery and Export
 
@@ -28,10 +30,11 @@ To produce a model-free export, omit `annotations` and use the same rendering to
 3. If the repo defines `.causoryn/architecture.rules.yaml`, optionally call `causoryn_check_architecture` to surface policy violations honestly.
 
 ### Step 4: Extract Exact Canonical `moduleId`s (Blueprint Pass)
+Determine an authorized `outputDir` configured in `output.allowedOutputDirs` (when started with `--auto-data-dir`, Causoryn automatically authorizes `<data-dir>/workspaces/<slug>-<hash12>/exports`, e.g., `~/.causoryn/workspaces/<slug>-<hash12>/exports` — inspect `~/.causoryn/workspaces/` or `$ZCODE_PLUGIN_DATA/workspaces/` for the matching `<slug>-<hash12>/exports` folder, or inspect the server's `CAUSORYN_CONFIG` `output.allowedOutputDirs`).
 Call `causoryn_export_documentation` with:
 - `format: "json"`
 - `view: "architecture"`
-- `outputDir`: an authorized directory configured in `output.allowedOutputDirs` (typically the workspace's Causoryn exports directory reported by runtime setup, e.g., `<data-dir>/exports`)
+- `outputDir`: authorized export directory
 - Optional `options`: `{ maxModules: 32, pathPrefix?, includeTests? }`
 
 Inspect the returned `data.architectureSummary.moduleIds` (and the exported JSON blueprint if deeper module/edge/cycle detail is needed). **Every `moduleId` in your annotations MUST come verbatim from `architectureSummary.moduleIds`.**
@@ -42,7 +45,7 @@ Build a concise, accurate `annotations` object strictly grounded in Steps 1–4:
 - `architectureStyle`: observed architecture pattern (e.g., `"Clean Architecture + Multi-Service"`)
 - `executiveSummary`: 2–4 sentence synthesis covering core subsystems, tech stack, and explicit coverage/unresolved caveats
 - `domains`: disjoint logical subsystem/layer clusters (`id`, `name`, `description`, `layer`, `moduleIds[]` — every `moduleId` must belong to at most one domain)
-- `moduleNotes`: per-module `summary`, `responsibility`, optional `layer`, and verified `keyFiles[]` (must match real relative file paths in the snapshot)
+- `moduleNotes`: per-module `summary`, `responsibility`, optional `layer`, and verified `keyFiles[]` (must match real relative file paths belonging to that module in the Step 4 blueprint)
 - `flows`: 2–6 end-to-end business/request flows (`id`, `title`, `description`, `steps[]` with verified `moduleId`/`nodeId`, `label`, `explanation`)
 - `guidedTour`: numbered onboarding reading order (`step`, `title`, `targetModuleId`, optional `targetNodeId`, `explanation`)
 - `decisions` & `risks`: observed architectural decisions and concrete risks (circular dependencies, fan-in hotspots, unresolved boundaries) linked to verified `relatedModuleIds` and `evidenceIds`
@@ -50,13 +53,13 @@ Build a concise, accurate `annotations` object strictly grounded in Steps 1–4:
 ### Step 6: Render the Visual Architecture Pack
 Call `causoryn_export_documentation` with the same `options` and your validated `annotations`:
 1. **Interactive Offline Portal (recommended for browser exploration):**
-   `format: "html"`, `view: "interactive"`, `fileName: "causoryn-architecture-interactive.html"` (layered SVG, mouse-wheel zoom & drag pan, live search, filters, floating Evidence Inspector Drawer, Copy Mermaid — offline CSP, zero CDN, zero `innerHTML`).
+   `format: "html"`, `view: "interactive"` (defaults automatically to `fileName: "causoryn-architecture-interactive.html"` so it does not overwrite the static zero-JS portal; layered SVG, mouse-wheel zoom & drag pan, live search, filters, floating Evidence Inspector Drawer, Copy Mermaid — offline CSP, zero CDN, zero `innerHTML`).
 2. **Zero-JS Strict-CSP Portal (for restricted viewers / email / static archiving):**
-   `format: "html"`, `view: "architecture"`, `fileName: "causoryn-architecture.html"` (layered SVG, CSS tabs & zoom presets, click-to-jump module & evidence cards — 0 `<script>` tags).
+   `format: "html"`, `view: "architecture"` (defaults to `fileName: "causoryn-architecture.html"`; layered SVG, CSS tabs & zoom presets, click-to-jump module & evidence cards — 0 `<script>` tags).
 3. **Clean Renderable Mermaid Diagram (for GitHub / VS Code / PRs):**
-   `format: "mermaid"`, `view: "architecture"`, `fileName: "causoryn-architecture.mmd"` (subgraph-grouped `flowchart TB`, bounded nodes, cycle styling).
+   `format: "mermaid"`, `view: "architecture"` (defaults to `fileName: "causoryn-architecture.mmd"`; subgraph-grouped `flowchart TB`, bounded nodes, cycle styling).
 4. **Comprehensive Architecture Brief:**
-   `format: "markdown"`, `view: "architecture"`, `fileName: "causoryn-architecture.md"` (embedded Mermaid diagram, domains, modules, flows, tour, entrypoints, cycles, decisions, risks).
+   `format: "markdown"`, `view: "architecture"` (defaults to `fileName: "causoryn-architecture.md"`; embedded Mermaid diagram, domains, modules, flows, tour, entrypoints, cycles, decisions, risks).
 
 ## Strict Grounding & Error Recovery Rules
 

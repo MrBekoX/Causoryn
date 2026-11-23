@@ -6,6 +6,22 @@ sürümleme [SemVer](https://semver.org/lang/tr/) ilkelerini izler.
 
 ## [Unreleased]
 
+### Added
+
+- **Doğal dil skill tetikleme & 17 çiftli Diátaxis TR/EN dokümantasyon rehberi (`K-026`):** `docs/prompting-and-architecture-portals.md` ve `docs/en/prompting-and-architecture-portals.md` rehberi (Deterministik vs. Host-LLM Anotasyonlu mimari portal tarifleri) eklendi; `skills/architecture-blueprint/SKILL.md` ön-metnine iki dilli (TR/EN) doğal dil tetiklemeleri ve Host-LLM reddetmeme kuralı, `skills/causoryn/SKILL.md`'ye görsel portal yönlendirmesi, `skills/map-system/SKILL.md` ile `integrations/zcode/causoryn/skills/map-system/SKILL.md`'ye `L3`/`Test` ve 10 alanlı envelope eşlemesi eklendi.
+- **MCP araç şema açıklamaları (`K-026`):** `causoryn_export_documentation` aracının Zod şemasına tüm `view`, `options` ve `annotations` (`title`, `architectureStyle`, `executiveSummary`, `domains`, `moduleNotes`, `flows`, `guidedTour`, `decisions`, `risks`) alanları için açıklayıcı `.describe()` JSON Schema metinleri eklendi.
+
+### Changed
+
+- **Temiz Diátaxis README ve iki dilli dokümantasyon yenilemesi (`K-026`):** Kök `README.md`, `packages/causoryn/README.md` ve 17 çiftli TR/EN `docs/` + `docs/en/` merkezi sürüm kirliliğinden arındırıldı; Deterministik vs. Host-LLM Anotasyonlu örnek prompt'lar, `npx causoryn@latest setup|doctor` hızlı başlangıç ve güncel `v0.2.3` + `K-025` güvenlik/CI kanıtları tüm belgelere senkronlandı.
+
+### Security
+
+- **CI/CD ve tedarik zinciri sertleştirmesi (`K-025`):**
+  - `.github/workflows/security.yml`: fail-closed `zizmor` iş akışı statik denetimi, PR `dependency-review-action` (`high`+ açık ve modern SPDX copyleft lisans engeli) ve çoklu-ekosistem `npm audit --audit-level=high` + fail-closed `--locked-mode` NuGet JSON taraması eklendi.
+  - `.github/workflows/codeql.yml` ve `.github/workflows/scorecard.yml`: 5 dilli CodeQL v4 SAST (`javascript-typescript`, `python`, `csharp`, `go`, `actions`) ve OpenSSF Scorecard (`publish_results: true`, SARIF yüklemeli) iş akışları eklendi.
+  - `.github/workflows/release.yml` ve `.github/workflows/ci.yml`: 2-job SLSA yayın ayrımı (`build-and-verify` salt-okunur + `step-security/harden-runner` → `attest-and-publish` OIDC/provenance, sıfır `NPM_TOKEN`), `-p:RestoreLockedMode=true` (`packages.lock.json`), `export-public-tree.mjs --verify-temp --ref HEAD` kapısı, 4 ekosistemde 7 günlük Dependabot soğuma süresi (`.github/dependabot.yml`) ve `tests/ci-workflow.test.ts` sözleşme testleri eklendi.
+
 **1.0.0 kapıları** (henüz sağlanmadı — ADR-010 gereği 1.0.0 ilan edilmez; bkz. [docs/implementation-status.md](docs/implementation-status.md) Sprint 7 bölümü, F9 ve K-022 kararları):
 
 - Antigravity host kurulum + smoke koşumu (öncül: `agy` CLI'nin makinede bulunması; TŞ §22 "agy CLI yoksa çalıştırılmadı diye açıkça raporla")
@@ -18,8 +34,8 @@ sürümleme [SemVer](https://semver.org/lang/tr/) ilkelerini izler.
 - compare_architecture/architecture_timeline için `.causoryn/architecture-snapshot.json` iş akışı otomasyonu (`causoryn_export_documentation(format="snapshot")` ile izinli `output.allowedOutputDirs` dizinine kanonik blob üreticisi 2026-11-18 K-020 ile eklendi; workspace içine otomatik yazma kırmızı çizgi 2 gereği yapılmaz)
 - wiki_search sorgu filtrelerinin (pageKind/language/…) araç yüzeyine açılması, `WIKI_NOTE_CONFLICT` için TOOL_ERROR_GUIDANCE kaydı eklenmesi ve incremental wiki yayımında link/FTS indekslerinin tam graph'tan yeniden yazmasının daraltılması
 - E6 offline visualizer'ın gerçek tarayıcı koşusuyla doğrulanması (`causoryn_export_documentation(format="html", view="interactive")` MCP yüzeyi v0.2.2'de açıldı)
-- Bundle fidelity: default lib (`.d.ts`) dosyalarının bundle'a katılması veya doküman sınırlaması (çıplak `packages/mcp-server/dist/` 33-dosya F1 klonunda `.d.ts` yoktur; açık kaynak dağıtım paketi `packages/causoryn` içinde `dist/typescript-lib/lib*.d.ts` sahnelemesi ve `resolveTypeScriptLibDir` ile 2026-11-19 K-021'de `state: "ready"` kanıtlandı — docs/security-pass.md Dürüstlük 1)
-- Rate-limit/concurrency resource budget (K-010 kapsam dışı beyanı) (adanmış secret-scan kapısı 2026-11-17/18'de `scripts/secret-scan.mjs` ile eklendi ve 2026-11-20 K-022'de 12 kök + kök dosyalarına genişletildi)
+- Bundle fidelity: default lib (`.d.ts`) dosyalarının bundle'a katılması veya doküman sınırlaması (çıplak `packages/mcp-server/dist/` 35-dosya F1 klonunda `.d.ts` yoktur; açık kaynak dağıtım paketi `packages/causoryn` içinde `dist/typescript-lib/lib*.d.ts` sahnelemesi ve `resolveTypeScriptLibDir` ile 2026-11-19 K-021'de `state: "ready"` kanıtlandı — docs/security-pass.md Dürüstlük 1)
+- Rate-limit/concurrency resource budget (K-010 kapsam dışı beyanı) (adanmış secret-scan kapısı 2026-11-17/18'de `scripts/secret-scan.mjs` ile eklendi ve 2026-11-20 K-022'de 13 kök + 13 kök metin dosyasına genişletildi)
 - ~~npm audit 10 moderate dev-toolchain uyarısının (minimatch) çözülmesi~~ — **Kapatıldı (2026-11-20, K-022):** `eslint@10.15.0` ve `typescript-eslint@8.73.0` yükseltmesiyle `npm audit` **0 güvenlik açığı** (`0 vulnerabilities`) döndürür.
 
 ## [0.2.3] - 2026-11-23

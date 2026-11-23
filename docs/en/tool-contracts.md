@@ -60,11 +60,11 @@ Per-tool typical error codes in the tables below were compiled from two sources:
 | `causoryn_get_evidence` | `nodeId`/`edgeId`/`evidenceId`/`findingId` | Provenance chain (`relativePath`, `startLine`/`endLine`, `sourceHash`, `analyzerId`, `rationale`, `contextRefs`) + deterministic `chain` summary; `finding:<sha256>` IDs are re-derived from `.causoryn/architecture.rules.yaml` | `WORKSPACE_NOT_AUTHORIZED`, `INDEX_NOT_READY`, `INVALID_ARGUMENT`, `LIMIT_EXCEEDED`, `EVIDENCE_NOT_FOUND`, `POLICY_INVALID` |
 | `causoryn_architecture_timeline` | `refs`/`range`, `granularity?` | Deterministically sampled architectural diff timeline across Git points + Phase E violation trends (`no-cycles` and `forbidden-dependency` tracked separately per milestone, never collapsed into a fake quality score); skipped points listed explicitly | `WORKSPACE_NOT_AUTHORIZED`, `INDEX_NOT_READY`, `INVALID_ARGUMENT`, `INVALID_REVISION`, `POLICY_INVALID`, `LIMIT_EXCEEDED` |
 
-### Architecture export details (v0.2.2–v0.2.3)
+### Architecture Export Details
 
-- `architecture` is the MCP default for `json`, `markdown`, `mermaid`, and `html` (default HTML filename: `causoryn-architecture.html`). `interactive` is available for `html` only and defaults to `causoryn-architecture-interactive.html` (`EXPORT_INTERACTIVE_HTML_FILE_NAME`, v0.2.3) when `fileName` is omitted, preventing silent overwrite of the zero-JS `causoryn-architecture.html` artifact. Select `view="full"` for the legacy raw dump. With `view` omitted or set to `full`, `format="snapshot"` emits the canonical `CompareContentSet` used by comparison tools.
-- `options` and `annotations` are accepted only for `architecture` and `interactive`. `maxModules` defaults to 32 and accepts 2–100. The summary's `moduleIds` can be used to annotate the same projection.
-- The calling client supplies optional `annotations`, which a host LLM can draft. Causoryn checks the schema, budgets, and supplied `moduleId`, `nodeId`, `evidenceId`, and `keyFiles` references before rendering the text. Free-form commentary remains the sender's interpretation.
+- `architecture` is the MCP default for `json`, `markdown`, `mermaid`, and `html` (default HTML filename: `causoryn-architecture.html`). `interactive` is available for `html` only and defaults to `causoryn-architecture-interactive.html` (`EXPORT_INTERACTIVE_HTML_FILE_NAME`) when `fileName` is omitted, preventing silent overwrite of the zero-JS `causoryn-architecture.html` artifact. Select `view="full"` for the legacy raw dump. With `view` omitted or set to `full`, `format="snapshot"` emits the canonical `CompareContentSet` used by comparison tools.
+- `options` and `annotations` are accepted only for `architecture` and `interactive`. `maxModules` defaults to 32 and accepts 2–100. The summary's `architectureSummary.moduleIds` provides the exact canonical module IDs for annotating the same projection.
+- **MCP JSON Schema `.describe()` guidance & natural-language triggering (`K-026`):** `causoryn_export_documentation` exposes descriptive Zod `.describe()` documentation across all top-level input fields (`workspaceId`, `format`, `outputDir`, `fileName`, `view`, `options`, `annotations`) and nested schema objects (`domains`, `moduleNotes`, `flows`, `guidedTour`, `decisions`, `risks`). Both the tool description and the `architecture-blueprint` skill (triggered from natural-language prompts in English or Turkish without naming the skill) guide the host LLM through the 2-step workflow (`format: "json", view: "architecture"` → inspect `architectureSummary.moduleIds` → `format: "html", view: "interactive"` with validated `annotations`), or omitting `annotations` for a purely structural deterministic export. Causoryn validates the schema, budgets, and supplied `moduleId`, `nodeId`, `evidenceId`, and `keyFiles` references fail-closed; free-form commentary remains the caller's interpretation. See [Prompting & Architecture Portals Guide](prompting-and-architecture-portals.md).
 - Byte equality applies to file contents for the same snapshot, format, view, effective options, and validated annotations. `packages/graph/test/architecture-export.test.ts` covers equality across four formats and both HTML views when the same graph's arrays are reversed.
 
 ## Wiki Tools (7 — Technical Specification §16A.8; `wiki_build` Is the Sole Writer)
@@ -74,12 +74,12 @@ Per-tool typical error codes in the tables below were compiled from two sources:
 | `causoryn_wiki_build` | `workspaceId?`, `mode` (`full`\|`incremental`), `revision?`, `scope?` (explicitly rejected) | Projects the published `GraphSnapshot` into a deterministic `WikiSnapshot` and atomically publishes **only** to the authorized data-root SQLite (`wiki.dataDbPath` or `--auto-data-dir`); falls back gracefully to `full` + `fallbackReason` when incremental preconditions are unavailable | `WORKSPACE_NOT_AUTHORIZED`, `INDEX_NOT_READY`, `INVALID_ARGUMENT`, `PATH_DENIED`, `EXPORT_NOT_ALLOWED` |
 | `causoryn_wiki_get_tree` | `parentId?`, `depth?`, `limit?`, `cursor?` | 12-root-category hierarchy in taxonomy order with `childCount`, `coverage`, and `freshness`; empty categories remain `no_data` without filler prose | `WORKSPACE_NOT_AUTHORIZED`, `INDEX_NOT_READY`, `WIKI_PAGE_NOT_FOUND`, `INVALID_ARGUMENT` |
 | `causoryn_wiki_get_page` | `pageId`, `sections?` (`sectionKey` filter), `limit?`, `cursor?` | Single page: generated Markdown sections, `evidenceRefs` + deduplicated `sourceRefs` provenance, `coverage`, and `freshness`; overlay annotations are not returned on this MCP surface (§16A.6 local UI/CLI flow) | `WORKSPACE_NOT_AUTHORIZED`, `INDEX_NOT_READY`, `WIKI_PAGE_NOT_FOUND`, `INVALID_ARGUMENT` |
-| `causoryn_wiki_search` | `query`, `snapshotId?`, `limit?`, `cursor?` (extra filter fields return explicit `INVALID_ARGUMENT` in v0.2.2) | Phrase-escaped multi-column FTS5 search ranked by exact symbol/route > title > module > BM25 > graph proximity; returns `matchedFields`, `evidenceIds`, `snippet`, and `skippedRankLegs`; zero embeddings (Red Line 1) | `WORKSPACE_NOT_AUTHORIZED`, `INDEX_NOT_READY`, `INVALID_ARGUMENT`, `EVIDENCE_NOT_FOUND`, `LIMIT_EXCEEDED` |
+| `causoryn_wiki_search` | `query`, `snapshotId?`, `limit?`, `cursor?` (extra filter fields return explicit `INVALID_ARGUMENT` in `v0.2.3`) | Phrase-escaped multi-column FTS5 search ranked by exact symbol/route > title > module > BM25 > graph proximity; returns `matchedFields`, `evidenceIds`, `snippet`, and `skippedRankLegs`; zero embeddings (Red Line 1) | `WORKSPACE_NOT_AUTHORIZED`, `INDEX_NOT_READY`, `INVALID_ARGUMENT`, `EVIDENCE_NOT_FOUND`, `LIMIT_EXCEEDED` |
 | `causoryn_wiki_get_links` | `pageId`, `direction?`, `linkKinds?`, `limit?`, `cursor?` | `outgoing` + `incoming` (reverse-index backlinks) with `resolution` + `evidenceRefs`; unresolved targets preserved with `toPageId: null` + `brokenLinkDiagnostics` (K-013 #4) | `WORKSPACE_NOT_AUTHORIZED`, `INDEX_NOT_READY`, `WIKI_PAGE_NOT_FOUND`, `INVALID_ARGUMENT` |
 | `causoryn_wiki_get_versions` | `pageId?`, `refs?`, `limit?`, `cursor?` | Reports stored `WikiSnapshot` revisions as `available` (`contentHash`, `linkSetHash`, `templateVersion`, `coverage`); resolves Git branch/tag/commit aliases via read-only `git cat-file -t` (`working-tree` resolves without requiring `.git`) | `WORKSPACE_NOT_AUTHORIZED`, `INDEX_NOT_READY`, `WIKI_PAGE_NOT_FOUND`, `INVALID_ARGUMENT`, `INVALID_REVISION` |
 | `causoryn_wiki_diff` | `base`, `target`, `pageId?` | `addedPages`, `removedPages`, `changedSections`, `addedLinks`, `removedLinks`, `coverageDelta` (`{pageId, previous, current, reason?}`), `unresolvedDifferences`, and `contractChanges` (`{contractId, changeKind, summary}`, K-013 #7) | `WORKSPACE_NOT_AUTHORIZED`, `INDEX_NOT_READY`, `WIKI_PAGE_NOT_FOUND`, `INVALID_ARGUMENT`, `INVALID_REVISION`, `PATH_DENIED`, `LIMIT_EXCEEDED` |
 
-## Server Identity, 5-Language Capability Matrix & Fixed 15 Error Codes (v0.2.3)
+## Server Identity, 5-Language Capability Matrix & Fixed 15 Error Codes
 
 ### 1. Server Identity & Protocol Constants (`packages/mcp-server/src/version.ts`)
 
@@ -94,7 +94,7 @@ Per-tool typical error codes in the tables below were compiled from two sources:
 
 | Language (`language`) | `analyzerId` | `astParse` | `symbolResolution` | `frameworkLinkers` | Execution Model |
 |---|---|---|---|---|---|
-| `typescript` | `ts-adapter` | `L1` | `L2` | `express+nextjs` | In-process TypeScript Compiler API (`TypeChecker` + Express/Next.js App Router L3 + BDD `Test`/`TESTS`) |
+| `typescript` | `ts-adapter` | `L1` | `L2` | `express+nextjs` | In-process TypeScript Compiler API (`TypeChecker`, TS/JS/CJS + confined `tsconfig.json`/`jsconfig.json` + Express/Next.js App Router L3 + BDD `Test`/`TESTS`) |
 | `csharp` | `roslyn-worker` | `L1` | `L2` | `aspnet-core-route-attributes (L3)` | `dotnet exec` Roslyn sidecar (`@causoryn/sidecar-ipc`; ASP.NET Core controller attributes + Minimal API `MapGet`/`MapPost`) |
 | `python` | `python-worker` | `L1` | `L2` | `decorator-route-pattern (L3)` | `python -B` stdlib `ast` sidecar (zero third-party dependencies) |
 | `go` | `go-worker` | `L1` | `heuristic-only (semantik L2 yok)` | `http-router-registration (L3)` | Go stdlib `go/parser` + `go/ast` sidecar (`net/http`, `gin`, `echo`, `chi`) |
@@ -141,7 +141,7 @@ All domain, policy, and workspace errors travel inside `envelope.error` (`{ code
 
 `causoryn_refresh_index` does not automatically rebuild the `WikiSnapshot` in v0.2.3; regenerating the Wiki projection is performed explicitly via `causoryn_wiki_build`. `causoryn_export_documentation` supports `view: "architecture" | "interactive" | "full"`, `options`, and fail-closed `annotations`, while `view: "wiki"` remains explicitly rejected with `INVALID_ARGUMENT` (ADR-010: incomplete surfaces are never silently ignored). Separate `wiki_refresh` or `wiki_export` tools are intentionally **not** introduced, keeping the tool catalog locked at 22 + 7 = 29 tools.
 
-## Zero-Config CLI, Dynamic Root Binding & `outputSchemaProfile` Contract (K-021)
+## Zero-Config CLI, Dynamic Root Binding & `outputSchemaProfile` Contract
 
 `packages/mcp-server/src/runtime-cli.ts` and `packages/mcp-server/src/server.ts` support deterministic programmatic embedding, bare stdio execution, CLI coding agents, and desktop IDE plugins under identical fail-closed security invariants:
 
@@ -159,10 +159,11 @@ All domain, policy, and workspace errors travel inside `envelope.error` (`{ code
 ## Related Documentation
 
 - [Documentation Index](README.md) — entry point for all English and Turkish documentation
+- [Prompting & Architecture Portals Guide](prompting-and-architecture-portals.md) — deterministic and Host-LLM annotated architecture portal guide
 - [Architecture Overview](architecture.md) — monorepo package map and dependency boundaries
 - [CLI & Configuration](cli-and-configuration.md) — CLI flags, environment variables, and `CAUSORYN_CONFIG` reference
 - [Language Analyzers](language-analyzers.md) — 5-language AST/semantic adapters and resolution honesty
-- [Living Wiki Specification](wiki-spec.md) — Living Wiki Engine design contract and v0.2.2 status
+- [Living Wiki Specification](wiki-spec.md) — Living Wiki Engine design contract and current status
 - [Implementation Status](implementation-status.md) — phase-by-phase verification evidence
 - [Compatibility Matrix](compatibility-matrix.md) — host × verification result matrix
 - Historical/source references: `wiki/mcp-tools.md` · `packages/mcp-server/src/errors.ts`

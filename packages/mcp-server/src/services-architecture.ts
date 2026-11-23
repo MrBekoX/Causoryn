@@ -997,26 +997,55 @@ export function generateOnboardingTool(
 /* ------------------------------------------------------------------ */
 
 export const ExportDocumentationInputSchema = z.strictObject({
-  workspaceId: z.string().min(1).optional(),
+  workspaceId: z
+    .string()
+    .min(1)
+    .optional()
+    .describe("Optional workspace identifier; omit to target the default authorized workspace."),
   /** TŞ §10.2/§16 "format": json|markdown|mermaid|html|snapshot. */
-  format: z.enum(EXPORT_DOCUMENTATION_FORMATS),
+  format: z
+    .enum(EXPORT_DOCUMENTATION_FORMATS)
+    .describe(
+      "Output format: 'json' (blueprint with architectureSummary.moduleIds), 'html' (offline architecture portal), 'mermaid' (clean flowchart), 'markdown' (Architecture Brief), or 'snapshot' (raw snapshot JSON).",
+    ),
   /** Hedef çıktı dizini; config.output.allowedOutputDirs beyanında olmalıdır
    * (görev sözleşmesi: yazma yalnızca C6 output yetkilendirmesi üzerinden).
    * TŞ §10.2 "output?" alanının bu dilimdeki adıdır; EXPLICIT beyan ilkesi
    * gereği zorunludur (implicit yazma hedefi yoktur). */
-  outputDir: z.string().min(1),
+  outputDir: z
+    .string()
+    .min(1)
+    .describe(
+      "Authorized target output directory listed in output.allowedOutputDirs (with --auto-data-dir, defaults to <data-dir>/workspaces/<slug>-<hash12>/exports). Unauthorized directories fail closed with EXPORT_NOT_ALLOWED.",
+    ),
   /** SAF dosya adı (ayraçsız); verilmezse formatın varsayılan adı kullanılır. */
-  fileName: z.string().min(1).optional(),
+  fileName: z
+    .string()
+    .min(1)
+    .optional()
+    .describe(
+      "Optional plain file name without path separators. Defaults by format & view (e.g., 'causoryn-architecture-interactive.html' for html+interactive, 'causoryn-architecture.html' for html+architecture).",
+    ),
   /** TŞ §10.2 "view?": `architecture` (varsayılan görsel/özet mimari görünümü),
    * `interactive` (yalnızca HTML etkileşimli offline portal), `full` (ham
    * snapshot dökümü). `wiki` görünümü ayrı Living Wiki diliminde olduğundan
    * açık INVALID_ARGUMENT döndürür. */
-  view: z.string().min(1).optional(),
+  view: z
+    .string()
+    .min(1)
+    .optional()
+    .describe(
+      "Projection view: 'architecture' (default — layered zero-JS SVG HTML, Mermaid, Markdown brief, or JSON blueprint with architectureSummary.moduleIds), 'interactive' (HTML-only offline interactive portal with pan/zoom/search/evidence drawer), or 'full' (raw snapshot dump without options/annotations).",
+    ),
   /** Mimari projeksiyon seçenekleri (yalnızca `architecture` / `interactive`). */
-  options: ArchitectureProjectionOptionsSchema.optional(),
+  options: ArchitectureProjectionOptionsSchema.optional().describe(
+    "Optional projection controls (maxModules, pathPrefix, includeTests) supported for 'architecture' and 'interactive' views.",
+  ),
   /** Host-LLM tarafından Causoryn MCP çıktılarından sentezlenen ve fail-closed
    * doğrulanan mimari anotasyonlar (yalnızca `architecture` / `interactive`). */
-  annotations: ArchitectureAnnotationsSchema.optional(),
+  annotations: ArchitectureAnnotationsSchema.optional().describe(
+    "Optional Host-LLM architectural annotations (title, architectureStyle, executiveSummary, domains, moduleNotes, flows, guidedTour, decisions, risks) grounded in Causoryn MCP evidence and validated fail-closed. Omit for a purely structural model-free export.",
+  ),
 });
 
 const ExportArchitectureSummarySchema = z.strictObject({

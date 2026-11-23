@@ -6,8 +6,8 @@ description: Route the host model to causoryn_map_system when it needs a read-on
 # map-system — Causoryn Architecture Map routing
 
 Causoryn is a **local, deterministic, LLM-free** code-analysis engine. This skill routes
-the host model to `causoryn_map_system`, a read-only tool that requires explicit root
-authorization in the fixture's `allowRoots` configuration.
+the host model to `causoryn_map_system`, a read-only tool that requires an authorized
+workspace root (`--allow-cwd`, MCP `roots`, or explicit `allowRoots` configuration).
 
 ## When to call `causoryn_map_system`
 
@@ -19,11 +19,11 @@ of one file. Do not use it to read file bodies; use the host's own file tools fo
 
 | Argument | Type | Notes |
 | --- | --- | --- |
-| `level` | `"L0"` \| `"L1"` \| `"L2"` \| `"L3"` (optional, default `"L2"`) | `L0` = Workspace / Repository / Project; `L1` = Module / Package / File / Namespace / Config; `L2` = Class / Interface / Type; `L3` = Function / Method / Handler / Endpoint. `L4` (flow maps) is **not supported in this release** and answers `INVALID_ARGUMENT`. |
+| `level` | `"L0"` \| `"L1"` \| `"L2"` \| `"L3"` (optional, default `"L2"`) | `L0` = Workspace / Repository / Project; `L1` = Module / Package / File / Namespace / Config; `L2` = Class / Interface / Type; `L3` = Function / Method / Handler / Endpoint / Test. `L4` (flow maps) is **not supported in this release** and answers `INVALID_ARGUMENT` (use `causoryn_trace_execution` or `causoryn_trace_business_flow` for flow tracing). |
 | `filters` | object (optional) | `filters.kinds`: array of node kinds (subset of the level's kinds, e.g. `["Class"]`); `filters.pathPrefix`: relative path prefix such as `packages/domain`. |
 | `maxNodes` | positive integer (optional) | Server default cap is 250. Requesting more than the configured cap answers `LIMIT_EXCEEDED`; lower the value instead of retrying with the same one. |
-| `cursor` | string (optional) | Page token from a previous response's `nextCursor`. Pass it back verbatim; a stale or corrupted cursor answers `INVALID_ARGUMENT`. |
-| `workspaceId` | string (optional) | Omit unless the server told you otherwise; Faz A servers authorize exactly one workspace. |
+| `cursor` | string (optional) | Page cursor from a previous response's `nextCursor`. Pass it back verbatim; a stale or corrupted cursor answers `INVALID_ARGUMENT`. |
+| `workspaceId` | string (optional) | Omit unless targeting a specific workspace identifier reported by the server. |
 
 Start broad (`level: "L2"`), then drill into `L3` with `filters.pathPrefix` narrowed to
 the interesting directory. For symbol lookup by name use `causoryn_find_symbols`, for
@@ -34,7 +34,7 @@ provenance behind a mapped node use `causoryn_get_evidence` with the node `id`.
 ## Reading the response
 
 Every tool answers the standard Causoryn envelope:
-`schemaVersion, requestId, workspaceId, snapshotId, status, coverage, warnings, data, nextCursor`.
+`schemaVersion, requestId, workspaceId, snapshotId, status, coverage, warnings, data, nextCursor, error`.
 
 - `status`: `"ok"` or `"partial"` (partial snapshot — treat numbers as incomplete and
   mention it); `"error"` carries a structured `error.code` in the envelope body.
@@ -50,8 +50,8 @@ Every tool answers the standard Causoryn envelope:
 
 | `error.code` | Meaning | Action |
 | --- | --- | --- |
-| `WORKSPACE_NOT_AUTHORIZED` | No authorized root declared, or unknown `workspaceId`. | Stop retrying. Tell the user to declare the workspace root in the plugin's server config (`allowRoots`), then retry. |
-| `INDEX_NOT_READY` | No published snapshot yet (indexing still running or disabled). | Wait briefly and retry once; if it persists, report that indexing is not complete. |
+| `WORKSPACE_NOT_AUTHORIZED` | No authorized root bound yet, or unknown `workspaceId`. | Stop retrying. Open a project directory (so `--allow-cwd` or MCP `roots` binds it) or declare `allowRoots` in server config, then retry. |
+| `INDEX_NOT_READY` | No published snapshot yet (indexing still running or not triggered). | Check `causoryn_index_status` (or trigger `causoryn_refresh_index`), wait briefly, and retry once. |
 | `INVALID_ARGUMENT` | Semantically invalid input: unsupported `L4` level, broken `cursor`, bad filter shape. | Fix the argument (use `L0`–`L3`, pass the cursor back unchanged) and retry once. |
 | `LIMIT_EXCEEDED` | `maxNodes` above the server cap. | Retry with a smaller `maxNodes`. |
 | `INTERNAL_ERROR` | Unexpected server failure. | Retry once; if it persists, report it with the stderr log hint — do not fabricate results. |
@@ -61,7 +61,7 @@ rejections arrive as tool errors instead. Do not paraphrase codes — quote them
 
 ## Hard limits of this skill
 
-- Use the map for structural facts and source evidence. Artifact exports require their own
-  output authorization.
+- Use the map for structural facts and source evidence. For an artifact export with its own
+  output authorization, see the `architecture-blueprint` skill.
 - Never invent node ids, qualified names or evidence: only cite what an envelope
   actually returned.

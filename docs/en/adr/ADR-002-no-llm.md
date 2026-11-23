@@ -2,9 +2,9 @@
 
 > **Language:** [Türkçe](../../adr/ADR-002-no-llm.md) | **English** · [Documentation Hub](../README.md)
 >
-> **Evidence base:** Technical Specification (TS) v2.1 §1 (Red Line), §3.1, §3.2, §19, §24 · `wiki/decisions.md` ADR-002, K-023 · `wiki/architecture.md`
-> **Status:** **Accepted** (foundational engine boundary; updated for `v0.2.2` Pre-1.0 Public Preview with `K-023` hybrid architecture boundary and verification proof)
-> **Date:** 2026-11-02 (initial record), 2026-11-20 (`v0.2.0` verification), 2026-11-23 (`v0.2.2` / `K-023` hybrid boundary clarification); originates from TS v2.1 (2026-10-31)
+> **Evidence base:** Technical Specification (TS) v2.1 §1 (Red Line), §3.1, §3.2, §19, §24 · `wiki/decisions.md` ADR-002, K-023, K-026 · `wiki/architecture.md`
+> **Status:** **Accepted** (foundational engine boundary; current for `v0.2.3` Pre-1.0 Public Preview with `K-023`/`K-026` hybrid architecture & MCP schema boundary)
+> **Date:** 2026-11-02 (initial record), 2026-11-20 (`v0.2.0` verification), 2026-11-23 (`v0.2.3` / `K-023`–`K-026` hybrid boundary & MCP `.describe()` refinement); originates from TS v2.1 (2026-10-31)
 
 ## Context
 
@@ -57,21 +57,15 @@ code path.
    `stdio`: `stdout` carries exclusively MCP JSON-RPC frames, while all logs go
    to `stderr` (TS §10.1).
 4. Across all **18 npm workspace packages + the monorepo root** (19
-   `package.json` manifests) in `v0.2.2`, runtime and build dependencies are
-   infrastructure libraries for analysis and packaging: `zod`,
+   `package.json` manifests) in `v0.2.3`, runtime and build dependencies are
+   strictly infrastructure libraries for analysis and packaging: `zod`,
    `@modelcontextprotocol/sdk`, `better-sqlite3`, `yaml`, `typescript`, and
    `esbuild` (and the published `packages/causoryn` package declares
    `"dependencies": {}` — zero external npm dependencies).
 
-### `v0.2.2` (`K-023`) Architecture Exports and Optional Annotations
+### Hybrid Architecture Exports, Optional Annotations & MCP `.describe()` (`K-023` / `K-026`)
 
-`causoryn_export_documentation` can render a portal from the static evidence
-graph. A caller can add summaries, domain groups, flows, tours, decisions, and
-risks through optional `annotations`. The `architecture-blueprint` skill guides
-an external host LLM to prepare that input. The validator checks its schema and
-whether its references exist and belong to the relevant graph or projection
-(`moduleId`, `nodeId`, `evidenceId`, `keyFiles`). Invalid input returns
-`INVALID_ARGUMENT`. The caller remains responsible for the accuracy of the prose.
+`causoryn_export_documentation` renders a deterministic architecture portal directly from the static evidence graph with zero model calls. A caller may also supply summaries, domain groups, flows, guided tours, decisions, and risk notes via optional `annotations`. Under `K-026`, MCP Zod `.describe()` field documentation on `causoryn_export_documentation` and natural-language triggering in the `architecture-blueprint` skill empower the external host LLM to run a two-pass discovery → evidence-grounded synthesis flow while keeping the Causoryn engine **100% LLM-free**. The server validator checks the schema and enforces fail-closed grounding against the active graph/projection (`moduleId`, `nodeId`, `evidenceId`, `keyFiles`). Invalid references return `INVALID_ARGUMENT`; factual accuracy of free-form prose remains the caller's responsibility. See [Prompting & Architecture Portals](../prompting-and-architecture-portals.md) for deterministic vs. annotated prompt patterns.
 
 ### Scope of Determinism
 
@@ -100,7 +94,7 @@ Optional host-generated prose is a variable input to the renderer. See
   narrative synthesis live in the host agent; static measurement, fail-closed
   grounding verification, and deterministic layout live in Causoryn.
 
-## Consequences & `v0.2.2` Verification Proof
+## Consequences & Verification Proof (`v0.2.3`)
 
 - **Honest static boundaries (`ADR-010`):** Static analysis gaps are never
   masked with LLM guesses; they are reported transparently via `heuristic` (+
@@ -131,4 +125,4 @@ Optional host-generated prose is a variable input to the renderer. See
 ## Related Decisions & Documentation
 
 - `ADR-001` Model-agnostic Core · `ADR-004` Evidence First · `ADR-008` Read-only Workspace Default · `ADR-010` Incomplete Feature Never Advertised as Done (TS §24; internal index: `wiki/decisions.md`)
-- [Architecture Overview](../architecture.md) · [5-Language Analyzers](../language-analyzers.md) · [Security Audit](../security-pass.md)
+- [Architecture Overview](../architecture.md) · [5-Language Analyzers](../language-analyzers.md) · [Prompting & Architecture Portals](../prompting-and-architecture-portals.md) · [Security Audit](../security-pass.md)

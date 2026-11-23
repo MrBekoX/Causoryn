@@ -476,6 +476,69 @@ describe("1. Canonical skills/ (YAML frontmatter + ADR-010 tool honesty)", () =>
       expect(blueprintSkill, `architecture-blueprint eksik terim: ${required}`).toContain(required);
     }
   });
+
+  it("exposes bilingual natural-language triggers and Host-LLM non-refusal guidance without requiring users to name skills (K-026)", () => {
+    const blueprintSkill = readFileSync(
+      path.join(REPO_ROOT, "skills", "architecture-blueprint", "SKILL.md"),
+      "utf8",
+    );
+    const bpEnd = blueprintSkill.indexOf("\n---", 3);
+    expect(bpEnd).toBeGreaterThan(3);
+    const bpFrontmatter = blueprintSkill.slice(3, bpEnd);
+
+    for (const trigger of [
+      "architecture diagram",
+      "interactive architecture portal",
+      "system blueprint",
+      "visual onboarding guide",
+      "mimari diyagram",
+      "görsel mimari harita",
+      "etkileşimli mimari portal",
+      "sistem haritası",
+    ]) {
+      expect(
+        bpFrontmatter.toLowerCase(),
+        `architecture-blueprint frontmatter eksik doğal dil tetikleyicisi: ${trigger}`,
+      ).toContain(trigger.toLowerCase());
+    }
+    expect(blueprintSkill).toMatch(/Never refuse because Causoryn is LLM-free/i);
+    expect(blueprintSkill).toMatch(/YOU are the host LLM/i);
+    expect(blueprintSkill).toContain("causoryn-architecture-interactive.html");
+    expect(blueprintSkill).toContain("<slug>-<hash12>/exports");
+    expect(blueprintSkill).not.toMatch(/call `causoryn_get_capabilities` if unsure/i);
+    expect(blueprintSkill).toMatch(/keyFiles[^\n]*belonging to that module/i);
+
+    const causorynSkill = readFileSync(
+      path.join(REPO_ROOT, "skills", "causoryn", "SKILL.md"),
+      "utf8",
+    );
+    const cEnd = causorynSkill.indexOf("\n---", 3);
+    expect(cEnd).toBeGreaterThan(3);
+    const cFrontmatter = causorynSkill.slice(3, cEnd);
+    expect(cFrontmatter).toMatch(/architecture diagram|interactive architecture portal|visual architecture/i);
+    expect(causorynSkill).toContain("architecture-blueprint");
+    expect(causorynSkill).toContain("causoryn-architecture-interactive.html");
+    expect(causorynSkill).toContain("deferAutoIndex");
+    expect(causorynSkill).toMatch(/tsconfig|jsconfig/i);
+    expect(causorynSkill).toContain("nextCursor, error");
+
+    const mapSkill = readFileSync(
+      path.join(REPO_ROOT, "skills", "map-system", "SKILL.md"),
+      "utf8",
+    );
+    expect(mapSkill).toMatch(/L3[^\n]*Test/);
+    expect(mapSkill).toContain("nextCursor, error");
+
+    const zcodeMapSkill = readFileSync(
+      path.join(REPO_ROOT, "integrations", "zcode", "causoryn", "skills", "map-system", "SKILL.md"),
+      "utf8",
+    );
+    expect(zcodeMapSkill).not.toContain("Faz A");
+    expect(zcodeMapSkill).toContain("architecture-blueprint");
+    expect(zcodeMapSkill).toContain("causoryn_trace_execution");
+    expect(zcodeMapSkill).toMatch(/L3[^\n]*Test/);
+    expect(zcodeMapSkill).toContain("nextCursor, error");
+  });
 });
 
 describe("2. Repo-root & packages/causoryn 4-host manifests (0.2.3 parity + zero credentials)", () => {

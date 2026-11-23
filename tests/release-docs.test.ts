@@ -885,9 +885,10 @@ describe("BAĞIMSIZ DENETİM DÖNGÜSÜ (2026-11-18): doküman↔kod tam parite 
     expect(text.slice(relatedIdx)).toContain("`integrations/antigravity/causoryn/README.md`");
   });
 
-  it("TR / EN tam dokümantasyon paritesi: 16 TR dokümanın her birinin docs/en/ karşılığı mevcut, kırık yerel markdown linki yok, EN tool-contracts 29 aracı ve EN security-pass/benchmarks pinli hashleri taşır", () => {
+  it("TR / EN tam dokümantasyon paritesi: 17 TR dokümanın her birinin docs/en/ karşılığı mevcut, kırık yerel markdown linki yok, EN tool-contracts 29 aracı ve EN security-pass/benchmarks pinli hashleri taşır", () => {
     const bilingualPairs: ReadonlyArray<readonly [string, string]> = [
       ["docs/README.md", "docs/en/README.md"],
+      ["docs/prompting-and-architecture-portals.md", "docs/en/prompting-and-architecture-portals.md"],
       ["docs/architecture.md", "docs/en/architecture.md"],
       ["docs/cli-and-configuration.md", "docs/en/cli-and-configuration.md"],
       ["docs/language-analyzers.md", "docs/en/language-analyzers.md"],
@@ -1005,5 +1006,139 @@ describe("BAĞIMSIZ DENETİM DÖNGÜSÜ (2026-11-18): doküman↔kod tam parite 
     // EN implementation-status.md: B7 Partial kalır (ADR-010)
     const enStatus = readFileSync(path.join(REPO_ROOT, "docs", "en", "implementation-status.md"), "utf8");
     expect(enStatus).toMatch(/\|\s*B7\s*\|[^\n]*\*\*Partial\*\*/);
+  });
+
+  it("K-026: temiz sürüm-kirliliğinden arınmış README, deterministik vs. anotasyonlu örnek prompt'lar, Diátaxis hub ve güncel v0.2.3 + K-025 TR/EN dokümanlar", () => {
+    const rootReadme = readFileSync(path.join(REPO_ROOT, "README.md"), "utf8");
+    const pkgReadme = readFileSync(path.join(REPO_ROOT, "packages", "causoryn", "README.md"), "utf8");
+
+    // 1. Temiz H1 başlıklar + dağınık sürüm aralığı kirliliği yok
+    expect(rootReadme).toMatch(/^# Causoryn\s*$/m);
+    expect(pkgReadme).toMatch(/^# Causoryn\s*$/m);
+    for (const readme of [rootReadme, pkgReadme]) {
+      expect(readme).not.toMatch(/v0\.2\.[12][–-]v0\.2\.3/);
+      expect(readme).toContain("prompting-and-architecture-portals.md");
+    }
+
+    // 2. Kök README: deterministik + Host-LLM anotasyonlu örnek prompt'lar, @latest kurulum, K-025 güvenlik rozetleri & komutları
+    expect(rootReadme).toContain("npx causoryn@latest setup");
+    expect(rootReadme).toContain("npx causoryn@latest doctor");
+    expect(rootReadme).toMatch(/Example Prompts/i);
+    expect(rootReadme).toMatch(/Deterministic/i);
+    expect(rootReadme).toMatch(/Annotated|annotations/i);
+    expect(rootReadme).toContain("docs/en/prompting-and-architecture-portals.md");
+    expect(rootReadme).toContain("docs/prompting-and-architecture-portals.md");
+    expect(rootReadme).toContain("security.yml");
+    expect(rootReadme).toContain("codeql.yml");
+    expect(rootReadme).toContain("scorecard");
+    expect(rootReadme).toContain("-p:RestoreLockedMode=true");
+    expect(rootReadme).toContain("npm audit --audit-level=high");
+    expect(rootReadme).toContain("export-public-tree.mjs --verify-temp");
+
+    // 3. Diátaxis hub'lar temiz H1 + JavaScript + prompt rehberi
+    const trHub = readDoc("docsIndexTr");
+    const enHub = readDoc("docsIndexEn");
+    expect(trHub).toMatch(/^# Causoryn Dokümantasyon Merkezi\s*$/m);
+    expect(enHub).toMatch(/^# Causoryn Documentation Hub\s*$/m);
+    expect(trHub).toContain("JavaScript");
+    expect(enHub).toContain("JavaScript");
+    expect(trHub).toContain("prompting-and-architecture-portals.md");
+    expect(enHub).toContain("prompting-and-architecture-portals.md");
+
+    // 4. Yeni 17. TR/EN rehber: prompting-and-architecture-portals.md
+    for (const rel of [
+      "docs/prompting-and-architecture-portals.md",
+      "docs/en/prompting-and-architecture-portals.md",
+    ]) {
+      const guide = readFileSync(path.join(REPO_ROOT, ...rel.split("/")), "utf8");
+      for (const token of [
+        "causoryn-architecture-interactive.html",
+        "causoryn-architecture.html",
+        "architectureSummary.moduleIds",
+        "annotations",
+        "title",
+        "architectureStyle",
+        "executiveSummary",
+        "domains",
+        "moduleNotes",
+        "flows",
+        "guidedTour",
+        "decisions",
+        "risks",
+        "EXPORT_NOT_ALLOWED",
+        "INVALID_ARGUMENT",
+      ]) {
+        expect(guide, `${rel} eksik terim: ${token}`).toContain(token);
+      }
+      expect(guide, `${rel} <slug>-<hash12>/exports içermeli`).toContain("<slug>-<hash12>/exports");
+      expect(guide, `${rel} <workspace-slug>/exports eksik hash içermemeli`).not.toContain(
+        "<workspace-slug>/exports",
+      );
+      expect(guide, `${rel} includeTests varsayılanı true olmalı`).toMatch(
+        /includeTests[^\n]*(varsayılan|default)\s+`true`/i,
+      );
+      expect(guide, `${rel} includeTests varsayılanı false olamaz`).not.toMatch(
+        /includeTests[^\n]*(varsayılan|default)\s+`false`/i,
+      );
+    }
+
+    // 5. CLI dokümanlarında 5 skill (architecture-blueprint dahil)
+    for (const rel of ["docs/cli-and-configuration.md", "docs/en/cli-and-configuration.md"]) {
+      const cliDoc = readFileSync(path.join(REPO_ROOT, ...rel.split("/")), "utf8");
+      expect(cliDoc, `${rel} architecture-blueprint skill eksik`).toContain("architecture-blueprint");
+    }
+
+    // 6. Dil analizörlerinde JS/CJS, tsconfig/jsconfig ve collectInventoryAsync
+    for (const rel of ["docs/language-analyzers.md", "docs/en/language-analyzers.md"]) {
+      const langDoc = readFileSync(path.join(REPO_ROOT, ...rel.split("/")), "utf8");
+      expect(langDoc).toContain("JavaScript");
+      expect(langDoc).toContain("tsconfig.json");
+      expect(langDoc).toContain("jsconfig.json");
+      expect(langDoc).toContain("collectInventoryAsync");
+    }
+
+    // 7. v0.2.3 + K-025 (zizmor, CodeQL, Scorecard, harden-runner, 2-job SLSA) güncelliği
+    for (const rel of ["docs/security-pass.md", "docs/en/security-pass.md"]) {
+      const secDoc = readFileSync(path.join(REPO_ROOT, ...rel.split("/")), "utf8");
+      expect(secDoc).toContain("zizmor");
+      expect(secDoc).toContain("CodeQL");
+      expect(secDoc).toContain("Scorecard");
+      expect(secDoc).toContain("harden-runner");
+    }
+    for (const rel of ["docs/architecture.md", "docs/en/architecture.md"]) {
+      const archDoc = readFileSync(path.join(REPO_ROOT, ...rel.split("/")), "utf8");
+      expect(archDoc).not.toMatch(/bu belge `v0\.2\.2`|this document reflects `v0\.2\.2`/i);
+      expect(archDoc).toContain("security.yml");
+      expect(archDoc).toContain("codeql.yml");
+      expect(archDoc).toContain("scorecard.yml");
+      expect(archDoc).toMatch(/Linux[^\n]*step-security\/harden-runner/i);
+    }
+    const changelogText = readDoc("changelog");
+    expect(changelogText).not.toContain("33-dosya");
+    expect(changelogText).not.toContain("12 kök + kök dosyalarına");
+    expect(readDoc("toolContracts")).not.toContain("küreyi");
+    for (const rel of ["docs/implementation-status.md", "docs/en/implementation-status.md"]) {
+      const statusDoc = readFileSync(path.join(REPO_ROOT, ...rel.split("/")), "utf8");
+      expect(statusDoc).toContain("K-024");
+      expect(statusDoc).toContain("K-025");
+    }
+
+    // 8. project-overview.tr-en.md doğrulamaları (syn 3, K-024, K-025, 96 test dosyası)
+    const overview = readFileSync(OVERVIEW_PATH, "utf8");
+    expect(overview).toContain("K-024");
+    expect(overview).toContain("K-025");
+    expect(overview).not.toContain("92 test dosyası");
+    expect(overview).not.toMatch(/\bsyn\s+2\b/);
+
+    // 9. SECURITY.md & CONTRIBUTING.md K-025 güncellemesi
+    const secMd = readFileSync(path.join(REPO_ROOT, "SECURITY.md"), "utf8");
+    expect(secMd).toContain("zizmor");
+    expect(secMd).toContain("CodeQL");
+    expect(secMd).toContain("Scorecard");
+
+    const contribMd = readFileSync(path.join(REPO_ROOT, "CONTRIBUTING.md"), "utf8");
+    expect(contribMd).toContain("-p:RestoreLockedMode=true");
+    expect(contribMd).toContain("npm audit --audit-level=high");
+    expect(contribMd).toContain("export-public-tree.mjs --verify-temp");
   });
 });

@@ -19,7 +19,7 @@ of one file. Do not use it to read file bodies; use the host's own file tools fo
 
 | Argument | Type | Notes |
 | --- | --- | --- |
-| `level` | `"L0"` \| `"L1"` \| `"L2"` \| `"L3"` (optional, default `"L2"`) | `L0` = Workspace / Repository / Project; `L1` = Module / Package / File / Namespace / Config; `L2` = Class / Interface / Type; `L3` = Function / Method / Handler / Endpoint. `L4` (flow maps) is **not supported in this release** and answers `INVALID_ARGUMENT` (use `causoryn_trace_execution` or `causoryn_trace_business_flow` for flow tracing). |
+| `level` | `"L0"` \| `"L1"` \| `"L2"` \| `"L3"` (optional, default `"L2"`) | `L0` = Workspace / Repository / Project; `L1` = Module / Package / File / Namespace / Config; `L2` = Class / Interface / Type; `L3` = Function / Method / Handler / Endpoint / Test. `L4` (flow maps) is **not supported in this release** and answers `INVALID_ARGUMENT` (use `causoryn_trace_execution` or `causoryn_trace_business_flow` for flow tracing). |
 | `filters` | object (optional) | `filters.kinds`: array of node kinds (subset of the level's kinds, e.g. `["Class"]`); `filters.pathPrefix`: relative path prefix such as `packages/domain`. |
 | `maxNodes` | positive integer (optional) | Server default cap is 250. Requesting more than the configured cap answers `LIMIT_EXCEEDED`; lower the value instead of retrying with the same one. |
 | `cursor` | string (optional) | Page cursor from a previous response's `nextCursor`. Pass it back verbatim; a stale or corrupted cursor answers `INVALID_ARGUMENT`. |
@@ -34,7 +34,7 @@ provenance behind a mapped node use `causoryn_get_evidence` with the node `id`.
 ## Reading the response
 
 Every tool answers the standard Causoryn envelope:
-`schemaVersion, requestId, workspaceId, snapshotId, status, coverage, warnings, data, nextCursor`.
+`schemaVersion, requestId, workspaceId, snapshotId, status, coverage, warnings, data, nextCursor, error`.
 
 - `status`: `"ok"` or `"partial"` (partial snapshot — treat numbers as incomplete and
   mention it); `"error"` carries a structured `error.code` in the envelope body.
