@@ -12,6 +12,8 @@ deterministik C#/ASP.NET Core çözümleyicisi. Süreç stdin'den satır satır
 istek okur, her isteğe tek satır JSON yanıt döner ve analiz boyunca kullanıcı
 workspace'ine HİÇBİR YAZMA yapmaz (ADR-008; derleme tamamen bellek-içindedir).
 
+- **Çalışma zamanı ve derleyici.** Worker `net10.0` hedefler ve `.NET 10` ile çalışır.
+  `Causoryn.RoslynWorker.csproj`, `Microsoft.CodeAnalysis.CSharp` sürümünü `5.12.0` olarak sabitler.
 - **Taşıma:** yerel stdio; satır-bazlı JSON (her mesaj birebir tek satır).
 - **Kodlama:** BOM'suz UTF-8; JSON içi yeni satırlar `\n` kaçış dizisidir,
   bu yüzden framing bozulmaz.

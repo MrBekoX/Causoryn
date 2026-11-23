@@ -4,7 +4,9 @@
 >
 > **Kanıt:** `packages/indexing/src/{index.ts,index-service.ts,fingerprint.ts}`, `packages/sidecar-ipc/src/index.ts`, `adapters/{typescript,csharp-roslyn,python,go,rust}/src/*`, `native/{roslyn-worker,python-worker,go-worker,rust-worker}/PROTOCOL.md` (TŞ v2.1 §6, §7, §8, §9, §15, §23 · `ADR-004` · `ADR-010` · `K-018` · `K-019` · `K-020` · `K-021`).
 
-Causoryn; **TypeScript/JavaScript**, **C# (.NET / Roslyn)**, **Python**, **Go** ve **Rust** dillerini tek bir birleşik kanıt grafiğinde (`Unified Evidence & Knowledge Graph`) birleştirir. Hiçbir dilde LLM tahmini kullanılmaz (`ADR-002`) ve semantik olarak kanıtlanamayan hiçbir kenar `verified` olarak etiketlenmez (`ADR-004`, `ADR-010`, `K-018`).
+Causoryn, **TypeScript/JavaScript**, **C# (.NET / Roslyn)**, **Python**, **Go** ve **Rust** analizlerini tek bir birleşik kanıt grafiğinde (`Unified Evidence & Knowledge Graph`) toplar. Analizörler model çağrısı yapmadan sözdizimi, semboller ve desteklenen framework kurallarından sonuç üretir (`ADR-002`). `verified` kenarlar kaynak kanıtı gerektirir, diğer eşleşmeler çözümleme durumunu açıkça taşır (`ADR-004`, `ADR-010`, `K-018`).
+
+Polyglot indeksleme, birden fazla analizörün ürettiği aynı kimlikli ve dosyaya bağlı olmayan dış/sanal düğümleri kanonik bir kayıtta birleştirir. Dosyaya bağlı çakışmalar hata olarak raporlanır (v0.2.1, `packages/indexing/src/index-service.ts`). Eşdeğer analiz için dosya girdileri ve etkin yapılandırmanın yanında analizör/araç zinciri koşulları da eşdeğer olmalıdır. Eksik çalışma zamanı, değişen referans paketleri veya zaman aşımı farklı kapsam ve tanılara yol açabilir.
 
 ---
 
@@ -18,7 +20,7 @@ Causoryn; **TypeScript/JavaScript**, **C# (.NET / Roslyn)**, **Python**, **Go** 
 | **C# / .NET** | `roslyn-worker` (`0.1.0`) | Sidecar (`adapters/csharp-roslyn` ↔ `native/roslyn-worker`) | `L1` | `L2` (Roslyn `SemanticModel` — tek tam semantik sidecar) | `aspnet-core-route-attributes (L3)` (Controller `[Route]`/`[Http*]` + Minimal API `MapGet`/…) | `CONTAINS`, `CALLS`, `ROUTES_TO` (`importEdges: false`) |
 | **Python** | `python-worker` (`0.1.0`) | Sidecar (`adapters/python` ↔ `native/python-worker/worker.py`) | `L1` | `L2` (AST ad kapsamı; tam type inference yok) | `decorator-route-pattern (L3)` (FastAPI/Starlette `@app.get`/… + Flask `@app.route`) | `CONTAINS`, `CALLS`, `ROUTES_TO` (`importEdges: false`) |
 | **Go** | `go-worker` (`0.1.0`) | Sidecar (`adapters/go` ↔ `native/go-worker/cmd/worker`) | `L1` | `heuristic-only (semantik L2 yok)` (`symbolResolution: false`) | `http-router-registration (L3)` (`net/http` `Handle`/`HandleFunc` + `gin`/`echo`/`chi`) | `CONTAINS`, `CALLS`, `ROUTES_TO` (`importEdges: false`) |
-| **Rust** | `rust-worker` (`0.1.0`) | Sidecar (`adapters/rust` ↔ `native/rust-worker`) | `L1` | `heuristic-heavy` (`syn 2` AST + deterministik isim tablosu) | `attribute-macro-route (L3)` (Actix-Web / Axum / Rocket HTTP fiil makroları) | `CONTAINS`, `CALLS`, `ROUTES_TO` (`importEdges: false`) |
+| **Rust** | `rust-worker` (`0.1.0`) | Sidecar (`adapters/rust` ↔ `native/rust-worker`) | `L1` | `heuristic-heavy` (`syn 3.0.10` AST + deterministik isim tablosu) | `attribute-macro-route (L3)` (Actix-Web / Axum / Rocket HTTP fiil makroları) | `CONTAINS`, `CALLS`, `ROUTES_TO` (`importEdges: false`) |
 
 ### Katman Tanımları (`L0` – `L3`) ve `coverage.tier` Hesabı
 
@@ -61,7 +63,7 @@ Causoryn'de hiçbir analizör belirsiz bir çağrıyı "en olası" iç sembole s
 - **Rust (`verified`):** Actix-Web, Axum ve Rocket öznitelik makroları (`#[get("/path")]`, `#[post("/path")]` vb.) doğrudan hedef `fn` öğesine bağlı olduğundan daima `verified` (`route-attribute`) üretir.
 - **C# ASP.NET Core (`verified` veya `heuristic`):** Controller `[Route]` + `[HttpGet]`/`[HttpPost]`/… öznitelikleri ve Minimal API `MapGet`/`MapPost`/… çağrıları (`WorkerAnalyzer.cs:1475-1508`), Roslyn `Microsoft.AspNetCore.*` tiplerini semantik olarak çözebildiğinde `verified` üretir. Ortamda `Microsoft.AspNetCore.App.Ref` paketi bulunamazsa bilinen-ad kuralıyla dürüstçe **`heuristic` (+ `ambiguity`)** düzeyine düşer.
 - **Go (`verified`, `heuristic` veya `unresolved`):** `net/http` (`Handle`, `HandleFunc` → metot `"*"`) ve `gin`/`echo`/`chi` HTTP fiil kayıtlarında (`routes.go:120-170`) aynı package'taki isimli handler `verified`, selector handler ifadesi **`heuristic` veya `unresolved`**, tanımsız çıplak handler **`unresolved` (`UnknownExternal`)** üretir; satır-içi anonim `func(...)` literal handler'larda `Endpoint` düğümü korunur, kenar üretilmez ve açık uyarı düşülür.
-- **BDD Test Çıkarımı (`Test` ve `TESTS`):** TypeScript analizörü BDD test bloklarını `Test` düğümü olarak çıkarır ve bir `Test` gövdesinden test-olmayan sembollere yapılan çözümlenmiş çağrılar için `verified` `TESTS` kenarı üretir (`causoryn_derive_test_plan` `direct` sinyali). C#, Python, Go ve Rust sidecar'larında `TESTS` kenarı üretimi `v0.2.0` sonrasında açık kalem olarak izlenmektedir.
+- **BDD Test Çıkarımı (`Test` ve `TESTS`):** TypeScript analizörü BDD test bloklarını `Test` düğümü olarak çıkarır ve bir `Test` gövdesinden test-olmayan sembollere yapılan çözümlenmiş çağrılar için `verified` `TESTS` kenarı üretir (`causoryn_derive_test_plan` `direct` sinyali). C#, Python, Go ve Rust sidecar'larında `TESTS` kenarı üretimi `v0.2.2` itibarıyla açık kalem olarak izlenmektedir.
 
 ---
 
@@ -89,7 +91,7 @@ Dört sidecar adapter (`csharp-roslyn`, `python`, `go`, `rust`) süreç yaşam d
 
 Makinede `.NET`, `Python`, `Go` veya `Cargo` kurulu değilse ya da worker zaman aşımına uğrarsa sunucu **asla çökmez**:
 - İlgili dilin dosyaları envanter karması (`sourceHash`) doğrulanmış `File` düğümleri olarak snapshot'ta korunur (`WORKER_UNAVAILABLE_CAPABILITIES`).
-- Snapshot durumu `partial`, adapter `coverageRatio` değeri `0` olur ve `warnings` dizisine neden kullanılamadığı açıkça yazılır (`npx causoryn@0.2.0 doctor` ile önceden denetlenebilir).
+- Snapshot durumu `partial`, adapter `coverageRatio` değeri `0` olur ve `warnings` dizisine neden kullanılamadığı açıkça yazılır (`npx causoryn@0.2.2 doctor` ile önceden denetlenebilir).
 
 ---
 
@@ -97,11 +99,11 @@ Makinede `.NET`, `Python`, `Go` veya `Cargo` kurulu değilse ya da worker zaman 
 
 | Bileşen / Analizör | Çalışma Zamanı Gereksinimi | Derleme Modeli | Ağ / Çevrimdışı Davranışı |
 |---|---|---|---|
-| **TypeScript + Çekirdek SQLite** | **Node.js >= 24** | Sıfır-derleme (`dist/mcp-server.mjs` + N-API v10 `better-sqlite3` prebuild'leri + `dist/typescript-lib/lib*.d.ts`) | **%100 çevrimdışı** |
-| **C# / Roslyn** (`roslyn-worker`) | **.NET 10 runtime** (`dotnet exec`) | Paket içinde önceden derlenmiş deterministik Release `Causoryn.RoslynWorker.dll` (`Microsoft.CodeAnalysis.CSharp` `5.0.0`, sıfır `.pdb`/`.resources.dll`) | **%100 çevrimdışı** |
-| **Python** (`python-worker`) | **Python 3.10+** (önerilen / CI: **Python 3.11+ / 3.12**) | Sıfır-derleme (`python -B worker.py`, saf stdlib `ast`, sıfır pip paketi, `__pycache__` üretmez) | **%100 çevrimdışı** |
-| **Go** (`go-worker`) | **Go 1.22+** | İstek anında yerel `go run ./cmd/worker` (`GOCACHE` önbellekli) veya önceden derlenmiş `CAUSORYN_GO_WORKER_BIN` (saf stdlib `go/parser`, `go.mod` dış modül içermez) | **%100 çevrimdışı** |
-| **Rust** (`rust-worker`) | **Rust / Cargo** (`edition = 2021`) | İstek anında `cargo build --locked` → `~/.causoryn/cache/rust-worker-target` (veya `CAUSORYN_RUST_TARGET_DIR`) | **İlk soğuk derlemede** `Cargo.lock` içindeki 12 kilitli crate (`syn 2`, `serde_json`, `proc-macro2` vb.) `crates.io` üzerinden indirilir; önbellekli sonraki tüm koşumlar **%100 çevrimdışı** çalışır. |
+| **TypeScript + Çekirdek SQLite** | **Node.js >= 24** | Sıfır-derleme (`dist/mcp-server.mjs` + N-API v10 `better-sqlite3` prebuild'leri + `dist/typescript-lib/lib*.d.ts`) | Kurulum sonrası yerel çalışma |
+| **C# / Roslyn** (`roslyn-worker`) | **.NET 10 runtime** (`dotnet exec`) | Paket içinde önceden derlenmiş deterministik Release `Causoryn.RoslynWorker.dll` (`Microsoft.CodeAnalysis.CSharp` `5.12.0`, sıfır `.pdb`/`.resources.dll`) | Kurulum sonrası yerel çalışma |
+| **Python** (`python-worker`) | **Python 3.10+** (önerilen / CI: **Python 3.11+ / 3.12**) | Sıfır-derleme (`python -B worker.py`, saf stdlib `ast`, sıfır pip paketi, `__pycache__` üretmez) | Kurulum sonrası yerel çalışma |
+| **Go** (`go-worker`) | **Go 1.22+** | İstek anında yerel `go run ./cmd/worker` (`GOCACHE` önbellekli) veya önceden derlenmiş `CAUSORYN_GO_WORKER_BIN` (saf stdlib `go/parser`, `go.mod` dış modül içermez) | Kurulum sonrası yerel çalışma |
+| **Rust** (`rust-worker`) | **Rust / Cargo** (`edition = 2021`) | İstek anında `cargo build --locked` → `~/.causoryn/cache/rust-worker-target` (veya `CAUSORYN_RUST_TARGET_DIR`) | İlk derleme, önbellekte bulunmayan `Cargo.lock` bağımlılıklarını (`syn 3`, `serde_json`, `proc-macro2` vb.) indirmek için ağ gerektirebilir. Hazır worker binary'si yerelde çalışır. |
 
 ---
 
@@ -124,11 +126,11 @@ fp2|ts-adapter@0.1.0|roslyn-worker@0.1.0|refpack=<pack>@<sürüm>@<tfmDir>;...|r
 
 ### 5.2 Neden İç Analizör Sürümleri `0.1.0` Olarak Kalır?
 
-Dağıtım paketi (`causoryn`), MCP sunucusu (`SERVER_VERSION`) ve indeksleme orkestratörü (`INDEXING_VERSION`) `0.2.0` sürümündeyken; beş dil analizörünün iç protokol sürümleri (`ts-adapter@0.1.0`, `roslyn-worker@0.1.0`, `python-worker@0.1.0`, `go-worker@0.1.0`, `rust-worker@0.1.0` ile `Causoryn.RoslynWorker.csproj` ve `native/rust-worker/Cargo.toml`) bilinçli olarak **`0.1.0`** seviyesinde kilitli tutulur:
+Dağıtım paketi (`causoryn`), MCP sunucusu (`SERVER_VERSION`) ve indeksleme orkestratörü (`INDEXING_VERSION`) `0.2.2` sürümündeyken; beş dil analizörünün iç protokol sürümleri (`ts-adapter@0.1.0`, `roslyn-worker@0.1.0`, `python-worker@0.1.0`, `go-worker@0.1.0`, `rust-worker@0.1.0` ile `Causoryn.RoslynWorker.csproj` ve `native/rust-worker/Cargo.toml`) bilinçli olarak **`0.1.0`** seviyesinde kilitli tutulur:
 
 1. `analyzerVersion` alanı hem her `Evidence` kaydının SHA-256 kimliğine (`evidenceId`) hem de `fp2` `analyzerFingerprint` dizgesine doğrudan girer.
 2. Analizörlerin AST/semantik çıkarım kurallarında veya NDJSON `protocolVersion: "1"` şemasında kırıcı bir değişiklik olmadıkça bu sabitin paket sürümüyle birlikte artırılması, diskteki tüm geçerli SQLite snapshot önbelleklerini gereksiz yere geçersiz kılar ve kanıt kimliklerini değiştirir.
-3. Bu nedenle iç analizör sürümü **çıkarım motoru semantiğini**, `0.2.0` ise **MCP/CLI dağıtım paketini** temsil eder.
+3. Bu nedenle iç analizör sürümü **çıkarım motoru semantiğini**, `0.2.2` ise **MCP/CLI dağıtım paketini** temsil eder.
 
 ---
 

@@ -2,7 +2,7 @@
 
 > Kanıt: TŞ v2.1 §3, §5, §6, §8, §9, §10, §16A, §17, §25 · Ayna sayfa: `wiki/architecture.md` · **Dil / Language:** **Türkçe** | [English](en/architecture.md)
 > Bu sayfa kod yazan ajan/kullanıcı içindir: repodaki paketler ile TŞ'nin istediği mimari arasındaki eşlemeyi gösterir.
-> Durum notu: bu belge `v0.2.0` (**Pre-1.0 Public Preview**, `K-020`/`K-021`/`K-022`) açık kaynak sürüm hazırlığı sonundaki
+> Durum notu: bu belge `v0.2.2` (**Pre-1.0 Public Preview**, `K-020`..`K-023` hibrit mimari) sürümündeki
 > kod halini yansıtır (tarihsel `v0.1.0` etiketi `4c9c188f` üzerinde kilitlidir; toplam **18 npm workspace paketi** + kök monorepo
 > = 19 `package.json`: `12 packages/*` + `5 adapters/*` + `1 integrations/zcode/causoryn`, ayrıca standalone `apps/visualizer`,
 > 4 `native/*` sidecar, kök 4-host açık kaynak pazaryeri manifestleri, `.github/workflows/{ci,release}.yml` iş akışları ve
@@ -18,8 +18,15 @@ Workspace Gateway → File Inventory → Language/Framework Adapters → Normali
   → Domain Queries → MCP structuredContent → Host-selected model
 ```
 
-Kaynak: TŞ v2.1 §5. Analizin tamamı yerel ve deterministiktir; graph/storage katmanında
-AI/LLM bağımlılığı yoktur (ADR-002, bkz. [docs/adr/ADR-002-no-llm.md](adr/ADR-002-no-llm.md)).
+Pipeline, TŞ v2.1 §5’e dayanır. Analiz Causoryn içinde yerelde ve LLM bağımlılığı olmadan çalışır. Host modeli isteğe bağlı bir MCP istemcisidir. [ADR-002](adr/ADR-002-no-llm.md)
+
+### LLM-free Motor ve Opsiyonel Host Anotasyonları (`v0.2.2`, `K-023`)
+
+Statik analizörler ve kontrat ayrıştırıcıları graph oluşturur. SQLite ve FTS5 sorgu yüzeyini besler. `SqliteGraphRepository` en fazla dört snapshot’ı bellekte tutar ve `PRAGMA data_version` ile başka bağlantıların yazımlarını kontrol eder. v0.2.1, snapshot yazımında O(1) konum sayaçları ve toplu transaction kullanır. Polyglot indekslemede ortak pathless dış veya sanal düğümler birleştirilir. Dosyaya bağlı kimlik çakışmaları reddedilir.
+
+v0.2.2’de `packages/graph`, adaptif modül projeksiyonu, Tarjan SCC ve Sugiyama tarzı SVG yerleşimiyle çevrimdışı mimari çıktılar üretir. Aynı renderer, metadata dahil aynı snapshot, format, görünüm, seçenekler ve anotasyon girdisiyle bayt düzeyinde aynı çıktı üretir. Yeni indeks işleri zaman ve revision metadata’sını değiştirebilir. [ADR-002](adr/ADR-002-no-llm.md)
+
+`architecture-blueprint`, harici host LLM’ine istenirse `causoryn_export_documentation` için `annotations` hazırlamada yol gösterir. Sunucu şemayı, referans ID’lerini ve modüle ait dosya yollarını doğrular. Anotasyon anlatısı çağıranın girdisi olarak kalır. [MCP Araç Sözleşmeleri](tool-contracts.md)
 
 ## Katmanlı bağımlılık ve dağıtım diyagramı
 
@@ -36,7 +43,7 @@ flowchart TD
         CSA["adapters/csharp-roslyn<br/>↔ native/roslyn-worker (.NET 10 DLL)"]
         PYA["adapters/python<br/>↔ native/python-worker (stdlib ast)"]
         GOA["adapters/go<br/>↔ native/go-worker (go/parser)"]
-        RSA["adapters/rust<br/>↔ native/rust-worker (syn 2)"]
+        RSA["adapters/rust<br/>↔ native/rust-worker (syn 3)"]
         SQL["packages/storage-sqlite<br/>SQLite WAL + FTS5 (SqliteGraphRepository & SqliteWikiStore)"]
         CON["packages/contracts<br/>OpenAPI / AsyncAPI / SQL / JSON Schema / Protobuf keşif & drift"]
     end
@@ -76,24 +83,24 @@ flowchart TD
 | `packages/sidecar-ipc` | Ortak sidecar süreç IPC çekirdeği: satır-bazlı NDJSON framing, timeout, `responseMaxChars`/`stderrMaxChars` bütçeleri, `stdin` EPIPE yutma, allowlist env kurucu, `resolveCausorynAssetRoot` | §7, K-020 | Done (sıfır dış npm bağımlılığı; 4 sidecar adapter tarafından paylaşılır) |
 | `packages/workspace` | Workspace Gateway: trusted roots, inventory, ignore, symlink escape, binary/size filtresi, `OutputAccessPolicy` | §5, §9, §25/2 | Done (fail-closed policy, null-byte ve symlink kaçış korumalı) |
 | `packages/indexing` | IndexCoordinator: 5-dil pipeline orkestrasyonu (TS in-process + C#/Python/Go/Rust sidecar yönlendirme, `INDEXED_ADAPTERS` 5 kayıt), job manager, watcher (in-process), fingerprint `fp2`, `symbol_fts` besleme, çoklu-süreç SQLite yarış kurtarması | §9, §25/4-5 | Done; **B7 Partial kalıntısı**: per-file parse reuse yok ve watcher MCP aracı değil (`refresh_index mode=full\|incremental` aktif) |
-| `packages/graph` | Snapshot sorguları, traversal/cursor, impact, guard (policy DSL), compare/timeline (salt-okunur git), export (`json`/`markdown`/`mermaid`/`html`/`snapshot`), onboarding/agent-context, evidence chain | §8, §9, §12, §13, §15, §16 | Done (`format="snapshot"` ile `.causoryn/architecture-snapshot.json` üreticisi `OutputAccessPolicy` korumalı) |
-| `packages/storage-sqlite` | SQLite + FTS5 store (`SqliteGraphRepository` + `symbol_fts`), migration (`user_version=2`), atomic snapshot + `SqliteWikiStore` (`wiki_*` şeması, FTS/alias indeksleri, annotation CAS) | §9, §16A.7 | Done |
+| `packages/graph` | Snapshot sorguları, traversal/cursor, impact, guard (policy DSL), compare/timeline (salt-okunur git), adaptif mimari projeksiyon + Sugiyama SVG yerleşim + fail-closed Host-LLM `annotations` + çok-görünümlü export (`json`/`markdown`/`mermaid`/`html`/`snapshot`; `view: architecture\|interactive\|full`), onboarding/agent-context, evidence chain | §8, §9, §12, §13, §15, §16, K-023 | Done (`view="architecture"` sıfır-JS katmanlı SVG portal + `view="interactive"` offline portal + `format="snapshot"` `OutputAccessPolicy` korumalı) |
+| `packages/storage-sqlite` | SQLite + FTS5 store (`SqliteGraphRepository` + `symbol_fts` + `PRAGMA data_version` korumalı sıcak snapshot önbelleği + O(1) pozisyon sayacı), migration (`user_version=2`), atomic snapshot + `SqliteWikiStore` (`wiki_*` şeması, FTS/alias indeksleri, annotation CAS) | §9, §16A.7 | Done |
 | `packages/contracts` | Salt-okunur sözleşme keşfi: OpenAPI/AsyncAPI/SQL/JSON Schema/protobuf + parse güvenlik kotaları (1 MiB/derinlik/alias) + compatibility/drift çekirdeği | §11, §10.2 | Done (belgeli sınır: openapi keşfi yalnızca istek şeması — yanıt-şeması drift yüzeyde görünmez, K-015(5)) |
 | `packages/preflight` | candidate-only Preflight Manifest (`candidateOnly` sabit `true` — kod yazmaz) + `derive_test_plan` (`direct`/`call-site`/`naming`) | §10.2/§10.3, §15 | Done (TS `Test` + `TESTS` kenarlarıyla `direct` sinyal aktif; C#/Python/Go/Rust sidecar'larda `TESTS` kenarı üretimi açık) |
 | `packages/verification` | `verify_change` saf çekirdeği: 4 denetim, 8-kuralı verdict zinciri, test durumu dürüstlüğü (`not_run`/`observed`+kanıt), byte-deterministik rapor | §10.4 | Done (E3 `passed` doğrulaması host beyanı üzerinden — K-016(3)) |
 | `packages/wiki` | Living Wiki projeksiyonu: link çözümleme (11 tür), FTS5 arama, incremental invalidation, annotation overlay (CAS), offline markdown+HTML export | §16A | Done (link-düzeyi invalidasyon sınırlı — mcp-server incremental yayımı indeksleri tam graph'tan yeniden yazar) |
-| `packages/mcp-server` | `stdio` transport, input validation, authorization, sıfır-ayar `--allow-cwd` + MCP `roots/list` + `--auto-data-dir`, `storage.dataDbPath` kalıcı SQLite / varsayılan `InMemoryGraphRepository`, 29 araç kablolaması + MCP `annotations` (`readOnlyHint`) + `outputSchemaProfile`, 10 alanlı envelope + sabit hata kodları, bundle girişi (F1) | §5, §10 | Done (`tools/list` TAM OLARAK 29 araç; SDK 1.32.2 v1.x — K-009 sapması; 35 dosyalık `bundle-manifest.json`) |
-| `packages/causoryn` | Yayınlanabilir açık kaynak çoklu-host CLI ve plugin dağıtım paketi (`causoryn` `v0.2.0` Pre-1.0 Public Preview, `MIT`, sıfır dış npm `dependencies`): `causoryn mcp\|setup\|doctor`, `plugin-mcp-launcher.mjs`, `build-package.mjs` ile sahnelenen `dist/mcp-server.mjs` + `mcp-server.mjs.LEGAL.txt` + `better-sqlite3` (`better-sqlite3/LICENSE` dahil) + `dist/typescript-lib/lib*.d.ts` + 4 `native/` worker + 4 `skills/` + 4 host plugin manifesti + `THIRD-PARTY-NOTICES.md` | §17, K-021, K-022 | Done (`npm pack` `.tgz` arşivinden izole 4-host `setup`/`doctor` + sıfır-ayar `stdio` E2E kanıtlı) |
+| `packages/mcp-server` | `stdio` transport, input validation, authorization, bloklamayan başlangıç (`deferAutoIndex` + kök `.gitignore` uyumu), sıfır-ayar `--allow-cwd` + MCP `roots/list` + `--auto-data-dir`, `storage.dataDbPath` kalıcı SQLite / varsayılan `InMemoryGraphRepository`, 29 araç kablolaması + MCP `annotations` (`readOnlyHint`) + `outputSchemaProfile`, 10 alanlı envelope + sabit hata kodları, bundle girişi (F1) | §5, §10 | Done (`tools/list` TAM OLARAK 29 araç; SDK 1.32.2 v1.x — K-009 sapması; 35 dosyalık `bundle-manifest.json`) |
+| `packages/causoryn` | Yayınlanabilir açık kaynak çoklu-host CLI ve plugin dağıtım paketi (`causoryn` `v0.2.2` Pre-1.0 Public Preview, `MIT`, sıfır dış npm `dependencies`): `causoryn mcp\|setup\|doctor`, `plugin-mcp-launcher.mjs`, `build-package.mjs` ile sahnelenen `dist/mcp-server.mjs` + `mcp-server.mjs.LEGAL.txt` + `better-sqlite3` (`better-sqlite3/LICENSE` dahil) + `dist/typescript-lib/lib*.d.ts` + 4 `native/` worker + 5 `skills/` (`architecture-blueprint` dahil) + 4 host plugin manifesti + `THIRD-PARTY-NOTICES.md` | §17, K-021, K-022, K-023 | Done (`npm pack` `.tgz` arşivinden izole 4-host `setup`/`doctor` + sıfır-ayar `stdio` E2E kanıtlı) |
 | `adapters/typescript` | Compiler API AST + symbol resolution + framework linkers (Express/Next.js) + BDD `Test` node & `TESTS` kenarı çıkarımı (L1/L2/L3) | §6, §7, §15, §25/4 | Done (cross-file receiver etiket sınırı belgeli) |
 | `adapters/csharp-roslyn` | Roslyn worker TS adapter: spawn (`dotnet exec`), istek/yanıt, 30 sn timeout, graceful fallback | §7 | Done (worker yok → L0/L1 + açık coverage; L3 `aspnet-core-route-attributes (L3)`) |
 | `adapters/python` | Python stdlib `ast` sidecar TS adapter: `python -B` spawn, satır-JSON protokol v1, 30 sn timeout, L0/L1 fallback | §7, §23 | Done (`decorator-route-pattern (L3)`; aynı modül `verified`, import `heuristic`) |
 | `adapters/go` | Go `go/parser`+`go/ast` sidecar TS adapter: `go run` / `goWorkerBinaryPath`, 120 sn timeout, Windows ağaç-kill, L0/L1 fallback | §7, §23 | Done (`heuristic-only (semantik L2 yok)`, `symbolResolution:false`; L3 HTTP/router kayıtları) |
-| `adapters/rust` | Rust `syn 2` sidecar TS adapter: literal `cargo` build (`--locked` + `~/.causoryn/cache/rust-worker-target`) + worker spawn, framing/timeout, L0/L1 fallback | §7, §23 | Done (`heuristic-heavy`; L3 attribute-macro route tespiti) |
-| `apps/visualizer` | Offline HTML+SVG viewer üretici: sıfır bağımlılık, inline CSS/JS, kısıtlayıcı CSP, resolution renk ayrımı, selection→evidence paneli | §16 | Done (gerçek tarayıcı koşusu yok — DOM-düzeyi vitest + statik inceleme; viewer HTML'i izinli output'a yazan MCP yüzeyi kapsam dışı) |
+| `adapters/rust` | Rust `syn 3` sidecar TS adapter: literal `cargo` build (`--locked` + `~/.causoryn/cache/rust-worker-target`) + worker spawn, framing/timeout, L0/L1 fallback | §7, §23 | Done (`heuristic-heavy`; L3 attribute-macro route tespiti) |
+| `apps/visualizer` | Offline HTML+SVG viewer üretici: sıfır bağımlılık, inline CSS/JS, kısıtlayıcı CSP, resolution renk ayrımı, selection→evidence paneli | §16 | Done (DOM-düzeyi vitest + statik inceleme; etkileşimli HTML MCP yüzeyi `v0.2.2`'de `packages/graph` `view="interactive"` ile açıldı; gerçek tarayıcı koşusu açık) |
 | `native/roslyn-worker` | C# Roslyn sidecar (stdin/stdout protokol v1; deterministik Release derlemesi, sıfır `.pdb`/`.resources.dll` sızıntısı) | §7, §23/B1 | Done (`.NET 10` koşumlarıyla; CI 3-OS matrisinde derlenip doğrulanır) |
 | `native/python-worker` | Python saf stdlib `ast` sidecar (`worker.py`, sıfır dış bağımlılık, satır-JSON protokol v1 + `PROTOCOL.md`) | §7, §23 | Done |
 | `native/go-worker` | Go stdlib `go/parser`+`go/ast` sidecar (`cmd/worker`, satır-JSON protokol v1 + `PROTOCOL.md`) | §7, §23 | Done |
-| `native/rust-worker` | Rust `syn 2` + `serde_json` Cargo sidecar (`causoryn-rust-worker`, satır-JSON protokol v1 + `PROTOCOL.md`) | §7, §23 | Done |
+| `native/rust-worker` | Rust `syn 3` + `serde_json` Cargo sidecar (`causoryn-rust-worker`, satır-JSON protokol v1 + `PROTOCOL.md`) | §7, §23 | Done |
 | `integrations/zcode/causoryn` | ZCode geliştirici plugin paketi: `.zcode-plugin/plugin.json` (`mcpServers` + `userConfig`) + skills + dev marketplace (`.claude-plugin/marketplace.json`) | §17, §25/8, K-002 | Done (manifest doğrulama; GUI kurulum koşulmadı — kırmızı kural 6) |
 | `integrations/antigravity/causoryn` | Antigravity eklenti dizini: `plugin.json` (`$schema`'sız yerel yükleyici uyumlu) + `mcp_config.json` (birincil yerel yükleyici tanımı) + `mcp.json` (TŞ §17.1 taşınabilir manifest) + `README.md` + `build:bundle` ile sahnelenen `scripts/mcp-server.mjs` (+ vendored `better-sqlite3`) | §17.1, §22 | Partial — doğrudan `stdio` spawn doğrulandı (29 araç); `agy` CLI yok: kurulum/smoke NOT RUN; `skills/`/`agents/`/`rules/`/`hooks.json` ayrı dilim |
 | `scripts/` | Kök yayın, tedarik zinciri ve güvenlik betikleri: `scripts/secret-scan.mjs` (13 dizin kökü + 13 kök metin dosyası sır/kişisel-yol tarayıcısı), `scripts/generate-sbom.mjs` (CycloneDX 1.5 SBOM + `SHA256SUMS.txt`), `scripts/export-public-tree.mjs` (Seçenek 1 temiz açık kaynak ağacı dışa aktarıcısı) | §19, K-022 | Done |
@@ -149,10 +156,7 @@ ve Living Wiki `wiki_*` (`wiki_fts` dahil) ailesi. Composite indeksler: `(snapsh
   görünmez); bütünlük kontrolünden sonra `ready` veya kapsam eksikse `partial` olarak tek transaction'da
   yayımlanır. Varsayılan sorgular en son yayımlanan snapshot'ı döndürür; daha yeni yayın veya aktif `building`
   varsa `stale=true` işaretlenir.
-- **Salt-okunur workspace garantisi:** Varsayılan çıplak `stdio` modunda `InMemoryGraphRepository` kullanılır;
-  kalıcı depolama `storage.dataDbPath` veya `--auto-data-dir` (`~/.causoryn/workspaces/<slug>-<hash12>/graph-<client>.sqlite`)
-  ile etkinleştirildiğinde yazma **yalnızca** yetkili workspace köklerinin dışındaki izinli data-root'a yapılır
-  (bkz. [docs/cli-and-configuration.md](cli-and-configuration.md)).
+- **Yazma sınırları:** Çıplak `stdio` varsayılan olarak `InMemoryGraphRepository` kullanır. Kalıcı graph ve wiki veritabanı yolları yetkili köklerin dışında doğrulanır. Otomatik yapılandırma dışa aktarım yolunu da çalışma alanı dışında oluşturur. Açıkça beyan edilen `output.allowedOutputDirs` için ayrı bir izin politikası uygulanır. [CLI ve Konfigürasyon](cli-and-configuration.md)
 - **SQL güvenliği:** Tüm SQL sorgularında dış girdiler parametre bağlamasıyla (`?`) kullanılır; SQL metni asla
   dize birleştirmeyle kurulmaz.
 
@@ -167,7 +171,7 @@ ve Living Wiki `wiki_*` (`wiki_fts` dahil) ailesi. Composite indeksler: `(snapsh
 - **Birleşik dağıtım paketi (`packages/causoryn`):** `build-package.mjs` sıfır-ayar CLI giriş noktasını
   (`src/cli-stdio.ts` → `dist/mcp-server.mjs`), yerleşik TypeScript kütüphane bildirimlerini
   (`dist/typescript-lib/lib*.d.ts`), taşınabilir Roslyn Release DLL setini (`native/roslyn-worker/`),
-  Python/Go/Rust sidecar kaynaklarını, 4 kanonik `skills/` dizinini, 4 host plugin manifestini ve
+  Python/Go/Rust sidecar kaynaklarını, 5 kanonik `skills/` dizinini (`architecture-blueprint` dahil), 4 host plugin manifestini ve
   `THIRD-PARTY-NOTICES.md` + `licenses/` dosyalarını birleştirir; `verify-package-ready.mjs` `prepack`
   aşamasında tüm SHA-256 özetlerini, LF satır sonlarını ve Roslyn binary temizliğini (sıfır kullanıcı yolu /
   `.pdb` / `.resources.dll`) fail-closed doğrular.
@@ -188,10 +192,10 @@ ve Living Wiki `wiki_*` (`wiki_fts` dahil) ailesi. Composite indeksler: `(snapsh
 | Paketleme | Çok-dosyalı deterministik ESM bundle | `esbuild` `^0.28.2` (`better-sqlite3` external — native `.node` gömülemez, `35` dosyalık `bundle-manifest.json`, ADR-010) |
 | Validasyon | Zod + JSON Schema | `zod` `^4` (`packages/domain`, `workspace`, `contracts`, `wiki`, `mcp-server`) |
 | TS analizi | TypeScript Compiler API + symbol resolution | `adapters/typescript` (in-process + paketli `lib*.d.ts`) |
-| Çok-dil sidecar'lar | C# Roslyn, Python `ast`, Go `go/parser`, Rust `syn 2` | `native/roslyn-worker`, `native/python-worker`, `native/go-worker`, `native/rust-worker` + `adapters/*` + `packages/sidecar-ipc` |
-| Graph store | SQLite + FTS5, WAL | `better-sqlite3` `^13` + `@types/better-sqlite3` (`packages/storage-sqlite`) |
+| Çok-dil sidecar'lar | C# Roslyn, Python `ast`, Go `go/parser`, Rust `syn 3` | `native/roslyn-worker`, `native/python-worker`, `native/go-worker`, `native/rust-worker` + `adapters/*` + `packages/sidecar-ipc` |
+| Graph store | SQLite + FTS5, WAL | `better-sqlite3` `^13.2.0` + `@types/better-sqlite3` (`packages/storage-sqlite`) |
 | Git | Salt okunur CLI; checkout/reset/clean yasak | `packages/graph/src/git-read.ts` (`execFile` allowlist: `cat-file`, `ls-tree` vb., `shell: false`) |
-| Test | Vitest + fixture/golden + MCP integration | `vitest` `5.0.5` |
+| Test | Vitest + fixture/golden + MCP integration | `vitest` `5.1.0` |
 | Lint | typescript-eslint recommended | `eslint` `^10.15.0` + `typescript-eslint` `^8.73.0` |
 
 Sürüm politikası (TŞ §6): SDK/paket sürümleri implementasyon başında yeniden doğrulanır;

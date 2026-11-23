@@ -4,14 +4,10 @@
 
 # Causoryn (`causoryn` v0.2.2 — Pre-1.0 Public Preview)
 
-**Causoryn** is a **local, deterministic, LLM-free** codebase and change intelligence
-engine exposed over the Model Context Protocol (`stdio`). It constructs evidence-backed
-dependency, symbol, route, and contract graphs across your project, exports **offline
-visual architecture portals** (layered SVG HTML, interactive pan/zoom viewer, subgraph
-Mermaid, Architecture Brief Markdown, and fail-closed Host-LLM `annotations`), and ships
-**5 canonical agent skills** while enforcing a strict **read-only workspace guarantee**:
-Causoryn never modifies your source tree and writes snapshots, Living Wiki SQLite
-databases, and exports strictly outside the analyzed workspace.
+**Causoryn** is a **local, LLM-free MCP engine (`ADR-002`)** for codebase and change
+analysis. It builds evidence-backed graphs, serves 29 tools over `stdio`, and ships
+5 canonical agent skills. Source analysis is read-only. Architecture exports can render from the
+graph alone or use optional caller-supplied `annotations` (`K-023`).
 
 > **Release status (`ADR-010`):** `0.2.2` is a **Pre-1.0 Public Preview** (not `1.0.0`).
 > Package architecture note: `causoryn` is a multi-file runtime package (`dist/mcp-server.mjs`
@@ -20,11 +16,12 @@ databases, and exports strictly outside the analyzed workspace.
 
 ## Why Causoryn?
 
-- **Zero LLM & zero API keys (`ADR-002`):** 100% deterministic static analysis — no embeddings, no token burn, no hallucinated call edges.
-- **Evidence-backed & honest (`ADR-010`):** Every graph edge carries its exact resolution (`verified`, `heuristic`, `unresolved`) and source-span evidence ID.
-- **Strictly read-only workspace (`ADR-008`):** Snapshots, SQLite indexes, Living Wiki databases, and exported architecture portals live outside your repository.
+- **LLM-free analysis (`ADR-002`):** Static analysis, search, verification, and export run locally without model calls, model credentials, or embeddings. The optional `architecture-blueprint` skill guides a host coding agent to supply `annotations`. The engine validates their schema and graph references. The prose remains caller-provided.
+- **Reproducible exports:** The same snapshot, including metadata, and identical format, view, options, and annotations produce byte-identical artifacts with the same renderer version. Build timestamps, MCP request IDs, job progress, and host-generated annotations can vary. [ADR-002](https://github.com/MrBekoX/Causoryn/blob/main/docs/en/adr/ADR-002-no-llm.md)
+- **Evidence-backed results (`ADR-010`):** Edges report `verified`, `heuristic`, or `unresolved` resolution. Every `verified` edge carries source evidence.
+- **Read-only source analysis (`ADR-008`):** SQLite graph and wiki databases stay outside analyzed roots. Automatic setup also places exports there. Custom export allowlists govern explicit export destinations independently of the analyzed roots.
 - **Offline visual architecture portals (`v0.2.2`):** Zero-JS layered SVG HTML (`view: "architecture"`), interactive pan/zoom/search/Inspector portal (`view: "interactive"`), clean subgraph Mermaid, Architecture Brief Markdown, and fail-closed Host-LLM `annotations` guided by the bundled `architecture-blueprint` skill.
-- **Fast on warm snapshots (1,000 TS files):** `11.8 ms` `workspace_summary`, `13.0 ms` `get_symbol_context`, `10.7 ms` `map_system` ([benchmarks](https://github.com/MrBekoX/Causoryn/blob/main/docs/en/benchmarks.md)), with non-blocking startup (`< 500 ms` `initialize`) and `PRAGMA data_version`-guarded SQLite snapshot caching.
+- **Warm snapshot reads:** The packaged server defers automatic indexing until after MCP initialization. Its SQLite snapshot cache checks `PRAGMA data_version` before reusing a snapshot. Historical medians on a 1,000-file TypeScript fixture were `11.8 ms` for `workspace_summary`, `13.0 ms` for `get_symbol_context`, and `10.7 ms` for `map_system`. [Benchmarks](https://github.com/MrBekoX/Causoryn/blob/main/docs/en/benchmarks.md)
 
 ## Requirements & Component Runtime Matrix
 
@@ -35,7 +32,7 @@ databases, and exports strictly outside the analyzed workspace.
 | **C# / Roslyn** (L2 + L3) | **.NET 10 runtime** (`dotnet exec`) | Prebuilt deterministic Release Roslyn DLL (zero-compile) | 100% offline |
 | **Python** (L2 + L3) | **Python 3.10+** (`python -B`, stdlib `ast`) | Zero-compile | 100% offline |
 | **Go** (L1/heuristic + L3) | **Go 1.22+** (stdlib `go/parser`) | On-demand `go run` (or `CAUSORYN_GO_WORKER_BIN`) | 100% offline |
-| **Rust** (L1/heuristic + L3) | **Rust / Cargo** (`syn` 2 sidecar) | On-demand `cargo build --locked` into `~/.causoryn/cache/rust-worker-target` | Cold build fetches 12 locked crates from `crates.io`; cached builds run offline |
+| **Rust** (L1/heuristic + L3) | **Rust / Cargo** (`syn` 3 sidecar) | On-demand `cargo build --locked` into `~/.causoryn/cache/rust-worker-target` | An uncached build can fetch locked crates from `crates.io`; a populated cache supports offline use |
 
 If an optional language sidecar toolchain (`dotnet`, `python`, `go`, `cargo`) is unavailable
 on a machine, Causoryn degrades gracefully and honestly to L0/L1 file-level provenance
@@ -91,7 +88,7 @@ npx causoryn@0.2.2 setup --client claude-code --uninstall --yes
 
 ## Read-Only Workspace & Zero-Config Authorization
 
-- **Read-only workspace guarantee:** Causoryn never writes to your repository source tree (`ADR-008`). SQLite graph databases, Living Wiki stores, and exports are isolated under `~/.causoryn/workspaces/<slug>-<hash>/` (or `ZCODE_PLUGIN_DATA` / `--data-dir`).
+- **Storage and export paths:** Automatic setup uses `~/.causoryn/workspaces/<slug>-<hash>/` or the supported `ZCODE_PLUGIN_DATA` / `--data-dir` override. With manual configuration, keep `output.allowedOutputDirs` outside the source tree for an out-of-tree export workflow. [CLI & Configuration](https://github.com/MrBekoX/Causoryn/blob/main/docs/en/cli-and-configuration.md)
 - **Zero-config CLI flags (`--allow-cwd --auto-data-dir`):** When launched inside a safe project directory, `--allow-cwd` authorizes that project root automatically; when launched by a desktop IDE from `$HOME`, filesystem root, or the plugin cache directory, Causoryn rejects unsafe roots and dynamically binds the active workspace via MCP `roots/list` (`notifications/roots/list_changed`).
 - **Explicit `CAUSORYN_CONFIG` (`allowRoots`):** Bare `node dist/mcp-server.mjs` without CLI flags preserves strict default-deny (`{"allowRoots":[]}`) until a project path such as `{"allowRoots":["/work/my-service"]}` is explicitly declared.
 

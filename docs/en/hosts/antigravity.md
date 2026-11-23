@@ -24,13 +24,15 @@ npx causoryn@0.2.2 setup --client antigravity --yes
 # Read-only health & alignment check
 npx causoryn@0.2.2 doctor
 
-# Clean removal (removes mcpServers.causoryn + 4 routing skills)
+# Clean removal (removes mcpServers.causoryn + 5 Causoryn skills)
 npx causoryn@0.2.2 setup --client antigravity --uninstall --yes
 ```
 
-Note: When a secondary `~/.gemini/antigravity/mcp_config.json` file already exists on disk,
-`causoryn setup` and `causoryn doctor` synchronize and validate it alongside the primary
-`~/.gemini/config/mcp_config.json`. End users can also install directly from the repository root
+The default setup installs five canonical skills. `architecture-blueprint` guides the selected Antigravity model in drafting optional `annotations` from MCP evidence. The server renders repeatable output with the same snapshot and export inputs. To export without annotations, call `causoryn_export_documentation` directly. [Architecture export contract](../tool-contracts.md)
+
+`causoryn setup` updates the primary `~/.gemini/config/mcp_config.json` and the secondary
+`~/.gemini/antigravity/mcp_config.json` if it already exists. `causoryn doctor` inspects both in
+read-only mode. End users can also install directly from the repository root
 (`https://github.com/MrBekoX/Causoryn`, root `plugin.json` + `mcp_config.json`). The
 `integrations/antigravity/causoryn/` section below documents the monorepo F1 staged bundle fixture
 and Spec §17.1 / §22 verification records.
@@ -91,7 +93,7 @@ Spec §22 applies directly: *"If `agy` CLI is absent, explicitly report that it 
 | `mcp.json` | ✅ Present (Spec §17.1 portable manifest counterpart; `"${PLUGIN_ROOT}/scripts/mcp-server.mjs"`) |
 | `README.md` | ✅ Present (user-facing setup, security model, and `NOT RUN` disclosure) |
 | `scripts/mcp-server.mjs` (+ `scripts/node_modules/better-sqlite3/` + `scripts/bundle-manifest.json`) | ✅ Staged deterministically by `npm run build:bundle --workspace packages/mcp-server` (gitignored) |
-| `skills/` (`causoryn`, `map-system`, `preflight-change`, `verify-change`) | ⚠️ Omitted in the monorepo fixture; all 4 canonical skills are published at root `skills/` and in `packages/causoryn` |
+| `skills/` | ⚠️ Omitted from the monorepo fixture. The five canonical skills (`causoryn`, `map-system`, `preflight-change`, `verify-change`, `architecture-blueprint`) are published in the root `skills/` directory and in the `packages/causoryn` package. |
 | `agents/`, `rules/`, `hooks.json` | ❌ Not included (separate slice) |
 
 **Dual-manifest and path resolution rationale:**

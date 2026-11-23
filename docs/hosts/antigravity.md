@@ -16,11 +16,13 @@ npx causoryn@0.2.2 setup --client antigravity --yes
 # Sağlık kontrolü (salt okunur)
 npx causoryn@0.2.2 doctor
 
-# Temiz kaldırma (mcpServers.causoryn + 4 yönlendirme skill dosyası)
+# Temiz kaldırma (mcpServers.causoryn + 5 Causoryn skill’i)
 npx causoryn@0.2.2 setup --client antigravity --uninstall --yes
 ```
 
-Not: `~/.gemini/antigravity/mcp_config.json` ikincil konfigürasyon dosyası diskte mevcutsa `causoryn setup` ve `causoryn doctor` bu dosyayı da birincil `~/.gemini/config/mcp_config.json` ile senkronize biçimde günceller ve doğrular. Ya da doğrudan kök depodan (`https://github.com/MrBekoX/Causoryn`, kök `plugin.json` + `mcp_config.json`) kurun. Aşağıdaki `integrations/antigravity/causoryn/` bölümü, monorepo içi sahnelenmiş F1 bundle test fikstürünü ve TŞ §17.1 / §22 doğrulama kayıtlarını belgeler.
+Varsayılan kurulum beş kanonik skill’i yükler. `architecture-blueprint`, Antigravity’de seçili modelin MCP kanıtlarından isteğe bağlı `annotations` hazırlamasına rehberlik eder. Sunucu, aynı snapshot ve export girdileriyle tekrarlanabilir çıktı üretir. Anotasyonsuz export için doğrudan `causoryn_export_documentation` çağırın. [Mimari export sözleşmesi](../tool-contracts.md)
+
+`causoryn setup`, birincil `~/.gemini/config/mcp_config.json` dosyasını ve mevcutsa ikincil `~/.gemini/antigravity/mcp_config.json` dosyasını günceller. `causoryn doctor` dosyaları salt okunur denetler. Doğrudan kök depodan (`https://github.com/MrBekoX/Causoryn`, kök `plugin.json` ve `mcp_config.json`) da kurabilirsiniz. Aşağıdaki `integrations/antigravity/causoryn/` bölümü, monorepo içi F1 bundle test fikstürünü ve TŞ §17.1 / §22 doğrulama kayıtlarını belgeler.
 
 ## Dürüstlük beyanı — NOT RUN (`agy` CLI) vs Doğrudan `stdio` Protokol Doğrulaması
 
@@ -54,7 +56,7 @@ TŞ §22 kuralı uygulanır: *"agy CLI yoksa çalıştırılmadı diye açıkça
 | `mcp.json` | ✅ VAR (TŞ §17.1 taşınabilir manifest karşılığı; `${PLUGIN_ROOT}/scripts/mcp-server.mjs`) |
 | `README.md` | ✅ VAR (kullanıcıya dönük kurulum, güvenlik ve `NOT RUN` dokümanı) |
 | `scripts/mcp-server.mjs` (+ `scripts/node_modules/better-sqlite3/` + `scripts/bundle-manifest.json`) | ✅ `npm run build:bundle --workspace packages/mcp-server` ile deterministik sahnelenir (`.gitignore`'da; repoya commit edilmez) |
-| `skills/` (`map-system`, `trace-flow`, `preflight-change`) | ⚠️ Monorepo fikstüründe yok; kanonik 4 skill (`causoryn`, `map-system`, `preflight-change`, `verify-change`) kök `skills/` ve `packages/causoryn` paketinde yayımlanır |
+| `skills/` | ⚠️ Monorepo fikstüründe yok. Beş kanonik skill (`causoryn`, `map-system`, `preflight-change`, `verify-change`, `architecture-blueprint`) kök `skills/` dizininde ve `packages/causoryn` paketinde yayımlanır. |
 | `agents/`, `rules/`, `hooks.json` | ❌ yok (ayrı dilim) |
 
 **Çift manifest ve yol çözümlemesi kararı:**

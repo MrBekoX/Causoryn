@@ -12,7 +12,7 @@ sürümleme [SemVer](https://semver.org/lang/tr/) ilkelerini izler.
 - ZCode GUI içi gerçek kurulum + tools/list smoke koşumu (kırmızı çizgi 6, kullanıcı kurulumunu bozmama kısıtıyla)
 - macOS/Linux/ARM canlı host dağıtım doğrulaması (TŞ §22 Release satırı; `.github/workflows/ci.yml` `ubuntu-latest` + `windows-latest` + `macos-latest` CI matrisi K-020/K-022 ile eklendi; canlı macOS/ARM64 host smoke hâlâ açık)
 - MCP SDK v1.x → v2 hattına yükseltme (TŞ §6 hedefi; K-009 sapma kaydının kapatılması — bugüne dek 1.32.2)
-- `causoryn_refresh_index` araç yüzeyinde `mode=incremental` (2026-11-18 K-020 ile açıldı; watcher MCP araca sarılması hâlâ açık) ve per-file parse reuse'un eklenmesi (B7 Partial kalıntısı — graph tutarlılığı bugün değişimde tam türetim zorluyor)
+- `causoryn_refresh_index mode=incremental` K-020 ile araç yüzeyinde mevcut. Watcher için MCP aracı ve per-file parse reuse açık (B7 Partial).
 - adapters/csharp-roslyn (ve diğer sidecar dillerde) TESTS kenarı üretimi (`adapters/typescript` `Test` node + `TESTS` kenarı üretimi 2026-11-18 K-020 ile aktifleştirildi; C#/Python/Go/Rust'ta `derive_test_plan` `direct` sinyali hâlâ açık)
 - OpenAPI keşfine yanıt-şeması drift'i eklenmesi (K-015(5) sadakat sınırı), TŞ §11 event versiyon uyumsuzluk kuralı (K-015(4)) ve SQL RENAME → `unknown` sınıflamasının netleştirilmesi (K-015(3))
 - compare_architecture/architecture_timeline için `.causoryn/architecture-snapshot.json` iş akışı otomasyonu (`causoryn_export_documentation(format="snapshot")` ile izinli `output.allowedOutputDirs` dizinine kanonik blob üreticisi 2026-11-18 K-020 ile eklendi; workspace içine otomatik yazma kırmızı çizgi 2 gereği yapılmaz)
@@ -32,7 +32,7 @@ sürümleme [SemVer](https://semver.org/lang/tr/) ilkelerini izler.
   - Opt-in `view: "interactive"` (yalnızca `format: "html"`): pan/zoom, anlık arama, dil/döngü/test filtreleri, 1-hop komşuluk vurgulu sağ Inspector Drawer, tıklanabilir kaynak-satır kanıtları ve Mermaid kopyalama içeren offline etkileşimli portal (`VIEWER_CSP_POLICY`, sıfır `innerHTML`, sıfır `fetch`/CDN).
   - Opsiyonel fail-closed `annotations` (`title`, `architectureStyle`, `executiveSummary`, `domains`, `moduleNotes`, `flows`, `guidedTour`, `decisions`, `risks`): platformdaki Host LLM'in Causoryn MCP araçlarıyla keşfettiği mimari anlatıyı tüm `moduleId`/`nodeId`/`evidenceId`/`keyFiles` kimliklerini doğrulayarak portala gömer (Causoryn çekirdeği %100 LLM-free kalır — ADR-002).
   - `view: "full"` ile eski ham snapshot dökümü geriye uyumlu korunur; 29 araç kataloğu sabit tutulur.
-- **Host-LLM Orkestrasyon Skill'i (`skills/architecture-blueprint/SKILL.md`):** Claude Code, Codex, Antigravity ve ZCode'daki platform LLM'ini 6 adımlı deterministik MCP keşif → blueprint → doğrulanmış anotasyon → görsel portal üretim akışına yönlendiren 5. kanonik skill (`CANONICAL_SKILL_NAMES` + 4 host kurulumuna dahil).
+- **Opsiyonel Host-LLM Skill’i (`skills/architecture-blueprint/SKILL.md`):** Beşinci kanonik skill, dört host’ta harici modelin MCP kanıtından hareketle anotasyon hazırlamasına yardımcı olur. Dışa aktarım sabit snapshot, format, görünüm, seçenekler ve aynı anotasyon girdisiyle tekrarlanır. Modelin hazırladığı anlatı değişebilir. [ADR-002](docs/adr/ADR-002-no-llm.md)
 
 ### Performance & Fixed
 

@@ -4,7 +4,7 @@
 
 > Kanıt: **K-021/K-022 dağıtım (2026-11-19):** `claude --version` → `2.1.328 (Claude Code)` ile
 > `claude plugin validate --strict` (kök `.claude-plugin/marketplace.json`) + `claude mcp list`
-> `√ Connected` ve `npx causoryn@0.2.2 setup --client claude-code` doğrulandı. **Tarihsel F3
+> `√ Connected` ve paketli CLI kurulumu doğrulandı. **Tarihsel F3
 > monorepo bundle smoke kanıtı:** `claude --version` → `2.1.322 (Claude Code)`; `claude mcp --help`
 > ve `claude mcp add --help` çıktıları (sözdizimi ilk kez 2026-11-08'de 2.1.319 ile, **2026-11-10'da
 > 2.1.322 ile uçtan uca yeniden doğrulandı**: yönlendirilmiş geçici config'de `mcp add` → `mcp list`
@@ -30,9 +30,11 @@ npx causoryn@0.2.2 setup --client claude-code --yes
 # Sağlık kontrolü (salt okunur)
 npx causoryn@0.2.2 doctor
 
-# Temiz kaldırma (mcpServers.causoryn + 4 yönlendirme skill dosyası)
+# Temiz kaldırma (mcpServers.causoryn + 5 Causoryn skill’i)
 npx causoryn@0.2.2 setup --client claude-code --uninstall --yes
 ```
+
+Varsayılan kurulum beş kanonik skill’i yükler. `architecture-blueprint`, Claude’un MCP kanıtlarından isteğe bağlı `annotations` hazırlamasına rehberlik eder. Sunucu, aynı snapshot ve export girdileriyle tekrarlanabilir çıktı üretir. Anotasyonsuz export için doğrudan `causoryn_export_documentation` çağırın. [Mimari export sözleşmesi](../tool-contracts.md)
 
 **`v0.2.2` `CLAUDE_CONFIG_DIR` desteği:** Ortamda `CLAUDE_CONFIG_DIR` tanımlıysa hem
 `causoryn setup --client claude-code` hem de `causoryn doctor` varsayılan `~/.claude.json` ve
@@ -157,7 +159,7 @@ Scope belirtilmezse kayıtlı olduğu scope'tan kaldırır (`claude mcp remove -
 
 Causoryn sunucu süreci stdout'a **yalnızca MCP protokol trafiği** yazar; tüm loglar `[causoryn]`
 önekiyle **stderr**'e gider. Bu yüzden host tarafında hiçbir log satırı protokol akışını bozmaz.
-Manuel doğrulama (2026-11-08, bundle `causoryn@0.1.0`; `causoryn@0.2.2` ile sürdürüldü):
+Tarihsel manuel doğrulama (2026-11-08, bundle `causoryn@0.1.0`):
 
 - stdout: 2 satır saf JSON-RPC (initialize yanıtı + `tools/list` → **29 araç**)
 - stderr: yalnızca `[causoryn] CAUSORYN_CONFIG tanımsız; ...` + hazır logu

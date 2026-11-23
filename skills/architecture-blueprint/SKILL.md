@@ -5,13 +5,14 @@ description: Orchestrate the host LLM and Causoryn MCP tools to generate a compr
 
 # architecture-blueprint — Host-LLM + Causoryn Visual Architecture Workflow
 
-Causoryn itself is **100% local, deterministic, and LLM-free** — it never calls external
-model APIs and never writes to your source repository. Instead, **you (the host LLM)**
-discover verified structural facts via Causoryn's MCP tools and pass grounded `annotations`
-to `causoryn_export_documentation`, which validates every referenced ID fail-closed and
-renders self-contained offline visual diagrams and portals.
+Causoryn's analysis and export engine runs locally without model calls or embeddings.
+Its structural export is reproducible with the same published snapshot, view, format,
+options, and supplied `annotations`. As the host LLM, you can use the MCP evidence to
+draft those optional annotations. Your wording can vary between runs. The server
+validates the references and renders the artifact into an authorized output directory.
+To produce a model-free export, omit `annotations` and use the same rendering tools.
 
-## 6-Step Deterministic Architecture Synthesis Protocol
+## Architecture Discovery and Export
 
 ### Step 1: Verify Snapshot Health & Coverage Boundaries
 1. Call `causoryn_index_status` to confirm a published snapshot exists (if `INDEX_NOT_READY` or `stale: true`, call `causoryn_refresh_index` and wait until ready).
@@ -62,7 +63,7 @@ Call `causoryn_export_documentation` with the same `options` and your validated 
 - **Zero Fabrication:** Never invent `moduleId`, `nodeId`, `evidenceId`, or `keyFiles` values. Causoryn validates all references fail-closed and rejects unknown IDs with `INVALID_ARGUMENT`.
 - **Coverage Honesty:** When `status` is `"partial"` or `externalSummary.nodeCount` / `unresolved` edges are high, state those boundaries explicitly in `executiveSummary` and `risks`.
 - **Error Recovery:**
-  - `EXPORT_NOT_ALLOWED`: `outputDir` is not in `output.allowedOutputDirs` — use the configured Causoryn exports directory instead of writing inside the source repo.
+  - `EXPORT_NOT_ALLOWED`: the server has no authorized export directory for this request. Set `output.allowedOutputDirs` or use the `--auto-data-dir` exports directory.
   - `INVALID_ARGUMENT`: inspect the offending `moduleId` / `nodeId` / `evidenceId` / `keyFile` or `view` combination reported in `error.message`, correct from Step 4's blueprint, and retry once.
-  - `PATH_DENIED`: `fileName` must be a plain filename with no path separators (`/` or `\`) or `..`.
+  - `PATH_DENIED`: check for unsafe paths, including symlink escapes. Use a plain `fileName` with no path separators (`/` or `\`) or parent traversal.
 - **Raw Audit Dump:** Only pass `view: "full"` (without `options` or `annotations`) when a user explicitly asks for the unfiltered raw node/edge/evidence snapshot dump.

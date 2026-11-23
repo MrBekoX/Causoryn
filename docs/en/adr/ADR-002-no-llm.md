@@ -2,9 +2,9 @@
 
 > **Language:** [Türkçe](../../adr/ADR-002-no-llm.md) | **English** · [Documentation Hub](../README.md)
 >
-> **Evidence base:** Technical Specification (TS) v2.1 §1 (Red Line), §3.1, §3.2, §19, §24 · `wiki/decisions.md` ADR-002 · `wiki/architecture.md`
-> **Status:** **Accepted** (foundational specification mandate; verification evidence updated for `v0.2.0` Pre-1.0 Public Preview)
-> **Date:** 2026-11-02 (initial record), 2026-11-20 (`v0.2.0` verification update); originates from TS v2.1 (2026-10-31)
+> **Evidence base:** Technical Specification (TS) v2.1 §1 (Red Line), §3.1, §3.2, §19, §24 · `wiki/decisions.md` ADR-002, K-023 · `wiki/architecture.md`
+> **Status:** **Accepted** (foundational engine boundary; updated for `v0.2.2` Pre-1.0 Public Preview with `K-023` hybrid architecture boundary and verification proof)
+> **Date:** 2026-11-02 (initial record), 2026-11-20 (`v0.2.0` verification), 2026-11-23 (`v0.2.2` / `K-023` hybrid boundary clarification); originates from TS v2.1 (2026-10-31)
 
 ## Context
 
@@ -21,7 +21,7 @@ establishes an immutable architectural red line:
 Interpretation, planning, code editing, and tool orchestration belong strictly
 to the host-selected model (`Antigravity`, `Claude Code`, `Codex`,
 `ZCode (GLM)`) (TS §3.1 responsibility matrix). Causoryn produces **structured,
-evidenced data** only: MCP tool responses are deterministic data payloads; the
+evidenced data** only: MCP tools return evidence-backed data. The
 MCP server never initiates `sampling`, `elicitation`, or outbound model calls;
 and Causoryn is never a client of any text-generation or embedding service
 (TS §3.1 boundary contract).
@@ -49,7 +49,7 @@ code path.
 
 1. Graph `Evidence` originates exclusively from static language analyzers
    (TypeScript Compiler API, C# Roslyn, Python `ast`, Go `go/parser`, Rust
-   `syn 2`), contract/config parsers, and verifiable file/git-commit spans;
+   `syn 3`), contract/config parsers, and verifiable file/git-commit spans;
    host-model prose can never be indexed as `verified` evidence (TS §3.2).
 2. Retrieval and search rely strictly on deterministic primitives: compiler/AST
    symbol tables, graph neighborhood queries, and SQLite FTS5.
@@ -57,26 +57,50 @@ code path.
    `stdio`: `stdout` carries exclusively MCP JSON-RPC frames, while all logs go
    to `stderr` (TS §10.1).
 4. Across all **18 npm workspace packages + the monorepo root** (19
-   `package.json` manifests) in `v0.2.0`, runtime and build dependencies are
-   strictly deterministic infrastructure libraries: `zod`,
+   `package.json` manifests) in `v0.2.2`, runtime and build dependencies are
+   infrastructure libraries for analysis and packaging: `zod`,
    `@modelcontextprotocol/sdk`, `better-sqlite3`, `yaml`, `typescript`, and
    `esbuild` (and the published `packages/causoryn` package declares
    `"dependencies": {}` — zero external npm dependencies).
 
+### `v0.2.2` (`K-023`) Architecture Exports and Optional Annotations
+
+`causoryn_export_documentation` can render a portal from the static evidence
+graph. A caller can add summaries, domain groups, flows, tours, decisions, and
+risks through optional `annotations`. The `architecture-blueprint` skill guides
+an external host LLM to prepare that input. The validator checks its schema and
+whether its references exist and belong to the relevant graph or projection
+(`moduleId`, `nodeId`, `evidenceId`, `keyFiles`). Invalid input returns
+`INVALID_ARGUMENT`. The caller remains responsible for the accuracy of the prose.
+
+### Scope of Determinism
+
+The same renderer version, snapshot including metadata, format, view, options,
+and annotation input produce byte-identical supported architecture artifacts.
+Static graph analysis takes file contents, workspace and ignore settings,
+analyzer versions, and toolchain versions and availability as inputs. New
+builds can change metadata such as `createdAt`, publication times, and revisions.
+MCP `requestId`, background job progress, and latency reflect runtime state.
+Optional host-generated prose is a variable input to the renderer. See
+`packages/graph/test/architecture-export.test.ts` and
+`packages/mcp-server/src/{context.ts,server.ts,services.ts}`.
+
 ## Rationale
 
-- **Determinism:** Identical inputs must yield byte-identical Graph JSON (TS §8
-  invariant vi). Probabilistic LLM outputs would destroy snapshot determinism
-  and reproducibility.
+- **Core determinism:** Canonical graph ordering and identities are reproducible
+  for equivalent inputs (TS §8 invariant vi). Annotations are renderer inputs.
+  Graph evidence for `verified` edges comes from static sources.
 - **Evidence integrity (`ADR-004`):** Every `verified` edge must cite a
   verifiable file path, 1-based line span, and SHA-256 `sourceHash` — a bar
   probabilistic completions cannot satisfy.
-- **Privacy & threat model:** Analysis executes locally with zero source-code
-  exfiltration to third-party model APIs or telemetry endpoints (TS §19).
-- **Clean separation of concerns (TS §3.1):** Reasoning and code synthesis live
-  in the host agent; static measurement and proof live in Causoryn.
+- **Privacy and threat model:** Causoryn analyzes the workspace locally and
+  sends no source code to model APIs or telemetry services (TS §19). An external
+  host’s data handling depends on its own configuration and provider.
+- **Clean separation of concerns (TS §3.1, K-023):** Semantic reasoning and
+  narrative synthesis live in the host agent; static measurement, fail-closed
+  grounding verification, and deterministic layout live in Causoryn.
 
-## Consequences & `v0.2.0` Verification Proof
+## Consequences & `v0.2.2` Verification Proof
 
 - **Honest static boundaries (`ADR-010`):** Static analysis gaps are never
   masked with LLM guesses; they are reported transparently via `heuristic` (+
@@ -96,7 +120,9 @@ code path.
   `NODE_OPTIONS="--require .../net-guard.cjs"`, intercepting and denying all
   in-process Node.js outbound network APIs (`dns`, `net`, `tls`, `http`,
   `https`, `fetch`, `WebSocket`) while logging any attempt to `CAUSORYN_NETLOG`.
-  Across full 29-tool sessions, `CAUSORYN_NETLOG` remains **0 bytes**.
+  The F6 session discovers 29 registrations through `tools/list`, then calls
+  `causoryn_workspace_summary` and HTML export. `CAUSORYN_NETLOG` remains
+  **0 bytes** in that session.
   *(Documented scope boundary: `net-guard.cjs` hooks in-process Node network
   APIs; child-process spawning is separately constrained to static command
   allowlists — read-only `git`, offline sidecars, and Rust's optional one-time

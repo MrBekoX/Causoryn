@@ -6,16 +6,20 @@ description: Primary orchestration runbook for the Causoryn local, deterministic
 # causoryn — Deterministic Codebase & Change Intelligence Workflow
 
 Causoryn is a **local, deterministic, LLM-free** static and architectural analysis engine
-served over MCP. It **never writes to your source tree** (strictly read-only workspace access;
-SQLite snapshots and wiki indexes live only in the authorized Causoryn data root) and every
-verified edge carries source-span provenance.
+served over MCP. Analysis reads workspace files, and every verified edge carries source-span
+provenance. SQLite snapshots and wiki indexes use the authorized data root outside the workspace.
+Artifact writes require a separately authorized output directory. The automatic data directory
+places exports outside the source tree. Repeatable analysis requires the same workspace inputs,
+effective configuration, and available toolchains. For exports, keep the published
+snapshot and export arguments fixed. Optional `annotations` are caller-supplied text. Omit
+them to export directly from the graph without a model.
 
 ## 5-Stage Engineering Workflow
 
 ### 1. Readiness & Snapshot Health
 1. Call `causoryn_get_capabilities` once when uncertain about active language adapters (L0–L3), configured limits, or published tools.
 2. Call `causoryn_index_status` to check whether a published snapshot exists and whether it is `stale`.
-3. If no published snapshot exists (`INDEX_NOT_READY`) or files changed on disk, trigger `causoryn_refresh_index` and poll `causoryn_index_status` with the returned `jobId`.
+3. If indexing is already active, poll `causoryn_index_status` with its `jobId`. If no published snapshot exists (`INDEX_NOT_READY`) and no job is active, or the published index is stale, call `causoryn_refresh_index` and poll the returned `jobId`.
 4. Call `causoryn_workspace_summary` for a fast overview of languages, entrypoints, projects, and edge resolution coverage.
 
 ### 2. Discover (Map, Symbols, Flows & Ranked Context)

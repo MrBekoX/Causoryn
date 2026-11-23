@@ -4,7 +4,7 @@
 
 > Evidence: **K-021/K-022 distribution (`2026-11-19`):** `claude --version` → `2.1.328 (Claude Code)`
 > verified `claude plugin validate --strict` (repository root `.claude-plugin/marketplace.json`),
-> `claude mcp list` `√ Connected`, and `npx causoryn@0.2.2 setup --client claude-code`.
+> `claude mcp list` `√ Connected`, and packaged CLI setup.
 > **Historical F3 monorepo bundle smoke evidence:** `claude --version` → `2.1.322 (Claude Code)`;
 > `claude mcp --help` and `claude mcp add --help` outputs (syntax first checked on `2026-11-08`
 > with `2.1.319`, **re-verified end-to-end on `2026-11-10` with `2.1.322`**: `mcp add` → `mcp list`
@@ -31,9 +31,11 @@ npx causoryn@0.2.2 setup --client claude-code --yes
 # Read-only health & alignment check
 npx causoryn@0.2.2 doctor
 
-# Clean removal (removes mcpServers.causoryn + 4 routing skills)
+# Clean removal (removes mcpServers.causoryn + 5 Causoryn skills)
 npx causoryn@0.2.2 setup --client claude-code --uninstall --yes
 ```
+
+The default setup installs five canonical skills. `architecture-blueprint` guides Claude in drafting optional `annotations` from MCP evidence. The server renders repeatable output with the same snapshot and export inputs. To export without annotations, call `causoryn_export_documentation` directly. [Architecture export contract](../tool-contracts.md)
 
 **`v0.2.2` `CLAUDE_CONFIG_DIR` support:** When `CLAUDE_CONFIG_DIR` is set in the environment, both
 `causoryn setup --client claude-code` and `causoryn doctor` target `$CLAUDE_CONFIG_DIR/.claude.json`
@@ -159,8 +161,7 @@ When `-s` is omitted, Claude Code removes the server from whichever scope holds 
 
 The Causoryn server process writes **only MCP protocol frames** to `stdout`; all operational logs
 are emitted with the `[causoryn]` prefix on **`stderr`**, guaranteeing that log lines never corrupt
-the host JSON-RPC stream. Manual verification (`2026-11-08` on `causoryn@0.1.0`; preserved in
-`causoryn@0.2.2`):
+the host JSON-RPC stream. Historical manual verification (`2026-11-08` on `causoryn@0.1.0`):
 
 - `stdout`: 2 lines of pure JSON-RPC (`initialize` response + `tools/list` → **29 tools**)
 - `stderr`: only `[causoryn]` default-deny startup notice + ready log

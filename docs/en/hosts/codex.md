@@ -4,7 +4,7 @@
 
 > Evidence: **K-021/K-022 distribution (`2026-11-19`):** `codex --version` → `codex-cli 0.169.0`
 > verified `codex plugin marketplace add` (`.agents/plugins/marketplace.json`), `codex mcp add/list`,
-> and `npx causoryn@0.2.2 setup --client codex`. **Historical F4 monorepo bundle smoke evidence:**
+> and packaged CLI setup. **Historical F4 monorepo bundle smoke evidence:**
 > `codex --version` → `codex-cli 0.163.0`; `codex mcp --help`, `codex mcp add --help`,
 > `codex mcp list --help`, and `codex mcp remove --help` outputs (syntax checked on `2026-11-08` and
 > **re-run live on `2026-11-10`**: `mcp add causoryn-smoke` → visible in `mcp list` → `mcp remove` →
@@ -32,17 +32,19 @@ npx causoryn@0.2.2 setup --client codex --yes
 # Read-only health & alignment check
 npx causoryn@0.2.2 doctor
 
-# Clean removal (removes [mcp_servers.causoryn] + 4 routing skills)
+# Clean removal (removes [mcp_servers.causoryn] + 5 Causoryn skills)
 npx causoryn@0.2.2 setup --client codex --uninstall --yes
 ```
+
+`architecture-blueprint` guides Codex in drafting optional `annotations` from MCP evidence. The server renders repeatable output with the same snapshot and export inputs. To export without annotations, call `causoryn_export_documentation` directly. [Architecture export contract](../tool-contracts.md)
 
 **`v0.2.2` `CODEX_HOME` and `startup_timeout_sec = 30` details:**
 
 - **`CODEX_HOME` support:** When `CODEX_HOME` is set in the environment, both
   `causoryn setup --client codex` and `causoryn doctor` read and update `$CODEX_HOME/config.toml`,
   defaulting to `~/.codex/config.toml` when unset (`resolveEffectiveCodexHomeDir` in
-  `packages/causoryn/src/setup.ts`). The 4 canonical routing skills (`causoryn`, `map-system`,
-  `preflight-change`, `verify-change`) are installed into `~/.agents/skills/`.
+  `packages/causoryn/src/setup.ts`). By default, setup installs five canonical skills (`causoryn`,
+  `map-system`, `preflight-change`, `verify-change`, `architecture-blueprint`) into `~/.agents/skills/`.
 - **Surgical TOML patching + `startup_timeout_sec = 30`:** Unlike `codex mcp add`, `causoryn setup`
   patches only the `[mcp_servers.causoryn]` table (`upsertCodexMcpServer`) without re-serializing
   neighboring TOML sections, writes an atomic `.causoryn.backup` copy first, and sets
@@ -174,7 +176,7 @@ codex mcp add causoryn \
 
 The Causoryn server process writes **only MCP protocol frames** to `stdout`; all operational logs go
 to **`stderr`** prefixed with `[causoryn]` so log lines never interfere with Codex's JSON-RPC pipe.
-Manual verification (`2026-11-08` on `causoryn@0.1.0`; preserved in `causoryn@0.2.2`): 2 lines of
+Historical manual verification (`2026-11-08` on `causoryn@0.1.0`): 2 lines of
 pure JSON-RPC on `stdout` (`initialize` + `tools/list` → **29 tools**), `[causoryn]` logs strictly
 on `stderr`.
 

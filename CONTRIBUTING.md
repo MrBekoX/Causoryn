@@ -9,7 +9,7 @@ Thank you for your interest in contributing to **Causoryn**! This guide covers l
   - **.NET 10 SDK** (`native/roslyn-worker` — C# Roslyn sidecar)
   - **Python 3.12+** (`native/python-worker` — stdlib `ast` sidecar)
   - **Go** matching `native/go-worker/go.mod` (`native/go-worker` — stdlib `go/parser` sidecar)
-  - **Rust / Cargo stable** (`native/rust-worker` — `syn` 2 sidecar)
+  - **Rust / Cargo stable** (`native/rust-worker` uses `syn` 3)
 
 ## Local Monorepo Setup & Verification
 
