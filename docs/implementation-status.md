@@ -26,6 +26,17 @@
 
 Tablodaki v0.2.1 ve v0.2.2 kanıtları kaynak kod ve test kapsamı incelemesidir. Gerçek tarayıcı ve host kabul durumları [uyumluluk matrisinde](compatibility-matrix.md) yer alır.
 
+### Mimari çıktı doğruluğu (yerel stdio, 2026-11-23)
+
+`v0.2.2` bundle’ı ile [TypeScript sipariş fixture’ında](../examples/fixture-ts-orders/README.md) ve geçici, dallanan bir varyantında `json/full`, `json/architecture` ve `html/architecture` çıktıları kaynak kodla karşılaştırıldı.
+
+- **Modül bağımlılıklarını** gösteren `routes → services → repositories` okları [servis çağrısı](../examples/fixture-ts-orders/src/routes/orders.ts) ve [repository çağrısı](../examples/fixture-ts-orders/src/services/orders-service.ts) için kaynak kanıtıyla eşleşti.
+- **Route factory** örneğinde `POST /orders` kaydı `ordersRoute` handler değerine bağlandı. Portalın kritik akışı orada durdu. Servis ve repository çağrıları ham graph’ta mevcut. Akışın factory’den dönen handler değerinden gövdeye geçmesi için gereken bağlantı eksik.
+- **Dallanan akışta** route doğrudan isimli bir handler’a bağlandı. Aynı servis metodu önce `recordAudit`, sonra `OrderRepository.save` çağırdı. Ham graph iki ayrı `CALLS` kenarı üretti. HTML kritik akış şeridi bunları ters sırada `OrderRepository.save → recordAudit` olarak bağladı. [Akış projeksiyonu](../packages/graph/src/architecture-projection.ts) · [SVG akış şeridi](../packages/graph/src/architecture-layout.ts)
+- **Host anotasyonu** olarak geçerli modül kimliği ve dosya yolu taşıyan yanlış bir açıklama kabul edildi. Causoryn şema ve graph referanslarını doğrular. Açıklamadaki iddianın doğruluğu ayrıca kaynak kanıtıyla kontrol edilmelidir. [Anotasyon doğrulayıcısı](../packages/graph/src/architecture-annotations.ts)
+
+Ayrıca projeksiyon, görsel dışa aktarma ve MCP araç testlerinde üç dosyada 20 hedefli test geçti. Yerel örnekler ürün geneli için bir mimari doğruluk oranı sağlamaz.
+
 ## K-020 / K-021 / K-022 — v0.2.0 Pre-1.0 Public Preview kaydı (2026-11-18..20)
 
 > Kanıt: `wiki/decisions.md` `K-019`..`K-022` · [CHANGELOG.md](../CHANGELOG.md) `[0.2.0] - 2026-11-20` ve `[Unreleased]` · [security-pass.md](security-pass.md) · [compatibility-matrix.md](compatibility-matrix.md) · `.github/workflows/ci.yml` · `.github/workflows/release.yml` · `packages/causoryn/` · `scripts/secret-scan.mjs` · `scripts/generate-sbom.mjs` · `scripts/export-public-tree.mjs`.

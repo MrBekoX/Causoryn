@@ -26,6 +26,17 @@ The core produces the evidence graph and artifacts without calling a model. Equi
 
 The v0.2.1 and v0.2.2 table entries are based on inspection of the source and test coverage. See the [compatibility matrix](compatibility-matrix.md) for live browser and host acceptance status.
 
+### Architecture output accuracy (local stdio, 2026-11-23)
+
+The `v0.2.2` bundle was used to compare `json/full`, `json/architecture`, and `html/architecture` output against the [TypeScript orders fixture](../../examples/fixture-ts-orders/README.md) and a temporary branching variant.
+
+- The **module dependency** arrows `routes → services → repositories` matched source evidence for the [service call](../../examples/fixture-ts-orders/src/routes/orders.ts) and the [repository call](../../examples/fixture-ts-orders/src/services/orders-service.ts).
+- In the **route factory** example, the `POST /orders` registration linked to the `ordersRoute` handler value. The portal’s critical flow stopped there. The raw graph contained the service and repository calls. The flow lacked a traversable link from the handler returned by the factory to its body.
+- In the temporary **branching flow**, the route registered a named handler directly. The same service method called `recordAudit` before `OrderRepository.save`. The raw graph recorded separate `CALLS` edges. The HTML critical-flow strip linked the calls in reverse order as `OrderRepository.save → recordAudit`. [Flow projection](../../packages/graph/src/architecture-projection.ts) · [SVG flow strip](../../packages/graph/src/architecture-layout.ts)
+- The server accepted an inaccurate **host annotation** with a valid module ID and file path. Causoryn validates the schema and graph references. Claims in the prose still require verification against the source evidence. [Annotation validator](../../packages/graph/src/architecture-annotations.ts)
+
+Twenty targeted projection, visual export, and MCP tool tests also passed across three test files. These local examples provide no product-wide architectural accuracy rate.
+
 ## K-020 / K-021 / K-022 — v0.2.0 Pre-1.0 Public Preview Record (2026-11-18..20)
 
 > Evidence: `wiki/decisions.md` `K-019`..`K-022` · [CHANGELOG.md](../../CHANGELOG.md) `[0.2.0] - 2026-11-20` & `[Unreleased]` · [security-pass.md](security-pass.md) · [compatibility-matrix.md](compatibility-matrix.md) · `.github/workflows/ci.yml` · `.github/workflows/release.yml` · `packages/causoryn/` · `scripts/secret-scan.mjs` · `scripts/generate-sbom.mjs` · `scripts/export-public-tree.mjs`.
