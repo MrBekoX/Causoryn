@@ -188,6 +188,123 @@ describe("MCP server — protokol düzeyi", { timeout: 30_000 }, () => {
     }
   });
 
+  it("tools/list: causoryn_export_documentation açıklaması ve JSON Schema alan açıklamaları Host-LLM annotations akışını beyan eder (K-026)", async () => {
+    const pair = await connectClient(makeContext());
+    try {
+      const { tools } = await pair.client.listTools();
+      const exportTool = tools.find((t) => t.name === "causoryn_export_documentation");
+      expect(exportTool).toBeDefined();
+
+      const desc = exportTool?.description ?? "";
+      expect(desc).toMatch(/LLM-free|zero LLM|ADR-002/i);
+      expect(desc).toContain("architectureSummary.moduleIds");
+      expect(desc).toContain("annotations");
+      expect(desc).toContain("causoryn-architecture-interactive.html");
+      expect(desc).toMatch(/format:\s*"json"|format="json"/i);
+      expect(desc).toMatch(/view:\s*"interactive"|view="interactive"/i);
+      expect(desc).toMatch(/omit\s+`?annotations`?|without\s+`?annotations`?/i);
+
+      const inputSchema = exportTool?.inputSchema as Record<string, unknown>;
+      const props = (inputSchema["properties"] ?? {}) as Record<string, Record<string, unknown>>;
+
+      const expectDesc = (
+        obj: Record<string, Record<string, unknown>>,
+        field: string,
+        label: string,
+      ): string => {
+        const value = obj[field]?.["description"];
+        expect(typeof value, `${label} JSON Schema description eksik`).toBe("string");
+        expect((value as string).trim().length, `${label} description boş`).toBeGreaterThan(8);
+        return value as string;
+      };
+
+      for (const topField of [
+        "workspaceId",
+        "format",
+        "outputDir",
+        "fileName",
+        "view",
+        "options",
+        "annotations",
+      ]) {
+        expectDesc(props, topField, `export.${topField}`);
+      }
+
+      const viewDesc = expectDesc(props, "view", "export.view");
+      expect(viewDesc).toContain("architecture");
+      expect(viewDesc).toContain("interactive");
+      expect(viewDesc).toContain("full");
+
+      const outputDirDesc = expectDesc(props, "outputDir", "export.outputDir");
+      expect(outputDirDesc).toContain("<slug>-<hash12>/exports");
+
+      const optionsProps = ((props["options"]?.["properties"] ?? {}) as Record<
+        string,
+        Record<string, unknown>
+      >);
+      for (const optField of ["maxModules", "pathPrefix", "includeTests"]) {
+        expectDesc(optionsProps, optField, `export.options.${optField}`);
+      }
+      const includeTestsDesc = expectDesc(optionsProps, "includeTests", "export.options.includeTests");
+      expect(includeTestsDesc).toMatch(/default\s+true/i);
+      expect(includeTestsDesc).not.toMatch(/default\s+false/i);
+
+      const annProps = ((props["annotations"]?.["properties"] ?? {}) as Record<
+        string,
+        Record<string, unknown>
+      >);
+      for (const annField of [
+        "title",
+        "architectureStyle",
+        "executiveSummary",
+        "domains",
+        "moduleNotes",
+        "flows",
+        "guidedTour",
+        "decisions",
+        "risks",
+      ]) {
+        expectDesc(annProps, annField, `export.annotations.${annField}`);
+      }
+
+      const itemPropsOf = (field: string): Record<string, Record<string, unknown>> =>
+        (((annProps[field]?.["items"] as Record<string, unknown> | undefined)?.["properties"] ??
+          {}) as Record<string, Record<string, unknown>>);
+
+      for (const f of ["id", "name", "description", "layer", "moduleIds"]) {
+        expectDesc(itemPropsOf("domains"), f, `annotations.domains[].${f}`);
+      }
+      for (const f of ["moduleId", "summary", "responsibility", "layer", "keyFiles"]) {
+        expectDesc(itemPropsOf("moduleNotes"), f, `annotations.moduleNotes[].${f}`);
+      }
+      expect(itemPropsOf("moduleNotes")["keyFiles"]?.["description"]).toMatch(
+        /this module/i,
+      );
+      for (const f of ["id", "title", "description", "steps"]) {
+        expectDesc(itemPropsOf("flows"), f, `annotations.flows[].${f}`);
+      }
+      const flowStepProps = (
+        (itemPropsOf("flows")["steps"]?.["items"] as Record<string, unknown> | undefined)?.[
+          "properties"
+        ] ?? {}
+      ) as Record<string, Record<string, unknown>>;
+      for (const f of ["moduleId", "nodeId", "label", "explanation"]) {
+        expectDesc(flowStepProps, f, `annotations.flows[].steps[].${f}`);
+      }
+      for (const f of ["step", "title", "targetModuleId", "targetNodeId", "explanation"]) {
+        expectDesc(itemPropsOf("guidedTour"), f, `annotations.guidedTour[].${f}`);
+      }
+      for (const f of ["id", "title", "summary", "rationale", "relatedModuleIds", "evidenceIds"]) {
+        expectDesc(itemPropsOf("decisions"), f, `annotations.decisions[].${f}`);
+      }
+      for (const f of ["id", "title", "severity", "summary", "relatedModuleIds", "evidenceIds"]) {
+        expectDesc(itemPropsOf("risks"), f, `annotations.risks[].${f}`);
+      }
+    } finally {
+      await pair.close();
+    }
+  });
+
   it("pozitif get_capabilities: adapter düzeyleri + config limitleri + protocol", async () => {
     const pair = await connectClient(makeContext());
     try {

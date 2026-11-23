@@ -2,9 +2,9 @@
 
 > **Dil / Language:** **Türkçe** | [English](../en/adr/ADR-002-no-llm.md) · [Dokümantasyon Merkezi](../README.md)
 >
-> Kanıt: TŞ v2.1 §1 (Kırmızı çizgi), §3.1, §3.2, §19, §24 · `wiki/decisions.md` ADR-002, K-023 · `wiki/architecture.md`
-> Durum: **Kabul edildi** (şartnameden gelen değişmez motor sınırı; `v0.2.2` Pre-1.0 Public Preview hibrit mimari sınırı `K-023` ve doğrulama kanıtlarıyla güncellendi)
-> Tarih: 2026-11-02 (ilk belgeleme), 2026-11-20 (`v0.2.0` doğrulaması), 2026-11-23 (`v0.2.2` / `K-023` hibrit sınır netleştirmesi); karar TŞ v2.1'den (31.10.2026) gelir
+> Kanıt: TŞ v2.1 §1 (Kırmızı çizgi), §3.1, §3.2, §19, §24 · `wiki/decisions.md` ADR-002, K-023, K-026 · `wiki/architecture.md`
+> Durum: **Kabul edildi** (şartnameden gelen değişmez motor sınırı; `v0.2.3` Pre-1.0 Public Preview ve `K-023`/`K-026` hibrit mimari + MCP şema sınırı ile güncel)
+> Tarih: 2026-11-02 (ilk belgeleme), 2026-11-20 (`v0.2.0` doğrulaması), 2026-11-23 (`v0.2.3` / `K-023`–`K-026` hibrit sınır ve MCP `.describe()` netleştirmesi); karar TŞ v2.1'den (31.10.2026) gelir
 
 ## Bağlam
 
@@ -54,22 +54,16 @@ yapmaz.
 3. `packages/mcp-server` host modeline tek yönlü hizmet verir: `stdout`
    kanalında yalnızca MCP JSON-RPC protokolü taşınır, tüm loglar `stderr`'e
    yazılır (TŞ §10.1).
-4. `v0.2.2` monoreposundaki **18 npm workspace paketi + kök monorepo** (toplam
-   19 `package.json`) genelinde çalışma zamanı ve derleme bağımlılıklarının
+4. `v0.2.3` monoreposundaki **18 npm workspace paketi + kök monorepo** (toplam
+   19 `package.json`) genelinde çalışma zamanı ve derleme bağımlılıkları yalnızca
    analiz ve paketleme için gereken altyapı kütüphaneleridir: `zod`,
    `@modelcontextprotocol/sdk`, `better-sqlite3`, `yaml`, `typescript`,
    `esbuild` (ayrıca yayımlanan `packages/causoryn` paketi `"dependencies": {}`
    sıfır dış npm bağımlılığı beyan eder).
 
-### `v0.2.2` (`K-023`) Mimari Dışa Aktarım ve Opsiyonel Anotasyonlar
+### Hibrit Mimari Dışa Aktarım, Opsiyonel Anotasyonlar ve MCP `.describe()` (`K-023` / `K-026`)
 
-`causoryn_export_documentation`, graph'taki statik kanıtla kendi başına bir portal
-üretir. Çağıran, isteğe bağlı `annotations` alanıyla özet, domain grupları, akışlar,
-tur, karar ve risk notları ekleyebilir. `architecture-blueprint` skill’i harici host
-LLM’ine bu girdiyi hazırlamada yol gösterir. Doğrulayıcı şemayı ve referansların
-ilgili graph veya projeksiyondaki varlığını ve aidiyetini denetler (`moduleId`,
-`nodeId`, `evidenceId`, `keyFiles`). Geçersiz girdi `INVALID_ARGUMENT` ile
-reddedilir. Serbest metnin doğruluğu çağıranın sorumluluğundadır.
+`causoryn_export_documentation`, graph'taki statik kanıtla tek başına (model çağrısı olmaksızın) deterministik bir mimari portalı üretir. Çağıran, isteğe bağlı `annotations` alanıyla özet, domain grupları, akışlar, tur, karar ve risk notları ekleyebilir. `K-026` ile `causoryn_export_documentation` aracının MCP Zod şemasındaki `.describe()` alan açıklamaları ve doğal dil tetiklemeli `architecture-blueprint` skill'i, harici host LLM'in iki aşamalı keşif → kanıta dayalı sentez akışını yürütmesini kolaylaştırırken Causoryn motorunu **%100 LLM-free** tutar. Sunucu doğrulayıcısı şemayı ve referansların ilgili graph veya projeksiyondaki varlığını ve aidiyetini fail-closed denetler (`moduleId`, `nodeId`, `evidenceId`, `keyFiles`). Geçersiz girdi `INVALID_ARGUMENT` ile reddedilir; serbest metnin doğruluğu çağıranın sorumluluğundadır. Uygulama desenleri ve prompt örnekleri için bkz. [Prompt ve Mimari Portal Rehberi](../prompting-and-architecture-portals.md).
 
 ### Determinizmin Kapsamı
 
@@ -98,7 +92,7 @@ Bkz. `packages/graph/test/architecture-export.test.ts` ve
   statik ölçüm, fail-closed kanıt doğrulaması ve görsel yerleşim Causoryn'dedir;
   iki katmanın sorumluluk alanı birbirine karışmaz.
 
-## Sonuçlar ve `v0.2.2` Doğrulama Kanıtları
+## Sonuçlar ve Doğrulama Kanıtları (`v0.2.3`)
 
 - **Dürüst kapsama (`ADR-010`):** Eksik statik çözümleme LLM tahminiyle
   doldurulmaz; `heuristic` (+ `ambiguity`), `unresolved` (`UnknownExternal`),
@@ -128,4 +122,4 @@ Bkz. `packages/graph/test/architecture-export.test.ts` ve
 ## İlgili kararlar ve belgeler
 
 - `ADR-001` Model-agnostic Core · `ADR-004` Evidence First · `ADR-008` Read-only Workspace Default · `ADR-010` Incomplete Feature Never Advertised as Done (TŞ §24; iç kayıt: `wiki/decisions.md`)
-- [Mimari Özeti](../architecture.md) · [5-Dil Analizörleri](../language-analyzers.md) · [Güvenlik Denetimi](../security-pass.md)
+- [Mimari Özeti](../architecture.md) · [5-Dil Analizörleri](../language-analyzers.md) · [Prompt ve Mimari Portal Rehberi](../prompting-and-architecture-portals.md) · [Güvenlik Denetimi](../security-pass.md)

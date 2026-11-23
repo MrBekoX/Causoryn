@@ -47,97 +47,188 @@ const NonEmptyBounded = (max: number) =>
       message: "Alan boş veya yalnızca boşluk olamaz",
     });
 
-export const ArchitectureDomainAnnotationSchema = z.strictObject({
-  id: NonEmptyBounded(80),
-  name: NonEmptyBounded(120),
-  description: NonEmptyBounded(ANNOTATION_LIMITS.maxTextChars),
-  layer: NonEmptyBounded(80).optional(),
-  moduleIds: z.array(NonEmptyBounded(ANNOTATION_LIMITS.maxShortChars)).min(1).max(100),
-});
+export const ArchitectureDomainAnnotationSchema = z
+  .strictObject({
+    id: NonEmptyBounded(80).describe("Unique slug identifier for this logical domain/subsystem (e.g., 'auth', 'billing')."),
+    name: NonEmptyBounded(120).describe("Human-readable domain or subsystem display name."),
+    description: NonEmptyBounded(ANNOTATION_LIMITS.maxTextChars).describe(
+      "Evidence-grounded summary of the domain's responsibility and boundaries.",
+    ),
+    layer: NonEmptyBounded(80)
+      .optional()
+      .describe("Optional architectural layer label (e.g., 'Presentation', 'Application', 'Domain', 'Infrastructure')."),
+    moduleIds: z
+      .array(NonEmptyBounded(ANNOTATION_LIMITS.maxShortChars))
+      .min(1)
+      .max(100)
+      .describe("Disjoint list of canonical moduleIds taken verbatim from architectureSummary.moduleIds (each moduleId may appear in at most one domain)."),
+  })
+  .describe("Logical domain or layer cluster grouping canonical architecture modules.");
 
-export const ArchitectureModuleNoteAnnotationSchema = z.strictObject({
-  moduleId: NonEmptyBounded(ANNOTATION_LIMITS.maxShortChars),
-  summary: NonEmptyBounded(ANNOTATION_LIMITS.maxTextChars),
-  responsibility: NonEmptyBounded(ANNOTATION_LIMITS.maxShortChars).optional(),
-  layer: NonEmptyBounded(80).optional(),
-  keyFiles: z
-    .array(NonEmptyBounded(ANNOTATION_LIMITS.maxShortChars))
-    .max(ANNOTATION_LIMITS.maxKeyFilesPerModule)
-    .optional(),
-});
+export const ArchitectureModuleNoteAnnotationSchema = z
+  .strictObject({
+    moduleId: NonEmptyBounded(ANNOTATION_LIMITS.maxShortChars).describe(
+      "Canonical moduleId taken verbatim from architectureSummary.moduleIds.",
+    ),
+    summary: NonEmptyBounded(ANNOTATION_LIMITS.maxTextChars).describe(
+      "Concise, evidence-grounded summary of what this module does.",
+    ),
+    responsibility: NonEmptyBounded(ANNOTATION_LIMITS.maxShortChars)
+      .optional()
+      .describe("Short single-phrase architectural responsibility label for the module card."),
+    layer: NonEmptyBounded(80)
+      .optional()
+      .describe("Optional architectural layer classification for this module."),
+    keyFiles: z
+      .array(NonEmptyBounded(ANNOTATION_LIMITS.maxShortChars))
+      .max(ANNOTATION_LIMITS.maxKeyFilesPerModule)
+      .optional()
+      .describe("Verified relative workspace file paths belonging to this module in the snapshot (validated fail-closed)."),
+  })
+  .describe("Per-module explanation card grounded in Causoryn MCP evidence.");
 
-export const ArchitectureFlowStepAnnotationSchema = z.strictObject({
-  moduleId: NonEmptyBounded(ANNOTATION_LIMITS.maxShortChars).optional(),
-  nodeId: NonEmptyBounded(ANNOTATION_LIMITS.maxShortChars).optional(),
-  label: NonEmptyBounded(160),
-  explanation: NonEmptyBounded(ANNOTATION_LIMITS.maxTextChars),
-});
+export const ArchitectureFlowStepAnnotationSchema = z
+  .strictObject({
+    moduleId: NonEmptyBounded(ANNOTATION_LIMITS.maxShortChars)
+      .optional()
+      .describe("Optional canonical moduleId from architectureSummary.moduleIds highlighted by this step."),
+    nodeId: NonEmptyBounded(ANNOTATION_LIMITS.maxShortChars)
+      .optional()
+      .describe("Optional verified snapshot graph nodeId returned by Causoryn MCP tools."),
+    label: NonEmptyBounded(160).describe("Short step title or action label."),
+    explanation: NonEmptyBounded(ANNOTATION_LIMITS.maxTextChars).describe(
+      "Evidence-grounded explanation of what happens at this step in the flow.",
+    ),
+  })
+  .describe("Single ordered step inside an end-to-end execution or business flow.");
 
-export const ArchitectureFlowAnnotationSchema = z.strictObject({
-  id: NonEmptyBounded(80),
-  title: NonEmptyBounded(160),
-  description: NonEmptyBounded(ANNOTATION_LIMITS.maxTextChars),
-  steps: z.array(ArchitectureFlowStepAnnotationSchema).min(1).max(ANNOTATION_LIMITS.maxFlowSteps),
-});
+export const ArchitectureFlowAnnotationSchema = z
+  .strictObject({
+    id: NonEmptyBounded(80).describe("Unique slug identifier for this flow (e.g., 'checkout-request')."),
+    title: NonEmptyBounded(160).describe("Human-readable title of the end-to-end request or business flow."),
+    description: NonEmptyBounded(ANNOTATION_LIMITS.maxTextChars).describe(
+      "High-level overview of the trigger, path, and outcome of this flow.",
+    ),
+    steps: z
+      .array(ArchitectureFlowStepAnnotationSchema)
+      .min(1)
+      .max(ANNOTATION_LIMITS.maxFlowSteps)
+      .describe("Ordered list of traced steps referencing verified moduleIds and/or nodeIds."),
+  })
+  .describe("End-to-end execution or business flow rendered in the interactive portal and Markdown brief.");
 
-export const ArchitectureGuidedTourStepSchema = z.strictObject({
-  step: z.number().int().positive().max(1000),
-  title: NonEmptyBounded(160),
-  targetModuleId: NonEmptyBounded(ANNOTATION_LIMITS.maxShortChars).optional(),
-  targetNodeId: NonEmptyBounded(ANNOTATION_LIMITS.maxShortChars).optional(),
-  explanation: NonEmptyBounded(ANNOTATION_LIMITS.maxTextChars),
-});
+export const ArchitectureGuidedTourStepSchema = z
+  .strictObject({
+    step: z
+      .number()
+      .int()
+      .positive()
+      .max(1000)
+      .describe("1-based sequential onboarding stop number."),
+    title: NonEmptyBounded(160).describe("Short headline for this onboarding tour stop."),
+    targetModuleId: NonEmptyBounded(ANNOTATION_LIMITS.maxShortChars)
+      .optional()
+      .describe("Optional canonical moduleId from architectureSummary.moduleIds to spotlight."),
+    targetNodeId: NonEmptyBounded(ANNOTATION_LIMITS.maxShortChars)
+      .optional()
+      .describe("Optional verified snapshot graph nodeId to spotlight."),
+    explanation: NonEmptyBounded(ANNOTATION_LIMITS.maxTextChars).describe(
+      "Onboarding narrative explaining why a newcomer should inspect this module or symbol now.",
+    ),
+  })
+  .describe("Ordered stop in the interactive Guided Onboarding Tour.");
 
-export const ArchitectureDecisionAnnotationSchema = z.strictObject({
-  id: NonEmptyBounded(80),
-  title: NonEmptyBounded(160),
-  summary: NonEmptyBounded(ANNOTATION_LIMITS.maxTextChars),
-  rationale: NonEmptyBounded(ANNOTATION_LIMITS.maxTextChars).optional(),
-  relatedModuleIds: z
-    .array(NonEmptyBounded(ANNOTATION_LIMITS.maxShortChars))
-    .max(ANNOTATION_LIMITS.maxRefsPerItem)
-    .optional(),
-  evidenceIds: z
-    .array(NonEmptyBounded(ANNOTATION_LIMITS.maxShortChars))
-    .max(ANNOTATION_LIMITS.maxRefsPerItem)
-    .optional(),
-});
+export const ArchitectureDecisionAnnotationSchema = z
+  .strictObject({
+    id: NonEmptyBounded(80).describe("Unique decision identifier (e.g., 'ADR-001' or 'DEC-01')."),
+    title: NonEmptyBounded(160).describe("Short title summarizing the architectural decision."),
+    summary: NonEmptyBounded(ANNOTATION_LIMITS.maxTextChars).describe(
+      "Concrete description of the observed architectural decision.",
+    ),
+    rationale: NonEmptyBounded(ANNOTATION_LIMITS.maxTextChars)
+      .optional()
+      .describe("Optional rationale or trade-off explanation grounded in repository evidence."),
+    relatedModuleIds: z
+      .array(NonEmptyBounded(ANNOTATION_LIMITS.maxShortChars))
+      .max(ANNOTATION_LIMITS.maxRefsPerItem)
+      .optional()
+      .describe("Optional canonical moduleIds from architectureSummary.moduleIds affected by this decision."),
+    evidenceIds: z
+      .array(NonEmptyBounded(ANNOTATION_LIMITS.maxShortChars))
+      .max(ANNOTATION_LIMITS.maxRefsPerItem)
+      .optional()
+      .describe("Optional verified evidenceIds returned by causoryn_get_evidence (validated fail-closed)."),
+  })
+  .describe("Observed architectural decision linked to verified modules and evidence.");
 
-export const ArchitectureRiskAnnotationSchema = z.strictObject({
-  id: NonEmptyBounded(80),
-  title: NonEmptyBounded(160),
-  severity: z.enum(["low", "medium", "high"]),
-  summary: NonEmptyBounded(ANNOTATION_LIMITS.maxTextChars),
-  relatedModuleIds: z
-    .array(NonEmptyBounded(ANNOTATION_LIMITS.maxShortChars))
-    .max(ANNOTATION_LIMITS.maxRefsPerItem)
-    .optional(),
-  evidenceIds: z
-    .array(NonEmptyBounded(ANNOTATION_LIMITS.maxShortChars))
-    .max(ANNOTATION_LIMITS.maxRefsPerItem)
-    .optional(),
-});
+export const ArchitectureRiskAnnotationSchema = z
+  .strictObject({
+    id: NonEmptyBounded(80).describe("Unique risk identifier (e.g., 'RISK-01')."),
+    title: NonEmptyBounded(160).describe("Short title summarizing the structural or coverage risk."),
+    severity: z
+      .enum(["low", "medium", "high"])
+      .describe("Risk severity level ('low', 'medium', or 'high')."),
+    summary: NonEmptyBounded(ANNOTATION_LIMITS.maxTextChars).describe(
+      "Evidence-grounded explanation of the risk (e.g., SCC cycle, fan-in hotspot, unresolved dynamic edges).",
+    ),
+    relatedModuleIds: z
+      .array(NonEmptyBounded(ANNOTATION_LIMITS.maxShortChars))
+      .max(ANNOTATION_LIMITS.maxRefsPerItem)
+      .optional()
+      .describe("Optional canonical moduleIds from architectureSummary.moduleIds impacted by this risk."),
+    evidenceIds: z
+      .array(NonEmptyBounded(ANNOTATION_LIMITS.maxShortChars))
+      .max(ANNOTATION_LIMITS.maxRefsPerItem)
+      .optional()
+      .describe("Optional verified evidenceIds returned by causoryn_get_evidence (validated fail-closed)."),
+  })
+  .describe("Observed architectural, coupling, or coverage risk linked to verified modules and evidence.");
 
-export const ArchitectureAnnotationsSchema = z.strictObject({
-  title: NonEmptyBounded(ANNOTATION_LIMITS.maxTitleChars).optional(),
-  architectureStyle: NonEmptyBounded(ANNOTATION_LIMITS.maxStyleChars).optional(),
-  executiveSummary: NonEmptyBounded(ANNOTATION_LIMITS.maxSummaryChars).optional(),
-  domains: z.array(ArchitectureDomainAnnotationSchema).max(ANNOTATION_LIMITS.maxDomains).optional(),
-  moduleNotes: z
-    .array(ArchitectureModuleNoteAnnotationSchema)
-    .max(ANNOTATION_LIMITS.maxModuleNotes)
-    .optional(),
-  flows: z.array(ArchitectureFlowAnnotationSchema).max(ANNOTATION_LIMITS.maxFlows).optional(),
-  guidedTour: z
-    .array(ArchitectureGuidedTourStepSchema)
-    .max(ANNOTATION_LIMITS.maxGuidedTourSteps)
-    .optional(),
-  decisions: z
-    .array(ArchitectureDecisionAnnotationSchema)
-    .max(ANNOTATION_LIMITS.maxDecisions)
-    .optional(),
-  risks: z.array(ArchitectureRiskAnnotationSchema).max(ANNOTATION_LIMITS.maxRisks).optional(),
-});
+export const ArchitectureAnnotationsSchema = z
+  .strictObject({
+    title: NonEmptyBounded(ANNOTATION_LIMITS.maxTitleChars)
+      .optional()
+      .describe("Custom portal/brief title summarizing the target system."),
+    architectureStyle: NonEmptyBounded(ANNOTATION_LIMITS.maxStyleChars)
+      .optional()
+      .describe("Observed architecture pattern label (e.g., 'Modular Monolith', 'Clean Architecture + Microservices')."),
+    executiveSummary: NonEmptyBounded(ANNOTATION_LIMITS.maxSummaryChars)
+      .optional()
+      .describe("2–4 sentence synthesis of core subsystems, stack, and explicit coverage/unresolved caveats."),
+    domains: z
+      .array(ArchitectureDomainAnnotationSchema)
+      .max(ANNOTATION_LIMITS.maxDomains)
+      .optional()
+      .describe("Disjoint logical subsystem/layer groupings referencing canonical architectureSummary.moduleIds."),
+    moduleNotes: z
+      .array(ArchitectureModuleNoteAnnotationSchema)
+      .max(ANNOTATION_LIMITS.maxModuleNotes)
+      .optional()
+      .describe("Per-module responsibilities, summaries, and verified keyFiles for canonical moduleIds."),
+    flows: z
+      .array(ArchitectureFlowAnnotationSchema)
+      .max(ANNOTATION_LIMITS.maxFlows)
+      .optional()
+      .describe("2–6 traced end-to-end execution or business flows referencing verified moduleIds/nodeIds."),
+    guidedTour: z
+      .array(ArchitectureGuidedTourStepSchema)
+      .max(ANNOTATION_LIMITS.maxGuidedTourSteps)
+      .optional()
+      .describe("Numbered onboarding walkthrough sequence highlighting canonical modules or symbols."),
+    decisions: z
+      .array(ArchitectureDecisionAnnotationSchema)
+      .max(ANNOTATION_LIMITS.maxDecisions)
+      .optional()
+      .describe("Observed architectural decisions backed by relatedModuleIds and evidenceIds."),
+    risks: z
+      .array(ArchitectureRiskAnnotationSchema)
+      .max(ANNOTATION_LIMITS.maxRisks)
+      .optional()
+      .describe("Concrete architectural or coverage risks backed by relatedModuleIds and evidenceIds."),
+  })
+  .describe(
+    "Optional Host-LLM annotations synthesized from Causoryn MCP evidence and validated fail-closed against the published snapshot (omit for a pure structural model-free export).",
+  );
 
 export type ArchitectureAnnotations = z.infer<typeof ArchitectureAnnotationsSchema>;
 export type ArchitectureDomainAnnotation = z.infer<typeof ArchitectureDomainAnnotationSchema>;

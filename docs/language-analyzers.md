@@ -2,11 +2,11 @@
 
 > **Dil / Language:** **Türkçe** | [English](en/language-analyzers.md)
 >
-> **Kanıt:** `packages/indexing/src/{index.ts,index-service.ts,fingerprint.ts}`, `packages/sidecar-ipc/src/index.ts`, `adapters/{typescript,csharp-roslyn,python,go,rust}/src/*`, `native/{roslyn-worker,python-worker,go-worker,rust-worker}/PROTOCOL.md` (TŞ v2.1 §6, §7, §8, §9, §15, §23 · `ADR-004` · `ADR-010` · `K-018` · `K-019` · `K-020` · `K-021`).
+> **Kanıt:** `packages/indexing/src/{index.ts,index-service.ts,inventory.ts,fingerprint.ts}`, `packages/workspace/src/ignore-matcher.ts`, `packages/mcp-server/src/workspace-ignore-discovery.ts`, `packages/sidecar-ipc/src/index.ts`, `adapters/typescript/src/{analyzer.ts,tsconfig-loader.ts}`, `adapters/{csharp-roslyn,python,go,rust}/src/*`, `native/{roslyn-worker,python-worker,go-worker,rust-worker}/PROTOCOL.md` (TŞ v2.1 §6, §7, §8, §9, §15, §23 · `ADR-004` · `ADR-010` · `K-018`..`K-024`).
 
-Causoryn, **TypeScript/JavaScript**, **C# (.NET / Roslyn)**, **Python**, **Go** ve **Rust** analizlerini tek bir birleşik kanıt grafiğinde (`Unified Evidence & Knowledge Graph`) toplar. Analizörler model çağrısı yapmadan sözdizimi, semboller ve desteklenen framework kurallarından sonuç üretir (`ADR-002`). `verified` kenarlar kaynak kanıtı gerektirir, diğer eşleşmeler çözümleme durumunu açıkça taşır (`ADR-004`, `ADR-010`, `K-018`).
+Causoryn, **TypeScript / JavaScript**, **C# (.NET / Roslyn)**, **Python**, **Go** ve **Rust** analizlerini tek bir birleşik kanıt grafiğinde (`Unified Evidence & Knowledge Graph`) toplar. Analizörler model çağrısı yapmadan sözdizimi, semboller ve desteklenen framework kurallarından sonuç üretir (`ADR-002`). `verified` kenarlar kaynak kanıtı gerektirir, diğer eşleşmeler çözümleme durumunu açıkça taşır (`ADR-004`, `ADR-010`, `K-018`).
 
-Polyglot indeksleme, birden fazla analizörün ürettiği aynı kimlikli ve dosyaya bağlı olmayan dış/sanal düğümleri kanonik bir kayıtta birleştirir. Dosyaya bağlı çakışmalar hata olarak raporlanır (v0.2.1, `packages/indexing/src/index-service.ts`). Eşdeğer analiz için dosya girdileri ve etkin yapılandırmanın yanında analizör/araç zinciri koşulları da eşdeğer olmalıdır. Eksik çalışma zamanı, değişen referans paketleri veya zaman aşımı farklı kapsam ve tanılara yol açabilir.
+Polyglot indeksleme, birden fazla analizörün ürettiği aynı kimlikli ve dosyaya bağlı olmayan dış/sanal düğümleri kanonik bir kayıtta birleştirir. Dosyaya bağlı çakışmalar hata olarak raporlanır (`packages/indexing/src/index-service.ts`). Eşdeğer analiz için dosya girdileri ve etkin yapılandırmanın yanında analizör/araç zinciri koşulları da eşdeğer olmalıdır. Eksik çalışma zamanı, değişen referans paketleri veya zaman aşımı farklı kapsam ve tanılara yol açabilir.
 
 ---
 
@@ -16,7 +16,7 @@ Polyglot indeksleme, birden fazla analizörün ürettiği aynı kimlikli ve dosy
 
 | Dil | `analyzerId` (`version`) | Çalışma Modu | `astParse` (`L1`) | `symbolResolution` (`L2`) | `frameworkLinkers` / Route & Test (`L3`) | Üretilen Kenar Türleri |
 |---|---|---|---|---|---|---|
-| **TypeScript / JS** | `ts-adapter` (`0.1.0`) | Süreç-içi (`adapters/typescript`, TS Compiler API `5.9.3`; `.ts/.tsx/.mts/.cts/.js/.jsx/.mjs/.cjs`, `allowJs`, kök-içi `tsconfig`/`jsconfig` yol alias'ları, hapsedilmiş derleyici konağı) | `L1` | `L2` (`TypeChecker` tam semantik çözümleme; ESM + CommonJS `require`/`exports`) | `express+nextjs` (TS/JS/CJS) + genel `<x>.<verb>` kalıbı + BDD `Test` düğümü ve `TESTS` kenarı | `CONTAINS`, `IMPORTS`, `CALLS`, `ROUTES_TO`, `TESTS` |
+| **TypeScript / JavaScript** | `ts-adapter` (`0.1.0`) | Süreç-içi (`adapters/typescript`, TS Compiler API `5.9.3`; `.ts/.tsx/.mts/.cts/.js/.jsx/.mjs/.cjs`, `allowJs: true`, `checkJs: false`, `jsx: Preserve`, kök-hapsedilmiş `tsconfig.json`/`jsconfig.json`) | `L1` | `L2` (`TypeChecker` tam semantik çözümleme; ESM + CommonJS `require`/`exports`/`module.exports`) | `express+nextjs` (TS/JS/CJS) + genel `<x>.<verb>` kalıbı + BDD `Test` düğümü ve `TESTS` kenarı | `CONTAINS`, `IMPORTS`, `CALLS`, `ROUTES_TO`, `TESTS` |
 | **C# / .NET** | `roslyn-worker` (`0.1.0`) | Sidecar (`adapters/csharp-roslyn` ↔ `native/roslyn-worker`) | `L1` | `L2` (Roslyn `SemanticModel` — tek tam semantik sidecar) | `aspnet-core-route-attributes (L3)` (Controller `[Route]`/`[Http*]` + Minimal API `MapGet`/…) | `CONTAINS`, `CALLS`, `ROUTES_TO` (`importEdges: false`) |
 | **Python** | `python-worker` (`0.1.0`) | Sidecar (`adapters/python` ↔ `native/python-worker/worker.py`) | `L1` | `L2` (AST ad kapsamı; tam type inference yok) | `decorator-route-pattern (L3)` (FastAPI/Starlette `@app.get`/… + Flask `@app.route`) | `CONTAINS`, `CALLS`, `ROUTES_TO` (`importEdges: false`) |
 | **Go** | `go-worker` (`0.1.0`) | Sidecar (`adapters/go` ↔ `native/go-worker/cmd/worker`) | `L1` | `heuristic-only (semantik L2 yok)` (`symbolResolution: false`) | `http-router-registration (L3)` (`net/http` `Handle`/`HandleFunc` + `gin`/`echo`/`chi`) | `CONTAINS`, `CALLS`, `ROUTES_TO` (`importEdges: false`) |
@@ -29,11 +29,38 @@ Polyglot indeksleme, birden fazla analizörün ürettiği aynı kimlikli ve dosy
 - **`L2` (Sembol ve Çağrı Çözümlemesi):** Çağrı (`CALLS`) ve modül içe aktarma (`IMPORTS`) ifadelerinin hedef sembollere veya açık `UnknownExternal` düğümlerine bağlanması.
 - **`L3` (Framework Rotaları ve Test Bağları):** HTTP `Endpoint` düğümleri, `Endpoint → Handler` (`ROUTES_TO`) kenarları ve TypeScript BDD `Test → Hedef` (`TESTS`) kenarları.
 - **Zarf `coverage.tier` hesabı (`coverageOf`):** Yayımlanan snapshot içinde TS/JS/C#/Python AST/sembol düğümü varsa `L2`, yalnızca Go/Rust AST/sembol düğümü varsa `L1`, yalnızca `File` envanter düğümleri varsa `L0` raporlanır.
-- **Senkron açılış vs asenkron yenileme nüansı:** Sunucu açılışındaki senkron `runIndex` köprüsü alt süreç başlatmaz; TypeScript tam analiz edilirken sidecar dilleri başlangıçta `L0` `File` düğümleri (`sync-run-degraded` + açık uyarı) olarak yayımlanır. `causoryn_refresh_index` (`runIndexAsync` / `runIncrementalIndexAsync`) çalıştığında 5 dilin tamamı tek birleşik snapshot içinde tam derinlikte birleştirilir.
+- **Senkron açılış vs asenkron yenileme nüansı:** Sunucu açılışındaki senkron `runIndex` köprüsü alt süreç başlatmaz; TypeScript ve JavaScript tam analiz edilirken sidecar dilleri başlangıçta `L0` `File` düğümleri (`sync-run-degraded` + açık uyarı) olarak yayımlanır. `causoryn_refresh_index` (`runIndexAsync` / `runIncrementalIndexAsync`) çalıştığında 5 dilin tamamı tek birleşik snapshot içinde tam derinlikte birleştirilir.
 
 ---
 
-## 2. Dürüst Kenar Çözümleme Disiplini (`K-018`, `ADR-004`, `ADR-010`)
+## 2. TypeScript / JavaScript Evrensel Analizi, `tsconfig.json` / `jsconfig.json` ve Non-Blocking Envanter
+
+### 2.1 TypeScript, JavaScript ve CommonJS (`ts-adapter`)
+
+`adapters/typescript` aynı süreç-içi TypeScript Compiler API (`5.9.3`) motoruyla tüm modern ve klasik JS/TS projelerini eksiksiz analiz eder:
+
+- **Tam uzantı kapsamı ve dil ayrımı:** `.ts`, `.tsx`, `.mts`, `.cts` dosyaları `language: "typescript"`, `.js`, `.jsx`, `.mjs`, `.cjs` dosyaları ise `language: "javascript"` olarak etiketlenir. Derleyici programı `allowJs: true`, `checkJs: false` ve `jsx: Preserve` ayarlarıyla açılır; böylece tiplenmemiş JavaScript dosyalarında sahte tip-denetimi gürültüsü üretilmeden AST, sembol ve çağrı grafiği çıkarılır.
+- **ESM + CommonJS çözümlemesi:** Standart `import`/`export` ifadelerinin yanı sıra literal `require("./module")` çağrıları `IMPORTS` kenarına, üst düzey `exports.<fn> = ...`, `module.exports.<fn> = ...` ve `module.exports = function <name>(...)` atamaları ise dışa aktarılan fonksiyon/sembol düğümlerine dönüştürülür.
+- **JS/CJS Express ve Next.js App Router linker'ları:** Express linker'ı hem ESM `import express from "express"` hem de CommonJS `const express = require("express")` / `express.Router()` / `Router()` akışlarını izleyerek `Endpoint → Handler` (`ROUTES_TO`) kenarları üretir; Next.js App Router linker'ı `app/**/route.{ts,tsx,js,jsx,mjs,cjs}` ve `page.{ts,tsx,js,jsx}` dosyalarını destekler.
+
+### 2.2 Kök-Hapsedilmiş `tsconfig.json` / `jsconfig.json` Yükleyicisi (`tsconfig-loader.ts`)
+
+`adapters/typescript/src/tsconfig-loader.ts`, gerçek dünya monorepo ve frontend/backend projelerindeki yol alias'larını ve derleyici ayarlarını güvenlik sınırları içinde (`ADR-008`, `CWE-22`, `CWE-59`) çözümler:
+
+- **Desteklenen ayarlar ve JSONC:** Yalnızca güvenli `compilerOptions` alanları (`baseUrl`, `paths` — ör. `@/*`, `~/*`, en fazla 200 girdi — `moduleResolution`, `module`, `target`, `jsx`, `experimentalDecorators`, `verbatimModuleSyntax`) resmi `ts.parseConfigFileTextToJson` ile (JSONC yorumları ve trailing comma destekli; `eval`/plugin yürütme olmadan) okunur. `baseUrl` veya `paths` mevcutsa açık `moduleResolution` yokken `Bundler`, aksi hâlde `NodeNext` seçilir. `__proto__`, `constructor` ve `prototype` anahtarları reddedilir.
+- **Kök-hapsedilmiş `extends` ve monorepo alt yapılandırmaları:** En fazla 64 dizin kapsamlı (`ScopedTsConfig`) iç-içe `tsconfig.json`/`jsconfig.json` dosyası desteklenir. `extends` zinciri kesinlikle çalışma alanı kökünde hapsedilir (derinlik ≤ 5, dosya başına ≤ 16 `extends`, global 128 ziyaret bütçesi, döngü tespiti).
+- **Hapsedilmiş derleyici konağı (`configureConfinedCompilerHost`):** TypeScript'in `ts.sys` üzerinden yetkisiz disk dosyalarına kaçışı kapatılır. Disk erişimine yalnızca (a) `WorkspaceAccessPolicy` onaylı bellek-içi dosya girdileri (`entries`), (b) paketli `lib*.d.ts` dizini (`CAUSORYN_TS_LIB_DIR`) ve (c) kök içindeki `node_modules` altındaki `.d.ts`/`.d.mts`/`.d.cts`/`package.json` dosyaları için izin verilir.
+- **TOCTOU-güvenli disk okuması ve artımlı önbellek geçersizleştirme:** Disk fallback yolu `lstatSync` + `realpathSync` + `openSync(O_RDONLY | O_NOFOLLOW)` + `fstatSync` (`dev`, `ino` ve boyut ≤ 256 KB doğrulaması) kullanır. `packages/indexing/src/index-service.ts` içindeki `isIndexRelevantFile`, `tsconfig.json` veya `jsconfig.json` dosyalarındaki her değişiklik ya da silinmede artımlı indeks önbelleğini otomatik geçersiz kılarak yeniden analiz tetikler.
+
+### 2.3 Non-Blocking `collectInventoryAsync` ve Akıllı Dışlama Motoru
+
+- **Event-loop dostu tarama (`collectInventoryAsync`):** `packages/indexing/src/inventory.ts` içindeki `collectInventoryAsync`, senkron `collectInventory` ile bayt düzeyinde aynı sıralı `InventoryEntry[]` çıktısını üretirken her 64 girdide (`yieldEvery = 64`) `setImmediate` ile Node.js event loop'una nefes verir; böylece büyük repolarda arka plan indekslemesi MCP isteklerini bloklamaz.
+- **Akıllı `.gitignore` + `.git/info/exclude` + iç-içe `.gitignore` ve `bin/` ayrımı:** `packages/mcp-server/src/workspace-ignore-discovery.ts` kök `.gitignore`, non-symlink `.git/info/exclude` ve bütçe-sınırlı iç-içe `.gitignore` desenlerini birleştirir; açık `ignore` verilmediğinde kaba `**/bin/**` yerine yalnızca `.NET` çıktı dizinlerini (`**/bin/{Debug,Release,x64,x86,AnyCPU}/**` ve `.csproj`/`.fsproj`/`.vbproj` altındaki `<proje>/bin/**`) dışlayarak `bin/*.ts|js` ve Rust `src/bin/*.rs` kaynaklarını korur.
+- **Polinom zamanlı sıfır-RegExp eşleyici (`ignore-matcher.ts`):** `packages/workspace/src/ignore-matcher.ts` geri izleme (backtracking) patlamasına yapısal olarak bağışık iki-işaretçili glob algoritması kullanır (sıfır `RegExp`, sıfır ReDoS).
+
+---
+
+## 3. Dürüst Kenar Çözümleme Disiplini (`K-018`, `ADR-004`, `ADR-010`)
 
 Causoryn'de hiçbir analizör belirsiz bir çağrıyı "en olası" iç sembole sessizce `verified` olarak bağlamaz ve kendi düğüm/kenar ID'sini üretmez (tüm kanonik SHA-256 kimlikler merkezi `packages/domain` normalizer katmanında hesaplanır).
 
@@ -41,24 +68,24 @@ Causoryn'de hiçbir analizör belirsiz bir çağrıyı "en olası" iç sembole s
 2. **`heuristic` (+ `ambiguity`):** Ad tablosu, import eşleşmesi veya benzersiz metot adı gibi kurallara dayanır; kenar üzerinde `ambiguity: { candidates: [...], reason: "..." }` alanı ile neden kesin olmadığı açıkça taşınır.
 3. **`unresolved` (`UnknownExternal`):** Çözümlenemeyen çağrılar, dinamik ifadeler veya analiz kümesi dışındaki tanımsız hedefler açık bir `UnknownExternal` düğümüne bağlanır. Grafikte asla kopuk kenar (`dangling edge`) oluşmaz.
 
-### 2.1 Dil Başına `CALLS` Çözümleme Kuralları
+### 3.1 Dil Başına `CALLS` Çözümleme Kuralları
 
 | Dil | `verified` Koşulu | `heuristic` (+ `ambiguity`) Koşulu | `unresolved` (`UnknownExternal`) Koşulu |
 |---|---|---|---|
-| **TypeScript** | `TypeChecker` imzayı analiz kümesindeki sembole (veya `lib*.d.ts` / `node_modules` bildirimli `UnknownExternal` düğümüne) çözdüğünde. *(Not: `IMPORTS` için relative aday ve Node yerleşik modülleri `heuristic` etiketlenir.)* | `IMPORTS` relative dosya adayı / `node:*` yerleşik modül eşleşmesi. | `TypeChecker` sembol bulamadığında (`any`/dinamik ifade → `UnknownExternal`). |
+| **TypeScript / JavaScript** | `TypeChecker` imzayı analiz kümesindeki sembole (veya `lib*.d.ts` / `node_modules` bildirimli `UnknownExternal` düğümüne) çözdüğünde (ESM + CJS `require`/`exports` dahil). *(Not: `IMPORTS` için relative aday ve Node yerleşik modülleri `heuristic` etiketlenir.)* | `IMPORTS` relative dosya adayı / `node:*` yerleşik modül eşleşmesi. | `TypeChecker` sembol bulamadığında (`any`/dinamik ifade → `UnknownExternal`). |
 | **C# (Roslyn)** | Roslyn `SemanticModel` hedef metodu/kurucuyu (küme içi veya BCL/NuGet `UnknownExternal`) çözdüğünde. | Semantik referans eksikliğinde bilinen-ad kuralı devreye girdiğinde. | Aşırı yükleme belirsizliği, hata tipi veya dinamik çağrılar. |
 | **Python** | Hedef **aynı modülde** tanımlı fonksiyon/sınıf, `self.<metot>` veya `AynıModülSınıfı.<metot>` olduğunda. | Hedef `import` / `from ... import` ile getirilen sembol olduğunda (Python dinamik ad bağlamı; tam type inference yoktur). | Yerel değişken üzerinden metot çağrısı, yerleşik fonksiyonlar (`len`, `list`) ve tanımsız adlar. |
 | **Go** | Yalnızca **aynı package** kapsamındaki üst-düzey fonksiyonlara yapılan çıplak (`bare ident`) çağrılar *(yerel değişken gölgelemesi AST'ten ayırt edilemez — belgeli sınır)*. *(Yerleşik `len`/`make` için kenar üretilmez.)* | Küme içi `pkg.Func` çağrısı, set dışı import selector'ı, analiz kümesinde tekil metot adı (`x.M()`) veya arayüz metodu. | Birden fazla metoda uyan belirsiz `x.M()` (aday listesiyle) veya tanımsız ad/selector. |
 | **Rust** | (a) Aynı dosyada tanımlı serbest `fn` çağrısı; (b) analiz kümesi isim tablosunda **tek** eşleşmesi olan nitelikli yol (`A::b`, `mod::A::b` — önek modül zinciri tam semantik doğrulanmaz, belgeli). | Alıcı metot çağrısı (`x.foo()` — trait dispatch çözülmez), farklı dosyadaki tekil çıplak `fn` adayı veya çok adaylı nitelikli yol. | Hiçbir aday bulunamayan çağrılar (`std::env::var`, `Vec::new` vb.). |
 
-### 2.2 Dil Başına `ROUTES_TO` ve `TESTS` Kuralları
+### 3.2 Dil Başına `ROUTES_TO` ve `TESTS` Kuralları
 
 `ROUTES_TO` kenarları beş dilin tamamında otomatik olarak `verified` **değildir**; her dil kendi kanıt gücüne göre etiket üretir:
 
-- **TypeScript (`verified`):**
+- **TypeScript / JavaScript (`verified`):**
   - Genel `<taşıyıcı>.<verb>("/path", handler)` çağrıları (`get`, `post`, `put`, `patch`, `delete`, `head`, `options`).
-  - **Express linker (`express`):** Dosyadaki `express()`, `express.Router()` ve isimli `Router()` örneklerini izler (`framework: "express"`). *(Dosyalar arası aktarılan receiver örneklerinde genel rota korunur, yalnızca framework etiketi eklenmez.)*
-  - **Next.js App Router linker (`nextjs`):** `app/**/route.ts(x)` ve `src/app/**/route.ts(x)` içindeki export edilen HTTP fiil fonksiyon/sabitlerini ve `page.ts(x)` içindeki isimli `default export` bileşenlerini `TypeChecker` ile çözer. Tanınmayan veya anonim default export'larda sembol uydurulmaz; `FRAMEWORK_PATTERN_UNKNOWN` tanısı düşülür.
+  - **Express linker (`express`):** Dosyadaki ESM/CJS `express()`, `express.Router()` ve isimli `Router()` örneklerini izler (`framework: "express"`). *(Dosyalar arası aktarılan receiver örneklerinde genel rota korunur, yalnızca framework etiketi eklenmez.)*
+  - **Next.js App Router linker (`nextjs`):** `app/**/route.{ts,tsx,js,jsx,mjs,cjs}` ve `src/app/**/route.{ts,tsx,js,jsx,mjs,cjs}` içindeki export edilen HTTP fiil fonksiyon/sabitlerini ve `page.{ts,tsx,js,jsx}` içindeki isimli `default export` bileşenlerini `TypeChecker` ile çözer. Tanınmayan veya anonim default export'larda sembol uydurulmaz; `FRAMEWORK_PATTERN_UNKNOWN` tanısı düşülür.
 - **Python (`verified`):** `@carrier.get("/path")` vb. FastAPI/Starlette dekoratörleri ile `@carrier.route("/path", methods=[...])` Flask dekoratörleri doğrudan altlarındaki `def`/`async def` bildirimine sözdizimsel bağlı olduğundan daima `verified` (`route-attribute`) üretir. Literal olmayan rota yolları veya karmaşık taşıyıcı ifadeleri sessizce atlanmaz, `warnings` listesine yazılır.
 - **Rust (`verified`):** Actix-Web, Axum ve Rocket öznitelik makroları (`#[get("/path")]`, `#[post("/path")]` vb.) doğrudan hedef `fn` öğesine bağlı olduğundan daima `verified` (`route-attribute`) üretir.
 - **C# ASP.NET Core (`verified` veya `heuristic`):** Controller `[Route]` + `[HttpGet]`/`[HttpPost]`/… öznitelikleri ve Minimal API `MapGet`/`MapPost`/… çağrıları (`WorkerAnalyzer.cs:1475-1508`), Roslyn `Microsoft.AspNetCore.*` tiplerini semantik olarak çözebildiğinde `verified` üretir. Ortamda `Microsoft.AspNetCore.App.Ref` paketi bulunamazsa bilinen-ad kuralıyla dürüstçe **`heuristic` (+ `ambiguity`)** düzeyine düşer.
@@ -67,7 +94,7 @@ Causoryn'de hiçbir analizör belirsiz bir çağrıyı "en olası" iç sembole s
 
 ---
 
-## 3. `@causoryn/sidecar-ipc` NDJSON Protokolü (v1) ve Süreç Güvenliği
+## 4. `@causoryn/sidecar-ipc` NDJSON Protokolü (v1) ve Süreç Güvenliği
 
 Dört sidecar adapter (`csharp-roslyn`, `python`, `go`, `rust`) süreç yaşam döngüsünü sıfır dış npm bağımlılıklı `@causoryn/sidecar-ipc` paketi üzerinden paylaşır:
 
@@ -91,15 +118,15 @@ Dört sidecar adapter (`csharp-roslyn`, `python`, `go`, `rust`) süreç yaşam d
 
 Makinede `.NET`, `Python`, `Go` veya `Cargo` kurulu değilse ya da worker zaman aşımına uğrarsa sunucu **asla çökmez**:
 - İlgili dilin dosyaları envanter karması (`sourceHash`) doğrulanmış `File` düğümleri olarak snapshot'ta korunur (`WORKER_UNAVAILABLE_CAPABILITIES`).
-- Snapshot durumu `partial`, adapter `coverageRatio` değeri `0` olur ve `warnings` dizisine neden kullanılamadığı açıkça yazılır (`npx causoryn@0.2.3 doctor` ile önceden denetlenebilir).
+- Snapshot durumu `partial`, adapter `coverageRatio` değeri `0` olur ve `warnings` dizisine neden kullanılamadığı açıkça yazılır (`npx causoryn@latest doctor` ile önceden denetlenebilir).
 
 ---
 
-## 4. Çalışma Zamanı, Derleme ve Çevrimdışı (Offline) Matrisi
+## 5. Çalışma Zamanı, Derleme ve Çevrimdışı (Offline) Matrisi
 
 | Bileşen / Analizör | Çalışma Zamanı Gereksinimi | Derleme Modeli | Ağ / Çevrimdışı Davranışı |
 |---|---|---|---|
-| **TypeScript + Çekirdek SQLite** | **Node.js >= 24** | Sıfır-derleme (`dist/mcp-server.mjs` + N-API v10 `better-sqlite3` prebuild'leri + `dist/typescript-lib/lib*.d.ts`) | Kurulum sonrası yerel çalışma |
+| **TypeScript / JavaScript + Çekirdek SQLite** | **Node.js >= 24** | Sıfır-derleme (`dist/mcp-server.mjs` + N-API v10 `better-sqlite3` prebuild'leri + `dist/typescript-lib/lib*.d.ts`) | Kurulum sonrası yerel çalışma |
 | **C# / Roslyn** (`roslyn-worker`) | **.NET 10 runtime** (`dotnet exec`) | Paket içinde önceden derlenmiş deterministik Release `Causoryn.RoslynWorker.dll` (`Microsoft.CodeAnalysis.CSharp` `5.12.0`, sıfır `.pdb`/`.resources.dll`) | Kurulum sonrası yerel çalışma |
 | **Python** (`python-worker`) | **Python 3.10+** (önerilen / CI: **Python 3.11+ / 3.12**) | Sıfır-derleme (`python -B worker.py`, saf stdlib `ast`, sıfır pip paketi, `__pycache__` üretmez) | Kurulum sonrası yerel çalışma |
 | **Go** (`go-worker`) | **Go 1.22+** | İstek anında yerel `go run ./cmd/worker` (`GOCACHE` önbellekli) veya önceden derlenmiş `CAUSORYN_GO_WORKER_BIN` (saf stdlib `go/parser`, `go.mod` dış modül içermez) | Kurulum sonrası yerel çalışma |
@@ -107,9 +134,9 @@ Makinede `.NET`, `Python`, `Go` veya `Cargo` kurulu değilse ya da worker zaman 
 
 ---
 
-## 5. `fp2` `analyzerFingerprint` Önbellek Geçersiz Kılma ve İç `0.1.0` Sürüm Kararı
+## 6. `fp2` `analyzerFingerprint` Önbellek Geçersiz Kılma ve İç `0.1.0` Sürüm Kararı
 
-### 5.1 Deterministik `fp2` Parmak İzi Şeması
+### 6.1 Deterministik `fp2` Parmak İzi Şeması
 
 Kalıcı SQLite önbelleğinin farklı çalışma zamanı veya referans paketi ortamlarında bayat sonuç döndürmesini önlemek için `packages/indexing/src/fingerprint.ts` konumsal `fp2` parmak izini üretir:
 
@@ -124,7 +151,7 @@ fp2|ts-adapter@0.1.0|roslyn-worker@0.1.0|refpack=<pack>@<sürüm>@<tfmDir>;...|r
 - **Gerçek referans ve durum takibi:** C# için yüklenen gerçek `.NET` / `ASP.NET Core` referans paketleri (`refpack=...` veya `fallback-corelib` / `unavailable`) ve keşif kaynağı (`env-dotnet-root`, `worker-discovered`, `worker-unavailable`, `sync-run-degraded`), diğer sidecar'lar için ise `WorkerRunStatus` (`ready`, `worker-unavailable`, `sync-run-degraded`) ve etkin ayarların kanonik JSON SHA-256 özeti (`opts`, ilk 16 hex) parmak izine girer.
 - **Otomatik önbellek yenileme:** `snapshotId = SHA-256(canonicalJson([workspaceId, revision.id, revision.sequence, configHash, analyzerFingerprint, contentHash]))` formülü sayesinde kullanıcı sonradan `.NET`, `Python`, `Go` veya `Rust` araç zincirini kurduğunda `worker-unavailable` → `ready` geçişi `analyzerFingerprint` değerini değiştirir ve eski kısmi (`partial`) snapshot yerine tam semantik snapshot üretilmesini tetikler.
 
-### 5.2 Neden İç Analizör Sürümleri `0.1.0` Olarak Kalır?
+### 6.2 Neden İç Analizör Sürümleri `0.1.0` Olarak Kalır?
 
 Dağıtım paketi (`causoryn`), MCP sunucusu (`SERVER_VERSION`) ve indeksleme orkestratörü (`INDEXING_VERSION`) `0.2.3` sürümündeyken; beş dil analizörünün iç protokol sürümleri (`ts-adapter@0.1.0`, `roslyn-worker@0.1.0`, `python-worker@0.1.0`, `go-worker@0.1.0`, `rust-worker@0.1.0` ile `Causoryn.RoslynWorker.csproj` ve `native/rust-worker/Cargo.toml`) bilinçli olarak **`0.1.0`** seviyesinde kilitli tutulur:
 

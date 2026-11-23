@@ -20,9 +20,10 @@ Our verification sequence mirrors `.github/workflows/ci.yml`:
 #    (Causoryn ships verified better-sqlite3 prebuilds; --ignore-scripts
 #    blocks untrusted postinstall execution during CI and contributor setup.)
 npm ci --ignore-scripts
+npm audit --audit-level=high
 
-# 2. Build native sidecar workers
-dotnet build native/roslyn-worker/Causoryn.RoslynWorker.csproj -c Release -p:DebugType=none -p:ContinuousIntegrationBuild=true -p:SatelliteResourceLanguages=en
+# 2. Build native sidecar workers (locked dependency graphs)
+dotnet build native/roslyn-worker/Causoryn.RoslynWorker.csproj -c Release -p:DebugType=none -p:ContinuousIntegrationBuild=true -p:SatelliteResourceLanguages=en -p:RestoreLockedMode=true
 cargo build --manifest-path native/rust-worker/Cargo.toml --locked
 
 # 3. Run the full quality gate chain
@@ -33,6 +34,7 @@ npm run build:package --workspace packages/causoryn
 node packages/causoryn/scripts/verify-package-ready.mjs
 npm run lint
 npm run secret-scan
+node scripts/export-public-tree.mjs --verify-temp --ref HEAD
 npm test
 ```
 
@@ -57,8 +59,8 @@ Every pull request must preserve Causoryn's core invariants:
 1. **TDD first:** Write a failing test demonstrating the bug or new contract (`RED`), observe it fail, implement the minimal clean change, and confirm it passes (`GREEN`). Never weaken or delete existing assertions to make tests pass.
 2. **Keep diffs focused:** Avoid unrelated edits outside the scope of your change.
 3. **No personal paths or secrets:** Run `npm run secret-scan` and ensure no personal usernames, local drive paths, or credentials appear in code, tests, or documentation.
-4. **Keep docs & changelog in sync:** Update relevant files in `docs/`, `README.md`, and `CHANGELOG.md` (`[Unreleased]`) when changing user-facing behavior or tool contracts.
-5. **Run all local gates** (`typecheck`, `build`, `build:bundle`, `build:package`, `verify-package-ready.mjs`, `lint`, `secret-scan`, `npm test`) before opening your PR.
+4. **Keep bilingual docs & changelog in sync:** Causoryn maintains a bilingual Diátaxis documentation hub with 17 Turkish/English parity pairs (`docs/` and `docs/en/`), verified by `tests/release-docs.test.ts` (including relative-link and schema checks). Update matching files in `docs/`, `docs/en/`, `README.md`, and `CHANGELOG.md` (`[Unreleased]`) whenever changing user-facing behavior or tool contracts.
+5. **Run all local gates** (`npm audit --audit-level=high`, locked native builds, `typecheck`, `build`, `build:bundle`, `build:package`, `verify-package-ready.mjs`, `lint`, `secret-scan`, `export-public-tree.mjs --verify-temp --ref HEAD`, `npm test`) before opening your PR.
 
 ## Community & Security
 

@@ -1,12 +1,12 @@
-# Güvenlik Turu — `v0.2.3` Sınırları ve Tarihsel TŞ §22 Matrisi
+# Güvenlik Denetimi ve Tedarik Zinciri Sınırları
 
 **Dil / Language:** Türkçe | [English](en/security-pass.md)
 
-> Kanıt: `raw/Causoryn_Teknik_Dokuman_v2.1.pdf` s.22 §22 "Security: symlink/path traversal, secret leakage, symlink TOCTOU, poisoned source comment, oversized files, malicious Git refs, network denied" + s.21 §19 tehdit modeli + s.22 §20 konfigürasyon güvenli default'ları · `wiki/sprint-7.md` F6 · `wiki/decisions.md` `K-008`/`K-011`/`K-012`/`K-014`/`K-015`/`K-016`/`K-021`/`K-022`/`K-024`.
+> Kanıt: `raw/Causoryn_Teknik_Dokuman_v2.1.pdf` s.22 §22 "Security: symlink/path traversal, secret leakage, symlink TOCTOU, poisoned source comment, oversized files, malicious Git refs, network denied" + s.21 §19 tehdit modeli + s.22 §20 konfigürasyon güvenli default'ları · `wiki/sprint-7.md` F6 · `wiki/decisions.md` `K-008`/`K-011`/`K-012`/`K-014`/`K-015`/`K-016`/`K-021`/`K-022`/`K-024`/`K-025`.
 
-## `v0.2.3` güvenlik sınırları
+## Güncel çalışma zamanı güvenlik sınırları (`v0.2.3`)
 
-**Bundle kimliği:** `packages/mcp-server/dist/mcp-server.mjs` SHA-256 `f467d15078f1938a914c1e5eda7f2bf36e40fa33e7473eaa0827fa495209decc`. `dist/bundle-manifest.json` bu özeti ve native SQLite çalışma zamanı dahil 35 dosya kaydını taşır. Bu özet yerel artefaktı tanımlar. Aşağıdaki F6 sonuçları, tabloda belirtilen tarihsel test oturumlarına aittir.
+**Bundle kimliği:** `packages/mcp-server/dist/mcp-server.mjs` SHA-256 `833bf422bab99ac70f3acb8f7e8a96b1d76918f69f872122cb40e5455855f92f`. `dist/bundle-manifest.json` bu özeti ve native SQLite çalışma zamanı dahil 35 dosya kaydını taşır. Bu özet yerel artefaktı tanımlar. Aşağıdaki F6 sonuçları, tabloda belirtilen tarihsel test oturumlarına aittir.
 
 - `causoryn_export_documentation`, `output.allowedOutputDirs` ile doğrulanan hedeflerde artefaktı `flag: "wx"` + `EEXIST` korumalı geçici dosyadan atomik yeniden adlandırarak yazar; `view="interactive"` varsayılan adı `causoryn-architecture-interactive.html` olduğundan sıfır-JS `causoryn-architecture.html` çıktısının üzerine sessizce yazmaz. `--auto-data-dir` export dizinini kaynak ağacının dışında açar. Elle yetkilendirilen bir export dizini kaynak ağacının içinde de olabilir. Bildirilmemiş dizin `EXPORT_NOT_ALLOWED`, güvensiz dosya adı veya kaçış `PATH_DENIED` döndürür. Kaynak dayanakları `packages/graph/src/export.ts`, `packages/workspace/src/output-policy.ts` ve `packages/mcp-server/src/runtime-cli.ts` dosyalarıdır.
 - **Evrensel uyumluluk savunma derinliği (`v0.2.3`, `K-024`):**
@@ -16,6 +16,23 @@
 - Opsiyonel `annotations`, kullanıcı veya host modeli tarafından sağlanan metindir. Server şema ve boyut bütçelerini uygular, `moduleId`, `nodeId`, `evidenceId` ve `keyFiles` başvurularını snapshot/projeksiyon ile doğrular. Geçersiz başvuru `INVALID_ARGUMENT` döndürür. Bu kontrol, metindeki yorumların doğruluğu için insan incelemesi gereksinimini ortadan kaldırmaz. Kaynak dayanağı `packages/graph/src/architecture-annotations.ts` dosyasıdır.
 - Varsayılan `view="architecture"` HTML çıktısı betiksiz ve `default-src 'none'` CSP’lidir. Opt-in `view="interactive"` aynı çevrimdışı sınırla yerel gömülü betiğe izin verir. Ekran metni kaçışlanır, veri adası güvenli biçimde serileştirilir ve etkileşim betiği `innerHTML`, `fetch` veya CDN kullanmaz. Kaynak ve test kapsamı `packages/graph/src/architecture-export.ts`, `packages/graph/test/architecture-export.test.ts` ve `packages/mcp-server/test/architecture-export-tool.test.ts` dosyalarındadır.
 - MCP analiz ve render kodu model API’lerini çağırmaz. Host modelinin kullanım ve ağ politikası hosta aittir. npm kurulum adımı ve Rust worker’ın soğuk `cargo build --locked` adımı paket kaynaklarına erişebilir. Tarihsel Node `net-guard.cjs` kanıtı yalnızca çalıştırılan süreç ve fixture yollarını kapsar. [Dil analizörleri](language-analyzers.md)
+
+## CI/CD ve tedarik zinciri sertleştirmesi (`K-025`)
+
+Çalışma zamanı ve paketlenmiş-bundle denetimlerine ek olarak `K-025` kapsamında tüm GitHub Actions boru hattı ve bağımlılık yaşam döngüsü çok katmanlı olarak sertleştirilmiştir:
+
+1. **`.github/workflows/security.yml` — statik iş akışı denetimi, PR bağımlılık incelemesi ve çoklu-ekosistem açığı taraması:**
+   - **`zizmor` (`zizmorcore/zizmor-action`):** Fail-closed GitHub Actions statik güvenlik denetimi (`strict-collection: true`, `persona: regular`, `min-severity: medium`, `advanced-security: false`, `annotations: true`, `fail-on-no-inputs: true`).
+   - **PR Bağımlılık İncelemesi (`actions/dependency-review-action`):** Yalnızca pull request'lerde çalışır; `high` ve üzeri güvenlik açıklarını ve modern SPDX copyleft lisanslarını (`GPL-*`, `AGPL-*`, `LGPL-*`) engeller.
+   - **Çoklu-Ekosistem Açık Taraması (`dependency-audit`):** `npm audit --audit-level=high` ve fail-closed NuGet JSON taraması (`dotnet restore native/roslyn-worker/Causoryn.RoslynWorker.csproj --locked-mode` + `dotnet list ... package --vulnerable --include-transitive --format json`) çalıştırır; herhangi bir seviyedeki NuGet açığında, `NU1900` uyarısında veya canlı `api.nuget.org` kaynağı sorgulanamadığında fail-closed durur (Rust `Cargo.lock` ise `cargo build --locked`, PR `dependency-review-action` ve Dependabot `cargo` ile korunur).
+2. **`.github/workflows/codeql.yml` — 5 dilli CodeQL v4 SAST:** `javascript-typescript`, `python`, `csharp`, `actions` (`build-mode: none`) ve `go` (`build-mode: manual`, `setup-go` → `init` → `go build ./...` → `analyze` sırasıyla) matrisinde `security-extended` sorgularını yürütür ve fork PR'larda SARIF 403 hatasını önleyen koşullu `upload:` ifadesi kullanır.
+3. **`.github/workflows/scorecard.yml` — OpenSSF Scorecard:** `ossf/scorecard-action` (`publish_results: true`) çalıştırır ve SARIF sonuçlarını `github/codeql-action/upload-sarif` ile yükler; `publish_results` kısıtları gereği yalnızca 5 onaylı, 40-karakter SHA-sabitli eylemle sınırlıdır ve Docker container çalışma zamanını korur.
+4. **`.github/workflows/release.yml` — 2-job SLSA tedarik zinciri ayrımı:**
+   - **`build-and-verify` (`contents: read`):** Linux üzerinde `step-security/harden-runner` (`egress-policy: audit`, `disable-sudo-and-containers: true`), `fetch-depth: 0` + `origin/main` ata doğrulaması, önbelleksiz hermetik `setup-node` (`package-manager-cache: false`), `npm ci --ignore-scripts`, `npm audit --audit-level=high`, `-p:RestoreLockedMode=true` deterministik Roslyn + `--locked` Rust derlemeleri, `export-public-tree.mjs --verify-temp --ref HEAD`, `npm test`, tek-tarball `npm pack` + izole derin MCP smoke testi (`--version`, `doctor --json`, `initialize`), CycloneDX 1.5 SBOM (`scripts/generate-sbom.mjs`) ve `SHA256SUMS.txt` üreterek değişmez `release-artifacts` artefaktını yükler.
+   - **`attest-and-publish` (`needs: build-and-verify`, `environment: release`, `id-token: write`, `attestations: write`, `contents: write`):** Sıfır derleme/test kodu çalıştırır; indirilen artefaktları `sha256sum -c SHA256SUMS.txt` ile doğruladıktan sonra `actions/attest-build-provenance`, `NPM_TOKEN` / `NODE_AUTH_TOKEN` sırrı olmadan OIDC `npm publish "./$TGZ_FILE" --provenance --access public` (ön-sürümlerde `--tag next`) ve idempotent `gh release create --verify-tag` adımlarını yürütür.
+5. **`.github/workflows/ci.yml` — 3-OS kilitli derleme ve sızıntı kapısı:** `ubuntu-latest`, `windows-latest`, `macos-latest` matrisinde Linux için `step-security/harden-runner`, `packages.lock.json` tabanlı `-p:RestoreLockedMode=true` Roslyn derlemesi, `cargo build --locked`, `npm audit --audit-level=high` ve çapraz-platform `node scripts/export-public-tree.mjs --verify-temp --ref HEAD` sızıntı kapısını uygular.
+6. **`.github/dependabot.yml` — tedarik zinciri soğuma (cooldown) süresi:** 4 ekosistemde (`npm` monorepo dizinleri `/`, `/packages/*`, `/adapters/*`, `/integrations/*/*`; `cargo` `/native/rust-worker`; `nuget` `/native/roslyn-worker`; `github-actions` `/`; Go worker yalnızca stdlib kullandığından harici `go.mod` bağımlılığı yoktur) 7 günlük `default-days` (SemVer ekosistemlerde 14 günlük `semver-major-days`) soğuma süresi ve gruplu güncelleme uygular.
+7. **Otomatik sözleşme regresyon kapısı (`tests/ci-workflow.test.ts`):** 5 iş akışı + `dependabot.yml` üzerinde %100 40-karakter SHA sabitlemesi, izinli eylem listesi, salt-okunur üst düzey izinler, `persist-credentials: false`, `run:` bloklarında sıfır `${{ ... }}` interpolasyonu, `harden-runner`, `zizmor`, 5-dil CodeQL, OpenSSF Scorecard ve 2-job SLSA yayın ayrımını otomatik testlerle kilitler.
 
 ## Tarihsel F6 kapsamı ve yöntemi
 
@@ -77,6 +94,9 @@ npx vitest run tests/security-release/f6-security-release.test.ts   # → 32 pas
 # Güvenlik turu paketinin tamamı (F6 + netguard sınırı + oturum kapanışı)
 npx vitest run tests/security-release/                              # → 36 passed (36)
 
+# CI/CD, tedarik zinciri, zizmor/CodeQL/Scorecard/SLSA ve Dependabot sözleşme testleri
+npx vitest run tests/ci-workflow.test.ts
+
 # Üretim kaynak, doküman ve workflow sır/profil-yolu taraması (13 kök + 13 kök dosyası)
 npm run secret-scan                                                 # → exit 0, 0 eşleşme
 
@@ -98,4 +118,4 @@ npx tsc -p tsconfig.typecheck.json --noEmit                                     
 - [compatibility-matrix.md](compatibility-matrix.md) — host × sonuç matrisi
 - [implementation-status.md](implementation-status.md) — faz faz durum ve kanıt kayıtları
 - [SECURITY.md](../SECURITY.md) — güvenlik politikası ve zafiyet bildirim süreci
-- Tarihsel çalışma kayıtları: `wiki/architecture.md` · `wiki/mcp-tools.md` · `wiki/sprint-7.md` · `wiki/decisions.md` (`ADR-010`, `K-008`, `K-021`, `K-022`)
+- Tarihsel çalışma kayıtları: `wiki/architecture.md` · `wiki/mcp-tools.md` · `wiki/sprint-7.md` · `wiki/decisions.md` (`ADR-010`, `K-008`, `K-021`, `K-022`, `K-024`, `K-025`)

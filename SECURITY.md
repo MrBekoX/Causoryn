@@ -42,6 +42,16 @@ Causoryn is a **local, LLM-free** MCP code-analysis server. Its automated securi
 6. **Clean MCP `stdout` channel:** `stdout` emits only JSON-RPC 2.0 MCP frames; all diagnostic logs are written exclusively to `stderr`.
 7. **Offline HTML exports:** Architecture and interactive HTML apply escaping and restrictive Content Security Policy (CSP), and use no external assets. The interactive view uses inline JavaScript. Optional annotations undergo schema and graph-reference validation. The caller is responsible for the accuracy of the prose. [Security audit](docs/en/security-pass.md)
 
+## Supply-Chain & CI/CD Security
+
+Causoryn's GitHub Actions pipeline and release process enforce layered supply-chain controls verified automatically by `tests/ci-workflow.test.ts`:
+
+- **Workflow & dependency security (`.github/workflows/security.yml`):** Runs fail-closed `zizmor` static workflow auditing, PR `dependency-review-action` (blocking `high`+ advisories and copyleft SPDX licenses), `npm audit --audit-level=high`, and fail-closed `--locked-mode` NuGet JSON auditing (`dotnet list ... package --vulnerable --include-transitive --format json`).
+- **5-language SAST (`.github/workflows/codeql.yml`):** Runs CodeQL v4 (`security-extended`) across `javascript-typescript`, `python`, `csharp`, `go`, and `actions`.
+- **OpenSSF Scorecard (`.github/workflows/scorecard.yml`):** Runs `ossf/scorecard-action` (`publish_results: true`) with SARIF upload to GitHub Code Scanning.
+- **2-job SLSA release pipeline (`.github/workflows/release.yml`):** Separates the read-only `build-and-verify` job (`step-security/harden-runner` with `egress-policy: audit`, hermetic builds, CycloneDX 1.5 SBOM via `scripts/generate-sbom.mjs`, and `SHA256SUMS.txt`) from the privileged `attest-and-publish` job (`environment: release`), which verifies checksums, runs `actions/attest-build-provenance`, and publishes via tokenless npm OIDC Trusted Publishing (`npm publish --provenance --access public`; zero `NPM_TOKEN` secrets).
+- **Locked, SHA-pinned CI & cooldown (`.github/workflows/ci.yml`, `.github/dependabot.yml`):** 100% 40-character SHA-pinned GitHub Actions, `persist-credentials: false`, zero `${{ ... }}` interpolation in `run:` steps, `npm ci --ignore-scripts`, `-p:RestoreLockedMode=true`, `cargo build --locked`, `scripts/export-public-tree.mjs --verify-temp --ref HEAD`, and a 7-day supply-chain Dependabot cooldown across 4 ecosystems (`npm`, `cargo`, `nuget`, `github-actions`).
+
 ## Out of Scope
 
 The following are outside Causoryn's security boundary:

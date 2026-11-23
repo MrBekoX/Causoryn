@@ -1,8 +1,8 @@
-# Compatibility Matrix — Host × Outcome (`v0.2.3` Distribution and Historical Smoke Evidence, Spec §22–§23)
+# Compatibility Matrix — Host × Outcome
 
 > **Language / Dil:** [Türkçe](../compatibility-matrix.md) · English
 
-> Evidence: Sprint 7 F2–F5 · Architecture Decisions K-021/K-022 ·
+> Evidence: Sprint 7 F2–F5 · Architecture Decisions K-021/K-022/K-025/K-026 ·
 > [docs/en/hosts/claude-code.md](hosts/claude-code.md), [docs/en/hosts/codex.md](hosts/codex.md),
 > [docs/en/hosts/zcode.md](hosts/zcode.md), [docs/en/hosts/antigravity.md](hosts/antigravity.md),
 > `integrations/zcode/causoryn/README.md` · Technical Specification v2.1 §22 (Cross-host smoke:
@@ -20,12 +20,12 @@ were recorded against `causoryn@0.1.0`), `stdio` MCP, `tools/list` publishes **e
 same engine (the artifact is intentionally not a standalone single file because native `.node`
 addons cannot be embedded, ADR-010). Local live host verification environment: Windows 10.0.26300
 x64, Node ≥ 24; 3-OS GitHub Actions CI matrix (`.github/workflows/ci.yml`: `ubuntu-latest`,
-`windows-latest`, `macos-latest`) verified green across all three operating systems in K-022.
+`windows-latest`, `macos-latest`) verified green across all three operating systems with K-022/K-025 security and leak gates.
 
-## `v0.2.3` Runtime Behavior
+## Current Runtime Behavior (`v0.2.3`)
 
-- All four hosts launch the same MCP engine on Node.js ≥ 24. Default package setup installs five canonical skills, including `architecture-blueprint`. The packaged CLI starts initial automatic indexing in the background after the handshake. Poll `causoryn_index_status` until a snapshot is available. [CLI and Configuration](cli-and-configuration.md)
-- Visual export runs without a model call. The user or host model can supply optional `annotations`. The same snapshot, format, view, options, and annotations render the same artifact. The wording produced by a host model can vary between runs. [Architecture export contract](tool-contracts.md)
+- All four hosts launch the same MCP engine on Node.js ≥ 24. Default package setup installs five canonical skills, including natural-language-triggered `architecture-blueprint`. The packaged CLI starts initial automatic indexing in the background after the handshake using non-blocking `collectInventoryAsync`. Poll `causoryn_index_status` until a snapshot is available. [CLI and Configuration](cli-and-configuration.md)
+- Visual export runs without a model call; `view="interactive"` writes `causoryn-architecture-interactive.html` by default. The user or host model can supply optional `annotations` (guided by `K-026` MCP Zod `.describe()` schema descriptions). The same snapshot, format, view, options, and annotations render the same artifact; host prose can vary across runs. [Prompting & Architecture Portals](prompting-and-architecture-portals.md) · [Architecture export contract](tool-contracts.md)
 - The security guide documents the interactive HTML portal's CSP and output boundaries in source and tests. This matrix's live host results come from the dated runs below. [Security pass](security-pass.md)
 
 ## Historical Host × Outcome Matrix (initial run `2026-11-08` · F8 final `2026-11-10` · K-021/K-022 CLI verification `2026-11-19`)
@@ -43,7 +43,7 @@ x64, Node ≥ 24; 3-OS GitHub Actions CI matrix (`.github/workflows/ci.yml`: `ub
 |---|---|---|
 | F1 bundle determinism | ✅ Bit-for-bit identical across consecutive builds; `bundle-manifest.json` (35 files: `mcp-server.mjs`, `mcp-server.mjs.LEGAL.txt`, `node_modules/better-sqlite3/LICENSE` + runtime/prebuilds, sorted sha256) matches `mcp-server.mjs` (`60735ff` + K-022 license notices) | `packages/mcp-server/test/bundle.test.ts`; `tests/hosts-docs.test.ts` manifest sha256 guard |
 | K-021/K-022 `packages/causoryn` distribution package | ✅ `build-package.mjs` + `verify-package-ready.mjs` + isolated `npm pack` `.tgz` E2E (4-host `setup`/`doctor` + `mcp` `stdio` handshake + `THIRD-PARTY-NOTICES.md` / `licenses/`) | `tests/open-source-distribution.test.ts`; `packages/causoryn/test/setup-and-doctor.test.ts` |
-| 3-OS GitHub Actions CI matrix (K-022) | ✅ All green across `ubuntu-latest`, `windows-latest`, and `macos-latest` running Node 24 + .NET 10 + Python 3.12 + Go + Rust builds, bundle, distribution package readiness, lint, secret-scan, and full Vitest suite | `.github/workflows/ci.yml` |
+| 3-OS GitHub Actions CI & K-025 supply chain | ✅ Green across `ubuntu-latest`, `windows-latest`, and `macos-latest` running Node 24 + .NET 10 (`-p:RestoreLockedMode=true`) + Python 3.12 + Go + Rust (`--locked`) builds, bundle, distribution package readiness, `npm audit --audit-level=high`, `export-public-tree.mjs --verify-temp --ref HEAD`, lint, secret-scan, and full Vitest suite, paired with dedicated `zizmor`, 5-language CodeQL, and OpenSSF Scorecard workflows | `.github/workflows/{ci,security,codeql,scorecard,release}.yml`; `tests/ci-workflow.test.ts` |
 | F6 security release audit (packaged bundle, Spec §22 matrix) | ✅ 9/9 rows PASS (traversal/symlink, secret leakage, TOCTOU, prompt injection, oversized files, malicious git refs, network denied, offline XSS/CSP, `stdout` hygiene); **final round (`e3d0bc2`, `2026-11-10`)** upgraded row 6 to bundle-level behavioral proof (real commit SHA resolved via `git cat-file`, 3 malicious refs → `INVALID_REVISION`) | `docs/en/security-pass.md`; `npx vitest run tests/security-release/f6-security-release.test.ts` → **32/32**; full directory `npx vitest run tests/security-release/` → **36/36** |
 | F7 performance benchmarks (1k-file fixture, MCP protocol layer) | ✅ Medians (**`2026-11-10` final run**): `workspace_summary` 11.8 ms, symbol context 13.0 ms, 200-node map 10.7 ms — well within Spec §21 reference targets (design budgets, not hard claims) | `docs/en/benchmarks.md`; `CAUSORYN_BENCH_WRITE_DOCS=1 npm run bench` (`vitest.bench.config.ts`) |
 | `stdio` `stdout` hygiene (unit) | ✅ `stdout` carries exclusively MCP protocol frames; logs go to `stderr` prefixed with `[causoryn]` | `packages/mcp-server/test/stdio-stdout.test.ts` |
@@ -76,5 +76,5 @@ x64, Node ≥ 24; 3-OS GitHub Actions CI matrix (`.github/workflows/ci.yml`: `ub
 ## Related Pages
 
 - [docs/en/hosts/claude-code.md](hosts/claude-code.md) · [docs/en/hosts/codex.md](hosts/codex.md) · [docs/en/hosts/zcode.md](hosts/zcode.md) · [docs/en/hosts/antigravity.md](hosts/antigravity.md) · `integrations/zcode/causoryn/README.md` · `integrations/antigravity/causoryn/README.md`
-- [docs/en/security-pass.md](security-pass.md) · [docs/en/benchmarks.md](benchmarks.md) · [docs/en/tool-contracts.md](tool-contracts.md) · [docs/en/implementation-status.md](implementation-status.md)
+- [docs/en/security-pass.md](security-pass.md) · [docs/en/benchmarks.md](benchmarks.md) · [docs/en/tool-contracts.md](tool-contracts.md) · [docs/en/prompting-and-architecture-portals.md](prompting-and-architecture-portals.md) · [docs/en/implementation-status.md](implementation-status.md)
 - [Türkçe sürüm](../compatibility-matrix.md)

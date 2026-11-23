@@ -2,13 +2,21 @@
 
 > **Dil / Language:** **Türkçe** | [English](en/cli-and-configuration.md)
 >
-> **Kanıt:** `packages/causoryn/src/{cli.ts,setup.ts,doctor.ts,runtime-stage.ts,types.ts}`, `packages/causoryn/scripts/{causoryn.mjs,plugin-mcp-launcher.mjs,lib/node-version-guard.mjs,verify-package-ready.mjs}`, `packages/mcp-server/src/{cli-stdio.ts,stdio.ts,runtime-cli.ts,config.ts,context.ts}`, `packages/workspace/src/policy-config.ts` (TŞ v2.1 §9, §10.1, §17, §20 · `ADR-008` · `K-021` · `K-022`).
+> **Kanıt:** `packages/causoryn/src/{cli.ts,setup.ts,doctor.ts,runtime-stage.ts,types.ts}`, `packages/causoryn/scripts/{causoryn.mjs,plugin-mcp-launcher.mjs,lib/node-version-guard.mjs,verify-package-ready.mjs}`, `packages/mcp-server/src/{cli-stdio.ts,stdio.ts,runtime-cli.ts,config.ts,context.ts,workspace-ignore-discovery.ts}`, `packages/workspace/src/policy-config.ts` (TŞ v2.1 §9, §10.1, §17, §20 · `ADR-008` · `K-021`..`K-026`).
 
 Bu kılavuz; `causoryn` (`v0.2.3` — Pre-1.0 Public Preview) komut satırı arayüzünü, ön-yükleme Node.js sürüm korumasını, plugin pazaryeri başlatıcısını, sıfır-ayar (`zero-config`) çalışma alanı güvenlik modelini, kaynak ağacı dışı (`out-of-tree`) veri dizini düzenini ve `CAUSORYN_CONFIG` şemasını kaynak kodla birebir eşleşecek şekilde belgeler.
 
 ---
 
 ## 1. CLI Alt Komutları ve Bayraklar (`causoryn`)
+
+Hızlı kurulum ve sağlık kontrolü için `@latest` etiketi önerilir (deterministik kurulum veya CI sabitlemesi için `@0.2.3` gibi tam sürüm pini de desteklenir):
+
+```bash
+npx causoryn@latest setup      # Algılanan host'lar için 5 skill + MCP sunucusunu kurar
+npx causoryn@latest doctor     # Node.js >= 24, runtime, 4 sidecar ve host hizalamasını salt-okunur doğrular
+# Sürüm sabitlemek için: npx causoryn@0.2.3 setup && npx causoryn@0.2.3 doctor
+```
 
 Paket ikilisi (`packages/causoryn/scripts/causoryn.mjs`) aşağıdaki alt komutları sunar:
 
@@ -42,9 +50,9 @@ Desteklenen 4 host ortamı (`antigravity`, `claude-code`, `codex`, `zcode`) içi
 | `antigravity` | `~/.gemini/config/mcp_config.json` (+ mevcutsa `~/.gemini/antigravity/mcp_config.json`) | `~/.gemini/config/skills/` | Yerel yükleyici uyumu için `mcpServers.causoryn` kaydında `type` alanı yazılmaz. |
 | `claude-code` | `~/.claude.json` (veya `$CLAUDE_CONFIG_DIR/.claude.json`) | `~/.claude/skills/` (veya `$CLAUDE_CONFIG_DIR/skills/`) | `mcpServers.causoryn` altında `type: "stdio"` yazar. |
 | `codex` | `$CODEX_HOME/config.toml` (varsayılan `~/.codex/config.toml`) | `~/.agents/skills/` | `[mcp_servers.causoryn]` tablosunu ve `startup_timeout_sec = 30` alanını TOML yapısını bozmadan günceller. |
-| `zcode` | `~/.zcode/cli/config.json` | `~/.zcode/skills/` | `mcp.servers.causoryn` yazar; `mcp.servers` ilk kez oluşturuluyorsa `~/.agents/mcp.json` içindeki mevcut fallback MCP sunucularını koruyarak taşır. |
+| `zcode` | `~/.zcode/cli/config.json` | `~/.zcode/skills/` | `mcp.servers.causoryn` (`type: "stdio"`) yazar; `mcp.servers` ilk kez oluşturuluyorsa `~/.agents/mcp.json` içindeki mevcut fallback MCP sunucularını koruyarak taşır. |
 
-- **Atomik yazım ve yedekleme:** Var olan her konfigürasyon dosyası değiştirilmeden önce aynı dosya izinleriyle (`varsayılan 0o600`) `<dosya>.causoryn.backup` yedeği atomik olarak alınır, ardından geçici dosya + `renameSync` ile hedef güncellenir.
+- **Atomik yazım ve yedekleme:** Var olan her konfigürasyon dosyası değiştirilmeden önce aynı dosya izinleriyle (`varsayılan 0o600`, skill dosyaları için `0o644`) `<dosya>.causoryn.backup` yedeği atomik olarak alınır, ardından geçici dosya + `renameSync` ile hedef güncellenir.
 - **Symlink koruması (`CWE-59`):** Hedef konfigürasyon dosyası, `.causoryn.backup` dosyası veya hedef `SKILL.md` sembolik bağlantıysa (`lstatSync().isSymbolicLink()`) yazma işlemi `cli/io-error` (çıkış kodu `2`) ile fail-closed reddedilir.
 
 ### 1.2 `causoryn doctor` — Salt-Okunur Sağlık ve Hizalama Denetçisi
@@ -110,9 +118,9 @@ Native plugin pazaryerleri (`.claude-plugin/plugin.json`, `.zcode-plugin/plugin.
 - **Çıplak başlatma (`node dist/mcp-server.mjs`, 0 argüman):** Geriye dönük uyumluluk ve güvenli varsayılan (`default-deny`) korunur. `CAUSORYN_CONFIG` verilmemişse `allowRoots: []` ve `outputSchemaProfile: "full"` ile başlar; tüm çalışma alanı araçları `WORKSPACE_NOT_AUTHORIZED` döner.
 - **Sıfır-ayar başlatma (`causoryn mcp --allow-cwd --auto-data-dir`):** Terminal tabanlı ajanlar proje dizininden başlatıldığında `process.cwd()` adayı `inspectProjectRootSafety` denetiminden geçirilir.
 
-CLI etkinleştirildiğinde `autoIndex` açık ve kök yetkiliyse ilk snapshot’ın yüklenmesi veya ilk tam indeksin başlatılması MCP `initialize` sonrasına ertelenir. `causoryn_index_status` ilk işi tetikleyebilir ve durumu raporlar. Snapshot gerektiren ilk araç çağrıları arka plan işini 15 saniyeye kadar bekleyebilir. `initialize` yanıtı indeksin hazır olduğu anlamına gelmez. Başlatma yolunu `packages/mcp-server/src/{cli-stdio.ts,context.ts}` tanımlar.
+CLI etkinleştirildiğinde (`deferAutoIndex: true`) `autoIndex` açık ve kök yetkiliyse ilk snapshot’ın yüklenmesi veya ilk tam indeksin başlatılması MCP `initialize` el sıkışmasından sonraya ertelenir; böylece büyük depolarda bile MCP başlangıcı bloklanmaz. `causoryn_index_status` ilk işi tetikleyebilir ve durumu raporlar. Snapshot gerektiren ilk araç çağrıları arka plan işini 15 saniyeye kadar bekleyebilir. `initialize` yanıtı indeksin hazır olduğu anlamına gelmez. Başlatma yolunu `packages/mcp-server/src/{cli-stdio.ts,context.ts}` tanımlar.
 
-Otomatik workspace konfigürasyonu (`packages/mcp-server/src/workspace-ignore-discovery.ts`, `v0.2.3`), birincil kökteki `.gitignore`, `.git/info/exclude` ve sınırlı derinlik/bütçeli iç-içe `.gitignore` dosyalarından desteklenen desenleri `extraIgnore` ile birleştirir (sembolik bağlantıları `O_NOFOLLOW` + `(dev, ino)` ile reddeder ve negasyonla çakışabilecek geniş üst dizin desenlerini dışlar). Ayrıca çağıran açıkça `ignore` vermediğinde kaba `**/bin/**` deseni yerine yalnızca `.NET` çıktı dizinleri (`**/bin/{Debug,Release,x64,x86,AnyCPU}/**` ve tespit edilen `.csproj`/`.fsproj`/`.vbproj` altındaki `<proje>/bin/**`) dışlanır; böylece `bin/*.ts|js` ve Rust `src/bin/*.rs` kaynakları korunur. Glob eşleştiricisi polinom zamanlı sıfır-RegExp iki-işaretçi motoru kullanır. [Dil Analizörleri](language-analyzers.md)
+Otomatik workspace konfigürasyonu (`buildWorkspaceAutoConfig` + `packages/mcp-server/src/workspace-ignore-discovery.ts`), birincil kökteki `.gitignore`, `.git/info/exclude` ve sınırlı derinlik/bütçeli iç-içe `.gitignore` dosyalarından (derinlik ≤ 6, en fazla 64 dosya, en fazla 4.000 dizin) desteklenen desenleri `extraIgnore` ile birleştirir (sembolik bağlantıları `O_NOFOLLOW` + `(dev, ino)` ile reddeder ve negasyonla çakışabilecek geniş üst dizin desenlerini dışlar). Ayrıca çağıran açıkça `ignore` vermediğinde `buildWorkspaceAutoConfig` kaba `**/bin/**` deseni yerine yalnızca `.NET` çıktı dizinlerini (`**/bin/{Debug,Release,x64,x86,AnyCPU}/**` ve tespit edilen `.csproj`/`.fsproj`/`.vbproj` altındaki `<proje>/bin/**`) dışlar; böylece Node `bin/*.ts|js` ve Rust `src/bin/*.rs` kaynakları indekslenmeye devam eder. Glob eşleştiricisi polinom zamanlı sıfır-RegExp iki-işaretçi motoru (`ignore-matcher.ts`) kullanır. [Dil Analizörleri](language-analyzers.md)
 
 ### 3.2 `inspectProjectRootSafety` — Reddedilen Güvensiz Kökler
 
@@ -148,18 +156,18 @@ Causoryn kaynak analizi sırasında proje dosyalarını salt okunur işler. Kal�
 │   ├── scripts/{causoryn.mjs,plugin-mcp-launcher.mjs,lib/node-version-guard.mjs}
 │   ├── dist/{mcp-server.mjs,bundle-manifest.json,node_modules/better-sqlite3,typescript-lib}
 │   ├── native/{roslyn-worker,python-worker,go-worker,rust-worker}
-│   └── skills/{causoryn,map-system,preflight-change,verify-change}
+│   └── skills/{causoryn,map-system,preflight-change,verify-change,architecture-blueprint}
 ├── workspaces/
 │   └── <slug>-<hash12>/                        # POSIX izin modu: 0o700 (slug + kanonik kök SHA-256 ilk 12 hex)
 │       ├── graph-<client>.sqlite               # storage.dataDbPath + wiki.dataDbPath (--client yoksa graph.sqlite)
-│       └── exports/                            # POSIX izin modu: 0o700 (output.allowedOutputDirs hedefi)
+│       └── exports/                            # POSIX izin modu: 0o700 (output.allowedOutputDirs hedefi; örn. causoryn-architecture-interactive.html)
 └── cache/
     └── rust-worker-target/                     # Rust sidecar derleme önbelleği (CAUSORYN_RUST_TARGET_DIR)
 ```
 
 - **Temel veri dizini önceliği (`resolveBaseDataDir`):** `--data-dir <mutlak-yol>` > `ZCODE_PLUGIN_DATA` > `~/.causoryn`.
 - **`mkdirSync` öncesi ve sonrası güvenlik doğrulaması:** Veri dizinleri oluşturulmadan **önce** tüm önek/ata dizinler taranır; sembolik bağlantılar (`CWE-59`; macOS sistem firmlink'leri `/var`, `/tmp`, `/etc` hariç), dangling symlink'ler ve yetkili `allowRoots` içine düşen yollar `CausorynConfigError` ile reddedilir. Oluşturma sonrasında `realpathSync` ile TOCTOU doğrulaması tekrarlanır.
-- **Geçici `_npx` çalışma zamanı sahnelemesi (`stagePersistentRuntime`):** `npx causoryn@0.2.3 setup` geçici bir `_npx`, `.npx` veya `os.tmpdir()` dizininden çalıştırıldığında paket içeriği `~/.causoryn/.runtime-stage-<pid>-<ts>` altına kopyalanıp atomik `renameSync` (hata anında `.runtime-prev-*` geri alma korumasıyla) ile `~/.causoryn/runtime` dizinine sahnelenir. Böylece npm önbelleği temizlense bile host konfigürasyonlarındaki giriş yolu kırılmaz.
+- **Geçici `_npx` çalışma zamanı sahnelemesi (`stagePersistentRuntime`):** `npx causoryn@latest setup` (veya sabitlenmiş `npx causoryn@0.2.3 setup`) geçici bir `_npx`, `.npx` veya `os.tmpdir()` dizininden çalıştırıldığında paket içeriği `~/.causoryn/.runtime-stage-<pid>-<ts>` altına kopyalanıp atomik `renameSync` (hata anında `.runtime-prev-*` geri alma korumasıyla) ile `~/.causoryn/runtime` dizinine sahnelenir. Böylece npm önbelleği temizlense bile host konfigürasyonlarındaki giriş yolu kırılmaz.
 
 ---
 
@@ -227,8 +235,8 @@ Causoryn kaynak analizi sırasında proje dosyalarını salt okunur işler. Kal�
 | `results.maxSymbols` | `number` (pozitif tam sayı) | `100` | `causoryn_find_symbols` sonuç tavanı. |
 | `results.maxDepth` | `number` (pozitif tam sayı) | `3` | `causoryn_get_symbol_context` komşuluk derinliği tavanı. |
 | `results.maxPaths` | `number` (pozitif tam sayı) | `50` | `causoryn_trace_execution` maksimum iz yolu tavanı. |
-| `autoIndex` | `boolean` | `true` | Yetkili kökte varsa mevcut kalıcı snapshot kullanılır. İlk indeks, CLI etkinse MCP başlatmasından sonraya ertelenir. Çıplak konfigürasyon yolunda indeksleme senkron çalışabilir. `false` ise otomatik indeks işi başlatılmaz. |
-| `output.allowedOutputDirs` | `string[]` | `[]` | `causoryn_export_documentation` için yazma izni olan mevcut dizinler ve alt dizinleri. Boşsa `EXPORT_NOT_ALLOWED` döner. Açık izin listesi `allowRoots`’tan bağımsızdır (`OutputAccessPolicy`). |
+| `autoIndex` | `boolean` | `true` | Yetkili kökte varsa mevcut kalıcı snapshot kullanılır. İlk indeks, CLI etkinse (`deferAutoIndex`) MCP başlatmasından sonraya ertelenir. Çıplak konfigürasyon yolunda indeksleme senkron çalışabilir. `false` ise otomatik indeks işi başlatılmaz. |
+| `output.allowedOutputDirs` | `string[]` | `[]` | `causoryn_export_documentation` için yazma izni olan mevcut dizinler ve alt dizinleri (`view: "interactive"` varsayılan dosya adı `causoryn-architecture-interactive.html`, `view: "architecture"` için `causoryn-architecture.html`). Boşsa `EXPORT_NOT_ALLOWED` döner. Açık izin listesi `allowRoots`’tan bağımsızdır (`OutputAccessPolicy`). [Prompting ve Portallar](prompting-and-architecture-portals.md) |
 | `storage.dataDbPath` | `string` (opsiyonel) | `undefined` (`InMemoryGraphRepository`) | Kalıcı SQLite graph + `symbol_fts` dosya yolu. Mutlak olmalı, üst dizini mevcut olmalı ve hem sözcüksel hem `realpath` olarak tüm `allowRoots` dışında kalmalıdır (`ADR-008`). Tanımlıysa çoklu-süreç yarış kurtarması (`tolerateConcurrentPublishRace`) açılır. |
 | `wiki.dataDbPath` | `string` (opsiyonel) | `undefined` (`PATH_DENIED` / `INDEX_NOT_READY`) | Living Wiki SQLite (`SqliteWikiStore` + `wiki_fts`) dosya yolu. `storage.dataDbPath` ile aynı güvenlik kurallarına tabidir ve aynı SQLite dosyasını paylaşabilir. |
 
@@ -263,6 +271,7 @@ Causoryn kaynak analizi sırasında proje dosyalarını salt okunur işler. Kal�
 ## İlgili Belgeler
 
 - [Dokümantasyon Merkezi](README.md) · [Mimari Özeti](architecture.md)
+- [Prompt ve Mimari Portal Rehberi](prompting-and-architecture-portals.md)
 - [5-Dil Analizörleri ve Sidecar Protokolü](language-analyzers.md) · [MCP Araç Sözleşmeleri](tool-contracts.md)
 - [Host Kurulum Rehberleri: Antigravity](hosts/antigravity.md) · [Claude Code](hosts/claude-code.md) · [Codex](hosts/codex.md) · [ZCode (GLM)](hosts/zcode.md)
 - [Güvenlik Denetimi](security-pass.md) · [Host Uyumluluk Matrisi](compatibility-matrix.md)

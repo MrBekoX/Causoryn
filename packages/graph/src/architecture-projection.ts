@@ -34,30 +34,41 @@ export const ARCHITECTURE_DEFAULT_MAX_MODULES = 32;
 export const ARCHITECTURE_MIN_MODULES = 2;
 export const ARCHITECTURE_MAX_MODULES = 100;
 
-export const ArchitectureProjectionOptionsSchema = z.strictObject({
-  maxModules: z
-    .number()
-    .int()
-    .min(ARCHITECTURE_MIN_MODULES)
-    .max(ARCHITECTURE_MAX_MODULES)
-    .optional(),
-  pathPrefix: z
-    .string()
-    .min(1)
-    .max(260)
-    .refine(
-      (v) =>
-        v.trim().length > 0 &&
-        !v.includes("..") &&
-        !v.includes("\0") &&
-        normalizePosixPath(v).length > 0,
-      {
-        message: "pathPrefix geçerli göreli yol öneki olmalıdır",
-      },
-    )
-    .optional(),
-  includeTests: z.boolean().optional(),
-});
+export const ArchitectureProjectionOptionsSchema = z
+  .strictObject({
+    maxModules: z
+      .number()
+      .int()
+      .min(ARCHITECTURE_MIN_MODULES)
+      .max(ARCHITECTURE_MAX_MODULES)
+      .optional()
+      .describe(
+        `Maximum number of aggregated architecture modules (${ARCHITECTURE_MIN_MODULES}–${ARCHITECTURE_MAX_MODULES}, default ${ARCHITECTURE_DEFAULT_MAX_MODULES}).`,
+      ),
+    pathPrefix: z
+      .string()
+      .min(1)
+      .max(260)
+      .refine(
+        (v) =>
+          v.trim().length > 0 &&
+          !v.includes("..") &&
+          !v.includes("\0") &&
+          normalizePosixPath(v).length > 0,
+        {
+          message: "pathPrefix geçerli göreli yol öneki olmalıdır",
+        },
+      )
+      .optional()
+      .describe("Optional relative POSIX directory prefix to focus the architecture projection on a subsystem (e.g., 'src/api' or 'packages/domain')."),
+    includeTests: z
+      .boolean()
+      .optional()
+      .describe(
+        "Include test files and test modules in the projected architecture graph (default true; set false to exclude test files and test modules).",
+      ),
+  })
+  .describe("Optional deterministic projection settings for 'architecture' and 'interactive' views.");
 
 export type ArchitectureProjectionOptions = z.infer<typeof ArchitectureProjectionOptionsSchema>;
 

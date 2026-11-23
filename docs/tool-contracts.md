@@ -1,7 +1,7 @@
 # Tool Sözleşmeleri — Yayımlanan 29 Araç (TŞ v2.1 §10.2 + §16A.8)
 
 > Kanıt: `packages/mcp-server/src/version.ts` `TOOL_NAMES` (29 araç; `tools/list`
-> TAM OLARAK bu küreyi sunar — boş handler yok, ADR-010) ·
+> TAM OLARAK bu kümeyi sunar — boş handler yok, ADR-010) ·
 > `packages/mcp-server/src/server.ts` (araç kayıtları + input/output schema'lar) ·
 > `packages/mcp-server/src/errors.ts` (sabit hata kodu tablosu) ·
 > `wiki/mcp-tools.md` (katalog) · Doğrulama testi: `tests/release-docs.test.ts`
@@ -71,11 +71,11 @@ sabitler — bkz. `docs/implementation-status.md`).
 | `causoryn_get_evidence` | `nodeId`/`edgeId`/`evidenceId`/`findingId` | Kanıt zinciri: relativePath+startLine/endLine+sourceHash+analyzerId+rationale; `targetId`/`chain` özeti; finding:<sha256> policy'den türetilir | `WORKSPACE_NOT_AUTHORIZED`, `INDEX_NOT_READY`, `INVALID_ARGUMENT`, `LIMIT_EXCEEDED`, `EVIDENCE_NOT_FOUND`, `POLICY_INVALID` |
 | `causoryn_architecture_timeline` | `refs`/`range`, `granularity?` | Git noktalarında deterministik örneklenmiş diff zaman çizelgesi + Faz E ihlal trendi (no-cycles/forbidden nokta başına ayrı; kalite tek sayıya indirgenmez); atlanan noktalar açık listelenir | `WORKSPACE_NOT_AUTHORIZED`, `INDEX_NOT_READY`, `INVALID_ARGUMENT`, `INVALID_REVISION`, `POLICY_INVALID`, `LIMIT_EXCEEDED` |
 
-### Mimari dışa aktarma ayrıntıları (v0.2.2–v0.2.3)
+### Mimari dışa aktarma ayrıntıları
 
-- `architecture`, `json`, `markdown`, `mermaid` ve `html` için MCP varsayılanıdır (`html` varsayılan dosya adı `causoryn-architecture.html`). `interactive` yalnızca `html` ile kullanılır ve `fileName` atlandığında varsayılan olarak `causoryn-architecture-interactive.html` (`EXPORT_INTERACTIVE_HTML_FILE_NAME`, v0.2.3) yazar; böylece sıfır-JS `causoryn-architecture.html` dosyasının üzerine yazılmaz. Eski ham döküm için `view="full"` seçilir. `format="snapshot"`, `view` atlandığında veya `full` seçildiğinde karşılaştırma araçlarının tükettiği kanonik `CompareContentSet` üretir.
-- `options` ve `annotations` yalnızca `architecture` ve `interactive` görünümlerinde kabul edilir. `maxModules` varsayılanı 32, aralığı 2–100'dür. Özet içindeki `moduleIds` aynı projeksiyonun anotasyonları için kullanılabilir.
-- İsteğe bağlı `annotations` çağıran istemciden gelir. Bir host LLM bu alanları hazırlayabilir. Causoryn şemayı, bütçeleri ve gönderilen `moduleId`, `nodeId`, `evidenceId` ve `keyFiles` referanslarını doğrular, ardından metni çıktıya işler. Serbest metindeki yorumlar gönderenin değerlendirmesidir.
+- `architecture`, `json`, `markdown`, `mermaid` ve `html` için MCP varsayılanıdır (`html` varsayılan dosya adı `causoryn-architecture.html`). `interactive` yalnızca `html` ile kullanılır ve `fileName` atlandığında varsayılan olarak `causoryn-architecture-interactive.html` (`EXPORT_INTERACTIVE_HTML_FILE_NAME`) yazar; böylece sıfır-JS `causoryn-architecture.html` dosyasının üzerine yazılmaz. Eski ham döküm için `view="full"` seçilir. `format="snapshot"`, `view` atlandığında veya `full` seçildiğinde karşılaştırma araçlarının tükettiği kanonik `CompareContentSet` üretir.
+- `options` ve `annotations` yalnızca `architecture` ve `interactive` görünümlerinde kabul edilir. `maxModules` varsayılanı 32, aralığı 2–100'dür. Özet içindeki `architectureSummary.moduleIds` aynı projeksiyonun anotasyonları için birebir referans kümesidir.
+- **MCP JSON Schema `.describe()` rehberliği ve doğal-dil tetikleme (`K-026`):** `causoryn_export_documentation` tüm üst düzey girdi alanlarında (`workspaceId`, `format`, `outputDir`, `fileName`, `view`, `options`, `annotations`) ve iç içe şema nesnelerinde (`domains`, `moduleNotes`, `flows`, `guidedTour`, `decisions`, `risks`) açıklayıcı Zod `.describe()` metinleri yayınlar. Araç açıklaması ve `architecture-blueprint` skill'i (İngilizce ve Türkçe doğal-dil istemleriyle tetiklenir) host LLM'e 2 adımlı akışı (`format: "json", view: "architecture"` → `architectureSummary.moduleIds` okuma → `format: "html", view: "interactive"` + doğrulanmış `annotations`) veya salt-yapısal deterministik çıktı için `annotations` atlamayı açıkça tarif eder. Causoryn şemayı, bütçeleri ve gönderilen `moduleId`, `nodeId`, `evidenceId` ile `keyFiles` referanslarını fail-closed doğrular; serbest metin yorumları gönderenin değerlendirmesidir. Bkz. [Prompt ve Mimari Portal Rehberi](prompting-and-architecture-portals.md).
 - Bayt eşitliği aynı snapshot, format, görünüm, etkin seçenekler ve doğrulanmış anotasyonlar için dosya içeriğine uygulanır. `packages/graph/test/architecture-export.test.ts`, aynı grafikte dizi sıraları ters çevrildiğinde dört formatın ve iki HTML görünümünün eşitliğini kapsar.
 
 ## Wiki 7 aracı (TŞ §16A.8; `wiki_build` tek yazma aracıdır)
@@ -90,7 +90,7 @@ sabitler — bkz. `docs/implementation-status.md`).
 | `causoryn_wiki_get_versions` | `pageId?`, `refs?`, sayfalama | Yayımlanmış WikiSnapshot revizyonu `available` (contentHash/linkSetHash/coverage); git alias'ları salt-okunur cat-file ile çözülür (`working-tree` `.git` olmadan da çözülür) | `WORKSPACE_NOT_AUTHORIZED`, `INDEX_NOT_READY`, `WIKI_PAGE_NOT_FOUND`, `INVALID_ARGUMENT`, `INVALID_REVISION` |
 | `causoryn_wiki_diff` | `base`, `target`, `pageId?` | added/removedPages, changedSections, link farkları, coverageDelta ({previous,current,reason?}), unresolvedDifferences, contractChanges (K-013 #7) | `WORKSPACE_NOT_AUTHORIZED`, `INDEX_NOT_READY`, `WIKI_PAGE_NOT_FOUND`, `INVALID_ARGUMENT`, `INVALID_REVISION`, `PATH_DENIED`, `LIMIT_EXCEEDED` |
 
-## Sunucu sürümü, 5-dil yetenek matrisi ve sabit 15 hata kodu (v0.2.3)
+## Sunucu sürümü, 5-dil yetenek matrisi ve sabit 15 hata kodu
 
 ### 1. Sunucu kimliği ve protokol sabitleri (`packages/mcp-server/src/version.ts`)
 
@@ -105,7 +105,7 @@ sabitler — bkz. `docs/implementation-status.md`).
 
 | Dil (`language`) | `analyzerId` | `astParse` | `symbolResolution` | `frameworkLinkers` | Çalışma modeli |
 |---|---|---|---|---|---|
-| `typescript` | `ts-adapter` | `L1` | `L2` | `express+nextjs` | Süreç-içi TypeScript Compiler API (`TypeChecker` + Express/Next.js App Router L3 + BDD `Test`/`TESTS`) |
+| `typescript` | `ts-adapter` | `L1` | `L2` | `express+nextjs` | Süreç-içi TypeScript Compiler API (`TypeChecker`, TS/JS/CJS + kök-hapsedilmiş `tsconfig.json`/`jsconfig.json` + Express/Next.js App Router L3 + BDD `Test`/`TESTS`) |
 | `csharp` | `roslyn-worker` | `L1` | `L2` | `aspnet-core-route-attributes (L3)` | `dotnet exec` Roslyn sidecar (`@causoryn/sidecar-ipc`; ASP.NET Core controller attribute + Minimal API `MapGet`/`MapPost`) |
 | `python` | `python-worker` | `L1` | `L2` | `decorator-route-pattern (L3)` | `python -B` stdlib `ast` sidecar (sıfır dış bağımlılık) |
 | `go` | `go-worker` | `L1` | `heuristic-only (semantik L2 yok)` | `http-router-registration (L3)` | Go stdlib `go/parser` + `go/ast` sidecar (`net/http`, `gin`, `echo`, `chi`) |
@@ -151,13 +151,13 @@ Tüm iş-mantığı ve yetkilendirme hataları protokol hatası olarak değil, `
 ## Tekrar kullanma ilkesi
 
 `causoryn_refresh_index` WikiSnapshot'ı otomatik güncellemez; wiki yenileme
-`causoryn_wiki_build`'in kendisidir. `causoryn_export_documentation` `v0.2.2` ile
-`view: "architecture" | "interactive" | "full"` görünümlerini ve fail-closed
-`annotations` alanını destekler; `view: "wiki"` Living Wiki dilimine ait olduğundan
+`causoryn_wiki_build`'in kendisidir. `causoryn_export_documentation`
+`view: "architecture" | "interactive" | "full"` görünümlerini, `options` ve fail-closed
+`annotations` alanlarını destekler; `view: "wiki"` Living Wiki dilimine ait olduğundan
 açık `INVALID_ARGUMENT` ile reddedilir (ADR-010). Ayrı `wiki_refresh`/`wiki_export`
 aracı AÇILMAZ — `wiki/mcp-tools.md` katalog ilkesiyle aynıdır.
 
-## Sıfır-ayar CLI, dinamik kök bağlama ve `outputSchemaProfile` sözleşmesi (K-021)
+## Sıfır-ayar CLI, dinamik kök bağlama ve `outputSchemaProfile` sözleşmesi
 
 `packages/mcp-server/src/runtime-cli.ts` ve `packages/mcp-server/src/server.ts`, hem deterministik gömülü/test kullanımını hem de sıfır-ayar CLI ve masaüstü IDE eklentilerini aynı güvenlik sınırlarıyla destekler:
 
@@ -175,10 +175,11 @@ aracı AÇILMAZ — `wiki/mcp-tools.md` katalog ilkesiyle aynıdır.
 ## İlgili sayfalar
 
 - [Dokümantasyon İndeksi](README.md) — tüm TR/EN dokümanların giriş sayfası
+- [Prompt ve Mimari Portal Rehberi](prompting-and-architecture-portals.md) — deterministik ve Host-LLM anotasyonlu mimari dışa aktarım kılavuzu
 - [docs/architecture.md](architecture.md) — paket haritası ve bağımlılık sınırları
 - [docs/cli-and-configuration.md](cli-and-configuration.md) — CLI bayrakları, ortam değişkenleri ve `CAUSORYN_CONFIG` şeması
 - [docs/language-analyzers.md](language-analyzers.md) — 5 dil analizörü ve çözümleme dürüstlüğü
-- [docs/wiki-spec.md](wiki-spec.md) — Living Wiki Engine tasarım ve v0.2.2 uygulama sözleşmesi
+- [docs/wiki-spec.md](wiki-spec.md) — Living Wiki Engine tasarım ve uygulama sözleşmesi
 - [docs/implementation-status.md](implementation-status.md) — araç yüzeylerinin faz faz kanıtları
 - [docs/compatibility-matrix.md](compatibility-matrix.md) — host × sonuç matrisi
 - `wiki/mcp-tools.md` — katalog ve yazma izni ilkesi · `packages/mcp-server/src/errors.ts` — kod tablosu
