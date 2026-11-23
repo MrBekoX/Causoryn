@@ -1998,5 +1998,37 @@ describe(
         await tsPair.close();
       }
     });
+
+    it("saf JavaScript (.js/.cjs) AST/sembol düğümleri içeren snapshot L2 coverage.tier raporlar (v0.2.3)", async () => {
+      const jsDir = mkdtempSync(path.join(tmpdir(), "causoryn-mcp-js-tier-"));
+      try {
+        mkdirSync(path.join(jsDir, "src"), { recursive: true });
+        writeFileSync(
+          path.join(jsDir, "src", "service.js"),
+          'export function greet(name) { return "hi " + name; }\n',
+          "utf8",
+        );
+        writeFileSync(
+          path.join(jsDir, "src", "index.js"),
+          'import { greet } from "./service.js";\nexport function run() { return greet("world"); }\n',
+          "utf8",
+        );
+        const jsPair = await connectClient(
+          makeContext({ allowRoots: [jsDir] }),
+        );
+        try {
+          const result = await callTool(jsPair.client, "causoryn_workspace_summary");
+          const envelope = expectEnvelope(result);
+          expect((envelope.coverage as Record<string, unknown>).tier).toBe("L2");
+          expect((envelope.data as Record<string, unknown>).languages).toEqual([
+            { language: "javascript", files: 2 },
+          ]);
+        } finally {
+          await jsPair.close();
+        }
+      } finally {
+        rmSync(jsDir, { recursive: true, force: true });
+      }
+    });
   },
 );

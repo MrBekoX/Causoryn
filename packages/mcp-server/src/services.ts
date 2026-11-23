@@ -137,6 +137,7 @@ export function requireSnapshot(deps: ServiceDeps, workspaceId: string): Snapsho
 
 const L2_LANGUAGES: ReadonlySet<string> = new Set([
   "typescript",
+  "javascript",
   "csharp",
   "python",
 ]);
