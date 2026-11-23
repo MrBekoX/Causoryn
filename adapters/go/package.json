@@ -1,6 +1,6 @@
 {
   "name": "@causoryn/adapter-go",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "private": true,
   "license": "MIT",
   "description": "Go Language Adapter: go/parser + go/ast sidecar worker süreç yönetimi (TŞ v2.1 §7, §23 dil planı; M1-Go).",
@@ -9,7 +9,7 @@
     ".": "./src/index.ts"
   },
   "dependencies": {
-    "@causoryn/domain": "0.2.2",
-    "@causoryn/sidecar-ipc": "0.2.2"
+    "@causoryn/domain": "0.2.3",
+    "@causoryn/sidecar-ipc": "0.2.3"
   }
 }

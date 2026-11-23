@@ -5,7 +5,7 @@
       "args": [
         "-y",
         "--package",
-        "causoryn@0.2.2",
+        "causoryn@0.2.3",
         "causoryn",
         "mcp",
         "--allow-cwd",

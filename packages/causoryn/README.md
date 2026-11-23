@@ -2,14 +2,14 @@
   <img src="https://raw.githubusercontent.com/MrBekoX/Causoryn/main/Causoryn.png" alt="Causoryn — Local, deterministic, LLM-free code intelligence MCP server" width="760" />
 </p>
 
-# Causoryn (`causoryn` v0.2.2 — Pre-1.0 Public Preview)
+# Causoryn (`causoryn` v0.2.3 — Pre-1.0 Public Preview)
 
 **Causoryn** is a **local, LLM-free MCP engine (`ADR-002`)** for codebase and change
 analysis. It builds evidence-backed graphs, serves 29 tools over `stdio`, and ships
 5 canonical agent skills. Source analysis is read-only. Architecture exports can render from the
 graph alone or use optional caller-supplied `annotations` (`K-023`).
 
-> **Release status (`ADR-010`):** `0.2.2` is a **Pre-1.0 Public Preview** (not `1.0.0`).
+> **Release status (`ADR-010`):** `0.2.3` is a **Pre-1.0 Public Preview** (not `1.0.0`).
 > Package architecture note: `causoryn` is a multi-file runtime package (`dist/mcp-server.mjs`
 > + vendored N-API v10 `better-sqlite3` prebuild binaries + `dist/typescript-lib/` +
 > `native/` sidecar workers + 5 canonical `skills/`), not a single-file JS bundle.
@@ -20,15 +20,15 @@ graph alone or use optional caller-supplied `annotations` (`K-023`).
 - **Reproducible exports:** The same snapshot, including metadata, and identical format, view, options, and annotations produce byte-identical artifacts with the same renderer version. Build timestamps, MCP request IDs, job progress, and host-generated annotations can vary. [ADR-002](https://github.com/MrBekoX/Causoryn/blob/main/docs/en/adr/ADR-002-no-llm.md)
 - **Evidence-backed results (`ADR-010`):** Edges report `verified`, `heuristic`, or `unresolved` resolution. Every `verified` edge carries source evidence.
 - **Read-only source analysis (`ADR-008`):** SQLite graph and wiki databases stay outside analyzed roots. Automatic setup also places exports there. Custom export allowlists govern explicit export destinations independently of the analyzed roots.
-- **Offline visual architecture portals (`v0.2.2`):** Zero-JS layered SVG HTML (`view: "architecture"`), interactive pan/zoom/search/Inspector portal (`view: "interactive"`), clean subgraph Mermaid, Architecture Brief Markdown, and fail-closed Host-LLM `annotations` guided by the bundled `architecture-blueprint` skill.
-- **Warm snapshot reads:** The packaged server defers automatic indexing until after MCP initialization. Its SQLite snapshot cache checks `PRAGMA data_version` before reusing a snapshot. Historical medians on a 1,000-file TypeScript fixture were `11.8 ms` for `workspace_summary`, `13.0 ms` for `get_symbol_context`, and `10.7 ms` for `map_system`. [Benchmarks](https://github.com/MrBekoX/Causoryn/blob/main/docs/en/benchmarks.md)
+- **Offline visual architecture portals (`v0.2.2`–`v0.2.3`):** Zero-JS layered SVG HTML (`view: "architecture"`, default `causoryn-architecture.html`), interactive pan/zoom/search/Inspector portal (`view: "interactive"`, default `causoryn-architecture-interactive.html`), clean subgraph Mermaid, Architecture Brief Markdown, and fail-closed Host-LLM `annotations` guided by the bundled `architecture-blueprint` skill.
+- **Universal repository compatibility & warm snapshot reads (`v0.2.1`–`v0.2.3`):** Analyzes `.ts/.tsx/.mts/.cts` and `.js/.jsx/.mjs/.cjs` (ESM + CommonJS) with safe read-only `tsconfig.json`/`jsconfig.json` path-alias resolution, reads root `.gitignore`, `.git/info/exclude`, and nested `.gitignore`, preserves `bin/*.ts|js` and `src/bin/*.rs` while ignoring `.NET` `bin/` outputs, yields during async inventory scans, defers automatic indexing until after MCP initialization, and checks `PRAGMA data_version` before reusing cached SQLite snapshots. Historical medians on a 1,000-file TypeScript fixture were `11.8 ms` for `workspace_summary`, `13.0 ms` for `get_symbol_context`, and `10.7 ms` for `map_system`. [Benchmarks](https://github.com/MrBekoX/Causoryn/blob/main/docs/en/benchmarks.md)
 
 ## Requirements & Component Runtime Matrix
 
 | Component | Runtime Requirement | Compilation | Offline Behavior |
 |---|---|---|---|
 | **Core MCP server & SQLite** (`dist/mcp-server.mjs` + N-API v10 `better-sqlite3` prebuilds) | **Node.js >= 24** | Zero-compile | 100% offline |
-| **TypeScript / JavaScript** (L2 + L3) | In-process TS Compiler API + bundled `dist/typescript-lib/lib*.d.ts` | Zero-compile | 100% offline |
+| **TypeScript / JavaScript** (L2 + L3: `.ts/.tsx/.mts/.cts/.js/.jsx/.mjs/.cjs`, ESM + CJS, `tsconfig`/`jsconfig` paths) | In-process TS Compiler API + bundled `dist/typescript-lib/lib*.d.ts` | Zero-compile | 100% offline |
 | **C# / Roslyn** (L2 + L3) | **.NET 10 runtime** (`dotnet exec`) | Prebuilt deterministic Release Roslyn DLL (zero-compile) | 100% offline |
 | **Python** (L2 + L3) | **Python 3.10+** (`python -B`, stdlib `ast`) | Zero-compile | 100% offline |
 | **Go** (L1/heuristic + L3) | **Go 1.22+** (stdlib `go/parser`) | On-demand `go run` (or `CAUSORYN_GO_WORKER_BIN`) | 100% offline |
@@ -36,7 +36,7 @@ graph alone or use optional caller-supplied `annotations` (`K-023`).
 
 If an optional language sidecar toolchain (`dotnet`, `python`, `go`, `cargo`) is unavailable
 on a machine, Causoryn degrades gracefully and honestly to L0/L1 file-level provenance
-(`npx causoryn@0.2.2 doctor` inspects sidecar readiness).
+(`npx causoryn@0.2.3 doctor` inspects sidecar readiness).
 
 ---
 
@@ -49,40 +49,40 @@ or via **each host's native Plugin Marketplace**.
 
 ```bash
 # Preview planned changes without writing any files
-npx causoryn@0.2.2 setup --all-detected --dry-run
+npx causoryn@0.2.3 setup --all-detected --dry-run
 
 # Configure all detected hosts on your machine (creates .causoryn.backup files and stages a persistent ~/.causoryn/runtime copy)
-npx causoryn@0.2.2 setup --all-detected --yes
+npx causoryn@0.2.3 setup --all-detected --yes
 
 # Or target specific hosts explicitly
-npx causoryn@0.2.2 setup --client antigravity --yes
-npx causoryn@0.2.2 setup --client claude-code --yes
-npx causoryn@0.2.2 setup --client codex --yes
-npx causoryn@0.2.2 setup --client zcode --yes
+npx causoryn@0.2.3 setup --client antigravity --yes
+npx causoryn@0.2.3 setup --client claude-code --yes
+npx causoryn@0.2.3 setup --client codex --yes
+npx causoryn@0.2.3 setup --client zcode --yes
 
 # Verify installation health (read-only)
-npx causoryn@0.2.2 doctor
+npx causoryn@0.2.3 doctor
 
 # Cleanly remove Causoryn from a host (cleans up ~/.causoryn/runtime when no remaining host points to it)
-npx causoryn@0.2.2 setup --client claude-code --uninstall --yes
+npx causoryn@0.2.3 setup --client claude-code --uninstall --yes
 ```
 
 ### Option B: Native Host Plugin Marketplaces
 
 1. **Antigravity** (`agy` / Antigravity IDE):
-   - Add the repository (`https://github.com/MrBekoX/Causoryn`) or extracted `causoryn` plugin folder containing `plugin.json` and `mcp_config.json`, or run `npx causoryn@0.2.2 setup --client antigravity --yes` (writes `~/.gemini/config/mcp_config.json`, updates `~/.gemini/antigravity/mcp_config.json` when present, and installs the 5 skills into `~/.gemini/config/skills/`).
+   - Add the repository (`https://github.com/MrBekoX/Causoryn`) or extracted `causoryn` plugin folder containing `plugin.json` and `mcp_config.json`, or run `npx causoryn@0.2.3 setup --client antigravity --yes` (writes `~/.gemini/config/mcp_config.json`, updates `~/.gemini/antigravity/mcp_config.json` when present, and installs the 5 skills into `~/.gemini/config/skills/`).
 2. **Claude Code**:
    - In Claude Code, register the GitHub marketplace and install the plugin:
      ```text
      /plugin marketplace add MrBekoX/Causoryn
      /plugin install causoryn@causoryn
      ```
-   - Or run `npx causoryn@0.2.2 setup --client claude-code --yes` (`~/.claude.json` + `~/.claude/skills/`).
+   - Or run `npx causoryn@0.2.3 setup --client claude-code --yes` (`~/.claude.json` + `~/.claude/skills/`).
 3. **Codex** (Codex CLI / Desktop):
-   - Add the repository marketplace (`.agents/plugins/marketplace.json` + `.codex-plugin/plugin.json`) via Codex plugin management, or run `npx causoryn@0.2.2 setup --client codex --yes` (`$CODEX_HOME/config.toml` `[mcp_servers.causoryn]` with `startup_timeout_sec = 30` + `~/.agents/skills/`).
+   - Add the repository marketplace (`.agents/plugins/marketplace.json` + `.codex-plugin/plugin.json`) via Codex plugin management, or run `npx causoryn@0.2.3 setup --client codex --yes` (`$CODEX_HOME/config.toml` `[mcp_servers.causoryn]` with `startup_timeout_sec = 30` + `~/.agents/skills/`).
 4. **ZCode (GLM)**:
    - Open **Plugin Marketplace -> New / Discover**, add `https://github.com/MrBekoX/Causoryn` (uses root `marketplace.json` and `.zcode-plugin/plugin.json`), and install `causoryn`.
-   - Or run `npx causoryn@0.2.2 setup --client zcode --yes` (writes `~/.zcode/cli/config.json` `mcp.servers.causoryn` while preserving any existing `~/.agents/mcp.json` fallback servers, plus `~/.zcode/skills/`).
+   - Or run `npx causoryn@0.2.3 setup --client zcode --yes` (writes `~/.zcode/cli/config.json` `mcp.servers.causoryn` while preserving any existing `~/.agents/mcp.json` fallback servers, plus `~/.zcode/skills/`).
 
 ---
 
@@ -149,7 +149,7 @@ Active envelope error codes exported in `CAUSORYN_TOOL_ERROR_CODES` (15 codes):
 - `UNSUPPORTED_LANGUAGE`
 - `INTERNAL_ERROR`
 
-Reserved specification base identifiers not emitted as envelope errors in v0.2.2 (6 codes; 21 total catalog + extension identifiers):
+Reserved specification base identifiers not emitted as envelope errors in v0.2.3 (6 codes; 21 total catalog + extension identifiers):
 - `UNRESOLVED_FLOW`
 - `STALE_PREFLIGHT`
 - `CANCELLED`

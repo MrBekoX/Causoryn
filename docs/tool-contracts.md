@@ -48,7 +48,7 @@ sabitler — bkz. `docs/implementation-status.md`).
 
 | Araç | Girdi (ana alanlar) | Çıktı (data özeti) | Tipik hata kodları |
 |---|---|---|---|
-| `causoryn_get_capabilities` | `workspace?` | Adapter düzeyleri L0–L4 (5 dil; C# `frameworkLinkers: "aspnet-core-route-attributes (L3)"`), sunucu kimliği (`SERVER_VERSION = "0.2.2"`, `SCHEMA_VERSION = "2.0"`), sunucu limitleri, protokol revizyonu, yayımlanan araç listesi; snapshot gerektirmez | `WORKSPACE_NOT_AUTHORIZED` |
+| `causoryn_get_capabilities` | `workspace?` | Adapter düzeyleri L0–L4 (5 dil; C# `frameworkLinkers: "aspnet-core-route-attributes (L3)"`), sunucu kimliği (`SERVER_VERSION = "0.2.3"`, `SCHEMA_VERSION = "2.0"`), sunucu limitleri, protokol revizyonu, yayımlanan araç listesi; snapshot gerektirmez | `WORKSPACE_NOT_AUTHORIZED` |
 | `causoryn_workspace_summary` | `workspaceId?` | Proje/framework/entrypoint/coverage özeti; sayılar yayınlanmış snapshot'tan türetilir; boş workspace `partial` | `WORKSPACE_NOT_AUTHORIZED`, `INDEX_NOT_READY`, `INVALID_ARGUMENT`, `LIMIT_EXCEEDED` |
 | `causoryn_index_status` | `jobId?` | Son (veya verilen) işin progress/snapshot/stale/tanıları. İşin tanıları ve uyarıları ayrı ayrı 50 kayıtla sınırlandırılır, gerektiğinde kısaltma özeti uyarılara eklenir. İş yoksa `job` ve `jobId` null döner, yayımlanmış snapshot yoksa yönlendirici uyarı eklenir | `WORKSPACE_NOT_AUTHORIZED`, `INVALID_ARGUMENT`, `LIMIT_EXCEEDED` |
 | `causoryn_refresh_index` | `mode` (`full` \| `incremental` — içerik karması karşılaştırmalı yenileme; B7 per-file parse reuse ve watcher MCP yüzeyi açık), `scope?` (açık ret) | Anında `jobId`; iş arka planda koşar; yalnızca izinli graph deposuna (`InMemoryGraphRepository` veya `storage.dataDbPath` SQLite) yazar | `WORKSPACE_NOT_AUTHORIZED`, `INVALID_ARGUMENT`, `LIMIT_EXCEEDED`, `PATH_DENIED` |
@@ -71,9 +71,9 @@ sabitler — bkz. `docs/implementation-status.md`).
 | `causoryn_get_evidence` | `nodeId`/`edgeId`/`evidenceId`/`findingId` | Kanıt zinciri: relativePath+startLine/endLine+sourceHash+analyzerId+rationale; `targetId`/`chain` özeti; finding:<sha256> policy'den türetilir | `WORKSPACE_NOT_AUTHORIZED`, `INDEX_NOT_READY`, `INVALID_ARGUMENT`, `LIMIT_EXCEEDED`, `EVIDENCE_NOT_FOUND`, `POLICY_INVALID` |
 | `causoryn_architecture_timeline` | `refs`/`range`, `granularity?` | Git noktalarında deterministik örneklenmiş diff zaman çizelgesi + Faz E ihlal trendi (no-cycles/forbidden nokta başına ayrı; kalite tek sayıya indirgenmez); atlanan noktalar açık listelenir | `WORKSPACE_NOT_AUTHORIZED`, `INDEX_NOT_READY`, `INVALID_ARGUMENT`, `INVALID_REVISION`, `POLICY_INVALID`, `LIMIT_EXCEEDED` |
 
-### Mimari dışa aktarma ayrıntıları (v0.2.2)
+### Mimari dışa aktarma ayrıntıları (v0.2.2–v0.2.3)
 
-- `architecture`, `json`, `markdown`, `mermaid` ve `html` için MCP varsayılanıdır. `interactive` yalnızca `html` ile kullanılır. Eski ham döküm için `view="full"` seçilir. `format="snapshot"`, `view` atlandığında veya `full` seçildiğinde karşılaştırma araçlarının tükettiği kanonik `CompareContentSet` üretir.
+- `architecture`, `json`, `markdown`, `mermaid` ve `html` için MCP varsayılanıdır (`html` varsayılan dosya adı `causoryn-architecture.html`). `interactive` yalnızca `html` ile kullanılır ve `fileName` atlandığında varsayılan olarak `causoryn-architecture-interactive.html` (`EXPORT_INTERACTIVE_HTML_FILE_NAME`, v0.2.3) yazar; böylece sıfır-JS `causoryn-architecture.html` dosyasının üzerine yazılmaz. Eski ham döküm için `view="full"` seçilir. `format="snapshot"`, `view` atlandığında veya `full` seçildiğinde karşılaştırma araçlarının tükettiği kanonik `CompareContentSet` üretir.
 - `options` ve `annotations` yalnızca `architecture` ve `interactive` görünümlerinde kabul edilir. `maxModules` varsayılanı 32, aralığı 2–100'dür. Özet içindeki `moduleIds` aynı projeksiyonun anotasyonları için kullanılabilir.
 - İsteğe bağlı `annotations` çağıran istemciden gelir. Bir host LLM bu alanları hazırlayabilir. Causoryn şemayı, bütçeleri ve gönderilen `moduleId`, `nodeId`, `evidenceId` ve `keyFiles` referanslarını doğrular, ardından metni çıktıya işler. Serbest metindeki yorumlar gönderenin değerlendirmesidir.
 - Bayt eşitliği aynı snapshot, format, görünüm, etkin seçenekler ve doğrulanmış anotasyonlar için dosya içeriğine uygulanır. `packages/graph/test/architecture-export.test.ts`, aynı grafikte dizi sıraları ters çevrildiğinde dört formatın ve iki HTML görünümünün eşitliğini kapsar.
@@ -90,12 +90,12 @@ sabitler — bkz. `docs/implementation-status.md`).
 | `causoryn_wiki_get_versions` | `pageId?`, `refs?`, sayfalama | Yayımlanmış WikiSnapshot revizyonu `available` (contentHash/linkSetHash/coverage); git alias'ları salt-okunur cat-file ile çözülür (`working-tree` `.git` olmadan da çözülür) | `WORKSPACE_NOT_AUTHORIZED`, `INDEX_NOT_READY`, `WIKI_PAGE_NOT_FOUND`, `INVALID_ARGUMENT`, `INVALID_REVISION` |
 | `causoryn_wiki_diff` | `base`, `target`, `pageId?` | added/removedPages, changedSections, link farkları, coverageDelta ({previous,current,reason?}), unresolvedDifferences, contractChanges (K-013 #7) | `WORKSPACE_NOT_AUTHORIZED`, `INDEX_NOT_READY`, `WIKI_PAGE_NOT_FOUND`, `INVALID_ARGUMENT`, `INVALID_REVISION`, `PATH_DENIED`, `LIMIT_EXCEEDED` |
 
-## Sunucu sürümü, 5-dil yetenek matrisi ve sabit 15 hata kodu (v0.2.2)
+## Sunucu sürümü, 5-dil yetenek matrisi ve sabit 15 hata kodu (v0.2.3)
 
 ### 1. Sunucu kimliği ve protokol sabitleri (`packages/mcp-server/src/version.ts`)
 
 - `SERVER_NAME = "causoryn"` — MCP `initialize` el sıkışmasındaki `serverInfo.name`.
-- `SERVER_VERSION = "0.2.2"` — Pre-1.0 Public Preview sürümü (K-022; kök `package.json`, `packages/causoryn/package.json` ve `server.json` ile kilitlidir; ADR-010 gereği açık 1.0.0 kapıları kapanmadan `1.0.0` ilan edilmez).
+- `SERVER_VERSION = "0.2.3"` — Pre-1.0 Public Preview sürümü (K-022 / K-024; kök `package.json`, `packages/causoryn/package.json` ve `server.json` ile kilitlidir; ADR-010 gereği açık 1.0.0 kapıları kapanmadan `1.0.0` ilan edilmez).
 - `SCHEMA_VERSION = "2.0"` — 29 aracın tamamında `envelope.schemaVersion` alanı.
 - `protocol.revision` — `@modelcontextprotocol/sdk` üzerinden `LATEST_PROTOCOL_VERSION`.
 

@@ -7,7 +7,7 @@
   },
   "metadata": {
     "description": "Official Causoryn plugin marketplace for Claude Code: local, deterministic, LLM-free codebase and change intelligence MCP server.",
-    "version": "0.2.2"
+    "version": "0.2.3"
   },
   "plugins": [
     {
@@ -15,10 +15,10 @@
       "source": {
         "source": "npm",
         "package": "causoryn",
-        "version": "0.2.2"
+        "version": "0.2.3"
       },
       "description": "Deterministic, local, LLM-free codebase and change intelligence via MCP: read-only workspace graphs, architecture maps, preflight analysis, post-change verification, and living wiki.",
-      "version": "0.2.2",
+      "version": "0.2.3",
       "author": {
         "name": "Causoryn Contributors",
         "url": "https://github.com/MrBekoX/Causoryn"

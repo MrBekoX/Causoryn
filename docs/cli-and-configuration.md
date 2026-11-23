@@ -4,7 +4,7 @@
 >
 > **Kanıt:** `packages/causoryn/src/{cli.ts,setup.ts,doctor.ts,runtime-stage.ts,types.ts}`, `packages/causoryn/scripts/{causoryn.mjs,plugin-mcp-launcher.mjs,lib/node-version-guard.mjs,verify-package-ready.mjs}`, `packages/mcp-server/src/{cli-stdio.ts,stdio.ts,runtime-cli.ts,config.ts,context.ts}`, `packages/workspace/src/policy-config.ts` (TŞ v2.1 §9, §10.1, §17, §20 · `ADR-008` · `K-021` · `K-022`).
 
-Bu kılavuz; `causoryn` (`v0.2.2` — Pre-1.0 Public Preview) komut satırı arayüzünü, ön-yükleme Node.js sürüm korumasını, plugin pazaryeri başlatıcısını, sıfır-ayar (`zero-config`) çalışma alanı güvenlik modelini, kaynak ağacı dışı (`out-of-tree`) veri dizini düzenini ve `CAUSORYN_CONFIG` şemasını kaynak kodla birebir eşleşecek şekilde belgeler.
+Bu kılavuz; `causoryn` (`v0.2.3` — Pre-1.0 Public Preview) komut satırı arayüzünü, ön-yükleme Node.js sürüm korumasını, plugin pazaryeri başlatıcısını, sıfır-ayar (`zero-config`) çalışma alanı güvenlik modelini, kaynak ağacı dışı (`out-of-tree`) veri dizini düzenini ve `CAUSORYN_CONFIG` şemasını kaynak kodla birebir eşleşecek şekilde belgeler.
 
 ---
 
@@ -80,7 +80,7 @@ Denetlenen dört katman:
 
 ### 1.4 `causoryn --version` ve `causoryn --help`
 
-- `causoryn --version` (`-v`, `version`): Paket sürümünü (`0.2.2`) `stdout`'a yazar ve `0` ile çıkar.
+- `causoryn --version` (`-v`, `version`): Paket sürümünü (`0.2.3`) `stdout`'a yazar ve `0` ile çıkar.
 - `causoryn --help` (`-h`, `help` veya argümansız `causoryn`): Yardım metnini `stdout`'a yazar ve `0` ile çıkar.
 
 ---
@@ -112,7 +112,7 @@ Native plugin pazaryerleri (`.claude-plugin/plugin.json`, `.zcode-plugin/plugin.
 
 CLI etkinleştirildiğinde `autoIndex` açık ve kök yetkiliyse ilk snapshot’ın yüklenmesi veya ilk tam indeksin başlatılması MCP `initialize` sonrasına ertelenir. `causoryn_index_status` ilk işi tetikleyebilir ve durumu raporlar. Snapshot gerektiren ilk araç çağrıları arka plan işini 15 saniyeye kadar bekleyebilir. `initialize` yanıtı indeksin hazır olduğu anlamına gelmez. Başlatma yolunu `packages/mcp-server/src/{cli-stdio.ts,context.ts}` tanımlar.
 
-Otomatik workspace konfigürasyonu, birincil kökteki `.gitignore` dosyasından desteklenen desenleri `extraIgnore` ile birleştirir. Okuma en çok 256 KiB ve 500 desene izin verir, sembolik bağlantıları atlar ve bir negasyonla çakışabilecek geniş üst dizin desenlerini içeri almaz. Eşleştirici Git ignore sözdiziminin bir alt kümesini destekler. [Dil Analizörleri](language-analyzers.md)
+Otomatik workspace konfigürasyonu (`packages/mcp-server/src/workspace-ignore-discovery.ts`, `v0.2.3`), birincil kökteki `.gitignore`, `.git/info/exclude` ve sınırlı derinlik/bütçeli iç-içe `.gitignore` dosyalarından desteklenen desenleri `extraIgnore` ile birleştirir (sembolik bağlantıları `O_NOFOLLOW` + `(dev, ino)` ile reddeder ve negasyonla çakışabilecek geniş üst dizin desenlerini dışlar). Ayrıca çağıran açıkça `ignore` vermediğinde kaba `**/bin/**` deseni yerine yalnızca `.NET` çıktı dizinleri (`**/bin/{Debug,Release,x64,x86,AnyCPU}/**` ve tespit edilen `.csproj`/`.fsproj`/`.vbproj` altındaki `<proje>/bin/**`) dışlanır; böylece `bin/*.ts|js` ve Rust `src/bin/*.rs` kaynakları korunur. Glob eşleştiricisi polinom zamanlı sıfır-RegExp iki-işaretçi motoru kullanır. [Dil Analizörleri](language-analyzers.md)
 
 ### 3.2 `inspectProjectRootSafety` — Reddedilen Güvensiz Kökler
 
@@ -159,7 +159,7 @@ Causoryn kaynak analizi sırasında proje dosyalarını salt okunur işler. Kal�
 
 - **Temel veri dizini önceliği (`resolveBaseDataDir`):** `--data-dir <mutlak-yol>` > `ZCODE_PLUGIN_DATA` > `~/.causoryn`.
 - **`mkdirSync` öncesi ve sonrası güvenlik doğrulaması:** Veri dizinleri oluşturulmadan **önce** tüm önek/ata dizinler taranır; sembolik bağlantılar (`CWE-59`; macOS sistem firmlink'leri `/var`, `/tmp`, `/etc` hariç), dangling symlink'ler ve yetkili `allowRoots` içine düşen yollar `CausorynConfigError` ile reddedilir. Oluşturma sonrasında `realpathSync` ile TOCTOU doğrulaması tekrarlanır.
-- **Geçici `_npx` çalışma zamanı sahnelemesi (`stagePersistentRuntime`):** `npx causoryn@0.2.2 setup` geçici bir `_npx`, `.npx` veya `os.tmpdir()` dizininden çalıştırıldığında paket içeriği `~/.causoryn/.runtime-stage-<pid>-<ts>` altına kopyalanıp atomik `renameSync` (hata anında `.runtime-prev-*` geri alma korumasıyla) ile `~/.causoryn/runtime` dizinine sahnelenir. Böylece npm önbelleği temizlense bile host konfigürasyonlarındaki giriş yolu kırılmaz.
+- **Geçici `_npx` çalışma zamanı sahnelemesi (`stagePersistentRuntime`):** `npx causoryn@0.2.3 setup` geçici bir `_npx`, `.npx` veya `os.tmpdir()` dizininden çalıştırıldığında paket içeriği `~/.causoryn/.runtime-stage-<pid>-<ts>` altına kopyalanıp atomik `renameSync` (hata anında `.runtime-prev-*` geri alma korumasıyla) ile `~/.causoryn/runtime` dizinine sahnelenir. Böylece npm önbelleği temizlense bile host konfigürasyonlarındaki giriş yolu kırılmaz.
 
 ---
 
@@ -216,9 +216,9 @@ Causoryn kaynak analizi sırasında proje dosyalarını salt okunur işler. Kal�
 |---|---|---|---|
 | `workspaceId` | `string` (`min(1)`) | `"default"` (`--auto-data-dir` ile `<slug>`) | Sunucunun tek yetkili çalışma alanı kimliği. |
 | `allowRoots` | `string[]` | `[]` | Mutlak dizin yolları (`\0` içeremez). Boş liste = tüm workspace araçları `WORKSPACE_NOT_AUTHORIZED` döner. Aktif kök `allowRoots[0]`'dır. |
-| `ignore` | `string[]` | 7 standart desen (`DEFAULT_IGNORE_PATTERNS`) | `**/.git/**`, `**/node_modules/**`, `**/bin/**`, `**/obj/**`, `**/dist/**`, `**/.env*`, `**/*.pem`. |
+| `ignore` | `string[]` | 38 standart desen (`DEFAULT_IGNORE_PATTERNS`, 7 TŞ §20 deseni dahil) | `**/.git/**`, `**/node_modules/**`, `**/bin/**`, `**/obj/**`, `**/dist/**`, `**/.env*`, `**/*.pem` + ekosistem derleme/sanal-ortam/önbellek dizinleri (`vendor`, `Pods`, `.next`, `.venv`, `target`, `.gradle`, `.vite`, `*.min.js` vb.). Otomatik yapılandırma açık `ignore` verilmediğinde akıllı `bin/` ayrımı uygular. |
 | `extraIgnore` | `string[]` | `[]` | `ignore` listesini ezmeden üzerine eklenen ek dışlama glob desenleri. |
-| `binaryExtensions` | `string[]` | 45 ikili uzantı (`DEFAULT_BINARY_EXTENSIONS`) | `.png`, `.pdf`, `.zip`, `.exe`, `.dll`, `.so`, `.dylib`, `.pyc`, `.wasm`, `.sqlite`, `.db` vb. küçük harfe normalize edilir. |
+| `binaryExtensions` | `string[]` | 68 ikili/ML/sourcemap uzantısı (`DEFAULT_BINARY_EXTENSIONS`) | `.png`, `.pdf`, `.zip`, `.exe`, `.dll`, `.so`, `.dylib`, `.pyc`, `.wasm`, `.sqlite`, `.db`, `.map`, `.whl`, `.parquet`, `.onnx`, `.pt`, `.safetensors`, `.gguf` vb. küçük harfe normalize edilir. |
 | `extensionFilterMode` | `"blacklist" \| "whitelist"` | `"blacklist"` | `"blacklist"` modunda `binaryExtensions` reddedilir; `"whitelist"` modunda yalnızca `allowedExtensions` kabul edilir. |
 | `allowedExtensions` | `string[]` | `[]` | `"whitelist"` modunda izinli uzantılar (`^\.(?:[A-Za-z0-9]+\.)*[A-Za-z0-9]+$`). |
 | `maxFileBytes` | `number` (pozitif tam sayı) | `2_000_000` (2 MB) | Tek kaynak dosyası bayt tavanı; aşım durumunda `LIMIT_EXCEEDED` döner. |

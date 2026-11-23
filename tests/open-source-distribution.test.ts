@@ -478,12 +478,12 @@ describe("1. Canonical skills/ (YAML frontmatter + ADR-010 tool honesty)", () =>
   });
 });
 
-describe("2. Repo-root & packages/causoryn 4-host manifests (0.2.2 parity + zero credentials)", () => {
+describe("2. Repo-root & packages/causoryn 4-host manifests (0.2.3 parity + zero credentials)", () => {
   it("validates ZCode, Claude Code, Codex, Antigravity, and MCP Registry root manifests", () => {
-    expect(SERVER_VERSION).toBe("0.2.2");
+    expect(SERVER_VERSION).toBe("0.2.3");
 
     const pkgJson = readJsonObject(path.join(PKG_DIR, "package.json"));
-    expect(pkgJson["version"]).toBe("0.2.2");
+    expect(pkgJson["version"]).toBe("0.2.3");
 
     const zcodeMkt = readJsonObject(path.join(REPO_ROOT, "marketplace.json"));
     expect(zcodeMkt["name"]).toBe("causoryn");
@@ -496,7 +496,7 @@ describe("2. Repo-root & packages/causoryn 4-host manifests (0.2.2 parity + zero
     expect(zcodePlugins[0]?.["source"]).toEqual({
       source: "npm",
       package: "causoryn",
-      version: "0.2.2",
+      version: "0.2.3",
     });
 
     const claudeMkt = readJsonObject(
@@ -509,7 +509,7 @@ describe("2. Repo-root & packages/causoryn 4-host manifests (0.2.2 parity + zero
     expect(claudePlugins[0]?.["source"]).toEqual({
       source: "npm",
       package: "causoryn",
-      version: "0.2.2",
+      version: "0.2.3",
     });
 
     const codexMkt = readJsonObject(
@@ -520,7 +520,7 @@ describe("2. Repo-root & packages/causoryn 4-host manifests (0.2.2 parity + zero
     expect(codexPlugins[0]?.["source"]).toEqual({
       source: "npm",
       package: "causoryn",
-      version: "0.2.2",
+      version: "0.2.3",
     });
     expect(codexPlugins[0]?.["policy"]).toEqual({
       installation: "AVAILABLE",
@@ -541,7 +541,7 @@ describe("2. Repo-root & packages/causoryn 4-host manifests (0.2.2 parity + zero
     expect(agyServers["causoryn"]?.["command"]).toBe("npx");
     expect(agyServers["causoryn"]?.["args"]).toEqual([
       "-y",
-      "causoryn@0.2.2",
+      "causoryn@0.2.3",
       "mcp",
       "--allow-cwd",
       "--auto-data-dir",
@@ -552,16 +552,16 @@ describe("2. Repo-root & packages/causoryn 4-host manifests (0.2.2 parity + zero
     const rootMcp = readJsonObject(path.join(REPO_ROOT, "mcp.json"));
     const portableServers = rootMcp["mcpServers"] as Record<string, Record<string, unknown>>;
     expect(portableServers["causoryn"]?.["command"]).toBe("npx");
-    expect(portableServers["causoryn"]?.["args"]).toContain("causoryn@0.2.2");
+    expect(portableServers["causoryn"]?.["args"]).toContain("causoryn@0.2.3");
 
     const serverJson = readJsonObject(path.join(REPO_ROOT, "server.json"));
     expect(serverJson["name"]).toBe("io.github.mrbekox/causoryn");
     expect(pkgJson["mcpName"]).toBe(serverJson["name"]);
-    expect(serverJson["version"]).toBe("0.2.2");
+    expect(serverJson["version"]).toBe("0.2.3");
     expect(serverJson["websiteUrl"]).toBe("https://github.com/MrBekoX/Causoryn");
     const serverPackages = serverJson["packages"] as Array<Record<string, unknown>>;
     expect(serverPackages).toHaveLength(1);
-    expect(serverPackages[0]?.["version"]).toBe("0.2.2");
+    expect(serverPackages[0]?.["version"]).toBe("0.2.3");
     expect(serverPackages[0]?.["registryBaseUrl"]).toBe("https://registry.npmjs.org");
     const pkgArgs = serverPackages[0]?.["packageArguments"] as Array<Record<string, unknown>>;
     expect(pkgArgs).toEqual([
@@ -573,7 +573,7 @@ describe("2. Repo-root & packages/causoryn 4-host manifests (0.2.2 parity + zero
 
   it("validates all 6 package-internal manifests in packages/causoryn/", () => {
     const zcodePlugin = readJsonObject(path.join(PKG_DIR, ".zcode-plugin", "plugin.json"));
-    expect(zcodePlugin["version"]).toBe("0.2.2");
+    expect(zcodePlugin["version"]).toBe("0.2.3");
     expect(zcodePlugin["skills"]).toBe("skills");
     const zcodeServers = zcodePlugin["mcpServers"] as Record<string, Record<string, unknown>>;
     expect(zcodeServers["causoryn"]?.["command"]).toBe("node");
@@ -581,7 +581,7 @@ describe("2. Repo-root & packages/causoryn 4-host manifests (0.2.2 parity + zero
     expect(zcodeServers["causoryn"]?.["args"]).toEqual([
       `${ZCODE_PLUGIN_ROOT_TOKEN}/scripts/plugin-mcp-launcher.mjs`,
       "--expected-version",
-      "0.2.2",
+      "0.2.3",
       "--allow-cwd",
       "--auto-data-dir",
       "--client",
@@ -589,13 +589,13 @@ describe("2. Repo-root & packages/causoryn 4-host manifests (0.2.2 parity + zero
     ]);
 
     const claudePlugin = readJsonObject(path.join(PKG_DIR, ".claude-plugin", "plugin.json"));
-    expect(claudePlugin["version"]).toBe("0.2.2");
+    expect(claudePlugin["version"]).toBe("0.2.3");
     const claudeServers = claudePlugin["mcpServers"] as Record<string, Record<string, unknown>>;
     expect(claudeServers["causoryn"]?.["command"]).toBe("node");
     expect(claudeServers["causoryn"]?.["args"]).toEqual([
       `${CLAUDE_PLUGIN_ROOT_TOKEN}/scripts/plugin-mcp-launcher.mjs`,
       "--expected-version",
-      "0.2.2",
+      "0.2.3",
       "--allow-cwd",
       "--auto-data-dir",
       "--client",
@@ -603,7 +603,7 @@ describe("2. Repo-root & packages/causoryn 4-host manifests (0.2.2 parity + zero
     ]);
 
     const codexPlugin = readJsonObject(path.join(PKG_DIR, ".codex-plugin", "plugin.json"));
-    expect(codexPlugin["version"]).toBe("0.2.2");
+    expect(codexPlugin["version"]).toBe("0.2.3");
     expect(codexPlugin["mcpServers"]).toBe("./.codex-plugin/mcp.json");
     expect(codexPlugin["skills"]).toBe("./skills");
 
@@ -614,7 +614,7 @@ describe("2. Repo-root & packages/causoryn 4-host manifests (0.2.2 parity + zero
     expect(codexServers["causoryn"]?.["args"]).toEqual([
       "-y",
       "--package",
-      "causoryn@0.2.2",
+      "causoryn@0.2.3",
       "causoryn",
       "mcp",
       "--allow-cwd",
@@ -628,7 +628,7 @@ describe("2. Repo-root & packages/causoryn 4-host manifests (0.2.2 parity + zero
     for (const key of Object.keys(pkgAgyPlugin)) {
       expect(ALLOWED_ANTIGRAVITY_PLUGIN_KEYS.has(key)).toBe(true);
     }
-    expect(pkgAgyPlugin["version"]).toBe("0.2.2");
+    expect(pkgAgyPlugin["version"]).toBe("0.2.3");
 
     const pkgAgyMcp = readJsonObject(path.join(PKG_DIR, "mcp_config.json"));
     const pkgAgyServers = pkgAgyMcp["mcpServers"] as Record<string, Record<string, unknown>>;
@@ -636,7 +636,7 @@ describe("2. Repo-root & packages/causoryn 4-host manifests (0.2.2 parity + zero
     expect(pkgAgyServers["causoryn"]?.["args"]).toEqual([
       "scripts/plugin-mcp-launcher.mjs",
       "--expected-version",
-      "0.2.2",
+      "0.2.3",
       "--allow-cwd",
       "--auto-data-dir",
       "--client",
@@ -703,7 +703,7 @@ describe("4. build-package.mjs + isolated npm pack end-to-end verification", () 
     };
 
     writeDrifted("package.json", { name: "causoryn", version: "0.9.9" });
-    expect(() => mod.verifyManifestVersionParity(REPO_ROOT, fakePkgDir)).toThrow(/0\.2\.2/);
+    expect(() => mod.verifyManifestVersionParity(REPO_ROOT, fakePkgDir)).toThrow(/0\.2\.3/);
   });
 
   it("verifies every file in bundle-manifest.json via SHA-256 and recovers from torn reads before failing closed", async () => {
