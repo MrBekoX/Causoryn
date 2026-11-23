@@ -42,8 +42,9 @@ jobs:
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: "24"
-          # Hermetic SLSA build: intentionally omit cache (prevents Actions cache poisoning)
-          # and omit registry-url (no static .npmrc token placeholder).
+          # Hermetic SLSA build: explicitly disable package-manager-cache (defaults to true in v7;
+          # prevents Actions cache poisoning) and omit registry-url (no static .npmrc token).
+          package-manager-cache: false
 
       - name: Setup .NET
         uses: actions/setup-dotnet@0f4a354dd5547a28c70b7853dbd95d5b67886e73 # v6.1.0
@@ -62,7 +63,8 @@ jobs:
           cache: false
 
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # pinned-commit
+        # Pinned dtolnay/rust-toolchain (stable branch commit; no upstream semver tag)
+        uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca
 
       - name: Verify release tag, main ancestry, and package version (fail-closed)
         env:
@@ -279,8 +281,9 @@ jobs:
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: "24"
-          # Intentionally omit cache and registry-url so actions/setup-node does not inject
-          # a static _authToken placeholder into .npmrc that conflicts with tokenless npm OIDC.
+          # Explicitly disable package-manager-cache (defaults to true in v7) and omit registry-url
+          # so actions/setup-node does not inject a static _authToken placeholder into .npmrc.
+          package-manager-cache: false
 
       - name: Attest build provenance
         uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3.0.0

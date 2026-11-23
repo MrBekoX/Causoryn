@@ -215,8 +215,8 @@ describe("Tüm GitHub Actions iş akışları — ortak tedarik zinciri güvenli
         `${label} concurrency.cancel-in-progress tanımlamalı`,
       ).toBeDefined();
 
-      // Kayan major tag (# v7, # v4) veya hareketli dal (# stable) yorumları zizmor ref-version-mismatch
-      // bulgusu üretmemesi için kullanılmaz:
+      // Kayan major tag (# v7, # v4), hareketli dal (# stable) veya bilinmeyen ref (# pinned-commit)
+      // yorumları zizmor ref-version-mismatch bulgusu üretmemesi için kullanılmaz:
       for (const line of raw.split(/\r?\n/)) {
         if (!/^\s*-?\s*uses:\s*/.test(line)) continue;
         expect(line, `${label} kayan major tag yorumu kullanmamalı: ${line.trim()}`).not.toMatch(
@@ -224,6 +224,9 @@ describe("Tüm GitHub Actions iş akışları — ortak tedarik zinciri güvenli
         );
         expect(line, `${label} hareketli # stable yorumu kullanmamalı: ${line.trim()}`).not.toMatch(
           /#\s*stable\s*$/,
+        );
+        expect(line, `${label} bilinmeyen # pinned-commit yorumu kullanmamalı: ${line.trim()}`).not.toMatch(
+          /#\s*pinned-commit\s*$/,
         );
       }
 
@@ -496,13 +499,15 @@ describe(".github/workflows/release.yml — iki-job izole OIDC Trusted Publishin
     expect(checkout?.with?.["fetch-depth"]).toBe(0);
     expect(checkout?.with?.["ref"]).toBeUndefined();
 
-    // Hiçbir setup-node adımında cache veya registry-url yok (zizmor cache-poisoning & OIDC ENEEDAUTH kapalı):
+    // Hiçbir setup-node adımında cache veya registry-url yok ve setup-node@v7'de
+    // package-manager-cache: false açıkça verilir (zizmor cache-poisoning & OIDC ENEEDAUTH kapalı):
     const setupNodes = collectAllSteps(doc).filter(
       (step) => step.uses === VERIFIED_ACTION_SHAS.setupNode,
     );
     expect(setupNodes.length).toBe(2);
     for (const sn of setupNodes) {
       expect(sn.with?.["cache"]).toBeUndefined();
+      expect(sn.with?.["package-manager-cache"]).toBe(false);
       expect(sn.with?.["registry-url"]).toBeUndefined();
     }
 
@@ -727,10 +732,12 @@ describe(".github/workflows/security.yml — zizmor, Dependency Review ve çoklu
     expect(joined).toContain("--include-transitive");
     expect(joined).toContain("--format");
     expect(joined).toContain("json");
-    // NU1900 warning'leri dahil report.problems fail-closed kontrol edilmeli + frameworkCount >= 1:
+    // NU1900 warning'leri dahil report.problems fail-closed kontrol edilmeli + canlı api.nuget.org kaynağı doğrulanmalı
+    // (.NET 10 0 açıkta frameworks dizisini çıkardığından frameworkCount===0 ile yanlış-pozitif üretmez):
     expect(joined).not.toContain('p.level === "error"');
+    expect(joined).not.toContain("frameworkCount === 0");
     expect(joined).toContain("report.problems");
-    expect(joined).toContain("frameworkCount");
+    expect(joined).toContain("api.nuget.org");
   });
 });
 

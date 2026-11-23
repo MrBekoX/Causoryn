@@ -138,16 +138,21 @@ jobs:
               console.error("NuGet audit problems (fail-closed, includes NU1900 warnings):", JSON.stringify(problems, null, 2));
               process.exit(1);
             }
+            const sources = report.sources ?? [];
+            const hasNugetFeed = sources.some((src) => String(src).includes("api.nuget.org"));
+            if (!hasNugetFeed) {
+              console.error("NuGet audit did not query live api.nuget.org advisory source (fail-closed):", sources);
+              process.exit(1);
+            }
             const projects = report.projects ?? [];
             if (projects.length === 0) {
               console.error("NuGet audit returned 0 projects (fail-closed)");
               process.exit(1);
             }
-            let frameworkCount = 0;
             const findings = [];
+            // Note: .NET 10 omits the `frameworks` array on projects with 0 vulnerable packages.
             for (const proj of projects) {
               for (const fw of proj.frameworks ?? []) {
-                frameworkCount += 1;
                 for (const pkg of [...(fw.topLevelPackages ?? []), ...(fw.transitivePackages ?? [])]) {
                   for (const vuln of pkg.vulnerabilities ?? []) {
                     findings.push({
@@ -162,13 +167,9 @@ jobs:
                 }
               }
             }
-            if (frameworkCount === 0) {
-              console.error("NuGet audit returned 0 target frameworks (fail-closed)");
-              process.exit(1);
-            }
             if (findings.length > 0) {
               console.error("Vulnerable NuGet packages detected:", JSON.stringify(findings, null, 2));
               process.exit(1);
             }
-            console.log(`NuGet vulnerability audit passed: ${projects.length} project(s), ${frameworkCount} framework(s), 0 vulnerabilities.`);
+            console.log(`NuGet vulnerability audit passed: ${projects.length} project(s), ${sources.length} source(s), 0 vulnerabilities.`);
           '
