@@ -14,30 +14,30 @@
 > live under `dist/node_modules/` — not a standalone single file; distribute the entire `dist/`
 > directory). Verification test: `tests/hosts-docs.test.ts`.
 
-Causoryn is a local, deterministic, LLM-free MCP code-intelligence engine (`causoryn@0.2.2`). If
+Causoryn is a local, deterministic, LLM-free MCP code-intelligence engine (`causoryn@0.2.3`). If
 Claude Code is not installed yet, install it with `npm install -g @anthropic-ai/claude-code`.
 
-## 0. End-User Quick Setup (Recommended — K-021 / `v0.2.2`)
+## 0. End-User Quick Setup (Recommended — K-021 / `v0.2.3`)
 
-### Option 0A — One-Command CLI (`npx causoryn@0.2.2 setup`)
+### Option 0A — One-Command CLI (`npx causoryn@0.2.3 setup`)
 
 ```bash
 # Preview planned changes without modifying any files (read-only)
-npx causoryn@0.2.2 setup --client claude-code --dry-run
+npx causoryn@0.2.3 setup --client claude-code --dry-run
 
 # Configure ~/.claude.json + ~/.claude/skills/ (with .causoryn.backup and persistent ~/.causoryn/runtime)
-npx causoryn@0.2.2 setup --client claude-code --yes
+npx causoryn@0.2.3 setup --client claude-code --yes
 
 # Read-only health & alignment check
-npx causoryn@0.2.2 doctor
+npx causoryn@0.2.3 doctor
 
 # Clean removal (removes mcpServers.causoryn + 5 Causoryn skills)
-npx causoryn@0.2.2 setup --client claude-code --uninstall --yes
+npx causoryn@0.2.3 setup --client claude-code --uninstall --yes
 ```
 
 The default setup installs five canonical skills. `architecture-blueprint` guides Claude in drafting optional `annotations` from MCP evidence. The server renders repeatable output with the same snapshot and export inputs. To export without annotations, call `causoryn_export_documentation` directly. [Architecture export contract](../tool-contracts.md)
 
-**`v0.2.2` `CLAUDE_CONFIG_DIR` support:** When `CLAUDE_CONFIG_DIR` is set in the environment, both
+**`v0.2.3` `CLAUDE_CONFIG_DIR` support:** When `CLAUDE_CONFIG_DIR` is set in the environment, both
 `causoryn setup --client claude-code` and `causoryn doctor` target `$CLAUDE_CONFIG_DIR/.claude.json`
 and `$CLAUDE_CONFIG_DIR/skills/` instead of `~/.claude.json` and `~/.claude/skills/`
 (`resolveEffectiveClaudeConfigDir` in `packages/causoryn/src/setup.ts`). Multi-profile setups and
@@ -50,11 +50,11 @@ isolated CI/smoke runs never touch the user's primary home configuration.
 /plugin install causoryn@causoryn
 ```
 
-- **Marketplace manifest & `--expected-version 0.2.2` launcher guard:** The root
-  `.claude-plugin/marketplace.json` (`source: { "source": "npm", "package": "causoryn", "version": "0.2.2" }`)
+- **Marketplace manifest & `--expected-version 0.2.3` launcher guard:** The root
+  `.claude-plugin/marketplace.json` (`source: { "source": "npm", "package": "causoryn", "version": "0.2.3" }`)
   and packaged `packages/causoryn/.claude-plugin/plugin.json` launch the server via
-  `${CLAUDE_PLUGIN_ROOT}/scripts/plugin-mcp-launcher.mjs --expected-version 0.2.2 --allow-cwd --auto-data-dir --client claude-code`.
-  `plugin-mcp-launcher.mjs` verifies `package.json` `version === "0.2.2"` (and cross-checks
+  `${CLAUDE_PLUGIN_ROOT}/scripts/plugin-mcp-launcher.mjs --expected-version 0.2.3 --allow-cwd --auto-data-dir --client claude-code`.
+  `plugin-mcp-launcher.mjs` verifies `package.json` `version === "0.2.3"` (and cross-checks
   `CAUSORYN_EXPECTED_VERSION` if set) without spawning a nested `npx` child process, exits `2` with
   a diagnostic on `stderr` on any version mismatch, sets `CAUSORYN_ASSET_ROOT`, and imports
   `dist/mcp-server.mjs` directly while keeping `stdout` strictly reserved for MCP JSON-RPC frames.

@@ -28,6 +28,12 @@ import {
   type TypeScriptAnalysisRun,
   type TsAdapterSourceFile,
 } from "./types.js";
+import {
+  buildProgramCompilerOptions,
+  expandCandidatePaths,
+  loadWorkspaceTsConfigs,
+  resolveScopedModuleName,
+} from "./tsconfig-loader.js";
 
 /**
  * TypeScript Language Adapter çekirdeği (TŞ v2.1 §6, §7, §7.1, §25/4;
@@ -121,7 +127,7 @@ function isNodeBuiltinSpecifier(specifier: string): boolean {
   return NODE_BUILTIN_MODULES.has(specifier);
 }
 
-const LANGUAGE = "typescript";
+type SourceLanguage = "typescript" | "javascript";
 
 /** TŞ §7: bu dilimde modellenmeyen yapılar açıkça beyan edilir. */
 const UNSUPPORTED_CONSTRUCTS: readonly string[] = [
@@ -150,7 +156,7 @@ function toPosix(p: string): string {
  * (diskteki kopyası olan fixture'da bu hata disk fallback'iyle maskelenir).
  */
 function normalizePosixPath(p: string): string {
-  const posix = toPosix(p);
+  const posix = toPosix(stripWindowsExtendedPrefix(p));
   const drivePrefix = /^[a-zA-Z]:/.test(posix) ? posix.slice(0, 2) : undefined;
   const body = drivePrefix === undefined ? posix : posix.slice(2);
   const isAbsolute = body.startsWith("/");
@@ -184,10 +190,11 @@ function posixDirname(p: string): string {
 }
 
 function posixJoin(base: string, relative: string): string {
-  const segments = base.split("/");
+  const segments = base === "" || base === "." ? [] : base.split("/").filter((s) => s !== "" && s !== ".");
   for (const segment of relative.split("/")) {
     if (segment === "" || segment === ".") continue;
     if (segment === "..") {
+      if (segments.length === 0) return "";
       segments.pop();
       continue;
     }
@@ -235,6 +242,7 @@ interface SourceEntry {
   readonly absolutePath: string;
   /** Kanonik sanal mutlak yol; compiler host harita anahtarı. */
   readonly absoluteKey: string;
+  readonly language: SourceLanguage;
   readonly content: string;
   readonly sourceHash: string;
   sourceFile?: ts.SourceFile;
@@ -378,6 +386,7 @@ interface AnalysisContext {
   readonly workspaceId: string;
   readonly compilerOptions: ts.CompilerOptions;
   readonly resolutionHost: ts.ModuleResolutionHost;
+  readonly resolveModule: (moduleName: string, containingFile: string) => ts.ResolvedModuleFull | undefined;
   readonly checker: ts.TypeChecker;
   readonly entries: Map<string, SourceEntry>;
   readonly entryByRelativePath: Map<string, SourceEntry>;
@@ -402,7 +411,7 @@ function runAnalysis(input: TypeScriptAdapterInput): AnalysisRun {
   if (input.workspaceId.trim().length === 0) {
     throw new DomainError("adapter/empty-workspace-id", "workspaceId boş olamaz");
   }
-  const rootPosix = toPosix(input.rootDir).replace(/\/+$/, "");
+  const rootPosix = normalizeRootPosix(input.rootDir);
   // Mutlaklık: POSIX ("/...") veya Windows sürücü harfi ("D:/...").
   const isAbsolute = rootPosix.startsWith("/") || /^[a-zA-Z]:\//.test(rootPosix);
   if (!isAbsolute) {
@@ -417,7 +426,7 @@ function runAnalysis(input: TypeScriptAdapterInput): AnalysisRun {
   const entryByRelativePath = new Map<string, SourceEntry>();
   for (const source of input.sources as readonly TsAdapterSourceFile[]) {
     const relativePath = normalizeRelativePath(source.relativePath);
-    const absolutePath = normalizePosixPath(`${rootPosix}/${relativePath}`);
+    const absolutePath = normalizePosixPath(joinRootAndRelative(rootPosix, relativePath));
     const absoluteKey = canonicalPath(absolutePath);
     if (entries.has(absoluteKey) || entryByRelativePath.has(relativePath)) {
       throw new DomainError(
@@ -429,6 +438,7 @@ function runAnalysis(input: TypeScriptAdapterInput): AnalysisRun {
       relativePath,
       absolutePath,
       absoluteKey,
+      language: languageForPath(relativePath),
       content: source.content,
       sourceHash: sha256Hex(utf8Encode(source.content)),
     };
@@ -439,74 +449,45 @@ function runAnalysis(input: TypeScriptAdapterInput): AnalysisRun {
     a.relativePath < b.relativePath ? -1 : 1,
   );
 
-  // 2) Compiler host: bellek-içi çanta önce, ts.sys salt-okunur fallback.
-  const compilerOptions: ts.CompilerOptions = {
-    strict: true,
-    target: ts.ScriptTarget.ES2022,
-    module: ts.ModuleKind.NodeNext,
-    moduleResolution: ts.ModuleResolutionKind.NodeNext,
-    skipLibCheck: true,
-    noEmit: true,
-  };
-  const host = createCompilerHostWithDefaultLib(compilerOptions);
-  const baseFileExists = host.fileExists.bind(host);
-  const baseReadFile = host.readFile.bind(host);
-  host.fileExists = (path: string) =>
-    entries.has(canonicalPath(path)) || baseFileExists(path);
-  host.readFile = (path: string): string | undefined => {
-    const hit = entries.get(canonicalPath(path));
-    return hit === undefined ? baseReadFile(path) : hit.content;
-  };
-  const resolutionHost: ts.ModuleResolutionHost = {
-    fileExists: (path: string) => host.fileExists(path),
-    readFile: (path: string) => host.readFile(path),
-  };
-  // Bellek-içi kaynakların ata dizinleri: NodeNext çözümleyicisi aday
-  // dosyaya bakmadan önce dizin varlığını directoryExists ile sorar;
-  // bellek-içi dizinler diskte olmadığından ham yanıt "yok"tur ve çözümleme
-  // adaya hiç ulaşmadan düşer (POSIX "/" kökünde ilk ayraç index 0'dır).
-  const memoryDirectories = new Set<string>();
-  for (const key of entries.keys()) {
-    let slash = key.indexOf("/");
-    while (slash >= 0) {
-      memoryDirectories.add(canonicalPath(slash === 0 ? "/" : key.slice(0, slash)));
-      slash = key.indexOf("/", slash + 1);
-    }
-  }
-  if (host.directoryExists !== undefined) {
-    const baseDirectoryExists = host.directoryExists.bind(host);
-    resolutionHost.directoryExists = (path: string): boolean =>
-      memoryDirectories.has(canonicalPath(path)) || baseDirectoryExists(path);
-  }
-  if (host.realpath !== undefined) {
-    const baseRealpath = host.realpath.bind(host);
-    // Denetim bulgusu düzeltmesi: Node16/NodeNext çözümlemesi adayları
-    // realpath ile gerçekler; bellek-içi kaynakların diskte gerçek yolu
-    // olmadığından ham realpath onları reddeder. Map eşleşmesi varsa yol
-    // olduğu gibi onaylanır.
-    resolutionHost.realpath = (path: string): string => {
-      if (entries.has(canonicalPath(path))) return path;
-      // realpath yalnızca fileExists onayından sonra çağrılır; disk tarafında
-      // beklenmedik bir undefined durumunda kimlik düşüşü güvenlidir.
-      const real = baseRealpath(path);
-      return real === undefined ? path : real;
-    };
-  }
-
-  // Denetim bulgusu düzeltmesi (modül çözümleme): TS'nin VARSAYILAN program
-  // çözümleyici, tamamen bellek-içi kaynak setlerinde göreli içe aktarımları
-  // host'a hiç modül adayı sorgulatmadan UNRESOLVED bırakabiliyor (kanıt:
-  // `fileExists` izi — yalnızca package.json/node_modules taraması; "Cannot
-  // find module" tanısı; diskte kopyası olan fixture'da disk fallback'i
-  // hatayı maskeler). Çözümleme kancaları, kanonik anahtarlı resolutionHost
-  // üzerinden ts.resolveModuleName çalıştırır; node_modules/lib dahil aynı
-  // semantik izlenir.
+  // 1.5) Güvenli, salt-okunur tsconfig.json / jsconfig.json yüklemesi.
+  const loadedConfigs = loadWorkspaceTsConfigs(
+    rootPosix,
+    input.configFiles,
+    input.configFiles === undefined ? input.rootDir : undefined,
+    sortedEntries.map((entry) => entry.relativePath),
+  );
+  const compilerOptions = buildProgramCompilerOptions(loadedConfigs.configs);
+  const resolvedLibDir = resolveTypeScriptLibDir();
+  const host = createCompilerHostWithDefaultLib(compilerOptions, resolvedLibDir);
+  /**
+   * SEC-04: CompilerHost + ModuleResolutionHost disk fallback'i kesinlikle
+   * sınırlandırılır — `entries` (WorkspaceAccessPolicy izinli kaynaklar)
+   * dışındaki workspace dosyaları (.env.js, ../outside-secret.js, symlink,
+   * bundle vb.) diskten ASLA okunmaz. Disk erişimi yalnızca:
+   * (a) TypeScript yerleşik lib*.d.ts dizini (`resolvedLibDir`), ve
+   * (b) `rootPosix` içindeki `node_modules` altındaki `.d.ts`/`.d.mts`/
+   *     `.d.cts`/`package.json` dosyaları için izin verilir.
+   */
+  const resolutionHost = configureConfinedCompilerHost(
+    host,
+    entries,
+    rootPosix,
+    resolvedLibDir,
+  );
+  // Her containingFile için en yakın ata tsconfig/jsconfig ile modül çözümleme.
   const resolveOne = (
     moduleName: string,
     containingFile: string,
-  ): ts.ResolvedModuleFull | undefined =>
-    ts.resolveModuleName(moduleName, containingFile, compilerOptions, resolutionHost)
-      .resolvedModule;
+  ): ts.ResolvedModuleFull | undefined => resolveScopedModuleName({
+    moduleName,
+    containingFile,
+    rootPosix,
+    ...(resolvedLibDir === undefined ? {} : { allowedLibDir: resolvedLibDir }),
+    programOptions: compilerOptions,
+    configs: loadedConfigs.configs,
+    resolutionHost,
+    entries,
+  });
   const resolveModuleNamesHook: ts.CompilerHost["resolveModuleNames"] = (
     moduleNames,
     containingFile,
@@ -531,10 +512,12 @@ function runAnalysis(input: TypeScriptAdapterInput): AnalysisRun {
   }
 
   const assembler = new GraphAssembler(input.workspaceId);
+  for (const warning of loadedConfigs.warnings) assembler.addWarning(warning);
   const context: AnalysisContext = {
     workspaceId: input.workspaceId,
     compilerOptions,
     resolutionHost,
+    resolveModule: resolveOne,
     checker,
     entries,
     entryByRelativePath,
@@ -552,13 +535,13 @@ function runAnalysis(input: TypeScriptAdapterInput): AnalysisRun {
 
   const diagnostics: TypeScriptAdapterDiagnostic[] = [];
 
-  // File node'ları (deterministik: sıralı girdi).
+  // File node'ları (deterministik: sıralı girdi, dosya uzantısına göre dil).
   for (const entry of sortedEntries) {
     assembler.ensureNode({
       kind: "File",
       qualifiedName: entry.relativePath,
       relativePath: entry.relativePath,
-      language: LANGUAGE,
+      language: entry.language,
       attributes: { sourceHash: entry.sourceHash },
     });
   }
@@ -576,10 +559,15 @@ function runAnalysis(input: TypeScriptAdapterInput): AnalysisRun {
       });
       return;
     }
-    const all = [
-      ...program.getSyntacticDiagnostics(sourceFile),
-      ...program.getSemanticDiagnostics(sourceFile),
-    ];
+    // Untyped JS dosyalarında (checkJs: false) sahte TS tip-denetimi
+    // gürültüsü üretilmez; bozuk JS sözdizimi syntactic tanılarla dürüstçe yakalanır.
+    const all =
+      entry.language === "javascript"
+        ? [...program.getSyntacticDiagnostics(sourceFile)]
+        : [
+            ...program.getSyntacticDiagnostics(sourceFile),
+            ...program.getSemanticDiagnostics(sourceFile),
+          ];
     for (const diag of all) {
       diagnostics.push({
         relativePath: entry.relativePath,
@@ -893,7 +881,7 @@ function extractDeclarations(
         kind: "Method",
         qualifiedName,
         relativePath: entry.relativePath,
-        language: LANGUAGE,
+        language: entry.language,
       });
       registerWithSymbol(symbolOfDeclaration(member), memberRecord);
       addContains(
@@ -914,7 +902,7 @@ function extractDeclarations(
         kind,
         qualifiedName: name,
         relativePath: entry.relativePath,
-        language: LANGUAGE,
+        language: entry.language,
       });
       registerWithSymbol(symbolOfDeclaration(statement), record);
       addContains(
@@ -934,7 +922,7 @@ function extractDeclarations(
         kind: "Function",
         qualifiedName: name,
         relativePath: entry.relativePath,
-        language: LANGUAGE,
+        language: entry.language,
       });
       registerWithSymbol(symbolOfDeclaration(statement), record);
       addContains(
@@ -949,6 +937,9 @@ function extractDeclarations(
     if (ts.isVariableStatement(statement)) {
       for (const declaration of statement.declarationList.declarations) {
         if (!ts.isIdentifier(declaration.name)) continue;
+        // CommonJS import bağlaması (`const express = require("express")`)
+        // yerel Handler bildirimi değildir.
+        if (isStaticRequireCall(declaration.initializer) !== undefined) continue;
         // Call signature'lı tip = handler değeri → Handler node'u
         // (ör. const ordersRoute = createOrdersRoute(ordersService)).
         const type = checker.getTypeAtLocation(declaration.name);
@@ -957,7 +948,7 @@ function extractDeclarations(
           kind: "Handler",
           qualifiedName: declaration.name.text,
           relativePath: entry.relativePath,
-          language: LANGUAGE,
+          language: entry.language,
         });
         registerWithSymbol(
           checker.getSymbolAtLocation(declaration.name),
@@ -972,6 +963,15 @@ function extractDeclarations(
       }
       continue;
     }
+
+    extractCjsExportStatement(
+      context,
+      entry,
+      statement,
+      fileNode,
+      addContains,
+      registerWithSymbol,
+    );
   }
 
   if (isTestAffinityTypeScriptFile(entry.relativePath)) {
@@ -1000,7 +1000,7 @@ function isTestAffinityTypeScriptFile(relativePath: string): boolean {
     return false;
   }
   let stem: string | undefined;
-  for (const ext of [".tsx", ".ts", ".mts", ".cts"]) {
+  for (const ext of [".tsx", ".ts", ".mts", ".cts", ".jsx", ".js", ".mjs", ".cjs"]) {
     if (basename.length > ext.length && basename.endsWith(ext)) {
       stem = basename.slice(0, basename.length - ext.length);
       break;
@@ -1138,7 +1138,7 @@ function extractTestDefinitions(
           kind: "Test",
           qualifiedName,
           relativePath: entry.relativePath,
-          language: LANGUAGE,
+          language: entry.language,
         });
         addContains(
           fileNode,
@@ -1177,12 +1177,9 @@ function classifyModuleSpecifier(
   if (isNodeBuiltinSpecifier(specifier)) {
     return { status: "external", builtin: true };
   }
-  const resolved = ts.resolveModuleName(
-    specifier,
-    containingAbsoluteKey,
-    context.compilerOptions,
-    context.resolutionHost,
-  ).resolvedModule;
+  const resolved = context.resolveModule(
+    specifier, containingAbsoluteKey,
+  );
   if (resolved === undefined) return { status: "unresolved" };
   const target = context.entries.get(canonicalPath(resolved.resolvedFileName));
   if (target !== undefined) {
@@ -1191,19 +1188,21 @@ function classifyModuleSpecifier(
   return { status: "external", builtin: false };
 }
 
-/** Kaynak dosyadaki import/export-from module specifier'larını toplar. */
-function collectModuleSpecifiers(
-  sourceFile: ts.SourceFile,
-): Array<{ node: ts.StringLiteralLike; text: string }> {
+/** ESM import/export-from ve statik CommonJS `require("...")` specifier'larını toplar. */
+function collectModuleSpecifiers(sourceFile: ts.SourceFile): Array<{ node: ts.StringLiteralLike; text: string }> {
   const specifiers: Array<{ node: ts.StringLiteralLike; text: string }> = [];
-  for (const statement of sourceFile.statements) {
-    if (ts.isImportDeclaration(statement) || ts.isExportDeclaration(statement)) {
-      const moduleSpecifier = statement.moduleSpecifier;
-      if (moduleSpecifier !== undefined && ts.isStringLiteralLike(moduleSpecifier)) {
-        specifiers.push({ node: moduleSpecifier, text: moduleSpecifier.text });
+  const visit = (node: ts.Node): void => {
+    if (ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) {
+      if (node.moduleSpecifier !== undefined && ts.isStringLiteralLike(node.moduleSpecifier)) {
+        specifiers.push({ node: node.moduleSpecifier, text: node.moduleSpecifier.text });
       }
+      return;
     }
-  }
+    const reqArg = isStaticRequireCall(node);
+    if (reqArg !== undefined) specifiers.push({ node: reqArg, text: reqArg.text });
+    ts.forEachChild(node, visit);
+  };
+  visit(sourceFile);
   return specifiers;
 }
 
@@ -1351,9 +1350,8 @@ function heuristicCandidatePath(
 ): string | undefined {
   if (!specifier.startsWith("./") && !specifier.startsWith("../")) return undefined;
   const joined = posixJoin(posixDirname(fromRelativePath), specifier);
-  const candidates = [joined];
-  if (joined.endsWith(".js")) candidates.push(`${joined.slice(0, -3)}.ts`);
-  for (const candidate of candidates) {
+  if (joined.length === 0) return undefined;
+  for (const candidate of expandCandidatePaths(joined)) {
     if (context.entryByRelativePath.has(candidate)) return candidate;
   }
   return undefined;
@@ -1387,7 +1385,7 @@ function extractCallsAndRoutes(
 
     if (ts.isCallExpression(node)) {
       tryRoutePattern(context, entry, sourceFile, node);
-      if (!context.testBlockCalls.has(node)) {
+      if (!context.testBlockCalls.has(node) && isStaticRequireCall(node) === undefined) {
         emitCallEdge(context, entry, sourceFile, node, currentCaller);
       }
     } else if (ts.isNewExpression(node)) {
@@ -1423,25 +1421,25 @@ function callerRecordForFunctionLike(
       kind,
       qualifiedName,
       relativePath: entry.relativePath,
-      language: LANGUAGE,
+      language: entry.language,
     });
     const symbol = checker.getSymbolAtLocation(name);
     if (symbol !== undefined) registry.set(symbol, record);
     return record;
   }
 
-  // Anonymous arrow/function-expression: VariableDeclaration'a bağlıysa
-  // Handler node'u caller olur (ör. const h = (req, res) => {...}).
+  // Anonymous arrow/function-expression: VariableDeclaration'a veya CommonJS
+  // export atamasına bağlıysa caller olarak çözümlenir.
   const parent = node.parent;
   if (parent !== undefined && ts.isVariableDeclaration(parent) && ts.isIdentifier(parent.name)) {
     return assembler.ensureNode({
       kind: "Handler",
       qualifiedName: parent.name.text,
       relativePath: entry.relativePath,
-      language: LANGUAGE,
+      language: entry.language,
     });
   }
-  return undefined;
+  return cjsExportCallerRecord(context, entry, node);
 }
 
 /** Bildirimi analiz seti içindeyse relativePath döner. */
@@ -1515,15 +1513,14 @@ function deriveNodeRecord(
     kind = "Method";
     qualifiedName = `${ownerName}.constructor`;
   } else {
-    const name = ts.getNameOfDeclaration(declaration);
-    if (name === undefined || !ts.isIdentifier(name)) return undefined;
+    const ownName = extractDeclarationNameText(declaration);
+    if (ownName === undefined) return undefined;
     const owner = declaration.parent;
     const ownerName =
       (ts.isClassDeclaration(owner) ||
         ts.isInterfaceDeclaration(owner))
         ? owner.name?.text
         : undefined;
-    const ownName = name.text;
     qualifiedName = ownerName === undefined ? ownName : `${ownerName}.${ownName}`;
     kind = inferNodeKind(declaration);
   }
@@ -1532,19 +1529,21 @@ function deriveNodeRecord(
   // dosyasına aittir; çağıran dosyaya değil. Aksi halde aynı sembol için
   // çağıran dosya başına çoğaltma node'ları doğar. Guard (resolveSymbolRecord
   // içindeki ownRelativePathOf denetimi) set-dışı bildirimi buraya sokmaz.
-  const declarationPath = ownRelativePathOf(context, declaration);
+  const declarationEntry = context.entries.get(
+    canonicalPath(declaration.getSourceFile().fileName),
+  );
   if (
     kind === undefined ||
     qualifiedName === undefined ||
-    declarationPath === undefined
+    declarationEntry === undefined
   ) {
     return undefined;
   }
   return assembler.ensureNode({
     kind,
     qualifiedName,
-    relativePath: declarationPath,
-    language: LANGUAGE,
+    relativePath: declarationEntry.relativePath,
+    language: declarationEntry.language,
   });
 }
 
@@ -1552,6 +1551,7 @@ function inferNodeKind(declaration: ts.Declaration): NodeKind | undefined {
   if (ts.isClassDeclaration(declaration)) return "Class";
   if (ts.isInterfaceDeclaration(declaration)) return "Interface";
   if (ts.isFunctionDeclaration(declaration)) return "Function";
+  if (ts.isFunctionExpression(declaration) || ts.isArrowFunction(declaration)) return inferCjsExportNodeKind(declaration);
   if (
     ts.isMethodDeclaration(declaration) ||
     ts.isMethodSignature(declaration) ||
@@ -1593,7 +1593,7 @@ function tryRoutePattern(
     kind: "Endpoint",
     qualifiedName: `${verb} ${pathText}`,
     relativePath: entry.relativePath,
-    language: LANGUAGE,
+    language: entry.language,
     attributes:
       framework === undefined
         ? { method: verb, path: pathText }
@@ -1737,7 +1737,11 @@ function emitCallEdge(
     return;
   }
 
-  if (targetSymbol !== undefined && (targetSymbol.getDeclarations()?.length ?? 0) > 0) {
+  if (
+    targetSymbol !== undefined &&
+    (targetSymbol.getDeclarations()?.length ?? 0) > 0 &&
+    !isInternalDeclarationOrSymbol(context, targetSymbol, declaration)
+  ) {
     // Analiz setinin dışında bildirilen sembol (lib/node_modules): açık
     // UnknownExternal node + checker dayanaklı verified kenar.
     const externalName = externalQualifiedName(targetSymbol, declaration);
@@ -1857,6 +1861,28 @@ function detectNextAppRouterFramework(
  * segmentinden sonraki segmentler route yoludur; kök kural dosyası "/"
  * olur. Dinamik segmentler (`[id]`) olduğu gibi korunur.
  */
+const NEXT_APP_ROUTE_BASENAMES: ReadonlySet<string> = new Set([
+  "route.ts",
+  "route.tsx",
+  "route.mts",
+  "route.cts",
+  "route.js",
+  "route.jsx",
+  "route.mjs",
+  "route.cjs",
+]);
+
+const NEXT_APP_PAGE_BASENAMES: ReadonlySet<string> = new Set([
+  "page.ts",
+  "page.tsx",
+  "page.mts",
+  "page.cts",
+  "page.js",
+  "page.jsx",
+  "page.mjs",
+  "page.cjs",
+]);
+
 function nextAppConvention(
   relativePath: string,
 ): { readonly kind: "route" | "page"; readonly routePath: string } | undefined {
@@ -1869,13 +1895,12 @@ function nextAppConvention(
         ? 0
         : -1;
   if (appIndex < 0) return undefined;
-  const base = segments[segments.length - 1] ?? "";
-  const kind =
-    base === "route.ts" || base === "route.tsx"
-      ? "route"
-      : base === "page.ts" || base === "page.tsx"
-        ? "page"
-        : undefined;
+  const base = (segments[segments.length - 1] ?? "").toLowerCase();
+  const kind = NEXT_APP_ROUTE_BASENAMES.has(base)
+    ? "route"
+    : NEXT_APP_PAGE_BASENAMES.has(base)
+      ? "page"
+      : undefined;
   if (kind === undefined) return undefined;
   const routeSegments = segments.slice(appIndex + 1, -1);
   const routePath =
@@ -1886,9 +1911,9 @@ function nextAppConvention(
 /**
  * Dosya içinde Express instance'ına bağlanan değişken adlarını toplar:
  * `const x = express()`, `const x = express.Router()` ve `const x = Router()`
- * (Router "express" specifier'ından isimli import edildiyse). Denetim
- * bulgusu 2 düzeltmesi: framework etiketi yalnızca bu receiver'ların
- * kayıtlarına yazılır — proje-geneli değil.
+ * (Router "express" specifier'ından ESM import veya CommonJS require ile
+ * alındıysa). Denetim bulgusu 2 düzeltmesi: framework etiketi yalnızca bu
+ * receiver'ların kayıtlarına yazılır — proje-geneli değil.
  */
 function collectExpressInstanceVars(
   sourceFile: ts.SourceFile,
@@ -1898,24 +1923,52 @@ function collectExpressInstanceVars(
   const namedBindings = new Set<string>();
 
   for (const statement of sourceFile.statements) {
-    if (!ts.isImportDeclaration(statement)) continue;
-    const moduleSpecifier = statement.moduleSpecifier;
-    if (
-      moduleSpecifier === undefined ||
-      !ts.isStringLiteralLike(moduleSpecifier) ||
-      moduleSpecifier.text !== "express"
-    ) {
+    if (ts.isImportDeclaration(statement)) {
+      const moduleSpecifier = statement.moduleSpecifier;
+      if (
+        moduleSpecifier === undefined ||
+        !ts.isStringLiteralLike(moduleSpecifier) ||
+        moduleSpecifier.text !== "express"
+      ) {
+        continue;
+      }
+      const importClause = statement.importClause;
+      if (importClause === undefined) continue;
+      if (importClause.name !== undefined) {
+        defaultBinding = importClause.name.text;
+      }
+      const named = importClause.namedBindings;
+      if (named !== undefined && ts.isNamedImports(named)) {
+        for (const element of named.elements) {
+          namedBindings.add(element.name.text);
+        }
+      }
       continue;
     }
-    const importClause = statement.importClause;
-    if (importClause === undefined) continue;
-    if (importClause.name !== undefined) {
-      defaultBinding = importClause.name.text;
-    }
-    const named = importClause.namedBindings;
-    if (named !== undefined && ts.isNamedImports(named)) {
-      for (const element of named.elements) {
-        namedBindings.add(element.name.text);
+
+    if (ts.isVariableStatement(statement)) {
+      for (const declaration of statement.declarationList.declarations) {
+        const reqArg = isStaticRequireCall(declaration.initializer);
+        if (reqArg !== undefined && reqArg.text === "express") {
+          if (ts.isIdentifier(declaration.name)) {
+            defaultBinding = declaration.name.text;
+          } else if (ts.isObjectBindingPattern(declaration.name)) {
+            for (const element of declaration.name.elements) {
+              if (ts.isIdentifier(element.name)) {
+                namedBindings.add(element.name.text);
+              }
+            }
+          }
+          continue;
+        }
+        // Zincirli CommonJS deyimleri: `const app = require("express")()`
+        // ve `const router = require("express").Router()`.
+        if (
+          ts.isIdentifier(declaration.name) &&
+          isChainedExpressRequireCall(declaration.initializer)
+        ) {
+          instanceVars.add(declaration.name.text);
+        }
       }
     }
   }
@@ -1927,21 +1980,25 @@ function collectExpressInstanceVars(
     if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name)) {
       const initializer = node.initializer;
       if (initializer !== undefined && ts.isCallExpression(initializer)) {
-        const callee = initializer.expression;
-        const isDefaultCall =
-          defaultBinding !== undefined &&
-          ts.isIdentifier(callee) &&
-          callee.text === defaultBinding;
-        const isDefaultRouterMember =
-          defaultBinding !== undefined &&
-          ts.isPropertyAccessExpression(callee) &&
-          ts.isIdentifier(callee.expression) &&
-          callee.expression.text === defaultBinding &&
-          callee.name.text === "Router";
-        const isNamedRouterCall =
-          ts.isIdentifier(callee) && namedBindings.has(callee.text);
-        if (isDefaultCall || isDefaultRouterMember || isNamedRouterCall) {
+        if (isChainedExpressRequireCall(initializer)) {
           instanceVars.add(node.name.text);
+        } else {
+          const callee = initializer.expression;
+          const isDefaultCall =
+            defaultBinding !== undefined &&
+            ts.isIdentifier(callee) &&
+            callee.text === defaultBinding;
+          const isDefaultRouterMember =
+            defaultBinding !== undefined &&
+            ts.isPropertyAccessExpression(callee) &&
+            ts.isIdentifier(callee.expression) &&
+            callee.expression.text === defaultBinding &&
+            callee.name.text === "Router";
+          const isNamedRouterCall =
+            ts.isIdentifier(callee) && namedBindings.has(callee.text);
+          if (isDefaultCall || isDefaultRouterMember || isNamedRouterCall) {
+            instanceVars.add(node.name.text);
+          }
         }
       }
     }
@@ -2026,7 +2083,7 @@ function emitNextRouteEdge(
     kind: "Endpoint",
     qualifiedName: `${method} ${routePath}`,
     relativePath: entry.relativePath,
-    language: LANGUAGE,
+    language: entry.language,
     attributes: { method, path: routePath, framework: "nextjs" },
   });
   context.framework.nodeKeys.add(endpoint.key);
@@ -2204,9 +2261,10 @@ function collectNextPageHandler(
 
 function createCompilerHostWithDefaultLib(
   compilerOptions: ts.CompilerOptions,
+  preResolvedLibDir?: string,
 ): ts.CompilerHost {
   const host = ts.createCompilerHost(compilerOptions, /*setParentNodes*/ true);
-  const resolvedLibDir = resolveTypeScriptLibDir();
+  const resolvedLibDir = preResolvedLibDir ?? resolveTypeScriptLibDir();
   if (resolvedLibDir !== undefined) {
     host.getDefaultLibLocation = () => resolvedLibDir;
     host.getDefaultLibFileName = (opts) =>
@@ -2340,4 +2398,457 @@ export function resolveTypeScriptLibDir(
   }
 
   return undefined;
+}
+
+/* ------------------------------------------------------------------ */
+/* JavaScript, CommonJS & izole host yardımcıları (v0.2.3)              */
+/* ------------------------------------------------------------------ */
+
+const JS_EXTENSION_PATTERN = /\.(?:js|jsx|mjs|cjs)$/i;
+
+/** Dosya uzantısına göre dil kimliği: .js/.jsx/.mjs/.cjs -> "javascript", diğerleri -> "typescript". */
+function languageForPath(relativePath: string): SourceLanguage {
+  return JS_EXTENSION_PATTERN.test(relativePath) ? "javascript" : "typescript";
+}
+
+function stripWindowsExtendedPrefix(raw: string): string {
+  if (raw.startsWith("\\\\?\\UNC\\") || raw.startsWith("//?/UNC/")) {
+    return `//${raw.slice(8)}`;
+  }
+  if (raw.startsWith("\\\\?\\") || raw.startsWith("//?/")) {
+    return raw.slice(4);
+  }
+  return raw;
+}
+
+function normalizeRootPosix(rawRootDir: string): string {
+  const normalized = normalizePosixPath(rawRootDir);
+  if (normalized === "/" || /^[a-zA-Z]:\/$/.test(normalized)) {
+    return normalized;
+  }
+  return normalized.replace(/\/+$/, "");
+}
+
+function joinRootAndRelative(rootPosix: string, relativePath: string): string {
+  return rootPosix.endsWith("/")
+    ? `${rootPosix}${relativePath}`
+    : `${rootPosix}/${relativePath}`;
+}
+
+/**
+ * SEC-04: CompilerHost + ModuleResolutionHost disk fallback'ini kesinlikle
+ * sınırlar — `entries` dışındaki workspace dosyaları (.env.js, ../secret.js,
+ * symlink, bundle vb.) diskten ASLA okunmaz. Disk erişimi yalnızca:
+ * (a) TypeScript yerleşik lib*.d.ts dizini (`resolvedLibDir`), ve
+ * (b) `rootPosix` içindeki `node_modules` altındaki `.d.ts`/`.d.mts`/`.d.cts`/
+ *     `package.json` dosyaları için izin verilir.
+ */
+export function configureConfinedCompilerHost(
+  host: ts.CompilerHost,
+  entries: ReadonlyMap<string, { readonly absolutePath: string; readonly content: string }>,
+  rootPosix: string,
+  resolvedLibDir: string | undefined,
+): ts.ModuleResolutionHost {
+  const baseFileExists = host.fileExists.bind(host);
+  const baseReadFile = host.readFile.bind(host);
+  const baseDirectoryExists = host.directoryExists?.bind(host);
+  const baseRealpath = host.realpath?.bind(host);
+  const baseGetDirectories = host.getDirectories?.bind(host);
+
+  const withTrailingSlash = (key: string): string =>
+    key.endsWith("/") ? key : `${key}/`;
+
+  const tryBaseRealpath = (p: string): string | undefined => {
+    if (baseRealpath === undefined || p.includes("\0")) return undefined;
+    try {
+      const real = baseRealpath(p);
+      return typeof real === "string" && real.length > 0 ? real : undefined;
+    } catch {
+      return undefined;
+    }
+  };
+
+  const rootKey = canonicalPath(rootPosix);
+  const rootKeyWithSlash = withTrailingSlash(rootKey);
+  const realRootRaw = tryBaseRealpath(rootPosix);
+  const realRootKey =
+    realRootRaw === undefined ? undefined : canonicalPath(realRootRaw);
+  const realRootKeyWithSlash =
+    realRootKey === undefined ? undefined : withTrailingSlash(realRootKey);
+
+  const libDirKey =
+    resolvedLibDir === undefined ? undefined : canonicalPath(resolvedLibDir);
+  const libDirKeyWithSlash =
+    libDirKey === undefined ? undefined : withTrailingSlash(libDirKey);
+  const realLibDirRaw =
+    resolvedLibDir === undefined ? undefined : tryBaseRealpath(resolvedLibDir);
+  const realLibDirKey =
+    realLibDirRaw === undefined ? undefined : canonicalPath(realLibDirRaw);
+  const realLibDirKeyWithSlash =
+    realLibDirKey === undefined ? undefined : withTrailingSlash(realLibDirKey);
+
+  const isInAllowedLibDir = (candidateKey: string): boolean =>
+    (libDirKeyWithSlash !== undefined && candidateKey.startsWith(libDirKeyWithSlash)) ||
+    (realLibDirKeyWithSlash !== undefined && candidateKey.startsWith(realLibDirKeyWithSlash));
+
+  const isInAllowedLibDirOrSelf = (candidateKey: string): boolean =>
+    isInAllowedLibDir(candidateKey) ||
+    (libDirKey !== undefined && candidateKey === libDirKey) ||
+    (realLibDirKey !== undefined && candidateKey === realLibDirKey);
+
+  const relativeUnderAllowedRoot = (candidateKey: string): string | undefined => {
+    if (candidateKey.startsWith(rootKeyWithSlash)) {
+      return candidateKey.slice(rootKeyWithSlash.length);
+    }
+    if (
+      realRootKeyWithSlash !== undefined &&
+      candidateKey.startsWith(realRootKeyWithSlash)
+    ) {
+      return candidateKey.slice(realRootKeyWithSlash.length);
+    }
+    return undefined;
+  };
+
+  const isInRootNodeModules = (candidateKey: string): boolean => {
+    const rel = relativeUnderAllowedRoot(candidateKey);
+    if (rel === undefined) return false;
+    return rel.startsWith("node_modules/") || rel.includes("/node_modules/");
+  };
+
+  const isAllowedDiskFile = (candidatePath: string): boolean => {
+    if (candidatePath.includes("\0")) return false;
+    const key = canonicalPath(candidatePath);
+    if (isInAllowedLibDir(key)) return true;
+    if (!isInRootNodeModules(key)) return false;
+    const lower = key.toLowerCase();
+    return (
+      lower.endsWith(".d.ts") ||
+      lower.endsWith(".d.mts") ||
+      lower.endsWith(".d.cts") ||
+      lower.endsWith("/package.json")
+    );
+  };
+
+  const isAllowedDiskDir = (candidatePath: string): boolean => {
+    if (candidatePath.includes("\0")) return false;
+    const key = canonicalPath(candidatePath);
+    if (isInAllowedLibDirOrSelf(key)) return true;
+    const rel = relativeUnderAllowedRoot(key);
+    if (rel === undefined) return false;
+    return (
+      rel === "node_modules" ||
+      rel.startsWith("node_modules/") ||
+      rel.endsWith("/node_modules") ||
+      rel.includes("/node_modules/")
+    );
+  };
+
+  // SEC-04-R1: CWE-59 symlink escape guard on BOTH fileExists and readFile.
+  const isRealpathConfinedDiskFile = (p: string): boolean => {
+    if (p.includes("\0")) return false;
+    const key = canonicalPath(p);
+    if (isInAllowedLibDir(key)) {
+      if (baseRealpath === undefined) return true;
+      const real = tryBaseRealpath(p);
+      return real !== undefined && isInAllowedLibDir(canonicalPath(real));
+    }
+    if (!isAllowedDiskFile(p)) return false;
+    if (baseRealpath === undefined) return false;
+    const real = tryBaseRealpath(p);
+    return real !== undefined && isAllowedDiskFile(real);
+  };
+
+  const isRealpathConfinedDiskDir = (p: string): boolean => {
+    if (p.includes("\0")) return false;
+    const key = canonicalPath(p);
+    if (isInAllowedLibDirOrSelf(key)) {
+      if (baseRealpath === undefined) return true;
+      const real = tryBaseRealpath(p);
+      return real !== undefined && isInAllowedLibDirOrSelf(canonicalPath(real));
+    }
+    if (!isAllowedDiskDir(p)) return false;
+    if (baseRealpath === undefined) return false;
+    const real = tryBaseRealpath(p);
+    return real !== undefined && isAllowedDiskDir(real);
+  };
+
+  const memoryDirectories = new Set<string>();
+  const memoryChildDirs = new Map<string, Set<string>>();
+  for (const entry of entries.values()) {
+    const normAbs = normalizePosixPath(entry.absolutePath);
+    let slash = normAbs.indexOf("/");
+    while (slash >= 0) {
+      const dirAbs = slash === 0 ? "/" : normAbs.slice(0, slash);
+      const dirKey = canonicalPath(dirAbs);
+      memoryDirectories.add(dirKey);
+      const nextSlash = normAbs.indexOf("/", slash + 1);
+      if (nextSlash > slash + 1) {
+        const childName = normAbs.slice(slash + 1, nextSlash);
+        let childSet = memoryChildDirs.get(dirKey);
+        if (childSet === undefined) {
+          childSet = new Set<string>();
+          memoryChildDirs.set(dirKey, childSet);
+        }
+        childSet.add(childName);
+      }
+      slash = nextSlash;
+    }
+  }
+
+  host.fileExists = (p: string): boolean =>
+    !p.includes("\0") &&
+    (entries.has(canonicalPath(p)) ||
+      (isAllowedDiskFile(p) && baseFileExists(p) && isRealpathConfinedDiskFile(p)));
+
+  host.readFile = (p: string): string | undefined => {
+    if (p.includes("\0")) return undefined;
+    const hit = entries.get(canonicalPath(p));
+    if (hit !== undefined) return hit.content;
+    return isAllowedDiskFile(p) && isRealpathConfinedDiskFile(p)
+      ? baseReadFile(p)
+      : undefined;
+  };
+
+  const resolutionHost: ts.ModuleResolutionHost = {
+    fileExists: (p: string) => host.fileExists(p),
+    readFile: (p: string) => host.readFile(p),
+  };
+
+  if (baseDirectoryExists !== undefined) {
+    const confinedDirectoryExists = (p: string): boolean =>
+      !p.includes("\0") &&
+      (memoryDirectories.has(canonicalPath(p)) ||
+        (isAllowedDiskDir(p) && baseDirectoryExists(p) && isRealpathConfinedDiskDir(p)));
+    resolutionHost.directoryExists = confinedDirectoryExists;
+    host.directoryExists = confinedDirectoryExists;
+  }
+
+  if (baseRealpath !== undefined) {
+    const confinedRealpath = (p: string): string => {
+      if (p.includes("\0")) return p;
+      if (entries.has(canonicalPath(p))) return p;
+      if (!isAllowedDiskFile(p) && !isAllowedDiskDir(p)) return p;
+      // Escaping symlink'leri leksik yol arkasına SAKLAMAZ: gerçek hedefi döner,
+      // böylece `isAllowedResolved` kök dışı hedefi kesin biçimde reddeder.
+      return tryBaseRealpath(p) ?? p;
+    };
+    resolutionHost.realpath = confinedRealpath;
+    host.realpath = confinedRealpath;
+  }
+
+  if (baseGetDirectories !== undefined) {
+    host.getDirectories = (p: string): string[] => {
+      if (p.includes("\0")) return [];
+      const key = canonicalPath(p);
+      const memChildren = memoryChildDirs.get(key);
+      const memList = memChildren === undefined ? [] : [...memChildren].sort();
+      if (!isAllowedDiskDir(p) || !isRealpathConfinedDiskDir(p)) {
+        return memList;
+      }
+      const childPrefix = p.endsWith("/") || p.endsWith("\\") ? p : `${p}/`;
+      let diskDirs: string[];
+      try {
+        diskDirs = baseGetDirectories(p).filter(
+          (name) => !name.includes("\0") && isRealpathConfinedDiskDir(`${childPrefix}${name}`),
+        );
+      } catch {
+        diskDirs = [];
+      }
+      if (memList.length === 0) return diskDirs;
+      return [...new Set([...memList, ...diskDirs])].sort();
+    };
+  }
+
+  return resolutionHost;
+}
+
+/** Statik CommonJS `require("...")` çağrısını tanır; dinamik ifadeleri yoksayar. */
+function isStaticRequireCall(
+  node: ts.Node | undefined,
+): ts.StringLiteralLike | undefined {
+  if (node === undefined || !ts.isCallExpression(node)) return undefined;
+  if (!ts.isIdentifier(node.expression) || node.expression.text !== "require") {
+    return undefined;
+  }
+  if (node.arguments.length !== 1) return undefined;
+  const arg = node.arguments[0];
+  if (arg === undefined || !ts.isStringLiteralLike(arg) || arg.text.length === 0) {
+    return undefined;
+  }
+  return arg;
+}
+
+/** `require("express")()` veya `require("express").Router()` zincirli çağrılarını tanır. */
+function isChainedExpressRequireCall(node: ts.Node | undefined): boolean {
+  if (node === undefined || !ts.isCallExpression(node)) return false;
+  const callee = node.expression;
+  const directReq = isStaticRequireCall(callee);
+  if (directReq !== undefined && directReq.text === "express") return true;
+  if (ts.isPropertyAccessExpression(callee) && callee.name.text === "Router") {
+    const memberReq = isStaticRequireCall(callee.expression);
+    if (memberReq !== undefined && memberReq.text === "express") return true;
+  }
+  return false;
+}
+
+interface CjsExportFunctionMatch {
+  readonly exportName: string;
+  readonly kind: "Function" | "Handler";
+  readonly lhs: ts.Expression;
+  readonly rhs: ts.FunctionExpression | ts.ArrowFunction;
+}
+
+function matchCjsExportAssignment(
+  binary: ts.BinaryExpression,
+): CjsExportFunctionMatch | undefined {
+  if (binary.operatorToken.kind !== ts.SyntaxKind.EqualsToken) return undefined;
+  const rhs = binary.right;
+  if (!ts.isFunctionExpression(rhs) && !ts.isArrowFunction(rhs)) return undefined;
+  const lhs = binary.left;
+  if (!ts.isPropertyAccessExpression(lhs)) return undefined;
+
+  // exports.<name> = fn|arrow
+  if (ts.isIdentifier(lhs.expression) && lhs.expression.text === "exports") {
+    return {
+      exportName: lhs.name.text,
+      kind: ts.isFunctionExpression(rhs) ? "Function" : "Handler",
+      lhs,
+      rhs,
+    };
+  }
+  // module.exports.<name> = fn|arrow
+  if (
+    ts.isPropertyAccessExpression(lhs.expression) &&
+    ts.isIdentifier(lhs.expression.expression) &&
+    lhs.expression.expression.text === "module" &&
+    lhs.expression.name.text === "exports"
+  ) {
+    return {
+      exportName: lhs.name.text,
+      kind: ts.isFunctionExpression(rhs) ? "Function" : "Handler",
+      lhs,
+      rhs,
+    };
+  }
+  // module.exports = function <name>(...)
+  if (
+    ts.isIdentifier(lhs.expression) &&
+    lhs.expression.text === "module" &&
+    lhs.name.text === "exports" &&
+    ts.isFunctionExpression(rhs) &&
+    rhs.name !== undefined
+  ) {
+    return {
+      exportName: rhs.name.text,
+      kind: "Function",
+      lhs,
+      rhs,
+    };
+  }
+  return undefined;
+}
+
+/** HIGH-2: Üst düzey CommonJS export atamalarını (`exports.fn`, `module.exports.fn`, `module.exports = function name`) düğüm + registry olarak çıkarır. */
+function extractCjsExportStatement(
+  context: AnalysisContext,
+  entry: SourceEntry,
+  statement: ts.Statement,
+  fileNode: NodeRecord,
+  addContains: (from: NodeRecord, to: NodeRecord, node: ts.Node, rationale: string) => void,
+  registerWithSymbol: (symbol: ts.Symbol | undefined, record: NodeRecord) => void,
+): void {
+  if (!ts.isExpressionStatement(statement)) return;
+  if (!ts.isBinaryExpression(statement.expression)) return;
+  const match = matchCjsExportAssignment(statement.expression);
+  if (match === undefined) return;
+
+  const { assembler, checker } = context;
+  const record = assembler.ensureNode({
+    kind: match.kind,
+    qualifiedName: match.exportName,
+    relativePath: entry.relativePath,
+    language: entry.language,
+  });
+
+  const rhsName = ts.getNameOfDeclaration(match.rhs);
+  registerWithSymbol(checker.getSymbolAtLocation(rhsName ?? match.rhs), record);
+  if (rhsName !== undefined) {
+    registerWithSymbol(checker.getSymbolAtLocation(match.rhs), record);
+  }
+  registerWithSymbol(checker.getSymbolAtLocation(match.lhs), record);
+  if (ts.isPropertyAccessExpression(match.lhs)) {
+    registerWithSymbol(checker.getSymbolAtLocation(match.lhs.name), record);
+  }
+
+  addContains(
+    fileNode,
+    record,
+    statement,
+    `CONTAINS: ${entry.relativePath} dosyasındaki CommonJS export ${match.exportName} bildirimi AST span kanıtıyla eşlendi.`,
+  );
+}
+
+/** CommonJS export atamasına bağlı fonksiyon/arrow ifadeleri için caller kaydı döndürür. */
+function cjsExportCallerRecord(
+  context: AnalysisContext,
+  entry: SourceEntry,
+  node: ts.Node,
+): NodeRecord | undefined {
+  const parent = node.parent;
+  if (parent === undefined || !ts.isBinaryExpression(parent) || parent.right !== node) {
+    return undefined;
+  }
+  const match = matchCjsExportAssignment(parent);
+  if (match === undefined) return undefined;
+  return context.assembler.ensureNode({
+    kind: match.kind,
+    qualifiedName: match.exportName,
+    relativePath: entry.relativePath,
+    language: entry.language,
+  });
+}
+
+/** HIGH-2: Sembol veya bildirimi analiz setindeki dahili bir dosyaya aitse true döner (UnknownExternal sınıflandırmasını önler). */
+function isInternalDeclarationOrSymbol(
+  context: AnalysisContext,
+  symbol: ts.Symbol,
+  declaration: ts.Declaration | undefined,
+): boolean {
+  if (declaration !== undefined && ownRelativePathOf(context, declaration) !== undefined) {
+    return true;
+  }
+  const decls = symbol.getDeclarations();
+  if (decls !== undefined) {
+    for (const decl of decls) {
+      if (ownRelativePathOf(context, decl) !== undefined) return true;
+    }
+  }
+  return false;
+}
+
+function extractDeclarationNameText(
+  declaration: ts.Declaration,
+): string | undefined {
+  const name = ts.getNameOfDeclaration(declaration);
+  if (name === undefined) return undefined;
+  if (ts.isIdentifier(name)) return name.text;
+  if (ts.isPropertyAccessExpression(name)) return name.name.text;
+  return undefined;
+}
+
+function inferCjsExportNodeKind(
+  declaration: ts.FunctionExpression | ts.ArrowFunction,
+): "Function" | "Handler" | undefined {
+  const parent = declaration.parent;
+  if (parent === undefined || !ts.isBinaryExpression(parent) || parent.right !== declaration) {
+    return undefined;
+  }
+  const statement = parent.parent;
+  if (statement === undefined || !ts.isExpressionStatement(statement)) {
+    return undefined;
+  }
+  if (!ts.isSourceFile(statement.parent)) {
+    return undefined;
+  }
+  return matchCjsExportAssignment(parent)?.kind;
 }

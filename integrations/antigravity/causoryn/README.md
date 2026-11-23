@@ -1,6 +1,6 @@
 # Causoryn for Antigravity
 
-> **Monorepo Development Fixture:** This directory (`integrations/antigravity/causoryn`) is a local monorepo development/testing fixture for verifying staged bundle compatibility. End users can install Causoryn via `npx causoryn@0.2.2 setup --client antigravity --yes` or from the repository root (`https://github.com/MrBekoX/Causoryn`).
+> **Monorepo Development Fixture:** This directory (`integrations/antigravity/causoryn`) is a local monorepo development/testing fixture for verifying staged bundle compatibility. End users can install Causoryn via `npx causoryn@0.2.3 setup --client antigravity --yes` or from the repository root (`https://github.com/MrBekoX/Causoryn`).
 
 > Evidence: TŞ v2.1 §17.1, §17.4, §22 · `docs/hosts/antigravity.md` · `packages/mcp-server` (29 published MCP tools)
 
@@ -60,5 +60,5 @@ Both `mcp_config.json` and `mcp.json` ship with a strict **default-deny** config
 
 ## Verification Honesty (`agy` CLI Status: `NOT RUN`)
 
-- **Direct `stdio` spawn coverage:** With the bundle staged, `antigravity-plugin.test.ts` spawns `node scripts/mcp-server.mjs` from this directory using `mcp_config.json` (`command`, `args`, `env`). It asserts `initialize` against `SERVER_VERSION` (`0.2.2`), `tools/list` (29 tools), `causoryn_get_capabilities` (`ok`), `causoryn_workspace_summary` (`WORKSPACE_NOT_AUTHORIZED`), and JSON-RPC-only `stdout`.
+- **Direct `stdio` spawn coverage:** With the bundle staged, `antigravity-plugin.test.ts` spawns `node scripts/mcp-server.mjs` from this directory using `mcp_config.json` (`command`, `args`, `env`). It asserts `initialize` against `SERVER_VERSION` (`0.2.3`), `tools/list` (29 tools), `causoryn_get_capabilities` (`ok`), `causoryn_workspace_summary` (`WORKSPACE_NOT_AUTHORIZED`), and JSON-RPC-only `stdout`.
 - **`NOT RUN` via `agy` CLI (TŞ §22):** `agy CLI bulunamadı — bu hostta kurulum/smoke koşulmadı`. Because the `agy` command-line binary is not installed on this host machine, CLI lifecycle commands (`agy plugin validate --strict`, `agy plugin install`, `agy plugin list`) were **NOT RUN** and are documented as reference examples in `docs/hosts/antigravity.md`.

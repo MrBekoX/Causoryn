@@ -22,6 +22,27 @@ sürümleme [SemVer](https://semver.org/lang/tr/) ilkelerini izler.
 - Rate-limit/concurrency resource budget (K-010 kapsam dışı beyanı) (adanmış secret-scan kapısı 2026-11-17/18'de `scripts/secret-scan.mjs` ile eklendi ve 2026-11-20 K-022'de 12 kök + kök dosyalarına genişletildi)
 - ~~npm audit 10 moderate dev-toolchain uyarısının (minimatch) çözülmesi~~ — **Kapatıldı (2026-11-20, K-022):** `eslint@10.15.0` ve `typescript-eslint@8.73.0` yükseltmesiyle `npm audit` **0 güvenlik açığı** (`0 vulnerabilities`) döndürür.
 
+## [0.2.3] - 2026-11-23
+
+### Added
+
+- **JavaScript & Modern TS Uzantıları (`adapters/typescript`, `packages/indexing`, `K-024` — yeni dil adapter'ı eklenmeden):** Mevcut süreç-içi `ts-adapter` artık `.ts`, `.tsx`, `.mts`, `.cts` yanında `.js`, `.jsx`, `.mjs`, `.cjs` dosyalarını da `allowJs: true`, `checkJs: false` ve varsayılan `jsx: ts.JsxEmit.Preserve` ile tam analiz eder; JS dosya/sembolleri `language: "javascript"`, TS dosya/sembolleri `language: "typescript"` olarak etiketlenir. ESM `import`/`export ... from` yanında CommonJS `require("literal")`, `exports.<fn>`, `module.exports.<fn>`, `module.exports = function ...` ve JS/CJS Express ile Next.js App Router rotaları çıkarılır.
+- **Güvenli Salt-Okunur `tsconfig.json` / `jsconfig.json` Yükleyici (`adapters/typescript/src/tsconfig-loader.ts`):** `baseUrl`, `paths` (`@/*`, `~/*`), `jsx`, `moduleResolution` (`Bundler` / `NodeNext`), `experimentalDecorators`, JSONC yorumları, kök-içi `extends` zincirleri ve monorepo iç-içe yapılandırmaları (`frontend/tsconfig.json` vb.) deterministik biçimde okunur; `IndexService` politika-onaylı config dosyalarını analizöre aktarır ve `tsconfig*`/`jsconfig*` değişikliklerinde artımlı önbelleği geçersiz kılar.
+- **Evrensel Ignore Keşfi & Akıllı `bin/` Ayrımı (`packages/workspace`, `packages/mcp-server`):**
+  - `DEFAULT_IGNORE_PATTERNS` içindeki 7 TŞ §20 deseni (dahil `**/bin/**`) ve `src/build/keep.ts` erişilebilirliği korunurken 14 kesin ekosistem önbellek/vendor dizini (`vendor`, `Pods`, `.gradle`, `.angular`, `.expo`, `.idea`, `.dart_tool`, `.terraform`, `.tox`, `.nox`, `.parcel-cache`, `.vite`, `*.min.js`, `*.min.mjs`) ve 20 ikili/ML/sourcemap uzantısı (`.map`, `.whl`, `.parquet`, `.onnx`, `.pt`, `.safetensors`, `.gguf` vb.) varsayılanlara eklendi.
+  - `workspace-ignore-discovery.ts` kök `.gitignore` yanında `.git/info/exclude` ve sınırlı derinlik/bütçeli iç-içe `.gitignore` dosyalarını okur.
+  - `buildWorkspaceAutoConfig` açık `ignore` verilmediğinde kaba `**/bin/**` desenini yalnızca `.NET` çıktı dizinleriyle (`**/bin/{Debug,Release,x64,x86,AnyCPU}/**` ve tespit edilen `.csproj`/`.fsproj`/`.vbproj` altındaki `<proje>/bin/**`) değiştirir; böylece Node/CLI `bin/*.ts|js` ve Rust `src/bin/*.rs` kaynakları korunur.
+- **Olay Döngüsünü Bloklamayan `collectInventoryAsync` (`packages/indexing`):** Envanter taraması her 64 girişte `setImmediate` ile nefes alarak büyük repolarda MCP el sıkışmasının ve eşzamanlı isteklerin gecikmesini önler; senkron `collectInventory` ile bayt-düzeyinde özdeş sıralı çıktı üretir.
+
+### Changed
+
+- **Etkileşimli HTML Varsayılan Dosya Adı (`packages/graph`):** `causoryn_export_documentation(format="html", view="interactive")` çağrısında `fileName` verilmediğinde varsayılan çıktı adı `causoryn-architecture-interactive.html` (`EXPORT_INTERACTIVE_HTML_FILE_NAME`) olur; böylece varsayılan sıfır-JS `causoryn-architecture.html` çıktısının üzerine sessizce yazılması önlenir.
+
+### Security
+
+- **Polinom Zamanlı Sıfır-RegExp Glob Eşleştirici (`packages/workspace/src/ignore-matcher.ts`):** `ignore-matcher.ts` geri izlemeli (backtracking) RegExp derlemesi yerine deterministik iki-işaretçili polinom-zamanlı glob eşleştiricisine geçirildi (ReDoS ve desen-önbellek döngüsü kapatıldı).
+- **Kök-İçi Hapsedilmiş TS Derleyici Konağı & Sınırlı `O_NOFOLLOW` Okumalar (`adapters/typescript`, `packages/mcp-server`, `packages/indexing`):** `configureConfinedCompilerHost` ile TypeScript derleyici ve modül çözümleyici konağı yalnızca yetkili `rootDir` ve paketli `typescript-lib` dizinleriyle sınırlandırıldı (`ts.sys` disk sızıntısı ve wildcard-gizli `..` kaçışı engellendi); `tsconfig`/`jsconfig`, `.gitignore`/`.git/info/exclude` ve dosya envanteri okumalarına `O_NOFOLLOW`, `fstat` `(dev, ino)` doğrulaması ve döngü/DAG bütçeleri eklendi; `writeDocumentation` geçici dosya oluşturma yolu `flag: "wx"` + `EEXIST` korumasıyla sertleştirildi.
+
 ## [0.2.2] - 2026-11-22
 
 ### Added

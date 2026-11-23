@@ -1,6 +1,7 @@
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 import { afterEach, describe, expect, it } from "vitest";
 
@@ -22,7 +23,11 @@ import {
 } from "../src/architecture-export.js";
 import { computeArchitectureLayout } from "../src/architecture-layout.js";
 import { projectArchitecture } from "../src/architecture-projection.js";
-import { writeDocumentation } from "../src/export.js";
+import {
+  EXPORT_DEFAULT_FILE_NAMES,
+  writeDocumentation,
+} from "../src/export.js";
+import { EXPORT_INTERACTIVE_HTML_FILE_NAME } from "../src/index.js";
 import { GraphRepositoryError } from "../src/errors.js";
 
 const WS = "ws_arch_export";
@@ -536,5 +541,112 @@ describe("writeDocumentation — view & annotations entegrasyonu", () => {
         policy,
       ),
     ).toThrowError(GraphRepositoryError);
+  });
+
+  it("varsayılan dosya adları: architecture → causoryn-architecture.html, interactive → causoryn-architecture-interactive.html (çakışmadan birlikte yaşar) ve açık fileName her zaman önceliklidir", () => {
+    expect(EXPORT_DEFAULT_FILE_NAMES.html).toBe("causoryn-architecture.html");
+    expect(EXPORT_INTERACTIVE_HTML_FILE_NAME).toBe("causoryn-architecture-interactive.html");
+
+    const snap = richFixture();
+    const outDir = makeTmp("default-names");
+    const policy = OutputAccessPolicy.create([outDir]);
+
+    // 1. Default architecture HTML (no fileName) -> causoryn-architecture.html (zero-JS SVG portal)
+    const archHtml = writeDocumentation(
+      { snapshot: snap, format: "html", outputDir: outDir, view: "architecture" },
+      policy,
+    );
+    expect(path.basename(archHtml.path)).toBe("causoryn-architecture.html");
+    expect(archHtml.view).toBe("architecture");
+
+    // 2. Interactive HTML (no fileName) -> causoryn-architecture-interactive.html without overwriting architecture HTML
+    const interHtml = writeDocumentation(
+      { snapshot: snap, format: "html", outputDir: outDir, view: "interactive" },
+      policy,
+    );
+    expect(path.basename(interHtml.path)).toBe("causoryn-architecture-interactive.html");
+    expect(interHtml.view).toBe("interactive");
+    expect(interHtml.path).not.toBe(archHtml.path);
+
+    // Both files coexist with distinct contents
+    const archContent = readFileSync(archHtml.path, "utf8");
+    const interContent = readFileSync(interHtml.path, "utf8");
+    expect(archContent).toContain("<svg ");
+    expect(/<script/i.test(archContent)).toBe(false);
+    expect(interContent).toContain("causoryn-portal-data");
+    expect(interContent).toContain("<svg ");
+    expect(archContent).not.toBe(interContent);
+
+    // 3. Explicit fileName always takes precedence for interactive view
+    const customInterHtml = writeDocumentation(
+      {
+        snapshot: snap,
+        format: "html",
+        outputDir: outDir,
+        view: "interactive",
+        fileName: "custom-portal.html",
+      },
+      policy,
+    );
+    expect(path.basename(customInterHtml.path)).toBe("custom-portal.html");
+    expect(readFileSync(customInterHtml.path, "utf8")).toContain("causoryn-portal-data");
+
+    expect(readdirSync(outDir).sort()).toEqual([
+      "causoryn-architecture-interactive.html",
+      "causoryn-architecture.html",
+      "custom-portal.html",
+    ]);
+
+    // 4. Non-interactive views (full / undefined) keep EXPORT_DEFAULT_FILE_NAMES.html
+    const fullDir = makeTmp("default-full");
+    const fullPolicy = OutputAccessPolicy.create([fullDir]);
+    const fullHtml = writeDocumentation(
+      { snapshot: snap, format: "html", outputDir: fullDir, view: "full" },
+      fullPolicy,
+    );
+    expect(path.basename(fullHtml.path)).toBe("causoryn-architecture.html");
+  });
+
+  it("SEC-12: atomik geçici dosya yazımı exclusive flag='wx' kullanır ve mevcut hedef dosyayı artık .tmp bırakmadan temizce üzerine yazar", () => {
+    const snap = richFixture();
+    const outDir = makeTmp("atomic-wx");
+    const policy = OutputAccessPolicy.create([outDir]);
+    const ann = sampleAnnotations(snap);
+
+    // 1. İlk interactive export hedef dosyayı oluşturur
+    const first = writeDocumentation(
+      { snapshot: snap, format: "html", outputDir: outDir, view: "interactive" },
+      policy,
+    );
+    expect(first.atomic).toBe(true);
+    expect(path.basename(first.path)).toBe(EXPORT_INTERACTIVE_HTML_FILE_NAME);
+    expect(readFileSync(first.path, "utf8")).not.toContain("Layered Modular Monolith");
+
+    // 2. Artık .tmp dosyası varken ikinci yazma mevcut hedefi atomik ve temizce üzerine yazar
+    writeFileSync(`${first.path}.tmp`, "STALE-TMP-RESIDUE", "utf8");
+    const second = writeDocumentation(
+      {
+        snapshot: snap,
+        format: "html",
+        outputDir: outDir,
+        view: "interactive",
+        annotations: ann,
+      },
+      policy,
+    );
+    expect(second.atomic).toBe(true);
+    expect(second.path).toBe(first.path);
+    const updatedContent = readFileSync(second.path, "utf8");
+    expect(updatedContent).toContain("causoryn-portal-data");
+    expect(updatedContent).toContain("Layered Modular Monolith");
+    expect(updatedContent).not.toContain("STALE-TMP-RESIDUE");
+    expect(readdirSync(outDir)).toEqual([EXPORT_INTERACTIVE_HTML_FILE_NAME]);
+
+    // 3. SEC-12 TOCTOU koruması: export.ts geçici dosyayı { encoding: "utf8", flag: "wx" } ile açar
+    const exportSourcePath = fileURLToPath(new URL("../src/export.ts", import.meta.url));
+    const exportSource = readFileSync(exportSourcePath, "utf8");
+    expect(exportSource).toMatch(
+      /writeFileSync\(\s*tmpPath\s*,\s*content\s*,\s*\{\s*encoding:\s*"utf8"\s*,\s*flag:\s*"wx"\s*\}\s*\)/,
+    );
   });
 });

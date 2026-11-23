@@ -46,7 +46,7 @@ import {
 
 export { IndexingError } from "./errors.js";
 export type { IndexingErrorCode } from "./errors.js";
-export { collectInventory } from "./inventory.js";
+export { collectInventory, collectInventoryAsync } from "./inventory.js";
 export type { InventoryEntry } from "./inventory.js";
 export {
   ANALYZER_FINGERPRINT_SCHEMA_VERSION,

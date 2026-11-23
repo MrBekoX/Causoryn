@@ -1,4 +1,4 @@
-# Compatibility Matrix — Host × Outcome (`v0.2.2` Distribution and Historical Smoke Evidence, Spec §22–§23)
+# Compatibility Matrix — Host × Outcome (`v0.2.3` Distribution and Historical Smoke Evidence, Spec §22–§23)
 
 > **Language / Dil:** [Türkçe](../compatibility-matrix.md) · English
 
@@ -12,17 +12,17 @@
 > Verification suite: `tests/release-docs.test.ts` (Antigravity row strictly `NOT RUN`; ZCode row
 > claims manifest + isolated CLI verification while desktop GUI remains `NOT RUN`).
 
-Engine identity: `causoryn@0.2.2` (`SERVER_VERSION` — Pre-1.0 Public Preview; historical F1–F9 runs
+Engine identity: `causoryn@0.2.3` (`SERVER_VERSION` — Pre-1.0 Public Preview; historical F1–F9 runs
 were recorded against `causoryn@0.1.0`), `stdio` MCP, `tools/list` publishes **exactly 29 tools**
 (`TOOL_NAMES`, `packages/mcp-server/src/version.ts`). Both the distribution package
-`packages/causoryn` (`npx causoryn@0.2.2 setup`) and the monorepo F1 bundle
+`packages/causoryn` (`npx causoryn@0.2.3 setup`) and the monorepo F1 bundle
 (`packages/mcp-server/dist/mcp-server.mjs` + vendored `node_modules/better-sqlite3/`) execute the
 same engine (the artifact is intentionally not a standalone single file because native `.node`
 addons cannot be embedded, ADR-010). Local live host verification environment: Windows 10.0.26300
 x64, Node ≥ 24; 3-OS GitHub Actions CI matrix (`.github/workflows/ci.yml`: `ubuntu-latest`,
 `windows-latest`, `macos-latest`) verified green across all three operating systems in K-022.
 
-## `v0.2.2` Runtime Behavior
+## `v0.2.3` Runtime Behavior
 
 - All four hosts launch the same MCP engine on Node.js ≥ 24. Default package setup installs five canonical skills, including `architecture-blueprint`. The packaged CLI starts initial automatic indexing in the background after the handshake. Poll `causoryn_index_status` until a snapshot is available. [CLI and Configuration](cli-and-configuration.md)
 - Visual export runs without a model call. The user or host model can supply optional `annotations`. The same snapshot, format, view, options, and annotations render the same artifact. The wording produced by a host model can vary between runs. [Architecture export contract](tool-contracts.md)
@@ -58,7 +58,7 @@ x64, Node ≥ 24; 3-OS GitHub Actions CI matrix (`.github/workflows/ci.yml`: `ub
    Red Rule 6 prohibits smoke tests from leaving permanent residue in a developer's real ZCode
    installation, and ZCode marketplace installation is GUI-only. Setup instructions
    ([docs/en/hosts/zcode.md](hosts/zcode.md), `integrations/zcode/causoryn/README.md`, and
-   `npx causoryn@0.2.2 setup --client zcode --yes`) are documented while interactive desktop GUI
+   `npx causoryn@0.2.3 setup --client zcode --yes`) are documented while interactive desktop GUI
    execution remains `NOT RUN`.
 3. **Two-layer `stdout` hygiene:** Because all four hosts spawn the exact same engine, process-level
    `stdout` discipline carries across hosts (unit suite + F6's 5 independent spawn sessions + Claude

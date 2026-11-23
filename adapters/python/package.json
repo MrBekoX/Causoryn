@@ -1,6 +1,6 @@
 {
   "name": "@causoryn/adapter-python",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "private": true,
   "license": "MIT",
   "description": "Python Language Adapter: stdlib ast sidecar worker süreç yönetimi (TŞ v2.1 §7; M1-Python).",
@@ -9,7 +9,7 @@
     ".": "./src/index.ts"
   },
   "dependencies": {
-    "@causoryn/domain": "0.2.2",
-    "@causoryn/sidecar-ipc": "0.2.2"
+    "@causoryn/domain": "0.2.3",
+    "@causoryn/sidecar-ipc": "0.2.3"
   }
 }

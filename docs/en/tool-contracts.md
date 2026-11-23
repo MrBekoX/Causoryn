@@ -37,7 +37,7 @@ Per-tool typical error codes in the tables below were compiled from two sources:
 
 | Tool | Inputs (primary fields) | Output (`data` summary) | Typical error codes |
 |---|---|---|---|
-| `causoryn_get_capabilities` | `workspace?` | Adapter capability levels L0–L4 across 5 languages (including C# `frameworkLinkers: "aspnet-core-route-attributes (L3)"`), server identity (`SERVER_VERSION = "0.2.2"`, `SCHEMA_VERSION = "2.0"`), server limits, protocol revision, and the 29 published tool names; requires no snapshot | `WORKSPACE_NOT_AUTHORIZED` |
+| `causoryn_get_capabilities` | `workspace?` | Adapter capability levels L0–L4 across 5 languages (including C# `frameworkLinkers: "aspnet-core-route-attributes (L3)"`), server identity (`SERVER_VERSION = "0.2.3"`, `SCHEMA_VERSION = "2.0"`), server limits, protocol revision, and the 29 published tool names; requires no snapshot | `WORKSPACE_NOT_AUTHORIZED` |
 | `causoryn_workspace_summary` | `workspaceId?` | Project, language, framework, entrypoint, and coverage summary derived strictly from the latest published `GraphSnapshot`; empty workspace returns `partial` | `WORKSPACE_NOT_AUTHORIZED`, `INDEX_NOT_READY`, `INVALID_ARGUMENT`, `LIMIT_EXCEEDED` |
 | `causoryn_index_status` | `jobId?` | Progress, snapshot ID, `stale` flag, and diagnostics for the specified or latest index job. Job diagnostics and warnings are each capped at 50 entries, with a truncation summary appended to warnings when needed. Returns null `job` and `jobId` when no job exists, and an actionable warning when no published snapshot exists | `WORKSPACE_NOT_AUTHORIZED`, `INVALID_ARGUMENT`, `LIMIT_EXCEEDED` |
 | `causoryn_refresh_index` | `mode` (`full` \| `incremental` — content-hash comparative refresh; B7 per-file parse reuse and file-watcher MCP surface remain open), `scope?` (explicitly rejected) | Returns `jobId` immediately while indexing runs asynchronously; writes **only** to Causoryn's authorized graph repository (`InMemoryGraphRepository` or `storage.dataDbPath` SQLite) | `WORKSPACE_NOT_AUTHORIZED`, `INVALID_ARGUMENT`, `LIMIT_EXCEEDED`, `PATH_DENIED` |
@@ -60,9 +60,9 @@ Per-tool typical error codes in the tables below were compiled from two sources:
 | `causoryn_get_evidence` | `nodeId`/`edgeId`/`evidenceId`/`findingId` | Provenance chain (`relativePath`, `startLine`/`endLine`, `sourceHash`, `analyzerId`, `rationale`, `contextRefs`) + deterministic `chain` summary; `finding:<sha256>` IDs are re-derived from `.causoryn/architecture.rules.yaml` | `WORKSPACE_NOT_AUTHORIZED`, `INDEX_NOT_READY`, `INVALID_ARGUMENT`, `LIMIT_EXCEEDED`, `EVIDENCE_NOT_FOUND`, `POLICY_INVALID` |
 | `causoryn_architecture_timeline` | `refs`/`range`, `granularity?` | Deterministically sampled architectural diff timeline across Git points + Phase E violation trends (`no-cycles` and `forbidden-dependency` tracked separately per milestone, never collapsed into a fake quality score); skipped points listed explicitly | `WORKSPACE_NOT_AUTHORIZED`, `INDEX_NOT_READY`, `INVALID_ARGUMENT`, `INVALID_REVISION`, `POLICY_INVALID`, `LIMIT_EXCEEDED` |
 
-### Architecture export details (v0.2.2)
+### Architecture export details (v0.2.2–v0.2.3)
 
-- `architecture` is the MCP default for `json`, `markdown`, `mermaid`, and `html`. `interactive` is available for `html` only. Select `view="full"` for the legacy raw dump. With `view` omitted or set to `full`, `format="snapshot"` emits the canonical `CompareContentSet` used by comparison tools.
+- `architecture` is the MCP default for `json`, `markdown`, `mermaid`, and `html` (default HTML filename: `causoryn-architecture.html`). `interactive` is available for `html` only and defaults to `causoryn-architecture-interactive.html` (`EXPORT_INTERACTIVE_HTML_FILE_NAME`, v0.2.3) when `fileName` is omitted, preventing silent overwrite of the zero-JS `causoryn-architecture.html` artifact. Select `view="full"` for the legacy raw dump. With `view` omitted or set to `full`, `format="snapshot"` emits the canonical `CompareContentSet` used by comparison tools.
 - `options` and `annotations` are accepted only for `architecture` and `interactive`. `maxModules` defaults to 32 and accepts 2–100. The summary's `moduleIds` can be used to annotate the same projection.
 - The calling client supplies optional `annotations`, which a host LLM can draft. Causoryn checks the schema, budgets, and supplied `moduleId`, `nodeId`, `evidenceId`, and `keyFiles` references before rendering the text. Free-form commentary remains the sender's interpretation.
 - Byte equality applies to file contents for the same snapshot, format, view, effective options, and validated annotations. `packages/graph/test/architecture-export.test.ts` covers equality across four formats and both HTML views when the same graph's arrays are reversed.
@@ -79,12 +79,12 @@ Per-tool typical error codes in the tables below were compiled from two sources:
 | `causoryn_wiki_get_versions` | `pageId?`, `refs?`, `limit?`, `cursor?` | Reports stored `WikiSnapshot` revisions as `available` (`contentHash`, `linkSetHash`, `templateVersion`, `coverage`); resolves Git branch/tag/commit aliases via read-only `git cat-file -t` (`working-tree` resolves without requiring `.git`) | `WORKSPACE_NOT_AUTHORIZED`, `INDEX_NOT_READY`, `WIKI_PAGE_NOT_FOUND`, `INVALID_ARGUMENT`, `INVALID_REVISION` |
 | `causoryn_wiki_diff` | `base`, `target`, `pageId?` | `addedPages`, `removedPages`, `changedSections`, `addedLinks`, `removedLinks`, `coverageDelta` (`{pageId, previous, current, reason?}`), `unresolvedDifferences`, and `contractChanges` (`{contractId, changeKind, summary}`, K-013 #7) | `WORKSPACE_NOT_AUTHORIZED`, `INDEX_NOT_READY`, `WIKI_PAGE_NOT_FOUND`, `INVALID_ARGUMENT`, `INVALID_REVISION`, `PATH_DENIED`, `LIMIT_EXCEEDED` |
 
-## Server Identity, 5-Language Capability Matrix & Fixed 15 Error Codes (v0.2.2)
+## Server Identity, 5-Language Capability Matrix & Fixed 15 Error Codes (v0.2.3)
 
 ### 1. Server Identity & Protocol Constants (`packages/mcp-server/src/version.ts`)
 
 - `SERVER_NAME = "causoryn"` — reported as `serverInfo.name` in the MCP `initialize` handshake.
-- `SERVER_VERSION = "0.2.2"` — Pre-1.0 Public Preview version (K-022; locked across root `package.json`, `packages/causoryn/package.json`, and `server.json`; per ADR-010, `1.0.0` is not declared while `[Unreleased]` 1.0.0 release gates remain open).
+- `SERVER_VERSION = "0.2.3"` — Pre-1.0 Public Preview version (K-022 / K-024; locked across root `package.json`, `packages/causoryn/package.json`, and `server.json`; per ADR-010, `1.0.0` is not declared while `[Unreleased]` 1.0.0 release gates remain open).
 - `SCHEMA_VERSION = "2.0"` — populated in `envelope.schemaVersion` across all 29 tools.
 - `protocol.revision` — `LATEST_PROTOCOL_VERSION` re-exported from `@modelcontextprotocol/sdk`.
 
@@ -139,7 +139,7 @@ All domain, policy, and workspace errors travel inside `envelope.error` (`{ code
 
 ## Reuse Principle (No Duplicate Wiki Refresh/Export Tools)
 
-`causoryn_refresh_index` does not automatically rebuild the `WikiSnapshot` in v0.2.2; regenerating the Wiki projection is performed explicitly via `causoryn_wiki_build`. `causoryn_export_documentation` supports `view: "architecture" | "interactive" | "full"`, `options`, and fail-closed `annotations`, while `view: "wiki"` remains explicitly rejected with `INVALID_ARGUMENT` (ADR-010: incomplete surfaces are never silently ignored). Separate `wiki_refresh` or `wiki_export` tools are intentionally **not** introduced, keeping the tool catalog locked at 22 + 7 = 29 tools.
+`causoryn_refresh_index` does not automatically rebuild the `WikiSnapshot` in v0.2.3; regenerating the Wiki projection is performed explicitly via `causoryn_wiki_build`. `causoryn_export_documentation` supports `view: "architecture" | "interactive" | "full"`, `options`, and fail-closed `annotations`, while `view: "wiki"` remains explicitly rejected with `INVALID_ARGUMENT` (ADR-010: incomplete surfaces are never silently ignored). Separate `wiki_refresh` or `wiki_export` tools are intentionally **not** introduced, keeping the tool catalog locked at 22 + 7 = 29 tools.
 
 ## Zero-Config CLI, Dynamic Root Binding & `outputSchemaProfile` Contract (K-021)
 

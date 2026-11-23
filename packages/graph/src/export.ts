@@ -97,6 +97,10 @@ export const EXPORT_DEFAULT_FILE_NAMES: Readonly<
   snapshot: "architecture-snapshot.json",
 };
 
+/** `view="interactive"` (yalnızca `format="html"`) için varsayılan çıktı dosya adı. */
+export const EXPORT_INTERACTIVE_HTML_FILE_NAME =
+  "causoryn-architecture-interactive.html";
+
 /* ------------------------------------------------------------------ */
 /* Kaçış yardımcıları (saf, deterministik)                             */
 /* ------------------------------------------------------------------ */
@@ -633,7 +637,11 @@ export function writeDocumentation(
     };
   }
 
-  const fileName = input.fileName ?? EXPORT_DEFAULT_FILE_NAMES[parsedFormat.data];
+  const defaultFileName =
+    resolvedView === "interactive" && parsedFormat.data === "html"
+      ? EXPORT_INTERACTIVE_HTML_FILE_NAME
+      : EXPORT_DEFAULT_FILE_NAMES[parsedFormat.data];
+  const fileName = input.fileName ?? defaultFileName;
   const decision = policy.authorizeFile(input.outputDir, fileName);
   if (!decision.allowed) {
     const contractCode =
@@ -653,13 +661,17 @@ export function writeDocumentation(
     } catch {
       // tmp yok: temizlik gereksiz; asıl yazma aşağıda.
     }
-    writeFileSync(tmpPath, content, "utf8");
+    writeFileSync(tmpPath, content, { encoding: "utf8", flag: "wx" });
     renameSync(tmpPath, targetPath);
   } catch (error) {
-    try {
-      unlinkSync(tmpPath);
-    } catch {
-      // tmp oluşmadıysa temizlik gereksiz; asıl hata aşağıda raporlanır.
+    const isEexist =
+      error instanceof Error && "code" in error && error.code === "EEXIST";
+    if (!isEexist) {
+      try {
+        unlinkSync(tmpPath);
+      } catch {
+        // tmp oluşmadıysa temizlik gereksiz; asıl hata aşağıda raporlanır.
+      }
     }
     throw new GraphRepositoryError(
       "export/write-failed",

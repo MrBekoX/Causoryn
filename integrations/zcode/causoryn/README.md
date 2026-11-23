@@ -1,6 +1,6 @@
 # Causoryn for ZCode
 
-> **Monorepo Development Fixture:** This directory (`integrations/zcode/causoryn`) is a local monorepo development/testing fixture. End users can install Causoryn via `npx causoryn@0.2.2 setup --client zcode --yes` or by adding the repository root marketplace (`https://github.com/MrBekoX/Causoryn`, root `marketplace.json`) in ZCode.
+> **Monorepo Development Fixture:** This directory (`integrations/zcode/causoryn`) is a local monorepo development/testing fixture. End users can install Causoryn via `npx causoryn@0.2.3 setup --client zcode --yes` or by adding the repository root marketplace (`https://github.com/MrBekoX/Causoryn`, root `marketplace.json`) in ZCode.
 
 > Evidence: TŞ v2.1 §17, §25/8 · wiki/decisions.md K-002 (ZCode as fourth host adapter) · wiki/mcp-tools.md (tool catalog) · packages/mcp-server (implemented tools)
 
@@ -178,4 +178,4 @@ Sprint-5 Faz D (Differentiation, TŞ §10.2/§11/§14/§15) added
 added `causoryn_verify_change` — the change-verification companion of the
 product cycle Discover → Preflight → Agent Edits → **Verify** → Explain: it
 writes no code, it only verifies, and it never runs tests (29 tools total).
-`v0.2.2` adds the visual architecture views and optional annotations to the existing export tool. The server still publishes 29 MCP tools. [Tool contracts](../../../docs/en/tool-contracts.md)
+`v0.2.3` adds the visual architecture views and optional annotations to the existing export tool. The server still publishes 29 MCP tools. [Tool contracts](../../../docs/en/tool-contracts.md)

@@ -1,6 +1,6 @@
 {
   "name": "@causoryn/graph",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "private": true,
   "license": "MIT",
   "description": "GraphRepository sözleşmesi ve bellek içi gerçekleme: building → ready/partial atomik snapshot yayımlama, stale bayrağı (TŞ v2.1 §8, §9, ADR-005).",
@@ -9,8 +9,8 @@
     ".": "./src/index.ts"
   },
   "dependencies": {
-    "@causoryn/domain": "0.2.2",
-    "@causoryn/workspace": "0.2.2",
+    "@causoryn/domain": "0.2.3",
+    "@causoryn/workspace": "0.2.3",
     "yaml": "^2.9.1",
     "zod": "^4.6.7"
   }

@@ -1,16 +1,16 @@
-# Causoryn Dokümantasyon Merkezi (`v0.2.2` — Pre-1.0 Public Preview)
+# Causoryn Dokümantasyon Merkezi (`v0.2.3` — Pre-1.0 Public Preview)
 
 > **Dil / Language:** **Türkçe** | [English](en/README.md) · [Kök README](../README.md) · [Bilingual Proje Dokümanı (TR · EN)](project-overview.tr-en.md)
 
 **Causoryn**, **yerel ve LLM-free** bir MCP statik analiz motorudur (`ADR-002`). **TypeScript**, **C# / Roslyn**, **Python**, **Go** ve **Rust** için kanıta dayalı bir graph oluşturur. Salt okunur çalışma alanı üzerinden **29 MCP aracı** ve **5 skill** sunar (`ADR-008`). Görsel mimari çıktıları sabit snapshot, seçenekler ve anotasyon girdisiyle tekrarlanabilir. `architecture-blueprint` skill’i, isterse dış host’un ek açıklama sağlamasına yardımcı olur (`K-023`). [ADR-002](adr/ADR-002-no-llm.md)
 
-> **Sürüm dürüstlüğü (`ADR-010`, `K-022`, `K-023`):** `v0.2.2` sürümü bir **Pre-1.0 Public Preview** yayınıdır (`1.0.0` değildir; tarihsel `v0.1.0` etiketi `4c9c188f` üzerinde kilitli tutulur). Açık `1.0.0` kapıları [CHANGELOG.md](../CHANGELOG.md) ve [Uygulama Durumu](implementation-status.md) içinde şeffafça izlenir.
+> **Sürüm dürüstlüğü (`ADR-010`, `K-022`, `K-023`):** `v0.2.3` sürümü bir **Pre-1.0 Public Preview** yayınıdır (`1.0.0` değildir; tarihsel `v0.1.0` etiketi `4c9c188f` üzerinde kilitli tutulur). Açık `1.0.0` kapıları [CHANGELOG.md](../CHANGELOG.md) ve [Uygulama Durumu](implementation-status.md) içinde şeffafça izlenir.
 
 ---
 
 ## Hızlı Başlangıç Haritası
 
-1. **Tek komutla kurmak veya mevcut kurulumu denetlemek istiyorsanız:** [CLI ve Konfigürasyon Başvurusu](cli-and-configuration.md) (`npx causoryn@0.2.2 setup` & `npx causoryn@0.2.2 doctor`)
+1. **Tek komutla kurmak veya mevcut kurulumu denetlemek istiyorsanız:** [CLI ve Konfigürasyon Başvurusu](cli-and-configuration.md) (`npx causoryn@0.2.3 setup` & `npx causoryn@0.2.3 doctor`)
 2. **Kullandığınız AI kodlama ortamına özel kurulum adımlarını arıyorsanız:** [Antigravity](hosts/antigravity.md) · [Claude Code](hosts/claude-code.md) · [Codex](hosts/codex.md) · [ZCode (GLM)](hosts/zcode.md)
 3. **29 MCP aracının girdi/çıktı zarflarını ve hata kodlarını incelemek istiyorsanız:** [MCP Araç Sözleşmeleri](tool-contracts.md) ve [Living Wiki Belirtimi](wiki-spec.md)
 4. **Beş dilin (`TS`, `C#`, `Python`, `Go`, `Rust`) statik çözümleme ve sidecar sınırlarını görmek istiyorsanız:** [5-Dil Analizörleri ve Sidecar Protokolü](language-analyzers.md)
@@ -52,7 +52,7 @@
 |---|---|---|
 | [Güvenlik Denetimi (`security-pass.md`)](security-pass.md) | 9/9 tehdit matrisi, F6 güvenlik süiti (`net-guard.cjs` sıfır-ağ kanıtı), `secret-scan`, CWE-59 symlink/yol kaçışı savunmaları ve bundle SHA-256 pini | [Security Audit](en/security-pass.md) |
 | [Performans Ölçümleri (`benchmarks.md`)](benchmarks.md) | 1.000 dosyalık deterministik fixture üzerinde soğuk indeks ve sıcak MCP sorgu medyanları (`11.8` / `13.0` / `10.7` ms) | [Benchmarks](en/benchmarks.md) |
-| [Uygulama Durumu (`implementation-status.md`)](implementation-status.md) | Faz A–F, Sprint 1–8 ve `v0.2.2` teslimatlarının kanıtlı durum tablosu (`Done` / `Partial` — `ADR-010`) | [Implementation Status](en/implementation-status.md) |
+| [Uygulama Durumu (`implementation-status.md`)](implementation-status.md) | Faz A–F, Sprint 1–8 ve `v0.2.3` teslimatlarının kanıtlı durum tablosu (`Done` / `Partial` — `ADR-010`) | [Implementation Status](en/implementation-status.md) |
 | [Teknik Backlog (`BACKLOG.md`)](BACKLOG.md) | `1.0.0` sürüm kapıları ve gelecek dilimlerde ele alınacak açık mühendislik kalemleri | [Backlog](en/BACKLOG.md) |
 | [ADR-002: No-LLM Strict Boundary (`adr/ADR-002-no-llm.md`)](adr/ADR-002-no-llm.md) | Motor içinde sıfır LLM/embedding/model API çağrısı ve bağımlılığı kuralının mimari karar kaydı | [ADR-002 (EN)](en/adr/ADR-002-no-llm.md) |
 

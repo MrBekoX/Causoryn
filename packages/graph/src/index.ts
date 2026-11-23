@@ -184,6 +184,7 @@ export type {
 export {
   EXPORT_DEFAULT_FILE_NAMES,
   EXPORT_DOCUMENTATION_FORMATS,
+  EXPORT_INTERACTIVE_HTML_FILE_NAME,
   exportDocumentationFormatSchema,
   serializeDocumentation,
   serializeDocumentationHtml,

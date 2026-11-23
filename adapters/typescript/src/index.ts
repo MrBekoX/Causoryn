@@ -37,3 +37,18 @@ export {
   analyzeTypeScriptProgramWithFrameworks,
   extractFrameworkEdges,
 } from "./analyzer.js";
+
+export {
+  findScopedTsConfigForFile,
+  loadWorkspaceTsConfigs,
+  MAX_EXTENDS_DEPTH,
+  MAX_EXTENDS_ENTRIES,
+  MAX_PATHS_ENTRIES,
+  MAX_SCOPED_CONFIGS,
+  MAX_TOTAL_RESOLVE_VISITS,
+  MAX_TSCONFIG_BYTES,
+  MAX_TSCONFIG_WARNINGS,
+  toCompilerPathsObject,
+  type LoadedTsConfigs,
+  type ScopedTsConfig,
+} from "./tsconfig-loader.js";

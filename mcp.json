@@ -5,7 +5,7 @@
       "command": "npx",
       "args": [
         "-y",
-        "causoryn@0.2.2",
+        "causoryn@0.2.3",
         "mcp",
         "--allow-cwd",
         "--auto-data-dir"

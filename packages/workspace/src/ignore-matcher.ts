@@ -3,7 +3,7 @@
  * sprint-1 görev 2 "ignore kuralları").
  *
  * Desteklenen semantik (kasıtlı olarak küçük ve deterministik):
- * - `**`  : bir veya birden çok yol segmenti (öndeki `**` sıfır segment de olabilir)
+ * - `**`  : sıfır veya daha çok yol segmenti
  * - `*`   : segment içinde sıfır veya daha çok karakter (`/` geçmez)
  * - `?`   : segment içinde tek karakter (`/` geçmez)
  * - `/`   : baştaki veya içteki ayraç deseni kökçe (anchored) yapar
@@ -14,41 +14,106 @@
  * kendisiyle de eşleşir — TŞ §19'un secret sızıntısı (.git/, .env*) reddetme
  * hedefi gereği git'ten biraz daha muhafazakârdır.
  *
+ * Güvenlik / karmaşıklık garantisi (SEC-01): RegExp motoru KULLANILMAZ.
+ * İki işaretçili polinomik glob algoritması ile geri izleme patlaması (ReDoS)
+ * yapısal olarak imkânsızdır; tüm RegExp meta karakterleri (`[`, `(`, `+`, `$`
+ * vb.) doğal olarak literal eşlenir.
+ *
  * Eşleme, Windows'ta dosya sistemi davranışıyla tutarlı olarak case-insensitive;
  * POSIX'te case-sensitive'dir (platform başına deterministik).
  */
 
 const IS_WIN = process.platform === "win32";
+const CHAR_STAR = 42; // '*'
+const CHAR_QUESTION = 63; // '?'
 
 function toPosix(p: string): string {
   return p.split("\\").join("/");
 }
 
-function escapeSegmentChars(segment: string): string {
-  let out = "";
-  let starRun = false;
-  for (const ch of segment) {
-    if (ch === "*") {
-      if (!starRun) {
-        out += "[^/]*";
-        starRun = true;
-      }
-      continue;
-    }
-    starRun = false;
-    if (ch === "?") {
-      out += "[^/]";
-    } else if ("\\.+^$|()[]{}".includes(ch)) {
-      out += `\\${ch}`;
+/**
+ * Tek yol segmenti üzerinde `*` (0+ karakter) ve `?` (1 karakter) eşler.
+ * İki işaretçili deterministik algoritma: O(|pattern| * |text|) üst sınırı,
+ * O(1) bellek, sıfır RegExp, sıfır özyineleme (SEC-01).
+ */
+function matchSegment(pattern: string, text: string): boolean {
+  let pi = 0;
+  let ti = 0;
+  let starIdx = -1;
+  let matchIdx = 0;
+  const pLen = pattern.length;
+  const tLen = text.length;
+
+  while (ti < tLen) {
+    if (
+      pi < pLen &&
+      (pattern.charCodeAt(pi) === CHAR_QUESTION ||
+        pattern.charCodeAt(pi) === text.charCodeAt(ti))
+    ) {
+      pi += 1;
+      ti += 1;
+    } else if (pi < pLen && pattern.charCodeAt(pi) === CHAR_STAR) {
+      starIdx = pi;
+      matchIdx = ti;
+      pi += 1;
+    } else if (starIdx !== -1) {
+      pi = starIdx + 1;
+      matchIdx += 1;
+      ti = matchIdx;
     } else {
-      out += ch;
+      return false;
     }
   }
-  return out;
+
+  while (pi < pLen && pattern.charCodeAt(pi) === CHAR_STAR) {
+    pi += 1;
+  }
+
+  return pi === pLen;
+}
+
+/**
+ * Segment dizileri üzerinde `**` (0+ segment) ve segment-içi `*`/`?` eşler.
+ * İki işaretçili polinomik algoritma: geri izleme patlaması yoktur (SEC-01).
+ */
+function matchSegments(
+  patSegs: readonly string[],
+  candSegs: readonly string[],
+): boolean {
+  let pi = 0;
+  let ci = 0;
+  let starIdx = -1;
+  let matchIdx = 0;
+  const pLen = patSegs.length;
+  const cLen = candSegs.length;
+
+  while (ci < cLen) {
+    const pSeg = pi < pLen ? patSegs[pi] : undefined;
+    if (pSeg === "**") {
+      starIdx = pi;
+      matchIdx = ci;
+      pi += 1;
+    } else if (pSeg !== undefined && matchSegment(pSeg, candSegs[ci] as string)) {
+      pi += 1;
+      ci += 1;
+    } else if (starIdx !== -1) {
+      pi = starIdx + 1;
+      matchIdx += 1;
+      ci = matchIdx;
+    } else {
+      return false;
+    }
+  }
+
+  while (pi < pLen && patSegs[pi] === "**") {
+    pi += 1;
+  }
+
+  return pi === pLen;
 }
 
 interface CompiledPattern {
-  readonly regex: RegExp;
+  readonly segments: readonly string[];
   readonly dirOnly: boolean;
   readonly anchored: boolean;
 }
@@ -66,55 +131,29 @@ function compilePattern(rawPattern: string, caseInsensitive: boolean): CompiledP
   if (!anchored && p.includes("/")) {
     anchored = true;
   }
-  const segments = p.split("/");
-  let re = "^";
-  // Ayraç muhasebesi: `**` grupları kendi ayraçlarını taşır:
-  // - öndeki **  -> "(?:[^/]+/)*" (her tekrarın sonunda "/" var) → sonraki token "/" EKLEMEZ
-  // - ortadaki ** -> "(?:/[^/]+)*" (her tekrarın başında "/" var) → sonraki token "/" EKLER
-  let pendingSlash: "none" | "required" = "required";
-  for (let i = 0; i < segments.length; i += 1) {
-    const seg = segments[i];
-    if (seg === undefined) continue; // split boş segment üretmez; noUncheckedIndexedAccess daralması
-    const last = i === segments.length - 1;
-    if (seg === "**") {
-      if (i === 0 && last) {
-        re += ".*"; // yalnız `**`: her şeyi eşle
-        pendingSlash = "required";
-        continue;
-      }
-      if (i === 0) {
-        re += "(?:[^/]+/)*"; // öndeki ** ayracı yutar; sıfır segment de olabilir
-        pendingSlash = "none";
-        continue;
-      }
-      if (last) {
-        re += pendingSlash === "none" ? ".*" : "(?:/.*)?"; // sondaki /** : konteyner dizin ve tüm içeriği
-        pendingSlash = "required";
-        continue;
-      }
-      re += "(?:/[^/]+)*"; // ortadaki ** : sıfır veya daha çok "/segment"
-      pendingSlash = "required";
+  const normalized = caseInsensitive ? p.toLowerCase() : p;
+  const rawSegments = normalized.split("/");
+  const segments: string[] = [];
+  for (const seg of rawSegments) {
+    if (seg === "**" && segments[segments.length - 1] === "**") {
       continue;
     }
-    // Literal segment: önceki token ayacı yuttuysa öneksiz, aksi hâlde "/" önekli.
-    re += (i > 0 && pendingSlash === "required" ? "/" : "") + escapeSegmentChars(seg);
-    pendingSlash = "required";
+    segments.push(seg);
   }
-  re += "$";
   return {
-    regex: new RegExp(re, caseInsensitive ? "i" : ""),
+    segments,
     dirOnly,
     anchored,
   };
 }
 
 /**
- * Derleme önbelleği (TŞ §21 performans hedefleri): aynı desen checkPath
+ * Derleme önbelleği (TŞ §21 performans hedefleri, SEC-05): aynı desen checkPath
  * başına (desen × ata derinliği) kez derlenir; önbellek bunu desen başına
- * bir keze indirger. Saf fonksiyon olduğundan davranış değişmez; sınır
- * aşımında temizlenir (bellek tavanı, kararlar yine deterministik).
+ * bir keze indirger. Kapasite dolduğunda tüm önbelleği silmek (thrashing)
+ * yerine yalnızca en eski tek anahtar çıkarılır (deterministik FIFO tavanı).
  */
-const PATTERN_CACHE_CAP = 1000;
+const PATTERN_CACHE_CAP = 4_096;
 const patternCache = new Map<string, CompiledPattern>();
 
 function compilePatternCached(rawPattern: string, caseInsensitive: boolean): CompiledPattern {
@@ -125,7 +164,10 @@ function compilePatternCached(rawPattern: string, caseInsensitive: boolean): Com
   }
   const compiled = compilePattern(rawPattern, caseInsensitive);
   if (patternCache.size >= PATTERN_CACHE_CAP) {
-    patternCache.clear();
+    const oldestKey = patternCache.keys().next().value;
+    if (oldestKey !== undefined) {
+      patternCache.delete(oldestKey);
+    }
   }
   patternCache.set(key, compiled);
   return compiled;
@@ -149,8 +191,18 @@ export function matchesIgnorePattern(
   if (compiled.dirOnly && !isDirectory) {
     return false;
   }
-  const target = compiled.anchored ? candidate : candidate.slice(candidate.lastIndexOf("/") + 1);
-  return compiled.regex.test(target);
+  if (!compiled.anchored) {
+    const seg = compiled.segments[0];
+    if (seg === undefined) {
+      return false;
+    }
+    if (seg === "**") {
+      return true;
+    }
+    const basename = candidate.slice(candidate.lastIndexOf("/") + 1);
+    return matchSegment(seg, basename);
+  }
+  return matchSegments(compiled.segments, candidate.split("/"));
 }
 
 /**

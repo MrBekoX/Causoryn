@@ -4,7 +4,7 @@
 >
 > **Evidence base:** `packages/causoryn/src/{cli.ts,setup.ts,doctor.ts,runtime-stage.ts,types.ts}`, `packages/causoryn/scripts/{causoryn.mjs,plugin-mcp-launcher.mjs,lib/node-version-guard.mjs,verify-package-ready.mjs}`, `packages/mcp-server/src/{cli-stdio.ts,stdio.ts,runtime-cli.ts,config.ts,context.ts}`, `packages/workspace/src/policy-config.ts` (TS v2.1 §9, §10.1, §17, §20 · `ADR-008` · `K-021` · `K-022`).
 
-This reference documents every `causoryn` (`v0.2.2` — Pre-1.0 Public Preview) CLI subcommand and flag, the pre-import Node.js `>= 24` runtime guard, the version-pinned plugin marketplace launcher, the zero-config workspace discovery and root-safety filter, the out-of-tree data directory layout, and the strict `CAUSORYN_CONFIG` JSON schema.
+This reference documents every `causoryn` (`v0.2.3` — Pre-1.0 Public Preview) CLI subcommand and flag, the pre-import Node.js `>= 24` runtime guard, the version-pinned plugin marketplace launcher, the zero-config workspace discovery and root-safety filter, the out-of-tree data directory layout, and the strict `CAUSORYN_CONFIG` JSON schema.
 
 ---
 
@@ -80,7 +80,7 @@ When invoked as `causoryn mcp`, `scripts/causoryn.mjs` hands off directly to `di
 
 ### 1.4 `causoryn --version` & `causoryn --help`
 
-- `causoryn --version` (`-v`, `version`): Prints `0.2.2` to `stdout` and exits `0`.
+- `causoryn --version` (`-v`, `version`): Prints `0.2.3` to `stdout` and exits `0`.
 - `causoryn --help` (`-h`, `help`, or bare `causoryn` with no arguments): Prints usage help to `stdout` and exits `0`.
 
 ---
@@ -111,7 +111,7 @@ Host marketplace manifests (`.claude-plugin/plugin.json`, `.zcode-plugin/plugin.
 
 With CLI activation, `autoIndex` enabled, and an authorized root, opening the published snapshot or starting the first full index is deferred until after MCP `initialize`. `causoryn_index_status` can start the job and report its state. Initial calls that need a snapshot may wait up to 15 seconds for the background job. Consult index status to establish readiness after the handshake. See `packages/mcp-server/src/{cli-stdio.ts,context.ts}`.
 
-Automatic workspace configuration merges supported patterns from the primary root’s `.gitignore` into `extraIgnore`. It reads at most 256 KiB and 500 patterns, skips symlinks, and omits broad top-level excludes that could conflict with negations. Pattern handling implements a subset of Git’s ignore semantics. [Language Analyzers](language-analyzers.md)
+Automatic workspace configuration (`packages/mcp-server/src/workspace-ignore-discovery.ts`, `v0.2.3`) merges supported patterns from the primary root’s `.gitignore`, `.git/info/exclude`, and depth/budget-bounded nested `.gitignore` files into `extraIgnore` (rejecting symlinks via `O_NOFOLLOW` + `(dev, ino)` verification and omitting broad directory patterns that could conflict with negations). When the caller does not supply an explicit `ignore` array, automatic configuration also replaces blunt `**/bin/**` with `.NET`-specific output globs (`**/bin/{Debug,Release,x64,x86,AnyCPU}/**` plus `<projDir>/bin/**` for detected `.csproj`/`.fsproj`/`.vbproj` projects), preserving `bin/*.ts|js` and Rust `src/bin/*.rs` sources. Pattern matching runs on a polynomial-time zero-RegExp two-pointer glob engine. [Language Analyzers](language-analyzers.md)
 
 ### 3.2 `inspectProjectRootSafety` — Rejected Unsafe Roots
 
@@ -158,7 +158,7 @@ Causoryn reads project files during source analysis. Persistent graph and wiki d
 
 - **Base data directory precedence (`resolveBaseDataDir`):** `--data-dir <abs-path>` > `ZCODE_PLUGIN_DATA` > `~/.causoryn`.
 - **Pre-mkdir & post-mkdir symlink/containment guards:** Before calling `mkdirSync`, Causoryn walks every ancestor prefix (`assertDataDirAncestorsSafe`, `assertNotSymlinkDirectory`, `assertStrictlyOutsideWorkspaceRoots`) to reject symlinks (`CWE-59`, allowing macOS system firmlinks `/var`, `/tmp`, `/etc`), dangling links, and any path resolving inside `allowRoots`. After directory creation, `realpathSync` re-verifies containment against TOCTOU races.
-- **Persistent runtime staging (`stagePersistentRuntime`):** When `npx causoryn@0.2.2 setup` executes from an ephemeral `_npx`, `.npx`, or `os.tmpdir()` cache, it copies the runtime into `~/.causoryn/.runtime-stage-<pid>-<ts>` and atomically swaps it into `~/.causoryn/runtime` (rolling back `.runtime-prev-*` on failure) so host MCP configurations survive `_npx` cache eviction.
+- **Persistent runtime staging (`stagePersistentRuntime`):** When `npx causoryn@0.2.3 setup` executes from an ephemeral `_npx`, `.npx`, or `os.tmpdir()` cache, it copies the runtime into `~/.causoryn/.runtime-stage-<pid>-<ts>` and atomically swaps it into `~/.causoryn/runtime` (rolling back `.runtime-prev-*` on failure) so host MCP configurations survive `_npx` cache eviction.
 
 ---
 
@@ -215,9 +215,9 @@ Causoryn reads project files during source analysis. Persistent graph and wiki d
 |---|---|---|---|
 | `workspaceId` | `string` (`min(1)`) | `"default"` (`<slug>` under `--auto-data-dir`) | Opaque identifier for the server's authorized workspace. |
 | `allowRoots` | `string[]` | `[]` | Absolute directory paths (no `\0` bytes). Empty array = default-deny (`WORKSPACE_NOT_AUTHORIZED`). `allowRoots[0]` is the indexed workspace root. |
-| `ignore` | `string[]` | 7 patterns (`DEFAULT_IGNORE_PATTERNS`) | `**/.git/**`, `**/node_modules/**`, `**/bin/**`, `**/obj/**`, `**/dist/**`, `**/.env*`, `**/*.pem`. |
+| `ignore` | `string[]` | 38 patterns (`DEFAULT_IGNORE_PATTERNS`, including all 7 Spec §20 defaults) | `**/.git/**`, `**/node_modules/**`, `**/bin/**`, `**/obj/**`, `**/dist/**`, `**/.env*`, `**/*.pem` + universal build/venv/cache directories (`vendor`, `Pods`, `.next`, `.venv`, `target`, `.gradle`, `.vite`, `*.min.js`, etc.). Automatic configuration replaces blunt `**/bin/**` with smart `.NET` `bin/` rules when `ignore` is not explicitly overridden. |
 | `extraIgnore` | `string[]` | `[]` | Additional ignore globs appended after `ignore` without replacing the defaults. |
-| `binaryExtensions` | `string[]` | 45 binary extensions (`DEFAULT_BINARY_EXTENSIONS`) | Lowercased binary extension denylist (`.png`, `.pdf`, `.zip`, `.exe`, `.dll`, `.so`, `.dylib`, `.pyc`, `.wasm`, `.sqlite`, `.db`, etc.). |
+| `binaryExtensions` | `string[]` | 68 binary/ML/sourcemap extensions (`DEFAULT_BINARY_EXTENSIONS`) | Lowercased denylist (`.png`, `.pdf`, `.zip`, `.exe`, `.dll`, `.so`, `.dylib`, `.pyc`, `.wasm`, `.sqlite`, `.db`, `.map`, `.whl`, `.parquet`, `.onnx`, `.pt`, `.safetensors`, `.gguf`, etc.). |
 | `extensionFilterMode` | `"blacklist" \| "whitelist"` | `"blacklist"` | `"blacklist"` skips `binaryExtensions`; `"whitelist"` admits only files matching `allowedExtensions`. |
 | `allowedExtensions` | `string[]` | `[]` | Permitted extensions when `extensionFilterMode === "whitelist"` (`^\.(?:[A-Za-z0-9]+\.)*[A-Za-z0-9]+$`). |
 | `maxFileBytes` | `number` (positive int) | `2_000_000` (2 MB) | Per-file byte ceiling; oversized files trigger `LIMIT_EXCEEDED`. |
