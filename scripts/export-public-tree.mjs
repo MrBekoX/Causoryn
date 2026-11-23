@@ -14,12 +14,14 @@ import { execFileSync } from "node:child_process";
 import {
   existsSync,
   mkdirSync,
+  mkdtempSync,
   readdirSync,
   readFileSync,
   rmSync,
   statSync,
   writeFileSync,
 } from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -336,6 +338,7 @@ function parseCliArgs(argv) {
   let outDir = "";
   let ref = "HEAD";
   let repoRoot = DEFAULT_REPO_ROOT;
+  let verifyTemp = false;
 
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
@@ -348,16 +351,21 @@ function parseCliArgs(argv) {
     } else if (arg === "--repo") {
       repoRoot = argv[i + 1] ?? "";
       i += 1;
+    } else if (arg === "--verify-temp") {
+      verifyTemp = true;
     } else {
       throw new Error(`Bilinmeyen argüman: ${String(arg)}`);
     }
   }
 
-  if (!outDir) {
-    throw new Error("Zorunlu --out <boş-hedef-dizin> parametresi eksik.");
+  if (verifyTemp && outDir) {
+    throw new Error("--verify-temp ve --out aynı anda kullanılamaz.");
+  }
+  if (!verifyTemp && !outDir) {
+    throw new Error("Zorunlu --out <boş-hedef-dizin> veya --verify-temp parametresi eksik.");
   }
 
-  return { outDir, ref, repoRoot };
+  return { outDir, ref, repoRoot, verifyTemp };
 }
 
 const isMainModule =
@@ -365,14 +373,27 @@ const isMainModule =
   path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
 
 if (isMainModule) {
+  let tempDir = "";
   try {
     const cli = parseCliArgs(process.argv.slice(2));
-    const result = exportPublicTree(cli);
+    if (cli.verifyTemp) {
+      tempDir = mkdtempSync(path.join(os.tmpdir(), "causoryn-export-gate-"));
+    }
+    const targetOutDir = cli.verifyTemp ? tempDir : cli.outDir;
+    const result = exportPublicTree({
+      repoRoot: cli.repoRoot,
+      outDir: targetOutDir,
+      ref: cli.ref,
+    });
     console.log(
       `PUBLIC_EXPORT YEŞİL — ref=${result.ref}, ${result.exportedFiles.length} dosya temiz aktarıldı → ${result.outDir}`,
     );
   } catch (error) {
     console.error(error instanceof Error ? error.message : String(error));
-    process.exit(1);
+    process.exitCode = 1;
+  } finally {
+    if (tempDir) {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
   }
 }

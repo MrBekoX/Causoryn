@@ -1,5 +1,5 @@
 import { execFileSync, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -196,6 +196,41 @@ describe("scripts/export-public-tree.mjs — Seçenek 1 temiz açık kaynak dı�
     expect(res.stdout).toContain("PUBLIC_EXPORT YEŞİL");
     expect(existsSync(path.join(outDir, "raw"))).toBe(false);
     expect(existsSync(path.join(outDir, "LICENSE"))).toBe(true);
+  });
+
+  it("CLI: --verify-temp --ref HEAD geçici dizinde fail-closed doğrular, exit 0 döner ve geçici dizini temizler", () => {
+    const repoDir = createSyntheticGitRepo();
+    const res = spawnSync(
+      process.execPath,
+      [EXPORT_SCRIPT_PATH, "--repo", repoDir, "--verify-temp", "--ref", "HEAD"],
+      { cwd: os.tmpdir(), encoding: "utf8", shell: false },
+    );
+    expect(res.status, res.stderr).toBe(0);
+    expect(res.stdout).toContain("PUBLIC_EXPORT YEŞİL");
+    const pathMatch = res.stdout.match(/→\s*(.+?)\s*(?:\(|$)/m);
+    const exportedTmp = pathMatch?.[1]?.trim();
+    if (exportedTmp) {
+      expect(existsSync(exportedTmp), `geçici dizin temizlenmeli: ${exportedTmp}`).toBe(false);
+    }
+
+    // Negatif: sızıntılı repoda --verify-temp exit 1 döner VE geçici dizin sızdırmaz:
+    const leakyRepo = createSyntheticGitRepo({
+      "docs/leak-temp.md": `token=${BAIT_GH_PAT}\n`,
+    });
+    const tmpBefore = new Set(
+      readdirSync(os.tmpdir()).filter((name) => name.startsWith("causoryn-export-gate-")),
+    );
+    const redRes = spawnSync(
+      process.execPath,
+      [EXPORT_SCRIPT_PATH, "--repo", leakyRepo, "--verify-temp", "--ref", "HEAD"],
+      { cwd: os.tmpdir(), encoding: "utf8", shell: false },
+    );
+    expect(redRes.status).toBe(1);
+    expect(redRes.stderr).toContain("PUBLIC_EXPORT KIRMIZI");
+    const leakedTmpDirs = readdirSync(os.tmpdir()).filter(
+      (name) => name.startsWith("causoryn-export-gate-") && !tmpBefore.has(name),
+    );
+    expect(leakedTmpDirs, "hata sonrasında da geçici dizin temizlenmeli").toEqual([]);
   });
 
   it("NEGATİF: dolu çıkış dizini (--out) fail-closed reddedilir", async () => {

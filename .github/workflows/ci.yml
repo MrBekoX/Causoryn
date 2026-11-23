@@ -11,11 +11,17 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
 jobs:
   verify:
     name: Verify (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
+    permissions:
+      contents: read
     strategy:
       fail-fast: false
       matrix:
@@ -24,41 +30,52 @@ jobs:
           - windows-latest
           - macos-latest
     steps:
+      - name: Harden Runner (Linux)
+        if: runner.os == 'Linux'
+        uses: step-security/harden-runner@aebdcf6156ab6691adf63218240e476564a1ed4c # v2.23.0
+        with:
+          egress-policy: audit
+          disable-sudo-and-containers: true
+
       - name: Checkout repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
       - name: Setup Node.js
-        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: "24"
           cache: npm
 
       - name: Setup .NET
-        uses: actions/setup-dotnet@0f4a354dd5547a28c70b7853dbd95d5b67886e73 # v6
+        uses: actions/setup-dotnet@0f4a354dd5547a28c70b7853dbd95d5b67886e73 # v6.1.0
         with:
           dotnet-version: "10.0.x"
 
       - name: Setup Python
-        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.12"
 
       - name: Setup Go
-        uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7
+        uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
         with:
           go-version-file: "native/go-worker/go.mod"
           cache: false
 
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
+        # Pinned dtolnay/rust-toolchain (stable branch commit; no upstream semver tag)
+        uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca
 
       - name: Install dependencies
         run: npm ci --ignore-scripts
 
-      - name: Build Roslyn worker (deterministic Release)
-        run: dotnet build native/roslyn-worker/Causoryn.RoslynWorker.csproj -c Release -p:DebugType=none -p:ContinuousIntegrationBuild=true -p:SatelliteResourceLanguages=en
+      - name: Audit npm dependencies (high+)
+        run: npm audit --audit-level=high
+
+      - name: Build Roslyn worker (deterministic Release, locked)
+        run: dotnet build native/roslyn-worker/Causoryn.RoslynWorker.csproj -c Release -p:DebugType=none -p:ContinuousIntegrationBuild=true -p:SatelliteResourceLanguages=en -p:RestoreLockedMode=true
 
       - name: Build Rust worker (locked)
         run: cargo build --manifest-path native/rust-worker/Cargo.toml --locked
@@ -83,6 +100,9 @@ jobs:
 
       - name: Secret scan
         run: npm run secret-scan
+
+      - name: Verify public export leak gate
+        run: node scripts/export-public-tree.mjs --verify-temp --ref HEAD
 
       - name: Run test suite
         run: npm test
