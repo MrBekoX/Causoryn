@@ -3,8 +3,8 @@
 > **Dil / Language:** **Türkçe** | [English](../en/adr/ADR-002-no-llm.md) · [Dokümantasyon Merkezi](../README.md)
 >
 > Kanıt: TŞ v2.1 §1 (Kırmızı çizgi), §3.1, §3.2, §19, §24 · `wiki/decisions.md` ADR-002, K-023, K-026 · `wiki/architecture.md`
-> Durum: **Kabul edildi** (şartnameden gelen değişmez motor sınırı; `v0.2.3` Pre-1.0 Public Preview ve `K-023`/`K-026` hibrit mimari + MCP şema sınırı ile güncel)
-> Tarih: 2026-11-02 (ilk belgeleme), 2026-11-20 (`v0.2.0` doğrulaması), 2026-11-23 (`v0.2.3` / `K-023`–`K-026` hibrit sınır ve MCP `.describe()` netleştirmesi); karar TŞ v2.1'den (31.10.2026) gelir
+> Durum: **Kabul edildi** (şartnameden gelen değişmez motor sınırı; `v0.2.4` Pre-1.0 Public Preview ve `K-023`/`K-026` hibrit mimari + MCP şema sınırı ile güncel)
+> Tarih: 2026-11-02 (ilk belgeleme), 2026-11-20 (`v0.2.0` doğrulaması), 2026-11-23 (`v0.2.4` / `K-023`–`K-026` hibrit sınır ve MCP `.describe()` netleştirmesi); karar TŞ v2.1'den (31.10.2026) gelir
 
 ## Bağlam
 
@@ -54,7 +54,7 @@ yapmaz.
 3. `packages/mcp-server` host modeline tek yönlü hizmet verir: `stdout`
    kanalında yalnızca MCP JSON-RPC protokolü taşınır, tüm loglar `stderr`'e
    yazılır (TŞ §10.1).
-4. `v0.2.3` monoreposundaki **18 npm workspace paketi + kök monorepo** (toplam
+4. `v0.2.4` monoreposundaki **18 npm workspace paketi + kök monorepo** (toplam
    19 `package.json`) genelinde çalışma zamanı ve derleme bağımlılıkları yalnızca
    analiz ve paketleme için gereken altyapı kütüphaneleridir: `zod`,
    `@modelcontextprotocol/sdk`, `better-sqlite3`, `yaml`, `typescript`,
@@ -92,7 +92,7 @@ Bkz. `packages/graph/test/architecture-export.test.ts` ve
   statik ölçüm, fail-closed kanıt doğrulaması ve görsel yerleşim Causoryn'dedir;
   iki katmanın sorumluluk alanı birbirine karışmaz.
 
-## Sonuçlar ve Doğrulama Kanıtları (`v0.2.3`)
+## Sonuçlar ve Doğrulama Kanıtları (`v0.2.4`)
 
 - **Dürüst kapsama (`ADR-010`):** Eksik statik çözümleme LLM tahminiyle
   doldurulmaz; `heuristic` (+ `ambiguity`), `unresolved` (`UnknownExternal`),

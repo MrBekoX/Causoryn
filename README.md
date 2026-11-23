@@ -17,7 +17,7 @@
 
 **Causoryn** is a local, deterministic, LLM-free MCP codebase and change intelligence engine (`ADR-002`) for **TypeScript / JavaScript**, **C# / Roslyn**, **Python**, **Go**, and **Rust**. It exposes **29 MCP tools** and **5 agent skills** over strictly read-only workspace analysis (`ADR-008`), grounding coding agents in verified dependency, symbol, route, contract, and test graphs.
 
-> **Release status (`ADR-010`):** `0.2.3` is a **Pre-1.0 Public Preview** (not `1.0.0`; historical `v0.1.0` remains frozen at `4c9c188f`). Remaining `1.0.0` release gates are tracked transparently in [`CHANGELOG.md`](CHANGELOG.md).
+> **Release status (`ADR-010`):** `0.2.4` is a **Pre-1.0 Public Preview** (not `1.0.0`; historical `v0.1.0` remains frozen at `4c9c188f`). Remaining `1.0.0` release gates are tracked transparently in [`CHANGELOG.md`](CHANGELOG.md).
 
 ---
 
@@ -209,7 +209,7 @@ Running `causoryn_preflight_change` before editing `src/services/orders-service.
 
 ## Supported Hosts
 
-Causoryn ships as a multi-file npm distribution package (`causoryn` `0.2.3`) and multi-host plugin repository supporting:
+Causoryn ships as a multi-file npm distribution package (`causoryn` `0.2.4`) and multi-host plugin repository supporting:
 
 1. **Antigravity** (`agy` / Antigravity IDE)
 2. **Claude Code**

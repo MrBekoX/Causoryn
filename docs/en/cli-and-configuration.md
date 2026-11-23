@@ -4,18 +4,18 @@
 >
 > **Evidence base:** `packages/causoryn/src/{cli.ts,setup.ts,doctor.ts,runtime-stage.ts,types.ts}`, `packages/causoryn/scripts/{causoryn.mjs,plugin-mcp-launcher.mjs,lib/node-version-guard.mjs,verify-package-ready.mjs}`, `packages/mcp-server/src/{cli-stdio.ts,stdio.ts,runtime-cli.ts,config.ts,context.ts,workspace-ignore-discovery.ts}`, `packages/workspace/src/policy-config.ts` (TS v2.1 §9, §10.1, §17, §20 · `ADR-008` · `K-021`..`K-026`).
 
-This reference documents every `causoryn` (`v0.2.3` — Pre-1.0 Public Preview) CLI subcommand and flag, the pre-import Node.js `>= 24` runtime guard, the version-pinned plugin marketplace launcher, the zero-config workspace discovery and root-safety filter, the out-of-tree data directory layout, and the strict `CAUSORYN_CONFIG` JSON schema.
+This reference documents every `causoryn` (`v0.2.4` — Pre-1.0 Public Preview) CLI subcommand and flag, the pre-import Node.js `>= 24` runtime guard, the version-pinned plugin marketplace launcher, the zero-config workspace discovery and root-safety filter, the out-of-tree data directory layout, and the strict `CAUSORYN_CONFIG` JSON schema.
 
 ---
 
 ## 1. CLI Subcommands & Flags (`causoryn`)
 
-For quick setup and health verification, use `@latest` (exact version pinning such as `@0.2.3` is also supported for deterministic or CI environments):
+For quick setup and health verification, use `@latest` (exact version pinning such as `@0.2.4` is also supported for deterministic or CI environments):
 
 ```bash
 npx causoryn@latest setup      # Installs the MCP server + all 5 canonical skills for detected hosts
 npx causoryn@latest doctor     # Read-only verification of Node.js >= 24, runtime, 4 sidecars & host configs
-# Optional exact version pin: npx causoryn@0.2.3 setup && npx causoryn@0.2.3 doctor
+# Optional exact version pin: npx causoryn@0.2.4 setup && npx causoryn@0.2.4 doctor
 ```
 
 The `causoryn` binary (`packages/causoryn/scripts/causoryn.mjs`) exposes the following commands:
@@ -88,7 +88,7 @@ When invoked as `causoryn mcp`, `scripts/causoryn.mjs` hands off directly to `di
 
 ### 1.4 `causoryn --version` & `causoryn --help`
 
-- `causoryn --version` (`-v`, `version`): Prints `0.2.3` to `stdout` and exits `0`.
+- `causoryn --version` (`-v`, `version`): Prints `0.2.4` to `stdout` and exits `0`.
 - `causoryn --help` (`-h`, `help`, or bare `causoryn` with no arguments): Prints usage help to `stdout` and exits `0`.
 
 ---
@@ -166,7 +166,7 @@ Causoryn reads project files during source analysis. Persistent graph and wiki d
 
 - **Base data directory precedence (`resolveBaseDataDir`):** `--data-dir <abs-path>` > `ZCODE_PLUGIN_DATA` > `~/.causoryn`.
 - **Pre-mkdir & post-mkdir symlink/containment guards:** Before calling `mkdirSync`, Causoryn walks every ancestor prefix (`assertDataDirAncestorsSafe`, `assertNotSymlinkDirectory`, `assertStrictlyOutsideWorkspaceRoots`) to reject symlinks (`CWE-59`, allowing macOS system firmlinks `/var`, `/tmp`, `/etc`), dangling links, and any path resolving inside `allowRoots`. After directory creation, `realpathSync` re-verifies containment against TOCTOU races.
-- **Persistent runtime staging (`stagePersistentRuntime`):** When `npx causoryn@latest setup` (or pinned `npx causoryn@0.2.3 setup`) executes from an ephemeral `_npx`, `.npx`, or `os.tmpdir()` cache, it copies the runtime into `~/.causoryn/.runtime-stage-<pid>-<ts>` and atomically swaps it into `~/.causoryn/runtime` (rolling back `.runtime-prev-*` on failure) so host MCP configurations survive `_npx` cache eviction.
+- **Persistent runtime staging (`stagePersistentRuntime`):** When `npx causoryn@latest setup` (or pinned `npx causoryn@0.2.4 setup`) executes from an ephemeral `_npx`, `.npx`, or `os.tmpdir()` cache, it copies the runtime into `~/.causoryn/.runtime-stage-<pid>-<ts>` and atomically swaps it into `~/.causoryn/runtime` (rolling back `.runtime-prev-*` on failure) so host MCP configurations survive `_npx` cache eviction.
 
 ---
 

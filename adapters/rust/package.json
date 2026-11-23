@@ -1,6 +1,6 @@
 {
   "name": "@causoryn/adapter-rust",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "private": true,
   "license": "MIT",
   "description": "Rust Language Adapter: syn sidecar worker süreç yönetimi (TŞ v2.1 §7; native/rust-worker).",
@@ -9,7 +9,7 @@
     ".": "./src/index.ts"
   },
   "dependencies": {
-    "@causoryn/domain": "0.2.3",
-    "@causoryn/sidecar-ipc": "0.2.3"
+    "@causoryn/domain": "0.2.4",
+    "@causoryn/sidecar-ipc": "0.2.4"
   }
 }

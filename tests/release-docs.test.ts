@@ -235,10 +235,11 @@ describe("NEGATİF: compatibility-matrix.md koşulmayan hostu geçmiş sayamaz",
   });
 });
 
-describe("F9 / K-022: sürüm kararı — 0.2.3 Pre-1.0 Public Preview (1.0.0 DEĞİL)", () => {
-  it("CHANGELOG.md Keep a Changelog formatında, [0.2.3] - tarih, [0.2.2] - tarih, [0.2.1] - tarih, [0.2.0] - tarih ve tarihsel [0.1.0] - tarih girişli", () => {
+describe("F9 / K-022: sürüm kararı — 0.2.4 Pre-1.0 Public Preview (1.0.0 DEĞİL)", () => {
+  it("CHANGELOG.md Keep a Changelog formatında, [0.2.4]..[0.2.0] - tarih ve tarihsel [0.1.0] - tarih girişli", () => {
     const text = readDoc("changelog");
     expect(text).toContain("Keep a Changelog");
+    expect(text).toMatch(/^## \[0\.2\.4\] - \d{4}-\d{2}-\d{2}$/m);
     expect(text).toMatch(/^## \[0\.2\.3\] - \d{4}-\d{2}-\d{2}$/m);
     expect(text).toMatch(/^## \[0\.2\.2\] - \d{4}-\d{2}-\d{2}$/m);
     expect(text).toMatch(/^## \[0\.2\.1\] - \d{4}-\d{2}-\d{2}$/m);
@@ -246,18 +247,18 @@ describe("F9 / K-022: sürüm kararı — 0.2.3 Pre-1.0 Public Preview (1.0.0 DE
     expect(text).toMatch(/^## \[0\.1\.0\] - \d{4}-\d{2}-\d{2}$/m);
   });
 
-  it("kök package.json version === SERVER_VERSION === 0.2.3 (karar üç yüzeyde tutarlı)", () => {
+  it("kök package.json version === SERVER_VERSION === 0.2.4 (karar üç yüzeyde tutarlı)", () => {
     const pkg = JSON.parse(readFileSync(DOC_PATHS.rootPkg, "utf8")) as {
       version?: string;
     };
-    expect(pkg.version).toBe("0.2.3");
+    expect(pkg.version).toBe("0.2.4");
     expect(pkg.version).toBe(SERVER_VERSION);
   });
 
   it("karar gerekçesi CHANGELOG'da ADR-010 ve K-022 atfıyla yazılı", () => {
     const text = readDoc("changelog");
     expect(text).toContain("ADR-010");
-    expect(text).toContain("0.2.3");
+    expect(text).toContain("0.2.4");
     expect(text).toContain("K-022");
   });
 });
@@ -381,9 +382,9 @@ describe("DENETİM DÖNGÜSÜ: CHANGELOG [Unreleased] 1.0.0 kapıları F9 sayım
   function unreleasedSection(): string {
     const text = readDoc("changelog");
     const start = text.indexOf("## [Unreleased]");
-    const end = text.indexOf("## [0.2.3]");
+    const end = text.indexOf("## [0.2.4]");
     expect(start, "## [Unreleased] başlığı olmalı").toBeGreaterThanOrEqual(0);
-    expect(end, "## [0.2.3] başlığı olmalı").toBeGreaterThan(start);
+    expect(end, "## [0.2.4] başlığı olmalı").toBeGreaterThan(start);
     return text.slice(start, end);
   }
 
@@ -755,7 +756,7 @@ describe("BAĞIMSIZ DENETİM DÖNGÜSÜ (2026-11-18): doküman↔kod tam parite 
       expect(half).toContain("output-policy.ts:11-48");
       expect(half).toContain("services.ts:698-716");
       expect(half).toContain("aspnet-core-route-attributes (L3)");
-      expect(half).toContain("0.2.3");
+      expect(half).toContain("0.2.4");
       expect(half).toContain("K-022");
     }
     expect(text).not.toContain('SERVER_VERSION="0.1.0"');
@@ -765,8 +766,8 @@ describe("BAĞIMSIZ DENETİM DÖNGÜSÜ (2026-11-18): doküman↔kod tam parite 
   it("CHANGELOG.md ve docs/implementation-status.md: secret-scan + npm audit (0 açık) kapanış notu ve antigravity-plugin.test.ts satır sayısı diskle senkron", () => {
     const changelog = readDoc("changelog");
     const start = changelog.indexOf("## [Unreleased]");
-    const end = changelog.indexOf("## [0.2.3]");
-    expect(end, "## [0.2.3] başlığı olmalı").toBeGreaterThan(start);
+    const end = changelog.indexOf("## [0.2.4]");
+    expect(end, "## [0.2.4] başlığı olmalı").toBeGreaterThan(start);
     const unreleased = changelog.slice(start, end);
     expect(unreleased).toContain("Rate-limit/concurrency resource budget (K-010 kapsam dışı beyanı)");
     expect(unreleased).toContain("scripts/secret-scan.mjs");
@@ -813,12 +814,12 @@ describe("BAĞIMSIZ DENETİM DÖNGÜSÜ (2026-11-18): doküman↔kod tam parite 
       plugins?: Array<{ version?: string }>;
     };
     expect(zcodeMarketplace.owner?.name).toBe("Causoryn Contributors");
-    expect(zcodeMarketplace.plugins?.[0]?.version).toBe("0.2.3");
+    expect(zcodeMarketplace.plugins?.[0]?.version).toBe("0.2.4");
 
     const rootReadme = readFileSync(path.join(REPO_ROOT, "README.md"), "utf8");
     const pkgReadme = readFileSync(path.join(REPO_ROOT, "packages", "causoryn", "README.md"), "utf8");
     for (const readme of [rootReadme, pkgReadme]) {
-      expect(readme).toContain("0.2.3");
+      expect(readme).toContain("0.2.4");
       expect(readme).toMatch(/Pre-1\.0 Public Preview/i);
       expect(readme).not.toContain("single zero-compile npm package");
       expect(readme).toContain("crates.io");

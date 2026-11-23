@@ -1,7 +1,7 @@
 {
   "name": "causoryn",
   "mcpName": "io.github.mrbekox/causoryn",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "private": false,
   "publishConfig": {
     "access": "public"

@@ -4,7 +4,7 @@
 
 **Causoryn**, **TypeScript / JavaScript**, **C# / Roslyn**, **Python**, **Go** ve **Rust** kod tabanları için kanıta dayalı bağımlılık, sembol, rota, kontrat ve test grafı oluşturan **yerel, deterministik ve LLM-free** bir MCP statik analiz motorudur (`ADR-002`). Salt okunur çalışma alanı (`ADR-008`) üzerinden **29 MCP aracı** ve **5 skill** sunar; görsel mimari dışa aktarımları saf yapısal modda veya isteğe bağlı Host-LLM `annotations` katmanıyla fail-closed çalışır.
 
-> **Sürüm durumu (`ADR-010`):** `v0.2.3` bir **Pre-1.0 Public Preview** yayınıdır (`1.0.0` değildir; tarihsel `v0.1.0` etiketi `4c9c188f` üzerinde kilitlidir). Açık `1.0.0` kapıları [CHANGELOG.md](../CHANGELOG.md) ve [Uygulama Durumu](implementation-status.md) belgelerinde şeffaf biçimde izlenir.
+> **Sürüm durumu (`ADR-010`):** `v0.2.4` bir **Pre-1.0 Public Preview** yayınıdır (`1.0.0` değildir; tarihsel `v0.1.0` etiketi `4c9c188f` üzerinde kilitlidir). Açık `1.0.0` kapıları [CHANGELOG.md](../CHANGELOG.md) ve [Uygulama Durumu](implementation-status.md) belgelerinde şeffaf biçimde izlenir.
 
 ---
 

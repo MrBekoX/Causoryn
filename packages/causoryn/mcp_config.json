@@ -5,7 +5,7 @@
       "args": [
         "scripts/plugin-mcp-launcher.mjs",
         "--expected-version",
-        "0.2.3",
+        "0.2.4",
         "--allow-cwd",
         "--auto-data-dir",
         "--client",

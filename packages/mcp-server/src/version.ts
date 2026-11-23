@@ -7,7 +7,7 @@
 export const SERVER_NAME = "causoryn";
 
 /** MCP serverInfo.version. */
-export const SERVER_VERSION = "0.2.3";
+export const SERVER_VERSION = "0.2.4";
 
 /** Tüm araç yanıtlarındaki envelope.schemaVersion (TŞ §10.1 örneği). */
 export const SCHEMA_VERSION = "2.0";

@@ -14,32 +14,32 @@
 > `dist/node_modules/` altında — `dist/` klasörünü bütün dağıtın). Doğrulama testi:
 > `tests/hosts-docs.test.ts`.
 
-Causoryn, LLM çalıştırmayan yerel ve deterministik bir MCP motorudur (`causoryn@0.2.3`). Codex'te
+Causoryn, LLM çalıştırmayan yerel ve deterministik bir MCP motorudur (`causoryn@0.2.4`). Codex'te
 `claude mcp add`'teki gibi **proje/local scope seçeneği YOKTUR** — `codex mcp add`, sunucuyu
 kullanıcı-genel `~/.codex/config.toml` (veya `$CODEX_HOME/config.toml`) dosyasına yazar. Bu yüzden
 smoke/deneme kayıtları **belirgin bir adla** eklenip **remove ile kaldırılmalıdır**.
 
-## 0. Son Kullanıcı Hızlı Kurulumu (Önerilen — K-021 / `v0.2.3`)
+## 0. Son Kullanıcı Hızlı Kurulumu (Önerilen — K-021 / `v0.2.4`)
 
-### Seçenek 0A — Tek Komut CLI (`npx causoryn@0.2.3 setup`)
+### Seçenek 0A — Tek Komut CLI (`npx causoryn@0.2.4 setup`)
 
 ```bash
 # Değişiklikleri önceden görmek için (salt okunur)
-npx causoryn@0.2.3 setup --client codex --dry-run
+npx causoryn@0.2.4 setup --client codex --dry-run
 
 # $CODEX_HOME/config.toml [mcp_servers.causoryn] + ~/.agents/skills/ kurulumu (.causoryn.backup yedeğiyle)
-npx causoryn@0.2.3 setup --client codex --yes
+npx causoryn@0.2.4 setup --client codex --yes
 
 # Sağlık kontrolü (salt okunur)
-npx causoryn@0.2.3 doctor
+npx causoryn@0.2.4 doctor
 
 # Temiz kaldırma ([mcp_servers.causoryn] + 5 Causoryn skill’i)
-npx causoryn@0.2.3 setup --client codex --uninstall --yes
+npx causoryn@0.2.4 setup --client codex --uninstall --yes
 ```
 
 `architecture-blueprint`, Codex’in MCP kanıtlarından isteğe bağlı `annotations` hazırlamasına rehberlik eder. Sunucu, aynı snapshot ve export girdileriyle tekrarlanabilir çıktı üretir. Anotasyonsuz export için doğrudan `causoryn_export_documentation` çağırın. [Mimari export sözleşmesi](../tool-contracts.md)
 
-**`v0.2.3` `CODEX_HOME` ve `startup_timeout_sec = 30` ayrıntıları:**
+**`v0.2.4` `CODEX_HOME` ve `startup_timeout_sec = 30` ayrıntıları:**
 
 - **`CODEX_HOME` desteği:** Ortamda `CODEX_HOME` tanımlıysa hem `causoryn setup --client codex`
   hem de `causoryn doctor`, MCP sunucu bloğunu `$CODEX_HOME/config.toml` içinde yönetir;
@@ -57,8 +57,8 @@ Kök `.agents/plugins/marketplace.json` ve paket içi `packages/causoryn/.codex-
 (+ `.codex-plugin/mcp.json`) manifestleri Codex plugin pazaryeriyle uyumludur (`2026-11-19`,
 `codex-cli 0.169.0` ile `codex plugin marketplace add` + `codex mcp add/list` doğrulandı):
 
-- `.agents/plugins/marketplace.json`, npm kaynağını (`source: { "source": "npm", "package": "causoryn", "version": "0.2.3" }`) ve kurulum politikasını `policy.installation: "AVAILABLE"`, `policy.authentication: "ON_INSTALL"` olarak beyan eder (Causoryn tamamen yerel ve LLM/API anahtarsız çalıştığından harici kimlik bilgisi gerekmez; Codex şeması kurulum anı onay akışı için `"ON_INSTALL"` değerini bekler).
-- `packages/causoryn/.codex-plugin/mcp.json`, sunucuyu `causoryn@0.2.3` paket pini, `--allow-cwd --auto-data-dir --client codex` bayrakları ve `"startup_timeout_sec": 30` ile tanımlar.
+- `.agents/plugins/marketplace.json`, npm kaynağını (`source: { "source": "npm", "package": "causoryn", "version": "0.2.4" }`) ve kurulum politikasını `policy.installation: "AVAILABLE"`, `policy.authentication: "ON_INSTALL"` olarak beyan eder (Causoryn tamamen yerel ve LLM/API anahtarsız çalıştığından harici kimlik bilgisi gerekmez; Codex şeması kurulum anı onay akışı için `"ON_INSTALL"` değerini bekler).
+- `packages/causoryn/.codex-plugin/mcp.json`, sunucuyu `causoryn@0.2.4` paket pini, `--allow-cwd --auto-data-dir --client codex` bayrakları ve `"startup_timeout_sec": 30` ile tanımlar.
 
 ---
 

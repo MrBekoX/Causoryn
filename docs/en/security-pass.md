@@ -4,9 +4,9 @@
 
 > Evidence: `raw/Causoryn_Teknik_Dokuman_v2.1.pdf` p.22 §22 "Security: symlink/path traversal, secret leakage, symlink TOCTOU, poisoned source comment, oversized files, malicious Git refs, network denied" + p.21 §19 threat model + p.22 §20 safe configuration defaults · `wiki/sprint-7.md` F6 · `wiki/decisions.md` `K-008`/`K-011`/`K-012`/`K-014`/`K-015`/`K-016`/`K-021`/`K-022`/`K-024`/`K-025`.
 
-## Current Runtime Security Boundaries (`v0.2.3`)
+## Current Runtime Security Boundaries (`v0.2.4`)
 
-**Bundle identity:** `packages/mcp-server/dist/mcp-server.mjs` SHA-256 `b2b2197054f1cec5546a82645138947eea504b607ba47f0126e53c833fde3415`. `dist/bundle-manifest.json` records this hash and 35 entries including the native SQLite runtime. The hash identifies the local artifact. The F6 results below describe the dated test sessions in the matrix.
+**Bundle identity:** `packages/mcp-server/dist/mcp-server.mjs` SHA-256 `c8be6f49dfb18101b96d59426045f364dfaaf348fa1c9accf08954d96f6fbb18`. `dist/bundle-manifest.json` records this hash and 35 entries including the native SQLite runtime. The hash identifies the local artifact. The F6 results below describe the dated test sessions in the matrix.
 
 - `causoryn_export_documentation` writes to destinations authorized by `output.allowedOutputDirs` using an exclusive `flag: "wx"` + `EEXIST`-guarded temporary file and atomic rename; `view="interactive"` defaults to `causoryn-architecture-interactive.html` so it never overwrites the zero-JS `causoryn-architecture.html`. `--auto-data-dir` puts exports outside the source tree. A manually authorized export directory may be inside that tree. An undeclared directory returns `EXPORT_NOT_ALLOWED`. An unsafe file name or path escape returns `PATH_DENIED`. See `packages/graph/src/export.ts`, `packages/workspace/src/output-policy.ts`, and `packages/mcp-server/src/runtime-cli.ts`.
 - **Universal compatibility defense-in-depth (`v0.2.3`, `K-024`):**
@@ -17,7 +17,7 @@
 - The default `view="architecture"` HTML is script-free with a `default-src 'none'` CSP. Opt-in `view="interactive"` retains the offline boundary and permits a local embedded script. Display text is escaped, the data island is serialized safely, and the script uses no `innerHTML`, `fetch`, or CDN. See `packages/graph/src/architecture-export.ts`, `packages/graph/test/architecture-export.test.ts`, and `packages/mcp-server/test/architecture-export-tool.test.ts`.
 - The MCP analysis and rendering code makes no model API calls. Host model usage and network policy are controlled by the host. npm installation and a cold Rust worker `cargo build --locked` can access package sources. The historical Node `net-guard.cjs` evidence covers the exercised process and fixture paths. [Language analyzers](language-analyzers.md)
 
-## CI/CD and Supply-Chain Security Hardening (`K-025`)
+## CI/CD and Supply-Chain Security Hardening (`v0.2.4`, `K-025`)
 
 Alongside runtime and packaged-bundle controls, `K-025` hardens the full GitHub Actions pipeline and dependency lifecycle with layered supply-chain checks:
 

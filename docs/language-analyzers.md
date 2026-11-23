@@ -90,7 +90,7 @@ Causoryn'de hiçbir analizör belirsiz bir çağrıyı "en olası" iç sembole s
 - **Rust (`verified`):** Actix-Web, Axum ve Rocket öznitelik makroları (`#[get("/path")]`, `#[post("/path")]` vb.) doğrudan hedef `fn` öğesine bağlı olduğundan daima `verified` (`route-attribute`) üretir.
 - **C# ASP.NET Core (`verified` veya `heuristic`):** Controller `[Route]` + `[HttpGet]`/`[HttpPost]`/… öznitelikleri ve Minimal API `MapGet`/`MapPost`/… çağrıları (`WorkerAnalyzer.cs:1475-1508`), Roslyn `Microsoft.AspNetCore.*` tiplerini semantik olarak çözebildiğinde `verified` üretir. Ortamda `Microsoft.AspNetCore.App.Ref` paketi bulunamazsa bilinen-ad kuralıyla dürüstçe **`heuristic` (+ `ambiguity`)** düzeyine düşer.
 - **Go (`verified`, `heuristic` veya `unresolved`):** `net/http` (`Handle`, `HandleFunc` → metot `"*"`) ve `gin`/`echo`/`chi` HTTP fiil kayıtlarında (`routes.go:120-170`) aynı package'taki isimli handler `verified`, selector handler ifadesi **`heuristic` veya `unresolved`**, tanımsız çıplak handler **`unresolved` (`UnknownExternal`)** üretir; satır-içi anonim `func(...)` literal handler'larda `Endpoint` düğümü korunur, kenar üretilmez ve açık uyarı düşülür.
-- **BDD Test Çıkarımı (`Test` ve `TESTS`):** TypeScript analizörü BDD test bloklarını `Test` düğümü olarak çıkarır ve bir `Test` gövdesinden test-olmayan sembollere yapılan çözümlenmiş çağrılar için `verified` `TESTS` kenarı üretir (`causoryn_derive_test_plan` `direct` sinyali). C#, Python, Go ve Rust sidecar'larında `TESTS` kenarı üretimi `v0.2.3` itibarıyla açık kalem olarak izlenmektedir.
+- **BDD Test Çıkarımı (`Test` ve `TESTS`):** TypeScript analizörü BDD test bloklarını `Test` düğümü olarak çıkarır ve bir `Test` gövdesinden test-olmayan sembollere yapılan çözümlenmiş çağrılar için `verified` `TESTS` kenarı üretir (`causoryn_derive_test_plan` `direct` sinyali). C#, Python, Go ve Rust sidecar'larında `TESTS` kenarı üretimi `v0.2.4` itibarıyla açık kalem olarak izlenmektedir.
 
 ---
 
@@ -153,11 +153,11 @@ fp2|ts-adapter@0.1.0|roslyn-worker@0.1.0|refpack=<pack>@<sürüm>@<tfmDir>;...|r
 
 ### 6.2 Neden İç Analizör Sürümleri `0.1.0` Olarak Kalır?
 
-Dağıtım paketi (`causoryn`), MCP sunucusu (`SERVER_VERSION`) ve indeksleme orkestratörü (`INDEXING_VERSION`) `0.2.3` sürümündeyken; beş dil analizörünün iç protokol sürümleri (`ts-adapter@0.1.0`, `roslyn-worker@0.1.0`, `python-worker@0.1.0`, `go-worker@0.1.0`, `rust-worker@0.1.0` ile `Causoryn.RoslynWorker.csproj` ve `native/rust-worker/Cargo.toml`) bilinçli olarak **`0.1.0`** seviyesinde kilitli tutulur:
+Dağıtım paketi (`causoryn`), MCP sunucusu (`SERVER_VERSION`) ve indeksleme orkestratörü (`INDEXING_VERSION`) `0.2.4` sürümündeyken; beş dil analizörünün iç protokol sürümleri (`ts-adapter@0.1.0`, `roslyn-worker@0.1.0`, `python-worker@0.1.0`, `go-worker@0.1.0`, `rust-worker@0.1.0` ile `Causoryn.RoslynWorker.csproj` ve `native/rust-worker/Cargo.toml`) bilinçli olarak **`0.1.0`** seviyesinde kilitli tutulur:
 
 1. `analyzerVersion` alanı hem her `Evidence` kaydının SHA-256 kimliğine (`evidenceId`) hem de `fp2` `analyzerFingerprint` dizgesine doğrudan girer.
 2. Analizörlerin AST/semantik çıkarım kurallarında veya NDJSON `protocolVersion: "1"` şemasında kırıcı bir değişiklik olmadıkça bu sabitin paket sürümüyle birlikte artırılması, diskteki tüm geçerli SQLite snapshot önbelleklerini gereksiz yere geçersiz kılar ve kanıt kimliklerini değiştirir.
-3. Bu nedenle iç analizör sürümü **çıkarım motoru semantiğini**, `0.2.3` ise **MCP/CLI dağıtım paketini** temsil eder.
+3. Bu nedenle iç analizör sürümü **çıkarım motoru semantiğini**, `0.2.4` ise **MCP/CLI dağıtım paketini** temsil eder.
 
 ---
 

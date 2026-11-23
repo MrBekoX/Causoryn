@@ -6,7 +6,7 @@
 
 **Causoryn** is a **local, deterministic, LLM-free MCP engine (`ADR-002`)** for codebase and change intelligence. It builds evidence-backed graphs for **TypeScript / JavaScript**, **C# / Roslyn**, **Python**, **Go**, and **Rust**, serves **29 MCP tools** over `stdio`, and ships **5 canonical agent skills** over read-only workspace analysis (`ADR-008`).
 
-> **Release status (`ADR-010`):** `0.2.3` is a **Pre-1.0 Public Preview** (not `1.0.0`).
+> **Release status (`ADR-010`):** `0.2.4` is a **Pre-1.0 Public Preview** (not `1.0.0`).
 > Package architecture note: `causoryn` is a multi-file runtime package (`dist/mcp-server.mjs`
 > + vendored N-API v10 `better-sqlite3` prebuild binaries + `dist/typescript-lib/` +
 > `native/` sidecar workers + 5 canonical `skills/`), not a single-file JS artifact.
@@ -161,7 +161,7 @@ Active envelope error codes exported in `CAUSORYN_TOOL_ERROR_CODES` (15 codes):
 - `UNSUPPORTED_LANGUAGE`
 - `INTERNAL_ERROR`
 
-Reserved specification base identifiers not emitted as envelope errors in v0.2.3 (6 codes; 21 total catalog + extension identifiers):
+Reserved specification base identifiers not emitted as envelope errors in v0.2.4 (6 codes; 21 total catalog + extension identifiers):
 - `UNRESOLVED_FLOW`
 - `STALE_PREFLIGHT`
 - `CANCELLED`

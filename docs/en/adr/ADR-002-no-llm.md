@@ -3,8 +3,8 @@
 > **Language:** [Türkçe](../../adr/ADR-002-no-llm.md) | **English** · [Documentation Hub](../README.md)
 >
 > **Evidence base:** Technical Specification (TS) v2.1 §1 (Red Line), §3.1, §3.2, §19, §24 · `wiki/decisions.md` ADR-002, K-023, K-026 · `wiki/architecture.md`
-> **Status:** **Accepted** (foundational engine boundary; current for `v0.2.3` Pre-1.0 Public Preview with `K-023`/`K-026` hybrid architecture & MCP schema boundary)
-> **Date:** 2026-11-02 (initial record), 2026-11-20 (`v0.2.0` verification), 2026-11-23 (`v0.2.3` / `K-023`–`K-026` hybrid boundary & MCP `.describe()` refinement); originates from TS v2.1 (2026-10-31)
+> **Status:** **Accepted** (foundational engine boundary; current for `v0.2.4` Pre-1.0 Public Preview with `K-023`/`K-026` hybrid architecture & MCP schema boundary)
+> **Date:** 2026-11-02 (initial record), 2026-11-20 (`v0.2.0` verification), 2026-11-23 (`v0.2.4` / `K-023`–`K-026` hybrid boundary & MCP `.describe()` refinement); originates from TS v2.1 (2026-10-31)
 
 ## Context
 
@@ -57,7 +57,7 @@ code path.
    `stdio`: `stdout` carries exclusively MCP JSON-RPC frames, while all logs go
    to `stderr` (TS §10.1).
 4. Across all **18 npm workspace packages + the monorepo root** (19
-   `package.json` manifests) in `v0.2.3`, runtime and build dependencies are
+   `package.json` manifests) in `v0.2.4`, runtime and build dependencies are
    strictly infrastructure libraries for analysis and packaging: `zod`,
    `@modelcontextprotocol/sdk`, `better-sqlite3`, `yaml`, `typescript`, and
    `esbuild` (and the published `packages/causoryn` package declares
@@ -94,7 +94,7 @@ Optional host-generated prose is a variable input to the renderer. See
   narrative synthesis live in the host agent; static measurement, fail-closed
   grounding verification, and deterministic layout live in Causoryn.
 
-## Consequences & Verification Proof (`v0.2.3`)
+## Consequences & Verification Proof (`v0.2.4`)
 
 - **Honest static boundaries (`ADR-010`):** Static analysis gaps are never
   masked with LLM guesses; they are reported transparently via `heuristic` (+

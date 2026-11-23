@@ -2,10 +2,10 @@
 
 > Kanıt: `raw/Causoryn_Teknik_Dokuman_v2.1.pdf` (TŞ v2.1) — §16A s.14–18, §10 s.9–10, §8–§9 s.8–9, §19–§20 s.21–22, §23 s.23, §24–§25 s.23–24 · `wiki/mcp-tools.md` · `wiki/scope.md` · `wiki/sprint-4.md` · **Dil / Language:** **Türkçe** | [English](en/wiki-spec.md)
 
-> **DURUM (`v0.2.3` Pre-1.0 Public Preview — ADR-010 Dürüstlük Özeti):**
+> **DURUM (`v0.2.4` Pre-1.0 Public Preview — ADR-010 Dürüstlük Özeti):**
 > - **Teslim edilen çekirdek ve MCP yüzeyi:** `@causoryn/wiki` saf projeksiyon motoru (`projectWiki`, `projectWikiIncremental`, `resolveWikiLinks`, `buildWikiLinkIndex`, `WikiSearchStore`, `AnnotationOverlayEngine`, `exportWikiOffline`, `computeWikiCoverageDeltas`, `computeWikiContractChanges`), `@causoryn/storage-sqlite` (`SqliteWikiStore`: `wiki_snapshots`, `wiki_pages`, `wiki_page_sections`, `wiki_links`, `wiki_page_versions`, `wiki_annotations`, `wiki_aliases`, `wiki_fts`) ve `packages/mcp-server/src/services-wiki.ts` altındaki **7 MCP Wiki aracının tamamı** kayıtlıdır.
 > - **Veri kökü ve `.git`'siz `working-tree` uyumu (K-021):** Açık `wiki.dataDbPath` konfigürasyonunun yanı sıra `causoryn mcp --allow-cwd --auto-data-dir [--client <id>]` (ve masaüstü IDE'lerde dinamik MCP `roots/list` bağlaması), kaynak ağacın dışında `~/.causoryn/workspaces/<slug>-<hash12>/graph[-<client>].sqlite` dosyasını otomatik hazırlar. Ayrıca `.git` dizini bulunmayan çalışma alanlarında (ör. dışa aktarılmış arşiv ağaçları) `working-tree` revizyonu Git alt-süreci başlatmadan doğrudan çözülür.
-> - **Açık kalan 1.0.0 kapıları:** (1) `causoryn_wiki_search` ek filtreleri (`kinds`, `scope`, `language`, `revision`, `resolution`) şemada beyanlıdır ancak `v0.2.3` MCP yüzeyinde açık `INVALID_ARGUMENT` ile reddedilir (`proximity` sıralama ayağı `skippedRankLegs` ile degrade raporlanır); (2) `WIKI_NOTE_CONFLICT` çekirdekte `wiki/annotation-conflict` olarak tam çalışır, ancak `v0.2.3`'te not yazan MCP aracı bulunmadığından `CAUSORYN_TOOL_ERROR_CODES` tablosuna kaydı yerel not UI/CLI yüzeyiyle birlikte 1.0.0 kapısına bırakılmıştır (K-014); (3) `causoryn_refresh_index` sonrası otomatik Wiki tetiklemesi (`wiki.autoBuildOnSnapshot`) ve `causoryn_export_documentation(view="wiki")` MCP kablolaması henüz açılmamıştır (Wiki yenileme `causoryn_wiki_build` çağrısıyla yapılır ve `view="wiki"` çağrısı `INVALID_ARGUMENT` döner); artımlı `wiki_build` değişmeyen sayfaların `contentHash` değerini korur ancak SQLite yayım katmanı her yeni `WikiSnapshot` satırında tam anlık görüntüyü yazar.
+> - **Açık kalan 1.0.0 kapıları:** (1) `causoryn_wiki_search` ek filtreleri (`kinds`, `scope`, `language`, `revision`, `resolution`) şemada beyanlıdır ancak `v0.2.4` MCP yüzeyinde açık `INVALID_ARGUMENT` ile reddedilir (`proximity` sıralama ayağı `skippedRankLegs` ile degrade raporlanır); (2) `WIKI_NOTE_CONFLICT` çekirdekte `wiki/annotation-conflict` olarak tam çalışır, ancak `v0.2.4`'te not yazan MCP aracı bulunmadığından `CAUSORYN_TOOL_ERROR_CODES` tablosuna kaydı yerel not UI/CLI yüzeyiyle birlikte 1.0.0 kapısına bırakılmıştır (K-014); (3) `causoryn_refresh_index` sonrası otomatik Wiki tetiklemesi (`wiki.autoBuildOnSnapshot`) ve `causoryn_export_documentation(view="wiki")` MCP kablolaması henüz açılmamıştır (Wiki yenileme `causoryn_wiki_build` çağrısıyla yapılır ve `view="wiki"` çağrısı `INVALID_ARGUMENT` döner); artımlı `wiki_build` değişmeyen sayfaların `contentHash` değerini korur ancak SQLite yayım katmanı her yeni `WikiSnapshot` satırında tam anlık görüntüyü yazar.
 
 ## 1. Amaç ve kapsam
 
@@ -346,13 +346,13 @@ Hata kodu yönetişimi (`packages/mcp-server/src/errors.ts`, `services-wiki.ts`,
   - `WIKI_BROKEN_LINK`: K-013 #4 gereği bozuk link hata değil **veri yüzeyidir** (`toPageId: null` +
     `brokenLinkDiagnostics`).
   - `WIKI_NOTE_CONFLICT`: `annotationVersion` CAS çakışması çekirdekte `wiki/annotation-conflict` olarak tam
-    kodlanmıştır (`AnnotationOverlayEngine.updateAnnotation`); ancak `v0.2.3`'te not yazan MCP aracı bulunmadığından
+    kodlanmıştır (`AnnotationOverlayEngine.updateAnnotation`); ancak `v0.2.4`'te not yazan MCP aracı bulunmadığından
     sunucu `CAUSORYN_TOOL_ERROR_CODES` / `TOOL_ERROR_GUIDANCE` tablosuna kaydı yerel not UI/CLI akışıyla birlikte
     açık 1.0.0 kalemi olarak takip edilmektedir.
 
 ### 4.2 Araçlar
 
-Araç girdi alanları TŞ §10.2 kataloğuna (s.10), amaç/izin satırları TŞ §16A.8 tablosuna (s.17) ve `v0.2.3`
+Araç girdi alanları TŞ §10.2 kataloğuna (s.10), amaç/izin satırları TŞ §16A.8 tablosuna (s.17) ve `v0.2.4`
 `packages/mcp-server/src/services-wiki.ts` şemalarına sadıktır. Tüm output şemaları envelope'un `data` alanının içeriğidir.
 
 #### 4.2.1 `causoryn_wiki_build`
@@ -365,7 +365,7 @@ Araç girdi alanları TŞ §10.2 kataloğuna (s.10), amaç/izin satırları TŞ 
 export const WikiBuildInputSchema = z.strictObject({
   workspaceId: z.string().min(1).optional(),
   mode: z.enum(["full", "incremental"]),      // K-013 #2
-  scope: z.string().min(1).optional(),        // v0.2.3'te açık INVALID_ARGUMENT reddi (ADR-010)
+  scope: z.string().min(1).optional(),        // v0.2.4'te açık INVALID_ARGUMENT reddi (ADR-010)
   revision: z.string().min(1).optional(),     // verilmezse graph meta revision.id
 });
 
@@ -490,7 +490,7 @@ export const WikiSearchInputSchema = z.strictObject({
   snapshotId: z.string().min(1).optional(),
   limit: z.number().int().min(1).optional(),      // K-013 #5: varsayılan 50, max 200
   cursor: z.string().min(1).optional(),
-  // Aşağıdaki TŞ §16A.3 filtre alanları şemada beyanlıdır ancak v0.2.3'te açık INVALID_ARGUMENT döner (ADR-010):
+  // Aşağıdaki TŞ §16A.3 filtre alanları şemada beyanlıdır ancak v0.2.4'te açık INVALID_ARGUMENT döner (ADR-010):
   kinds: z.array(WikiPageKindSchema).optional(),
   scope: z.string().min(1).optional(),
   language: z.string().min(1).optional(),
@@ -514,7 +514,7 @@ export const WikiSearchHitSchema = z.strictObject({
 ```
 
 - **Sıralama garantisi**: `CreateOrder` gibi tam sembol/route eşleşmesi, FTS genel eşleşmesinin **üstünde** döner
-  (kabul testi, TŞ §16A.10). `proximity` ayağı `v0.2.3` MCP yüzeyinde beslenmediğinden `skippedRankLegs` içinde açıkça bildirilir.
+  (kabul testi, TŞ §16A.10). `proximity` ayağı `v0.2.4` MCP yüzeyinde beslenmediğinden `skippedRankLegs` içinde açıkça bildirilir.
 - **Token bütçesi**: sonuca uygun özet döner; tam sayfa sonraki `causoryn_wiki_get_page` çağrısıyla alınır (16A.3).
 - **Hata kodları**: `WORKSPACE_NOT_AUTHORIZED`, `INDEX_NOT_READY`, `EVIDENCE_NOT_FOUND` (verilen `snapshotId` yok),
   `INVALID_ARGUMENT` (boş sorgu, bozuk cursor veya henüz açılmamış ek filtreler), `LIMIT_EXCEEDED`, `INTERNAL_ERROR`.
@@ -635,7 +635,7 @@ export const WikiDiffDataSchema = z.strictObject({
 ### 4.3 İsteğe bağlı MCP resources
 
 Opsiyonel resource URI: `causoryn://wiki/{workspaceId}/{pageId}?snapshot={wikiSnapshotId}` (TŞ §16A.8).
-`v0.2.3` diliminde MCP `resources` yüzeyi yayımlanmamıştır; taşınabilir temel sözleşme 7 MCP tool'dur. MCP Apps
+`v0.2.4` diliminde MCP `resources` yüzeyi yayımlanmamıştır; taşınabilir temel sözleşme 7 MCP tool'dur. MCP Apps
 gibi etkileşimli UI uzantıları host destek testinden sonra değerlendirilir; hiçbir host'ta otomatik interaktif
 panel varmış gibi vaat edilmez (ADR-010).
 
@@ -670,7 +670,7 @@ panel varmış gibi vaat edilmez (ADR-010).
 | `causoryn_wiki_get_links` | ❌ YOK (`readOnlyHint: true`) | — (salt okunur) | TŞ §16A.8 |
 | `causoryn_wiki_get_versions` | ❌ YOK (`readOnlyHint: true`) | — (salt okunur; Git read-only + `.git`'siz `working-tree`) | TŞ §16A.8, kırmızı çizgi #3 |
 | `causoryn_wiki_diff` | ❌ YOK (`readOnlyHint: true`) | — (salt okunur; working tree değişmez) | TŞ §16A.8, §16A.10 |
-| `causoryn_refresh_index` | ✅ (indeks, `readOnlyHint: false`) | Yalnızca Causoryn graph indeksi (`InMemoryGraphRepository` / `storage.dataDbPath`); `v0.2.3`'te Wiki yenileme açık `causoryn_wiki_build` ile yapılır | TŞ §10.2, ADR-010 |
+| `causoryn_refresh_index` | ✅ (indeks, `readOnlyHint: false`) | Yalnızca Causoryn graph indeksi (`InMemoryGraphRepository` / `storage.dataDbPath`); `v0.2.4`'te Wiki yenileme açık `causoryn_wiki_build` ile yapılır | TŞ §10.2, ADR-010 |
 | `causoryn_export_documentation` | ✅ (export, `readOnlyHint: false`) | Yalnızca explicit izinli `output.allowedOutputDirs` klasörü (görsel mimari görünümleri etkin, `view="wiki"` açık `INVALID_ARGUMENT`) | TŞ §10.2, §16A.9, ADR-010 |
 | Wiki not ekleme/düzenleme | ✅ (onaylı yerel akış) | **MCP aracı YOK**; çekirdek `AnnotationOverlayEngine` hazır, yerel UI/CLI yüzeyi 1.0.0 kapısında | TŞ §16A.6, §10.2, K-014 |
 
@@ -679,10 +679,10 @@ altısı analiz/query bakımından tamamen salt okunurdur.
 
 ## 6. Yeniden kullanım ilkesi: `refresh_index` ve `export_documentation`
 
-TŞ §10.2 + §16A.8 katalog tasarım ilkesi (ve `v0.2.3` dürüst uygulama durumu):
+TŞ §10.2 + §16A.8 katalog tasarım ilkesi (ve `v0.2.4` dürüst uygulama durumu):
 
 1. **Ayrı `wiki_refresh` ve `wiki_export` MCP aracı AÇILMAZ** — toplam araç sayısı 22 + 7 = 29 olarak kilitlidir.
-2. **TŞ hedef akışı vs. `v0.2.3` durumu (ADR-010):**
+2. **TŞ hedef akışı vs. `v0.2.4` durumu (ADR-010):**
    - TŞ §20 tasarımında `wiki.autoBuildOnSnapshot: true` ile `causoryn_refresh_index` sonrası otomatik Wiki
      güncellemesi ve `causoryn_export_documentation(view="wiki")` ile offline Wiki dışa aktarımı öngörülmüştür.
    - Çekirdekte `projectWikiIncremental` ve `exportWikiOffline` bulunur. MCP üzerinden Living Wiki projeksiyonu `causoryn_wiki_build` ile tetiklenir. Görsel Mimari Portalları için `causoryn_export_documentation`, `architecture`, HTML'e özel `interactive` (varsayılan dosya adı `causoryn-architecture-interactive.html`) ve `full` görünümlerini sunar (`view="wiki"` açıkça `INVALID_ARGUMENT` döndürür). Bkz. [Araç sözleşmeleri](tool-contracts.md) · [Prompt ve Mimari Portal Rehberi](prompting-and-architecture-portals.md).
@@ -693,7 +693,7 @@ TŞ §10.2 + §16A.8 katalog tasarım ilkesi (ve `v0.2.3` dürüst uygulama duru
 4. Wiki not ekleme/düzenleme, normal MCP sorgularından ayrı ve açık kullanıcı izinli yerel CLI/UI akışı olarak
    tutulur (TŞ §10.2, §16A.6).
 
-İlgili TŞ hedef konfigürasyonu (TŞ §20; `v0.2.3` sunucu çalışma zamanında aktif alan `wiki.dataDbPath`'tir, bkz. [CLI ve Konfigürasyon](cli-and-configuration.md)):
+İlgili TŞ hedef konfigürasyonu (TŞ §20; `v0.2.4` sunucu çalışma zamanında aktif alan `wiki.dataDbPath`'tir, bkz. [CLI ve Konfigürasyon](cli-and-configuration.md)):
 
 ```yaml
 wiki:
@@ -749,7 +749,7 @@ Her araç için sprint kuralı uygulanmıştır: pozitif + negatif + partial tes
    şemasıyla iki `WikiSnapshot`'ın arka `GraphSnapshot` sözleşme düğümleri (`ApiContract`/`EventContract`/`SchemaContract`/`ContractVersion`)
    üzerinden hesaplanır.
 
-**`v0.2.3` itibarıyla `1.0.0` sürüm kapısına kalan açık Wiki maddeleri (CHANGELOG `[Unreleased]` ile senkron):**
+**`v0.2.4` itibarıyla `1.0.0` sürüm kapısına kalan açık Wiki maddeleri (CHANGELOG `[Unreleased]` ile senkron):**
 
 - `causoryn_wiki_search` ek filtrelerinin (`kinds`, `scope`, `language`, `revision`, `resolution`) ve `proximity` sıralama ayağının MCP yüzeyinde açılması.
 - Yerel not ekleme/düzenleme CLI/UI akışı açıldığında `WIKI_NOTE_CONFLICT` sabit kodunun MCP `CAUSORYN_TOOL_ERROR_CODES` / `TOOL_ERROR_GUIDANCE` tablosuna kaydedilmesi (K-014).

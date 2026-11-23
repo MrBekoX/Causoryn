@@ -13,30 +13,30 @@
 > `better-sqlite3` prebuilds `dist/node_modules/` altındadır — "tek dosya" değil, `dist/` klasörünün
 > bütününü dağıtın). Doğrulama testi: `tests/hosts-docs.test.ts`.
 
-Causoryn, LLM çalıştırmayan yerel ve deterministik bir MCP motorudur (`causoryn@0.2.3`). CLI yoksa
+Causoryn, LLM çalıştırmayan yerel ve deterministik bir MCP motorudur (`causoryn@0.2.4`). CLI yoksa
 `npm install -g @anthropic-ai/claude-code` ile kurulur.
 
-## 0. Son Kullanıcı Hızlı Kurulumu (Önerilen — K-021 / `v0.2.3`)
+## 0. Son Kullanıcı Hızlı Kurulumu (Önerilen — K-021 / `v0.2.4`)
 
-### Seçenek 0A — Tek Komut CLI (`npx causoryn@0.2.3 setup`)
+### Seçenek 0A — Tek Komut CLI (`npx causoryn@0.2.4 setup`)
 
 ```bash
 # Değişiklikleri önceden görmek için (salt okunur)
-npx causoryn@0.2.3 setup --client claude-code --dry-run
+npx causoryn@0.2.4 setup --client claude-code --dry-run
 
 # ~/.claude.json + ~/.claude/skills/ kurulumu (.causoryn.backup yedeği ve kalıcı ~/.causoryn/runtime ile)
-npx causoryn@0.2.3 setup --client claude-code --yes
+npx causoryn@0.2.4 setup --client claude-code --yes
 
 # Sağlık kontrolü (salt okunur)
-npx causoryn@0.2.3 doctor
+npx causoryn@0.2.4 doctor
 
 # Temiz kaldırma (mcpServers.causoryn + 5 Causoryn skill’i)
-npx causoryn@0.2.3 setup --client claude-code --uninstall --yes
+npx causoryn@0.2.4 setup --client claude-code --uninstall --yes
 ```
 
 Varsayılan kurulum beş kanonik skill’i yükler. `architecture-blueprint`, Claude’un MCP kanıtlarından isteğe bağlı `annotations` hazırlamasına rehberlik eder. Sunucu, aynı snapshot ve export girdileriyle tekrarlanabilir çıktı üretir. Anotasyonsuz export için doğrudan `causoryn_export_documentation` çağırın. [Mimari export sözleşmesi](../tool-contracts.md)
 
-**`v0.2.3` `CLAUDE_CONFIG_DIR` desteği:** Ortamda `CLAUDE_CONFIG_DIR` tanımlıysa hem
+**`v0.2.4` `CLAUDE_CONFIG_DIR` desteği:** Ortamda `CLAUDE_CONFIG_DIR` tanımlıysa hem
 `causoryn setup --client claude-code` hem de `causoryn doctor` varsayılan `~/.claude.json` ve
 `~/.claude/skills/` yerine `$CLAUDE_CONFIG_DIR/.claude.json` ve `$CLAUDE_CONFIG_DIR/skills/`
 yollarını kullanır (`resolveEffectiveClaudeConfigDir`, `packages/causoryn/src/setup.ts`). Böylece
@@ -49,12 +49,12 @@ yollarını kullanır (`resolveEffectiveClaudeConfigDir`, `packages/causoryn/src
 /plugin install causoryn@causoryn
 ```
 
-- **Pazaryeri ve sürüm kilidi (`--expected-version 0.2.3`):** Kök `.claude-plugin/marketplace.json`
-  (`source: { "source": "npm", "package": "causoryn", "version": "0.2.3" }`) ve paket içi
+- **Pazaryeri ve sürüm kilidi (`--expected-version 0.2.4`):** Kök `.claude-plugin/marketplace.json`
+  (`source: { "source": "npm", "package": "causoryn", "version": "0.2.4" }`) ve paket içi
   `packages/causoryn/.claude-plugin/plugin.json`, sunucuyu
-  `${CLAUDE_PLUGIN_ROOT}/scripts/plugin-mcp-launcher.mjs --expected-version 0.2.3 --allow-cwd --auto-data-dir --client claude-code`
+  `${CLAUDE_PLUGIN_ROOT}/scripts/plugin-mcp-launcher.mjs --expected-version 0.2.4 --allow-cwd --auto-data-dir --client claude-code`
   komutuyla başlatır. Başlatıcı betik (`plugin-mcp-launcher.mjs`), iç içe `npx` alt-süreci açmadan
-  kurulu plugin `package.json` dosyasındaki `version === "0.2.3"` eşitliğini (ve varsa
+  kurulu plugin `package.json` dosyasındaki `version === "0.2.4"` eşitliğini (ve varsa
   `CAUSORYN_EXPECTED_VERSION` ortam değişkeniyle tutarlılığını) denetler; sürüm uyuşmazlığında
   `stderr` üzerinden açık hata verip `exit 2` ile çıkar, doğrulama geçtiğinde `CAUSORYN_ASSET_ROOT`
   atayarak doğrudan `dist/mcp-server.mjs` modülünü yükler.

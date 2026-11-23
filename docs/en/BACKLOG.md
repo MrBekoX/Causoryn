@@ -2,11 +2,11 @@
 
 **Language / Dil:** [Türkçe](../BACKLOG.md) | English
 
-> Evidence: `wiki/roadmap.md` (Spec v2.1 §23–§25), `wiki/sprint-1.md` – `wiki/sprint-8.md`, `wiki/decisions.md` (`K-001`..`K-026`), [implementation-status.md](implementation-status.md), and [CHANGELOG.md](../../CHANGELOG.md) · Section 1–2 preserve the original Sprint 1 Task 11 phase-dependency architecture (mapped 1-to-1 to GitHub issues `#1`–`#6`); Sections 3–5 record the post-plan expansions delivered from Sprint 8 through the `v0.2.3` Pre-1.0 Public Preview and `K-025`/`K-026` baseline alongside the genuinely open `1.0.0` release gates and post-1.0 candidates under strict `ADR-010` honesty.
+> Evidence: `wiki/roadmap.md` (Spec v2.1 §23–§25), `wiki/sprint-1.md` – `wiki/sprint-8.md`, `wiki/decisions.md` (`K-001`..`K-026`), [implementation-status.md](implementation-status.md), and [CHANGELOG.md](../../CHANGELOG.md) · Section 1–2 preserve the original Sprint 1 Task 11 phase-dependency architecture (mapped 1-to-1 to GitHub issues `#1`–`#6`); Sections 3–5 record the post-plan expansions delivered from Sprint 8 through the `v0.2.4` Pre-1.0 Public Preview (`K-025`/`K-026`) baseline alongside the genuinely open `1.0.0` release gates and post-1.0 candidates under strict `ADR-010` honesty.
 
 ## 1. Historical Phase → Issue Mapping & Current Status
 
-| Order | Phase | Issue | Phase Dependencies | Primary Components | Acceptance Gate | `v0.2.3` Status (`ADR-010`) |
+| Order | Phase | Issue | Phase Dependencies | Primary Components | Acceptance Gate | `v0.2.4` Status (`ADR-010`) |
 |---|---|---|---|---|---|---|
 | 0 | **A — Foundation** | *Delivered directly in Sprint 1* | — | `packages/domain`, `packages/workspace`, `packages/indexing`, `packages/graph`, `packages/storage-sqlite`, `packages/mcp-server`, `adapters/typescript` | Live tool calls + fixture golden + security tests | **Done** (11/11, PR #7) |
 | 1 | **B — Deep Mapping** | [#1](https://github.com/MrBekoX/Causoryn/issues/1) | A (hard) | `native/roslyn-worker/`, `adapters/csharp-roslyn/`, `packages/indexing`, `packages/graph`, `packages/mcp-server` | C# + TS fixture cross-boundary evidence chain | **7/8 Done · `B7` Partial** (PR #8 + B9 + `K-020`; per-file parse reuse & watcher MCP surface remain open) |
@@ -38,7 +38,7 @@ Hard dependency spine: **A → B → C → D → E → F** (`C2` depends strictl
 6. **E sixth:** `causoryn_verify_change` (`E1`) requires `preflightId` (`D → E` hard edge; only `E4` `get_evidence` enrichment can stand alone).
 7. **F last:** release tagging is governed by `ADR-010` — `1.0.0` is never declared while host or fidelity gates remain open (`F9`: `0.1.0` public snapshot; `K-022`: `0.2.0` Pre-1.0 Public Preview).
 
-## 3. Delivered Post-Plan Expansions (Sprint 8 → `v0.2.3` / `K-026`)
+## 3. Delivered Post-Plan Expansions (Sprint 8 → `v0.2.4`)
 
 After completing the initial 7-sprint roadmap, the following expansions were delivered and closed:
 
@@ -50,8 +50,8 @@ After completing the initial 7-sprint roadmap, the following expansions were del
 - **v0.2.1 — Startup and indexing:** Background indexing after the MCP handshake, build/cache exclusions and root `.gitignore` for auto-configured workspaces, polyglot external-node deduplication, bulk SQLite transactions, and bounded job diagnostics (**Done**).
 - **v0.2.2 — Visual architecture exports (`K-023`):** Layered SVG, Mermaid, Markdown, and JSON views, an HTML-only interactive portal, validated caller annotations, and the fifth canonical skill, `architecture-blueprint`. This version also introduced the `PRAGMA data_version`-guarded snapshot cache and dynamic `doctor` version (**Done**).
 - **v0.2.3 — Universal JS/CJS compatibility and confined analysis (`K-024`):** `.js`/`.jsx`/`.mjs`/`.cjs` + CommonJS + JS Express/Next.js analysis inside the existing `ts-adapter`, root-confined `tsconfig.json`/`jsconfig.json` loader (`configureConfinedCompilerHost`), zero-RegExp polynomial-time glob matcher + `.git/info/exclude` & nested `.gitignore` discovery + smart `bin/` handling, non-blocking `collectInventoryAsync`, and default interactive HTML filename `causoryn-architecture-interactive.html` (`causoryn@0.2.3` live on npm via OIDC) (**Done**).
-- **K-025 — CI/CD & Supply-Chain Security Hardening:** `.github/workflows/security.yml` (`zizmor`, PR `dependency-review-action`, `npm audit --audit-level=high` + fail-closed `--locked-mode` NuGet JSON audit), 5-language `.github/workflows/codeql.yml`, OpenSSF `.github/workflows/scorecard.yml`, 2-job SLSA `.github/workflows/release.yml` (`step-security/harden-runner`, tokenless OIDC), `.github/workflows/ci.yml` (`-p:RestoreLockedMode=true`, `export-public-tree.mjs --verify-temp --ref HEAD`), 4-ecosystem 7-day cooldown `.github/dependabot.yml`, and `tests/ci-workflow.test.ts` regression pins (**Done**).
-- **K-026 — Natural-Language Skill Triggering, MCP Schema Docs & Diátaxis TR/EN Overhaul:** Bilingual canonical skill refinements, Zod `.describe()` documentation on `causoryn_export_documentation`, 17-pair Diátaxis TR/EN documentation hub (including [prompting-and-architecture-portals.md](prompting-and-architecture-portals.md)), and Deterministic vs. Annotated example prompt recipes (**Done**). [Release notes](../../CHANGELOG.md) · [Tool contracts](tool-contracts.md)
+- **v0.2.4 (`K-025`) — CI/CD & Supply-Chain Security Hardening:** `.github/workflows/security.yml` (`zizmor`, PR `dependency-review-action`, `npm audit --audit-level=high` + fail-closed `--locked-mode` NuGet JSON audit), 5-language `.github/workflows/codeql.yml`, OpenSSF `.github/workflows/scorecard.yml`, 2-job SLSA `.github/workflows/release.yml` (`step-security/harden-runner`, tokenless OIDC), `.github/workflows/ci.yml` (`-p:RestoreLockedMode=true`, `export-public-tree.mjs --verify-temp --ref HEAD`), 4-ecosystem 7-day cooldown `.github/dependabot.yml`, and `tests/ci-workflow.test.ts` regression pins (**Done**).
+- **v0.2.4 (`K-026`) — Natural-Language Skill Triggering, MCP Schema Docs & Diátaxis TR/EN Overhaul:** Bilingual canonical skill refinements, Zod `.describe()` documentation on `causoryn_export_documentation`, 17-pair Diátaxis TR/EN documentation hub (including [prompting-and-architecture-portals.md](prompting-and-architecture-portals.md)), and Deterministic vs. Annotated example prompt recipes (**Done**). [Release notes](../../CHANGELOG.md) · [Tool contracts](tool-contracts.md)
 
 ## 4. Current Open Backlog — `1.0.0` Release Gates (`ADR-010`)
 
@@ -93,6 +93,6 @@ The gates below mirror [CHANGELOG.md](../../CHANGELOG.md) `[Unreleased]`; `1.0.0
 ## Related Pages
 
 - [implementation-status.md](implementation-status.md) — detailed sprint-by-sprint and `K-019`..`K-026` evidence tables
-- [CHANGELOG.md](../../CHANGELOG.md) — `0.2.3` Pre-1.0 Public Preview release notes and `[Unreleased]` 1.0.0 gates
+- [CHANGELOG.md](../../CHANGELOG.md) — `0.2.4` Pre-1.0 Public Preview release notes and `[Unreleased]` 1.0.0 gates
 - [architecture.md](architecture.md) — 18-workspace-package and 4-native-sidecar architecture
 - [compatibility-matrix.md](compatibility-matrix.md) — 4-host compatibility matrix

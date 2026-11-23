@@ -5,7 +5,7 @@
 > Kanıt: `raw/Causoryn_Teknik_Dokuman_v2.1.pdf` §21 (s.22): "1.000 TS dosyası fixture üzerinde sıcak workspace_summary <1 sn, küçük graph neighborhood <500 ms, sınırlı 200 node map <2 sn". TŞ bu rakamları **tasarım hedefi** olarak verir ve açıkça şunu söyler: "bu rakamlar tasarım hedefi, gerçekleşmiş test sonucu değildir". Dolayısıyla aşağıdaki hedef kolonu **referans**tır, sonuç değil; tabloda yalnızca ölçülen değerler raporlanır.
 > ADR-010 dürüstlük kuralı: ölçülemeyen şey ölçülmüş yazılmaz — ortam kesintisi/deadline aşımı olan satır `not measured (<neden>)` olarak raporlanır.
 
-## Güncel performans kapsamı (`v0.2.3`)
+## Güncel performans kapsamı (`v0.2.4`)
 
 Aşağıdaki F7 tablosu 10 Kasım 2026'daki sentetik 1.000 dosyalık fixture koşumunu tarihsel taban olarak kaydeder. Sonraki sürümler büyük çalışma alanları için dört temel yürütme iyileştirmesi eklemiştir: `v0.2.1` ilk indekslemeyi MCP el sıkışmasından sonra arka plana erteledi ve SQLite toplu yazımlarını tek transaction'a aldı; `v0.2.2` yayımlanmış grafiğin sıcak okumalarında `PRAGMA data_version` korumalı sınırlı (en fazla 4 girişli) bir önbellek ve varsayılan kümelenmiş mimari görünümler (ham döküm `view="full"`) ekledi; `v0.2.3` (`K-024`) ise her 64 girişte olay döngüsünü serbest bırakan bloklamasız `collectInventoryAsync` taramasını ve polinom-zamanlı sıfır-RegExp glob eşleştiricisini getirdi. Bu iyileştirmeler için F7 tablosuna yeni bir süre satırı eklenmemiştir — tablo yalnızca fiilen ölçülmüş F7 değerlerini korur. [Sürüm notları](../CHANGELOG.md) · [Araç sözleşmeleri](tool-contracts.md)
 
