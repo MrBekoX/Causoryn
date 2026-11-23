@@ -32,6 +32,7 @@ import {
 } from "./context.js";
 import type { PreflightManifestStore } from "./preflight-store.js";
 import type { OutputSchemaProfile } from "./server.js";
+import { discoverWorkspaceIgnoreConfig } from "./workspace-ignore-discovery.js";
 
 /**
  * K-021 — Sıfır-ayar MCP CLI bayrakları, güvenli `--allow-cwd` kök filtresi,
@@ -852,76 +853,6 @@ function assertDataDirAncestorsSafe(
   }
 }
 
-const MAX_GITIGNORE_BYTES = 256 * 1024;
-const MAX_GITIGNORE_PATTERNS = 500;
-
-/**
- * Bir proje kökündeki `.gitignore` dosyasından salt-okunur, güvenli ve
- * deterministik ignore desenleri okur (v0.2.1):
- * - Symlink (CWE-59) veya > 256 KB dosyalar atlanır.
- * - Yorum (`#`), boş satır ve `\0` içeren satırlar atlanır.
- * - Negasyon (`!foo/...`) içeren bir dizin öneki varsa, aynı öneki hedefleyen
- *   geniş desenler (`foo/*`, `foo/**`, `foo/`, `foo`) aşırı-dışlamayı önlemek
- *   için atlanır.
- */
-function readSafeGitignorePatterns(rootDir: string): string[] {
-  const gitignorePath = path.join(rootDir, ".gitignore");
-  try {
-    const st = lstatSync(gitignorePath);
-    if (st.isSymbolicLink() || !st.isFile() || st.size > MAX_GITIGNORE_BYTES) {
-      return [];
-    }
-    const raw = readFileSync(gitignorePath, "utf8");
-    const lines = raw.split(/\r?\n/);
-
-    const negatedTopSegments = new Set<string>();
-    const rawEntries: string[] = [];
-
-    for (const rawLine of lines) {
-      const trimmed = rawLine.trim();
-      if (trimmed.length === 0 || trimmed.startsWith("#") || trimmed.includes("\0")) {
-        continue;
-      }
-      if (trimmed.startsWith("!")) {
-        const rest = trimmed.slice(1).replace(/^\/+/, "").split("\\").join("/");
-        const firstSeg = rest.split("/")[0]?.trim();
-        if (firstSeg !== undefined && firstSeg.length > 0) {
-          negatedTopSegments.add(process.platform === "win32" ? firstSeg.toLowerCase() : firstSeg);
-        }
-        continue;
-      }
-      rawEntries.push(trimmed);
-    }
-
-    const patterns: string[] = [];
-    const seen = new Set<string>();
-    for (const entry of rawEntries) {
-      if (patterns.length >= MAX_GITIGNORE_PATTERNS) break;
-      const posix = entry.split("\\").join("/");
-      const stripped = posix.replace(/^\/+/, "");
-      const firstSeg = stripped.split("/")[0]?.trim() ?? "";
-      const comparableFirst = process.platform === "win32" ? firstSeg.toLowerCase() : firstSeg;
-      if (
-        comparableFirst.length > 0 &&
-        negatedTopSegments.has(comparableFirst) &&
-        (stripped === firstSeg ||
-          stripped === `${firstSeg}/` ||
-          stripped === `${firstSeg}/*` ||
-          stripped === `${firstSeg}/**`)
-      ) {
-        continue;
-      }
-      if (!seen.has(posix)) {
-        seen.add(posix);
-        patterns.push(posix);
-      }
-    }
-    return patterns;
-  } catch {
-    return [];
-  }
-}
-
 function mergeExtraIgnore(
   baseExtraIgnore: unknown,
   gitignorePatterns: readonly string[],
@@ -965,6 +896,9 @@ export function buildWorkspaceAutoConfig(
     return parseCausorynServerConfig(rawBase);
   }
 
+  const hasExplicitIgnore =
+    Object.hasOwn(rawBase, "ignore") && rawBase["ignore"] !== undefined;
+
   const baseAllowRoots = Array.isArray(rawBase["allowRoots"])
     ? (rawBase["allowRoots"] as unknown[])
     : [];
@@ -974,12 +908,17 @@ export function buildWorkspaceAutoConfig(
       : baseAllowRoots.map((entry) => String(entry));
 
   if (!options.autoDataDir || effectiveRoots.length === 0) {
-    const gitignorePatterns =
-      effectiveRoots.length > 0 ? readSafeGitignorePatterns(effectiveRoots[0] as string) : [];
-    const extraIgnore = mergeExtraIgnore(rawBase["extraIgnore"], gitignorePatterns);
+    const discovery =
+      effectiveRoots.length > 0
+        ? discoverWorkspaceIgnoreConfig(effectiveRoots[0] as string, { hasExplicitIgnore })
+        : undefined;
+    const extraIgnore = mergeExtraIgnore(rawBase["extraIgnore"], discovery?.extraIgnore ?? []);
     return parseCausorynServerConfig({
       ...rawBase,
       allowRoots: effectiveRoots,
+      ...(!hasExplicitIgnore && discovery?.refinedDefaultIgnore !== undefined
+        ? { ignore: [...discovery.refinedDefaultIgnore] }
+        : {}),
       ...(extraIgnore !== undefined ? { extraIgnore } : {}),
     });
   }
@@ -1060,12 +999,15 @@ export function buildWorkspaceAutoConfig(
   const baseStorage = isPlainObject(rawBase["storage"]) ? rawBase["storage"] : {};
   const baseWiki = isPlainObject(rawBase["wiki"]) ? rawBase["wiki"] : {};
   const baseOutput = isPlainObject(rawBase["output"]) ? rawBase["output"] : {};
-  const gitignorePatterns = readSafeGitignorePatterns(primaryRoot);
-  const extraIgnore = mergeExtraIgnore(rawBase["extraIgnore"], gitignorePatterns);
+  const discovery = discoverWorkspaceIgnoreConfig(primaryRoot, { hasExplicitIgnore });
+  const extraIgnore = mergeExtraIgnore(rawBase["extraIgnore"], discovery.extraIgnore);
 
   const mergedConfig: Record<string, unknown> = {
     ...rawBase,
     allowRoots: effectiveRoots,
+    ...(!hasExplicitIgnore && discovery.refinedDefaultIgnore !== undefined
+      ? { ignore: [...discovery.refinedDefaultIgnore] }
+      : {}),
     ...(extraIgnore !== undefined ? { extraIgnore } : {}),
     workspaceId: Object.hasOwn(rawBase, "workspaceId") ? rawBase["workspaceId"] : slug,
     storage: {

@@ -41,6 +41,12 @@ export interface TypeScriptAdapterInput {
    */
   readonly rootDir: string;
   readonly sources: readonly TsAdapterSourceFile[];
+  /**
+   * İsteğe bağlı `tsconfig.json` / `jsconfig.json` / `tsconfig.*.json` dosyaları
+   * (WorkspaceAccessPolicy yetkili, bellek-içi salt-okunur). Verilmezse ve
+   * `rootDir` diskte mevcutsa güvenli salt-okunur disk fallback uygulanır.
+   */
+  readonly configFiles?: readonly TsAdapterSourceFile[];
 }
 
 /**

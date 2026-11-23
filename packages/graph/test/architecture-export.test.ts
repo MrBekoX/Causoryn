@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
@@ -22,7 +22,11 @@ import {
 } from "../src/architecture-export.js";
 import { computeArchitectureLayout } from "../src/architecture-layout.js";
 import { projectArchitecture } from "../src/architecture-projection.js";
-import { writeDocumentation } from "../src/export.js";
+import {
+  EXPORT_DEFAULT_FILE_NAMES,
+  writeDocumentation,
+} from "../src/export.js";
+import { EXPORT_INTERACTIVE_HTML_FILE_NAME } from "../src/index.js";
 import { GraphRepositoryError } from "../src/errors.js";
 
 const WS = "ws_arch_export";
@@ -536,5 +540,69 @@ describe("writeDocumentation — view & annotations entegrasyonu", () => {
         policy,
       ),
     ).toThrowError(GraphRepositoryError);
+  });
+
+  it("varsayılan dosya adları: architecture → causoryn-architecture.html, interactive → causoryn-architecture-interactive.html (çakışmadan birlikte yaşar) ve açık fileName her zaman önceliklidir", () => {
+    expect(EXPORT_DEFAULT_FILE_NAMES.html).toBe("causoryn-architecture.html");
+    expect(EXPORT_INTERACTIVE_HTML_FILE_NAME).toBe("causoryn-architecture-interactive.html");
+
+    const snap = richFixture();
+    const outDir = makeTmp("default-names");
+    const policy = OutputAccessPolicy.create([outDir]);
+
+    // 1. Default architecture HTML (no fileName) -> causoryn-architecture.html (zero-JS SVG portal)
+    const archHtml = writeDocumentation(
+      { snapshot: snap, format: "html", outputDir: outDir, view: "architecture" },
+      policy,
+    );
+    expect(path.basename(archHtml.path)).toBe("causoryn-architecture.html");
+    expect(archHtml.view).toBe("architecture");
+
+    // 2. Interactive HTML (no fileName) -> causoryn-architecture-interactive.html without overwriting architecture HTML
+    const interHtml = writeDocumentation(
+      { snapshot: snap, format: "html", outputDir: outDir, view: "interactive" },
+      policy,
+    );
+    expect(path.basename(interHtml.path)).toBe("causoryn-architecture-interactive.html");
+    expect(interHtml.view).toBe("interactive");
+    expect(interHtml.path).not.toBe(archHtml.path);
+
+    // Both files coexist with distinct contents
+    const archContent = readFileSync(archHtml.path, "utf8");
+    const interContent = readFileSync(interHtml.path, "utf8");
+    expect(archContent).toContain("<svg ");
+    expect(/<script/i.test(archContent)).toBe(false);
+    expect(interContent).toContain("causoryn-portal-data");
+    expect(interContent).toContain("<svg ");
+    expect(archContent).not.toBe(interContent);
+
+    // 3. Explicit fileName always takes precedence for interactive view
+    const customInterHtml = writeDocumentation(
+      {
+        snapshot: snap,
+        format: "html",
+        outputDir: outDir,
+        view: "interactive",
+        fileName: "custom-portal.html",
+      },
+      policy,
+    );
+    expect(path.basename(customInterHtml.path)).toBe("custom-portal.html");
+    expect(readFileSync(customInterHtml.path, "utf8")).toContain("causoryn-portal-data");
+
+    expect(readdirSync(outDir).sort()).toEqual([
+      "causoryn-architecture-interactive.html",
+      "causoryn-architecture.html",
+      "custom-portal.html",
+    ]);
+
+    // 4. Non-interactive views (full / undefined) keep EXPORT_DEFAULT_FILE_NAMES.html
+    const fullDir = makeTmp("default-full");
+    const fullPolicy = OutputAccessPolicy.create([fullDir]);
+    const fullHtml = writeDocumentation(
+      { snapshot: snap, format: "html", outputDir: fullDir, view: "full" },
+      fullPolicy,
+    );
+    expect(path.basename(fullHtml.path)).toBe("causoryn-architecture.html");
   });
 });

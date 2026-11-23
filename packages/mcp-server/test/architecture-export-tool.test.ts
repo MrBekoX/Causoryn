@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -247,6 +247,78 @@ describe("causoryn_export_documentation — v0.2.2 visual architecture & Host-LL
         },
       });
       expectToolErrorCode(wikiView as CallToolResult, "INVALID_ARGUMENT");
+    } finally {
+      await pair.close();
+    }
+  });
+
+  it("fileName verilmeden ardışık html (varsayılan architecture) ve html+interactive çağrıları çakışmadan ayrı dosyalara yazar; açık fileName önceliklidir", async () => {
+    const outDir = makeOutDir();
+    const pair = await connectClient(
+      createCausorynContext({
+        workspaceId: "default",
+        allowRoots: [FIXTURE_ROOT],
+        results: { maxNodes: 250, maxSymbols: 100 },
+        autoIndex: true,
+        output: { allowedOutputDirs: [outDir] },
+      }),
+    );
+    try {
+      // 1. Default format="html" (default view="architecture", no fileName) -> causoryn-architecture.html
+      const archRes = await pair.client.callTool({
+        name: "causoryn_export_documentation",
+        arguments: { format: "html", outputDir: outDir },
+      });
+      const archEnv = expectEnvelope(archRes as CallToolResult);
+      expect(archEnv.status).toBe("ok");
+      const archData = archEnv.data as { path: string; view?: string };
+      expect(archData.view).toBe("architecture");
+      expect(path.basename(archData.path)).toBe("causoryn-architecture.html");
+
+      // 2. format="html", view="interactive" without fileName -> causoryn-architecture-interactive.html
+      const interRes = await pair.client.callTool({
+        name: "causoryn_export_documentation",
+        arguments: { format: "html", view: "interactive", outputDir: outDir },
+      });
+      const interEnv = expectEnvelope(interRes as CallToolResult);
+      expect(interEnv.status).toBe("ok");
+      const interData = interEnv.data as { path: string; view?: string };
+      expect(interData.view).toBe("interactive");
+      expect(path.basename(interData.path)).toBe("causoryn-architecture-interactive.html");
+      expect(interData.path).not.toBe(archData.path);
+
+      // Verify both files coexist and default HTML was NOT overwritten
+      const archContent = readFileSync(archData.path, "utf8");
+      const interContent = readFileSync(interData.path, "utf8");
+      expect(archContent).toContain("<svg ");
+      expect(archContent).toContain("default-src 'none'");
+      expect(/<script/i.test(archContent)).toBe(false);
+      expect(interContent).toContain("causoryn-portal-data");
+      expect(interContent).toContain("<svg ");
+      expect(archContent).not.toBe(interContent);
+
+      // 3. Explicit fileName takes precedence even with view="interactive"
+      const customRes = await pair.client.callTool({
+        name: "causoryn_export_documentation",
+        arguments: {
+          format: "html",
+          view: "interactive",
+          outputDir: outDir,
+          fileName: "custom-portal.html",
+        },
+      });
+      const customEnv = expectEnvelope(customRes as CallToolResult);
+      expect(customEnv.status).toBe("ok");
+      const customData = customEnv.data as { path: string; view?: string };
+      expect(customData.view).toBe("interactive");
+      expect(path.basename(customData.path)).toBe("custom-portal.html");
+      expect(readFileSync(customData.path, "utf8")).toContain("causoryn-portal-data");
+
+      expect(readdirSync(outDir).sort()).toEqual([
+        "causoryn-architecture-interactive.html",
+        "causoryn-architecture.html",
+        "custom-portal.html",
+      ]);
     } finally {
       await pair.close();
     }

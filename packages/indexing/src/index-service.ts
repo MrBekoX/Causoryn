@@ -88,7 +88,11 @@ import {
   type RustIndexSettings,
   type WorkerRunStatus,
 } from "./fingerprint.js";
-import { collectInventory, type InventoryEntry } from "./inventory.js";
+import {
+  collectInventory,
+  collectInventoryAsync,
+  type InventoryEntry,
+} from "./inventory.js";
 
 /**
  * IndexService — indeksleme pipeline'ı (TŞ v2.1 §9, §25/4-5; sprint-1
@@ -396,23 +400,48 @@ function l0LanguageAnalyzerVersion(language: string): string {
   }
 }
 
-/** prepareRun çıktısı (pipeline girdisi; M2 ile beş dil kümesi taşır). */
+/** prepareRun çıktısı (pipeline girdisi; M2 ile beş dil kümesi + TS/JS yapılandırmaları). */
 interface PreparedRun {
   readonly canonicalRoot: string;
   readonly entries: InventoryEntry[];
   readonly tsEntries: InventoryEntry[];
+  readonly tsConfigEntries: InventoryEntry[];
   readonly csEntries: InventoryEntry[];
   readonly pyEntries: InventoryEntry[];
   readonly goEntries: InventoryEntry[];
   readonly rsEntries: InventoryEntry[];
 }
 
-const TS_EXTENSIONS = new Set([".ts", ".tsx"]);
+const TS_EXTENSIONS = new Set([
+  ".ts",
+  ".tsx",
+  ".mts",
+  ".cts",
+  ".js",
+  ".jsx",
+  ".mjs",
+  ".cjs",
+]);
 const CS_EXTENSIONS = new Set([".cs"]);
 /** M2: sidecar worker dil uzantıları (python/go/rust). */
 const PY_EXTENSIONS = new Set([".py"]);
 const GO_EXTENSIONS = new Set([".go"]);
 const RS_EXTENSIONS = new Set([".rs"]);
+
+function isTsConfigFile(relativePath: string): boolean {
+  const base = path.posix.basename(relativePath).toLowerCase();
+  return (
+    base === "tsconfig.json" ||
+    base === "jsconfig.json" ||
+    /^tsconfig\..+\.json$/.test(base)
+  );
+}
+
+function yieldToEventLoop(): Promise<void> {
+  return new Promise<void>((resolve) => {
+    setImmediate(resolve);
+  });
+}
 
 /**
  * Dinamik sidecar asset kökü çözümleyicisi:
@@ -622,7 +651,7 @@ export class IndexService {
    * adapter L0/L1'e düşer (partial + warning) — motor çökmez.
    */
   async runIndexAsync(rootPath: string): Promise<IndexRunResult> {
-    const prepared = this.prepareRun(rootPath);
+    const prepared = await this.prepareRunAsync(rootPath);
     return this.runPipelineAsync(prepared);
   }
 
@@ -668,7 +697,7 @@ export class IndexService {
     rootPath: string,
     changeSet: readonly string[] = [],
   ): Promise<IndexRunResult> {
-    const prepared = this.prepareRun(rootPath);
+    const prepared = await this.prepareRunAsync(rootPath);
     const change = this.analyzeChanges(prepared.entries);
     const latest = this.repository.getLatestPublished(this.workspaceId);
     const degradedSyncSnapshot =
@@ -704,18 +733,26 @@ export class IndexService {
         .listFiles(this.workspaceId)
         .map((record) => [record.relativePath, record.contentHash]),
     );
-    const languageEntries = entries.filter((entry) =>
-      this.isLanguageSource(path.extname(entry.relativePath).toLowerCase()),
+    const relevantEntries = entries.filter((entry) =>
+      this.isIndexRelevantFile(entry.relativePath),
     );
-    const changedSources = languageEntries.filter(
+    const changedSources = relevantEntries.filter(
       (entry) => previousHashes.get(entry.relativePath) !== entry.contentHash,
     );
     const deletedSources = [...previousHashes.keys()].filter(
       (relativePath) =>
-        this.isLanguageSource(path.extname(relativePath).toLowerCase()) &&
-        !languageEntries.some((entry) => entry.relativePath === relativePath),
+        this.isIndexRelevantFile(relativePath) &&
+        !relevantEntries.some((entry) => entry.relativePath === relativePath),
     );
     return changedSources.length > 0 || deletedSources.length > 0;
+  }
+
+  /** Değişim analizinde yeniden indeksleme tetikleyen dosya mı (dil kaynağı veya TS/JS config). */
+  private isIndexRelevantFile(relativePath: string): boolean {
+    return (
+      this.isLanguageSource(path.extname(relativePath).toLowerCase()) ||
+      isTsConfigFile(relativePath)
+    );
   }
 
   /** Uzantının dil pipeline kapsamında olup olmadığı (senkron + async ortak). */
@@ -784,8 +821,25 @@ export class IndexService {
     };
   }
 
-  /** Ortak hazırlık: yetki + workspace kaydı + tam envanter (Discover). */
+  /** Ortak hazırlık: yetki + workspace kaydı + senkron tam envanter (Discover). */
   private prepareRun(rootPath: string): PreparedRun {
+    const canonicalRoot = this.authorizeAndRegister(rootPath);
+    const entries = collectInventory(this.policy, canonicalRoot, this.limits.maxFiles);
+    return this.partitionPreparedRun(canonicalRoot, entries);
+  }
+
+  /** Non-blocking async hazırlık: yetki + workspace kaydı + async envanter (v0.2.3). */
+  private async prepareRunAsync(rootPath: string): Promise<PreparedRun> {
+    const canonicalRoot = this.authorizeAndRegister(rootPath);
+    const entries = await collectInventoryAsync(
+      this.policy,
+      canonicalRoot,
+      this.limits.maxFiles,
+    );
+    return this.partitionPreparedRun(canonicalRoot, entries);
+  }
+
+  private authorizeAndRegister(rootPath: string): string {
     const rootDecision = this.policy.authorizeRoot(rootPath);
     if (!rootDecision.allowed) {
       throw new IndexingError(
@@ -793,11 +847,19 @@ export class IndexService {
         `kök yetkilendirilmedi (${rootDecision.code}): ${rootDecision.reason}`,
       );
     }
-    const canonicalRoot = rootDecision.canonicalRoot;
     this.ensureWorkspaceRegistered();
-    const entries = collectInventory(this.policy, canonicalRoot, this.limits.maxFiles);
+    return rootDecision.canonicalRoot;
+  }
+
+  private partitionPreparedRun(
+    canonicalRoot: string,
+    entries: InventoryEntry[],
+  ): PreparedRun {
     const tsEntries = entries.filter((entry) =>
       TS_EXTENSIONS.has(path.extname(entry.relativePath).toLowerCase()),
+    );
+    const tsConfigEntries = entries.filter((entry) =>
+      isTsConfigFile(entry.relativePath),
     );
     const csEntries = entries.filter((entry) =>
       CS_EXTENSIONS.has(path.extname(entry.relativePath).toLowerCase()),
@@ -811,7 +873,16 @@ export class IndexService {
     const rsEntries = entries.filter((entry) =>
       RS_EXTENSIONS.has(path.extname(entry.relativePath).toLowerCase()),
     );
-    return { canonicalRoot, entries, tsEntries, csEntries, pyEntries, goEntries, rsEntries };
+    return {
+      canonicalRoot,
+      entries,
+      tsEntries,
+      tsConfigEntries,
+      csEntries,
+      pyEntries,
+      goEntries,
+      rsEntries,
+    };
   }
 
   private withTransaction<T>(fn: () => T): T {
@@ -1111,8 +1182,16 @@ export class IndexService {
    * mod bilgisi graph meta'sına girmez.
    */
   private runPipeline(prepared: PreparedRun): IndexRunResult {
-    const { canonicalRoot, entries, tsEntries, csEntries, pyEntries, goEntries, rsEntries } =
-      prepared;
+    const {
+      canonicalRoot,
+      entries,
+      tsEntries,
+      tsConfigEntries,
+      csEntries,
+      pyEntries,
+      goEntries,
+      rsEntries,
+    } = prepared;
     const warnings: string[] = [];
     const diagnostics: IndexDiagnostic[] = [];
     const contentHashByPath = new Map<string, string>(
@@ -1216,6 +1295,10 @@ export class IndexService {
           workspaceId: this.workspaceId,
           rootDir: canonicalRoot,
           sources: tsEntries.map((entry) => ({
+            relativePath: entry.relativePath,
+            content: entry.content,
+          })),
+          configFiles: tsConfigEntries.map((entry) => ({
             relativePath: entry.relativePath,
             content: entry.content,
           })),
@@ -1382,8 +1465,16 @@ export class IndexService {
    * analyzer'ı dürüstçe taşır.
    */
   private async runPipelineAsync(prepared: PreparedRun): Promise<IndexRunResult> {
-    const { canonicalRoot, entries, tsEntries, csEntries, pyEntries, goEntries, rsEntries } =
-      prepared;
+    const {
+      canonicalRoot,
+      entries,
+      tsEntries,
+      tsConfigEntries,
+      csEntries,
+      pyEntries,
+      goEntries,
+      rsEntries,
+    } = prepared;
     const warnings: string[] = [];
     const diagnostics: IndexDiagnostic[] = [];
     const contentHashByPath = new Map<string, string>(
@@ -1400,10 +1491,15 @@ export class IndexService {
     let tsNodes: readonly SnapshotNodeInput[] = [];
     let tsEdges: readonly SnapshotEdgeInput[] = [];
     if (tsEntries.length > 0) {
+      await yieldToEventLoop();
       const adapterResult = analyzeTypeScriptProgram({
         workspaceId: this.workspaceId,
         rootDir: canonicalRoot,
         sources: tsEntries.map((entry) => ({
+          relativePath: entry.relativePath,
+          content: entry.content,
+        })),
+        configFiles: tsConfigEntries.map((entry) => ({
           relativePath: entry.relativePath,
           content: entry.content,
         })),
@@ -1424,6 +1520,7 @@ export class IndexService {
         );
       }
       warnings.push(...adapterResult.warnings);
+      await yieldToEventLoop();
     }
 
     let csharpResult: RoslynAdapterResult | undefined;
@@ -1601,6 +1698,7 @@ export class IndexService {
           : null,
     });
 
+    await yieldToEventLoop();
     const buildAttempt = this.openBuildOrRecover(
       entries,
       fingerprint,
