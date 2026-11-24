@@ -52,6 +52,9 @@ Every tool answers the standard Causoryn envelope:
 - `data.totalNodes` / `data.returned` / `data.truncated`: page position.
 - `data.nodes[]`: `id`, `kind`, `qualifiedName`, optional `language`, optional
   `location { relativePath, startLine, endLine }` — cite locations when reporting.
+  TypeScript/JavaScript locations span the declaration; C#, Python, Go, and Rust node
+  locations only anchor the file (`startLine` = `endLine` = 1), so take exact lines from
+  edge evidence (`causoryn_get_evidence`) for those languages.
 - `data.edges[]`: `id`, `from`, `to`, `kind`, `resolution` (only edges whose both ends
   are on this page).
 - `nextCursor`: non-null means more pages — call `causoryn_map_system` again with the

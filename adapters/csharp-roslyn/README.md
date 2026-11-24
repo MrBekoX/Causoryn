@@ -130,9 +130,10 @@ fp3 analyzerFingerprint sözleşmesi — "|" ile ayrılmış konumsal segmentler
 
 - **adapter versiyonu**: koşuma katılan her adapter'ın id@versiyonu.
 - **refpack**: worker'ın GERÇEKTEN yüklediği ref pack sürümleri — worker
-  healthy yanıt warnings'inden türetilir (ReferenceResolver.cs:144 canonical
-  satırı `referans paketi yüklendi: <pack> <sürüm> (<tfmDir>)`). Pack hiç
-  bulunamadıysa `fallback-corelib` (System.Private.CoreLib runtime ref);
+  healthy yanıt warnings'inden türetilir (ReferenceResolver.cs:248 canonical
+  satırı `reference pack loaded: <pack> <version> (<tfmDir>)`). Pack hiç
+  bulunamadıysa (`Microsoft.NETCore.App.Ref pack not found; ...` uyarısı)
+  `fallback-corelib` (System.Private.CoreLib runtime ref);
   keşif bilgisi yoksa `unavailable` — hiçbir koşulda uydurma sürüm yazılmaz.
 - **refsrc**: discovery kaynağı — discovery="performed" iken tfmDir
   `DOTNET_ROOT` altındaysa (dizin sınır ayıracı + Windows büyük/küçük harf

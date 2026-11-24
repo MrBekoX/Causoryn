@@ -31,7 +31,7 @@ part of the default `core` tool profile.
 3. If the repo defines `.causoryn/architecture.rules.yaml`, optionally call `causoryn_verify_change` `{"checks": ["architecture"]}` to surface policy violations honestly.
 
 ### Step 4: Extract Exact Canonical `moduleId`s (Blueprint Pass)
-Determine an authorized `outputDir` configured in `output.allowedOutputDirs` (when started with `--auto-data-dir`, Causoryn automatically authorizes `<data-dir>/workspaces/<slug>-<hash12>/exports`, e.g., `~/.causoryn/workspaces/<slug>-<hash12>/exports` — inspect `~/.causoryn/workspaces/` or `$ZCODE_PLUGIN_DATA/workspaces/` for the matching `<slug>-<hash12>/exports` folder, or inspect the server's `CAUSORYN_CONFIG` `output.allowedOutputDirs`).
+Determine an authorized `outputDir` configured in `output.allowedOutputDirs` (when started with `--auto-data-dir`, Causoryn automatically authorizes `<data-dir>/workspaces/<slug>-<hash12>/exports`, e.g., `~/.causoryn/workspaces/<slug>-<hash12>/exports` on every host, including ZCode — inspect `~/.causoryn/workspaces/` (or the `--data-dir` base, if one is configured) for the matching `<slug>-<hash12>/exports` folder, or inspect the server's `CAUSORYN_CONFIG` `output.allowedOutputDirs`; `$ZCODE_PLUGIN_DATA/workspaces/` is used only when `~/.causoryn` cannot be written).
 Call `causoryn_export_documentation` `{"format": "json", "view": "architecture", "outputDir": "<authorized export directory>", "options": {"maxModules": 32}}`:
 - `format: "json"` with `view: "architecture"` produces the compact JSON blueprint.
 - `outputDir`: the authorized export directory.
