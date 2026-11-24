@@ -92,7 +92,7 @@ function createTempArena(): TempArena {
     dataDir,
     dbPath,
     cleanup: () => {
-      rmSync(baseDir, { recursive: true, force: true });
+      rmSync(baseDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
     },
   };
 }
@@ -743,7 +743,7 @@ describe(
             process.env[key] = val;
           }
         }
-        rmSync(tempRoot, { recursive: true, force: true });
+        rmSync(tempRoot, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
       }
     });
 
@@ -887,7 +887,7 @@ describe(
             process.env[key] = val;
           }
         }
-        rmSync(tempRoot, { recursive: true, force: true });
+        rmSync(tempRoot, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
       }
     });
   },

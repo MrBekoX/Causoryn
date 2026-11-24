@@ -221,7 +221,7 @@ describe("4 sidecar adapter dinamik asset root keşfi (CAUSORYN_ASSET_ROOT)", ()
         path.join(tmpDir, "native", "python-worker", "worker.py"),
       ]);
     } finally {
-      rmSync(tmpDir, { recursive: true, force: true });
+      rmSync(tmpDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
     }
   });
 
@@ -288,7 +288,7 @@ describe("4 sidecar adapter dinamik asset root keşfi (CAUSORYN_ASSET_ROOT)", ()
 
       expect(flatArgs[0]).toEqual(["exec", flatDll]);
     } finally {
-      rmSync(tmpDir, { recursive: true, force: true });
+      rmSync(tmpDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
     }
   });
 
@@ -319,7 +319,7 @@ describe("4 sidecar adapter dinamik asset root keşfi (CAUSORYN_ASSET_ROOT)", ()
 
       expect(capturedCwds).toEqual([path.join(tmpDir, "native", "go-worker")]);
     } finally {
-      rmSync(tmpDir, { recursive: true, force: true });
+      rmSync(tmpDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
     }
   });
 
@@ -341,7 +341,7 @@ describe("4 sidecar adapter dinamik asset root keşfi (CAUSORYN_ASSET_ROOT)", ()
         },
       );
     } finally {
-      rmSync(tmpDir, { recursive: true, force: true });
+      rmSync(tmpDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
     }
   });
 });
@@ -484,7 +484,7 @@ describe("Rust yazılabilir CARGO_TARGET_DIR önbelleği ve fallback zinciri", (
         ["build", "--manifest-path", unlockedManifest, "--target-dir", safeTarget],
       ]);
     } finally {
-      rmSync(tmpDir, { recursive: true, force: true });
+      rmSync(tmpDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
     }
   });
 
@@ -576,7 +576,7 @@ describe("Rust yazılabilir CARGO_TARGET_DIR önbelleği ve fallback zinciri", (
         },
       );
     } finally {
-      rmSync(tmpDir, { recursive: true, force: true });
+      rmSync(tmpDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
     }
   });
 
@@ -698,7 +698,7 @@ describe("Rust yazılabilir CARGO_TARGET_DIR önbelleği ve fallback zinciri", (
         true,
       );
     } finally {
-      rmSync(tmpDir, { recursive: true, force: true });
+      rmSync(tmpDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
     }
   });
 
@@ -819,7 +819,7 @@ describe("Rust yazılabilir CARGO_TARGET_DIR önbelleği ve fallback zinciri", (
         expect(afterSnapshot).toEqual(beforeSnapshot);
       } finally {
         setTreePermissions(stagedPkgRoot, false);
-        rmSync(tmpDir, { recursive: true, force: true });
+        rmSync(tmpDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
       }
     },
     240_000,
