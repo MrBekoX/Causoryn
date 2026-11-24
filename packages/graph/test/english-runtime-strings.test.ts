@@ -20,7 +20,7 @@ const SRC_DIR = fileURLToPath(new URL("../src/", import.meta.url));
  *   they never appear in output.
  * - git-read.ts: translated in a separate change (owned by another work item).
  */
-const EXEMPT_FILES = new Set(["symbol-tokens.ts", "git-read.ts"]);
+const EXEMPT_FILES = new Set(["symbol-tokens.ts"]);
 
 const TURKISH_LETTERS = /[çğıöşüÇĞİÖŞÜ]/u;
 /** Turkish words that carry no Turkish-specific letters (ASCII-only spelling). */
