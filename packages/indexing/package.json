@@ -1,6 +1,6 @@
 {
   "name": "@causoryn/indexing",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "private": true,
   "license": "MIT",
   "description": "IndexCoordinator: dosya envanteri (WorkspaceAccessPolicy) → dil adapter'ları (TypeScript + C# Roslyn worker + Python/Go/Rust sidecar worker) → graph → atomik snapshot publish (TŞ v2.1 §5, §7, §9, §25/4-5).",
@@ -9,13 +9,13 @@
     ".": "./src/index.ts"
   },
   "dependencies": {
-    "@causoryn/adapter-csharp-roslyn": "0.2.3",
-    "@causoryn/adapter-go": "0.2.3",
-    "@causoryn/adapter-python": "0.2.3",
-    "@causoryn/adapter-rust": "0.2.3",
-    "@causoryn/adapter-typescript": "0.2.3",
-    "@causoryn/domain": "0.2.3",
-    "@causoryn/graph": "0.2.3",
-    "@causoryn/workspace": "0.2.3"
+    "@causoryn/adapter-csharp-roslyn": "0.2.4",
+    "@causoryn/adapter-go": "0.2.4",
+    "@causoryn/adapter-python": "0.2.4",
+    "@causoryn/adapter-rust": "0.2.4",
+    "@causoryn/adapter-typescript": "0.2.4",
+    "@causoryn/domain": "0.2.4",
+    "@causoryn/graph": "0.2.4",
+    "@causoryn/workspace": "0.2.4"
   }
 }

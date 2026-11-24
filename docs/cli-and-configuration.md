@@ -4,18 +4,18 @@
 >
 > **Kanıt:** `packages/causoryn/src/{cli.ts,setup.ts,doctor.ts,runtime-stage.ts,types.ts}`, `packages/causoryn/scripts/{causoryn.mjs,plugin-mcp-launcher.mjs,lib/node-version-guard.mjs,verify-package-ready.mjs}`, `packages/mcp-server/src/{cli-stdio.ts,stdio.ts,runtime-cli.ts,config.ts,context.ts,workspace-ignore-discovery.ts}`, `packages/workspace/src/policy-config.ts` (TŞ v2.1 §9, §10.1, §17, §20 · `ADR-008` · `K-021`..`K-026`).
 
-Bu kılavuz; `causoryn` (`v0.2.3` — Pre-1.0 Public Preview) komut satırı arayüzünü, ön-yükleme Node.js sürüm korumasını, plugin pazaryeri başlatıcısını, sıfır-ayar (`zero-config`) çalışma alanı güvenlik modelini, kaynak ağacı dışı (`out-of-tree`) veri dizini düzenini ve `CAUSORYN_CONFIG` şemasını kaynak kodla birebir eşleşecek şekilde belgeler.
+Bu kılavuz; `causoryn` (`v0.2.4` — Pre-1.0 Public Preview) komut satırı arayüzünü, ön-yükleme Node.js sürüm korumasını, plugin pazaryeri başlatıcısını, sıfır-ayar (`zero-config`) çalışma alanı güvenlik modelini, kaynak ağacı dışı (`out-of-tree`) veri dizini düzenini ve `CAUSORYN_CONFIG` şemasını kaynak kodla birebir eşleşecek şekilde belgeler.
 
 ---
 
 ## 1. CLI Alt Komutları ve Bayraklar (`causoryn`)
 
-Hızlı kurulum ve sağlık kontrolü için `@latest` etiketi önerilir (deterministik kurulum veya CI sabitlemesi için `@0.2.3` gibi tam sürüm pini de desteklenir):
+Hızlı kurulum ve sağlık kontrolü için `@latest` etiketi önerilir (deterministik kurulum veya CI sabitlemesi için `@0.2.4` gibi tam sürüm pini de desteklenir):
 
 ```bash
 npx causoryn@latest setup      # Algılanan host'lar için 5 skill + MCP sunucusunu kurar
 npx causoryn@latest doctor     # Node.js >= 24, runtime, 4 sidecar ve host hizalamasını salt-okunur doğrular
-# Sürüm sabitlemek için: npx causoryn@0.2.3 setup && npx causoryn@0.2.3 doctor
+# Sürüm sabitlemek için: npx causoryn@0.2.4 setup && npx causoryn@0.2.4 doctor
 ```
 
 Paket ikilisi (`packages/causoryn/scripts/causoryn.mjs`) aşağıdaki alt komutları sunar:
@@ -88,7 +88,7 @@ Denetlenen dört katman:
 
 ### 1.4 `causoryn --version` ve `causoryn --help`
 
-- `causoryn --version` (`-v`, `version`): Paket sürümünü (`0.2.3`) `stdout`'a yazar ve `0` ile çıkar.
+- `causoryn --version` (`-v`, `version`): Paket sürümünü (`0.2.4`) `stdout`'a yazar ve `0` ile çıkar.
 - `causoryn --help` (`-h`, `help` veya argümansız `causoryn`): Yardım metnini `stdout`'a yazar ve `0` ile çıkar.
 
 ---
@@ -167,7 +167,7 @@ Causoryn kaynak analizi sırasında proje dosyalarını salt okunur işler. Kal�
 
 - **Temel veri dizini önceliği (`resolveBaseDataDir`):** `--data-dir <mutlak-yol>` > `ZCODE_PLUGIN_DATA` > `~/.causoryn`.
 - **`mkdirSync` öncesi ve sonrası güvenlik doğrulaması:** Veri dizinleri oluşturulmadan **önce** tüm önek/ata dizinler taranır; sembolik bağlantılar (`CWE-59`; macOS sistem firmlink'leri `/var`, `/tmp`, `/etc` hariç), dangling symlink'ler ve yetkili `allowRoots` içine düşen yollar `CausorynConfigError` ile reddedilir. Oluşturma sonrasında `realpathSync` ile TOCTOU doğrulaması tekrarlanır.
-- **Geçici `_npx` çalışma zamanı sahnelemesi (`stagePersistentRuntime`):** `npx causoryn@latest setup` (veya sabitlenmiş `npx causoryn@0.2.3 setup`) geçici bir `_npx`, `.npx` veya `os.tmpdir()` dizininden çalıştırıldığında paket içeriği `~/.causoryn/.runtime-stage-<pid>-<ts>` altına kopyalanıp atomik `renameSync` (hata anında `.runtime-prev-*` geri alma korumasıyla) ile `~/.causoryn/runtime` dizinine sahnelenir. Böylece npm önbelleği temizlense bile host konfigürasyonlarındaki giriş yolu kırılmaz.
+- **Geçici `_npx` çalışma zamanı sahnelemesi (`stagePersistentRuntime`):** `npx causoryn@latest setup` (veya sabitlenmiş `npx causoryn@0.2.4 setup`) geçici bir `_npx`, `.npx` veya `os.tmpdir()` dizininden çalıştırıldığında paket içeriği `~/.causoryn/.runtime-stage-<pid>-<ts>` altına kopyalanıp atomik `renameSync` (hata anında `.runtime-prev-*` geri alma korumasıyla) ile `~/.causoryn/runtime` dizinine sahnelenir. Böylece npm önbelleği temizlense bile host konfigürasyonlarındaki giriş yolu kırılmaz.
 
 ---
 

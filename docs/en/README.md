@@ -4,7 +4,7 @@
 
 **Causoryn** is a **local, deterministic, LLM-free** static analysis MCP engine (`ADR-002`) that builds an evidence-backed dependency, symbol, route, contract, and test graph for **TypeScript / JavaScript**, **C# / Roslyn**, **Python**, **Go**, and **Rust**. It exposes **29 MCP tools** and **5 skills** over read-only workspace access (`ADR-008`), supporting both pure structural architecture exports and fail-closed Host-LLM `annotations`.
 
-> **Release status (`ADR-010`):** `v0.2.3` is a **Pre-1.0 Public Preview** (not `1.0.0`; historical `v0.1.0` remains frozen at `4c9c188f`). Remaining `1.0.0` release gates are tracked transparently in [CHANGELOG.md](../../CHANGELOG.md) and [Implementation Status](implementation-status.md).
+> **Release status (`ADR-010`):** `v0.2.4` is a **Pre-1.0 Public Preview** (not `1.0.0`; historical `v0.1.0` remains frozen at `4c9c188f`). Remaining `1.0.0` release gates are tracked transparently in [CHANGELOG.md](../../CHANGELOG.md) and [Implementation Status](implementation-status.md).
 
 ---
 

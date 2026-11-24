@@ -4,10 +4,10 @@
 >
 > **Evidence:** `raw/Causoryn_Teknik_Dokuman_v2.1.pdf` (Technical Specification v2.1) — §16A pp. 14–18, §10 pp. 9–10, §8–§9 pp. 8–9, §19–§20 pp. 21–22, §23 p. 23, §24–§25 pp. 23–24 · `wiki/mcp-tools.md` · `wiki/scope.md` · `wiki/sprint-4.md` · `packages/wiki/src/*` · `packages/storage-sqlite/src/*` · `packages/mcp-server/src/services-wiki.ts`
 
-> **STATUS (`v0.2.3` Pre-1.0 Public Preview — ADR-010 Honesty Summary):**
+> **STATUS (`v0.2.4` Pre-1.0 Public Preview — ADR-010 Honesty Summary):**
 > - **Shipped core & MCP surface:** The pure `@causoryn/wiki` projection engine (`projectWiki`, `projectWikiIncremental`, `resolveWikiLinks`, `buildWikiLinkIndex`, `WikiSearchStore`, `AnnotationOverlayEngine`, `exportWikiOffline`, `computeWikiCoverageDeltas`, `computeWikiContractChanges`), `@causoryn/storage-sqlite` (`SqliteWikiStore`: `wiki_snapshots`, `wiki_pages`, `wiki_page_sections`, `wiki_links`, `wiki_page_versions`, `wiki_annotations`, `wiki_aliases`, `wiki_fts`), and **all 7 MCP Wiki tools** in `packages/mcp-server/src/services-wiki.ts` are registered in the server.
 > - **Data-root provisioning & `.git`-less `working-tree` compatibility (K-021):** Alongside explicit `wiki.dataDbPath` configuration, `causoryn mcp --allow-cwd --auto-data-dir [--client <id>]` (and dynamic MCP `roots/list` workspace binding in desktop IDEs) automatically provisions an out-of-tree SQLite database at `~/.causoryn/workspaces/<slug>-<hash12>/graph[-<client>].sqlite`. Furthermore, in workspaces without a `.git` directory (such as exported source archives), the `working-tree` revision resolves directly without spawning `git`.
-> - **Open 1.0.0 release gates:** (1) Extra filter fields on `causoryn_wiki_search` (`kinds`, `scope`, `language`, `revision`, `resolution`) are declared in the schema but explicitly rejected with `INVALID_ARGUMENT` on the `v0.2.3` MCP surface (and the unpopulated `proximity` rank leg is honestly reported via `skippedRankLegs`); (2) `WIKI_NOTE_CONFLICT` is fully implemented as `wiki/annotation-conflict` in `AnnotationOverlayEngine`, while its registration in MCP `CAUSORYN_TOOL_ERROR_CODES` is deferred until local note CLI/UI write flows ship in 1.0.0 (K-014); (3) automatic Wiki rebuilds on `causoryn_refresh_index` (`wiki.autoBuildOnSnapshot`) and `causoryn_export_documentation(view="wiki")` MCP wiring remain open 1.0.0 items (Wiki rebuilds are triggered explicitly via `causoryn_wiki_build`, and `view="wiki"` returns `INVALID_ARGUMENT`); incremental `wiki_build` preserves unchanged page `contentHash` values while writing a complete `WikiSnapshot` row set per publication in SQLite.
+> - **Open 1.0.0 release gates:** (1) Extra filter fields on `causoryn_wiki_search` (`kinds`, `scope`, `language`, `revision`, `resolution`) are declared in the schema but explicitly rejected with `INVALID_ARGUMENT` on the `v0.2.4` MCP surface (and the unpopulated `proximity` rank leg is honestly reported via `skippedRankLegs`); (2) `WIKI_NOTE_CONFLICT` is fully implemented as `wiki/annotation-conflict` in `AnnotationOverlayEngine`, while its registration in MCP `CAUSORYN_TOOL_ERROR_CODES` is deferred until local note CLI/UI write flows ship in 1.0.0 (K-014); (3) automatic Wiki rebuilds on `causoryn_refresh_index` (`wiki.autoBuildOnSnapshot`) and `causoryn_export_documentation(view="wiki")` MCP wiring remain open 1.0.0 items (Wiki rebuilds are triggered explicitly via `causoryn_wiki_build`, and `view="wiki"` returns `INVALID_ARGUMENT`); incremental `wiki_build` preserves unchanged page `contentHash` values while writing a complete `WikiSnapshot` row set per publication in SQLite.
 
 ## 1. Purpose and Scope
 
@@ -288,7 +288,7 @@ Error code governance (`packages/mcp-server/src/errors.ts`, `services-wiki.ts`, 
 
 ### 4.2 Tools
 
-Input and output schemas below reflect Technical Specification §10.2 (p. 10), §16A.8 (p. 17), and the exact `v0.2.3` schemas in `packages/mcp-server/src/services-wiki.ts`. Each output schema describes the `envelope.data` payload.
+Input and output schemas below reflect Technical Specification §10.2 (p. 10), §16A.8 (p. 17), and the exact `v0.2.4` schemas in `packages/mcp-server/src/services-wiki.ts`. Each output schema describes the `envelope.data` payload.
 
 #### 4.2.1 `causoryn_wiki_build`
 
@@ -299,7 +299,7 @@ Input and output schemas below reflect Technical Specification §10.2 (p. 10), �
 export const WikiBuildInputSchema = z.strictObject({
   workspaceId: z.string().min(1).optional(),
   mode: z.enum(["full", "incremental"]),      // K-013 #2
-  scope: z.string().min(1).optional(),        // explicitly rejected with INVALID_ARGUMENT in v0.2.3 (ADR-010)
+  scope: z.string().min(1).optional(),        // explicitly rejected with INVALID_ARGUMENT in v0.2.4 (ADR-010)
   revision: z.string().min(1).optional(),     // defaults to graph.meta.revision.id
 });
 
@@ -415,7 +415,7 @@ export const WikiSearchInputSchema = z.strictObject({
   snapshotId: z.string().min(1).optional(),
   limit: z.number().int().min(1).optional(),      // K-013 #5: default 50, max 200
   cursor: z.string().min(1).optional(),
-  // Declared per §16A.3 but explicitly rejected with INVALID_ARGUMENT in v0.2.3 (ADR-010):
+  // Declared per §16A.3 but explicitly rejected with INVALID_ARGUMENT in v0.2.4 (ADR-010):
   kinds: z.array(WikiPageKindSchema).optional(),
   scope: z.string().min(1).optional(),
   language: z.string().min(1).optional(),
@@ -438,7 +438,7 @@ export const WikiSearchHitSchema = z.strictObject({
 });
 ```
 
-- **Ranking guarantee**: Exact symbol/route matches (such as `CreateOrder`) always rank **above** generic FTS body matches (§16A.10 acceptance gate). Because graph `proximity` is not populated on the `v0.2.3` MCP surface, it is honestly listed in `skippedRankLegs`.
+- **Ranking guarantee**: Exact symbol/route matches (such as `CreateOrder`) always rank **above** generic FTS body matches (§16A.10 acceptance gate). Because graph `proximity` is not populated on the `v0.2.4` MCP surface, it is honestly listed in `skippedRankLegs`.
 - **Token budget**: Returns compact snippets and metadata; full section bodies are fetched on demand via `causoryn_wiki_get_page` (§16A.3).
 - **Error codes**: `WORKSPACE_NOT_AUTHORIZED`, `INDEX_NOT_READY`, `EVIDENCE_NOT_FOUND` (unknown `snapshotId`), `INVALID_ARGUMENT` (empty query, malformed cursor, or unimplemented extra filter fields), `LIMIT_EXCEEDED`, `INTERNAL_ERROR`.
 
@@ -550,7 +550,7 @@ export const WikiDiffDataSchema = z.strictObject({
 
 ### 4.3 Optional MCP Resources
 
-Optional resource URI template: `causoryn://wiki/{workspaceId}/{pageId}?snapshot={wikiSnapshotId}` (§16A.8). In `v0.2.3`, MCP `resources` are not published; the portable baseline contract is the 7 MCP tools above. Interactive UI extensions (such as MCP Apps) are deferred until cross-host support is verified and are never advertised prematurely (ADR-010).
+Optional resource URI template: `causoryn://wiki/{workspaceId}/{pageId}?snapshot={wikiSnapshotId}` (§16A.8). In `v0.2.4`, MCP `resources` are not published; the portable baseline contract is the 7 MCP tools above. Interactive UI extensions (such as MCP Apps) are deferred until cross-host support is verified and are never advertised prematurely (ADR-010).
 
 ## 5. Write Permissions: Data-Root Rule and Permission Matrix
 
@@ -574,7 +574,7 @@ Optional resource URI template: `causoryn://wiki/{workspaceId}/{pageId}?snapshot
 | `causoryn_wiki_get_links` | ❌ NO (`readOnlyHint: true`) | — (read-only) | §16A.8 |
 | `causoryn_wiki_get_versions` | ❌ NO (`readOnlyHint: true`) | — (read-only; Git read-only + `.git`-less `working-tree`) | §16A.8, Red Line 3 |
 | `causoryn_wiki_diff` | ❌ NO (`readOnlyHint: true`) | — (read-only; working tree untouched) | §16A.8, §16A.10 |
-| `causoryn_refresh_index` | ✅ (index, `readOnlyHint: false`) | Causoryn graph index only (`InMemoryGraphRepository` / `storage.dataDbPath`); Wiki rebuilds are invoked explicitly via `causoryn_wiki_build` in `v0.2.3` | §10.2, ADR-010 |
+| `causoryn_refresh_index` | ✅ (index, `readOnlyHint: false`) | Causoryn graph index only (`InMemoryGraphRepository` / `storage.dataDbPath`); Wiki rebuilds are invoked explicitly via `causoryn_wiki_build` in `v0.2.4` | §10.2, ADR-010 |
 | `causoryn_export_documentation` | ✅ (export, `readOnlyHint: false`) | Explicitly authorized `output.allowedOutputDirs` only (visual architecture views are available, `view="wiki"` explicitly returns `INVALID_ARGUMENT`) | §10.2, §16A.9, ADR-010 |
 | Wiki note create/update | ✅ (consented local flow) | **No MCP tool**; core `AnnotationOverlayEngine` implemented, local UI/CLI surface tracked for 1.0.0 | §16A.6, §10.2, K-014 |
 
@@ -582,16 +582,16 @@ Summary: **Out of the 7 Wiki MCP tools, only `causoryn_wiki_build` writes**, and
 
 ## 6. Reuse Principle: `refresh_index` and `export_documentation`
 
-Technical Specification §10.2 + §16A.8 catalog design principle (and honest `v0.2.3` implementation status):
+Technical Specification §10.2 + §16A.8 catalog design principle (and honest `v0.2.4` implementation status):
 
 1. **Separate `wiki_refresh` and `wiki_export` MCP tools are NEVER created** — keeping the published catalog locked at 22 + 7 = 29 tools.
-2. **Specification target vs. `v0.2.3` surface (ADR-010):**
+2. **Specification target vs. `v0.2.4` surface (ADR-010):**
    - Technical Specification §20 envisions automatic Wiki refresh after `causoryn_refresh_index` (`wiki.autoBuildOnSnapshot: true`) and offline Wiki export through `causoryn_export_documentation(view="wiki")`.
    - The core includes `projectWikiIncremental` and `exportWikiOffline`. On the MCP surface, invoke `causoryn_wiki_build` to project the Living Wiki. For Visual Architecture Portals, `causoryn_export_documentation` supports the `architecture`, HTML-only `interactive` (defaulting to `causoryn-architecture-interactive.html`), and `full` views (`view="wiki"` explicitly returns `INVALID_ARGUMENT`). See [MCP Tool Contracts](tool-contracts.md) · [Prompting & Architecture Portals Guide](prompting-and-architecture-portals.md).
 3. **Incremental pipeline (`packages/wiki/src/incremental.ts`, §16A.5):** `diffWikiGraphs` computes affected root and child `pageId`s between consecutive `GraphSnapshot`s → unaffected pages preserve their exact `contentHash` and section payloads → the new `WikiSnapshot` and `wiki_fts` publish atomically in a single SQLite transaction → until publication completes, concurrent readers continue serving the previous `WikiSnapshot` with `stale: true`.
 4. Manual annotation editing remains isolated from MCP read tools in user-consented local CLI/UI flows (§10.2, §16A.6).
 
-Target configuration model (§20; in `v0.2.3`, the active runtime server config key is `wiki.dataDbPath` — see [CLI & Configuration](cli-and-configuration.md)):
+Target configuration model (§20; in `v0.2.4`, the active runtime server config key is `wiki.dataDbPath` — see [CLI & Configuration](cli-and-configuration.md)):
 
 ```yaml
 wiki:

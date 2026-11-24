@@ -13,32 +13,32 @@
 > `better-sqlite3` prebuilds live under `dist/node_modules/` — not a standalone single file;
 > distribute the entire `dist/` directory). Verification test: `tests/hosts-docs.test.ts`.
 
-Causoryn is a local, deterministic, LLM-free MCP code-intelligence engine (`causoryn@0.2.3`). Unlike
+Causoryn is a local, deterministic, LLM-free MCP code-intelligence engine (`causoryn@0.2.4`). Unlike
 Claude Code, Codex CLI **has no project/local scope option** in `codex mcp add` — registrations write
 to user-wide `~/.codex/config.toml` (or `$CODEX_HOME/config.toml`). Always use an explicit name such
 as `causoryn-smoke` for temporary smoke runs and clean up via `codex mcp remove`.
 
-## 0. End-User Quick Setup (Recommended — K-021 / `v0.2.3`)
+## 0. End-User Quick Setup (Recommended — K-021 / `v0.2.4`)
 
-### Option 0A — One-Command CLI (`npx causoryn@0.2.3 setup`)
+### Option 0A — One-Command CLI (`npx causoryn@0.2.4 setup`)
 
 ```bash
 # Preview planned changes without modifying any files (read-only)
-npx causoryn@0.2.3 setup --client codex --dry-run
+npx causoryn@0.2.4 setup --client codex --dry-run
 
 # Configure $CODEX_HOME/config.toml [mcp_servers.causoryn] + ~/.agents/skills/ (with .causoryn.backup)
-npx causoryn@0.2.3 setup --client codex --yes
+npx causoryn@0.2.4 setup --client codex --yes
 
 # Read-only health & alignment check
-npx causoryn@0.2.3 doctor
+npx causoryn@0.2.4 doctor
 
 # Clean removal (removes [mcp_servers.causoryn] + 5 Causoryn skills)
-npx causoryn@0.2.3 setup --client codex --uninstall --yes
+npx causoryn@0.2.4 setup --client codex --uninstall --yes
 ```
 
 `architecture-blueprint` guides Codex in drafting optional `annotations` from MCP evidence. The server renders repeatable output with the same snapshot and export inputs. To export without annotations, call `causoryn_export_documentation` directly. [Architecture export contract](../tool-contracts.md)
 
-**`v0.2.3` `CODEX_HOME` and `startup_timeout_sec = 30` details:**
+**`v0.2.4` `CODEX_HOME` and `startup_timeout_sec = 30` details:**
 
 - **`CODEX_HOME` support:** When `CODEX_HOME` is set in the environment, both
   `causoryn setup --client codex` and `causoryn doctor` read and update `$CODEX_HOME/config.toml`,
@@ -57,8 +57,8 @@ The repository root `.agents/plugins/marketplace.json` and packaged
 plugin marketplace schema (verified on `2026-11-19` with `codex-cli 0.169.0` via
 `codex plugin marketplace add` + `codex mcp add/list`):
 
-- `.agents/plugins/marketplace.json` declares `source: { "source": "npm", "package": "causoryn", "version": "0.2.3" }` along with `policy.installation: "AVAILABLE"` and `policy.authentication: "ON_INSTALL"` (Causoryn requires no external credentials or API keys; `"ON_INSTALL"` satisfies the Codex marketplace policy schema for install-time confirmation).
-- `packages/causoryn/.codex-plugin/mcp.json` launches `causoryn@0.2.3` with `--allow-cwd --auto-data-dir --client codex` and `"startup_timeout_sec": 30`.
+- `.agents/plugins/marketplace.json` declares `source: { "source": "npm", "package": "causoryn", "version": "0.2.4" }` along with `policy.installation: "AVAILABLE"` and `policy.authentication: "ON_INSTALL"` (Causoryn requires no external credentials or API keys; `"ON_INSTALL"` satisfies the Codex marketplace policy schema for install-time confirmation).
+- `packages/causoryn/.codex-plugin/mcp.json` launches `causoryn@0.2.4` with `--allow-cwd --auto-data-dir --client codex` and `"startup_timeout_sec": 30`.
 
 ---
 

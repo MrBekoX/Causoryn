@@ -4,9 +4,9 @@
 
 > Kanıt: `raw/Causoryn_Teknik_Dokuman_v2.1.pdf` s.22 §22 "Security: symlink/path traversal, secret leakage, symlink TOCTOU, poisoned source comment, oversized files, malicious Git refs, network denied" + s.21 §19 tehdit modeli + s.22 §20 konfigürasyon güvenli default'ları · `wiki/sprint-7.md` F6 · `wiki/decisions.md` `K-008`/`K-011`/`K-012`/`K-014`/`K-015`/`K-016`/`K-021`/`K-022`/`K-024`/`K-025`.
 
-## Güncel çalışma zamanı güvenlik sınırları (`v0.2.3`)
+## Güncel çalışma zamanı güvenlik sınırları (`v0.2.4`)
 
-**Bundle kimliği:** `packages/mcp-server/dist/mcp-server.mjs` SHA-256 `b2b2197054f1cec5546a82645138947eea504b607ba47f0126e53c833fde3415`. `dist/bundle-manifest.json` bu özeti ve native SQLite çalışma zamanı dahil 35 dosya kaydını taşır. Bu özet yerel artefaktı tanımlar. Aşağıdaki F6 sonuçları, tabloda belirtilen tarihsel test oturumlarına aittir.
+**Bundle kimliği:** `packages/mcp-server/dist/mcp-server.mjs` SHA-256 `c8be6f49dfb18101b96d59426045f364dfaaf348fa1c9accf08954d96f6fbb18`. `dist/bundle-manifest.json` bu özeti ve native SQLite çalışma zamanı dahil 35 dosya kaydını taşır. Bu özet yerel artefaktı tanımlar. Aşağıdaki F6 sonuçları, tabloda belirtilen tarihsel test oturumlarına aittir.
 
 - `causoryn_export_documentation`, `output.allowedOutputDirs` ile doğrulanan hedeflerde artefaktı `flag: "wx"` + `EEXIST` korumalı geçici dosyadan atomik yeniden adlandırarak yazar; `view="interactive"` varsayılan adı `causoryn-architecture-interactive.html` olduğundan sıfır-JS `causoryn-architecture.html` çıktısının üzerine sessizce yazmaz. `--auto-data-dir` export dizinini kaynak ağacının dışında açar. Elle yetkilendirilen bir export dizini kaynak ağacının içinde de olabilir. Bildirilmemiş dizin `EXPORT_NOT_ALLOWED`, güvensiz dosya adı veya kaçış `PATH_DENIED` döndürür. Kaynak dayanakları `packages/graph/src/export.ts`, `packages/workspace/src/output-policy.ts` ve `packages/mcp-server/src/runtime-cli.ts` dosyalarıdır.
 - **Evrensel uyumluluk savunma derinliği (`v0.2.3`, `K-024`):**
@@ -17,7 +17,7 @@
 - Varsayılan `view="architecture"` HTML çıktısı betiksiz ve `default-src 'none'` CSP’lidir. Opt-in `view="interactive"` aynı çevrimdışı sınırla yerel gömülü betiğe izin verir. Ekran metni kaçışlanır, veri adası güvenli biçimde serileştirilir ve etkileşim betiği `innerHTML`, `fetch` veya CDN kullanmaz. Kaynak ve test kapsamı `packages/graph/src/architecture-export.ts`, `packages/graph/test/architecture-export.test.ts` ve `packages/mcp-server/test/architecture-export-tool.test.ts` dosyalarındadır.
 - MCP analiz ve render kodu model API’lerini çağırmaz. Host modelinin kullanım ve ağ politikası hosta aittir. npm kurulum adımı ve Rust worker’ın soğuk `cargo build --locked` adımı paket kaynaklarına erişebilir. Tarihsel Node `net-guard.cjs` kanıtı yalnızca çalıştırılan süreç ve fixture yollarını kapsar. [Dil analizörleri](language-analyzers.md)
 
-## CI/CD ve tedarik zinciri sertleştirmesi (`K-025`)
+## CI/CD ve tedarik zinciri sertleştirmesi (`v0.2.4`, `K-025`)
 
 Çalışma zamanı ve paketlenmiş-bundle denetimlerine ek olarak `K-025` kapsamında tüm GitHub Actions boru hattı ve bağımlılık yaşam döngüsü çok katmanlı olarak sertleştirilmiştir:
 

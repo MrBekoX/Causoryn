@@ -1,6 +1,6 @@
 {
   "name": "@causoryn/sidecar-ipc",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "private": true,
   "license": "MIT",
   "description": "Ortak sidecar worker IPC çekirdeği: satır-bazlı NDJSON framing, per-request timeout, stdout/stderr karakter bütçeleri, EPIPE yutma ve allowlist env kurucu (TŞ v2.1 §7 adapter izolasyonu).",

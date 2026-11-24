@@ -2,11 +2,11 @@
 
 **Dil / Language:** Türkçe | [English](en/BACKLOG.md)
 
-> Kanıt: `wiki/roadmap.md` (TŞ v2.1 §23–§25), `wiki/sprint-1.md` – `wiki/sprint-8.md`, `wiki/decisions.md` (`K-001`..`K-026`), [implementation-status.md](implementation-status.md) ve [CHANGELOG.md](../CHANGELOG.md) · İlk bölüm Sprint 1 Görev 11 çıktısı olan faz bağımlılık mimarisini (`#1`–`#6` GitHub issue eşlemesiyle) korur; sonraki bölümler Sprint 8'den `v0.2.3` Pre-1.0 Public Preview ve `K-025`/`K-026` tabanına kadar olan teslimleri ve `1.0.0` öncesi gerçekten açık kalan kapıları `ADR-010` dürüstlüğüyle listeler.
+> Kanıt: `wiki/roadmap.md` (TŞ v2.1 §23–§25), `wiki/sprint-1.md` – `wiki/sprint-8.md`, `wiki/decisions.md` (`K-001`..`K-026`), [implementation-status.md](implementation-status.md) ve [CHANGELOG.md](../CHANGELOG.md) · İlk bölüm Sprint 1 Görev 11 çıktısı olan faz bağımlılık mimarisini (`#1`–`#6` GitHub issue eşlemesiyle) korur; sonraki bölümler Sprint 8'den `v0.2.4` Pre-1.0 Public Preview (`K-025`/`K-026`) tabanına kadar olan teslimleri ve `1.0.0` öncesi gerçekten açık kalan kapıları `ADR-010` dürüstlüğüyle listeler.
 
 ## 1. Tarihsel Faz → Issue Eşlemesi ve Güncel Durum
 
-| Sıra | Faz | Issue | Bağlı olduğu fazlar | Ana bileşenler | Kabul kapısı | `v0.2.3` durumu (`ADR-010`) |
+| Sıra | Faz | Issue | Bağlı olduğu fazlar | Ana bileşenler | Kabul kapısı | `v0.2.4` durumu (`ADR-010`) |
 |---|---|---|---|---|---|---|
 | 0 | **A — Foundation** | *Sprint 1 doğrudan teslim* | — | `packages/domain`, `packages/workspace`, `packages/indexing`, `packages/graph`, `packages/storage-sqlite`, `packages/mcp-server`, `adapters/typescript` | Gerçek araç çağrıları + fixture golden + güvenlik testleri | **Done** (11/11, PR #7) |
 | 1 | **B — Deep Mapping** | [#1](https://github.com/MrBekoX/Causoryn/issues/1) | A (sert) | `native/roslyn-worker/`, `adapters/csharp-roslyn/`, `packages/indexing`, `packages/graph`, `packages/mcp-server` | C# + TS fixture cross-boundary kanıt zinciri | **7/8 Done · `B7` Partial** (PR #8 + B9 + `K-020`; per-file parse reuse ve watcher MCP yüzeyi açık) |
@@ -38,7 +38,7 @@ Sert bağımlılık zinciri: **A → B → C → D → E → F** (`C2`'nin tek s
 6. **E altıncı:** `causoryn_verify_change` (`E1`), `preflightId` sözleşmesi olmadan çalışmaz (`D → E` sert kenar; yalnız `E4` `get_evidence` zenginleştirmesi bağımsızdır).
 7. **F en son:** sürüm kapısı `ADR-010` dürüstlük kuralına bağlıdır — eksik veya koşulmamış host/platform kapısı varken `1.0.0` ilan edilmez (`F9`: `0.1.0` snapshot; `K-022`: `0.2.0` Pre-1.0 Public Preview).
 
-## 3. Plan Sonrası Teslim Edilen Genişlemeler (Sprint 8 → `v0.2.3` / `K-026`)
+## 3. Plan Sonrası Teslim Edilen Genişlemeler (Sprint 8 → `v0.2.4`)
 
 7 sprintlik temel planın tamamlanmasının ardından aşağıdaki kapsam kalemleri teslim edilerek backlog'dan kapatılmıştır:
 
@@ -50,8 +50,8 @@ Sert bağımlılık zinciri: **A → B → C → D → E → F** (`C2`'nin tek s
 - **v0.2.1 — Başlatma ve indeksleme:** MCP el sıkışması sonrasında arka plan indeksi, otomatik çalışma alanlarında build/önbellek dışlamaları ve kök `.gitignore`, polyglot dış düğüm birleştirme, toplu SQLite transaction'ları ve sınırlı iş tanıları (**Done**).
 - **v0.2.2 — Görsel mimari dışa aktarma (`K-023`):** Katmanlı SVG, Mermaid, Markdown ve JSON görünümleri, HTML'e özel etkileşimli portal, doğrulanan istemci anotasyonları ve beşinci kanonik skill `architecture-blueprint`. `PRAGMA data_version` korumalı snapshot önbelleği ve dinamik `doctor` sürümü de bu sürümde yer alır (**Done**).
 - **v0.2.3 — Evrensel JS/CJS uyumluluğu ve hapsedilmiş analiz (`K-024`):** Mevcut `ts-adapter` üzerinde `.js`/`.jsx`/`.mjs`/`.cjs` + CommonJS + JS Express/Next.js desteği, kök-içi hapsedilmiş `tsconfig.json`/`jsconfig.json` yükleyicisi (`configureConfinedCompilerHost`), polinom-zamanlı sıfır-RegExp glob eşleştiricisi + `.git/info/exclude` & iç-içe `.gitignore` + akıllı `bin/` ayrımı, olay döngüsünü bloklamayan `collectInventoryAsync` ve varsayılan etkileşimli HTML adı `causoryn-architecture-interactive.html` (`causoryn@0.2.3` npm'de OIDC ile yayımlandı) (**Done**).
-- **K-025 — CI/CD ve Tedarik Zinciri Güvenliği Sertleştirmesi:** `.github/workflows/security.yml` (`zizmor`, PR `dependency-review-action`, `npm audit --audit-level=high` + fail-closed `--locked-mode` NuGet JSON taraması), 5 dilli `.github/workflows/codeql.yml`, OpenSSF `.github/workflows/scorecard.yml`, 2-job SLSA `.github/workflows/release.yml` (`step-security/harden-runner`, sıfır `NPM_TOKEN` OIDC), `.github/workflows/ci.yml` (`-p:RestoreLockedMode=true`, `export-public-tree.mjs --verify-temp --ref HEAD`), 4 ekosistemli 7 günlük soğuma süreli `.github/dependabot.yml` ve `tests/ci-workflow.test.ts` regresyon paketi (**Done**).
-- **K-026 — Doğal Dil Skill Tetikleme, MCP Şema Belgeleri ve Diátaxis TR/EN Yenilemesi:** İki dilli kanonik skill iyileştirmeleri, `causoryn_export_documentation` Zod `.describe()` açıklamaları, 17 çiftli Diátaxis TR/EN dokümantasyon ağı ([prompting-and-architecture-portals.md](prompting-and-architecture-portals.md) dahil) ve Deterministik vs. Anotasyonlu örnek prompt rehberi (**Done**). [Sürüm notları](../CHANGELOG.md) · [Araç sözleşmeleri](tool-contracts.md)
+- **v0.2.4 (`K-025`) — CI/CD ve Tedarik Zinciri Güvenliği Sertleştirmesi:** `.github/workflows/security.yml` (`zizmor`, PR `dependency-review-action`, `npm audit --audit-level=high` + fail-closed `--locked-mode` NuGet JSON taraması), 5 dilli `.github/workflows/codeql.yml`, OpenSSF `.github/workflows/scorecard.yml`, 2-job SLSA `.github/workflows/release.yml` (`step-security/harden-runner`, sıfır `NPM_TOKEN` OIDC), `.github/workflows/ci.yml` (`-p:RestoreLockedMode=true`, `export-public-tree.mjs --verify-temp --ref HEAD`), 4 ekosistemli 7 günlük soğuma süreli `.github/dependabot.yml` ve `tests/ci-workflow.test.ts` regresyon paketi (**Done**).
+- **v0.2.4 (`K-026`) — Doğal Dil Skill Tetikleme, MCP Şema Belgeleri ve Diátaxis TR/EN Yenilemesi:** İki dilli kanonik skill iyileştirmeleri, `causoryn_export_documentation` Zod `.describe()` açıklamaları, 17 çiftli Diátaxis TR/EN dokümantasyon ağı ([prompting-and-architecture-portals.md](prompting-and-architecture-portals.md) dahil) ve Deterministik vs. Anotasyonlu örnek prompt rehberi (**Done**). [Sürüm notları](../CHANGELOG.md) · [Araç sözleşmeleri](tool-contracts.md)
 
 ## 4. Güncel Açık Backlog — `1.0.0` Kapıları (`ADR-010`)
 
@@ -93,6 +93,6 @@ Aşağıdaki kalemler [CHANGELOG.md](../CHANGELOG.md) `[Unreleased]` ile birebir
 ## İlgili sayfalar
 
 - [implementation-status.md](implementation-status.md) — tüm sprintlerin ve `K-019`..`K-026` izleklerinin ayrıntılı kanıt tablosu
-- [CHANGELOG.md](../CHANGELOG.md) — `0.2.3` Pre-1.0 Public Preview sürüm notları ve `[Unreleased]` 1.0.0 kapıları
+- [CHANGELOG.md](../CHANGELOG.md) — `0.2.4` Pre-1.0 Public Preview sürüm notları ve `[Unreleased]` 1.0.0 kapıları
 - [architecture.md](architecture.md) — 18 workspace paketi ve 4 native sidecar mimarisi
 - [compatibility-matrix.md](compatibility-matrix.md) — 4 host uyumluluk durumu

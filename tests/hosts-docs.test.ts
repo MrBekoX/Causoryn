@@ -360,24 +360,24 @@ describe("NEGATİF: host dokümanları yanlış/tehlikeli iddia taşımaz", () =
     expect(text).toContain("cli-stdio.ts");
     expect(text).toContain("--allow-cwd");
     expect(text).toContain("--auto-data-dir");
-    expect(text).toContain("npx causoryn@0.2.3 setup");
+    expect(text).toContain("npx causoryn@0.2.4 setup");
   });
 
-  it("K-021/K-022: claude-code.md ve codex.md 0.2.3 setup + 2026-11-19 güncel CLI kanıtlarını (claude 2.1.328, codex 0.169.0) taşır", () => {
+  it("K-021/K-022: claude-code.md ve codex.md 0.2.4 setup + 2026-11-19 güncel CLI kanıtlarını (claude 2.1.328, codex 0.169.0) taşır", () => {
     const claudeText = readClaudeDoc();
-    expect(claudeText).toContain("npx causoryn@0.2.3 setup");
+    expect(claudeText).toContain("npx causoryn@0.2.4 setup");
     expect(claudeText).toContain("2.1.328");
     expect(claudeText).toContain("2026-11-19");
     expect(claudeText).toContain("plugin validate --strict");
 
     const codexText = readCodexDoc();
-    expect(codexText).toContain("npx causoryn@0.2.3 setup");
+    expect(codexText).toContain("npx causoryn@0.2.4 setup");
     expect(codexText).toContain("0.169.0");
     expect(codexText).toContain("2026-11-19");
     expect(codexText).toContain("plugin marketplace add");
   });
 
-  it("zcode.md: ZCode CLI setup (npx causoryn@0.2.3 setup --client zcode --yes), deneysel marketplace ve GUI NOT RUN dürüstlüğünü belgeler; kişisel yol/sır YOK", () => {
+  it("zcode.md: ZCode CLI setup (npx causoryn@0.2.4 setup --client zcode --yes), deneysel marketplace ve GUI NOT RUN dürüstlüğünü belgeler; kişisel yol/sır YOK", () => {
     expect(existsSync(DOCS.zcodeDoc), "docs/hosts/zcode.md mevcut olmalı").toBe(true);
     const zcodeText = readFileSync(DOCS.zcodeDoc, "utf8");
     expect(zcodeText).not.toMatch(ROOT_GRANT);
@@ -386,7 +386,7 @@ describe("NEGATİF: host dokümanları yanlış/tehlikeli iddia taşımaz", () =
     expect(zcodeText).not.toMatch(/D:[\\/]Causoryn/i);
     expect(zcodeText).not.toMatch(/D:[\\/]tools/i);
     expect(zcodeText).not.toContain("ber" + "ka");
-    expect(zcodeText).toContain("npx causoryn@0.2.3 setup --client zcode --yes");
+    expect(zcodeText).toContain("npx causoryn@0.2.4 setup --client zcode --yes");
     expect(zcodeText).toContain(".zcode/cli/config.json");
     expect(zcodeText).toContain("ZCODE_PLUGIN_ROOT");
     expect(zcodeText).toContain("ZCODE_PROJECT_DIR");

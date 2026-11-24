@@ -90,7 +90,7 @@ No analyzer in Causoryn ever guesses a plausible target symbol as `verified`, an
 - **Rust (`verified`):** Actix-Web, Axum, and Rocket attribute macros (`#[get("/path")]`, `#[post("/path")]`, etc.) attach directly to the target `fn` item, always emitting `verified` (`route-attribute`) edges.
 - **C# ASP.NET Core (`verified` or `heuristic`):** Controller `[Route]` + `[HttpGet]`/`[HttpPost]`/… attributes and Minimal API `MapGet`/`MapPost`/… calls (`WorkerAnalyzer.cs:1475-1508`) emit `verified` when Roslyn resolves the attribute/extension types to `Microsoft.AspNetCore.*`. When `Microsoft.AspNetCore.App.Ref` is unavailable on the host machine, they degrade honestly to **`heuristic` (+ `ambiguity`)** via the well-known-name rule.
 - **Go (`verified`, `heuristic`, or `unresolved`):** Across `net/http` (`Handle`, `HandleFunc` with method `"*"`) and `gin`/`echo`/`chi` verb registrations (`routes.go:120-170`), a same-package named handler function emits `verified`, a selector handler expression emits **`heuristic` or `unresolved`**, an unknown bare handler emits **`unresolved` (`UnknownExternal`)**, and an inline anonymous `func` literal preserves the `Endpoint` node without emitting a `ROUTES_TO` edge (recording an explicit warning).
-- **BDD Test Extraction (`Test` & `TESTS`):** The TypeScript analyzer extracts BDD test blocks as `Test` nodes and emits `verified` `TESTS` edges whenever a `Test` body calls a non-`Test` workspace symbol (`adapters/typescript/src/analyzer.ts`), powering the `direct` signal in `causoryn_derive_test_plan`. Sidecar `TESTS` edge extraction for C#, Python, Go, and Rust remains tracked as an open item in `0.2.3`.
+- **BDD Test Extraction (`Test` & `TESTS`):** The TypeScript analyzer extracts BDD test blocks as `Test` nodes and emits `verified` `TESTS` edges whenever a `Test` body calls a non-`Test` workspace symbol (`adapters/typescript/src/analyzer.ts`), powering the `direct` signal in `causoryn_derive_test_plan`. Sidecar `TESTS` edge extraction for C#, Python, Go, and Rust remains tracked as an open item in `0.2.4`.
 
 ---
 
@@ -153,11 +153,11 @@ fp2|ts-adapter@0.1.0|roslyn-worker@0.1.0|refpack=<pack>@<version>@<tfmDir>;...|r
 
 ### 6.2 Why Internal Analyzer Protocol Versions Remain `0.1.0`
 
-While the distribution package (`causoryn`), MCP server (`SERVER_VERSION`), and indexing coordinator (`INDEXING_VERSION`) are at `0.2.3`, all five internal analyzer versions (`ts-adapter@0.1.0`, `roslyn-worker@0.1.0`, `python-worker@0.1.0`, `go-worker@0.1.0`, `rust-worker@0.1.0`, `Causoryn.RoslynWorker.csproj`, and `native/rust-worker/Cargo.toml`) intentionally remain pinned to **`0.1.0`**:
+While the distribution package (`causoryn`), MCP server (`SERVER_VERSION`), and indexing coordinator (`INDEXING_VERSION`) are at `0.2.4`, all five internal analyzer versions (`ts-adapter@0.1.0`, `roslyn-worker@0.1.0`, `python-worker@0.1.0`, `go-worker@0.1.0`, `rust-worker@0.1.0`, `Causoryn.RoslynWorker.csproj`, and `native/rust-worker/Cargo.toml`) intentionally remain pinned to **`0.1.0`**:
 
 1. `analyzerVersion` is hashed directly into every `Evidence` record (`evidenceId`) and embedded in `fp2` `analyzerFingerprint`.
 2. Bumping `analyzerVersion` on packaging-only releases when AST/semantic extraction semantics and NDJSON `protocolVersion: "1"` have not changed would needlessly invalidate every persisted SQLite graph cache and churn evidence hashes.
-3. Internal analyzer versions therefore version **analyzer extraction semantics**, independently of the `causoryn` `0.2.3` package release.
+3. Internal analyzer versions therefore version **analyzer extraction semantics**, independently of the `causoryn` `0.2.4` package release.
 
 ---
 

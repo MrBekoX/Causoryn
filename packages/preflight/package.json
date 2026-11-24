@@ -1,6 +1,6 @@
 {
   "name": "@causoryn/preflight",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "private": true,
   "license": "MIT",
   "description": "Preflight çekirdeği (sprint-5 D4+D6): build_preflight_manifest — intent + hedef kümesinden impactCandidates/certainty (packages/graph), contractChecks (D2/D3 eşlemesi), testPlanId referansı, limitations ve git-read salt-okunur sourceRevision birleştiren ADAY manifest; sembole bağlanamayan hedef requiresDisambiguation + aday listesi üretir, otomatik kesinleştirme yoktur, manifest hiçbir koşulda kod yazmaz (TŞ v2.1 §10.2/§10.3). derive_test_plan — TESTS kenarları, test-dosyası isimlendirme bağlamı ve değişen CALLS noktalarından deterministik test adayları (TŞ v2.1 §15).",
@@ -9,7 +9,7 @@
     ".": "./src/index.ts"
   },
   "dependencies": {
-    "@causoryn/domain": "0.2.3",
-    "@causoryn/graph": "0.2.3"
+    "@causoryn/domain": "0.2.4",
+    "@causoryn/graph": "0.2.4"
   }
 }

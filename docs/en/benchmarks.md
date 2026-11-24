@@ -5,7 +5,7 @@
 > Evidence: `raw/Causoryn_Teknik_Dokuman_v2.1.pdf` §21 (p.22): "On a 1,000-TS-file fixture: warm `workspace_summary` < 1 s, small graph neighborhood < 500 ms, bounded 200-node map < 2 s." The specification explicitly defines these numbers as **design targets, not achieved test results**. Accordingly, the target column below is provided strictly as a **reference**, and only actually measured values are reported.
 > ADR-010 honesty rule: anything unmeasured is never reported as measured — any row hitting an environment interruption or call deadline is recorded as `not measured (<reason>)`.
 
-## Current Performance Scope (`v0.2.3`)
+## Current Performance Scope (`v0.2.4`)
 
 The F7 table below records the historical November 10, 2026 synthetic 1,000-file fixture run. Subsequent releases added four core execution improvements for large workspaces: `v0.2.1` deferred initial indexing to a background job after the MCP handshake and batched SQLite bulk writes in transactions; `v0.2.2` introduced a bounded (up to 4-entry) `PRAGMA data_version`-guarded warm snapshot cache plus default clustered architecture views (with the raw dump available via `view="full"`); and `v0.2.3` (`K-024`) added non-blocking `collectInventoryAsync` scanning (yielding every 64 entries) alongside a zero-RegExp polynomial-time glob matcher. No synthetic or unmeasured timings have been added for these later optimizations — the F7 table reports only actually executed measurements. [Release notes](../../CHANGELOG.md) · [Tool contracts](tool-contracts.md)
 
