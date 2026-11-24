@@ -148,7 +148,7 @@ Analiz tamamlandığında:
     metot bildirimi → `Method`: `<modül>::<Trait>::<metot>`.
   - UnknownExternal: çağrı ifadesinin çözümlenen metni (ör.
     `std::env::var`), çözülemeyen metot çağrısında metot adı, yolu
-    olmayan çağrıda `(anonim-cağrı)`.
+    olmayan çağrıda `(anonymous-call)`.
   - Endpoint: `"METHOD PATH"` (ör. `"GET /orders"`); `attributes`:
     `method` + `path` (önde `/` ile).
 - `attributes` — File: `sourceHash` (UTF-8 SHA-256, 64 hex); Endpoint:
@@ -185,7 +185,7 @@ Analiz tamamlandığında:
   "span": { "relativePath": "main.rs", "startLine": 12, "endLine": 12, "sourceHash": "<sha256-hex>" },
   "analyzerId": "rust-worker",
   "analyzerVersion": "0.1.0",
-  "rationale": "CALLS: ... (verified; syn AST, semantik çözümleyici yoktur)."
+  "rationale": "CALLS: ... (verified; syn AST, no semantic resolver)."
 }
 ```
 
@@ -204,8 +204,8 @@ Analiz tamamlandığında:
 | resolution | Ne zaman |
 |---|---|
 | `verified` | **(a)** Bare çağrı (`foo()`) AYNI dosyada (modülde) tanımlı `fn` ile eşleşir — ask sözleşmesi. **(b)** Nitelikli yol çağrısı (`a::B::c` / `B::c`) analiz seti isim tablosunda (impl metotları + serbest fn'ler) TEK eşleşme bulur. **(c)** ROUTES_TO: route özniteliği fn'e sözdizimsel olarak bağlıdır. Sınırlama (belgeli): nitelikli çağrının modül önekleri tam doğrulanmaz — eşleşme son iki segment + analiz seti tek adaydır. |
-| `heuristic` | **(a)** Metot çağrısı (`x.foo()`) — alıcı türü çözülemez (trait dispatch bu dilimde yok); tek isim adayı hedef gösterilir, çok aday `ambiguity` ile işaretlenir. **(b)** Bare çağrı başka dosyada tek adaya eşleşir (import kanıtı yok). **(c)** Nitelikli yol çağrısı çok aday bulur — `ambiguity` taşıyarak. |
-| `unresolved` | Hiçbir aday yok (ör. `std::env::var`, `Vec::new`); hedef açık UnknownExternal node'dur, **uydurma hedef üretilmez**. |
+| `heuristic` | **(a)** Metot çağrısı (`x.foo()`) — alıcı türü çözülemez (trait dispatch bu dilimde yok); YALNIZCA tek isim adayı varsa hedef gösterilir. **(b)** Bare çağrı başka dosyada tek adaya eşleşir (import kanıtı yok). |
+| `unresolved` | **(a)** Hiçbir aday yok (ör. `std::env::var`, `Vec::new`); hedef açık UnknownExternal node'dur, **uydurma hedef üretilmez**. **(b)** Çok aday (bare çağrı başka dosyalarda, nitelikli yol çağrısı ya da metot çağrısı birden çok sembolle eşleşir): **hiçbir adaya kenar çizilmez** (keyfi `candidates[0]` yok); kenar UnknownExternal node'una (bare/metot çağrısında ad, nitelikli çağrıda çağrı metni) `unresolved` olarak gider ve tüm adaylar hem `ambiguity.candidates`'te hem rationale'de listelenir. |
 
 ### `unsupportedConstructs` (bu dilimde modellenmeyenler)
 
@@ -271,7 +271,7 @@ cargo bulunamadığında meşrudur (çalıştırılamadı olarak raporlanır):
   create_audit_entry` (aynı modül) ve `OrdersService::new →
   OrderRepository::new` (nitelikli yol) CALLS verified; metot çağrısı
   (`service.list()`) heuristic; `save` çağrısı trait + impl adaylarıyla
-  heuristic + ambiguity; `std::env::var` unresolved + UnknownExternal;
+  unresolved + ambiguity (hiçbir adaya kenar yok); `std::env::var` unresolved + UnknownExternal;
   evidence satırları fixture metniyle eşleşir; node/edge türleri TŞ §8
   kataloğu içinde.
 - **Negatif:** boş `files` / eksik `files` / `..` segmenti / mutlak yol /

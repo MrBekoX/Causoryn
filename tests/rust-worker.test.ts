@@ -210,6 +210,7 @@ describe.skipIf(!workerReady)("rust-worker M1 (PROTOCOL.md v1)", () => {
   };
   let enumRun: WorkerResponse | null = null;
   let bareCrossFileRun: WorkerResponse | null = null;
+  let ambiguityRun: WorkerResponse | null = null;
 
   let cargoTomlVersion = "";
 
@@ -376,6 +377,33 @@ describe.skipIf(!workerReady)("rust-worker M1 (PROTOCOL.md v1)", () => {
         },
       ]);
       bareCrossFileRun = bareRun.lines[0] ? parseLine(bareRun.lines[0]) : null;
+
+      // 8b) Multi-candidate calls (bare free fn, qualified path, method):
+      //     no edge may be drawn to an arbitrary candidate.
+      const ambiguityRaw = await runWorker([
+        {
+          id: "multi-candidate-calls",
+          type: "analyze",
+          protocolVersion: "1",
+          files: [
+            {
+              path: "src/caller.rs",
+              content:
+                "fn run(store: &dyn Thing) {\n    helper();\n    util::compute();\n    store.save();\n}\n",
+            },
+            { path: "src/lib_a.rs", content: "pub fn helper() -> u32 { 1 }\n" },
+            { path: "src/lib_b.rs", content: "pub fn helper() -> u32 { 2 }\n" },
+            { path: "src/a/util.rs", content: "pub fn compute() -> u32 { 3 }\n" },
+            { path: "src/b/util.rs", content: "pub fn compute() -> u32 { 4 }\n" },
+            {
+              path: "src/store.rs",
+              content:
+                "pub struct Disk;\nimpl Disk { pub fn save(&self) {} }\npub struct Memory;\nimpl Memory { pub fn save(&self) {} }\n",
+            },
+          ],
+        },
+      ]);
+      ambiguityRun = ambiguityRaw.lines[0] ? parseLine(ambiguityRaw.lines[0]) : null;
 
       // 9) Sürüm senkron dayanağı: Cargo.toml [package] version okunur.
       const cargoToml = readFileSync(RUST_WORKER_MANIFEST_PATH, "utf8");
@@ -592,21 +620,74 @@ describe.skipIf(!workerReady)("rust-worker M1 (PROTOCOL.md v1)", () => {
     expect(edge?.evidence[0]?.rationale.length).toBeGreaterThan(0);
   });
 
-  it("pozitif: CALLS belirsiz metot çağrısı → heuristic + ambiguity (trait + impl adayı)", () => {
+  it("ambiguous method call (trait + impl candidate) is unresolved with both candidates and no edge to either", () => {
+    const caller = "crate::services::OrdersService::create";
+    const candidates = [
+      "crate::repositories::OrderRepository::save",
+      "crate::repositories::OrderStore::save",
+    ];
+    for (const candidate of candidates) {
+      expect(
+        findEdge(
+          analyzeResponse,
+          (edge) =>
+            edge.kind === "CALLS" &&
+            edge.from.qualifiedName === caller &&
+            edge.to.qualifiedName === candidate,
+        ),
+      ).toBeUndefined();
+    }
     const edge = findEdge(
       analyzeResponse,
       (edge) =>
         edge.kind === "CALLS" &&
-        edge.from.qualifiedName === "crate::services::OrdersService::create" &&
-        edge.to.qualifiedName === "crate::repositories::OrderRepository::save",
+        edge.from.qualifiedName === caller &&
+        edge.to.kind === "UnknownExternal" &&
+        edge.to.qualifiedName === "save",
     );
     expect(edge).toBeDefined();
-    expect(edge?.resolution).toBe("heuristic");
-    expect(edge?.ambiguity?.candidates).toEqual([
-      "crate::repositories::OrderRepository::save",
-      "crate::repositories::OrderStore::save",
-    ]);
+    expect(edge?.resolution).toBe("unresolved");
+    expect(edge?.to.relativePath).toBeUndefined();
+    expect(edge?.ambiguity?.candidates).toEqual(candidates);
     expect(edge?.ambiguity?.reason.length).toBeGreaterThan(0);
+    const rationale = edge?.evidence[0]?.rationale ?? "";
+    for (const candidate of candidates) {
+      expect(rationale).toContain(candidate);
+    }
+  });
+
+  it("multi-candidate bare, qualified and method calls are unresolved, list every candidate and draw no edge to any candidate", () => {
+    expect(ambiguityRun?.status).toBe("ready");
+    const caller = "crate::caller::run";
+    const cases = [
+      { unknown: "helper", candidates: ["crate::lib_a::helper", "crate::lib_b::helper"] },
+      { unknown: "util::compute", candidates: ["crate::a::util::compute", "crate::b::util::compute"] },
+      { unknown: "save", candidates: ["crate::store::Disk::save", "crate::store::Memory::save"] },
+    ];
+    const callerEdges = (ambiguityRun?.edges ?? []).filter(
+      (edge) => edge.kind === "CALLS" && edge.from.qualifiedName === caller,
+    );
+    expect(callerEdges.map((edge) => edge.resolution)).toEqual(["unresolved", "unresolved", "unresolved"]);
+    for (const { unknown, candidates } of cases) {
+      for (const candidate of candidates) {
+        expect(callerEdges.some((edge) => edge.to.qualifiedName === candidate)).toBe(false);
+      }
+      const edge = callerEdges.find(
+        (candidateEdge) =>
+          candidateEdge.to.kind === "UnknownExternal" && candidateEdge.to.qualifiedName === unknown,
+      );
+      expect(edge, unknown).toBeDefined();
+      expect(edge?.resolution).toBe("unresolved");
+      expect(edge?.ambiguity?.candidates).toEqual(candidates);
+      expect(edge?.ambiguity?.reason.length).toBeGreaterThan(0);
+      expect(edge?.evidence[0]?.kind).toBe("ast-span");
+      const rationale = edge?.evidence[0]?.rationale ?? "";
+      expect(rationale.startsWith("CALLS: ")).toBe(true);
+      expect(rationale).toContain("(unresolved");
+      for (const candidate of candidates) {
+        expect(rationale).toContain(candidate);
+      }
+    }
   });
 
   it("pozitif: CALLS çözülemeyen çağrı → unresolved + UnknownExternal (uydurma hedef yok)", () => {
@@ -970,7 +1051,7 @@ describe.skipIf(!workerReady)("rust-worker node bütçesi (PROTOCOL.md maxNodes)
   it("negatif: maxNodes tam sayı değilse (float/bool) → INVALID_ARGUMENT", () => {
     for (const id of ["budget-float", "budget-bool"]) {
       expect(invalidById[id]?.error?.code).toBe("INVALID_ARGUMENT");
-      expect(invalidById[id]?.error?.message).toContain("tam sayı");
+      expect(invalidById[id]?.error?.message).toContain("must be an integer");
     }
   });
 
@@ -987,7 +1068,7 @@ describe.skipIf(!workerReady)("rust-worker node bütçesi (PROTOCOL.md maxNodes)
       (diag) => diag.code === "RESPONSE_TRUNCATED",
     );
     expect(truncatedDiagnostic).toBeDefined();
-    expect(truncatedDiagnostic?.message).toContain("dangling yok");
+    expect(truncatedDiagnostic?.message).toContain("no dangling edges");
     // Dangling yok: her kenar ucunun node'u yayımlanmış kümede olmalı.
     const published = new Set(
       (response?.nodes ?? []).map(
