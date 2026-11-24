@@ -53,13 +53,13 @@ Tool profiles are defined in `packages/mcp-server/src/version.ts` (`TOOL_PROFILE
 | `wiki,history` | 20 (11 core + 7 wiki + 2 history) | all 7 |
 | `full` | 32 (29 legacy names + `causoryn_status`, `causoryn_trace`, `causoryn_contracts`) | all 7 |
 
-Selection order: `--tool-profile <list>` > `CAUSORYN_TOOL_PROFILE` > `core`. Profiles combine with commas. In `full`, superseded legacy tools carry a deprecation note; the wiki tools are not deprecated and behave identically in `wiki` and `full`.
+Selection order: `--tool-profile <list>` > `CAUSORYN_TOOL_PROFILE` > `CAUSORYN_CONFIG.toolProfile` > `core`. Profiles combine with commas. In `full`, superseded legacy tools carry a deprecation note; the wiki tools are not deprecated and behave identically in `wiki` and `full`.
 
 ### 2.2 Data root
 
 `causoryn_wiki_build` writes, and the read tools read, a SQLite database outside every authorized workspace root:
 
-1. **Zero-config (`--auto-data-dir` or `--data-dir <path>`):** `buildWorkspaceAutoConfig` (`runtime-cli.ts`) resolves the base directory (`--data-dir` > `ZCODE_PLUGIN_DATA` > `~/.causoryn`) and sets both `storage.dataDbPath` and `wiki.dataDbPath` to the same file, `<base>/workspaces/<slug>-<hash12>/graph.sqlite`. All hosts share this one database, so a wiki built from one host is visible to every host that uses the same data directory. Directories are created with mode `0700` and checked to be strictly outside the authorized roots before and after creation.
+1. **Zero-config (`--auto-data-dir` or `--data-dir <path>`):** `buildWorkspaceAutoConfig` (`runtime-cli.ts`) resolves the base directory (`--data-dir` > `~/.causoryn` for every host; `ZCODE_PLUGIN_DATA` only as a fallback when `~/.causoryn` is unusable) and sets both `storage.dataDbPath` and `wiki.dataDbPath` to the same file, `<base>/workspaces/<slug>-<hash12>/graph.sqlite`. All hosts share this one database, so a wiki built from one host is visible to every host that uses the same data directory. Directories are created with mode `0700` and checked to be strictly outside the authorized roots before and after creation.
 2. **Explicit configuration:** set `wiki.dataDbPath` in `CAUSORYN_CONFIG` to an absolute path outside the workspace. It is validated at startup by `validateDataDbPath` (`context.ts`); see [§9](#9-write-permissions-and-security-boundaries).
 
 The `wiki` configuration object accepts only `dataDbPath` (`config.ts`, strict schema); other keys are rejected at startup.
@@ -133,7 +133,7 @@ All hashes are SHA-256 over canonical JSON (sorted keys, no whitespace) from `@c
 
 | Identifier | Derivation (code) |
 |---|---|
-| `wikiSnapshotId` | `wiki:` + sha256(`[graphSnapshotId, WIKI_TEMPLATE_VERSION]`) — `deriveWikiSnapshotId`; `WIKI_TEMPLATE_VERSION = "1.0.0"` |
+| `wikiSnapshotId` | `wiki:` + sha256(`[graphSnapshotId, WIKI_TEMPLATE_VERSION]`) — `deriveWikiSnapshotId`; `WIKI_TEMPLATE_VERSION = "1.1.0"` |
 | Root `pageId` | `page:` + sha256(`[workspaceId, "root", categoryKey, categoryKind]`) — `wikiRootPageIdFor` |
 | Child `pageId` | `page:` + sha256(`[workspaceId, "node", pageKind, nodeId]`) — `wikiChildPageId` |
 | Section `id` | `section:` + sha256(`[pageId, sectionKey]`) |
@@ -142,7 +142,7 @@ All hashes are SHA-256 over canonical JSON (sorted keys, no whitespace) from `@c
 | `linkSetHash` | sha256 over the page's outgoing links `{id, kind, toPageId, resolution}` sorted by ID |
 
 - **Two-level versioning:** `GraphSnapshot` → deterministic `WikiSnapshot`. Re-running `causoryn_wiki_build` for a graph snapshot whose wiki is already the latest published one is an idempotent no-op (`pagesRegenerated: 0` plus a warning).
-- **Template version:** changing a generated Markdown template requires bumping `WIKI_TEMPLATE_VERSION`, which changes every `wikiSnapshotId` and forces incremental builds to fall back to a full build.
+- **Template version:** changing a generated Markdown template requires bumping `WIKI_TEMPLATE_VERSION`, which changes every `wikiSnapshotId` and forces incremental builds to fall back to a full build. The version moved to `1.1.0` when the generated templates were translated to English, so a wiki published with an older template version is rebuilt on the next build.
 - **`revisionRef`:** defaults to the graph snapshot's `revision.id`. The indexer records `working-tree` there, so unless `causoryn_wiki_build` is called with an explicit `revision` label, every `WikiSnapshot` has `revisionRef: "working-tree"`. The `revision` input is a free-form label; it is not resolved against Git.
 - **Output order:** roots in taxonomy order, child pages by category then `pageId`; all core outputs are deep-frozen.
 
@@ -359,7 +359,7 @@ Multiple edges of the same kind between the same page pair collapse into one lin
 
 ## 7. Storage Schema (`wiki_*`, `wiki_fts`)
 
-Defined in `packages/storage-sqlite/src/wiki-schema.ts` and applied with the main schema (`user_version = 4`). All DDL and DML are static SQL with bound parameters.
+Defined in `packages/storage-sqlite/src/wiki-schema.ts` and applied with the main schema (`user_version = 5`). All DDL and DML are static SQL with bound parameters.
 
 | Table | Key | Notes |
 |---|---|---|
@@ -390,7 +390,7 @@ Available only under `--tool-profile wiki`, `wiki,history` or `full` ([§2.1](#2
 - **Pagination:** opaque base64url cursor `{ "v": 1, "o": <offset> }`; `limit` default 50, maximum 200 (`LIMIT_EXCEEDED` above that); a malformed cursor gives `INVALID_ARGUMENT`; `nextCursor` is `null` on the last page and `envelope.nextCursor` equals `data.nextCursor` on the five paginated tools.
 - **Snapshot selection:** an explicit `snapshotId` must be a published `WikiSnapshot` of the same workspace (`EVIDENCE_NOT_FOUND` otherwise); without it the latest published `WikiSnapshot` is used (`INDEX_NOT_READY` if none exists or no wiki data root is configured).
 - **Indexing:** like other non-status tools, wiki tools wait up to `CAUSORYN_INDEX_WAIT_MS` for the first graph index. Unlike core tools, a wiki tool's `INDEX_NOT_READY` stays an error envelope (it is not converted into a `partial` "indexing" envelope), and wiki responses do not receive the background re-index `stale=true` warning that core tools get.
-- **Strings:** field names, enum values and error codes are stable identifiers. Warning texts, `reason` / `summary` strings, error messages and some generated Markdown labels are currently in Turkish; do not parse free text.
+- **Strings:** field names, enum values and error codes are stable identifiers. Warning texts, `reason` / `summary` strings, error messages and generated Markdown labels are free text in plain English; do not parse free text.
 
 ### 8.2 Error codes
 
@@ -739,7 +739,7 @@ Each wiki tool has positive, negative and partial-result cases in `wiki-tools.te
 | `depth` (`causoryn_wiki_get_tree`) | 1–8 |
 | `refs` (`causoryn_wiki_get_versions`) | 1–200 |
 | Search snippet | 12 tokens |
-| Template version | `1.0.0` |
+| Template version | `1.1.0` |
 | Concurrent builds | one `building` row per workspace and graph snapshot |
 
 **Gaps (not implemented or partial)**
@@ -755,7 +755,7 @@ Each wiki tool has positive, negative and partial-result cases in `wiki-tools.te
 9. Offline wiki export is library-only; `causoryn_export_documentation(view="wiki")` returns `INVALID_ARGUMENT`.
 10. Aliases (`wiki_aliases`) are not written or used by the build; rename detection is not active.
 11. MCP resources for wiki pages are not published.
-12. Warning, reason and summary texts, error messages, and some generated Markdown labels are in Turkish.
+12. Warning, reason and summary texts, error messages and generated Markdown labels are English free text; clients should key on codes and enum values, not on message wording.
 13. Planned configuration keys (`enabled`, `autoBuildOnSnapshot`, `includeManualNotesInSearch`, `includeManualNotesInExport`, `historicalSnapshotRetention`, `offlineExportDefault`) and planned metrics (`wiki_projection_duration`, `wiki_fts_update_duration`, `wiki_stale_queries`, `wiki_orphaned_notes`, …) do not exist; the strict config schema rejects these keys. `pagesRegenerated` and `brokenLinks` are reported in `causoryn_wiki_build` responses.
 
 ## 12. Related Documentation

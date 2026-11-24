@@ -135,7 +135,7 @@ Seçim sırası `--tool-profile <list>` > `CAUSORYN_TOOL_PROFILE` > `core`'dur; 
 | TypeScript / JavaScript | TS Compiler API (in-process) | L2 (TypeChecker verified) | `express+nextjs` + genel `<x>.<verb>` kalıbı |
 | C# | Roslyn `SemanticModel` | L2 — gerçek semantik sidecar | `aspnet-core-route-attributes (L3)`: controller `[Route]`/`[Http*]` + Minimal API `MapGet`/… |
 | Python | stdlib `ast` | L2 + "tam type inference YOK" | `decorator-route-pattern (L3)`: `@carrier.get/…` + Flask `route` |
-| Go | stdlib `go/parser` | "heuristic-only (semantik L2 yok)", `symbolResolution: false` | `http-router-registration (L3)`: Handle/HandleFunc + chi/gin/echo |
+| Go | stdlib `go/parser` | "heuristic-only (no semantic L2)", `symbolResolution: false` | `http-router-registration (L3)`: Handle/HandleFunc + chi/gin/echo |
 | Rust | `syn` 3 | "heuristic-heavy" | `attribute-macro-route (L3)`: attribute-macro fiilleri + axum/actix/rocket |
 
 C#'ın L3 yüzeyi `frameworkLinkers: "aspnet-core-route-attributes (L3)"` olarak beyan edilir (`packages/indexing/src/index.ts:205`, `K-022`); worker içi tam yetenek beyanı `aspnetcore-controller-attribute-and-minimal-api-call-pattern`'dir (`native/roslyn-worker/Protocol.cs:234`).
@@ -385,10 +385,10 @@ Both `storage.dataDbPath` and `wiki.dataDbPath` are strictly validated at startu
 | TypeScript / JavaScript | TS Compiler API (in-process) | L2 (TypeChecker verified) | `express+nextjs` + generic `<x>.<verb>` pattern |
 | C# | Roslyn `SemanticModel` | L2 — true semantic sidecar | `aspnet-core-route-attributes (L3)`: controller `[Route]`/`[Http*]` + Minimal API `MapGet`/… |
 | Python | stdlib `ast` | L2 + "no full type inference" | `decorator-route-pattern (L3)`: `@carrier.get/…` + Flask `route` |
-| Go | stdlib `go/parser` | "heuristic-only (semantik L2 yok)", `symbolResolution: false` | `http-router-registration (L3)`: Handle/HandleFunc + chi/gin/echo |
+| Go | stdlib `go/parser` | "heuristic-only (no semantic L2)", `symbolResolution: false` | `http-router-registration (L3)`: Handle/HandleFunc + chi/gin/echo |
 | Rust | `syn` 3 | "heuristic-heavy" | `attribute-macro-route (L3)`: attribute-macro verbs + axum/actix/rocket |
 
-C#'s L3 surface is declared as `frameworkLinkers: "aspnet-core-route-attributes (L3)"` (`packages/indexing/src/index.ts:205`, `K-022`); the worker-internal capability label is `aspnetcore-controller-attribute-and-minimal-api-call-pattern` (`native/roslyn-worker/Protocol.cs:234`). The Go label `heuristic-only (semantik L2 yok)` is the literal runtime string ("no semantic L2").
+C#'s L3 surface is declared as `frameworkLinkers: "aspnet-core-route-attributes (L3)"` (`packages/indexing/src/index.ts:205`, `K-022`); the worker-internal capability label is `aspnetcore-controller-attribute-and-minimal-api-call-pattern` (`native/roslyn-worker/Protocol.cs:234`). The Go label `heuristic-only (no semantic L2)` is the literal runtime string ("no semantic L2").
 
 ### 6.2 Resolution honesty per language
 
