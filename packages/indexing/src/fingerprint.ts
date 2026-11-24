@@ -110,17 +110,17 @@ export type RoslynDiscoveryStatus =
   | "sync-run-degraded";
 
 /** Yükleme notunun canonical başlık öneki (ReferenceResolver.cs:144). */
-const REF_PACK_LOADED_PREFIX = "referans paketi yüklendi: ";
+const REF_PACK_LOADED_PREFIX = "reference pack loaded: ";
 
 /** ReferenceResolver.cs:62-65 fallback satırının ayrıştırıcı imzası. */
-const REF_PACK_FALLBACK_PREFIX = "Microsoft.NETCore.App.Ref pack bulunamadı;";
+const REF_PACK_FALLBACK_PREFIX = "Microsoft.NETCore.App.Ref pack not found;";
 
 /** Sürüm biçimi: X.Y.Z (ReferenceResolver VersionDirRegex karşılığı). */
 const VERSION_SHAPE = /^\d+\.\d+\.\d+$/;
 
 /**
- * Tek yükleme satırını ayrıştırır: "referans paketi yüklendi: <pack>
- * <sürüm> (<tfmDir>)". Regex capture yerine adım adım dilimleme kullanılır
+ * Tek yükleme satırını ayrıştırır: "reference pack loaded: <pack>
+ * <version> (<tfmDir>)". Regex capture yerine adım adım dilimleme kullanılır
  * (saf string işlemi — yürütme ile ilişkisi yoktur).
  */
 function parseRefPackWarning(warning: string): RoslynRefPackEntry | null {
