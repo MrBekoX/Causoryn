@@ -235,13 +235,26 @@ describe("stdio server — stdout saflığı ve protokol el sıkışması", () =
 
     expect(listMsg.id).toBe(2);
     const listResult = listMsg.result as { tools?: Array<{ name?: string }> };
-    // Sprint-2 B6: causoryn_index_status + causoryn_refresh_index, B5:
-    // causoryn_get_symbol_context, B4: causoryn_trace_execution, sprint-3
-    // C8: Faz C'nin 7 aracı, sprint-4 W5: Living Wiki'nin 7 aracı, sprint-5
-    // D2-D6: Faz D'nin 5 aracı, sprint-6 E1-E3: Faz E'nin causoryn_verify_
-    // change aracı eklendi (TŞ §10.2 + §16A.8 katalog büyümesi; liste
-    // alfabetik karşılaştırılır).
-    expect(listResult.tools?.map((t) => t.name).sort()).toEqual([...CORE_TOOL_NAMES].sort());
+    // Default `core` profile: the exact 11-tool surface is pinned as an
+    // independent literal oracle (sorted alphabetically), so a change to
+    // CORE_TOOL_NAMES in source cannot silently pass this test. The source
+    // constant must agree with the pinned list as well.
+    const EXPECTED_CORE_TOOLS = [
+      "causoryn_contracts",
+      "causoryn_export_documentation",
+      "causoryn_find_symbols",
+      "causoryn_get_agent_context",
+      "causoryn_get_evidence",
+      "causoryn_get_symbol_context",
+      "causoryn_map_system",
+      "causoryn_preflight_change",
+      "causoryn_status",
+      "causoryn_trace",
+      "causoryn_verify_change",
+    ];
+    expect(EXPECTED_CORE_TOOLS).toHaveLength(11);
+    expect(listResult.tools?.map((t) => t.name).sort()).toEqual(EXPECTED_CORE_TOOLS);
+    expect([...CORE_TOOL_NAMES].sort()).toEqual(EXPECTED_CORE_TOOLS);
 
     expect(callMsg.id).toBe(3);
     const callResult = callMsg.result as {
