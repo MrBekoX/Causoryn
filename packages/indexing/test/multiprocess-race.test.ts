@@ -276,18 +276,16 @@ describe("IndexService — çoklu-süreç SQLite yarış kurtarması", { timeout
       const repoC = new SqliteGraphRepository(arena.dbPath);
       const repoD = new SqliteGraphRepository(arena.dbPath);
       try {
-        // C# analizi sırasında bariyerle ikisinin de aynı anda analyzeChanges=true görmesini garantileyelim.
-        let barrierResolve!: () => void;
-        const barrier = new Promise<void>((resolve) => {
-          barrierResolve = resolve;
-        });
-        let entered = 0;
-        const synchronizedAnalyze = async () => {
-          entered += 1;
-          if (entered >= 2) {
-            barrierResolve();
-          }
-          await barrier;
+        // Both runs see the change concurrently. Since Task 1.7 follow-up
+        // (finding 6) the build lease is claimed BEFORE analysis, so the two
+        // can no longer analyze at the same time (the former barrier that
+        // forced both into analysis would now deadlock by design): exactly
+        // one analyzes and publishes, the other waits for the live peer and
+        // reuses its snapshot without analyzing (outcome reused_peer).
+        let analyzeCalls = 0;
+        const countingAnalyze = async () => {
+          analyzeCalls += 1;
+          await new Promise((resolve) => setTimeout(resolve, 50));
           return stubAnalyzeCSharp();
         };
 
@@ -297,8 +295,9 @@ describe("IndexService — çoklu-süreç SQLite yarış kurtarması", { timeout
           repository: repoC,
           clock: () => T0,
           limits: { maxFiles: 100 },
-          csharp: { analyzeCSharp: synchronizedAnalyze },
+          csharp: { analyzeCSharp: countingAnalyze },
           tolerateConcurrentPublishRace: true,
+          peerPollIntervalMs: 20,
         });
         const syncServiceD = new IndexService({
           workspaceId: "default",
@@ -306,8 +305,9 @@ describe("IndexService — çoklu-süreç SQLite yarış kurtarması", { timeout
           repository: repoD,
           clock: () => T1,
           limits: { maxFiles: 100 },
-          csharp: { analyzeCSharp: synchronizedAnalyze },
+          csharp: { analyzeCSharp: countingAnalyze },
           tolerateConcurrentPublishRace: true,
+          peerPollIntervalMs: 20,
         });
 
         const [incC, incD] = await Promise.all([
@@ -316,6 +316,8 @@ describe("IndexService — çoklu-süreç SQLite yarış kurtarması", { timeout
         ]);
         const publishedFlags = [incC.published, incD.published].sort();
         expect(publishedFlags).toEqual([false, true]);
+        expect([incC.outcome, incD.outcome].sort()).toEqual(["published", "reused_peer"]);
+        expect(analyzeCalls).toBe(1);
         expect(incC.snapshotId).toBe(incD.snapshotId);
         expect(repoC.getLatestPublished("default")?.stale).toBe(false);
       } finally {
@@ -353,6 +355,9 @@ describe("IndexService — çoklu-süreç SQLite yarış kurtarması", { timeout
         clock: () => T1,
         limits: { maxFiles: 100 },
         tolerateConcurrentPublishRace: true,
+        // Async runs now wait for a live peer; bound the wait for this test.
+        peerPollIntervalMs: 20,
+        peerWaitTimeoutMs: 200,
       });
 
       // Dosya değiştirilir ve repoA sequence=2 için aktif bir 'building' satırı + canlı lease açar.
@@ -380,6 +385,7 @@ describe("IndexService — çoklu-süreç SQLite yarış kurtarması", { timeout
 
       const syncFallback = serviceB.runIndex(arena.workspaceDir);
       expect(syncFallback.published).toBe(false);
+      expect(syncFallback.outcome).toBe("peer_busy");
       expect(syncFallback.reused).toBe(true);
       expect(syncFallback.waitingForPeer).toBe(true);
       expect(syncFallback.peerStatus).toBe("waiting_for_peer");
@@ -391,6 +397,7 @@ describe("IndexService — çoklu-süreç SQLite yarış kurtarması", { timeout
 
       const asyncFallback = await serviceB.runIndexAsync(arena.workspaceDir);
       expect(asyncFallback.published).toBe(false);
+      expect(asyncFallback.outcome).toBe("peer_busy");
       expect(asyncFallback.waitingForPeer).toBe(true);
       expect(asyncFallback.peerStatus).toBe("waiting_for_peer");
       expect(asyncFallback.snapshotId).toBe(initial.snapshotId);
@@ -398,6 +405,7 @@ describe("IndexService — çoklu-süreç SQLite yarış kurtarması", { timeout
 
       const incFallback = await serviceB.runIncrementalIndexAsync(arena.workspaceDir);
       expect(incFallback.published).toBe(false);
+      expect(incFallback.outcome).toBe("peer_busy");
       expect(incFallback.waitingForPeer).toBe(true);
       expect(incFallback.peerStatus).toBe("waiting_for_peer");
       expect(incFallback.snapshotId).toBe(initial.snapshotId);

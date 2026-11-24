@@ -19,7 +19,12 @@ import { fileURLToPath } from "node:url";
 import { sha256Hex, utf8Encode } from "@causoryn/domain";
 import type { GraphRepository, SymbolSearchStore } from "@causoryn/graph";
 import type { IndexJobManager, IndexService } from "@causoryn/indexing";
-import type { SqliteWikiStore } from "@causoryn/storage-sqlite";
+import {
+  migrateLegacyWorkspaceDatabase,
+  readSqliteUserVersion,
+  SCHEMA_VERSION as STORAGE_SCHEMA_VERSION,
+  type SqliteWikiStore,
+} from "@causoryn/storage-sqlite";
 import type { WikiSearchStore } from "@causoryn/wiki";
 import {
   isUncOrDevicePath,
@@ -132,7 +137,7 @@ const SAFE_CLIENT_ID_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$/;
 export function parseMcpCliArgs(argv: readonly string[]): ParsedMcpCliArgs {
   for (const token of argv) {
     if (token.includes("\0")) {
-      throw new McpCliUsageError("CLI argümanları null byte içeremez");
+      throw new McpCliUsageError("CLI arguments must not contain a NUL byte");
     }
   }
 
@@ -161,13 +166,13 @@ export function parseMcpCliArgs(argv: readonly string[]): ParsedMcpCliArgs {
   const readRequiredValue = (flag: string, inlineValue: string | undefined): string => {
     if (inlineValue !== undefined) {
       if (inlineValue.trim().length === 0) {
-        throw new McpCliUsageError(`${flag} bayrağı boş değer alamaz`);
+        throw new McpCliUsageError(`${flag} must not have an empty value`);
       }
       return inlineValue;
     }
     const next = argv[index + 1];
     if (next === undefined || next.trim().length === 0 || KNOWN_FLAGS.has(next)) {
-      throw new McpCliUsageError(`${flag} bayrağı bir değer gerektirir`);
+      throw new McpCliUsageError(`${flag} requires a value`);
     }
     index += 1;
     return next;
@@ -176,7 +181,7 @@ export function parseMcpCliArgs(argv: readonly string[]): ParsedMcpCliArgs {
   for (; index < argv.length; index += 1) {
     const rawToken = argv[index] as string;
     if (!rawToken.startsWith("--")) {
-      throw new McpCliUsageError(`Beklenmeyen konumsal argüman veya bayrak: ${rawToken}`);
+      throw new McpCliUsageError(`Unexpected positional argument or flag: ${rawToken}`);
     }
 
     const eqPos = rawToken.indexOf("=");
@@ -186,14 +191,14 @@ export function parseMcpCliArgs(argv: readonly string[]): ParsedMcpCliArgs {
     switch (flag) {
       case "--allow-cwd": {
         if (inlineValue !== undefined) {
-          throw new McpCliUsageError("--allow-cwd bayrağı değer almaz");
+          throw new McpCliUsageError("--allow-cwd does not take a value");
         }
         allowCwd = true;
         break;
       }
       case "--auto-data-dir": {
         if (inlineValue !== undefined) {
-          throw new McpCliUsageError("--auto-data-dir bayrağı değer almaz");
+          throw new McpCliUsageError("--auto-data-dir does not take a value");
         }
         autoDataDir = true;
         break;
@@ -213,7 +218,7 @@ export function parseMcpCliArgs(argv: readonly string[]): ParsedMcpCliArgs {
         const clientValue = readRequiredValue("--client", inlineValue);
         if (!SAFE_CLIENT_ID_PATTERN.test(clientValue)) {
           throw new McpCliUsageError(
-            `Geçersiz --client kimliği (yalnızca alfasayısal, '.', '_', '-' karakterleri): ${clientValue}`,
+            `Invalid --client id (only alphanumerics, '.', '_' and '-' are allowed): ${clientValue}`,
           );
         }
         client = clientValue;
@@ -790,7 +795,7 @@ export function inspectProjectRootSafety(
   options: SafeProjectRootOptions = {},
 ): ProjectRootSafetyResult {
   if (candidatePath.trim().length === 0 || candidatePath.includes("\0")) {
-    return { safe: false, reason: "boş veya geçersiz yol" };
+    return { safe: false, reason: "empty or invalid path" };
   }
 
   // Lexical UNC / Win32 device path pre-check BEFORE any filesystem syscall
@@ -808,15 +813,15 @@ export function inspectProjectRootSafety(
   try {
     real = stripWin32DevicePrefix(realpathSync(lexicalCandidate));
     if (!statSync(real).isDirectory()) {
-      return { safe: false, reason: `dizin değil: ${real}` };
+      return { safe: false, reason: `not a directory: ${real}` };
     }
   } catch {
-    return { safe: false, reason: `çözümlenemeyen dizin: ${candidatePath}` };
+    return { safe: false, reason: `unresolvable directory: ${candidatePath}` };
   }
 
   // 1) Dosya sistemi kökleri (/, C:\, D:\ vb.)
   if (path.dirname(real) === real || path.parse(real).root === real) {
-    return { safe: false, reason: `dosya sistemi kökü reddedildi: ${real}` };
+    return { safe: false, reason: `filesystem root rejected: ${real}` };
   }
 
   // 2) Kullanıcı ev dizini ($HOME) ve tüm üst ataları (ör. /home, /Users, C:\Users)
@@ -824,7 +829,7 @@ export function inspectProjectRootSafety(
   if (rawHome.trim().length > 0 && !isUncOrDevicePath(rawHome)) {
     const realHome = resolveRealOrLexical(rawHome);
     if (isSameComparablePath(real, rawHome) || isSameComparablePath(real, realHome)) {
-      return { safe: false, reason: `kullanıcı ev dizini ($HOME) reddedildi: ${real}` };
+      return { safe: false, reason: `user home directory ($HOME) rejected: ${real}` };
     }
     if (
       isSameOrInsideComparable(rawHome, real) ||
@@ -850,7 +855,7 @@ export function inspectProjectRootSafety(
       isSameOrInsideComparable(real, rawDataDir) ||
       isSameOrInsideComparable(real, realDataDir)
     ) {
-      return { safe: false, reason: `Causoryn veri dizini reddedildi: ${real}` };
+      return { safe: false, reason: `Causoryn data directory rejected: ${real}` };
     }
   }
 
@@ -913,15 +918,15 @@ export function resolveBaseDataDir(options: {
   const explicitDataDir = options.dataDir?.trim();
   if (explicitDataDir !== undefined && explicitDataDir.length > 0) {
     if (explicitDataDir.includes("\0")) {
-      throw new CausorynConfigError(["--data-dir null byte içeremez"]);
+      throw new CausorynConfigError(["--data-dir must not contain a NUL byte"]);
     }
     if (isUncOrDevicePath(explicitDataDir)) {
       throw new CausorynConfigError([
-        `--data-dir UNC veya Win32 cihaz yolu olamaz: ${explicitDataDir}`,
+        `--data-dir must not be a UNC or Win32 device path: ${explicitDataDir}`,
       ]);
     }
     if (!path.isAbsolute(explicitDataDir)) {
-      throw new CausorynConfigError([`--data-dir mutlak yol olmalı: ${explicitDataDir}`]);
+      throw new CausorynConfigError([`--data-dir must be an absolute path: ${explicitDataDir}`]);
     }
     return path.resolve(explicitDataDir);
   }
@@ -930,16 +935,16 @@ export function resolveBaseDataDir(options: {
   const zcodeDataDir = env["ZCODE_PLUGIN_DATA"]?.trim();
   if (zcodeDataDir !== undefined && zcodeDataDir.length > 0) {
     if (zcodeDataDir.includes("\0")) {
-      throw new CausorynConfigError(["ZCODE_PLUGIN_DATA null byte içeremez"]);
+      throw new CausorynConfigError(["ZCODE_PLUGIN_DATA must not contain a NUL byte"]);
     }
     if (isUncOrDevicePath(zcodeDataDir)) {
       throw new CausorynConfigError([
-        `ZCODE_PLUGIN_DATA UNC veya Win32 cihaz yolu olamaz: ${zcodeDataDir}`,
+        `ZCODE_PLUGIN_DATA must not be a UNC or Win32 device path: ${zcodeDataDir}`,
       ]);
     }
     if (!path.isAbsolute(zcodeDataDir)) {
       throw new CausorynConfigError([
-        `ZCODE_PLUGIN_DATA mutlak yol olmalı: ${zcodeDataDir}`,
+        `ZCODE_PLUGIN_DATA must be an absolute path: ${zcodeDataDir}`,
       ]);
     }
     return path.resolve(zcodeDataDir);
@@ -948,7 +953,7 @@ export function resolveBaseDataDir(options: {
   const homeDir = options.homeDir ?? os.homedir();
   if (isUncOrDevicePath(homeDir)) {
     throw new CausorynConfigError([
-      `homeDir UNC veya Win32 cihaz yolu olamaz: ${homeDir}`,
+      `homeDir must not be a UNC or Win32 device path: ${homeDir}`,
     ]);
   }
   return path.resolve(homeDir, ".causoryn");
@@ -998,7 +1003,7 @@ function assertStrictlyOutsideWorkspaceRoots(
         isSameOrInsideComparable(realTarget, canonicalRoot)
       ) {
         throw new CausorynConfigError([
-          `otomatik veri dizini yetkili workspace kökünün içinde olamaz (ADR-008): ${target}`,
+          `the automatic data directory must not be inside an authorized workspace root: ${target}`,
         ]);
       }
     }
@@ -1010,19 +1015,19 @@ function assertNotSymlinkDirectory(targetDir: string): void {
     const st = lstatSync(targetDir);
     if (st.isSymbolicLink()) {
       throw new CausorynConfigError([
-        `veri dizini sembolik bağ olamaz (CWE-59): ${targetDir}`,
+        `the data directory must not be a symbolic link (CWE-59): ${targetDir}`,
       ]);
     }
     if (!st.isDirectory()) {
       throw new CausorynConfigError([
-        `veri dizini bir dizin değil: ${targetDir}`,
+        `the data directory path is not a directory: ${targetDir}`,
       ]);
     }
   } catch (error) {
     if (error instanceof CausorynConfigError) throw error;
     if ((error as NodeJS.ErrnoException | undefined)?.code !== "ENOENT") {
       throw new CausorynConfigError([
-        `veri dizini durumu doğrulanamadı: ${targetDir}`,
+        `the data directory status could not be verified: ${targetDir}`,
       ]);
     }
   }
@@ -1069,18 +1074,18 @@ function assertDataDirAncestorsSafe(
         continue;
       }
       throw new CausorynConfigError([
-        `veri dizini üst yolu doğrulanamadı: ${prefix}`,
+        `a data directory ancestor could not be verified: ${prefix}`,
       ]);
     }
 
     if (st.isSymbolicLink() && !isMacOsSystemFirmlinkPrefix(prefix)) {
       throw new CausorynConfigError([
-        `veri dizini veya üst dizini sembolik bağ olamaz (CWE-59): ${prefix}`,
+        `the data directory or an ancestor must not be a symbolic link (CWE-59): ${prefix}`,
       ]);
     }
     if (!st.isSymbolicLink() && !st.isDirectory()) {
       throw new CausorynConfigError([
-        `veri dizini veya üst yolu bir dizin değil: ${prefix}`,
+        `the data directory or an ancestor path is not a directory: ${prefix}`,
       ]);
     }
 
@@ -1089,7 +1094,7 @@ function assertDataDirAncestorsSafe(
       realPrefix = stripWin32DevicePrefix(realpathSync(prefix));
     } catch {
       throw new CausorynConfigError([
-        `veri dizini üst yolunun gerçek konumu çözümlenemedi (dangling symlink / CWE-59): ${prefix}`,
+        `the real location of a data directory ancestor could not be resolved (dangling symlink / CWE-59): ${prefix}`,
       ]);
     }
 
@@ -1101,7 +1106,7 @@ function assertDataDirAncestorsSafe(
         isSameOrInsideComparable(realPrefix, canonicalRoot)
       ) {
         throw new CausorynConfigError([
-          `otomatik veri dizini yetkili workspace kökünün içinde olamaz (ADR-008): ${targetDir}`,
+          `the automatic data directory must not be inside an authorized workspace root: ${targetDir}`,
         ]);
       }
     }
@@ -1135,6 +1140,103 @@ export interface WorkspaceAutoConfigOptions {
   readonly rawBaseConfig?: unknown;
   readonly homeDir?: string;
   readonly env?: NodeJS.ProcessEnv;
+  /** stderr logger for data-dir notices (default `console.error`). */
+  readonly logger?: (message: string) => void;
+}
+
+/** Shared per-workspace database file used by every MCP host client. */
+export const SHARED_WORKSPACE_DB_FILE = "graph.sqlite";
+
+/**
+ * Version-specific fallback database file name. Used when the shared
+ * `graph.sqlite` was stamped by a NEWER schema than this build supports, so
+ * two different schema versions never write the same file.
+ */
+export function versionedWorkspaceDbFileName(
+  schemaVersion: number = STORAGE_SCHEMA_VERSION,
+): string {
+  return `graph.schema-${String(schemaVersion)}.sqlite`;
+}
+
+/**
+ * Picks the database file inside an (already validated) workspace data dir:
+ * the shared `graph.sqlite`, unless its `user_version` is newer than this
+ * build's schema, in which case `graph.schema-<N>.sqlite` (N = this build's
+ * schema version) is used and one stderr warning is logged. The probe opens
+ * the file read-only and never creates, migrates or writes it.
+ */
+export function selectWorkspaceDbPath(
+  workspaceDataDir: string,
+  logger: (message: string) => void = (message) => {
+    console.error(message);
+  },
+): string {
+  const shared = path.join(workspaceDataDir, SHARED_WORKSPACE_DB_FILE);
+  try {
+    const st = lstatSync(shared);
+    if (!st.isFile()) {
+      // Symlinks / non-files are rejected later by validateDataDbPath.
+      return shared;
+    }
+  } catch {
+    return shared;
+  }
+  let version: number | undefined;
+  try {
+    version = readSqliteUserVersion(shared);
+  } catch {
+    // Unreadable/corrupt: keep the shared path; opening it fails loudly later.
+    return shared;
+  }
+  if (version !== undefined && version > STORAGE_SCHEMA_VERSION) {
+    const fallback = path.join(workspaceDataDir, versionedWorkspaceDbFileName());
+    logger(
+      `[causoryn] ${shared} uses schema v${String(version)}, newer than this Causoryn build supports (v${String(STORAGE_SCHEMA_VERSION)}); using ${fallback} instead so different schema versions never write the same file`,
+    );
+    return fallback;
+  }
+  return shared;
+}
+
+/**
+ * One-time migration of legacy per-client databases (`graph-<client>.sqlite`,
+ * used up to v0.2.4) into the shared `graph.sqlite` before any connection is
+ * opened. Only applies when the configured storage DB is the shared file and
+ * it does not exist yet. Never throws: failures are logged and startup
+ * continues with a fresh shared database. Legacy files are left in place.
+ */
+export async function prepareWorkspaceDatabase(
+  config: CausorynServerConfig,
+  options: { readonly logger?: (message: string) => void } = {},
+): Promise<void> {
+  const log =
+    options.logger ??
+    ((message: string): void => {
+      console.error(message);
+    });
+  const dbPath = config.storage.dataDbPath;
+  if (dbPath === undefined || path.basename(dbPath) !== SHARED_WORKSPACE_DB_FILE) {
+    return;
+  }
+  try {
+    const result = await migrateLegacyWorkspaceDatabase(dbPath);
+    if (result.migrated) {
+      log(
+        `[causoryn] migrated legacy database ${path.basename(result.source)} (schema v${String(result.sourceSchemaVersion)}) into ${result.target}; legacy files were left in place`,
+      );
+    } else if (result.reason === "no-valid-legacy-file") {
+      const rejected = result.candidates
+        .map((candidate) => `${path.basename(candidate.path)}: ${candidate.reason ?? "invalid"}`)
+        .join("; ");
+      log(
+        `[causoryn] legacy per-client databases found but none could be migrated (${rejected}); starting with a fresh ${SHARED_WORKSPACE_DB_FILE}`,
+      );
+    }
+  } catch (error) {
+    log(
+      `[causoryn] legacy database migration failed: ${error instanceof Error ? error.message : String(error)}; starting with a fresh ${SHARED_WORKSPACE_DB_FILE}`,
+    );
+  }
 }
 
 /**
@@ -1168,7 +1270,7 @@ export function buildWorkspaceAutoConfig(
   for (const rawRoot of rawRoots) {
     if (isUncOrDevicePath(rawRoot) || isUncOrDevicePath(rawRoot.trim())) {
       throw new CausorynConfigError([
-        `allowRoot UNC veya Win32 cihaz yolu olamaz: ${rawRoot}`,
+        `allowRoot must not be a UNC or Win32 device path: ${rawRoot}`,
       ]);
     }
   }
@@ -1179,7 +1281,7 @@ export function buildWorkspaceAutoConfig(
   for (const resolvedRoot of effectiveRoots) {
     if (isUncOrDevicePath(resolvedRoot)) {
       throw new CausorynConfigError([
-        `allowRoot UNC veya Win32 cihaz yolu olamaz: ${resolvedRoot}`,
+        `allowRoot must not be a UNC or Win32 device path: ${resolvedRoot}`,
       ]);
     }
   }
@@ -1208,24 +1310,24 @@ export function buildWorkspaceAutoConfig(
 
   if (options.client !== undefined && !SAFE_CLIENT_ID_PATTERN.test(options.client)) {
     throw new CausorynConfigError([
-      `geçersiz client kimliği: ${options.client}`,
+      `invalid client id: ${options.client}`,
     ]);
   }
 
   const canonicalRoots: string[] = effectiveRoots.map((root) => {
     if (isUncOrDevicePath(root) || !path.isAbsolute(root) || root.includes("\0")) {
-      throw new CausorynConfigError([`allowRoot geçersiz veya mutlak yol değil: ${root}`]);
+      throw new CausorynConfigError([`allowRoot is invalid or not an absolute path: ${root}`]);
     }
     try {
       const resolved = stripWin32DevicePrefix(realpathSync(path.resolve(root)));
       if (!statSync(resolved).isDirectory()) {
-        throw new CausorynConfigError([`allowRoot bir dizin değil: ${root}`]);
+        throw new CausorynConfigError([`allowRoot is not a directory: ${root}`]);
       }
       return resolved;
     } catch (error) {
       if (error instanceof CausorynConfigError) throw error;
       throw new CausorynConfigError([
-        `allowRoot gerçek yolu çözümlenemedi: ${root}`,
+        `allowRoot real path could not be resolved: ${root}`,
       ]);
     }
   });
@@ -1244,13 +1346,13 @@ export function buildWorkspaceAutoConfig(
   const exportsDir = path.join(workspaceDataDir, "exports");
   // Single shared workspace SQLite database across all MCP host clients;
   // `options.client` is preserved strictly as a diagnostic/host label.
-  const dbPath = path.join(workspaceDataDir, "graph.sqlite");
+  const sharedDbPath = path.join(workspaceDataDir, SHARED_WORKSPACE_DB_FILE);
 
   // Yazmadan ÖNCE hem sözcüksel hem gerçek-ata yollarının workspace dışında
   // kaldığını ve hiçbir önek/ata dizinin sembolik/dangling bağ olmadığını
   // doğrula (ADR-008 + CWE-59: kaynak ağaca tek klasör bile açılamaz).
   assertStrictlyOutsideWorkspaceRoots(
-    [baseDataDir, workspacesDir, workspaceDataDir, exportsDir, dbPath],
+    [baseDataDir, workspacesDir, workspaceDataDir, exportsDir, sharedDbPath],
     effectiveRoots,
     canonicalRoots,
   );
@@ -1279,6 +1381,10 @@ export function buildWorkspaceAutoConfig(
     effectiveRoots,
     canonicalRoots,
   );
+
+  // Schema forward guard (Task 1.7 criterion 4): never share a file with a
+  // newer schema version; fall back to graph.schema-<N>.sqlite instead.
+  const dbPath = selectWorkspaceDbPath(workspaceDataDir, options.logger);
 
   const baseStorage = isPlainObject(rawBase["storage"]) ? rawBase["storage"] : {};
   const baseWiki = isPlainObject(rawBase["wiki"]) ? rawBase["wiki"] : {};
@@ -1392,7 +1498,7 @@ export function createDynamicCausorynContext(
         previous.close();
       } catch (error) {
         active.logger(
-          `[causoryn] önceki bağlam kapatılamadı: ${error instanceof Error ? error.message : String(error)}`,
+          `[causoryn] could not close the previous context: ${error instanceof Error ? error.message : String(error)}`,
         );
       }
     },
@@ -1490,8 +1596,8 @@ export function attachMcpRootsWorkspaceBinder(
     ...(options.env !== undefined ? { env: options.env } : {}),
   };
 
-  const rebindRoot = (canonicalRoot: string | null): void => {
-    const nextConfig = buildWorkspaceAutoConfig({
+  const buildRootConfig = (canonicalRoot: string | null): CausorynServerConfig =>
+    buildWorkspaceAutoConfig({
       roots: canonicalRoot === null ? [] : [canonicalRoot],
       autoDataDir: options.autoDataDir ?? false,
       ...(options.dataDir !== undefined ? { dataDir: options.dataDir } : {}),
@@ -1499,12 +1605,24 @@ export function attachMcpRootsWorkspaceBinder(
       ...(options.rawBaseConfig !== undefined ? { rawBaseConfig: options.rawBaseConfig } : {}),
       ...(options.homeDir !== undefined ? { homeDir: options.homeDir } : {}),
       ...(options.env !== undefined ? { env: options.env } : {}),
+      logger: log,
     });
+  const bindConfig = (nextConfig: CausorynServerConfig): void => {
     const nextContext = createCausorynContext(nextConfig, {
       deferAutoIndex: true,
+      ...(options.client === undefined ? {} : { hostLabel: options.client }),
       ...effectiveContextOverrides,
     });
     dynamicContext.rebind(nextContext);
+  };
+  const rebindRoot = (canonicalRoot: string | null): void => {
+    bindConfig(buildRootConfig(canonicalRoot));
+  };
+  /** Async rebind: migrates legacy per-client DBs before opening the shared DB. */
+  const rebindRootAsync = async (canonicalRoot: string | null): Promise<void> => {
+    const nextConfig = buildRootConfig(canonicalRoot);
+    await prepareWorkspaceDatabase(nextConfig, { logger: log });
+    bindConfig(nextConfig);
   };
 
   let currentBoundRoot: string | null =
@@ -1521,11 +1639,11 @@ export function attachMcpRootsWorkspaceBinder(
       initialSyncDone = true;
       const clientTag = options.client !== undefined ? `, client=${options.client}` : "";
       log(
-        `[causoryn] --allow-cwd ile güvenli çalışma alanı bağlandı: ${cwdCheck.canonicalRoot} (workspaceId=${dynamicContext.config.workspaceId}${clientTag})`,
+        `[causoryn] bound safe workspace via --allow-cwd: ${cwdCheck.canonicalRoot} (workspaceId=${dynamicContext.config.workspaceId}${clientTag})`,
       );
     } else {
       log(
-        `[causoryn] --allow-cwd reddedildi (${cwdCheck.reason}); allowRoots: [] ile başlanıyor, MCP roots/list bekleniyor`,
+        `[causoryn] --allow-cwd rejected (${cwdCheck.reason}); starting with allowRoots: [] and waiting for MCP roots/list`,
       );
     }
   }
@@ -1560,7 +1678,7 @@ export function attachMcpRootsWorkspaceBinder(
       listedRoots = response.roots;
     } catch (error) {
       log(
-        `[causoryn] MCP roots/list alınamadı: ${error instanceof Error ? error.message : String(error)}`,
+        `[causoryn] could not fetch MCP roots/list: ${error instanceof Error ? error.message : String(error)}`,
       );
       return true;
     }
@@ -1571,7 +1689,7 @@ export function attachMcpRootsWorkspaceBinder(
       if (localPath === null) continue;
       const safety = inspectProjectRootSafety(localPath, safetyOptions);
       if (!safety.safe) {
-        log(`[causoryn] MCP root adayı atlandı (${safety.reason}): ${entry.uri}`);
+        log(`[causoryn] skipped MCP root candidate (${safety.reason}): ${entry.uri}`);
         continue;
       }
       selectedRoot = safety.canonicalRoot;
@@ -1583,10 +1701,10 @@ export function attachMcpRootsWorkspaceBinder(
         try {
           rebindRoot(null);
           currentBoundRoot = null;
-          log("[causoryn] MCP roots/list güvenli kök içermiyor; allowRoots: [] durumuna dönüldü");
+          log("[causoryn] MCP roots/list contains no safe root; reverted to allowRoots: []");
         } catch (error) {
           log(
-            `[causoryn] boş bağlama dönüş başarısız: ${error instanceof Error ? error.message : String(error)}`,
+            `[causoryn] reverting to an empty binding failed: ${error instanceof Error ? error.message : String(error)}`,
           );
         }
       }
@@ -1598,15 +1716,15 @@ export function attachMcpRootsWorkspaceBinder(
     }
 
     try {
-      rebindRoot(selectedRoot);
+      await rebindRootAsync(selectedRoot);
       currentBoundRoot = selectedRoot;
       const clientTag = options.client !== undefined ? `, client=${options.client}` : "";
       log(
-        `[causoryn] MCP roots/list ile çalışma alanı bağlandı: ${selectedRoot} (workspaceId=${dynamicContext.config.workspaceId}${clientTag})`,
+        `[causoryn] bound workspace via MCP roots/list: ${selectedRoot} (workspaceId=${dynamicContext.config.workspaceId}${clientTag})`,
       );
     } catch (error) {
       log(
-        `[causoryn] MCP roots/list çalışma alanı bağlanamadı (${selectedRoot}): ${error instanceof Error ? error.message : String(error)}`,
+        `[causoryn] could not bind the MCP roots/list workspace (${selectedRoot}): ${error instanceof Error ? error.message : String(error)}`,
       );
     }
     return true;

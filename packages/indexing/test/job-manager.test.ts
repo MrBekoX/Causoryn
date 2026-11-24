@@ -227,10 +227,18 @@ describe("IndexJobManager — refresh_index iş yönetimi (sprint-2 B6)", () => 
 
       for (const task of harness.tasks.splice(0)) task();
       const done = await harness.manager.waitForJob(incremental.jobId);
-      expect(done.status).toBe("done");
+      // Fixture unchanged: the incremental hash comparison is a no-op and the
+      // current snapshot is kept. A job that published nothing is never
+      // reported `done` (Task 1.7 criterion 5): it ends `reused` / `unchanged`.
+      expect(done.status).toBe("reused");
+      expect(done.outcome).toBe("unchanged");
+      expect(done.published).toBe(false);
+      expect(done.progress.message).toBe(
+        `No changes; snapshot ${String(fullDone.snapshotId)} is current`,
+      );
+      expect(fullDone.status).toBe("done");
+      expect(fullDone.outcome).toBe("published");
       expect(done.mode).toBe("incremental");
-      // Fixture değişmedi: incremental karma karşılaştırması no-op verir,
-      // mevcut snapshot korunur (IndexService unit testleri ayrıca kanıtlar).
       expect(done.snapshotId).toBe(fullDone.snapshotId);
       expect(harness.manager.jobs().map((job) => job.jobId)).toEqual([
         full.jobId,

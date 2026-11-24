@@ -312,7 +312,7 @@ export class WorkspaceWatcher {
       debounceMs > WATCHER_DEBOUNCE_MAX_MS
     ) {
       throw new RangeError(
-        `debounceMs TŞ §9 bandında olmalı: [${String(WATCHER_DEBOUNCE_MIN_MS)}, ${String(WATCHER_DEBOUNCE_MAX_MS)}] ms tam sayı; gelen: ${String(debounceMs)}`,
+        `debounceMs must be an integer within [${String(WATCHER_DEBOUNCE_MIN_MS)}, ${String(WATCHER_DEBOUNCE_MAX_MS)}] ms; received: ${String(debounceMs)}`,
       );
     }
     const maxWaitMs =
@@ -323,7 +323,7 @@ export class WorkspaceWatcher {
       maxWaitMs > WATCHER_MAX_WAIT_MAX_MS
     ) {
       throw new RangeError(
-        `maxWaitMs tam sayı olmalı ve [debounceMs, ${String(WATCHER_MAX_WAIT_MAX_MS)}] aralığında olmalı (≥ ${String(debounceMs)}); gelen: ${String(maxWaitMs)}`,
+        `maxWaitMs must be an integer within [debounceMs, ${String(WATCHER_MAX_WAIT_MAX_MS)}] (>= ${String(debounceMs)}); received: ${String(maxWaitMs)}`,
       );
     }
     this.rootPath = options.rootPath;
@@ -393,13 +393,13 @@ export class WorkspaceWatcher {
    */
   start(): void {
     if (this.watcherState !== "stopped") {
-      throw new Error(`WorkspaceWatcher zaten ${this.watcherState} durumunda; önce stop() çağırın`);
+      throw new Error(`WorkspaceWatcher is already ${this.watcherState}; call stop() first`);
     }
     const decision = this.policy.authorizeRoot(this.rootPath);
     if (!decision.allowed) {
       throw new IndexingError(
         "indexing/root-not-authorized",
-        `izlenecek kök yetkilendirilmedi (${decision.code}): ${decision.reason}`,
+        `root to watch is not authorized (${decision.code}): ${decision.reason}`,
       );
     }
     this.canonicalRoot = decision.canonicalRoot;
@@ -416,7 +416,7 @@ export class WorkspaceWatcher {
     handle.on("error", (error) => this.handleWatcherError(error));
     this.handle = handle;
     this.watcherState = "watching";
-    this.safeLog(`[${this.clock()}] [causoryn-watch] izleme başladı: ${this.canonicalRoot} (debounce ${String(this.debounceMs)} ms)`);
+    this.safeLog(`[${this.clock()}] [causoryn-watch] watching started: ${this.canonicalRoot} (debounce ${String(this.debounceMs)} ms)`);
   }
 
   /**
@@ -432,7 +432,7 @@ export class WorkspaceWatcher {
       try {
         this.handle.close();
       } catch (error) {
-        this.safeLog(`[${this.clock()}] [causoryn-watch] close hatası (yok sayıldı): ${error instanceof Error ? error.message : String(error)}`);
+        this.safeLog(`[${this.clock()}] [causoryn-watch] close error (ignored): ${error instanceof Error ? error.message : String(error)}`);
       }
       this.handle = undefined;
     }
@@ -474,7 +474,7 @@ export class WorkspaceWatcher {
       this.scheduleDebounce();
     } catch (error) {
       this.errors += 1;
-      this.safeLog(`[${this.clock()}] [causoryn-watch] olay işleme hatası (olay düşürüldü, motor sürüyor): ${error instanceof Error ? error.message : String(error)}`);
+      this.safeLog(`[${this.clock()}] [causoryn-watch] event handling error (event dropped, engine keeps running): ${error instanceof Error ? error.message : String(error)}`);
     }
   }
 
@@ -522,7 +522,7 @@ export class WorkspaceWatcher {
       const skipped = candidates.length - changed.length;
       if (skipped > 0) this.noOpSkipped += skipped;
       if (changed.length === 0) {
-        this.safeLog(`[${this.clock()}] [causoryn-watch] debounce kümesinde içerik değişimi yok (no-op skip: ${String(skipped)})`);
+        this.safeLog(`[${this.clock()}] [causoryn-watch] no content change in the debounce batch (no-op skip: ${String(skipped)})`);
         return;
       }
       const mode = changed.some((entry) => isInvalidationTrigger(entry.relativePosix))
@@ -543,7 +543,7 @@ export class WorkspaceWatcher {
         // JobManager işi SERİ kuyrukta koşturur; watcher await ETMEZ.
         const job = this.jobManager.refreshIndex(this.rootPath, { mode, changeSet: changed.map((entry) => entry.relativePosix) });
         this.jobsEnqueued += 1;
-        this.safeLog(`[${this.clock()}] [causoryn-watch] ${mode} işi açıldı (${job.jobId}; ${String(changed.length)} yol)`);
+        this.safeLog(`[${this.clock()}] [causoryn-watch] ${mode} job queued (${job.jobId}; ${String(changed.length)} paths)`);
         this.trackJob(job.jobId, rollback);
       } catch (enqueueError) {
         // İş açılamadı: optimist yazımı geri al — aynı dosyanın sonraki
@@ -557,7 +557,7 @@ export class WorkspaceWatcher {
     } catch (error) {
       // refreshIndex reddi (ör. kök artık yetkili değil) motoru düşürmez.
       this.errors += 1;
-      this.safeLog(`[${this.clock()}] [causoryn-watch] flush hatası (motor sürüyor): ${error instanceof Error ? error.message : String(error)}`);
+      this.safeLog(`[${this.clock()}] [causoryn-watch] flush error (engine keeps running): ${error instanceof Error ? error.message : String(error)}`);
     }
   }
 
@@ -602,7 +602,7 @@ export class WorkspaceWatcher {
       // İzleme fingerprint'siz de çalışır (konservatif: her olay değişim);
       // hata motoru düşürmez.
       this.fingerprints = new Map();
-      this.safeLog(`[${this.clock()}] [causoryn-watch] fingerprint tohumlanamadı (konservatif mod): ${error instanceof Error ? error.message : String(error)}`);
+      this.safeLog(`[${this.clock()}] [causoryn-watch] could not seed fingerprints (conservative mode): ${error instanceof Error ? error.message : String(error)}`);
     }
   }
 
@@ -616,7 +616,9 @@ export class WorkspaceWatcher {
     this.jobManager
       .waitForJob(jobId)
       .then((record) => {
-        if (record.status === "done") {
+        // `done` (published) and `reused` (no new snapshot needed) both mean
+        // the indexed state matches; only `failed` rolls back.
+        if (record.status === "done" || record.status === "reused") {
           this.seedFingerprints();
           return;
         }
@@ -657,14 +659,14 @@ export class WorkspaceWatcher {
       this.handle = undefined;
     }
     this.watcherState = "degraded";
-    this.safeLog(`[${this.clock()}] [causoryn-watch] ${phase} hatası: ${error.message}; watcher degrade — motor etkilenmedi, reconciliation full işi açılıyor`);
+    this.safeLog(`[${this.clock()}] [causoryn-watch] ${phase} error: ${error.message}; watcher degraded (engine unaffected), queuing a full reconciliation job`);
     this.safeOnError(error);
     try {
       const job = this.jobManager.refreshIndex(this.rootPath, { mode: "full" });
       this.jobsEnqueued += 1;
       this.trackJob(job.jobId, new Map());
     } catch (enqueueError) {
-      this.safeLog(`[${this.clock()}] [causoryn-watch] reconciliation işi açılamadı: ${enqueueError instanceof Error ? enqueueError.message : String(enqueueError)}`);
+      this.safeLog(`[${this.clock()}] [causoryn-watch] could not queue the reconciliation job: ${enqueueError instanceof Error ? enqueueError.message : String(enqueueError)}`);
     }
   }
 }

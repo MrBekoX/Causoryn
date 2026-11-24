@@ -14,11 +14,11 @@ import {
 import { WorkspaceAccessPolicy } from "@causoryn/workspace";
 
 /**
- * Wave 1 Track C (Task 1.7 + SQLite CVE defense-in-depth) — TDD verification suite.
+ * Wave 1 Track C (Task 1.7) — TDD verification suite.
  *
  * Covers:
- * 1. Schema v3 + SQLite CVE defense-in-depth (PRAGMA page_size = 4096 on new DBs,
- *    PRAGMA busy_timeout = 5000, default FTS5 detail=full, v2 -> v3 migration).
+ * 1. Schema v5 (page_size is SQLite's default 4096 — not a security control;
+ *    busy_timeout = 5000, default FTS5 detail=full, v2 -> v5 migration).
  * 2. Orphan `building` row recovery:
  *    - Legacy v0.2.4 crash (building row with NO lease) + file edit -> recovers orphan,
  *      publishes a new snapshot, and clears `stale` to `false`.
@@ -68,15 +68,15 @@ function createTempWorkspace(): {
   };
 }
 
-describe("Task 1.7 — SQLite schema v4, CVE defense-in-depth, build leases & orphan recovery", { timeout: 30_000 }, () => {
-  it("new DB sets SCHEMA_VERSION=4, PRAGMA page_size=4096, busy_timeout=5000, build_leases table, and keeps symbol_fts detail=full", () => {
-    expect(SCHEMA_VERSION).toBe(4);
+describe("Task 1.7 — SQLite schema v5, build leases & orphan recovery", { timeout: 30_000 }, () => {
+  it("new DB sets SCHEMA_VERSION=5, default page_size=4096, busy_timeout=5000, build_leases table, and keeps symbol_fts detail=full", () => {
+    expect(SCHEMA_VERSION).toBe(5);
     const dbPath = path.join(tempRoot, "fresh.sqlite");
     const repo = new SqliteGraphRepository(dbPath);
     try {
       const probe = new Database(dbPath, { readonly: true });
       try {
-        expect(probe.pragma("user_version", { simple: true })).toBe(4);
+        expect(probe.pragma("user_version", { simple: true })).toBe(5);
         expect(probe.pragma("page_size", { simple: true })).toBe(4096);
         expect(probe.pragma("journal_mode", { simple: true })).toBe("wal");
 
@@ -401,10 +401,15 @@ describe("Task 1.7 — SQLite schema v4, CVE defense-in-depth, build leases & or
         limits: { maxFiles: 100 },
         tolerateConcurrentPublishRace: true,
         isPidAlive: () => true,
+        // Async runs now WAIT for a live peer (claim-before-analysis); bound
+        // the wait so this test observes the honest give-up result.
+        peerPollIntervalMs: 20,
+        peerWaitTimeoutMs: 200,
       });
       const deferred = await serviceB.runIndexAsync(workspaceDir);
 
       expect(deferred.published).toBe(false);
+      expect(deferred.outcome).toBe("peer_busy");
       expect(deferred.reused).toBe(true);
       expect(deferred.waitingForPeer).toBe(true);
       expect(deferred.peerStatus).toBe("waiting_for_peer");
