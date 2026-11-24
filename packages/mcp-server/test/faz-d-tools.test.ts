@@ -902,7 +902,7 @@ describe("causoryn_preflight_change", { timeout: 60_000 }, () => {
         // contractChecks bu dilimde türetilmez → dürüst limitation notu.
         expect(data.contractChecks).toEqual([]);
         expect(
-          limitations.some((note) => note.includes("sözleşme denetimi")),
+          limitations.some((note) => note.includes("contract check")),
         ).toBe(true);
       } finally {
         await pair.close();
@@ -928,7 +928,7 @@ describe("causoryn_preflight_change", { timeout: 60_000 }, () => {
       expect(candidates[0]?.target).toBe("NoSuchSymbolAnywhere");
       const limitations = data.limitations as string[];
       expect(
-        limitations.some((note) => note.includes("aday bulunamadı")),
+        limitations.some((note) => note.includes("no candidates found")),
         "adaysız hedef dürüst limitation taşır",
       ).toBe(true);
     } finally {

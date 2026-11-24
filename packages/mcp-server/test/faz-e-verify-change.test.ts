@@ -331,6 +331,7 @@ describe("causoryn_verify_change sprint kapısı", () => {
         // SPRINT KAPISI 1: not_run adaylı raporda "geçti" kelimesi YOK.
         const serialized = JSON.stringify(firstEnvelope.data);
         expect(serialized).not.toContain("geçti");
+        expect(serialized).not.toMatch(/\bpassed\b/i);
 
         // TŞ §10.4 alan sadakati (PDF s.11, sprint-6 takım denetimi
         // bulgusu): yayınlanan envelope gövdesi üst düzey bulgu alanını

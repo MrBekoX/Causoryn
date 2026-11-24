@@ -742,7 +742,7 @@ describe("causoryn_check_architecture", { timeout: 30_000 }, () => {
         expect(data.findings).toEqual([]);
         const summary = data.summary as Record<string, unknown>;
         expect(summary.findings).toBe(0);
-        expect((envelope.warnings as string[]).some((w) => w.includes("ihlal"))).toBe(true);
+        expect((envelope.warnings as string[]).some((w) => w.includes("no rule violations"))).toBe(true);
       } finally {
         await pair.close();
       }

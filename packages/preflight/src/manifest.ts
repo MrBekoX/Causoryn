@@ -260,7 +260,7 @@ function requireNonBlankString(field: string, value: unknown): string {
   if (typeof value !== "string" || value.trim().length === 0) {
     throw new PreflightError(
       "preflight/invalid-input",
-      `${field} boş/blank olamaz: ${String(value)}`,
+      `${field} must not be empty or blank: ${String(value)}`,
     );
   }
   return value;
@@ -276,12 +276,12 @@ function requireLimit(
   if (typeof requested !== "number" || !Number.isInteger(requested) || requested < 1) {
     throw new PreflightError(
       "preflight/invalid-input",
-      `${name} pozitif tam sayı olmalı: ${String(requested)}`,
+      `${name} must be a positive integer: ${String(requested)}`,
     );
   }
   if (requested > ceiling) {
     limitations.push(
-      `${name}=${String(requested)} istenen değeri tavana (${String(ceiling)}) indirildi (TŞ §20 resource budget)`,
+      `${name}=${String(requested)} exceeds the ceiling and was capped at ${String(ceiling)} (resource budget)`,
     );
     return ceiling;
   }
@@ -329,7 +329,7 @@ function disambiguationCandidates(
   const chosen = exact.length > 0 ? exact : suffix;
   if (chosen.length > cap) {
     limitations.push(
-      `aday listesi kırpıldı: "${target}" eşleşmesi ${String(chosen.length)} node buldu, tavan ${String(cap)}`,
+      `candidate list truncated: "${target}" matched ${String(chosen.length)} nodes; the cap is ${String(cap)}`,
     );
     return chosen.slice(0, cap);
   }
@@ -449,7 +449,7 @@ export function buildPreflightManifest(
   if (state !== "ready" && state !== "partial") {
     throw new PreflightError(
       "preflight/snapshot-state",
-      `preflight manifest yalnızca ready/partial snapshot üzerinde üretilir; snapshot durumu: ${String(state)}`,
+      `a preflight manifest can only be built on a ready or partial snapshot; snapshot state: ${String(state)}`,
     );
   }
 
@@ -465,14 +465,14 @@ export function buildPreflightManifest(
   if (rawSymbols.length === 0 && rawFiles.length === 0) {
     throw new PreflightError(
       "preflight/invalid-input",
-      "targetSymbols/targetFiles kümesi boş olamaz: en az bir sembol veya dosya hedefi gerekli",
+      "targetSymbols and targetFiles cannot both be empty: provide at least one symbol or file target",
     );
   }
   for (const target of rawSymbols) {
-    requireNonBlankString("targetSymbols üyesi", target);
+    requireNonBlankString("targetSymbols entry", target);
   }
   for (const file of rawFiles) {
-    requireNonBlankString("targetFiles üyesi", file);
+    requireNonBlankString("targetFiles entry", file);
   }
   const uniqueSymbols = [...new Set(rawSymbols)].sort(cmp);
   const uniqueFiles = [...new Set(rawFiles)].sort(cmp);
@@ -485,7 +485,7 @@ export function buildPreflightManifest(
     if (input.authorizeFile === undefined) {
       throw new PreflightError(
         "preflight/invalid-input",
-        "targetFiles istendi ama authorizeFile sağlanmadı: hedef dosyalar yetkilendirme kararı olmadan kullanılamaz (fail-closed)",
+        "targetFiles was given but authorizeFile was not provided: target files cannot be used without an authorization decision (fail-closed)",
       );
     }
     for (const file of uniqueFiles) {
@@ -493,7 +493,7 @@ export function buildPreflightManifest(
       if (!decision.allowed) {
         throw new PreflightError(
           "preflight/file-not-authorized",
-          `hedef dosya yetkilendirilmedi: ${file}` +
+          `target file not authorized: ${file}` +
             ` (${decision.code ?? "workspace/path-denied"})` +
             `${decision.reason === undefined ? "" : ` — ${decision.reason}`}`,
         );
@@ -527,7 +527,7 @@ export function buildPreflightManifest(
     const node = fileNodeByPath.get(authorized);
     if (node === undefined) {
       limitations.push(
-        `değişen dosya snapshot'ta yok: "${authorized}" — File node eşleşmedi; aday üretilemez (uydurma yok)`,
+        `changed file is not in the snapshot: "${authorized}" has no matching File node, so no candidates can be produced (nothing is guessed)`,
       );
     } else {
       matchedFileNodes.push(node);
@@ -604,7 +604,7 @@ export function buildPreflightManifest(
     });
     if (candidates.length === 0) {
       limitations.push(
-        `aday bulunamadı: "${unresolved.target}" sembole bağlanamadı; aday listesi boş — çözümleme otomatik yapılmaz (TŞ §10.3)`,
+        `no candidates found: "${unresolved.target}" could not be linked to a symbol; the candidate list is empty and nothing is resolved automatically`,
       );
     }
   }
@@ -617,7 +617,7 @@ export function buildPreflightManifest(
   const contractChecks: PreflightContractCheck[] = [];
   if (input.includeContracts === false) {
     limitations.push(
-      "sözleşme denetimi istenmedi (includeContracts=false); contractChecks boş bırakıldı",
+      "contract check not requested (includeContracts=false); contractChecks left empty",
     );
   } else {
     const seenChecks = new Set<string>();
@@ -629,7 +629,7 @@ export function buildPreflightManifest(
       ) {
         throw new PreflightError(
           "preflight/invalid-input",
-          `contractChecks.classification geçersiz (${contractId}): ${String(check.classification)}; beklenen değerler: backward-safe|risk|breaking_candidate|unknown`,
+          `contractChecks.classification is invalid (${contractId}): ${String(check.classification)}; expected one of: backward-safe|risk|breaking_candidate|unknown`,
         );
       }
       const classification = check.classification as PreflightContractClassification;
@@ -674,14 +674,14 @@ export function buildPreflightManifest(
     const requestedPlanId = requireNonBlankString("testPlanId", input.testPlanId);
     if (input.includeTestPlan === false) {
       limitations.push(
-        "testPlanId verildi ama includeTestPlan=false; test planı referansı manifest'e katılmadı",
+        "testPlanId was given but includeTestPlan=false; the test plan reference was not added to the manifest",
       );
     } else {
       testPlanId = requestedPlanId;
     }
   } else if (input.includeTestPlan === true) {
     limitations.push(
-      "testPlanId verilmedi: includeTestPlan=true iken test planı referansı (D6 deriveTestPlan çıktısı) manifest'e bağlanmadı",
+      "testPlanId not provided: includeTestPlan=true, but no test plan reference (deriveTestPlan output) is attached to the manifest",
     );
   }
 
@@ -694,20 +694,20 @@ export function buildPreflightManifest(
     if (revision.kind !== "working-tree") {
       throw new PreflightError(
         "preflight/invalid-input",
-        `sourceRevision.kind yalnızca "working-tree" olabilir: ${String(revision.kind)}`,
+        `sourceRevision.kind must be "working-tree": ${String(revision.kind)}`,
       );
     }
     const head = requireNonBlankString("sourceRevision.head", revision.head);
     if (!/^[0-9a-fA-F]{4,64}$/.test(head)) {
       throw new PreflightError(
         "preflight/invalid-input",
-        `sourceRevision.head git commit SHA'sı olmalı (4-64 hex): ${head}`,
+        `sourceRevision.head must be a git commit SHA (4-64 hex characters): ${head}`,
       );
     }
     if (typeof revision.dirty !== "undefined" && typeof revision.dirty !== "boolean") {
       throw new PreflightError(
         "preflight/invalid-input",
-        `sourceRevision.dirty boolean olmalı: ${String(revision.dirty)}`,
+        `sourceRevision.dirty must be a boolean: ${String(revision.dirty)}`,
       );
     }
     sourceRevision = {
@@ -717,14 +717,14 @@ export function buildPreflightManifest(
     };
   } else {
     limitations.push(
-      "sourceRevision verilmedi: git-read salt-okunur HEAD çözümlemesi bu manifest'e bağlanmadı",
+      "sourceRevision not provided: no read-only git HEAD resolution is attached to this manifest",
     );
   }
 
   // 14) limitations: host katkısı + çekirdek notları + impact rationale'leri;
   //     tekrarsız, kanonik sırada (determinizm).
   for (const note of input.limitations ?? []) {
-    limitations.push(requireNonBlankString("limitations üyesi", note));
+    limitations.push(requireNonBlankString("limitations entry", note));
   }
   limitations.push(...impact.rationales);
   const uniqueLimitations = [...new Set(limitations)].sort(cmp);

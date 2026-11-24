@@ -152,7 +152,7 @@ function invalid(message: string): VerificationError {
 
 function requireNonBlank(field: string, value: unknown): string {
   if (typeof value !== "string" || value.trim().length === 0) {
-    throw invalid(`${field} boş/blank olamaz: ${String(value)}`);
+    throw invalid(`${field} must not be empty or blank: ${String(value)}`);
   }
   return value;
 }
@@ -188,11 +188,11 @@ function assertSnapshotUsable(snapshot: SnapshotGraph, label: string): void {
   if (state !== "ready" && state !== "partial") {
     throw new VerificationError(
       "verification/snapshot-state",
-      `verify yalnızca ready/partial snapshot üzerinde çalışır (${label}); snapshot durumu: ${String(state)}`,
+      `verify only runs on a ready or partial snapshot (${label}); snapshot state: ${String(state)}`,
     );
   }
   if (typeof snapshot.meta?.id !== "string" || snapshot.meta.id.length === 0) {
-    throw invalid(`${label}.meta.id geçersiz: yayımlanmış snapshot kimliği zorunludur`);
+    throw invalid(`${label}.meta.id is invalid: a published snapshot ID is required`);
   }
 }
 
@@ -204,14 +204,14 @@ function normalizeChecks(checks: readonly VerifyCheckName[] | undefined): Verify
   if (checks === undefined) return [...VERIFY_CHECK_NAMES];
   if (!Array.isArray(checks) || checks.length === 0) {
     throw invalid(
-      "checks kümesi boş olamaz: en az bir denetim adı verin veya parametreyi hiç vermeyin (tümü)",
+      "checks must not be empty: name at least one check, or omit the parameter to run all checks",
     );
   }
   const seen = new Set<string>();
   for (const check of checks) {
     if (typeof check !== "string" || !KNOWN_CHECKS.has(check)) {
       throw invalid(
-        `bilinmeyen denetim adı: ${String(check)}; beklenen değerler: ${VERIFY_CHECK_NAMES.join(", ")}`,
+        `unknown check name: ${String(check)}; expected one of: ${VERIFY_CHECK_NAMES.join(", ")}`,
       );
     }
     seen.add(check);
@@ -237,17 +237,17 @@ function authorizeScopeFiles(
   if (files.length === 0) return [];
   if (authorizeFile === undefined) {
     throw invalid(
-      "kapsam dosyası verildi ama authorizeFile sağlanmadı: dosyalar yetkilendirme kararı olmadan kullanılamaz (fail-closed)",
+      "scope files were given but authorizeFile was not provided: files cannot be used without an authorization decision (fail-closed)",
     );
   }
   const authorized: string[] = [];
   for (const file of files) {
-    requireNonBlank("kapsam dosyası", file);
+    requireNonBlank("scope file", file);
     const decision = authorizeFile(file);
     if (!decision.allowed) {
       throw new VerificationError(
         "verification/file-not-authorized",
-        `kapsam dosyası yetkilendirilmedi: ${file}` +
+        `scope file not authorized: ${file}` +
           ` (${decision.code ?? "workspace/path-denied"})` +
           `${decision.reason === undefined ? "" : ` — ${decision.reason}`}`,
       );
@@ -282,7 +282,7 @@ function normalizeObservedRun(
   if (!parsed.success) {
     throw new VerificationError(
       "verification/invalid-input",
-      `observedTestRun doğrulanamadı (E3 dürüstlük şeması — kanıtsız koşum iddiası kabul edilmez): ${formatZodIssues(parsed.error.issues)}`,
+      `observedTestRun failed validation (a test run claim without evidence is not accepted): ${formatZodIssues(parsed.error.issues)}`,
     );
   }
   const data = parsed.data;
@@ -335,7 +335,7 @@ function assertTestStatusSchema(status: VerifyTestStatus): void {
   const parsed = TEST_RUN_STATUS_SCHEMA.safeParse(status);
   if (!parsed.success) {
     throw invalid(
-      `tests koşum durumu E3 şemasını ihlal ediyor (dahili invariant): ${formatZodIssues(parsed.error.issues)}`,
+      `test run status violates the test status schema (internal invariant):${formatZodIssues(parsed.error.issues)}`,
     );
   }
 }
@@ -374,7 +374,7 @@ function toContentSet(snapshot: SnapshotGraph): CompareContentSet {
     const to = nodeById.get(edge.to);
     if (from === undefined || to === undefined) {
       throw invalid(
-        `snapshot kenarı içerik kümesinde çözülemedi (dangling; bozuk snapshot): ${edge.id}`,
+        `snapshot edge could not be resolved in the content set (dangling edge; corrupt snapshot): ${edge.id}`,
       );
     }
     return {
@@ -402,13 +402,13 @@ function assertDriftResult(drift: ContractDriftResult): void {
   for (const field of arrayFields) {
     if (!Array.isArray(drift[field])) {
       throw invalid(
-        `contractDrift D3 çıktısı doğrulanamadı: ${field} dizisi zorunludur (detectContractDrift çıktısı beklenir)`,
+        `contractDrift input failed validation: the ${field} array is required (expects detectContractDrift output)`,
       );
     }
   }
   if (!Array.isArray(drift.rationale)) {
     throw invalid(
-      "contractDrift D3 çıktısı doğrulanamadı: rationale dizisi zorunludur",
+      "contractDrift input failed validation: the rationale array is required",
     );
   }
 }
@@ -475,25 +475,25 @@ export function verifyChange(input: VerifyChangeInput): VerificationReport {
     requireNonBlank("preflightId", input.preflightId);
     if (input.changedSymbols !== undefined || input.changedFiles !== undefined) {
       throw invalid(
-        "preflightId ile changedSymbols/changedFiles birlikte verilmez (TŞ §10.2 'changeSet/preflightId?' — tam birini verin)",
+        "preflightId cannot be combined with changedSymbols/changedFiles; provide exactly one of them",
       );
     }
     if (input.resolvePreflight === undefined) {
       throw new VerificationError(
         "verification/preflight-not-found",
-        `preflightId çözümlenemedi (manifest çözümleyici sağlanmadı): ${input.preflightId}`,
+        `preflightId could not be resolved (no manifest resolver provided): ${input.preflightId}`,
       );
     }
     manifest = input.resolvePreflight(input.preflightId);
     if (manifest === undefined) {
       throw new VerificationError(
         "verification/preflight-not-found",
-        `preflightId çözümlenemedi: bilinmeyen kimlik — ${input.preflightId}`,
+        `preflightId could not be resolved: unknown ID ${input.preflightId}`,
       );
     }
     if (manifest.preflightId !== input.preflightId) {
       throw invalid(
-        `çözümlenen manifest kimliği istenenle uyuşmuyor: istenen ${input.preflightId}, dönen ${manifest.preflightId}`,
+        `resolved manifest ID does not match the requested one: requested ${input.preflightId}, got ${manifest.preflightId}`,
       );
     }
   }
@@ -507,7 +507,7 @@ export function verifyChange(input: VerifyChangeInput): VerificationReport {
   if (manifest !== undefined) {
     const fileTargets: string[] = [];
     for (const target of manifest.identifiedTargets) {
-      requireNonBlank("manifest identifiedTargets üyesi", target.qualifiedName);
+      requireNonBlank("manifest identifiedTargets entry", target.qualifiedName);
       if (target.origin === "file") fileTargets.push(target.qualifiedName);
       else {
         // nodeId yayımlanmış hedef snapshot'ta varsa en kesin çözüm odur
@@ -521,7 +521,7 @@ export function verifyChange(input: VerifyChangeInput): VerificationReport {
     scopeSymbols = sortedUnique(scopeSymbols);
   } else if (input.changedSymbols !== undefined || input.changedFiles !== undefined) {
     const symbols = input.changedSymbols ?? [];
-    for (const symbol of symbols) requireNonBlank("changedSymbols üyesi", symbol);
+    for (const symbol of symbols) requireNonBlank("changedSymbols entry", symbol);
     const files = input.changedFiles ?? [];
     scopeSymbols = sortedUnique(symbols);
     scopeFiles = authorizeScopeFiles(files, input.authorizeFile);
@@ -579,11 +579,11 @@ export function verifyChange(input: VerifyChangeInput): VerificationReport {
       findings: [],
       suppressedCount: 0,
       evidenceIds: [],
-      limitations: [`"architecture" denetimi istenmedi (checks parametresi)`],
+      limitations: [`"architecture" check not requested (checks parameter)`],
     };
   } else if (input.guardPolicy === undefined) {
     unknowns.push(
-      "architecture denetimi değerlendirilemedi: guard policy sağlanmadı (parseArchitecturePolicy çıktısı beklenir)",
+      "architecture check not evaluated: no guard policy provided (expects parseArchitecturePolicy output)",
     );
     architecture = {
       status: "not_evaluated",
@@ -591,7 +591,7 @@ export function verifyChange(input: VerifyChangeInput): VerificationReport {
       suppressedCount: 0,
       evidenceIds: [],
       limitations: [
-        "architecture denetimi değerlendirilemedi: guard policy sağlanmadı (parseArchitecturePolicy çıktısı beklenir)",
+        "architecture check not evaluated: no guard policy provided (expects parseArchitecturePolicy output)",
       ],
     };
   } else {
@@ -611,7 +611,7 @@ export function verifyChange(input: VerifyChangeInput): VerificationReport {
       suppressedCount,
       evidenceIds: sortedUnique(findings.flatMap((finding) => [...finding.evidenceIds])),
       limitations: usedDefaultBaseline
-        ? ["guardBaseline sağlanmadı; boş suppression kümesi uygulandı"]
+        ? ["guardBaseline not provided; an empty suppression set was applied"]
         : [],
     };
   }
@@ -627,11 +627,11 @@ export function verifyChange(input: VerifyChangeInput): VerificationReport {
       drift: [],
       unconsumedChanges: [],
       evidenceIds: [],
-      limitations: [`"contracts" denetimi istenmedi (checks parametresi)`],
+      limitations: [`"contracts" check not requested (checks parameter)`],
     };
   } else if (input.contractDrift === undefined) {
     const note =
-      "contracts denetimi değerlendirilemedi: D2/D3 drift sonucu sağlanmadı (detectContractDrift çıktısı beklenir)";
+      "contracts check not evaluated: no contract drift result provided (expects detectContractDrift output)";
     unknowns.push(note);
     contracts = {
       status: "not_evaluated",
@@ -662,13 +662,13 @@ export function verifyChange(input: VerifyChangeInput): VerificationReport {
     for (const entry of contractDriftEntries) {
       if (entry.compatibility === "unknown") {
         unknowns.push(
-          `sözleşme "${entry.contractId}" (${entry.matchKey}): sınıflama unknown — ${entry.summary}`,
+          `contract "${entry.contractId}" (${entry.matchKey}): classification unknown — ${entry.summary}`,
         );
       }
     }
     for (const change of unconsumedChanges) {
       unknowns.push(
-        `sözleşme "${change.contractId}": tüketici kenarı bulunamadı; etki değerlendirilemedi (unresolved consumers)`,
+        `contract "${change.contractId}": no consumer edge found; impact could not be evaluated (unresolved consumers)`,
       );
     }
     contracts = {
@@ -677,7 +677,7 @@ export function verifyChange(input: VerifyChangeInput): VerificationReport {
       unconsumedChanges,
       evidenceIds: [], // D2/D3 kanıtı span tabanlıdır; Evidence kaydı kimliği taşımaz
       limitations: [
-        "contracts denetimi D2/D3 kayıtlarını yansıtır; sözleşme uyumluluğu framework/serializer/runtime'a göre farklılaşabilir (TŞ §11 unknown ilkesi)",
+        "the contracts check reflects contract drift records; actual compatibility can differ by framework, serializer, or runtime, so cases that cannot be decided statically are reported as unknown",
       ],
     };
   }
@@ -709,9 +709,9 @@ export function verifyChange(input: VerifyChangeInput): VerificationReport {
     evidenceIds: sortedUnique(graphDiffEvidenceIds),
     limitations: requested.has("graph-diff")
       ? diffTotal === 0
-        ? ["graph-diff: taban ile hedef içerik kümesi özdeş (node/edge değişikliği yok)"]
+        ? ["graph-diff: base and target content sets are identical (no node or edge changes)"]
         : []
-      : [`"graph-diff" denetimi istenmedi (checks parametresi)`],
+      : [`"graph-diff" check not requested (checks parameter)`],
   };
   limitations.push(...graphDiff.limitations);
 
@@ -732,7 +732,7 @@ export function verifyChange(input: VerifyChangeInput): VerificationReport {
       missingCoverageCandidates: [],
       unresolvedTargets: [],
       evidenceIds: observedRun === undefined ? [] : [...observedRun.evidenceIds],
-      limitations: [`"test-plan" denetimi istenmedi (checks parametresi)`],
+      limitations: [`"test-plan" check not requested (checks parameter)`],
     };
   } else {
     // Kapsam çözümü: beyan edilen kapsam (preflight/explicit) önceliklidir;
@@ -760,7 +760,7 @@ export function verifyChange(input: VerifyChangeInput): VerificationReport {
         unresolvedTargets: [],
         evidenceIds: observedRun === undefined ? [] : [...observedRun.evidenceIds],
         limitations: [
-          "test planı boş: taban ile hedef özdeş (değişiklik kümesi boş) — test adayı türetilemez; çalıştırma kararı kullanıcı/host akışına aittir",
+          "test plan is empty: base and target are identical (empty change set), so no test candidate can be derived; deciding which tests to run is up to the user or host workflow",
         ],
       };
       limitations.push(...testPlan.limitations);
@@ -841,7 +841,7 @@ export function verifyChange(input: VerifyChangeInput): VerificationReport {
     const anyObserved = targets.some((target) => target.observedInDiff);
     if (!anyObserved && targets.length > 0) {
       limitations.push(
-        `preflight hedeflerinin hiçbiri değişiklik kümesinde gözlenmedi (${String(targets.length)} hedef; bilgilendirme — inconclusive değildir)`,
+        `none of the preflight targets were observed in the change set (${String(targets.length)} target(s); informational, not inconclusive)`,
       );
     }
     alignment = { preflightId: manifest.preflightId, targets, anyObserved };
@@ -876,45 +876,45 @@ export function verifyChange(input: VerifyChangeInput): VerificationReport {
     rationale.push({
       rule: VERIFY_VERDICT_RULES.blockingFinding,
       detail:
-        `${String(unsuppressedErrors)} baskılanmamış error guard bulgusu` +
-        ` ve/veya ${String(breakingCount)} breaking_candidate drift kaydı` +
+        `${String(unsuppressedErrors)} unsuppressed error guard finding(s)` +
+        ` and/or ${String(breakingCount)} breaking_candidate drift record(s)` +
         `${architecture.findings.some((finding) => !finding.suppressed && finding.severity === "error") ? ` (ruleId: ${[...new Set(architecture.findings.filter((finding) => !finding.suppressed && finding.severity === "error").map((finding) => finding.ruleId))].sort(cmp).join(", ")})` : ""}`,
     });
   }
   if (notEvaluatedNames.length > 0) {
     rationale.push({
       rule: VERIFY_VERDICT_RULES.missingInput,
-      detail: `değerlendirilemeyen istenen denetim(ler): ${notEvaluatedNames.join(", ")} (girdi eksik / policy reddi — denetim koşulamadı)`,
+      detail: `requested check(s) not evaluated: ${notEvaluatedNames.join(", ")} (missing input or rejected policy; the check could not run)`,
     });
   }
   if (suppressedFindings > 0) {
     rationale.push({
       rule: VERIFY_VERDICT_RULES.suppressedFinding,
-      detail: `${String(suppressedFindings)} bulgu baseline suppression ile baskılandı; yönetişim incelemesi gerekir`,
+      detail: `${String(suppressedFindings)} finding(s) suppressed by the baseline; governance review required`,
     });
   }
   if (scopeUnresolved > 0) {
     rationale.push({
       rule: VERIFY_VERDICT_RULES.unresolvedTarget,
-      detail: `${String(scopeUnresolved)} kapsam hedefi hedef snapshot'ta çözülemedi; kapsamın bu bölümü denetlenemedi`,
+      detail: `${String(scopeUnresolved)} scope target(s) could not be resolved in the target snapshot; this part of the scope was not checked`,
     });
   }
   if (unsuppressedNonErrors > 0) {
     rationale.push({
       rule: VERIFY_VERDICT_RULES.warningFinding,
-      detail: `${String(unsuppressedNonErrors)} baskılanmamış warning/info guard bulgusu`,
+      detail: `${String(unsuppressedNonErrors)} unsuppressed warning/info guard finding(s)`,
     });
   }
   if (reviewContractCount > 0) {
     rationale.push({
       rule: VERIFY_VERDICT_RULES.contractRisk,
-      detail: `${String(reviewContractCount)} risk/unknown sınıflı contract drift kaydı`,
+      detail: `${String(reviewContractCount)} contract drift record(s) classified as risk/unknown`,
     });
   }
   if (graphDiff.apiSurfaceChanges > 0) {
     rationale.push({
       rule: VERIFY_VERDICT_RULES.apiSurface,
-      detail: `${String(graphDiff.apiSurfaceChanges)} API yüzeyi (endpoint/contract türleri) değişimi`,
+      detail: `${String(graphDiff.apiSurfaceChanges)} API surface change(s) (endpoint/contract kinds)`,
     });
   }
 
@@ -923,7 +923,7 @@ export function verifyChange(input: VerifyChangeInput): VerificationReport {
     verdict = "no_findings";
     rationale.push({
       rule: VERIFY_VERDICT_RULES.cleanResolved,
-      detail: "hiçbir bulgu/belirsizlik sinyali yok; tüm istenen denetimler evaluated",
+      detail: "no finding or uncertainty signals; all requested checks were evaluated",
     });
   } else {
     // Savunma daraltması (denetim bulgusu): bu dal yalnızca
@@ -934,7 +934,7 @@ export function verifyChange(input: VerifyChangeInput): VerificationReport {
     if (primary === undefined) {
       throw new VerificationError(
         "verification/invalid-input",
-        "verdict rationale boş: karar kuralı türetilemez (uydurma kural kimliği üretilemez)",
+        "verdict rationale is empty: no decision rule can be derived (no rule ID is fabricated)",
       );
     }
     verdict = verdictOfFirstRule(primary);
@@ -958,7 +958,7 @@ export function verifyChange(input: VerifyChangeInput): VerificationReport {
   const disclaimers: string[] = [NO_FINDINGS_CORE_DISCLAIMER];
   if (observedRun === undefined) {
     disclaimers.push(
-      `test-plan durumu not_run: hiçbir test çalıştırılmadı; recommendedCount (${String(testPlan.recommendedCount)}) yalnızca aday listesidir (Causoryn test koşucusu içermez — TŞ §10.4)`,
+      `test-plan state is not_run: no tests were executed; recommendedCount (${String(testPlan.recommendedCount)}) is only a candidate list (Causoryn does not include a test runner)`,
     );
   } else {
     disclaimers.push(

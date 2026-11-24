@@ -107,21 +107,21 @@ export function requireAuthorizedWorkspace(deps: ServiceDeps, workspaceId: strin
   if (workspaceId !== deps.config.workspaceId) {
     throw new CausorynToolError(
       "WORKSPACE_NOT_AUTHORIZED",
-      `workspaceId yetkili workspace kaydında yok: ${workspaceId}`,
+      `workspaceId is not an authorized workspace: ${workspaceId}`,
     );
   }
   const declaredRoot = deps.config.allowRoots[0];
   if (declaredRoot === undefined) {
     throw new CausorynToolError(
       "WORKSPACE_NOT_AUTHORIZED",
-      "sunucu konfigürasyonunda allowRoot beyanı yok (explicit authorization, TŞ §9/§20)",
+      "the server configuration declares no allowRoot (explicit authorization is required)",
     );
   }
   const decision = deps.policy.authorizeRoot(declaredRoot);
   if (!decision.allowed) {
     throw new CausorynToolError(
       "WORKSPACE_NOT_AUTHORIZED",
-      `workspace kökü yetkilendirilmedi (${decision.code}): ${decision.reason}`,
+      `workspace root not authorized (${decision.code}): ${decision.reason}`,
     );
   }
   return decision.canonicalRoot;
@@ -133,7 +133,7 @@ export function requireSnapshot(deps: ServiceDeps, workspaceId: string): Snapsho
   if (read === undefined) {
     throw new CausorynToolError(
       "INDEX_NOT_READY",
-      `workspace için yayınlanmış snapshot yok: ${workspaceId}; indeksleme tamamlanmadan sorgu yapılamaz`,
+      `no published snapshot for workspace: ${workspaceId}; queries are unavailable until indexing completes`,
     );
   }
   return read;
@@ -304,11 +304,11 @@ export function coverageOf(snapshot: SnapshotGraph): Coverage {
 function staleWarningFromState(state: string, stale: boolean): string[] {
   const warnings: string[] = [];
   if (stale) {
-    warnings.push("yayınlanmış snapshot bayat (stale=true); yeniden indeksleme önerilir");
+    warnings.push("the published snapshot is stale (stale=true); re-indexing is recommended");
   }
   if (state === "partial") {
     warnings.push(
-      "snapshot partial durumda; coverage eksik olabilir (boş kaynak, parse tanıları veya kapsam dışı dosyalar)",
+      "snapshot is partial; coverage may be incomplete (empty sources, parse diagnostics, or out-of-scope files)",
     );
   }
   return warnings;
@@ -463,7 +463,7 @@ export function getCapabilities(
     if (!decision.allowed) {
       throw new CausorynToolError(
         "WORKSPACE_NOT_AUTHORIZED",
-        `workspace kökü yetkilendirilmedi (${decision.code}): ${decision.reason}`,
+        `workspace root not authorized (${decision.code}): ${decision.reason}`,
       );
     }
   }
@@ -547,7 +547,7 @@ export function workspaceSummary(
     if (summaryMeta === undefined) {
       throw new CausorynToolError(
         "INDEX_NOT_READY",
-        `workspace için yayınlanmış snapshot yok: ${workspaceId}; indeksleme tamamlanmadan sorgu yapılamaz`,
+        `no published snapshot for workspace: ${workspaceId}; queries are unavailable until indexing completes`,
       );
     }
     const languages = [...summaryMeta.languages]
@@ -719,7 +719,7 @@ function jobRecordOf(job: IndexJobRecord): z.infer<typeof IndexJobRecordSchema> 
   const warnings = job.warnings.slice(0, MAX_JOB_WARNINGS_IN_RESPONSE);
   if (truncatedDiagnostics > 0 || truncatedWarnings > 0) {
     warnings.push(
-      `[kısaltıldı] ${String(truncatedDiagnostics)} ek tanı ve ${String(truncatedWarnings)} ek uyarı yanıt bütçesi (max ${String(MAX_JOB_DIAGNOSTICS_IN_RESPONSE)}) nedeniyle kırpıldı`,
+      `[truncated] ${String(truncatedDiagnostics)} more diagnostic(s) and ${String(truncatedWarnings)} more warning(s) omitted due to the response budget (max ${String(MAX_JOB_DIAGNOSTICS_IN_RESPONSE)})`,
     );
   }
   return {
@@ -772,7 +772,7 @@ export function indexStatus(
     if (job === undefined) {
       throw new CausorynToolError(
         "INVALID_ARGUMENT",
-        `bilinmeyen jobId: ${input.jobId}; kayıt düşmüş (maxJobs) veya hiç böyle bir iş başlatılmadı — jobId'siz çağrı en son işi döndürür`,
+        `unknown jobId: ${input.jobId}; the record was evicted (maxJobs) or no such job was started; call without jobId to get the latest job`,
       );
     }
   } else {
@@ -783,7 +783,7 @@ export function indexStatus(
     const summaryMeta = deps.repository.getLatestWorkspaceSummaryMeta(workspaceId);
     const warnings =
       summaryMeta === undefined
-        ? ["yayınlanmış snapshot yok; refresh_index ile yeni snapshot işi başlatın"]
+        ? ["no published snapshot yet; start a snapshot job with refresh_index"]
         : staleWarningFromState(summaryMeta.state, summaryMeta.stale);
 
     return buildEnvelope({
@@ -817,7 +817,7 @@ export function indexStatus(
   const read = deps.repository.getLatestPublished(workspaceId);
   const warnings = read === undefined
     ? [
-        "yayınlanmış snapshot yok; refresh_index ile yeni snapshot işi başlatın",
+        "no published snapshot yet; start a snapshot job with refresh_index",
       ]
     : staleWarningOf(read);
 
@@ -901,7 +901,7 @@ export function refreshIndex(
   if (input.scope !== undefined) {
     throw new CausorynToolError(
       "INVALID_ARGUMENT",
-      `scope dar kapsamlı yeniden indeksleme bu araç yüzeyinde desteklenmiyor (${input.scope}); tam veya artımlı yeniden indeksleme için mode=full|incremental kullanın`,
+      `scoped re-indexing is not supported by this tool (${input.scope}); use mode=full|incremental for a full or incremental re-index`,
     );
   }
 
@@ -956,7 +956,7 @@ export function indexingErrorToToolError(
     case "indexing/internal":
       return new CausorynToolError(
         "INTERNAL_ERROR",
-        `Beklenmeyen iç hata; ayrıntılar sunucu loglarında (requestId: ${requestId})`,
+        `Unexpected internal error; see the server logs for details (requestId: ${requestId})`,
       );
   }
 }
@@ -1038,21 +1038,21 @@ export function mapSystem(
   if (level === "L4") {
     throw new CausorynToolError(
       "INVALID_ARGUMENT",
-      "L4 akış haritası Faz A'da desteklenmiyor (L0–L3 kullanın)",
+      "the L4 flow map is not supported yet (use L0–L3)",
     );
   }
   const maxNodes = input.maxNodes ?? deps.config.results.maxNodes;
   if (maxNodes > deps.config.results.maxNodes) {
     throw new CausorynToolError(
       "LIMIT_EXCEEDED",
-      `maxNodes=${String(maxNodes)} results.maxNodes tavanını (${String(deps.config.results.maxNodes)}) aşıyor`,
+      `maxNodes=${String(maxNodes)} exceeds the results.maxNodes ceiling (${String(deps.config.results.maxNodes)})`,
     );
   }
   let offset = 0;
   if (input.cursor !== undefined) {
     const decoded = decodeCursor(input.cursor);
     if (decoded === null) {
-      throw new CausorynToolError("INVALID_ARGUMENT", "cursor çözümlenemedi (bozuk veya eski biçim)");
+      throw new CausorynToolError("INVALID_ARGUMENT", "cursor could not be decoded (corrupt or outdated format)");
     }
     offset = decoded;
   }
@@ -1198,14 +1198,14 @@ export function findSymbols(
   if (needle.length === 0) {
     throw new CausorynToolError(
       "INVALID_ARGUMENT",
-      "query yalnızca boşluk olamaz; aranacak simge adını verin",
+      "query must not be only whitespace; provide the symbol name to search for",
     );
   }
   const limit = input.limit ?? deps.config.results.maxSymbols;
   if (limit > deps.config.results.maxSymbols) {
     throw new CausorynToolError(
       "LIMIT_EXCEEDED",
-      `limit=${String(limit)} results.maxSymbols tavanını (${String(deps.config.results.maxSymbols)}) aşıyor`,
+      `limit=${String(limit)} exceeds the results.maxSymbols ceiling (${String(deps.config.results.maxSymbols)})`,
     );
   }
 
@@ -1501,7 +1501,7 @@ export function getSymbolContext(
     if (invalid.length > 0) {
       throw new CausorynToolError(
         "INVALID_ARGUMENT",
-        `geçersiz edgeKinds üyesi(leri): ${invalid.join(", ")}; edgeKinds EDGE_KINDS alt kümesi olmalı`,
+        `invalid edgeKinds value(s): ${invalid.join(", ")}; edgeKinds must be a subset of EDGE_KINDS`,
       );
     }
     allowedKinds = new Set(input.edgeKinds);
@@ -1512,7 +1512,7 @@ export function getSymbolContext(
   if (depth > deps.config.results.maxDepth) {
     throw new CausorynToolError(
       "LIMIT_EXCEEDED",
-      `depth=${String(depth)} results.maxDepth tavanını (${String(deps.config.results.maxDepth)}) aşıyor`,
+      `depth=${String(depth)} exceeds the results.maxDepth ceiling (${String(deps.config.results.maxDepth)})`,
     );
   }
 
@@ -1621,12 +1621,12 @@ export function getSymbolContext(
   const warnings = staleWarningOf(read);
   if (cappedByMaxNodes) {
     warnings.push(
-      `context results.maxNodes tavanıyla kesildi (${String(maxNodes)}); depth/edgeKinds ile daraltın`,
+      `context truncated at the results.maxNodes ceiling (${String(maxNodes)}); narrow it with depth or edgeKinds`,
     );
   }
   if (truncatedByDepth) {
     warnings.push(
-      `context istenen depth=${String(depth)} sınırında kesildi; daha derin komşular mevcut (depth'i artırın, tavan results.maxDepth)`,
+      `context truncated at the requested depth=${String(depth)}; deeper neighbors exist (increase depth, up to results.maxDepth)`,
     );
   }
 
@@ -2200,13 +2200,13 @@ function resolveFindingFromWorkspace(
   if (policyRead.status === "too-large") {
     throw new CausorynToolError(
       "LIMIT_EXCEEDED",
-      `${EVIDENCE_POLICY_DIR}/${EVIDENCE_POLICY_FILE} ${String(policyRead.bytes)} byte ile config.maxFileBytes tavanını (${String(maxPolicyBytes)}) aşıyor (TŞ §20 dosya başına byte bütçesi); policy dosyasını küçültün veya kuralları bölün`,
+      `${EVIDENCE_POLICY_DIR}/${EVIDENCE_POLICY_FILE} is ${String(policyRead.bytes)} bytes, which exceeds the config.maxFileBytes ceiling (${String(maxPolicyBytes)}) for a single file; shrink the policy file or split its rules`,
     );
   }
   if (policyRead.status !== "ok") {
     throw new CausorynToolError(
       "POLICY_INVALID",
-      `finding kimliği çözümlenemedi: policy dosyası bulunamadı ${EVIDENCE_POLICY_DIR}/${EVIDENCE_POLICY_FILE} (workspace köküne göre); finding kimlikleri workspace policy'sinden türetilir — kural dosyasını oluşturun veya kimlikleri causoryn_check_architecture çıktısından alın`,
+      `finding ID could not be resolved: policy file not found: ${EVIDENCE_POLICY_DIR}/${EVIDENCE_POLICY_FILE} (relative to the workspace root); finding IDs are derived from the workspace policy, so create the rules file or take IDs from causoryn_check_architecture output`,
     );
   }
   const baselineRead = readOptionalPolicyTextSync(
@@ -2216,7 +2216,7 @@ function resolveFindingFromWorkspace(
   if (baselineRead.status === "too-large") {
     throw new CausorynToolError(
       "LIMIT_EXCEEDED",
-      `${EVIDENCE_POLICY_DIR}/${EVIDENCE_BASELINE_FILE} ${String(baselineRead.bytes)} byte ile config.maxFileBytes tavanını (${String(maxPolicyBytes)}) aşıyor (TŞ §20 dosya başına byte bütçesi); baseline dosyasını küçültün`,
+      `${EVIDENCE_POLICY_DIR}/${EVIDENCE_BASELINE_FILE} is ${String(baselineRead.bytes)} bytes, which exceeds the config.maxFileBytes ceiling (${String(maxPolicyBytes)}) for a single file; shrink the baseline file`,
     );
   }
   let finding: GuardFinding;
@@ -2235,7 +2235,7 @@ function resolveFindingFromWorkspace(
     if (resolved === undefined) {
       throw new CausorynToolError(
         "EVIDENCE_NOT_FOUND",
-        `finding kimliği workspace policy'sinden türetilen bulgularla eşleşmedi: ${findingId}; finding kimliklerini causoryn_check_architecture çıktısından alın (policy dosyası bulgu üretildikten sonra değişmiş olabilir)`,
+        `finding ID does not match any finding derived from the workspace policy: ${findingId}; take finding IDs from causoryn_check_architecture output (the policy file may have changed since the findings were produced)`,
       );
     }
     finding = resolved;
@@ -2295,7 +2295,7 @@ function requireChain(chain: EvidenceChain | undefined): EvidenceChain {
   if (chain === undefined) {
     throw new CausorynToolError(
       "EVIDENCE_NOT_FOUND",
-      "kanıt zinciri üretilemedi: hedef kimliği yayınlanmış snapshot'ta bulunamadı",
+      "evidence chain could not be built: the target ID was not found in the published snapshot",
     );
   }
   return chain;
@@ -2445,6 +2445,6 @@ export function getEvidence(
   //    listesinde olmayan proje uzantısı — bkz. errors.ts başlığı).
   throw new CausorynToolError(
     "EVIDENCE_NOT_FOUND",
-    `kimlik yayınlanmış snapshot'ta bulunamadı: ${id}; node/edge kimliklerini map_system/find_symbols, finding kimliklerini causoryn_check_architecture çıktısından alın`,
+    `ID not found in the published snapshot: ${id}; take node/edge IDs from map_system/find_symbols and finding IDs from causoryn_check_architecture output`,
   );
 }
