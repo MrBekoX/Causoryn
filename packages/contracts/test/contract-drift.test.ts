@@ -221,9 +221,9 @@ describe("detectContractDrift — negatif (değişiklik yok)", () => {
 
   it("rationale gerekçeyi taşır: karşılaştırılan çift sayısı + değişiklik yok notu", () => {
     expect(drift.rationale.length).toBeGreaterThan(0);
-    expect(drift.rationale[0]).toContain("karşılaştırılan çift");
-    expect(drift.rationale[0]).toContain("değişen: 0");
-    expect(drift.rationale.some((entry) => entry.includes("drift boş"))).toBe(true);
+    expect(drift.rationale[0]).toContain("compared pairs");
+    expect(drift.rationale[0]).toContain("; changed: 0;");
+    expect(drift.rationale.some((entry) => entry.includes("drift is empty"))).toBe(true);
   });
 });
 
@@ -293,7 +293,7 @@ describe("detectContractDrift — partial (unconsumed)", () => {
     expect(protoDrift.unknowns).toHaveLength(0); // değişiklik yok → sınıflama alanlarına girmez
     expect(
       protoDrift.rationale.some(
-        (entry) => entry.includes("serializer-unknown") && entry.includes("değişiklik yok"),
+        (entry) => entry.includes("serializer-unknown") && entry.includes("no change"),
       ),
     ).toBe(true);
   });
@@ -384,7 +384,7 @@ describe("detectContractDrift — unknown sınıflı değişiklikler (ayrı alan
     // marker sözleşmesini (diagnostics metni) doğrudan doğrular — değişiklik bulgusu
     // (optional-property-added) ateşlenerek changeKind=modified altında unknown
     // sınıflamasının üretildiği kanıtlanır.
-    const marker = "protobuf: map<string,string> alan türü sınırlı parser diliminin ötesinde — serializer unknown";
+    const marker = "protobuf: map<string,string> field type is beyond the scope of this limited parser — serializer unknown";
     const evtV1 = makeSchemaCandidate({
       sourceKind: "protobuf",
       nodeKind: "SchemaContract",
@@ -605,6 +605,6 @@ describe("detectContractDrift — girdi disiplini", () => {
   it("tamamen boş girdi → boş drift, rationale sayacıyla", () => {
     const drift = detectContractDrift({ base: empty, target: empty, baseEdges: [], targetEdges: [] });
     expect(drift.contractChanges).toHaveLength(0);
-    expect(drift.rationale[0]).toContain("karşılaştırılan çift: 0");
+    expect(drift.rationale[0]).toContain("compared pairs: 0");
   });
 });

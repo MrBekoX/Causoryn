@@ -49,13 +49,13 @@ export function assertSpecSize(byteLength: number): void {
   if (!Number.isFinite(byteLength) || byteLength < 0) {
     throw new ContractDiscoveryError(
       "contracts/invalid-input",
-      "byteLength sonlu, negatif olmayan bir sayı olmalı",
+      "byteLength must be a finite, non-negative number",
     );
   }
   if (byteLength > MAX_SPEC_BYTES) {
     throw new ContractDiscoveryError(
       "contracts/limit-exceeded",
-      `Spec boyutu kotası aşıldı: ${String(byteLength)} > ${String(MAX_SPEC_BYTES)} bayt (TŞ §19)`,
+      `Spec size quota exceeded: ${String(byteLength)} > ${String(MAX_SPEC_BYTES)} bytes`,
     );
   }
 }
@@ -73,13 +73,13 @@ export function assertSpecTextPrechecks(text: string): void {
   if (maxTextNesting(text) > MAX_TEXT_NESTING) {
     throw new ContractDiscoveryError(
       "contracts/depth-exceeded",
-      `Ham metin parantez derinliği sınırı aşıldı (> ${String(MAX_TEXT_NESTING)})`,
+      `Raw text bracket nesting limit exceeded (> ${String(MAX_TEXT_NESTING)})`,
     );
   }
   if (countAliasRefs(text) > MAX_ALIAS_REFS) {
     throw new ContractDiscoveryError(
       "contracts/limit-exceeded",
-      `YAML alias referans sayısı kotası aşıldı (> ${String(MAX_ALIAS_REFS)}) — alias bombası olabilir`,
+      `YAML alias reference quota exceeded (> ${String(MAX_ALIAS_REFS)}) — possible alias bomb`,
     );
   }
 }
@@ -138,13 +138,13 @@ function checkStructureQuotas(root: unknown): void {
     if (nodes > MAX_SPEC_NODES) {
       throw new ContractDiscoveryError(
         "contracts/limit-exceeded",
-        `Spec node kotası aşıldı (> ${String(MAX_SPEC_NODES)}) — alias bombası olabilir`,
+        `Spec node quota exceeded (> ${String(MAX_SPEC_NODES)}) — possible alias bomb`,
       );
     }
     if (item.depth > MAX_SPEC_DEPTH) {
       throw new ContractDiscoveryError(
         "contracts/depth-exceeded",
-        `Spec derinlik sınırı aşıldı (> ${String(MAX_SPEC_DEPTH)})`,
+        `Spec depth limit exceeded (> ${String(MAX_SPEC_DEPTH)})`,
       );
     }
     const { value, depth } = item;
@@ -241,10 +241,10 @@ function syntaxErrorCode(relativePath: string): "contracts/spec-json-invalid" | 
  */
 export function parseStructuredSpec(relativePath: string, text: string): ParsedSpec {
   if (typeof relativePath !== "string" || relativePath.trim().length === 0) {
-    throw new ContractDiscoveryError("contracts/invalid-input", "relativePath boş olamaz");
+    throw new ContractDiscoveryError("contracts/invalid-input", "relativePath must not be empty");
   }
   if (typeof text !== "string") {
-    throw new ContractDiscoveryError("contracts/invalid-input", "text string olmalı");
+    throw new ContractDiscoveryError("contracts/invalid-input", "text must be a string");
   }
   assertSpecTextPrechecks(text);
 
@@ -256,7 +256,7 @@ export function parseStructuredSpec(relativePath: string, text: string): ParsedS
       const first = document.errors[0];
       throw new ContractDiscoveryError(
         syntaxErrorCode(relativePath),
-        `Spec YAML/JSON sözdizimi hatalı: ${first?.message ?? "bilinmeyen hata"}`,
+        `Spec YAML/JSON syntax error: ${first?.message ?? "unknown error"}`,
       );
     }
     // toJS() alias'ları genişletir; kütüphane alias bombası sınırını
@@ -269,7 +269,7 @@ export function parseStructuredSpec(relativePath: string, text: string): ParsedS
       message.includes("alias")
         ? "contracts/limit-exceeded"
         : syntaxErrorCode(relativePath),
-      `Spec çözümlenemedi: ${message}`,
+      `Spec could not be parsed: ${message}`,
     );
   }
   checkStructureQuotas(root);
@@ -277,7 +277,7 @@ export function parseStructuredSpec(relativePath: string, text: string): ParsedS
   if (!isPlainObject(root)) {
     throw new ContractDiscoveryError(
       "contracts/spec-invalid",
-      `Spec kökü bir eşleme (object) olmalı; gelen: ${Array.isArray(root) ? "array" : typeof root}`,
+      `Spec root must be a mapping (object); received: ${Array.isArray(root) ? "array" : typeof root}`,
     );
   }
 

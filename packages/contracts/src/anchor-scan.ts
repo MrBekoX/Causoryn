@@ -49,13 +49,13 @@ export function scanServiceAnchors(
   symbol: string,
 ): ServiceAnchor[] {
   if (typeof relativePath !== "string" || relativePath.trim().length === 0) {
-    throw new ContractDiscoveryError("contracts/invalid-input", "relativePath boş olamaz");
+    throw new ContractDiscoveryError("contracts/invalid-input", "relativePath must not be empty");
   }
   if (typeof text !== "string") {
-    throw new ContractDiscoveryError("contracts/invalid-input", "text string olmalı");
+    throw new ContractDiscoveryError("contracts/invalid-input", "text must be a string");
   }
   if (typeof symbol !== "string" || symbol.trim().length === 0) {
-    throw new ContractDiscoveryError("contracts/invalid-input", "symbol boş olamaz");
+    throw new ContractDiscoveryError("contracts/invalid-input", "symbol must not be empty");
   }
 
   const anchors: ServiceAnchor[] = [];
