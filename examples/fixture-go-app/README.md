@@ -1,54 +1,57 @@
 # fixture-go-app
 
-TŞ v2.1 §25/4 kanıt zincirinin Go karşılığı: **"* /orders" (http.HandleFunc) →
-ordersHandler → OrdersService.GetOrders → OrdersRepository.FindAll**. Go
-sidecar worker'ın (`native/go-worker/`, M1 dilimi) L1/L2/L3 çıkarımını
-kanıtlayan bellek-içi fixture'dır — worker kaynakları istek gövdesinde alır,
-diskte hiçbir şey derlemez (salt-okunur workspace kırmızı çizgisi). `go.mod`
-yalnızca fixture'ın gerçek bir Go modülü olduğunu belgelemek içindir; worker
-için gerekli değildir.
+The Go counterpart of the orders evidence chain: **"* /orders" (`http.HandleFunc`) →
+ordersHandler → OrdersService.GetOrders → OrdersRepository.FindAll**. An in-memory fixture that
+exercises the L1/L2/L3 extraction of the Go sidecar worker (`native/go-worker/`). The worker
+receives the sources in the request body and compiles nothing on disk (the analyzed workspace
+stays read-only). `go.mod` (module `causoryn.fixture.go-orders`) documents that the fixture is a
+real Go module; when the Causoryn indexer analyzes this directory it sends `go.mod` to the worker
+for exact import resolution (see below).
 
-## Dosyalar
+## Files
 
-| Dosya | İçerik |
+| File | Content |
 |---|---|
-| `main.go` | `http.HandleFunc` kayıtları (`/orders`, `/orders/create`, `/health`) + handler'lar + `newOrderService`/`writeJSON` yardımcıları |
+| `main.go` | `http.HandleFunc` registrations (`/orders`, `/orders/create`, `/health`) + handlers + the `newOrderService` / `writeJSON` helpers |
 | `services/orders_service.go` | `OrdersService` (`GetOrders`, `Create`) — struct + constructor |
 | `repositories/orders_repository.go` | `Order` + `OrdersRepository` (`FindAll`, `Save`) |
 
-## Beklenen graph (worker çıktısı — native/go-worker/PROTOCOL.md)
+## Expected graph (worker output — [`native/go-worker/PROTOCOL.md`](../../native/go-worker/PROTOCOL.md))
 
-- **CONTAINS** (verified, ast-span): File → Function/Class; Class → Method
-  (alıcılı `func (s *OrdersService) GetOrders` → Method node).
+- **CONTAINS** (`verified`, `ast-span`): File → Function/Class; Class → Method (a function with a
+  receiver, `func (s *OrdersService) GetOrders`, becomes a Method node).
 - **CALLS**:
-  - verified (aynı package, bare ident): `ordersHandler → newOrderService`,
-    `ordersHandler → writeJSON`, `createOrderHandler → newOrderService`,
-    `createOrderHandler → writeJSON`, `healthHandler → writeJSON`.
-  - heuristic (package-qualified, analiz setindeki package):
+  - `verified` (bare identifier in the same package, i.e. same directory + same package name):
+    `ordersHandler → newOrderService`, `ordersHandler → writeJSON`,
+    `createOrderHandler → newOrderService`, `createOrderHandler → writeJSON`,
+    `healthHandler → writeJSON`.
+  - package-qualified calls to packages of the analysis set:
     `newOrderService → services.NewOrdersService`,
-    `newOrderService → repositories.NewOrdersRepository`.
-  - heuristic (benzersiz metot adı): `ordersHandler →
-    services.OrdersService.GetOrders`, `createOrderHandler →
-    services.OrdersService.Create`, `OrdersService.GetOrders →
-    repositories.OrdersRepository.FindAll`, `OrdersService.Create →
-    repositories.OrdersRepository.Save`.
-  - heuristic (analiz seti dışı package; zincirli akış dahil):
+    `newOrderService → repositories.NewOrdersRepository` — `heuristic` with ambiguity when the
+    worker gets no `go.mod` (the acceptance test sends only the three `.go` files), and `verified`
+    when `go.mod` is sent as `moduleFiles`, because the import paths
+    `causoryn.fixture.go-orders/services` and `.../repositories` then map exactly to those
+    directories (this is what the Causoryn indexer does).
+  - `heuristic` (unique method name): `ordersHandler → services.OrdersService.GetOrders`,
+    `createOrderHandler → services.OrdersService.Create`,
+    `OrdersService.GetOrders → repositories.OrdersRepository.FindAll`,
+    `OrdersService.Create → repositories.OrdersRepository.Save`.
+  - `heuristic` (package outside the analysis set, including chained calls):
     `main → UnknownExternal ("log.Fatal")`,
     `writeJSON → UnknownExternal ("json.NewEncoder")`,
     `writeJSON → UnknownExternal ("json.NewEncoder(w).Encode")`.
-  - unresolved: `writeJSON → UnknownExternal ("w.Header")`,
+  - `unresolved`: `writeJSON → UnknownExternal ("w.Header")`,
     `writeJSON → UnknownExternal ("w.Header().Set")`,
-    `main → UnknownExternal ("srv.ListenAndServe")` — uydurma hedef yok
-    (sunucu kaynak sınırları için `http.Server` literal'i güvenlik denetimi
-    bulgusu sonucu eklendi; selector çağrı tip çözümsüzdür).
-- **ROUTES_TO** (verified, route-registration): `"* /orders" → ordersHandler`,
-  `"* /orders/create" → createOrderHandler`, `"* /health" → healthHandler`.
-  `http.HandleFunc` HTTP fiili taşımadığından Endpoint metodu `"*"`'dir.
-- `len`/`append`/`make` builtin çağrıları CALLS üretmez.
+    `main → UnknownExternal ("srv.ListenAndServe")` — no invented target (a selector call on a
+    value has no type resolution; the `http.Server` literal sets server resource limits).
+- **ROUTES_TO** (`verified`, `route-registration`): `"* /orders" → ordersHandler`,
+  `"* /orders/create" → createOrderHandler`, `"* /health" → healthHandler`. `http.HandleFunc`
+  carries no HTTP verb, so the Endpoint method is `"*"`.
+- Builtin calls such as `len` / `append` / `make` produce no CALLS edge.
 
-## Doğrulama
+## Verification
 
 ```bash
-go build ./...   # native/go-worker derleme kanıtı (veya /path/to/go build ./...)
-npx vitest run adapters/go/test/go-adapter.test.ts   # kabul testleri (M1)
+go build ./...   # in native/go-worker: proves the worker compiles (or /path/to/go build ./...)
+npx vitest run adapters/go/test/go-adapter.test.ts   # acceptance tests
 ```
