@@ -1,8 +1,10 @@
 import {
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   realpathSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from "node:fs";
 import os from "node:os";
@@ -93,6 +95,138 @@ function createFakePkg(baseDir: string): string {
   }
   return pkgRoot;
 }
+
+function snapshotTree(rootDir: string): string[] {
+  const entries: string[] = [];
+  const walk = (current: string): void => {
+    for (const item of readdirSync(current, { withFileTypes: true })) {
+      const full = path.join(current, item.name);
+      const rel = path.relative(rootDir, full).replace(/\\/g, "/");
+      if (item.isDirectory()) {
+        entries.push(`d:${rel}`);
+        walk(full);
+      } else {
+        const st = statSync(full);
+        entries.push(`f:${rel}:${String(st.size)}:${String(st.mtimeMs)}`);
+      }
+    }
+  };
+  walk(rootDir);
+  return entries.sort();
+}
+
+describe("doctor: legacy per-host index files (graph-<client>.sqlite)", { timeout: 30_000 }, () => {
+  it("warns (read-only) about legacy graph-*.sqlite files and says they can be deleted once graph.sqlite exists", async () => {
+    const sandbox = createTempDir("legacy-index");
+    const fakeHome = path.join(sandbox, "home");
+    const fakeCodex = path.join(fakeHome, ".codex");
+    const pkgRoot = createFakePkg(sandbox);
+    const workspaces = path.join(fakeHome, ".causoryn", "workspaces");
+
+    // Migrated workspace: shared graph.sqlite next to two legacy files (+ a WAL sidecar).
+    const migrated = path.join(workspaces, "orders-0123456789ab");
+    mkdirSync(path.join(migrated, "exports"), { recursive: true });
+    writeFileSync(path.join(migrated, "graph.sqlite"), "shared", "utf8");
+    writeFileSync(path.join(migrated, "graph-claude-code.sqlite"), "legacy", "utf8");
+    writeFileSync(path.join(migrated, "graph-claude-code.sqlite-wal"), "wal", "utf8");
+    writeFileSync(path.join(migrated, "graph-codex.sqlite"), "legacy", "utf8");
+    // Not yet migrated: only a legacy file, no graph.sqlite.
+    const pending = path.join(workspaces, "billing-ba9876543210");
+    mkdirSync(pending, { recursive: true });
+    writeFileSync(path.join(pending, "graph-zcode.sqlite"), "legacy", "utf8");
+    // Unrelated files are ignored.
+    writeFileSync(path.join(migrated, "graph.sqlite-wal"), "wal", "utf8");
+    writeFileSync(path.join(migrated, "notes-graph-x.sqlite.txt"), "x", "utf8");
+
+    const before = snapshotTree(fakeHome);
+    const report = runDoctor({
+      homeDir: fakeHome,
+      codexHomeDir: fakeCodex,
+      packageRoot: pkgRoot,
+      nodeVersion: "24.10.0",
+      probeToolchain: () => ({ available: true, version: "1.0", detail: "ok" }),
+    });
+    // Strictly read-only: nothing created, changed, or deleted.
+    expect(snapshotTree(fakeHome)).toEqual(before);
+
+    const legacy = report.legacyIndexFiles;
+    expect(legacy.status).toBe("warn");
+    expect(legacy.files.map((f) => path.relative(workspaces, f.path).replace(/\\/g, "/"))).toEqual([
+      "billing-ba9876543210/graph-zcode.sqlite",
+      "orders-0123456789ab/graph-claude-code.sqlite",
+      "orders-0123456789ab/graph-codex.sqlite",
+    ]);
+    const byName = new Map(legacy.files.map((f) => [path.basename(f.path), f]));
+    expect(byName.get("graph-claude-code.sqlite")?.sharedIndexPresent).toBe(true);
+    expect(byName.get("graph-claude-code.sqlite")?.sidecars.map((s) => path.basename(s))).toEqual([
+      "graph-claude-code.sqlite-wal",
+    ]);
+    expect(byName.get("graph-zcode.sqlite")?.sharedIndexPresent).toBe(false);
+    expect(legacy.detail).toContain("can be deleted");
+    expect(legacy.detail).toContain("graph.sqlite");
+
+    const text = formatDoctorReportText(report);
+    expect(text).toContain("[Legacy Index Files] WARN");
+    expect(text).toContain(path.join(migrated, "graph-codex.sqlite"));
+    expect(text).toMatch(/graph-codex\.sqlite[^\n]*safe to delete/);
+    expect(text).toMatch(/graph-zcode\.sqlite[^\n]*graph\.sqlite missing/);
+    expect(text).not.toMatch(/[çğıöşüÇĞİÖŞÜ]/);
+
+    // The warning is advisory housekeeping: a fully aligned host stays HEALTHY (exit code 0).
+    await runSetup({
+      homeDir: fakeHome,
+      codexHomeDir: fakeCodex,
+      packageRoot: pkgRoot,
+      ephemeralTmpDir: path.join(sandbox, "unused-tmp"),
+      clients: ["claude-code"],
+      yes: true,
+    });
+    const healthy = runDoctor({
+      homeDir: fakeHome,
+      codexHomeDir: fakeCodex,
+      packageRoot: pkgRoot,
+      clients: ["claude-code"],
+      nodeVersion: "24.10.0",
+      probeToolchain: () => ({ available: true, version: "1.0", detail: "ok" }),
+    });
+    expect(healthy.overallStatus).toBe("HEALTHY");
+    expect(healthy.legacyIndexFiles.status).toBe("warn");
+    const healthyText = formatDoctorReportText(healthy, ["claude-code"]);
+    expect(healthyText).toContain("— HEALTHY");
+    expect(healthyText).toContain("[Legacy Index Files] WARN");
+  });
+
+  it("reports OK when no legacy index files exist (and when the data root is absent)", () => {
+    const sandbox = createTempDir("legacy-none");
+    const fakeHome = path.join(sandbox, "home");
+    const pkgRoot = createFakePkg(sandbox);
+    mkdirSync(fakeHome, { recursive: true });
+
+    const absent = runDoctor({
+      homeDir: fakeHome,
+      codexHomeDir: path.join(fakeHome, ".codex"),
+      packageRoot: pkgRoot,
+      nodeVersion: "24.10.0",
+      probeToolchain: () => ({ available: true, version: "1.0", detail: "ok" }),
+    });
+    expect(absent.legacyIndexFiles.status).toBe("ok");
+    expect(absent.legacyIndexFiles.files).toEqual([]);
+    expect(readdirSync(fakeHome)).toEqual([]);
+
+    const ws = path.join(fakeHome, ".causoryn", "workspaces", "app-aaaaaaaaaaaa");
+    mkdirSync(ws, { recursive: true });
+    writeFileSync(path.join(ws, "graph.sqlite"), "shared", "utf8");
+    const clean = runDoctor({
+      homeDir: fakeHome,
+      codexHomeDir: path.join(fakeHome, ".codex"),
+      packageRoot: pkgRoot,
+      nodeVersion: "24.10.0",
+      probeToolchain: () => ({ available: true, version: "1.0", detail: "ok" }),
+    });
+    expect(clean.legacyIndexFiles.status).toBe("ok");
+    expect(formatDoctorReportText(clean)).toContain("[Legacy Index Files] OK");
+  });
+});
 
 describe("Task 1.1 & 1.8b — doctor.ts probe cwd isolation, absolute node path check, honest status", () => {
   it("defaultToolchainProbe runs with cwd: os.tmpdir() instead of untrusted process.cwd()", () => {

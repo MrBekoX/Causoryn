@@ -1062,7 +1062,7 @@ describe("doctor (strictly read-only health check + injectable toolchain seam + 
           clients: ["claude-code"],
           yes: true,
         }),
-      ).rejects.toThrow(/sembolik bağlantı|CWE-59/);
+      ).rejects.toThrow(/symbolic link|CWE-59/);
       rmSync(claudeConfigPath, { force: true });
     }
 
@@ -1592,7 +1592,7 @@ describe(
     const fakeHome = path.join(base, "home");
     mkdirSync(fakeHome, { recursive: true });
 
-    // 1) Eksik SKILL.md -> CausorynCliError("cli/io-error", "Kaynak skill dosyası bulunamadı: ...")
+    // 1) Eksik SKILL.md -> CausorynCliError("cli/io-error", "Source skill file not found: ...")
     const missingPkg = createFakePackageRoot(base, "pkg-missing-skill");
     const missingSkillFile = path.join(missingPkg, "skills", CANONICAL_SKILL_NAMES[0], "SKILL.md");
     rmSync(missingSkillFile);
@@ -1611,7 +1611,7 @@ describe(
     expect(missingErr).toBeInstanceOf(CausorynCliError);
     expect((missingErr as CausorynCliError).code).toBe("cli/io-error");
     expect((missingErr as CausorynCliError).message).toContain(
-      `Kaynak skill dosyası bulunamadı: ${missingSkillFile}`,
+      `Source skill file not found: ${missingSkillFile}`,
     );
 
     // 2) Dizin olan SKILL.md -> aynı CausorynCliError
@@ -1634,7 +1634,7 @@ describe(
     expect(dirErr).toBeInstanceOf(CausorynCliError);
     expect((dirErr as CausorynCliError).code).toBe("cli/io-error");
     expect((dirErr as CausorynCliError).message).toContain(
-      `Kaynak skill dosyası bulunamadı: ${dirSkillFile}`,
+      `Source skill file not found: ${dirSkillFile}`,
     );
 
     // 3) Symlink'li kaynak SKILL.md (OS izin veriyorsa) O_NOFOLLOW olmadan başarıyla okunur

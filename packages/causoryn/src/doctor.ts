@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { existsSync, readFileSync, statSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, statSync, type Dirent } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
@@ -21,6 +21,8 @@ import {
   SIDECAR_TOOLCHAIN_IDS,
   type CanonicalSkillName,
   type DoctorHostStatus,
+  type DoctorLegacyIndexCheck,
+  type DoctorLegacyIndexFile,
   type DoctorNodeCheck,
   type DoctorOptions,
   type DoctorReport,
@@ -138,7 +140,7 @@ function checkNodeVersion(rawNodeVersion: string): DoctorNodeCheck {
     requiredMajor: REQUIRED_NODE_MAJOR,
     detail: ok
       ? `Node.js ${cleaned} (>= ${String(REQUIRED_NODE_MAJOR)})`
-      : `Node.js ${cleaned} desteklenmiyor; Node.js >= ${String(REQUIRED_NODE_MAJOR)} gerekli`,
+      : `Node.js ${cleaned} is not supported; Node.js >= ${String(REQUIRED_NODE_MAJOR)} is required`,
   };
 }
 
@@ -317,8 +319,8 @@ function probeSidecarToolchains(
       version: res.version,
       mode: res.available ? "sidecar-ready" : "l0-l1-fallback",
       detail: res.available
-        ? `${res.version ?? spec.cmd} (sidecar hazır)`
-        : `Bulunamadı (${res.detail}) — bu dil L0/L1 dosya düzeyine zarifçe düşer`,
+        ? `${res.version ?? spec.cmd} (sidecar ready)`
+        : `Not found (${res.detail}) — this language falls back to L0/L1 file-level analysis`,
     };
   }
   return out;
@@ -424,29 +426,29 @@ function inspectSingleHost(
         const parsed: unknown = JSON.parse(raw);
         if (!isPlainObject(parsed)) {
           configValid = false;
-          parseDetail = "JSON kök değeri nesne değil";
+          parseDetail = "the JSON root value is not an object";
         } else if (client === "zcode") {
           const mcp = parsed["mcp"];
           const servers = isPlainObject(mcp) ? mcp["servers"] : undefined;
           if (mcp !== undefined && !isPlainObject(mcp)) {
             configValid = false;
-            parseDetail = "mcp alanı nesne değil";
+            parseDetail = "the mcp field is not an object";
           } else if (servers !== undefined && !isPlainObject(servers)) {
             configValid = false;
-            parseDetail = "mcp.servers alanı nesne değil";
+            parseDetail = "the mcp.servers field is not an object";
           } else if (isPlainObject(servers) && "causoryn" in servers) {
             const entry = servers["causoryn"];
             if (!isPlainObject(entry)) {
               mcpConfigured = false;
               configValid = false;
-              parseDetail = "mcp.servers.causoryn alanı nesne değil";
+              parseDetail = "the mcp.servers.causoryn field is not an object";
             } else if (
               typeof entry["command"] !== "string" ||
               entry["command"].trim().length === 0
             ) {
               mcpConfigured = false;
               configValid = false;
-              parseDetail = "mcp.servers.causoryn.command boş olmayan bir dizge olmalı";
+              parseDetail = "mcp.servers.causoryn.command must be a non-empty string";
             } else {
               mcpConfigured = true;
               entrypointExists = checkEntrypointExists(entry["command"], entry["args"]);
@@ -456,20 +458,20 @@ function inspectSingleHost(
           const servers = parsed["mcpServers"];
           if (servers !== undefined && !isPlainObject(servers)) {
             configValid = false;
-            parseDetail = "mcpServers alanı nesne değil";
+            parseDetail = "the mcpServers field is not an object";
           } else if (isPlainObject(servers) && "causoryn" in servers) {
             const entry = servers["causoryn"];
             if (!isPlainObject(entry)) {
               mcpConfigured = false;
               configValid = false;
-              parseDetail = "mcpServers.causoryn alanı nesne değil";
+              parseDetail = "the mcpServers.causoryn field is not an object";
             } else if (
               typeof entry["command"] !== "string" ||
               entry["command"].trim().length === 0
             ) {
               mcpConfigured = false;
               configValid = false;
-              parseDetail = "mcpServers.causoryn.command boş olmayan bir dizge olmalı";
+              parseDetail = "mcpServers.causoryn.command must be a non-empty string";
             } else {
               mcpConfigured = true;
               entrypointExists = checkEntrypointExists(entry["command"], entry["args"]);
@@ -491,13 +493,13 @@ function inspectSingleHost(
         const secParsed: unknown = JSON.parse(readFileSync(secondary, "utf8"));
         if (!isPlainObject(secParsed)) {
           configValid = false;
-          parseDetail = `İkincil Antigravity JSON kök değeri nesne değil (${secondary})`;
+          parseDetail = `the JSON root value of the secondary Antigravity config is not an object (${secondary})`;
         } else if (
           secParsed["mcpServers"] !== undefined &&
           !isPlainObject(secParsed["mcpServers"])
         ) {
           configValid = false;
-          parseDetail = `İkincil Antigravity mcpServers alanı nesne değil (${secondary})`;
+          parseDetail = `the mcpServers field of the secondary Antigravity config is not an object (${secondary})`;
         } else if (
           isPlainObject(secParsed["mcpServers"]) &&
           "causoryn" in secParsed["mcpServers"]
@@ -509,7 +511,7 @@ function inspectSingleHost(
             secEntry["command"].trim().length === 0
           ) {
             configValid = false;
-            parseDetail = `İkincil Antigravity mcpServers.causoryn.command boş olmayan bir dizge olmalı (${secondary})`;
+            parseDetail = `mcpServers.causoryn.command in the secondary Antigravity config must be a non-empty string (${secondary})`;
           }
         }
       } catch (error) {
@@ -530,23 +532,24 @@ function inspectSingleHost(
   let detail: string;
   if (!configValid) {
     status = "error";
-    detail = `Bozuk konfigürasyon: ${parseDetail}`;
+    detail = `Invalid configuration: ${parseDetail}`;
   } else if (brokenEntrypoint) {
     status = "error";
-    detail = "MCP sunucu giriş betiği diskte bulunamadı (`npx causoryn setup --yes` ile yenileyin)";
+    detail =
+      "The MCP server entry script was not found on disk (refresh it with `npx causoryn setup --yes`)";
   } else if (aligned) {
     status = "ok";
-    detail = "MCP sunucusu ve 4 yönlendirme skill dosyası tam hizalı";
+    detail = `MCP server and all ${String(CANONICAL_SKILL_NAMES.length)} routing skills are aligned`;
   } else if (!mcpConfigured && skills.installed.length === 0) {
     status = "not-configured";
     detail = detected
-      ? "Host algılandı ancak Causoryn henüz kurulmamış"
-      : "Host algılanmadı";
+      ? "Host detected, but Causoryn is not installed for it yet"
+      : "Host not detected";
   } else {
     status = "warn";
     detail = mcpConfigured
-      ? `MCP kurulu ancak eksik skill'ler var: ${skills.missing.join(", ")}`
-      : "Skill dosyaları mevcut ancak MCP sunucu kaydı yok";
+      ? `MCP server is configured, but these skills are missing: ${skills.missing.join(", ")}`
+      : "Skill files are installed, but the MCP server entry is missing";
   }
 
   return {
@@ -562,6 +565,120 @@ function inspectSingleHost(
     aligned,
     status,
     detail,
+  };
+}
+
+/** Legacy per-host index name written by earlier versions: `graph-<client>.sqlite`. */
+const LEGACY_INDEX_FILE_PATTERN = /^graph-[a-z0-9._-]+\.sqlite$/i;
+const SHARED_INDEX_FILE_NAME = "graph.sqlite";
+const SQLITE_SIDECAR_SUFFIXES = ["-wal", "-shm", "-journal"] as const;
+
+/**
+ * `workspaces/` directories that may hold per-workspace data dirs: the default
+ * `~/.causoryn` data root and, when the environment applies, `ZCODE_PLUGIN_DATA`.
+ */
+export function resolveLegacyIndexScanDirs(
+  homeDir: string,
+  explicitHomeProvided = false,
+  env: NodeJS.ProcessEnv = process.env,
+): string[] {
+  const roots = [path.join(homeDir, ".causoryn")];
+  if (!explicitHomeProvided || env !== process.env) {
+    const zcodeDataDir = env["ZCODE_PLUGIN_DATA"]?.trim();
+    if (
+      zcodeDataDir !== undefined &&
+      zcodeDataDir.length > 0 &&
+      !zcodeDataDir.includes("\0") &&
+      path.isAbsolute(zcodeDataDir)
+    ) {
+      roots.push(path.resolve(zcodeDataDir));
+    }
+  }
+  const seen = new Set<string>();
+  const dirs: string[] = [];
+  for (const root of roots) {
+    const dir = path.join(root, "workspaces");
+    const key = process.platform === "win32" ? dir.toLowerCase() : dir;
+    if (!seen.has(key)) {
+      seen.add(key);
+      dirs.push(dir);
+    }
+  }
+  return dirs;
+}
+
+function readDirEntries(dir: string): Dirent[] | null {
+  try {
+    return readdirSync(dir, { withFileTypes: true });
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Read-only scan for legacy `graph-<client>.sqlite` files next to (or instead of)
+ * the shared `graph.sqlite` in each workspace data directory. Does not descend
+ * into symbolic-link entries and never creates, changes, or deletes anything.
+ */
+export function inspectLegacyIndexFiles(scanDirs: readonly string[]): DoctorLegacyIndexCheck {
+  const files: DoctorLegacyIndexFile[] = [];
+  for (const workspacesDir of scanDirs) {
+    const workspaceEntries = readDirEntries(workspacesDir);
+    if (workspaceEntries === null) continue;
+    for (const workspaceEntry of workspaceEntries) {
+      if (!workspaceEntry.isDirectory()) continue;
+      const workspaceDataDir = path.join(workspacesDir, workspaceEntry.name);
+      const children = readDirEntries(workspaceDataDir);
+      if (children === null) continue;
+      const fileNames = new Set(
+        children.filter((child) => child.isFile()).map((child) => child.name),
+      );
+      const sharedIndexPresent = fileNames.has(SHARED_INDEX_FILE_NAME);
+      for (const name of fileNames) {
+        if (!LEGACY_INDEX_FILE_PATTERN.test(name)) continue;
+        files.push({
+          path: path.join(workspaceDataDir, name),
+          workspaceDataDir,
+          sharedIndexPresent,
+          sidecars: SQLITE_SIDECAR_SUFFIXES.map((suffix) => `${name}${suffix}`)
+            .filter((sidecar) => fileNames.has(sidecar))
+            .map((sidecar) => path.join(workspaceDataDir, sidecar)),
+        });
+      }
+    }
+  }
+  files.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
+
+  if (files.length === 0) {
+    return {
+      status: "ok",
+      scannedDirs: [...scanDirs],
+      files,
+      detail: "No legacy per-host index files (graph-<client>.sqlite) found.",
+    };
+  }
+
+  const redundant = files.filter((file) => file.sharedIndexPresent).length;
+  const pending = files.length - redundant;
+  const parts = [
+    `Found ${String(files.length)} legacy per-host index file(s) (graph-<client>.sqlite) from an earlier Causoryn version; the server now keeps one shared ${SHARED_INDEX_FILE_NAME} per workspace.`,
+  ];
+  if (redundant > 0) {
+    parts.push(
+      `${String(redundant)} of them sit next to an existing ${SHARED_INDEX_FILE_NAME} and can be deleted, together with their -wal/-shm sidecar files.`,
+    );
+  }
+  if (pending > 0) {
+    parts.push(
+      `${String(pending)} of them have no ${SHARED_INDEX_FILE_NAME} yet: start the MCP server once in that workspace so it migrates the index, then delete them (deleting them earlier only forces a re-index).`,
+    );
+  }
+  parts.push("Doctor never deletes files.");
+  return {
+    status: "warn",
+    scannedDirs: [...scanDirs],
+    files,
+    detail: parts.join(" "),
   };
 }
 
@@ -667,6 +784,10 @@ export function runDoctor(options: ExtendedDoctorOptions = {}): DoctorReportWith
     );
   }
 
+  const legacyIndexFiles = inspectLegacyIndexFiles(
+    resolveLegacyIndexScanDirs(homeDir, explicitHomeProvided, effectiveEnv),
+  );
+
   const baseReport: DoctorReport = {
     healthy: false,
     version: CAUSORYN_PACKAGE_VERSION,
@@ -674,6 +795,7 @@ export function runDoctor(options: ExtendedDoctorOptions = {}): DoctorReportWith
     runtime: runtimeCheck,
     toolchains,
     hosts,
+    legacyIndexFiles,
   };
   const { overallStatus, configuredCount } = computeDoctorOverallStatus(baseReport, targetClients);
   const healthy = overallStatus === "HEALTHY";
@@ -733,6 +855,19 @@ export function formatDoctorReportText(
   for (const client of clientsToShow) {
     const h = report.hosts[client];
     lines.push(`  - ${h.client}: ${h.status.toUpperCase()} — ${h.detail}`);
+  }
+  lines.push("");
+  const legacy = report.legacyIndexFiles;
+  lines.push(`[Legacy Index Files] ${legacy.status.toUpperCase()} — ${legacy.detail}`);
+  for (const file of legacy.files) {
+    lines.push(
+      file.sharedIndexPresent
+        ? `  - ${file.path} (graph.sqlite present: safe to delete)`
+        : `  - ${file.path} (graph.sqlite missing: keep it until the server has migrated it)`,
+    );
+    for (const sidecar of file.sidecars) {
+      lines.push(`    sidecar: ${sidecar}`);
+    }
   }
   return `${lines.join("\n")}\n`;
 }

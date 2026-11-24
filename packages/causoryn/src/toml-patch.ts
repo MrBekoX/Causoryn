@@ -69,7 +69,7 @@ function unescapeTomlString(raw: string): string {
     return trimmed.slice(1, -1);
   }
   if (!trimmed.startsWith('"') || !trimmed.endsWith('"') || trimmed.length < 2) {
-    throw new CausorynCliError("cli/malformed-toml", `Geçersiz TOML string değeri: ${raw}`);
+    throw new CausorynCliError("cli/malformed-toml", `Invalid TOML string value: ${raw}`);
   }
   const body = trimmed.slice(1, -1);
   let result = "";
@@ -81,7 +81,7 @@ function unescapeTomlString(raw: string): string {
     }
     i += 1;
     if (i >= body.length) {
-      throw new CausorynCliError("cli/malformed-toml", "Kapanmamış TOML kaçış dizisi");
+      throw new CausorynCliError("cli/malformed-toml", "Unterminated TOML escape sequence");
     }
     const esc = body[i] ?? "";
     switch (esc) {
@@ -109,7 +109,7 @@ function unescapeTomlString(raw: string): string {
       case "u": {
         const hex = body.slice(i + 1, i + 5);
         if (!/^[0-9a-fA-F]{4}$/.test(hex)) {
-          throw new CausorynCliError("cli/malformed-toml", `Geçersiz \\u kaçışı: ${hex}`);
+          throw new CausorynCliError("cli/malformed-toml", `Invalid \\u escape: ${hex}`);
         }
         result += String.fromCharCode(Number.parseInt(hex, 16));
         i += 4;
@@ -221,7 +221,7 @@ function scanTomlLine(
       if (state.bracketDepth < 0) {
         throw new CausorynCliError(
           "cli/malformed-toml",
-          `Bozuk TOML (satır ${String(lineNumber)}): eşleşmeyen ']' karakteri`,
+          `Malformed TOML (line ${String(lineNumber)}): unmatched ']' character`,
         );
       }
     } else if (ch === "{") {
@@ -231,7 +231,7 @@ function scanTomlLine(
       if (state.braceDepth < 0) {
         throw new CausorynCliError(
           "cli/malformed-toml",
-          `Bozuk TOML (satır ${String(lineNumber)}): eşleşmeyen '}' karakteri`,
+          `Malformed TOML (line ${String(lineNumber)}): unmatched '}' character`,
         );
       }
     }
@@ -241,7 +241,7 @@ function scanTomlLine(
   if (inBasic || inLiteral) {
     throw new CausorynCliError(
       "cli/malformed-toml",
-      `Bozuk TOML (satır ${String(lineNumber)}): kapanmamış string tırnağı`,
+      `Malformed TOML (line ${String(lineNumber)}): unterminated string quote`,
     );
   }
 
@@ -256,14 +256,14 @@ function parseTableHeaderCode(effectiveCode: string, lineNumber: number): string
     if (!effectiveCode.endsWith("]]")) {
       throw new CausorynCliError(
         "cli/malformed-toml",
-        `Bozuk TOML (satır ${String(lineNumber)}): kapanmamış dizi-tablo başlığı`,
+        `Malformed TOML (line ${String(lineNumber)}): unterminated array-of-tables header`,
       );
     }
     const inner = effectiveCode.slice(2, -2).trim();
     if (inner.length === 0 || inner.includes("[") || inner.includes("]")) {
       throw new CausorynCliError(
         "cli/malformed-toml",
-        `Bozuk TOML (satır ${String(lineNumber)}): geçersiz dizi-tablo başlığı`,
+        `Malformed TOML (line ${String(lineNumber)}): invalid array-of-tables header`,
       );
     }
     return `[${inner}]`;
@@ -272,14 +272,14 @@ function parseTableHeaderCode(effectiveCode: string, lineNumber: number): string
   if (!effectiveCode.endsWith("]")) {
     throw new CausorynCliError(
       "cli/malformed-toml",
-      `Bozuk TOML (satır ${String(lineNumber)}): kapanmamış tablo başlığı`,
+      `Malformed TOML (line ${String(lineNumber)}): unterminated table header`,
     );
   }
   const inner = effectiveCode.slice(1, -1).trim();
   if (inner.length === 0 || inner.includes("[") || inner.includes("]")) {
     throw new CausorynCliError(
       "cli/malformed-toml",
-      `Bozuk TOML (satır ${String(lineNumber)}): geçersiz tablo başlığı`,
+      `Malformed TOML (line ${String(lineNumber)}): invalid table header`,
     );
   }
   return inner;
@@ -347,7 +347,7 @@ function parseTomlDocument(rawToml: string): ParsedTomlDocument {
     const { effectiveCode } = scanTomlLine(line, lineNumber, state);
     const currentBuilder = builders[builders.length - 1];
     if (currentBuilder === undefined) {
-      throw new CausorynCliError("cli/malformed-toml", "İç TOML ayrıştırıcı hatası");
+      throw new CausorynCliError("cli/malformed-toml", "Internal TOML parser error");
     }
 
     if (wasContinuation || effectiveCode.length === 0) {
@@ -360,7 +360,7 @@ function parseTomlDocument(rawToml: string): ParsedTomlDocument {
       if (state.bracketDepth !== 0 || state.braceDepth !== 0) {
         throw new CausorynCliError(
           "cli/malformed-toml",
-          `Bozuk TOML (satır ${String(lineNumber)}): dengesiz tablo başlığı`,
+          `Malformed TOML (line ${String(lineNumber)}): unbalanced table header`,
         );
       }
       const header = parseTableHeaderCode(effectiveCode, lineNumber);
@@ -368,7 +368,7 @@ function parseTomlDocument(rawToml: string): ParsedTomlDocument {
         if (seenStandardTables.has(header)) {
           throw new CausorynCliError(
             "cli/malformed-toml",
-            `Bozuk TOML (satır ${String(lineNumber)}): mükerrer tablo başlığı [${header}]`,
+            `Malformed TOML (line ${String(lineNumber)}): duplicate table header [${header}]`,
           );
         }
         seenStandardTables.add(header);
@@ -381,7 +381,7 @@ function parseTomlDocument(rawToml: string): ParsedTomlDocument {
     if (eqIdx <= 0) {
       throw new CausorynCliError(
         "cli/malformed-toml",
-        `Bozuk TOML (satır ${String(lineNumber)}): anahtar = değer ataması bekleniyordu`,
+        `Malformed TOML (line ${String(lineNumber)}): expected a key = value assignment`,
       );
     }
     const keyPart = effectiveCode.slice(0, eqIdx).trim();
@@ -392,7 +392,7 @@ function parseTomlDocument(rawToml: string): ParsedTomlDocument {
     ) {
       throw new CausorynCliError(
         "cli/malformed-toml",
-        `Bozuk TOML (satır ${String(lineNumber)}): eksik anahtar veya değer`,
+        `Malformed TOML (line ${String(lineNumber)}): missing key or value`,
       );
     }
 
@@ -407,7 +407,7 @@ function parseTomlDocument(rawToml: string): ParsedTomlDocument {
   ) {
     throw new CausorynCliError(
       "cli/malformed-toml",
-      "Bozuk TOML: dosya sonunda kapanmamış çok-satırlı değer veya dizi/tablo",
+      "Malformed TOML: unterminated multi-line value, array, or inline table at end of file",
     );
   }
 

@@ -21,7 +21,7 @@ if (rawArgs[0] === "mcp") {
   const mcpBundlePath = path.join(PKG_ROOT, "dist", "mcp-server.mjs");
   if (!existsSync(mcpBundlePath)) {
     console.error(
-      `[causoryn] derlenmiş MCP sunucu paketi bulunamadı: ${mcpBundlePath} (önce build:package çalıştırın)`,
+      `[causoryn] compiled MCP server bundle not found: ${mcpBundlePath} (run build:package first)`,
     );
     process.exit(2);
   }
@@ -31,7 +31,7 @@ if (rawArgs[0] === "mcp") {
 } else {
   const cliModulePath = path.join(PKG_ROOT, "dist", "index.js");
   if (!existsSync(cliModulePath)) {
-    console.error(`[causoryn] CLI modülü derlenmemiş: ${cliModulePath}`);
+    console.error(`[causoryn] CLI module is not compiled: ${cliModulePath} (run npm run build first)`);
     process.exit(2);
   }
   const { runCli } = await import(pathToFileURL(cliModulePath).href);
