@@ -6,6 +6,8 @@
 
 > **Sürüm durumu (`ADR-010`):** `v0.2.4` bir **Pre-1.0 Public Preview** yayınıdır (`1.0.0` değildir; tarihsel `v0.1.0` etiketi `4c9c188f` üzerinde kilitlidir). Açık `1.0.0` kapıları [CHANGELOG.md](../CHANGELOG.md) ve [Uygulama Durumu](implementation-status.md) belgelerinde şeffaf biçimde izlenir.
 
+> **0.3.0 notu:** `0.3.0` sürümünde varsayılan MCP araç yüzeyi 29 araçtan 11 araçlık `core` profiline indi; eski araç adları `--tool-profile full` (veya `CAUSORYN_TOOL_PROFILE=full`) ile, Living Wiki araçları `--tool-profile wiki` ile, mimari geçmiş araçları `--tool-profile history` ile açılır. Tüm host'lar artık çalışma alanı başına tek bir paylaşımlı `graph.sqlite` kullanır. Bu Türkçe belgelerin bir kısmı hâlâ `0.2.4` durumunu (29 araçlık yüzey) anlatır; güncel ayrıntılar için [İngilizce belgelere](en/README.md) ve [CHANGELOG.md](../CHANGELOG.md) geçiş notlarına bakın.
+
 ---
 
 ## Hızlı Başlangıç Haritası

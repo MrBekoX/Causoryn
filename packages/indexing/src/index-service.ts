@@ -145,7 +145,7 @@ import {
  * kimliği, bu sürümden bağımsız olarak analyzerFingerprint fp2 şemasıyla
  * taşınır (fp1→fp2 geçişi snapshot meta'da ayrışır).
  */
-export const INDEXING_VERSION = "0.2.4";
+export const INDEXING_VERSION = "0.3.0";
 
 /** Envanter/adaptasyon limitleri (TŞ §20 index bölümü). */
 export interface IndexLimits {
