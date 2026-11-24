@@ -29,8 +29,8 @@ import {
   type TsAdapterSourceFile,
 } from "./types.js";
 import {
-  buildProgramCompilerOptions, expandCandidatePaths,
-  loadWorkspacePackages, loadWorkspaceTsConfigs,
+  buildProgramCompilerOptions, expandCandidatePaths, loadPackageModuleScopes,
+  loadWorkspacePackages, loadWorkspaceTsConfigs, type PackageModuleScope,
   resolveScopedModuleName, type ScopedTsConfig, type WorkspacePackageManifest,
 } from "./tsconfig-loader.js";
 
@@ -249,7 +249,7 @@ interface SourceEntry {
 
 interface NodeRecord {
   readonly key: string;
-  readonly node: SnapshotNodeInput;
+  node: SnapshotNodeInput;
   readonly ref: NodeRef;
 }
 
@@ -294,10 +294,11 @@ class GraphAssembler {
     relativePath?: string;
     language?: string;
     attributes?: Record<string, unknown>;
+    location?: SnapshotNodeInput["location"];
   }): NodeRecord {
     const key = this.nodeKey(input.kind, input.qualifiedName, input.relativePath);
     const existing = this.nodes.get(key);
-    if (existing !== undefined) return existing;
+    if (existing !== undefined) return withLocation(existing, input.location);
     const ref: NodeRef = {
       kind: input.kind,
       qualifiedName: input.qualifiedName,
@@ -315,7 +316,7 @@ class GraphAssembler {
       },
     };
     this.nodes.set(key, record);
-    return record;
+    return withLocation(record, input.location);
   }
 
   /** Kenarı ekler; aynı (kind, from, to) kenarı kanıtlarıyla birleştirir. */
@@ -461,6 +462,7 @@ function runAnalysis(input: TypeScriptAdapterInput): AnalysisRun {
     input.packageFiles === undefined ? input.rootDir : undefined,
     sortedEntries.map((entry) => entry.relativePath),
   );
+  const moduleFormat = loadModuleFormatScopes(input, rootPosix, sortedEntries);
   const compilerOptions = buildProgramCompilerOptions(loadedConfigs.configs);
   const resolvedLibDir = resolveTypeScriptLibDir();
   const host = createCompilerHostWithDefaultLib(compilerOptions, resolvedLibDir);
@@ -475,6 +477,7 @@ function runAnalysis(input: TypeScriptAdapterInput): AnalysisRun {
     entries,
     rootPosix,
     resolvedLibDir,
+    moduleFormat.projections,
   );
   const resolveOne = (
     moduleName: string,
@@ -506,7 +509,7 @@ function runAnalysis(input: TypeScriptAdapterInput): AnalysisRun {
 
   // 3) Program + TypeChecker (TŞ §7: TypeScript Compiler API) + incremental oldProgram.
   const { program, optionsSignature } = createProgramWithIncrementalReuse({
-    input, rootPosix, compilerOptions, loadedConfigs: loadedConfigs.configs,
+    input, rootPosix, compilerOptions, loadedConfigs: loadedConfigs.configs, moduleScopes: moduleFormat.scopes,
     workspacePackages: loadedPackages.packages, host, entries, sortedEntries, resolvedLibDir,
   });
   const checker = program.getTypeChecker();
@@ -516,7 +519,7 @@ function runAnalysis(input: TypeScriptAdapterInput): AnalysisRun {
   }
 
   const assembler = new GraphAssembler(input.workspaceId);
-  for (const warning of [...loadedConfigs.warnings, ...loadedPackages.warnings]) assembler.addWarning(warning);
+  for (const warning of [...loadedConfigs.warnings, ...loadedPackages.warnings, ...moduleFormat.warnings]) assembler.addWarning(warning);
   const context: AnalysisContext = {
     workspaceId: input.workspaceId,
     compilerOptions,
@@ -788,12 +791,7 @@ function evidenceFor(
 ): SnapshotEvidenceInput {
   return {
     kind,
-    span: {
-      relativePath: entry.relativePath,
-      startLine: spanStart(sourceFile, node),
-      endLine: spanEnd(sourceFile, node),
-      sourceHash: entry.sourceHash,
-    },
+    span: declarationSpan(entry, sourceFile, node),
     analyzerId: TS_ADAPTER_ANALYZER_ID,
     analyzerVersion: TS_ADAPTER_VERSION,
     rationale,
@@ -856,13 +854,15 @@ function extractDeclarations(
     node: ts.Node,
     rationale: string,
   ): void => {
+    const evidence = evidenceFor(entry, sourceFile, node, "ast-span", rationale);
     assembler.addEdge({
       kind: "CONTAINS",
       from,
       to,
       resolution: "verified",
-      evidence: evidenceFor(entry, sourceFile, node, "ast-span", rationale),
+      evidence,
     });
+    withLocation(to, evidence.span);
   };
 
   const registerMembers = (
@@ -1418,10 +1418,10 @@ function callerRecordForFunctionLike(
       ownerName === undefined ? name.text : `${ownerName}.${name.text}`;
     const kind: NodeKind = ts.isMethodDeclaration(node) ? "Method" : "Function";
     const record = assembler.ensureNode({
-      kind,
-      qualifiedName,
+      kind, qualifiedName,
       relativePath: entry.relativePath,
       language: entry.language,
+      location: declarationSpan(entry, node.getSourceFile(), node),
     });
     const symbol = checker.getSymbolAtLocation(name);
     if (symbol !== undefined) registry.set(symbol, record);
@@ -1433,10 +1433,10 @@ function callerRecordForFunctionLike(
   const parent = node.parent;
   if (parent !== undefined && ts.isVariableDeclaration(parent) && ts.isIdentifier(parent.name)) {
     return assembler.ensureNode({
-      kind: "Handler",
-      qualifiedName: parent.name.text,
+      kind: "Handler", qualifiedName: parent.name.text,
       relativePath: entry.relativePath,
       language: entry.language,
+      location: declarationSpan(entry, parent.getSourceFile(), parent),
     });
   }
   return cjsExportCallerRecord(context, entry, node);
@@ -1540,10 +1540,10 @@ function deriveNodeRecord(
     return undefined;
   }
   return assembler.ensureNode({
-    kind,
-    qualifiedName,
+    kind, qualifiedName,
     relativePath: declarationEntry.relativePath,
     language: declarationEntry.language,
+    location: declarationSpan(declarationEntry, declaration.getSourceFile(), declaration),
   });
 }
 
@@ -1590,14 +1590,14 @@ function tryRoutePattern(
   const verb = callee.name.text.toUpperCase();
   const pathText = pathArg.text;
   const endpoint = assembler.ensureNode({
-    kind: "Endpoint",
-    qualifiedName: `${verb} ${pathText}`,
+    kind: "Endpoint", qualifiedName: `${verb} ${pathText}`,
     relativePath: entry.relativePath,
     language: entry.language,
     attributes:
       framework === undefined
         ? { method: verb, path: pathText }
         : { method: verb, path: pathText, framework },
+    location: declarationSpan(entry, sourceFile, call),
   });
   if (framework !== undefined) {
     context.framework.nodeKeys.add(endpoint.key);
@@ -1846,6 +1846,7 @@ function resolveInternalCallableRecord(
         qualifiedName: `${ownerName}.${decl.name.text}`,
         relativePath: declEntry.relativePath,
         language: declEntry.language,
+        location: declarationSpan(declEntry, decl.getSourceFile(), decl),
       });
       context.registry.set(symbol, record);
       return record;
@@ -1867,6 +1868,7 @@ function resolveInternalCallableRecord(
         qualifiedName: decl.name.text,
         relativePath: declEntry.relativePath,
         language: declEntry.language,
+        location: declarationSpan(declEntry, decl.getSourceFile(), decl),
       });
       context.registry.set(symbol, record);
       return record;
@@ -2232,6 +2234,7 @@ function emitNextRouteEdge(
     relativePath: entry.relativePath,
     language: entry.language,
     attributes: { method, path: routePath, framework: "nextjs" },
+    location: declarationSpan(entry, sourceFile, anchor),
   });
   context.framework.nodeKeys.add(endpoint.key);
   const edge = context.assembler.addEdge({
@@ -2591,6 +2594,33 @@ function joinRootAndRelative(rootPosix: string, relativePath: string): string {
 }
 
 /**
+ * Maps each workspace `package.json` (canonical absolute path) to a minimal
+ * JSON projection carrying only its `"type"` field. TypeScript reads the
+ * nearest package.json through the compiler host to decide whether a
+ * `.ts`/`.js` file is ESM or CommonJS (`impliedNodeFormat`); without this the
+ * confined host hides every workspace manifest and all such files are treated
+ * as CommonJS (false TS1470 for `import.meta` in `"type": "module"` packages).
+ * Other manifest fields are deliberately not exposed, so module resolution
+ * behaves exactly as before.
+ */
+function buildPackageJsonProjections(
+  rootPosix: string,
+  scopes: readonly PackageModuleScope[],
+): ReadonlyMap<string, string> {
+  const projections = new Map<string, string>();
+  for (const scope of scopes) {
+    const absolutePath = normalizePosixPath(
+      joinRootAndRelative(rootPosix, scope.manifestRelativePath),
+    );
+    projections.set(
+      canonicalPath(absolutePath),
+      JSON.stringify(scope.moduleType === undefined ? {} : { type: scope.moduleType }),
+    );
+  }
+  return projections;
+}
+
+/**
  * SEC-04: CompilerHost + ModuleResolutionHost disk fallback'ini kesinlikle
  * sınırlar — `entries` dışındaki workspace dosyaları (.env.js, ../secret.js,
  * symlink, bundle vb.) diskten ASLA okunmaz. Disk erişimi yalnızca:
@@ -2603,6 +2633,7 @@ export function configureConfinedCompilerHost(
   entries: ReadonlyMap<string, { readonly absolutePath: string; readonly content: string }>,
   rootPosix: string,
   resolvedLibDir: string | undefined,
+  packageJsonProjections: ReadonlyMap<string, string> = new Map(),
 ): ts.ModuleResolutionHost {
   const baseFileExists = host.fileExists.bind(host);
   const baseReadFile = host.readFile.bind(host);
@@ -2750,15 +2781,21 @@ export function configureConfinedCompilerHost(
     }
   }
 
+  // Workspace package.json manifests are never read from disk here; the host
+  // serves only their module-format projection (see buildPackageJsonProjections).
   host.fileExists = (p: string): boolean =>
     !p.includes("\0") &&
     (entries.has(canonicalPath(p)) ||
+      packageJsonProjections.has(canonicalPath(p)) ||
       (isAllowedDiskFile(p) && baseFileExists(p) && isRealpathConfinedDiskFile(p)));
 
   host.readFile = (p: string): string | undefined => {
     if (p.includes("\0")) return undefined;
-    const hit = entries.get(canonicalPath(p));
+    const key = canonicalPath(p);
+    const hit = entries.get(key);
     if (hit !== undefined) return hit.content;
+    const projected = packageJsonProjections.get(key);
+    if (projected !== undefined) return projected;
     return isAllowedDiskFile(p) && isRealpathConfinedDiskFile(p)
       ? baseReadFile(p)
       : undefined;
@@ -2960,6 +2997,7 @@ function cjsExportCallerRecord(
     qualifiedName: match.exportName,
     relativePath: entry.relativePath,
     language: entry.language,
+    location: declarationSpan(entry, parent.getSourceFile(), parent),
   });
 }
 
@@ -3028,6 +3066,7 @@ function computeIncrementalOptionsSignature(
   compilerOptions: ts.CompilerOptions,
   configs: readonly ScopedTsConfig[],
   workspacePackages: ReadonlyMap<string, WorkspacePackageManifest>,
+  moduleScopes: readonly PackageModuleScope[],
 ): string {
   const normalizedConfigs = configs.map((cfg) => ({
     dirPrefix: cfg.dirPrefix,
@@ -3070,6 +3109,10 @@ function computeIncrementalOptionsSignature(
     },
     configs: normalizedConfigs,
     workspacePackages: normalizedPackages,
+    moduleScopes: moduleScopes.map((scope) => [
+      scope.manifestRelativePath,
+      scope.moduleType ?? null,
+    ]),
   };
   return sha256Hex(utf8Encode(JSON.stringify(signaturePayload)));
 }
@@ -3114,11 +3157,20 @@ function configureIncrementalSourceFileReuse(
   const tryReuseOldSourceFile = (
     fileName: string,
     shouldCreateNewSourceFile?: boolean,
+    languageVersionOrOptions?: ts.ScriptTarget | ts.CreateSourceFileOptions,
   ): ts.SourceFile | undefined => {
     if (shouldCreateNewSourceFile) return undefined;
     const key = canonicalPath(fileName);
     const oldSf = oldSourceFilesByKey.get(key);
     if (oldSf === undefined) return undefined;
+    // A package.json "type" change flips ESM/CommonJS without touching the
+    // file text; never reuse a SourceFile parsed under the other format.
+    if (
+      typeof languageVersionOrOptions === "object" &&
+      languageVersionOrOptions.impliedNodeFormat !== oldSf.impliedNodeFormat
+    ) {
+      return undefined;
+    }
 
     const entry = entries.get(key);
     if (entry !== undefined) {
@@ -3140,7 +3192,7 @@ function configureIncrementalSourceFileReuse(
     onError,
     shouldCreateNewSourceFile,
   ) =>
-    tryReuseOldSourceFile(fileName, shouldCreateNewSourceFile) ??
+    tryReuseOldSourceFile(fileName, shouldCreateNewSourceFile, languageVersionOrOptions) ??
     baseGetSourceFile(
       fileName,
       languageVersionOrOptions,
@@ -3157,7 +3209,7 @@ function configureIncrementalSourceFileReuse(
       onError,
       shouldCreateNewSourceFile,
     ) =>
-      tryReuseOldSourceFile(fileName, shouldCreateNewSourceFile) ??
+      tryReuseOldSourceFile(fileName, shouldCreateNewSourceFile, languageVersionOrOptions) ??
       baseGetSourceFileByPath(
         fileName,
         pathArg,
@@ -3174,6 +3226,7 @@ function createProgramWithIncrementalReuse(params: {
   readonly compilerOptions: ts.CompilerOptions;
   readonly loadedConfigs: readonly ScopedTsConfig[];
   readonly workspacePackages: ReadonlyMap<string, WorkspacePackageManifest>;
+  readonly moduleScopes: readonly PackageModuleScope[];
   readonly host: ts.CompilerHost;
   readonly entries: ReadonlyMap<string, SourceEntry>;
   readonly sortedEntries: readonly SourceEntry[];
@@ -3185,6 +3238,7 @@ function createProgramWithIncrementalReuse(params: {
     compilerOptions,
     loadedConfigs,
     workspacePackages,
+    moduleScopes,
     host,
     entries,
     sortedEntries,
@@ -3195,6 +3249,7 @@ function createProgramWithIncrementalReuse(params: {
     compilerOptions,
     loadedConfigs,
     workspacePackages,
+    moduleScopes,
   );
   let oldProgram: ts.Program | undefined;
   let previousSourceHashes: ReadonlyMap<string, string> | undefined;
@@ -3533,4 +3588,88 @@ function extractHeritageClauses(
   };
 
   walk(sourceFile);
+}
+
+/* ------------------------------------------------------------------ */
+/* Symbol node locations & module-format scopes                         */
+/* (kept at the end of the file so cited line numbers above stay fixed) */
+/* ------------------------------------------------------------------ */
+
+type NodeLocation = NonNullable<SnapshotNodeInput["location"]>;
+
+/** 1-based line span of `node` in its file (leading trivia such as JSDoc excluded). */
+function declarationSpan(
+  entry: SourceEntry,
+  sourceFile: ts.SourceFile,
+  node: ts.Node,
+): NodeLocation {
+  return {
+    relativePath: entry.relativePath,
+    startLine: spanStart(sourceFile, node),
+    endLine: spanEnd(sourceFile, node),
+    sourceHash: entry.sourceHash,
+  };
+}
+
+/**
+ * Merges a declaration span into a file-bound symbol node's `location` and
+ * returns the record. Only spans of the node's own file are accepted; File
+ * nodes carry no adapter span (the indexer anchors them). Repeated
+ * declarations of the same node (overloads, merged declarations, a symbol
+ * seen both as a declaration and as a call target) widen the span to cover
+ * all of them, so the result does not depend on visit order.
+ */
+function withLocation(record: NodeRecord, span: NodeLocation | undefined): NodeRecord {
+  if (span === undefined || record.ref.kind === "File") return record;
+  if (record.ref.relativePath === undefined || record.ref.relativePath !== span.relativePath) {
+    return record;
+  }
+  const current = record.node.location;
+  if (
+    current !== undefined &&
+    current.startLine <= span.startLine &&
+    current.endLine >= span.endLine
+  ) {
+    return record;
+  }
+  const location: NodeLocation = {
+    relativePath: span.relativePath,
+    startLine: current === undefined ? span.startLine : Math.min(current.startLine, span.startLine),
+    endLine: current === undefined ? span.endLine : Math.max(current.endLine, span.endLine),
+    sourceHash: span.sourceHash,
+  };
+  const { language, attributes } = record.node;
+  record.node = {
+    ...record.ref,
+    ...(language === undefined ? {} : { language }),
+    location,
+    ...(attributes === undefined ? {} : { attributes }),
+  };
+  return record;
+}
+
+/**
+ * Loads the nearest-`package.json` `"type"` scopes for every analyzed file
+ * (in-memory `packageFiles`, otherwise the guarded read-only disk reader) and
+ * the compiler-host projections TypeScript uses for ESM/CommonJS detection.
+ */
+function loadModuleFormatScopes(
+  input: TypeScriptAdapterInput,
+  rootPosix: string,
+  sortedEntries: readonly SourceEntry[],
+): {
+  readonly scopes: readonly PackageModuleScope[];
+  readonly warnings: readonly string[];
+  readonly projections: ReadonlyMap<string, string>;
+} {
+  const loaded = loadPackageModuleScopes(
+    input.packageFiles,
+    input.packageFiles === undefined ? input.rootDir : undefined,
+    sortedEntries.map((entry) => entry.relativePath),
+  );
+  return {
+    scopes: loaded.scopes,
+    warnings: loaded.warnings,
+    projections: buildPackageJsonProjections(rootPosix, loaded.scopes),
+  };
 }

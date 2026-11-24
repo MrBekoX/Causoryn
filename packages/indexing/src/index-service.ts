@@ -428,21 +428,33 @@ function toGraphNode(
     readonly qualifiedName: string;
     readonly relativePath?: string;
     readonly language?: string;
+    readonly location?: SourceSpan;
     readonly attributes?: Readonly<Record<string, unknown>>;
   },
   contentHashByPath: ReadonlyMap<string, string>,
 ): GraphNode {
   const relativePath = input.relativePath;
+  const inventoryHash =
+    relativePath === undefined ? undefined : contentHashByPath.get(relativePath);
+  // Adapter-declared span (e.g. a symbol's declaration lines) is kept only when
+  // it describes the same file content as the inventory; otherwise the node
+  // falls back to the 1:1 file anchor.
+  const declared =
+    input.location !== undefined &&
+    input.location.relativePath === relativePath &&
+    input.location.sourceHash === inventoryHash
+      ? input.location
+      : undefined;
   const location: SourceSpan | undefined =
     relativePath === undefined
       ? undefined
       : {
           relativePath,
-          startLine: 1,
-          endLine: 1,
+          startLine: declared?.startLine ?? 1,
+          endLine: declared?.endLine ?? 1,
           // Envanter karması: node'un geldiği dosyanın bütünlük kanıtı.
           // Envanter dışı bir path bu aşamada sözleşme ihlalidir.
-          sourceHash: contentHashByPath.get(relativePath) ?? "",
+          sourceHash: inventoryHash ?? "",
         };
   if (location !== undefined && location.sourceHash.length === 0) {
     throw new IndexingError(
