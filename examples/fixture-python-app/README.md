@@ -1,29 +1,29 @@
-# fixture-python-app — Python dil desteği kabul fixture'i (M1-Python).
+# fixture-python-app — Python Language Support Acceptance Fixture
 
-TŞ v2.1 §7 deseni uyarınca **roslyn-worker + adapters/csharp-roslyn**
-kalıbının Python karşılığı: `native/python-worker/worker.py` (saf stdlib
-`ast`) + `adapters/python` TS adapter. Route → service → repository zinciri
-kanıtlanır (TŞ §8: Endpoint node + ROUTES_TO; CALLS + evidence).
+The Python counterpart of the `native/roslyn-worker` + `adapters/csharp-roslyn` pattern:
+`native/python-worker/worker.py` (pure standard-library `ast`) + the `adapters/python` TypeScript
+adapter. The fixture proves the route → service → repository chain (Endpoint node + `ROUTES_TO`;
+`CALLS` + evidence).
 
-## Dosyalar
+## Files
 
-| Dosya | İçerik |
+| File | Content |
 |---|---|
-| `app.py` | `@app.get("/orders")` + `@app.post("/orders")` FastAPI tarzı handler'lar; `logger.info` çözümsüz çağrı örneği |
-| `services/orders_service.py` | `create_order` (aynı modül `_validate_order` → verified; import edilen `save` → heuristic), `list_orders`, `async def audit_order` |
-| `repositories/order_repository.py` | `save`/`all_orders` modül fonksiyonları + `OrderRepository` sınıfı (`self._stamp` → verified, `save` → aynı modül fonksiyon → verified) |
+| `app.py` | FastAPI-style `@app.get("/orders")` + `@app.post("/orders")` handlers; `logger.info` as an example of an unresolved call |
+| `services/orders_service.py` | `create_order` (same-module `_validate_order` → `verified`; imported `save` → `heuristic`), `list_orders`, `async def audit_order` |
+| `repositories/order_repository.py` | the module functions `save` / `all_orders` + the `OrderRepository` class (`self._stamp` → `verified`; `save` → same-module function → `verified`) |
 
-## Beklenen zincir
+## Expected chain
 
-- `GET /orders` → `app.get_orders` → `services.orders_service.list_orders` (heuristic)
-  → `repositories.order_repository.all_orders` (heuristic)
-- `POST /orders` → `app.add_order` → `services.orders_service.create_order` (heuristic)
-  → `repositories.order_repository.save` (heuristic); `create_order →
-  _validate_order` (verified)
-- `app.get_orders → logger.info` **unresolved** (UnknownExternal `logger.info`;
-  uydurma kenar yok)
+- `GET /orders` → `app.get_orders` → `services.orders_service.list_orders` (`heuristic`)
+  → `repositories.order_repository.all_orders` (`heuristic`)
+- `POST /orders` → `app.add_order` → `services.orders_service.create_order` (`heuristic`)
+  → `repositories.order_repository.save` (`heuristic`); `create_order →
+  _validate_order` (`verified`)
+- `app.get_orders → logger.info` is **unresolved** (UnknownExternal `logger.info`; no invented
+  edge)
 
-Fixture kaynak kodu çalıştırılmaz; analiz bellek-içi AST üzerinden yapılır
-(`fastapi`/`flask` kurulu olması gerekmez — import'lar yalnızca ad tablosu
-içindir). Kabul testleri: `tests/python-worker.test.ts` ve
-`adapters/python/test/python-adapter.test.ts` (`npx vitest run <dosya>`).
+The fixture source is never executed; the analysis runs on the in-memory AST (`fastapi` / `flask`
+do not have to be installed — the imports are used only as a name table). Acceptance tests:
+`tests/python-worker.test.ts` and `adapters/python/test/python-adapter.test.ts`
+(`npx vitest run <file>`).

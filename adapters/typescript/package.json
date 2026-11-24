@@ -3,7 +3,7 @@
   "version": "0.3.0",
   "private": true,
   "license": "MIT",
-  "description": "TypeScript/JS Language Adapter: Compiler API ile AST + symbol resolution (TŞ v2.1 §6, §7, §25/4).",
+  "description": "TypeScript/JavaScript language adapter: TypeScript Compiler API parsing and symbol resolution, framework route linkers and test intelligence.",
   "type": "module",
   "exports": {
     ".": "./src/index.ts"

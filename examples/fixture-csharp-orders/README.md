@@ -1,42 +1,46 @@
 # fixture-csharp-orders
 
-TŞ v2.1 §25/4 kanıt zincirinin C# karşılığı: **POST /orders (controller) →
-OrdersService.Create → OrderRepository.Save**. Roslyn sidecar worker'ın
-(`native/roslyn-worker/`, sprint-2 B1) L2/L3 çıkarımını kanıtlayan 4 dosyalık
-bellek-içi fixture'dır — csproj/SLN içermez; worker kaynakları istek gövdesinde
-alır ve diskte hiçbir şey derlemez (ADR-008 salt-okunur workspace).
+The C# counterpart of the orders evidence chain: **POST /orders (controller) →
+OrdersService.Create → OrderRepository.Save**. A 4-file in-memory fixture that exercises the L2/L3
+extraction of the Roslyn sidecar worker (`native/roslyn-worker/`). It contains no csproj or SLN:
+the worker receives the sources in the request body and compiles nothing on disk (the analyzed
+workspace stays read-only).
 
-## Dosyalar
+## Files
 
-| Dosya | İçerik |
+| File | Content |
 |---|---|
-| `Program.cs` | Top-level host kurulumu + minimal API `GET /health` (adlandırılmış yerel fonksiyon handler) |
-| `Controllers/OrdersController.cs` | `[ApiController]` `[Route("api/[controller]")]` + `[HttpGet("{id}")]`/`[HttpPost]` action'ları |
-| `Services/OrdersService.cs` | `OrdersService` + `CreateOrderInput` record |
-| `Repositories/OrderRepository.cs` | `OrderRepository` + `Order` record |
+| `Program.cs` | Top-level host setup + minimal API `GET /health` (named local function handler) |
+| `Controllers/OrdersController.cs` | `[ApiController]` `[Route("api/[controller]")]` controller deriving from `ControllerBase`, with `[HttpGet("{id}")]` / `[HttpPost]` actions |
+| `Services/OrdersService.cs` | `OrdersService` + the `CreateOrderInput` record |
+| `Repositories/OrderRepository.cs` | the `Order` record, the `IOrderRepository` interface and `OrderRepository : IOrderRepository` |
 
-## Beklenen graph (worker çıktısı)
+## Expected graph (worker output)
 
-- **CONTAINS** (verified, ast-span): File → Class/Function, Class → Method
-  (property bildirimleri erişimci-metot yaklaşımıyla Method düğümü olur).
-- **CALLS** (verified, semantic-symbol):
+- **CONTAINS** (`verified`, `ast-span`): File → Class/Interface/Function, Class → Method (property
+  declarations become Method nodes through the accessor-method approach).
+- **CALLS** (`verified`, `semantic-symbol`):
   `OrdersController.GetById → OrdersService.GetById → OrderRepository.GetAll`,
-  `OrdersController.Create → OrdersService.Create → OrderRepository.Save`
-  ve `new Order` için `OrdersService.Create → Class Order`.
-  `List<T>.Add/ToArray` gibi analiz seti dışı çağrılar açık
-  `UnknownExternal` node + verified kenar olarak temsil edilir.
-- **ROUTES_TO** (verified, route-attribute):
+  `OrdersController.Create → OrdersService.Create → OrderRepository.Save`,
+  and `OrdersService.Create → Class Order` for `new Order`.
+  Calls outside the analysis set, such as `List<T>.Add` / `ToArray`, are represented as explicit
+  `UnknownExternal` nodes with `verified` edges.
+- **ROUTES_TO** (`verified`, `route-attribute`):
   `GET /api/Orders/{id} → OrdersController.GetById`,
   `POST /api/Orders → OrdersController.Create`,
-  `GET /health → Program.Health` (minimal API). `[controller]` token'ı
-  ASP.NET kuralıyla sınıf adının "Controller" ekinden arınmış hâliyle
-  (büyük/küçük harf korunarak: `Orders`) yazılır.
-- DI kayıt çağrıları (`AddScoped`, `AddControllers`, `MapControllers`) çağıran
-  bağlamı top-level statement olduğu için CALLS üretmez — uydurma kenar yok.
+  `GET /health → Program.Health` (minimal API). The `[controller]` token is written, following
+  the ASP.NET convention, as the class name without its "Controller" suffix, keeping its casing
+  (`Orders`).
+- **IMPLEMENTS** (`verified`, `semantic-symbol`): `OrderRepository → IOrderRepository`.
+- **INHERITS**: `OrdersController → ControllerBase` points at an `UnknownExternal` node — `verified`
+  when the ASP.NET Core reference assemblies can be resolved, otherwise `unresolved` with a
+  warning (no invented target).
+- DI registration calls (`AddScoped`, `AddControllers`, `MapControllers`) produce no CALLS edge,
+  because their calling context is a top-level statement — no invented edges.
 
-## Doğrulama
+## Verification
 
 ```bash
 dotnet build native/roslyn-worker
-npx vitest run tests/roslyn-worker.test.ts   # kabul testleri (B1)
+npx vitest run tests/roslyn-worker.test.ts   # acceptance tests
 ```

@@ -1,125 +1,81 @@
-# ADR-002 — No-LLM Strict Boundary
+# Karar Kaydı: LLM / Embedding / Model Bağımlılığı Yok
 
 > **Dil / Language:** **Türkçe** | [English](../en/adr/ADR-002-no-llm.md) · [Dokümantasyon Merkezi](../README.md)
 >
-> Kanıt: TŞ v2.1 §1 (Kırmızı çizgi), §3.1, §3.2, §19, §24 · `wiki/decisions.md` ADR-002, K-023, K-026 · `wiki/architecture.md`
-> Durum: **Kabul edildi** (şartnameden gelen değişmez motor sınırı; `v0.2.4` Pre-1.0 Public Preview ve `K-023`/`K-026` hibrit mimari + MCP şema sınırı ile güncel)
-> Tarih: 2026-11-02 (ilk belgeleme), 2026-11-20 (`v0.2.0` doğrulaması), 2026-11-23 (`v0.2.4` / `K-023`–`K-026` hibrit sınır ve MCP `.describe()` netleştirmesi); karar TŞ v2.1'den (31.10.2026) gelir
+> **Durum:** Kabul edildi — temel motor sınırı; Causoryn 0.3.0 (pre-1.0) için güncel.
+> **Tarihler:** 2026-11-02'de kaydedildi; 2026-11-20 ve 2026-11-23'te yeniden doğrulandı (host tarafından yazılan anotasyonlar ve MCP `.describe()` rehberliği); 0.3.0 için yeniden gözden geçirildi (araç profilleri, `worker_threads` indeksleme).
 
 ## Bağlam
 
-Causoryn, repository/monorepo kodunu kanıta bağlanan bir Unified Evidence &
-Knowledge Graph motorudur (TŞ v2.1 §1). Teknik Şartname'nin birinci sayfasında
-değişmez kırmızı çizgi olarak yazılıdır:
+Causoryn, depolar ve monorepo'lar için kanıta dayalı bir kod grafı ve değişiklik doğrulama motorudur. Kuruluş tasarımı, pazarlığa kapalı tek bir kural koyar:
 
-> "Causoryn içinde hiçbir LLM çalıştırılmayacak veya çağrılmayacak. …
-> Causoryn, yerel ve deterministik analiz, grafik, doğrulama ve araç çıktısı
-> üretir. LLM API, model yönlendirici, model adapter/provider, inference
-> sunucusu, embedding modeli, API anahtarı veya host model seçme fonksiyonu
-> bulunmaz." (TŞ v2.1, s.1)
+> Causoryn içinde hiçbir LLM çalıştırılmaz veya çağrılmaz. Causoryn yerel, deterministik analiz, graf, doğrulama ve yapılandırılmış araç çıktısı üretir. LLM API'si, model yönlendirici, model adapter'ı veya provider'ı, inference sunucusu, embedding modeli, API anahtarı istemi ya da host model seçim mantığı içermez.
 
-Yorumlama, planlama, kod yazma ve araç seçimi host modelin (`Antigravity`,
-`Claude Code`, `Codex`, `ZCode (GLM)`) sorumluluğudur (TŞ §3.1 sorumluluk
-matrisi). Causoryn yalnızca **kanıta dayalı veri** üretir: MCP aracından dönen
-sonuç yapısal veridir; MCP sunucusu host modeline `sampling`, `elicitation`
-veya başka bir yolla model çağrısı başlatmaz; Causoryn herhangi bir metin
-üretim ya da embedding servisinin istemcisi değildir (TŞ §3.1 sınır sözleşmesi).
+Sorumluluklar açıkça ayrılmıştır:
+
+- **Host kodlama ajanı** (`Antigravity`, `Claude Code`, `Codex`, `ZCode (GLM)`): host hangi modelle yapılandırılmışsa onu kullanarak yorumlama, planlama, kod düzenleme ve araç orkestrasyonu.
+- **Causoryn:** yalnızca yapılandırılmış, kanıta dayalı veri. MCP araçları graf olgularını, kanıtları, doğrulama kararlarını ve deterministik artefaktları döndürür.
+
+MCP sunucusu hiçbir zaman `sampling`, `elicitation` ya da giden herhangi bir model çağrısı başlatmaz; yalnızca `tools` yeteneğini kaydeder (`packages/mcp-server/src/server.ts`). Causoryn hiçbir zaman bir metin üretimi veya embedding servisinin istemcisi değildir.
 
 ## Karar
 
-Causoryn motoru **hiçbir LLM, embedding, vektör veritabanı veya model API
-bağımlılığı içermez** ve hiçbir kod yolunda yerel ya da uzak model çağrısı
-yapmaz.
+Causoryn motoru **hiçbir LLM, embedding, vektör veritabanı veya model API bağımlılığı içermez** ve hiçbir kod yolunda yerel ya da uzak model çıkarımı (inference) yapmaz.
 
-### Yasaklı bağımlılıklar (TŞ §3.2, değişmez)
+### Yasaklı Bağımlılıklar ve Yapılar
 
-- `openai`, `@anthropic-ai/sdk`, `@google/generative-ai`, `langchain` vb. LLM
-  inference/provider bağımlılıkları (isimler örnektir; aynı işlevdeki her
-  bağımlılık yasaktır).
-- `ModelProvider`, `LLMRouter`, `InferenceService`, `EmbeddingService`,
-  otomatik model indirme, Ollama/vLLM/Transformers çalışma servisleri.
-- Model API key ortam değişkeni, provider endpoint ayarı, kredi/billing ekranı.
-- RAG için vektör DB veya embedding modeli. Arama; derleyici sembolleri, graph
-  traversal, exact matching, **SQLite FTS5** (`symbol_fts` ve `wiki_fts`) ve
-  belgeli sözcüksel sıralama (lexical ranking) ile yapılır.
+- `openai`, `@anthropic-ai/sdk`, `@google/generative-ai`, `langchain` gibi LLM inference veya orkestrasyon SDK'ları ya da eşdeğer herhangi bir istemci kütüphanesi.
+- `ModelProvider`, `LLMRouter`, `InferenceService`, `EmbeddingService`, otomatik model ağırlığı indirmeleri veya yerel Ollama / vLLM / Transformers çalışma ortamları.
+- Model API anahtarı ortam değişkenleri, provider endpoint ayarları veya token/kredi faturalama ekranları.
+- Erişim (retrieval) için vektör veritabanları veya embedding modelleri. Sembol ve dokümantasyon araması; derleyici/AST sembol tablolarını, sınırlı graf gezinmesini, tam eşleşmeyi, yol ve tanımlayıcı tokenizasyonunu (`camelCase` / `PascalCase` / `snake_case` / `kebab-case`) ve `bm25` sıralamalı **SQLite FTS5**'i (`symbol_fts`, `wiki_fts`) kullanır.
 
-### Bu kararın kod ve dağıtım tarafındaki pratik sonuçları
+## Sonuçlar
 
-1. Graph kanıtı (`Evidence`) yalnızca dil analizörleri (TS Compiler API, C#
-   Roslyn, Python `ast`, Go `go/parser`, Rust `syn 3`), şema/konfigürasyon
-   ayrıştırıcıları ve doğrulanabilir dosya/commit kaynaklarından gelir; host
-   model çıktısı asla `verified` evidence olarak indekslenemez (TŞ §3.2).
-2. Arama yetenekleri deterministik bileşenlerle kurulur: derleyici/AST
-   sembolleri, sınırlı graph gezinmesi ve SQLite FTS5.
-3. `packages/mcp-server` host modeline tek yönlü hizmet verir: `stdout`
-   kanalında yalnızca MCP JSON-RPC protokolü taşınır, tüm loglar `stderr`'e
-   yazılır (TŞ §10.1).
-4. `v0.2.4` monoreposundaki **18 npm workspace paketi + kök monorepo** (toplam
-   19 `package.json`) genelinde çalışma zamanı ve derleme bağımlılıkları yalnızca
-   analiz ve paketleme için gereken altyapı kütüphaneleridir: `zod`,
-   `@modelcontextprotocol/sdk`, `better-sqlite3`, `yaml`, `typescript`,
-   `esbuild` (ayrıca yayımlanan `packages/causoryn` paketi `"dependencies": {}`
-   sıfır dış npm bağımlılığı beyan eder).
+1. **Kanıt yalnızca statik kaynaklardan gelir.** Graf `Evidence` kayıtları statik analizörlerden (TypeScript Compiler API, C# Roslyn, Python `ast`, Go `go/parser`, Rust `syn` 3), sözleşme/konfigürasyon ayrıştırıcılarından ve doğrulanabilir dosya ya da Git commit aralıklarından gelir. Host modelinin yazdığı metin hiçbir zaman `verified` kanıta dönüşemez.
+2. **Deterministik erişim.** Arama ve konumlandırma (localization) sembol tablolarına, graf komşuluklarına ve FTS5'e dayanır — eşit girdiler için sonuçlar tekrarlanabilir.
+3. **Tek yönlü `stdio` hizmeti.** `packages/mcp-server` host'a `stdio` üzerinden hizmet verir: `stdout` yalnızca MCP JSON-RPC çerçevelerini taşır; tüm loglar `stderr`'e gider.
+4. **Küçük bağımlılık ayak izi.** 18 npm workspace paketi ve monorepo kökü (19 `package.json` manifesti) genelinde tek dış bağımlılıklar analiz, depolama, protokol ve build/test araçlarıdır: `zod`, `@modelcontextprotocol/sdk`, `better-sqlite3`, `yaml`, `typescript`, `esbuild`, `vitest`, `eslint`, `typescript-eslint` ve `@types/*`. Yayımlanan `packages/causoryn` paketi `"dependencies": {}` beyan eder.
+5. **Statik boşluklar görünür kalır.** Statik analiz bir bağlamayı kanıtlayamadığında Causoryn boşluğu bir tahminle doldurmak yerine bunu `heuristic` (+ `ambiguity`), `unresolved` (`UnknownExternal`), daha düşük `coverage` katmanları ve `warnings` olarak raporlar (bkz. [5-Dil Analizörleri](../language-analyzers.md)).
+6. **Semantik sentez host'a aittir.** Modül özetleri veya rehberli turlar gibi anlatılar host ajanından gelmelidir (bkz. sonraki bölüm); Causoryn bunları yalnızca doğrular ve render eder.
 
-### Hibrit Mimari Dışa Aktarım, Opsiyonel Anotasyonlar ve MCP `.describe()` (`K-023` / `K-026`)
+### Host Tarafından Yazılan Mimari Anotasyonların Sınırı
 
-`causoryn_export_documentation`, graph'taki statik kanıtla tek başına (model çağrısı olmaksızın) deterministik bir mimari portalı üretir. Çağıran, isteğe bağlı `annotations` alanıyla özet, domain grupları, akışlar, tur, karar ve risk notları ekleyebilir. `K-026` ile `causoryn_export_documentation` aracının MCP Zod şemasındaki `.describe()` alan açıklamaları ve doğal dil tetiklemeli `architecture-blueprint` skill'i, harici host LLM'in iki aşamalı keşif → kanıta dayalı sentez akışını yürütmesini kolaylaştırırken Causoryn motorunu **%100 LLM-free** tutar. Sunucu doğrulayıcısı şemayı ve referansların ilgili graph veya projeksiyondaki varlığını ve aidiyetini fail-closed denetler (`moduleId`, `nodeId`, `evidenceId`, `keyFiles`). Geçersiz girdi `INVALID_ARGUMENT` ile reddedilir; serbest metnin doğruluğu çağıranın sorumluluğundadır. Uygulama desenleri ve prompt örnekleri için bkz. [Prompt ve Mimari Portal Rehberi](../prompting-and-architecture-portals.md).
+`causoryn_export_documentation`, mimari portalları hiçbir model çağrısı yapmadan doğrudan statik kanıt grafından render eder. Bir çağıran — genellikle `skills/architecture-blueprint/SKILL.md` ve her girdi alanındaki `.describe()` belgeleriyle yönlendirilen host kodlama ajanı — isteğe bağlı olarak yapılandırılmış `annotations` (başlık, mimari stil, yönetici özeti, alanlar (domains), modül notları, akışlar, rehberli tur, kararlar, riskler) geçirebilir. Önerilen akış iki geçişlidir: önce `format: "json"` ile `architectureSummary.moduleIds` okunur, ardından kanıta dayalı anotasyonlar `format: "html"`, `view: "interactive"` ile gönderilir.
+
+Sınırın Causoryn tarafı:
+
+- anotasyon şemasını ve boyut bütçelerini doğrular;
+- başvurulan her `moduleId`, `nodeId`, `evidenceId` ve `keyFiles` girdisini etkin graf ve projeksiyona karşı fail-closed biçimde denetler; çağrı başına en fazla 25 hatayı `INVALID_ARGUMENT` altında toplar (`packages/graph/src/architecture-annotations.ts`);
+- metni asla üretmez, yeniden yazmaz veya "iyileştirmez".
+
+Çağıranın sağladığı metnin olgusal doğruluğu çağıranın sorumluluğunda kalır. Anotasyonlu çıktı da yine deterministik bir renderer tarafından üretilir; anotasyonlar yalnızca onun girdilerinden biridir. Deterministik ve anotasyonlu prompt desenleri için bkz. [Prompt ve Mimari Portal Rehberi](../prompting-and-architecture-portals.md).
 
 ### Determinizmin Kapsamı
 
-Aynı renderer sürümü, metadata dahil aynı snapshot, format, görünüm, seçenekler
-ve anotasyon girdisi, desteklenen mimari çıktılarda bayt düzeyinde aynı sonucu
-üretir. Graph analizinin girdileri arasında dosya içeriği, çalışma alanı ve ignore
-ayarları, analizör ve araç zinciri sürümleri ile bunların kullanılabilirliği yer alır.
-Yeni build’ler `createdAt`, yayın zamanı ve revision gibi metadata alanlarını
-değiştirebilir. MCP `requestId`, indeks işi ilerlemesi ve gecikmeler çalışma zamanına
-bağlıdır. Opsiyonel host LLM anlatısı, renderer için değişken bir girdidir.
-Bkz. `packages/graph/test/architecture-export.test.ts` ve
-`packages/mcp-server/src/{context.ts,server.ts,services.ts}`.
+- Aynı renderer sürümü, snapshot (metadata dahil), format, görünüm, etkin seçenekler ve doğrulanmış anotasyonlar **bayt düzeyinde aynı** mimari artefaktları üretir (`packages/graph/test/architecture-export.test.ts`).
+- Statik graf snapshot'ları dosya içeriklerine, workspace ve ignore ayarlarına, analizör sürümlerine ve araç zinciri sürümleri ile bunların kullanılabilirliğine bağlıdır. Snapshot kimlikleri duvar saati zamanını dışarıda bırakan akışlı (streaming) SHA-256 özetleridir (`computeStreamingSnapshotId`); bu yüzden aynı girdilerin temiz bir tam build'i ile erken kesmeli (early cutoff) bir incremental build'i tek bir snapshot kimliğini paylaşır.
+- Yeni build'ler `createdAt`, yayın zamanı ve revizyon gibi metadata alanlarını değiştirebilir. MCP `requestId`, arka plan iş ilerlemesi ve gecikme çalışma zamanı durumunu yansıtır. İsteğe bağlı, host tarafından yazılan metin renderer için değişken bir girdidir.
 
 ## Gerekçe
 
-- **Çekirdek determinizmi:** Kanonik graph sıralaması ve kimlikleri eşdeğer
-  girdilerle tekrarlanabilir (TŞ §8 invariant vi). Dışa aktarımda anotasyonlar
-  renderer girdisidir. Graph’taki `verified` kanıtlar statik kaynaklardan gelir.
-- **Kanıt bütünlüğü (`ADR-004`):** Her `verified` kenarın dosya, satır aralığı
-  ve SHA-256 `sourceHash` kaynaklı doğrulanabilir kanıtı vardır; model çıktısı
-  bu standardı karşılayamaz.
-- **Gizlilik ve tehdit modeli:** Causoryn analizi yerelde yürütür ve kaynak kodu
-  model API’sine veya telemetri servisine göndermez (TŞ §19). Harici host’un
-  veri işleme davranışı kendi yapılandırmasına ve sağlayıcısına bağlıdır.
-- **Sorumluluk ayrımı (TŞ §3.1, K-023):** Semantik sentez ve anlatı host modelde,
-  statik ölçüm, fail-closed kanıt doğrulaması ve görsel yerleşim Causoryn'dedir;
-  iki katmanın sorumluluk alanı birbirine karışmaz.
+- **Tekrarlanabilirlik:** kanonik graf sıralaması ve kimlikleri eşdeğer girdiler için tekrarlanabilir; olasılıksal bir bileşen bunu bozardı.
+- **Kanıt bütünlüğü:** her `verified` kenar bir dosya yolunu, 1 tabanlı bir satır aralığını ve bir SHA-256 `sourceHash` değerini gösterir — üretilmiş metnin karşılayamayacağı bir çıta.
+- **Gizlilik ve tehdit modeli:** Causoryn workspace'i yerelde analiz eder ve kaynak kodu model API'lerine veya telemetri servislerine göndermez. Harici bir host'un veriyi nasıl işlediği kendi yapılandırmasına ve sağlayıcısına bağlıdır.
+- **Sorumlulukların ayrılması:** semantik akıl yürütme ve anlatı sentezi host ajanında; statik ölçüm, fail-closed referans doğrulaması ve deterministik yerleşim Causoryn'de yer alır.
 
-## Sonuçlar ve Doğrulama Kanıtları (`v0.2.4`)
+## Uygulama ve Doğrulama
 
-- **Dürüst kapsama (`ADR-010`):** Eksik statik çözümleme LLM tahminiyle
-  doldurulmaz; `heuristic` (+ `ambiguity`), `unresolved` (`UnknownExternal`),
-  `coverage` ve `warnings` alanlarıyla şeffafça raporlanır (bkz.
-  [5-Dil Analizörleri](../language-analyzers.md)).
-- **Manifest ve SBOM denetimi:** `tests/smoke.test.ts` ("yasak LLM
-  bağımlılıkları" testi) yasaklı paketlerin workspace manifestolarında yer
-  almadığını doğrular. `packages/mcp-server/dist/bundle-manifest.json` içindeki
-  **35** dosyalık deterministik bundle (`mcp-server.mjs`,
-  `mcp-server.mjs.LEGAL.txt`, `node_modules/better-sqlite3/LICENSE` ve N-API v10
-  prebuild ikilileri), `packages/causoryn/THIRD-PARTY-NOTICES.md` ve
-  `scripts/generate-sbom.mjs` tarafından üretilen CycloneDX 1.5 SBOM hiçbir
-  AI/model bileşeni barındırmaz.
-- **F6 davranışsal sıfır-ağ kanıtı (`net-guard.cjs`):** Güvenlik test süitinde
-  (`tests/security-release/helpers/net-guard.cjs`, [Güvenlik Denetimi](../security-pass.md))
-  sunucu süreci `NODE_OPTIONS="--require .../net-guard.cjs"` preload kancasıyla
-  başlatılır; süreç-içi tüm giden Node.js ağ API'leri (`dns`, `net`, `tls`,
-  `http`, `https`, `fetch`, `WebSocket`) kayıt + anında red (`CAUSORYN_NETWORK_DENIED`)
-  davranışına çevrilir. F6 oturumu `tools/list` ile 29 kaydı keşfeder ve
-  `causoryn_workspace_summary` ile HTML dışa aktarımını çağırır. Bu oturumda
-  `CAUSORYN_NETLOG` **0 bayt** kalır. *(`net-guard.cjs` süreç-içi
-  Node ağ API'lerini sarar; alt süreç çalıştırma yüzeyi statik komut
-  allowlist'leriyle — salt-okunur `git` ve çevrimdışı sidecar'lar; Rust
-  sidecar'da ise yalnızca ilk soğuk `cargo build --locked` derlemesinde kilitli
-  `crates.io` bağımlılık indirmesi — sınırlandırılmıştır.)*
+| Kontrol | Neyi kanıtlar | Nerede |
+|---|---|---|
+| Yasaklı bağımlılık testi | `openai`, `@anthropic-ai/sdk`, `@google/generative-ai` ve `langchain` hiçbir workspace `package.json` dosyasında (kök, tüm paketler ve adapter'lar, `packages/causoryn`, `integrations/zcode/causoryn`) yer almaz | `tests/smoke.test.ts` |
+| Bundle manifesti ve bildirimler | 36 girdili `packages/mcp-server/dist/bundle-manifest.json` (`mcp-server.mjs`, `index-worker.mjs`, `mcp-server.mjs.LEGAL.txt`, vendored `better-sqlite3` ve prebuild'leri), `packages/causoryn/THIRD-PARTY-NOTICES.md` ve `scripts/generate-sbom.mjs` tarafından üretilen CycloneDX 1.5 SBOM hiçbir AI veya inference paketi listelemez | `packages/mcp-server/scripts/build-bundle.mjs`, `scripts/generate-sbom.mjs` |
+| Statik ağ taraması | Bundle hiçbir ağ taşıma import'u veya çağrısı içermez (`node:http`, `node:https`, `node:net`, `node:tls`, `node:dgram`, `node:dns`, `fetch(`, `XMLHttpRequest`, `WebSocket`) | `tests/security-release/f6-security-release.test.ts` içindeki statik ağ grubu |
+| Davranışsal sıfır ağ oturumu | Bundle'lanmış sunucu, süreç içi `dns`, `net`, `tls`, `http`, `https`, `fetch` ve `WebSocket` kullanımını kaydedip reddeden `NODE_OPTIONS="--require …/net-guard.cjs"` ile başlatılır. Oturum `tools/list` ile 32 aracı listeler (`full` profili), `causoryn_workspace_summary` aracını ve bir HTML dışa aktarımını çağırır ve ağ logu **0 bayt** kalır | `tests/security-release/helpers/net-guard.cjs` + aynı test dosyasının ağ reddi grubu; bkz. [Güvenlik Denetimi](../security-pass.md) |
+| Sunucu yetenekleri | MCP sunucusu yalnızca `tools` yeteneğini duyurur; sampling veya elicitation işleyicisi yoktur | `packages/mcp-server/src/server.ts` |
 
-## İlgili kararlar ve belgeler
+Kapsam notu: `net-guard.cjs` süreç içi Node.js ağ API'lerine kanca atar. Alt süreçler ayrıca sabit komut izin listeleriyle (allowlist) sınırlandırılır — salt okunur `git`, çevrimdışı sidecar'lar ve Rust worker'ının crates.io'dan crate indirebilen, isteğe bağlı, tek seferlik soğuk `cargo build --locked` derlemesi.
 
-- `ADR-001` Model-agnostic Core · `ADR-004` Evidence First · `ADR-008` Read-only Workspace Default · `ADR-010` Incomplete Feature Never Advertised as Done (TŞ §24; iç kayıt: `wiki/decisions.md`)
-- [Mimari Özeti](../architecture.md) · [5-Dil Analizörleri](../language-analyzers.md) · [Prompt ve Mimari Portal Rehberi](../prompting-and-architecture-portals.md) · [Güvenlik Denetimi](../security-pass.md)
+## İlgili Dokümantasyon
+
+- İlgili tasarım kararları: modelden bağımsız çekirdek, önce kanıt, varsayılan olarak salt okunur workspace ve "tamamlanmamış bir özellik asla Done olarak tanıtılmaz" (bkz. [Mimari Özeti](../architecture.md) ve [Uygulama Durumu](../implementation-status.md)).
+- [5-Dil Analizörleri](../language-analyzers.md) · [Prompt ve Mimari Portal Rehberi](../prompting-and-architecture-portals.md) · [Güvenlik Denetimi](../security-pass.md)

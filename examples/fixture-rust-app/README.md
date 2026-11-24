@@ -1,25 +1,24 @@
-# fixture-rust-app — Rust kanıt zinciri fixture'ı (M1-Rust)
+# fixture-rust-app — Rust Evidence Chain Fixture
 
-> Kanıt: TŞ v2.1 §7 (dil sidecar worker'ları), §8 (graph sözleşmesi).
-> Roslyn worker'ın `examples/fixture-csharp-orders` fixture'ının Rust
-> karşılığıdır: route → service → repository zinciri.
+The Rust counterpart of the `examples/fixture-csharp-orders` fixture of the Roslyn worker: a
+route → service → repository chain for the Rust sidecar worker (`native/rust-worker`, see its
+[`PROTOCOL.md`](../../native/rust-worker/PROTOCOL.md)).
 
-3 dosya, salt-okunur kaynak çantası (build edilemez cargo projesi DEĞİLDİR
-— worker stdin üzerinden içerik analizi yapar, disk yazmaz):
+Three files form a read-only source bag. This is NOT a buildable cargo project: the worker
+analyzes the contents sent over stdin and writes nothing to disk.
 
-- `main.rs` — `#[get("/orders")] list_orders` ve `#[post("/orders")]
-  create_order` handler'ları; aynı modülde doğrudan çağrı
-  (`create_audit_entry`) ve nitelikli yol çağrısı
-  (`services::OrdersService::new`); çözülemeyen çağrı örneği
-  (`std::env::var` → unresolved + UnknownExternal).
-- `services.rs` — `OrdersService` (struct → Class; impl metotları →
-  Method) `create`/`list` içindeki metot çağrıları → heuristic.
-- `repositories.rs` — `Order` (struct → Class), `OrderStore` (trait →
-  Interface; metot bildirimleri Method), `OrderRepository` (struct →
-  Class; `new` + `impl OrderStore` metotları Method). `save`/`get_all`
-  adlarında trait + impl adayı çiftliği → metot çağrısı ambiguity
-  taşır.
+- `main.rs` — the `#[get("/orders")] list_orders` and `#[post("/orders")] create_order`
+  handlers (`ROUTES_TO`, `verified`); a direct call in the same module (`create_audit_entry`,
+  `verified`); a qualified path call (`services::OrdersService::new`, `heuristic` with an
+  `unverified-module-prefix-suffix-match` ambiguity because only the last two path segments are
+  matched); and an unresolvable call (`std::env::var` → `unresolved` + UnknownExternal).
+- `services.rs` — `OrdersService` (struct → Class; impl methods → Method); the method calls
+  inside `create` / `list` → `heuristic`, and `OrderRepository::new` inside `OrdersService::new`
+  → `heuristic` (qualified path).
+- `repositories.rs` — `Order` (struct → Class), `OrderStore` (trait → Interface; its method
+  declarations are Method nodes), `OrderRepository` (struct → Class; `new` and the
+  `impl OrderStore` methods are Method nodes). The trait + impl candidates for `save` /
+  `get_all` make those method calls carry an ambiguity.
 
-Kabul testi: `tests/rust-worker.test.ts` ve
-`adapters/rust/test/rust-adapter.test.ts`
+Acceptance tests: `tests/rust-worker.test.ts` and `adapters/rust/test/rust-adapter.test.ts`
 (`npx vitest run tests/rust-worker.test.ts`).

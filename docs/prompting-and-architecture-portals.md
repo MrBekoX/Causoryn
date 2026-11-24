@@ -1,115 +1,134 @@
 # Prompt ve Mimari Portal Rehberi
 
 > **Dil / Language:** **Türkçe** | [English](en/prompting-and-architecture-portals.md) · [Dokümantasyon Merkezi](README.md) · [Kök README](../README.md)
+>
+> **Durum:** Causoryn 0.3.0'ı yansıtır. Aşağıdaki araç adları varsayılan `core` profilinin (11 araç) adlarıdır; bir profille işaretlenmiş satırlar, sunucunun `--tool-profile wiki`, `history` veya `full` ile başlatılmasını gerektirir (bkz. [Araç Profilleri](tool-contracts.md)).
 
-Bu kılavuz, **Causoryn** MCP sunucusunu hem **%100 deterministik / modelsiz statik analiz** için hem de **Host LLM anotasyonlu etkileşimli mimari portallar** (`causoryn-architecture-interactive.html`) üretmek için doğal dilde nasıl yönlendireceğinizi açıklar.
+Bu rehber, yapay zekâ kodlama ajanınızı doğal dille yönlendirerek **Causoryn**'i hem **tamamen deterministik, sıfır-LLM statik analiz** için hem de **host LLM anotasyonlu etkileşimli mimari portallar** (`causoryn-architecture-interactive.html`) için nasıl kullanacağınızı açıklar.
 
-> **Mimari sınır (`ADR-002` & `ADR-008`):** Causoryn çekirdeği içinde sıfır LLM çağrısı, sıfır API anahtarı ve sıfır embedding bulunur; kaynak çalışma alanı her zaman salt okunurdur. Zengin mimari açıklamalar gerektiğinde **Host LLM sizdeki kodlama ajanıdır** (Claude Code, Codex, Antigravity veya ZCode); Causoryn ise her referansı fail-closed doğrulayıp çevrimdışı portalı deterministik biçimde oluşturur.
+> **Sıfır-LLM ve salt okunur sınır:** Causoryn motoru hiçbir LLM çağrısı yapmaz, model kimlik bilgisine ihtiyaç duymaz ve embedding kullanmaz (bkz. [No-LLM Mimari Politikası](adr/ADR-002-no-llm.md)); analiz edilen workspace salt okunurdur. Mimari bir anlatı istediğinizde **host LLM rolünü kodlama ajanınız üstlenir** (Claude Code, Codex, Antigravity veya ZCode). Causoryn, ajanın verdiği her referansı fail-closed denetler ve çevrimdışı portalı deterministik biçimde oluşturur.
 
 ---
 
 ## 1. Causoryn'i Kullanmanın İki Yolu
 
-Causoryn tüm analiz, etki taraması ve mimari dışa aktarım iş akışlarında iki net çalışma modunu destekler:
-
-| Boyut | Saf Deterministik / Modelsiz Mod (`annotations` gönderilmez) | Host-LLM Anotasyonlu Portal Modu (`annotations` gönderilir) |
+| Boyut | Deterministik / sıfır-LLM mod (`annotations` gönderilmez) | Host-LLM anotasyonlu portal modu (`annotations` gönderilir) |
 |---|---|---|
-| **Ne zaman seçilir?** | Günlük kod keşfi, değişiklik öncesi etki/kontrat kontrolü, değişiklik sonrası mimari doğrulama, CI/arşiv amaçlı saf yapısal diyagramlar | Yeni ekip üyesi onboarding'i, sistem mimarisi sunumu, alan (domain) sınırları, uçtan uca iş akışları ve yapısal risk incelemesi |
-| **Motor davranış sınırı (`ADR-002`)** | %100 yerel, LLM-free statik graf sorgusu ve dışa aktarım | Causoryn çekirdeği yine %100 LLM-free kalır; yalnızca dış Host LLM anlatı katmanını üretir |
-| **Tekrarlanabilirlik** | Aynı snapshot + `format` + `view` + `options` → **bit düzeyinde aynı çıktı** | Aynı snapshot + `format` + `view` + `options` + aynı `annotations` girdisi → **bit düzeyinde aynı çıktı** (Host LLM metni oturumlar arasında değişebilir) |
-| **Kanıt ve doğrulama (`ADR-010`)** | Yalnızca graf kanıtları (`verified` / `heuristic` / `unresolved`) | Her `moduleId`, `nodeId`, `evidenceId` ve `keyFiles` yolu snapshot üzerinde fail-closed doğrulanır; uydurma referans `INVALID_ARGUMENT` ile reddedilir |
-| **Tipik çıktı** | MCP JSON zarfları veya saf yapısal `causoryn-architecture.html` / `causoryn-architecture-interactive.html` / `.mmd` / `.md` / `.json` | Zenginleştirilmiş `causoryn-architecture-interactive.html` (pan/zoom, canlı arama, kanıt çekmecesi), sıfır-JS `causoryn-architecture.html`, `.mmd` ve `.md` özet paketi |
+| **En uygun olduğu işler** | Kod tabanı keşfi, düzenleme öncesi etki alanı (blast radius) ve kontrat kontrolleri, düzenleme sonrası doğrulama, CI veya arşiv amaçlı yapısal diyagramlar | Ekibe katılım (onboarding), mimari incelemeler, domain sınırı haritaları, uçtan uca istek akışları, yapısal risk denetimleri |
+| **Motor sınırı** | Yerel, sıfır-LLM graf sorguları ve dışa aktarım | Causoryn sıfır-LLM kalır; isteğe bağlı anlatı katmanını yalnızca dıştaki host ajan yazar |
+| **Tekrarlanabilirlik** | Aynı snapshot + `format` + `view` + `options` → **bayt düzeyinde aynı çıktı** | Aynı snapshot + `format` + `view` + `options` + aynı `annotations` → **bayt düzeyinde aynı çıktı** (host'un yazdığı metnin kendisi oturumlar arasında değişebilir) |
+| **Dayanak ve doğrulama** | Yalnızca statik graf kanıtı (`verified` / `heuristic` / `unresolved`) | Her `moduleId`, `nodeId`, `evidenceId` ve `keyFiles` yolu tek geçişte snapshot'a karşı denetlenir; en fazla 25 hata `INVALID_ARGUMENT` altında birlikte raporlanır ve uydurulmuş referanslar reddedilir |
+| **Tipik çıktılar** | MCP JSON envelope'ları veya yapısal `causoryn-architecture.html` / `causoryn-architecture-interactive.html` / `.mmd` / `.md` / `.json` | Anotasyonlu `causoryn-architecture-interactive.html` (pan/zoom, canlı arama, kanıt çekmecesi, hash ile sabitlenmiş CSP), sıfır-JS `causoryn-architecture.html`, `.mmd` ve `.md` Mimari Özeti (Architecture Brief) |
 
 ```mermaid
 flowchart LR
-  USER["Geliştirici<br/>(Doğal Dil İsteği)"] --> HOST["Host Kodlama Ajanı<br/>Claude Code · Codex · Antigravity · ZCode"]
-  HOST -->|"1. Kanıt topla + JSON blueprint al"| MCP["Causoryn MCP Sunucusu<br/>(Sıfır-LLM · ADR-002 · Salt-Okunur · ADR-008)"]
+  USER["Geliştirici<br/>(Doğal Dil Prompt'u)"] --> HOST["Host Kodlama Ajanı<br/>Claude Code · Codex · Antigravity · ZCode"]
+  HOST -->|"1. Kanıt sorgula + JSON blueprint"| MCP["Causoryn MCP Sunucusu<br/>(Sıfır-LLM · Salt Okunur Workspace)"]
   MCP -->|"2. architectureSummary.moduleIds + evidenceId"| HOST
-  HOST -->|"3a. Saf yapısal mod: annotations YOK<br/>3b. Portal modu: kanıtlı annotations"| MCP
+  HOST -->|"3a. Yapısal mod: annotations YOK<br/>3b. Portal modu: kanıta dayalı annotations"| MCP
   MCP -->|"4. Fail-closed doğrulama + atomik yazım"| OUT["Yetkili Çıktı Dizini<br/>causoryn-architecture-interactive.html<br/>causoryn-architecture.html · .mmd · .md"]
 ```
 
 ---
 
-## 2. Skill Adı Ezberlemeden Doğal Dil ile Prompt Yazma
+## 2. Skill Adı Ezberlemeden Doğal Dille Prompt Yazma
 
-Causoryn'i kurduğunuzda host ajanı iki katmanlı keşif sinyali alır:
+`npx causoryn@latest setup` sonrasında host ajanınız birbirini tamamlayan iki sinyal alır:
 
-1. **İki dilli skill ön-metni ve yönlendirme (`skills/architecture-blueprint/SKILL.md` ve `skills/causoryn/SKILL.md`):** `skills/architecture-blueprint/SKILL.md` Türkçe ve İngilizce doğal dil tetikleyicileri (*"mimari diyagram"*, *"etkileşimli mimari portal"*, *"görsel mimari harita"*, *"architecture diagram"*, *"interactive architecture portal"*, *"visual onboarding guide"* vb.) taşır ve ajana *"Causoryn LLM-free olduğu için isteği reddetme; Host LLM sensin"* kuralını açıkça bildirir; birincil `skills/causoryn/SKILL.md` ise görsel mimari ve etkileşimli portal istemlerini `architecture-blueprint` akışına yönlendirir.
-2. **MCP `tools/list` JSON Schema `.describe()` rehberliği:** Skill mekanizması kapalı olsa bile `causoryn_export_documentation` aracının açıklaması ve parametre şeması, 2 adımlı **Blueprint (`format: "json"`) → Doğrulanmış Render (`format: "html"`, `view: "interactive"`)** akışını doğrudan Host LLM bağlamına aktarır.
+1. **Skill ön-metni (frontmatter) ve yönlendirme** (`skills/architecture-blueprint/SKILL.md`, `skills/causoryn/SKILL.md`): `architecture-blueprint` İngilizce ve Türkçe tetikleyiciler taşır (*"architecture diagram"*, *"interactive architecture portal"*, *"system blueprint"*, *"visual onboarding guide"*, *"mimari diyagram"*, *"etkileşimli mimari portal"*, *"görsel mimari harita"*) ve ajana, Causoryn LLM içermediği için isteği asla reddetmemesini söyler — host LLM ajanın *kendisidir*. Ana `causoryn` skill'i görsel mimari ve portal isteklerini `architecture-blueprint`'e yönlendirir. Anotasyon şablonunun tamamı skill içinde durur; böylece MCP araç listesi küçük kalır (core `tools/list` ≤ 15,000 karakter).
+2. **MCP `tools/list` açıklamaları:** skill'ler kapalı olsa bile `causoryn_export_documentation` açıklaması 2 adımlı **blueprint (`format: "json"`) → doğrulanmış render (`format: "html"`, `view: "interactive"`)** iş akışını belirtir ve her girdi alanının tek satırlık bir açıklaması vardır.
 
-Bu sayede hiçbir skill adını veya araç adını ezberlemeden doğrudan hedef odaklı doğal dil prompt'ları yazabilirsiniz.
+Bu nedenle hiçbir skill veya araç adını bilmeniz gerekmez — sonucu isteyin. Kurulu bazı skill'ler core adlarının yanında hâlâ legacy araç adlarından (örneğin `causoryn_index_status` veya `causoryn_generate_onboarding`) söz eder; varsayılan `core` profilinde ajan aşağıda listelenen core araçları kullanmalıdır. Eşleme [Legacy Araç Karşılıkları](tool-contracts.md) bölümündedir.
 
-### A. Günlük Deterministik Mühendislik Prompt'ları (`annotations` olmadan)
+### A. Günlük Deterministik Mühendislik Prompt'ları (`annotations` gönderilmez)
 
-| Amaç | Kopyala-Yapıştır Prompt (Türkçe) | Copy-Paste Prompt (English) | Temel MCP Araçları |
+| Amaç | Kopyala-yapıştır prompt (Türkçe) | Copy-paste prompt (English) | Temel MCP araçları (`core` profili) |
 |---|---|---|---|
-| **Keşif (`Discover`)** | `"Causoryn ile bu projenin yüksek seviye modül haritasını çıkar, ana giriş noktalarını ve en merkezi bileşenleri kanıtlarıyla listele."` | `"Use Causoryn to map the top-level modules, entrypoints, and highest-centrality components of this repository with evidence."` | `causoryn_workspace_summary`, `causoryn_map_system`, `causoryn_find_symbols` |
-| **Değişiklik Öncesi (`Preflight`)** | `"OrderService.createOrder fonksiyonuna idempotencyKey eklemeden önce Causoryn ile etki alanını, kontrat risklerini ve aday test planını çıkar."` | `"Before adding idempotencyKey to OrderService.createOrder, run Causoryn preflight to list blast-radius candidates, contract impacts, and a candidate test plan."` | `causoryn_preflight_change`, `causoryn_check_contracts`, `causoryn_derive_test_plan` |
-| **Değişiklik Sonrası (`Verify`)** | `"Yaptığımız değişiklikleri Causoryn ile doğrula: mimari kural ihlali, yeni döngü veya kontrat kayması var mı?"` | `"Verify our working-tree edits with Causoryn: check for architecture rule violations, new cycles, or contract drift."` | `causoryn_verify_change`, `causoryn_check_architecture`, `causoryn_detect_contract_drift` |
-| **Living Wiki Sorgusu** | `"Causoryn Living Wiki'yi oluştur ve kimlik doğrulama akışıyla ilgili sayfaları kanıt bağlantılarıyla özetle."` | `"Build the Causoryn Living Wiki and summarize the pages related to authentication with source evidence references."` | `causoryn_wiki_build`, `causoryn_wiki_search`, `causoryn_wiki_get_page` |
-| **Saf Yapısal Mimari Dışa Aktarım (Modelsiz)** | `"Causoryn ile anotasyon eklemeden bu reponun tamamen yapısal, modelsiz etkileşimli mimari diyagramını dışa aktar."` | `"Export a purely structural, model-free interactive architecture diagram of this repo using Causoryn without annotations."` | `causoryn_export_documentation` (`annotations` gönderilmez) |
+| **Keşif** | `"Causoryn ile bu projenin yüksek seviye modül haritasını çıkar, ana giriş noktalarını ve en merkezi bileşenleri kanıtlarıyla listele."` | `"Use Causoryn to map the top-level modules, entrypoints, and highest-centrality components of this repository with evidence."` | `causoryn_status`, `causoryn_map_system` (`profile: "onboarding"`), `causoryn_find_symbols` |
+| **Yerini bulma ve izleme** | `"POST /orders isteğinin nerede işlendiğini bul ve tüm çağrı zincirini kaynak kanıtlarıyla izle."` | `"Locate where POST /orders is handled and trace its full execution chain with source evidence."` | `causoryn_get_agent_context`, `causoryn_trace`, `causoryn_get_evidence` |
+| **Değişiklik öncesi (preflight)** | `"OrdersService.create fonksiyonuna idempotencyKey eklemeden önce Causoryn ile etki alanını, kontrat risklerini ve aday test planını çıkar."` | `"Before adding idempotencyKey to OrdersService.create, run Causoryn preflight to list blast-radius candidates, contract impacts, and a candidate test plan."` | `causoryn_preflight_change`, `causoryn_contracts` |
+| **Doğrulama** | `"Yaptığımız değişiklikleri Causoryn ile doğrula: mimari kural ihlali, yeni döngü veya kontrat kayması var mı?"` | `"Verify our working-tree edits with Causoryn: check for architecture rule violations, new cycles, or contract drift."` | `causoryn_verify_change` (mimari, graf farkı, test planı), `causoryn_contracts` (`action: "drift"`) |
+| **Düzenleme sonrası yenileme** | `"Causoryn ile bu çalışma alanını yeniden indeksle ve yeni snapshot hazır olunca haber ver."` | `"Re-index this workspace with Causoryn and tell me when the new snapshot is ready."` | `causoryn_status` (`action: "refresh"`, ardından `action: "inspect"`) |
+| **Yapısal dışa aktarım (modelsiz)** | `"Causoryn ile anotasyon eklemeden bu reponun tamamen yapısal, modelsiz etkileşimli mimari diyagramını dışa aktar."` | `"Export a purely structural, model-free interactive architecture diagram of this repo using Causoryn without annotations."` | `causoryn_export_documentation` (`annotations` gönderilmez) |
+
+`causoryn_verify_change` hiçbir zaman test çalıştırmaz; aday testleri listeler ve host'un bildirdiği sonuçları yalnızca `host_asserted` olarak kaydeder. Kontrat kayması için ajan `causoryn_contracts` aracını önceki/sonraki spec dosyalarıyla çağırmalıdır; çünkü `causoryn_verify_change` içindeki `contracts` kontrolü bu dosyalar olmadan değerlendirilemez.
 
 ### B. Host-LLM Anotasyonlu Etkileşimli Mimari Portal Prompt'ları
 
-| Senaryo | Kopyala-Yapıştır Prompt (Türkçe) | Copy-Paste Prompt (English) | Önerilen Çıktı & Seçenekler |
+| Senaryo | Kopyala-yapıştır prompt (Türkçe) | Copy-paste prompt (English) | Önerilen view ve seçenekler |
 |---|---|---|---|
-| **Tam Sistem Mimari Portalı** | `"Causoryn kullanarak bu projenin kapsamlı, kanıta dayalı etkileşimli mimari portalını oluştur."` | `"Create a comprehensive, evidence-grounded interactive architecture portal for this project using Causoryn."` | `format: "html"`, `view: "interactive"` → `causoryn-architecture-interactive.html` |
-| **Görsel Onboarding Rehberi** | `"Causoryn ile projenin görsel mimari haritasını, ana iş akışlarını, okuma sırasını ve yapısal risklerini çıkar."` | `"Build a visual onboarding architecture guide with core domains, request flows, guided tour, and structural risks using Causoryn."` | `annotations` içinde `domains`, `flows`, `guidedTour`, `risks` |
-| **Belirli Alt Sistem Odağı (`pathPrefix`)** | `"Causoryn kullanarak yalnızca src/billing alt sistemine odaklanan etkileşimli mimari portal ve Mermaid diyagramı üret."` | `"Use Causoryn to generate an interactive architecture portal and Mermaid diagram focused strictly on the src/billing subsystem."` | `options: { pathPrefix: "src/billing", maxModules: 24 }` |
-| **Yapısal Risk & Döngü Denetimi** | `"Causoryn ile döngüsel bağımlılıkları, yüksek fan-in sıcak noktalarını ve çözümlenmemiş sınırları kanıt kimlikleriyle birlikte bir mimari risk raporuna dönüştür."` | `"Use Causoryn to produce an annotated architecture portal highlighting circular dependencies, fan-in hotspots, and unresolved boundaries backed by evidence IDs."` | `annotations.risks` + `annotations.decisions` + `evidenceIds` |
-| **Katı Sıfır-JS Arşiv + PR Özeti** | `"Causoryn ile sıfır JavaScript içeren arşivlenebilir mimari HTML portalı, PR'a yapıştırılabilir Mermaid diyagramı ve Markdown mimari özeti üret."` | `"Generate a zero-JavaScript archival HTML architecture portal, a PR-ready Mermaid diagram, and a Markdown architecture brief using Causoryn."` | `view: "architecture"` → `causoryn-architecture.html`, `.mmd`, `.md` |
+| **Tam sistem portalı** | `"Causoryn kullanarak bu projenin kapsamlı, kanıta dayalı etkileşimli mimari portalını oluştur."` | `"Create a comprehensive, evidence-grounded interactive architecture portal for this project using Causoryn."` | `format: "html"`, `view: "interactive"` → `causoryn-architecture-interactive.html` |
+| **Görsel onboarding rehberi** | `"Causoryn ile projenin görsel mimari haritasını, ana iş akışlarını, okuma sırasını ve yapısal risklerini çıkar."` | `"Build a visual onboarding architecture guide with core domains, request flows, guided tour, and structural risks using Causoryn."` | `annotations` içinde `domains`, `flows`, `guidedTour`, `risks` alanlarını doldurun |
+| **Alt sistem odağı (`pathPrefix`)** | `"Causoryn kullanarak yalnızca src/billing alt sistemine odaklanan etkileşimli mimari portal ve Mermaid diyagramı üret."` | `"Use Causoryn to generate an interactive architecture portal and Mermaid diagram focused strictly on the src/billing subsystem."` | `options: { pathPrefix: "src/billing", maxModules: 24 }` |
+| **Risk ve döngü denetimi** | `"Causoryn ile döngüsel bağımlılıkları, yüksek fan-in sıcak noktalarını ve çözümlenmemiş sınırları kanıt kimlikleriyle birlikte bir mimari risk raporuna dönüştür."` | `"Use Causoryn to produce an annotated architecture portal highlighting circular dependencies, fan-in hotspots, and unresolved boundaries backed by evidence IDs."` | `annotations.risks` + `annotations.decisions` + `evidenceIds` |
+| **Sıfır-JS arşiv + PR özeti** | `"Causoryn ile sıfır JavaScript içeren arşivlenebilir mimari HTML portalı, PR'a yapıştırılabilir Mermaid diyagramı ve Markdown mimari özeti üret."` | `"Generate a zero-JavaScript archival HTML architecture portal, a PR-ready Mermaid diagram, and a Markdown architecture brief using Causoryn."` | `view: "architecture"` → `causoryn-architecture.html`, `.mmd`, `.md` |
+
+### C. Başka bir araç profili gerektiren prompt'lar
+
+Bu araçlar varsayılan `core` profilinde kayıtlı değildir. Profili host yapılandırmanızdaki sunucu argümanlarına ekleyin (örneğin `causoryn mcp --allow-cwd --auto-data-dir --tool-profile wiki`) veya `CAUSORYN_TOOL_PROFILE` değişkenini ayarlayın, ardından host'u yeniden başlatın. Profil olmadan ajan bu araçları hiç görmez.
+
+| Amaç | Kopyala-yapıştır prompt (Türkçe) | Copy-paste prompt (English) | Araçlar | Gereken profil |
+|---|---|---|---|---|
+| **Living Wiki** | `"Causoryn Living Wiki'yi oluştur ve kimlik doğrulama akışıyla ilgili sayfaları kanıt bağlantılarıyla özetle."` | `"Build the Causoryn Living Wiki and summarize the pages related to authentication with source evidence references."` | `causoryn_wiki_build`, `causoryn_wiki_search`, `causoryn_wiki_get_page` | `--tool-profile wiki` (veya `full`) |
+| **Mimari geçmişi** | `"Causoryn ile main ve HEAD~5 arasındaki mimariyi karşılaştır; eklenen, silinen ve yeniden adlandırılan modülleri listele."` | `"Compare the architecture of main and HEAD~5 with Causoryn and list added, removed, and renamed modules."` | `causoryn_compare_architecture`, `causoryn_architecture_timeline` | `--tool-profile history` (veya `full`) |
+| **Legacy araç adları kullanan eski prompt'lar** | `causoryn_index_status`, `causoryn_trace_execution`, `causoryn_check_contracts`, ... araçlarını adıyla çağıran prompt'lar veya betikler | — | 29 legacy ad (core karşılığı olanlar deprecated) | `--tool-profile full` |
+
+Geçmiş (history) araçları, her ref'te commit edilmiş `.causoryn/architecture-snapshot.json` dosyalarını karşılaştırır (bu dosyalar `causoryn_export_documentation` `format: "snapshot"` ile yazılır); bu dosyası olmayan bir ref `INVALID_REVISION` döner.
 
 ---
 
-## 3. Dışa Aktarım Görünümleri, Formatlar ve Varsayılan Dosya Adları
+## 3. Dışa Aktarım Formatları, View'lar ve Varsayılan Dosya Adları
 
-`causoryn_export_documentation` yalnızca `output.allowedOutputDirs` altında yetkilendirilmiş dizinlere (otomatik `--auto-data-dir` kurulumunda `<data-dir>/workspaces/<slug>-<hash12>/exports`) atomik `.tmp` + `rename` yöntemiyle yazar.
+`causoryn_export_documentation` atomik olarak yazar (önce `flag: "wx"` ile bir `.tmp` dosyası oluşturulur, ardından `rename` yapılır) ve **yalnızca** `output.allowedOutputDirs` içinde listelenen dizinlere yazar. `--auto-data-dir` ile Causoryn `<data-dir>/workspaces/<slug>-<hash12>/exports` dizinini otomatik olarak yetkilendirir (örneğin `~/.causoryn/workspaces/<slug>-<hash12>/exports`).
 
-| `format` | `view` | Varsayılan Dosya Adı | Güvenlik & Yetenek Özeti |
+| `format` | `view` | Varsayılan dosya adı | Çevrimdışı güvenlik ve temel yetenekler |
 |---|---|---|---|
-| `html` | `interactive` | `causoryn-architecture-interactive.html` | Çevrimdışı etkileşimli portal: fare tekerleği ile yakınlaştırma ve sürükle-kaydır (pan/zoom), canlı arama, dil/domain/döngü filtreleri, sağ **Evidence Inspector Drawer**, 1-hop komşuluk vurgusu, tek tık **Copy Mermaid**. Çevrimdışı CSP (`default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'`), sıfır CDN, sıfır `fetch`, sıfır `innerHTML`. |
-| `html` | `architecture` *(varsayılan)* | `causoryn-architecture.html` | **Sıfır JavaScript** (`0` adet `<script>` etiketi), katı çevrimdışı CSP (`default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'`), 5 saf-CSS sekme, Sugiyama katmanlı SVG diyagramı, zoom ön ayarları, Tarjan SCC döngü vurguları, satır içi SVG akış şeritleri. Farklı dosya adı sayesinde `interactive` çıktıyı ezmez. |
-| `mermaid` | `architecture` *(varsayılan)* | `causoryn-architecture.mmd` | GitHub / VS Code / PR açıklamaları için temiz, subgraph gruplu `flowchart TB`, ağırlıklı modüller arası kenarlar (`verified` düz, `heuristic`/`unresolved` kesikli) ve döngü renklendirmesi. |
-| `markdown` | `architecture` *(varsayılan)* | `causoryn-architecture.md` | Yönetici özeti, gömülü Mermaid diyagramı, domain/modül dökümü, kritik akışlar, rehberli tur, giriş noktaları, kararlar ve riskler. |
-| `json` | `architecture` *(varsayılan)* | `causoryn-architecture.json` | Kompakt mimari blueprint: kanonik `architectureSummary.moduleIds`, modül metrikleri, modüller arası kenarlar ve `evidenceCatalog`. |
-| `snapshot` | *(kullanılmaz)* | `architecture-snapshot.json` | Git tabanlı mimari karşılaştırma (`causoryn_compare_architecture`) için kanonik snapshot. |
-| `html` / `mermaid` / `markdown` / `json` | `full` | Format varsayılanı | Ham düğüm/kenar/kanıt dökümü. `options` ve `annotations` ile birlikte kullanılamaz (`INVALID_ARGUMENT`). |
+| `html` | `interactive` | `causoryn-architecture-interactive.html` | Çevrimdışı etkileşimli görüntüleyici: fare tekerleğiyle yakınlaştırma ve sürükleyerek kaydırma (pan), canlı arama, dil/domain/döngü filtreleri, yüzen **Evidence Inspector Drawer** (kanıt inceleme çekmecesi), 1-hop komşuluk vurgulama, tek tıkla **Copy Mermaid**. Hash ile sabitlenmiş çevrimdışı CSP (`default-src 'none'; script-src 'sha256-<hash>'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'`): `'unsafe-inline'` script yok, CDN yok, `fetch` yok, `innerHTML` yok. |
+| `html` | `architecture` *(varsayılan)* | `causoryn-architecture.html` | **Sıfır JavaScript** (`<script>` etiketi yok), çevrimdışı CSP (`default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'`), 5 saf-CSS sekme, katmanlı (Sugiyama) SVG diyagramı, yakınlaştırma ön ayarları, Tarjan SCC döngü vurguları, satır içi SVG akış şeritleri. Ayrı varsayılan dosya adı, etkileşimli portalın üzerine yazılmasını önler. |
+| `mermaid` | `architecture` *(varsayılan)* | `causoryn-architecture.mmd` | GitHub, VS Code ve pull request'ler için render edilebilir, subgraph gruplu `flowchart TB`; ağırlıklı modüller arası kenarlar (`verified` düz, `heuristic`/`unresolved` kesikli) ve döngü stillendirmesi. |
+| `markdown` | `architecture` *(varsayılan)* | `causoryn-architecture.md` | Mimari Özeti (Architecture Brief): yönetici özeti, gömülü Mermaid diyagramı, domain'ler, modül sorumlulukları, kritik akışlar, rehberli tur, giriş noktaları, kararlar, riskler. |
+| `json` | `architecture` *(varsayılan)* | `causoryn-architecture.json` | Kanonik `architectureSummary.moduleIds`, toplulaştırılmış modül metrikleri, modüller arası kenarlar ve `evidenceCatalog` içeren kompakt blueprint. |
+| `snapshot` | *(verilmez)* | `architecture-snapshot.json` | Salt okunur Git karşılaştırması (`causoryn_compare_architecture`, `causoryn_architecture_timeline`; history profili) için kanonik snapshot içerik kümesi. |
+| `html` / `mermaid` / `markdown` / `json` | `full` | Format varsayılanı | Filtrelenmemiş ham düğüm, kenar ve kanıt dökümü. `options` veya `annotations` ile birlikte kullanılamaz (`INVALID_ARGUMENT`). |
+
+Araç yanıtı (`data`) `path`, `format`, `bytes`, `atomic: true`, `view` alanlarını ve `architecture` ile `interactive` view'larında `architectureSummary` (`moduleCount`, `edgeCount`, `cycleCount`, `entrypointCount`, `contractCount`, `flowCount`, `annotated`, `moduleIds`) alanını döner.
 
 ### Projeksiyon Seçenekleri (`options`)
 
-`view: "architecture"` ve `view: "interactive"` görünümlerinde şu isteğe bağlı deterministik filtreler kullanılabilir:
+`view: "architecture"` ve `view: "interactive"` ile kullanılabilir:
 
-- `maxModules` (`2–100`, varsayılan `32`): Adaptif dizin ağacı kümelemesinin üreteceği en fazla mimari modül sayısı.
-- `pathPrefix` (göreli POSIX yol öneki, örn. `"src/api"` veya `"packages/domain"`): Projeksiyonu tek bir alt sisteme odaklar; `..` ve NUL bayt reddedilir.
-- `includeTests` (`boolean`, varsayılan `true`): Test dosyalarını ve test modüllerini mimari projeksiyona dahil eder; test modüllerini dışlamak için `false` verin.
+- `maxModules` (`2–100`, varsayılan `32`): uyarlamalı dizin ağacı kümelemesinden çıkan en fazla toplulaştırılmış modül sayısı. Aralık dışındaki değerler `INVALID_ARGUMENT` döner.
+- `pathPrefix` (`"src/api"` veya `"packages/domain"` gibi göreli POSIX dizin öneki, en fazla 260 karakter): projeksiyonu tek bir alt sisteme odaklar; `..` ve NUL baytları reddedilir.
+- `includeTests` (`boolean`, varsayılan `true`): test dosyalarını ve test modüllerini projeksiyona dahil eder; test modüllerini dışarıda bırakmak için `false` verin.
 
-### 2 Adımlı Anotasyonlu Portal Akışı (Özet)
+### 2 Adımlı Blueprint → Render İş Akışı
 
-1. **Adım 1 — Kanıt ve Kanonik `moduleId` Keşfi:** Host LLM önce `causoryn_index_status`, `causoryn_workspace_summary`, `causoryn_generate_onboarding`, `causoryn_map_system`, `causoryn_trace_business_flow` / `causoryn_trace_execution` ve `causoryn_get_evidence` araçlarıyla doğrulanmış kanıtları toplar; ardından `causoryn_export_documentation({ format: "json", view: "architecture", outputDir, options })` çağırarak kesin **`architectureSummary.moduleIds`** listesini alır.
-2. **Adım 2 — Fail-Closed Doğrulamalı Render:** Host LLM, yalnızca Adım 1'deki kanonik kimlikleri kullanarak `annotations` nesnesini oluşturur ve aynı `options` ile `causoryn_export_documentation({ format: "html", view: "interactive", outputDir, options, annotations })` çağırır (istenirse aynı `annotations` ile `view: "architecture"`, `mermaid` ve `markdown` çıktıları da üretilir).
+1. **Adım 1 — Kanıtı ve kanonik `moduleId`'leri toplayın.** Host ajan snapshot sağlığını ve graf olgularını `causoryn_status` (snapshot yoksa veya bayatsa önce yenileyin), `causoryn_map_system` (`profile: "onboarding"`, ardından `filters.pathPrefix` ile `level: "L1"` / `"L2"`), `causoryn_trace` (`mode: "execution"` veya `"business-flow"`) ve `causoryn_get_evidence` ile denetler; depoda `.causoryn/architecture.rules.yaml` varsa isteğe bağlı olarak `checks: ["architecture"]` ile `causoryn_verify_change` çağırır. Ardından kesin **`architectureSummary.moduleIds`** listesini almak için `causoryn_export_documentation({ format: "json", view: "architecture", outputDir, options })` çağırır. (`full` profilinde `causoryn_index_status`, `causoryn_workspace_summary`, `causoryn_generate_onboarding` veya `causoryn_trace_business_flow` gibi legacy adlar hâlâ çalışır.)
+2. **Adım 2 — Doğrulanmış portalı render edin.** Host ajan `annotations` alanlarını yalnızca Adım 1'deki kimliklerle doldurur ve `causoryn_export_documentation({ format: "html", view: "interactive", outputDir, options, annotations })` çağırır. Eşleşen bir sıfır-JS portal, diyagram ve özet elde etmek için `view: "architecture"` HTML, `mermaid` ve `markdown` çıktılarını tamamen aynı `options` ve `annotations` ile render edebilir.
 
 ---
 
-## 4. `annotations` Sözleşmesi (Fail-Closed Doğrulama Referansı)
+## 4. `annotations` Sözleşmesinin Tam Başvurusu (Fail-Closed, Çok Hatalı Doğrulama)
 
-Tüm `annotations` alanları katı (`strictObject`) Zod şeması ve snapshot üyelik kontrolünden geçer; bilinmeyen alan, boş metin, mükerrer kimlik veya graf dışı referans anında `INVALID_ARGUMENT` ile reddedilir.
+`annotations` içindeki her alan katı (`strictObject`) bir Zod şemasına göre doğrulanır, ardından etkin projeksiyona ve yayımlanmış snapshot'a karşı denetlenir. Bilinmeyen özellikler, boş veya yalnızca boşluktan oluşan metinler, mükerrer kimlikler ve var olmayan graf referansları reddedilir. Doğrulama tek geçişte **25**'e kadar şema ve graf referansı hatası toplar ve bunları `INVALID_ARGUMENT` altında birlikte döner; fazlası bir sayı olarak özetlenir.
 
-| Üst Alan | Tür & Üst Sınır | Alt Alanlar | Fail-Closed Doğrulama Kuralı |
+| Üst düzey alan | Tür ve bütçe sınırı | Alt alanlar | Fail-closed doğrulama kuralı |
 |---|---|---|---|
-| `title` | `string` (≤ 160 karakter) | — | Boş/yalnızca boşluk olamaz |
-| `architectureStyle` | `string` (≤ 120 karakter) | — | Gözlenen mimari stil etiketi (örn. `"Modular Monolith"`) |
-| `executiveSummary` | `string` (≤ 2.000 karakter) | — | 2–4 cümlelik özet; `partial` kapsam veya çözümlenmemiş sınırları açıkça belirtmelidir |
-| `domains` | `array` (≤ 24 öğe) | `id`, `name`, `description`, `layer?`, `moduleIds[]` (`1..100`) | `id` benzersiz; her `moduleId` `architectureSummary.moduleIds` içinde bulunmalı ve **en fazla bir domain'e** atanabilir (ayrık bölümleme) |
-| `moduleNotes` | `array` (≤ 120 öğe) | `moduleId`, `summary`, `responsibility?`, `layer?`, `keyFiles?` (≤ 12) | `moduleId` benzersiz ve `architectureSummary.moduleIds` içinde; her `keyFiles` yolu o modüle ait gerçek göreli dosya yolu olmalıdır |
-| `flows` | `array` (≤ 20 öğe) | `id`, `title`, `description`, `steps[]` (`1..24`: `moduleId?`, `nodeId?`, `label`, `explanation`) | `id` benzersiz; `steps` sırası korunur; verilen `moduleId` projeksiyonda, verilen `nodeId` aktif snapshot düğümleri arasında (`Workspace`/`Repository`/`UnknownExternal` hariç) olmalıdır |
-| `guidedTour` | `array` (≤ 30 öğe) | `step` (`1..1000`), `title`, `targetModuleId?`, `targetNodeId?`, `explanation` | `step` artan sırada kanonikleştirilir; `targetModuleId` ve `targetNodeId` aktif projeksiyon/snapshot üzerinde doğrulanır |
-| `decisions` | `array` (≤ 24 öğe) | `id`, `title`, `summary`, `rationale?`, `relatedModuleIds?` (≤ 24), `evidenceIds?` (≤ 24) | `id` benzersiz; her `relatedModuleId` `architectureSummary.moduleIds` içinde, her `evidenceId` gerçek snapshot kanıtları arasında olmalıdır |
-| `risks` | `array` (≤ 24 öğe) | `id`, `title`, `severity` (`"low" \| "medium" \| "high"`), `summary`, `relatedModuleIds?` (≤ 24), `evidenceIds?` (≤ 24) | `id` benzersiz; `relatedModuleIds` ve `evidenceIds` fail-closed doğrulanır |
+| `title` | `string` (≤ 160 karakter) | — | Kırpıldıktan sonra boş olmayan metin |
+| `architectureStyle` | `string` (≤ 120 karakter) | — | Gözlenen mimari desen etiketi (örneğin `"Modular Monolith"`) |
+| `executiveSummary` | `string` (≤ 2,000 karakter) | — | 2–4 cümlelik sentez; `partial` kapsamı veya çözümlenmemiş sınırları açıkça belirtmelidir |
+| `domains` | `array` (≤ 24 öğe) | `id`, `name`, `description`, `layer?`, `moduleIds[]` (`1..100`) | Benzersiz `id`; her `moduleId` `architectureSummary.moduleIds` içinde bulunmalı ve **en fazla bir domain'e** ait olmalıdır (ayrık bölümleme) |
+| `moduleNotes` | `array` (≤ 120 öğe) | `moduleId`, `summary`, `responsibility?`, `layer?`, `keyFiles?` (≤ 12) | `architectureSummary.moduleIds` içinden benzersiz `moduleId`; her `keyFiles` yolu o modülün içinde gerçek bir göreli dosya olmalıdır |
+| `flows` | `array` (≤ 20 öğe) | `id`, `title`, `description`, `steps[]` (`1..24`: `moduleId?`, `nodeId?`, `label`, `explanation`) | Benzersiz `id`; adım sırası korunur; her `moduleId` projeksiyonda, her `nodeId` etkin snapshot düğümleri arasında olmalıdır (`Workspace`, `Repository`, `UnknownExternal` hariç) |
+| `guidedTour` | `array` (≤ 30 öğe) | `step` (`1..1000`), `title`, `targetModuleId?`, `targetNodeId?`, `explanation` | `step`'e göre artan sırada sıralanır; `targetModuleId` ve `targetNodeId` projeksiyona/snapshot'a karşı denetlenir |
+| `decisions` | `array` (≤ 24 öğe) | `id`, `title`, `summary`, `rationale?`, `relatedModuleIds?` (≤ 24), `evidenceIds?` (≤ 24) | Benzersiz `id`; her `relatedModuleId` `architectureSummary.moduleIds` içinde, her `evidenceId` snapshot kanıtları içinde olmalıdır |
+| `risks` | `array` (≤ 24 öğe) | `id`, `title`, `severity` (`"low" \| "medium" \| "high"`), `summary`, `relatedModuleIds?` (≤ 24), `evidenceIds?` (≤ 24) | Benzersiz `id`; `relatedModuleIds` ve `evidenceIds` fail-closed denetlenir |
+
+**İç içe metin bütçeleri** (`packages/graph/src/architecture-annotations.ts`): `id` ve `layer` ≤ 80 karakter; domain `name` ≤ 120; `title` ve adım `label` ≤ 160; `responsibility`, modül/düğüm referansları, `keyFiles` girdileri ve `evidenceIds` ≤ 240; `description`, `summary`, `explanation` ve `rationale` ≤ 1,200.
 
 ### Kompakt Geçerli `annotations` JSON Örneği
 
-Aşağıdaki örnekte tüm `moduleId`, `nodeId`, `keyFiles` ve `evidenceId` değerleri Adım 1'de `architectureSummary.moduleIds` ve Causoryn MCP araçlarından okunan gerçek kimlikleri temsil eder:
+Aşağıdaki her `moduleId`, `keyFiles` yolu ve `evidenceId`, Adım 1'deki `architectureSummary.moduleIds` listesinden ve Causoryn kanıt çağrılarından birebir kopyalanmış bir değeri temsil eder (kısaltılmış `evidence:7d09d378...` tam bir kimlikle değiştirilmelidir). Dosya ve sembol adları `examples/fixture-ts-orders` örnek projesini izler; gerçek modül kimlikleri snapshot'ınızın kümelemesine bağlıdır.
 
 ```json
 {
@@ -150,7 +169,7 @@ Aşağıdaki örnekte tüm `moduleId`, `nodeId`, `keyFiles` ve `evidenceId` değ
         {
           "moduleId": "mod:src/routes",
           "label": "Accept POST /orders",
-          "explanation": "Parses request payload and invokes createOrder."
+          "explanation": "Parses request payload and invokes OrdersService.create."
         },
         {
           "moduleId": "mod:src/services",
@@ -177,7 +196,7 @@ Aşağıdaki örnekte tüm `moduleId`, `nodeId`, `keyFiles` ve `evidenceId` değ
   "decisions": [
     {
       "id": "DEC-01",
-      "title": "Unidirectional Routes → Services Boundary",
+      "title": "Unidirectional Routes -> Services Boundary",
       "summary": "Route handlers call service modules without reverse imports.",
       "rationale": "Keeps HTTP transport concerns isolated from domain logic.",
       "relatedModuleIds": ["mod:src/routes", "mod:src/services"],
@@ -201,15 +220,17 @@ Aşağıdaki örnekte tüm `moduleId`, `nodeId`, `keyFiles` ve `evidenceId` değ
 
 ## 5. Sorun Giderme
 
-| Hata Kodu | Olası Neden | Çözüm |
+| Hata kodu / belirti | Tipik neden | Çözüm |
 |---|---|---|
-| `EXPORT_NOT_ALLOWED` | Hedef `outputDir`, `output.allowedOutputDirs` içinde tanımlı değil (varsayılan reddetme). | Otomatik `--auto-data-dir` kurulumunun izin verdiği `<data-dir>/workspaces/<slug>-<hash12>/exports` dizinini kullanın (veya `CAUSORYN_CONFIG` içinde `output.allowedOutputDirs` tanımlayın). |
-| `INVALID_ARGUMENT` | (1) `annotations` içinde `architectureSummary.moduleIds` listesinde olmayan bir `moduleId`, geçersiz `nodeId`, `evidenceId` veya modül dışı `keyFiles` yolu; (2) bir `moduleId`'nin birden fazla domain'e atanması; (3) `view: "wiki"` verilmesi (Living Wiki araçlarına aittir); (4) `view: "interactive"` ile `html` dışı format kullanılması; (5) `view: "full"` ile birlikte `options` veya `annotations` geçirilmesi. | Hata mesajındaki tam alanı okuyun, Adım 1'deki JSON blueprint çıktısından gerçek `architectureSummary.moduleIds` ve dosya yollarını doğrulayın ve çağrıyı düzeltip tekrarlayın. |
-| `PATH_DENIED` | `fileName` içinde `/` veya `\` yol ayracı, `..` üst dizin geçişi, NUL bayt veya symlink kaçışı tespit edildi. | Yalnızca düz dosya adı verin (örn. `"custom-architecture.html"`) veya varsayılan ad için `fileName` alanını boş bırakın. |
-| `WORKSPACE_NOT_AUTHORIZED` | Çalışma alanı yetkili kökler arasında değil (`--allow-cwd`, MCP `roots/list` veya `CAUSORYN_CONFIG.allowRoots` eksik). | Projenin güvenli bir kök dizininde olduğunuzu doğrulayın; kurulumu `npx causoryn@latest doctor` ile denetleyin. |
-| `INDEX_NOT_READY` | Seçili çalışma alanı için henüz yayınlanmış snapshot yok veya indeksleme sürüyor. | Önce `causoryn_refresh_index` çağırın, ardından `causoryn_index_status` ile `ready` durumunu doğrulayın. |
+| `EXPORT_NOT_ALLOWED` | `outputDir`, `output.allowedOutputDirs` içinde değil (varsayılan olarak reddeden dışa aktarım politikası) ya da sunucu hem `--auto-data-dir` olmadan hem de yapılandırılmış bir liste olmadan başlatıldı. | `<data-dir>/workspaces/<slug>-<hash12>/exports` dizinini kullanın (`--auto-data-dir` gerektirir) veya `CAUSORYN_CONFIG` içinde `output.allowedOutputDirs` ayarlayın. |
+| `INVALID_ARGUMENT` | (1) `architectureSummary.moduleIds` içinde olmayan bir `moduleId`, etkin snapshot dışında bir `nodeId`, bilinmeyen bir `evidenceId` veya modülünün dışında kalan bir `keyFiles` yolu; (2) birden fazla domain'e atanmış bir `moduleId`; (3) `view: "wiki"` (wiki sayfaları wiki araçlarına aittir); (4) HTML dışı bir formatla `view: "interactive"`; (5) `view: "full"` ile birlikte `options` veya `annotations`; (6) 2–100 aralığı dışında `maxModules`. | `error.message` içindeki hata listesinin tamamını (en fazla 25 girdi) okuyun, kimlikleri Adım 1'deki JSON blueprint ile hizalayın, yükü düzeltin ve bir kez yeniden deneyin. |
+| `PATH_DENIED` | `fileName` içinde `/` veya `\`, `..` geçişi, NUL baytları veya symlink kaçışı var. | Düz bir dosya adı verin (örneğin `"custom-architecture.html"`) ya da format/view varsayılanını kullanmak için `fileName` alanını boş bırakın. |
+| `WORKSPACE_NOT_AUTHORIZED` | Yetkili kök yok: `--root`, `--allow-cwd`, MCP `roots/list` veya `CAUSORYN_CONFIG.allowRoots` ile bağlanmamış. | Host'u güvenli bir proje dizininden başlatın veya `roots/list` göndermesine izin verin; bu durumda `causoryn_status` `authorized: false` gösterir. Yapılandırmayı incelemek için `npx causoryn@latest doctor` çalıştırın. |
+| `INDEX_NOT_READY` veya `data.status: "indexing"` ile `status: "partial"` | Henüz yayımlanmış snapshot yok veya ilk indeksleme hâlâ sürüyor. | `retryAfterMs` kadar bekleyip `causoryn_status` (`action: "inspect"`) çağırın; çalışan bir iş yoksa `causoryn_status({ action: "refresh" })` ile bir tane başlatın. |
+| Ajan bir wiki veya history aracının olmadığını söylüyor | Sunucu varsayılan `core` profilini çalıştırıyor. | `--tool-profile wiki`, `history` veya `wiki,history` ekleyin (ya da `CAUSORYN_TOOL_PROFILE` ayarlayın) ve host'u yeniden başlatın ([§2.C](#c-başka-bir-araç-profili-gerektiren-promptlar)). |
+| Bir history aracından `INVALID_REVISION` | Ref'te commit edilmiş bir `.causoryn/architecture-snapshot.json` yok. | `format: "snapshot"` ile dışa aktarın, karşılaştırmak istediğiniz ref'lerde commit edin ve yeniden deneyin. |
 
-Kurulum sağlığını, sidecar zincirlerini ve host skill eşlemesini salt okunur biçimde denetlemek için:
+Çalışma zamanının, dil sidecar'larının ve kurulu host yapılandırmaları ile skill'lerin salt okunur sağlık kontrolünü çalıştırmak için:
 
 ```bash
 npx causoryn@latest doctor
@@ -219,8 +240,7 @@ npx causoryn@latest doctor
 
 ## İlgili Belgeler
 
-- [MCP Araç Sözleşmeleri (29 Araç)](tool-contracts.md)
-- [CLI ve Konfigürasyon](cli-and-configuration.md)
-- [ADR-002: No-LLM Strict Boundary](adr/ADR-002-no-llm.md)
-- [Mimari Özeti](architecture.md)
+- [5 Dakikalık Hızlı Başlangıç Rehberi](en/tutorial-5-minutes.md) (İngilizce) · [MCP Araç Sözleşmeleri](tool-contracts.md)
+- [CLI ve Yapılandırma](cli-and-configuration.md) · [No-LLM Mimari Politikası](adr/ADR-002-no-llm.md)
+- [Mimari Genel Bakış](architecture.md) · [Living Wiki Spesifikasyonu](wiki-spec.md)
 - [Dokümantasyon Merkezi (TR)](README.md) · [Documentation Hub (EN)](en/README.md)

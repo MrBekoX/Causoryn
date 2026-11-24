@@ -685,6 +685,50 @@ function extractReadmeToolTokens(text: string): string[] {
   ].sort();
 }
 
+/**
+ * Tool names in the first table column of one README section (from the heading
+ * that starts with `headingPrefix` up to the next `### ` or `## ` heading),
+ * sorted and de-duplicated.
+ */
+function extractSectionTableTools(text: string, headingPrefix: string): string[] {
+  const lines = text.replace(/\r\n/g, "\n").split("\n");
+  const start = lines.findIndex((line) => line.startsWith(headingPrefix));
+  if (start < 0) return [];
+  const tools = new Set<string>();
+  for (const line of lines.slice(start + 1)) {
+    if (line.startsWith("### ") || line.startsWith("## ")) break;
+    const match = line.match(/^\|\s*`(causoryn_[a-z_]+)`\s*\|/);
+    if (match?.[1] !== undefined) tools.add(match[1]);
+  }
+  return [...tools].sort();
+}
+
+/** DEPRECATED_TOOL_REPLACEMENTS entries parsed from the version.ts source. */
+function extractDeprecatedReplacements(versionSource: string): Record<string, string> {
+  const block = versionSource.match(
+    /export const DEPRECATED_TOOL_REPLACEMENTS[^=]*=\s*\{([\s\S]*?)\};/,
+  );
+  if (block === null) return {};
+  const out: Record<string, string> = {};
+  for (const m of block[1].matchAll(/(causoryn_[a-z_]+):\s*"(causoryn_[a-z_]+)"/g)) {
+    out[m[1] as string] = m[2] as string;
+  }
+  return out;
+}
+
+/**
+ * `[legacy, replacement]` pairs from the README legacy table: rows whose first
+ * cell is a backticked tool and whose second cell starts with a backticked tool.
+ */
+function extractLegacyReplacementRows(text: string): Array<[string, string]> {
+  const rows: Array<[string, string]> = [];
+  for (const line of text.replace(/\r\n/g, "\n").split("\n")) {
+    const match = line.match(/^\|\s*`(causoryn_[a-z_]+)`\s*\|\s*`(causoryn_[a-z_]+)`/);
+    if (match?.[1] !== undefined && match[2] !== undefined) rows.push([match[1], match[2]]);
+  }
+  return rows.sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+}
+
 /* ------------------------------------------------------------------ */
 /* README validator'ı                                                  */
 /* ------------------------------------------------------------------ */
@@ -961,11 +1005,11 @@ describe("mcp-server katalog desenkron korumaları (sprint-2 takım denetimi)", 
     ).toBe(expectedLegacy);
   });
 
-  it("BAĞLANTI: package.json description TOOL_NAMES kümesini ve sayısını yansıtır (bayat paket dokümanı koruması)", () => {
-    // Denetim bulgusu (iki bağımsız denetçi): description '8 gerçek araç'
-    // diyip causoryn_trace_execution'ı listelemiyordu — server.ts 9 araç
-    // kaydederken paket dokümanı bayat kaldı. Docstring koruması package.json
-    // DESCRIPTION'ını kapsamıyordu; bu test kapsamı kapatır.
+  it("LINK: packages/mcp-server package.json description states the default core profile size and the legacy catalog size from version.ts (stale package doc guard)", () => {
+    // Audit finding (two independent reviewers): the description once said
+    // '8 tools' while server.ts registered 9. Since 0.3.0 the default surface is
+    // the core profile, so the description must state both catalog sizes as
+    // derived from version.ts; a catalog change without a description update fails.
     const pkgJson = JSON.parse(
       readFileSync(
         path.join(REPO_ROOT, "packages", "mcp-server", "package.json"),
@@ -974,18 +1018,19 @@ describe("mcp-server katalog desenkron korumaları (sprint-2 takım denetimi)", 
     ) as { description?: unknown };
     expect(typeof pkgJson.description).toBe("string");
     const description = pkgJson.description as string;
-    const count = String(TOOL_NAMES_FROM_SOURCE.length);
+    const coreCount = String(CORE_TOOL_NAMES_FROM_SOURCE.length);
+    const legacyCount = String(TOOL_NAMES_FROM_SOURCE.length);
     expect(
       description,
-      "package.json description araç sayısı katalogla desenkron",
-    ).toContain(count + " gerçek araç");
-    const missing = TOOL_NAMES_FROM_SOURCE.filter(
-      (tool) => !description.includes(tool),
-    );
+      "package.json description must state the default core profile size",
+    ).toContain(coreCount + "-tool default core profile");
     expect(
-      missing,
-      "package.json description'da eksik araçlar: " + missing.join(", "),
-    ).toEqual([]);
+      description,
+      "package.json description must state the legacy catalog size of the full profile",
+    ).toContain(legacyCount + " legacy tool names");
+    expect(description, "package.json description must be English").not.toMatch(
+      /[çğıöşüÇĞİÖŞÜ]/,
+    );
   });
 
   it("BAĞLANTI: hata kodu uzantıları mcp-server paket başlığında eksiksiz anılır (bayat uzantı notu koruması)", () => {
@@ -1143,6 +1188,36 @@ describe("F2: TOOL_NAMES↔README çapraz kontrol", () => {
     const readme = readPluginFile("README.md");
     const tokens = extractReadmeToolTokens(readme);
     expect(tokens, "README backtick kümesi katalogla eşit değil").toEqual(catalog);
+  });
+
+  it("LINK: the README's default `core` profile table lists exactly CORE_TOOL_NAMES (the 11-tool default surface)", () => {
+    expect(CORE_TOOL_NAMES_FROM_SOURCE.length, "core catalog could not be extracted").toBe(11);
+    const readme = readPluginFile("README.md");
+    const coreTable = extractSectionTableTools(readme, "### Default `core` profile");
+    expect(coreTable, "README core-profile table does not match CORE_TOOL_NAMES").toEqual(
+      [...CORE_TOOL_NAMES_FROM_SOURCE].sort(),
+    );
+  });
+
+  it("LINK: the README's legacy table maps every DEPRECATED_TOOL_REPLACEMENTS entry to its core replacement and documents how to select the full profile", () => {
+    const replacements = extractDeprecatedReplacements(VERSION_TS);
+    expect(Object.keys(replacements).length, "replacement map could not be extracted").toBe(12);
+    const readme = readPluginFile("README.md");
+    const rows = extractLegacyReplacementRows(readme);
+    expect(rows, "README legacy table does not match DEPRECATED_TOOL_REPLACEMENTS").toEqual(
+      Object.entries(replacements).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)),
+    );
+    expect(readme).toContain("--tool-profile full");
+    expect(readme).toContain('"CAUSORYN_TOOL_PROFILE": "full"');
+  });
+
+  it("NEGATIVE (mechanism): a core tool missing from the core-profile table breaks the core-list check", () => {
+    const readme = readPluginFile("README.md");
+    const victim = CORE_TOOL_NAMES_FROM_SOURCE[0] as string;
+    const tampered = readme.replace("| `" + victim + "` |", "| `causoryn_removed_tool` |");
+    expect(extractSectionTableTools(tampered, "### Default `core` profile")).not.toEqual(
+      [...CORE_TOOL_NAMES_FROM_SOURCE].sort(),
+    );
   });
 
   it("NEGATİF (mekanizma): README'den bir araç çıkarılırsa çapraz kontrol kırılır", () => {

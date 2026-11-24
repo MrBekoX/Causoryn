@@ -3,7 +3,7 @@
   "version": "0.3.0",
   "private": true,
   "license": "MIT",
-  "description": "IndexCoordinator: dosya envanteri (WorkspaceAccessPolicy) → dil adapter'ları (TypeScript + C# Roslyn worker + Python/Go/Rust sidecar worker) → graph → atomik snapshot publish (TŞ v2.1 §5, §7, §9, §25/4-5).",
+  "description": "Index coordinator: workspace inventory, language adapters (TypeScript/JavaScript, C# Roslyn and the Python, Go and Rust sidecar workers), background worker_threads index jobs, per-file incremental early cutoff and atomic snapshot publication.",
   "type": "module",
   "exports": {
     ".": "./src/index.ts"

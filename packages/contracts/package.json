@@ -3,7 +3,7 @@
   "version": "0.3.0",
   "private": true,
   "license": "MIT",
-  "description": "Salt-okunur sözleşme keşfi: OpenAPI, AsyncAPI, SQL migration, JSON Schema ve protobuf kaynaklarından ApiContract/EventContract/SchemaContract node adayları ile PRODUCES/CONSUMES_CONTRACT kenar adayları (TŞ v2.1 §11).",
+  "description": "Read-only contract discovery for OpenAPI, AsyncAPI, SQL migration, JSON Schema and Protobuf sources: contract node and PRODUCES_CONTRACT/CONSUMES_CONTRACT edge candidates, compatibility checks and drift classification.",
   "type": "module",
   "exports": {
     ".": "./src/index.ts"
