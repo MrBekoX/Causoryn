@@ -12,7 +12,7 @@ than guesswork. Every tool named here is part of the default `core` tool profile
 ## Step-by-Step Procedure
 
 1. **Ensure Snapshot Freshness**
-   - Call `causoryn_status` `{"action": "inspect"}`. If no snapshot is published (`INDEX_NOT_READY`) or `data.index.latestSnapshot.stale` is `true` after recent file edits, call `causoryn_status` `{"action": "refresh", "mode": "incremental"}` first and poll `causoryn_status` `{"action": "inspect", "jobId": "<jobId>"}` until the job is `done`.
+   - Call `causoryn_status` `{"action": "inspect"}`. If no snapshot is published (`INDEX_NOT_READY`) or `data.index.latestSnapshot.stale` is `true` after recent file edits, call `causoryn_status` `{"action": "refresh", "mode": "incremental"}` first and poll `causoryn_status` `{"action": "inspect", "jobId": "<jobId>"}` until the job reaches a terminal status: `done` (a new snapshot was published), `reused` (nothing changed, or a concurrent build already published an identical snapshot — keep using it) or `failed` (read its error).
 2. **Resolve Target Identifiers**
    - If you only have partial symbol names, resolve exact qualified names or node IDs with `causoryn_find_symbols` `{"query": "<partial name>"}` and confirm them with `causoryn_get_symbol_context` `{"symbolId": "<node id or exact qualifiedName>"}`.
 3. **Generate the Candidate-Only Preflight Manifest**
