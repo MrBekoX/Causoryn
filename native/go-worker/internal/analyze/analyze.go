@@ -612,7 +612,7 @@ func AnalyzeWithModules(files []SourceFile, moduleFiles []ModuleFile, maxNodes i
 				AnalyzerID:      AnalyzerID,
 				AnalyzerVersion: AnalyzerVersion,
 				Rationale: fmt.Sprintf(
-					"CONTAINS: %s '%s' bildirimini kapsar (go/ast declaration aralığı).",
+					"CONTAINS: %s contains the '%s' declaration (go/ast declaration range).",
 					fi.file.relativePath, fi.qname,
 				),
 			}},
@@ -630,7 +630,7 @@ func AnalyzeWithModules(files []SourceFile, moduleFiles []ModuleFile, maxNodes i
 						AnalyzerID:      AnalyzerID,
 						AnalyzerVersion: AnalyzerVersion,
 						Rationale: fmt.Sprintf(
-							"CONTAINS: %s '%s' metodunu kapsar (go/ast alıcı eşleşmesi).",
+							"CONTAINS: %s contains the '%s' method (go/ast receiver match).",
 							ti.qname, fi.qname,
 						),
 					}},
@@ -650,7 +650,7 @@ func AnalyzeWithModules(files []SourceFile, moduleFiles []ModuleFile, maxNodes i
 				AnalyzerID:      AnalyzerID,
 				AnalyzerVersion: AnalyzerVersion,
 				Rationale: fmt.Sprintf(
-					"CONTAINS: %s '%s' bildirimini kapsar (go/ast type spec aralığı).",
+					"CONTAINS: %s contains the '%s' declaration (go/ast type spec range).",
 					ti.file.relativePath, ti.qname,
 				),
 			}},
@@ -666,11 +666,11 @@ func AnalyzeWithModules(files []SourceFile, moduleFiles []ModuleFile, maxNodes i
 		diagnostic := Diagnostic{
 			RelativePath: fctx.relativePath,
 			Code:         "GO_AST_DEPTH",
-			Message:      fmt.Sprintf("AST gezinme derinliği %d aşıldı; derin gövdeler çağrı çıkarımına dahil edilmedi", MaxAstDepth),
+			Message:      fmt.Sprintf("AST traversal depth %d exceeded; deep bodies were not included in call extraction", MaxAstDepth),
 			Line:         0,
 		}
 		diagnostics = append(diagnostics, diagnostic)
-		warnings = append(warnings, fmt.Sprintf("%s: AST derinlik sınırı aşan gövdeler atlandı (%s)", AnalyzerID, fctx.relativePath))
+		warnings = append(warnings, fmt.Sprintf("%s: bodies exceeding the AST depth limit were skipped (%s)", AnalyzerID, fctx.relativePath))
 	}
 	actx := &analysisContext{
 		fset:                 fset,
@@ -731,7 +731,7 @@ func AnalyzeWithModules(files []SourceFile, moduleFiles []ModuleFile, maxNodes i
 			RelativePath: "",
 			Code:         "RESPONSE_TRUNCATED",
 			Message: fmt.Sprintf(
-				"yanıt node bütçesi (%d) aşıldı; %d node yayınlandı, uçları yayınlanmayan %d kenar düştü (dangling yok)",
+				"response node budget (%d) exceeded; %d nodes emitted, %d edges with unemitted endpoints dropped (no dangling edges)",
 				budget, budget, droppedEdges,
 			),
 			Line: 0,
@@ -857,7 +857,7 @@ func resolveImportedSelectorCall(
 					ref:        NodeRef{Kind: "Function", QualifiedName: callee.qname, RelativePath: callee.file.relativePath},
 					resolution: ResolutionVerified,
 					rationale: fmt.Sprintf(
-						"CALLS: %s → %s; import yolu '%s' go.mod ile '%s' dizinine kesin çözümlendi (verified).",
+						"CALLS: %s → %s; import path '%s' resolved exactly to directory '%s' via go.mod (verified).",
 						fi.qname, callee.qname, imp.importPath, targetDir,
 					),
 				}
@@ -866,7 +866,7 @@ func resolveImportedSelectorCall(
 				ref:        NodeRef{Kind: "UnknownExternal", QualifiedName: text},
 				resolution: ResolutionUnresolved,
 				rationale: fmt.Sprintf(
-					"CALLS: '%s' go.mod ile çözümlenen '%s' (%s) paketinde tanımlı değil; uydurma hedef üretilmedi (unresolved).",
+					"CALLS: '%s' is not defined in package '%s' (%s) resolved via go.mod; no fabricated target was produced (unresolved).",
 					text, targetPkg.name, targetDir,
 				),
 			}
@@ -885,10 +885,10 @@ func resolveImportedSelectorCall(
 					resolution: ResolutionUnresolved,
 					ambiguity: &Ambiguity{
 						Candidates: labels,
-						Reason:     fmt.Sprintf("'%s' dizininde birden fazla paket bildirimi bulundu; belirsizlik çözülemedi (unresolved).", targetDir),
+						Reason:     fmt.Sprintf("multiple package declarations found in directory '%s'; the ambiguity could not be resolved (unresolved).", targetDir),
 					},
 					rationale: fmt.Sprintf(
-						"CALLS: '%s' için '%s' dizininde birden fazla aday paket bulundu (unresolved).",
+						"CALLS: '%s' has multiple candidate packages in directory '%s' (unresolved).",
 						text, targetDir,
 					),
 				}
@@ -901,12 +901,12 @@ func resolveImportedSelectorCall(
 			ambiguity: &Ambiguity{
 				Candidates: []string{text},
 				Reason: fmt.Sprintf(
-					"import yolu '%s' analiz seti dışındaki '%s' dizinine çözülüyor (heuristic).",
+					"import path '%s' resolves to directory '%s' outside the analysis set (heuristic).",
 					imp.importPath, targetDir,
 				),
 			},
 			rationale: fmt.Sprintf(
-				"CALLS: %s → %s; analiz seti dışı import yolu, UnknownExternal üzerinde temsil edilir (heuristic).",
+				"CALLS: %s → %s; import path outside the analysis set, represented on UnknownExternal (heuristic).",
 				fi.qname, text,
 			),
 		}
@@ -922,12 +922,12 @@ func resolveImportedSelectorCall(
 			ambiguity: &Ambiguity{
 				Candidates: []string{text},
 				Reason: fmt.Sprintf(
-					"analiz seti dışı package çağrısı ('%s'); go.mod modül yoluyla eşleşmediğinden UnknownExternal üzerinde temsil edilir (heuristic).",
+					"package call outside the analysis set ('%s'); it does not match the go.mod module path, so it is represented on UnknownExternal (heuristic).",
 					imp.importPath,
 				),
 			},
 			rationale: fmt.Sprintf(
-				"CALLS: %s → %s; analiz seti dışı package çağrısı, çağrı metni UnknownExternal üzerinde temsil edilir (heuristic).",
+				"CALLS: %s → %s; package call outside the analysis set, the call text is represented on UnknownExternal (heuristic).",
 				fi.qname, text,
 			),
 		}
@@ -980,9 +980,9 @@ func resolveImportedSelectorCall(
 	if len(matchedPkgs) == 1 {
 		pk := matchedPkgs[0]
 		if callee, ok := actx.pkgFuncs[pk][selName]; ok && callee.recv == "" {
-			matchKind := "paket adı"
+			matchKind := "package name"
 			if matchedBySuffix {
-				matchKind = "dizin son-eki"
+				matchKind = "directory suffix"
 			}
 			return &callTarget{
 				ref:        NodeRef{Kind: "Function", QualifiedName: callee.qname, RelativePath: callee.file.relativePath},
@@ -990,12 +990,12 @@ func resolveImportedSelectorCall(
 				ambiguity: &Ambiguity{
 					Candidates: []string{callee.qname},
 					Reason: fmt.Sprintf(
-						"package-qualified çağrı go.mod olmadan %s kuralıyla '%s' (%s) paketine eşlendi; go/types ve go.mod doğrulaması yok (heuristic).",
+						"package-qualified call matched by the %s rule without go.mod to package '%s' (%s); no go/types or go.mod verification (heuristic).",
 						matchKind, pk.name, pk.dir,
 					),
 				},
 				rationale: fmt.Sprintf(
-					"CALLS: %s → %s; package-qualified çağrı go.mod olmadan %s kuralıyla analiz setindeki '%s' (%s) paketine eşlendi (heuristic).",
+					"CALLS: %s → %s; package-qualified call matched by the %s rule without go.mod to package '%s' (%s) in the analysis set (heuristic).",
 					fi.qname, callee.qname, matchKind, pk.name, pk.dir,
 				),
 			}
@@ -1004,7 +1004,7 @@ func resolveImportedSelectorCall(
 			ref:        NodeRef{Kind: "UnknownExternal", QualifiedName: text},
 			resolution: ResolutionUnresolved,
 			rationale: fmt.Sprintf(
-				"CALLS: '%s' analiz setindeki '%s' (%s) paketinde tanımlı değil; uydurma hedef üretilmedi (unresolved).",
+				"CALLS: '%s' is not defined in package '%s' (%s) in the analysis set; no fabricated target was produced (unresolved).",
 				text, pk.name, pk.dir,
 			),
 		}
@@ -1025,12 +1025,12 @@ func resolveImportedSelectorCall(
 				ambiguity: &Ambiguity{
 					Candidates: labels,
 					Reason: fmt.Sprintf(
-						"import yolu '%s' go.mod olmadan birden fazla workspace diziniyle eşleşti; belirsizlik çözülemedi (unresolved).",
+						"import path '%s' matched multiple workspace directories without go.mod; the ambiguity could not be resolved (unresolved).",
 						imp.importPath,
 					),
 				},
 				rationale: fmt.Sprintf(
-					"CALLS: '%s' go.mod olmadan birden fazla aday paketle eşleşti (%d aday); uydurma hedef üretilmedi (unresolved).",
+					"CALLS: '%s' matched multiple candidate packages without go.mod (%d candidates); no fabricated target was produced (unresolved).",
 					text, len(labels),
 				),
 			}
@@ -1048,12 +1048,12 @@ func resolveImportedSelectorCall(
 				ambiguity: &Ambiguity{
 					Candidates: dirCandidates,
 					Reason: fmt.Sprintf(
-						"import yolu '%s' go.mod olmadan birden fazla dizinle eşleşti; '%s' yalnızca tek dizinde tanımlı olduğu için heuristic olarak bağlandı.",
+						"import path '%s' matched multiple directories without go.mod; '%s' is defined in only one of them, so it was linked heuristically.",
 						imp.importPath, selName,
 					),
 				},
 				rationale: fmt.Sprintf(
-					"CALLS: %s → %s; import yolu '%s' go.mod olmadan çoklu dizin içinde tek sembol adayıyla eşlendi (heuristic).",
+					"CALLS: %s → %s; import path '%s' matched a single symbol candidate across multiple directories without go.mod (heuristic).",
 					fi.qname, only.qname, imp.importPath,
 				),
 			}
@@ -1062,7 +1062,7 @@ func resolveImportedSelectorCall(
 			ref:        NodeRef{Kind: "UnknownExternal", QualifiedName: text},
 			resolution: ResolutionUnresolved,
 			rationale: fmt.Sprintf(
-				"CALLS: '%s' aday paketlerin hiçbirinde tanımlı değil; uydurma hedef üretilmedi (unresolved).",
+				"CALLS: '%s' is not defined in any candidate package; no fabricated target was produced (unresolved).",
 				text,
 			),
 		}
@@ -1075,12 +1075,12 @@ func resolveImportedSelectorCall(
 		ambiguity: &Ambiguity{
 			Candidates: []string{text},
 			Reason: fmt.Sprintf(
-				"analiz seti dışı package çağrısı ('%s'); çağrı metni UnknownExternal üzerinde temsil edilir (heuristic).",
+				"package call outside the analysis set ('%s'); the call text is represented on UnknownExternal (heuristic).",
 				imp.localName,
 			),
 		},
 		rationale: fmt.Sprintf(
-			"CALLS: %s → %s; analiz seti dışı package çağrısı, çağrı metni UnknownExternal üzerinde temsil edilir (heuristic).",
+			"CALLS: %s → %s; package call outside the analysis set, the call text is represented on UnknownExternal (heuristic).",
 			fi.qname, text,
 		),
 	}
@@ -1102,7 +1102,7 @@ func classifyExpr(
 				ref:        NodeRef{Kind: "Function", QualifiedName: samePkg.qname, RelativePath: samePkg.file.relativePath},
 				resolution: ResolutionVerified,
 				rationale: fmt.Sprintf(
-					"CALLS: %s → %s; aynı dizindeki '%s' paketi içindeki tanımlı fonksiyon go/ast ile çözümlendi (verified).",
+					"CALLS: %s → %s; resolved with go/ast to a function defined in package '%s' in the same directory (verified).",
 					fi.qname, samePkg.qname, fi.pkg,
 				),
 			}
@@ -1111,7 +1111,7 @@ func classifyExpr(
 			ref:        NodeRef{Kind: "UnknownExternal", QualifiedName: fun.Name},
 			resolution: ResolutionUnresolved,
 			rationale: fmt.Sprintf(
-				"CALLS: '%s' hiçbir tanımlı sembolle eşleşmedi; uydurma hedef üretilmedi (unresolved).",
+				"CALLS: '%s' did not match any defined symbol; no fabricated target was produced (unresolved).",
 				fun.Name,
 			),
 		}
@@ -1152,12 +1152,12 @@ func classifyExpr(
 					ambiguity: &Ambiguity{
 						Candidates: []string{text},
 						Reason: fmt.Sprintf(
-							"analiz seti dışı package çağrısı ('%s'); çağrı metni UnknownExternal üzerinde temsil edilir (heuristic).",
+							"package call outside the analysis set ('%s'); the call text is represented on UnknownExternal (heuristic).",
 							x.Name,
 						),
 					},
 					rationale: fmt.Sprintf(
-						"CALLS: %s → %s; analiz seti dışı package çağrısı, çağrı metni UnknownExternal üzerinde temsil edilir (heuristic).",
+						"CALLS: %s → %s; package call outside the analysis set, the call text is represented on UnknownExternal (heuristic).",
 						fi.qname, text,
 					),
 				}
@@ -1170,10 +1170,10 @@ func classifyExpr(
 					resolution: ResolutionHeuristic,
 					ambiguity: &Ambiguity{
 						Candidates: []string{only.qname},
-						Reason:     "benzersiz metot adı kuralı; alıcı tipi go/types olmadan doğrulanamaz (heuristic).",
+						Reason:     "unique method name rule; the receiver type cannot be verified without go/types (heuristic).",
 					},
 					rationale: fmt.Sprintf(
-						"CALLS: %s → %s; benzersiz metot adı kuralı (heuristic — alıcı tipi go/types olmadan doğrulanamaz).",
+						"CALLS: %s → %s; unique method name rule (heuristic — the receiver type cannot be verified without go/types).",
 						fi.qname, only.qname,
 					),
 				}
@@ -1184,10 +1184,10 @@ func classifyExpr(
 					resolution: ResolutionUnresolved,
 					ambiguity: &Ambiguity{
 						Candidates: names,
-						Reason:     "metot adı analiz setinde birden fazla tipte bulundu; belirsizlik çözülemedi (unresolved).",
+						Reason:     "the method name was found on multiple types in the analysis set; the ambiguity could not be resolved (unresolved).",
 					},
 					rationale: fmt.Sprintf(
-						"CALLS: '%s' birden fazla aday metotla eşleşti (%d aday); uydurma hedef üretilmedi (unresolved).",
+						"CALLS: '%s' matched multiple candidate methods (%d candidates); no fabricated target was produced (unresolved).",
 						text, len(names),
 					),
 				}
@@ -1205,10 +1205,10 @@ func classifyExpr(
 					resolution: ResolutionHeuristic,
 					ambiguity: &Ambiguity{
 						Candidates: candidates,
-						Reason:     "arayüz metodu adı analiz setinde bulundu; somut gerçekleme go/types olmadan çözülemez (heuristic).",
+						Reason:     "the interface method name was found in the analysis set; the concrete implementation cannot be resolved without go/types (heuristic).",
 					},
 					rationale: fmt.Sprintf(
-						"CALLS: %s → %s; arayüz metodu adı analiz setinde bulundu, somut gerçekleme çözülemez (heuristic).",
+						"CALLS: %s → %s; the interface method name was found in the analysis set, the concrete implementation cannot be resolved (heuristic).",
 						fi.qname, text,
 					),
 				}
@@ -1218,7 +1218,7 @@ func classifyExpr(
 				ref:        NodeRef{Kind: "UnknownExternal", QualifiedName: text},
 				resolution: ResolutionUnresolved,
 				rationale: fmt.Sprintf(
-					"CALLS: '%s' hiçbir tanımlı sembolle eşleşmedi; uydurma hedef üretilmedi (unresolved).",
+					"CALLS: '%s' did not match any defined symbol; no fabricated target was produced (unresolved).",
 					text,
 				),
 			}
@@ -1228,7 +1228,7 @@ func classifyExpr(
 			ref:        NodeRef{Kind: "UnknownExternal", QualifiedName: text},
 			resolution: ResolutionUnresolved,
 			rationale: fmt.Sprintf(
-				"CALLS: '%s' zincirli ifade çözümlenemedi; uydurma hedef üretilmedi (unresolved).",
+				"CALLS: '%s' chained expression could not be resolved; no fabricated target was produced (unresolved).",
 				text,
 			),
 		}
@@ -1239,7 +1239,7 @@ func classifyExpr(
 			ref:        NodeRef{Kind: "UnknownExternal", QualifiedName: text},
 			resolution: ResolutionUnresolved,
 			rationale: fmt.Sprintf(
-				"CALLS: '%s' bu dilimde çözümlenmeyen ifade kalıbı; uydurma hedef üretilmedi (unresolved).",
+				"CALLS: '%s' uses an expression pattern that is not resolved yet; no fabricated target was produced (unresolved).",
 				text,
 			),
 		}

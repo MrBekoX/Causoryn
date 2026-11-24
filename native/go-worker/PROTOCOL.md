@@ -155,7 +155,7 @@ riski düşüktür; sınırın amacı sınırlı iş + dürüst rapordur).
   "to":   { "kind": "Method", "qualifiedName": "services.OrdersService.GetOrders", "relativePath": "services/orders_service.go" },
   "resolution": "heuristic",
   "evidence": [ { "kind": "ast-span", "span": {...}, "analyzerId": "go-worker", "analyzerVersion": "0.1.0", "rationale": "..." } ],
-  "ambiguity": { "candidates": ["services.OrdersService.GetOrders"], "reason": "benzersiz metot adı kuralı; ..." }
+  "ambiguity": { "candidates": ["services.OrdersService.GetOrders"], "reason": "unique method name rule; ..." }
 }
 ```
 
