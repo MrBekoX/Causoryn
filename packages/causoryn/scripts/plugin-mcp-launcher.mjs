@@ -27,7 +27,7 @@ function parseLauncherArgs(argv) {
     if (token === "--expected-version") {
       const next = argv[i + 1];
       if (next === undefined || next.trim().length === 0 || next.startsWith("-")) {
-        console.error("[causoryn-launcher] --expected-version bayrağı geçerli bir sürüm değeri gerektirir");
+        console.error("[causoryn-launcher] --expected-version requires a valid version value");
         process.exit(2);
       }
       cliExpectedVersion = next.trim();
@@ -37,7 +37,7 @@ function parseLauncherArgs(argv) {
     if (token.startsWith("--expected-version=")) {
       const inlineVal = token.slice("--expected-version=".length).trim();
       if (inlineVal.length === 0 || inlineVal.startsWith("-")) {
-        console.error("[causoryn-launcher] --expected-version bayrağı boş veya geçersiz değer alamaz");
+        console.error("[causoryn-launcher] --expected-version does not accept an empty or invalid value");
         process.exit(2);
       }
       cliExpectedVersion = inlineVal;
@@ -59,7 +59,7 @@ try {
     pkgRaw.name !== "causoryn" ||
     typeof pkgRaw.version !== "string"
   ) {
-    console.error(`[causoryn-launcher] geçersiz plugin package.json: ${PKG_JSON_PATH}`);
+    console.error(`[causoryn-launcher] invalid plugin package.json: ${PKG_JSON_PATH}`);
     process.exit(2);
   }
 
@@ -71,7 +71,7 @@ try {
     cliExpectedVersion !== envExpectedVersion
   ) {
     console.error(
-      `[causoryn-launcher] çelişen sürüm pini: --expected-version=${cliExpectedVersion}, CAUSORYN_EXPECTED_VERSION=${envExpectedVersion}`,
+      `[causoryn-launcher] conflicting version pins: --expected-version=${cliExpectedVersion}, CAUSORYN_EXPECTED_VERSION=${envExpectedVersion}`,
     );
     process.exit(2);
   }
@@ -84,19 +84,19 @@ try {
 
   if (expectedVersion !== undefined && pkgRaw.version !== expectedVersion) {
     console.error(
-      `[causoryn-launcher] sürüm uyuşmazlığı: beklenen ${expectedVersion}, bulunan ${pkgRaw.version}`,
+      `[causoryn-launcher] version mismatch: expected ${expectedVersion}, found ${pkgRaw.version}`,
     );
     process.exit(2);
   }
 } catch (error) {
   console.error(
-    `[causoryn-launcher] package.json okunamadı: ${error instanceof Error ? error.message : String(error)}`,
+    `[causoryn-launcher] could not read package.json: ${error instanceof Error ? error.message : String(error)}`,
   );
   process.exit(2);
 }
 
 if (!existsSync(MCP_BUNDLE_PATH)) {
-  console.error(`[causoryn-launcher] MCP sunucu paketi bulunamadı: ${MCP_BUNDLE_PATH}`);
+  console.error(`[causoryn-launcher] MCP server bundle not found: ${MCP_BUNDLE_PATH}`);
   process.exit(2);
 }
 

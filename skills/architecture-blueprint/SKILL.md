@@ -6,36 +6,36 @@ description: Orchestrate the host LLM and Causoryn MCP tools to generate a compr
 # architecture-blueprint — Host-LLM + Causoryn Visual Architecture Workflow
 
 **Never refuse because Causoryn is LLM-free — YOU are the host LLM.**
-Causoryn's analysis and export engine runs locally with zero model calls or embeddings (`ADR-002`).
+Causoryn's analysis and export engine runs locally with zero model calls or embeddings.
 Its structural export is byte-reproducible for the same published snapshot, view, format,
 options, and supplied `annotations`. As the host LLM, you gather verified facts from Causoryn's
 MCP tools and synthesize the optional `annotations` payload; Causoryn validates every reference
 fail-closed and renders the offline portal into an authorized output directory.
 If the user explicitly asks for a purely deterministic / model-free export, simply omit
-`annotations` and call `causoryn_export_documentation` directly.
+`annotations` and call `causoryn_export_documentation` directly. Every tool used below is
+part of the default `core` tool profile.
 
 ## Architecture Discovery and Export
 
 ### Step 1: Verify Snapshot Health & Coverage Boundaries
-1. Call `causoryn_status` (or legacy `causoryn_index_status` + `causoryn_workspace_summary`) to confirm a published snapshot exists (if indexing is pending or `stale: true`, call `causoryn_status` with `action: "refresh"` and wait until ready).
-2. Capture exact languages, analyzed file counts, entrypoints, per-language `coverage.byLanguage` tiers (`L0`/`L1`/`L2`), and edge resolution breakdown (`verified` / `heuristic` / `unresolved`).
+1. Call `causoryn_status` `{"action": "inspect"}` to confirm a published snapshot exists (`data.index.latestSnapshot`). If indexing is pending or `stale: true`, call `causoryn_status` `{"action": "refresh", "mode": "incremental"}` and poll `causoryn_status` `{"action": "inspect", "jobId": "<jobId>"}` until the job is `done`.
+2. From `data.summary` and the envelope `coverage`, capture exact languages, analyzed file counts, entrypoints, per-language `coverage.byLanguage` tiers (`L0`/`L1`/`L2`), and the edge resolution breakdown (`verified` / `heuristic` / `unresolved`).
 
 ### Step 2: Map Modules, Centrality, Entrypoints & Risks
-1. Call `causoryn_map_system` with `profile: "onboarding"` and `audience: "maintainer"` (or legacy `causoryn_generate_onboarding`) to retrieve deterministic entrypoints, top central modules, learning order (with SCC cycles), critical flows, and risk areas.
-2. Call `causoryn_map_system` at `level: "L1"` (and targeted `level: "L2"` / `"L3"` with `filters.pathPrefix` on major subsystems) to inspect module boundaries, controllers, services, and contracts.
+1. Call `causoryn_map_system` `{"profile": "onboarding", "audience": "maintainer"}` to retrieve deterministic entrypoints, top central modules, learning order (with SCC cycles), critical flows, and risk areas.
+2. Call `causoryn_map_system` `{"level": "L1"}` to inspect module boundaries, then targeted `level: "L2"` / `"L3"` calls on major subsystems, such as `causoryn_map_system` `{"level": "L3", "filters": {"pathPrefix": "<major subsystem path>"}}`, to inspect controllers, services, and contracts.
 
 ### Step 3: Trace Critical Execution & Business Flows + Evidence
-1. For the highest-impact endpoints/handlers discovered in Step 2, call `causoryn_trace` (`mode: "business-flow"` and/or `mode: "execution"`) to map real cross-module call chains.
-2. Call `causoryn_get_evidence` on key cross-module boundaries or structural risks to collect verified `evidenceId`s and exact source-span locations (`relativePath:startLine-endLine`).
-3. If the repo defines `.causoryn/architecture.rules.yaml`, optionally call `causoryn_verify_change` with `checks: ["architecture"]` to surface policy violations honestly.
+1. For the highest-impact endpoints/handlers discovered in Step 2, call `causoryn_trace` `{"mode": "business-flow", "entrypoint": "<endpoint or handler>"}` and/or `causoryn_trace` `{"mode": "execution", "entrypoint": "<endpoint or handler>"}` to map real cross-module call chains.
+2. Call `causoryn_get_evidence` `{"id": "<node or edge id>"}` on key cross-module boundaries or structural risks to collect verified `evidenceId`s and exact source-span locations (`relativePath:startLine-endLine`).
+3. If the repo defines `.causoryn/architecture.rules.yaml`, optionally call `causoryn_verify_change` `{"checks": ["architecture"]}` to surface policy violations honestly.
 
 ### Step 4: Extract Exact Canonical `moduleId`s (Blueprint Pass)
 Determine an authorized `outputDir` configured in `output.allowedOutputDirs` (when started with `--auto-data-dir`, Causoryn automatically authorizes `<data-dir>/workspaces/<slug>-<hash12>/exports`, e.g., `~/.causoryn/workspaces/<slug>-<hash12>/exports` — inspect `~/.causoryn/workspaces/` or `$ZCODE_PLUGIN_DATA/workspaces/` for the matching `<slug>-<hash12>/exports` folder, or inspect the server's `CAUSORYN_CONFIG` `output.allowedOutputDirs`).
-Call `causoryn_export_documentation` with:
-- `format: "json"`
-- `view: "architecture"`
-- `outputDir`: authorized export directory
-- Optional `options`: `{ maxModules: 32, pathPrefix?, includeTests? }`
+Call `causoryn_export_documentation` `{"format": "json", "view": "architecture", "outputDir": "<authorized export directory>", "options": {"maxModules": 32}}`:
+- `format: "json"` with `view: "architecture"` produces the compact JSON blueprint.
+- `outputDir`: the authorized export directory.
+- Optional `options`: `maxModules` (1–200), `pathPrefix`, `includeTests`.
 
 Inspect the returned `data.architectureSummary.moduleIds` (and the exported JSON blueprint if deeper module/edge/cycle detail is needed). **Every `moduleId` in your annotations MUST come verbatim from `architectureSummary.moduleIds`.**
 
@@ -81,6 +81,7 @@ Causoryn validates every field in `annotations` strictly (`strictObject`, fail-c
 
 ### Copy-Pasteable Walkthrough Example
 
+Example `causoryn_export_documentation` arguments:
 ```json
 {
   "format": "html",
