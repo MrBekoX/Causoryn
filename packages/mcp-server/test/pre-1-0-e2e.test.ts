@@ -179,6 +179,7 @@ describe("Pre-1.0 Cross-Track E2E — Test Intelligence + Snapshot Git Compare",
 
       const serializedPlanText = JSON.stringify(planResult);
       expect(serializedPlanText).not.toContain("geçti");
+      expect(serializedPlanText).not.toMatch(/\bpassed\b/i);
 
       const planData = planEnvelope.data as Record<string, unknown>;
       const summary = planData.summary as Record<string, number>;

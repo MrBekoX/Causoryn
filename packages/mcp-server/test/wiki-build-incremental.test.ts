@@ -303,7 +303,7 @@ describe("causoryn_wiki_build mode=incremental", { timeout: 120_000 }, () => {
       expect(String(data.fallbackReason)).toMatch(/graph/i);
       expect(String(data.wikiSnapshotId)).not.toBe(oldWikiId);
       const warnings = envelope.warnings as string[];
-      expect(warnings.some((w) => /full-rebuild|tam yeniden build/i.test(w))).toBe(
+      expect(warnings.some((w) => /full-rebuild|full rebuild/i.test(w))).toBe(
         true,
       );
     } finally {

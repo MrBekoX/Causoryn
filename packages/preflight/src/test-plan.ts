@@ -225,12 +225,12 @@ function requireLimit(
   if (typeof requested !== "number" || !Number.isInteger(requested) || requested < 1) {
     throw new PreflightError(
       "preflight/invalid-input",
-      `${name} pozitif tam sayı olmalı: ${String(requested)}`,
+      `${name} must be a positive integer: ${String(requested)}`,
     );
   }
   if (requested > ceiling) {
     rationales.push(
-      `${name}=${String(requested)} istenen değeri tavana (${String(ceiling)}) indirildi (TŞ §20 resource budget)`,
+      `${name}=${String(requested)} exceeds the ceiling and was capped at ${String(ceiling)} (resource budget)`,
     );
     return ceiling;
   }
@@ -337,7 +337,7 @@ export function deriveTestPlan(
   if (state !== "ready" && state !== "partial") {
     throw new PreflightError(
       "preflight/snapshot-state",
-      `test planı yalnızca ready/partial snapshot üzerinde türetilir; snapshot durumu: ${String(state)}`,
+      `a test plan can only be derived from a ready or partial snapshot; snapshot state: ${String(state)}`,
     );
   }
 
@@ -348,14 +348,14 @@ export function deriveTestPlan(
   if (rawSymbols.length === 0 && rawFiles.length === 0) {
     throw new PreflightError(
       "preflight/invalid-input",
-      "changedSymbols/changedFiles kümesi boş olamaz: en az bir değişen sembol veya dosya gerekli",
+      "changedSymbols and changedFiles cannot both be empty: provide at least one changed symbol or file",
     );
   }
   for (const target of rawSymbols) {
     if (typeof target !== "string" || target.trim().length === 0) {
       throw new PreflightError(
         "preflight/invalid-input",
-        `changedSymbols üyesi boş/blank olamaz: ${String(target)}`,
+        `changedSymbols entries must not be empty or blank: ${String(target)}`,
       );
     }
   }
@@ -363,7 +363,7 @@ export function deriveTestPlan(
     if (typeof file !== "string" || file.trim().length === 0) {
       throw new PreflightError(
         "preflight/invalid-input",
-        `changedFiles üyesi boş/blank olamaz: ${String(file)}`,
+        `changedFiles entries must not be empty or blank: ${String(file)}`,
       );
     }
   }
@@ -433,12 +433,12 @@ export function deriveTestPlan(
       continue;
     }
     if (byName.length === 0) {
-      const reason = `hedef çözülemedi: "${target}" — node kimliği veya tam qualifiedName olarak yayınlanmış snapshot'ta bulunamadı`;
+      const reason = `target not resolved: "${target}" was not found in the published snapshot as a node ID or exact qualifiedName`;
       unresolvedSymbols.push({ target, reason });
       rationales.push(reason);
     } else {
       const candidateIds = byName.map((node) => node.id).sort(cmp);
-      const reason = `hedef belirsiz: "${target}" tam qualifiedName ${String(byName.length)} node ile eşleşti (${candidateIds.join(", ")}); node kimliği ile hedefleyin`;
+      const reason = `ambiguous target: "${target}" matches ${String(byName.length)} nodes by exact qualifiedName (${candidateIds.join(", ")}); target it by node ID instead`;
       unresolvedSymbols.push({ target, reason });
       rationales.push(reason);
     }
@@ -463,7 +463,7 @@ export function deriveTestPlan(
     const node = fileNodeByPath.get(file);
     if (node === undefined) {
       rationales.push(
-        `değişen dosya eşleşmedi: "${file}" — snapshot'ta bu yolla File node yok; sinyal üretilmedi`,
+        `changed file not matched: "${file}" has no File node with this path in the snapshot; no signal was produced`,
       );
     } else {
       matchedFileNodes.push(node);
@@ -495,7 +495,7 @@ export function deriveTestPlan(
         strength: MATCH_LEVEL_STRENGTH.direct,
         resolution: edge.resolution,
         depth: 1,
-        reason: `direct: "${test.qualifiedName}" (${test.kind}), değişen "${changed.qualifiedName}" ile TESTS kenarıyla bağlı (kenar: ${edge.id}, resolution: ${edge.resolution})`,
+        reason: `direct: "${test.qualifiedName}" (${test.kind}) is linked to changed "${changed.qualifiedName}" by a TESTS edge (edge: ${edge.id}, resolution: ${edge.resolution})`,
         edgeRefs: [toEdgeRef(edge)],
         evidenceIds: [...edge.evidenceIds],
       });
@@ -554,7 +554,7 @@ export function deriveTestPlan(
               strength: MATCH_LEVEL_STRENGTH["call-site"],
               resolution: weakest,
               depth: nextDepth,
-              reason: `call-site: "${nextNode.qualifiedName}" testi, değişen "${symbol.qualifiedName}" sembolüne ${String(nextDepth)} adımlık CALLS zinciriyle ulaşıyor (en zayıf resolution: ${weakest}; zincir: ${chainIds})`,
+              reason: `call-site: test "${nextNode.qualifiedName}" reaches changed symbol "${symbol.qualifiedName}" through a ${String(nextDepth)}-step CALLS chain (weakest resolution: ${weakest}; chain: ${chainIds})`,
               edgeRefs: [...partial.edgeRefs, toEdgeRef(edge)],
               evidenceIds: [...partial.edgeRefs, toEdgeRef(edge)].flatMap(
                 (ref) => ref.evidenceIds,
@@ -644,7 +644,7 @@ export function deriveTestPlan(
             strength: MATCH_LEVEL_STRENGTH.naming,
             resolution: "heuristic",
             depth: 0,
-            reason: `naming: "${path}" yolu, değişen "${base}" adıyla test-dosyası isimlendirme kalıbında eşleşti (heuristic — düşük güven; dosya adı benzerliği tek başına kanıt değildir)`,
+            reason: `naming: path "${path}" matches changed name "${base}" by test-file naming convention (heuristic, low confidence; file-name similarity alone is not evidence)`,
             edgeRefs: [],
             evidenceIds: [],
           });
@@ -732,7 +732,7 @@ export function deriveTestPlan(
       nodeId: symbol.nodeId,
       kind: symbol.kind,
       qualifiedName: symbol.qualifiedName,
-      reason: `missing-coverage: değişen "${symbol.qualifiedName}" sembolüne işaret eden TESTS kenarı yok — coverage gap adayı (bu bir adaylıktır; test varlığı/yokluğu doğrulanmamıştır)`,
+      reason: `missing-coverage: no TESTS edge points to changed symbol "${symbol.qualifiedName}"; possible coverage gap (a candidate only; whether tests exist has not been verified)`,
     });
   }
   missingCoverageCandidates.sort((a, b) => {
@@ -745,13 +745,13 @@ export function deriveTestPlan(
   for (const node of matchedFileNodes) {
     if (!candidateChangedIds.has(node.id)) {
       rationales.push(
-        `değişen dosya sinyalsiz: "${filePathOf(node)}" File node'u eşleşti; TESTS/naming/CALLS sinyali üretmedi`,
+        `changed file produced no signal: "${filePathOf(node)}" matched a File node but yielded no TESTS, naming, or CALLS signal`,
       );
     }
   }
   if (candidates.length === 0) {
     rationales.push(
-      "test planı boş: değişiklik kümesinden yapısal sinyalle türetilecek test adayı yok (bu bir adaylık boşluğudur; çalıştırma kararı kullanıcı/host akışına aittir)",
+      "test plan is empty: no test candidate can be derived from the change set using structural signals (this is a candidate gap; deciding which tests to run is up to the user or host workflow)",
     );
   }
 

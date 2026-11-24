@@ -819,7 +819,7 @@ describe("resolveSourceRevision — salt-okunur HEAD çözümlemesi", { timeout:
     // Kota aşımı uydurma SHA ile telafi EDİLMEZ: revizyon çözülemez.
     expect(resolution.sourceRevision).toBeUndefined();
     expect(
-      resolution.limitations.some((note) => note.includes("kota")),
+      resolution.limitations.some((note) => note.includes("quota")),
     ).toBe(true);
   });
 
@@ -863,7 +863,7 @@ describe("resolveSourceRevision — salt-okunur HEAD çözümlemesi", { timeout:
     expect(headQuotaRes.sourceRevision).toBeUndefined();
     expect(
       headQuotaRes.limitations.some(
-        (note) => note.includes(".git/HEAD") && note.includes("boyut kotası aşıldı"),
+        (note) => note.includes(".git/HEAD") && note.includes("exceeds the size quota"),
       ),
     ).toBe(true);
 
