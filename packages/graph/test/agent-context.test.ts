@@ -738,7 +738,7 @@ describe("generateAgentContext — partial (degrade)", () => {
     // D7 sonrası degrade gerekçesi: snapshot'ta sözleşme kaydı YOK ve
     // contractSymbols verilmedi (K-013(7) kesinleşti; kayıt gelince ayak
     // otomatik dolar — yukarıdaki D7 pozitif testleri bunu sabitler).
-    expect(result.degradedLegs[0]?.reason).toContain("sözleşme kaydı yok");
+    expect(result.degradedLegs[0]?.reason).toContain("no contract records");
     expect(result.degradedLegs[0]?.reason).toContain("contractSymbols");
     expect(result.degradedLegs[1]?.reason.length).toBeGreaterThan(0);
     expect(result.legsApplied).toEqual<readonly AgentContextLeg[]>([

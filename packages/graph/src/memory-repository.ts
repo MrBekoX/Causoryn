@@ -111,7 +111,7 @@ export class InMemoryGraphRepository implements GraphRepository {
     if (this.workspaces.has(record.id)) {
       throw new GraphRepositoryError(
         "graph/duplicate-workspace",
-        `Workspace zaten kayıtlı: ${record.id}`,
+        `Workspace is already registered: ${record.id}`,
       );
     }
     this.workspaces.set(record.id, { ...record });
@@ -121,7 +121,7 @@ export class InMemoryGraphRepository implements GraphRepository {
     if (!this.workspaces.has(record.workspaceId)) {
       throw new GraphRepositoryError(
         "graph/unknown-workspace",
-        `Bilinmeyen workspace: ${record.workspaceId}`,
+        `Unknown workspace: ${record.workspaceId}`,
       );
     }
     requireNonEmptyField("file.relativePath", record.relativePath);
@@ -134,7 +134,7 @@ export class InMemoryGraphRepository implements GraphRepository {
     ) {
       throw new GraphRepositoryError(
         "graph/invalid-file-size",
-        `file.sizeBytes negatif olmayan tam sayı olmalı: ${String(record.sizeBytes)}`,
+        `file.sizeBytes must be a non-negative integer: ${String(record.sizeBytes)}`,
       );
     }
     this.files.set(fileKey(record.workspaceId, record.relativePath), {
@@ -146,7 +146,7 @@ export class InMemoryGraphRepository implements GraphRepository {
     if (!this.workspaces.has(workspaceId)) {
       throw new GraphRepositoryError(
         "graph/unknown-workspace",
-        `Bilinmeyen workspace: ${workspaceId}`,
+        `Unknown workspace: ${workspaceId}`,
       );
     }
     const records: FileRecord[] = [];
@@ -162,7 +162,7 @@ export class InMemoryGraphRepository implements GraphRepository {
     if (!this.workspaces.has(workspaceId)) {
       throw new GraphRepositoryError(
         "graph/unknown-workspace",
-        `Bilinmeyen workspace: ${workspaceId}`,
+        `Unknown workspace: ${workspaceId}`,
       );
     }
     requireNonEmptyField("file.relativePath", relativePath);
@@ -173,7 +173,7 @@ export class InMemoryGraphRepository implements GraphRepository {
     if (!this.workspaces.has(input.workspaceId)) {
       throw new GraphRepositoryError(
         "graph/unknown-workspace",
-        `Bilinmeyen workspace: ${input.workspaceId}`,
+        `Unknown workspace: ${input.workspaceId}`,
       );
     }
     requireNonEmptyField("build.revision.id", input.revision.id);
@@ -187,7 +187,7 @@ export class InMemoryGraphRepository implements GraphRepository {
       ) {
         throw new GraphRepositoryError(
           "graph/build-already-active",
-          `Aynı revizyon için aktif build var: ${input.workspaceId}#${input.revision.id}@${input.revision.sequence}`,
+          `An active build already exists for this revision: ${input.workspaceId}#${input.revision.id}@${input.revision.sequence}`,
         );
       }
     }
@@ -216,7 +216,7 @@ export class InMemoryGraphRepository implements GraphRepository {
     if (build.nodes.has(node.id)) {
       throw new GraphRepositoryError(
         "graph/duplicate-node",
-        `Aynı node kimliği build içinde zaten var: ${node.id}`,
+        `Node id already exists in this build: ${node.id}`,
       );
     }
     build.nodes.set(node.id, node);
@@ -237,7 +237,7 @@ export class InMemoryGraphRepository implements GraphRepository {
         const missing = endpoint === edge.from ? "from" : "to";
         throw new GraphRepositoryError(
           "graph/dangling-edge",
-          `Kenar ucu bilinmeyen node'a işaret ediyor (${missing}): ${endpoint}`,
+          `Edge endpoint points to an unknown node (${missing}): ${endpoint}`,
         );
       }
     }
@@ -245,7 +245,7 @@ export class InMemoryGraphRepository implements GraphRepository {
     if (build.edges.has(edge.id)) {
       throw new GraphRepositoryError(
         "graph/duplicate-edge",
-        `Aynı edge kimliği build içinde zaten var: ${edge.id}`,
+        `Edge id already exists in this build: ${edge.id}`,
       );
     }
     build.edges.set(edge.id, edge);
@@ -534,7 +534,7 @@ export class InMemoryGraphRepository implements GraphRepository {
     if (!this.workspaces.has(record.workspaceId)) {
       throw new GraphRepositoryError(
         "graph/unknown-workspace",
-        `Bilinmeyen workspace: ${record.workspaceId}`,
+        `Unknown workspace: ${record.workspaceId}`,
       );
     }
     requireNonEmptyField("fileFact.relativePath", record.relativePath);
@@ -559,7 +559,7 @@ export class InMemoryGraphRepository implements GraphRepository {
     if (!this.workspaces.has(workspaceId)) {
       throw new GraphRepositoryError(
         "graph/unknown-workspace",
-        `Bilinmeyen workspace: ${workspaceId}`,
+        `Unknown workspace: ${workspaceId}`,
       );
     }
     const out: MemoryFileFactRecord[] = [];
@@ -583,7 +583,7 @@ export class InMemoryGraphRepository implements GraphRepository {
     if (!this.workspaces.has(workspaceId)) {
       throw new GraphRepositoryError(
         "graph/unknown-workspace",
-        `Bilinmeyen workspace: ${workspaceId}`,
+        `Unknown workspace: ${workspaceId}`,
       );
     }
     requireNonEmptyField("fileFact.relativePath", relativePath);
@@ -594,7 +594,7 @@ export class InMemoryGraphRepository implements GraphRepository {
     if (!this.workspaces.has(workspaceId)) {
       throw new GraphRepositoryError(
         "graph/unknown-workspace",
-        `Bilinmeyen workspace: ${workspaceId}`,
+        `Unknown workspace: ${workspaceId}`,
       );
     }
     let deleted = 0;
@@ -612,7 +612,7 @@ export class InMemoryGraphRepository implements GraphRepository {
     if (build === undefined || build.state !== "building") {
       throw new GraphRepositoryError(
         "graph/build-not-active",
-        `Aktif build yok: ${buildId}`,
+        `No active build: ${buildId}`,
       );
     }
     return build;

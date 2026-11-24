@@ -553,7 +553,7 @@ describe("generateOnboarding — partial (endpoint içermeyen repo)", () => {
     const warning = report.warnings.find(
       (item) => item.code === "onboarding/no-entry-endpoint",
     );
-    expect(warning?.message).toContain("riskli alanlar");
+    expect(warning?.message).toContain("riskAreas");
 
     // Risk alanları: unresolved kenar uçları, sayı + leksik sıra.
     expect(
@@ -610,11 +610,11 @@ describe("generateOnboarding — determinizm", () => {
     expect(report.learningOrder).toHaveLength(3);
     const codes = report.warnings.map((warning) => warning.code);
     expect(codes).toContain("onboarding/learning-order-truncated");
-    // Denetim bulgusu 7: şablon metni Türkçe yazımda doğru olmalı.
+    // Audit finding 7: the template text must read correctly (English runtime text).
     const warning = report.warnings.find(
       (item) => item.code === "onboarding/learning-order-truncated",
     );
-    expect(warning?.message).toContain("indirildi");
+    expect(warning?.message).toContain("clamped to the ceiling");
   });
 
   it("profil öğrenme adımı tavanları profil başına farklıdır", () => {

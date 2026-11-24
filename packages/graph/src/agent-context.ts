@@ -571,7 +571,7 @@ function resolveLimits(
     tokenBudget < 1
   ) {
     throw invalidInput(
-      `tokenBudget pozitif tam sayı olmalı (0 ve kesirli değerler açık reddedilir): ${String(tokenBudget)}`,
+      `tokenBudget must be a positive integer (0 and fractional values are rejected): ${String(tokenBudget)}`,
     );
   }
   const maxProximityDepth = input.maxProximityDepth ?? DEFAULT_PROXIMITY_DEPTH;
@@ -581,20 +581,20 @@ function resolveLimits(
     maxProximityDepth < 1
   ) {
     throw invalidInput(
-      `maxProximityDepth pozitif tam sayı olmalı: ${String(maxProximityDepth)}`,
+      `maxProximityDepth must be a positive integer: ${String(maxProximityDepth)}`,
     );
   }
   let appliedBudget = tokenBudget;
   let appliedDepth = maxProximityDepth;
   if (appliedBudget > AGENT_CONTEXT_LIMIT_CEILINGS.tokenBudget) {
     rationales.push(
-      `tokenBudget=${String(tokenBudget)} istenen değeri tavana (${String(AGENT_CONTEXT_LIMIT_CEILINGS.tokenBudget)}) indirildi (TŞ §20 resource budget)`,
+      `tokenBudget=${String(tokenBudget)} exceeds the ceiling and was clamped to ${String(AGENT_CONTEXT_LIMIT_CEILINGS.tokenBudget)} (resource budget)`,
     );
     appliedBudget = AGENT_CONTEXT_LIMIT_CEILINGS.tokenBudget;
   }
   if (appliedDepth > AGENT_CONTEXT_LIMIT_CEILINGS.maxProximityDepth) {
     rationales.push(
-      `maxProximityDepth=${String(maxProximityDepth)} istenen değeri tavana (${String(AGENT_CONTEXT_LIMIT_CEILINGS.maxProximityDepth)}) indirildi (TŞ §20 resource budget)`,
+      `maxProximityDepth=${String(maxProximityDepth)} exceeds the ceiling and was clamped to ${String(AGENT_CONTEXT_LIMIT_CEILINGS.maxProximityDepth)} (resource budget)`,
     );
     appliedDepth = AGENT_CONTEXT_LIMIT_CEILINGS.maxProximityDepth;
   }
@@ -605,12 +605,12 @@ function resolveLimits(
 function validateOptionalInputs(input: AgentContextInput): void {
   if (input.contractSymbols !== undefined) {
     if (!Array.isArray(input.contractSymbols)) {
-      throw invalidInput("contractSymbols dizi olmalı");
+      throw invalidInput("contractSymbols must be an array");
     }
     for (const symbol of input.contractSymbols) {
       if (typeof symbol !== "string") {
         throw invalidInput(
-          `contractSymbols öğesi string olmalı: ${String(symbol)}`,
+          `contractSymbols entries must be strings: ${String(symbol)}`,
         );
       }
     }
@@ -620,12 +620,12 @@ function validateOptionalInputs(input: AgentContextInput): void {
       input.symbolSearch === null ||
       typeof input.symbolSearch.searchSymbols !== "function"
     ) {
-      throw invalidInput("symbolSearch SymbolSearchStore sözleşmesini uygulamalı");
+      throw invalidInput("symbolSearch must implement the SymbolSearchStore contract");
     }
   }
   if (input.fileFreshness !== undefined) {
     if (!Array.isArray(input.fileFreshness)) {
-      throw invalidInput("fileFreshness dizi olmalı");
+      throw invalidInput("fileFreshness must be an array");
     }
     for (const record of input.fileFreshness) {
       if (
@@ -635,7 +635,7 @@ function validateOptionalInputs(input: AgentContextInput): void {
         typeof record.updatedAt !== "string"
       ) {
         throw invalidInput(
-          "fileFreshness kaydı {relativePath: string, updatedAt: string} olmalı",
+          "fileFreshness entries must be {relativePath: string, updatedAt: string}",
         );
       }
     }
@@ -659,7 +659,7 @@ export function generateAgentContext(
 ): AgentContextResult {
   // 1) Girdi sözleşmesi: görev metni zorunlu ve boş olmayan arama verisidir.
   if (typeof input.task !== "string" || input.task.trim().length === 0) {
-    throw invalidInput("task boş olmayan bir görev metni (arama sorgusu) olmalı");
+    throw invalidInput("task must be a non-empty task description (it is used as the search query)");
   }
   validateOptionalInputs(input);
 
@@ -670,7 +670,7 @@ export function generateAgentContext(
   if (state !== "ready" && state !== "partial") {
     throw new GraphRepositoryError(
       "graph/agent-context-snapshot-state",
-      `agent context yalnızca ready/partial snapshot üzerinde çalışır; snapshot durumu: ${String(state)}`,
+      `agent context only runs on a ready or partial snapshot; snapshot state: ${String(state)}`,
     );
   }
 
@@ -699,21 +699,21 @@ export function generateAgentContext(
     degradedLegs.push({
       leg: "contract",
       reason:
-        "contract ayakı atlandı: snapshot'ta sözleşme kaydı yok (ApiContract/EventContract/SchemaContract/ContractVersion yüzeyi boş) ve contractSymbols verilmedi (hata değildir)",
+        "contract leg skipped: the snapshot has no contract records (the ApiContract/EventContract/SchemaContract/ContractVersion surface is empty) and no contractSymbols were given (this is not an error)",
     });
   }
   if (!freshnessProvided) {
     degradedLegs.push({
       leg: "freshness",
       reason:
-        "freshness ayakı atlandı: fileFreshness verilmedi (dosya updatedAt eşlemesi yok)",
+        "freshness leg skipped: no fileFreshness was given (no per-file updatedAt mapping)",
     });
   }
   if (!ftsProvided) {
     degradedLegs.push({
       leg: "fts",
       reason:
-        "fts ayakı atlandı: symbolSearch deposu verilmedi (symbol_fts yok)",
+        "fts leg skipped: no symbolSearch store was given (symbol_fts unavailable)",
     });
   }
   const legsApplied: AgentContextLeg[] = LEG_ORDER.filter((leg) => {
@@ -725,7 +725,7 @@ export function generateAgentContext(
 
   if (queryTokens.length === 0) {
     rationales.push(
-      "görev metni arama tokenı üretmedi; boş sorgu kümesiyle hiçbir ayak eşleşemez",
+      "the task text produced no search tokens; no leg can match an empty query set",
     );
   }
 
@@ -1157,7 +1157,7 @@ export function generateAgentContext(
   );
   if (proximityTruncated) {
     rationales.push(
-      `graph-proximity tavanı vuruldu: ${String(MAX_PROXIMITY_NODES)} keşif node ile sınırlandı (TŞ §20 resource budget)`,
+      `graph-proximity ceiling reached: exploration was limited to ${String(MAX_PROXIMITY_NODES)} nodes (resource budget)`,
     );
   }
 
@@ -1170,7 +1170,7 @@ export function generateAgentContext(
     ]);
     if (queryTokens.length === 0) {
       rationales.push(
-        "contract: boş sorgu kümesi kontrat kesişimi üretmez (ayak koştu, katkı yok)",
+        "contract: an empty query set cannot intersect any contract (leg ran, no contribution)",
       );
     }
     for (const node of sortedNodes) {
@@ -1191,7 +1191,7 @@ export function generateAgentContext(
   if (ftsProvided && input.symbolSearch !== undefined) {
     if (queryTokens.length === 0) {
       rationales.push(
-        "fts: boş sorgu kümesi için depo çağrısı yapılmadı (ayak koştu, katkı yok)",
+        "fts: the store was not queried for an empty query set (leg ran, no contribution)",
       );
     } else {
       const primaryHits = input.symbolSearch.searchSymbols(
@@ -1264,7 +1264,7 @@ export function generateAgentContext(
 
       if (droppedUnknown > 0) {
         rationales.push(
-          `fts: ${String(droppedUnknown)} isabet snapshot'ta olmayan nodeId taşıdığı için düşürüldü`,
+          `fts: dropped ${String(droppedUnknown)} hit(s) whose nodeId is not in the snapshot`,
         );
       }
     }
@@ -1348,7 +1348,7 @@ export function generateAgentContext(
 
   if (ranked.length === 0) {
     rationales.push(
-      `görev tokenları (${String(queryTokens.length)} adet) hiçbir ayakta aday üretmedi; boş bağlam döndürüldü`,
+      `the ${String(queryTokens.length)} task token(s) produced no candidates in any leg; returning an empty context`,
     );
   }
 
@@ -1367,7 +1367,7 @@ export function generateAgentContext(
     } else {
       omittedCount = ranked.length - contextItems.length;
       rationales.push(
-        `tokenBudget doldu: ${String(omittedCount)} aday pakete alınmadı (uygulanan bütçe ${String(tokenBudget)})`,
+        `tokenBudget exhausted: ${String(omittedCount)} candidate(s) left out of the package (applied budget ${String(tokenBudget)})`,
       );
       break;
     }
@@ -1516,19 +1516,19 @@ function resolveReason(candidate: Candidate): string {
     if (!candidate.legs.has(leg)) continue;
     switch (leg) {
       case "exact-symbol":
-        return "exact-symbol: görev tokenları sembol adı tokenlarıyla birebir eşleşti";
+        return "exact-symbol: task tokens exactly match the symbol name tokens";
       case "graph-proximity": {
         const depth = candidate.depth ?? 0;
-        return `graph-proximity: birebir eşleşen sembolden ${String(depth)} kenar derinliğinde bağlı`;
+        return `graph-proximity: connected to an exactly matched symbol at edge depth ${String(depth)}`;
       }
       case "contract":
-        return "contract: görevle token kesişen kontrat yüzey sembolü";
+        return "contract: contract surface symbol that shares tokens with the task";
       case "freshness":
-        return "freshness: dosya tazeliğine göre sıralandı";
+        return "freshness: ranked by file freshness";
       case "fts":
-        return "fts: symbol_fts eşleşmesi";
+        return "fts: symbol_fts match";
     }
   }
   // Ulaşılamaz: aday en az bir ayakla oluşur.
-  return "agent-context: yapısal aday";
+  return "agent-context: structural candidate";
 }

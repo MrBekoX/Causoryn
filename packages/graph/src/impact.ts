@@ -248,12 +248,12 @@ function requireLimit(
   if (typeof requested !== "number" || !Number.isInteger(requested) || requested < 1) {
     throw new GraphRepositoryError(
       "graph/impact-invalid-input",
-      `${name} pozitif tam sayı olmalı: ${String(requested)}`,
+      `${name} must be a positive integer: ${String(requested)}`,
     );
   }
   if (requested > ceiling) {
     rationales.push(
-      `${name}=${String(requested)} istenen değeri tavana (${String(ceiling)}) indirildi (TŞ §20 resource budget)`,
+      `${name}=${String(requested)} exceeds the ceiling and was clamped to ${String(ceiling)} (resource budget)`,
     );
     return ceiling;
   }
@@ -307,7 +307,7 @@ export function analyzeImpact(
   if (state !== "ready" && state !== "partial") {
     throw new GraphRepositoryError(
       "graph/impact-snapshot-state",
-      `etki analizi yalnızca ready/partial snapshot üzerinde çalışır; snapshot durumu: ${String(state)}`,
+      `impact analysis only runs on a ready or partial snapshot; snapshot state: ${String(state)}`,
     );
   }
 
@@ -316,14 +316,14 @@ export function analyzeImpact(
   if (requestedTargets === undefined || requestedTargets.length === 0) {
     throw new GraphRepositoryError(
       "graph/impact-invalid-input",
-      "targets boş olamaz: en az bir node kimliği veya tam qualifiedName gerekli",
+      "targets must not be empty: at least one node id or exact qualifiedName is required",
     );
   }
   for (const target of requestedTargets) {
     if (typeof target !== "string" || target.trim().length === 0) {
       throw new GraphRepositoryError(
         "graph/impact-invalid-input",
-        `targets üyesi boş/blanks olamaz: ${String(target)}`,
+        `targets members must not be empty or blank: ${String(target)}`,
       );
     }
   }
@@ -347,7 +347,7 @@ export function analyzeImpact(
     if (invalid.length > 0) {
       throw new GraphRepositoryError(
         "graph/impact-invalid-input",
-        `geçersiz edgeKinds üyesi(leri): ${invalid.join(", ")}; edgeKinds EDGE_KINDS alt kümesi olmalı`,
+        `invalid edgeKinds member(s): ${invalid.join(", ")}; edgeKinds must be a subset of EDGE_KINDS`,
       );
     }
     allowedKinds = new Set(input.edgeKinds);
@@ -393,7 +393,7 @@ export function analyzeImpact(
   const uniqueDangling = [...new Set(danglingEdgeIds)].sort(cmp);
   for (const edgeId of uniqueDangling) {
     rationales.push(
-      `kenar yok sayıldı: ucu snapshot node kümesinde olmayan kenar (edge:${edgeId})`,
+      `edge ignored: an endpoint is not in the snapshot node set (edge:${edgeId})`,
     );
   }
   const getEdgeRef = (edge: GraphEdge): ImpactEdgeRef => {
@@ -428,13 +428,13 @@ export function analyzeImpact(
     if (byName.length === 0) {
       unresolvedTargets.push({
         target,
-        reason: `hedef çözülemedi: "${target}" — node kimliği veya tam qualifiedName olarak yayınlanmış snapshot'ta bulunamadı`,
+        reason: `target not resolved: "${target}" was not found in the published snapshot as a node id or an exact qualifiedName`,
       });
     } else {
       const candidateIds = byName.map((node) => node.id).sort(cmp);
       unresolvedTargets.push({
         target,
-        reason: `hedef belirsiz: "${target}" tam qualifiedName ${String(byName.length)} node ile eşleşti (${candidateIds.join(", ")}); node kimliği ile hedefleyin`,
+        reason: `ambiguous target: the exact qualifiedName "${target}" matches ${String(byName.length)} nodes (${candidateIds.join(", ")}); target it by node id`,
       });
     }
   }
@@ -643,7 +643,7 @@ export function analyzeImpact(
     );
     if (!hasIncoming) {
       rationales.push(
-        `hedef izole: "${target.qualifiedName}" (${target.nodeId}) için ters kenar yok — doğrudan bağımlı node bulunamadı, etki adayı üretilmedi`,
+        `isolated target: "${target.qualifiedName}" (${target.nodeId}) has no incoming edges; no direct dependents were found, so no impact candidates were produced`,
       );
     }
   }
