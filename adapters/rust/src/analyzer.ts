@@ -53,10 +53,16 @@ import {
 } from "node:fs";
 import { dirname, join } from "node:path";
 import {
+  buildRustWorkerFromStagedSource,
   isCargoAvailable,
+  isSafeCommandPath,
   resolveCargoHomeDir,
-  runCargoBuild,
 } from "./cargo.js";
+import {
+  collectUntrustedRoots,
+  isFullyQualifiedPath,
+  isWithinUntrustedRoots,
+} from "@causoryn/sidecar-ipc";
 import { runWorkerAnalyze, type WorkerRunOutcome } from "./worker-process.js";
 import {
   DEFAULT_CARGO_BUILD_TIMEOUT_MS,
@@ -134,7 +140,7 @@ function normalizeRelativePath(raw: string): string {
   if (posix.startsWith("/") || /^[a-zA-Z]:/.test(posix)) {
     throw new DomainError(
       "adapter/absolute-source-path",
-      `Mutlak kaynak yolu kabul edilmez: ${raw}`,
+      `Absolute source paths are not accepted: ${raw}`,
     );
   }
 
@@ -142,14 +148,14 @@ function normalizeRelativePath(raw: string): string {
     if (segment.length === 0 || segment === ".") {
       throw new DomainError(
         "adapter/invalid-source-path",
-        `Kaynak yolu boş/geçersiz segment içeriyor: ${raw}`,
+        `Source path contains an empty or invalid segment: ${raw}`,
       );
     }
 
     if (segment === "..") {
       throw new DomainError(
         "adapter/source-path-escape",
-        `Kaynak yolu kök dışına çıkıyor: ${raw}`,
+        `Source path escapes the workspace root: ${raw}`,
       );
     }
   }
@@ -397,24 +403,24 @@ export function verifyRustWorkerBinaryIntegrity(
   if (expectedSourceFingerprint === null) {
     return {
       valid: false,
-      reason: "sourceFingerprint hesaplanamadı (Cargo.toml eksik veya okunamadı)",
+      reason: "sourceFingerprint could not be computed (Cargo.toml missing or unreadable)",
     };
   }
   const st = lstatOrNull(binaryPath);
   if (st === null) {
-    return { valid: false, reason: "worker binary mevcut değil" };
+    return { valid: false, reason: "worker binary does not exist" };
   }
   if (st.isSymbolicLink() || !st.isFile()) {
     return {
       valid: false,
-      reason: "worker binary symlink veya düzenli dosya değil (reddedildi)",
+      reason: "worker binary is a symlink or not a regular file (rejected)",
     };
   }
   const actualBinarySha256 = readRegularFileSha256NoFollow(binaryPath);
   if (actualBinarySha256 === null) {
     return {
       valid: false,
-      reason: "worker binary O_NOFOLLOW ile doğrulanamadı",
+      reason: "worker binary could not be verified with O_NOFOLLOW",
     };
   }
   const metaPath = rustWorkerIntegrityPath(binaryPath);
@@ -425,7 +431,7 @@ export function verifyRustWorkerBinaryIntegrity(
   if (metaRaw === null) {
     return {
       valid: false,
-      reason: "bütünlük yan-dosyası (.sha256.json) eksik veya düzenli dosya değil",
+      reason: "integrity sidecar file (.sha256.json) is missing or not a regular file",
     };
   }
   let parsed: unknown;
@@ -434,13 +440,13 @@ export function verifyRustWorkerBinaryIntegrity(
   } catch {
     return {
       valid: false,
-      reason: "bütünlük yan-dosyası (.sha256.json) geçerli JSON değil",
+      reason: "integrity sidecar file (.sha256.json) is not valid JSON",
     };
   }
   if (!isRecord(parsed)) {
     return {
       valid: false,
-      reason: "bütünlük yan-dosyası (.sha256.json) geçersiz şema",
+      reason: "integrity sidecar file (.sha256.json) has an invalid schema",
     };
   }
   const recordedSource = parsed["sourceFingerprint"];
@@ -453,19 +459,19 @@ export function verifyRustWorkerBinaryIntegrity(
   ) {
     return {
       valid: false,
-      reason: "bütünlük yan-dosyası geçersiz SHA-256 alanı içeriyor",
+      reason: "integrity sidecar file contains an invalid SHA-256 field",
     };
   }
   if (recordedSource !== expectedSourceFingerprint) {
     return {
       valid: false,
-      reason: "sourceFingerprint uyuşmuyor (worker kaynağı değişmiş)",
+      reason: "sourceFingerprint mismatch (the worker source changed)",
     };
   }
   if (recordedBinary !== actualBinarySha256) {
     return {
       valid: false,
-      reason: "binarySha256 uyuşmuyor (kurcalanmış veya bozuk binary)",
+      reason: "binarySha256 mismatch (tampered or corrupted binary)",
     };
   }
   return { valid: true, reason: "" };
@@ -480,11 +486,15 @@ interface WorkerBinaryProbe {
 /**
  * Worker binary'sini sağlar ve önbellekteki binary için yürütme öncesi
  * SHA-256 + sourceFingerprint + symlink-reddi bütünlük doğrulaması yapar.
- * Uyuşmazlık/kurcalanma durumunda temiz yeniden derleme yapılır (autoBuild=false
- * ise güvenli reddedilir ve L0/L1'e düşülür).
+ * On a mismatch the cached binary and its pin are deleted and the worker is
+ * rebuilt from a staged crate copy into a FRESH target directory; the new
+ * pin is computed from the copied, freshly built bytes (autoBuild=false
+ * ise güvenli reddedilir ve L0/L1'e düşülür). A cache directory inside the
+ * analyzed workspace is never used (neither executed nor built into).
  */
 async function ensureWorkerBinary(
   options: ResolvedRuntimeOptions,
+  untrustedRoots: readonly string[],
 ): Promise<WorkerBinaryProbe> {
   const manifestPath = defaultWorkerManifestPath();
 
@@ -496,7 +506,7 @@ async function ensureWorkerBinary(
         return {
           available: false,
           workerDir: options.workerDir,
-          detail: `worker binary symlink veya düzenli dosya değil (reddedildi): ${binaryPath}`,
+          detail: `worker binary is a symlink or not a regular file (rejected): ${binaryPath}`,
         };
       }
       return { available: true, workerDir: options.workerDir, detail: "" };
@@ -507,50 +517,14 @@ async function ensureWorkerBinary(
       return { available: true, workerDir: options.workerDir, detail: "" };
     }
 
-    if (!options.autoBuild) {
-      return {
-        available: false,
-        workerDir: options.workerDir,
-        detail: `Rust worker binary bulunamadı ve autoBuild kapalı: ${binaryPath}`,
-      };
-    }
-
-    if (!isCargoAvailable(manifestPath)) {
-      return {
-        available: false,
-        workerDir: options.workerDir,
-        detail:
-          "cargo bulunamadı (PATH ve cargo-home öneklemesi) — Rust worker binary'si yok ve derlenemedi",
-      };
-    }
-
-    const build = await runCargoBuild({
-      manifestPath,
-      timeoutMs: options.cargoBuildTimeoutMs,
-    });
-    if (build.status !== 0) {
-      const tail =
-        build.spawnError ||
-        build.stderr.trim().slice(-300) ||
-        build.stdout.trim().slice(-300) ||
-        "(çıktı boş)";
-      return {
-        available: false,
-        workerDir: options.workerDir,
-        detail: `cargo build başarısız (exit=${String(build.status ?? "bilinmiyor")}): ${tail}`,
-      };
-    }
-    const builtStat = lstatOrNull(binaryPath);
-    if (builtStat === null || builtStat.isSymbolicLink() || !builtStat.isFile()) {
-      // Dürüst ayrım: derleme BAŞARILI ama binary override edilen dizinde
-      // değil — "build başarısız" DEMEYİZ; gerçek sebep bildirilir.
-      return {
-        available: false,
-        workerDir: options.workerDir,
-        detail: `cargo build başarılı ama worker binary'si beklenen konumda yok: ${binaryPath} (workerDir override'ını kontrol edin)`,
-      };
-    }
-    return { available: true, workerDir: options.workerDir, detail: "" };
+    // No in-place build for a configured worker directory: building the
+    // packaged crate where it lies would let cargo read config files from
+    // the directories above it.
+    return {
+      available: false,
+      workerDir: options.workerDir,
+      detail: `Rust worker binary not found in the configured worker directory: ${binaryPath} (automatic builds only target the Causoryn build cache)`,
+    };
   }
 
   // hasExplicitWorkerDir === false:
@@ -562,7 +536,7 @@ async function ensureWorkerBinary(
       return {
         available: false,
         workerDir: options.workerDir,
-        detail: `asset Rust worker binary symlink veya düzenli dosya değil (reddedildi): ${assetBinaryPath}`,
+        detail: `packaged Rust worker binary is a symlink or not a regular file (rejected): ${assetBinaryPath}`,
       };
     }
     return { available: true, workerDir: options.workerDir, detail: "" };
@@ -572,6 +546,24 @@ async function ensureWorkerBinary(
   const cacheTargetDir = defaultWritableRustTargetDir();
   const cacheWorkerDir = join(cacheTargetDir, "debug");
   const cacheBinaryPath = join(cacheWorkerDir, options.workerBinaryName);
+  if (!isFullyQualifiedPath(cacheTargetDir) || !isSafeCommandPath(cacheTargetDir)) {
+    return {
+      available: false,
+      workerDir: cacheWorkerDir,
+      detail: `invalid Rust build cache directory (CAUSORYN_RUST_TARGET_DIR must be a safe absolute path): ${cacheTargetDir}`,
+    };
+  }
+  if (isWithinUntrustedRoots(cacheTargetDir, untrustedRoots)) {
+    // A binary and its pin inside the workspace could both be planted, so
+    // the cache is neither executed nor built into.
+    return {
+      available: false,
+      workerDir: cacheWorkerDir,
+      detail:
+        `Rust analyzer unavailable: the Rust build cache directory (${cacheTargetDir}) is inside the analyzed workspace; ` +
+        "set CAUSORYN_RUST_TARGET_DIR to a directory outside the workspace",
+    };
+  }
   const sourceFingerprint = computeRustWorkerSourceFingerprint(manifestPath);
   const cacheStat = lstatOrNull(cacheBinaryPath);
 
@@ -584,13 +576,13 @@ async function ensureWorkerBinary(
       return { available: true, workerDir: cacheWorkerDir, detail: "" };
     }
     console.error(
-      `[rust-adapter] önbellekteki Rust worker binary bütünlük doğrulamasından geçemedi (${verification.reason}): ${cacheBinaryPath}`,
+      `[rust-adapter] cached Rust worker binary failed the integrity check (${verification.reason}): ${cacheBinaryPath}`,
     );
     if (!options.autoBuild || options.hasSpawnInjection) {
       return {
         available: false,
         workerDir: cacheWorkerDir,
-        detail: `önbellekteki Rust worker binary bütünlük doğrulamasından geçemedi (${verification.reason})`,
+        detail: `cached Rust worker binary failed the integrity check (${verification.reason})`,
       };
     }
     // Temiz yeniden derleme öncesi kurcalanmış/symlink/bayat binary ve yan-dosya kaldırılır.
@@ -601,7 +593,7 @@ async function ensureWorkerBinary(
       return {
         available: false,
         workerDir: cacheWorkerDir,
-        detail: `önbellekteki bozuk Rust worker binary temizlenemedi: ${cacheBinaryPath}`,
+        detail: `corrupted cached Rust worker binary could not be removed: ${cacheBinaryPath}`,
       };
     }
   } else {
@@ -612,52 +604,48 @@ async function ensureWorkerBinary(
       return {
         available: false,
         workerDir: cacheWorkerDir,
-        detail: `Rust worker binary bulunamadı ve autoBuild kapalı: ${cacheBinaryPath}`,
+        detail: `Rust worker binary not found and autoBuild is disabled: ${cacheBinaryPath}`,
       };
     }
   }
 
   // 3) İkisi de yoksa (veya önbellek doğrulaması başarısız olup temizlendiyse)
-  //    cargo build yazılabilir CARGO_TARGET_DIR içine çalıştırılır ve .sha256.json yazılır.
+  //    worker is built from a staged crate copy and copied into the cache.
   if (sourceFingerprint === null) {
     return {
       available: false,
       workerDir: cacheWorkerDir,
-      detail: `Rust worker manifest kaynağı bulunamadı: ${manifestPath}`,
+      detail: `Rust worker manifest source not found: ${manifestPath}`,
     };
   }
-  if (!isCargoAvailable(manifestPath)) {
+  if (!isCargoAvailable(undefined, { cargoHomeDir: options.cargoHomeDir, untrustedRoots })) {
     return {
       available: false,
       workerDir: cacheWorkerDir,
       detail:
-        "cargo bulunamadı (PATH ve cargo-home öneklemesi) — Rust worker binary'si yok ve derlenemedi",
+        "cargo not found (PATH and cargo home outside the analyzed workspace) — the Rust worker binary is missing and could not be built",
     };
   }
 
-  const build = await runCargoBuild({
-    manifestPath,
+  const build = await buildRustWorkerFromStagedSource({
+    sourceManifestPath: manifestPath,
+    cacheRoot: cacheTargetDir,
+    destinationBinaryPath: cacheBinaryPath,
+    untrustedRoots,
     timeoutMs: options.cargoBuildTimeoutMs,
-    targetDir: cacheTargetDir,
+    cargoHomeDir: options.cargoHomeDir,
   });
-  if (build.status !== 0) {
-    const tail =
-      build.spawnError ||
-      build.stderr.trim().slice(-300) ||
-      build.stdout.trim().slice(-300) ||
-      "(çıktı boş)";
-    return {
-      available: false,
-      workerDir: cacheWorkerDir,
-      detail: `cargo build başarısız (exit=${String(build.status ?? "bilinmiyor")}): ${tail}`,
-    };
+  if (!build.ok) {
+    return { available: false, workerDir: cacheWorkerDir, detail: build.detail };
   }
+  // The pin is computed from the freshly copied bytes, never from a file the
+  // build did not just produce.
   const binarySha256 = readRegularFileSha256NoFollow(cacheBinaryPath);
   if (binarySha256 === null) {
     return {
       available: false,
       workerDir: cacheWorkerDir,
-      detail: `cargo build başarılı ama worker binary'si doğrulanamadı (eksik veya düzenli dosya değil): ${cacheBinaryPath}`,
+      detail: `cargo build succeeded but the worker binary could not be verified (missing or not a regular file): ${cacheBinaryPath}`,
     };
   }
   try {
@@ -670,7 +658,7 @@ async function ensureWorkerBinary(
     return {
       available: false,
       workerDir: cacheWorkerDir,
-      detail: `worker binary bütünlük kaydı (.sha256.json) yazılamadı: ${detail}`,
+      detail: `worker binary integrity record (.sha256.json) could not be written: ${detail}`,
     };
   }
   const postBuildCheck = verifyRustWorkerBinaryIntegrity(
@@ -681,7 +669,7 @@ async function ensureWorkerBinary(
     return {
       available: false,
       workerDir: cacheWorkerDir,
-      detail: `yeni derlenen Rust worker binary doğrulaması başarısız: ${postBuildCheck.reason}`,
+      detail: `verification of the freshly built Rust worker binary failed: ${postBuildCheck.reason}`,
     };
   }
   return { available: true, workerDir: cacheWorkerDir, detail: "" };
@@ -788,7 +776,7 @@ function mapNode(raw: unknown, skipped: string[]): SnapshotNodeInput | null {
   }
 
   if (typeof kind !== "string" || !NODE_KIND_SET.has(kind)) {
-    skipped.push(`katalog dışı node türü atlandı: ${String(kind)}`);
+    skipped.push(`skipped a node with a kind outside the catalog: ${String(kind)}`);
     return null;
   }
 
@@ -809,19 +797,19 @@ function mapEdge(raw: unknown, skipped: string[]): SnapshotEdgeInput | null {
   const kind = raw["kind"];
   const resolution = raw["resolution"];
   if (typeof kind !== "string" || !EDGE_KIND_SET.has(kind)) {
-    skipped.push(`katalog dışı edge türü atlandı: ${String(kind)}`);
+    skipped.push(`skipped an edge with a kind outside the catalog: ${String(kind)}`);
     return null;
   }
 
   if (typeof resolution !== "string" || !RESOLUTION_SET.has(resolution)) {
-    skipped.push(`geçersiz resolution değeri olan kenar atlandı: ${String(resolution)}`);
+    skipped.push(`skipped an edge with an invalid resolution value: ${String(resolution)}`);
     return null;
   }
 
   const from = mapNodeRef(raw["from"]);
   const to = mapNodeRef(raw["to"]);
   if (from === null || to === null) {
-    skipped.push("geçersiz kenar ucu atlandı");
+    skipped.push("skipped an edge with an invalid endpoint");
     return null;
   }
 
@@ -896,7 +884,7 @@ function mapWorkerResponse(
 ): MappedWorkerResponse | null {
   if (!isRecord(payload)) return null;
   if (payload["id"] !== expectedId) {
-    skipped.push("worker yanıtı id echo eşleşmedi");
+    skipped.push("worker response id did not match the request id");
     return null;
   }
 
@@ -912,13 +900,13 @@ function mapWorkerResponse(
     const code =
       error !== null && typeof error["code"] === "string"
         ? error["code"]
-        : "bilinmeyen";
+        : "unknown";
     const message =
       error !== null && typeof error["message"] === "string"
         ? error["message"]
         : "";
     skipped.push(
-      `worker hatası ${code}${message.length > 0 ? `: ${message}` : ""} — istek kaynak sınırlarını (dosya boyutu/sayısı) kontrol edin`,
+      `worker error ${code}${message.length > 0 ? `: ${message}` : ""} — check the request resource limits (file size/count)`,
     );
     return null;
   }
@@ -973,7 +961,7 @@ function fallbackResult(
   skipped: string[],
 ): RustAdapterResult {
   const warningLines = [
-    `${reason} — L0/L1 dosya düzeyine düşüldü`,
+    `${reason} — fell back to L0/L1 file-level facts`,
     ...(stderr.trim().length > 0
       ? [`worker stderr: ${stderr.trim().slice(0, 200)}`]
       : []),
@@ -1015,7 +1003,7 @@ export async function analyzeRustWorkspace(
 ): Promise<RustAdapterResult> {
   const { workspaceId, files } = input;
   if (workspaceId.trim().length === 0) {
-    throw new DomainError("adapter/empty-workspace-id", "workspaceId boş olamaz");
+    throw new DomainError("adapter/empty-workspace-id", "workspaceId must not be empty");
   }
 
   // 1) Girdi normalizasyonu (sıralı, çakışmasız — deterministik istek).
@@ -1030,7 +1018,7 @@ export async function analyzeRustWorkspace(
     if (seen.has(relativePath)) {
       throw new DomainError(
         "adapter/duplicate-source-path",
-        `Aynı kaynak yolu iki kez verildi: ${relativePath}`,
+        `The same source path was given twice: ${relativePath}`,
       );
     }
 
@@ -1050,7 +1038,10 @@ export async function analyzeRustWorkspace(
 
   // 2) Worker binary sağlama (yoksa LİTERAL "cargo" ile derleme; olmazsa
   //    fallback detayı warnings'e aynen taşınır).
-  const binaryProbe = await ensureWorkerBinary(options);
+  const binaryProbe = await ensureWorkerBinary(
+    options,
+    collectUntrustedRoots([input.workspaceRoot]),
+  );
   if (!binaryProbe.available) {
     return fallbackResult(entries, binaryProbe.detail, "", []);
   }
@@ -1103,12 +1094,12 @@ export async function analyzeRustWorkspace(
   //    DEĞİLDİR — istek reddidir; gerekçe metni bunu dürüstçe ayırt eder.
   const isWorkerRejection =
     outcome.status === "ok" &&
-    skipped.some((line) => line.startsWith("worker hatası"));
+    skipped.some((line) => line.startsWith("worker error"));
   const reason =
     outcome.status === "ok"
       ? isWorkerRejection
-        ? 'Rust worker isteği reddetti (worker status:"error"); ayrıntı warnings\'te'
-        : "Rust worker kullanılamıyor (yanıt sözleşmeye aykırı)"
-      : `Rust worker kullanılamıyor (${outcome.detail})`;
+        ? 'Rust worker rejected the request (worker status:"error"); details are in the warnings'
+        : "Rust worker unavailable (the response violates the protocol)"
+      : `Rust worker unavailable (${outcome.detail})`;
   return fallbackResult(entries, reason, outcome.stderr, skipped);
 }

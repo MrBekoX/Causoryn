@@ -16,7 +16,12 @@
 import { dirname } from "node:path";
 import {
   buildAllowlistedWorkerEnv,
+  isFullyQualifiedPath,
+  collectUntrustedRoots,
+  resolveWorkerCommand,
   runLineJsonWorker,
+  withSanitizedPath,
+  workerUnavailable,
   type WorkerRunOutcome,
 } from "@causoryn/sidecar-ipc";
 import {
@@ -44,20 +49,42 @@ export interface RunWorkerAnalyzeInput {
   readonly stderrMaxChars?: number;
   /** Test enjeksiyonu; default node:child_process.spawn. */
   readonly spawnProcess?: SpawnFunction;
+  /**
+   * Analyzed workspace root(s): PATH entries inside them are never used to
+   * resolve the python executable (the process cwd is always included).
+   */
+  readonly untrustedRoots?: readonly string[];
 }
 
 export function runWorkerAnalyze(
   input: RunWorkerAnalyzeInput,
 ): Promise<WorkerRunOutcome> {
+  if (!isFullyQualifiedPath(input.workerScriptPath)) {
+    return Promise.resolve(
+      workerUnavailable(
+        `worker process was not started: the worker script path must be absolute (got: ${input.workerScriptPath})`,
+      ),
+    );
+  }
+  const untrustedRoots = collectUntrustedRoots(input.untrustedRoots ?? []);
+  const env = withSanitizedPath(
+    buildAllowlistedWorkerEnv(WORKER_ENV_ALLOWLIST, {
+      PYTHONIOENCODING: WORKER_IO_ENCODING,
+    }),
+    untrustedRoots,
+  );
+  // Absolute executable: a bare name would be searched in the cwd first on Windows.
+  const resolved = resolveWorkerCommand(input.pythonCommand, env, untrustedRoots);
+  if ("detail" in resolved) {
+    return Promise.resolve(workerUnavailable(resolved.detail));
+  }
   return runLineJsonWorker({
-    command: input.pythonCommand,
+    command: resolved.command,
     // "-I": isolated mode (ignores PYTHONPATH/PYTHON* env vars and omits cwd & user-site from sys.path)
     // "-B": disable __pycache__ bytecode writes (read-only discipline)
     // "-X utf8": enforce UTF-8 stdio/stderr on Windows even under -I
     args: ["-I", "-B", "-X", "utf8", input.workerScriptPath],
-    env: buildAllowlistedWorkerEnv(WORKER_ENV_ALLOWLIST, {
-      PYTHONIOENCODING: WORKER_IO_ENCODING,
-    }),
+    env,
     cwd: dirname(input.workerScriptPath),
     requestPayload: input.requestPayload,
     requestTimeoutMs: input.requestTimeoutMs,

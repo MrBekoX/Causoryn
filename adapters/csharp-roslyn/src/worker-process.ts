@@ -15,7 +15,12 @@
 import { dirname } from "node:path";
 import {
   buildAllowlistedWorkerEnv,
+  isFullyQualifiedPath,
+  collectUntrustedRoots,
+  resolveWorkerCommand,
   runLineJsonWorker,
+  withSanitizedPath,
+  workerUnavailable,
   type WorkerRunOutcome,
 } from "@causoryn/sidecar-ipc";
 import {
@@ -44,6 +49,11 @@ export interface RunWorkerAnalyzeInput {
   readonly stderrMaxChars?: number;
   /** Test enjeksiyonu; default node:child_process.spawn. */
   readonly spawnProcess?: SpawnFunction;
+  /**
+   * Analyzed workspace root(s): PATH entries inside them are never used to
+   * resolve the dotnet executable (the process cwd is always included).
+   */
+  readonly untrustedRoots?: readonly string[];
 }
 
 const DOTNET_ISOLATION_ENV_OVERRIDES = {
@@ -56,13 +66,27 @@ const DOTNET_ISOLATION_ENV_OVERRIDES = {
 export function runWorkerAnalyze(
   input: RunWorkerAnalyzeInput,
 ): Promise<WorkerRunOutcome> {
+  if (!isFullyQualifiedPath(input.workerDllPath)) {
+    return Promise.resolve(
+      workerUnavailable(
+        `worker process was not started: the worker DLL path must be absolute (got: ${input.workerDllPath})`,
+      ),
+    );
+  }
+  const untrustedRoots = collectUntrustedRoots(input.untrustedRoots ?? []);
+  const env = withSanitizedPath(
+    buildAllowlistedWorkerEnv(WORKER_ENV_ALLOWLIST, DOTNET_ISOLATION_ENV_OVERRIDES),
+    untrustedRoots,
+  );
+  // Absolute executable: a bare name would be searched in the cwd first on Windows.
+  const resolved = resolveWorkerCommand(input.dotnetCommand, env, untrustedRoots);
+  if ("detail" in resolved) {
+    return Promise.resolve(workerUnavailable(resolved.detail));
+  }
   return runLineJsonWorker({
-    command: input.dotnetCommand,
+    command: resolved.command,
     args: ["exec", input.workerDllPath],
-    env: buildAllowlistedWorkerEnv(
-      WORKER_ENV_ALLOWLIST,
-      DOTNET_ISOLATION_ENV_OVERRIDES,
-    ),
+    env,
     cwd: dirname(input.workerDllPath),
     requestPayload: input.requestPayload,
     requestTimeoutMs: input.requestTimeoutMs,

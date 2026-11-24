@@ -143,6 +143,12 @@ export interface AnalyzeGoWorkspaceInput {
   readonly files: readonly GoSourceFile[];
   /** Opsiyonel go.mod dosyaları; varsa <modulePath>/<subdir> import'ları tam çözülür. */
   readonly moduleFiles?: readonly GoModuleFile[];
+  /**
+   * Absolute root of the analyzed workspace (optional). PATH entries inside
+   * it are never used to resolve toolchain executables; the process cwd is
+   * always treated the same way.
+   */
+  readonly workspaceRoot?: string;
   readonly options?: Partial<GoAdapterOptions>;
 }
 
