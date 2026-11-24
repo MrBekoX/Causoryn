@@ -107,7 +107,11 @@ function ok(output: string): ToolchainProbeOutcome {
   return { available: true, version: firstLine, detail: "ok", output };
 }
 
-/** Probe that answers like real, supported toolchains, with per-command overrides. */
+/**
+ * Probe that answers like real, supported toolchains, with per-command overrides.
+ * `python3` is not installed unless overridden, so on POSIX (where doctor tries
+ * python3 before python) the `python` answers below are the ones reported.
+ */
 function makeProbe(
   overrides: Partial<Record<string, ToolchainProbeOutcome>> = {},
   seen?: Array<{ command: string; args: readonly string[] }>,
@@ -116,6 +120,9 @@ function makeProbe(
     seen?.push({ command, args });
     const override = overrides[command];
     if (override !== undefined) return override;
+    if (command === "python3") {
+      return { available: false, version: null, detail: "ENOENT", failure: "not-found" };
+    }
     const output = HEALTHY_OUTPUT[command];
     if (output === undefined) throw new Error(`unexpected probe command ${command}`);
     return ok(output);

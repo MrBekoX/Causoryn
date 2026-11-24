@@ -19,6 +19,7 @@ import {
   CAUSORYN_PACKAGE_VERSION,
   HOST_CLIENT_IDS,
   SIDECAR_TOOLCHAIN_IDS,
+  pythonCommandCandidates,
   type CanonicalSkillName,
   type DoctorHostStatus,
   type DoctorLegacyIndexCheck,
@@ -135,12 +136,9 @@ export function defaultToolchainProbe(
     };
   };
 
-  const primary = runOnce(command);
-  if (!primary.available && command === "python" && process.platform !== "win32") {
-    const py3 = runOnce("python3");
-    if (py3.available) return py3;
-  }
-  return primary;
+  // Alternative commands (python3 / python) are tried by the caller, in the
+  // Python adapter's order (see probeSidecarToolchains).
+  return runOnce(command);
 }
 
 function checkNodeVersion(rawNodeVersion: string): DoctorNodeCheck {
@@ -323,11 +321,15 @@ interface ToolchainVersionCheck {
 
 interface SidecarToolchainSpec {
   readonly id: SidecarToolchainId;
-  readonly cmd: string;
+  /**
+   * Commands tried in order (the same order the language adapter uses); the
+   * first one that is not "not found" is the one reported.
+   */
+  readonly commands: (platform: NodeJS.Platform) => readonly string[];
   readonly args: readonly string[];
   readonly label: string;
   readonly minimumVersion: string | null;
-  readonly check: (output: string) => ToolchainVersionCheck;
+  readonly check: (output: string, cmd: string) => ToolchainVersionCheck;
 }
 
 interface NumericVersion {
@@ -418,7 +420,7 @@ function checkDotnetRuntimes(output: string): ToolchainVersionCheck {
 const SIDECAR_TOOLCHAIN_SPECS: readonly SidecarToolchainSpec[] = [
   {
     id: "dotnet",
-    cmd: "dotnet",
+    commands: () => ["dotnet"],
     args: ["--list-runtimes"],
     label: ".NET runtime",
     minimumVersion: `${String(REQUIRED_DOTNET_RUNTIME_MAJOR)}.0`,
@@ -426,46 +428,47 @@ const SIDECAR_TOOLCHAIN_SPECS: readonly SidecarToolchainSpec[] = [
   },
   {
     id: "python",
-    cmd: "python",
+    // Same candidates and order as the Python adapter's default command.
+    commands: pythonCommandCandidates,
     args: ["--version"],
     label: "Python",
     minimumVersion: "3.10",
-    check: (output) =>
+    check: (output, cmd) =>
       checkVersionFloor({
         output,
         pattern: /\bPython (\d+)\.(\d+)(?:\.(\d+))?/,
         label: "Python",
         minimum: { major: 3, minor: 10 },
-        cmd: "python",
+        cmd,
         args: ["--version"],
       }),
   },
   {
     id: "go",
-    cmd: "go",
+    commands: () => ["go"],
     args: ["version"],
     label: "Go",
     minimumVersion: "1.22",
-    check: (output) =>
+    check: (output, cmd) =>
       checkVersionFloor({
         output,
         pattern: /\bgo(\d+)\.(\d+)(?:\.(\d+))?/,
         label: "Go",
         minimum: { major: 1, minor: 22 },
-        cmd: "go",
+        cmd,
         args: ["version"],
       }),
   },
   {
     id: "cargo",
-    cmd: "cargo",
+    commands: () => ["cargo"],
     args: ["--version"],
     label: "Cargo",
     minimumVersion: null,
-    check: (output) => {
+    check: (output, cmd) => {
       const match = /\bcargo (\d+)\.(\d+)\.(\d+)/.exec(output);
       return match === null
-        ? unreadableVersion("cargo", ["--version"], output)
+        ? unreadableVersion(cmd, ["--version"], output)
         : { version: toNumericVersion(match).text, problem: null };
     },
   },
@@ -476,10 +479,14 @@ const L0_L1_FALLBACK_NOTE = "this language falls back to L0/L1 file-level analys
 function evaluateSidecarToolchain(
   spec: SidecarToolchainSpec,
   res: ToolchainProbeOutcome,
+  cmd: string,
+  tried: readonly string[],
 ): DoctorToolchainStatus {
   const base = { id: spec.id, available: res.available, minimumVersion: spec.minimumVersion };
+  // With several candidate commands, say which one was found (the one the adapter starts).
+  const via = tried.length > 1 ? ` via \`${cmd}\`` : "";
   if (!res.available) {
-    const probeCommand = `\`${[spec.cmd, ...spec.args].join(" ")}\``;
+    const probeCommand = `\`${[cmd, ...spec.args].join(" ")}\``;
     if (res.failure === "error") {
       return {
         ...base,
@@ -497,17 +504,17 @@ function evaluateSidecarToolchain(
       detail:
         res.failure === "exited"
           ? `Not usable: ${probeCommand} exited without a working toolchain (${res.detail}); treated as not installed — ${L0_L1_FALLBACK_NOTE}`
-          : `Not found (${res.detail}) — ${L0_L1_FALLBACK_NOTE}`,
+          : `Not found (${res.detail}${tried.length > 1 ? `; tried ${tried.join(", ")}` : ""}) — ${L0_L1_FALLBACK_NOTE}`,
     };
   }
-  const check = spec.check(res.output ?? res.version ?? "");
+  const check = spec.check(res.output ?? res.version ?? "", cmd);
   if (check.problem !== null) {
     return {
       ...base,
       version: check.version,
       status: "warn",
       mode: "l0-l1-fallback",
-      detail: `${check.problem} — unsupported: the sidecar may fail, and this language then falls back to L0/L1 file-level analysis`,
+      detail: `${check.problem}${via} — unsupported: the sidecar may fail, and this language then falls back to L0/L1 file-level analysis`,
     };
   }
   return {
@@ -515,19 +522,29 @@ function evaluateSidecarToolchain(
     version: check.version,
     status: "ok",
     mode: "sidecar-ready",
-    detail: `${spec.label} ${check.version ?? ""}${spec.minimumVersion !== null ? `, minimum ${spec.minimumVersion}` : ""}`,
+    detail: `${spec.label} ${check.version ?? ""}${via}${spec.minimumVersion !== null ? `, minimum ${spec.minimumVersion}` : ""}`,
   };
+}
+
+function isNotFoundOutcome(res: ToolchainProbeOutcome): boolean {
+  return !res.available && (res.failure ?? "not-found") === "not-found";
 }
 
 function probeSidecarToolchains(
   probe: ToolchainProbeFn,
+  platform: NodeJS.Platform,
 ): Record<SidecarToolchainId, DoctorToolchainStatus> {
   const out = {} as Record<SidecarToolchainId, DoctorToolchainStatus>;
   for (const spec of SIDECAR_TOOLCHAIN_SPECS) {
-    out[spec.id] = evaluateSidecarToolchain(
-      spec,
-      probe(spec.cmd, spec.args, SIDECAR_PROBE_TIMEOUT_MS),
-    );
+    const candidates = spec.commands(platform);
+    // A candidate that exists but fails is reported as is: the adapter would start it too.
+    let cmd = candidates[0] ?? spec.id;
+    let res = probe(cmd, spec.args, SIDECAR_PROBE_TIMEOUT_MS);
+    for (let i = 1; i < candidates.length && isNotFoundOutcome(res); i += 1) {
+      cmd = candidates[i] ?? cmd;
+      res = probe(cmd, spec.args, SIDECAR_PROBE_TIMEOUT_MS);
+    }
+    out[spec.id] = evaluateSidecarToolchain(spec, res, cmd, candidates);
   }
   return out;
 }
@@ -968,7 +985,7 @@ export function runDoctor(options: ExtendedDoctorOptions = {}): DoctorReportWith
 
   const nodeCheck = checkNodeVersion(nodeVersion);
   const runtimeCheck = checkRuntime(packageRoot, homeDir, platform, arch, musl);
-  const toolchains = probeSidecarToolchains(probe);
+  const toolchains = probeSidecarToolchains(probe, platform);
 
   const detectedSet = new Set<HostClientId>(
     detectInstalledClients(homeDir, codexHomeDir, claudeConfigDir),
