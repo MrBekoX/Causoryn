@@ -74,13 +74,38 @@ export interface SnapshotRead {
   readonly stale: boolean;
 }
 
+/** Lightweight published snapshot metadata summary without hydrating graph rows. */
+export interface SnapshotMetaSummary {
+  readonly snapshotId: string;
+  readonly workspaceId: string;
+  readonly state: PublishableState;
+  readonly revisionId: string;
+  readonly revisionSequence: number;
+  readonly configHash: string;
+  readonly analyzerFingerprint: string;
+  readonly createdAt: string;
+  readonly publishedAt: string;
+  readonly nodeCount: number;
+  readonly edgeCount: number;
+  readonly evidenceCount: number;
+  readonly stale: boolean;
+}
+
+/** Retention GC summary returned by `pruneOldSnapshots`. */
+export interface PruneSnapshotsResult {
+  readonly prunedSnapshotSids: number;
+  readonly prunedFtsRows: number;
+}
+
 /**
  * symbol_fts indeks girdisi: sembol adı → node eşlemesi (TŞ §9 FTS5
- * sembol/ad arama; Faz A dilimi yalnızca tablo + temel ekleme/arama).
+ * sembol/ad arama; LocAgent tokenlaştırması için opsiyonel relativePath).
  */
 export interface SymbolIndexEntry {
   readonly symbol: string;
   readonly nodeId: string;
+  /** Optional relative file path indexed alongside the symbol name for path-aware FTS5 search. */
+  readonly relativePath?: string;
 }
 
 /** Sembol arama isabeti; yalnızca yayımlanmış snapshot'lardan döner. */
@@ -125,6 +150,13 @@ export interface GraphRepository {
   getSnapshot(snapshotId: string): SnapshotRead | undefined;
   /** Varsayılan sorgu yolu: en son kullanılabilir snapshot (TŞ §9). */
   getLatestPublished(workspaceId: string): SnapshotRead | undefined;
+  /** Lightweight metadata summary of the latest published snapshot without hydrating rows. */
+  getLatestSnapshotMeta?(workspaceId: string): SnapshotMetaSummary | undefined;
+  /** Retention GC: retains the newest `keepCount` (default 2) published snapshots and cleans up old/orphaned data. */
+  pruneOldSnapshots?(
+    workspaceId: string,
+    keepCount?: number,
+  ): PruneSnapshotsResult;
   /**
    * Opsiyonel toplu yazma işlemi sarmalayıcısı (SQLite transaction): binlerce
    * node/edge/evidence/file yazımını tek atomik commit'te yürütür.
@@ -142,6 +174,11 @@ export interface SymbolSearchStore {
    * olabilir; arama yalnızca yayımlanmış satırları döndürür.
    */
   indexSymbols(snapshotId: string, entries: readonly SymbolIndexEntry[]): void;
+  /** Replaces all indexed FTS entries for `snapshotId` atomically. */
+  replaceSymbolIndex?(
+    snapshotId: string,
+    entries: readonly SymbolIndexEntry[],
+  ): void;
   searchSymbols(
     query: string,
     limit?: number,

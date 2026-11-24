@@ -68,15 +68,15 @@ function createTempWorkspace(): {
   };
 }
 
-describe("Task 1.7 — SQLite schema v3, CVE defense-in-depth, build leases & orphan recovery", { timeout: 30_000 }, () => {
-  it("new DB sets SCHEMA_VERSION=3, PRAGMA page_size=4096, busy_timeout=5000, build_leases table, and keeps symbol_fts detail=full", () => {
-    expect(SCHEMA_VERSION).toBe(3);
+describe("Task 1.7 — SQLite schema v4, CVE defense-in-depth, build leases & orphan recovery", { timeout: 30_000 }, () => {
+  it("new DB sets SCHEMA_VERSION=4, PRAGMA page_size=4096, busy_timeout=5000, build_leases table, and keeps symbol_fts detail=full", () => {
+    expect(SCHEMA_VERSION).toBe(4);
     const dbPath = path.join(tempRoot, "fresh.sqlite");
     const repo = new SqliteGraphRepository(dbPath);
     try {
       const probe = new Database(dbPath, { readonly: true });
       try {
-        expect(probe.pragma("user_version", { simple: true })).toBe(3);
+        expect(probe.pragma("user_version", { simple: true })).toBe(4);
         expect(probe.pragma("page_size", { simple: true })).toBe(4096);
         expect(probe.pragma("journal_mode", { simple: true })).toBe("wal");
 

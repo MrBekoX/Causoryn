@@ -83,6 +83,8 @@ export const causorynServerConfigSchema = workspacePolicyConfigSchema.extend({
       dataDbPath: z.string().min(1).optional(),
     })
     .default({}),
+  /** Optional default tool profile (e.g., "core", "full", "wiki", "history", or comma-separated). */
+  toolProfile: z.string().min(1).optional(),
 });
 
 export type CausorynServerConfig = z.infer<typeof causorynServerConfigSchema>;

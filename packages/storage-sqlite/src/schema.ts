@@ -1,4 +1,5 @@
 import Database from "better-sqlite3";
+import { buildSymbolFtsDocument } from "@causoryn/graph";
 
 import { applyWikiSchema } from "./wiki-schema.js";
 
@@ -40,9 +41,15 @@ import { applyWikiSchema } from "./wiki-schema.js";
  *   uygulanır; `symbol_fts` varsayılan `detail=full` ile korunur (asla
  *   `detail=none` kullanılmaz — CVE-2026-119373 savunması). v1/v2 → v3 geçişi
  *   tek transaction içinde geriye uyumludur.
+ * - Wave 2 Track 2C (Tasks 2.4, 2.6 & LocAgent FTS5): SCHEMA_VERSION 4 —
+ *   adds `file_facts` table for per-file incremental indexing with early cutoff
+ *   (`public_interface_hash` + `imported_paths_json`) and upgrades `symbol_fts`
+ *   to `(symbol, search_text, node_id UNINDEXED, snapshot_sid UNINDEXED)` (still
+ *   default `detail=full`, CVE-2026-119373 hardened) with LocAgent path+camelCase
+ *   tokenization. v1/v2/v3 -> v4 migration runs in a single atomic transaction.
  */
 
-export const SCHEMA_VERSION = 3;
+export const SCHEMA_VERSION = 4;
 
 /** Şemayı uygular (sürüm < SCHEMA_VERSION ise); DDL tamamen statiktir. */
 export function applySchema(db: Database.Database): void {
@@ -71,6 +78,22 @@ export function applySchema(db: Database.Database): void {
         updated_at TEXT NOT NULL,
         PRIMARY KEY (workspace_id, relative_path)
       );
+      CREATE TABLE IF NOT EXISTS file_facts (
+        workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+        relative_path TEXT NOT NULL,
+        content_hash TEXT NOT NULL,
+        analyzer_fingerprint TEXT NOT NULL,
+        language TEXT NOT NULL,
+        public_interface_hash TEXT NOT NULL,
+        nodes_json TEXT NOT NULL,
+        edges_json TEXT NOT NULL,
+        evidence_json TEXT NOT NULL,
+        imported_paths_json TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY (workspace_id, relative_path)
+      );
+      CREATE INDEX IF NOT EXISTS idx_file_facts_workspace_fp
+        ON file_facts(workspace_id, analyzer_fingerprint);
       CREATE TABLE IF NOT EXISTS snapshots (
         sid INTEGER PRIMARY KEY,
         id TEXT UNIQUE,
@@ -157,13 +180,55 @@ export function applySchema(db: Database.Database): void {
       );
       CREATE INDEX IF NOT EXISTS idx_evidence_snapshot_path
         ON evidence(snapshot_sid, relative_path);
+    `);
+
+    if (version > 0 && version < 4) {
+      db.exec(`DROP TABLE IF EXISTS symbol_fts;`);
+    }
+
+    db.exec(`
       CREATE VIRTUAL TABLE IF NOT EXISTS symbol_fts USING fts5(
         symbol,
+        search_text,
         node_id UNINDEXED,
         snapshot_sid UNINDEXED
       );
     `);
+
+    if (version > 0 && version < 4) {
+      const existingNodes = db
+        .prepare(
+          `SELECT n.snapshot_sid AS snapshot_sid,
+                  n.node_id AS node_id,
+                  n.qualified_name AS qualified_name,
+                  n.relative_path AS relative_path
+           FROM nodes n
+           JOIN snapshots s ON s.sid = n.snapshot_sid
+           WHERE s.state IN ('ready','partial')
+             AND n.kind NOT IN ('Workspace','UnknownExternal')`,
+        )
+        .all() as Array<{
+        snapshot_sid: number;
+        node_id: string;
+        qualified_name: string;
+        relative_path: string | null;
+      }>;
+      if (existingNodes.length > 0) {
+        const insertFts = db.prepare(
+          `INSERT INTO symbol_fts (symbol, search_text, node_id, snapshot_sid)
+           VALUES (?, ?, ?, ?)`,
+        );
+        for (const row of existingNodes) {
+          const searchText = buildSymbolFtsDocument(
+            row.qualified_name,
+            row.relative_path ?? undefined,
+          );
+          insertFts.run(row.qualified_name, searchText, row.node_id, row.snapshot_sid);
+        }
+      }
+    }
+
     applyWikiSchema(db);
-    db.exec("PRAGMA user_version = 3;");
+    db.exec("PRAGMA user_version = 4;");
   })();
 }

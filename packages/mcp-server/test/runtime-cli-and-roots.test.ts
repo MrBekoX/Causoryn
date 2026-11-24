@@ -195,12 +195,12 @@ describe("parseMcpCliArgs — sıfır-ayar CLI ayrıştırıcısı", () => {
     expect(() => parseMcpCliArgs(["--root", "/tmp/bad\0null"])).toThrow(McpCliUsageError);
   });
 
-  it("resolveEffectiveOutputSchemaProfile: bayrak > CAUSORYN_MCP_OUTPUT_SCHEMA_PROFILE > mod varsayılanı sırasını uygular", () => {
+  it("resolveEffectiveOutputSchemaProfile: bayrak > CAUSORYN_MCP_OUTPUT_SCHEMA_PROFILE > varsayılan omit sırasını uygular", () => {
     const bare = parseMcpCliArgs([]);
-    expect(resolveEffectiveOutputSchemaProfile(bare, {})).toBe("full");
+    expect(resolveEffectiveOutputSchemaProfile(bare, {})).toBe("omit");
     expect(
-      resolveEffectiveOutputSchemaProfile(bare, { CAUSORYN_MCP_OUTPUT_SCHEMA_PROFILE: "omit" }),
-    ).toBe("omit");
+      resolveEffectiveOutputSchemaProfile(bare, { CAUSORYN_MCP_OUTPUT_SCHEMA_PROFILE: "full" }),
+    ).toBe("full");
 
     const cli = parseMcpCliArgs(["mcp", "--allow-cwd"]);
     expect(resolveEffectiveOutputSchemaProfile(cli, {})).toBe("omit");
@@ -214,6 +214,9 @@ describe("parseMcpCliArgs — sıfır-ayar CLI ayrıştırıcısı", () => {
         CAUSORYN_MCP_OUTPUT_SCHEMA_PROFILE: "omit",
       }),
     ).toBe("full");
+
+    const shortFlag = parseMcpCliArgs(["mcp", "--output-schema", "full"]);
+    expect(resolveEffectiveOutputSchemaProfile(shortFlag, {})).toBe("full");
 
     expect(() =>
       resolveEffectiveOutputSchemaProfile(bare, { CAUSORYN_MCP_OUTPUT_SCHEMA_PROFILE: "bogus" }),
@@ -805,8 +808,12 @@ describe("createCausorynMcpServer — outputSchemaProfile ve beforeToolCall", { 
     );
     const seenToolCalls: string[] = [];
 
-    const fullServer = createCausorynMcpServer(fullCtx);
+    const fullServer = createCausorynMcpServer(fullCtx, {
+      toolProfile: "full",
+      outputSchemaProfile: "full",
+    });
     const omitServer = createCausorynMcpServer(omitCtx, {
+      toolProfile: "full",
       outputSchemaProfile: "omit",
       beforeToolCall: async (toolName) => {
         seenToolCalls.push(toolName);
@@ -827,8 +834,8 @@ describe("createCausorynMcpServer — outputSchemaProfile ve beforeToolCall", { 
       const fullList = await fullClient.listTools();
       const omitList = await omitClient.listTools();
 
-      expect(fullList.tools.length).toBe(29);
-      expect(omitList.tools.length).toBe(29);
+      expect(fullList.tools.length).toBe(32);
+      expect(omitList.tools.length).toBe(32);
       for (const tool of fullList.tools) {
         expect(tool.outputSchema).toBeDefined();
       }
@@ -897,6 +904,7 @@ describe("DynamicCausorynContext + attachMcpRootsWorkspaceBinder — dinamik MCP
       const dynamicContext = createDynamicCausorynContext(trackedInitial);
       const hookRef: { current?: (toolName: string) => Promise<void> } = {};
       const server = createCausorynMcpServer(dynamicContext, {
+        toolProfile: "full",
         outputSchemaProfile: "omit",
         beforeToolCall: async (toolName) => {
           await hookRef.current?.(toolName);
@@ -1022,6 +1030,7 @@ describe("DynamicCausorynContext + attachMcpRootsWorkspaceBinder — dinamik MCP
       try {
         const hookRef: { current?: (toolName: string) => Promise<void> } = {};
         const server = createCausorynMcpServer(dynamicContext, {
+          toolProfile: "full",
           outputSchemaProfile: "omit",
           beforeToolCall: async (toolName) => {
             await hookRef.current?.(toolName);
@@ -1090,6 +1099,7 @@ describe("DynamicCausorynContext + attachMcpRootsWorkspaceBinder — dinamik MCP
       );
       const hookRef: { current?: (toolName: string) => Promise<void> } = {};
       const server = createCausorynMcpServer(dynamicContext, {
+        toolProfile: "full",
         outputSchemaProfile: "omit",
         beforeToolCall: async (toolName) => {
           await hookRef.current?.(toolName);
@@ -1167,6 +1177,7 @@ describe("DynamicCausorynContext + attachMcpRootsWorkspaceBinder — dinamik MCP
       try {
         const hookRef: { current?: (toolName: string) => Promise<void> } = {};
         const server = createCausorynMcpServer(dynamicContext, {
+          toolProfile: "full",
           outputSchemaProfile: "omit",
           beforeToolCall: async (toolName) => {
             await hookRef.current?.(toolName);
@@ -1373,7 +1384,7 @@ describe("stdio.ts — gerçek alt-süreç CLI modları ve geriye dönük uyumlu
             id: 3,
             method: "tools/call",
             params: {
-              name: "causoryn_workspace_summary",
+              name: "causoryn_map_system",
               arguments: { workspaceId: "alpha-service" },
             },
           },
@@ -1444,11 +1455,11 @@ describe("stdio.ts — gerçek alt-süreç CLI modları ve geriye dönük uyumlu
       }
       expect(initMsg["id"]).toBe(1);
 
-      // CLI aktivasyonunda varsayılan outputSchemaProfile === "omit" olmalı.
+      // CLI aktivasyonunda varsayılan toolProfile === "core" (11 araç) ve outputSchemaProfile === "omit" olmalı.
       const tools = (
         listMsg["result"] as { tools?: Array<{ name?: string; outputSchema?: unknown }> }
       ).tools ?? [];
-      expect(tools.length).toBe(29);
+      expect(tools.length).toBe(11);
       expect(tools.every((t) => t.outputSchema === undefined)).toBe(true);
 
       // Workspace otomatik bağlandı ve indeks hazır!
@@ -1529,7 +1540,7 @@ describe("stdio.ts — gerçek alt-süreç CLI modları ve geriye dönük uyumlu
             jsonrpc: "2.0",
             id: 3,
             method: "tools/call",
-            params: { name: "causoryn_workspace_summary", arguments: {} },
+            params: { name: "causoryn_map_system", arguments: {} },
           },
         ];
         for (const frame of frames) {
@@ -1588,8 +1599,8 @@ describe("stdio.ts — gerçek alt-süreç CLI modları ve geriye dönük uyumlu
       const tools = (
         listMsg["result"] as { tools?: Array<{ name?: string; outputSchema?: unknown }> }
       ).tools ?? [];
-      expect(tools.length).toBe(29);
-      expect(tools.every((t) => t.outputSchema !== undefined)).toBe(true);
+      expect(tools.length).toBe(11);
+      expect(tools.every((t) => t.outputSchema === undefined)).toBe(true);
 
       const summaryEnv = (
         summaryMsg["result"] as {
@@ -1675,7 +1686,7 @@ describe("stdio.ts — gerçek alt-süreç CLI modları ve geriye dönük uyumlu
             id: 11,
             method: "tools/call",
             params: {
-              name: "causoryn_workspace_summary",
+              name: "causoryn_map_system",
               arguments: { workspaceId: "alpha-service" },
             },
           },

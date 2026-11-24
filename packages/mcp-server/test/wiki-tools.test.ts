@@ -83,7 +83,10 @@ interface ClientPair {
 
 /** Context'i SDK InMemory transport üzerinden bir Client'a bağlar. */
 async function connectClient(context: CausorynContext): Promise<ClientPair> {
-  const server = createCausorynMcpServer(context);
+  const server = createCausorynMcpServer(context, {
+    toolProfile: "full",
+    outputSchemaProfile: "full",
+  });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   const client = new Client({ name: "vitest-wiki-client", version: "0.0.0" });
   await server.connect(serverTransport);
@@ -208,7 +211,7 @@ describe("Wiki araç katalogu", { timeout: 60_000 }, () => {
         expect(tool?.outputSchema).toBeDefined();
         expect((tool?.description ?? "").length).toBeGreaterThan(0);
       }
-      expect(names.length).toBe(29);
+      expect(names.length).toBe(32);
     } finally {
       await pair.close();
     }
@@ -400,7 +403,10 @@ describe("causoryn_wiki_build", { timeout: 60_000 }, () => {
         realStore.searchWiki(...args),
     } as unknown as SqliteWikiStore;
     const sabotaged = { ...context, wikiStore: sabotage } as unknown as CausorynContext;
-    const server = createCausorynMcpServer(sabotaged);
+    const server = createCausorynMcpServer(sabotaged, {
+      toolProfile: "full",
+      outputSchemaProfile: "full",
+    });
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
     const client = new Client({ name: "publish-sabotage", version: "0.0.0" });
     await server.connect(serverTransport);

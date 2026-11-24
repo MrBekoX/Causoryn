@@ -47,6 +47,8 @@ export {
   SourceSpanSchema,
 } from "./graph-schema.js";
 export {
+  computeStreamingContentHash,
+  computeStreamingSnapshotId,
   createSnapshot,
   snapshotCanonicalJson,
 } from "./snapshot.js";

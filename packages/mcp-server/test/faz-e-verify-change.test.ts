@@ -71,7 +71,10 @@ interface ClientPair {
 }
 
 async function connectClient(context: CausorynContext): Promise<ClientPair> {
-  const server = createCausorynMcpServer(context);
+  const server = createCausorynMcpServer(context, {
+    toolProfile: "full",
+    outputSchemaProfile: "full",
+  });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   const client = new Client({ name: "vitest-faz-e-client", version: "0.0.0" });
   await server.connect(serverTransport);
@@ -243,9 +246,9 @@ describe("causoryn_verify_change araç kaydı (29. araç)", () => {
       const verifyTool = tools.find((t) => t.name === "causoryn_verify_change");
       expect(verifyTool?.inputSchema).toBeDefined();
       expect(verifyTool?.outputSchema).toBeDefined();
-      // README sözleşmesiyle aynı satır: "kod yazmaz ... DOĞRULAR".
-      expect(verifyTool?.description).toMatch(/kod yazmaz/);
-      expect(verifyTool?.description).toMatch(/doğrular/i);
+      // English-first description contract: read-only verification without running tests.
+      expect(verifyTool?.description).toMatch(/read-only/i);
+      expect(verifyTool?.description).toMatch(/verify/i);
     } finally {
       await pair.close();
     }

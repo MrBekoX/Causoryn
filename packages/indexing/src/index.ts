@@ -72,20 +72,36 @@ export type {
   BuildLeaseInfo,
   BuildLeaseStore,
   CsharpIndexOptions,
+  FileFactRecord,
+  FileFactStore,
   GoIndexOptions,
   IndexDiagnostic,
   IndexLimits,
   IndexPeerStatus,
+  IndexProgressCallback,
+  IndexProgressEvent,
+  IndexProgressPhase,
+  IndexRunOptions,
   IndexRunResult,
   IndexServiceOptions,
+  IndexWorkerServiceConfig,
   PythonIndexOptions,
   RustIndexOptions,
 } from "./index-service.js";
-export { IndexJobManager } from "./job-manager.js";
+export { runIndexWorkerTask, startIndexWorker } from "./index-worker-core.js";
+export type {
+  CloseableGraphRepository,
+  IndexWorkerMessage,
+  IndexWorkerResultSummary,
+  IndexWorkerTaskInput,
+  SqliteRepositoryConstructor,
+} from "./index-worker-core.js";
+export { IndexJobManager, validateWorkerEntryPath } from "./job-manager.js";
 export type {
   IndexJobError,
   IndexJobManagerOptions,
   IndexJobMode,
+  IndexJobProgress,
   IndexJobRecord,
   IndexJobStatus,
 } from "./job-manager.js";

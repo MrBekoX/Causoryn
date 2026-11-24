@@ -85,7 +85,10 @@ interface ClientPair {
 }
 
 async function connectClient(context: CausorynContext): Promise<ClientPair> {
-  const server = createCausorynMcpServer(context);
+  const server = createCausorynMcpServer(context, {
+    toolProfile: "full",
+    outputSchemaProfile: "full",
+  });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   const client = new Client({ name: "vitest-faz-d-client", version: "0.0.0" });
   await server.connect(serverTransport);
@@ -327,7 +330,7 @@ describe("Faz D katalog büyümesi", { timeout: 60_000 }, () => {
     const pair = await connectClient(makeContext());
     try {
       const { tools } = await pair.client.listTools();
-      expect(tools).toHaveLength(29);
+      expect(tools).toHaveLength(32);
       for (const name of [
         "causoryn_check_contracts",
         "causoryn_detect_contract_drift",

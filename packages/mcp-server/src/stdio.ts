@@ -1,6 +1,7 @@
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 
 import { createCausorynContext, type CausorynContext } from "./context.js";
+import { parseMcpCliArgs, resolveEffectiveToolProfile } from "./runtime-cli.js";
 import { createCausorynMcpServer } from "./server.js";
 import { SERVER_NAME, SERVER_VERSION } from "./version.js";
 
@@ -46,7 +47,8 @@ function main(): void {
     process.exit(2); // never döner; context akış aşağısında tanımlıdır
   }
 
-  const server = createCausorynMcpServer(context);
+  const toolProfile = resolveEffectiveToolProfile(parseMcpCliArgs([]), process.env);
+  const server = createCausorynMcpServer(context, { toolProfile });
   server
     .connect(new StdioServerTransport())
     .then(() => {

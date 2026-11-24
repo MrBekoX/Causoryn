@@ -496,6 +496,17 @@ public static class WorkerAnalyzer
             });
         }
 
+        // 4.5) Faz 1.5: Class Hierarchy Analysis (CHA — Dean et al. ECOOP 1995):
+        //      INHERITS / IMPLEMENTS kenarları (tüm tipler registry'ye girdikten sonra).
+        foreach (var entry in entries)
+        {
+            RunPhaseIsolated(entry, () =>
+            {
+                var model = compilation.GetSemanticModel(entry.Tree);
+                ExtractTypeHierarchies(entry, entries, model, assembler, registry);
+            });
+        }
+
         // 5) Faz 2: çağrılar + minimal API rotaları (semantic model).
         foreach (var entry in entries)
         {
@@ -906,6 +917,212 @@ public static class WorkerAnalyzer
         var from = assembler.EnsureNode(fromNode.Kind, fromNode.QualifiedName, fromNode.RelativePath, null);
         assembler.AddEdge("CONTAINS", from, toRecord, "verified",
             SpanEvidence(entry, declaration, "ast-span", rationale), null);
+    }
+
+    /* ------------------------------------------------------------------ */
+    /* Faz 1.5: Class Hierarchy Analysis (CHA — INHERITS / IMPLEMENTS)     */
+    /* ------------------------------------------------------------------ */
+
+    private static void ExtractTypeHierarchies(
+        SourceEntry entry,
+        IReadOnlyList<SourceEntry> entries,
+        SemanticModel model,
+        GraphAssembler assembler,
+        Dictionary<ISymbol, NodeRecord> registry)
+    {
+        if (entry.Tree.GetRoot() is not CompilationUnitSyntax unit)
+        {
+            return;
+        }
+
+        foreach (var member in unit.Members)
+        {
+            WalkMemberHierarchies(entry, entries, member, model, assembler, registry, depth: 0);
+        }
+    }
+
+    private static void WalkMemberHierarchies(
+        SourceEntry entry,
+        IReadOnlyList<SourceEntry> entries,
+        SyntaxNode member,
+        SemanticModel model,
+        GraphAssembler assembler,
+        Dictionary<ISymbol, NodeRecord> registry,
+        int depth)
+    {
+        if (depth > MaxTraversalDepth)
+        {
+            return;
+        }
+
+        switch (member)
+        {
+            case NamespaceDeclarationSyntax ns:
+                foreach (var child in ns.Members)
+                {
+                    WalkMemberHierarchies(entry, entries, child, model, assembler, registry, depth + 1);
+                }
+
+                break;
+
+            case FileScopedNamespaceDeclarationSyntax fsns:
+                foreach (var child in fsns.Members)
+                {
+                    WalkMemberHierarchies(entry, entries, child, model, assembler, registry, depth + 1);
+                }
+
+                break;
+
+            case TypeDeclarationSyntax typeDecl:
+                EmitTypeHierarchyEdges(entry, entries, typeDecl, model, assembler, registry);
+                foreach (var child in typeDecl.Members)
+                {
+                    if (child is TypeDeclarationSyntax)
+                    {
+                        WalkMemberHierarchies(entry, entries, child, model, assembler, registry, depth + 1);
+                    }
+                }
+
+                break;
+        }
+    }
+
+    private static void EmitTypeHierarchyEdges(
+        SourceEntry entry,
+        IReadOnlyList<SourceEntry> entries,
+        TypeDeclarationSyntax typeDecl,
+        SemanticModel model,
+        GraphAssembler assembler,
+        Dictionary<ISymbol, NodeRecord> registry)
+    {
+        if (typeDecl.BaseList is null || typeDecl.BaseList.Types.Count == 0)
+        {
+            return;
+        }
+
+        var declaredSymbol = model.GetDeclaredSymbol(typeDecl) as INamedTypeSymbol;
+        var ownerRecord = declaredSymbol is null ? null : RegistryLookupPlain(registry, declaredSymbol);
+        if (ownerRecord is null)
+        {
+            return;
+        }
+
+        var isInterfaceDecl = typeDecl is InterfaceDeclarationSyntax || declaredSymbol?.TypeKind == TypeKind.Interface;
+        var isStructDecl = typeDecl is StructDeclarationSyntax ||
+            (typeDecl is RecordDeclarationSyntax rec && rec.ClassOrStructKeyword.IsKind(SyntaxKind.StructKeyword));
+
+        for (var i = 0; i < typeDecl.BaseList.Types.Count; i += 1)
+        {
+            var baseTypeSyntax = typeDecl.BaseList.Types[i];
+            var typeInfo = model.GetTypeInfo(baseTypeSyntax.Type);
+            var baseSymbol = (typeInfo.Type ?? typeInfo.ConvertedType) as INamedTypeSymbol;
+            var isResolved = baseSymbol is not null && baseSymbol.TypeKind != TypeKind.Error;
+
+            if (isResolved)
+            {
+                // Skip trivial runtime base types so graphs aren't polluted by every class/struct/enum.
+                if (baseSymbol!.SpecialType is SpecialType.System_Object or SpecialType.System_ValueType or SpecialType.System_Enum)
+                {
+                    continue;
+                }
+
+                var edgeKind = isInterfaceDecl
+                    ? "INHERITS"
+                    : baseSymbol.TypeKind == TypeKind.Interface
+                        ? "IMPLEMENTS"
+                        : "INHERITS";
+
+                var originalTarget = baseSymbol.OriginalDefinition;
+                var targetRecord = RegistryLookupPlain(registry, baseSymbol);
+                if (targetRecord is null && originalTarget.DeclaringSyntaxReferences.Length > 0)
+                {
+                    var declRelPath = RelativePathOfDeclaration(entries, originalTarget);
+                    if (declRelPath is not null)
+                    {
+                        targetRecord = assembler.EnsureNode(
+                            CatalogKindOf(originalTarget),
+                            TypeQualifiedName(originalTarget),
+                            declRelPath,
+                            null);
+                        registry[originalTarget] = targetRecord;
+                    }
+                }
+
+                if (targetRecord is not null)
+                {
+                    if (targetRecord.Key == ownerRecord.Key)
+                    {
+                        continue;
+                    }
+
+                    assembler.AddEdge(edgeKind, ownerRecord, targetRecord, "verified",
+                        SpanEvidence(entry, baseTypeSyntax, "semantic-symbol",
+                            $"{edgeKind}: {ownerRecord.Node.QualifiedName} bildirimi Roslyn semantic model ile {targetRecord.Node.QualifiedName} tipine çözümlendi (verified)."),
+                        null);
+                    continue;
+                }
+
+                var externalName = TypeQualifiedName(originalTarget);
+                if (string.IsNullOrEmpty(externalName))
+                {
+                    continue;
+                }
+
+                var externalRecord = assembler.EnsureExternal(externalName);
+                assembler.AddEdge(edgeKind, ownerRecord, externalRecord, "verified",
+                    SpanEvidence(entry, baseTypeSyntax, "semantic-symbol",
+                        $"{edgeKind}: {ownerRecord.Node.QualifiedName} bildirimi analiz seti dışındaki {externalName} tipine çözümlendi; dış kaynak açık UnknownExternal node olarak temsil edildi."),
+                    null);
+                continue;
+            }
+
+            var rawName = baseTypeSyntax.Type.ToString().Trim();
+            if (rawName.Length == 0)
+            {
+                continue;
+            }
+
+            var unresolvedKind = isInterfaceDecl
+                ? "INHERITS"
+                : isStructDecl || i > 0
+                    ? "IMPLEMENTS"
+                    : LooksLikeCSharpInterfaceName(rawName) && baseTypeSyntax is not PrimaryConstructorBaseTypeSyntax
+                        ? "IMPLEMENTS"
+                        : "INHERITS";
+
+            var unresolvedTarget = assembler.EnsureExternal(rawName);
+            assembler.AddEdge(unresolvedKind, ownerRecord, unresolvedTarget, "unresolved",
+                SpanEvidence(entry, baseTypeSyntax, "ast-span",
+                    $"{unresolvedKind}: {ownerRecord.Node.QualifiedName} içindeki '{rawName}' kalıtım hedefi çözümlenemedi; açık UnknownExternal node üzerinde unresolved işaretlendi."),
+                null);
+            assembler.AddWarning(
+                $"{unresolvedKind} çözümlenemedi: {entry.RelativePath} '{ownerRecord.Node.QualifiedName}' -> '{rawName}' (unresolved, UnknownExternal node üretildi)");
+        }
+    }
+
+    private static bool LooksLikeCSharpInterfaceName(string typeText)
+    {
+        var genericIdx = typeText.IndexOf('<');
+        var withoutGeneric = genericIdx >= 0 ? typeText.Substring(0, genericIdx) : typeText;
+        var dotIdx = withoutGeneric.LastIndexOf('.');
+        var simpleName = dotIdx >= 0 ? withoutGeneric.Substring(dotIdx + 1) : withoutGeneric;
+        return simpleName.Length >= 2 && simpleName[0] == 'I' && char.IsUpper(simpleName[1]);
+    }
+
+    private static string? RelativePathOfDeclaration(IReadOnlyList<SourceEntry> entries, ISymbol symbol)
+    {
+        foreach (var reference in symbol.DeclaringSyntaxReferences)
+        {
+            foreach (var entry in entries)
+            {
+                if (entry.Tree.Equals(reference.SyntaxTree))
+                {
+                    return entry.RelativePath;
+                }
+            }
+        }
+
+        return null;
     }
 
     /* ------------------------------------------------------------------ */

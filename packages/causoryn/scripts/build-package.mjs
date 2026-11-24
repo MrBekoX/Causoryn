@@ -576,11 +576,13 @@ export function stageVerifiedBundleArtifacts(options) {
 
   const bundleSrc = path.join(resolvedMcpDist, "mcp-server.mjs");
   const bundleLegalSrc = path.join(resolvedMcpDist, "mcp-server.mjs.LEGAL.txt");
+  const workerBundleSrc = path.join(resolvedMcpDist, "index-worker.mjs");
   const bundleManifestSrc = path.join(resolvedMcpDist, "bundle-manifest.json");
   const vendorNodeModulesSrc = path.join(resolvedMcpDist, "node_modules");
 
   const destBundle = path.join(resolvedPkgDist, "mcp-server.mjs");
   const destLegal = path.join(resolvedPkgDist, "mcp-server.mjs.LEGAL.txt");
+  const destWorkerBundle = path.join(resolvedPkgDist, "index-worker.mjs");
   const destManifest = path.join(resolvedPkgDist, "bundle-manifest.json");
   const destVendorNodeModules = path.join(resolvedPkgDist, "node_modules");
   const pkgDistBoundary = resolvedPkgDist.endsWith(path.sep)
@@ -605,6 +607,11 @@ export function stageVerifiedBundleArtifacts(options) {
         copyFileSync(bundleLegalSrc, destLegal);
       } else {
         rmSync(destLegal, { force: true });
+      }
+      if (existsSync(workerBundleSrc)) {
+        copyFileSync(workerBundleSrc, destWorkerBundle);
+      } else {
+        rmSync(destWorkerBundle, { force: true });
       }
       copyFileSync(bundleManifestSrc, destManifest);
       rmSync(destVendorNodeModules, { recursive: true, force: true });
@@ -662,6 +669,7 @@ export function stageVerifiedBundleArtifacts(options) {
 
   rmSync(destBundle, { force: true });
   rmSync(destLegal, { force: true });
+  rmSync(destWorkerBundle, { force: true });
   rmSync(destManifest, { force: true });
   rmSync(destVendorNodeModules, { recursive: true, force: true });
   throw new Error(

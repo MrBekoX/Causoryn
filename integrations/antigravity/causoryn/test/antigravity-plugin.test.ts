@@ -7,6 +7,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   CausorynConfigError,
+  CORE_TOOL_NAMES,
   parseCausorynServerConfig,
   SCHEMA_VERSION,
   SERVER_NAME,
@@ -533,13 +534,13 @@ async function runMcpConfigHandshakeOnce(
         jsonrpc: "2.0",
         id: 3,
         method: "tools/call",
-        params: { name: "causoryn_get_capabilities", arguments: {} },
+        params: { name: "causoryn_status", arguments: {} },
       },
       {
         jsonrpc: "2.0",
         id: 4,
         method: "tools/call",
-        params: { name: "causoryn_workspace_summary", arguments: {} },
+        params: { name: "causoryn_map_system", arguments: {} },
       },
     ];
 
@@ -770,7 +771,7 @@ describe("sahnelenmiş bundle bağlantısı + gerçek stdio el sıkışması (cw
   });
 
   it.skipIf(STAGED_BUNDLE_SKIP_REASON)(
-    "mcp_config.json command+args+env ile gerçek spawn: initialize (causoryn@0.2.0), tools/list (29 araç), get_capabilities (ok), workspace_summary (WORKSPACE_NOT_AUTHORIZED), saf JSON-RPC stdout",
+    "mcp_config.json command+args+env ile gerçek spawn: initialize, tools/list (11 core araç), causoryn_status (ok), causoryn_map_system (WORKSPACE_NOT_AUTHORIZED), saf JSON-RPC stdout",
     async () => {
       const localManifest = validateMcpManifest(
         parseJsonStrict(readMcpConfigJsonRaw(), "mcp_config.json"),
@@ -802,24 +803,30 @@ describe("sahnelenmiş bundle bağlantısı + gerçek stdio el sıkışması (cw
       };
       const listedNames = listResult.tools?.map((t) => t.name).sort();
       expect(TOOL_NAMES.length).toBe(29);
-      expect(listedNames).toEqual([...TOOL_NAMES].sort());
+      expect(CORE_TOOL_NAMES.length).toBe(11);
+      expect(listedNames).toEqual([...CORE_TOOL_NAMES].sort());
 
-      const capResult = session.responseOf(3).result as {
-        structuredContent?: { status?: string; schemaVersion?: string };
+      const statusResult = session.responseOf(3).result as {
+        structuredContent?: {
+          status?: string;
+          schemaVersion?: string;
+          data?: { authorized?: boolean };
+        };
         isError?: boolean;
       };
-      expect(capResult.isError).toBeFalsy();
-      expect(capResult.structuredContent?.schemaVersion).toBe(SCHEMA_VERSION);
-      expect(capResult.structuredContent?.status).toBe("ok");
+      expect(statusResult.isError).toBeFalsy();
+      expect(statusResult.structuredContent?.schemaVersion).toBe(SCHEMA_VERSION);
+      expect(statusResult.structuredContent?.status).toBe("ok");
+      expect(statusResult.structuredContent?.data?.authorized).toBe(false);
 
-      const summaryResult = session.responseOf(4).result as {
+      const mapResult = session.responseOf(4).result as {
         structuredContent?: {
           status?: string;
           error?: { code?: string };
         };
       };
-      expect(summaryResult.structuredContent?.status).toBe("error");
-      expect(summaryResult.structuredContent?.error?.code).toBe("WORKSPACE_NOT_AUTHORIZED");
+      expect(mapResult.structuredContent?.status).toBe("error");
+      expect(mapResult.structuredContent?.error?.code).toBe("WORKSPACE_NOT_AUTHORIZED");
 
       expect(session.stderrLines.some((line) => line.includes(READY_MARKER))).toBe(true);
       expect(session.exitCode).toBe(0);

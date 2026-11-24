@@ -882,3 +882,113 @@ describe("generateAgentContext — CodeQL #17 splitIdentifierTokens paritesi ve 
     expect(elapsedMs).toBeLessThan(250);
   });
 });
+
+describe("generateAgentContext — Wave 2 LocAgent localization & proximity cleanup", () => {
+  it("tokenizes full File path + basename instead of reducing '.ts' paths to extension 'ts'", () => {
+    const snapshot = createSnapshot({
+      workspaceId: WORKSPACE_ID,
+      revision: { id: "rev-file-tok", sequence: 1 },
+      configHash: "cfg",
+      analyzerFingerprint: "fp",
+      state: "ready",
+      createdAt: "2026-11-24T00:00:00Z",
+      nodes: [
+        {
+          kind: "File",
+          qualifiedName: "packages/mcp-server/src/server.ts",
+          relativePath: "packages/mcp-server/src/server.ts",
+        },
+        {
+          kind: "File",
+          qualifiedName: "packages/mcp-server/src/envelope.ts",
+          relativePath: "packages/mcp-server/src/envelope.ts",
+        },
+        {
+          kind: "File",
+          qualifiedName: "packages/core/src/a_alpha.ts",
+          relativePath: "packages/core/src/a_alpha.ts",
+        },
+      ],
+      edges: [],
+    });
+
+    const envRes = generateAgentContext(snapshot, { task: "Where is the response envelope built?" });
+    expect(envRes.contextItems[0]?.qualifiedName).toBe("packages/mcp-server/src/envelope.ts");
+
+    const srvRes = generateAgentContext(snapshot, { task: "MCP server entrypoint" });
+    expect(srvRes.contextItems[0]?.qualifiedName).toBe("packages/mcp-server/src/server.ts");
+  });
+
+  it("excludes Workspace root and upward reverse CONTAINS from proximity BFS and breaks ties by structural degree (not alphabetically)", () => {
+    const snapshot = createSnapshot({
+      workspaceId: WORKSPACE_ID,
+      revision: { id: "rev-prox-clean", sequence: 1 },
+      configHash: "cfg",
+      analyzerFingerprint: "fp",
+      state: "ready",
+      createdAt: "2026-11-24T00:00:00Z",
+      nodes: [
+        { kind: "Workspace", qualifiedName: WORKSPACE_ID },
+        {
+          kind: "File",
+          qualifiedName: "packages/mcp-server/src/a_leaf.ts",
+          relativePath: "packages/mcp-server/src/a_leaf.ts",
+        },
+        {
+          kind: "File",
+          qualifiedName: "packages/mcp-server/src/server.ts",
+          relativePath: "packages/mcp-server/src/server.ts",
+        },
+        {
+          kind: "File",
+          qualifiedName: "packages/mcp-server/src/cli.ts",
+          relativePath: "packages/mcp-server/src/cli.ts",
+        },
+        {
+          kind: "File",
+          qualifiedName: "packages/unrelated/src/a_unrelated.ts",
+          relativePath: "packages/unrelated/src/a_unrelated.ts",
+        },
+      ],
+      edges: [
+        {
+          kind: "CONTAINS",
+          from: { kind: "Workspace", qualifiedName: WORKSPACE_ID },
+          to: { kind: "File", qualifiedName: "packages/mcp-server/src/a_leaf.ts", relativePath: "packages/mcp-server/src/a_leaf.ts" },
+          resolution: "verified",
+          evidence: [{ kind: "inv", analyzerId: "idx", analyzerVersion: "0.3.0", rationale: "ws" }],
+        },
+        {
+          kind: "CONTAINS",
+          from: { kind: "Workspace", qualifiedName: WORKSPACE_ID },
+          to: { kind: "File", qualifiedName: "packages/mcp-server/src/server.ts", relativePath: "packages/mcp-server/src/server.ts" },
+          resolution: "verified",
+          evidence: [{ kind: "inv", analyzerId: "idx", analyzerVersion: "0.3.0", rationale: "ws" }],
+        },
+        {
+          kind: "CONTAINS",
+          from: { kind: "Workspace", qualifiedName: WORKSPACE_ID },
+          to: { kind: "File", qualifiedName: "packages/unrelated/src/a_unrelated.ts", relativePath: "packages/unrelated/src/a_unrelated.ts" },
+          resolution: "verified",
+          evidence: [{ kind: "inv", analyzerId: "idx", analyzerVersion: "0.3.0", rationale: "ws" }],
+        },
+        {
+          kind: "IMPORTS",
+          from: { kind: "File", qualifiedName: "packages/mcp-server/src/cli.ts", relativePath: "packages/mcp-server/src/cli.ts" },
+          to: { kind: "File", qualifiedName: "packages/mcp-server/src/server.ts", relativePath: "packages/mcp-server/src/server.ts" },
+          resolution: "verified",
+          evidence: [{ kind: "imp", analyzerId: "ts", analyzerVersion: "0.3.0", rationale: "cli imports server" }],
+        },
+      ],
+    });
+
+    const result = generateAgentContext(snapshot, { task: "mcp" });
+    const names = result.contextItems.map((i) => i.qualifiedName);
+    expect(names).not.toContain(WORKSPACE_ID);
+    expect(names).not.toContain("packages/unrelated/src/a_unrelated.ts");
+    // server.ts has higher non-CONTAINS structural importance than a_leaf.ts
+    expect(names.indexOf("packages/mcp-server/src/server.ts")).toBeLessThan(
+      names.indexOf("packages/mcp-server/src/a_leaf.ts"),
+    );
+  });
+});

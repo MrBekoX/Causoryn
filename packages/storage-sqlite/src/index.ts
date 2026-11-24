@@ -25,8 +25,12 @@ export type {
   AcquireBuildLeaseInput,
   AcquireBuildLeaseResult,
   BuildLeaseRecord,
+  FileFactRecord,
+  PruneSnapshotsOptions,
+  PruneSnapshotsResult,
   RecoverOrphanBuildsOptions,
   RecoverOrphanBuildsResult,
+  SnapshotMetaSummary,
 } from "./sqlite-repository.js";
 export { applyWikiSchema } from "./wiki-schema.js";
 export {

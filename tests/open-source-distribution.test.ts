@@ -17,6 +17,7 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import {
   CAUSORYN_TOOL_ERROR_CODES,
+  CORE_TOOL_NAMES,
   SERVER_NAME,
   SERVER_VERSION,
   TOOL_NAMES,
@@ -358,7 +359,7 @@ async function runStdioSequence(
 
     for (const req of requests) {
       child.stdin?.write(`${JSON.stringify(req)}\n`);
-      if (req["method"] === "initialize" && typeof req["id"] === "number") {
+      if (typeof req["id"] === "number") {
         await waitForId(req["id"]);
       }
     }
@@ -399,13 +400,13 @@ async function runStdioHandshake(
       jsonrpc: "2.0",
       id: 3,
       method: "tools/call",
-      params: { name: "causoryn_get_capabilities", arguments: {} },
+      params: { name: "causoryn_status", arguments: {} },
     },
   ]);
 }
 
 describe("1. Canonical skills/ (YAML frontmatter + ADR-010 tool honesty)", () => {
-  const knownTools = new Set<string>(TOOL_NAMES);
+  const knownTools = new Set<string>([...TOOL_NAMES, ...CORE_TOOL_NAMES]);
 
   it("ships all 5 canonical skills with valid frontmatter and strictly real published tools", () => {
     for (const skillName of EXPECTED_SKILLS) {
@@ -1007,7 +1008,8 @@ describe("4. build-package.mjs + isolated npm pack end-to-end verification", () 
       const listMsg = launcherHandshake.responses.get(2)?.result as {
         tools?: Array<{ name?: string }>;
       };
-      expect(listMsg.tools?.map((t) => t.name)).toEqual([...TOOL_NAMES]);
+      expect(listMsg.tools?.map((t) => t.name)).toEqual([...CORE_TOOL_NAMES]);
+      expect(JSON.stringify(listMsg).length).toBeLessThanOrEqual(15_000);
 
       // 4. Unpacked causoryn.mjs mcp over pure JSON-RPC stdio
       const cliHandshake = await runStdioHandshake(
@@ -1123,16 +1125,16 @@ describe("4. build-package.mjs + isolated npm pack end-to-end verification", () 
             jsonrpc: "2.0",
             id: 3,
             method: "tools/call",
-            params: { name: "causoryn_workspace_summary", arguments: {} },
+            params: {
+              name: "causoryn_find_symbols",
+              arguments: { query: "aggregateOrderBuckets" },
+            },
           },
           {
             jsonrpc: "2.0",
             id: 4,
             method: "tools/call",
-            params: {
-              name: "causoryn_find_symbols",
-              arguments: { query: "aggregateOrderBuckets" },
-            },
+            params: { name: "causoryn_status", arguments: {} },
           },
         ],
       );
@@ -1140,36 +1142,19 @@ describe("4. build-package.mjs + isolated npm pack end-to-end verification", () 
       // Pure JSON-RPC stdout discipline (4 responses, zero log noise)
       expect(session.stdoutLines).toHaveLength(4);
 
-      // tools/list: 29 tools AND outputSchema omitted on wire
+      // tools/list: 11 lean core tools, <= 15,000 chars, AND outputSchema omitted on wire
       const listResult = session.responses.get(2)?.result as {
         tools?: Array<Record<string, unknown>>;
       };
       expect(listResult.tools).toBeDefined();
-      expect(listResult.tools?.map((t) => t["name"])).toEqual([...TOOL_NAMES]);
+      expect(listResult.tools?.map((t) => t["name"])).toEqual([...CORE_TOOL_NAMES]);
+      expect(JSON.stringify(listResult).length).toBeLessThanOrEqual(15_000);
       for (const toolDef of listResult.tools ?? []) {
         expect("outputSchema" in toolDef).toBe(false);
       }
 
-      // causoryn_workspace_summary: status === "ok" and snapshotState === "ready" (zero TS2318 errors!)
-      const summaryCallResult = session.responses.get(3)?.result as {
-        structuredContent?: {
-          status?: string;
-          data?: {
-            snapshotState?: string;
-            fileCount?: number;
-            languages?: Array<{ language: string; files: number }>;
-          };
-        };
-      };
-      expect(summaryCallResult.structuredContent?.status).toBe("ok");
-      expect(summaryCallResult.structuredContent?.data?.snapshotState).toBe("ready");
-      expect(summaryCallResult.structuredContent?.data?.languages).toContainEqual({
-        language: "typescript",
-        files: 1,
-      });
-
-      // causoryn_find_symbols: locates aggregateOrderBuckets in src/order-service.ts
-      const findCallResult = session.responses.get(4)?.result as {
+      // causoryn_find_symbols (id 3): triggers wait for initial index and locates aggregateOrderBuckets in src/order-service.ts
+      const findCallResult = session.responses.get(3)?.result as {
         structuredContent?: {
           status?: string;
           data?: {
@@ -1193,6 +1178,26 @@ describe("4. build-package.mjs + isolated npm pack end-to-end verification", () 
             hit.relativePath === "src/order-service.ts",
         ),
       ).toBe(true);
+
+      // causoryn_status (id 4): status === "ok" and snapshotState === "ready" (zero TS2318 errors!)
+      const summaryCallResult = session.responses.get(4)?.result as {
+        structuredContent?: {
+          status?: string;
+          data?: {
+            summary?: {
+              snapshotState?: string;
+              fileCount?: number;
+              languages?: Array<{ language: string; files: number }>;
+            };
+          };
+        };
+      };
+      expect(summaryCallResult.structuredContent?.status).toBe("ok");
+      expect(summaryCallResult.structuredContent?.data?.summary?.snapshotState).toBe("ready");
+      expect(summaryCallResult.structuredContent?.data?.summary?.languages).toContainEqual({
+        language: "typescript",
+        files: 1,
+      });
 
       // (e) Assert 100% read-only workspace + external shared graph.sqlite & exports/
       expect(snapshotDirectoryState(sampleProjectDir)).toEqual(beforeProjectSnapshot);

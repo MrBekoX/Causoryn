@@ -40,7 +40,10 @@ interface ClientSession {
 }
 
 async function connectMcpClient(context: CausorynContext): Promise<ClientSession> {
-  const server = createCausorynMcpServer(context);
+  const server = createCausorynMcpServer(context, {
+    toolProfile: "full",
+    outputSchemaProfile: "full",
+  });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   const client = new Client({ name: "pre-1-0-e2e-verifier", version: "1.0.0" });
   await server.connect(serverTransport);

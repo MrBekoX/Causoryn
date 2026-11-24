@@ -36,11 +36,14 @@ import {
 } from "./config.js";
 import {
   createCausorynContext,
+  type ActiveIndexJobInfo,
   type CausorynContext,
   type ContextOverrides,
+  type WaitForInitialIndexOptions,
 } from "./context.js";
 import type { PreflightManifestStore } from "./preflight-store.js";
-import type { OutputSchemaProfile } from "./server.js";
+import type { BeforeToolCallContext, OutputSchemaProfile } from "./server.js";
+import { TOOL_PROFILES, type ToolProfile } from "./version.js";
 import { discoverWorkspaceIgnoreConfig } from "./workspace-ignore-discovery.js";
 
 /**
@@ -75,6 +78,7 @@ export interface ParsedMcpCliArgs {
   readonly dataDir?: string;
   readonly client?: string;
   readonly outputSchemaProfile?: OutputSchemaProfile;
+  readonly toolProfile?: string;
 }
 
 const KNOWN_FLAGS = new Set([
@@ -83,8 +87,41 @@ const KNOWN_FLAGS = new Set([
   "--auto-data-dir",
   "--data-dir",
   "--client",
+  "--output-schema",
   "--output-schema-profile",
+  "--tool-profile",
 ]);
+
+const TOOL_PROFILE_SET: ReadonlySet<string> = new Set<string>(TOOL_PROFILES);
+
+/**
+ * Parses a single or comma-separated tool profile string (e.g., "core", "full",
+ * "wiki", "history", "wiki,history"). Throws McpCliUsageError on invalid entries.
+ */
+export function parseToolProfile(raw: string): readonly ToolProfile[] {
+  const trimmed = raw.trim();
+  if (trimmed.length === 0) {
+    throw new McpCliUsageError(
+      `--tool-profile cannot be empty; valid profiles: ${TOOL_PROFILES.join(", ")}`,
+    );
+  }
+  const parts = trimmed.split(",");
+  const parsed: ToolProfile[] = [];
+  const seen = new Set<string>();
+  for (const part of parts) {
+    const token = part.trim();
+    if (token.length === 0 || !TOOL_PROFILE_SET.has(token)) {
+      throw new McpCliUsageError(
+        `Invalid tool profile "${token}"; valid profiles: ${TOOL_PROFILES.join(", ")} (or comma-separated combination)`,
+      );
+    }
+    if (!seen.has(token)) {
+      seen.add(token);
+      parsed.push(token as ToolProfile);
+    }
+  }
+  return parsed;
+}
 
 const SAFE_CLIENT_ID_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$/;
 
@@ -118,6 +155,7 @@ export function parseMcpCliArgs(argv: readonly string[]): ParsedMcpCliArgs {
   let dataDir: string | undefined;
   let client: string | undefined;
   let outputSchemaProfile: OutputSchemaProfile | undefined;
+  let toolProfile: string | undefined;
   const roots: string[] = [];
 
   const readRequiredValue = (flag: string, inlineValue: string | undefined): string => {
@@ -181,18 +219,25 @@ export function parseMcpCliArgs(argv: readonly string[]): ParsedMcpCliArgs {
         client = clientValue;
         break;
       }
+      case "--output-schema":
       case "--output-schema-profile": {
-        const profileValue = readRequiredValue("--output-schema-profile", inlineValue);
+        const profileValue = readRequiredValue(flag, inlineValue);
         if (profileValue !== "full" && profileValue !== "omit") {
           throw new McpCliUsageError(
-            `--output-schema-profile yalnızca 'full' veya 'omit' olabilir: ${profileValue}`,
+            `${flag} must be 'full' or 'omit': ${profileValue}`,
           );
         }
         outputSchemaProfile = profileValue;
         break;
       }
+      case "--tool-profile": {
+        const rawProfile = readRequiredValue("--tool-profile", inlineValue);
+        const normalized = parseToolProfile(rawProfile);
+        toolProfile = normalized.join(",");
+        break;
+      }
       default:
-        throw new McpCliUsageError(`Bilinmeyen CLI bayrağı: ${flag}`);
+        throw new McpCliUsageError(`Unknown CLI flag: ${flag}`);
     }
   }
 
@@ -204,12 +249,13 @@ export function parseMcpCliArgs(argv: readonly string[]): ParsedMcpCliArgs {
     ...(dataDir !== undefined ? { dataDir } : {}),
     ...(client !== undefined ? { client } : {}),
     ...(outputSchemaProfile !== undefined ? { outputSchemaProfile } : {}),
+    ...(toolProfile !== undefined ? { toolProfile } : {}),
   };
 }
 
 /**
- * Etkin `outputSchemaProfile` kararını çözer:
- * `--output-schema-profile` > `CAUSORYN_MCP_OUTPUT_SCHEMA_PROFILE` > (`hasCliActivation ? "omit" : "full"`).
+ * Resolves the effective outputSchemaProfile:
+ * `--output-schema` / `--output-schema-profile` > `CAUSORYN_MCP_OUTPUT_SCHEMA_PROFILE` > `"omit"`.
  */
 export function resolveEffectiveOutputSchemaProfile(
   cliArgs: ParsedMcpCliArgs,
@@ -224,10 +270,46 @@ export function resolveEffectiveOutputSchemaProfile(
       return envRaw;
     }
     throw new McpCliUsageError(
-      `CAUSORYN_MCP_OUTPUT_SCHEMA_PROFILE yalnızca 'full' veya 'omit' olabilir: ${envRaw}`,
+      `CAUSORYN_MCP_OUTPUT_SCHEMA_PROFILE must be 'full' or 'omit': ${envRaw}`,
     );
   }
-  return cliArgs.hasCliActivation ? "omit" : "full";
+  return "omit";
+}
+
+/**
+ * Resolves the effective tool profile string:
+ * `--tool-profile` > `CAUSORYN_TOOL_PROFILE` > `"core"`.
+ */
+export function resolveEffectiveToolProfile(
+  cliArgs: ParsedMcpCliArgs,
+  env: NodeJS.ProcessEnv = process.env,
+): string {
+  if (cliArgs.toolProfile !== undefined) {
+    return parseToolProfile(cliArgs.toolProfile).join(",");
+  }
+  const envRaw = env["CAUSORYN_TOOL_PROFILE"]?.trim();
+  if (envRaw !== undefined && envRaw.length > 0) {
+    return parseToolProfile(envRaw).join(",");
+  }
+  return "core";
+}
+
+export const DEFAULT_INDEX_WAIT_MS = 15_000;
+
+/**
+ * Resolves the bounded cold-start indexing wait window from `CAUSORYN_INDEX_WAIT_MS`
+ * (defaults to 15,000 ms; 0 skips waiting and returns indexing status immediately).
+ */
+export function resolveIndexWaitTimeoutMs(env: NodeJS.ProcessEnv = process.env): number {
+  const raw = env["CAUSORYN_INDEX_WAIT_MS"]?.trim();
+  if (raw === undefined || raw.length === 0) {
+    return DEFAULT_INDEX_WAIT_MS;
+  }
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed < 0) {
+    return DEFAULT_INDEX_WAIT_MS;
+  }
+  return Math.floor(parsed);
 }
 
 function stripWin32DevicePrefix(value: string): string {
@@ -1291,8 +1373,13 @@ export function createDynamicCausorynContext(
     startDeferredIndex(): void {
       active.startDeferredIndex?.();
     },
-    waitForInitialIndex(timeoutMs?: number): Promise<void> {
-      return active.waitForInitialIndex ? active.waitForInitialIndex(timeoutMs) : Promise.resolve();
+    waitForInitialIndex(timeoutOrOptions?: number | WaitForInitialIndexOptions): Promise<void> {
+      return active.waitForInitialIndex
+        ? active.waitForInitialIndex(timeoutOrOptions)
+        : Promise.resolve();
+    },
+    getActiveIndexJob(): ActiveIndexJobInfo | null {
+      return active.getActiveIndexJob ? active.getActiveIndexJob() : null;
     },
     close(): void {
       active.close();
@@ -1330,7 +1417,10 @@ export interface AttachMcpRootsBinderOptions {
 }
 
 export interface McpRootsWorkspaceBinder {
-  readonly beforeToolCall: (toolName: string) => Promise<void>;
+  readonly beforeToolCall: (
+    toolName: string,
+    hookContext?: BeforeToolCallContext,
+  ) => Promise<void>;
   readonly syncFromClientRoots: (force?: boolean) => Promise<void>;
 }
 
@@ -1569,16 +1659,38 @@ export function attachMcpRootsWorkspaceBinder(
   });
 
   const NON_BLOCKING_BOOT_TOOLS: ReadonlySet<string> = new Set([
+    "causoryn_status",
     "causoryn_get_capabilities",
     "causoryn_index_status",
     "causoryn_refresh_index",
   ]);
 
   return {
-    beforeToolCall: async (toolName: string): Promise<void> => {
+    beforeToolCall: async (
+      toolName: string,
+      hookContext?: BeforeToolCallContext,
+    ): Promise<void> => {
       await syncFromClientRoots(false);
+      if (toolName === "causoryn_status" || toolName === "causoryn_index_status") {
+        dynamicContext.startDeferredIndex?.();
+        return;
+      }
       if (!NON_BLOCKING_BOOT_TOOLS.has(toolName)) {
-        await dynamicContext.waitForInitialIndex?.(15_000);
+        const timeoutMs = resolveIndexWaitTimeoutMs(options.env ?? process.env);
+        await dynamicContext.waitForInitialIndex?.({
+          timeoutMs,
+          ...(hookContext?.signal === undefined ? {} : { signal: hookContext.signal }),
+          ...(hookContext?.progressToken === undefined
+            ? {}
+            : {
+                onProgress: (update) =>
+                  hookContext.sendProgress({
+                    progress: update.progress,
+                    total: update.total,
+                    message: update.message,
+                  }),
+              }),
+        });
       }
     },
     syncFromClientRoots,

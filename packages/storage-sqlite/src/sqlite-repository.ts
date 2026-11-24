@@ -10,6 +10,8 @@ import {
 } from "@causoryn/domain";
 import {
   GraphRepositoryError,
+  buildSafeFts5OrQuery,
+  buildSymbolFtsDocument,
   deriveBuildId,
   finalizeSnapshotGraph,
   requireNonEmptyField,
@@ -243,8 +245,67 @@ function parseJsonField(field: string, text: string): JsonValue {
   return parsed as JsonValue;
 }
 
+interface FileFactRow {
+  workspace_id: string;
+  relative_path: string;
+  content_hash: string;
+  analyzer_fingerprint: string;
+  language: string;
+  public_interface_hash: string;
+  nodes_json: string;
+  edges_json: string;
+  evidence_json: string;
+  imported_paths_json: string;
+  updated_at: string;
+}
+
+/** Per-file cached analysis fact stored in `file_facts` (schema v4, Task 2.6). */
+export interface FileFactRecord {
+  readonly workspaceId: string;
+  readonly relativePath: string;
+  readonly contentHash: string;
+  readonly analyzerFingerprint: string;
+  readonly language: string;
+  readonly publicInterfaceHash: string;
+  readonly nodesJson: string;
+  readonly edgesJson: string;
+  readonly evidenceJson: string;
+  readonly importedPathsJson: string;
+  readonly updatedAt: string;
+}
+
+/** Lightweight published snapshot metadata summary (no node/edge/evidence hydration). */
+export interface SnapshotMetaSummary {
+  readonly snapshotId: string;
+  readonly workspaceId: string;
+  readonly state: PublishableState;
+  readonly revisionId: string;
+  readonly revisionSequence: number;
+  readonly configHash: string;
+  readonly analyzerFingerprint: string;
+  readonly createdAt: string;
+  readonly publishedAt: string;
+  readonly nodeCount: number;
+  readonly edgeCount: number;
+  readonly evidenceCount: number;
+  readonly stale: boolean;
+}
+
+/** Retention GC result returned by `pruneOldSnapshots`. */
+export interface PruneSnapshotsResult {
+  readonly prunedSnapshotSids: number;
+  readonly prunedFtsRows: number;
+}
+
+export interface PruneSnapshotsOptions {
+  readonly checkpointMode?: "PASSIVE" | "TRUNCATE";
+}
+
 const DEFAULT_SEARCH_LIMIT = 20;
-const MAX_PUBLISHED_CACHE_ENTRIES = 4;
+const MAX_PUBLISHED_CACHE_ENTRIES = 1;
+const DEFAULT_SNAPSHOT_RETENTION_KEEP_COUNT = 2;
+const MAX_RETAINED_FAILED_BUILDS = 2;
+const SNAPSHOT_ID_PATTERN = /^snapshot:[0-9a-f]{64}$/;
 
 interface CachedPublishedSnapshot {
   readonly id: string;
@@ -252,9 +313,36 @@ interface CachedPublishedSnapshot {
   readonly graph: SnapshotGraph;
 }
 
+function mapFileFactRow(row: FileFactRow): FileFactRecord {
+  return {
+    workspaceId: row.workspace_id,
+    relativePath: row.relative_path,
+    contentHash: row.content_hash,
+    analyzerFingerprint: row.analyzer_fingerprint,
+    language: row.language,
+    publicInterfaceHash: row.public_interface_hash,
+    nodesJson: row.nodes_json,
+    edgesJson: row.edges_json,
+    evidenceJson: row.evidence_json,
+    importedPathsJson: row.imported_paths_json,
+    updatedAt: row.updated_at,
+  };
+}
+
+function ensureSortedById<T extends { readonly id: string }>(items: T[]): T[] {
+  for (let i = 1; i < items.length; i += 1) {
+    if ((items[i - 1] as T).id > (items[i] as T).id) {
+      items.sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+      break;
+    }
+  }
+  return items;
+}
+
 export class SqliteGraphRepository
   implements GraphRepository, SymbolSearchStore
 {
+  readonly dbPath: string;
   private readonly db: Database.Database;
   private readonly statements = new Map<string, Database.Statement>();
   private readonly buildPositions = new Map<
@@ -266,6 +354,7 @@ export class SqliteGraphRepository
 
   constructor(dbPath: string) {
     requireNonEmptyField("dbPath", dbPath);
+    this.dbPath = dbPath;
     this.db = new Database(dbPath);
     try {
       this.db.pragma("busy_timeout = 5000");
@@ -649,6 +738,7 @@ export class SqliteGraphRepository
   ): SnapshotGraph {
     requireNonEmptyField("buildId", buildId);
     requireTimestamp("publishedAt", publishedAt);
+    let prunedDuringPublish = false;
     const publishTx = this.db.transaction((): SnapshotGraph => {
       const row = this.requireBuildingRow(buildId);
       const content = this.readBuildContent(row.sid);
@@ -670,11 +760,18 @@ export class SqliteGraphRepository
         `DELETE FROM build_leases WHERE workspace_id = ? AND build_id = ?`,
       ).run(row.workspace_id, buildId);
       this.buildPositions.delete(row.sid);
+      const pruned = this.pruneOldSnapshotsLocked(
+        row.workspace_id,
+        DEFAULT_SNAPSHOT_RETENTION_KEEP_COUNT,
+      );
+      prunedDuringPublish =
+        pruned.prunedSnapshotSids > 0 || pruned.prunedFtsRows > 0;
       this.cachePublished(row.sid, graph);
       return graph;
     });
+    let publishedGraph: SnapshotGraph;
     try {
-      return publishTx();
+      publishedGraph = publishTx();
     } catch (error) {
       if (error instanceof GraphRepositoryError) throw error;
       // SQLite hatası (ör. aynı deterministik kimliğe çakışan UNIQUE
@@ -684,6 +781,10 @@ export class SqliteGraphRepository
         `Yayımlama işlemi başarısız, depo değişmedi: ${errorText(error)}`,
       );
     }
+    if (prunedDuringPublish && !this.db.inTransaction) {
+      this.runWalCheckpoint("PASSIVE");
+    }
+    return publishedGraph;
   }
 
   failBuild(buildId: string, reason: string): void {
@@ -939,37 +1040,267 @@ export class SqliteGraphRepository
       : this.db.transaction(execute).immediate();
   }
 
+  private runInReadTransaction<T>(fn: () => T): T {
+    return this.db.inTransaction ? fn() : this.db.transaction(fn)();
+  }
+
   getSnapshot(snapshotId: string): SnapshotRead | undefined {
     requireNonEmptyField("snapshotId", snapshotId);
-    const row = this.stmt(
-      `SELECT sid, id, build_id, workspace_id, revision_id, revision_sequence,
-              config_hash, analyzer_fingerprint, state, created_at,
-              published_at, failure_reason
-       FROM snapshots WHERE id = ? AND state IN ('ready','partial') LIMIT 1`,
-    ).get(snapshotId) as SnapshotRow | undefined;
-    if (row === undefined) return undefined;
-    return {
-      snapshot: this.reconstructPublished(row),
-      stale: this.isStale(row),
-    };
+    return this.runInReadTransaction(() => {
+      const row = this.stmt(
+        `SELECT sid, id, build_id, workspace_id, revision_id, revision_sequence,
+                config_hash, analyzer_fingerprint, state, created_at,
+                published_at, failure_reason
+         FROM snapshots WHERE id = ? AND state IN ('ready','partial') LIMIT 1`,
+      ).get(snapshotId) as SnapshotRow | undefined;
+      if (row === undefined) return undefined;
+      return {
+        snapshot: this.reconstructPublished(row),
+        stale: this.isStale(row),
+      };
+    });
   }
 
   getLatestPublished(workspaceId: string): SnapshotRead | undefined {
     requireNonEmptyField("workspaceId", workspaceId);
-    const row = this.stmt(
-      `SELECT sid, id, build_id, workspace_id, revision_id, revision_sequence,
-              config_hash, analyzer_fingerprint, state, created_at,
-              published_at, failure_reason
-       FROM snapshots
-       WHERE workspace_id = ? AND state IN ('ready','partial')
-       ORDER BY revision_sequence DESC, published_at DESC, sid DESC
-       LIMIT 1`,
-    ).get(workspaceId) as SnapshotRow | undefined;
-    if (row === undefined) return undefined;
+    return this.runInReadTransaction(() => {
+      const row = this.stmt(
+        `SELECT sid, id, build_id, workspace_id, revision_id, revision_sequence,
+                config_hash, analyzer_fingerprint, state, created_at,
+                published_at, failure_reason
+         FROM snapshots
+         WHERE workspace_id = ? AND state IN ('ready','partial')
+         ORDER BY revision_sequence DESC, published_at DESC, sid DESC
+         LIMIT 1`,
+      ).get(workspaceId) as SnapshotRow | undefined;
+      if (row === undefined) return undefined;
+      return {
+        snapshot: this.reconstructPublished(row),
+        stale: this.isStale(row),
+      };
+    });
+  }
+
+  /**
+   * Lightweight metadata query for the newest published snapshot of `workspaceId`.
+   * Reads ONLY the `snapshots` metadata row + `COUNT(*)` over `nodes`/`edges`/`evidence`
+   * without hydrating graph rows into memory (Task 2.4b instant warm boot).
+   */
+  getLatestSnapshotMeta(workspaceId: string): SnapshotMetaSummary | undefined {
+    requireNonEmptyField("workspaceId", workspaceId);
+    return this.runInReadTransaction(() => {
+      const row = this.stmt(
+        `SELECT sid, id, build_id, workspace_id, revision_id, revision_sequence,
+                config_hash, analyzer_fingerprint, state, created_at,
+                published_at, failure_reason
+         FROM snapshots
+         WHERE workspace_id = ? AND state IN ('ready','partial')
+         ORDER BY revision_sequence DESC, published_at DESC, sid DESC
+         LIMIT 1`,
+      ).get(workspaceId) as SnapshotRow | undefined;
+      if (row === undefined || row.id === null) return undefined;
+      if (row.state !== "ready" && row.state !== "partial") return undefined;
+      return {
+        snapshotId: row.id,
+        workspaceId: row.workspace_id,
+        state: row.state,
+        revisionId: row.revision_id,
+        revisionSequence: row.revision_sequence,
+        configHash: row.config_hash,
+        analyzerFingerprint: row.analyzer_fingerprint,
+        createdAt: row.created_at,
+        publishedAt: row.published_at ?? row.created_at,
+        nodeCount: this.countRows("nodes", row.sid),
+        edgeCount: this.countRows("edges", row.sid),
+        evidenceCount: this.countRows("evidence", row.sid),
+        stale: this.isStale(row),
+      };
+    });
+  }
+
+  /**
+   * Retention GC (Task 2.4b): retains only the newest `keepCount` (default 2)
+   * published snapshots + last 2 failed builds for `workspaceId`, deletes orphaned
+   * `symbol_fts` rows, and runs a safe WAL checkpoint outside the transaction.
+   */
+  pruneOldSnapshots(
+    workspaceId: string,
+    keepCount = DEFAULT_SNAPSHOT_RETENTION_KEEP_COUNT,
+    options: PruneSnapshotsOptions = {},
+  ): PruneSnapshotsResult {
+    requireNonEmptyField("workspaceId", workspaceId);
+    if (!Number.isInteger(keepCount) || keepCount < 1) {
+      throw new GraphRepositoryError(
+        "graph/invalid-limit",
+        `keepCount pozitif tam sayı olmalı: ${String(keepCount)}`,
+      );
+    }
+    const result = this.db.inTransaction
+      ? this.pruneOldSnapshotsLocked(workspaceId, keepCount)
+      : this.db
+          .transaction(() => this.pruneOldSnapshotsLocked(workspaceId, keepCount))
+          .immediate();
+    if (
+      !this.db.inTransaction &&
+      (result.prunedSnapshotSids > 0 || result.prunedFtsRows > 0)
+    ) {
+      this.runWalCheckpoint(options.checkpointMode ?? "PASSIVE");
+    }
+    return result;
+  }
+
+  private pruneOldSnapshotsLocked(
+    workspaceId: string,
+    keepCount: number,
+  ): PruneSnapshotsResult {
+    const publishedSids = (
+      this.stmt(
+        `SELECT sid FROM snapshots
+         WHERE workspace_id = ? AND state IN ('ready','partial')
+         ORDER BY revision_sequence DESC, published_at DESC, sid DESC`,
+      ).all(workspaceId) as Array<{ sid: number }>
+    ).map((r) => r.sid);
+
+    const failedSids = (
+      this.stmt(
+        `SELECT sid FROM snapshots
+         WHERE workspace_id = ? AND state = 'failed'
+         ORDER BY sid DESC`,
+      ).all(workspaceId) as Array<{ sid: number }>
+    ).map((r) => r.sid);
+
+    const sidsToDelete = [
+      ...publishedSids.slice(keepCount),
+      ...failedSids.slice(MAX_RETAINED_FAILED_BUILDS),
+    ];
+
+    let prunedSnapshotSids = 0;
+    const deleteSnapStmt = this.stmt(`DELETE FROM snapshots WHERE sid = ?`);
+    for (const sid of sidsToDelete) {
+      const deleted = deleteSnapStmt.run(sid);
+      prunedSnapshotSids += deleted.changes;
+      this.publishedCache.delete(sid);
+      this.buildPositions.delete(sid);
+    }
+
+    const ftsDeleted = this.stmt(
+      `DELETE FROM symbol_fts
+       WHERE snapshot_sid NOT IN (SELECT sid FROM snapshots)`,
+    ).run();
+
     return {
-      snapshot: this.reconstructPublished(row),
-      stale: this.isStale(row),
+      prunedSnapshotSids,
+      prunedFtsRows: ftsDeleted.changes,
     };
+  }
+
+  private runWalCheckpoint(mode: "PASSIVE" | "TRUNCATE"): void {
+    try {
+      this.db.pragma(
+        mode === "TRUNCATE"
+          ? "wal_checkpoint(TRUNCATE)"
+          : "wal_checkpoint(PASSIVE)",
+      );
+    } catch {
+      // Best-effort WAL checkpoint: concurrent readers may defer truncation safely.
+    }
+  }
+
+  /* ---------------------------------------------------------------- */
+  /* Per-file incremental analysis facts (schema v4, Task 2.6)        */
+  /* ---------------------------------------------------------------- */
+
+  upsertFileFact(record: FileFactRecord): void {
+    this.requireWorkspace(record.workspaceId);
+    requireNonEmptyField("fileFact.relativePath", record.relativePath);
+    requireNonEmptyField("fileFact.contentHash", record.contentHash);
+    requireNonEmptyField("fileFact.analyzerFingerprint", record.analyzerFingerprint);
+    requireNonEmptyField("fileFact.language", record.language);
+    requireNonEmptyField("fileFact.publicInterfaceHash", record.publicInterfaceHash);
+    requireTimestamp("fileFact.updatedAt", record.updatedAt);
+    this.runWrite(
+      `INSERT INTO file_facts (
+         workspace_id, relative_path, content_hash, analyzer_fingerprint,
+         language, public_interface_hash, nodes_json, edges_json,
+         evidence_json, imported_paths_json, updated_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(workspace_id, relative_path) DO UPDATE SET
+         content_hash = excluded.content_hash,
+         analyzer_fingerprint = excluded.analyzer_fingerprint,
+         language = excluded.language,
+         public_interface_hash = excluded.public_interface_hash,
+         nodes_json = excluded.nodes_json,
+         edges_json = excluded.edges_json,
+         evidence_json = excluded.evidence_json,
+         imported_paths_json = excluded.imported_paths_json,
+         updated_at = excluded.updated_at`,
+      record.workspaceId,
+      record.relativePath,
+      record.contentHash,
+      record.analyzerFingerprint,
+      record.language,
+      record.publicInterfaceHash,
+      record.nodesJson,
+      record.edgesJson,
+      record.evidenceJson,
+      record.importedPathsJson,
+      record.updatedAt,
+    );
+  }
+
+  upsertFileFacts(records: readonly FileFactRecord[]): void {
+    if (records.length === 0) return;
+    this.runInTransaction(() => {
+      for (const record of records) {
+        this.upsertFileFact(record);
+      }
+    });
+  }
+
+  listFileFacts(
+    workspaceId: string,
+    analyzerFingerprint?: string,
+  ): readonly FileFactRecord[] {
+    this.requireWorkspace(workspaceId);
+    const rows =
+      analyzerFingerprint !== undefined
+        ? (this.stmt(
+            `SELECT workspace_id, relative_path, content_hash, analyzer_fingerprint,
+                    language, public_interface_hash, nodes_json, edges_json,
+                    evidence_json, imported_paths_json, updated_at
+             FROM file_facts
+             WHERE workspace_id = ? AND analyzer_fingerprint = ?
+             ORDER BY relative_path ASC`,
+          ).all(workspaceId, analyzerFingerprint) as FileFactRow[])
+        : (this.stmt(
+            `SELECT workspace_id, relative_path, content_hash, analyzer_fingerprint,
+                    language, public_interface_hash, nodes_json, edges_json,
+                    evidence_json, imported_paths_json, updated_at
+             FROM file_facts
+             WHERE workspace_id = ?
+             ORDER BY relative_path ASC`,
+          ).all(workspaceId) as FileFactRow[]);
+    return rows.map(mapFileFactRow);
+  }
+
+  deleteFileFact(workspaceId: string, relativePath: string): boolean {
+    this.requireWorkspace(workspaceId);
+    requireNonEmptyField("fileFact.relativePath", relativePath);
+    const result = this.runWrite(
+      `DELETE FROM file_facts WHERE workspace_id = ? AND relative_path = ?`,
+      workspaceId,
+      relativePath,
+    );
+    return result.changes > 0;
+  }
+
+  clearFileFacts(workspaceId: string): number {
+    this.requireWorkspace(workspaceId);
+    const result = this.runWrite(
+      `DELETE FROM file_facts WHERE workspace_id = ?`,
+      workspaceId,
+    );
+    return result.changes;
   }
 
   indexSymbols(snapshotId: string, entries: readonly SymbolIndexEntry[]): void {
@@ -990,15 +1321,65 @@ export class SqliteGraphRepository
     }
     const insertTx = this.db.transaction(
       (sid: number, items: readonly SymbolIndexEntry[]): void => {
+        const insertStmt = this.stmt(
+          "INSERT INTO symbol_fts (symbol, search_text, node_id, snapshot_sid) VALUES (?, ?, ?, ?)",
+        );
         for (const entry of items) {
-          this.stmt(
-            "INSERT INTO symbol_fts (symbol, node_id, snapshot_sid) VALUES (?, ?, ?)",
-          ).run(entry.symbol, entry.nodeId, sid);
+          const searchText = buildSymbolFtsDocument(
+            entry.symbol,
+            entry.relativePath,
+          );
+          insertStmt.run(entry.symbol, searchText, entry.nodeId, sid);
         }
       },
     );
     try {
       insertTx(row.sid, entries);
+    } catch (error) {
+      throw new GraphRepositoryError(
+        "storage/driver-error",
+        `SQLite yazma hatası: ${errorText(error)}`,
+      );
+    }
+  }
+
+  /** Replaces all FTS5 rows for `snapshotId` atomically using LocAgent tokenization. */
+  replaceSymbolIndex(
+    snapshotId: string,
+    entries: readonly SymbolIndexEntry[],
+  ): void {
+    requireNonEmptyField("snapshotId", snapshotId);
+    const row = this.stmt(
+      `SELECT sid FROM snapshots WHERE id = ? OR build_id = ?
+       ORDER BY sid DESC LIMIT 1`,
+    ).get(snapshotId, snapshotId) as { sid: number } | undefined;
+    if (row === undefined) {
+      throw new GraphRepositoryError(
+        "graph/unknown-snapshot",
+        `Snapshot ya da build kimliği bulunamadı: ${snapshotId}`,
+      );
+    }
+    for (const entry of entries) {
+      requireNonEmptyField("entry.symbol", entry.symbol);
+      requireNonEmptyField("entry.nodeId", entry.nodeId);
+    }
+    const replaceTx = this.db.transaction(
+      (sid: number, items: readonly SymbolIndexEntry[]): void => {
+        this.stmt("DELETE FROM symbol_fts WHERE snapshot_sid = ?").run(sid);
+        const insertStmt = this.stmt(
+          "INSERT INTO symbol_fts (symbol, search_text, node_id, snapshot_sid) VALUES (?, ?, ?, ?)",
+        );
+        for (const entry of items) {
+          const searchText = buildSymbolFtsDocument(
+            entry.symbol,
+            entry.relativePath,
+          );
+          insertStmt.run(entry.symbol, searchText, entry.nodeId, sid);
+        }
+      },
+    );
+    try {
+      replaceTx(row.sid, entries);
     } catch (error) {
       throw new GraphRepositoryError(
         "storage/driver-error",
@@ -1023,16 +1404,17 @@ export class SqliteGraphRepository
     if (snapshotId !== undefined) {
       requireNonEmptyField("snapshotId", snapshotId);
     }
-    // Gömülü NUL byte (\0) SQLite C FTS5 ayrıştırıcısında dizgeyi kapanış
-    // tırnağından önce kesip "unterminated string" hatası ürettiğinden boşluğa
-    // normalize edilir; kalan metin boşsa isabet yoktur.
+    // Strip embedded NUL bytes before tokenization (SQLite C FTS5 parser safety).
     const sanitized = trimmed.replaceAll("\0", " ").trim();
     if (sanitized.length === 0) {
       return [];
     }
-    // Kullanıcı girdisi FTS ifade (phrase) sözdizimiyle sarmalanır ve
-    // PARAMETRE olarak bağlanır; operatör metni MATCH diline katılmaz.
-    const phrase = `"${sanitized.replaceAll('"', '""')}"`;
+    // LocAgent safe FTS5 OR query: strictly double-quoted alphanumeric tokens,
+    // zero raw FTS5 operators, zero wildcard `*` injection (CVE-2026-119373).
+    const ftsQuery = buildSafeFts5OrQuery(sanitized);
+    if (ftsQuery === null) {
+      return [];
+    }
     let rows: Array<{
       symbol: string;
       node_id: string;
@@ -1042,35 +1424,53 @@ export class SqliteGraphRepository
       rows =
         snapshotId !== undefined
           ? (this.stmt(
-              `SELECT DISTINCT symbol_fts.symbol AS symbol,
-                      symbol_fts.node_id AS node_id,
-                      snapshots.id AS snapshot_id
-               FROM symbol_fts JOIN snapshots ON snapshots.sid = symbol_fts.snapshot_sid
-               WHERE symbol_fts MATCH ? AND snapshots.id = ? AND snapshots.state IN ('ready','partial')
-               ORDER BY symbol_fts.symbol, symbol_fts.node_id
+              `WITH raw AS MATERIALIZED (
+                 SELECT symbol_fts.symbol AS symbol,
+                        symbol_fts.node_id AS node_id,
+                        snapshots.id AS snapshot_id,
+                        bm25(symbol_fts, 2.0, 1.0, 0.0, 0.0) AS rank_score
+                 FROM symbol_fts
+                 JOIN snapshots ON snapshots.sid = symbol_fts.snapshot_sid
+                 WHERE symbol_fts MATCH ? AND snapshots.id = ? AND snapshots.state IN ('ready','partial')
+               )
+               SELECT raw.symbol AS symbol,
+                      raw.node_id AS node_id,
+                      raw.snapshot_id AS snapshot_id
+               FROM raw
+               GROUP BY raw.symbol, raw.node_id, raw.snapshot_id
+               ORDER BY MIN(raw.rank_score) ASC, raw.node_id ASC, raw.symbol ASC
                LIMIT ?`,
-            ).all(phrase, snapshotId, effectiveLimit) as Array<{
+            ).all(ftsQuery, snapshotId, effectiveLimit) as Array<{
               symbol: string;
               node_id: string;
               snapshot_id: string | null;
             }>)
           : (this.stmt(
-              `SELECT matched.symbol AS symbol,
-                      matched.node_id AS node_id,
-                      snapshots.id AS snapshot_id
-               FROM (
+              `WITH raw AS MATERIALIZED (
                  SELECT symbol_fts.symbol AS symbol,
                         symbol_fts.node_id AS node_id,
-                        MAX(snapshots.sid) AS latest_sid
+                        snapshots.sid AS sid,
+                        bm25(symbol_fts, 2.0, 1.0, 0.0, 0.0) AS rank_score
                  FROM symbol_fts
                  JOIN snapshots ON snapshots.sid = symbol_fts.snapshot_sid
                  WHERE symbol_fts MATCH ? AND snapshots.state IN ('ready','partial')
-                 GROUP BY symbol_fts.symbol, symbol_fts.node_id
-               ) AS matched
+               ),
+               matched AS (
+                 SELECT raw.symbol AS symbol,
+                        raw.node_id AS node_id,
+                        MAX(raw.sid) AS latest_sid,
+                        MIN(raw.rank_score) AS rank_score
+                 FROM raw
+                 GROUP BY raw.symbol, raw.node_id
+               )
+               SELECT matched.symbol AS symbol,
+                      matched.node_id AS node_id,
+                      snapshots.id AS snapshot_id
+               FROM matched
                JOIN snapshots ON snapshots.sid = matched.latest_sid
-               ORDER BY matched.symbol, matched.node_id
+               ORDER BY matched.rank_score ASC, matched.node_id ASC, matched.symbol ASC
                LIMIT ?`,
-            ).all(phrase, effectiveLimit) as Array<{
+            ).all(ftsQuery, effectiveLimit) as Array<{
               symbol: string;
               node_id: string;
               snapshot_id: string | null;
@@ -1164,134 +1564,205 @@ export class SqliteGraphRepository
     };
   }
 
+  private mapNodeRow(row: NodeRow): GraphNode {
+    const spanComplete =
+      row.relative_path !== null &&
+      row.start_line !== null &&
+      row.end_line !== null &&
+      row.source_hash !== null;
+    const spanAny =
+      row.relative_path !== null ||
+      row.start_line !== null ||
+      row.end_line !== null ||
+      row.source_hash !== null;
+    if (!spanComplete && spanAny) {
+      throw new GraphRepositoryError(
+        "storage/corrupt-row",
+        `Node konum sütunları eksik: ${row.node_id}`,
+      );
+    }
+    const span =
+      row.relative_path === null ||
+      row.start_line === null ||
+      row.end_line === null ||
+      row.source_hash === null
+        ? undefined
+        : {
+            relativePath: row.relative_path,
+            startLine: row.start_line,
+            endLine: row.end_line,
+            sourceHash: row.source_hash,
+          };
+    return {
+      id: row.node_id,
+      kind: row.kind as GraphNode["kind"],
+      qualifiedName: row.qualified_name,
+      ...(row.language === null ? {} : { language: row.language }),
+      ...(span === undefined ? {} : { location: span }),
+      attributes: parseJsonField(
+        `nodes.attributes_json:${row.node_id}`,
+        row.attributes_json,
+      ) as Record<string, unknown>,
+    };
+  }
+
+  private mapEdgeRow(row: EdgeRow): GraphEdge {
+    const parsedEvidenceIds = parseJsonField(
+      `edges.evidence_ids_json:${row.edge_id}`,
+      row.evidence_ids_json,
+    );
+    if (!Array.isArray(parsedEvidenceIds)) {
+      throw new GraphRepositoryError(
+        "storage/corrupt-row",
+        `edge.evidence_ids_json dizi değil: ${row.edge_id}`,
+      );
+    }
+    let ambiguity: GraphEdge["ambiguity"];
+    if (row.ambiguity_json !== null) {
+      const parsed = parseJsonField(
+        `edges.ambiguity_json:${row.edge_id}`,
+        row.ambiguity_json,
+      ) as { candidates: string[]; reason: string };
+      ambiguity = { candidates: parsed.candidates, reason: parsed.reason };
+    }
+    return {
+      id: row.edge_id,
+      from: row.from_id,
+      to: row.to_id,
+      kind: row.kind as GraphEdge["kind"],
+      resolution: row.resolution as GraphEdge["resolution"],
+      evidenceIds: parsedEvidenceIds as string[],
+      ...(ambiguity === undefined ? {} : { ambiguity }),
+    };
+  }
+
+  private mapEvidenceRow(row: EvidenceRow): Evidence {
+    const spanComplete =
+      row.relative_path !== null &&
+      row.start_line !== null &&
+      row.end_line !== null &&
+      row.source_hash !== null;
+    const spanAny =
+      row.relative_path !== null ||
+      row.start_line !== null ||
+      row.end_line !== null ||
+      row.source_hash !== null;
+    if (!spanComplete && spanAny) {
+      throw new GraphRepositoryError(
+        "storage/corrupt-row",
+        `Evidence konum sütunları eksik: ${row.evidence_id}`,
+      );
+    }
+    const span =
+      row.relative_path === null ||
+      row.start_line === null ||
+      row.end_line === null ||
+      row.source_hash === null
+        ? undefined
+        : {
+            relativePath: row.relative_path,
+            startLine: row.start_line,
+            endLine: row.end_line,
+            sourceHash: row.source_hash,
+          };
+    return {
+      id: row.evidence_id,
+      kind: row.kind,
+      ...(span === undefined ? {} : { span }),
+      analyzerId: row.analyzer_id,
+      analyzerVersion: row.analyzer_version,
+      rationale: row.rationale,
+    };
+  }
+
   private readBuildContent(sid: number): BuildContent {
     const nodeRows = this.stmt(
       `SELECT node_id, kind, qualified_name, language, relative_path,
               start_line, end_line, source_hash, attributes_json
        FROM nodes WHERE snapshot_sid = ? ORDER BY position`,
     ).all(sid) as NodeRow[];
-    const nodes: GraphNode[] = nodeRows.map((row) => {
-      const spanComplete =
-        row.relative_path !== null &&
-        row.start_line !== null &&
-        row.end_line !== null &&
-        row.source_hash !== null;
-      const spanAny =
-        row.relative_path !== null ||
-        row.start_line !== null ||
-        row.end_line !== null ||
-        row.source_hash !== null;
-      if (!spanComplete && spanAny) {
-        throw new GraphRepositoryError(
-          "storage/corrupt-row",
-          `Node konum sütunları eksik: ${row.node_id}`,
-        );
-      }
-      const span =
-        row.relative_path === null ||
-        row.start_line === null ||
-        row.end_line === null ||
-        row.source_hash === null
-          ? undefined
-          : {
-              relativePath: row.relative_path,
-              startLine: row.start_line,
-              endLine: row.end_line,
-              sourceHash: row.source_hash,
-            };
-      return {
-        id: row.node_id,
-        kind: row.kind as GraphNode["kind"],
-        qualifiedName: row.qualified_name,
-        ...(row.language === null ? {} : { language: row.language }),
-        ...(span === undefined ? {} : { location: span }),
-        attributes: parseJsonField(
-          `nodes.attributes_json:${row.node_id}`,
-          row.attributes_json,
-        ) as Record<string, unknown>,
-      };
-    });
+    const nodes = nodeRows.map((row) => this.mapNodeRow(row));
 
     const edgeRows = this.stmt(
       `SELECT edge_id, from_id, to_id, kind, resolution,
               evidence_ids_json, ambiguity_json
        FROM edges WHERE snapshot_sid = ? ORDER BY position`,
     ).all(sid) as EdgeRow[];
-    const edges: GraphEdge[] = edgeRows.map((row) => {
-      const parsedEvidenceIds = parseJsonField(
-        `edges.evidence_ids_json:${row.edge_id}`,
-        row.evidence_ids_json,
-      );
-      if (!Array.isArray(parsedEvidenceIds)) {
-        throw new GraphRepositoryError(
-          "storage/corrupt-row",
-          `edge.evidence_ids_json dizi değil: ${row.edge_id}`,
-        );
-      }
-      let ambiguity: GraphEdge["ambiguity"];
-      if (row.ambiguity_json !== null) {
-        const parsed = parseJsonField(
-          `edges.ambiguity_json:${row.edge_id}`,
-          row.ambiguity_json,
-        ) as { candidates: string[]; reason: string };
-        ambiguity = { candidates: parsed.candidates, reason: parsed.reason };
-      }
-      return {
-        id: row.edge_id,
-        from: row.from_id,
-        to: row.to_id,
-        kind: row.kind as GraphEdge["kind"],
-        resolution: row.resolution as GraphEdge["resolution"],
-        evidenceIds: parsedEvidenceIds as string[],
-        ...(ambiguity === undefined ? {} : { ambiguity }),
-      };
-    });
+    const edges = edgeRows.map((row) => this.mapEdgeRow(row));
 
     const evidenceRows = this.stmt(
       `SELECT evidence_id, kind, relative_path, start_line, end_line,
               source_hash, analyzer_id, analyzer_version, rationale
        FROM evidence WHERE snapshot_sid = ? ORDER BY position`,
     ).all(sid) as EvidenceRow[];
-    const evidence: Evidence[] = evidenceRows.map((row) => {
-      const spanComplete =
-        row.relative_path !== null &&
-        row.start_line !== null &&
-        row.end_line !== null &&
-        row.source_hash !== null;
-      const spanAny =
-        row.relative_path !== null ||
-        row.start_line !== null ||
-        row.end_line !== null ||
-        row.source_hash !== null;
-      if (!spanComplete && spanAny) {
-        throw new GraphRepositoryError(
-          "storage/corrupt-row",
-          `Evidence konum sütunları eksik: ${row.evidence_id}`,
-        );
-      }
-      const span =
-        row.relative_path === null ||
-        row.start_line === null ||
-        row.end_line === null ||
-        row.source_hash === null
-          ? undefined
-          : {
-              relativePath: row.relative_path,
-              startLine: row.start_line,
-              endLine: row.end_line,
-              sourceHash: row.source_hash,
-            };
-      return {
-        id: row.evidence_id,
-        kind: row.kind,
-        ...(span === undefined ? {} : { span }),
-        analyzerId: row.analyzer_id,
-        analyzerVersion: row.analyzer_version,
-        rationale: row.rationale,
-      };
-    });
+    const evidence = evidenceRows.map((row) => this.mapEvidenceRow(row));
 
     return { nodes, edges, evidence };
+  }
+
+  /**
+   * Direct trusted hydration for already-published snapshots (Task 2.4b).
+   * Full invariant validation (Zod, ID derivation, dangling edges, canonical hashing)
+   * is enforced at write/publish time (`add*` + `publish` -> `finalizeSnapshotGraph`);
+   * reads hydrate directly in canonical ID order without re-hashing or re-validating
+   * 50k+ rows on warm startup.
+   */
+  private hydratePublishedSnapshot(row: SnapshotRow): SnapshotGraph {
+    if (row.state !== "ready" && row.state !== "partial") {
+      throw new GraphRepositoryError(
+        "storage/corrupt-row",
+        `Yayımlanmamış snapshot okunamaz: ${String(row.id)}`,
+      );
+    }
+    if (row.id === null || !SNAPSHOT_ID_PATTERN.test(row.id)) {
+      throw new GraphRepositoryError(
+        "storage/corrupt-snapshot",
+        `Snapshot kimliği geçersiz veya bozuk: ${String(row.id)}`,
+      );
+    }
+
+    const nodeRows = this.stmt(
+      `SELECT node_id, kind, qualified_name, language, relative_path,
+              start_line, end_line, source_hash, attributes_json
+       FROM nodes WHERE snapshot_sid = ? ORDER BY node_id ASC`,
+    ).all(row.sid) as NodeRow[];
+    const nodes = ensureSortedById(nodeRows.map((r) => this.mapNodeRow(r)));
+
+    const edgeRows = this.stmt(
+      `SELECT edge_id, from_id, to_id, kind, resolution,
+              evidence_ids_json, ambiguity_json
+       FROM edges WHERE snapshot_sid = ? ORDER BY edge_id ASC`,
+    ).all(row.sid) as EdgeRow[];
+    const edges = ensureSortedById(edgeRows.map((r) => this.mapEdgeRow(r)));
+
+    const evidenceRows = this.stmt(
+      `SELECT evidence_id, kind, relative_path, start_line, end_line,
+              source_hash, analyzer_id, analyzer_version, rationale
+       FROM evidence WHERE snapshot_sid = ? ORDER BY evidence_id ASC`,
+    ).all(row.sid) as EvidenceRow[];
+    const evidence = ensureSortedById(
+      evidenceRows.map((r) => this.mapEvidenceRow(r)),
+    );
+
+    const meta = Object.freeze({
+      id: row.id,
+      workspaceId: row.workspace_id,
+      revision: Object.freeze({
+        id: row.revision_id,
+        sequence: row.revision_sequence,
+      }),
+      configHash: row.config_hash,
+      analyzerFingerprint: row.analyzer_fingerprint,
+      state: row.state,
+      createdAt: row.created_at,
+    });
+
+    return Object.freeze({
+      meta,
+      nodes: Object.freeze(nodes),
+      edges: Object.freeze(edges),
+      evidence: Object.freeze(evidence),
+    });
   }
 
   private reconstructPublished(row: SnapshotRow): SnapshotGraph {
@@ -1310,16 +1781,7 @@ export class SqliteGraphRepository
     ) {
       return cached.graph;
     }
-    const graph = finalizeSnapshotGraph(
-      this.metaOf(row, row.state),
-      this.readBuildContent(row.sid),
-    );
-    if (row.id === null || graph.meta.id !== row.id) {
-      throw new GraphRepositoryError(
-        "storage/corrupt-snapshot",
-        `Snapshot kimliği satırla uyuşmuyor: ${String(row.id)} != ${graph.meta.id}`,
-      );
-    }
+    const graph = this.hydratePublishedSnapshot(row);
     this.cachePublished(row.sid, graph);
     return graph;
   }

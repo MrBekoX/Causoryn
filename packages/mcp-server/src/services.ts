@@ -36,7 +36,7 @@ import { z } from "zod";
 import { decodeCursor, encodeCursor } from "./cursor.js";
 import type { CausorynServerConfig } from "./config.js";
 import { CausorynToolError } from "./errors.js";
-import { buildEnvelope, type Coverage, type Envelope } from "./envelope.js";
+import { buildEnvelope, type Coverage, type Envelope, type LanguageCoverage } from "./envelope.js";
 import {
   readOptionalBoundedTextFileSync,
   type BoundedTextReadResult,
@@ -149,6 +149,24 @@ const ADAPTER_LANGUAGE_ORDER: ReadonlyMap<string, number> = new Map(
   INDEXED_ADAPTERS.map((adapter, index) => [adapter.language, index]),
 );
 
+const WORKSPACE_DEFINITION_KINDS: ReadonlySet<string> = new Set([
+  "Function",
+  "Class",
+  "Method",
+  "Interface",
+  "Type",
+  "TypeAlias",
+  "Variable",
+  "Enum",
+  "Module",
+  "Namespace",
+  "Struct",
+  "Trait",
+  "Endpoint",
+  "Handler",
+  "Test",
+]);
+
 function isAstOrSymbolNode(node: GraphNode): boolean {
   return (
     node.kind !== "Workspace" &&
@@ -164,6 +182,10 @@ function isAstOrSymbolNode(node: GraphNode): boolean {
  * toplamıdır); MCP envelope `coverage.coverageRatio` bu nedenle
  * `(verified + heuristic) / totalEdges` iken, sidecar worker protokol çıktılarındaki
  * `coverageRatio` `verified / totalEdges` oranıdır.
+ *
+ * Per-language breakdown (`byLanguage`) is computed deterministically in sorted
+ * language key order so a single TypeScript file never masks L0 degradation in
+ * C#, Python, Go, or Rust.
  */
 export function coverageOf(snapshot: SnapshotGraph): Coverage {
   const totalEdges = snapshot.edges.length;
@@ -184,12 +206,96 @@ export function coverageOf(snapshot: SnapshotGraph): Coverage {
   const tier: Coverage["tier"] = hasL2AstNodes ? "L2" : hasL1AstNodes ? "L1" : "L0";
   const coverageRatio =
     totalEdges === 0 ? 0 : Math.round((resolvedEdges / totalEdges) * 10_000) / 10_000;
+
+  interface MutableLangBucket {
+    files: number;
+    hasAstSymbols: boolean;
+    verifiedEdges: number;
+    heuristicEdges: number;
+    unresolvedEdges: number;
+  }
+  const buckets = new Map<string, MutableLangBucket>();
+  const ensureBucket = (lang: string): MutableLangBucket => {
+    let bucket = buckets.get(lang);
+    if (bucket === undefined) {
+      bucket = {
+        files: 0,
+        hasAstSymbols: false,
+        verifiedEdges: 0,
+        heuristicEdges: 0,
+        unresolvedEdges: 0,
+      };
+      buckets.set(lang, bucket);
+    }
+    return bucket;
+  };
+
+  const nodeById = new Map<string, GraphNode>();
+  for (const node of snapshot.nodes) {
+    nodeById.set(node.id, node);
+    if (typeof node.language === "string" && node.language.length > 0) {
+      const bucket = ensureBucket(node.language);
+      if (node.kind === "File") {
+        bucket.files += 1;
+      } else if (isAstOrSymbolNode(node)) {
+        bucket.hasAstSymbols = true;
+      }
+    }
+  }
+
+  for (const edge of snapshot.edges) {
+    const fromNode = nodeById.get(edge.from);
+    const toNode = nodeById.get(edge.to);
+    if (fromNode?.kind === "Workspace" && edge.kind === "CONTAINS") {
+      continue;
+    }
+    const lang =
+      typeof fromNode?.language === "string" && fromNode.language.length > 0
+        ? fromNode.language
+        : typeof toNode?.language === "string" && toNode.language.length > 0
+          ? toNode.language
+          : undefined;
+    if (lang === undefined) continue;
+    const bucket = ensureBucket(lang);
+    if (edge.resolution === "verified") {
+      bucket.verifiedEdges += 1;
+    } else if (edge.resolution === "heuristic") {
+      bucket.heuristicEdges += 1;
+    } else {
+      bucket.unresolvedEdges += 1;
+    }
+  }
+
+  const byLanguage: Record<string, LanguageCoverage> = {};
+  const sortedLanguages = [...buckets.keys()].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+  for (const lang of sortedLanguages) {
+    const bucket = buckets.get(lang) as MutableLangBucket;
+    const langTier: LanguageCoverage["tier"] = !bucket.hasAstSymbols
+      ? "L0"
+      : L2_LANGUAGES.has(lang)
+        ? "L2"
+        : "L1";
+    const langTotal = bucket.verifiedEdges + bucket.heuristicEdges + bucket.unresolvedEdges;
+    const langResolved = bucket.verifiedEdges + bucket.heuristicEdges;
+    const langRatio =
+      langTotal === 0 ? 0 : Math.round((langResolved / langTotal) * 10_000) / 10_000;
+    byLanguage[lang] = {
+      tier: langTier,
+      files: bucket.files,
+      verifiedEdges: bucket.verifiedEdges,
+      heuristicEdges: bucket.heuristicEdges,
+      unresolvedEdges: bucket.unresolvedEdges,
+      coverageRatio: langRatio,
+    };
+  }
+
   return {
     tier,
     resolvedEdges,
     unresolvedEdges,
     totalEdges,
     coverageRatio,
+    byLanguage,
   };
 }
 
@@ -961,7 +1067,7 @@ export function findSymbols(
     if (lowered.includes(needle)) return 2;
     return undefined;
   };
-  const matches = snapshot.nodes
+  const rawMatches = snapshot.nodes
     .map((node) => ({ node, rank: rankOf(node.qualifiedName) }))
     .filter(
       (entry): entry is { node: GraphNode; rank: 0 | 1 | 2 } =>
@@ -975,15 +1081,42 @@ export function findSymbols(
       return a.node.id < b.node.id ? -1 : a.node.id > b.node.id ? 1 : 0;
     });
 
-  // AMBIGUOUS_SYMBOL: tam ad eşleşmesi birden çok node'a çözülüyorsa istek
-  // belirsizdir; adaylar döner (TŞ §10.1 + §10.3 requiresDisambiguation).
+  // When one or more real workspace definition symbols match the query (and the
+  // caller did not explicitly filter for kind="UnknownExternal"), exclude
+  // shadowed UnknownExternal placeholders from disambiguation and hits so
+  // external call stubs never cause false AMBIGUOUS_SYMBOL errors.
+  const realWorkspaceNames = new Set<string>();
+  let hasRealWorkspaceMatch = false;
+  for (const entry of rawMatches) {
+    if (WORKSPACE_DEFINITION_KINDS.has(entry.node.kind)) {
+      hasRealWorkspaceMatch = true;
+      realWorkspaceNames.add(entry.node.qualifiedName.toLowerCase());
+    }
+  }
+  const matches =
+    input.kind === undefined && hasRealWorkspaceMatch
+      ? rawMatches.filter(
+          (entry) =>
+            entry.node.kind !== "UnknownExternal" ||
+            !realWorkspaceNames.has(entry.node.qualifiedName.toLowerCase()),
+        )
+      : rawMatches;
+
+  // AMBIGUOUS_SYMBOL: multiple distinct exact matches require disambiguation.
   const exactMatches = matches.filter((entry) => entry.rank === 0);
-  if (exactMatches.length > 1) {
+  const realExactMatches = exactMatches.filter((entry) =>
+    WORKSPACE_DEFINITION_KINDS.has(entry.node.kind),
+  );
+  const disambiguationMatches =
+    input.kind === undefined && realExactMatches.length > 0
+      ? exactMatches.filter((entry) => entry.node.kind !== "UnknownExternal")
+      : exactMatches;
+  if (disambiguationMatches.length > 1) {
     throw new CausorynToolError(
       "AMBIGUOUS_SYMBOL",
-      `"${input.query.trim()}" sorgusu ${String(exactMatches.length)} farklı simge düğümüne tam eşleşti; kind/limit/pathPrefix ile daraltın`,
+      `Query "${input.query.trim()}" matched ${String(disambiguationMatches.length)} distinct symbol nodes; narrow with kind/limit or select a candidate symbolId`,
       {
-        candidates: exactMatches.map((entry) => {
+        candidates: disambiguationMatches.map((entry) => {
           const hit = hitOf(entry.node);
           return {
             symbolId: hit.symbolId,
@@ -1147,20 +1280,23 @@ export function resolveSymbolNode(
 ): GraphNode {
   const byId = snapshot.nodes.find((node) => node.id === symbolId);
   if (byId !== undefined) return byId;
-  const byName = snapshot.nodes.filter((node) => node.qualifiedName === symbolId);
+  const byNameAll = snapshot.nodes.filter((node) => node.qualifiedName === symbolId);
+  const hasRealDefinition = byNameAll.some((node) =>
+    WORKSPACE_DEFINITION_KINDS.has(node.kind),
+  );
+  const byName = hasRealDefinition
+    ? byNameAll.filter((node) => node.kind !== "UnknownExternal")
+    : byNameAll;
   if (byName.length === 0) {
     throw new CausorynToolError(
       "SYMBOL_NOT_FOUND",
-      `sembol yayınlanmış snapshot'ta bulunamadı: ${symbolId}; node kimliklerini map_system/find_symbols çıktısından alın`,
+      `Symbol not found in published snapshot: ${symbolId}; inspect node IDs from causoryn_map_system or causoryn_find_symbols`,
     );
   }
   if (byName.length > 1) {
     throw new CausorynToolError(
       "AMBIGUOUS_SYMBOL",
-      `"${symbolId}" sorgusu ${String(byName.length)} farklı sembol düğümüne tam eşleşti; adaylardan birinin symbolId'sini kullanın veya kind/pathPrefix ile daraltın`,
-      // Aday formu find_symbols AmbiguityDataSchema ile birebir aynıdır
-      // (symbolId/qualifiedName/kind/relativePath); language gibi ek node
-      // alanları aday şemasına taşınmaz.
+      `Query "${symbolId}" matched ${String(byName.length)} distinct symbol nodes; select one of the returned candidate symbolIds`,
       {
         candidates: byName.map((node) => {
           const hit = hitOf(node);
@@ -1398,30 +1534,26 @@ function symbolNodeOf(node: GraphNode): z.infer<typeof SymbolContextNodeSchema> 
 /* trace_execution (sprint-2 B4)                                       */
 /* ------------------------------------------------------------------ */
 
+const DEFAULT_TRACE_MAX_DEPTH = 6;
+const DEFAULT_TRACE_MAX_PATHS = 25;
+
 export const TraceExecutionInputSchema = z.strictObject({
   workspaceId: z.string().min(1).optional(),
   /**
-   * Çağrı zincirinin başlangıç noktası (TŞ §10.2 "entrypoint"): yayımlanmış
-   * node kimliği ("node:<hex>") YA DA qualifiedName kabul edilir. Framework
-   * endpoint adları ("POST /orders" — B3 linker ROUTES_TO çıktıları) ve
-   * sembol adları bu yolla çözülür; ad birden çok node'a tam eşleşirse
-   * AMBIGUOUS_SYMBOL + adaylar, hiçbir node'a eşleşmezse SYMBOL_NOT_FOUND
-   * döner (get_symbol_context ile aynı çözümleme sözleşmesi).
+   * Starting node ID ("node:<hex>"), qualified symbol name, or framework
+   * endpoint name ("POST /orders").
    */
   entrypoint: z.string().min(1),
   /**
-   * Yol uzunluğu sınırı — kenar sayısı (TŞ §20 resource budget "maxDepth").
-   * Şema 0'a izin verir; 0 anlamsal girdi hatasıdır → INVALID_ARGUMENT
-   * (görev sözleşmesi). Tavan results.maxDepth aşılırsa LIMIT_EXCEEDED.
+   * Maximum edge depth (default 6). 0 is rejected with INVALID_ARGUMENT;
+   * values above config results.maxDepth are clamped with a warning.
    */
-  maxDepth: z.number().int().min(0),
+  maxDepth: z.number().int().min(0).optional(),
   /**
-   * Döndürülecek azami yol sayısı (TŞ §20 resource budget "maxPaths").
-   * Şema 0'a izin verir; 0 → INVALID_ARGUMENT. Tavan results.maxPaths
-   * aşılırsa LIMIT_EXCEEDED. Sınır keşif sırasında vurulursa sonuç
-   * truncated=true + uyarıyla döner.
+   * Maximum paths to return (default 25). 0 is rejected with INVALID_ARGUMENT;
+   * values above config results.maxPaths are clamped with a warning.
    */
-  maxPaths: z.number().int().min(0),
+  maxPaths: z.number().int().min(0).optional(),
 });
 
 /** Yol kenarı: resolution düzeyi KENDİ alanında taşınır (karıştırma yasak). */
@@ -1627,42 +1759,47 @@ export function traceExecution(
   const read = requireSnapshot(deps, workspaceId);
   const snapshot = read.snapshot;
 
-  // 1) Sınır doğrulama: 0 anlamsal girdi hatası; tavan aşımı LIMIT_EXCEEDED.
+  // 1) Bound validation: 0 is INVALID_ARGUMENT; values above server config
+  //    ceilings are clamped with transparent warnings instead of crashing.
   if (input.maxDepth === 0) {
     throw new CausorynToolError(
       "INVALID_ARGUMENT",
-      "maxDepth=0 geçersiz: en az 1 kenar derinlik gerekli (tavan results.maxDepth)",
+      "maxDepth=0 is invalid: at least 1 edge depth is required",
     );
   }
   if (input.maxPaths === 0) {
     throw new CausorynToolError(
       "INVALID_ARGUMENT",
-      "maxPaths=0 geçersiz: en az 1 yol gerekli (tavan results.maxPaths)",
+      "maxPaths=0 is invalid: at least 1 path is required",
     );
   }
-  if (input.maxDepth > deps.config.results.maxDepth) {
-    throw new CausorynToolError(
-      "LIMIT_EXCEEDED",
-      `maxDepth=${String(input.maxDepth)} results.maxDepth tavanını (${String(deps.config.results.maxDepth)}) aşıyor`,
+  const depthCeiling = deps.config.results.maxDepth;
+  const pathsCeiling = deps.config.results.maxPaths;
+  const requestedDepth = input.maxDepth ?? DEFAULT_TRACE_MAX_DEPTH;
+  const requestedPaths = input.maxPaths ?? DEFAULT_TRACE_MAX_PATHS;
+  const effectiveMaxDepth = Math.min(requestedDepth, depthCeiling);
+  const effectiveMaxPaths = Math.min(requestedPaths, pathsCeiling);
+  const clampedWarnings: string[] = [];
+  if (input.maxDepth !== undefined && input.maxDepth > depthCeiling) {
+    clampedWarnings.push(
+      `maxDepth=${String(input.maxDepth)} exceeds server ceiling results.maxDepth=${String(depthCeiling)}; clamped to ${String(effectiveMaxDepth)}`,
     );
   }
-  if (input.maxPaths > deps.config.results.maxPaths) {
-    throw new CausorynToolError(
-      "LIMIT_EXCEEDED",
-      `maxPaths=${String(input.maxPaths)} results.maxPaths tavanını (${String(deps.config.results.maxPaths)}) aşıyor`,
+  if (input.maxPaths !== undefined && input.maxPaths > pathsCeiling) {
+    clampedWarnings.push(
+      `maxPaths=${String(input.maxPaths)} exceeds server ceiling results.maxPaths=${String(pathsCeiling)}; clamped to ${String(effectiveMaxPaths)}`,
     );
   }
 
-  // 2) Entrypoint çözümleme (ID → qualifiedName; belirsizlik adaylarla
-  //    reddedilir — get_symbol_context ile aynı sözleşme).
+  // 2) Resolve entrypoint (node ID or exact qualifiedName).
   const start = resolveSymbolNode(snapshot, input.entrypoint);
 
-  // 3) Deterministik DFS yol sayımı.
+  // 3) Deterministic DFS path walk.
   const { paths, truncatedByPaths, truncatedByDepth } = walkCallPaths(
     snapshot,
     start.id,
-    input.maxDepth,
-    input.maxPaths,
+    effectiveMaxDepth,
+    effectiveMaxPaths,
   );
 
   // 4) Yollardaki node'lar: qualifiedName+id sıralı, tekrarsız
@@ -1713,25 +1850,25 @@ export function traceExecution(
     path.edges.some((edge) => edge.resolution === "heuristic"),
   ).length;
 
-  const warnings = staleWarningOf(read);
+  const warnings = [...staleWarningOf(read), ...clampedWarnings];
   if (anyUnresolved) {
     warnings.push(
-      `${String(unresolvedPathCount)} yol unresolved kenarda durduruldu; bilinmeyen kenarlar verified/heuristic kenarlardan ayrı raporlanır ve zincir o noktada biter (TŞ §4.2)`,
+      `${String(unresolvedPathCount)} path(s) stopped at an unresolved edge; unresolved edges are kept separate from verified/heuristic edges`,
     );
   }
   if (heuristicPathCount > 0) {
     warnings.push(
-      `${String(heuristicPathCount)} yol heuristic kenar içeriyor; bu yollar "heuristic" etiketlidir ve verified gibi sunulmaz`,
+      `${String(heuristicPathCount)} path(s) include heuristic edges and are labeled "heuristic" rather than verified`,
     );
   }
   if (truncatedByPaths) {
     warnings.push(
-      `yol sayısı maxPaths=${String(input.maxPaths)} sınırıyla kesildi; kesilmeyen yollar mevcut olabilir (maxPaths'i artırın, tavan results.maxPaths)`,
+      `paths truncated at maxPaths=${String(effectiveMaxPaths)}; additional paths may exist (raise maxPaths up to results.maxPaths)`,
     );
   }
   if (truncatedByDepth) {
     warnings.push(
-      `zincir maxDepth=${String(input.maxDepth)} sınırında kesildi; daha derin devam mevcut (maxDepth'i artırın, tavan results.maxDepth)`,
+      `call chain truncated at maxDepth=${String(effectiveMaxDepth)}; deeper edges exist (raise maxDepth up to results.maxDepth)`,
     );
   }
 
@@ -1748,8 +1885,8 @@ export function traceExecution(
     data: {
       workspaceId,
       entrypoint: symbolNodeOf(start),
-      maxDepth: input.maxDepth,
-      maxPaths: input.maxPaths,
+      maxDepth: effectiveMaxDepth,
+      maxPaths: effectiveMaxPaths,
       pathCount: paths.length,
       truncated: truncatedByPaths || truncatedByDepth,
       paths: paths.map((path, index) => ({

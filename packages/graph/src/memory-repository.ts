@@ -11,9 +11,11 @@ import { finalizeSnapshotGraph, type SnapshotMetaInput } from "./finalize.js";
 import type {
   FileRecord,
   GraphRepository,
+  PruneSnapshotsResult,
   PublishableState,
   SnapshotBuildInfo,
   SnapshotBuildInput,
+  SnapshotMetaSummary,
   SnapshotRead,
   WorkspaceRecord,
 } from "./repository.js";
@@ -77,9 +79,24 @@ function isNewer(candidate: PublishedEntry, than: PublishedEntry): boolean {
   return a[2] > (b[2] as number);
 }
 
+interface MemoryFileFactRecord {
+  readonly workspaceId: string;
+  readonly relativePath: string;
+  readonly contentHash: string;
+  readonly analyzerFingerprint: string;
+  readonly language: string;
+  readonly publicInterfaceHash: string;
+  readonly nodesJson: string;
+  readonly edgesJson: string;
+  readonly evidenceJson: string;
+  readonly importedPathsJson: string;
+  readonly updatedAt: string;
+}
+
 export class InMemoryGraphRepository implements GraphRepository {
   private readonly workspaces = new Map<string, WorkspaceRecord>();
   private readonly files = new Map<string, FileRecord>();
+  private readonly fileFacts = new Map<string, MemoryFileFactRecord>();
   private readonly builds = new Map<string, MemoryBuild>();
   private readonly published = new Map<string, PublishedEntry>();
   private buildSerial = 0;
@@ -285,6 +302,153 @@ export class InMemoryGraphRepository implements GraphRepository {
     }
     if (latest === undefined) return undefined;
     return { snapshot: latest.graph, stale: this.isStale(latest) };
+  }
+
+  getLatestSnapshotMeta(workspaceId: string): SnapshotMetaSummary | undefined {
+    requireNonEmptyField("workspaceId", workspaceId);
+    let latest: PublishedEntry | undefined;
+    for (const entry of this.published.values()) {
+      if (entry.graph.meta.workspaceId !== workspaceId) continue;
+      if (latest === undefined || isNewer(entry, latest)) latest = entry;
+    }
+    if (latest === undefined) return undefined;
+    const state = latest.graph.meta.state;
+    if (state !== "ready" && state !== "partial") return undefined;
+    return {
+      snapshotId: latest.graph.meta.id,
+      workspaceId: latest.graph.meta.workspaceId,
+      state,
+      revisionId: latest.graph.meta.revision.id,
+      revisionSequence: latest.graph.meta.revision.sequence,
+      configHash: latest.graph.meta.configHash,
+      analyzerFingerprint: latest.graph.meta.analyzerFingerprint,
+      createdAt: latest.graph.meta.createdAt,
+      publishedAt: latest.publishedAt,
+      nodeCount: latest.graph.nodes.length,
+      edgeCount: latest.graph.edges.length,
+      evidenceCount: latest.graph.evidence.length,
+      stale: this.isStale(latest),
+    };
+  }
+
+  pruneOldSnapshots(
+    workspaceId: string,
+    keepCount = 2,
+  ): PruneSnapshotsResult {
+    requireNonEmptyField("workspaceId", workspaceId);
+    if (!Number.isInteger(keepCount) || keepCount < 1) {
+      throw new GraphRepositoryError(
+        "graph/invalid-limit",
+        `keepCount must be a positive integer: ${String(keepCount)}`,
+      );
+    }
+    const workspacePublished: PublishedEntry[] = [];
+    for (const entry of this.published.values()) {
+      if (entry.graph.meta.workspaceId === workspaceId) {
+        workspacePublished.push(entry);
+      }
+    }
+    workspacePublished.sort((a, b) => (isNewer(a, b) ? -1 : isNewer(b, a) ? 1 : 0));
+
+    let prunedSnapshotSids = 0;
+    for (let i = keepCount; i < workspacePublished.length; i += 1) {
+      const target = workspacePublished[i]!;
+      if (this.published.delete(target.graph.meta.id)) {
+        prunedSnapshotSids += 1;
+      }
+    }
+
+    const failedBuildIds: string[] = [];
+    for (const build of this.builds.values()) {
+      if (build.state === "failed" && build.input.workspaceId === workspaceId) {
+        failedBuildIds.push(build.buildId);
+      }
+    }
+    if (failedBuildIds.length > 2) {
+      for (let i = 0; i < failedBuildIds.length - 2; i += 1) {
+        if (this.builds.delete(failedBuildIds[i]!)) {
+          prunedSnapshotSids += 1;
+        }
+      }
+    }
+    return { prunedSnapshotSids, prunedFtsRows: 0 };
+  }
+
+  upsertFileFact(record: MemoryFileFactRecord): void {
+    if (!this.workspaces.has(record.workspaceId)) {
+      throw new GraphRepositoryError(
+        "graph/unknown-workspace",
+        `Bilinmeyen workspace: ${record.workspaceId}`,
+      );
+    }
+    requireNonEmptyField("fileFact.relativePath", record.relativePath);
+    requireNonEmptyField("fileFact.contentHash", record.contentHash);
+    requireNonEmptyField("fileFact.analyzerFingerprint", record.analyzerFingerprint);
+    requireNonEmptyField("fileFact.language", record.language);
+    requireNonEmptyField("fileFact.publicInterfaceHash", record.publicInterfaceHash);
+    requireTimestamp("fileFact.updatedAt", record.updatedAt);
+    this.fileFacts.set(fileKey(record.workspaceId, record.relativePath), { ...record });
+  }
+
+  upsertFileFacts(records: readonly MemoryFileFactRecord[]): void {
+    for (const record of records) {
+      this.upsertFileFact(record);
+    }
+  }
+
+  listFileFacts(
+    workspaceId: string,
+    analyzerFingerprint?: string,
+  ): readonly MemoryFileFactRecord[] {
+    if (!this.workspaces.has(workspaceId)) {
+      throw new GraphRepositoryError(
+        "graph/unknown-workspace",
+        `Bilinmeyen workspace: ${workspaceId}`,
+      );
+    }
+    const out: MemoryFileFactRecord[] = [];
+    for (const record of this.fileFacts.values()) {
+      if (record.workspaceId !== workspaceId) continue;
+      if (
+        analyzerFingerprint !== undefined &&
+        record.analyzerFingerprint !== analyzerFingerprint
+      ) {
+        continue;
+      }
+      out.push({ ...record });
+    }
+    out.sort((a, b) =>
+      a.relativePath < b.relativePath ? -1 : a.relativePath > b.relativePath ? 1 : 0,
+    );
+    return out;
+  }
+
+  deleteFileFact(workspaceId: string, relativePath: string): boolean {
+    if (!this.workspaces.has(workspaceId)) {
+      throw new GraphRepositoryError(
+        "graph/unknown-workspace",
+        `Bilinmeyen workspace: ${workspaceId}`,
+      );
+    }
+    requireNonEmptyField("fileFact.relativePath", relativePath);
+    return this.fileFacts.delete(fileKey(workspaceId, relativePath));
+  }
+
+  clearFileFacts(workspaceId: string): number {
+    if (!this.workspaces.has(workspaceId)) {
+      throw new GraphRepositoryError(
+        "graph/unknown-workspace",
+        `Bilinmeyen workspace: ${workspaceId}`,
+      );
+    }
+    let deleted = 0;
+    for (const [key, record] of this.fileFacts.entries()) {
+      if (record.workspaceId === workspaceId) {
+        this.fileFacts.delete(key);
+        deleted += 1;
+      }
+    }
+    return deleted;
   }
 
   private requireActiveBuild(buildId: string): MemoryBuild {

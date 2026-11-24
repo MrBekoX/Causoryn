@@ -115,10 +115,31 @@ export interface RoslynAdapterOptions {
   readonly spawnProcess?: SpawnFunction;
 }
 
+/** Maximum allowed size for read-only `obj/project.assets.json` parsing (8 MB). */
+export const MAX_PROJECT_ASSETS_BYTES = 8 * 1024 * 1024;
+
+/** Maximum number of local NuGet reference directories forwarded to Roslyn. */
+export const MAX_NUGET_REFERENCE_DIRS = 64;
+
+/** Result of read-only NuGet `obj/project.assets.json` reference directory discovery. */
+export interface NugetReferenceDiscoveryResult {
+  readonly referenceDirs: readonly string[];
+  readonly warnings: readonly string[];
+}
+
 export interface AnalyzeCSharpWorkspaceInput {
   /** Opaque workspace kimliği; boş/boşluk DomainError ile reddedilir. */
   readonly workspaceId: string;
   readonly files: readonly RoslynSourceFile[];
+  /**
+   * Optional workspace root directory on disk (strictly read-only).
+   * When present and containing valid `obj/project.assets.json` file(s),
+   * local compile-time NuGet DLL directories are discovered safely and
+   * passed via `referenceDirs` to the Roslyn worker.
+   */
+  readonly rootDir?: string;
+  /** Optional explicit local reference directories (validated, bounded <= 64). */
+  readonly referenceDirs?: readonly string[];
   readonly options?: Partial<RoslynAdapterOptions>;
 }
 

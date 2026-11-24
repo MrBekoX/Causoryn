@@ -55,7 +55,10 @@ interface ClientPair {
 
 /** Context'i SDK InMemory transport üzerinden bir Client'a bağlar. */
 async function connectClient(context: CausorynContext): Promise<ClientPair> {
-  const server = createCausorynMcpServer(context);
+  const server = createCausorynMcpServer(context, {
+    toolProfile: "full",
+    outputSchemaProfile: "full",
+  });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   const client = new Client({ name: "vitest-client", version: "0.0.0" });
   await server.connect(serverTransport);
@@ -297,7 +300,11 @@ describe("Faz C MCP yüzeyi — katalog", { timeout: 30_000 }, () => {
     const pair = await connectClient(makeContext());
     try {
       const { tools } = await pair.client.listTools();
-      expect(tools.map((t) => t.name).sort()).toEqual([...TOOL_NAMES].sort());
+      const listedNames = new Set(tools.map((t) => t.name));
+      for (const legacyName of TOOL_NAMES) {
+        expect(listedNames.has(legacyName), `missing legacy tool ${legacyName}`).toBe(true);
+      }
+      expect(tools).toHaveLength(32);
       expect(TOOL_NAMES).toHaveLength(29);
       // Katalog sırası TŞ §10.2 PDF sırasını izler: trace_business_flow
       // trace_execution'dan sonra (sprint-5 D5), Faz D'nin diğer dört aracı
@@ -357,7 +364,7 @@ describe("causoryn_analyze_impact", { timeout: 30_000 }, () => {
     const pair = await connectClient(makeContext());
     try {
       const result = await callTool(pair.client, "causoryn_analyze_impact", {
-        targets: ["OrdersService.create"],
+        targets: ["OrderRepository.save"],
         depth: 1,
       });
       const envelope = expectEnvelope(result);
@@ -367,7 +374,7 @@ describe("causoryn_analyze_impact", { timeout: 30_000 }, () => {
       const data = envelope.data as Record<string, unknown>;
       const targets = data.targets as Array<Record<string, unknown>>;
       expect(targets).toHaveLength(1);
-      expect(targets[0]?.qualifiedName).toBe("OrdersService.create");
+      expect(targets[0]?.qualifiedName).toBe("OrderRepository.save");
       expect(data.unresolvedTargets).toEqual([]);
 
       const paths = data.paths as Array<Record<string, unknown>>;
@@ -381,21 +388,20 @@ describe("causoryn_analyze_impact", { timeout: 30_000 }, () => {
         expect(edges).toHaveLength(1);
         expect((path.evidenceIds as string[]).length).toBeGreaterThanOrEqual(1);
       }
-      // Etki kümesi hedefi içermez; ters kenar üzerinden gelen node'lar var.
+      // Etki kümesi hedefi içermez; ters kenar üzerinden gelen node'lar var (CONTAINS gürültüsü olmadan).
       const affected = data.affectedNodes as Array<Record<string, unknown>>;
       expect(affected.length).toBeGreaterThanOrEqual(1);
+      expect(affected.some((n) => n.kind === "Workspace")).toBe(false);
       const summary = data.summary as Record<string, unknown>;
       expect(summary.totalPaths).toBe(paths.length);
-      // depth=1'de hedefin ters kenar komşuları daha derin uzatılabilir:
-      // TŞ §20 truncated sözleşmesi gereği bu açıkça raporlanır (sessiz
-      // kırpma yok); depth=1 istenen sınırda kesilen yol truncated=true'dur.
+      // depth=1'de OrdersService.create üzerinden createOrdersRoute'a (depth=2) daha derin CALLS kenarı var:
       expect(data.truncated).toBe(true);
       const truncatedBy = data.truncatedBy as string[];
       expect(truncatedBy).toContain("maxDepth");
 
       // Determinizm (TŞ §8 invariant vi): aynı istek → aynı data.
       const repeat = await callTool(pair.client, "causoryn_analyze_impact", {
-        targets: ["OrdersService.create"],
+        targets: ["OrderRepository.save"],
         depth: 1,
       });
       expect(expectEnvelope(repeat).data).toEqual(data);

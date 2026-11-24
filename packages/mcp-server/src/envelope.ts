@@ -8,36 +8,58 @@ import {
 import { SCHEMA_VERSION } from "./version.js";
 
 /**
- * Standart envelope (TŞ v2.1 §10.1 örneği, wiki/mcp-tools.md):
+ * Standard MCP tool response envelope:
  *
  *   schemaVersion, requestId, workspaceId, snapshotId, status,
- *   coverage, warnings, data, nextCursor (+ hata için error)
+ *   coverage, warnings, data, nextCursor, error
  *
  * - status: "ok" | "partial" | "error".
- * - coverage: snapshot graph'ından türetilen çözümlenme istatistiği.
- * - error: sabit hata kodları (CAUSORYN_TOOL_ERROR_CODES); stack trace
- *   sonucun GİRMEZ (TŞ §10.1). data, AMBIGUOUS_SYMBOL'da aday listesi
- *   taşır (TŞ §10.3 requiresDisambiguation deseni), diğer hatalarda null.
- * - Her tool çıktısı SDK outputSchema ile bu şemadan doğrulanır.
+ * - coverage: graph edge resolution statistics (overall + per-language byLanguage).
+ * - error: fixed error codes (CAUSORYN_TOOL_ERROR_CODES); stack traces never leak.
  */
 
+export const LanguageCoverageSchema = z.strictObject({
+  tier: z.enum(["L0", "L1", "L2"]),
+  files: z.number().int().nonnegative(),
+  verifiedEdges: z.number().int().nonnegative(),
+  heuristicEdges: z.number().int().nonnegative(),
+  unresolvedEdges: z.number().int().nonnegative(),
+  coverageRatio: z.number().min(0).max(1),
+});
+
+export type LanguageCoverage = z.infer<typeof LanguageCoverageSchema>;
+
 export const CoverageSchema = z.strictObject({
-  /** Adapter yetenek düzeyi: TS Faz A → L2; analiz edilebilir kaynak yokken L0. */
+  /** Highest adapter capability tier across analyzed workspace symbols (L0 when no AST symbols exist). */
   tier: z.enum(["L0", "L1", "L2", "L3", "L4"]),
   resolvedEdges: z.number().int().nonnegative(),
   unresolvedEdges: z.number().int().nonnegative(),
   totalEdges: z.number().int().nonnegative(),
   coverageRatio: z.number().min(0).max(1),
+  /** Per-language tier and edge breakdown (sorted keys) so one language never masks L0 degradation in another. */
+  byLanguage: z.record(z.string(), LanguageCoverageSchema).optional(),
 });
 
 export type Coverage = z.infer<typeof CoverageSchema>;
 
+export const IndexingInProgressDataSchema = z.strictObject({
+  indexing: z.literal(true),
+  status: z.literal("indexing"),
+  jobId: z.string(),
+  progress: z.strictObject({
+    phase: z.string(),
+    completed: z.number().int().min(0),
+    total: z.number().int().positive(),
+  }),
+  retryAfterMs: z.number().int().positive(),
+});
+
+export type IndexingInProgressData = z.infer<typeof IndexingInProgressDataSchema>;
+
 export const ToolErrorSchema = z.strictObject({
   code: z.enum(CAUSORYN_TOOL_ERROR_CODES),
   message: z.string(),
-  /** TŞ §10.1: "Tekrar denenebilirlik ... belirtilir." */
   retryable: z.boolean(),
-  /** TŞ §10.1: "... ve kullanici aksiyonu belirtilir." */
   userAction: z.string().min(1),
 });
 
@@ -56,9 +78,11 @@ export const EnvelopeSchema = z.strictObject({
 
 export type Envelope = z.infer<typeof EnvelopeSchema>;
 
-/** Per-tool output şeması: envelope + tool'a özgü data şeması. */
+/** Per-tool output schema: envelope + tool-specific data schema (or indexing-in-progress / null). */
 export function envelopeOutputSchema(dataSchema: z.ZodType): z.ZodType {
-  return EnvelopeSchema.extend({ data: z.union([dataSchema, z.null()]) });
+  return EnvelopeSchema.extend({
+    data: z.union([dataSchema, IndexingInProgressDataSchema, z.null()]),
+  });
 }
 
 export interface EnvelopeInput {
@@ -80,7 +104,7 @@ export interface EnvelopeInput {
     | null;
 }
 
-/** Envelope nesnesi kurar; tüm alanlar her yanıtta mevcuttur. */
+/** Builds a normalized envelope with all required fields populated. */
 export function buildEnvelope(input: EnvelopeInput): Envelope {
   return {
     schemaVersion: SCHEMA_VERSION,
@@ -104,7 +128,7 @@ export function buildEnvelope(input: EnvelopeInput): Envelope {
   };
 }
 
-/** Hata envelope'u: code + mesaj + sabit retryable/userAction rehberi. */
+/** Builds a standardized error envelope with deterministic retryable/userAction guidance. */
 export function errorEnvelope(
   requestId: string,
   workspaceId: string | null,

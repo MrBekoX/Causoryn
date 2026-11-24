@@ -1439,6 +1439,11 @@ describe(
       writeFileSync(path.join(pkgDir, "LICENSE"), "MIT License\n", "utf8");
       writeFileSync(path.join(pkgDir, "dist", "index.js"), "export {};\n", "utf8");
       writeFileSync(
+        path.join(pkgDir, "dist", "index-worker.mjs"),
+        "export {};\n",
+        "utf8",
+      );
+      writeFileSync(
         path.join(pkgDir, "dist", "mcp-server.mjs.LEGAL.txt"),
         "/*! legal notices */\n",
         "utf8",

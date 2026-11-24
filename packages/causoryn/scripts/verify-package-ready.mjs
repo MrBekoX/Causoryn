@@ -114,6 +114,7 @@ export function verifyPackageReady(pkgDir = DEFAULT_PKG_DIR) {
     path.join(distDir, "index.js"),
     path.join(distDir, "mcp-server.mjs"),
     path.join(distDir, "mcp-server.mjs.LEGAL.txt"),
+    path.join(distDir, "index-worker.mjs"),
     path.join(distDir, "bundle-manifest.json"),
     path.join(distDir, "node_modules", "better-sqlite3", "LICENSE"),
     path.join(distDir, "typescript-lib", "lib.es2022.full.d.ts"),

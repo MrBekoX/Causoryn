@@ -25,14 +25,13 @@ import {
   type TypeScriptAdapterDiagnostic,
   type TypeScriptAdapterInput,
   type TypeScriptAdapterResult,
-  type TypeScriptAnalysisRun,
+  type TypeScriptAnalysisRun, type TypeScriptIncrementalAnalysisRun, type TypeScriptIncrementalState,
   type TsAdapterSourceFile,
 } from "./types.js";
 import {
-  buildProgramCompilerOptions,
-  expandCandidatePaths,
-  loadWorkspaceTsConfigs,
-  resolveScopedModuleName,
+  buildProgramCompilerOptions, expandCandidatePaths,
+  loadWorkspacePackages, loadWorkspaceTsConfigs,
+  resolveScopedModuleName, type ScopedTsConfig, type WorkspacePackageManifest,
 } from "./tsconfig-loader.js";
 
 /**
@@ -391,8 +390,8 @@ interface AnalysisContext {
   readonly entries: Map<string, SourceEntry>;
   readonly entryByRelativePath: Map<string, SourceEntry>;
   readonly assembler: GraphAssembler;
-  /** Bildirim sembolü → node kaydı (registry). */
   readonly registry: Map<ts.Symbol, NodeRecord>;
+  readonly declarationNodes: Map<ts.ClassLikeDeclaration | ts.InterfaceDeclaration, NodeRecord>;
   /** Test callback fonksiyonu → Test node kaydı (yalnızca test-affinity dosyalar). */
   readonly testCallbacks: Map<ts.Node, NodeRecord>;
   /** BDD sarmalayıcı çağrıları (`describe`/`it`/`test`); sahte CALLS kenarı üretmez. */
@@ -405,7 +404,7 @@ interface AnalysisContext {
 /* ------------------------------------------------------------------ */
 
 /** Tek analiz koşusunun çıktısı: ana sonuç + framework linker katkısı. */
-type AnalysisRun = TypeScriptAnalysisRun;
+type AnalysisRun = TypeScriptIncrementalAnalysisRun;
 
 function runAnalysis(input: TypeScriptAdapterInput): AnalysisRun {
   if (input.workspaceId.trim().length === 0) {
@@ -449,11 +448,17 @@ function runAnalysis(input: TypeScriptAdapterInput): AnalysisRun {
     a.relativePath < b.relativePath ? -1 : 1,
   );
 
-  // 1.5) Güvenli, salt-okunur tsconfig.json / jsconfig.json yüklemesi.
+  // 1.5) Güvenli, salt-okunur tsconfig.json / jsconfig.json + monorepo package.json yüklemesi.
   const loadedConfigs = loadWorkspaceTsConfigs(
     rootPosix,
     input.configFiles,
     input.configFiles === undefined ? input.rootDir : undefined,
+    sortedEntries.map((entry) => entry.relativePath),
+  );
+  const loadedPackages = loadWorkspacePackages(
+    rootPosix,
+    input.packageFiles,
+    input.packageFiles === undefined ? input.rootDir : undefined,
     sortedEntries.map((entry) => entry.relativePath),
   );
   const compilerOptions = buildProgramCompilerOptions(loadedConfigs.configs);
@@ -463,10 +468,7 @@ function runAnalysis(input: TypeScriptAdapterInput): AnalysisRun {
    * SEC-04: CompilerHost + ModuleResolutionHost disk fallback'i kesinlikle
    * sınırlandırılır — `entries` (WorkspaceAccessPolicy izinli kaynaklar)
    * dışındaki workspace dosyaları (.env.js, ../outside-secret.js, symlink,
-   * bundle vb.) diskten ASLA okunmaz. Disk erişimi yalnızca:
-   * (a) TypeScript yerleşik lib*.d.ts dizini (`resolvedLibDir`), ve
-   * (b) `rootPosix` içindeki `node_modules` altındaki `.d.ts`/`.d.mts`/
-   *     `.d.cts`/`package.json` dosyaları için izin verilir.
+   * bundle vb.) diskten ASLA okunmaz.
    */
   const resolutionHost = configureConfinedCompilerHost(
     host,
@@ -474,7 +476,6 @@ function runAnalysis(input: TypeScriptAdapterInput): AnalysisRun {
     rootPosix,
     resolvedLibDir,
   );
-  // Her containingFile için en yakın ata tsconfig/jsconfig ile modül çözümleme.
   const resolveOne = (
     moduleName: string,
     containingFile: string,
@@ -485,6 +486,7 @@ function runAnalysis(input: TypeScriptAdapterInput): AnalysisRun {
     ...(resolvedLibDir === undefined ? {} : { allowedLibDir: resolvedLibDir }),
     programOptions: compilerOptions,
     configs: loadedConfigs.configs,
+    workspacePackages: loadedPackages.packages,
     resolutionHost,
     entries,
   });
@@ -502,9 +504,11 @@ function runAnalysis(input: TypeScriptAdapterInput): AnalysisRun {
   host.resolveModuleNames = resolveModuleNamesHook;
   host.resolveModuleNameLiterals = resolveModuleNameLiteralsHook;
 
-  // 3) Program + TypeChecker (TŞ §7: TypeScript Compiler API).
-  const rootNames = sortedEntries.map((entry) => entry.absolutePath);
-  const program = ts.createProgram({ rootNames, options: compilerOptions, host });
+  // 3) Program + TypeChecker (TŞ §7: TypeScript Compiler API) + incremental oldProgram.
+  const { program, optionsSignature } = createProgramWithIncrementalReuse({
+    input, rootPosix, compilerOptions, loadedConfigs: loadedConfigs.configs,
+    workspacePackages: loadedPackages.packages, host, entries, sortedEntries, resolvedLibDir,
+  });
   const checker = program.getTypeChecker();
   for (const sourceFile of program.getSourceFiles()) {
     const hit = entries.get(canonicalPath(sourceFile.fileName));
@@ -512,7 +516,7 @@ function runAnalysis(input: TypeScriptAdapterInput): AnalysisRun {
   }
 
   const assembler = new GraphAssembler(input.workspaceId);
-  for (const warning of loadedConfigs.warnings) assembler.addWarning(warning);
+  for (const warning of [...loadedConfigs.warnings, ...loadedPackages.warnings]) assembler.addWarning(warning);
   const context: AnalysisContext = {
     workspaceId: input.workspaceId,
     compilerOptions,
@@ -523,6 +527,7 @@ function runAnalysis(input: TypeScriptAdapterInput): AnalysisRun {
     entryByRelativePath,
     assembler,
     registry: new Map<ts.Symbol, NodeRecord>(),
+    declarationNodes: new Map<ts.ClassLikeDeclaration | ts.InterfaceDeclaration, NodeRecord>(),
     testCallbacks: new Map<ts.Node, NodeRecord>(),
     testBlockCalls: new Set<ts.CallExpression>(),
     framework: {
@@ -619,6 +624,9 @@ function runAnalysis(input: TypeScriptAdapterInput): AnalysisRun {
     );
   }
   for (const entry of sortedEntries) {
+    runPhase(entry, (sourceFile) => extractHeritageClauses(context, entry, sourceFile));
+  }
+  for (const entry of sortedEntries) {
     runPhase(entry, (sourceFile) => extractImports(context, entry, sourceFile));
   }
 
@@ -696,39 +704,25 @@ function runAnalysis(input: TypeScriptAdapterInput): AnalysisRun {
     frameworkLinkers: TS_ADAPTER_FRAMEWORK_LINKERS,
   };
 
-  return {
-    result: {
-      analyzerId: TS_ADAPTER_ANALYZER_ID,
-      analyzerVersion: TS_ADAPTER_VERSION,
-      state: diagnostics.length > 0 ? "partial" : "ready",
-      capabilities,
-      coverageRatio,
-      unsupportedConstructs: UNSUPPORTED_CONSTRUCTS,
-      warnings: assembler.warnings,
-      diagnostics,
-      nodes: nodeInputs,
-      edges: edgeInputs,
-    },
-    framework: {
-      detections: [...context.framework.detections].sort((a, b) =>
-        a.framework < b.framework ? -1 : 1,
-      ),
-      nodes: frameworkNodes,
-      edges: [...context.framework.edges].sort(byEdgeKey).map(edgeRecordToInput),
-      diagnostics: [...context.framework.diagnostics].sort((a, b) => {
-        if (a.relativePath !== b.relativePath) {
-          return a.relativePath < b.relativePath ? -1 : 1;
-        }
-        if (a.code !== b.code) return a.code < b.code ? -1 : 1;
-        return a.message < b.message ? -1 : a.message > b.message ? 1 : 0;
-      }),
-    },
-  };
+  return buildAnalysisRunWithIncrementalState({
+    diagnostics,
+    capabilities,
+    coverageRatio,
+    assembler,
+    nodeInputs,
+    edgeInputs,
+    context,
+    frameworkNodes,
+    byEdgeKey,
+    program,
+    sortedEntries,
+    optionsSignature,
+  });
 }
 
 /**
  * TypeScript Language Adapter ana girişi: tam graph (framework kenarları
- * dahil) döner.
+ * dahil) döner. `nextIncrementalState` non-enumerable olarak eklenir.
  */
 export function analyzeTypeScriptProgram(
   input: TypeScriptAdapterInput,
@@ -766,7 +760,11 @@ export function extractFrameworkEdges(
 export function analyzeTypeScriptProgramWithFrameworks(
   input: TypeScriptAdapterInput,
 ): TypeScriptAnalysisRun {
-  return runAnalysis(input);
+  const run = runAnalysis(input);
+  return attachNonEnumerableIncrementalState(
+    { result: run.result, framework: run.framework },
+    run.nextIncrementalState,
+  );
 }
 
 /* ------------------------------------------------------------------ */
@@ -868,7 +866,7 @@ function extractDeclarations(
   };
 
   const registerMembers = (
-    statement: ts.ClassDeclaration | ts.InterfaceDeclaration,
+    statement: ts.ClassLikeDeclaration | ts.InterfaceDeclaration,
     ownerRecord: NodeRecord,
     ownerKind: NodeKind,
   ): void => {
@@ -905,6 +903,7 @@ function extractDeclarations(
         language: entry.language,
       });
       registerWithSymbol(symbolOfDeclaration(statement), record);
+      context.declarationNodes.set(statement, record);
       addContains(
         fileNode,
         record,
@@ -940,6 +939,7 @@ function extractDeclarations(
         // CommonJS import bağlaması (`const express = require("express")`)
         // yerel Handler bildirimi değildir.
         if (isStaticRequireCall(declaration.initializer) !== undefined) continue;
+        if (tryRegisterClassExpression(context, entry, statement, declaration, fileNode, addContains, registerWithSymbol, registerMembers)) continue;
         // Call signature'lı tip = handler değeri → Handler node'u
         // (ör. const ordersRoute = createOrdersRoute(ordersService)).
         const type = checker.getTypeAtLocation(declaration.name);
@@ -1413,7 +1413,7 @@ function callerRecordForFunctionLike(
     const ownerName =
       (ts.isClassDeclaration(owner) || ts.isInterfaceDeclaration(owner))
         ? owner.name?.text
-        : undefined;
+        : resolveClassExpressionOwnerName(context, owner);
     const qualifiedName =
       ownerName === undefined ? name.text : `${ownerName}.${name.text}`;
     const kind: NodeKind = ts.isMethodDeclaration(node) ? "Method" : "Function";
@@ -1548,8 +1548,8 @@ function deriveNodeRecord(
 }
 
 function inferNodeKind(declaration: ts.Declaration): NodeKind | undefined {
-  if (ts.isClassDeclaration(declaration)) return "Class";
-  if (ts.isInterfaceDeclaration(declaration)) return "Interface";
+  if (ts.isClassDeclaration(declaration) || ts.isClassExpression(declaration)) return "Class";
+  if (ts.isInterfaceDeclaration(declaration) || ts.isTypeAliasDeclaration(declaration)) return ts.isInterfaceDeclaration(declaration) ? "Interface" : "Type";
   if (ts.isFunctionDeclaration(declaration)) return "Function";
   if (ts.isFunctionExpression(declaration) || ts.isArrowFunction(declaration)) return inferCjsExportNodeKind(declaration);
   if (
@@ -2859,4 +2859,531 @@ function inferCjsExportNodeKind(
     return undefined;
   }
   return matchCjsExportAssignment(parent)?.kind;
+}
+
+/* ------------------------------------------------------------------ */
+/* Monorepo Workspace, CHA (INHERITS/IMPLEMENTS) & Incremental Reuse   */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Incremental entry point returning `{ result, framework, nextIncrementalState }`
+ * with enumerable `nextIncrementalState` for reusing unchanged `ts.SourceFile`
+ * ASTs via `ts.createProgram(..., oldProgram)` on subsequent runs.
+ */
+export function analyzeTypeScriptProgramIncremental(
+  input: TypeScriptAdapterInput,
+): TypeScriptIncrementalAnalysisRun {
+  return runAnalysis(input);
+}
+
+function computeIncrementalOptionsSignature(
+  rootPosix: string,
+  compilerOptions: ts.CompilerOptions,
+  configs: readonly ScopedTsConfig[],
+  workspacePackages: ReadonlyMap<string, WorkspacePackageManifest>,
+): string {
+  const normalizedConfigs = configs.map((cfg) => ({
+    dirPrefix: cfg.dirPrefix,
+    configRelativePath: cfg.configRelativePath,
+    baseUrl: cfg.baseUrl ?? null,
+    pathsBasePath: cfg.pathsBasePath ?? null,
+    paths: cfg.paths === undefined ? null : [...cfg.paths.entries()],
+    jsx: cfg.jsx ?? null,
+    moduleResolution: cfg.moduleResolution ?? null,
+    module: cfg.module ?? null,
+    target: cfg.target ?? null,
+    experimentalDecorators: cfg.experimentalDecorators ?? null,
+    verbatimModuleSyntax: cfg.verbatimModuleSyntax ?? null,
+  }));
+  const normalizedPackages = [...workspacePackages.entries()]
+    .sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0))
+    .map(([name, pkg]) => ({
+      name,
+      dirPrefix: pkg.dirPrefix,
+      manifestRelativePath: pkg.manifestRelativePath,
+      exports: pkg.exports ?? null,
+      main: pkg.main ?? null,
+      module: pkg.module ?? null,
+      types: pkg.types ?? null,
+      typings: pkg.typings ?? null,
+    }));
+  const signaturePayload = {
+    rootPosix,
+    options: {
+      strict: compilerOptions.strict ?? null,
+      allowJs: compilerOptions.allowJs ?? null,
+      checkJs: compilerOptions.checkJs ?? null,
+      jsx: compilerOptions.jsx ?? null,
+      target: compilerOptions.target ?? null,
+      module: compilerOptions.module ?? null,
+      moduleResolution: compilerOptions.moduleResolution ?? null,
+      experimentalDecorators: compilerOptions.experimentalDecorators ?? null,
+      verbatimModuleSyntax: compilerOptions.verbatimModuleSyntax ?? null,
+      baseUrl: compilerOptions.baseUrl ?? null,
+    },
+    configs: normalizedConfigs,
+    workspacePackages: normalizedPackages,
+  };
+  return sha256Hex(utf8Encode(JSON.stringify(signaturePayload)));
+}
+
+function isCompilerOptionsCompatibleForReuse(
+  prev: ts.CompilerOptions,
+  next: ts.CompilerOptions,
+): boolean {
+  return (
+    prev.target === next.target &&
+    prev.jsx === next.jsx &&
+    prev.module === next.module &&
+    prev.moduleResolution === next.moduleResolution &&
+    prev.strict === next.strict &&
+    prev.allowJs === next.allowJs &&
+    prev.checkJs === next.checkJs &&
+    prev.experimentalDecorators === next.experimentalDecorators &&
+    prev.verbatimModuleSyntax === next.verbatimModuleSyntax
+  );
+}
+
+function configureIncrementalSourceFileReuse(
+  host: ts.CompilerHost,
+  oldProgram: ts.Program,
+  entries: ReadonlyMap<string, SourceEntry>,
+  previousSourceHashes: ReadonlyMap<string, string> | undefined,
+  resolvedLibDir: string | undefined,
+): void {
+  const baseGetSourceFile = host.getSourceFile.bind(host);
+  const oldSourceFilesByKey = new Map<string, ts.SourceFile>();
+  for (const sf of oldProgram.getSourceFiles()) {
+    oldSourceFilesByKey.set(canonicalPath(sf.fileName), sf);
+  }
+  const libDirKeyWithSlash =
+    resolvedLibDir === undefined
+      ? undefined
+      : (() => {
+          const k = canonicalPath(resolvedLibDir);
+          return k.endsWith("/") ? k : `${k}/`;
+        })();
+
+  const tryReuseOldSourceFile = (
+    fileName: string,
+    shouldCreateNewSourceFile?: boolean,
+  ): ts.SourceFile | undefined => {
+    if (shouldCreateNewSourceFile) return undefined;
+    const key = canonicalPath(fileName);
+    const oldSf = oldSourceFilesByKey.get(key);
+    if (oldSf === undefined) return undefined;
+
+    const entry = entries.get(key);
+    if (entry !== undefined) {
+      if (previousSourceHashes !== undefined) {
+        return previousSourceHashes.get(key) === entry.sourceHash ? oldSf : undefined;
+      }
+      return oldSf.text === entry.content ? oldSf : undefined;
+    }
+
+    if (libDirKeyWithSlash !== undefined && key.startsWith(libDirKeyWithSlash)) {
+      return oldSf;
+    }
+    return undefined;
+  };
+
+  host.getSourceFile = (
+    fileName,
+    languageVersionOrOptions,
+    onError,
+    shouldCreateNewSourceFile,
+  ) =>
+    tryReuseOldSourceFile(fileName, shouldCreateNewSourceFile) ??
+    baseGetSourceFile(
+      fileName,
+      languageVersionOrOptions,
+      onError,
+      shouldCreateNewSourceFile,
+    );
+
+  if (host.getSourceFileByPath !== undefined) {
+    const baseGetSourceFileByPath = host.getSourceFileByPath.bind(host);
+    host.getSourceFileByPath = (
+      fileName,
+      pathArg,
+      languageVersionOrOptions,
+      onError,
+      shouldCreateNewSourceFile,
+    ) =>
+      tryReuseOldSourceFile(fileName, shouldCreateNewSourceFile) ??
+      baseGetSourceFileByPath(
+        fileName,
+        pathArg,
+        languageVersionOrOptions,
+        onError,
+        shouldCreateNewSourceFile,
+      );
+  }
+}
+
+function createProgramWithIncrementalReuse(params: {
+  readonly input: TypeScriptAdapterInput;
+  readonly rootPosix: string;
+  readonly compilerOptions: ts.CompilerOptions;
+  readonly loadedConfigs: readonly ScopedTsConfig[];
+  readonly workspacePackages: ReadonlyMap<string, WorkspacePackageManifest>;
+  readonly host: ts.CompilerHost;
+  readonly entries: ReadonlyMap<string, SourceEntry>;
+  readonly sortedEntries: readonly SourceEntry[];
+  readonly resolvedLibDir: string | undefined;
+}): { readonly program: ts.Program; readonly optionsSignature: string } {
+  const {
+    input,
+    rootPosix,
+    compilerOptions,
+    loadedConfigs,
+    workspacePackages,
+    host,
+    entries,
+    sortedEntries,
+    resolvedLibDir,
+  } = params;
+  const optionsSignature = computeIncrementalOptionsSignature(
+    rootPosix,
+    compilerOptions,
+    loadedConfigs,
+    workspacePackages,
+  );
+  let oldProgram: ts.Program | undefined;
+  let previousSourceHashes: ReadonlyMap<string, string> | undefined;
+  if (
+    input.incrementalState !== undefined &&
+    input.incrementalState.optionsSignature === optionsSignature
+  ) {
+    oldProgram = input.incrementalState.program;
+    previousSourceHashes = input.incrementalState.sourceHashes;
+  } else if (
+    input.previousProgram !== undefined &&
+    isCompilerOptionsCompatibleForReuse(
+      input.previousProgram.getCompilerOptions(),
+      compilerOptions,
+    )
+  ) {
+    oldProgram = input.previousProgram;
+  }
+  if (oldProgram !== undefined) {
+    configureIncrementalSourceFileReuse(
+      host,
+      oldProgram,
+      entries,
+      previousSourceHashes,
+      resolvedLibDir,
+    );
+  }
+  const rootNames = sortedEntries.map((entry) => entry.absolutePath);
+  const program = ts.createProgram({
+    rootNames,
+    options: compilerOptions,
+    host,
+    ...(oldProgram === undefined ? {} : { oldProgram }),
+  });
+  return { program, optionsSignature };
+}
+
+function attachNonEnumerableIncrementalState<T extends object>(
+  target: T,
+  state: TypeScriptIncrementalState,
+): T {
+  Object.defineProperty(target, "nextIncrementalState", {
+    value: state,
+    enumerable: false,
+    writable: false,
+    configurable: true,
+  });
+  return target;
+}
+
+function buildAnalysisRunWithIncrementalState(params: {
+  readonly diagnostics: TypeScriptAdapterDiagnostic[];
+  readonly capabilities: TypeScriptAdapterCapabilities;
+  readonly coverageRatio: number;
+  readonly assembler: GraphAssembler;
+  readonly nodeInputs: SnapshotNodeInput[];
+  readonly edgeInputs: SnapshotEdgeInput[];
+  readonly context: AnalysisContext;
+  readonly frameworkNodes: SnapshotNodeInput[];
+  readonly byEdgeKey: (a: EdgeRecord, b: EdgeRecord) => number;
+  readonly program: ts.Program;
+  readonly sortedEntries: readonly SourceEntry[];
+  readonly optionsSignature: string;
+}): AnalysisRun {
+  const {
+    diagnostics,
+    capabilities,
+    coverageRatio,
+    assembler,
+    nodeInputs,
+    edgeInputs,
+    context,
+    frameworkNodes,
+    byEdgeKey,
+    program,
+    sortedEntries,
+    optionsSignature,
+  } = params;
+
+  const sourceHashes = new Map<string, string>();
+  for (const entry of sortedEntries) {
+    sourceHashes.set(entry.absoluteKey, entry.sourceHash);
+  }
+  const nextIncrementalState: TypeScriptIncrementalState = {
+    program,
+    sourceHashes,
+    optionsSignature,
+  };
+
+  const result: TypeScriptAdapterResult = attachNonEnumerableIncrementalState(
+    {
+      analyzerId: TS_ADAPTER_ANALYZER_ID,
+      analyzerVersion: TS_ADAPTER_VERSION,
+      state: diagnostics.length > 0 ? "partial" : "ready",
+      capabilities,
+      coverageRatio,
+      unsupportedConstructs: UNSUPPORTED_CONSTRUCTS,
+      warnings: assembler.warnings,
+      diagnostics,
+      nodes: nodeInputs,
+      edges: edgeInputs,
+    },
+    nextIncrementalState,
+  );
+
+  const framework: FrameworkEdgesResult = {
+    detections: [...context.framework.detections].sort((a, b) =>
+      a.framework < b.framework ? -1 : 1,
+    ),
+    nodes: frameworkNodes,
+    edges: [...context.framework.edges].sort(byEdgeKey).map(edgeRecordToInput),
+    diagnostics: [...context.framework.diagnostics].sort((a, b) => {
+      if (a.relativePath !== b.relativePath) {
+        return a.relativePath < b.relativePath ? -1 : 1;
+      }
+      if (a.code !== b.code) return a.code < b.code ? -1 : 1;
+      return a.message < b.message ? -1 : a.message > b.message ? 1 : 0;
+    }),
+  };
+
+  return {
+    result,
+    framework,
+    nextIncrementalState,
+  };
+}
+
+function unwrapParenthesizedExpression(
+  expr: ts.Expression | undefined,
+): ts.Expression | undefined {
+  let current = expr;
+  while (current !== undefined && ts.isParenthesizedExpression(current)) {
+    current = current.expression;
+  }
+  return current;
+}
+
+function tryRegisterClassExpression(
+  context: AnalysisContext,
+  entry: SourceEntry,
+  statement: ts.VariableStatement,
+  declaration: ts.VariableDeclaration,
+  fileNode: NodeRecord,
+  addContains: (from: NodeRecord, to: NodeRecord, node: ts.Node, rationale: string) => void,
+  registerWithSymbol: (symbol: ts.Symbol | undefined, record: NodeRecord) => void,
+  registerMembers: (
+    stmt: ts.ClassLikeDeclaration | ts.InterfaceDeclaration,
+    ownerRecord: NodeRecord,
+    ownerKind: NodeKind,
+  ) => void,
+): boolean {
+  if (!ts.isIdentifier(declaration.name)) return false;
+  const unwrappedInit = unwrapParenthesizedExpression(declaration.initializer);
+  if (unwrappedInit === undefined || !ts.isClassExpression(unwrappedInit)) return false;
+
+  const { assembler, checker } = context;
+  const classRecord = assembler.ensureNode({
+    kind: "Class",
+    qualifiedName: declaration.name.text,
+    relativePath: entry.relativePath,
+    language: entry.language,
+  });
+  registerWithSymbol(checker.getSymbolAtLocation(declaration.name), classRecord);
+  if (unwrappedInit.name !== undefined) {
+    registerWithSymbol(checker.getSymbolAtLocation(unwrappedInit.name), classRecord);
+  }
+  context.declarationNodes.set(unwrappedInit, classRecord);
+  addContains(
+    fileNode,
+    classRecord,
+    statement,
+    `CONTAINS: ${entry.relativePath} dosyasındaki ${declaration.name.text} class ifadesi AST span kanıtıyla eşlendi.`,
+  );
+  registerMembers(unwrappedInit, classRecord, "Class");
+  return true;
+}
+
+function resolveClassExpressionOwnerName(
+  context: AnalysisContext,
+  owner: ts.Node,
+): string | undefined {
+  if (!ts.isClassExpression(owner)) return undefined;
+  return context.declarationNodes.get(owner)?.node.qualifiedName ?? owner.name?.text;
+}
+
+function unwrapAliasSymbol(
+  checker: ts.TypeChecker,
+  symbol: ts.Symbol | undefined,
+): ts.Symbol | undefined {
+  if (symbol === undefined) return undefined;
+  let current = symbol;
+  let depth = 0;
+  while ((current.flags & ts.SymbolFlags.Alias) !== 0 && depth < 16) {
+    const aliased = checker.getAliasedSymbol(current);
+    if (aliased === undefined || aliased === current || aliased.flags === 0) {
+      break;
+    }
+    current = aliased;
+    depth += 1;
+  }
+  return current;
+}
+
+function extractHeritageClauses(
+  context: AnalysisContext,
+  entry: SourceEntry,
+  sourceFile: ts.SourceFile,
+): void {
+  const { assembler, checker } = context;
+
+  const emitHeritageEdge = (
+    ownerRecord: NodeRecord,
+    edgeKind: "INHERITS" | "IMPLEMENTS",
+    heritageType: ts.ExpressionWithTypeArguments,
+  ): void => {
+    const rawSym = checker.getSymbolAtLocation(heritageType.expression);
+    const exprSym = unwrapAliasSymbol(checker, rawSym);
+    const exprDecl = exprSym?.getDeclarations()?.[0];
+
+    let targetRecord = resolveSymbolRecord(context, entry, exprSym, exprDecl);
+    let resolvedSym = exprSym;
+    let resolvedDecl = exprDecl;
+
+    if (targetRecord === undefined) {
+      const resolvedType = checker.getTypeAtLocation(heritageType);
+      const isTrivialErrorType =
+        (resolvedType.flags &
+          (ts.TypeFlags.Any | ts.TypeFlags.Unknown | ts.TypeFlags.Never)) !==
+        0;
+      if (!isTrivialErrorType) {
+        const typeSym = unwrapAliasSymbol(
+          checker,
+          resolvedType.getSymbol() ?? resolvedType.aliasSymbol,
+        );
+        const typeDecl = typeSym?.getDeclarations()?.[0];
+        if (typeSym !== undefined) {
+          targetRecord = resolveSymbolRecord(context, entry, typeSym, typeDecl);
+          if (targetRecord !== undefined || (typeSym.getDeclarations()?.length ?? 0) > 0) {
+            resolvedSym = typeSym;
+            resolvedDecl = typeDecl;
+          }
+        }
+      }
+    }
+
+    if (targetRecord !== undefined) {
+      if (targetRecord.key === ownerRecord.key) return;
+      assembler.addEdge({
+        kind: edgeKind,
+        from: ownerRecord,
+        to: targetRecord,
+        resolution: "verified",
+        evidence: evidenceFor(
+          entry,
+          sourceFile,
+          heritageType,
+          "semantic-symbol",
+          `${edgeKind}: ${ownerRecord.node.qualifiedName} bildirimi TypeChecker ile ${targetRecord.node.qualifiedName} sembolüne çözümlendi (verified).`,
+        ),
+      });
+      return;
+    }
+
+    if (
+      resolvedSym !== undefined &&
+      (resolvedSym.flags & ts.SymbolFlags.Alias) === 0 &&
+      (resolvedSym.getDeclarations()?.length ?? 0) > 0 &&
+      !isInternalDeclarationOrSymbol(context, resolvedSym, resolvedDecl)
+    ) {
+      const externalName = externalQualifiedName(resolvedSym, resolvedDecl);
+      const externalNode = assembler.ensureNode({
+        kind: "UnknownExternal",
+        qualifiedName: externalName,
+      });
+      assembler.addEdge({
+        kind: edgeKind,
+        from: ownerRecord,
+        to: externalNode,
+        resolution: "verified",
+        evidence: evidenceFor(
+          entry,
+          sourceFile,
+          heritageType,
+          "semantic-symbol",
+          `${edgeKind}: ${ownerRecord.node.qualifiedName} bildirimi analiz seti dışındaki ${externalName} sembolüne çözümlendi; dış kaynak açık UnknownExternal node olarak temsil edildi.`,
+        ),
+      });
+      return;
+    }
+
+    const rawText = heritageType.expression.getText(sourceFile).trim();
+    if (rawText.length === 0) return;
+    const unresolvedNode = assembler.ensureNode({
+      kind: "UnknownExternal",
+      qualifiedName: rawText,
+    });
+    assembler.addEdge({
+      kind: edgeKind,
+      from: ownerRecord,
+      to: unresolvedNode,
+      resolution: "unresolved",
+      evidence: evidenceFor(
+        entry,
+        sourceFile,
+        heritageType,
+        "ast-span",
+        `${edgeKind}: ${ownerRecord.node.qualifiedName} içindeki '${rawText}' kalıtım hedefi çözümlenemedi; açık UnknownExternal node üzerinde unresolved işaretlendi.`,
+      ),
+    });
+    assembler.addWarning(
+      `${edgeKind} çözümlenemedi: ${entry.relativePath} '${ownerRecord.node.qualifiedName}' -> '${rawText}' (unresolved, UnknownExternal node üretildi)`,
+    );
+  };
+
+  const walk = (node: ts.Node): void => {
+    if (
+      ts.isClassDeclaration(node) ||
+      ts.isClassExpression(node) ||
+      ts.isInterfaceDeclaration(node)
+    ) {
+      const clauses = node.heritageClauses;
+      const ownerRecord = context.declarationNodes.get(node);
+      if (clauses !== undefined && clauses.length > 0 && ownerRecord !== undefined) {
+        for (const clause of clauses) {
+          const edgeKind: "INHERITS" | "IMPLEMENTS" =
+            clause.token === ts.SyntaxKind.ImplementsKeyword
+              ? "IMPLEMENTS"
+              : "INHERITS";
+          for (const heritageType of clause.types) {
+            emitHeritageEdge(ownerRecord, edgeKind, heritageType);
+          }
+        }
+      }
+    }
+    ts.forEachChild(node, walk);
+  };
+
+  walk(sourceFile);
 }

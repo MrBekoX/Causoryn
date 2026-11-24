@@ -1,3 +1,4 @@
+using System.Reflection.PortableExecutable;
 using System.Text.RegularExpressions;
 
 namespace Causoryn.RoslynWorker;
@@ -25,10 +26,12 @@ public static class ReferenceResolver
 {
     private static readonly Regex VersionDirRegex = new("^\\d+\\.\\d+\\.\\d+$", RegexOptions.Compiled);
     private static readonly Regex TfmDirRegex = new("^net(\\d+)\\.(\\d+)$", RegexOptions.Compiled);
+    private const int MaxExtraReferenceDirs = 64;
+    private const int MaxExtraReferenceDlls = 512;
 
     /**
      * Referans DLL yollarını döndürür. `workerTfm` örn. "net10.0".
-     * Bulunamayan kaynaklar için `warnings` içine açık not yazılır.
+     * Bulunamayan veya güvensiz (UNC/symlink) kaynaklar için `warnings` içine açık not yazılır.
      */
     public static IReadOnlyList<string> Resolve(
         IReadOnlyList<string>? extraDirs,
@@ -36,22 +39,11 @@ public static class ReferenceResolver
         ICollection<string> warnings)
     {
         var paths = new SortedSet<string>(StringComparer.Ordinal);
-
-        foreach (var dir in extraDirs ?? Array.Empty<string>())
-        {
-            if (Directory.Exists(dir))
-            {
-                AddDlls(dir, paths);
-            }
-            else
-            {
-                warnings.Add($"referenceDirs girdisi yok: {dir} (atlandı)");
-            }
-        }
+        var seenFileNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
         var dotnetRoots = CandidateDotNetRoots();
-        var bclAdded = TryAddRefPack(dotnetRoots, "Microsoft.NETCore.App.Ref", workerTfm, paths, warnings);
-        var aspNetCoreAdded = TryAddRefPack(dotnetRoots, "Microsoft.AspNetCore.App.Ref", workerTfm, paths, warnings);
+        var bclAdded = TryAddRefPack(dotnetRoots, "Microsoft.NETCore.App.Ref", workerTfm, paths, seenFileNames, warnings);
+        var aspNetCoreAdded = TryAddRefPack(dotnetRoots, "Microsoft.AspNetCore.App.Ref", workerTfm, paths, seenFileNames, warnings);
 
         if (!bclAdded)
         {
@@ -59,6 +51,7 @@ public static class ReferenceResolver
             if (!string.IsNullOrEmpty(coreLib) && File.Exists(coreLib))
             {
                 paths.Add(coreLib);
+                seenFileNames.Add(Path.GetFileName(coreLib));
                 warnings.Add(
                     "Microsoft.NETCore.App.Ref pack bulunamadı; çalışma zamanı düşüşü: " +
                     $"yalnızca {Path.GetFileName(coreLib)} referansı eklendi. BCL tiplerinden " +
@@ -74,7 +67,117 @@ public static class ReferenceResolver
                 "heuristic ROUTES_TO üretilir (TŞ §8 resolution kuralı).");
         }
 
+        if (extraDirs is { Count: > 0 })
+        {
+            var processedDirs = 0;
+            var addedExtraDlls = 0;
+            foreach (var rawDir in extraDirs)
+            {
+                if (processedDirs >= MaxExtraReferenceDirs)
+                {
+                    warnings.Add($"referenceDirs üst sınırı ({MaxExtraReferenceDirs}) aşıldı; kalan girdiler atlandı");
+                    break;
+                }
+
+                if (string.IsNullOrWhiteSpace(rawDir) || rawDir.Contains('\0'))
+                {
+                    warnings.Add("geçersiz boş/null-byte referenceDirs girdisi atlandı");
+                    continue;
+                }
+
+                var dir = rawDir.Trim();
+                // Lexical UNC/device (all 4 slash combinations) and non-fully-qualified rejection
+                // BEFORE any filesystem call (prevents SMB/NTLM leak and rejects drive-relative paths).
+                if (IsUncOrDevicePath(dir) || !Path.IsPathFullyQualified(dir))
+                {
+                    warnings.Add($"güvensiz veya göreli referenceDirs girdisi reddedildi: {dir}");
+                    continue;
+                }
+
+                // Strip non-root trailing separators so GetFileAttributesEx / lstat inspects
+                // the link entry itself rather than traversing through a trailing-slash symlink.
+                var normalizedDir = TrimTrailingDirectorySeparators(dir);
+
+                // Check symlink/reparse-point BEFORE Directory.Exists so a symlinked directory
+                // pointing to a UNC share is never traversed.
+                try
+                {
+                    var dirInfo = new DirectoryInfo(normalizedDir);
+                    if (IsSymlinkOrReparsePoint(dirInfo))
+                    {
+                        warnings.Add($"symlink/reparse-point referenceDirs girdisi reddedildi: {dir}");
+                        continue;
+                    }
+
+                    if (dirInfo.Attributes == (FileAttributes)(-1) || !Directory.Exists(normalizedDir))
+                    {
+                        warnings.Add($"referenceDirs girdisi yok: {dir} (atlandı)");
+                        continue;
+                    }
+                }
+                catch
+                {
+                    warnings.Add($"referenceDirs girdisi doğrulanamadı: {dir} (atlandı)");
+                    continue;
+                }
+
+                processedDirs += 1;
+                addedExtraDlls += AddExtraDlls(normalizedDir, paths, seenFileNames, MaxExtraReferenceDlls - addedExtraDlls);
+                if (addedExtraDlls >= MaxExtraReferenceDlls)
+                {
+                    warnings.Add($"referenceDirs DLL üst sınırı ({MaxExtraReferenceDlls}) aşıldı; kalan DLL'ler atlandı");
+                    break;
+                }
+            }
+        }
+
         return paths.ToList();
+    }
+
+    private static bool IsUncOrDevicePath(string path) =>
+        path.Length >= 2 &&
+        (path[0] == '\\' || path[0] == '/') &&
+        (path[1] == '\\' || path[1] == '/');
+
+    private static string TrimTrailingDirectorySeparators(string path)
+    {
+        var current = path;
+        while (true)
+        {
+            var next = Path.TrimEndingDirectorySeparator(current);
+            if (next.Length == current.Length)
+            {
+                return current;
+            }
+
+            current = next;
+        }
+    }
+
+    private static bool IsSymlinkOrReparsePoint(FileSystemInfo info)
+    {
+        var attributes = info.Attributes;
+        if (attributes != (FileAttributes)(-1) &&
+            (attributes & FileAttributes.ReparsePoint) != 0)
+        {
+            return true;
+        }
+
+        return info.LinkTarget is not null;
+    }
+
+    private static bool IsManagedAssembly(string dllPath)
+    {
+        try
+        {
+            using var stream = new FileStream(dllPath, FileMode.Open, FileAccess.Read, FileShare.Read);
+            using var peReader = new PEReader(stream);
+            return peReader.HasMetadata;
+        }
+        catch
+        {
+            return false;
+        }
     }
 
     private static IEnumerable<string> CandidateDotNetRoots()
@@ -118,6 +221,7 @@ public static class ReferenceResolver
         string packName,
         string workerTfm,
         SortedSet<string> paths,
+        HashSet<string> seenFileNames,
         ICollection<string> warnings)
     {
         foreach (var root in roots)
@@ -140,7 +244,7 @@ public static class ReferenceResolver
                 continue;
             }
 
-            AddDlls(tfmDir, paths);
+            AddDlls(tfmDir, paths, seenFileNames);
             warnings.Add($"referans paketi yüklendi: {packName} {versionDir} ({tfmDir})");
             return true;
         }
@@ -225,11 +329,78 @@ public static class ReferenceResolver
         return (compatible.Dir ?? candidatesSorted[0].Dir);
     }
 
-    private static void AddDlls(string dir, SortedSet<string> paths)
+    private static void AddDlls(string dir, SortedSet<string> paths, HashSet<string> seenFileNames)
     {
         foreach (var dll in Directory.EnumerateFiles(dir, "*.dll", SearchOption.TopDirectoryOnly))
         {
-            paths.Add(dll);
+            if (paths.Add(dll))
+            {
+                seenFileNames.Add(Path.GetFileName(dll));
+            }
         }
+    }
+
+    private static int AddExtraDlls(
+        string dir,
+        SortedSet<string> paths,
+        HashSet<string> seenFileNames,
+        int remainingBudget)
+    {
+        if (remainingBudget <= 0)
+        {
+            return 0;
+        }
+
+        var added = 0;
+        IEnumerable<string> dlls;
+        try
+        {
+            dlls = Directory.EnumerateFiles(dir, "*.dll", SearchOption.TopDirectoryOnly)
+                .OrderBy(p => p, StringComparer.Ordinal);
+        }
+        catch
+        {
+            return 0;
+        }
+
+        foreach (var dll in dlls)
+        {
+            if (added >= remainingBudget)
+            {
+                break;
+            }
+
+            var fileName = Path.GetFileName(dll);
+            if (seenFileNames.Contains(fileName))
+            {
+                continue;
+            }
+
+            try
+            {
+                var fileInfo = new FileInfo(dll);
+                if (IsSymlinkOrReparsePoint(fileInfo))
+                {
+                    continue;
+                }
+            }
+            catch
+            {
+                continue;
+            }
+
+            if (!IsManagedAssembly(dll))
+            {
+                continue;
+            }
+
+            if (paths.Add(dll))
+            {
+                seenFileNames.Add(fileName);
+                added += 1;
+            }
+        }
+
+        return added;
     }
 }

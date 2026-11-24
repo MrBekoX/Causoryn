@@ -75,7 +75,7 @@ import {
   type SymbolIndexEntry,
   type SymbolSearchStore,
 } from "@causoryn/graph";
-import type { WorkspaceAccessPolicy } from "@causoryn/workspace";
+import type { WorkspaceAccessPolicy, WorkspacePolicyConfig } from "@causoryn/workspace";
 
 import { IndexingError } from "./errors.js";
 import {
@@ -294,6 +294,77 @@ export interface BuildLeaseStore {
   withImmediateTransaction?<T>(fn: () => T): T;
 }
 
+/** Per-file cached analysis fact stored in `file_facts` (structural match for SqliteGraphRepository). */
+export interface FileFactRecord {
+  readonly workspaceId: string;
+  readonly relativePath: string;
+  readonly contentHash: string;
+  readonly analyzerFingerprint: string;
+  readonly language: string;
+  readonly publicInterfaceHash: string;
+  readonly nodesJson: string;
+  readonly edgesJson: string;
+  readonly evidenceJson: string;
+  readonly importedPathsJson: string;
+  readonly updatedAt: string;
+}
+
+/** Optional per-file incremental fact store implemented by SQLite and InMemory repositories. */
+export interface FileFactStore {
+  upsertFileFact(record: FileFactRecord): void;
+  upsertFileFacts(records: readonly FileFactRecord[]): void;
+  listFileFacts(
+    workspaceId: string,
+    analyzerFingerprint?: string,
+  ): readonly FileFactRecord[];
+  deleteFileFact(workspaceId: string, relativePath: string): boolean;
+  clearFileFacts(workspaceId: string): number;
+}
+
+/** Structured indexing lifecycle phase reported via progress callbacks / worker messages. */
+export type IndexProgressPhase =
+  | "queued"
+  | "inventory"
+  | "analyzing"
+  | "building"
+  | "publishing"
+  | "done"
+  | "failed";
+
+/** Structured progress event emitted during async / worker-thread indexing. */
+export interface IndexProgressEvent {
+  readonly phase: IndexProgressPhase;
+  readonly completed: number;
+  readonly total: number;
+  readonly message: string;
+}
+
+export type IndexProgressCallback = (event: IndexProgressEvent) => void;
+
+export interface IndexRunOptions {
+  readonly onProgress?: IndexProgressCallback;
+}
+
+/** Serializable IndexService configuration forwarded to `worker_threads` worker entrypoint. */
+export interface IndexWorkerServiceConfig {
+  readonly dbPath?: string;
+  readonly workspaceId: string;
+  readonly policyConfig: WorkspacePolicyConfig;
+  readonly limits: IndexLimits;
+  readonly csharp?: {
+    readonly dotnetCommand?: string;
+    readonly requestTimeoutMs?: number;
+    readonly workerDllPath?: string;
+  };
+  readonly python?: PythonIndexOptions;
+  readonly go?: GoIndexOptions;
+  readonly rust?: RustIndexOptions;
+  readonly tolerateConcurrentPublishRace: boolean;
+  readonly hostLabel?: string;
+  readonly leaseTtlMs: number;
+  readonly leaseHeartbeatIntervalMs: number;
+}
+
 /** Adapter tanı kaydının uygulama düzeyi karşılığı (parser detayı sızmaz). */
 export interface IndexDiagnostic {
   readonly relativePath: string;
@@ -322,6 +393,12 @@ export interface IndexRunResult {
    * yeniden kullanıldı (yalnızca files tablosu tazelendi).
    */
   readonly published: boolean;
+  /** Number of source files re-analyzed during this indexing run (Task 2.6). */
+  readonly reanalyzedFiles?: number;
+  /** Number of unchanged source files reused from `file_facts` cache (Task 2.6). */
+  readonly cachedFiles?: number;
+  /** True when early cutoff skipped reverse dependents because public interfaces stayed identical. */
+  readonly earlyCutoffApplied?: boolean;
   /** Set when a live peer holds the workspace build lease and this run deferred honestly. */
   readonly peerStatus?: IndexPeerStatus;
   /** True when this run deferred because a live peer is actively building. */
@@ -420,6 +497,951 @@ function isBuildLeaseStore(
   );
 }
 
+function isFileFactStore(
+  repository: GraphRepository,
+): repository is GraphRepository & FileFactStore {
+  const candidate = repository as Partial<FileFactStore>;
+  return (
+    typeof candidate.upsertFileFact === "function" &&
+    typeof candidate.upsertFileFacts === "function" &&
+    typeof candidate.listFileFacts === "function" &&
+    typeof candidate.deleteFileFact === "function" &&
+    typeof candidate.clearFileFacts === "function"
+  );
+}
+
+const VOLATILE_INTERFACE_ATTR_KEYS = new Set([
+  "sourceHash",
+  "startLine",
+  "endLine",
+  "line",
+  "column",
+  "relativePath",
+]);
+
+function stripVolatileAttributes(
+  attributes: Readonly<Record<string, unknown>> | undefined,
+): JsonValue {
+  if (attributes === undefined) return {};
+  const out: Record<string, JsonValue> = {};
+  for (const key of Object.keys(attributes).sort()) {
+    if (VOLATILE_INTERFACE_ATTR_KEYS.has(key)) continue;
+    const value = attributes[key];
+    if (
+      value === null ||
+      typeof value === "string" ||
+      typeof value === "boolean" ||
+      (typeof value === "number" && Number.isFinite(value))
+    ) {
+      out[key] = value;
+    } else if (Array.isArray(value) || typeof value === "object") {
+      try {
+        out[key] = JSON.parse(JSON.stringify(value)) as JsonValue;
+      } catch {
+        // Ignore non-serializable attribute values in interface fingerprint.
+      }
+    }
+  }
+  return out;
+}
+
+function isIdentCharCode(code: number): boolean {
+  return (
+    (code >= 65 && code <= 90) ||
+    (code >= 97 && code <= 122) ||
+    (code >= 48 && code <= 57) ||
+    code === 95 ||
+    code === 36
+  );
+}
+
+function isAsciiAlphaCode(code: number): boolean {
+  return (code >= 65 && code <= 90) || (code >= 97 && code <= 122);
+}
+
+/**
+ * Tokens after which `/` begins a JavaScript/TypeScript regular expression literal
+ * rather than a division operator.
+ */
+const JS_REGEX_PREFIX_TOKENS = new Set([
+  "(",
+  "[",
+  "{",
+  "}",
+  ";",
+  ",",
+  ":",
+  "?",
+  "=",
+  "=>",
+  "!",
+  "~",
+  "+",
+  "-",
+  "*",
+  "/",
+  "%",
+  "&",
+  "|",
+  "^",
+  "<",
+  ">",
+  "->",
+  "::",
+  "return",
+  "throw",
+  "case",
+  "in",
+  "instanceof",
+  "typeof",
+  "void",
+  "delete",
+  "new",
+  "yield",
+  "await",
+  "of",
+  "else",
+  "do",
+  "export",
+  "default",
+]);
+
+/**
+ * Pure O(n) comment-stripping lexer for brace-delimited languages (TS/JS/Go/Rust/C#).
+ * Zero backtracking regexes; handles single-line comments, block comments, string
+ * literals, JS/TS regex literals (`/pattern/flags`), nested template literal
+ * `${ ... }` expressions, and CRLF cleanly.
+ */
+function tokenizeBraceSource(
+  content: string,
+  options: { readonly isJsTs?: boolean } = {},
+): string[] {
+  const isJsTs = options.isJsTs ?? false;
+  const tokens: string[] = [];
+  const len = content.length;
+  const templateBraceDepthStack: number[] = [];
+  let i = 0;
+
+  const scanJsTemplateChunk = (startIndex: number): void => {
+    let cur = startIndex + 1;
+    while (cur < len) {
+      const code = content.charCodeAt(cur);
+      if (code === 92) {
+        cur = Math.min(len, cur + 2);
+        continue;
+      }
+      if (code === 96) {
+        cur += 1;
+        tokens.push(content.slice(startIndex, cur));
+        i = cur;
+        return;
+      }
+      if (code === 36 && cur + 1 < len && content.charCodeAt(cur + 1) === 123) {
+        cur += 2;
+        tokens.push(content.slice(startIndex, cur));
+        templateBraceDepthStack.push(0);
+        i = cur;
+        return;
+      }
+      cur += 1;
+    }
+    tokens.push(content.slice(startIndex, len));
+    i = len;
+  };
+
+  while (i < len) {
+    const ch = content.charCodeAt(i);
+    // Whitespace
+    if (ch === 32 || ch === 9 || ch === 10 || ch === 13) {
+      i += 1;
+      continue;
+    }
+    // Single-line comment //
+    if (ch === 47 && i + 1 < len && content.charCodeAt(i + 1) === 47) {
+      i += 2;
+      while (i < len && content.charCodeAt(i) !== 10) i += 1;
+      continue;
+    }
+    // Multi-line comment /* ... */
+    if (ch === 47 && i + 1 < len && content.charCodeAt(i + 1) === 42) {
+      i += 2;
+      while (
+        i + 1 < len &&
+        !(content.charCodeAt(i) === 42 && content.charCodeAt(i + 1) === 47)
+      ) {
+        i += 1;
+      }
+      i = Math.min(len, i + 2);
+      continue;
+    }
+    // JS/TS regex literal `/pattern/flags` (distinguished from division `/`)
+    if (isJsTs && ch === 47) {
+      const prev = tokens[tokens.length - 1];
+      if (prev === undefined || JS_REGEX_PREFIX_TOKENS.has(prev)) {
+        const start = i;
+        let cur = i + 1;
+        let inCharClass = false;
+        let closed = false;
+        while (cur < len) {
+          const code = content.charCodeAt(cur);
+          if (code === 10 || code === 13) {
+            // Regex literals cannot span unescaped line breaks
+            break;
+          }
+          if (code === 92) {
+            if (
+              cur + 1 < len &&
+              content.charCodeAt(cur + 1) !== 10 &&
+              content.charCodeAt(cur + 1) !== 13
+            ) {
+              cur += 2;
+            } else {
+              break;
+            }
+            continue;
+          }
+          if (code === 91) {
+            inCharClass = true;
+            cur += 1;
+            continue;
+          }
+          if (code === 93) {
+            inCharClass = false;
+            cur += 1;
+            continue;
+          }
+          if (code === 47 && !inCharClass) {
+            cur += 1;
+            while (cur < len && isAsciiAlphaCode(content.charCodeAt(cur))) {
+              cur += 1;
+            }
+            closed = true;
+            break;
+          }
+          cur += 1;
+        }
+        if (closed) {
+          tokens.push(content.slice(start, cur));
+          i = cur;
+          continue;
+        }
+      }
+      tokens.push("/");
+      i += 1;
+      continue;
+    }
+    // Template literal (`...${...}...`)
+    if (ch === 96) {
+      if (isJsTs) {
+        scanJsTemplateChunk(i);
+        continue;
+      }
+      const start = i;
+      i += 1;
+      while (i < len && content.charCodeAt(i) !== 96) {
+        i += 1;
+      }
+      if (i < len) i += 1;
+      tokens.push(content.slice(start, i));
+      continue;
+    }
+    // Nested `{` / `}` inside JS/TS template interpolation `${ ... }`
+    if (isJsTs && templateBraceDepthStack.length > 0) {
+      if (ch === 123) {
+        templateBraceDepthStack[templateBraceDepthStack.length - 1] =
+          (templateBraceDepthStack[templateBraceDepthStack.length - 1] ?? 0) + 1;
+        tokens.push("{");
+        i += 1;
+        continue;
+      }
+      if (ch === 125) {
+        const depth = templateBraceDepthStack[templateBraceDepthStack.length - 1] ?? 0;
+        if (depth > 0) {
+          templateBraceDepthStack[templateBraceDepthStack.length - 1] = depth - 1;
+          tokens.push("}");
+          i += 1;
+          continue;
+        }
+        templateBraceDepthStack.pop();
+        scanJsTemplateChunk(i);
+        continue;
+      }
+    }
+    // Single- or double-quoted string literal ('...', "...")
+    if (ch === 34 || ch === 39) {
+      const quote = ch;
+      const start = i;
+      i += 1;
+      while (i < len) {
+        const cur = content.charCodeAt(i);
+        if (cur === 92) {
+          i = Math.min(len, i + 2);
+          continue;
+        }
+        if (cur === quote) {
+          i += 1;
+          break;
+        }
+        i += 1;
+      }
+      tokens.push(content.slice(start, i));
+      continue;
+    }
+    // Identifier / keyword / number
+    if (isIdentCharCode(ch)) {
+      const start = i;
+      i += 1;
+      while (i < len && isIdentCharCode(content.charCodeAt(i))) i += 1;
+      tokens.push(content.slice(start, i));
+      continue;
+    }
+    // Two-char punctuation (`=>`, `::`, `->`, `++`, `--`, JSX `</`)
+    if (i + 1 < len) {
+      const pair = content.slice(i, i + 2);
+      if (
+        pair === "=>" ||
+        pair === "::" ||
+        pair === "->" ||
+        pair === "++" ||
+        pair === "--" ||
+        pair === "</"
+      ) {
+        tokens.push(pair);
+        i += 2;
+        continue;
+      }
+    }
+    tokens.push(content[i]!);
+    i += 1;
+  }
+  return tokens;
+}
+
+interface InterfaceBraceFrame {
+  readonly kind: "type-like" | "class" | "body";
+  readonly insideHeader: boolean;
+}
+
+/**
+ * Extracts a deterministic, comment-free, body-stripped declaration surface for
+ * TS/JS/Go/Rust/C# files in O(n) time so early cutoff ignores comment/whitespace/body
+ * edits while detecting every exported signature, type, class member, or re-export change.
+ * Tracks `parenDepth` and `angleDepth` so object types inside generic type arguments
+ * (`class Foo extends Bar<{ a: number }>`) or parameter lists (`function f(x: { a: number })`)
+ * never prematurely clear `currentDeclKeyword` or trigger body skipping.
+ */
+function extractBraceLanguageInterfaceSurface(
+  content: string,
+  language = "typescript",
+): string {
+  const isJsTs = language === "typescript" || language === "javascript";
+  const tokens = tokenizeBraceSource(content, { isJsTs });
+  const out: string[] = [];
+  const braceStack: InterfaceBraceFrame[] = [];
+  const parenAngleStack: number[] = [];
+  let angleDepth = 0;
+  let headerBraceCount = 0;
+  let skipBodyDepth = 0;
+  let currentDeclKeyword = "";
+
+  for (let i = 0; i < tokens.length; i += 1) {
+    const tok = tokens[i]!;
+    if (skipBodyDepth > 0) {
+      if (tok === "{") {
+        skipBodyDepth += 1;
+      } else if (tok === "}") {
+        skipBodyDepth -= 1;
+        if (skipBodyDepth === 0) {
+          braceStack.pop();
+          out.push("}");
+        }
+      }
+      continue;
+    }
+
+    if (tok === "(") {
+      parenAngleStack.push(angleDepth);
+    } else if (tok === ")") {
+      if (parenAngleStack.length > 0) {
+        angleDepth = parenAngleStack.pop()!;
+      }
+    } else if (tok === "<") {
+      angleDepth += 1;
+    } else if (tok === ">") {
+      if (angleDepth > 0) {
+        angleDepth -= 1;
+      }
+    }
+
+    const inHeaderContext =
+      parenAngleStack.length > 0 || angleDepth > 0 || headerBraceCount > 0;
+    const enclosingKind = braceStack[braceStack.length - 1]?.kind;
+
+    if (!inHeaderContext && enclosingKind !== "type-like") {
+      if (
+        tok === "interface" ||
+        tok === "type" ||
+        tok === "enum" ||
+        tok === "namespace" ||
+        tok === "struct" ||
+        tok === "trait" ||
+        tok === "class" ||
+        tok === "function" ||
+        tok === "func" ||
+        tok === "fn"
+      ) {
+        currentDeclKeyword = tok;
+      } else if (tok === "const" || tok === "let" || tok === "var") {
+        currentDeclKeyword = "";
+      }
+    }
+
+    if (tok === ";" && parenAngleStack.length === 0 && headerBraceCount === 0) {
+      currentDeclKeyword = "";
+      angleDepth = 0;
+    }
+
+    if (tok === "{") {
+      const prev = tokens[i - 1] ?? "";
+      const insideHeader = inHeaderContext;
+      let kind: "type-like" | "class" | "body";
+      if (insideHeader) {
+        kind = "type-like";
+      } else if (
+        prev === "export" ||
+        prev === "import" ||
+        prev === ":" ||
+        prev === "=" ||
+        prev === "|" ||
+        prev === "&" ||
+        currentDeclKeyword === "interface" ||
+        currentDeclKeyword === "type" ||
+        currentDeclKeyword === "enum" ||
+        currentDeclKeyword === "namespace" ||
+        currentDeclKeyword === "struct" ||
+        currentDeclKeyword === "trait"
+      ) {
+        kind = "type-like";
+      } else if (currentDeclKeyword === "class") {
+        kind = "class";
+      } else if (enclosingKind === "class" && prev !== "=>") {
+        kind = "body";
+      } else {
+        kind = "body";
+      }
+
+      braceStack.push({ kind, insideHeader });
+      if (insideHeader) {
+        headerBraceCount += 1;
+      } else if (currentDeclKeyword !== "type") {
+        currentDeclKeyword = "";
+      }
+      out.push("{");
+      if (kind === "body") {
+        skipBodyDepth = 1;
+      }
+      continue;
+    }
+
+    if (tok === "}") {
+      const popped = braceStack.pop();
+      if (popped?.insideHeader) {
+        headerBraceCount = Math.max(0, headerBraceCount - 1);
+      } else if (currentDeclKeyword !== "type") {
+        currentDeclKeyword = "";
+      }
+      out.push("}");
+      continue;
+    }
+
+    out.push(tok);
+  }
+
+  return out.join(" ");
+}
+
+/**
+ * Extracts a deterministic comment-free, body-stripped signature surface for Python
+ * files (module-level and class-level `def`/`async def`/`class`/`__all__` headers).
+ */
+function extractPythonInterfaceSurface(content: string): string {
+  const lines = content.split(/\r?\n/);
+  const headers: string[] = [];
+  for (const rawLine of lines) {
+    // Strip inline # comments outside quotes linearly
+    let stripped = "";
+    let inQuote: string | null = null;
+    for (let i = 0; i < rawLine.length; i += 1) {
+      const ch = rawLine[i]!;
+      if (inQuote !== null) {
+        stripped += ch;
+        if (ch === "\\" && i + 1 < rawLine.length) {
+          stripped += rawLine[i + 1]!;
+          i += 1;
+        } else if (ch === inQuote) {
+          inQuote = null;
+        }
+      } else if (ch === '"' || ch === "'") {
+        inQuote = ch;
+        stripped += ch;
+      } else if (ch === "#") {
+        break;
+      } else {
+        stripped += ch;
+      }
+    }
+    const trimmed = stripped.trim();
+    if (trimmed.length === 0) continue;
+    const isTopLevel = rawLine[0] !== " " && rawLine[0] !== "\t";
+    if (
+      isTopLevel ||
+      trimmed.startsWith("def ") ||
+      trimmed.startsWith("async def ") ||
+      trimmed.startsWith("class ") ||
+      trimmed.startsWith("@")
+    ) {
+      if (
+        isTopLevel &&
+        (trimmed.startsWith('"""') || trimmed.startsWith("'''"))
+      ) {
+        continue;
+      }
+      headers.push(trimmed);
+    }
+  }
+  return headers.join("\n");
+}
+
+/**
+ * Computes the deterministic early-cutoff `publicInterfaceHash` for a single file
+ * (Mokhov et al., ICFP 2018): combines extracted non-File symbol descriptors with
+ * the body-stripped, comment-stripped declaration surface.
+ */
+function computePublicInterfaceHash(
+  language: string,
+  content: string,
+  fileNodes: readonly SnapshotNodeInput[],
+): string {
+  const symbolDescriptors: JsonValue[] = fileNodes
+    .filter((node) => node.kind !== "File")
+    .map((node) => [
+      node.kind,
+      node.qualifiedName,
+      stripVolatileAttributes(node.attributes),
+    ])
+    .sort((a, b) => {
+      const ka = canonicalJson(a);
+      const kb = canonicalJson(b);
+      return ka < kb ? -1 : ka > kb ? 1 : 0;
+    });
+
+  const surface =
+    language === "python"
+      ? extractPythonInterfaceSurface(content)
+      : extractBraceLanguageInterfaceSurface(content, language);
+
+  return sha256Hex(
+    utf8Encode(canonicalJson([language, symbolDescriptors, surface])),
+  );
+}
+
+function edgeOwnerPath(edge: SnapshotEdgeInput): string | undefined {
+  if (edge.from.relativePath !== undefined) return edge.from.relativePath;
+  const firstSpanPath = edge.evidence?.[0]?.span?.relativePath;
+  if (firstSpanPath !== undefined) return firstSpanPath;
+  return edge.to.relativePath;
+}
+
+interface ParsedFileFactPayload {
+  readonly nodes: readonly SnapshotNodeInput[];
+  readonly edges: readonly SnapshotEdgeInput[];
+  readonly evidence: readonly SnapshotEvidenceInput[];
+  readonly importedPaths: readonly string[];
+}
+
+function parseFileFactPayload(record: FileFactRecord): ParsedFileFactPayload | undefined {
+  try {
+    const nodes = JSON.parse(record.nodesJson) as SnapshotNodeInput[];
+    const edges = JSON.parse(record.edgesJson) as SnapshotEdgeInput[];
+    const evidence = JSON.parse(record.evidenceJson) as SnapshotEvidenceInput[];
+    const importedPaths = JSON.parse(record.importedPathsJson) as string[];
+    if (
+      !Array.isArray(nodes) ||
+      !Array.isArray(edges) ||
+      !Array.isArray(evidence) ||
+      !Array.isArray(importedPaths)
+    ) {
+      return undefined;
+    }
+    return { nodes, edges, evidence, importedPaths };
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Partitions an adapter output into per-file `FileFactRecord` entries for `targetEntries`.
+ * External nodes (`relativePath === undefined`) referenced by a file's edges are attached
+ * to that file's fact so merging cached + dirty facts preserves 100% of external nodes.
+ */
+function partitionAdapterOutputByFile(input: {
+  readonly workspaceId: string;
+  readonly analyzerFingerprint: string;
+  readonly language: string;
+  readonly updatedAt: string;
+  readonly targetEntries: readonly InventoryEntry[];
+  readonly nodes: readonly SnapshotNodeInput[];
+  readonly edges: readonly SnapshotEdgeInput[];
+  readonly evidence: readonly SnapshotEvidenceInput[];
+}): Map<string, FileFactRecord> {
+  const targetByPath = new Map(
+    input.targetEntries.map((entry) => [entry.relativePath, entry]),
+  );
+  const externalNodeByKey = new Map<string, SnapshotNodeInput>();
+  const buckets = new Map<
+    string,
+    {
+      readonly ownNodes: SnapshotNodeInput[];
+      readonly edges: SnapshotEdgeInput[];
+      readonly evidence: SnapshotEvidenceInput[];
+      readonly importedPaths: Set<string>;
+      readonly externalNodeKeys: Set<string>;
+    }
+  >();
+
+  for (const entry of input.targetEntries) {
+    buckets.set(entry.relativePath, {
+      ownNodes: [],
+      edges: [],
+      evidence: [],
+      importedPaths: new Set(),
+      externalNodeKeys: new Set(),
+    });
+  }
+
+  for (const node of input.nodes) {
+    if (node.relativePath === undefined) {
+      externalNodeByKey.set(nodeRefKey(node), node);
+      continue;
+    }
+    const bucket = buckets.get(node.relativePath);
+    if (bucket !== undefined) {
+      bucket.ownNodes.push(node);
+    }
+  }
+
+  for (const edge of input.edges) {
+    const owner = edgeOwnerPath(edge);
+    if (owner === undefined) continue;
+    const bucket = buckets.get(owner);
+    if (bucket === undefined) continue;
+    bucket.edges.push(edge);
+    if (edge.from.relativePath === undefined) {
+      bucket.externalNodeKeys.add(nodeRefKey(edge.from));
+    }
+    if (edge.to.relativePath === undefined) {
+      bucket.externalNodeKeys.add(nodeRefKey(edge.to));
+    }
+    if (edge.to.relativePath !== undefined && edge.to.relativePath !== owner) {
+      bucket.importedPaths.add(edge.to.relativePath);
+    }
+  }
+
+  for (const ev of input.evidence) {
+    const owner = ev.span?.relativePath;
+    if (owner === undefined) continue;
+    const bucket = buckets.get(owner);
+    if (bucket !== undefined) {
+      bucket.evidence.push(ev);
+    }
+  }
+
+  const facts = new Map<string, FileFactRecord>();
+  for (const [relativePath, bucket] of buckets) {
+    const entry = targetByPath.get(relativePath)!;
+    const externalNodes: SnapshotNodeInput[] = [];
+    for (const key of [...bucket.externalNodeKeys].sort()) {
+      const extNode = externalNodeByKey.get(key);
+      if (extNode !== undefined) {
+        externalNodes.push(extNode);
+      }
+    }
+    const allFileNodes = [...bucket.ownNodes, ...externalNodes];
+    const importedPaths = [...bucket.importedPaths].sort();
+    const publicInterfaceHash = computePublicInterfaceHash(
+      input.language,
+      entry.content,
+      bucket.ownNodes,
+    );
+    facts.set(relativePath, {
+      workspaceId: input.workspaceId,
+      relativePath,
+      contentHash: entry.contentHash,
+      analyzerFingerprint: input.analyzerFingerprint,
+      language: input.language,
+      publicInterfaceHash,
+      nodesJson: JSON.stringify(allFileNodes),
+      edgesJson: JSON.stringify(bucket.edges),
+      evidenceJson: JSON.stringify(bucket.evidence),
+      importedPathsJson: JSON.stringify(importedPaths),
+      updatedAt: input.updatedAt,
+    });
+  }
+  return facts;
+}
+
+const RESOLUTION_RANK: Readonly<Record<SnapshotEdgeInput["resolution"], number>> = {
+  verified: 3,
+  heuristic: 2,
+  unresolved: 1,
+};
+
+/**
+ * Reconstructs a merged `AdapterOutput` from per-file `FileFactRecord`s in canonical
+ * path order, deduplicating shared external nodes and identical edges cleanly.
+ */
+function mergeFileFactOutputs(
+  facts: readonly FileFactRecord[],
+  meta: {
+    readonly analyzerId: string;
+    readonly analyzerVersion: string;
+    readonly state: "ready" | "partial";
+  },
+): AdapterOutput | undefined {
+  const sortedFacts = [...facts].sort((a, b) =>
+    a.relativePath < b.relativePath ? -1 : a.relativePath > b.relativePath ? 1 : 0,
+  );
+  const nodeByKey = new Map<string, SnapshotNodeInput>();
+  const edgeByKey = new Map<
+    string,
+    {
+      edge: SnapshotEdgeInput;
+      evidenceByCanon: Map<string, SnapshotEvidenceInput>;
+    }
+  >();
+  const topEvidenceByCanon = new Map<string, SnapshotEvidenceInput>();
+
+  for (const fact of sortedFacts) {
+    const parsed = parseFileFactPayload(fact);
+    if (parsed === undefined) return undefined;
+
+    for (const node of parsed.nodes) {
+      const key = nodeRefKey(node);
+      if (!nodeByKey.has(key)) {
+        nodeByKey.set(key, node);
+      }
+    }
+
+    for (const edge of parsed.edges) {
+      const key = canonicalJson([
+        edge.kind,
+        edge.from.kind,
+        edge.from.qualifiedName,
+        edge.from.relativePath ?? null,
+        edge.to.kind,
+        edge.to.qualifiedName,
+        edge.to.relativePath ?? null,
+      ]);
+      const existing = edgeByKey.get(key);
+      if (existing === undefined) {
+        const evidenceByCanon = new Map<string, SnapshotEvidenceInput>();
+        for (const ev of edge.evidence ?? []) {
+          evidenceByCanon.set(canonicalJson(ev as unknown as JsonValue), ev);
+        }
+        edgeByKey.set(key, { edge, evidenceByCanon });
+      } else {
+        for (const ev of edge.evidence ?? []) {
+          existing.evidenceByCanon.set(canonicalJson(ev as unknown as JsonValue), ev);
+        }
+        if (RESOLUTION_RANK[edge.resolution] > RESOLUTION_RANK[existing.edge.resolution]) {
+          existing.edge = edge;
+        }
+      }
+    }
+
+    for (const ev of parsed.evidence) {
+      topEvidenceByCanon.set(canonicalJson(ev as unknown as JsonValue), ev);
+    }
+  }
+
+  const mergedEdges: SnapshotEdgeInput[] = [];
+  for (const entry of edgeByKey.values()) {
+    if (
+      !nodeByKey.has(nodeRefKey(entry.edge.from)) ||
+      !nodeByKey.has(nodeRefKey(entry.edge.to))
+    ) {
+      return undefined;
+    }
+    const mergedEvidence = [...entry.evidenceByCanon.values()];
+    mergedEdges.push({
+      ...entry.edge,
+      ...(mergedEvidence.length === 0 ? {} : { evidence: mergedEvidence }),
+    });
+  }
+
+  return {
+    analyzerId: meta.analyzerId,
+    analyzerVersion: meta.analyzerVersion,
+    state: meta.state,
+    nodes: [...nodeByKey.values()],
+    edges: mergedEdges,
+    evidence: [...topEvidenceByCanon.values()],
+  };
+}
+
+const TS_RESOLVE_CANDIDATE_EXTS = [
+  ".ts",
+  ".tsx",
+  ".mts",
+  ".cts",
+  ".js",
+  ".jsx",
+  ".mjs",
+  ".cjs",
+  ".d.ts",
+];
+
+function resolveRelativeTsSpecifier(
+  fromRelativePath: string,
+  specifier: string,
+  knownPaths: ReadonlySet<string>,
+): string | undefined {
+  const fromDir = path.posix.dirname(fromRelativePath);
+  const rawJoined = path.posix.normalize(
+    fromDir === "." ? specifier : `${fromDir}/${specifier}`,
+  );
+  if (knownPaths.has(rawJoined)) return rawJoined;
+
+  // TS ESM convention: `./foo.js` -> `./foo.ts` / `./foo.tsx`
+  const strippedJs = rawJoined.replace(/\.(?:m?js|cjs|jsx)$/i, "");
+  for (const ext of TS_RESOLVE_CANDIDATE_EXTS) {
+    const candidate = `${strippedJs}${ext}`;
+    if (knownPaths.has(candidate)) return candidate;
+  }
+  for (const ext of TS_RESOLVE_CANDIDATE_EXTS) {
+    const indexCandidate = `${rawJoined}/index${ext}`;
+    if (knownPaths.has(indexCandidate)) return indexCandidate;
+  }
+  return undefined;
+}
+
+/**
+ * Pure O(n) static specifier scanner for TS/JS dirty files so incremental analysis
+ * always includes newly added forward relative imports in compiler context.
+ */
+function scanTsSpecifiers(content: string): {
+  readonly relativeSpecifiers: readonly string[];
+  readonly hasNonRelativeWorkspaceSpecifier: boolean;
+} {
+  const tokens = tokenizeBraceSource(content, { isJsTs: true });
+  const relativeSpecifiers: string[] = [];
+  let hasNonRelativeWorkspaceSpecifier = false;
+
+  const inspectLiteral = (rawLiteral: string): void => {
+    if (rawLiteral.length < 2) return;
+    const quote = rawLiteral[0];
+    if (quote !== '"' && quote !== "'") return;
+    const spec = rawLiteral.slice(1, -1);
+    if (spec.length === 0) return;
+    if (spec.startsWith("./") || spec.startsWith("../")) {
+      relativeSpecifiers.push(spec);
+    } else if (!spec.startsWith("node:")) {
+      hasNonRelativeWorkspaceSpecifier = true;
+    }
+  };
+
+  for (let i = 0; i < tokens.length; i += 1) {
+    const tok = tokens[i]!;
+    if (tok === "from" && i + 1 < tokens.length) {
+      inspectLiteral(tokens[i + 1]!);
+    } else if (
+      tok === "import" &&
+      i + 1 < tokens.length &&
+      (tokens[i + 1]!.startsWith('"') || tokens[i + 1]!.startsWith("'"))
+    ) {
+      inspectLiteral(tokens[i + 1]!);
+    } else if (
+      (tok === "require" || tok === "import") &&
+      tokens[i + 1] === "(" &&
+      i + 2 < tokens.length
+    ) {
+      inspectLiteral(tokens[i + 2]!);
+    }
+  }
+
+  return { relativeSpecifiers, hasNonRelativeWorkspaceSpecifier };
+}
+
+/**
+ * Computes the minimal set of TS/JS files required as compiler context for `dirtyPaths`
+ * (dirty files + transitive forward relative imports + any ambient `.d.ts` files).
+ */
+function computeTsContextPaths(
+  dirtyPaths: readonly string[],
+  allTsEntries: readonly InventoryEntry[],
+  cachedFactsByPath: ReadonlyMap<string, FileFactRecord>,
+  hasTsConfig: boolean,
+  hasWorkspacePackageJson: boolean,
+): readonly InventoryEntry[] {
+  const entryByPath = new Map(allTsEntries.map((e) => [e.relativePath, e]));
+  const knownPaths = new Set(entryByPath.keys());
+  const contextSet = new Set<string>(dirtyPaths);
+  const queue = [...dirtyPaths];
+
+  // Always include ambient `.d.ts` files in compiler context
+  for (const entry of allTsEntries) {
+    if (entry.relativePath.endsWith(".d.ts")) {
+      contextSet.add(entry.relativePath);
+    }
+  }
+
+  let needsFullWorkspaceContext = false;
+  while (queue.length > 0) {
+    const current = queue.shift()!;
+    const entry = entryByPath.get(current);
+    if (entry === undefined) continue;
+
+    // 1) Forward edges from cached fact (if available)
+    const cached = cachedFactsByPath.get(current);
+    if (cached !== undefined) {
+      const parsed = parseFileFactPayload(cached);
+      if (parsed !== undefined) {
+        for (const dep of parsed.importedPaths) {
+          if (knownPaths.has(dep) && !contextSet.has(dep)) {
+            contextSet.add(dep);
+            queue.push(dep);
+          }
+        }
+      }
+    }
+
+    // 2) Live scan of current file's specifiers (captures newly added imports)
+    const scanned = scanTsSpecifiers(entry.content);
+    for (const spec of scanned.relativeSpecifiers) {
+      const resolved = resolveRelativeTsSpecifier(current, spec, knownPaths);
+      if (resolved !== undefined && !contextSet.has(resolved)) {
+        contextSet.add(resolved);
+        queue.push(resolved);
+      }
+    }
+    if (
+      scanned.hasNonRelativeWorkspaceSpecifier &&
+      (hasTsConfig || hasWorkspacePackageJson)
+    ) {
+      // Path aliases / workspace packages configured in tsconfig or workspace package.json
+      // may resolve to non-relative sibling files; fall back safely to full TS context to avoid losing edges.
+      needsFullWorkspaceContext = true;
+      break;
+    }
+  }
+
+  if (needsFullWorkspaceContext) {
+    return allTsEntries;
+  }
+
+  return allTsEntries.filter((entry) => contextSet.has(entry.relativePath));
+}
+
 const DEFAULT_BUILD_LEASE_TTL_MS = 30_000;
 const DEFAULT_BUILD_LEASE_HEARTBEAT_MS = 10_000;
 
@@ -495,12 +1517,13 @@ function l0LanguageAnalyzerVersion(language: string): string {
   }
 }
 
-/** prepareRun çıktısı (pipeline girdisi; M2 ile beş dil kümesi + TS/JS yapılandırmaları). */
+/** prepareRun çıktısı (pipeline girdisi; M2 ile beş dil kümesi + TS/JS/package.json yapılandırmaları). */
 interface PreparedRun {
   readonly canonicalRoot: string;
   readonly entries: InventoryEntry[];
   readonly tsEntries: InventoryEntry[];
   readonly tsConfigEntries: InventoryEntry[];
+  readonly packageJsonEntries: InventoryEntry[];
   readonly csEntries: InventoryEntry[];
   readonly pyEntries: InventoryEntry[];
   readonly goEntries: InventoryEntry[];
@@ -532,6 +1555,12 @@ function isTsConfigFile(relativePath: string): boolean {
 
 function isGoModFile(relativePath: string): boolean {
   return path.posix.basename(relativePath) === "go.mod";
+}
+
+function isWorkspacePackageJsonFile(relativePath: string): boolean {
+  const normalized = relativePath.replaceAll("\\", "/");
+  if (path.posix.basename(normalized) !== "package.json") return false;
+  return !normalized.split("/").includes("node_modules");
 }
 
 /**
@@ -580,6 +1609,12 @@ export class IndexService {
   private readonly hasExplicitRustWorkerDir: boolean;
   /** C# analiz seam'i: prod analyzeCSharpWorkspace; testler stub enjekte eder. */
   private readonly analyzeCSharpFn: AnalyzeCSharpFunction;
+  /** True when a custom non-serializable C# test seam was injected. */
+  private readonly hasCustomCsharpStub: boolean;
+  private readonly rawCsharpOptions: CsharpIndexOptions | undefined;
+  private readonly rawPythonOptions: PythonIndexOptions | undefined;
+  private readonly rawGoOptions: GoIndexOptions | undefined;
+  private readonly rawRustOptions: RustIndexOptions | undefined;
   /** K-021: çoklu-süreç SQLite yarış kurtarma modu. */
   private readonly tolerateConcurrentPublishRace: boolean;
   /** Optional diagnostic host/client label stored in build_leases.host_label. */
@@ -646,6 +1681,11 @@ export class IndexService {
         : join(assetRoot, WORKER_DLL_RELATIVE_PATH);
     }
     const csharpOptions = options.csharp ?? {};
+    this.rawCsharpOptions = options.csharp;
+    this.rawPythonOptions = options.python;
+    this.rawGoOptions = options.go;
+    this.rawRustOptions = options.rust;
+    this.hasCustomCsharpStub = csharpOptions.analyzeCSharp !== undefined;
     this.csharpSettings = {
       dotnetCommand: csharpOptions.dotnetCommand ?? DEFAULT_DOTNET_COMMAND,
       requestTimeoutMs: csharpOptions.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS,
@@ -763,10 +1803,15 @@ export class IndexService {
    * Depoda yayımlanmış bir snapshot varsa revision.sequence değerini okur;
    * kalıcı SQLite yeniden açılışlarında sequence sıfırlanmasını ve UNIQUE(id)
    * çakışmasını önler. Kayıtlı olmayan workspace'lerde güvenli biçimde 0 döner.
+   * Task 2.4b: `getLatestSnapshotMeta` varsa tam graph hidrasyonu yapmadan
+   * yalnızca metadata satırını okur (< 5 ms sıcak başlatma).
    */
   private readInitialRunCount(): number {
     if (this.workspaceId.trim().length === 0) return 0;
     try {
+      if (typeof this.repository.getLatestSnapshotMeta === "function") {
+        return this.repository.getLatestSnapshotMeta(this.workspaceId)?.revisionSequence ?? 0;
+      }
       const existing = this.repository.getLatestPublished(this.workspaceId);
       return existing?.snapshot.meta.revision.sequence ?? 0;
     } catch {
@@ -774,25 +1819,94 @@ export class IndexService {
     }
   }
 
+  /** Synchronizes in-memory `runCount` with the latest published snapshot metadata (used after worker runs). */
+  syncRunCountFromRepository(): void {
+    const latestSeq = this.readInitialRunCount();
+    if (latestSeq > this.runCount) {
+      this.runCount = latestSeq;
+    }
+  }
+
   /**
-   * Depo SymbolSearchStore destekliyorsa yayımlanan snapshot'ın sembol
-   * düğümlerini (Workspace/File/UnknownExternal hariç) symbol_fts tablosuna
-   * yazar (Agent GPS FTS5 ayağı, TŞ §9/§15).
+   * Returns a structured-clone-safe configuration snapshot for `worker_threads`
+   * off-thread indexing, or `undefined` when non-serializable test seams were injected.
+   */
+  getWorkerConfig(): IndexWorkerServiceConfig | undefined {
+    if (this.hasCustomCsharpStub || this.isPidAlive !== undefined) {
+      return undefined;
+    }
+    const repoDbPath = (this.repository as { readonly dbPath?: unknown }).dbPath;
+    const dbPath =
+      typeof repoDbPath === "string" &&
+      repoDbPath.trim().length > 0 &&
+      repoDbPath !== ":memory:"
+        ? repoDbPath
+        : undefined;
+    const rawCs = this.rawCsharpOptions;
+    const csharpConfig =
+      rawCs === undefined
+        ? undefined
+        : {
+            ...(rawCs.dotnetCommand === undefined
+              ? {}
+              : { dotnetCommand: rawCs.dotnetCommand }),
+            ...(rawCs.requestTimeoutMs === undefined
+              ? {}
+              : { requestTimeoutMs: rawCs.requestTimeoutMs }),
+            ...(rawCs.workerDllPath === undefined
+              ? {}
+              : { workerDllPath: rawCs.workerDllPath }),
+          };
+    return {
+      ...(dbPath === undefined ? {} : { dbPath }),
+      workspaceId: this.workspaceId,
+      policyConfig: {
+        allowRoots: [...this.policy.config.allowRoots],
+        ignore: [...this.policy.config.ignore],
+        extraIgnore: [...this.policy.config.extraIgnore],
+        binaryExtensions: [...this.policy.config.binaryExtensions],
+        extensionFilterMode: this.policy.config.extensionFilterMode,
+        allowedExtensions: [...this.policy.config.allowedExtensions],
+        maxFileBytes: this.policy.config.maxFileBytes,
+      },
+      limits: { maxFiles: this.limits.maxFiles },
+      ...(csharpConfig === undefined ? {} : { csharp: csharpConfig }),
+      ...(this.rawPythonOptions === undefined ? {} : { python: { ...this.rawPythonOptions } }),
+      ...(this.rawGoOptions === undefined ? {} : { go: { ...this.rawGoOptions } }),
+      ...(this.rawRustOptions === undefined ? {} : { rust: { ...this.rawRustOptions } }),
+      tolerateConcurrentPublishRace: this.tolerateConcurrentPublishRace,
+      ...(this.hostLabel === undefined ? {} : { hostLabel: this.hostLabel }),
+      leaseTtlMs: this.leaseTtlMs,
+      leaseHeartbeatIntervalMs: this.leaseHeartbeatIntervalMs,
+    };
+  }
+
+  /**
+   * Depo SymbolSearchStore destekliyorsa yayımlanan snapshot'ın hem sembol
+   * hem `File` düğümlerini (yalnızca `Workspace` ve `UnknownExternal` hariç)
+   * `relativePath` bilgisiyle birlikte `symbol_fts` tablosuna yazar (LocAgent FTS5).
    */
   private indexPublishedSymbols(snapshot: SnapshotGraph): void {
     if (!isSymbolSearchStore(this.repository)) return;
     const symbolEntries: SymbolIndexEntry[] = [];
     for (const node of snapshot.nodes) {
-      if (
-        node.kind !== "Workspace" &&
-        node.kind !== "File" &&
-        node.kind !== "UnknownExternal"
-      ) {
-        symbolEntries.push({ symbol: node.qualifiedName, nodeId: node.id });
+      if (node.kind === "Workspace" || node.kind === "UnknownExternal") {
+        continue;
       }
+      symbolEntries.push({
+        symbol: node.qualifiedName,
+        nodeId: node.id,
+        ...(node.location?.relativePath === undefined
+          ? {}
+          : { relativePath: node.location.relativePath }),
+      });
     }
     if (symbolEntries.length > 0) {
-      this.repository.indexSymbols(snapshot.meta.id, symbolEntries);
+      if (typeof this.repository.replaceSymbolIndex === "function") {
+        this.repository.replaceSymbolIndex(snapshot.meta.id, symbolEntries);
+      } else {
+        this.repository.indexSymbols(snapshot.meta.id, symbolEntries);
+      }
     }
   }
 
@@ -818,76 +1932,913 @@ export class IndexService {
    * çıktısını TEK snapshot'a katıp atomik yayımlar. Worker kullanılamıyorsa
    * adapter L0/L1'e düşer (partial + warning) — motor çökmez.
    */
-  async runIndexAsync(rootPath: string): Promise<IndexRunResult> {
+  async runIndexAsync(
+    rootPath: string,
+    options: IndexRunOptions = {},
+  ): Promise<IndexRunResult> {
+    options.onProgress?.({
+      phase: "inventory",
+      completed: 0,
+      total: 0,
+      message: "Scanning workspace inventory",
+    });
     const prepared = await this.prepareRunAsync(rootPath);
-    return this.runPipelineAsync(prepared);
+    options.onProgress?.({
+      phase: "inventory",
+      completed: prepared.entries.length,
+      total: prepared.entries.length,
+      message: `Collected ${String(prepared.entries.length)} workspace files`,
+    });
+    return this.runPipelineAsync(prepared, options);
   }
 
   /**
-   * SENKRON incremental yeniden indeksleme (TŞ v2.1 §9; sprint-2 B7).
+   * SENKRON incremental yeniden indeksleme (TŞ v2.1 §9; sprint-2 B7 + Task 2.6).
    *
    * Karar yetkilisi DEĞİŞİKLİK KARMASIDIR (TŞ §9 "fingerprint" adımı):
    * envanter tam taranır, files tablosunun önceki karmalarıyla
-   * karşılaştırılır. Dil kapsamındaki kaynaklarda (TS + C#) anlamlı
-   * değişim yoksa graph KORUNUR, mevcut snapshot yeniden kullanılır ve
-   * yalnızca files tablosu tazelenir (published=false). B9 notu: senkron
-   * graph C#'ı L0 File node'larıyla (sourceHash attribute'lu) temsil
-   * ettiği için .cs karma değişimi de yeniden yayın tetikler — aksi halde
-   * L0 node'ların bütünlük kanıtı bayat kalırdı.
+   * karşılaştırılır. Dil kapsamındaki kaynaklarda anlamlı değişim yoksa
+   * graph KORUNUR (published=false). TS-only workspace'lerde `file_facts`
+   * erken kesme (early cutoff) ile yalnızca kirli dosyalar yeniden analiz edilir.
    */
   runIncrementalIndex(rootPath: string, changeSet: readonly string[] = []): IndexRunResult {
     const prepared = this.prepareRun(rootPath);
     this.recoverOrphanBuildsIfSupported(this.clock());
     const change = this.analyzeChanges(prepared.entries);
-    const latest = this.repository.getLatestPublished(this.workspaceId);
+    const totalLangFiles = this.countLanguageEntries(prepared);
+    const latestMeta = this.readLatestPublishedMeta();
+    if (!change && latestMeta !== undefined) {
+      const latest = this.repository.getLatestPublished(this.workspaceId);
+      if (
+        latest !== undefined &&
+        (latest.snapshot.meta.state === "ready" || latest.snapshot.meta.state === "partial")
+      ) {
+        return this.noOpResult(
+          prepared.entries,
+          prepared.tsEntries.length,
+          prepared.csEntries.length,
+          latest,
+          changeSet,
+          totalLangFiles,
+        );
+      }
+    }
     if (
-      !change &&
-      latest !== undefined &&
-      (latest.snapshot.meta.state === "ready" || latest.snapshot.meta.state === "partial")
+      latestMeta !== undefined &&
+      prepared.csEntries.length === 0 &&
+      prepared.pyEntries.length === 0 &&
+      prepared.goEntries.length === 0 &&
+      prepared.rsEntries.length === 0
     ) {
-      return this.noOpResult(
-        prepared.entries,
-        prepared.tsEntries.length,
-        prepared.csEntries.length,
-        latest,
-        changeSet,
-      );
+      const incremental = this.tryRunSyncTsIncremental(prepared, latestMeta);
+      if (incremental !== undefined) {
+        return incremental;
+      }
     }
     return this.runPipeline(prepared);
   }
 
   /**
-   * TAM incremental pipeline (B9 + M2): dil karma karşılaştırması (TS, C#,
-   * python, go, rust); hiçbir dilde anlamlı değişim yoksa mevcut snapshot
-   * korunur (published=false), varsa tüm dillerin tam analiziyle YENİ
-   * snapshot türetilir ve atomik yayımlanır.
+   * TAM incremental pipeline (B9 + M2 + Task 2.6 early cutoff):
+   * dil karma karşılaştırması (TS, C#, python, go, rust); hiçbir dilde anlamlı
+   * değişim yoksa mevcut snapshot korunur (published=false); değişim varsa
+   * `file_facts` önbelleği + `publicInterfaceHash` erken kesme ile yalnızca
+   * kirli dosya(lar) ve (arayüz değiştiyse) doğrudan ters bağımlılar analiz edilir.
    */
   async runIncrementalIndexAsync(
     rootPath: string,
     changeSet: readonly string[] = [],
+    options: IndexRunOptions = {},
   ): Promise<IndexRunResult> {
+    options.onProgress?.({
+      phase: "inventory",
+      completed: 0,
+      total: 0,
+      message: "Scanning workspace inventory",
+    });
     const prepared = await this.prepareRunAsync(rootPath);
+    options.onProgress?.({
+      phase: "inventory",
+      completed: prepared.entries.length,
+      total: prepared.entries.length,
+      message: `Collected ${String(prepared.entries.length)} workspace files`,
+    });
     this.recoverOrphanBuildsIfSupported(this.clock());
     const change = this.analyzeChanges(prepared.entries);
-    const latest = this.repository.getLatestPublished(this.workspaceId);
+    const totalLangFiles = this.countLanguageEntries(prepared);
+    const latestMeta = this.readLatestPublishedMeta();
     const degradedSyncSnapshot =
-      latest !== undefined &&
-      latest.snapshot.meta.analyzerFingerprint.includes("sync-run-degraded");
+      latestMeta !== undefined &&
+      latestMeta.analyzerFingerprint.includes("sync-run-degraded");
+    if (!change && !degradedSyncSnapshot && latestMeta !== undefined) {
+      const latest = this.repository.getLatestPublished(this.workspaceId);
+      if (
+        latest !== undefined &&
+        (latest.snapshot.meta.state === "ready" || latest.snapshot.meta.state === "partial")
+      ) {
+        options.onProgress?.({
+          phase: "done",
+          completed: totalLangFiles,
+          total: totalLangFiles,
+          message: "No source changes detected; reused published snapshot",
+        });
+        return this.noOpResult(
+          prepared.entries,
+          prepared.tsEntries.length,
+          prepared.csEntries.length,
+          latest,
+          changeSet,
+          totalLangFiles,
+        );
+      }
+    }
+    if (latestMeta !== undefined && !degradedSyncSnapshot) {
+      const incremental = await this.tryRunIncrementalPipelineAsync(
+        prepared,
+        latestMeta,
+        options,
+      );
+      if (incremental !== undefined) {
+        return incremental;
+      }
+    }
+    return this.runPipelineAsync(prepared, options);
+  }
+
+  private countLanguageEntries(prepared: PreparedRun): number {
+    return (
+      prepared.tsEntries.length +
+      prepared.csEntries.length +
+      prepared.pyEntries.length +
+      prepared.goEntries.length +
+      prepared.rsEntries.length
+    );
+  }
+
+  private readLatestPublishedMeta():
+    | {
+        readonly snapshotId: string;
+        readonly configHash: string;
+        readonly analyzerFingerprint: string;
+        readonly state: PublishableState;
+      }
+    | undefined {
+    if (typeof this.repository.getLatestSnapshotMeta === "function") {
+      const meta = this.repository.getLatestSnapshotMeta(this.workspaceId);
+      if (meta === undefined) return undefined;
+      return {
+        snapshotId: meta.snapshotId,
+        configHash: meta.configHash,
+        analyzerFingerprint: meta.analyzerFingerprint,
+        state: meta.state,
+      };
+    }
+    const latest = this.repository.getLatestPublished(this.workspaceId);
+    if (latest === undefined) return undefined;
+    const state = latest.snapshot.meta.state;
+    if (state !== "ready" && state !== "partial") return undefined;
+    return {
+      snapshotId: latest.snapshot.meta.id,
+      configHash: latest.snapshot.meta.configHash,
+      analyzerFingerprint: latest.snapshot.meta.analyzerFingerprint,
+      state,
+    };
+  }
+
+  private hasConfigFileChanged(prepared: PreparedRun): boolean {
+    const previousFiles = this.repository.listFiles(this.workspaceId);
+    const prevConfigHashes = new Map<string, string>();
+    for (const file of previousFiles) {
+      if (
+        isTsConfigFile(file.relativePath) ||
+        isGoModFile(file.relativePath) ||
+        isWorkspacePackageJsonFile(file.relativePath)
+      ) {
+        prevConfigHashes.set(file.relativePath, file.contentHash);
+      }
+    }
+    const currentConfigs = [
+      ...prepared.tsConfigEntries,
+      ...prepared.goModEntries,
+      ...prepared.packageJsonEntries,
+    ];
+    if (currentConfigs.length !== prevConfigHashes.size) return true;
+    for (const cfg of currentConfigs) {
+      if (prevConfigHashes.get(cfg.relativePath) !== cfg.contentHash) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  private persistFileFacts(
+    currentLanguagePaths: ReadonlySet<string>,
+    factMaps: readonly ReadonlyMap<string, FileFactRecord>[],
+    diagnosticPaths: ReadonlySet<string>,
+  ): void {
+    if (!isFileFactStore(this.repository)) return;
+    const store = this.repository;
+    const toUpsert: FileFactRecord[] = [];
+    for (const map of factMaps) {
+      for (const [relativePath, record] of map) {
+        if (!diagnosticPaths.has(relativePath)) {
+          toUpsert.push(record);
+        }
+      }
+    }
+    const existingFacts = store.listFileFacts(this.workspaceId);
+    this.withTransaction(() => {
+      if (toUpsert.length > 0) {
+        store.upsertFileFacts(toUpsert);
+      }
+      for (const existing of existingFacts) {
+        if (
+          !currentLanguagePaths.has(existing.relativePath) ||
+          diagnosticPaths.has(existing.relativePath)
+        ) {
+          store.deleteFileFact(this.workspaceId, existing.relativePath);
+        }
+      }
+    });
+  }
+
+  /**
+   * Synchronous TS-only incremental early-cutoff path for `runIncrementalIndex`.
+   */
+  private tryRunSyncTsIncremental(
+    prepared: PreparedRun,
+    prevMeta: {
+      readonly configHash: string;
+      readonly analyzerFingerprint: string;
+    },
+  ): IndexRunResult | undefined {
+    if (!isFileFactStore(this.repository)) return undefined;
+    if (prepared.tsEntries.length === 0) return undefined;
+    if (prevMeta.configHash !== this.configHash) return undefined;
     if (
-      !change &&
-      !degradedSyncSnapshot &&
-      latest !== undefined &&
-      (latest.snapshot.meta.state === "ready" || latest.snapshot.meta.state === "partial")
+      prevMeta.analyzerFingerprint.includes("sync-run-degraded") ||
+      prevMeta.analyzerFingerprint.includes("worker-unavailable")
     ) {
-      return this.noOpResult(
-        prepared.entries,
+      return undefined;
+    }
+    if (this.hasConfigFileChanged(prepared)) return undefined;
+
+    const cachedFacts = this.repository.listFileFacts(
+      this.workspaceId,
+      prevMeta.analyzerFingerprint,
+    );
+    if (cachedFacts.length === 0) return undefined;
+    const cachedTsByPath = new Map<string, FileFactRecord>();
+    for (const fact of cachedFacts) {
+      if (fact.language === "typescript") {
+        cachedTsByPath.set(fact.relativePath, fact);
+      }
+    }
+    if (cachedTsByPath.size === 0) return undefined;
+
+    const warnings: string[] = [];
+    const diagnostics: IndexDiagnostic[] = [];
+    const updatedAt = this.clock();
+    const tsOutcome = this.runIncrementalTsLanguage(
+      prepared.canonicalRoot,
+      prepared.tsEntries,
+      prepared.tsConfigEntries,
+      prepared.packageJsonEntries.length > 0,
+      cachedTsByPath,
+      prevMeta.analyzerFingerprint,
+      updatedAt,
+      warnings,
+      diagnostics,
+    );
+    if (tsOutcome === undefined) return undefined;
+
+    const contentHashByPath = new Map<string, string>(
+      prepared.entries.map((entry) => [entry.relativePath, entry.contentHash]),
+    );
+    const createdAt = this.clock();
+    const buildAttempt = this.openBuildOrRecover(
+      prepared.entries,
+      prevMeta.analyzerFingerprint,
+      createdAt,
+      prepared.canonicalRoot,
+      prepared.entries.length,
+      prepared.tsEntries.length,
+      0,
+      warnings,
+      diagnostics,
+    );
+    if (buildAttempt.kind === "reused") {
+      return buildAttempt.result;
+    }
+    const { opened, activeLease } = buildAttempt;
+    try {
+      const finalState: PublishableState =
+        tsOutcome.output.state === "ready" && diagnostics.length === 0
+          ? "ready"
+          : "partial";
+      try {
+        this.syncInventoryRecords(prepared.entries);
+        const nodeByKey = new Map<string, GraphNode>();
+        this.withTransaction(() => {
+          this.addAdapterGraph(
+            opened.buildId,
+            opened.workspaceNode,
+            tsOutcome.output,
+            contentHashByPath,
+            nodeByKey,
+          );
+        });
+        const diagnosticPaths = new Set(diagnostics.map((d) => d.relativePath));
+        const currentLangPaths = new Set(
+          prepared.tsEntries.map((entry) => entry.relativePath),
+        );
+        this.persistFileFacts(
+          currentLangPaths,
+          [tsOutcome.updatedFacts],
+          diagnosticPaths,
+        );
+      } catch (error) {
+        this.failBuild(opened.buildId, error);
+      }
+      return this.finalizePublish(
+        opened.buildId,
+        finalState,
+        prepared.entries.length,
+        prepared.tsEntries.length,
+        0,
+        warnings,
+        diagnostics,
+        {
+          reanalyzedFiles: tsOutcome.reanalyzedFiles,
+          cachedFiles: prepared.tsEntries.length - tsOutcome.reanalyzedFiles,
+          earlyCutoffApplied: tsOutcome.earlyCutoffApplied,
+        },
+      );
+    } finally {
+      activeLease?.release();
+    }
+  }
+
+  /**
+   * Executes incremental TypeScript analysis with per-file `publicInterfaceHash`
+   * early cutoff (Mokhov et al., ICFP 2018).
+   */
+  private runIncrementalTsLanguage(
+    canonicalRoot: string,
+    tsEntries: readonly InventoryEntry[],
+    tsConfigEntries: readonly InventoryEntry[],
+    hasWorkspacePackageJson: boolean,
+    cachedByPath: ReadonlyMap<string, FileFactRecord>,
+    analyzerFingerprint: string,
+    updatedAt: string,
+    warnings: string[],
+    diagnostics: IndexDiagnostic[],
+  ):
+    | {
+        readonly output: AdapterOutput;
+        readonly updatedFacts: Map<string, FileFactRecord>;
+        readonly reanalyzedFiles: number;
+        readonly earlyCutoffApplied: boolean;
+      }
+    | undefined {
+    const entryByPath = new Map(tsEntries.map((e) => [e.relativePath, e]));
+    const currentPaths = new Set(entryByPath.keys());
+
+    // Build reverse dependency map from cached facts
+    const reverseDependents = new Map<string, Set<string>>();
+    for (const [filePath, fact] of cachedByPath) {
+      const parsed = parseFileFactPayload(fact);
+      if (parsed === undefined) return undefined;
+      for (const dep of parsed.importedPaths) {
+        let rev = reverseDependents.get(dep);
+        if (rev === undefined) {
+          rev = new Set<string>();
+          reverseDependents.set(dep, rev);
+        }
+        rev.add(filePath);
+      }
+    }
+
+    const dirtySet = new Set<string>();
+    for (const entry of tsEntries) {
+      const prev = cachedByPath.get(entry.relativePath);
+      if (prev === undefined || prev.contentHash !== entry.contentHash) {
+        dirtySet.add(entry.relativePath);
+      }
+    }
+
+    let interfaceChangedAny = false;
+    for (const prevPath of cachedByPath.keys()) {
+      if (!currentPaths.has(prevPath)) {
+        interfaceChangedAny = true;
+        const deps = reverseDependents.get(prevPath);
+        if (deps !== undefined) {
+          for (const dep of deps) {
+            if (currentPaths.has(dep)) dirtySet.add(dep);
+          }
+        }
+      }
+    }
+
+    const mergedFacts = new Map<string, FileFactRecord>();
+    for (const [p, fact] of cachedByPath) {
+      if (currentPaths.has(p)) {
+        mergedFacts.set(p, fact);
+      }
+    }
+
+    const reanalyzedSet = new Set<string>();
+    const updatedFacts = new Map<string, FileFactRecord>();
+    let earlyCutoffHits = 0;
+    let state: "ready" | "partial" = "ready";
+
+    for (let pass = 0; pass < 8; pass += 1) {
+      const batch = [...dirtySet]
+        .filter((p) => !reanalyzedSet.has(p) && entryByPath.has(p))
+        .sort();
+      if (batch.length === 0) break;
+
+      const batchSet = new Set(batch);
+      const batchEntries = batch.map((p) => entryByPath.get(p)!);
+      const contextEntries = computeTsContextPaths(
+        batch,
+        tsEntries,
+        mergedFacts,
+        tsConfigEntries.length > 0,
+        hasWorkspacePackageJson,
+      );
+
+      const adapterResult = analyzeTypeScriptProgram({
+        workspaceId: this.workspaceId,
+        rootDir: canonicalRoot,
+        sources: contextEntries.map((entry) => ({
+          relativePath: entry.relativePath,
+          content: entry.content,
+        })),
+        configFiles: tsConfigEntries.map((entry) => ({
+          relativePath: entry.relativePath,
+          content: entry.content,
+        })),
+      });
+
+      const batchDiagnostics = adapterResult.diagnostics.filter((d) =>
+        batchSet.has(d.relativePath),
+      );
+      if (batchDiagnostics.length > 0) {
+        state = "partial";
+      }
+      for (const diagnostic of batchDiagnostics) {
+        const converted: IndexDiagnostic = {
+          relativePath: diagnostic.relativePath,
+          code: diagnostic.code,
+          message: diagnostic.message,
+          line: diagnostic.line,
+        };
+        diagnostics.push(converted);
+        warnings.push(
+          `tanı: ${converted.relativePath}:${String(converted.line)} ${converted.code} ${converted.message}`,
+        );
+      }
+      warnings.push(...adapterResult.warnings);
+
+      const freshFacts = partitionAdapterOutputByFile({
+        workspaceId: this.workspaceId,
+        analyzerFingerprint,
+        language: "typescript",
+        updatedAt,
+        targetEntries: batchEntries,
+        nodes: adapterResult.nodes,
+        edges: adapterResult.edges,
+        evidence: [],
+      });
+
+      for (const filePath of batch) {
+        reanalyzedSet.add(filePath);
+        const newFact = freshFacts.get(filePath);
+        if (newFact === undefined) return undefined;
+        const prevFact = cachedByPath.get(filePath);
+        mergedFacts.set(filePath, newFact);
+        updatedFacts.set(filePath, newFact);
+
+        if (
+          prevFact !== undefined &&
+          newFact.publicInterfaceHash === prevFact.publicInterfaceHash
+        ) {
+          earlyCutoffHits += 1;
+        } else {
+          interfaceChangedAny = true;
+          const dependents = reverseDependents.get(filePath);
+          if (dependents !== undefined) {
+            for (const dep of dependents) {
+              if (currentPaths.has(dep) && !reanalyzedSet.has(dep)) {
+                dirtySet.add(dep);
+              }
+            }
+          }
+        }
+      }
+    }
+
+    for (const p of dirtySet) {
+      if (entryByPath.has(p) && !reanalyzedSet.has(p)) {
+        return undefined;
+      }
+    }
+
+    const mergedOutput = mergeFileFactOutputs([...mergedFacts.values()], {
+      analyzerId: TS_ADAPTER_ANALYZER_ID,
+      analyzerVersion: TS_ADAPTER_VERSION,
+      state,
+    });
+    if (mergedOutput === undefined) return undefined;
+
+    return {
+      output: mergedOutput,
+      updatedFacts,
+      reanalyzedFiles: reanalyzedSet.size,
+      earlyCutoffApplied: earlyCutoffHits > 0 && !interfaceChangedAny,
+    };
+  }
+
+  /**
+   * Async per-file incremental indexing pipeline with early cutoff across all
+   * configured languages (Task 2.6). Falls back cleanly (`undefined`) to full
+   * `runPipelineAsync` whenever config/fingerprint/language-set changed or cache is cold.
+   */
+  private async tryRunIncrementalPipelineAsync(
+    prepared: PreparedRun,
+    prevMeta: {
+      readonly configHash: string;
+      readonly analyzerFingerprint: string;
+    },
+    options: IndexRunOptions,
+  ): Promise<IndexRunResult | undefined> {
+    if (!isFileFactStore(this.repository)) return undefined;
+    if (prevMeta.configHash !== this.configHash) return undefined;
+    if (
+      prevMeta.analyzerFingerprint.includes("sync-run-degraded") ||
+      prevMeta.analyzerFingerprint.includes("worker-unavailable")
+    ) {
+      return undefined;
+    }
+    if (this.hasConfigFileChanged(prepared)) return undefined;
+
+    const totalLangFiles = this.countLanguageEntries(prepared);
+    if (totalLangFiles === 0) return undefined;
+
+    const cachedFacts = this.repository.listFileFacts(
+      this.workspaceId,
+      prevMeta.analyzerFingerprint,
+    );
+    if (cachedFacts.length === 0) return undefined;
+
+    const cachedByLang = new Map<string, Map<string, FileFactRecord>>();
+    for (const fact of cachedFacts) {
+      let langMap = cachedByLang.get(fact.language);
+      if (langMap === undefined) {
+        langMap = new Map<string, FileFactRecord>();
+        cachedByLang.set(fact.language, langMap);
+      }
+      langMap.set(fact.relativePath, fact);
+    }
+
+    // Ensure the set of active languages matches the cached fingerprint exactly
+    const activeLangCounts: ReadonlyArray<readonly [string, readonly InventoryEntry[]]> = [
+      ["typescript", prepared.tsEntries],
+      ["csharp", prepared.csEntries],
+      ["python", prepared.pyEntries],
+      ["go", prepared.goEntries],
+      ["rust", prepared.rsEntries],
+    ];
+    for (const [lang, langEntries] of activeLangCounts) {
+      const hadLang = (cachedByLang.get(lang)?.size ?? 0) > 0;
+      const hasLang = langEntries.length > 0;
+      if (hadLang !== hasLang) {
+        return undefined;
+      }
+    }
+
+    const warnings: string[] = [];
+    const diagnostics: IndexDiagnostic[] = [];
+    const updatedAt = this.clock();
+    const adapterOutputs: AdapterOutput[] = [];
+    const factMapsToPersist: Array<ReadonlyMap<string, FileFactRecord>> = [];
+    let totalReanalyzed = 0;
+    let earlyCutoffAppliedAny = false;
+    let interfaceBrokeCutoffAny = false;
+    let processedLangFiles = 0;
+
+    options.onProgress?.({
+      phase: "analyzing",
+      completed: 0,
+      total: totalLangFiles,
+      message: "Running incremental dependency analysis",
+    });
+
+    // 1) TypeScript / JavaScript
+    if (prepared.tsEntries.length > 0) {
+      await yieldToEventLoop();
+      const tsCached = cachedByLang.get("typescript") ?? new Map<string, FileFactRecord>();
+      const tsOutcome = this.runIncrementalTsLanguage(
+        prepared.canonicalRoot,
+        prepared.tsEntries,
+        prepared.tsConfigEntries,
+        prepared.packageJsonEntries.length > 0,
+        tsCached,
+        prevMeta.analyzerFingerprint,
+        updatedAt,
+        warnings,
+        diagnostics,
+      );
+      if (tsOutcome === undefined) return undefined;
+      adapterOutputs.push(tsOutcome.output);
+      factMapsToPersist.push(tsOutcome.updatedFacts);
+      totalReanalyzed += tsOutcome.reanalyzedFiles;
+      if (tsOutcome.reanalyzedFiles > 0) {
+        if (tsOutcome.earlyCutoffApplied) {
+          earlyCutoffAppliedAny = true;
+        } else {
+          interfaceBrokeCutoffAny = true;
+        }
+      }
+      processedLangFiles += prepared.tsEntries.length;
+      options.onProgress?.({
+        phase: "analyzing",
+        completed: processedLangFiles,
+        total: totalLangFiles,
+        message: `Analyzed TypeScript (${String(tsOutcome.reanalyzedFiles)} reanalyzed, ${String(prepared.tsEntries.length - tsOutcome.reanalyzedFiles)} cached)`,
+      });
+      await yieldToEventLoop();
+    }
+
+    // 2) Sidecar languages (C#, Python, Go, Rust) — skip adapter completely when 0 files changed!
+    const sidecarSpecs: ReadonlyArray<{
+      readonly lang: "csharp" | "python" | "go" | "rust";
+      readonly entries: readonly InventoryEntry[];
+      readonly analyzerId: string;
+      readonly analyzerVersion: string;
+      readonly runAdapter: (subset: readonly InventoryEntry[]) => Promise<{
+        readonly workerAvailable: boolean;
+        readonly state: "ready" | "partial";
+        readonly nodes: readonly SnapshotNodeInput[];
+        readonly edges: readonly SnapshotEdgeInput[];
+        readonly evidence: readonly SnapshotEvidenceInput[];
+        readonly diagnostics: readonly RoslynAdapterDiagnostic[];
+        readonly warnings: readonly string[];
+      }>;
+    }> = [
+      {
+        lang: "csharp",
+        entries: prepared.csEntries,
+        analyzerId: CSHARP_ROSLYN_ADAPTER_ID,
+        analyzerVersion: CSHARP_ROSLYN_ADAPTER_VERSION,
+        runAdapter: (subset) =>
+          this.analyzeCSharpFn({
+            workspaceId: this.workspaceId,
+            rootDir: prepared.canonicalRoot,
+            files: subset.map((entry) => ({
+              path: entry.relativePath,
+              content: entry.content,
+            })),
+            options: {
+              dotnetCommand: this.csharpSettings.dotnetCommand,
+              requestTimeoutMs: this.csharpSettings.requestTimeoutMs,
+              workerDllPath: this.csharpSettings.workerDllPath,
+            },
+          }),
+      },
+      {
+        lang: "python",
+        entries: prepared.pyEntries,
+        analyzerId: PYTHON_WORKER_ADAPTER_ID,
+        analyzerVersion: PYTHON_WORKER_ADAPTER_VERSION,
+        runAdapter: (subset) =>
+          analyzePythonWorkspace({
+            workspaceId: this.workspaceId,
+            files: subset.map((entry) => ({
+              path: entry.relativePath,
+              content: entry.content,
+            })),
+            options: {
+              pythonCommand: this.pythonSettings.pythonCommand,
+              requestTimeoutMs: this.pythonSettings.requestTimeoutMs,
+              workerScriptPath: this.pythonSettings.workerScriptPath,
+              responseMaxChars: this.pythonSettings.responseMaxChars,
+            },
+          }),
+      },
+      {
+        lang: "go",
+        entries: prepared.goEntries,
+        analyzerId: GO_ADAPTER_ID,
+        analyzerVersion: GO_ADAPTER_VERSION,
+        runAdapter: (subset) =>
+          analyzeGoWorkspace({
+            workspaceId: this.workspaceId,
+            files: subset.map((entry) => ({
+              path: entry.relativePath,
+              content: entry.content,
+            })),
+            ...(prepared.goModEntries.length > 0
+              ? {
+                  moduleFiles: prepared.goModEntries.map((entry) => ({
+                    relativePath: entry.relativePath,
+                    content: entry.content,
+                  })),
+                }
+              : {}),
+            options: {
+              goBinaryPath: this.goSettings.goBinaryPath,
+              ...(this.goSettings.goWorkerBinaryPath.length > 0
+                ? { goWorkerBinaryPath: this.goSettings.goWorkerBinaryPath }
+                : {}),
+              workerDir: this.goSettings.workerDir,
+              requestTimeoutMs: this.goSettings.requestTimeoutMs,
+            },
+          }),
+      },
+      {
+        lang: "rust",
+        entries: prepared.rsEntries,
+        analyzerId: RUST_ADAPTER_ID,
+        analyzerVersion: RUST_ADAPTER_VERSION,
+        runAdapter: (subset) =>
+          analyzeRustWorkspace({
+            workspaceId: this.workspaceId,
+            files: subset.map((entry) => ({
+              path: entry.relativePath,
+              content: entry.content,
+            })),
+            options: {
+              ...(this.hasExplicitRustWorkerDir
+                ? { workerDir: this.rustSettings.workerDir }
+                : {}),
+              workerBinaryName: this.rustSettings.workerBinaryName,
+              ...(this.rustSettings.cargoHomeDir.length > 0
+                ? { cargoHomeDir: this.rustSettings.cargoHomeDir }
+                : {}),
+              requestTimeoutMs: this.rustSettings.requestTimeoutMs,
+              responseMaxChars: this.rustSettings.responseMaxChars,
+              cargoBuildTimeoutMs: this.rustSettings.cargoBuildTimeoutMs,
+            },
+          }),
+      },
+    ];
+
+    for (const spec of sidecarSpecs) {
+      if (spec.entries.length === 0) continue;
+      const langCached = cachedByLang.get(spec.lang) ?? new Map<string, FileFactRecord>();
+      const entryByPath = new Map(spec.entries.map((e) => [e.relativePath, e]));
+      const currentPaths = new Set(entryByPath.keys());
+
+      const dirtyEntries = spec.entries.filter((entry) => {
+        const prev = langCached.get(entry.relativePath);
+        return prev === undefined || prev.contentHash !== entry.contentHash;
+      });
+      const hasDeleted = [...langCached.keys()].some((p) => !currentPaths.has(p));
+
+      if (dirtyEntries.length === 0 && !hasDeleted) {
+        const merged = mergeFileFactOutputs([...langCached.values()], {
+          analyzerId: spec.analyzerId,
+          analyzerVersion: spec.analyzerVersion,
+          state: "ready",
+        });
+        if (merged === undefined) return undefined;
+        adapterOutputs.push(merged);
+      } else {
+        // Re-analyze language files with full cross-file context so zero sidecar edge is lost
+        const res = await spec.runAdapter(spec.entries);
+        if (!res.workerAvailable) return undefined;
+        for (const diag of res.diagnostics) {
+          diagnostics.push(toDiagnostic(diag));
+          warnings.push(
+            `tanı: ${diag.relativePath}:${String(diag.line)} ${diag.code} ${diag.message}`,
+          );
+        }
+        warnings.push(...res.warnings);
+        const freshMap = partitionAdapterOutputByFile({
+          workspaceId: this.workspaceId,
+          analyzerFingerprint: prevMeta.analyzerFingerprint,
+          language: spec.lang,
+          updatedAt,
+          targetEntries: spec.entries,
+          nodes: res.nodes,
+          edges: res.edges,
+          evidence: res.evidence,
+        });
+        adapterOutputs.push({
+          analyzerId: spec.analyzerId,
+          analyzerVersion: spec.analyzerVersion,
+          state: res.state,
+          nodes: res.nodes,
+          edges: res.edges,
+          evidence: res.evidence,
+        });
+        factMapsToPersist.push(freshMap);
+        totalReanalyzed += spec.entries.length;
+        interfaceBrokeCutoffAny = true;
+      }
+
+      processedLangFiles += spec.entries.length;
+      options.onProgress?.({
+        phase: "analyzing",
+        completed: processedLangFiles,
+        total: totalLangFiles,
+        message: `Processed ${spec.lang} files`,
+      });
+    }
+
+    const contentHashByPath = new Map<string, string>(
+      prepared.entries.map((entry) => [entry.relativePath, entry.contentHash]),
+    );
+    const createdAt = this.clock();
+
+    await yieldToEventLoop();
+    options.onProgress?.({
+      phase: "building",
+      completed: totalLangFiles,
+      total: totalLangFiles,
+      message: "Building incremental snapshot graph",
+    });
+
+    const buildAttempt = this.openBuildOrRecover(
+      prepared.entries,
+      prevMeta.analyzerFingerprint,
+      createdAt,
+      prepared.canonicalRoot,
+      prepared.entries.length,
+      prepared.tsEntries.length,
+      prepared.csEntries.length,
+      warnings,
+      diagnostics,
+    );
+    if (buildAttempt.kind === "reused") {
+      return buildAttempt.result;
+    }
+    const { opened, activeLease } = buildAttempt;
+
+    try {
+      let finalState: PublishableState = "ready";
+      try {
+        this.syncInventoryRecords(prepared.entries);
+        const nodeByKey = new Map<string, GraphNode>();
+        this.withTransaction(() => {
+          for (const output of adapterOutputs) {
+            this.addAdapterGraph(
+              opened.buildId,
+              opened.workspaceNode,
+              output,
+              contentHashByPath,
+              nodeByKey,
+            );
+            if (output.state !== "ready") finalState = "partial";
+          }
+        });
+        if (diagnostics.length > 0) finalState = "partial";
+
+        const diagnosticPaths = new Set(diagnostics.map((d) => d.relativePath));
+        const currentLangPaths = new Set<string>([
+          ...prepared.tsEntries.map((e) => e.relativePath),
+          ...prepared.csEntries.map((e) => e.relativePath),
+          ...prepared.pyEntries.map((e) => e.relativePath),
+          ...prepared.goEntries.map((e) => e.relativePath),
+          ...prepared.rsEntries.map((e) => e.relativePath),
+        ]);
+        this.persistFileFacts(currentLangPaths, factMapsToPersist, diagnosticPaths);
+      } catch (error) {
+        this.failBuild(opened.buildId, error);
+      }
+
+      options.onProgress?.({
+        phase: "publishing",
+        completed: totalLangFiles,
+        total: totalLangFiles,
+        message: "Publishing incremental snapshot",
+      });
+      const result = this.finalizePublish(
+        opened.buildId,
+        finalState,
+        prepared.entries.length,
         prepared.tsEntries.length,
         prepared.csEntries.length,
-        latest,
-        changeSet,
+        warnings,
+        diagnostics,
+        {
+          reanalyzedFiles: totalReanalyzed,
+          cachedFiles: totalLangFiles - totalReanalyzed,
+          earlyCutoffApplied: earlyCutoffAppliedAny && !interfaceBrokeCutoffAny,
+        },
       );
+      options.onProgress?.({
+        phase: "done",
+        completed: totalLangFiles,
+        total: totalLangFiles,
+        message: `Published snapshot ${result.snapshotId}`,
+      });
+      return result;
+    } finally {
+      activeLease?.release();
     }
-    return this.runPipelineAsync(prepared);
   }
 
   /**
@@ -920,12 +2871,13 @@ export class IndexService {
     return changedSources.length > 0 || deletedSources.length > 0;
   }
 
-  /** Değişim analizinde yeniden indeksleme tetikleyen dosya mı (dil kaynağı, TS/JS config veya go.mod). */
+  /** Değişim analizinde yeniden indeksleme tetikleyen dosya mı (dil kaynağı, TS/JS config, go.mod veya workspace package.json). */
   private isIndexRelevantFile(relativePath: string): boolean {
     return (
       this.isLanguageSource(path.extname(relativePath).toLowerCase()) ||
       isTsConfigFile(relativePath) ||
-      isGoModFile(relativePath)
+      isGoModFile(relativePath) ||
+      isWorkspacePackageJsonFile(relativePath)
     );
   }
 
@@ -951,6 +2903,7 @@ export class IndexService {
     csFileCount: number,
     latest: NonNullable<ReturnType<GraphRepository["getLatestPublished"]>>,
     changeSet: readonly string[],
+    cachedLanguageFileCount = tsFileCount + csFileCount,
   ): IndexRunResult {
     // Güvenlik bulgusu 3: mutabakat upsert'lerden ÖNCE okunur.
     const previousFilePaths = new Set(
@@ -992,6 +2945,9 @@ export class IndexService {
       ],
       diagnostics: [],
       published: false,
+      reanalyzedFiles: 0,
+      cachedFiles: cachedLanguageFileCount,
+      earlyCutoffApplied: false,
     };
   }
 
@@ -1035,6 +2991,9 @@ export class IndexService {
     const tsConfigEntries = entries.filter((entry) =>
       isTsConfigFile(entry.relativePath),
     );
+    const packageJsonEntries = entries.filter((entry) =>
+      isWorkspacePackageJsonFile(entry.relativePath),
+    );
     const csEntries = entries.filter((entry) =>
       CS_EXTENSIONS.has(path.extname(entry.relativePath).toLowerCase()),
     );
@@ -1053,6 +3012,7 @@ export class IndexService {
       entries,
       tsEntries,
       tsConfigEntries,
+      packageJsonEntries,
       csEntries,
       pyEntries,
       goEntries,
@@ -1397,6 +3357,11 @@ export class IndexService {
     csFileCount: number,
     warnings: string[],
     diagnostics: IndexDiagnostic[],
+    incrementalTelemetry?: {
+      readonly reanalyzedFiles: number;
+      readonly cachedFiles: number;
+      readonly earlyCutoffApplied: boolean;
+    },
   ): IndexRunResult {
     const publishedAt = this.clock();
     let snapshot: SnapshotGraph;
@@ -1438,7 +3403,10 @@ export class IndexService {
       throw error;
     }
     this.runCount += 1;
-    const stale = this.repository.getLatestPublished(this.workspaceId)?.stale ?? false;
+    const stale =
+      typeof this.repository.getLatestSnapshotMeta === "function"
+        ? (this.repository.getLatestSnapshotMeta(this.workspaceId)?.stale ?? false)
+        : (this.repository.getLatestPublished(this.workspaceId)?.stale ?? false);
     return {
       snapshotId: snapshot.meta.id,
       snapshot,
@@ -1450,6 +3418,7 @@ export class IndexService {
       warnings,
       diagnostics,
       published: true,
+      ...(incrementalTelemetry === undefined ? {} : incrementalTelemetry),
     };
   }
 
@@ -1577,6 +3546,8 @@ export class IndexService {
 
         const nodeByKey = new Map<string, GraphNode>();
         let tsState: "ready" | "partial" = "ready";
+        let syncTsNodes: readonly SnapshotNodeInput[] = [];
+        let syncTsEdges: readonly SnapshotEdgeInput[] = [];
         if (tsEntries.length > 0) {
           // TS adapter (salt-okunur kaynak çantası; rootDir çözümleme
           // çapasıdır, adapter diske YAZMAZ — ADR-008).
@@ -1593,6 +3564,8 @@ export class IndexService {
             })),
           });
           tsState = adapterResult.state;
+          syncTsNodes = adapterResult.nodes;
+          syncTsEdges = adapterResult.edges;
           for (const diagnostic of adapterResult.diagnostics) {
             const converted: IndexDiagnostic = {
               relativePath: diagnostic.relativePath,
@@ -1705,6 +3678,25 @@ export class IndexService {
         // itip bayat graph'ı korur.
         this.syncInventoryRecords(entries);
 
+        if (!syncHasL0Language && tsEntries.length > 0 && isFileFactStore(this.repository)) {
+          const diagnosticPaths = new Set(diagnostics.map((d) => d.relativePath));
+          const tsFacts = partitionAdapterOutputByFile({
+            workspaceId: this.workspaceId,
+            analyzerFingerprint: fingerprint,
+            language: "typescript",
+            updatedAt: createdAt,
+            targetEntries: tsEntries,
+            nodes: syncTsNodes,
+            edges: syncTsEdges,
+            evidence: [],
+          });
+          this.persistFileFacts(
+            new Set(tsEntries.map((e) => e.relativePath)),
+            [tsFacts],
+            diagnosticPaths,
+          );
+        }
+
         finalState =
           tsState === "ready" &&
           csState === "ready" &&
@@ -1717,6 +3709,7 @@ export class IndexService {
         this.failBuild(opened.buildId, error);
       }
 
+      const totalLangFiles = this.countLanguageEntries(prepared);
       if (emptyLanguageRun) {
         return this.finalizePublish(
           opened.buildId,
@@ -1726,6 +3719,7 @@ export class IndexService {
           0,
           warnings,
           [],
+          { reanalyzedFiles: 0, cachedFiles: 0, earlyCutoffApplied: false },
         );
       }
       return this.finalizePublish(
@@ -1736,6 +3730,11 @@ export class IndexService {
         csEntries.length,
         warnings,
         diagnostics,
+        {
+          reanalyzedFiles: totalLangFiles,
+          cachedFiles: 0,
+          earlyCutoffApplied: false,
+        },
       );
     } finally {
       activeLease?.release();
@@ -1756,7 +3755,10 @@ export class IndexService {
    * yazılır — build'in analyzerFingerprint alanı koşuma katılan beş
    * analyzer'ı dürüstçe taşır.
    */
-  private async runPipelineAsync(prepared: PreparedRun): Promise<IndexRunResult> {
+  private async runPipelineAsync(
+    prepared: PreparedRun,
+    options: IndexRunOptions = {},
+  ): Promise<IndexRunResult> {
     const {
       canonicalRoot,
       entries,
@@ -1773,6 +3775,17 @@ export class IndexService {
     const contentHashByPath = new Map<string, string>(
       entries.map((entry) => [entry.relativePath, entry.contentHash]),
     );
+    const totalLangFiles = this.countLanguageEntries(prepared);
+    let completedLangFiles = 0;
+
+    if (totalLangFiles > 0) {
+      options.onProgress?.({
+        phase: "analyzing",
+        completed: 0,
+        total: totalLangFiles,
+        message: `Analyzing ${String(totalLangFiles)} source files`,
+      });
+    }
 
     // Sıralama sözleşmesi (denetim bulgusu): adapter koşumları files
     // upsert'lerinden ÖNCE yapılır. Adapter koşumu build'den ÖNCE olduğundan
@@ -1813,6 +3826,13 @@ export class IndexService {
         );
       }
       warnings.push(...adapterResult.warnings);
+      completedLangFiles += tsEntries.length;
+      options.onProgress?.({
+        phase: "analyzing",
+        completed: completedLangFiles,
+        total: totalLangFiles,
+        message: `Analyzed ${String(tsEntries.length)} TypeScript/JavaScript files`,
+      });
       await yieldToEventLoop();
     }
 
@@ -1821,6 +3841,7 @@ export class IndexService {
       // C# adapter (async worker; graceful fallback adapter içindedir).
       csharpResult = await this.analyzeCSharpFn({
         workspaceId: this.workspaceId,
+        rootDir: canonicalRoot,
         files: csEntries.map((entry) => ({
           path: entry.relativePath,
           content: entry.content,
@@ -2016,6 +4037,13 @@ export class IndexService {
     }
     const { opened, activeLease } = buildAttempt;
 
+    options.onProgress?.({
+      phase: "building",
+      completed: totalLangFiles,
+      total: totalLangFiles,
+      message: "Building snapshot graph",
+    });
+
     try {
       let finalState: PublishableState = "ready";
       let emptyLanguageRun = false;
@@ -2106,13 +4134,102 @@ export class IndexService {
         if (tsState !== "ready") state = "partial";
         if (diagnostics.length > 0) state = "partial";
         finalState = state;
+
+        if (isFileFactStore(this.repository)) {
+          const diagnosticPaths = new Set(diagnostics.map((d) => d.relativePath));
+          const factMaps: Array<ReadonlyMap<string, FileFactRecord>> = [];
+          if (tsEntries.length > 0) {
+            factMaps.push(
+              partitionAdapterOutputByFile({
+                workspaceId: this.workspaceId,
+                analyzerFingerprint: fingerprint,
+                language: "typescript",
+                updatedAt: createdAt,
+                targetEntries: tsEntries,
+                nodes: tsNodes,
+                edges: tsEdges,
+                evidence: [],
+              }),
+            );
+          }
+          if (csharpResult !== undefined && csharpResult.workerAvailable) {
+            factMaps.push(
+              partitionAdapterOutputByFile({
+                workspaceId: this.workspaceId,
+                analyzerFingerprint: fingerprint,
+                language: "csharp",
+                updatedAt: createdAt,
+                targetEntries: csEntries,
+                nodes: csharpResult.nodes,
+                edges: csharpResult.edges,
+                evidence: csharpResult.evidence,
+              }),
+            );
+          }
+          if (pythonResult !== undefined && pythonResult.workerAvailable) {
+            factMaps.push(
+              partitionAdapterOutputByFile({
+                workspaceId: this.workspaceId,
+                analyzerFingerprint: fingerprint,
+                language: "python",
+                updatedAt: createdAt,
+                targetEntries: pyEntries,
+                nodes: pythonResult.nodes,
+                edges: pythonResult.edges,
+                evidence: pythonResult.evidence,
+              }),
+            );
+          }
+          if (goResult !== undefined && goResult.workerAvailable) {
+            factMaps.push(
+              partitionAdapterOutputByFile({
+                workspaceId: this.workspaceId,
+                analyzerFingerprint: fingerprint,
+                language: "go",
+                updatedAt: createdAt,
+                targetEntries: goEntries,
+                nodes: goResult.nodes,
+                edges: goResult.edges,
+                evidence: goResult.evidence,
+              }),
+            );
+          }
+          if (rustResult !== undefined && rustResult.workerAvailable) {
+            factMaps.push(
+              partitionAdapterOutputByFile({
+                workspaceId: this.workspaceId,
+                analyzerFingerprint: fingerprint,
+                language: "rust",
+                updatedAt: createdAt,
+                targetEntries: rsEntries,
+                nodes: rustResult.nodes,
+                edges: rustResult.edges,
+                evidence: rustResult.evidence,
+              }),
+            );
+          }
+          const currentLangPaths = new Set<string>([
+            ...tsEntries.map((e) => e.relativePath),
+            ...csEntries.map((e) => e.relativePath),
+            ...pyEntries.map((e) => e.relativePath),
+            ...goEntries.map((e) => e.relativePath),
+            ...rsEntries.map((e) => e.relativePath),
+          ]);
+          this.persistFileFacts(currentLangPaths, factMaps, diagnosticPaths);
+        }
         }
       } catch (error) {
         this.failBuild(opened.buildId, error);
       }
 
+      options.onProgress?.({
+        phase: "publishing",
+        completed: totalLangFiles,
+        total: totalLangFiles,
+        message: "Publishing snapshot",
+      });
       if (emptyLanguageRun) {
-        return this.finalizePublish(
+        const emptyResult = this.finalizePublish(
           opened.buildId,
           "partial",
           entries.length,
@@ -2120,9 +4237,17 @@ export class IndexService {
           0,
           warnings,
           [],
+          { reanalyzedFiles: 0, cachedFiles: 0, earlyCutoffApplied: false },
         );
+        options.onProgress?.({
+          phase: "done",
+          completed: 0,
+          total: 0,
+          message: `Published partial snapshot ${emptyResult.snapshotId}`,
+        });
+        return emptyResult;
       }
-      return this.finalizePublish(
+      const result = this.finalizePublish(
         opened.buildId,
         finalState,
         entries.length,
@@ -2130,7 +4255,19 @@ export class IndexService {
         csEntries.length,
         warnings,
         diagnostics,
+        {
+          reanalyzedFiles: totalLangFiles,
+          cachedFiles: 0,
+          earlyCutoffApplied: false,
+        },
       );
+      options.onProgress?.({
+        phase: "done",
+        completed: totalLangFiles,
+        total: totalLangFiles,
+        message: `Published snapshot ${result.snapshotId}`,
+      });
+      return result;
     } finally {
       activeLease?.release();
     }

@@ -787,7 +787,8 @@ describe("F6-K6 davranışsal: network denied (netguard preload oturumu)", () =>
     const s = requireSession(session);
     const list = await s.call("tools/list", {});
     const listResult = list.result as { tools?: unknown[] } | undefined;
-    expect(listResult?.tools?.length).toBe(29);
+    // full profile exposes all 29 legacy tools + 3 consolidated core tools (32 total).
+    expect(listResult?.tools?.length).toBe(32);
 
     const summary = await s.call("tools/call", {
       name: "causoryn_workspace_summary",

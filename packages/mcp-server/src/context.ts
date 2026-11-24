@@ -55,6 +55,29 @@ import { PreflightManifestStore } from "./preflight-store.js";
  * console.error'dur (stderr) — stdout YALNIZCA MCP protokolüdür (TŞ §10.1).
  */
 
+export interface IndexWaitProgress {
+  readonly jobId: string;
+  readonly status: "queued" | "running" | "done" | "failed";
+  readonly phase?: string;
+  readonly progress: number;
+  readonly total: number;
+  readonly message: string;
+}
+
+export interface WaitForInitialIndexOptions {
+  readonly timeoutMs?: number;
+  readonly onProgress?: (update: IndexWaitProgress) => void | Promise<void>;
+  readonly signal?: AbortSignal;
+  readonly pollIntervalMs?: number;
+}
+
+export interface ActiveIndexJobInfo {
+  readonly jobId: string;
+  readonly status: "queued" | "running";
+  readonly progressPercent: number;
+  readonly phase: string;
+}
+
 export interface CausorynContext {
   readonly config: CausorynServerConfig;
   readonly policy: WorkspaceAccessPolicy;
@@ -102,17 +125,20 @@ export interface CausorynContext {
    */
   readonly close: () => void;
   /**
-   * v0.2.1: `deferAutoIndex: true` ile oluşturulan bağlamda arka plan ilk
-   * indeksleme işini idempotent olarak başlatır (MCP `oninitialized` sonrası
-   * çağrılır ki `initialize` / `tools/list` asla event loop blokajı yaşamasın).
+   * Starts deferred background indexing idempotently (invoked after MCP
+   * `oninitialized` so `initialize` / `tools/list` never block).
    */
   readonly startDeferredIndex?: () => void;
   /**
-   * v0.2.1: `deferAutoIndex: true` ile başlatılan arka plan ilk indeksleme
-   * işinin tamamlanmasını en fazla `timeoutMs` kadar bekler (timeout aşılırsa
-   * fırlatmaz; arka plan işi kesilmeden devam eder).
+   * Waits for cold-start background indexing up to `timeoutMs` while forwarding
+   * optional progress updates; returns immediately on warm starts when a
+   * published snapshot already exists.
    */
-  readonly waitForInitialIndex?: (timeoutMs?: number) => Promise<void>;
+  readonly waitForInitialIndex?: (
+    timeoutOrOptions?: number | WaitForInitialIndexOptions,
+  ) => Promise<void>;
+  /** Returns active queued/running indexing job info, or null if idle/terminal. */
+  readonly getActiveIndexJob?: () => ActiveIndexJobInfo | null;
 }
 
 export interface ContextOverrides {
@@ -212,57 +238,253 @@ export function createCausorynContext(
       }
     }
 
+    const hasPublishedSnapshotFast = (): boolean => {
+      const maybeMeta = (
+        repository as unknown as {
+          getLatestSnapshotMeta?: (wsId: string) => unknown;
+        }
+      ).getLatestSnapshotMeta;
+      if (typeof maybeMeta === "function") {
+        return maybeMeta.call(repository, config.workspaceId) !== undefined;
+      }
+      return repository.getLatestPublished(config.workspaceId) !== undefined;
+    };
+
+    const getActiveIndexJob = (): ActiveIndexJobInfo | null => {
+      const jobs = jobManager.jobs();
+      for (let i = jobs.length - 1; i >= 0; i -= 1) {
+        const job = jobs[i];
+        if (job !== undefined && (job.status === "running" || job.status === "queued")) {
+          return {
+            jobId: job.jobId,
+            status: job.status,
+            progressPercent: job.progressPercent,
+            phase: job.progress?.phase ?? (job.status === "queued" ? "queued" : "indexing"),
+          };
+        }
+      }
+      return null;
+    };
+
     const startDeferredIndex = (): void => {
       if (deferredBootRoot === undefined || initialBootJobId !== undefined) return;
       const rootToIndex = deferredBootRoot;
       deferredBootRoot = undefined;
       try {
-        const existing =
-          overrides.repository === undefined && config.storage.dataDbPath !== undefined
-            ? repository.getLatestPublished(config.workspaceId)
-            : undefined;
-        if (existing !== undefined) {
-          logger(
-            `kalıcı index yüklendi: workspace=${config.workspaceId} snapshot=${existing.snapshot.meta.id} state=${existing.snapshot.meta.state}`,
-          );
+        if (
+          overrides.repository === undefined &&
+          config.storage.dataDbPath !== undefined &&
+          hasPublishedSnapshotFast()
+        ) {
+          logger(`persistent index ready: workspace=${config.workspaceId}`);
           return;
         }
         const bootJob = jobManager.refreshIndex(rootToIndex, { mode: "full" });
         initialBootJobId = bootJob.jobId;
         logger(
-          `arka plan ilk index başlatıldı: workspace=${config.workspaceId} jobId=${bootJob.jobId}`,
+          `background initial index started: workspace=${config.workspaceId} jobId=${bootJob.jobId}`,
         );
       } catch (error) {
         logger(
-          `arka plan ilk index başlatılamadı: ${error instanceof Error ? error.message : String(error)}`,
+          `background initial index failed to start: ${error instanceof Error ? error.message : String(error)}`,
         );
       }
     };
 
-    const waitForInitialIndex = async (timeoutMs = 15_000): Promise<void> => {
-      startDeferredIndex();
-      if (initialBootJobId === undefined) return;
-      const current = jobManager.status(initialBootJobId);
-      if (current === undefined || current.status === "done" || current.status === "failed") {
+    const waitForInitialIndex = async (
+      timeoutOrOptions: number | WaitForInitialIndexOptions = 15_000,
+    ): Promise<void> => {
+      const opts: WaitForInitialIndexOptions =
+        typeof timeoutOrOptions === "number"
+          ? { timeoutMs: timeoutOrOptions }
+          : timeoutOrOptions;
+      // Warm start fast-path: if a published snapshot already exists, serve immediately.
+      if (hasPublishedSnapshotFast()) {
         return;
       }
-      const boundedMs = Number.isFinite(timeoutMs) && timeoutMs > 0 ? timeoutMs : 15_000;
+      startDeferredIndex();
+      if (hasPublishedSnapshotFast()) {
+        return;
+      }
+      const targetJobId = initialBootJobId ?? getActiveIndexJob()?.jobId;
+      if (targetJobId === undefined) return;
+      const initialRecord = jobManager.status(targetJobId);
+      if (
+        initialRecord === undefined ||
+        initialRecord.status === "done" ||
+        initialRecord.status === "failed"
+      ) {
+        return;
+      }
+      if (opts.signal?.aborted) return;
+
+      const rawTimeout = opts.timeoutMs;
+      const boundedMs =
+        rawTimeout !== undefined && Number.isFinite(rawTimeout) && rawTimeout >= 0
+          ? rawTimeout
+          : 15_000;
+
+      const emitProgress = async (
+        status: "queued" | "running" | "done" | "failed",
+        progress: number,
+        message: string,
+        phase?: string,
+      ): Promise<void> => {
+        if (opts.onProgress === undefined) return;
+        try {
+          await opts.onProgress({
+            jobId: targetJobId,
+            status,
+            ...(phase === undefined ? {} : { phase }),
+            progress,
+            total: 100,
+            message,
+          });
+        } catch {
+          // Ignore progress consumer failures.
+        }
+      };
+
+      const formatPhaseMessage = (
+        phase: string,
+        detail: string | undefined,
+        percent: number,
+      ): string => {
+        if (detail !== undefined && detail.length > 0) {
+          return `[${phase}] ${detail}`;
+        }
+        return `[${phase}] Indexing workspace (${String(percent)}%)`;
+      };
+
+      let lastStatus: "queued" | "running" | "done" | "failed" = initialRecord.status;
+      let lastProgress: number = initialRecord.progressPercent;
+      let lastPhase: string = initialRecord.progress?.phase ?? initialRecord.status;
+
+      if (boundedMs === 0) {
+        await emitProgress(
+          lastStatus,
+          lastProgress,
+          formatPhaseMessage(lastPhase, initialRecord.progress?.message, lastProgress),
+          lastPhase,
+        );
+        return;
+      }
+
       let timer: ReturnType<typeof setTimeout> | undefined;
+      let unsubscribeProgress: (() => void) | undefined;
+      let abortCleanup: (() => void) | undefined;
+      let completed = false;
+      const pendingProgress = new Set<Promise<void>>();
+      const scheduleProgress = (promise: Promise<void>): void => {
+        pendingProgress.add(promise);
+        void promise.finally(() => {
+          pendingProgress.delete(promise);
+        });
+      };
+
       try {
-        await Promise.race([
-          jobManager.waitForJob(initialBootJobId).then(
-            () => undefined,
-            () => undefined,
+        if (
+          opts.onProgress !== undefined &&
+          typeof (jobManager as { subscribeProgress?: unknown }).subscribeProgress === "function"
+        ) {
+          unsubscribeProgress = jobManager.subscribeProgress(targetJobId, (event) => {
+            const snap = jobManager.status(targetJobId);
+            const status: "queued" | "running" | "done" | "failed" =
+              snap?.status ??
+              (event.phase === "done"
+                ? "done"
+                : event.phase === "failed"
+                  ? "failed"
+                  : event.phase === "queued"
+                    ? "queued"
+                    : "running");
+            const progress = snap?.progressPercent ?? lastProgress;
+            lastStatus = status;
+            lastProgress = progress;
+            lastPhase = event.phase;
+            scheduleProgress(
+              emitProgress(
+                status,
+                progress,
+                formatPhaseMessage(event.phase, event.message, progress),
+                event.phase,
+              ),
+            );
+          });
+        }
+
+        await emitProgress(
+          lastStatus,
+          lastProgress,
+          formatPhaseMessage(lastPhase, initialRecord.progress?.message, lastProgress),
+          lastPhase,
+        );
+
+        const racers: Promise<void>[] = [
+          jobManager.waitForJob(targetJobId).then(
+            () => {
+              completed = true;
+            },
+            () => {
+              completed = true;
+            },
           ),
           new Promise<void>((resolve) => {
             timer = setTimeout(resolve, boundedMs);
             timer.unref();
           }),
-        ]);
-      } finally {
-        if (timer !== undefined) {
-          clearTimeout(timer);
+        ];
+        if (opts.signal !== undefined) {
+          const signal = opts.signal;
+          if (signal.aborted) {
+            return;
+          }
+          racers.push(
+            new Promise<void>((resolve) => {
+              const onAbort = (): void => resolve();
+              signal.addEventListener("abort", onAbort, { once: true });
+              abortCleanup = () => signal.removeEventListener("abort", onAbort);
+            }),
+          );
         }
+        await Promise.race(racers);
+        if (pendingProgress.size > 0) {
+          let flushTimer: ReturnType<typeof setTimeout> | undefined;
+          try {
+            await Promise.race([
+              Promise.all([...pendingProgress]),
+              new Promise<void>((resolve) => {
+                flushTimer = setTimeout(resolve, 50);
+                flushTimer.unref();
+              }),
+            ]);
+          } finally {
+            if (flushTimer !== undefined) clearTimeout(flushTimer);
+          }
+        }
+        if (completed) {
+          const finalRecord = jobManager.status(targetJobId);
+          const finalPhase = finalRecord?.progress?.phase ?? finalRecord?.status;
+          if (
+            finalRecord !== undefined &&
+            (finalRecord.status !== lastStatus ||
+              finalRecord.progressPercent !== lastProgress ||
+              finalPhase !== lastPhase)
+          ) {
+            await emitProgress(
+              finalRecord.status,
+              finalRecord.progressPercent,
+              finalRecord.status === "done"
+                ? `[${finalPhase ?? "done"}] Workspace indexing complete`
+                : `[${finalPhase ?? finalRecord.status}] Workspace indexing ${finalRecord.status}`,
+              finalPhase,
+            );
+          }
+        }
+      } finally {
+        if (timer !== undefined) clearTimeout(timer);
+        unsubscribeProgress?.();
+        abortCleanup?.();
       }
     };
 
@@ -282,11 +504,18 @@ export function createCausorynContext(
       logger,
       startDeferredIndex,
       waitForInitialIndex,
+      getActiveIndexJob,
       close: (): void => {
         try {
-          activeWiki.close();
+          (jobManager as { close?: () => void }).close?.();
+        } catch (error) {
+          logger(`index job manager kapatılamadı: ${errorText(error)}`);
         } finally {
-          storage.close();
+          try {
+            activeWiki.close();
+          } finally {
+            storage.close();
+          }
         }
       },
     };

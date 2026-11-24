@@ -12,11 +12,13 @@
   `.zcode-plugin/plugin.json`.
 - One routing skill: `skills/map-system/SKILL.md` teaches the host model when and how to
   call `causoryn_map_system`.
-- Twenty-nine published tools (exactly what the compiled server registers — empty handlers are
-  never advertised):
+- Tool profiles: **11 consolidated core tools** by default (`core` profile, keeping `tools/list` lean) and **32 tools** under `--tool-profile full` (the 29 legacy tools plus the 3 consolidated core tools `causoryn_status`, `causoryn_trace`, and `causoryn_contracts`; empty handlers are never advertised):
 
 | Tool | Purpose |
 | --- | --- |
+| `causoryn_status` | Consolidated core status & refresh tool (`action: "inspect"` default for capabilities, coverage tiers, workspace summary, and index job progress; `action: "refresh"` to queue a background `full` or `incremental` re-index job). |
+| `causoryn_trace` | Consolidated core trace tool (`mode: "execution"` default for bounded `CALLS`/`ROUTES_TO` call paths; `mode: "business-flow"` for cross-component request/event/contract flows with honest `gap` segments). |
+| `causoryn_contracts` | Consolidated core contract tool (`action: "check"` default for OpenAPI/AsyncAPI/JSON Schema/SQL/Protobuf compatibility; `action: "drift"` for producer/consumer drift impact). |
 | `causoryn_get_capabilities` | Adapter levels (L0–L4), server limits, protocol revision, published tool list. Needs no snapshot. |
 | `causoryn_workspace_summary` | Project / language / entrypoint / edge-coverage summary derived from the published graph snapshot. |
 | `causoryn_index_status` | Index job status: latest (or given `jobId`) job progress, published snapshot, stale flag and diagnostics. |
@@ -178,4 +180,4 @@ Sprint-5 Faz D (Differentiation, TŞ §10.2/§11/§14/§15) added
 added `causoryn_verify_change` — the change-verification companion of the
 product cycle Discover → Preflight → Agent Edits → **Verify** → Explain: it
 writes no code, it only verifies, and it never runs tests (29 tools total).
-`v0.2.4` includes the visual architecture views and optional annotations on the existing export tool. The server still publishes 29 MCP tools. [Tool contracts](../../../docs/en/tool-contracts.md)
+`v0.2.4` includes the visual architecture views and optional annotations on the existing export tool, plus lean tool profiles (`core` exposes 11 consolidated tools by default, including `causoryn_status`, `causoryn_trace`, and `causoryn_contracts`, while `--tool-profile full` exposes all 32 tools — the 29 legacy tools plus the 3 consolidated core aliases). [Tool contracts](../../../docs/en/tool-contracts.md)

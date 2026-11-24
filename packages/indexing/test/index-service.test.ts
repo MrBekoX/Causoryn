@@ -634,10 +634,10 @@ describe("IndexService — kalıcı depo yeniden başlatma, symbol_fts ve L0 yü
       const node = nodesById.get(entry.nodeId);
       expect(node).toBeDefined();
       expect(node?.kind).not.toBe("Workspace");
-      expect(node?.kind).not.toBe("File");
       expect(node?.kind).not.toBe("UnknownExternal");
       expect(entry.symbol).toBe(node?.qualifiedName);
     }
+    expect(syncEntries.some((e) => nodesById.get(e.nodeId)?.kind === "File")).toBe(true);
     expect(syncEntries.map((e) => e.symbol)).toContain("OrdersService");
     expect(syncEntries.map((e) => e.symbol)).toContain("OrdersService.create");
 

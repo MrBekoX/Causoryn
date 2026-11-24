@@ -37,8 +37,18 @@ import {
   type SourceSpan,
 } from "@causoryn/domain";
 import { resolveCausorynAssetRoot } from "@causoryn/sidecar-ipc";
-import { existsSync } from "node:fs";
-import { join } from "node:path";
+import {
+  closeSync,
+  constants as fsConstants,
+  existsSync,
+  fstatSync,
+  lstatSync,
+  openSync,
+  readdirSync,
+  readSync,
+  realpathSync,
+} from "node:fs";
+import { isAbsolute, join, posix as pathPosix, resolve, sep } from "node:path";
 import { runWorkerAnalyze, type WorkerRunOutcome } from "./worker-process.js";
 import {
   CSHARP_ROSLYN_ADAPTER_ID,
@@ -46,9 +56,12 @@ import {
   DEFAULT_DOTNET_COMMAND,
   DEFAULT_REQUEST_TIMEOUT_MS,
   DEFAULT_RESPONSE_MAX_CHARS,
+  MAX_NUGET_REFERENCE_DIRS,
+  MAX_PROJECT_ASSETS_BYTES,
   WORKER_DLL_RELATIVE_PATH,
   WORKER_UNAVAILABLE_CAPABILITIES,
   type AnalyzeCSharpWorkspaceInput,
+  type NugetReferenceDiscoveryResult,
   type RoslynAdapterCapabilities,
   type RoslynAdapterDiagnostic,
   type RoslynAdapterOptions,
@@ -486,6 +499,524 @@ function fallbackResult(
 }
 
 /* ------------------------------------------------------------------ */
+/* Read-Only NuGet `obj/project.assets.json` Reference Discovery       */
+/* ------------------------------------------------------------------ */
+
+const MAX_ASSETS_SCAN_DEPTH = 4;
+const MAX_ASSETS_FILES = 32;
+const MAX_ASSETS_DIR_VISITS = 512;
+
+const FORBIDDEN_JSON_KEYS: ReadonlySet<string> = new Set([
+  "__proto__",
+  "constructor",
+  "prototype",
+]);
+
+const ASSETS_SKIP_DIRS: ReadonlySet<string> = new Set([
+  "node_modules",
+  ".git",
+  ".hg",
+  ".svn",
+  ".vs",
+  ".vscode",
+  ".idea",
+  "bin",
+  "obj",
+  "dist",
+  "build",
+  "out",
+  "target",
+]);
+
+const UNC_OR_DEVICE_PREFIX = /^(?:\\\\|\/\/|\/\\|\\\/)/;
+
+function isUncOrDevicePath(raw: string): boolean
+{
+  if (raw.length < 2) return false;
+  return UNC_OR_DEVICE_PREFIX.test(raw);
+}
+
+function stripTrailingSeparators(p: string): string
+{
+  let end = p.length;
+  while (end > 1 && (p.charCodeAt(end - 1) === 47 || p.charCodeAt(end - 1) === 92))
+  {
+    // Preserve Windows drive root (e.g. "C:\") and POSIX root ("/").
+    if (end === 3 && p.charCodeAt(1) === 58) break;
+    end -= 1;
+  }
+  return end === p.length ? p : p.slice(0, end);
+}
+
+function comparablePath(p: string): string
+{
+  const normalized = resolve(p);
+  return process.platform === "win32" ? normalized.toLowerCase() : normalized;
+}
+
+function isInsideRealDir(realParent: string, realCandidate: string): boolean
+{
+  const parentCmp = comparablePath(realParent);
+  const candidateCmp = comparablePath(realCandidate);
+  const prefix = parentCmp.endsWith(sep) ? parentCmp : `${parentCmp}${sep}`;
+  return candidateCmp === parentCmp || candidateCmp.startsWith(prefix);
+}
+
+function validateSafeRelativeSegments(rawPath: string): string[] | null
+{
+  if (rawPath.length === 0 || rawPath.includes("\0")) return null;
+  const posixPath = rawPath.replace(/\\/g, "/");
+  if (posixPath.startsWith("/") || /^[a-zA-Z]:/.test(posixPath)) return null;
+  const segments = posixPath.split("/");
+  for (const segment of segments)
+  {
+    if (segment.length === 0 || segment === "." || segment === "..")
+    {
+      return null;
+    }
+  }
+  return segments;
+}
+
+function readBoundedFileNoFollow(filePath: string, realRoot: string): string | null
+{
+  let leafStat;
+  try
+  {
+    leafStat = lstatSync(filePath);
+  }
+  catch
+  {
+    return null;
+  }
+  if (leafStat.isSymbolicLink() || !leafStat.isFile()) return null;
+  if (leafStat.size > MAX_PROJECT_ASSETS_BYTES) return null;
+
+  let realFile: string;
+  try
+  {
+    realFile = realpathSync(filePath);
+  }
+  catch
+  {
+    return null;
+  }
+  if (!isInsideRealDir(realRoot, realFile)) return null;
+
+  const flags =
+    (fsConstants.O_RDONLY ?? 0) | (fsConstants.O_NOFOLLOW ?? 0);
+  let fd: number;
+  try
+  {
+    fd = openSync(realFile, flags);
+  }
+  catch
+  {
+    return null;
+  }
+
+  try
+  {
+    const fdStat = fstatSync(fd);
+    if (!fdStat.isFile()) return null;
+    if (fdStat.size > MAX_PROJECT_ASSETS_BYTES) return null;
+    if (
+      leafStat.ino !== 0 &&
+      (fdStat.ino !== leafStat.ino || fdStat.dev !== leafStat.dev)
+    )
+    {
+      return null;
+    }
+
+    const buffer = Buffer.allocUnsafe(Math.min(fdStat.size + 1, MAX_PROJECT_ASSETS_BYTES + 1));
+    let totalRead = 0;
+    while (totalRead < buffer.length)
+    {
+      const bytesRead = readSync(fd, buffer, totalRead, buffer.length - totalRead, null);
+      if (bytesRead <= 0) break;
+      totalRead += bytesRead;
+    }
+    if (totalRead > MAX_PROJECT_ASSETS_BYTES) return null;
+    return buffer.subarray(0, totalRead).toString("utf8");
+  }
+  catch
+  {
+    return null;
+  }
+  finally
+  {
+    try
+    {
+      closeSync(fd);
+    }
+    catch
+    {
+      // Ignore close error.
+    }
+  }
+}
+
+function scoreTargetFrameworkKey(tfmKey: string): readonly [number, number, number]
+{
+  const slashIdx = tfmKey.indexOf("/");
+  const baseTfm = (slashIdx >= 0 ? tfmKey.slice(0, slashIdx) : tfmKey).toLowerCase();
+  const ridPenalty = slashIdx >= 0 ? 0 : 1;
+
+  const netMatch = /^net(\d+)\.(\d+)$/.exec(baseTfm);
+  if (netMatch !== null)
+  {
+    return [3, Number(netMatch[1]) * 100 + Number(netMatch[2]), ridPenalty];
+  }
+  const netCoreMatch = /^netcoreapp(\d+)\.(\d+)$/.exec(baseTfm);
+  if (netCoreMatch !== null)
+  {
+    return [2, Number(netCoreMatch[1]) * 100 + Number(netCoreMatch[2]), ridPenalty];
+  }
+  const netStdMatch = /^netstandard(\d+)\.(\d+)$/.exec(baseTfm);
+  if (netStdMatch !== null)
+  {
+    return [1, Number(netStdMatch[1]) * 100 + Number(netStdMatch[2]), ridPenalty];
+  }
+  return [0, 0, ridPenalty];
+}
+
+function selectPreferredTargetKey(targetKeys: readonly string[]): string | undefined
+{
+  if (targetKeys.length === 0) return undefined;
+  const sorted = [...targetKeys].sort((a, b) => {
+    const scoreA = scoreTargetFrameworkKey(a);
+    const scoreB = scoreTargetFrameworkKey(b);
+    if (scoreB[0] !== scoreA[0]) return scoreB[0] - scoreA[0];
+    if (scoreB[1] !== scoreA[1]) return scoreB[1] - scoreA[1];
+    if (scoreB[2] !== scoreA[2]) return scoreB[2] - scoreA[2];
+    return a < b ? -1 : a > b ? 1 : 0;
+  });
+  return sorted[0];
+}
+
+function resolveNonSymlinkDirWithinBase(
+  baseRealDir: string,
+  segments: readonly string[],
+): string | null
+{
+  let current = baseRealDir;
+  for (const seg of segments)
+  {
+    current = join(current, seg);
+    let stat;
+    try
+    {
+      stat = lstatSync(current);
+    }
+    catch
+    {
+      return null;
+    }
+    if (stat.isSymbolicLink() || !stat.isDirectory()) return null;
+  }
+
+  let realTarget: string;
+  try
+  {
+    realTarget = realpathSync(current);
+  }
+  catch
+  {
+    return null;
+  }
+  if (!isInsideRealDir(baseRealDir, realTarget)) return null;
+  return realTarget;
+}
+
+function validateSafeLocalDirectory(rawDir: string): string | null
+{
+  if (rawDir.length === 0 || rawDir.includes("\0")) return null;
+  const trimmed = rawDir.trim();
+  if (trimmed.length === 0 || isUncOrDevicePath(trimmed) || !isAbsolute(trimmed))
+  {
+    return null;
+  }
+  const normalized = stripTrailingSeparators(trimmed);
+  let stat;
+  try
+  {
+    stat = lstatSync(normalized);
+  }
+  catch
+  {
+    return null;
+  }
+  if (stat.isSymbolicLink() || !stat.isDirectory()) return null;
+  try
+  {
+    const real = realpathSync(normalized);
+    if (isUncOrDevicePath(real)) return null;
+    return real;
+  }
+  catch
+  {
+    return null;
+  }
+}
+
+function extractNugetDirsFromAssetsContent(
+  content: string,
+  discovered: Set<string>,
+): void
+{
+  let parsed: unknown;
+  try
+  {
+    parsed = JSON.parse(content);
+  }
+  catch
+  {
+    return;
+  }
+  if (!isRecord(parsed)) return;
+
+  // 1) Validated local packageFolders (reject UNC/device paths, relative paths, and symlinks).
+  const rawPackageFolders = parsed["packageFolders"];
+  if (!isRecord(rawPackageFolders)) return;
+  const packageFolders: string[] = [];
+  for (const key of Object.getOwnPropertyNames(rawPackageFolders).sort())
+  {
+    if (FORBIDDEN_JSON_KEYS.has(key)) continue;
+    if (!Object.prototype.hasOwnProperty.call(rawPackageFolders, key)) continue;
+    const realFolder = validateSafeLocalDirectory(key);
+    if (realFolder !== null && !packageFolders.includes(realFolder))
+    {
+      packageFolders.push(realFolder);
+    }
+  }
+  if (packageFolders.length === 0) return;
+
+  // 2) Map library keys -> safe relative package paths.
+  const libraryPathByKey = new Map<string, readonly string[]>();
+  const rawLibraries = parsed["libraries"];
+  if (isRecord(rawLibraries))
+  {
+    for (const key of Object.getOwnPropertyNames(rawLibraries))
+    {
+      if (FORBIDDEN_JSON_KEYS.has(key)) continue;
+      if (!Object.prototype.hasOwnProperty.call(rawLibraries, key)) continue;
+      const lib = rawLibraries[key];
+      if (!isRecord(lib)) continue;
+      if (lib["type"] !== undefined && lib["type"] !== "package") continue;
+      const rawPath = lib["path"];
+      if (typeof rawPath === "string")
+      {
+        const segments = validateSafeRelativeSegments(rawPath);
+        if (segments !== null)
+        {
+          libraryPathByKey.set(key, segments);
+        }
+      }
+    }
+  }
+
+  // 3) Extract compile-time DLL directories from the preferred TFM target.
+  const rawTargets = parsed["targets"];
+  if (!isRecord(rawTargets)) return;
+  const targetKeys = Object.getOwnPropertyNames(rawTargets).filter(
+    (key) => !FORBIDDEN_JSON_KEYS.has(key) && Object.prototype.hasOwnProperty.call(rawTargets, key),
+  );
+  const preferredTargetKey = selectPreferredTargetKey(targetKeys);
+  if (preferredTargetKey === undefined) return;
+
+  const targetPackages = rawTargets[preferredTargetKey];
+  if (!isRecord(targetPackages)) return;
+
+  const sortedPkgKeys = Object.getOwnPropertyNames(targetPackages)
+    .filter((key) => !FORBIDDEN_JSON_KEYS.has(key) && Object.prototype.hasOwnProperty.call(targetPackages, key))
+    .sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+
+  for (const pkgKey of sortedPkgKeys)
+  {
+    if (discovered.size >= MAX_NUGET_REFERENCE_DIRS) break;
+    const pkgInfo = targetPackages[pkgKey];
+    if (!isRecord(pkgInfo)) continue;
+    if (pkgInfo["type"] !== undefined && pkgInfo["type"] !== "package") continue;
+
+    const compileObj = pkgInfo["compile"];
+    if (!isRecord(compileObj)) continue;
+
+    const libSegments =
+      libraryPathByKey.get(pkgKey) ??
+      validateSafeRelativeSegments(pkgKey.toLowerCase());
+    if (libSegments === null) continue;
+
+    const compileEntries = Object.getOwnPropertyNames(compileObj)
+      .filter((k) => !FORBIDDEN_JSON_KEYS.has(k) && Object.prototype.hasOwnProperty.call(compileObj, k))
+      .sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+
+    for (const compileKey of compileEntries)
+    {
+      if (discovered.size >= MAX_NUGET_REFERENCE_DIRS) break;
+      if (!compileKey.toLowerCase().endsWith(".dll")) continue;
+      const compileSegments = validateSafeRelativeSegments(compileKey);
+      if (compileSegments === null || compileSegments.length === 0) continue;
+
+      const dllFileName = compileSegments[compileSegments.length - 1]!;
+      const compileDirPosix = pathPosix.dirname(compileSegments.join("/"));
+      const compileDirSegments =
+        compileDirPosix === "." ? [] : compileDirPosix.split("/");
+      const fullDirSegments = [...libSegments, ...compileDirSegments];
+
+      for (const pkgFolder of packageFolders)
+      {
+        const resolvedDir = resolveNonSymlinkDirWithinBase(pkgFolder, fullDirSegments);
+        if (resolvedDir === null) continue;
+        const dllPath = join(resolvedDir, dllFileName);
+        let dllStat;
+        try
+        {
+          dllStat = lstatSync(dllPath);
+        }
+        catch
+        {
+          continue;
+        }
+        if (dllStat.isSymbolicLink() || !dllStat.isFile()) continue;
+
+        discovered.add(resolvedDir);
+        break;
+      }
+    }
+  }
+}
+
+/**
+ * Strictly read-only, bounded, symlink- and UNC-safe discovery of local NuGet
+ * compile-time DLL directories from `obj/project.assets.json` inside `rootDir`.
+ * Degrades silently with zero crashes if absent, malformed, or oversized (> 8 MB).
+ */
+export function discoverNugetReferenceDirs(rootDir: string): NugetReferenceDiscoveryResult
+{
+  const warnings: string[] = [];
+  if (rootDir.length === 0 || rootDir.includes("\0") || isUncOrDevicePath(rootDir) || !isAbsolute(rootDir))
+  {
+    return { referenceDirs: [], warnings };
+  }
+
+  const normalizedRoot = stripTrailingSeparators(rootDir);
+  let rootStat;
+  try
+  {
+    rootStat = lstatSync(normalizedRoot);
+  }
+  catch
+  {
+    return { referenceDirs: [], warnings };
+  }
+  if (rootStat.isSymbolicLink() || !rootStat.isDirectory())
+  {
+    return { referenceDirs: [], warnings };
+  }
+
+  let realRoot: string;
+  try
+  {
+    realRoot = realpathSync(normalizedRoot);
+  }
+  catch
+  {
+    return { referenceDirs: [], warnings };
+  }
+  if (isUncOrDevicePath(realRoot))
+  {
+    return { referenceDirs: [], warnings };
+  }
+
+  const assetsFiles: string[] = [];
+  const queue: Array<{ readonly dir: string; readonly depth: number }> = [
+    { dir: realRoot, depth: 0 },
+  ];
+  let visitedDirs = 0;
+
+  while (
+    queue.length > 0 &&
+    visitedDirs < MAX_ASSETS_DIR_VISITS &&
+    assetsFiles.length < MAX_ASSETS_FILES
+  )
+  {
+    const current = queue.shift()!;
+    visitedDirs += 1;
+
+    // Check `<current>/obj/project.assets.json` strictly without following symlinks.
+    const objDir = join(current.dir, "obj");
+    try
+    {
+      const objStat = lstatSync(objDir);
+      if (!objStat.isSymbolicLink() && objStat.isDirectory())
+      {
+        const realObj = realpathSync(objDir);
+        if (isInsideRealDir(realRoot, realObj))
+        {
+          const assetsPath = join(realObj, "project.assets.json");
+          if (existsSync(assetsPath))
+          {
+            assetsFiles.push(assetsPath);
+          }
+        }
+      }
+    }
+    catch
+    {
+      // Absent obj/ directory — normal case, degrade silently.
+    }
+
+    if (current.depth >= MAX_ASSETS_SCAN_DEPTH) continue;
+
+    let names: string[];
+    try
+    {
+      names = readdirSync(current.dir).sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+    }
+    catch
+    {
+      continue;
+    }
+
+    for (const name of names)
+    {
+      if (name.length === 0 || name.startsWith(".") || ASSETS_SKIP_DIRS.has(name.toLowerCase()))
+      {
+        continue;
+      }
+      const childDir = join(current.dir, name);
+      try
+      {
+        const childStat = lstatSync(childDir);
+        if (childStat.isSymbolicLink() || !childStat.isDirectory()) continue;
+        const realChild = realpathSync(childDir);
+        if (!isInsideRealDir(realRoot, realChild)) continue;
+        queue.push({ dir: realChild, depth: current.depth + 1 });
+      }
+      catch
+      {
+        continue;
+      }
+    }
+  }
+
+  const discovered = new Set<string>();
+  for (const assetsPath of assetsFiles.sort((a, b) => (a < b ? -1 : a > b ? 1 : 0)))
+  {
+    if (discovered.size >= MAX_NUGET_REFERENCE_DIRS) break;
+    const content = readBoundedFileNoFollow(assetsPath, realRoot);
+    if (content === null) continue;
+    extractNugetDirsFromAssetsContent(content, discovered);
+  }
+
+  const referenceDirs = [...discovered]
+    .sort((a, b) => (a < b ? -1 : a > b ? 1 : 0))
+    .slice(0, MAX_NUGET_REFERENCE_DIRS);
+
+  return { referenceDirs, warnings };
+}
+
+/* ------------------------------------------------------------------ */
 /* Ana giriş                                                           */
 /* ------------------------------------------------------------------ */
 
@@ -529,6 +1060,32 @@ export async function analyzeCSharpWorkspace(
     a.relativePath < b.relativePath ? -1 : a.relativePath > b.relativePath ? 1 : 0,
   );
 
+  // 1.5) Read-only NuGet `obj/project.assets.json` referenceDirs discovery (bounded, symlink/UNC-safe).
+  const mergedRefDirs = new Set<string>();
+  if (input.rootDir !== undefined)
+  {
+    const discovered = discoverNugetReferenceDirs(input.rootDir);
+    for (const dir of discovered.referenceDirs)
+    {
+      mergedRefDirs.add(dir);
+    }
+  }
+  if (input.referenceDirs !== undefined)
+  {
+    for (const rawDir of input.referenceDirs)
+    {
+      if (mergedRefDirs.size >= MAX_NUGET_REFERENCE_DIRS) break;
+      const safeDir = validateSafeLocalDirectory(rawDir);
+      if (safeDir !== null)
+      {
+        mergedRefDirs.add(safeDir);
+      }
+    }
+  }
+  const referenceDirs = [...mergedRefDirs]
+    .sort((a, b) => (a < b ? -1 : a > b ? 1 : 0))
+    .slice(0, MAX_NUGET_REFERENCE_DIRS);
+
   const options = resolveOptions(input.options);
   const request = {
     id: `analyze:${workspaceId}`,
@@ -538,6 +1095,7 @@ export async function analyzeCSharpWorkspace(
       path: entry.relativePath,
       content: entry.content,
     })),
+    ...(referenceDirs.length > 0 ? { referenceDirs } : {}),
   };
 
   const outcome: WorkerRunOutcome = await runWorkerAnalyze({

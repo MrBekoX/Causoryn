@@ -37,7 +37,13 @@ export type {
   OnboardingUnknownEdges,
   OnboardingWarning,
 } from "./onboarding.js";
-export { analyzeImpact, IMPACT_LIMIT_CEILINGS } from "./impact.js";
+export {
+  analyzeImpact,
+  DEFAULT_IMPACT_EDGE_KINDS,
+  IMPACT_LIMIT_CEILINGS,
+  MAX_IMPACT_EDGE_EVIDENCE_IDS,
+  MAX_IMPACT_PATH_EVIDENCE_IDS,
+} from "./impact.js";
 export type {
   AnalyzeImpactInput,
   ImpactAffectedNode,
@@ -113,9 +119,11 @@ export type {
 export type {
   FileRecord,
   GraphRepository,
+  PruneSnapshotsResult,
   PublishableState,
   SnapshotBuildInfo,
   SnapshotBuildInput,
+  SnapshotMetaSummary,
   SnapshotRead,
   SymbolIndexEntry,
   SymbolSearchHit,
@@ -170,6 +178,11 @@ export {
   AGENT_CONTEXT_LIMIT_CEILINGS,
   generateAgentContext,
 } from "./agent-context.js";
+export {
+  buildSafeFts5OrQuery,
+  buildSymbolFtsDocument,
+  tokenizeSymbolText,
+} from "./symbol-tokens.js";
 export type {
   AgentContextAppliedLimits,
   AgentContextInput,
@@ -213,6 +226,7 @@ export {
   ArchitectureGuidedTourStepSchema,
   ArchitectureModuleNoteAnnotationSchema,
   ArchitectureRiskAnnotationSchema,
+  MAX_VALIDATION_ERRORS,
   validateArchitectureAnnotations,
 } from "./architecture-annotations.js";
 export type {

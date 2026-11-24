@@ -139,9 +139,10 @@ const VERSION_TS = readFileSync(
 );
 
 /**
- * TOOL_NAMES kataloğu — packages/mcp-server/src/version.ts'ten çıkarılır
- * (sprint-2 takım denetimi koruması): server.ts'te kaydedilen araçlar ve
- * docstring'lerdeki araç sayıları bu katalogla desenkronize olmamalıdır.
+ * TOOL_NAMES ve CORE_TOOL_NAMES katalogları — packages/mcp-server/src/version.ts'ten
+ * çıkarılır (sprint-2 takım denetimi + Wave 2 11-core / 32-full profil koruması):
+ * server.ts'te kaydedilen araçlar ve docstring'lerdeki araç sayıları bu kataloglarla
+ * desenkronize olmamalıdır.
  */
 function extractToolNames(versionSource: string): string[] {
   const block = versionSource.match(
@@ -151,7 +152,19 @@ function extractToolNames(versionSource: string): string[] {
   return [...block[1].matchAll(/"([a-z_]+)"/g)].map((m) => m[1] as string);
 }
 
+function extractCoreToolNames(versionSource: string): string[] {
+  const block = versionSource.match(
+    /export const CORE_TOOL_NAMES = \[([\s\S]*?)\] as const/,
+  );
+  if (block === null) return [];
+  return [...block[1].matchAll(/"([a-z_]+)"/g)].map((m) => m[1] as string);
+}
+
 const TOOL_NAMES_FROM_SOURCE = extractToolNames(VERSION_TS);
+const CORE_TOOL_NAMES_FROM_SOURCE = extractCoreToolNames(VERSION_TS);
+const FULL_CATALOG_FROM_SOURCE = [
+  ...new Set([...TOOL_NAMES_FROM_SOURCE, ...CORE_TOOL_NAMES_FROM_SOURCE]),
+].sort();
 
 /**
  * TŞ §10.1 taban hata kodu seti (18 kod) — raw/Causoryn_Teknik_Dokuman_v2.1.pdf
@@ -849,8 +862,8 @@ describe("README.md", () => {
   // '8 araç' yazısı B4/B5 katalog büyümelerinde bayat kalmıştı).
   it(
     "POZİTİF: İngilizce tanıtım; kurulum, Node >= 24, kök beyanı, yayımlanan " +
-      String(TOOL_NAMES_FROM_SOURCE.length) +
-      " araç, salt-okunur model",
+      String(FULL_CATALOG_FROM_SOURCE.length) +
+      " araç (11 core + legacy full profili), salt-okunur model",
     () => {
       const issues = validateReadme(readPluginFile("README.md"));
       expect(issues, JSON.stringify(issues)).toEqual([]);
@@ -896,13 +909,13 @@ describe("README.md", () => {
 /* ------------------------------------------------------------------ */
 
 describe("mcp-server katalog desenkron korumaları (sprint-2 takım denetimi)", () => {
-  it("BAĞLANTI: server.ts kayıtlı araçları version.ts TOOL_NAMES kataloğuyla birebir eşit", () => {
-    expect(TOOL_NAMES_FROM_SOURCE.length, "TOOL_NAMES çıkarılamadı").toBeGreaterThan(0);
+  it("BAĞLANTI: server.ts kayıtlı araçları version.ts 11-core / 32-full katalog birleşimiyle birebir eşit", () => {
+    expect(CORE_TOOL_NAMES_FROM_SOURCE.length, "CORE_TOOL_NAMES çıkarılamadı").toBe(11);
+    expect(TOOL_NAMES_FROM_SOURCE.length, "TOOL_NAMES çıkarılamadı").toBe(29);
+    expect(FULL_CATALOG_FROM_SOURCE.length).toBe(32);
     // Kayıt ↔ katalog desenkronu: server.ts'e eklenen/çıkarılan her araç
-    // version.ts TOOL_NAMES'e de yansımalıdır (ve tersi). Karşılaştırma üye
-    // kümesi düzeyindedir: PUBLISHED_TOOLS alfabetik, TOOL_NAMES ise TŞ §10.2
-    // katalog sırasını taşır — sıra farklılığı bug değil, desenkron kümeyi bozar.
-    expect(PUBLISHED_TOOLS).toEqual([...TOOL_NAMES_FROM_SOURCE].sort());
+    // version.ts TOOL_NAMES / CORE_TOOL_NAMES'e de yansımalıdır (ve tersi).
+    expect(PUBLISHED_TOOLS).toEqual(FULL_CATALOG_FROM_SOURCE);
   });
 
   it("NEGATİF: katalog desenkronu sentetik girdiyle yakalanır (koruma sinyali kanıtı)", () => {
@@ -916,29 +929,34 @@ describe("mcp-server katalog desenkron korumaları (sprint-2 takım denetimi)", 
     expect(staleCatalog).not.toEqual(["causoryn_a", "causoryn_b"]);
   });
 
-  it("BAĞLANTI: docstring araç sayıları TOOL_NAMES büyüklüğüyle eşittir (bayat yorum koruması)", () => {
-    const expected = String(TOOL_NAMES_FROM_SOURCE.length);
-    const serverDoc = SERVER_TS.match(/tam olarak (\d+) gerçek araç/);
-    expect(serverDoc, "server.ts docstring araç sayısı bulunamadı").not.toBeNull();
-    expect(
-      serverDoc?.[1],
-      "server.ts 'tam olarak N gerçek araç' katalogla desenkron (B5/B6 katalog büyümelerinde docstring güncellenmedi)",
-    ).toBe(expected);
-    const serverRegister = SERVER_TS.match(/tam olarak (\d+) araç kaydeder/);
-    expect(
-      serverRegister,
-      "createCausorynMcpServer docstring araç sayısı bulunamadı",
-    ).not.toBeNull();
-    expect(
-      serverRegister?.[1],
-      "createCausorynMcpServer 'tam olarak N araç kaydeder' katalogla desenkron",
-    ).toBe(expected);
+  it("BAĞLANTI: docstring araç sayıları 11-core / 29-legacy / 32-full kataloglarıyla eşittir (bayat yorum koruması)", () => {
+    const expectedLegacy = String(TOOL_NAMES_FROM_SOURCE.length);
+    const expectedCore = String(CORE_TOOL_NAMES_FROM_SOURCE.length);
+    const expectedFull = String(FULL_CATALOG_FROM_SOURCE.length);
+
+    const serverFullDoc = SERVER_TS.match(
+      /all (\d+) legacy tools plus the \d+ consolidated aliases \((\d+) total\)/,
+    );
+    expect(serverFullDoc, "server.ts full-profile yorumu bulunamadı").not.toBeNull();
+    expect(serverFullDoc?.[1], "server.ts legacy araç sayısı katalogla desenkron").toBe(
+      expectedLegacy,
+    );
+    expect(serverFullDoc?.[2], "server.ts full toplam araç sayısı katalogla desenkron").toBe(
+      expectedFull,
+    );
+
+    const serverCoreDoc = SERVER_TS.match(/with (\d+) lean consolidated tools/);
+    expect(serverCoreDoc, "createCausorynMcpServer core profil docstring sayısı bulunamadı").not.toBeNull();
+    expect(serverCoreDoc?.[1], "createCausorynMcpServer core araç sayısı katalogla desenkron").toBe(
+      expectedCore,
+    );
+
     const indexDoc = INDEX_TS.match(/tam olarak (\d+) gerçek araç/);
     expect(indexDoc, "index.ts docstring araç sayısı bulunamadı").not.toBeNull();
     expect(
       indexDoc?.[1],
       "index.ts 'tam olarak N gerçek araç' katalogla desenkron",
-    ).toBe(expected);
+    ).toBe(expectedLegacy);
   });
 
   it("BAĞLANTI: package.json description TOOL_NAMES kümesini ve sayısını yansıtır (bayat paket dokümanı koruması)", () => {
@@ -1116,10 +1134,10 @@ describe("F2: manifest şeması güçlendirmeleri (resmî plugin.json sözleşme
 });
 
 describe("F2: TOOL_NAMES↔README çapraz kontrol", () => {
-  const catalog = [...TOOL_NAMES_FROM_SOURCE].sort();
+  const catalog = FULL_CATALOG_FROM_SOURCE;
 
-  it("BAĞLANTI: README geri tırnak araç kümesi TOOL_NAMES kataloğuyla birebir eşit", () => {
-    expect(TOOL_NAMES_FROM_SOURCE.length, "TOOL_NAMES çıkarılamadı").toBeGreaterThan(0);
+  it("BAĞLANTI: README geri tırnak araç kümesi 32-araçlık tam katalogla (11 core + 29 legacy birleşimi) birebir eşit", () => {
+    expect(catalog.length, "katalog çıkarılamadı").toBe(32);
     const readme = readPluginFile("README.md");
     const tokens = extractReadmeToolTokens(readme);
     expect(tokens, "README backtick kümesi katalogla eşit değil").toEqual(catalog);

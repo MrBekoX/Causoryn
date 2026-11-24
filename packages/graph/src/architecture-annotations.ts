@@ -44,7 +44,7 @@ const NonEmptyBounded = (max: number) =>
     .min(1)
     .max(max)
     .refine((v) => v.trim().length > 0, {
-      message: "Alan boş veya yalnızca boşluk olamaz",
+      message: "Field must not be empty or whitespace-only",
     });
 
 export const ArchitectureDomainAnnotationSchema = z
@@ -262,6 +262,30 @@ function uniqueSorted(values: readonly string[]): string[] {
   return [...new Set(values)].sort(cmpStr);
 }
 
+export const MAX_VALIDATION_ERRORS = 25;
+
+/** Upper bound on raw array inspection during fallback error accumulation (DoS guard). */
+const MAX_RAW_SECTION_SCAN = 256;
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function nonEmptyString(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim().length > 0 ? value : undefined;
+}
+
+function extractNonEmptyStrings(value: unknown, maxScan: number): string[] {
+  if (!Array.isArray(value)) return [];
+  const out: string[] = [];
+  const limit = Math.min(value.length, maxScan);
+  for (let i = 0; i < limit; i += 1) {
+    const s = nonEmptyString(value[i]);
+    if (s !== undefined) out.push(s);
+  }
+  return out;
+}
+
 function invalidAnnotations(message: string): never {
   throw new GraphRepositoryError("export/invalid-annotations", message);
 }
@@ -284,22 +308,35 @@ const EXCLUDED_GROUNDING_NODE_KINDS: ReadonlySet<string> = new Set([
 /**
  * Host-LLM anotasyonlarını hem Zod şemasına hem de gerçek snapshot/projeksiyon
  * kimliklerine karşı fail-closed doğrular ve deterministik kanonik forma çevirir.
+ *
+ * Tek geçişte TÜM Zod şema sorunlarını VE TÜM kırık grafik/modül/sembol/kanıt/dosya
+ * referans hatalarını toplar (en fazla `MAX_VALIDATION_ERRORS = 25`, aşılırsa özet
+ * satırıyla) ve tek bir eyleme dönüştürülebilir `export/invalid-annotations` hatası atar.
  */
 export function validateArchitectureAnnotations(
   raw: unknown,
   projection: ArchitectureProjection,
   snapshot: SnapshotGraph,
 ): ValidatedArchitectureAnnotations {
+  const errors: string[] = [];
+  let totalErrorCount = 0;
+  const recordError = (message: string): void => {
+    totalErrorCount += 1;
+    if (errors.length < MAX_VALIDATION_ERRORS) {
+      errors.push(message);
+    }
+  };
+
+  // 1) Zod schema validation: collect ALL issues (do not stop on issue[0]).
   const parsed = ArchitectureAnnotationsSchema.safeParse(raw);
   if (!parsed.success) {
-    const issue = parsed.error.issues[0];
-    const pathStr = issue ? issue.path.join(".") : "";
-    invalidAnnotations(
-      `Geçersiz mimari anotasyon şeması${pathStr.length > 0 ? ` (${pathStr})` : ""}: ${issue?.message ?? parsed.error.message}`,
-    );
+    for (const issue of parsed.error.issues) {
+      const pathStr = issue.path.length > 0 ? issue.path.join(".") : "<root>";
+      recordError(`${pathStr}: ${issue.message}`);
+    }
   }
 
-  const input = parsed.data;
+  // 2) Build active grounding index from projection + snapshot.
   const moduleIds = new Set(projection.modules.map((m) => m.id));
   const moduleFilesById = new Map<string, ReadonlySet<string>>(
     projection.modules.map((m) => [m.id, new Set(m.files.map(normalizePosixPath))]),
@@ -324,38 +361,228 @@ export function validateArchitectureAnnotations(
   }
   const snapshotEvidenceIds = new Set(snapshot.evidence.map((e) => e.id));
 
-  const assertModuleExists = (id: string, ctx: string): void => {
+  const checkModuleExists = (id: string, fieldPath: string): void => {
     if (!moduleIds.has(id)) {
-      invalidAnnotations(
-        `Anotasyon bilinmeyen moduleId içeriyor (${ctx}): "${id}". Geçerli kimlikler için architectureSummary.moduleIds çıktısını kullanın.`,
+      recordError(
+        `${fieldPath}: unknown moduleId "${id}" (use canonical IDs from architectureSummary.moduleIds)`,
       );
     }
   };
-  const assertNodeExists = (id: string, ctx: string): void => {
+  const checkNodeExists = (id: string, fieldPath: string): void => {
     if (!activeSnapshotNodeIds.has(id)) {
-      invalidAnnotations(`Anotasyon bilinmeyen veya kapsam-dışı nodeId içeriyor (${ctx}): "${id}"`);
+      recordError(`${fieldPath}: unknown or out-of-scope nodeId "${id}"`);
     }
   };
-  const assertEvidenceExists = (id: string, ctx: string): void => {
+  const checkEvidenceExists = (id: string, fieldPath: string): void => {
     if (!snapshotEvidenceIds.has(id)) {
-      invalidAnnotations(`Anotasyon bilinmeyen evidenceId içeriyor (${ctx}): "${id}"`);
+      recordError(`${fieldPath}: unknown evidenceId "${id}"`);
+    }
+  };
+  const checkKeyFiles = (modId: string, keyFiles: readonly string[], fieldPath: string): void => {
+    const modFiles = moduleFilesById.get(modId);
+    for (const relFile of keyFiles) {
+      const validInModule =
+        modFiles !== undefined && modFiles.size > 0
+          ? modFiles.has(relFile)
+          : snapshotFilePaths.has(relFile);
+      if (!validInModule) {
+        recordError(
+          `${fieldPath}: unknown or out-of-module keyFile "${relFile}" for module "${modId}"`,
+        );
+      }
     }
   };
 
-  // 1. Domains: unique id, valid moduleIds, disjoint partition across domains
+  // Helper to throw one consolidated fail-closed error when any issue was collected.
+  const throwIfErrors = (): void => {
+    if (totalErrorCount > 0 || !parsed.success) {
+      const count = Math.max(totalErrorCount, 1);
+      const header = `Invalid architecture annotations (${String(count)} ${count === 1 ? "error" : "errors"}):`;
+      const lines = errors.map((err, i) => `  ${String(i + 1)}. ${err}`);
+      if (totalErrorCount > MAX_VALIDATION_ERRORS) {
+        lines.push(
+          `  ... and ${String(totalErrorCount - MAX_VALIDATION_ERRORS)} more error(s) (truncated at ${String(MAX_VALIDATION_ERRORS)})`,
+        );
+      }
+      invalidAnnotations(`${header}\n${lines.join("\n")}`);
+    }
+  };
+
+  // 3) If Zod failed on a plain-object payload, STILL inspect all sections defensively so
+  //    both schema errors and broken graph-ID references are reported in a single pass.
+  if (!parsed.success) {
+    if (isPlainRecord(raw)) {
+      const seenDomainIds = new Set<string>();
+      const claimedModules = new Set<string>();
+      if (Array.isArray(raw["domains"])) {
+        const rawDomains = raw["domains"];
+        const limit = Math.min(rawDomains.length, MAX_RAW_SECTION_SCAN);
+        for (let idx = 0; idx < limit; idx += 1) {
+          const item = rawDomains[idx];
+          if (!isPlainRecord(item)) continue;
+          const domId = nonEmptyString(item["id"]);
+          const label = domId ?? String(idx);
+          if (domId !== undefined) {
+            if (seenDomainIds.has(domId)) {
+              recordError(`domains[${String(idx)}].id: duplicate domain id "${domId}"`);
+            }
+            seenDomainIds.add(domId);
+          }
+          for (const modId of uniqueSorted(extractNonEmptyStrings(item["moduleIds"], MAX_RAW_SECTION_SCAN))) {
+            checkModuleExists(modId, `domains[${label}].moduleIds`);
+            if (claimedModules.has(modId)) {
+              recordError(
+                `domains[${label}].moduleIds: module "${modId}" is already assigned to another domain`,
+              );
+            }
+            claimedModules.add(modId);
+          }
+        }
+      }
+
+      const seenNoteModules = new Set<string>();
+      if (Array.isArray(raw["moduleNotes"])) {
+        const rawNotes = raw["moduleNotes"];
+        const limit = Math.min(rawNotes.length, MAX_RAW_SECTION_SCAN);
+        for (let idx = 0; idx < limit; idx += 1) {
+          const item = rawNotes[idx];
+          if (!isPlainRecord(item)) continue;
+          const modId = nonEmptyString(item["moduleId"]);
+          if (modId !== undefined) {
+            if (seenNoteModules.has(modId)) {
+              recordError(`moduleNotes[${String(idx)}].moduleId: duplicate moduleNotes entry "${modId}"`);
+            }
+            seenNoteModules.add(modId);
+            checkModuleExists(modId, `moduleNotes[${String(idx)}].moduleId`);
+            const keyFiles = uniqueSorted(
+              extractNonEmptyStrings(item["keyFiles"], ANNOTATION_LIMITS.maxKeyFilesPerModule * 2).map(
+                normalizePosixPath,
+              ),
+            );
+            checkKeyFiles(modId, keyFiles, `moduleNotes[${modId}].keyFiles`);
+          }
+        }
+      }
+
+      const seenFlowIds = new Set<string>();
+      if (Array.isArray(raw["flows"])) {
+        const rawFlows = raw["flows"];
+        const limit = Math.min(rawFlows.length, MAX_RAW_SECTION_SCAN);
+        for (let idx = 0; idx < limit; idx += 1) {
+          const item = rawFlows[idx];
+          if (!isPlainRecord(item)) continue;
+          const flowId = nonEmptyString(item["id"]);
+          const label = flowId ?? String(idx);
+          if (flowId !== undefined) {
+            if (seenFlowIds.has(flowId)) {
+              recordError(`flows[${String(idx)}].id: duplicate flow id "${flowId}"`);
+            }
+            seenFlowIds.add(flowId);
+          }
+          if (Array.isArray(item["steps"])) {
+            const stepsLimit = Math.min(item["steps"].length, MAX_RAW_SECTION_SCAN);
+            for (let sIdx = 0; sIdx < stepsLimit; sIdx += 1) {
+              const step = item["steps"][sIdx];
+              if (!isPlainRecord(step)) continue;
+              const stepMod = nonEmptyString(step["moduleId"]);
+              const stepNode = nonEmptyString(step["nodeId"]);
+              if (stepMod !== undefined) {
+                checkModuleExists(stepMod, `flows[${label}].steps[${String(sIdx)}].moduleId`);
+              }
+              if (stepNode !== undefined) {
+                checkNodeExists(stepNode, `flows[${label}].steps[${String(sIdx)}].nodeId`);
+              }
+            }
+          }
+        }
+      }
+
+      if (Array.isArray(raw["guidedTour"])) {
+        const rawTour = raw["guidedTour"];
+        const limit = Math.min(rawTour.length, MAX_RAW_SECTION_SCAN);
+        for (let idx = 0; idx < limit; idx += 1) {
+          const stop = rawTour[idx];
+          if (!isPlainRecord(stop)) continue;
+          const targetMod = nonEmptyString(stop["targetModuleId"]);
+          const targetNode = nonEmptyString(stop["targetNodeId"]);
+          if (targetMod !== undefined) {
+            checkModuleExists(targetMod, `guidedTour[${String(idx)}].targetModuleId`);
+          }
+          if (targetNode !== undefined) {
+            checkNodeExists(targetNode, `guidedTour[${String(idx)}].targetNodeId`);
+          }
+        }
+      }
+
+      const seenDecisionIds = new Set<string>();
+      if (Array.isArray(raw["decisions"])) {
+        const rawDecisions = raw["decisions"];
+        const limit = Math.min(rawDecisions.length, MAX_RAW_SECTION_SCAN);
+        for (let idx = 0; idx < limit; idx += 1) {
+          const dec = rawDecisions[idx];
+          if (!isPlainRecord(dec)) continue;
+          const decId = nonEmptyString(dec["id"]);
+          const label = decId ?? String(idx);
+          if (decId !== undefined) {
+            if (seenDecisionIds.has(decId)) {
+              recordError(`decisions[${String(idx)}].id: duplicate decision id "${decId}"`);
+            }
+            seenDecisionIds.add(decId);
+          }
+          for (const m of uniqueSorted(extractNonEmptyStrings(dec["relatedModuleIds"], MAX_RAW_SECTION_SCAN))) {
+            checkModuleExists(m, `decisions[${label}].relatedModuleIds`);
+          }
+          for (const e of uniqueSorted(extractNonEmptyStrings(dec["evidenceIds"], MAX_RAW_SECTION_SCAN))) {
+            checkEvidenceExists(e, `decisions[${label}].evidenceIds`);
+          }
+        }
+      }
+
+      const seenRiskIds = new Set<string>();
+      if (Array.isArray(raw["risks"])) {
+        const rawRisks = raw["risks"];
+        const limit = Math.min(rawRisks.length, MAX_RAW_SECTION_SCAN);
+        for (let idx = 0; idx < limit; idx += 1) {
+          const risk = rawRisks[idx];
+          if (!isPlainRecord(risk)) continue;
+          const riskId = nonEmptyString(risk["id"]);
+          const label = riskId ?? String(idx);
+          if (riskId !== undefined) {
+            if (seenRiskIds.has(riskId)) {
+              recordError(`risks[${String(idx)}].id: duplicate risk id "${riskId}"`);
+            }
+            seenRiskIds.add(riskId);
+          }
+          for (const m of uniqueSorted(extractNonEmptyStrings(risk["relatedModuleIds"], MAX_RAW_SECTION_SCAN))) {
+            checkModuleExists(m, `risks[${label}].relatedModuleIds`);
+          }
+          for (const e of uniqueSorted(extractNonEmptyStrings(risk["evidenceIds"], MAX_RAW_SECTION_SCAN))) {
+            checkEvidenceExists(e, `risks[${label}].evidenceIds`);
+          }
+        }
+      }
+    }
+    throwIfErrors();
+  }
+
+  const input = parsed.data!;
+
+  // 4. Domains: unique id, valid moduleIds, disjoint partition across domains
   const seenDomainIds = new Set<string>();
   const claimedModules = new Set<string>();
   const domains: ArchitectureDomainAnnotation[] = [];
-  for (const domain of input.domains ?? []) {
+  for (const [idx, domain] of (input.domains ?? []).entries()) {
     if (seenDomainIds.has(domain.id)) {
-      invalidAnnotations(`Tekrarlanan domain id: "${domain.id}"`);
+      recordError(`domains[${String(idx)}].id: duplicate domain id "${domain.id}"`);
     }
     seenDomainIds.add(domain.id);
     const dedupModules = uniqueSorted(domain.moduleIds);
     for (const modId of dedupModules) {
-      assertModuleExists(modId, `domains[${domain.id}]`);
+      checkModuleExists(modId, `domains[${domain.id}].moduleIds`);
       if (claimedModules.has(modId)) {
-        invalidAnnotations(`Modül birden fazla domain'e atanamaz: "${modId}"`);
+        recordError(
+          `domains[${domain.id}].moduleIds: module "${modId}" is already assigned to another domain`,
+        );
       }
       claimedModules.add(modId);
     }
@@ -369,30 +596,21 @@ export function validateArchitectureAnnotations(
   }
   domains.sort((a, b) => cmpStr(a.id, b.id));
 
-  // 2. Module notes: unique moduleId, valid moduleId, valid keyFiles
+  // 5. Module notes: unique moduleId, valid moduleId, valid keyFiles
   const seenNoteModules = new Set<string>();
   const moduleNotes: ArchitectureModuleNoteAnnotation[] = [];
-  for (const note of input.moduleNotes ?? []) {
+  for (const [idx, note] of (input.moduleNotes ?? []).entries()) {
     if (seenNoteModules.has(note.moduleId)) {
-      invalidAnnotations(`Tekrarlanan moduleNotes girişi: "${note.moduleId}"`);
+      recordError(
+        `moduleNotes[${String(idx)}].moduleId: duplicate moduleNotes entry "${note.moduleId}"`,
+      );
     }
     seenNoteModules.add(note.moduleId);
-    assertModuleExists(note.moduleId, "moduleNotes");
-    const modFiles = moduleFilesById.get(note.moduleId);
+    checkModuleExists(note.moduleId, `moduleNotes[${String(idx)}].moduleId`);
     let normalizedKeyFiles: string[] | undefined;
     if (note.keyFiles !== undefined) {
       normalizedKeyFiles = uniqueSorted(note.keyFiles.map(normalizePosixPath));
-      for (const relFile of normalizedKeyFiles) {
-        const validInModule =
-          modFiles !== undefined && modFiles.size > 0
-            ? modFiles.has(relFile)
-            : snapshotFilePaths.has(relFile);
-        if (!validInModule) {
-          invalidAnnotations(
-            `Anotasyon modüle ait olmayan veya bilinmeyen keyFile yolu içeriyor (moduleNotes[${note.moduleId}]): "${relFile}"`,
-          );
-        }
-      }
+      checkKeyFiles(note.moduleId, normalizedKeyFiles, `moduleNotes[${note.moduleId}].keyFiles`);
     }
     moduleNotes.push({
       moduleId: note.moduleId,
@@ -404,20 +622,20 @@ export function validateArchitectureAnnotations(
   }
   moduleNotes.sort((a, b) => cmpStr(a.moduleId, b.moduleId));
 
-  // 3. Flows: unique id, valid step moduleId/nodeId (step order preserved!)
+  // 6. Flows: unique id, valid step moduleId/nodeId (step order preserved!)
   const seenFlowIds = new Set<string>();
   const flows: ArchitectureFlowAnnotation[] = [];
-  for (const flow of input.flows ?? []) {
+  for (const [idx, flow] of (input.flows ?? []).entries()) {
     if (seenFlowIds.has(flow.id)) {
-      invalidAnnotations(`Tekrarlanan flow id: "${flow.id}"`);
+      recordError(`flows[${String(idx)}].id: duplicate flow id "${flow.id}"`);
     }
     seenFlowIds.add(flow.id);
-    for (const [idx, step] of flow.steps.entries()) {
+    for (const [stepIdx, step] of flow.steps.entries()) {
       if (step.moduleId !== undefined) {
-        assertModuleExists(step.moduleId, `flows[${flow.id}].steps[${String(idx)}]`);
+        checkModuleExists(step.moduleId, `flows[${flow.id}].steps[${String(stepIdx)}].moduleId`);
       }
       if (step.nodeId !== undefined) {
-        assertNodeExists(step.nodeId, `flows[${flow.id}].steps[${String(idx)}]`);
+        checkNodeExists(step.nodeId, `flows[${flow.id}].steps[${String(stepIdx)}].nodeId`);
       }
     }
     flows.push({
@@ -434,14 +652,14 @@ export function validateArchitectureAnnotations(
   }
   flows.sort((a, b) => cmpStr(a.id, b.id));
 
-  // 4. Guided tour: sorted by step asc, title asc; valid moduleId/nodeId
+  // 7. Guided tour: sorted by step asc, title asc; valid moduleId/nodeId
   const guidedTour: ArchitectureGuidedTourStep[] = [];
   for (const [idx, stop] of (input.guidedTour ?? []).entries()) {
     if (stop.targetModuleId !== undefined) {
-      assertModuleExists(stop.targetModuleId, `guidedTour[${String(idx)}]`);
+      checkModuleExists(stop.targetModuleId, `guidedTour[${String(idx)}].targetModuleId`);
     }
     if (stop.targetNodeId !== undefined) {
-      assertNodeExists(stop.targetNodeId, `guidedTour[${String(idx)}]`);
+      checkNodeExists(stop.targetNodeId, `guidedTour[${String(idx)}].targetNodeId`);
     }
     guidedTour.push({
       step: stop.step,
@@ -462,18 +680,18 @@ export function validateArchitectureAnnotations(
     return cmpStr(a.explanation, b.explanation);
   });
 
-  // 5. Decisions: unique id, valid relatedModuleIds & evidenceIds
+  // 8. Decisions: unique id, valid relatedModuleIds & evidenceIds
   const seenDecisionIds = new Set<string>();
   const decisions: ArchitectureDecisionAnnotation[] = [];
-  for (const dec of input.decisions ?? []) {
+  for (const [idx, dec] of (input.decisions ?? []).entries()) {
     if (seenDecisionIds.has(dec.id)) {
-      invalidAnnotations(`Tekrarlanan decision id: "${dec.id}"`);
+      recordError(`decisions[${String(idx)}].id: duplicate decision id "${dec.id}"`);
     }
     seenDecisionIds.add(dec.id);
     const relMods = dec.relatedModuleIds === undefined ? undefined : uniqueSorted(dec.relatedModuleIds);
     const evIds = dec.evidenceIds === undefined ? undefined : uniqueSorted(dec.evidenceIds);
-    for (const m of relMods ?? []) assertModuleExists(m, `decisions[${dec.id}]`);
-    for (const e of evIds ?? []) assertEvidenceExists(e, `decisions[${dec.id}]`);
+    for (const m of relMods ?? []) checkModuleExists(m, `decisions[${dec.id}].relatedModuleIds`);
+    for (const e of evIds ?? []) checkEvidenceExists(e, `decisions[${dec.id}].evidenceIds`);
     decisions.push({
       id: dec.id,
       title: dec.title,
@@ -485,18 +703,18 @@ export function validateArchitectureAnnotations(
   }
   decisions.sort((a, b) => cmpStr(a.id, b.id));
 
-  // 6. Risks: unique id, valid relatedModuleIds & evidenceIds
+  // 9. Risks: unique id, valid relatedModuleIds & evidenceIds
   const seenRiskIds = new Set<string>();
   const risks: ArchitectureRiskAnnotation[] = [];
-  for (const risk of input.risks ?? []) {
+  for (const [idx, risk] of (input.risks ?? []).entries()) {
     if (seenRiskIds.has(risk.id)) {
-      invalidAnnotations(`Tekrarlanan risk id: "${risk.id}"`);
+      recordError(`risks[${String(idx)}].id: duplicate risk id "${risk.id}"`);
     }
     seenRiskIds.add(risk.id);
     const relMods = risk.relatedModuleIds === undefined ? undefined : uniqueSorted(risk.relatedModuleIds);
     const evIds = risk.evidenceIds === undefined ? undefined : uniqueSorted(risk.evidenceIds);
-    for (const m of relMods ?? []) assertModuleExists(m, `risks[${risk.id}]`);
-    for (const e of evIds ?? []) assertEvidenceExists(e, `risks[${risk.id}]`);
+    for (const m of relMods ?? []) checkModuleExists(m, `risks[${risk.id}].relatedModuleIds`);
+    for (const e of evIds ?? []) checkEvidenceExists(e, `risks[${risk.id}].evidenceIds`);
     risks.push({
       id: risk.id,
       title: risk.title,
@@ -507,6 +725,9 @@ export function validateArchitectureAnnotations(
     });
   }
   risks.sort((a, b) => cmpStr(a.id, b.id));
+
+  // Fail-closed: if ANY schema or grounding error was collected, reject completely.
+  throwIfErrors();
 
   return {
     ...(input.title === undefined ? {} : { title: input.title }),

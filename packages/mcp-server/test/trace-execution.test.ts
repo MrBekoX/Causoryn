@@ -69,7 +69,10 @@ interface ClientPair {
 
 /** Context'i SDK InMemory transport üzerinden bir Client'a bağlar. */
 async function connectClient(context: CausorynContext): Promise<ClientPair> {
-  const server = createCausorynMcpServer(context);
+  const server = createCausorynMcpServer(context, {
+    toolProfile: "full",
+    outputSchemaProfile: "full",
+  });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   const client = new Client({ name: "vitest-trace-client", version: "0.0.0" });
   await server.connect(serverTransport);
@@ -580,24 +583,35 @@ describe(
           (expectErrorEnvelope(zeroPaths).error as Record<string, unknown>).code,
         ).toBe("INVALID_ARGUMENT");
 
-        // Config tavanı: results.maxDepth=3 (default), results.maxPaths=50.
+        // Config ceiling: results.maxDepth=3 (default), results.maxPaths=50.
+        // Values above config ceilings are clamped with a transparent warning (Task 2.2).
         const overDepth = await callTool(pair.client, "causoryn_trace_execution", {
           entrypoint: "POST /orders",
           maxDepth: 4,
           maxPaths: 10,
         });
+        const overDepthEnv = expectEnvelope(overDepth);
+        expect(overDepthEnv.status).toBe("ok");
+        expect((overDepthEnv.data as Record<string, unknown>).maxDepth).toBe(3);
         expect(
-          (expectErrorEnvelope(overDepth).error as Record<string, unknown>).code,
-        ).toBe("LIMIT_EXCEEDED");
+          (overDepthEnv.warnings as string[]).some(
+            (w) => w.includes("maxDepth") && w.includes("clamped"),
+          ),
+        ).toBe(true);
 
         const overPaths = await callTool(pair.client, "causoryn_trace_execution", {
           entrypoint: "POST /orders",
           maxDepth: 2,
           maxPaths: 51,
         });
+        const overPathsEnv = expectEnvelope(overPaths);
+        expect(overPathsEnv.status).toBe("ok");
+        expect((overPathsEnv.data as Record<string, unknown>).maxPaths).toBe(50);
         expect(
-          (expectErrorEnvelope(overPaths).error as Record<string, unknown>).code,
-        ).toBe("LIMIT_EXCEEDED");
+          (overPathsEnv.warnings as string[]).some(
+            (w) => w.includes("maxPaths") && w.includes("clamped"),
+          ),
+        ).toBe(true);
 
         // Negatif değer şema düzeyinde reddedilir (SDK protokol hatası;
         // structuredContent taşımaz).

@@ -213,6 +213,7 @@ describe("SqliteGraphRepository — şema ve bağlantı", () => {
       for (const table of [
         "workspaces",
         "files",
+        "file_facts",
         "snapshots",
         "build_leases",
         "nodes",
@@ -223,7 +224,7 @@ describe("SqliteGraphRepository — şema ve bağlantı", () => {
         expect(tables, `tablo yok: ${table}`).toContain(table);
       }
       expect(probe.pragma("page_size", { simple: true })).toBe(4096);
-      expect(probe.pragma("user_version", { simple: true })).toBe(3);
+      expect(probe.pragma("user_version", { simple: true })).toBe(4);
       probe.close();
     } finally {
       repo.close();
@@ -749,23 +750,31 @@ describe("SqliteGraphRepository — symbol_fts (temel)", () => {
         { symbol: "listOrders", nodeId: graph.nodes[2]!.id },
       ]);
 
+      // LocAgent camelCase tokenlaştırması + BM25: createOrder tam + alt-token
+      // eşleşmesiyle 1. sırada, listOrders ortak "order" tokenıyla 2. sırada döner.
       const hits = repo.searchSymbols("createOrder");
-      expect(hits.length).toBe(1);
+      expect(hits.length).toBe(2);
       expect(hits[0]?.symbol).toBe("createOrder");
       expect(hits[0]?.nodeId).toBe(graph.nodes[1]!.id);
       expect(hits[0]?.snapshotId).toBe(graph.meta.id);
+      expect(hits[1]?.symbol).toBe("listOrders");
 
-      // FTS5 token semantiği (unicode61 camelCase'i bölmez): ortak token'a
-      // sahip semboller; sonuç sırası deterministik (sembol adına göre artan).
+      // Ortak "order" tokenına sahip tüm semboller (camelCase + snake_case)
+      // deterministik BM25 + node_id sırasıyla döner.
       repo.indexSymbols(graph.meta.id, [
         { symbol: "order_total", nodeId: graph.nodes[2]!.id },
         { symbol: "order_item", nodeId: graph.nodes[3]!.id },
       ]);
       const ordered = repo.searchSymbols("order", 10);
-      expect(ordered.map((hit) => hit.symbol)).toEqual([
-        "order_item",
-        "order_total",
-      ]);
+      expect(ordered.map((hit) => hit.symbol)).toEqual(
+        expect.arrayContaining([
+          "createOrder",
+          "listOrders",
+          "order_item",
+          "order_total",
+        ]),
+      );
+      expect(ordered).toHaveLength(4);
       // Farklı token eşleşmez (alt-dize semantiği yok).
       expect(repo.searchSymbols("nomatchsymbol")).toEqual([]);
     } finally {

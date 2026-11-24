@@ -731,7 +731,7 @@ describe("wiki store — partial", () => {
       const probe = new Database(p, { readonly: true });
       try {
         const version = probe.pragma("user_version", { simple: true });
-        expect(version).toBe(3);
+        expect(version).toBe(4);
         const tables = probe
           .prepare(
             "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'wiki_%' ORDER BY name",

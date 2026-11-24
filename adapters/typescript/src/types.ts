@@ -13,6 +13,8 @@
  * katmanında deterministik olarak üretilir (TŞ §8 invariant iii).
  */
 
+import type ts from "typescript";
+
 import type {
   SnapshotEdgeInput,
   SnapshotNodeInput,
@@ -31,6 +33,17 @@ export interface TsAdapterSourceFile {
   readonly content: string;
 }
 
+/**
+ * Opaque incremental state returned alongside analysis results so callers can
+ * reuse unchanged `ts.SourceFile` ASTs across incremental runs via
+ * `ts.createProgram(..., oldProgram)` with byte-identical deterministic output.
+ */
+export interface TypeScriptIncrementalState {
+  readonly program: ts.Program;
+  readonly sourceHashes: ReadonlyMap<string, string>;
+  readonly optionsSignature: string;
+}
+
 /** `analyzeTypeScriptProgram` girdisi. */
 export interface TypeScriptAdapterInput {
   /** Opaque workspace kimliği; boş/boşluk reddedilir. */
@@ -47,7 +60,27 @@ export interface TypeScriptAdapterInput {
    * `rootDir` diskte mevcutsa güvenli salt-okunur disk fallback uygulanır.
    */
   readonly configFiles?: readonly TsAdapterSourceFile[];
+  /**
+   * Optional in-memory workspace `package.json` manifests (strictly read-only,
+   * root-confined). When omitted and `rootDir` exists on disk, bounded safe
+   * read-only discovery scans workspace `package.json` manifests inside
+   * `rootDir` (max depth 4, max 256 manifests, rejecting symlinks).
+   */
+  readonly packageFiles?: readonly TsAdapterSourceFile[];
+  /**
+   * Optional previous `ts.Program` to pass as `oldProgram` to `ts.createProgram`
+   * for reusing unchanged `ts.SourceFile` ASTs across incremental runs.
+   */
+  readonly previousProgram?: ts.Program;
+  /**
+   * Optional opaque incremental state from a previous run (`result.nextIncrementalState`)
+   * enabling O(1) hash-verified `ts.SourceFile` reuse across incremental runs.
+   */
+  readonly incrementalState?: TypeScriptIncrementalState;
 }
+
+/** Alias for `TypeScriptAdapterInput` for workspace-level callers. */
+export type AnalyzeTypeScriptWorkspaceOptions = TypeScriptAdapterInput;
 
 /**
  * Framework linker kimlikleri (sprint-2 B3). Her kimlik, `extractFrameworkEdges`
@@ -73,6 +106,18 @@ export const TS_ADAPTER_FRAMEWORK_LINKERS: readonly FrameworkLinkerId[] = [
 export interface TypeScriptAnalysisRun {
   readonly result: TypeScriptAdapterResult;
   readonly framework: FrameworkEdgesResult;
+  /**
+   * Non-enumerable incremental state for reusing `ts.Program` / `ts.SourceFile`
+   * across incremental runs without affecting `JSON.stringify` determinism.
+   */
+  readonly nextIncrementalState?: TypeScriptIncrementalState;
+}
+
+/** Incremental analysis run with explicit enumerable `nextIncrementalState`. */
+export interface TypeScriptIncrementalAnalysisRun {
+  readonly result: TypeScriptAdapterResult;
+  readonly framework: FrameworkEdgesResult;
+  readonly nextIncrementalState: TypeScriptIncrementalState;
 }
 
 /**
@@ -135,4 +180,10 @@ export interface TypeScriptAdapterResult {
   readonly nodes: readonly SnapshotNodeInput[];
   /** Domain `createSnapshot` girdisiyle birebir uyumlu kenar kümesi. */
   readonly edges: readonly SnapshotEdgeInput[];
+  /**
+   * Non-enumerable opaque state carrying `ts.Program` + source hashes for
+   * incremental `oldProgram` reuse. Non-enumerable so `JSON.stringify(result)`
+   * never serializes circular ASTs and remains byte-identical.
+   */
+  readonly nextIncrementalState?: TypeScriptIncrementalState;
 }
