@@ -10,7 +10,12 @@ import type {
 import { GraphRepositoryError } from "./errors.js";
 
 function normalizePosixPath(value: string): string {
-  return value.replace(/\\/g, "/").replace(/^\/+|\/+$/g, "");
+  const normalized = value.replace(/\\/g, "/");
+  let start = 0;
+  let end = normalized.length;
+  while (start < end && normalized.charCodeAt(start) === 47) start += 1;
+  while (end > start && normalized.charCodeAt(end - 1) === 47) end -= 1;
+  return normalized.slice(start, end);
 }
 
 /**

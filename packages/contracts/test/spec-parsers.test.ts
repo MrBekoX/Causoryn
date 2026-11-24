@@ -354,6 +354,66 @@ describe("discoverJsonSchemaContracts", () => {
       "contracts/spec-invalid",
     );
   });
+
+  it("güvenlik (#22): sahte $schema URL'leri resmi JSON Schema sayılmaz (hostname/protocol doğrulaması)", () => {
+    const spoofedUris = [
+      "https://evil.example/json-schema.org",
+      "https://evil-json-schema.org/draft-07/schema",
+      "https://json-schema.org.evil.example/draft/2020-12/schema",
+      "javascript://json-schema.org/",
+      "ftp://json-schema.org/draft-07/schema",
+      "https://user:json-schema.org@evil.example/schema",
+      "https://.json-schema.org/draft/2020-12/schema",
+      "https://foo..json-schema.org/draft/2020-12/schema",
+      "https://user:pass@json-schema.org/draft/2020-12/schema",
+      "https://evil.example@json-schema.org/draft/2020-12/schema",
+      "https://json-schema.org:8443/draft/2020-12/schema",
+    ];
+
+    for (const uri of spoofedUris) {
+      // Başka şema işareti yoksa: contracts/json-schema-not-a-schema ve 0 sözleşme
+      const noMarks = discoverJsonSchemaContracts(
+        "ws-1",
+        "schemas/spoofed.json",
+        JSON.stringify({ $schema: uri, title: "Spoofed" }),
+      );
+      expect(noMarks.contracts, `spoofed without marks: ${uri}`).toHaveLength(0);
+      expect(
+        noMarks.diagnostics.some((d) => d.code === "contracts/json-schema-not-a-schema"),
+        `expected not-a-schema for ${uri}`,
+      ).toBe(true);
+
+      // properties varsa: resmi DEĞİL, assumed + partial
+      const withProps = discoverJsonSchemaContracts(
+        "ws-1",
+        "schemas/spoofed-props.json",
+        JSON.stringify({ $schema: uri, properties: { id: { type: "string" } } }),
+      );
+      expect(withProps.contracts, `spoofed with props: ${uri}`).toHaveLength(1);
+      expect(withProps.contracts[0]?.certainty, `expected partial for ${uri}`).toBe("partial");
+      expect(
+        withProps.diagnostics.some((d) => d.code === "contracts/json-schema-assumed"),
+        `expected assumed for ${uri}`,
+      ).toBe(true);
+    }
+
+    // Resmi json-schema.org URI'leri (https, http ve alt alan adları) full kalır
+    const officialUris = [
+      "https://json-schema.org/draft/2020-12/schema",
+      "http://json-schema.org/draft-07/schema#",
+      "https://sub.json-schema.org/draft/2020-12/schema",
+    ];
+    for (const uri of officialUris) {
+      const ok = discoverJsonSchemaContracts(
+        "ws-1",
+        "schemas/official.json",
+        JSON.stringify({ $schema: uri, title: "Official" }),
+      );
+      expect(ok.contracts, `official: ${uri}`).toHaveLength(1);
+      expect(ok.contracts[0]?.certainty, `expected full for ${uri}`).toBe("full");
+      expect(ok.diagnostics, `expected no diagnostics for ${uri}`).toEqual([]);
+    }
+  });
 });
 
 /* ------------------------------------------------------------------ */

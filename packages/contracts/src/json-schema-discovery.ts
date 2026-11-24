@@ -80,6 +80,33 @@ function resolveLocalPointer(root: Record<string, unknown>, pointer: string): bo
   return true;
 }
 
+function isOfficialJsonSchemaUri(value: unknown): boolean {
+  if (typeof value !== "string") return false;
+  let parsed: URL;
+  try {
+    parsed = new URL(value);
+  } catch {
+    return false;
+  }
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+    return false;
+  }
+  if (parsed.username !== "" || parsed.password !== "" || parsed.port !== "") {
+    return false;
+  }
+  const hostname = parsed.hostname.toLowerCase();
+  if (hostname === "json-schema.org") {
+    return true;
+  }
+  if (!hostname.endsWith(".json-schema.org")) {
+    return false;
+  }
+  if (hostname.startsWith(".") || hostname.includes("..")) {
+    return false;
+  }
+  return true;
+}
+
 export function discoverJsonSchemaContracts(
   workspaceId: string,
   relativePath: string,
@@ -93,8 +120,7 @@ export function discoverJsonSchemaContracts(
   const diagnostics: ContractDiagnostic[] = [];
 
   const schemaUri = root["$schema"];
-  const isOfficialSchema =
-    typeof schemaUri === "string" && schemaUri.includes("json-schema.org");
+  const isOfficialSchema = isOfficialJsonSchemaUri(schemaUri);
   const hasSchemaMarks =
     isPlainObject(root["properties"]) ||
     isPlainObject(root["$defs"]) ||

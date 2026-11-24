@@ -1,4 +1,3 @@
-import { readFile, stat } from "node:fs/promises";
 import path from "node:path";
 
 import {
@@ -27,6 +26,10 @@ import { z } from "zod";
 
 import { CausorynToolError } from "./errors.js";
 import { buildEnvelope, type Envelope } from "./envelope.js";
+import {
+  readOptionalBoundedTextFile,
+  type BoundedTextReadResult,
+} from "./safe-file-read.js";
 import {
   coverageOf,
   envelopeStatusOf,
@@ -405,44 +408,17 @@ export const CheckArchitectureDataSchema = z.strictObject({
 const POLICY_RELATIVE_PATH = ".causoryn/architecture.rules.yaml";
 const BASELINE_RELATIVE_PATH = ".causoryn/architecture.baseline.yaml";
 
-/** Policy/baseline okuma sonucu: okundu, yok ya da bütçe aşımı. */
-type ReadTextResult =
-  | { readonly status: "ok"; readonly text: string }
-  | { readonly status: "missing" }
-  | { readonly status: "too-large"; readonly bytes: number };
-
 /**
  * Policy/baseline dosyasını TŞ §20 "dosya başına byte" resource bütçesiyle
- * okur (takım denetimi bulgusu: TŞ §19 gereği depo dosyası güvenilmez
- * girdidir; bütçesiz tam belleğe okuma yoktur). Denetim iki katmandır:
- * okuma ÖNCESİ stat boyutu VE okuma SONRASI byteLength (stat/read yarışına
- * karşı savunma; utf-8 uzunluk farkı dahil). Bütçe aşımı LIMIT_EXCEEDED
- * eşlenir; eksik dosya "missing" (çağıran POLICY_INVALID'a çevirir).
+ * tek file handle üzerinden sınırlı okur (CWE-367 TOCTOU'ya karşı
+ * open+fstat+bounded read). Bütçe aşımı LIMIT_EXCEEDED eşlenir; eksik dosya
+ * "missing" (çağıran POLICY_INVALID'a çevirir).
  */
-async function readOptionalTextFile(
+function readOptionalTextFile(
   absolutePath: string,
   maxBytes: number,
-): Promise<ReadTextResult> {
-  let statSize: number | undefined;
-  try {
-    statSize = (await stat(absolutePath)).size;
-  } catch {
-    return { status: "missing" };
-  }
-  if (statSize > maxBytes) {
-    return { status: "too-large", bytes: statSize };
-  }
-  let text: string;
-  try {
-    text = await readFile(absolutePath, "utf8");
-  } catch {
-    return { status: "missing" };
-  }
-  const bytes = Buffer.byteLength(text, "utf8");
-  if (bytes > maxBytes) {
-    return { status: "too-large", bytes };
-  }
-  return { status: "ok", text };
+): Promise<BoundedTextReadResult> {
+  return readOptionalBoundedTextFile(absolutePath, maxBytes);
 }
 
 /**

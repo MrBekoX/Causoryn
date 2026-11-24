@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -144,10 +144,7 @@ describe("F7 benchmark — pozitif", { timeout: 590_000 }, () => {
   it("fixture diski birebir doğrulanır: 1000 .ts dosyası, model hash'i ile aynı içerik", () => {
     const model = buildFixtureModel(1000);
     expect(model.entries.length).toBe(1000);
-    const root = path.join(
-      os.tmpdir(),
-      `causoryn-bench-fixture-verify-${process.pid}-${Date.now()}`,
-    );
+    const root = mkdtempSync(path.join(os.tmpdir(), "causoryn-bench-fixture-verify-"));
     try {
       writeFixture(root, model);
       const diskHash = fixtureDiskHash(root, model);
@@ -160,17 +157,13 @@ describe("F7 benchmark — pozitif", { timeout: 590_000 }, () => {
 
 describe("F7 benchmark — negatif", { timeout: 30_000 }, () => {
   it("üst dizin bir dosya ise fixture üretimi explicit hata ile reddedilir", () => {
-    const base = path.join(
-      os.tmpdir(),
-      `causoryn-bench-negative-${process.pid}-${Date.now()}`,
-    );
-    mkdirSync(base, { recursive: true });
-    const blocker = path.join(base, "blocker.txt");
-    writeFileSync(blocker, "bu bir dosyadır; altına dizin gelemez", "utf8");
-    // Bitiştirme kasıtlıdır: parent'ı DOSYA olan kök adayı; dynamic join
-    // yok, fs çağrısı fixture.ts guard'ının arkasındadır.
-    const root = blocker + path.sep + "fixture-root";
+    const base = mkdtempSync(path.join(os.tmpdir(), "causoryn-bench-negative-"));
     try {
+      const blocker = path.join(base, "blocker.txt");
+      writeFileSync(blocker, "bu bir dosyadır; altına dizin gelemez", "utf8");
+      // Bitiştirme kasıtlıdır: parent'ı DOSYA olan kök adayı; dynamic join
+      // yok, fs çağrısı fixture.ts guard'ının arkasındadır.
+      const root = blocker + path.sep + "fixture-root";
       expect(() => writeFixture(root, buildFixtureModel(4))).toThrow(
         BenchFixtureError,
       );
@@ -188,14 +181,11 @@ describe("F7 benchmark — negatif", { timeout: 30_000 }, () => {
   });
 
   it("tmpdir dışına fixture yazımı explicit hata ile reddedilir", () => {
-    // Kaçış adayı tmpdir'in ÜST dizinidir (gerçek yol üzerinden dirname
-    // ile hesaplanır; konteynman kontrolü bunu reddetmelidir).
-    const tmpReal = realpathSync(os.tmpdir());
-    const outside = path.dirname(tmpReal);
-    const probe = path.join(
-      os.tmpdir(),
-      `causoryn-bench-outside-probe-${process.pid}`,
-    );
+    // Kaçış adayı tmpdir'in ÜST dizinidir (mkdtempSync altından gerçek yol
+    // üzerinden iki üst dizin olarak hesaplanır; konteynman kontrolü reddetmelidir).
+    const probeBase = mkdtempSync(path.join(os.tmpdir(), "causoryn-bench-outside-probe-"));
+    const outside = path.dirname(path.dirname(realpathSync(probeBase)));
+    const probe = path.join(probeBase, "fixture");
     try {
       expect(() => writeFixture(probe, buildFixtureModel(4))).not.toThrow();
       expect(() => writeFixture(outside, buildFixtureModel(4))).toThrow(
@@ -210,16 +200,12 @@ describe("F7 benchmark — negatif", { timeout: 30_000 }, () => {
       }
       expect(code).toBe("FIXTURE_ROOT_OUTSIDE_TMPDIR");
     } finally {
-      rmSync(probe, { recursive: true, force: true });
+      rmSync(probeBase, { recursive: true, force: true });
     }
   });
 
   it("dolu mevcut dizine fixture yazımı explicit hata ile reddedilir", () => {
-    const root = path.join(
-      os.tmpdir(),
-      `causoryn-bench-nonempty-${process.pid}-${Date.now()}`,
-    );
-    mkdirSync(root, { recursive: true });
+    const root = mkdtempSync(path.join(os.tmpdir(), "causoryn-bench-nonempty-"));
     try {
       writeFileSync(path.join(root, "mevcut.txt"), "dolu", "utf8");
       expect(() => writeFixture(root, buildFixtureModel(4))).toThrow(

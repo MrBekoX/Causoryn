@@ -698,3 +698,46 @@ describe("WorkspaceWatcher — debounce max-wait (güvenlik bulgusu 2)", { timeo
     },
   );
 });
+
+describe("hashWorkspaceFile — CodeQL #28 fd tabanlı sınırlı okuma ve sınır koşulları", () => {
+  it("oversized, tam sınır, çoklu parça (>64 KiB), dizin, eksik dosya ve UTF-8 genleşmesini doğru ele alır", () => {
+    const root = mkdtempSync(path.join(tmpdir(), "causoryn-hash-fd-"));
+    try {
+      mkdirSync(path.join(root, "src", "subdir"), { recursive: true });
+      const policy = WorkspaceAccessPolicy.create({ allowRoots: [root] });
+
+      // 1. Eksik dosya ve dizin → null (silinme/dosya-değil semantiği)
+      expect(hashWorkspaceFile(policy, root, "src/missing.ts", 1024)).toBeNull();
+      expect(hashWorkspaceFile(policy, root, "src/subdir", 1024)).toBeNull();
+      expect(hashWorkspaceFile(policy, root, "../escape.ts", 1024)).toBeNull();
+      expect(hashWorkspaceFile(policy, root, "src/a\0b.ts", 1024)).toBeNull();
+
+      // 2. Boş dosya (0 bayt) ve tam sınır (size === maxFileBytes)
+      writeFileSync(path.join(root, "src", "empty.ts"), "", "utf8");
+      expect(hashWorkspaceFile(policy, root, "src/empty.ts", 0)).toBe(sha256Hex(utf8Encode("")));
+
+      const exactContent = "x".repeat(64);
+      writeFileSync(path.join(root, "src", "exact.ts"), exactContent, "utf8");
+      expect(hashWorkspaceFile(policy, root, "src/exact.ts", 64)).toBe(
+        sha256Hex(utf8Encode(exactContent)),
+      );
+
+      // 3. Boyut aşımı (size === maxFileBytes + 1) → undefined (konservatif değişim)
+      expect(hashWorkspaceFile(policy, root, "src/exact.ts", 63)).toBeUndefined();
+
+      // 4. Çoklu parça okuma (> 64 KiB READ_CHUNK_BYTES) → tam sha256 eşleşmesi
+      const multiChunkContent = `${"export const line = '0123456789abcdef';\n".repeat(4000)}`;
+      writeFileSync(path.join(root, "src", "large.ts"), multiChunkContent, "utf8");
+      expect(
+        hashWorkspaceFile(policy, root, "src/large.ts", policy.config.maxFileBytes),
+      ).toBe(sha256Hex(utf8Encode(multiChunkContent)));
+      expect(hashWorkspaceFile(policy, root, "src/large.ts", 1024)).toBeUndefined();
+
+      // 5. Geçersiz UTF-8 baytlarının U+FFFD genleşmesi maxFileBytes'ı aşarsa undefined
+      writeFileSync(path.join(root, "src", "invalid-utf8.ts"), Buffer.alloc(10, 0xff));
+      expect(hashWorkspaceFile(policy, root, "src/invalid-utf8.ts", 10)).toBeUndefined();
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});

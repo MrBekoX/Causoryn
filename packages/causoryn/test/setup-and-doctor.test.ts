@@ -1575,4 +1575,80 @@ describe(
       );
     }
   });
+
+  it("güvenlik (#25): kaynak SKILL.md eksik veya dizin olduğunda fd tabanlı okuma aynı cli/io-error hatasını fırlatır", async () => {
+    const base = createTempDir("skill-fd-check");
+    const fakeHome = path.join(base, "home");
+    mkdirSync(fakeHome, { recursive: true });
+
+    // 1) Eksik SKILL.md -> CausorynCliError("cli/io-error", "Kaynak skill dosyası bulunamadı: ...")
+    const missingPkg = createFakePackageRoot(base, "pkg-missing-skill");
+    const missingSkillFile = path.join(missingPkg, "skills", CANONICAL_SKILL_NAMES[0], "SKILL.md");
+    rmSync(missingSkillFile);
+
+    let missingErr: unknown;
+    try {
+      await runSetup({
+        clients: ["claude-code"],
+        homeDir: fakeHome,
+        packageRoot: missingPkg,
+        dryRun: true,
+      });
+    } catch (err) {
+      missingErr = err;
+    }
+    expect(missingErr).toBeInstanceOf(CausorynCliError);
+    expect((missingErr as CausorynCliError).code).toBe("cli/io-error");
+    expect((missingErr as CausorynCliError).message).toContain(
+      `Kaynak skill dosyası bulunamadı: ${missingSkillFile}`,
+    );
+
+    // 2) Dizin olan SKILL.md -> aynı CausorynCliError
+    const dirPkg = createFakePackageRoot(base, "pkg-dir-skill");
+    const dirSkillFile = path.join(dirPkg, "skills", CANONICAL_SKILL_NAMES[0], "SKILL.md");
+    rmSync(dirSkillFile);
+    mkdirSync(dirSkillFile, { recursive: true });
+
+    let dirErr: unknown;
+    try {
+      await runSetup({
+        clients: ["claude-code"],
+        homeDir: fakeHome,
+        packageRoot: dirPkg,
+        dryRun: true,
+      });
+    } catch (err) {
+      dirErr = err;
+    }
+    expect(dirErr).toBeInstanceOf(CausorynCliError);
+    expect((dirErr as CausorynCliError).code).toBe("cli/io-error");
+    expect((dirErr as CausorynCliError).message).toContain(
+      `Kaynak skill dosyası bulunamadı: ${dirSkillFile}`,
+    );
+
+    // 3) Symlink'li kaynak SKILL.md (OS izin veriyorsa) O_NOFOLLOW olmadan başarıyla okunur
+    const symlinkPkg = createFakePackageRoot(base, "pkg-symlink-skill");
+    const symlinkSkillFile = path.join(symlinkPkg, "skills", CANONICAL_SKILL_NAMES[0], "SKILL.md");
+    const realSkillTarget = path.join(base, "shared-skill.md");
+    writeFileSync(realSkillTarget, "---\nname: causoryn\n---\nSymlinked skill content.\n", "utf8");
+    rmSync(symlinkSkillFile);
+    let symlinkCreated = false;
+    try {
+      symlinkSync(realSkillTarget, symlinkSkillFile, "file");
+      symlinkCreated = true;
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException | undefined)?.code !== "EPERM") {
+        throw err;
+      }
+    }
+    if (symlinkCreated) {
+      const setupRes = await runSetup({
+        clients: ["claude-code"],
+        homeDir: fakeHome,
+        packageRoot: symlinkPkg,
+        dryRun: true,
+      });
+      expect(setupRes.actions.some((a) => a.kind === "skill")).toBe(true);
+    }
+  });
 });

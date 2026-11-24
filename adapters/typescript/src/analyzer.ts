@@ -2287,6 +2287,14 @@ function readDefaultProcessEnv(): ProcessEnvMap {
   return proc?.env ?? {};
 }
 
+function stripTrailingSlashes(value: string): string {
+  let end = value.length;
+  while (end > 0 && value.charCodeAt(end - 1) === 47) {
+    end -= 1;
+  }
+  return end === value.length ? value : value.slice(0, end);
+}
+
 function normalizeLibDirPosix(rawPath: string): string {
   const posix = toPosix(rawPath);
   if (posix === "/" || /^[a-zA-Z]:\/$/.test(posix)) {
@@ -2295,7 +2303,7 @@ function normalizeLibDirPosix(rawPath: string): string {
   if (/^[a-zA-Z]:$/.test(posix)) {
     return `${posix}/`;
   }
-  return posix.replace(/\/+$/, "");
+  return stripTrailingSlashes(posix);
 }
 
 function joinLibPosix(base: string, child: string): string {
@@ -2309,7 +2317,7 @@ function parentLibPosixDir(dir: string): string {
   if (/^[a-zA-Z]:$/.test(dir)) {
     return `${dir}/`;
   }
-  const trimmed = dir.replace(/\/+$/, "");
+  const trimmed = stripTrailingSlashes(dir);
   const slashIdx = trimmed.lastIndexOf("/");
   if (slashIdx < 0) {
     return ".";
@@ -2426,7 +2434,7 @@ function normalizeRootPosix(rawRootDir: string): string {
   if (normalized === "/" || /^[a-zA-Z]:\/$/.test(normalized)) {
     return normalized;
   }
-  return normalized.replace(/\/+$/, "");
+  return stripTrailingSlashes(normalized);
 }
 
 function joinRootAndRelative(rootPosix: string, relativePath: string): string {

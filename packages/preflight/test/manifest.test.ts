@@ -850,4 +850,51 @@ describe("resolveSourceRevision — salt-okunur HEAD çözümlemesi", { timeout:
     expect(noGit.sourceRevision).toBeUndefined();
     expect(noGit.limitations.length).toBeGreaterThan(0);
   });
+
+  it("CodeQL #35: aşırı büyük .git/HEAD kota ile reddedilir; dizin HEAD çökmez; çoklu parça (>64 KiB) packed-refs çözülür", async () => {
+    // 1. Aşırı büyük .git/HEAD (> 1 MiB) → quota limitation + sourceRevision=undefined
+    const oversizedHeadRepo = await mkdtemp(path.join(os.tmpdir(), "causoryn-preflight-head-"));
+    createdDirs.push(oversizedHeadRepo);
+    await mkdir(path.join(oversizedHeadRepo, ".git"), { recursive: true });
+    const oversizedHead = `${"a".repeat(1024 * 1024 + 64)}\n`;
+    await writeFile(path.join(oversizedHeadRepo, ".git", "HEAD"), oversizedHead, "utf8");
+
+    const headQuotaRes = await resolveSourceRevision(oversizedHeadRepo);
+    expect(headQuotaRes.sourceRevision).toBeUndefined();
+    expect(
+      headQuotaRes.limitations.some(
+        (note) => note.includes(".git/HEAD") && note.includes("boyut kotası aşıldı"),
+      ),
+    ).toBe(true);
+
+    // 2. .git/HEAD bir dizinse (dosya değil) fırlatmadan undefined + limitation döner
+    const dirHeadRepo = await mkdtemp(path.join(os.tmpdir(), "causoryn-preflight-dirhead-"));
+    createdDirs.push(dirHeadRepo);
+    await mkdir(path.join(dirHeadRepo, ".git", "HEAD"), { recursive: true });
+    const dirHeadRes = await resolveSourceRevision(dirHeadRepo);
+    expect(dirHeadRes.sourceRevision).toBeUndefined();
+    expect(dirHeadRes.limitations.length).toBeGreaterThan(0);
+
+    // 3. Çoklu 64 KiB parça (> 128 KiB, kota altı) packed-refs tam okunur ve HEAD çözülür
+    const multiChunkRepo = await mkdtemp(path.join(os.tmpdir(), "causoryn-preflight-packed-"));
+    createdDirs.push(multiChunkRepo);
+    await mkdir(path.join(multiChunkRepo, ".git"), { recursive: true });
+    await writeFile(
+      path.join(multiChunkRepo, ".git", "HEAD"),
+      "ref: refs/heads/main\n",
+      "utf8",
+    );
+    const expectedSha = "0123456789abcdef0123456789abcdef01234567";
+    const commentBlock = `# ${"c".repeat(120)}\n`.repeat(1500); // ~184 KiB (> 2 × 64 KiB)
+    await writeFile(
+      path.join(multiChunkRepo, ".git", "packed-refs"),
+      `${commentBlock}${expectedSha} refs/heads/main\n`,
+      "utf8",
+    );
+    const multiChunkRes = await resolveSourceRevision(multiChunkRepo);
+    expect(multiChunkRes.sourceRevision).toEqual({
+      kind: "working-tree",
+      head: expectedSha,
+    });
+  });
 });
