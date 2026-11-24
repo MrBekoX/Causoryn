@@ -1,26 +1,29 @@
-//! syn 2 tabanlı deterministik analiz — M1-Rust.
+//! Deterministic analysis based on syn 3 (Cargo.lock pins 3.0.10).
 //!
-//! Çıkarım sözleşmesi (native/rust-worker/PROTOCOL.md v1):
-//! - Bildirimler: fn → Function, struct/enum → Class, trait → Interface,
-//!   impl fn → Method (CONTAINS File→tip, tip→Method).
-//! - CALLS resolution üçlüsü:
-//!     * aynı modülde tanımlı fn'e doğrudan (bare) çağrı → verified,
-//!     * nitelikli yol çağrısı (a::B::c / B::c) → son 2 segment eşleşmesi
-//!       modül öneklerini ve `use` import'larını doğrulamadığından
-//!       heuristic + explicit ambiguity ("unverified-module-prefix-suffix-match"),
-//!       çok eşleşme → heuristic + çoklu aday ambiguity, hiç eşleşme yok →
+//! Extraction contract (native/rust-worker/PROTOCOL.md v1):
+//! - Declarations: fn → Function, struct/enum → Class, trait → Interface,
+//!   impl fn → Method (CONTAINS File→type, type→Method).
+//! - CALLS resolution:
+//!     * bare call to a fn defined in the same module → verified; a single
+//!       match in another file → heuristic; several matches → heuristic +
+//!       ambiguity,
+//!     * qualified path call (a::B::c / B::c) → matched on the last 2 segments,
+//!       which checks neither module prefixes nor `use` imports, so a single
+//!       match is heuristic + explicit ambiguity
+//!       ("unverified-module-prefix-suffix-match"), several matches are
+//!       heuristic + multi-candidate ambiguity, and no match is
 //!       unresolved + UnknownExternal,
-//!     * metot çağrısı (x.foo()) → alıcı türü çözülmez (trait dispatch
-//!       bu dilimde yok) → heuristic; tek isim tablosu adayı hedef,
-//!       çok aday → ambiguity, aday yok → unresolved.
-//!   verified/heuristic kenarlar "semantic-symbol", unresolved kenarlar ve
-//!   CONTAINS "ast-span", ROUTES_TO "route-attribute" kanıt türünü taşır
-//!   (kanıt türleri TŞ §8 kümesinden; rationale metni isim tablosu
-//!   dayanağını DÜRÜST belirtir — semantik çözümleyici yoktur).
-//! - Route tespiti: #[get/post/put/delete/patch/head/options/connect/trace("…")]
-//!   ve #[route("…", method = …)] (axum/actix/rocket örüntüleri) → Endpoint
-//!   node + ROUTES_TO (verified, sözdizimsel bağ).
-//! - Determinizm: BTreeMap/BTreeSet, kanonik sıralama, saat okunmaz.
+//!     * method call (x.foo()) → the receiver type is not resolved (no trait
+//!       dispatch) → heuristic; a single name-table candidate is the target,
+//!       several candidates add ambiguity, none → unresolved.
+//!   verified/heuristic edges carry "semantic-symbol" evidence, unresolved
+//!   edges and CONTAINS carry "ast-span", ROUTES_TO carries "route-attribute"
+//!   (the rationale text states honestly that the basis is a name table —
+//!   there is no semantic resolver).
+//! - Route detection: #[get/post/put/delete/patch/head/options/connect/trace("…")]
+//!   and #[route("…", method = …)] (axum/actix/rocket patterns) → Endpoint
+//!   node + ROUTES_TO (verified, syntactic binding).
+//! - Determinism: BTreeMap/BTreeSet, canonical ordering, no clock reads.
 
 use std::collections::{BTreeMap, BTreeSet};
 
