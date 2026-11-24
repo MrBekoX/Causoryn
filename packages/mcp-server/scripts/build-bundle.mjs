@@ -117,7 +117,7 @@ const VENDOR_ENTRIES = ["package.json", "LICENSE", "lib", "prebuilds"];
 
 function assertExists(filePath, label) {
   if (!existsSync(filePath)) {
-    console.error(`[build:bundle] ${label} bulunamadı: ${filePath}`);
+    console.error(`[build:bundle] ${label} not found: ${filePath}`);
     process.exit(1);
   }
 }
@@ -133,7 +133,7 @@ function writeFileAtomic(destPath, content) {
   renameSync(tmpPath, destPath);
 }
 
-assertExists(path.join(PKG_DIR, "src", "stdio.ts"), "giriş noktası src/stdio.ts");
+assertExists(path.join(PKG_DIR, "src", "stdio.ts"), "entry point src/stdio.ts");
 assertExists(SQLITE_SRC, "repo node_modules/better-sqlite3 (npm install gerekli)");
 
 // --- 1) Bundle (in-memory + atomik yazım: koşut testlerde ENOENT penceresi yok) ---
@@ -177,7 +177,7 @@ const outputFiles = buildResult.outputFiles ?? [];
 const bundleOut = outputFiles.find((f) => path.resolve(f.path) === path.resolve(BUNDLE_PATH));
 const legalOut = outputFiles.find((f) => path.resolve(f.path) === path.resolve(LEGAL_PATH));
 if (!bundleOut || !legalOut) {
-  console.error("[build:bundle] esbuild beklenen mcp-server.mjs veya mcp-server.mjs.LEGAL.txt çıktısını üretmedi");
+  console.error("[build:bundle] esbuild did not produce the expected mcp-server.mjs or mcp-server.mjs.LEGAL.txt output");
   process.exit(1);
 }
 
@@ -204,7 +204,7 @@ writeFileAtomic(BUNDLE_PATH, finalBundleBytes);
 writeFileAtomic(LEGAL_PATH, finalLegalBytes);
 
 // --- 1b) Non-blocking worker_threads indexing bundle (Wave 2 Task 2.5) ---
-assertExists(WORKER_ENTRY_PATH, "indexing worker giriş noktası src/index-worker-entry.ts");
+assertExists(WORKER_ENTRY_PATH, "indexing worker entry point src/index-worker-entry.ts");
 const workerBuildResult = await build({
   absWorkingDir: PKG_DIR,
   entryPoints: [WORKER_ENTRY_PATH],
@@ -234,7 +234,7 @@ const workerOut = (workerBuildResult.outputFiles ?? []).find(
   (f) => path.resolve(f.path) === path.resolve(WORKER_BUNDLE_PATH),
 );
 if (!workerOut) {
-  console.error("[build:bundle] esbuild beklenen index-worker.mjs çıktısını üretmedi");
+  console.error("[build:bundle] esbuild did not produce the expected index-worker.mjs output");
   process.exit(1);
 }
 const rawWorker = workerOut.text;
@@ -253,7 +253,7 @@ writeFileAtomic(WORKER_BUNDLE_PATH, finalWorkerBytes);
 mkdirSync(VENDOR_DEST, { recursive: true });
 for (const entry of VENDOR_ENTRIES) {
   const source = path.join(SQLITE_SRC, entry);
-  assertExists(source, `better-sqlite3 çalışma zamanı parçası ${entry}`);
+  assertExists(source, `better-sqlite3 runtime file ${entry}`);
   cpSync(source, path.join(VENDOR_DEST, entry), { recursive: true, force: true });
 }
 
