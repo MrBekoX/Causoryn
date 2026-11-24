@@ -50,6 +50,3 @@ Thumbs.db
 # Test bootstrap kilit dosyası (tests/rust-worker-build.ts koşum-içi kilit;
 # sert kill'de diskte kalabilir — untracked kalıntı olmasın)
 native/rust-worker/test-build.lock
-
-# Yerel uygulama planları (kullanıcı talebi — repo içinde tutulur ama git'e eklenmez)
-docs/superpowers/plans/2026-11-24-opus-audit-remediation-plan.md
