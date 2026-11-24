@@ -9,9 +9,11 @@
  *   and kebab-case into lowercased searchable tokens.
  * - Filters common natural-language stop words (EN + TR) when turning free-text queries
  *   into bounded FTS5 `OR` queries.
- * - Defense-in-depth for SQLite FTS5 (including CVE-2026-119373 prefix-match hardening):
- *   every FTS5 query term is strictly alphanumeric `[a-z0-9]+`, double-quoted, with ZERO
- *   raw FTS5 operators (`NEAR`, `NOT`, `^`, `*`, `:`), bounded to at most 16 terms.
+ * - Defense-in-depth for SQLite FTS5 query parsing: every FTS5 query term is strictly
+ *   alphanumeric `[a-z0-9]+`, double-quoted, with ZERO raw FTS5 operators (`NEAR`, `NOT`,
+ *   `^`, `*`, `:`), bounded to at most 16 terms. Upstream SQLite fixes (the bundled
+ *   better-sqlite3 ships SQLite 3.54.1) are not a substitute for, nor a prerequisite of,
+ *   this sanitization.
  */
 
 const MAX_INPUT_CHARS = 4_096;
