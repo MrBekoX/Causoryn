@@ -216,16 +216,16 @@ for (const rootFile of ROOT_TEXT_FILES) {
 }
 
 if (missingRoots.length > 0) {
-  console.error("SECRET_SCAN KIRMIZI — beyan edilen kök dizin/dosya bulunamadı:");
+  console.error("SECRET_SCAN FAIL — declared root directory/file not found:");
   for (const missing of missingRoots) console.error("  " + missing);
   process.exit(1);
 }
 
 if (findings.length > 0) {
-  console.error("SECRET_SCAN KIRMIZI — eşleşen satırlar:");
+  console.error("SECRET_SCAN FAIL — matching lines:");
   for (const finding of findings) console.error("  " + finding);
   process.exit(1);
 }
 console.log(
-  `SECRET_SCAN YEŞİL — ${scannedRoots} kök tarandı (+ ${scannedRootFiles} kök dosyası), 0 eşleşme.`,
+  `SECRET_SCAN PASS — ${scannedRoots} roots scanned (+ ${scannedRootFiles} root files), 0 matches.`,
 );

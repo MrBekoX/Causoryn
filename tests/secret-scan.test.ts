@@ -165,9 +165,9 @@ describe("scripts/secret-scan.mjs — genişletilmiş kapsam (12 kök + kök dos
       encoding: "utf8",
       stdio: ["ignore", "pipe", "pipe"],
     });
-    expect(stdout).toContain("SECRET_SCAN YEŞİL");
-    expect(stdout).toContain(`${String(EXPECTED_DIR_ROOTS.length)} kök tarandı`);
-    expect(stdout).toContain("0 eşleşme");
+    expect(stdout).toContain("SECRET_SCAN PASS");
+    expect(stdout).toContain(`${String(EXPECTED_DIR_ROOTS.length)} roots scanned`);
+    expect(stdout).toContain("0 matches");
   });
 
   it("NEGATİF: .github, docs, skills ve kök README.md içindeki yeni sır/kişisel-yol kalıpları exit 1 ile yakalanır", () => {
@@ -199,7 +199,7 @@ describe("scripts/secret-scan.mjs — genişletilmiş kapsam (12 kök + kök dos
       shell: false,
     });
     expect(res.status).toBe(1);
-    expect(res.stderr).toContain("SECRET_SCAN KIRMIZI");
+    expect(res.stderr).toContain("SECRET_SCAN FAIL");
     expect(res.stderr).toContain("github-fine-grained-pat");
     expect(res.stderr).toContain("npm-token");
     expect(res.stderr).toContain("openai-key");
@@ -236,7 +236,7 @@ describe("scripts/secret-scan.mjs — genişletilmiş kapsam (12 kök + kök dos
       shell: false,
     });
     expect(res.status, res.stderr).toBe(0);
-    expect(res.stdout).toContain("SECRET_SCAN YEŞİL");
+    expect(res.stdout).toContain("SECRET_SCAN PASS");
 
     // Negatif: eğik çizgili Windows profili ve Linux /home/<user> yakalanmalı:
     writeFileSync(path.join(repoDir, "docs", "slash.md"), `Path: ${BAIT_WIN_SLASH_PROFILE}\n`, "utf8");
@@ -298,8 +298,8 @@ describe("scripts/secret-scan.mjs — genişletilmiş kapsam (12 kök + kök dos
       shell: false,
     });
     expect(cleanRun.status, cleanRun.stderr).toBe(0);
-    expect(cleanRun.stdout).toContain(`${String(EXPECTED_DIR_ROOTS.length)} kök tarandı`);
-    expect(cleanRun.stdout).toContain("0 eşleşme");
+    expect(cleanRun.stdout).toContain(`${String(EXPECTED_DIR_ROOTS.length)} roots scanned`);
+    expect(cleanRun.stdout).toContain("0 matches");
 
     writeFileSync(
       path.join(repoDir, "scripts", "check-helper.mjs"),
@@ -312,7 +312,7 @@ describe("scripts/secret-scan.mjs — genişletilmiş kapsam (12 kök + kök dos
       shell: false,
     });
     expect(redRun.status).toBe(1);
-    expect(redRun.stderr).toContain("SECRET_SCAN KIRMIZI");
+    expect(redRun.stderr).toContain("SECRET_SCAN FAIL");
     expect(redRun.stderr).toContain(path.join("scripts", "check-helper.mjs"));
   });
 
