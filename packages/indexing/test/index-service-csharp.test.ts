@@ -308,7 +308,7 @@ describe.skipIf(!workerReady)(
         // Explicit degradasyon warning'i (adapter fallback sözleşmesi).
         expect(
           run.warnings.some(
-            (w) => w.includes("Roslyn worker kullanılamıyor") && w.includes("L0/L1"),
+            (w) => w.includes("Roslyn worker unavailable") && w.includes("L0/L1"),
           ),
         ).toBe(true);
         // Fingerprint dürüstçülüğü: ref-pack keşfi YAPILMADI.
@@ -430,7 +430,7 @@ describe("IndexService.runIndex — senkron koşum C# derin analiz yürütmez (B
     try {
       const repository = new InMemoryGraphRepository();
       // Olmayan DLL ile koş: senkron yol adapter'a SPAWN ATMAMALI — spawn
-      // atılsaydı fallback warning'i ("Roslyn worker kullanılamıyor")
+      // atılsaydı fallback warning ("Roslyn worker unavailable")
       // warnings'e girerdi; köprü sözleşmesinde o uyarı YOKTUR.
       const service = makeService(
         repository,
@@ -473,7 +473,7 @@ describe("IndexService.runIndex — senkron koşum C# derin analiz yürütmez (B
       ).toBe(true);
       // Spawn atılmadı: adapter fallback uyarısı yok.
       expect(
-        run.warnings.some((w) => w.includes("Roslyn worker kullanılamıyor")),
+        run.warnings.some((w) => w.includes("Roslyn worker unavailable")),
       ).toBe(false);
       // Fingerprint: sync koşum worker keşfi yapmadı — dürüst etiket.
       const segments = run.snapshot.meta.analyzerFingerprint.split("|");

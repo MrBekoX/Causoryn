@@ -3152,6 +3152,7 @@ export class IndexService {
         runAdapter: (subset) =>
           analyzePythonWorkspace({
             workspaceId: this.workspaceId,
+            workspaceRoot: prepared.canonicalRoot,
             files: subset.map((entry) => ({
               path: entry.relativePath,
               content: entry.content,
@@ -3172,6 +3173,7 @@ export class IndexService {
         runAdapter: (subset) =>
           analyzeGoWorkspace({
             workspaceId: this.workspaceId,
+            workspaceRoot: prepared.canonicalRoot,
             files: subset.map((entry) => ({
               path: entry.relativePath,
               content: entry.content,
@@ -3202,6 +3204,7 @@ export class IndexService {
         runAdapter: (subset) =>
           analyzeRustWorkspace({
             workspaceId: this.workspaceId,
+            workspaceRoot: prepared.canonicalRoot,
             files: subset.map((entry) => ({
               path: entry.relativePath,
               content: entry.content,
@@ -4415,6 +4418,7 @@ export class IndexService {
     if (pyEntries.length > 0) {
       pythonResult = await analyzePythonWorkspace({
         workspaceId: this.workspaceId,
+        workspaceRoot: canonicalRoot,
         files: pyEntries.map((entry) => ({
           path: entry.relativePath,
           content: entry.content,
@@ -4438,6 +4442,7 @@ export class IndexService {
     if (goEntries.length > 0) {
       goResult = await analyzeGoWorkspace({
         workspaceId: this.workspaceId,
+        workspaceRoot: canonicalRoot,
         files: goEntries.map((entry) => ({
           path: entry.relativePath,
           content: entry.content,
@@ -4471,6 +4476,7 @@ export class IndexService {
     if (rsEntries.length > 0) {
       rustResult = await analyzeRustWorkspace({
         workspaceId: this.workspaceId,
+        workspaceRoot: canonicalRoot,
         files: rsEntries.map((entry) => ({
           path: entry.relativePath,
           content: entry.content,
