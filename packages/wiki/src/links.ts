@@ -70,7 +70,7 @@ export const WikiLinkSchema = z
     if (link.resolution === "verified" && link.evidenceRefs.length === 0) {
       ctx.addIssue({
         code: "custom",
-        message: `verified Wiki linki en az bir Evidence gerektirir (TŞ §16A.7): ${link.id}`,
+        message: `A verified wiki link requires at least one Evidence: ${link.id}`,
         path: ["evidenceRefs"],
       });
     }
@@ -95,28 +95,28 @@ export const WikiLinkDraftSchema = z
     if (draft.id.trim().length === 0) {
       ctx.addIssue({
         code: "custom",
-        message: "link id boş olamaz",
+        message: "link id must not be empty",
         path: ["id"],
       });
     }
     if (draft.fromPageId.trim().length === 0) {
       ctx.addIssue({
         code: "custom",
-        message: "link fromPageId boş olamaz",
+        message: "link fromPageId must not be empty",
         path: ["fromPageId"],
       });
     }
     if (draft.toRef.trim().length === 0) {
       ctx.addIssue({
         code: "custom",
-        message: "link toRef boş olamaz",
+        message: "link toRef must not be empty",
         path: ["toRef"],
       });
     }
     if (draft.resolution === "verified" && draft.evidenceRefs.length === 0) {
       ctx.addIssue({
         code: "custom",
-        message: `verified taslak en az bir Evidence gerektirir (TŞ §16A.7): ${draft.id}`,
+        message: `A verified link draft requires at least one Evidence: ${draft.id}`,
         path: ["evidenceRefs"],
       });
     }
@@ -222,7 +222,7 @@ function parseDrafts(drafts: readonly WikiLinkDraft[]): WikiLinkDraft[] {
         .join("; ");
       throw new WikiProjectionError(
         "wiki/invalid-input",
-        `WikiLinkDraft[${index}] şema doğrulaması başarısız: ${detail}`,
+        `WikiLinkDraft[${index}] schema validation failed: ${detail}`,
       );
     }
     return parsed.data;
@@ -242,13 +242,13 @@ function buildCatalog(pages: readonly WikiPageTarget[]): TargetCatalog {
     if (byId.has(page.id)) {
       throw new WikiProjectionError(
         "wiki/duplicate-catalog-page",
-        `Hedef kataloğunda aynı sayfa kimliği iki kez var: ${page.id}`,
+        `Target catalog contains the same page id twice: ${page.id}`,
       );
     }
     if (bySlug.has(page.slug)) {
       throw new WikiProjectionError(
         "wiki/duplicate-catalog-page",
-        `Hedef kataloğunda aynı slug iki sayfaya ait: ${page.slug}`,
+        `Target catalog assigns the same slug to two pages: ${page.slug}`,
       );
     }
     byId.set(page.id, page);
@@ -379,7 +379,7 @@ export function resolveWikiLinks(
   if (input.wikiSnapshotId.trim().length === 0) {
     throw new WikiProjectionError(
       "wiki/invalid-input",
-      "wikiSnapshotId boş olamaz",
+      "wikiSnapshotId must not be empty",
     );
   }
   const catalog = buildCatalog(input.pages);
@@ -387,7 +387,7 @@ export function resolveWikiLinks(
     if (!catalog.byId.has(draft.fromPageId)) {
       throw new WikiProjectionError(
         "wiki/unknown-link-source",
-        `Link taslağı bilinmeyen kaynak sayfaya ait (TŞ §16A.2: broken-link sözleşmesi yalnızca hedef içindir): ${draft.id} → kaynak ${draft.fromPageId}`,
+        `Link draft belongs to an unknown source page (the broken-link contract applies only to targets): ${draft.id} → source ${draft.fromPageId}`,
       );
     }
   }
@@ -396,7 +396,7 @@ export function resolveWikiLinks(
     if (seenIds.has(draft.id)) {
       throw new WikiProjectionError(
         "wiki/duplicate-link",
-        `Aynı link kimliği iki kez geldi: ${draft.id}`,
+        `Duplicate link id: ${draft.id}`,
       );
     }
     seenIds.add(draft.id);
@@ -427,7 +427,7 @@ export function resolveWikiLinks(
         fromPageId: draft.fromPageId,
         toRef: draft.toRef,
         kind: draft.kind,
-        reason: `Wiki linki hedefi çözümlenemedi: kaynak sayfa '${draft.fromPageId}' hedef '${draft.toRef}' (kind=${draft.kind}) — katalogda eşleşen pageId/slug/alias yok; kayıt toPageId=null ile korunur (K-013 #4)`,
+        reason: `Wiki link target could not be resolved: source page '${draft.fromPageId}' target '${draft.toRef}' (kind=${draft.kind}) — no matching pageId/slug/alias in the catalog; the record is kept with toPageId=null`,
       });
     }
   }
@@ -447,7 +447,7 @@ export function resolveWikiLinks(
         .join("; ");
       throw new WikiProjectionError(
         "wiki/invalid-input",
-        `Çözümlenen WikiLink[${index}] şema doğrulaması başarısız: ${detail}`,
+        `Resolved WikiLink[${index}] schema validation failed: ${detail}`,
       );
     }
   }
@@ -486,7 +486,7 @@ export function buildWikiLinkIndex(links: readonly WikiLink[]): WikiLinkIndex {
         .join("; ");
       throw new WikiProjectionError(
         "wiki/invalid-input",
-        `WikiLink[${index}] şema doğrulaması başarısız: ${detail}`,
+        `WikiLink[${index}] schema validation failed: ${detail}`,
       );
     }
     return parsed.data;
@@ -497,7 +497,7 @@ export function buildWikiLinkIndex(links: readonly WikiLink[]): WikiLinkIndex {
     if (seenIds.has(link.id)) {
       throw new WikiProjectionError(
         "wiki/duplicate-link",
-        `Aynı link kimliği indeks girdisinde iki kez var: ${link.id}`,
+        `Duplicate link id in the index input: ${link.id}`,
       );
     }
     seenIds.add(link.id);
@@ -527,7 +527,7 @@ export function buildWikiLinkIndex(links: readonly WikiLink[]): WikiLinkIndex {
       fromPageId: link.fromPageId,
       toRef: null,
       kind: link.kind,
-      reason: `Kalıcı WikiLink satırı toPageId=null (K-013 #4): link '${link.id}' hedefi çözümlenmemiş; ham hedef adı kalıcı modelde taşınmadığından diagnostics'ta bilinmiyor`,
+      reason: `Persisted WikiLink row has toPageId=null: the target of link '${link.id}' is unresolved; the raw target name is not stored in the persisted model, so diagnostics cannot show it`,
     }));
 
   const brokenCountByPage = new Map<string, number>();
