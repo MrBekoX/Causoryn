@@ -107,7 +107,7 @@ export class WorkspaceAccessPolicy {
       if (isUncOrDevicePath(root)) {
         throw new WorkspacePolicyError(
           "workspace/policy-invalid",
-          `allowRoot UNC veya Win32 aygıt yolu olamaz (dosya sistemi erişiminden önce reddedildi): ${root}`,
+          `allowRoot must not be a UNC or Win32 device path (rejected before filesystem access): ${root}`,
         );
       }
       try {
@@ -127,7 +127,7 @@ export class WorkspaceAccessPolicy {
     if (!parsed.ok) {
       throw new WorkspacePolicyError(
         parsed.code,
-        `Politika konfigürasyonu geçersiz (TŞ §10.1 POLICY_INVALID): ${parsed.issues.join("; ")}`,
+        `Invalid policy configuration (POLICY_INVALID): ${parsed.issues.join("; ")}`,
       );
     }
     return new WorkspaceAccessPolicy(parsed.config);
@@ -141,15 +141,15 @@ export class WorkspaceAccessPolicy {
    */
   authorizeRoot(rootPath: string): PolicyDecision {
     if (rootPath.length === 0) {
-      return deny("workspace/root-not-authorized", "kök yolu boş");
+      return deny("workspace/root-not-authorized", "root path is empty");
     }
     if (rootPath.includes("\0")) {
-      return deny("workspace/root-not-authorized", "kök yolu null byte içeriyor");
+      return deny("workspace/root-not-authorized", "root path contains a null byte");
     }
     if (isUncOrDevicePath(rootPath)) {
       return deny(
         "workspace/root-not-authorized",
-        "kök yolu UNC veya Win32 aygıt yolu olamaz (dosya sistemi erişiminden önce reddedildi)",
+        "root path must not be a UNC or Win32 device path (rejected before filesystem access)",
         "unc-or-device-path",
       );
     }
@@ -159,23 +159,23 @@ export class WorkspaceAccessPolicy {
     } catch {
       return deny(
         "workspace/root-not-authorized",
-        "kök gerçek yola çözümlenemedi (yok veya erişilemez); doğrulanamayan kök güven kaynağı olamaz",
+        "root could not be resolved to a real path (missing or inaccessible); an unverifiable root cannot be trusted",
       );
     }
     let isDirectory = true;
     try {
       isDirectory = statSync(canonical).isDirectory();
     } catch {
-      return deny("workspace/root-not-authorized", "kök durumu okunamadı");
+      return deny("workspace/root-not-authorized", "root status could not be read");
     }
     if (!isDirectory) {
-      return deny("workspace/root-not-authorized", "kök bir dizin değil");
+      return deny("workspace/root-not-authorized", "root is not a directory");
     }
     const declared = this.canonicalRoots.find((canonicalRoot) => isInside(canonicalRoot, canonical));
     if (declared === undefined) {
       return deny(
         "workspace/root-not-authorized",
-        "kök kullanıcının beyan ettiği allowRoot listesinde değil (explicit authorization, TŞ §9/§20)",
+        "root is not in the user-declared allowRoots list (explicit authorization required)",
       );
     }
     return { allowed: true, canonicalRoot: canonical, relativePath: "." };
@@ -188,12 +188,12 @@ export class WorkspaceAccessPolicy {
       return rootDecision;
     }
     if (candidatePath.includes("\0")) {
-      return deny("workspace/path-denied", "aday yol null byte içeriyor (OWASP %00 bypass)");
+      return deny("workspace/path-denied", "candidate path contains a null byte (OWASP %00 bypass)");
     }
     if (isUncOrDevicePath(candidatePath)) {
       return deny(
         "workspace/path-denied",
-        "aday yol UNC veya Win32 aygıt yolu olamaz (dosya sistemi erişiminden önce reddedildi)",
+        "candidate path must not be a UNC or Win32 device path (rejected before filesystem access)",
         "unc-or-device-path",
       );
     }
@@ -223,7 +223,7 @@ export class WorkspaceAccessPolicy {
     if (isLexicalEscape(relative)) {
       return deny(
         "workspace/path-denied",
-        "aday yol leksik çözümlemede kök dışına çıkıyor (`..` traversal / farklı kök)",
+        "candidate path escapes the root after lexical resolution (`..` traversal or a different root)",
         "..",
       );
     }
@@ -238,7 +238,7 @@ export class WorkspaceAccessPolicy {
         const isDirectoryCandidate = depth < segments.length || !isFile;
         const matched = findMatchingIgnorePattern(prefix, isDirectoryCandidate, this.ignorePatterns);
         if (matched !== undefined) {
-          return deny("workspace/path-denied", "aday yol ignore kuralıyla eşleşti", matched);
+          return deny("workspace/path-denied", "candidate path matches an ignore rule", matched);
         }
       }
     }
@@ -246,12 +246,12 @@ export class WorkspaceAccessPolicy {
     // 5) Symlink/junction escape: gerçek yol kök sarmalanmış mı? (CWE-59, TŞ §19)
     const resolved = this.resolveRealpath(absolute);
     if (resolved === undefined) {
-      return deny("workspace/path-denied", "aday yolun gerçek yolu çözümlenemedi");
+      return deny("workspace/path-denied", "the real path of the candidate could not be resolved");
     }
     if (!isInside(rootDecision.canonicalRoot, resolved)) {
       return deny(
         "workspace/path-denied",
-        "aday yolun gerçek yolu (symlink/junction) kök dışına çıkıyor",
+        "the real path of the candidate (symlink/junction) escapes the root",
         "realpath-containment",
       );
     }
@@ -271,7 +271,7 @@ export class WorkspaceAccessPolicy {
         if (matched !== undefined) {
           return deny(
             "workspace/path-denied",
-            "kanonik gerçek yol ignore kuralıyla eşleşti (symlink üzerinden ignore bypass'ı engellendi)",
+            "the canonical real path matches an ignore rule (ignore bypass through a symlink was blocked)",
             matched,
           );
         }
@@ -298,7 +298,7 @@ export class WorkspaceAccessPolicy {
     if (sizeBytes !== undefined && (!Number.isFinite(sizeBytes) || sizeBytes < 0)) {
       return deny(
         "workspace/path-denied",
-        "sizeBytes geçersiz: sonlu, negatif olmayan sayı beklenir",
+        "invalid sizeBytes: a finite, non-negative number is expected",
         "sizeBytes",
       );
     }
@@ -313,7 +313,7 @@ export class WorkspaceAccessPolicy {
       if (extension !== "" && this.config.binaryExtensions.includes(extension)) {
         return deny(
           "workspace/path-denied",
-          `binary uzantı kara listede: ${extension}`,
+          `extension is on the binary blacklist: ${extension}`,
           extension,
         );
       }
@@ -322,8 +322,8 @@ export class WorkspaceAccessPolicy {
       if (!allowed) {
         return deny(
           "workspace/path-denied",
-          extension === "" ? "uzantısız dosya whitelist modunda izinli değil" : `uzantı whitelist'te yok: ${extension}`,
-          extension === "" ? "(uzantısız)" : extension,
+          extension === "" ? "files without an extension are not allowed in whitelist mode" : `extension is not in the whitelist: ${extension}`,
+          extension === "" ? "(no extension)" : extension,
         );
       }
     }
@@ -338,7 +338,7 @@ export class WorkspaceAccessPolicy {
     if (effectiveSize !== undefined && effectiveSize > this.config.maxFileBytes) {
       return deny(
         "workspace/limit-exceeded",
-        `dosya boyutu (${String(effectiveSize)} bayt) maxFileBytes sınırını (${String(this.config.maxFileBytes)}) aşıyor`,
+        `file size (${String(effectiveSize)} bytes) exceeds the maxFileBytes limit (${String(this.config.maxFileBytes)})`,
         "maxFileBytes",
       );
     }

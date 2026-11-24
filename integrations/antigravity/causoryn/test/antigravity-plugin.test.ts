@@ -1034,7 +1034,7 @@ describe("negatif durumlar: bozuk/eksik/yasak manifest alanları açık reddedil
     };
     expect(() =>
       validateMcpManifest(relativeAllowRoot, "sentetik-mcp.json", "portable"),
-    ).toThrowError(/CAUSORYN_CONFIG sunucu şemasına uymuyor.*mutlak yol/s);
+    ).toThrowError(/CAUSORYN_CONFIG sunucu şemasına uymuyor.*must be an absolute path/s);
   });
 });
 
