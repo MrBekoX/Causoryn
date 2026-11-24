@@ -325,7 +325,7 @@ describe.skipIf(!(pythonAvailable && goAvailable && cargoAvailable))(
   it("analyzerFingerprint: koşuma katılan beş analyzer segmenti + worker durumları + ayar hash'leri", () => {
     const run = firstRun as NonNullable<typeof firstRun>;
     const segments = run.snapshot.meta.analyzerFingerprint.split("|");
-    expect(segments[0]).toBe("fp2");
+    expect(segments[0]).toBe("fp3");
     expect(segments).toContain("ts-adapter@0.1.0");
     expect(segments).toContain("roslyn-worker@0.1.0");
     expect(segments).toContain("python-worker@0.1.0");

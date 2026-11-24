@@ -637,7 +637,7 @@ describe("analyzerFingerprint fp2 şeması (birim)", () => {
       csharp,
     });
     expect(a).toBe(b);
-    expect(a.startsWith("fp2|")).toBe(true);
+    expect(a.startsWith("fp3|")).toBe(true);
     expect(a.split("|")).toContain("ts-adapter@0.1.0");
     expect(a.split("|")).toContain("roslyn-worker@0.1.0");
     expect(a).toContain("Microsoft.NETCore.App.Ref@10.0.11");

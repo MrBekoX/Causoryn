@@ -46,7 +46,7 @@ yanıt verirse:
 ```ts
 import { analyzeCSharpWorkspace } from "@causoryn/adapter-csharp-roslyn";
 import { createSnapshot } from "@causoryn/domain";
-// analyzerFingerprint fp2 kurgusu packages/indexing'ten gelir:
+// analyzerFingerprint fp3 kurgusu packages/indexing'ten gelir:
 import {
   buildAnalyzerFingerprint,
   extractRoslynRefPackContext,
@@ -58,7 +58,7 @@ const result = await analyzeCSharpWorkspace({
   options: { requestTimeoutMs: 30_000 }, // workerDllPath/dotnetCommand da override edilebilir
 });
 
-// fp2 (aşağıdaki "KAPATILDI" bölümü): worker healthy yanıttan ref-pack
+// fp3 (aşağıdaki "KAPATILDI" bölümü): worker healthy yanıttan ref-pack
 // keşfi türetilir; keşif bilgisi yoksa nötr etiket kullanılır.
 const refPacks = result.workerAvailable
   ? extractRoslynRefPackContext(result.warnings)
@@ -121,12 +121,12 @@ PROTOCOL.md §6'nın belirttiği gibi, worker'ın otomatik ref-pack keşfi
 (DOTNET_ROOT / host / standart kurulum yolu) **referans DLL kümesine ve
 dolayısıyla semantiğe** dokunur: farklı makinelerde farklı .NET/ASP.NET
 Core pack sürümleri farklı çözümleme sonuçları üretebilir. Bu borç,
-packages/indexing B9 diliminde **fp2 şemasıyla kapatıldı**
+packages/indexing B9 diliminde **fp3 şemasıyla kapatıldı**
 (`packages/indexing/src/fingerprint.ts`).
 
-fp2 analyzerFingerprint sözleşmesi — "|" ile ayrılmış konumsal segmentler:
+fp3 analyzerFingerprint sözleşmesi — "|" ile ayrılmış konumsal segmentler:
 
-    fp2|<ts-adapter>@<ver>|roslyn-worker@<ver>|refpack=<pack>@<sürüm>@<tfmDir>;...|refsrc=<kaynak>|opts=<sha256-16>
+    fp3|<ts-adapter>@<ver>|roslyn-worker@<ver>|refpack=<pack>@<sürüm>@<tfmDir>;...|refsrc=<kaynak>|opts=<sha256-16>
 
 - **adapter versiyonu**: koşuma katılan her adapter'ın id@versiyonu.
 - **refpack**: worker'ın GERÇEKTEN yüklediği ref pack sürümleri — worker

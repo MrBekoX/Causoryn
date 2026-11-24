@@ -229,7 +229,7 @@ async function main(): Promise<void> {
   server
     .connect(new StdioServerTransport())
     .then(() => {
-      activeContext.logger(`causoryn mcp server hazir (${SERVER_NAME}@${SERVER_VERSION})`);
+      activeContext.logger(`causoryn mcp server ready (${SERVER_NAME}@${SERVER_VERSION})`);
     })
     .catch((error: unknown) => {
       activeContext.close();

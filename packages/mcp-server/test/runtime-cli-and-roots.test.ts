@@ -55,7 +55,7 @@ const REPO_ROOT = path.dirname(path.dirname(PKG_DIR));
 const STDIO_ENTRY = path.join(PKG_DIR, "src", "cli-stdio.ts");
 const LOADER_ENTRY = path.join(TEST_DIR, "loader", "register-strip.mjs");
 const FIXTURE_ROOT = path.join(REPO_ROOT, "examples", "fixture-ts-orders");
-const READY_MARKER = "causoryn mcp server hazir";
+const READY_MARKER = "causoryn mcp server ready";
 const UP_DIR_TOKEN = "." + ".";
 
 interface TempSandbox {

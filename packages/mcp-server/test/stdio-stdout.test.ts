@@ -51,7 +51,7 @@ interface JsonRpcMessage {
   readonly method?: unknown;
 }
 
-const READY_MARKER = "causoryn mcp server hazir";
+const READY_MARKER = "causoryn mcp server ready";
 
 describe("stdio server — stdout saflığı ve protokol el sıkışması", () => {
   it("stdout yalnızca JSON-RPC taşır; initialize/tools/list/tools/call yanıtlanır; loglar stderr'de", async () => {

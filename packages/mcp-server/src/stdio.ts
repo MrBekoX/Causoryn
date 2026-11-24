@@ -53,7 +53,7 @@ function main(): void {
     .connect(new StdioServerTransport())
     .then(() => {
       // Hazır logu: yalnızca stderr (stdout-safi testi bu satırı bekler).
-      context.logger(`causoryn mcp server hazir (${SERVER_NAME}@${SERVER_VERSION})`);
+      context.logger(`causoryn mcp server ready (${SERVER_NAME}@${SERVER_VERSION})`);
     })
     .catch((error: unknown) => {
       console.error(

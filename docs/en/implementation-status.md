@@ -313,7 +313,7 @@ Open notes [C]: `WIKI_NOTE_CONFLICT` guidance waits for an annotation-writing MC
 | **Documentation export** | `export.ts`: pure `json` / `markdown` / `mermaid` / `html` serializers and atomic `.tmp` → rename writes through `OutputAccessPolicy` | **Done** | **[D/R]** `packages/graph/test/export.test.ts` 26/26 (CSP `default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'`, `<script>` escaping, `..` traversal rejection). |
 | **Architecture timeline** | `timeline.ts`: sampled Git-point diff timeline, bounded tag peeling (6-layer tag-chain test), `maxRangeWalk` (100 default / 500 cap) | **Done** | **[D/R]** `packages/graph/test/timeline.test.ts` 23/23. |
 | **MCP surface** | 7 tools wired to stdio (`TOOL_NAMES` 9 → 16), `EXPORT_NOT_ALLOWED`, two-stage `maxFileBytes` policy/baseline budget | **Done** | **[D/R]** `packages/mcp-server/test/faz-c-tools.test.ts` 26/26 (627/627 full suite at that point). |
-| **C# live pipeline integration** | `.cs` routed through `INDEXED_ADAPTERS` → `analyzeCSharpWorkspace` and the async `IndexJobManager`; Roslyn reference-pack data in the analyzer fingerprint (`fp2`) | **Done** | **[D/R]** `packages/indexing/test/index-service-csharp.test.ts` 20/20 with live `.NET 10.0.400` worker runs; `fp1` remnants forbidden by test. |
+| **C# live pipeline integration** | `.cs` routed through `INDEXED_ADAPTERS` → `analyzeCSharpWorkspace` and the async `IndexJobManager`; Roslyn reference-pack data in the analyzer fingerprint (`fp3`) | **Done** | **[D/R]** `packages/indexing/test/index-service-csharp.test.ts` 20/20 with live `.NET 10.0.400` worker runs; `fp1` remnants forbidden by test. |
 
 **Phase result: all Done** (634 tests passed at PR #9).
 
