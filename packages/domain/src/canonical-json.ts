@@ -33,7 +33,7 @@ function serialize(value: JsonValue): string {
       if (!Number.isFinite(value)) {
         throw new DomainError(
           "domain/non-finite-number",
-          `Canonical JSON yalnızca sonlu sayılar kabul eder: ${String(value)}`,
+          `Canonical JSON accepts only finite numbers: ${String(value)}`,
         );
       }
       return JSON.stringify(value);
@@ -54,7 +54,7 @@ function serialize(value: JsonValue): string {
     default:
       throw new DomainError(
         "domain/unsupported-json-value",
-        `Canonical JSON bu değeri desteklemiyor: ${typeof value}`,
+        `Canonical JSON does not support this value type: ${typeof value}`,
       );
   }
 }
