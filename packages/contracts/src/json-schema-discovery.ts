@@ -113,7 +113,7 @@ export function discoverJsonSchemaContracts(
   text: string,
 ): DiscoveryOutput {
   if (typeof workspaceId !== "string" || workspaceId.trim().length === 0) {
-    throw new ContractDiscoveryError("contracts/invalid-input", "workspaceId boş olamaz");
+    throw new ContractDiscoveryError("contracts/invalid-input", "workspaceId must not be empty");
   }
   const spec = parseStructuredSpec(relativePath, text);
   const root = spec.root;
@@ -132,7 +132,7 @@ export function discoverJsonSchemaContracts(
       relativePath,
       code: "contracts/json-schema-not-a-schema",
       message:
-        "Kök, JSON Schema işareti taşımıyor ($schema/properties/$defs/definitions/type yok); sözleşme üretilmedi",
+        "Root has no JSON Schema marker (no $schema/properties/$defs/definitions/type); no contract produced",
       line: spec.lineOf("$schema") ?? spec.lineOf("properties") ?? 1,
     });
     return { contracts: [], diagnostics };
@@ -143,7 +143,7 @@ export function discoverJsonSchemaContracts(
     diagnostics.push({
       relativePath,
       code: "contracts/json-schema-assumed",
-      message: "$schema alanı yok; properties/$defs/type işaretlerinden şema varsayıldı",
+      message: "No $schema field; assumed a schema from the properties/$defs/type markers",
       line: spec.lineOf("$schema") ?? spec.lineOf("properties") ?? 1,
     });
   }
@@ -184,7 +184,7 @@ export function discoverJsonSchemaContracts(
         diagnostics.push({
           relativePath,
           code: "contracts/json-schema-ref-unresolved",
-          message: `Yerel $ref dosya içinde çözümlenemedi: ${ref}`,
+          message: `Local $ref could not be resolved within the file: ${ref}`,
           line: spec.lineOf("$id") ?? spec.lineOf("properties") ?? 1,
         });
       }
@@ -192,7 +192,7 @@ export function discoverJsonSchemaContracts(
       diagnostics.push({
         relativePath,
         code: "contracts/json-schema-external-ref",
-        message: `Dış $ref çözümlenmez (salt-okunur yerel keşif; ağ/FS erişimi yok): ${ref}`,
+        message: `External $ref is not resolved (read-only local discovery; no network/filesystem access): ${ref}`,
         line: spec.lineOf("$id") ?? spec.lineOf("properties") ?? 1,
       });
     }
@@ -217,7 +217,7 @@ export function discoverJsonSchemaContracts(
     resolvedRefs,
     certainty: diagnostics.length > 0 ? "partial" : "full",
     evidence: { relativePath, startLine: evidenceLine, endLine: evidenceLine },
-    diagnostics: assumed ? ["json-schema: $schema alanı yok, şema varsayıldı"] : [],
+    diagnostics: assumed ? ["json-schema: no $schema field, schema assumed"] : [],
   };
   return { contracts: [contract], diagnostics };
 }
