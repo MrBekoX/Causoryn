@@ -48,7 +48,8 @@ import {
 } from "./context.js";
 import type { PreflightManifestStore } from "./preflight-store.js";
 import type { BeforeToolCallContext, OutputSchemaProfile } from "./server.js";
-import { TOOL_PROFILES, type ToolProfile } from "./version.js";
+import { tryParseToolProfile } from "./tool-profile.js";
+import type { ToolProfile } from "./version.js";
 import { discoverWorkspaceIgnoreConfig } from "./workspace-ignore-discovery.js";
 
 /**
@@ -97,35 +98,21 @@ const KNOWN_FLAGS = new Set([
   "--tool-profile",
 ]);
 
-const TOOL_PROFILE_SET: ReadonlySet<string> = new Set<string>(TOOL_PROFILES);
-
 /**
  * Parses a single or comma-separated tool profile string (e.g., "core", "full",
- * "wiki", "history", "wiki,history"). Throws McpCliUsageError on invalid entries.
+ * "wiki", "history", "wiki,history"). Throws McpCliUsageError on invalid
+ * entries; `source` names the setting in the message (`--tool-profile`,
+ * `CAUSORYN_TOOL_PROFILE` or `CAUSORYN_CONFIG.toolProfile`).
  */
-export function parseToolProfile(raw: string): readonly ToolProfile[] {
-  const trimmed = raw.trim();
-  if (trimmed.length === 0) {
-    throw new McpCliUsageError(
-      `--tool-profile cannot be empty; valid profiles: ${TOOL_PROFILES.join(", ")}`,
-    );
+export function parseToolProfile(
+  raw: string,
+  source = "--tool-profile",
+): readonly ToolProfile[] {
+  const parsed = tryParseToolProfile(raw);
+  if (!parsed.ok) {
+    throw new McpCliUsageError(`${source}: ${parsed.message}`);
   }
-  const parts = trimmed.split(",");
-  const parsed: ToolProfile[] = [];
-  const seen = new Set<string>();
-  for (const part of parts) {
-    const token = part.trim();
-    if (token.length === 0 || !TOOL_PROFILE_SET.has(token)) {
-      throw new McpCliUsageError(
-        `Invalid tool profile "${token}"; valid profiles: ${TOOL_PROFILES.join(", ")} (or comma-separated combination)`,
-      );
-    }
-    if (!seen.has(token)) {
-      seen.add(token);
-      parsed.push(token as ToolProfile);
-    }
-  }
-  return parsed;
+  return parsed.profiles;
 }
 
 const SAFE_CLIENT_ID_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$/;
@@ -283,20 +270,73 @@ export function resolveEffectiveOutputSchemaProfile(
 
 /**
  * Resolves the effective tool profile string:
- * `--tool-profile` > `CAUSORYN_TOOL_PROFILE` > `"core"`.
+ * `--tool-profile` > `CAUSORYN_TOOL_PROFILE` > `CAUSORYN_CONFIG.toolProfile`
+ * (`configToolProfile`) > `"core"`. Every supplied value is validated, even
+ * when a higher-precedence source wins, so a typo never hides until the
+ * higher-precedence setting is removed.
  */
 export function resolveEffectiveToolProfile(
   cliArgs: ParsedMcpCliArgs,
   env: NodeJS.ProcessEnv = process.env,
+  configToolProfile?: string,
 ): string {
+  const fromConfig =
+    configToolProfile === undefined
+      ? undefined
+      : parseToolProfile(configToolProfile, "CAUSORYN_CONFIG.toolProfile").join(",");
+  const envRaw = env["CAUSORYN_TOOL_PROFILE"]?.trim();
+  const fromEnv =
+    envRaw !== undefined && envRaw.length > 0
+      ? parseToolProfile(envRaw, "CAUSORYN_TOOL_PROFILE").join(",")
+      : undefined;
   if (cliArgs.toolProfile !== undefined) {
     return parseToolProfile(cliArgs.toolProfile).join(",");
   }
-  const envRaw = env["CAUSORYN_TOOL_PROFILE"]?.trim();
-  if (envRaw !== undefined && envRaw.length > 0) {
-    return parseToolProfile(envRaw).join(",");
+  return fromEnv ?? fromConfig ?? "core";
+}
+
+/** Startup settings shared by the bare `stdio.ts` entry and the `causoryn mcp` entry. */
+export interface McpServerSettings {
+  readonly outputSchemaProfile: OutputSchemaProfile;
+  readonly toolProfile: string;
+  readonly indexWaitTimeoutMs: number;
+}
+
+function configToolProfileOf(rawConfig: unknown): string | undefined {
+  if (!isPlainObject(rawConfig) || !Object.hasOwn(rawConfig, "toolProfile")) {
+    return undefined;
   }
-  return "core";
+  const value = rawConfig["toolProfile"];
+  if (value === undefined) {
+    return undefined;
+  }
+  if (typeof value !== "string") {
+    throw new McpCliUsageError(
+      `CAUSORYN_CONFIG.toolProfile must be a string (for example "core" or "wiki,history"), got ${value === null ? "null" : typeof value}`,
+    );
+  }
+  return value;
+}
+
+/**
+ * The single resolver both MCP entry points use for their startup settings:
+ * output schema profile (`--output-schema` > `CAUSORYN_MCP_OUTPUT_SCHEMA_PROFILE`
+ * > `"omit"`), tool profile (`--tool-profile` > `CAUSORYN_TOOL_PROFILE` >
+ * `CAUSORYN_CONFIG.toolProfile` > `"core"`) and the cold-start index wait
+ * window (`CAUSORYN_INDEX_WAIT_MS`). `rawConfig` is the parsed
+ * `CAUSORYN_CONFIG` JSON (`{}` when unset). The bare entry passes
+ * `parseMcpCliArgs([])`. Invalid values throw `McpCliUsageError`.
+ */
+export function resolveMcpServerSettings(
+  cliArgs: ParsedMcpCliArgs,
+  env: NodeJS.ProcessEnv = process.env,
+  rawConfig: unknown = {},
+): McpServerSettings {
+  return {
+    outputSchemaProfile: resolveEffectiveOutputSchemaProfile(cliArgs, env),
+    toolProfile: resolveEffectiveToolProfile(cliArgs, env, configToolProfileOf(rawConfig)),
+    indexWaitTimeoutMs: resolveIndexWaitTimeoutMs(env),
+  };
 }
 
 export const DEFAULT_INDEX_WAIT_MS = 15_000;
