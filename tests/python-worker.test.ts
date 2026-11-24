@@ -71,6 +71,7 @@ interface WorkerNode {
   qualifiedName: string;
   language?: string;
   relativePath?: string | null;
+  span?: { startLine: number; endLine: number };
   attributes: Record<string, unknown>;
 }
 
@@ -330,6 +331,67 @@ describe.skipIf(!pythonAvailable)("tests/python-worker (M1-Python)", () => {
       "CONTAINS: the method declaration repositories.order_repository.OrderRepository._stamp " +
         "in repositories/order_repository.py was matched with AST span evidence.",
     );
+  });
+
+  it("node span: Function/Method/Class nodes carry their declaration lines (= CONTAINS evidence span)", () => {
+    const nodes = positive?.nodes ?? [];
+    const declarations = nodes.filter((node) =>
+      ["Function", "Method", "Class"].includes(node.kind),
+    );
+    expect(declarations.length).toBe(11);
+    for (const node of declarations) {
+      const contains = findEdge(
+        positive,
+        (edge) =>
+          edge.kind === "CONTAINS" &&
+          edge.to.kind === node.kind &&
+          edge.to.qualifiedName === node.qualifiedName,
+      );
+      const evidenceSpan = contains?.evidence[0]?.span;
+      expect(node.span, node.qualifiedName).toEqual({
+        startLine: evidenceSpan?.startLine,
+        endLine: evidenceSpan?.endLine,
+      });
+    }
+    const stamp = nodes.find(
+      (node) => node.qualifiedName === "repositories.order_repository.OrderRepository._stamp",
+    );
+    expect(stamp?.span?.startLine).toBe(
+      fixtureLine("repositories/order_repository.py", "def _stamp"),
+    );
+    for (const node of nodes.filter((candidate) =>
+      ["File", "Endpoint", "UnknownExternal"].includes(candidate.kind),
+    )) {
+      expect(node.span, `${node.kind} ${node.qualifiedName}`).toBeUndefined();
+    }
+  });
+
+  it("node span: a node declared twice (property getter + setter) covers both declarations", () => {
+    const source = [
+      "class Ledger:", // 1
+      "    @property", // 2
+      "    def amount(self):", // 3
+      "        return 1", // 4
+      "", // 5
+      "    @amount.setter", // 6
+      "    def amount(self, value):", // 7
+      "        pass", // 8
+      "",
+    ].join("\n");
+    const run = runWorker([
+      {
+        id: "span-widen",
+        type: "analyze",
+        files: [{ path: "ledger.py", content: source }],
+      },
+    ]);
+    const response = parseLine(run.lines[0] ?? "");
+    const amount = response.nodes?.find(
+      (node) => node.kind === "Method" && node.qualifiedName === "ledger.Ledger.amount",
+    );
+    expect(amount?.span).toEqual({ startLine: 3, endLine: 8 });
+    const ledger = response.nodes?.find((node) => node.qualifiedName === "ledger.Ledger");
+    expect(ledger?.span).toEqual({ startLine: 1, endLine: 8 });
   });
 
   it("pozitif: aynı modülde tanımlı hedef → verified CALLS", () => {

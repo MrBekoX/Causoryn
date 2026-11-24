@@ -167,6 +167,28 @@ fn insert_node(tables: &mut Tables, key: NodeKey, attributes: Value) -> NodeKey 
     key
 }
 
+/// Records a 1-based declaration line range on a symbol node (PROTOCOL.md
+/// "Node fields": `span`). A node declared more than once (one method name in
+/// two impl blocks of the same type) gets the smallest range that covers every
+/// declaration, so the result does not depend on visit order.
+fn widen_node_span(tables: &mut Tables, key: &NodeKey, start_line: usize, end_line: usize) {
+    let Some(node) = tables.nodes.get_mut(key) else {
+        return;
+    };
+    let (start, end) = match node.get("span") {
+        Some(current) => (
+            current["startLine"]
+                .as_u64()
+                .map_or(start_line, |line| (line as usize).min(start_line)),
+            current["endLine"]
+                .as_u64()
+                .map_or(end_line, |line| (line as usize).max(end_line)),
+        ),
+        None => (start_line, end_line),
+    };
+    node["span"] = json!({ "startLine": start, "endLine": end });
+}
+
 fn push_evidence(
     tables: &mut Tables,
     kind: &str,
@@ -722,6 +744,7 @@ fn process_items(
                     json!({}),
                 );
                 let (start_line, end_line) = span_lines(item_fn);
+                widen_node_span(tables, &key, start_line, end_line);
                 let evidence = push_evidence(
                     tables,
                     "ast-span",
@@ -777,6 +800,7 @@ fn process_items(
                     json!({}),
                 );
                 let (start_line, end_line) = span_lines(item);
+                widen_node_span(tables, &key, start_line, end_line);
                 let evidence = push_evidence(
                     tables,
                     "ast-span",
@@ -805,6 +829,7 @@ fn process_items(
                     json!({}),
                 );
                 let (start_line, end_line) = span_lines(item_trait);
+                widen_node_span(tables, &key, start_line, end_line);
                 let evidence = push_evidence(
                     tables,
                     "ast-span",
@@ -840,6 +865,7 @@ fn process_items(
                             json!({}),
                         );
                         let (ms, me) = span_lines(method);
+                        widen_node_span(tables, &method_key, ms, me);
                         let evidence = push_evidence(
                             tables,
                             "ast-span",
@@ -914,6 +940,7 @@ fn process_items(
                             json!({}),
                         );
                         let (ms, me) = span_lines(method);
+                        widen_node_span(tables, &method_key, ms, me);
                         let evidence = push_evidence(
                             tables,
                             "ast-span",
@@ -1503,5 +1530,87 @@ mod tests {
         let save = find_call(edges, "crate::caller::run", "crate::store::Disk::save")
             .expect("single-candidate method call edge");
         assert_eq!(save["resolution"], "heuristic");
+    }
+
+    fn find_node<'a>(nodes: &'a [Value], kind: &str, qualified: &str) -> Option<&'a Value> {
+        nodes
+            .iter()
+            .find(|n| n["kind"] == kind && n["qualifiedName"] == qualified)
+    }
+
+    /// Symbol nodes carry their 1-based declaration span (the same range as the
+    /// CONTAINS evidence: syn item spans include outer attributes and doc
+    /// comments); one method name in two impl blocks is widened over both; File,
+    /// Endpoint and UnknownExternal nodes carry none.
+    #[test]
+    fn symbol_nodes_carry_declaration_spans() {
+        let files = vec![FileEntry {
+            path: "src/ledger.rs".to_string(),
+            content: [
+                "/// Sums the items.",                                  // 1
+                "pub fn total(items: &[u32]) -> u32 {",                 // 2
+                "    missing(items)",                                   // 3
+                "}",                                                    // 4
+                "",                                                     // 5
+                "#[derive(Debug)]",                                     // 6
+                "pub struct Ledger {",                                  // 7
+                "    amount: u32,",                                     // 8
+                "}",                                                    // 9
+                "",                                                     // 10
+                "pub trait Store {",                                    // 11
+                "    fn save(&self);",                                  // 12
+                "}",                                                    // 13
+                "",                                                     // 14
+                "impl Ledger {",                                        // 15
+                "    #[get(\"/ledger\")]",                              // 16
+                "    pub fn show(&self) -> u32 {",                      // 17
+                "        self.amount",                                  // 18
+                "    }",                                                // 19
+                "}",                                                    // 20
+                "",                                                     // 21
+                "impl Clone for Ledger {",                              // 22
+                "    fn clone(&self) -> Self {",                        // 23
+                "        Ledger { amount: self.amount }",               // 24
+                "    }",                                                // 25
+                "}",                                                    // 26
+                "",                                                     // 27
+                "impl Ledger {",                                        // 28
+                "    fn clone(&self) -> Self { Ledger { amount: 0 } }", // 29
+                "}",                                                    // 30
+            ]
+            .join("\n"),
+        }];
+
+        let result = analyze(&json!("rust-spans-1"), &files, 0);
+        let nodes = result["nodes"].as_array().expect("nodes array");
+        let expected = [
+            ("Function", "crate::ledger::total", 1, 4),
+            ("Class", "crate::ledger::Ledger", 6, 9),
+            ("Interface", "crate::ledger::Store", 11, 13),
+            ("Method", "crate::ledger::Store::save", 12, 12),
+            ("Method", "crate::ledger::Ledger::show", 16, 19),
+            ("Method", "crate::ledger::Ledger::clone", 23, 29),
+        ];
+        for (kind, qualified, start, end) in expected {
+            let node = find_node(nodes, kind, qualified)
+                .unwrap_or_else(|| panic!("node {kind} {qualified} not found"));
+            assert_eq!(
+                node["span"],
+                json!({ "startLine": start, "endLine": end }),
+                "span of {qualified}"
+            );
+        }
+        for (kind, qualified) in [
+            ("File", "src/ledger.rs"),
+            ("Endpoint", "GET /ledger"),
+            ("UnknownExternal", "missing"),
+        ] {
+            let node = find_node(nodes, kind, qualified)
+                .unwrap_or_else(|| panic!("node {kind} {qualified} not found"));
+            assert!(
+                node.get("span").is_none(),
+                "{kind} {qualified} must carry no span"
+            );
+        }
     }
 }

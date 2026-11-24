@@ -390,6 +390,10 @@ public sealed class NodeOut
     [JsonPropertyName("relativePath")]
     public string? RelativePath { get; set; }
 
+    /** Optional declaration line range (PROTOCOL.md "Node fields"); null → omitted. */
+    [JsonPropertyName("span")]
+    public NodeSpanOut? Span { get; set; }
+
     [JsonPropertyName("attributes")]
     public Dictionary<string, object> Attributes { get; set; } = new();
 }
@@ -455,4 +459,18 @@ public static class ProtocolJson
         Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping,
         WriteIndented = false,
     };
+}
+
+/**
+ * 1-based, inclusive declaration line range of a symbol node (PROTOCOL.md
+ * "Node fields": optional `span`). Only declaration nodes carry it; File,
+ * Endpoint and UnknownExternal nodes do not.
+ */
+public sealed class NodeSpanOut
+{
+    [JsonPropertyName("startLine")]
+    public int StartLine { get; set; }
+
+    [JsonPropertyName("endLine")]
+    public int EndLine { get; set; }
 }
