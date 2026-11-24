@@ -24,7 +24,7 @@ The `causoryn` binary (`packages/causoryn/scripts/causoryn.mjs`) exposes:
 
 ```text
 causoryn mcp [--allow-cwd] [--root <path>] [--auto-data-dir] [--data-dir <path>] [--client <id>] [--tool-profile <core|full|wiki|history>] [--output-schema <omit|full>]
-causoryn setup [--client <antigravity|claude-code|codex|zcode>...] [--all] [--all-detected] [--yes] [--dry-run] [--uninstall] [--skill | --no-skill] [--json]
+causoryn setup [--client <antigravity|claude-code|codex|zcode>...] [--all] [--all-detected] [--tool-profile <list>] [--yes] [--dry-run] [--uninstall] [--skill | --no-skill] [--json]
 causoryn doctor [--client <antigravity|claude-code|codex|zcode>...] [--json]
 causoryn --version
 causoryn --help
@@ -40,7 +40,8 @@ Registers (or removes) the `causoryn` MCP server entry and the 5 canonical skill
 |---|---|
 | `--client <id>` | Target host. Repeatable (`--client claude-code --client codex`) or comma-separated (`--client=claude-code,zcode`). Only the 4 host IDs are accepted. Takes precedence over `--all` and detection. |
 | `--all` | Configures all 4 hosts even if they are not detected. |
-| `--all-detected` | Targets the hosts detected on this machine. This is also the behavior when neither `--client` nor `--all` is given. If no host is detected, `setup` writes **0 files** and prints a message suggesting `--client <id>` or `--all`. |
+| `--all-detected` | Explicit alias of the default: targets the hosts detected on this machine (the behavior when neither `--client` nor `--all` is given). If no host is detected, `setup` writes **0 files**, prints guidance on `stderr` (name the host with `--client <id>`, or use `--all`), and exits `1`. |
+| `--tool-profile <list>` | Writes `--tool-profile <list>` into every generated `causoryn mcp` entry: `core`, `full`, `wiki`, `history`, or a comma list such as `wiki,history` (validated; an invalid value exits `2`). Cannot be combined with `--uninstall`. Without this flag an existing entry keeps the `--tool-profile` it already has. |
 | `--dry-run` | Lists the planned operations (`create`, `update`, `remove`, `noop`) and the runtime staging directory, if any, without writing or deleting anything. |
 | `--yes`, `-y` | Applies changes without confirmation. Without `--yes`, an interactive TTY session is asked `Continue? [y/N]` on `stderr`; a non-interactive session with pending changes fails with `cli/confirmation-required` (exit `2`). |
 | `--skill` / `--no-skill` | Installs (default) or skips the 5 skill directories (`SKILL.md`). With `--uninstall`, controls whether skills are removed. |
@@ -48,7 +49,7 @@ Registers (or removes) the `causoryn` MCP server entry and the 5 canonical skill
 | `--json` | Prints the `SetupResult` object as formatted JSON on `stdout`. |
 | `--help`, `-h` | Prints usage and exits `0`. |
 
-**Exit codes:** `0` when the run completes (including "no changes" and a declined prompt), `2` for invalid arguments, malformed host configs (`cli/malformed-json`), symlinked targets or other I/O errors (`cli/io-error`), missing confirmation, or a failed runtime staging step.
+**Exit codes:** `0` when the run completes (including "no changes" and a declined prompt), `1` when no host was detected and none was named (nothing is changed), `2` for invalid arguments, malformed host configs (`cli/malformed-json`), symlinked targets or other I/O errors (`cli/io-error`), missing confirmation, or a failed runtime staging step.
 
 #### Per-host detection, target paths & behavior
 
@@ -56,10 +57,11 @@ Registers (or removes) the `causoryn` MCP server entry and the 5 canonical skill
 |---|---|---|---|---|
 | `antigravity` | `~/.gemini/antigravity` or `~/.gemini/config/mcp_config.json` exists (a bare `~/.gemini` from Gemini CLI is not enough) | `~/.gemini/config/mcp_config.json` (and `~/.gemini/antigravity/mcp_config.json` when present) | `~/.gemini/config/skills/` | Writes `mcpServers.causoryn` without a `type` field, for Antigravity's local MCP loader. |
 | `claude-code` | `~/.claude.json` or `~/.claude` exists (or `$CLAUDE_CONFIG_DIR` / its `.claude.json`) | `~/.claude.json` (or `$CLAUDE_CONFIG_DIR/.claude.json`) | `~/.claude/skills/` (or `$CLAUDE_CONFIG_DIR/skills/`) | Writes `mcpServers.causoryn` with `type: "stdio"`. |
-| `codex` | `$CODEX_HOME` (default `~/.codex`) or its `config.toml` exists | `$CODEX_HOME/config.toml` | `~/.agents/skills/` | Patches only the `[mcp_servers.causoryn]` table (with `startup_timeout_sec = 30`), keeping comments and other TOML sections. |
+| `codex` | `$CODEX_HOME` (default `~/.codex`) or its `config.toml` exists | `$CODEX_HOME/config.toml` | `~/.agents/skills/` | Patches only the `[mcp_servers.causoryn]` table (`startup_timeout_sec = 30` on first write), keeping comments, other TOML sections, and user keys of the table (for example a changed `startup_timeout_sec`). |
 | `zcode` | `~/.zcode` or `~/.zcode/cli/config.json` exists | `~/.zcode/cli/config.json` | `~/.zcode/skills/` | Writes `mcp.servers.causoryn` (`type: "stdio"`); when `mcp.servers` is created for the first time, existing servers from `~/.agents/mcp.json` are carried over. |
 
-- **Generated server entry:** `command` is the absolute Node.js binary that ran `setup` (`process.execPath`), so desktop hosts with a reduced `PATH` still start it. `args` are `<runtime>/scripts/causoryn.mjs mcp --allow-cwd --auto-data-dir --client <host>`. No `--tool-profile` is written, so hosts start with the `core` profile unless `CAUSORYN_TOOL_PROFILE` is set for them.
+- **Generated server entry:** `command` is the absolute Node.js binary that ran `setup` (`process.execPath`), so desktop hosts with a reduced `PATH` still start it. `args` are `<runtime>/scripts/causoryn.mjs mcp --allow-cwd --auto-data-dir --client <host>`, plus `--tool-profile <list>` when `setup --tool-profile <list>` is used; otherwise hosts start with the `core` profile unless `CAUSORYN_TOOL_PROFILE` or `CAUSORYN_CONFIG.toolProfile` is set for them.
+- **Re-running `setup` keeps your edits to the Causoryn entry:** the `env` object, the `--tool-profile` and `--output-schema` (`--output-schema-profile`) arguments, and other keys of the entry (for example JSON `disabled` / `autoApprove`, or Codex `startup_timeout_sec`) are kept; only `command` and the generated arguments are refreshed. Pass `--tool-profile <list>` to change the profile.
 - **Persistent runtime staging:** when `setup` runs from an ephemeral location (a path with an `_npx` or `.npx` segment, or inside `os.tmpdir()`), it copies the runtime into `~/.causoryn/.runtime-stage-<pid>-<timestamp>` and swaps it atomically into `~/.causoryn/runtime` (the previous copy is kept as `.runtime-prev-*` and restored on failure). Host configs then point at `~/.causoryn/runtime`, so they keep working after the npx cache is cleared.
 - **Idempotent writes & original backup:** if the rendered file is byte-identical to the existing one, nothing is written and no backup is made (`noop`). The first real change writes `<file>.causoryn.backup` with your original content; that file is never overwritten. Later changes write a timestamped `<file>.causoryn.<timestamp>-<nonce>.backup`. Files are replaced through a temporary file and `rename`, keeping the existing permissions (new configs `0o600`, skills `0o644`).
 - **Symlink protection (CWE-59):** if a target config, a backup path or a destination `SKILL.md` is a symbolic link, `setup` stops with `cli/io-error` (exit `2`) before writing.
@@ -78,13 +80,14 @@ Checked subsystems:
 
 1. **Node.js (`node`):** major version `>= 24`.
 2. **Package runtime (`runtime`):** `dist/mcp-server.mjs`, the platform/arch/libc-matched `better-sqlite3` prebuild (`glibc` vs `linuxmusl`) under `dist/node_modules/better-sqlite3/prebuilds/`, `dist/typescript-lib/lib.es2022.full.d.ts`, the 4 `native/` worker sources, and a compiled `Causoryn.RoslynWorker.dll`; the staged `~/.causoryn/runtime` is checked too when it exists. (`dist/index-worker.mjs` is checked at build time by `scripts/verify-package-ready.mjs`, not by `doctor`.)
-3. **Sidecar toolchains (`toolchains`):** `dotnet --version`, `python --version` (falls back to `python3 --version` on POSIX), `go version`, `cargo --version`, each with `shell: false`, a 5 s timeout and an allowlisted environment (`DOCTOR_PROBE_ENV_ALLOWLIST` plus `PYTHONIOENCODING=utf-8`). A missing toolchain is reported as `l0-l1-fallback` (that language drops to file-level `L0`/`L1` analysis); it does not make the report unhealthy.
+3. **Sidecar toolchains (`toolchains`):** `dotnet --list-runtimes` (a Microsoft.NETCore.App **10.x** runtime is required; the Roslyn worker targets `net10.0` and does not roll forward to another major version), `python --version` (falls back to `python3 --version` on POSIX; minimum **3.10**), `go version` (minimum **1.22**), `cargo --version` (no pinned minimum), each with `shell: false`, a 5 s timeout and an allowlisted environment (`DOCTOR_PROBE_ENV_ALLOWLIST` plus `PYTHONIOENCODING=utf-8`). Each toolchain reports `status` (`ok`, `warn` or `absent`), `minimumVersion`, `version` and `mode` (`sidecar-ready` or `l0-l1-fallback`). `absent` (not installed) is informational: that language drops to file-level `L0`/`L1` analysis. `warn` (installed but below the minimum, unreadable version, or a probe that timed out or could not start) makes the report `DEGRADED`.
 4. **Host alignment (`hosts`):** JSON/TOML syntax, presence of the `causoryn` entry, whether the configured entry script exists on disk (both bare `node` and absolute Node paths are accepted as `command`), and the 5 skills. Each host is `ok`, `warn` (MCP entry without all skills, or skills without the entry), `not-configured` or `error` (broken config or missing entry script).
+5. **Legacy index files (`legacyIndexFiles`):** a read-only scan of `~/.causoryn/workspaces/*/` for per-host `graph-<client>.sqlite` files from releases before 0.3.0. Each file is listed with its `-wal`/`-shm` side files and whether the shared `graph.sqlite` already exists next to it (then it can be deleted). This check only warns: it does not change the overall status or the exit code, and `doctor` never deletes files.
 
 **Overall status & exit codes:**
 
 - `HEALTHY` (exit `0`): Node `>= 24`, runtime complete, at least one configured host, no host warnings or errors.
-- `DEGRADED` (exit `1`): runtime is fine but a configured host reports `warn` (for example missing skills).
+- `DEGRADED` (exit `1`): runtime is fine but a configured host reports `warn` (for example missing skills), or a sidecar toolchain reports `warn`.
 - `NOT CONFIGURED` (exit `1`): runtime is fine but no host has Causoryn configured yet.
 - `UNHEALTHY` (exit `1`): Node `< 24`, missing runtime files, or a host config `error`.
 - Exit `2`: invalid CLI arguments.
@@ -100,12 +103,12 @@ Checked subsystems:
 | `--auto-data-dir` | Creates the workspace data directory `<base>/workspaces/<slug>-<hash12>/` outside the workspace and wires `storage.dataDbPath` and `wiki.dataDbPath` to its `graph.sqlite` and `output.allowedOutputDirs` to its `exports/` ([§4](#4-out-of-tree-data-directory-layout)). Takes no value. Applied when a root is bound — at startup, or later when `roots/list` supplies one. |
 | `--data-dir <absPath>` | Base directory for `--auto-data-dir` (default `~/.causoryn`). Must be absolute, without NUL bytes, and not a UNC/device path. Implies `--auto-data-dir`. |
 | `--client <id>` | Diagnostic host label (pattern `^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$`), written to `build_leases.host_label` and log lines. It does not change any path: all hosts share the workspace's `graph.sqlite`. |
-| `--tool-profile <list>` | Active MCP tool profile: `core` (default, 11 tools), `wiki` (+7), `history` (+2), a comma list such as `wiki,history` (20), or `full` (29 legacy + 3 consolidated = 32). Order of precedence: `--tool-profile` > `CAUSORYN_TOOL_PROFILE` > `core`. Unknown names fail startup. |
+| `--tool-profile <list>` | Active MCP tool profile: `core` (default, 11 tools), `wiki` (+7), `history` (+2), a comma list such as `wiki,history` (20), or `full` (29 legacy + 3 consolidated = 32). Order of precedence: `--tool-profile` > `CAUSORYN_TOOL_PROFILE` > `CAUSORYN_CONFIG.toolProfile` > `core`. Every supplied value is validated, even one a higher-precedence source overrides; unknown names fail startup. |
 | `--output-schema <omit\|full>` *(alias `--output-schema-profile`)* | Whether `tools/list` includes each tool's JSON `outputSchema`. Order of precedence: flag > `CAUSORYN_MCP_OUTPUT_SCHEMA_PROFILE` > `omit`. The server validates every response envelope in both modes. |
 
 **Flag syntax:** `--flag value` and `--flag=value` both work. Positional arguments, unknown flags, empty values, a value that is itself a known flag, and any argument containing a NUL byte are rejected.
 
-**Startup exit codes:** `2` for CLI argument errors, invalid `CAUSORYN_TOOL_PROFILE` / `CAUSORYN_MCP_OUTPUT_SCHEMA_PROFILE` values, `CAUSORYN_CONFIG` that is not valid JSON, or a configuration that fails validation (`CausorynConfigError`, for example a data path inside the workspace); `1` if the stdio transport cannot start. All diagnostics go to `stderr`.
+**Startup exit codes:** `2` for CLI argument errors, invalid `CAUSORYN_TOOL_PROFILE` / `CAUSORYN_CONFIG.toolProfile` / `CAUSORYN_MCP_OUTPUT_SCHEMA_PROFILE` values, `CAUSORYN_CONFIG` that is not valid JSON, or a configuration that fails validation (`CausorynConfigError`, for example a data path inside the workspace); `1` if the stdio transport cannot start. All diagnostics go to `stderr`.
 
 ### 1.4 `causoryn --version` & `causoryn --help`
 
@@ -137,14 +140,14 @@ Host plugin manifests (`.claude-plugin/plugin.json`, `.zcode-plugin/plugin.json`
 | Mode | How it starts | Root source | Initial index |
 |---|---|---|---|
 | **Bare** | `node dist/mcp-server.mjs` with no arguments (or `packages/mcp-server/src/stdio.ts`) | `CAUSORYN_CONFIG.allowRoots` only; without it, `allowRoots: []` and a `stderr` note, so workspace tools return `WORKSPACE_NOT_AUTHORIZED` | If `autoIndex` is on and a root is set: reuses the published snapshot from `storage.dataDbPath` when one exists, otherwise indexes **synchronously before** the server connects. |
-| **CLI activation** | Any `causoryn mcp ...` argument | `--root` / `CAUSORYN_CONFIG.allowRoots` > safe cwd with `--allow-cwd` > MCP `roots/list` with `--allow-cwd` > none | Deferred: started about 100 ms after MCP `initialized`, or on the first `causoryn_status` call, so `initialize` and `tools/list` return immediately. If the SQLite store already has a published snapshot, it is reused and no job starts. |
+| **CLI activation** | Any `causoryn mcp ...` argument | `--root` / `CAUSORYN_CONFIG.allowRoots` > safe cwd with `--allow-cwd` > MCP `roots/list` with `--allow-cwd` > none | Deferred: started about 100 ms after MCP `initialized`, or on the first `causoryn_status` call, so `initialize` and `tools/list` return immediately. If the SQLite store already has a published snapshot, it is served at once and a background incremental refresh is queued. |
 
-Both modes default to `outputSchemaProfile: "omit"` and resolve the tool profile from `--tool-profile` / `CAUSORYN_TOOL_PROFILE` (bare mode reads only the environment variable).
+Both modes resolve their startup settings through the same resolver (`resolveMcpServerSettings`): tool profile `--tool-profile` > `CAUSORYN_TOOL_PROFILE` > `CAUSORYN_CONFIG.toolProfile` > `core`, output schema profile `--output-schema` > `CAUSORYN_MCP_OUTPUT_SCHEMA_PROFILE` > `omit`, and `CAUSORYN_INDEX_WAIT_MS`. Bare mode takes no flags, so only the environment and `CAUSORYN_CONFIG` apply.
 
 ### 3.2 Non-blocking indexing, warm reads & freshness
 
 - **Worker thread:** index jobs run in a `worker_threads` worker (`dist/index-worker.mjs`) with an in-process async fallback, so the MCP event loop keeps answering while a large repository is analyzed.
-- **Warm start:** with an existing `graph.sqlite`, `getLatestSnapshotMeta` reads snapshot metadata without loading the whole graph, and the published snapshot is served as is. There is no automatic re-index on warm start; call `causoryn_status` with `action: "refresh"` (`mode: "incremental"` reuses unchanged per-file facts from `file_facts`) after code changes.
+- **Warm start:** with an existing `graph.sqlite`, `getLatestSnapshotMeta` reads snapshot metadata without loading the whole graph, the published snapshot is served immediately, and a background incremental refresh (reusing unchanged per-file facts from `file_facts`) picks up files edited while the server was not running. After later code changes, call `causoryn_status` with `action: "refresh"`.
 - **Bounded wait:** snapshot-dependent tools wait up to `CAUSORYN_INDEX_WAIT_MS` (default `15000`, `0` = no wait) for the first index, then return a structured `{ indexing: true, status: "indexing", jobId, progress, retryAfterMs }` payload with `status: "partial"` instead of failing. Clients that send `_meta.progressToken` receive `notifications/progress`.
 - **Stale reads:** while a re-index runs, responses carry a `stale=true` warning and serve the latest published snapshot.
 - **SQLite settings:** WAL journal mode, `busy_timeout = 5000`, `page_size = 4096` set on new databases (SQLite's default page size; a configuration fact, not a security control). Causoryn opens only database files in its own data directory, never database or WAL files from an analyzed workspace.
@@ -185,10 +188,10 @@ If the caller does not pass its own `ignore` list, the blunt default `**/bin/**`
 
 ## 4. Out-of-Tree Data Directory Layout
 
-Causoryn never writes into the analyzed source tree. With `--auto-data-dir`, every MCP host that opens the same repository uses the same SQLite database (`graph.sqlite`, WAL mode). Single-writer coordination uses heartbeat leases in the `build_leases` table (`lease_id`, `owner_pid`, `host_label`, `heartbeat_at`, `expires_at`; default TTL 30 s, heartbeat every 10 s), which prevents two concurrent publishers; `recoverOrphanBuilds` marks builds left in `building` state by a crashed process as recovered orphans.
+Causoryn never writes into the analyzed source tree. With `--auto-data-dir`, every MCP host that opens the same repository uses the same SQLite database (`graph.sqlite`, WAL mode). Single-writer coordination uses heartbeat leases in the `build_leases` table (`lease_id`, `owner_pid`, `host_label`, `hostname`, `owner_instance`, `heartbeat_at`, `expires_at`; default TTL 120 s, heartbeat every 10 s from the main thread and at phase boundaries), which prevents two concurrent publishers. On the same host a holder counts as alive while its PID is alive (the TTL is secondary); on another host only the TTL counts; a heartbeat older than 10 minutes (`CAUSORYN_LEASE_STALE_CEILING_MS`) always counts as dead. A run that finds a live holder waits for it (`waiting_for_peer`, up to `CAUSORYN_PEER_WAIT_TIMEOUT_MS`) and reuses its snapshot when the inputs match. `recoverOrphanBuilds` marks builds left in `building` state by a crashed process as recovered orphans.
 
 ```text
-~/.causoryn/                                    # base dir (override: --data-dir, then ZCODE_PLUGIN_DATA)
+~/.causoryn/                                    # base dir for every host (override: --data-dir; ZCODE_PLUGIN_DATA only as a fallback)
 ├── runtime/                                    # persistent runtime staged by `setup` from an ephemeral npx cache
 │   ├── package.json
 │   ├── scripts/{causoryn.mjs,plugin-mcp-launcher.mjs,lib/node-version-guard.mjs}
@@ -198,14 +201,16 @@ Causoryn never writes into the analyzed source tree. With `--auto-data-dir`, eve
 ├── workspaces/
 │   └── <slug>-<hash12>/                        # mode 0o700 on POSIX
 │       ├── graph.sqlite                        # storage.dataDbPath + wiki.dataDbPath: graph, file_facts, build_leases, symbol_fts, wiki store
+│       ├── graph.schema-<N>.sqlite             # only when graph.sqlite has a newer schema than this build (never written by this build)
 │       └── exports/                            # mode 0o700; output.allowedOutputDirs (e.g. causoryn-architecture-interactive.html)
 └── cache/
     └── rust-worker-target/                     # writable Cargo target dir (CAUSORYN_RUST_TARGET_DIR) + causoryn-rust-worker.sha256.json pin
 ```
 
-- **Base directory precedence** (`resolveBaseDataDir`): `--data-dir <absPath>` > `ZCODE_PLUGIN_DATA` > `~/.causoryn`. `--data-dir` and `ZCODE_PLUGIN_DATA` must be absolute and must not be UNC/device paths.
+- **Base directory precedence** (`resolveBaseDataDir`): `--data-dir <absPath>` > `~/.causoryn`, the same for every host, so ZCode shares the index with the other hosts. `ZCODE_PLUGIN_DATA` is only a fallback, used when `~/.causoryn` cannot be created or written (an explicit `--data-dir` never falls back). `--data-dir` and `ZCODE_PLUGIN_DATA` must be absolute and must not be UNC/device paths; a set `ZCODE_PLUGIN_DATA` is validated even when it is not used.
 - **Workspace folder name:** `<slug>` is the root's base name, lowercased, with characters outside `[a-z0-9._-]` replaced by `-`, trimmed of leading/trailing `.`, `_`, `-`, and cut to 48 characters (`workspace` if empty). `<hash12>` is the first 12 hex characters of the SHA-256 of the canonical root path. The slug is also the default `workspaceId`.
-- **Shared database:** earlier releases created one `graph-<client>.sqlite` per host; this release opens only `graph.sqlite`, so the first start after upgrading builds a new index there. `--client` no longer changes the file name.
+- **Shared database and legacy files:** earlier releases created one `graph-<client>.sqlite` per host. When `graph.sqlite` does not exist yet, the first start copies the newest valid legacy file into it once (each candidate is opened read-only and must pass `PRAGMA quick_check` with a supported `user_version`; the copy uses SQLite's online backup and is published without overwriting a file another process created first). Legacy files are left in place; `causoryn doctor` lists them so you can delete them. `--client` no longer changes the file name.
+- **Newer-schema guard:** if `graph.sqlite` was stamped by a newer Causoryn schema than this build supports, this build never writes it and uses `graph.schema-<N>.sqlite` (N = its own schema version) instead, logging one `stderr` line.
 - **Containment checks before and after `mkdir`:** before creating anything, every existing ancestor of the target is checked (`assertDataDirAncestorsSafe`, `assertNotSymlinkDirectory`, `assertStrictlyOutsideWorkspaceRoots`): symlinks (CWE-59; the macOS system firmlinks `/var`, `/tmp`, `/etc` are allowed), dangling links, non-directories, and any path that resolves inside an authorized root are rejected with `CausorynConfigError`. After creation, `realpathSync` re-checks containment against TOCTOU races.
 - **`CAUSORYN_CONFIG` wins:** if `CAUSORYN_CONFIG` already sets `storage.dataDbPath`, `wiki.dataDbPath`, `output.allowedOutputDirs` or `workspaceId`, `--auto-data-dir` keeps those values and only fills the missing ones.
 - **Retention:** each publish prunes old snapshots in the same transaction (`pruneOldSnapshots` keeps the newest 2 published snapshots and deletes orphan `symbol_fts` rows), then runs a passive WAL checkpoint. Snapshot IDs are a streaming SHA-256 over the canonical snapshot bytes, so they stay identical to the canonical form.
@@ -284,7 +289,7 @@ Causoryn never writes into the analyzed source tree. With `--auto-data-dir`, eve
 | `output.allowedOutputDirs` | `string[]` | `[]` | Existing directories (and their descendants) that `causoryn_export_documentation` may write to. They are resolved at startup; an unresolvable entry stops the server. Independent of `allowRoots`. Empty = `EXPORT_NOT_ALLOWED`. See [Prompting & Portals](prompting-and-architecture-portals.md). |
 | `storage.dataDbPath` | optional `string` | unset (`InMemoryGraphRepository`) | SQLite file for the graph, `file_facts`, `build_leases` and `symbol_fts`. Must be absolute, without NUL bytes, with an existing parent directory, with a non-empty `allowRoots`, and strictly outside every root both lexically and after `realpath`; otherwise startup fails. Enables the shared-database lease coordination. |
 | `wiki.dataDbPath` | optional `string` | unset (`causoryn_wiki_build` → `PATH_DENIED`, wiki reads → `INDEX_NOT_READY`) | SQLite file for the Living Wiki store (`wiki_fts`). Same checks as `storage.dataDbPath`; may be the same file. |
-| `toolProfile` | optional `string` | unset | Default tool profile for programmatic embedding (`createCausorynMcpServer`). The packaged CLI and `stdio.ts` always resolve the profile from `--tool-profile` / `CAUSORYN_TOOL_PROFILE` / `core`, so this field has no effect there. |
+| `toolProfile` | optional `string` | unset | Tool profile used when neither `--tool-profile` nor `CAUSORYN_TOOL_PROFILE` is given (`core`, `full`, `wiki`, `history`, or a comma list). Validated by the same parser as the flag and the environment variable; an invalid value stops startup. Applies to `causoryn mcp`, the bare `stdio.ts` entry, and programmatic embedding. |
 
 > **Programmatic sidecar options (`IndexServiceOptions`):** library callers that create `IndexService` directly can pass `csharp` (`dotnetCommand`, `requestTimeoutMs`, `workerDllPath`), `python` (`pythonCommand`, `requestTimeoutMs`, `workerScriptPath`), `go` (`goBinaryPath`, `goWorkerBinaryPath`, `workerDir`, `requestTimeoutMs`) and `rust` (`workerDir`, `cargoHomeDir`, `requestTimeoutMs`, `cargoBuildTimeoutMs`). In MCP server deployments, sidecar locations come from the environment variables below.
 
@@ -295,26 +300,29 @@ Causoryn never writes into the analyzed source tree. With `--auto-data-dir`, eve
 | Variable | Read by | Purpose & default |
 |---|---|---|
 | `CAUSORYN_CONFIG` | `mcp-server` (`cli-stdio.ts`, `stdio.ts`) | JSON server configuration ([§5](#5-full-causoryn_config-schema)). Invalid JSON exits `2`. |
-| `CAUSORYN_TOOL_PROFILE` | `mcp-server` (`runtime-cli.ts`) | `core`, `wiki`, `history`, `full` or a comma list; used when `--tool-profile` is absent (default `core`). Invalid values fail startup. |
+| `CAUSORYN_TOOL_PROFILE` | `mcp-server` (`runtime-cli.ts`) | `core`, `wiki`, `history`, `full` or a comma list; used when `--tool-profile` is absent and takes precedence over `CAUSORYN_CONFIG.toolProfile` (default `core`). Invalid values fail startup. |
 | `CAUSORYN_MCP_OUTPUT_SCHEMA_PROFILE` | `mcp-server` (`runtime-cli.ts`) | `omit` (default) or `full`; used when `--output-schema` is absent. Invalid values fail startup. |
 | `CAUSORYN_INDEX_WAIT_MS` | `mcp-server` (`runtime-cli.ts`) | Wait window for the first index in milliseconds (default `15000`; `0` returns the indexing status immediately; negative or non-numeric values fall back to the default). |
+| `CAUSORYN_PEER_WAIT_TIMEOUT_MS` | `indexing` (`index-service.ts`) | How long an index run waits for a live peer that holds the build lease (default `900000` = 15 min; `0` disables waiting). On timeout the job ends `failed` with outcome `peer_busy` and the existing snapshot stays served. |
+| `CAUSORYN_PEER_POLL_INTERVAL_MS` | `indexing` (`index-service.ts`) | Initial poll interval while waiting for a peer (default `100`; grows with exponential backoff). |
+| `CAUSORYN_LEASE_STALE_CEILING_MS` | `indexing` (`index-service.ts`) | Hard staleness ceiling for lease heartbeats (default `600000` = 10 min); an older heartbeat counts as dead even when its PID is alive. |
 | `CAUSORYN_EXPECTED_VERSION` | `plugin-mcp-launcher.mjs` | Exact package version the launcher must find (exit `2` on mismatch). |
 | `CAUSORYN_ASSET_ROOT` | `sidecar-ipc`, `causoryn.mjs`, `plugin-mcp-launcher.mjs` | Root used to find `native/` sidecar assets; set to the package root by the launchers when unset. |
 | `CAUSORYN_TS_LIB_DIR` | `adapters/typescript` | Location of the bundled TypeScript `lib.*.d.ts` files (`lib.es2022.full.d.ts`). |
 | `CLAUDE_CONFIG_DIR` | `causoryn` (`setup`, `doctor`) | Moves Claude Code config and skills to `$CLAUDE_CONFIG_DIR/.claude.json` and `$CLAUDE_CONFIG_DIR/skills/`. |
 | `CODEX_HOME` | `causoryn` (`setup`, `doctor`) | Codex config directory (`$CODEX_HOME/config.toml`, default `~/.codex`). |
-| `ZCODE_PLUGIN_DATA` | `mcp-server` (`runtime-cli.ts`) | Base data directory for `--auto-data-dir` when `--data-dir` is absent; also never accepted as a project root. |
+| `ZCODE_PLUGIN_DATA` | `mcp-server` (`runtime-cli.ts`) | Fallback base data directory for `--auto-data-dir`, used only when `~/.causoryn` cannot be created or written and `--data-dir` is absent; validated whenever it is set and never accepted as a project root. |
 | `CLAUDE_PLUGIN_ROOT` / `ZCODE_PLUGIN_ROOT` | host plugin loaders, `runtime-cli.ts` | Used by plugin manifests to locate the launcher; these directories are never accepted as project roots. |
 | `DOTNET_ROOT` | `adapters/csharp-roslyn`, `native/roslyn-worker`, `indexing` | Primary root for the .NET runtime and the `Microsoft.NETCore.App.Ref` / `Microsoft.AspNetCore.App.Ref` reference packs. |
 | `CAUSORYN_ROSLYN_WORKER_DLL` | `adapters/csharp-roslyn`, `indexing` | Path to a compiled `Causoryn.RoslynWorker.dll`. |
 | `CAUSORYN_PYTHON_WORKER_SCRIPT` | `adapters/python`, `indexing` | Path to `native/python-worker/worker.py`. |
 | `CAUSORYN_GO_WORKER_BIN` | `adapters/go`, `indexing` | Path to a prebuilt Go worker binary (skips `go run ./cmd/worker`). |
 | `CAUSORYN_GO_WORKER_DIR` | `adapters/go`, `indexing` | Location of the `native/go-worker` module. At runtime the Go command is `go` from `PATH` (or `go.goBinaryPath` programmatically); `CAUSORYN_GO_BINARY` is only a helper for the Go adapter test suite. |
-| `CAUSORYN_RUST_WORKER_DIR` | `adapters/rust`, `indexing` | Location of the `native/rust-worker` crate / compiled `causoryn-rust-worker` binary. |
-| `CAUSORYN_RUST_TARGET_DIR` | `adapters/rust` | Writable `CARGO_TARGET_DIR` for the on-demand `cargo build --locked` (default `~/.causoryn/cache/rust-worker-target`); the built binary is pinned by `causoryn-rust-worker.sha256.json` next to it. |
+| `CAUSORYN_RUST_WORKER_DIR` | `adapters/rust`, `indexing` | Directory that holds a compiled `causoryn-rust-worker` binary. An explicitly configured directory is never built in place; if the binary is missing there, the Rust analyzer falls back to L0/L1. |
+| `CAUSORYN_RUST_TARGET_DIR` | `adapters/rust` | Build cache for the on-demand `cargo build --locked` (default `~/.causoryn/cache/rust-worker-target`). The worker crate is copied into a staging directory there and built with `--target-dir` inside it; the built binary is pinned by `causoryn-rust-worker.sha256.json`. A cache directory inside the analyzed workspace is refused. |
 | `CAUSORYN_CARGO_HOME` | `adapters/rust` | Directory prepended to the child `PATH` to find `cargo` (default `~/.cargo/bin`, validated as a safe command path). |
 
-Sidecar processes get a reduced, hardened environment (for example `GOTOOLCHAIN=local`, `GOWORK=off`, `GOPROXY=off` for Go, `python -I -B -X utf8` for Python, an empty `DOTNET_STARTUP_HOOKS` for Roslyn, an empty `CARGO_BUILD_RUSTC_WRAPPER` for Cargo). Details: [Security Pass](security-pass.md).
+Every child process the MCP server starts (sidecars, `git`, `cargo`; on Windows `taskkill` from `System32`) is started from an absolute executable path resolved from `PATH` entries outside the analyzed workspace, with `shell: false` and a trusted working directory, and gets a reduced, hardened environment (for example `GOTOOLCHAIN=local`, `GOWORK=off`, `GOPROXY=off` for Go, `python -I -B -X utf8` for Python, an empty `DOTNET_STARTUP_HOOKS` for Roslyn, an empty `CARGO_BUILD_RUSTC_WRAPPER` for Cargo). On POSIX the Python adapter tries `python3` before `python`. Details: [Security Pass](security-pass.md).
 
 ---
 

@@ -24,7 +24,7 @@ npx causoryn@latest doctor             # Node.js, runtime dosyaları, sidecar ar
 
 ```text
 causoryn mcp [--allow-cwd] [--root <path>] [--auto-data-dir] [--data-dir <path>] [--client <id>] [--tool-profile <core|full|wiki|history>] [--output-schema <omit|full>]
-causoryn setup [--client <antigravity|claude-code|codex|zcode>...] [--all] [--all-detected] [--yes] [--dry-run] [--uninstall] [--skill | --no-skill] [--json]
+causoryn setup [--client <antigravity|claude-code|codex|zcode>...] [--all] [--all-detected] [--tool-profile <list>] [--yes] [--dry-run] [--uninstall] [--skill | --no-skill] [--json]
 causoryn doctor [--client <antigravity|claude-code|codex|zcode>...] [--json]
 causoryn --version
 causoryn --help
@@ -40,7 +40,8 @@ Desteklenen 4 host (`antigravity`, `claude-code`, `codex`, `zcode`) için `causo
 |---|---|
 | `--client <id>` | Hedef host. Tekrarlanabilir (`--client claude-code --client codex`) veya virgülle ayrılabilir (`--client=claude-code,zcode`). Yalnızca 4 host kimliği kabul edilir. `--all` ve algılamaya göre önceliklidir. |
 | `--all` | 4 host'un tamamını, algılanmasalar bile yapılandırır. |
-| `--all-detected` | Bu makinede algılanan host'ları hedefler. Ne `--client` ne de `--all` verildiğinde de davranış budur. Hiçbir host algılanmazsa `setup` **0 dosya** yazar ve `--client <id>` veya `--all` öneren bir mesaj basar. |
+| `--all-detected` | Varsayılan davranışın açık takma adı: bu makinede algılanan host'ları hedefler (ne `--client` ne de `--all` verildiğinde davranış budur). Hiçbir host algılanmazsa `setup` **0 dosya** yazar, `stderr`'e yönlendirme basar (host'u `--client <id>` ile adlandırın veya `--all` kullanın) ve `1` ile çıkar. |
+| `--tool-profile <list>` | Üretilen her `causoryn mcp` kaydına `--tool-profile <list>` yazar: `core`, `full`, `wiki`, `history` veya `wiki,history` gibi virgüllü bir liste (doğrulanır; geçersiz değer `2` ile çıkar). `--uninstall` ile birlikte kullanılamaz. Bu bayrak olmadan mevcut bir kayıt sahip olduğu `--tool-profile` değerini korur. |
 | `--dry-run` | Hiçbir şey yazmadan veya silmeden planlanan işlemleri (`create`, `update`, `remove`, `noop`) ve varsa runtime sahneleme dizinini listeler. |
 | `--yes`, `-y` | Değişiklikleri onay sormadan uygular. `--yes` olmadan etkileşimli bir TTY oturumunda `stderr` üzerinden `Continue? [y/N]` sorulur; bekleyen değişikliği olan etkileşimsiz bir oturum `cli/confirmation-required` (çıkış `2`) ile başarısız olur. |
 | `--skill` / `--no-skill` | 5 skill dizinini (`SKILL.md`) kurar (varsayılan) veya atlar. `--uninstall` ile birlikte skill'lerin kaldırılıp kaldırılmayacağını belirler. |
@@ -48,7 +49,7 @@ Desteklenen 4 host (`antigravity`, `claude-code`, `codex`, `zcode`) için `causo
 | `--json` | `SetupResult` nesnesini biçimlendirilmiş JSON olarak `stdout`'a yazar. |
 | `--help`, `-h` | Kullanım metnini basar ve `0` ile çıkar. |
 
-**Çıkış kodları:** çalışma tamamlandığında `0` ("değişiklik yok" ve reddedilen onay istemi dahil); geçersiz argümanlar, bozuk host konfigürasyonları (`cli/malformed-json`), sembolik bağlantı olan hedefler veya diğer G/Ç hataları (`cli/io-error`), eksik onay ya da başarısız bir runtime sahneleme adımı için `2`.
+**Çıkış kodları:** çalışma tamamlandığında `0` ("değişiklik yok" ve reddedilen onay istemi dahil); hiçbir host algılanmadığında ve hiçbiri adlandırılmadığında `1` (hiçbir şey değişmez); geçersiz argümanlar, bozuk host konfigürasyonları (`cli/malformed-json`), sembolik bağlantı olan hedefler veya diğer G/Ç hataları (`cli/io-error`), eksik onay ya da başarısız bir runtime sahneleme adımı için `2`.
 
 #### Host başına algılama, hedef yollar ve davranış
 
@@ -56,10 +57,11 @@ Desteklenen 4 host (`antigravity`, `claude-code`, `codex`, `zcode`) için `causo
 |---|---|---|---|---|
 | `antigravity` | `~/.gemini/antigravity` veya `~/.gemini/config/mcp_config.json` mevcut (Gemini CLI'dan kalan yalın bir `~/.gemini` yeterli değildir) | `~/.gemini/config/mcp_config.json` (mevcutsa `~/.gemini/antigravity/mcp_config.json` de) | `~/.gemini/config/skills/` | Antigravity'nin yerel MCP yükleyicisi için `mcpServers.causoryn` kaydını `type` alanı olmadan yazar. |
 | `claude-code` | `~/.claude.json` veya `~/.claude` mevcut (ya da `$CLAUDE_CONFIG_DIR` / onun `.claude.json` dosyası) | `~/.claude.json` (veya `$CLAUDE_CONFIG_DIR/.claude.json`) | `~/.claude/skills/` (veya `$CLAUDE_CONFIG_DIR/skills/`) | `mcpServers.causoryn` kaydını `type: "stdio"` ile yazar. |
-| `codex` | `$CODEX_HOME` (varsayılan `~/.codex`) veya onun `config.toml` dosyası mevcut | `$CODEX_HOME/config.toml` | `~/.agents/skills/` | Yalnızca `[mcp_servers.causoryn]` tablosunu (`startup_timeout_sec = 30` ile) yamalar; yorumları ve diğer TOML bölümlerini korur. |
+| `codex` | `$CODEX_HOME` (varsayılan `~/.codex`) veya onun `config.toml` dosyası mevcut | `$CODEX_HOME/config.toml` | `~/.agents/skills/` | Yalnızca `[mcp_servers.causoryn]` tablosunu yamalar (ilk yazımda `startup_timeout_sec = 30`); yorumları, diğer TOML bölümlerini ve tablodaki kullanıcı anahtarlarını (örneğin değiştirilmiş bir `startup_timeout_sec`) korur. |
 | `zcode` | `~/.zcode` veya `~/.zcode/cli/config.json` mevcut | `~/.zcode/cli/config.json` | `~/.zcode/skills/` | `mcp.servers.causoryn` (`type: "stdio"`) yazar; `mcp.servers` ilk kez oluşturulurken `~/.agents/mcp.json` içindeki mevcut sunucular taşınır. |
 
-- **Üretilen sunucu kaydı:** `command`, `setup`'ı çalıştıran mutlak Node.js ikilisidir (`process.execPath`); böylece `PATH`'i daraltılmış masaüstü host'lar da sunucuyu başlatabilir. `args` değeri `<runtime>/scripts/causoryn.mjs mcp --allow-cwd --auto-data-dir --client <host>` şeklindedir. `--tool-profile` yazılmaz; dolayısıyla host'lar, kendileri için `CAUSORYN_TOOL_PROFILE` ayarlanmadıkça `core` profiliyle başlar.
+- **Üretilen sunucu kaydı:** `command`, `setup`'ı çalıştıran mutlak Node.js ikilisidir (`process.execPath`); böylece `PATH`'i daraltılmış masaüstü host'lar da sunucuyu başlatabilir. `args` değeri `<runtime>/scripts/causoryn.mjs mcp --allow-cwd --auto-data-dir --client <host>` şeklindedir; `setup --tool-profile <list>` kullanıldığında sonuna `--tool-profile <list>` eklenir. Aksi hâlde host'lar, kendileri için `CAUSORYN_TOOL_PROFILE` veya `CAUSORYN_CONFIG.toolProfile` ayarlanmadıkça `core` profiliyle başlar.
+- **`setup`'ı yeniden çalıştırmak Causoryn kaydındaki düzenlemelerinizi korur:** `env` nesnesi, `--tool-profile` ve `--output-schema` (`--output-schema-profile`) argümanları ve kaydın diğer anahtarları (örneğin JSON `disabled` / `autoApprove` ya da Codex `startup_timeout_sec`) korunur; yalnızca `command` ve üretilen argümanlar yenilenir. Profili değiştirmek için `--tool-profile <list>` verin.
 - **Kalıcı runtime sahnelemesi:** `setup` geçici bir konumdan (`_npx` veya `.npx` segmenti içeren bir yol ya da `os.tmpdir()` içi) çalıştığında runtime'ı `~/.causoryn/.runtime-stage-<pid>-<timestamp>` altına kopyalar ve atomik olarak `~/.causoryn/runtime` ile yer değiştirir (önceki kopya `.runtime-prev-*` olarak tutulur ve hata durumunda geri yüklenir). Host konfigürasyonları ardından `~/.causoryn/runtime`'ı gösterir; böylece npx önbelleği temizlendikten sonra da çalışmaya devam eder.
 - **İdempotent yazım ve özgün yedek:** Üretilen dosya mevcut dosyayla bayt bayt aynıysa hiçbir şey yazılmaz ve yedek alınmaz (`noop`). İlk gerçek değişiklik, özgün içeriğinizle `<file>.causoryn.backup` dosyasını yazar; bu dosyanın üzerine asla yazılmaz. Sonraki değişiklikler zaman damgalı bir `<file>.causoryn.<timestamp>-<nonce>.backup` yazar. Dosyalar geçici bir dosya ve `rename` ile değiştirilir; mevcut izinler korunur (yeni konfigürasyonlar `0o600`, skill'ler `0o644`).
 - **Symlink koruması (CWE-59):** Hedef konfigürasyon, bir yedek yolu veya hedef `SKILL.md` sembolik bağlantıysa `setup` yazmadan önce `cli/io-error` (çıkış `2`) ile durur.
@@ -78,13 +80,14 @@ Denetlenen alt sistemler:
 
 1. **Node.js (`node`):** ana sürüm `>= 24`.
 2. **Paket runtime'ı (`runtime`):** `dist/mcp-server.mjs`, `dist/node_modules/better-sqlite3/prebuilds/` altındaki platform/mimari/libc uyumlu `better-sqlite3` prebuild'i (`glibc` vs `linuxmusl`), `dist/typescript-lib/lib.es2022.full.d.ts`, 4 `native/` worker kaynağı ve derlenmiş bir `Causoryn.RoslynWorker.dll`; sahnelenmiş `~/.causoryn/runtime` mevcutsa o da denetlenir. (`dist/index-worker.mjs`, `doctor` tarafından değil, derleme zamanında `scripts/verify-package-ready.mjs` tarafından denetlenir.)
-3. **Sidecar araç zincirleri (`toolchains`):** `dotnet --version`, `python --version` (POSIX'te `python3 --version`'a düşer), `go version`, `cargo --version`; her biri `shell: false`, 5 sn zaman aşımı ve izin listesine alınmış bir ortamla (`DOCTOR_PROBE_ENV_ALLOWLIST` artı `PYTHONIOENCODING=utf-8`) çalışır. Eksik bir araç zinciri `l0-l1-fallback` olarak raporlanır (o dil dosya düzeyinde `L0`/`L1` analizine düşer); raporu sağlıksız yapmaz.
+3. **Sidecar araç zincirleri (`toolchains`):** `dotnet --list-runtimes` (bir Microsoft.NETCore.App **10.x** runtime'ı gerekir; Roslyn worker `net10.0` hedefler ve başka bir ana sürüme roll-forward yapmaz), `python --version` (POSIX'te `python3 --version`'a düşer; en az **3.10**), `go version` (en az **1.22**), `cargo --version` (sabitlenmiş alt sınır yok); her biri `shell: false`, 5 sn zaman aşımı ve izin listesine alınmış bir ortamla (`DOCTOR_PROBE_ENV_ALLOWLIST` artı `PYTHONIOENCODING=utf-8`) çalışır. Her araç zinciri `status` (`ok`, `warn` veya `absent`), `minimumVersion`, `version` ve `mode` (`sidecar-ready` veya `l0-l1-fallback`) raporlar. `absent` (kurulu değil) bilgi amaçlıdır: o dil dosya düzeyinde `L0`/`L1` analizine düşer. `warn` (kurulu ama alt sınırın altında, sürümü okunamıyor ya da yoklama zaman aşımına uğradı veya başlatılamadı) raporu `DEGRADED` yapar.
 4. **Host hizalaması (`hosts`):** JSON/TOML sözdizimi, `causoryn` kaydının varlığı, yapılandırılmış giriş betiğinin diskte olup olmadığı (`command` olarak hem yalın `node` hem mutlak Node yolları kabul edilir) ve 5 skill. Her host `ok`, `warn` (tüm skill'ler olmadan MCP kaydı veya kayıt olmadan skill'ler), `not-configured` veya `error` (bozuk konfigürasyon ya da eksik giriş betiği) olarak değerlendirilir.
+5. **Eski indeks dosyaları (`legacyIndexFiles`):** `~/.causoryn/workspaces/*/` altında 0.3.0 öncesi sürümlerden kalan host başına `graph-<client>.sqlite` dosyalarının salt-okunur taraması. Her dosya `-wal`/`-shm` yan dosyalarıyla ve yanında paylaşılan `graph.sqlite`'ın zaten bulunup bulunmadığıyla (bulunuyorsa silinebilir) listelenir. Bu denetim yalnızca uyarır: genel durumu veya çıkış kodunu değiştirmez ve `doctor` hiçbir dosyayı silmez.
 
 **Genel durum ve çıkış kodları:**
 
 - `HEALTHY` (çıkış `0`): Node `>= 24`, runtime eksiksiz, en az bir yapılandırılmış host, host uyarısı veya hatası yok.
-- `DEGRADED` (çıkış `1`): runtime sorunsuz ancak yapılandırılmış bir host `warn` raporluyor (örneğin eksik skill'ler).
+- `DEGRADED` (çıkış `1`): runtime sorunsuz ancak yapılandırılmış bir host `warn` raporluyor (örneğin eksik skill'ler) ya da bir sidecar araç zinciri `warn` raporluyor.
 - `NOT CONFIGURED` (çıkış `1`): runtime sorunsuz ancak henüz hiçbir host'ta Causoryn yapılandırılmamış.
 - `UNHEALTHY` (çıkış `1`): Node `< 24`, eksik runtime dosyaları veya bir host konfigürasyonunda `error`.
 - Çıkış `2`: geçersiz CLI argümanları.
@@ -100,12 +103,12 @@ Denetlenen alt sistemler:
 | `--auto-data-dir` | Çalışma alanının dışında `<base>/workspaces/<slug>-<hash12>/` veri dizinini oluşturur; `storage.dataDbPath` ve `wiki.dataDbPath` değerlerini bu dizindeki `graph.sqlite`'a, `output.allowedOutputDirs` değerini de `exports/` dizinine bağlar ([§4](#4-kaynak-ağacı-dışı-veri-dizini-düzeni)). Değer almaz. Bir kök bağlandığında uygulanır — başlangıçta ya da daha sonra `roots/list` bir kök sağladığında. |
 | `--data-dir <absPath>` | `--auto-data-dir` için temel dizin (varsayılan `~/.causoryn`). Mutlak olmalı, NUL baytı içermemeli ve UNC/aygıt yolu olmamalıdır. `--auto-data-dir`'i örtük olarak açar. |
 | `--client <id>` | Tanılama amaçlı host etiketi (desen `^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$`); `build_leases.host_label` alanına ve log satırlarına yazılır. Hiçbir yolu değiştirmez: tüm host'lar çalışma alanının `graph.sqlite` dosyasını paylaşır. |
-| `--tool-profile <list>` | Etkin MCP araç profili: `core` (varsayılan, 11 araç), `wiki` (+7), `history` (+2), `wiki,history` gibi virgüllü bir liste (20) veya `full` (29 legacy + 3 birleştirilmiş = 32). Öncelik sırası: `--tool-profile` > `CAUSORYN_TOOL_PROFILE` > `core`. Bilinmeyen adlar başlatmayı başarısız kılar. |
+| `--tool-profile <list>` | Etkin MCP araç profili: `core` (varsayılan, 11 araç), `wiki` (+7), `history` (+2), `wiki,history` gibi virgüllü bir liste (20) veya `full` (29 legacy + 3 birleştirilmiş = 32). Öncelik sırası: `--tool-profile` > `CAUSORYN_TOOL_PROFILE` > `CAUSORYN_CONFIG.toolProfile` > `core`. Verilen her değer doğrulanır (daha öncelikli bir kaynağın geçersiz kıldığı değer de); bilinmeyen adlar başlatmayı başarısız kılar. |
 | `--output-schema <omit\|full>` *(takma adı `--output-schema-profile`)* | `tools/list` yanıtının her aracın JSON `outputSchema`'sını içerip içermeyeceği. Öncelik sırası: bayrak > `CAUSORYN_MCP_OUTPUT_SCHEMA_PROFILE` > `omit`. Sunucu her iki modda da her yanıt envelope'unu doğrular. |
 
 **Bayrak sözdizimi:** `--flag value` ve `--flag=value` biçimlerinin ikisi de çalışır. Konumsal argümanlar, bilinmeyen bayraklar, boş değerler, kendisi bilinen bir bayrak olan değerler ve NUL baytı içeren her argüman reddedilir.
 
-**Başlangıç çıkış kodları:** CLI argüman hataları, geçersiz `CAUSORYN_TOOL_PROFILE` / `CAUSORYN_MCP_OUTPUT_SCHEMA_PROFILE` değerleri, geçerli JSON olmayan `CAUSORYN_CONFIG` veya doğrulamadan geçemeyen bir konfigürasyon (`CausorynConfigError`; örneğin çalışma alanı içindeki bir veri yolu) için `2`; stdio taşıması başlatılamazsa `1`. Tüm tanılar `stderr`'e gider.
+**Başlangıç çıkış kodları:** CLI argüman hataları, geçersiz `CAUSORYN_TOOL_PROFILE` / `CAUSORYN_CONFIG.toolProfile` / `CAUSORYN_MCP_OUTPUT_SCHEMA_PROFILE` değerleri, geçerli JSON olmayan `CAUSORYN_CONFIG` veya doğrulamadan geçemeyen bir konfigürasyon (`CausorynConfigError`; örneğin çalışma alanı içindeki bir veri yolu) için `2`; stdio taşıması başlatılamazsa `1`. Tüm tanılar `stderr`'e gider.
 
 ### 1.4 `causoryn --version` ve `causoryn --help`
 
@@ -137,14 +140,14 @@ Host plugin manifestleri (`.claude-plugin/plugin.json`, `.zcode-plugin/plugin.js
 | Mod | Nasıl başlar | Kök kaynağı | İlk indeks |
 |---|---|---|---|
 | **Çıplak** | Argümansız `node dist/mcp-server.mjs` (veya `packages/mcp-server/src/stdio.ts`) | Yalnızca `CAUSORYN_CONFIG.allowRoots`; yoksa `allowRoots: []` ve bir `stderr` notu; bu durumda çalışma alanı araçları `WORKSPACE_NOT_AUTHORIZED` döner | `autoIndex` açık ve bir kök ayarlıysa: `storage.dataDbPath` içinde yayımlanmış bir snapshot varsa onu yeniden kullanır, yoksa sunucu bağlanmadan **önce senkron olarak** indeksler. |
-| **CLI etkinleştirmesi** | Herhangi bir `causoryn mcp ...` argümanı | `--root` / `CAUSORYN_CONFIG.allowRoots` > `--allow-cwd` ile güvenli cwd > `--allow-cwd` ile MCP `roots/list` > hiçbiri | Ertelenir: MCP `initialized`'dan yaklaşık 100 ms sonra veya ilk `causoryn_status` çağrısında başlar; böylece `initialize` ve `tools/list` hemen yanıt verir. SQLite deposunda zaten yayımlanmış bir snapshot varsa yeniden kullanılır ve iş başlatılmaz. |
+| **CLI etkinleştirmesi** | Herhangi bir `causoryn mcp ...` argümanı | `--root` / `CAUSORYN_CONFIG.allowRoots` > `--allow-cwd` ile güvenli cwd > `--allow-cwd` ile MCP `roots/list` > hiçbiri | Ertelenir: MCP `initialized`'dan yaklaşık 100 ms sonra veya ilk `causoryn_status` çağrısında başlar; böylece `initialize` ve `tools/list` hemen yanıt verir. SQLite deposunda zaten yayımlanmış bir snapshot varsa hemen sunulur ve arka planda bir incremental yenileme kuyruğa alınır. |
 
-Her iki mod da varsayılan olarak `outputSchemaProfile: "omit"` kullanır ve araç profilini `--tool-profile` / `CAUSORYN_TOOL_PROFILE` üzerinden çözer (çıplak mod yalnızca ortam değişkenini okur).
+Her iki mod da başlangıç ayarlarını aynı çözümleyiciyle (`resolveMcpServerSettings`) belirler: araç profili `--tool-profile` > `CAUSORYN_TOOL_PROFILE` > `CAUSORYN_CONFIG.toolProfile` > `core`, çıktı şeması profili `--output-schema` > `CAUSORYN_MCP_OUTPUT_SCHEMA_PROFILE` > `omit` ve `CAUSORYN_INDEX_WAIT_MS`. Çıplak mod bayrak almaz; bu yüzden yalnızca ortam ve `CAUSORYN_CONFIG` uygulanır.
 
 ### 3.2 Bloklamayan indeksleme, sıcak okumalar ve güncellik
 
 - **Worker thread:** İndeks işleri, süreç-içi asenkron bir fallback'le birlikte bir `worker_threads` worker'ında (`dist/index-worker.mjs`) çalışır; böylece büyük bir depo analiz edilirken MCP olay döngüsü yanıt vermeye devam eder.
-- **Sıcak başlangıç:** Mevcut bir `graph.sqlite` ile `getLatestSnapshotMeta`, tüm grafiği yüklemeden snapshot meta verisini okur ve yayımlanmış snapshot olduğu gibi sunulur. Sıcak başlangıçta otomatik yeniden indeksleme yoktur; kod değişikliklerinden sonra `causoryn_status`'u `action: "refresh"` ile çağırın (`mode: "incremental"`, değişmemiş dosya başına olguları `file_facts`'ten yeniden kullanır).
+- **Sıcak başlangıç:** Mevcut bir `graph.sqlite` ile `getLatestSnapshotMeta`, tüm grafiği yüklemeden snapshot meta verisini okur, yayımlanmış snapshot hemen sunulur ve arka plandaki bir incremental yenileme (değişmemiş dosya başına olguları `file_facts`'ten yeniden kullanarak) sunucu kapalıyken düzenlenen dosyaları yakalar. Sonraki kod değişikliklerinden sonra `causoryn_status`'u `action: "refresh"` ile çağırın.
 - **Sınırlı bekleme:** Snapshot'a bağımlı araçlar ilk indeks için `CAUSORYN_INDEX_WAIT_MS` (varsayılan `15000`, `0` = bekleme yok) kadar bekler; ardından başarısız olmak yerine `status: "partial"` ile yapısal bir `{ indexing: true, status: "indexing", jobId, progress, retryAfterMs }` yükü döner. `_meta.progressToken` gönderen istemciler `notifications/progress` alır.
 - **Bayat okumalar:** Yeniden indeksleme sürerken yanıtlar bir `stale=true` uyarısı taşır ve en son yayımlanmış snapshot'ı sunar.
 - **SQLite ayarları:** WAL günlük modu, `busy_timeout = 5000`, yeni veritabanlarında ayarlanan `page_size = 4096` (SQLite'ın varsayılan sayfa boyutu; bir güvenlik kontrolü değil, bir konfigürasyon olgusudur). Causoryn yalnızca kendi veri dizinindeki veritabanı dosyalarını açar; analiz edilen bir çalışma alanındaki veritabanı veya WAL dosyalarını asla açmaz.
@@ -185,10 +188,10 @@ Sunucu konfigürasyonunu CLI bayraklarından oluşturduğunda (`buildWorkspaceAu
 
 ## 4. Kaynak ağacı dışı veri dizini düzeni
 
-Causoryn analiz edilen kaynak ağacına asla yazmaz. `--auto-data-dir` ile aynı depoyu açan her MCP host'u aynı SQLite veritabanını (`graph.sqlite`, WAL modu) kullanır. Tek-yazar koordinasyonu `build_leases` tablosundaki heartbeat kiralarıyla (`lease_id`, `owner_pid`, `host_label`, `heartbeat_at`, `expires_at`; varsayılan TTL 30 sn, heartbeat 10 sn'de bir) sağlanır; bu, eşzamanlı iki yayımcıyı önler. `recoverOrphanBuilds`, çöken bir sürecin `building` durumunda bıraktığı derlemeleri kurtarılmış yetimler olarak işaretler.
+Causoryn analiz edilen kaynak ağacına asla yazmaz. `--auto-data-dir` ile aynı depoyu açan her MCP host'u aynı SQLite veritabanını (`graph.sqlite`, WAL modu) kullanır. Tek-yazar koordinasyonu `build_leases` tablosundaki heartbeat kiralarıyla (`lease_id`, `owner_pid`, `host_label`, `hostname`, `owner_instance`, `heartbeat_at`, `expires_at`; varsayılan TTL 120 sn, heartbeat 10 sn'de bir ana iş parçacığından ve faz sınırlarında) sağlanır; bu, eşzamanlı iki yayımcıyı önler. Aynı host'ta bir sahip PID'i yaşadığı sürece canlı sayılır (TTL ikincildir); başka bir host'ta yalnızca TTL geçerlidir; 10 dakikadan eski bir heartbeat (`CAUSORYN_LEASE_STALE_CEILING_MS`) her zaman ölü sayılır. Canlı bir sahiple karşılaşan koşu onu bekler (`waiting_for_peer`, en fazla `CAUSORYN_PEER_WAIT_TIMEOUT_MS`) ve girdiler eşleşirse onun snapshot'ını yeniden kullanır. `recoverOrphanBuilds`, çöken bir sürecin `building` durumunda bıraktığı derlemeleri kurtarılmış yetimler olarak işaretler.
 
 ```text
-~/.causoryn/                                    # temel dizin (geçersiz kılma: --data-dir, sonra ZCODE_PLUGIN_DATA)
+~/.causoryn/                                    # her host için temel dizin (geçersiz kılma: --data-dir; ZCODE_PLUGIN_DATA yalnızca yedek)
 ├── runtime/                                    # `setup`'ın geçici npx önbelleğinden sahnelediği kalıcı runtime
 │   ├── package.json
 │   ├── scripts/{causoryn.mjs,plugin-mcp-launcher.mjs,lib/node-version-guard.mjs}
@@ -198,14 +201,16 @@ Causoryn analiz edilen kaynak ağacına asla yazmaz. `--auto-data-dir` ile aynı
 ├── workspaces/
 │   └── <slug>-<hash12>/                        # POSIX'te mod 0o700
 │       ├── graph.sqlite                        # storage.dataDbPath + wiki.dataDbPath: graph, file_facts, build_leases, symbol_fts, wiki deposu
+│       ├── graph.schema-<N>.sqlite             # yalnızca graph.sqlite bu build'den daha yeni bir şemadaysa (bu build ona asla yazmaz)
 │       └── exports/                            # mod 0o700; output.allowedOutputDirs (ör. causoryn-architecture-interactive.html)
 └── cache/
     └── rust-worker-target/                     # yazılabilir Cargo hedef dizini (CAUSORYN_RUST_TARGET_DIR) + causoryn-rust-worker.sha256.json pini
 ```
 
-- **Temel dizin önceliği** (`resolveBaseDataDir`): `--data-dir <absPath>` > `ZCODE_PLUGIN_DATA` > `~/.causoryn`. `--data-dir` ve `ZCODE_PLUGIN_DATA` mutlak olmalı ve UNC/aygıt yolu olmamalıdır.
+- **Temel dizin önceliği** (`resolveBaseDataDir`): `--data-dir <absPath>` > `~/.causoryn`; her host için aynıdır, böylece ZCode indeksi diğer host'larla paylaşır. `ZCODE_PLUGIN_DATA` yalnızca `~/.causoryn` oluşturulamadığında veya yazılamadığında yedek olarak kullanılır (açık bir `--data-dir` asla yedeğe düşmez). `--data-dir` ve `ZCODE_PLUGIN_DATA` mutlak olmalı ve UNC/aygıt yolu olmamalıdır; ayarlanmış bir `ZCODE_PLUGIN_DATA` kullanılmasa bile doğrulanır.
 - **Çalışma alanı klasör adı:** `<slug>`, kökün temel adının küçük harfe çevrilmiş, `[a-z0-9._-]` dışındaki karakterleri `-` ile değiştirilmiş, baştaki/sondaki `.`, `_`, `-` karakterleri kırpılmış ve 48 karaktere kesilmiş hâlidir (boşsa `workspace`). `<hash12>`, kanonik kök yolunun SHA-256 değerinin ilk 12 hex karakteridir. Slug aynı zamanda varsayılan `workspaceId`'dir.
-- **Ortak veritabanı:** Önceki sürümler host başına bir `graph-<client>.sqlite` oluşturuyordu; bu sürüm yalnızca `graph.sqlite`'ı açar, dolayısıyla yükseltmeden sonraki ilk başlangıç orada yeni bir indeks oluşturur. `--client` artık dosya adını değiştirmez.
+- **Ortak veritabanı ve eski dosyalar:** Önceki sürümler host başına bir `graph-<client>.sqlite` oluşturuyordu. `graph.sqlite` henüz yoksa ilk başlangıç en yeni geçerli eski dosyayı bir kez ona kopyalar (her aday salt-okunur açılır ve desteklenen bir `user_version` ile `PRAGMA quick_check`'ten geçmelidir; kopya SQLite'ın çevrimiçi yedeklemesiyle yapılır ve başka bir sürecin önce oluşturduğu dosyanın üzerine yazmadan yayımlanır). Eski dosyalar yerinde bırakılır; `causoryn doctor` bunları listeler, böylece silebilirsiniz. `--client` artık dosya adını değiştirmez.
+- **Daha yeni şema koruması:** `graph.sqlite` bu build'in desteklediğinden daha yeni bir Causoryn şemasıyla damgalanmışsa bu build ona asla yazmaz; bunun yerine `graph.schema-<N>.sqlite` (N = kendi şema sürümü) kullanır ve `stderr`'e tek bir satır yazar.
 - **`mkdir` öncesi ve sonrası kapsama denetimleri:** Herhangi bir şey oluşturulmadan önce hedefin mevcut her atası denetlenir (`assertDataDirAncestorsSafe`, `assertNotSymlinkDirectory`, `assertStrictlyOutsideWorkspaceRoots`): sembolik bağlantılar (CWE-59; macOS sistem firmlink'leri `/var`, `/tmp`, `/etc` serbesttir), sarkan bağlantılar, dizin olmayanlar ve yetkili bir kökün içine çözümlenen her yol `CausorynConfigError` ile reddedilir. Oluşturmadan sonra `realpathSync`, TOCTOU yarışlarına karşı kapsamayı yeniden denetler.
 - **`CAUSORYN_CONFIG` kazanır:** `CAUSORYN_CONFIG` zaten `storage.dataDbPath`, `wiki.dataDbPath`, `output.allowedOutputDirs` veya `workspaceId` ayarlıyorsa, `--auto-data-dir` bu değerleri korur ve yalnızca eksik olanları doldurur.
 - **Saklama:** Her yayım, aynı işlemde eski snapshot'ları budar (`pruneOldSnapshots` en yeni 2 yayımlanmış snapshot'ı tutar ve yetim `symbol_fts` satırlarını siler), ardından pasif bir WAL checkpoint çalıştırır. Snapshot kimlikleri kanonik snapshot baytları üzerinde akışlı bir SHA-256'dır; bu nedenle kanonik biçimle özdeş kalır.
@@ -284,7 +289,7 @@ Causoryn analiz edilen kaynak ağacına asla yazmaz. `--auto-data-dir` ile aynı
 | `output.allowedOutputDirs` | `string[]` | `[]` | `causoryn_export_documentation`'ın yazabileceği mevcut dizinler (ve alt dizinleri). Başlangıçta çözümlenir; çözümlenemeyen bir girdi sunucuyu durdurur. `allowRoots`'tan bağımsızdır. Boş = `EXPORT_NOT_ALLOWED`. Bkz. [Prompting ve Mimari Portallar](prompting-and-architecture-portals.md). |
 | `storage.dataDbPath` | isteğe bağlı `string` | ayarsız (`InMemoryGraphRepository`) | Graph, `file_facts`, `build_leases` ve `symbol_fts` için SQLite dosyası. Mutlak olmalı, NUL baytı içermemeli, üst dizini mevcut olmalı, boş olmayan bir `allowRoots` ile birlikte verilmeli ve hem sözcüksel olarak hem `realpath` sonrasında her kökün kesinlikle dışında olmalıdır; aksi hâlde başlatma başarısız olur. Ortak veritabanı kira koordinasyonunu etkinleştirir. |
 | `wiki.dataDbPath` | isteğe bağlı `string` | ayarsız (`causoryn_wiki_build` → `PATH_DENIED`, wiki okumaları → `INDEX_NOT_READY`) | Living Wiki deposu (`wiki_fts`) için SQLite dosyası. `storage.dataDbPath` ile aynı denetimler uygulanır; aynı dosya olabilir. |
-| `toolProfile` | isteğe bağlı `string` | ayarsız | Programatik gömme (`createCausorynMcpServer`) için varsayılan araç profili. Paketlenmiş CLI ve `stdio.ts` profili her zaman `--tool-profile` / `CAUSORYN_TOOL_PROFILE` / `core` üzerinden çözer; bu nedenle bu alanın orada etkisi yoktur. |
+| `toolProfile` | isteğe bağlı `string` | ayarsız | Ne `--tool-profile` ne de `CAUSORYN_TOOL_PROFILE` verildiğinde kullanılan araç profili (`core`, `full`, `wiki`, `history` veya virgüllü bir liste). Bayrak ve ortam değişkeniyle aynı ayrıştırıcıyla doğrulanır; geçersiz değer başlatmayı durdurur. `causoryn mcp`, çıplak `stdio.ts` girişi ve programatik gömme için geçerlidir. |
 
 > **Programatik sidecar seçenekleri (`IndexServiceOptions`):** `IndexService`'i doğrudan oluşturan kütüphane çağıranları `csharp` (`dotnetCommand`, `requestTimeoutMs`, `workerDllPath`), `python` (`pythonCommand`, `requestTimeoutMs`, `workerScriptPath`), `go` (`goBinaryPath`, `goWorkerBinaryPath`, `workerDir`, `requestTimeoutMs`) ve `rust` (`workerDir`, `cargoHomeDir`, `requestTimeoutMs`, `cargoBuildTimeoutMs`) seçeneklerini geçebilir. MCP sunucu dağıtımlarında sidecar konumları aşağıdaki ortam değişkenlerinden gelir.
 
@@ -295,26 +300,29 @@ Causoryn analiz edilen kaynak ağacına asla yazmaz. `--auto-data-dir` ile aynı
 | Değişken | Okuyan | Amaç ve varsayılan |
 |---|---|---|
 | `CAUSORYN_CONFIG` | `mcp-server` (`cli-stdio.ts`, `stdio.ts`) | JSON sunucu konfigürasyonu ([§5](#5-tam-causoryn_config-şeması)). Geçersiz JSON `2` ile çıkar. |
-| `CAUSORYN_TOOL_PROFILE` | `mcp-server` (`runtime-cli.ts`) | `core`, `wiki`, `history`, `full` veya virgüllü bir liste; `--tool-profile` yokken kullanılır (varsayılan `core`). Geçersiz değerler başlatmayı başarısız kılar. |
+| `CAUSORYN_TOOL_PROFILE` | `mcp-server` (`runtime-cli.ts`) | `core`, `wiki`, `history`, `full` veya virgüllü bir liste; `--tool-profile` yokken kullanılır ve `CAUSORYN_CONFIG.toolProfile`'dan önceliklidir (varsayılan `core`). Geçersiz değerler başlatmayı başarısız kılar. |
 | `CAUSORYN_MCP_OUTPUT_SCHEMA_PROFILE` | `mcp-server` (`runtime-cli.ts`) | `omit` (varsayılan) veya `full`; `--output-schema` yokken kullanılır. Geçersiz değerler başlatmayı başarısız kılar. |
 | `CAUSORYN_INDEX_WAIT_MS` | `mcp-server` (`runtime-cli.ts`) | İlk indeks için milisaniye cinsinden bekleme penceresi (varsayılan `15000`; `0` indeksleme durumunu hemen döner; negatif veya sayısal olmayan değerler varsayılana düşer). |
+| `CAUSORYN_PEER_WAIT_TIMEOUT_MS` | `indexing` (`index-service.ts`) | Bir indeks koşusunun build lease'ini tutan canlı bir eşi ne kadar bekleyeceği (varsayılan `900000` = 15 dk; `0` beklemeyi kapatır). Zaman aşımında iş `peer_busy` sonucuyla `failed` biter ve mevcut snapshot sunulmaya devam eder. |
+| `CAUSORYN_PEER_POLL_INTERVAL_MS` | `indexing` (`index-service.ts`) | Eş beklenirken ilk yoklama aralığı (varsayılan `100`; üstel geri çekilmeyle büyür). |
+| `CAUSORYN_LEASE_STALE_CEILING_MS` | `indexing` (`index-service.ts`) | Lease heartbeat'leri için sert bayatlık tavanı (varsayılan `600000` = 10 dk); daha eski bir heartbeat, PID'i yaşasa bile ölü sayılır. |
 | `CAUSORYN_EXPECTED_VERSION` | `plugin-mcp-launcher.mjs` | Başlatıcının bulması gereken tam paket sürümü (uyuşmazlıkta çıkış `2`). |
 | `CAUSORYN_ASSET_ROOT` | `sidecar-ipc`, `causoryn.mjs`, `plugin-mcp-launcher.mjs` | `native/` sidecar varlıklarını bulmak için kullanılan kök; ayarlı değilse başlatıcılar tarafından paket köküne ayarlanır. |
 | `CAUSORYN_TS_LIB_DIR` | `adapters/typescript` | Paketlenmiş TypeScript `lib.*.d.ts` dosyalarının (`lib.es2022.full.d.ts`) konumu. |
 | `CLAUDE_CONFIG_DIR` | `causoryn` (`setup`, `doctor`) | Claude Code konfigürasyonunu ve skill'lerini `$CLAUDE_CONFIG_DIR/.claude.json` ve `$CLAUDE_CONFIG_DIR/skills/` konumlarına taşır. |
 | `CODEX_HOME` | `causoryn` (`setup`, `doctor`) | Codex konfigürasyon dizini (`$CODEX_HOME/config.toml`, varsayılan `~/.codex`). |
-| `ZCODE_PLUGIN_DATA` | `mcp-server` (`runtime-cli.ts`) | `--data-dir` yokken `--auto-data-dir` için temel veri dizini; ayrıca asla proje kökü olarak kabul edilmez. |
+| `ZCODE_PLUGIN_DATA` | `mcp-server` (`runtime-cli.ts`) | `--auto-data-dir` için yedek temel veri dizini; yalnızca `~/.causoryn` oluşturulamadığında veya yazılamadığında ve `--data-dir` yokken kullanılır; ayarlandığında her zaman doğrulanır ve asla proje kökü olarak kabul edilmez. |
 | `CLAUDE_PLUGIN_ROOT` / `ZCODE_PLUGIN_ROOT` | host plugin yükleyicileri, `runtime-cli.ts` | Plugin manifestleri tarafından başlatıcıyı bulmak için kullanılır; bu dizinler asla proje kökü olarak kabul edilmez. |
 | `DOTNET_ROOT` | `adapters/csharp-roslyn`, `native/roslyn-worker`, `indexing` | .NET runtime'ı ile `Microsoft.NETCore.App.Ref` / `Microsoft.AspNetCore.App.Ref` referans paketleri için birincil kök. |
 | `CAUSORYN_ROSLYN_WORKER_DLL` | `adapters/csharp-roslyn`, `indexing` | Derlenmiş bir `Causoryn.RoslynWorker.dll` yolu. |
 | `CAUSORYN_PYTHON_WORKER_SCRIPT` | `adapters/python`, `indexing` | `native/python-worker/worker.py` yolu. |
 | `CAUSORYN_GO_WORKER_BIN` | `adapters/go`, `indexing` | Önceden derlenmiş bir Go worker ikilisinin yolu (`go run ./cmd/worker` adımını atlar). |
 | `CAUSORYN_GO_WORKER_DIR` | `adapters/go`, `indexing` | `native/go-worker` modülünün konumu. Çalışma zamanında Go komutu `PATH`'teki `go`'dur (veya programatik olarak `go.goBinaryPath`); `CAUSORYN_GO_BINARY` yalnızca Go adapter test süiti için bir yardımcıdır. |
-| `CAUSORYN_RUST_WORKER_DIR` | `adapters/rust`, `indexing` | `native/rust-worker` crate'inin / derlenmiş `causoryn-rust-worker` ikilisinin konumu. |
-| `CAUSORYN_RUST_TARGET_DIR` | `adapters/rust` | İsteğe bağlı `cargo build --locked` için yazılabilir `CARGO_TARGET_DIR` (varsayılan `~/.causoryn/cache/rust-worker-target`); derlenen ikili, yanındaki `causoryn-rust-worker.sha256.json` ile pinlenir. |
+| `CAUSORYN_RUST_WORKER_DIR` | `adapters/rust`, `indexing` | Derlenmiş bir `causoryn-rust-worker` ikilisini içeren dizin. Açıkça yapılandırılmış bir dizin asla yerinde derlenmez; ikili orada yoksa Rust analizörü L0/L1'e düşer. |
+| `CAUSORYN_RUST_TARGET_DIR` | `adapters/rust` | İsteğe bağlı `cargo build --locked` için derleme önbelleği (varsayılan `~/.causoryn/cache/rust-worker-target`). Worker crate'i oradaki bir hazırlık (staging) dizinine kopyalanır ve onun içindeki `--target-dir` ile derlenir; derlenen ikili `causoryn-rust-worker.sha256.json` ile pinlenir. Analiz edilen workspace içindeki bir önbellek dizini reddedilir. |
 | `CAUSORYN_CARGO_HOME` | `adapters/rust` | `cargo`'yu bulmak için alt sürecin `PATH`'inin başına eklenen dizin (varsayılan `~/.cargo/bin`; güvenli bir komut yolu olarak doğrulanır). |
 
-Sidecar süreçleri daraltılmış, sertleştirilmiş bir ortam alır (örneğin Go için `GOTOOLCHAIN=local`, `GOWORK=off`, `GOPROXY=off`; Python için `python -I -B -X utf8`; Roslyn için boş bir `DOTNET_STARTUP_HOOKS`; Cargo için boş bir `CARGO_BUILD_RUSTC_WRAPPER`). Ayrıntılar: [Güvenlik Denetimi](security-pass.md).
+MCP sunucusunun başlattığı her alt süreç (sidecar'lar, `git`, `cargo`; Windows'ta `System32` altındaki `taskkill`), analiz edilen workspace dışındaki `PATH` girdilerinden çözümlenen mutlak bir çalıştırılabilir yoldan, `shell: false` ve güvenilir bir çalışma diziniyle başlatılır ve daraltılmış, sertleştirilmiş bir ortam alır (örneğin Go için `GOTOOLCHAIN=local`, `GOWORK=off`, `GOPROXY=off`; Python için `python -I -B -X utf8`; Roslyn için boş bir `DOTNET_STARTUP_HOOKS`; Cargo için boş bir `CARGO_BUILD_RUSTC_WRAPPER`). POSIX'te Python adapter'ı `python`'dan önce `python3`'ü dener. Ayrıntılar: [Güvenlik Denetimi](security-pass.md).
 
 ---
 
