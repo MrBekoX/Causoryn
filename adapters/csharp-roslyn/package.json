@@ -3,7 +3,7 @@
   "version": "0.3.0",
   "private": true,
   "license": "MIT",
-  "description": "C#/.NET Language Adapter: Roslyn sidecar worker süreç yönetimi (TŞ v2.1 §7; sprint-2 B2).",
+  "description": "C#/.NET language adapter: runs the Roslyn sidecar worker process and maps its output into the Causoryn graph.",
   "type": "module",
   "exports": {
     ".": "./src/index.ts"
