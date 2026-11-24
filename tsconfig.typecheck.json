@@ -11,6 +11,8 @@
     "adapters/*/src/**/*.ts",
     "adapters/*/test/**/*.ts",
     "tests/**/*.ts",
+    "integrations/*/causoryn/test/**/*.ts",
+    "apps/*/src/**/*.ts",
     "vitest.config.ts",
     "vitest.bench.config.ts"
   ]
