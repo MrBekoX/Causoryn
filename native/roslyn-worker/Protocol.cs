@@ -67,6 +67,15 @@ public static class ProtocolConstants
      * üstünü istemek INVALID_ARGUMENT reddidir.
      */
     public const int MaxResponseNodes = 250_000;
+
+    /** Upper bound for the optional `projects` request field (one compilation per project). */
+    public const int MaxProjectCount = 1024;
+
+    /** Upper bound for `projects[].globalUsings` entries of a single project. */
+    public const int MaxGlobalUsingsPerProject = 512;
+
+    /** Upper bound for `projects[].projectReferences` entries of a single project. */
+    public const int MaxProjectReferencesPerProject = 512;
 }
 
 /**
@@ -134,6 +143,58 @@ public sealed class WorkerRequest
      */
     [JsonPropertyName("maxNodes")]
     public int? MaxNodes { get; set; }
+
+    /**
+     * Optional MSBuild project model (PROTOCOL.md "Projects"). Each source file
+     * belongs to the project whose directory is its nearest ancestor; every
+     * project is compiled separately with its own global usings and its
+     * ProjectReference closure. Files outside every project share one
+     * compilation (the behavior when the field is absent).
+     */
+    [JsonPropertyName("projects")]
+    public List<ProjectIn>? Projects { get; set; }
+
+    [JsonExtensionData]
+    public Dictionary<string, JsonElement>? ExtensionData { get; set; }
+}
+
+/** One MSBuild project of the analysis set (already evaluated by the adapter). */
+public sealed class ProjectIn
+{
+    /** Workspace-relative POSIX path of the `.csproj` file. */
+    [JsonPropertyName("path")]
+    public string? Path { get; set; }
+
+    /** Optional compilation assembly name (InternalsVisibleTo matching); default: project file name. */
+    [JsonPropertyName("assemblyName")]
+    public string? AssemblyName { get; set; }
+
+    /** Global using directives the .NET SDK would generate for this project. */
+    [JsonPropertyName("globalUsings")]
+    public List<GlobalUsingIn>? GlobalUsings { get; set; }
+
+    /** Workspace-relative POSIX paths of referenced `.csproj` files. */
+    [JsonPropertyName("projectReferences")]
+    public List<string>? ProjectReferences { get; set; }
+
+    [JsonExtensionData]
+    public Dictionary<string, JsonElement>? ExtensionData { get; set; }
+}
+
+/** One generated `global using` directive (MSBuild `Using` item). */
+public sealed class GlobalUsingIn
+{
+    /** Dotted namespace or type name (`Include`). */
+    [JsonPropertyName("name")]
+    public string? Name { get; set; }
+
+    /** Optional alias (`Alias` metadata): `global using Alias = global::Name;`. */
+    [JsonPropertyName("alias")]
+    public string? Alias { get; set; }
+
+    /** Optional static import (`Static="true"`): `global using static global::Name;`. */
+    [JsonPropertyName("static")]
+    public bool? Static { get; set; }
 
     [JsonExtensionData]
     public Dictionary<string, JsonElement>? ExtensionData { get; set; }
