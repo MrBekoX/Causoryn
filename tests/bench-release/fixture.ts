@@ -322,11 +322,11 @@ export function writeFixture(
   }
   for (const dir of [...dirs].sort()) {
     const dirAbs = rootResolved + path.sep + dir.replace(/\//g, path.sep);
-    mkdirSync(dirAbs, { recursive: true });
+    mkdirSync(dirAbs, { recursive: true, mode: 0o700 });
   }
   for (const entry of model.entries) {
     const abs = entryAbsPath(rootResolved, entry.relativePath);
-    writeFileSync(abs, entry.content, { encoding: "utf8", flag: "wx" });
+    writeFileSync(abs, entry.content, { encoding: "utf8", flag: "wx", mode: 0o600 });
   }
   return { root: rootResolved, fileCount: model.fileCount, hash: model.hash };
 }

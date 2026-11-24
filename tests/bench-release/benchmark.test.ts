@@ -181,11 +181,10 @@ describe("F7 benchmark — negatif", { timeout: 30_000 }, () => {
   });
 
   it("tmpdir dışına fixture yazımı explicit hata ile reddedilir", () => {
-    // Kaçış adayı tmpdir'in ÜST dizinidir (gerçek yol üzerinden dirname
-    // ile hesaplanır; konteynman kontrolü bunu reddetmelidir).
-    const tmpReal = realpathSync(os.tmpdir());
-    const outside = path.dirname(tmpReal);
+    // Kaçış adayı tmpdir'in ÜST dizinidir (mkdtempSync altından gerçek yol
+    // üzerinden iki üst dizin olarak hesaplanır; konteynman kontrolü reddetmelidir).
     const probeBase = mkdtempSync(path.join(os.tmpdir(), "causoryn-bench-outside-probe-"));
+    const outside = path.dirname(path.dirname(realpathSync(probeBase)));
     const probe = path.join(probeBase, "fixture");
     try {
       expect(() => writeFixture(probe, buildFixtureModel(4))).not.toThrow();
