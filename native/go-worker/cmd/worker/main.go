@@ -146,14 +146,14 @@ var driveLetterPattern = regexp.MustCompile(`^[a-zA-Z]:`)
 func normalizeRelativePath(raw string) (string, *apiError) {
 	posix := strings.ReplaceAll(raw, "\\", "/")
 	if strings.HasPrefix(posix, "/") || driveLetterPattern.MatchString(posix) {
-		return "", invalidArgument("Mutlak kaynak yolu kabul edilmez: " + raw)
+		return "", invalidArgument("Absolute source paths are not accepted: " + raw)
 	}
 	for _, segment := range strings.Split(posix, "/") {
 		if segment == "" || segment == "." {
-			return "", invalidArgument("Kaynak yolu boş/geçersiz segment içeriyor: " + raw)
+			return "", invalidArgument("Source path contains an empty or invalid segment: " + raw)
 		}
 		if segment == ".." {
-			return "", invalidArgument("Kaynak yolu kök dışına çıkıyor: " + raw)
+			return "", invalidArgument("Source path escapes the workspace root: " + raw)
 		}
 	}
 	return posix, nil
@@ -166,11 +166,11 @@ func decodeStrictFields(line string) (map[string]json.RawMessage, *apiError) {
 	decoder := json.NewDecoder(strings.NewReader(line))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&fields); err != nil {
-		return nil, invalidArgument("istek satırı geçerli JSON değil: " + err.Error())
+		return nil, invalidArgument("request line is not valid JSON: " + err.Error())
 	}
 	for key := range fields {
 		if !allowedTopLevelFields[key] {
-			return nil, invalidArgument(fmt.Sprintf("bilinmeyen üst-düzey alan kabul edilmez: %q", key))
+			return nil, invalidArgument(fmt.Sprintf("unknown top-level field is not accepted: %q", key))
 		}
 	}
 	return fields, nil
@@ -181,17 +181,17 @@ func decodeStrictFields(line string) (map[string]json.RawMessage, *apiError) {
 func echoableID(fields map[string]json.RawMessage) (json.RawMessage, *apiError) {
 	raw, present := fields["id"]
 	if !present {
-		return json.RawMessage("null"), invalidArgument("id alanı zorunludur")
+		return json.RawMessage("null"), invalidArgument("the id field is required")
 	}
 	var value any
 	if err := json.Unmarshal(raw, &value); err != nil {
-		return json.RawMessage("null"), invalidArgument("id string veya sayı olmalıdır")
+		return json.RawMessage("null"), invalidArgument("id must be a string or a number")
 	}
 	switch value.(type) {
 	case string, float64:
 		return raw, nil
 	default:
-		return json.RawMessage("null"), invalidArgument("id string veya sayı olmalıdır")
+		return json.RawMessage("null"), invalidArgument("id must be a string or a number")
 	}
 }
 
@@ -208,27 +208,27 @@ func parseRequest(line string) ([]analyze.SourceFile, []analyze.ModuleFile, int,
 
 	typeRaw, present := fields["type"]
 	if !present {
-		return nil, nil, 0, echo, invalidArgument("type alanı zorunludur")
+		return nil, nil, 0, echo, invalidArgument("the type field is required")
 	}
 	var typeName string
 	if err := json.Unmarshal(typeRaw, &typeName); err != nil || typeName != "analyze" {
-		return nil, nil, 0, echo, invalidArgument("type yalnızca \"analyze\" desteklenir")
+		return nil, nil, 0, echo, invalidArgument("only type \"analyze\" is supported")
 	}
 
 	if raw, present := fields["protocolVersion"]; present {
 		var version string
 		if err := json.Unmarshal(raw, &version); err != nil || version != analyze.ProtocolVersion {
-			return nil, nil, 0, echo, invalidArgument(fmt.Sprintf("desteklenmeyen protocolVersion; %q olmalıdır", analyze.ProtocolVersion))
+			return nil, nil, 0, echo, invalidArgument(fmt.Sprintf("unsupported protocolVersion; must be %q", analyze.ProtocolVersion))
 		}
 	}
 
 	filesRaw, present := fields["files"]
 	if !present {
-		return nil, nil, 0, echo, invalidArgument("files alanı zorunludur")
+		return nil, nil, 0, echo, invalidArgument("the files field is required")
 	}
 	var rawFiles []json.RawMessage
 	if err := json.Unmarshal(filesRaw, &rawFiles); err != nil {
-		return nil, nil, 0, echo, invalidArgument("files dizisi geçersiz: " + err.Error())
+		return nil, nil, 0, echo, invalidArgument("files array is invalid: " + err.Error())
 	}
 	inputs := make([]fileInput, 0, len(rawFiles))
 	for _, rawFile := range rawFiles {
@@ -237,25 +237,25 @@ func parseRequest(line string) ([]analyze.SourceFile, []analyze.ModuleFile, int,
 		fileDecoder.DisallowUnknownFields()
 		var input fileInput
 		if err := fileDecoder.Decode(&input); err != nil {
-			return nil, nil, 0, echo, invalidArgument("files öğesi geçersiz (bilinmeyen alan dahil): " + err.Error())
+			return nil, nil, 0, echo, invalidArgument("files entry is invalid (including unknown fields): " + err.Error())
 		}
 		inputs = append(inputs, input)
 	}
 	if len(inputs) == 0 {
-		return nil, nil, 0, echo, invalidArgument("files en az 1 dosya içermelidir")
+		return nil, nil, 0, echo, invalidArgument("files must contain at least 1 file")
 	}
 	if len(inputs) > analyze.MaxFileCount {
-		return nil, nil, 0, echo, limitExceeded(fmt.Sprintf("files sayısı sınırı aşıldı: %d > %d", len(inputs), analyze.MaxFileCount))
+		return nil, nil, 0, echo, limitExceeded(fmt.Sprintf("files count limit exceeded: %d > %d", len(inputs), analyze.MaxFileCount))
 	}
 
 	var moduleFiles []analyze.ModuleFile
 	if modRaw, present := fields["moduleFiles"]; present {
 		var rawMods []json.RawMessage
 		if err := json.Unmarshal(modRaw, &rawMods); err != nil {
-			return nil, nil, 0, echo, invalidArgument("moduleFiles dizisi geçersiz: " + err.Error())
+			return nil, nil, 0, echo, invalidArgument("moduleFiles array is invalid: " + err.Error())
 		}
 		if len(rawMods) > analyze.MaxFileCount {
-			return nil, nil, 0, echo, limitExceeded(fmt.Sprintf("moduleFiles sayısı sınırı aşıldı: %d > %d", len(rawMods), analyze.MaxFileCount))
+			return nil, nil, 0, echo, limitExceeded(fmt.Sprintf("moduleFiles count limit exceeded: %d > %d", len(rawMods), analyze.MaxFileCount))
 		}
 		seenMods := map[string]bool{}
 		moduleFiles = make([]analyze.ModuleFile, 0, len(rawMods))
@@ -264,17 +264,17 @@ func parseRequest(line string) ([]analyze.SourceFile, []analyze.ModuleFile, int,
 			modDecoder.DisallowUnknownFields()
 			var mf moduleFileInput
 			if err := modDecoder.Decode(&mf); err != nil {
-				return nil, nil, 0, echo, invalidArgument("moduleFiles öğesi geçersiz (bilinmeyen alan dahil): " + err.Error())
+				return nil, nil, 0, echo, invalidArgument("moduleFiles entry is invalid (including unknown fields): " + err.Error())
 			}
 			if len(mf.Content) > analyze.MaxFileContentBytes {
-				return nil, nil, 0, echo, limitExceeded(fmt.Sprintf("modül dosya içerik boyutu sınırı aşıldı: %d > %d bayt", len(mf.Content), analyze.MaxFileContentBytes))
+				return nil, nil, 0, echo, limitExceeded(fmt.Sprintf("module file content size limit exceeded: %d > %d bytes", len(mf.Content), analyze.MaxFileContentBytes))
 			}
 			relPath, verr := normalizeRelativePath(mf.RelativePath)
 			if verr != nil {
 				return nil, nil, 0, echo, verr
 			}
 			if seenMods[relPath] {
-				return nil, nil, 0, echo, invalidArgument("Aynı modül dosya yolu iki kez verildi: " + relPath)
+				return nil, nil, 0, echo, invalidArgument("The same module file path was given twice: " + relPath)
 			}
 			seenMods[relPath] = true
 			moduleFiles = append(moduleFiles, analyze.ModuleFile{
@@ -288,10 +288,10 @@ func parseRequest(line string) ([]analyze.SourceFile, []analyze.ModuleFile, int,
 	if raw, present := fields["maxNodes"]; present {
 		var value float64
 		if err := json.Unmarshal(raw, &value); err != nil || value != math.Trunc(value) {
-			return nil, nil, 0, echo, invalidArgument("maxNodes tam sayı olmalıdır")
+			return nil, nil, 0, echo, invalidArgument("maxNodes must be an integer")
 		}
 		if value < 1 || value > analyze.MaxResponseNodes {
-			return nil, nil, 0, echo, invalidArgument(fmt.Sprintf("maxNodes 1..%d aralığında olmalıdır", analyze.MaxResponseNodes))
+			return nil, nil, 0, echo, invalidArgument(fmt.Sprintf("maxNodes must be in the range 1..%d", analyze.MaxResponseNodes))
 		}
 		budget = int(value)
 	}
@@ -300,14 +300,14 @@ func parseRequest(line string) ([]analyze.SourceFile, []analyze.ModuleFile, int,
 	sources := make([]analyze.SourceFile, 0, len(inputs))
 	for _, input := range inputs {
 		if len(input.Content) > analyze.MaxFileContentBytes {
-			return nil, nil, 0, echo, limitExceeded(fmt.Sprintf("dosya içerik boyutu sınırı aşıldı: %d > %d bayt", len(input.Content), analyze.MaxFileContentBytes))
+			return nil, nil, 0, echo, limitExceeded(fmt.Sprintf("file content size limit exceeded: %d > %d bytes", len(input.Content), analyze.MaxFileContentBytes))
 		}
 		relativePath, verr := normalizeRelativePath(input.Path)
 		if verr != nil {
 			return nil, nil, 0, echo, verr
 		}
 		if seen[relativePath] {
-			return nil, nil, 0, echo, invalidArgument("Aynı kaynak yolu iki kez verildi: " + relativePath)
+			return nil, nil, 0, echo, invalidArgument("The same source path was given twice: " + relativePath)
 		}
 		seen[relativePath] = true
 		sum := sha256.Sum256([]byte(input.Content))
@@ -353,8 +353,8 @@ func buildResponse(echo json.RawMessage, result analyze.Result) []byte {
 	}
 	payload, err := json.Marshal(response)
 	if err != nil {
-		logStderr("yanıt serileştirilemedi: " + err.Error())
-		return errorPayload(json.RawMessage("null"), &apiError{code: "INTERNAL_ERROR", message: "yanıt serileştirilemedi"})
+		logStderr("response could not be serialized: " + err.Error())
+		return errorPayload(json.RawMessage("null"), &apiError{code: "INTERNAL_ERROR", message: "response could not be serialized"})
 	}
 	return payload
 }
@@ -368,7 +368,7 @@ func errorPayload(echo json.RawMessage, apiErr *apiError) []byte {
 	})
 	if err != nil {
 		// Son çare: sabit satır (marshal struct alanlarıyla pratikte imkânsız).
-		return []byte(`{"id":null,"protocolVersion":"1","status":"error","error":{"code":"INTERNAL_ERROR","message":"yanıt serileştirilemedi"}}`)
+		return []byte(`{"id":null,"protocolVersion":"1","status":"error","error":{"code":"INTERNAL_ERROR","message":"response could not be serialized"}}`)
 	}
 	return payload
 }
@@ -393,7 +393,7 @@ func safeProcessLine(line string) (payload []byte) {
 			logStderr(fmt.Sprintf("INTERNAL_ERROR: %v", recovered))
 			payload = errorPayload(json.RawMessage("null"), &apiError{
 				code:    "INTERNAL_ERROR",
-				message: fmt.Sprintf("çözümleyici beklenmeyen hatayla durdu: %v", recovered),
+				message: fmt.Sprintf("analyzer stopped with an unexpected error: %v", recovered),
 			})
 		}
 	}()
@@ -428,7 +428,7 @@ func readRequestLine(reader *bufio.Reader) (line string, overLimit bool, eof boo
 			if builder.Len() >= analyze.MaxRequestLineChars {
 				over = true
 				builder.Reset()
-				logStderr("istek satırı karakter sınırını aştı; satırın kalanı DISCARD ediliyor")
+				logStderr("request line exceeded the character limit; discarding the rest of the line")
 				continue
 			}
 			builder.WriteByte(chunk)
@@ -438,22 +438,22 @@ func readRequestLine(reader *bufio.Reader) (line string, overLimit bool, eof boo
 
 func writeResponseLine(writer *bufio.Writer, payload []byte) {
 	if _, err := writer.Write(payload); err != nil {
-		logStderr("stdout yazımı başarısız: " + err.Error())
+		logStderr("stdout write failed: " + err.Error())
 		os.Exit(1)
 	}
 	if err := writer.WriteByte('\n'); err != nil {
-		logStderr("stdout yazımı başarısız: " + err.Error())
+		logStderr("stdout write failed: " + err.Error())
 		os.Exit(1)
 	}
 	if err := writer.Flush(); err != nil {
-		logStderr("stdout flush başarısız: " + err.Error())
+		logStderr("stdout flush failed: " + err.Error())
 		os.Exit(1)
 	}
 }
 
 func main() {
 	logStderr(fmt.Sprintf(
-		"worker başladı (protokol v%s; analyzer %s@%s; stdlib-only go/parser+go/ast)",
+		"worker started (protocol v%s; analyzer %s@%s; stdlib-only go/parser+go/ast)",
 		analyze.ProtocolVersion, analyze.AnalyzerID, analyze.AnalyzerVersion,
 	))
 	reader := bufio.NewReaderSize(os.Stdin, 256*1024)
@@ -461,12 +461,12 @@ func main() {
 	for {
 		line, overLimit, eof, readErr := readRequestLine(reader)
 		if readErr != nil {
-			logStderr("stdin okuma hatası: " + readErr.Error())
+			logStderr("stdin read error: " + readErr.Error())
 			os.Exit(1)
 		}
 		if overLimit {
 			writeResponseLine(writer, errorPayload(json.RawMessage("null"), limitExceeded(
-				fmt.Sprintf("istek satırı %d karakter sınırını aştı", analyze.MaxRequestLineChars),
+				fmt.Sprintf("request line exceeded the %d character limit", analyze.MaxRequestLineChars),
 			)))
 		}
 		if eof && strings.TrimSpace(line) == "" {
@@ -479,5 +479,5 @@ func main() {
 			break
 		}
 	}
-	logStderr("stdin EOF — worker 0 çıkış koduyla sonlanıyor")
+	logStderr("stdin EOF — worker exiting with code 0")
 }

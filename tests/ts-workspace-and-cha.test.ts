@@ -916,7 +916,7 @@ describe.skipIf(!dotnetAvailable)("Wave 2A — C# Roslyn CHA (INHERITS & IMPLEME
 
       // Every lexical UNC/relative/drive-relative entry must produce an explicit lexical rejection warning.
       const lexicalRejected = parsed.warnings.filter((w) =>
-        w.includes("güvensiz veya göreli referenceDirs girdisi reddedildi"),
+        w.includes("unsafe or relative referenceDirs entry rejected"),
       );
       expect(lexicalRejected.some((w) => w.includes("\\\\10.0.0.1\\evil\\share"))).toBe(true);
       expect(lexicalRejected.some((w) => w.includes("//10.0.0.1/evil/share"))).toBe(true);
@@ -930,7 +930,7 @@ describe.skipIf(!dotnetAvailable)("Wave 2A — C# Roslyn CHA (INHERITS & IMPLEME
       // Missing non-existent local dir must be reported as missing (NOT misclassified as symlink via Attributes == -1).
       expect(
         parsed.warnings.some(
-          (w) => w.includes("referenceDirs girdisi yok") && w.includes("does-not-exist-dir"),
+          (w) => w.includes("referenceDirs entry does not exist") && w.includes("does-not-exist-dir"),
         ),
       ).toBe(true);
       expect(
@@ -941,7 +941,7 @@ describe.skipIf(!dotnetAvailable)("Wave 2A — C# Roslyn CHA (INHERITS & IMPLEME
 
       if (linkCreated) {
         const symlinkRejected = parsed.warnings.filter((w) =>
-          w.includes("symlink/reparse-point referenceDirs girdisi reddedildi"),
+          w.includes("symlink/reparse-point referenceDirs entry rejected"),
         );
         expect(symlinkRejected.length).toBeGreaterThanOrEqual(2);
       }

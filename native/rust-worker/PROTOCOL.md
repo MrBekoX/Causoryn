@@ -139,7 +139,7 @@ When the analysis completes:
   - `fn` inside an `impl` → `Method`: `<module>::<Type>::<fn>`; a method declaration inside a
     `trait` → `Method`: `<module>::<Trait>::<method>`.
   - UnknownExternal: the call text as written (for example `std::env::var`), the method name for
-    an unresolved method call, or `(anonim-cağrı)` for a call whose callee is not a path (for
+    an unresolved method call, or `(anonymous-call)` for a call whose callee is not a path (for
     example calling a closure or a returned function value).
   - Endpoint: `"METHOD PATH"` (for example `"GET /orders"`).
 - `attributes` — File: `sourceHash` (SHA-256 of the UTF-8 content, 64 hex); Endpoint: `method`
@@ -175,7 +175,7 @@ When the analysis completes:
   "span": { "relativePath": "main.rs", "startLine": 12, "endLine": 12, "sourceHash": "<sha256-hex>" },
   "analyzerId": "rust-worker",
   "analyzerVersion": "0.1.0",
-  "rationale": "CALLS: ... (verified; syn AST, ...)."
+  "rationale": "CALLS: ... (verified; syn AST, no semantic resolver)."
 }
 ```
 
@@ -192,20 +192,21 @@ When the analysis completes:
 The worker builds four name tables from the declarations of the whole request: free functions
 per module, free functions keyed by (last module segment, name), free functions by bare name,
 and methods keyed by (owning type or trait name, method name) plus by bare method name. Calls
-are resolved against these tables only; candidates are sorted, and when several candidates
-exist the edge points at the first one in canonical order.
+are resolved against these tables only; candidates are sorted. When several candidates exist,
+no edge is drawn to any of them: the call is `unresolved`, its target is an UnknownExternal node,
+and every candidate is listed in `ambiguity.candidates` and in the rationale.
 
 | Call shape | Candidates | resolution | Target / ambiguity |
 |---|---|---|---|
 | Bare call `foo()` | a free `fn foo` in the SAME module (file) | `verified` | that Function |
 | Bare call `foo()` | none in the same module, exactly one `fn foo` elsewhere in the set | `heuristic` | that Function (no import evidence) |
-| Bare call `foo()` | none in the same module, several elsewhere | `heuristic` + ambiguity | first candidate; `candidates` lists all of them |
+| Bare call `foo()` | none in the same module, several elsewhere | `unresolved` + ambiguity | UnknownExternal (no edge to any candidate); `candidates` lists all of them |
 | Path call `a::B::c()` / `B::c()` | exactly one match on the LAST TWO segments (`B::c`: a method of type/trait `B`, or a free fn `c` in a module whose last segment is `B`) | `heuristic` + ambiguity | that symbol; `candidates` = `[it]`, `reason` starts with `unverified-module-prefix-suffix-match` because module prefixes and `use` imports are not checked |
-| Path call | several matches on the last two segments | `heuristic` + ambiguity | first candidate; `candidates` lists all of them |
+| Path call | several matches on the last two segments | `unresolved` + ambiguity | UnknownExternal (no edge to any candidate); `candidates` lists all of them |
 | Method call `x.foo()` | exactly one method named `foo` in the set | `heuristic` | that Method (the receiver type is not resolved) |
-| Method call `x.foo()` | several methods named `foo` (for example a trait declaration and its `impl`) | `heuristic` + ambiguity | first candidate; `candidates` lists all of them |
+| Method call `x.foo()` | several methods named `foo` (for example a trait declaration and its `impl`) | `unresolved` + ambiguity | UnknownExternal (no edge to any candidate); `candidates` lists all of them |
 | Any of the above | no candidate (for example `std::env::var`, `Vec::new`) | `unresolved` | UnknownExternal (call text or method name); **no invented target** |
-| Callee that is not a path (closure call, `f()()`, ...) | — | `unresolved` | UnknownExternal `(anonim-cağrı)` |
+| Callee that is not a path (closure call, `f()()`, ...) | — | `unresolved` | UnknownExternal `(anonymous-call)` |
 
 `verified` CALLS edges come only from same-module bare calls. Qualified paths are never
 `verified`, even with a single candidate, because the match ignores the module prefix (the unit
@@ -280,8 +281,8 @@ legitimate only when `cargo` is not found (reported as not run). Rust unit tests
   `OrdersService::new → OrderRepository::new` are `heuristic` with
   `ambiguity.candidates = [<the single match>]` and a reason containing
   `unverified-module-prefix-suffix-match`; the method call `service.list()` is `heuristic`; the
-  `save` call is `heuristic` with ambiguity over the trait and `impl` candidates
-  (`OrderRepository::save`, `OrderStore::save`); `std::env::var` is `unresolved` with an
+  `save` call is `unresolved` (no edge to either candidate) with ambiguity over the trait and
+  `impl` candidates (`OrderRepository::save`, `OrderStore::save`); `std::env::var` is `unresolved` with an
   UnknownExternal target; a bare call that matches a single function in another file is
   `heuristic`; evidence lines match the fixture text; node and edge kinds stay within the domain
   catalog.
