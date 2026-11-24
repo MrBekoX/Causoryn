@@ -38,17 +38,20 @@ import {
 } from "@causoryn/domain";
 import { resolveCausorynAssetRoot } from "@causoryn/sidecar-ipc";
 import {
-  closeSync,
-  constants as fsConstants,
   existsSync,
-  fstatSync,
   lstatSync,
-  openSync,
   readdirSync,
-  readSync,
   realpathSync,
 } from "node:fs";
-import { isAbsolute, join, posix as pathPosix, resolve, sep } from "node:path";
+import { isAbsolute, join, posix as pathPosix } from "node:path";
+import { resolveCSharpProjects } from "./project-model.js";
+import {
+  isInsideRealDir,
+  isUncOrDevicePath,
+  readBoundedFileNoFollow,
+  resolveSafeRealRoot,
+  stripTrailingSeparators,
+} from "./safe-fs.js";
 import { runWorkerAnalyze, type WorkerRunOutcome } from "./worker-process.js";
 import {
   CSHARP_ROSLYN_ADAPTER_ID,
@@ -528,40 +531,6 @@ const ASSETS_SKIP_DIRS: ReadonlySet<string> = new Set([
   "target",
 ]);
 
-const UNC_OR_DEVICE_PREFIX = /^(?:\\\\|\/\/|\/\\|\\\/)/;
-
-function isUncOrDevicePath(raw: string): boolean
-{
-  if (raw.length < 2) return false;
-  return UNC_OR_DEVICE_PREFIX.test(raw);
-}
-
-function stripTrailingSeparators(p: string): string
-{
-  let end = p.length;
-  while (end > 1 && (p.charCodeAt(end - 1) === 47 || p.charCodeAt(end - 1) === 92))
-  {
-    // Preserve Windows drive root (e.g. "C:\") and POSIX root ("/").
-    if (end === 3 && p.charCodeAt(1) === 58) break;
-    end -= 1;
-  }
-  return end === p.length ? p : p.slice(0, end);
-}
-
-function comparablePath(p: string): string
-{
-  const normalized = resolve(p);
-  return process.platform === "win32" ? normalized.toLowerCase() : normalized;
-}
-
-function isInsideRealDir(realParent: string, realCandidate: string): boolean
-{
-  const parentCmp = comparablePath(realParent);
-  const candidateCmp = comparablePath(realCandidate);
-  const prefix = parentCmp.endsWith(sep) ? parentCmp : `${parentCmp}${sep}`;
-  return candidateCmp === parentCmp || candidateCmp.startsWith(prefix);
-}
-
 function validateSafeRelativeSegments(rawPath: string): string[] | null
 {
   if (rawPath.length === 0 || rawPath.includes("\0")) return null;
@@ -576,84 +545,6 @@ function validateSafeRelativeSegments(rawPath: string): string[] | null
     }
   }
   return segments;
-}
-
-function readBoundedFileNoFollow(filePath: string, realRoot: string): string | null
-{
-  let leafStat;
-  try
-  {
-    leafStat = lstatSync(filePath);
-  }
-  catch
-  {
-    return null;
-  }
-  if (leafStat.isSymbolicLink() || !leafStat.isFile()) return null;
-  if (leafStat.size > MAX_PROJECT_ASSETS_BYTES) return null;
-
-  let realFile: string;
-  try
-  {
-    realFile = realpathSync(filePath);
-  }
-  catch
-  {
-    return null;
-  }
-  if (!isInsideRealDir(realRoot, realFile)) return null;
-
-  const flags =
-    (fsConstants.O_RDONLY ?? 0) | (fsConstants.O_NOFOLLOW ?? 0);
-  let fd: number;
-  try
-  {
-    fd = openSync(realFile, flags);
-  }
-  catch
-  {
-    return null;
-  }
-
-  try
-  {
-    const fdStat = fstatSync(fd);
-    if (!fdStat.isFile()) return null;
-    if (fdStat.size > MAX_PROJECT_ASSETS_BYTES) return null;
-    if (
-      leafStat.ino !== 0 &&
-      (fdStat.ino !== leafStat.ino || fdStat.dev !== leafStat.dev)
-    )
-    {
-      return null;
-    }
-
-    const buffer = Buffer.allocUnsafe(Math.min(fdStat.size + 1, MAX_PROJECT_ASSETS_BYTES + 1));
-    let totalRead = 0;
-    while (totalRead < buffer.length)
-    {
-      const bytesRead = readSync(fd, buffer, totalRead, buffer.length - totalRead, null);
-      if (bytesRead <= 0) break;
-      totalRead += bytesRead;
-    }
-    if (totalRead > MAX_PROJECT_ASSETS_BYTES) return null;
-    return buffer.subarray(0, totalRead).toString("utf8");
-  }
-  catch
-  {
-    return null;
-  }
-  finally
-  {
-    try
-    {
-      closeSync(fd);
-    }
-    catch
-    {
-      // Ignore close error.
-    }
-  }
 }
 
 function scoreTargetFrameworkKey(tfmKey: string): readonly [number, number, number]
@@ -894,36 +785,8 @@ function extractNugetDirsFromAssetsContent(
 export function discoverNugetReferenceDirs(rootDir: string): NugetReferenceDiscoveryResult
 {
   const warnings: string[] = [];
-  if (rootDir.length === 0 || rootDir.includes("\0") || isUncOrDevicePath(rootDir) || !isAbsolute(rootDir))
-  {
-    return { referenceDirs: [], warnings };
-  }
-
-  const normalizedRoot = stripTrailingSeparators(rootDir);
-  let rootStat;
-  try
-  {
-    rootStat = lstatSync(normalizedRoot);
-  }
-  catch
-  {
-    return { referenceDirs: [], warnings };
-  }
-  if (rootStat.isSymbolicLink() || !rootStat.isDirectory())
-  {
-    return { referenceDirs: [], warnings };
-  }
-
-  let realRoot: string;
-  try
-  {
-    realRoot = realpathSync(normalizedRoot);
-  }
-  catch
-  {
-    return { referenceDirs: [], warnings };
-  }
-  if (isUncOrDevicePath(realRoot))
+  const realRoot = resolveSafeRealRoot(rootDir);
+  if (realRoot === null)
   {
     return { referenceDirs: [], warnings };
   }
@@ -1004,7 +867,7 @@ export function discoverNugetReferenceDirs(rootDir: string): NugetReferenceDisco
   for (const assetsPath of assetsFiles.sort((a, b) => (a < b ? -1 : a > b ? 1 : 0)))
   {
     if (discovered.size >= MAX_NUGET_REFERENCE_DIRS) break;
-    const content = readBoundedFileNoFollow(assetsPath, realRoot);
+    const content = readBoundedFileNoFollow(assetsPath, realRoot, MAX_PROJECT_ASSETS_BYTES);
     if (content === null) continue;
     extractNugetDirsFromAssetsContent(content, discovered);
   }
@@ -1086,6 +949,14 @@ export async function analyzeCSharpWorkspace(
     .sort((a, b) => (a < b ? -1 : a > b ? 1 : 0))
     .slice(0, MAX_NUGET_REFERENCE_DIRS);
 
+  // 1.6) Read-only MSBuild project model (.csproj + Directory.Build.props inside
+  //      rootDir): one compilation per project with the SDK's implicit global
+  //      usings, Using items and ProjectReference closure (project-model.ts).
+  const projectModel =
+    input.rootDir !== undefined
+      ? resolveCSharpProjects(input.rootDir, entries.map((entry) => entry.relativePath))
+      : { projects: [], warnings: [] };
+
   const options = resolveOptions(input.options);
   const request = {
     id: `analyze:${workspaceId}`,
@@ -1096,6 +967,7 @@ export async function analyzeCSharpWorkspace(
       content: entry.content,
     })),
     ...(referenceDirs.length > 0 ? { referenceDirs } : {}),
+    ...(projectModel.projects.length > 0 ? { projects: projectModel.projects } : {}),
   };
 
   const outcome: WorkerRunOutcome = await runWorkerAnalyze({
@@ -1110,7 +982,7 @@ export async function analyzeCSharpWorkspace(
       : {}),
   });
 
-  const skipped: string[] = [];
+  const skipped: string[] = [...projectModel.warnings];
   if (outcome.status === "ok")
   {
     const mapped = mapWorkerResponse(outcome.response, request.id, skipped);

@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -315,6 +316,10 @@ public static class WorkerAnalyzer
         var assembler = new GraphAssembler(nodeLimit);
         var warnings = assembler.Warnings;
 
+        // 0) Optional MSBuild project model: request-level validation (strict
+        //    schema) before any parse, so a malformed model rejects the request.
+        var projects = ProjectModel.Validate(request.Projects, warnings);
+
         // 1) Kaynaklar: yol normalizasyonu, çakışma reddi, deterministik sıra.
         //    Parse, dosya başına izole edilir: derin AST Roslyn parser'ında
         //    InsufficientExecutionStackException üretebilir (guard'lı, yakalanabilir);
@@ -337,7 +342,7 @@ public static class WorkerAnalyzer
             {
                 tree = CSharpSyntaxTree.ParseText(
                     file.Content,
-                    new CSharpParseOptions(languageVersion: LanguageVersion.Latest),
+                    ParseOptions,
                     path: relativePath);
             }
             catch (Exception ex)
@@ -360,20 +365,17 @@ public static class WorkerAnalyzer
         // 2) Referanslar + derleme (bellek-içi; workspace'e dokunulmaz — ADR-008).
         var referencePaths = ReferenceResolver.Resolve(request.ReferenceDirs, "net10.0", warnings);
         var references = referencePaths.Select(p => (MetadataReference)MetadataReference.CreateFromFile(p)).ToList();
-        // Top-level statement içeren girdi yürütülebilir derlenmelidir
-        // (CS8805); aksi halde kütüphane çıktısı CS5001 uyarısı üretmez.
-        // Her iki durum da girdiden türetilir → deterministik.
-        var hasTopLevelStatements = entries.Any(e =>
-            e.Tree.GetRoot() is CompilationUnitSyntax unit &&
-            unit.Members.OfType<GlobalStatementSyntax>().Any());
-        var outputKind = hasTopLevelStatements ? OutputKind.ConsoleApplication : OutputKind.DynamicallyLinkedLibrary;
-        var compilation = CSharpCompilation.Create(
-            "CausorynWorker.Analysis",
-            entries.Select(e => e.Tree),
-            references,
-            new CSharpCompilationOptions(
-                outputKind,
-                nullableContextOptions: NullableContextOptions.Enable));
+        var compilationSets = BuildCompilations(entries, projects, references, warnings);
+        var compilationByTree = new Dictionary<SyntaxTree, CSharpCompilation>();
+        foreach (var set in compilationSets)
+        {
+            foreach (var entry in set.Entries)
+            {
+                compilationByTree[entry.Tree] = set.Compilation;
+            }
+        }
+
+        SemanticModel ModelFor(SourceEntry entry) => compilationByTree[entry.Tree].GetSemanticModel(entry.Tree);
 
         // 3) Tanılar: Roslyn 5.0 GetDiagnostics (parse+declaration+semantic+body)
         //    tek çağrı; Warning+Error korunur, dosyaya eşlenir (1 tabanlı satır)
@@ -381,48 +383,62 @@ public static class WorkerAnalyzer
         //    derin AST'de Roslyn bind/tanı aşaması InsufficientExecutionStackException
         //    fırlatabilir (guard'lı) — yakalanır, bütün girdiye ADAPTER_INTERNAL
         //    tanısı + uyarı yazılır ve analiz partial olarak sürer.
+        //    Each compilation (one per project) is isolated the same way.
         var entryByTree = entries.ToDictionary(e => e.Tree, e => e);
         var diagnostics = parseDiagnostics;
-        try
+        foreach (var set in compilationSets)
         {
-            foreach (var diagnostic in compilation.GetDiagnostics())
+            try
             {
-                if (diagnostic.Severity is not (DiagnosticSeverity.Error or DiagnosticSeverity.Warning))
+                foreach (var diagnostic in set.Compilation.GetDiagnostics())
                 {
-                    continue;
+                    if (diagnostic.Severity is not (DiagnosticSeverity.Error or DiagnosticSeverity.Warning))
+                    {
+                        continue;
+                    }
+
+                    if (set.GlobalUsingsTree is not null && diagnostic.Location.SourceTree == set.GlobalUsingsTree)
+                    {
+                        // The synthetic global usings are not a workspace file: a
+                        // problem there (e.g. a namespace whose reference pack is
+                        // missing) is reported as an explicit warning, never dropped.
+                        assembler.AddWarning(
+                            $"generated global using of project '{set.ProjectPath}' reported {diagnostic.Id}: {diagnostic.GetMessage(CultureInfo.InvariantCulture)}");
+                        continue;
+                    }
+
+                    if (diagnostic.Location.SourceTree is not SyntaxTree sourceTree ||
+                        !entryByTree.TryGetValue(sourceTree, out var entry))
+                    {
+                        continue; // dosya-dışı derleme tanısı bu protokolde taşınmaz
+                    }
+
+                    var lineSpan = diagnostic.Location.GetLineSpan();
+                    var line = lineSpan.IsValid ? lineSpan.StartLinePosition.Line + 1 : 0;
+                    diagnostics.Add(new DiagnosticOut
+                    {
+                        RelativePath = entry.RelativePath,
+                        Code = diagnostic.Id,
+                        Message = diagnostic.GetMessage(),
+                        Line = line,
+                    });
+                }
+            }
+            catch (Exception ex)
+            {
+                foreach (var entry in set.Entries)
+                {
+                    diagnostics.Add(new DiagnosticOut
+                    {
+                        RelativePath = entry.RelativePath,
+                        Code = "ADAPTER_INTERNAL",
+                        Message = $"compilation diagnostics phase could not complete ({ex.GetType().Name}); input nesting depth exceeds the code budget",
+                        Line = 0,
+                    });
                 }
 
-                if (diagnostic.Location.SourceTree is not SyntaxTree sourceTree ||
-                    !entryByTree.TryGetValue(sourceTree, out var entry))
-                {
-                    continue; // dosya-dışı derleme tanısı bu protokolde taşınmaz
-                }
-
-                var lineSpan = diagnostic.Location.GetLineSpan();
-                var line = lineSpan.IsValid ? lineSpan.StartLinePosition.Line + 1 : 0;
-                diagnostics.Add(new DiagnosticOut
-                {
-                    RelativePath = entry.RelativePath,
-                    Code = diagnostic.Id,
-                    Message = diagnostic.GetMessage(),
-                    Line = line,
-                });
+                warnings.Add("diagnostics phase could not complete: " + ex.Message);
             }
-        }
-        catch (Exception ex)
-        {
-            foreach (var entry in entries)
-            {
-                diagnostics.Add(new DiagnosticOut
-                {
-                    RelativePath = entry.RelativePath,
-                    Code = "ADAPTER_INTERNAL",
-                    Message = $"compilation diagnostics phase could not complete ({ex.GetType().Name}); input nesting depth exceeds the code budget",
-                    Line = 0,
-                });
-            }
-
-            warnings.Add("diagnostics phase could not complete: " + ex.Message);
         }
 
         diagnostics.Sort((a, b) =>
@@ -488,7 +504,7 @@ public static class WorkerAnalyzer
         {
             RunPhaseIsolated(entry, () =>
             {
-                var model = compilation.GetSemanticModel(entry.Tree);
+                var model = ModelFor(entry);
                 var fileRecord = assembler.EnsureNode(
                     "File", entry.RelativePath, entry.RelativePath,
                     new Dictionary<string, object> { ["sourceHash"] = entry.SourceHash });
@@ -502,7 +518,7 @@ public static class WorkerAnalyzer
         {
             RunPhaseIsolated(entry, () =>
             {
-                var model = compilation.GetSemanticModel(entry.Tree);
+                var model = ModelFor(entry);
                 ExtractTypeHierarchies(entry, entries, model, assembler, registry);
             });
         }
@@ -512,7 +528,7 @@ public static class WorkerAnalyzer
         {
             RunPhaseIsolated(entry, () =>
             {
-                var model = compilation.GetSemanticModel(entry.Tree);
+                var model = ModelFor(entry);
                 VisitCalls(entry, entries, model, assembler, registry, diagnostics);
             });
         }
@@ -522,7 +538,7 @@ public static class WorkerAnalyzer
         {
             RunPhaseIsolated(entry, () =>
             {
-                var model = compilation.GetSemanticModel(entry.Tree);
+                var model = ModelFor(entry);
                 ExtractControllerRoutes(entry, info, model, assembler, registry);
             });
         }
@@ -680,6 +696,115 @@ public static class WorkerAnalyzer
     {
         var hash = SHA256.HashData(Encoding.UTF8.GetBytes(content));
         return Convert.ToHexString(hash).ToLowerInvariant();
+    }
+
+    /* ------------------------------------------------------------------ */
+    /* Compilations: one per project (+ one for files outside projects)    */
+    /* ------------------------------------------------------------------ */
+
+    private static readonly CSharpParseOptions ParseOptions = new(languageVersion: LanguageVersion.Latest);
+
+    private sealed record CompilationSet(
+        string? ProjectPath,
+        CSharpCompilation Compilation,
+        IReadOnlyList<SourceEntry> Entries,
+        SyntaxTree? GlobalUsingsTree);
+
+    /**
+     * Builds the compilations of the request. Without a project model every file
+     * shares one compilation (historical behavior). With one, each project gets its
+     * own compilation: its sources, its generated global usings and its transitive
+     * ProjectReference closure as compilation references (dependencies first). All
+     * compilations share the same MetadataReference instances, so symbols of a
+     * referenced project are the referenced compilation's own source symbols.
+     */
+    private static List<CompilationSet> BuildCompilations(
+        IReadOnlyList<SourceEntry> entries,
+        IReadOnlyList<ProjectSpec> projects,
+        IReadOnlyList<MetadataReference> references,
+        List<string> warnings)
+    {
+        var projectByDirectory = projects.ToDictionary(p => p.Directory, StringComparer.Ordinal);
+        var entriesByProject = new Dictionary<string, List<SourceEntry>>(StringComparer.Ordinal);
+        var looseEntries = new List<SourceEntry>();
+        foreach (var entry in entries)
+        {
+            var owner = ProjectModel.OwningProject(entry.RelativePath, projectByDirectory);
+            if (owner is null)
+            {
+                looseEntries.Add(entry);
+                continue;
+            }
+
+            if (!entriesByProject.TryGetValue(owner, out var list))
+            {
+                list = new List<SourceEntry>();
+                entriesByProject.Add(owner, list);
+            }
+
+            list.Add(entry);
+        }
+
+        var projectsWithSources = projects.Where(p => entriesByProject.ContainsKey(p.Path)).ToList();
+        var requestedPaths = projects.Select(p => p.Path).ToHashSet(StringComparer.Ordinal);
+        var order = ProjectModel.CompilationOrder(projectsWithSources, requestedPaths, warnings, out var closure);
+
+        var sets = new List<CompilationSet>();
+        var built = new Dictionary<string, CSharpCompilation>(StringComparer.Ordinal);
+        foreach (var project in order)
+        {
+            var projectEntries = entriesByProject[project.Path];
+            var trees = projectEntries.Select(e => e.Tree).ToList();
+            SyntaxTree? globalUsingsTree = null;
+            if (project.GlobalUsings.Count > 0)
+            {
+                globalUsingsTree = CSharpSyntaxTree.ParseText(
+                    ProjectModel.GlobalUsingsSource(project.GlobalUsings),
+                    ParseOptions,
+                    path: ProjectModel.GlobalUsingsPath(project));
+                trees.Add(globalUsingsTree);
+            }
+
+            var projectReferences = references
+                .Concat(closure[project.Path].Select(path => (MetadataReference)built[path].ToMetadataReference()))
+                .ToList();
+            var compilation = CSharpCompilation.Create(
+                project.AssemblyName,
+                trees,
+                projectReferences,
+                CompilationOptionsFor(projectEntries));
+            built.Add(project.Path, compilation);
+            sets.Add(new CompilationSet(project.Path, compilation, projectEntries, globalUsingsTree));
+        }
+
+        if (looseEntries.Count > 0 || sets.Count == 0)
+        {
+            sets.Insert(0, new CompilationSet(
+                null,
+                CSharpCompilation.Create(
+                    ProjectModel.LooseAssemblyName,
+                    looseEntries.Select(e => e.Tree),
+                    references,
+                    CompilationOptionsFor(looseEntries)),
+                looseEntries,
+                null));
+        }
+
+        return sets;
+    }
+
+    /**
+     * Top-level statement içeren girdi yürütülebilir derlenmelidir (CS8805);
+     * aksi halde kütüphane çıktısı CS5001 uyarısı üretmez. Derived per
+     * compilation from its own sources → deterministic.
+     */
+    private static CSharpCompilationOptions CompilationOptionsFor(IReadOnlyList<SourceEntry> compilationEntries)
+    {
+        var hasTopLevelStatements = compilationEntries.Any(e =>
+            e.Tree.GetRoot() is CompilationUnitSyntax unit &&
+            unit.Members.OfType<GlobalStatementSyntax>().Any());
+        var outputKind = hasTopLevelStatements ? OutputKind.ConsoleApplication : OutputKind.DynamicallyLinkedLibrary;
+        return new CSharpCompilationOptions(outputKind, nullableContextOptions: NullableContextOptions.Enable);
     }
 
     /* ------------------------------------------------------------------ */
@@ -1440,17 +1565,26 @@ public static class WorkerAnalyzer
         return ns is { IsGlobalNamespace: false } ? $"{ns.ToDisplayString()}.{owner}" : owner;
     }
 
+    /**
+     * `Namespace.Type.Member` of a symbol outside the analysis set. TypeQualifiedName
+     * already carries the namespace, so it is not prefixed a second time (that
+     * produced names such as `System.System.Console.WriteLine`).
+     */
     private static string ExternalQualifiedName(ISymbol symbol)
     {
-        var ns = symbol.ContainingNamespace;
-        var nsPrefix = ns is { IsGlobalNamespace: false } ? $"{ns.ToDisplayString()}." : string.Empty;
-        return symbol switch
+        switch (symbol)
         {
-            IMethodSymbol method => $"{nsPrefix}{TypeQualifiedName(method.ContainingType)}.{method.OriginalDefinition.Name}",
-            IPropertySymbol property => $"{nsPrefix}{TypeQualifiedName(property.ContainingType)}.{property.OriginalDefinition.Name}",
-            INamedTypeSymbol type => $"{nsPrefix}{TypeQualifiedName(type)}",
-            _ => $"{nsPrefix}{symbol.Name}",
-        };
+            case IMethodSymbol method:
+                return $"{TypeQualifiedName(method.ContainingType)}.{method.OriginalDefinition.Name}";
+            case IPropertySymbol property:
+                return $"{TypeQualifiedName(property.ContainingType)}.{property.OriginalDefinition.Name}";
+            case INamedTypeSymbol type:
+                return TypeQualifiedName(type);
+            default:
+                var ns = symbol.ContainingNamespace;
+                var nsPrefix = ns is { IsGlobalNamespace: false } ? $"{ns.ToDisplayString()}." : string.Empty;
+                return $"{nsPrefix}{symbol.Name}";
+        }
     }
 
     /* ------------------------------------------------------------------ */

@@ -421,6 +421,79 @@ describe.skipIf(!workerReady)(
 );
 
 /* ------------------------------------------------------------------ */
+/* SDK-style project with implicit global usings (real worker)          */
+/* ------------------------------------------------------------------ */
+
+describe.skipIf(!workerReady)(
+  "IndexService.runIndexAsync — SDK-style project with ImplicitUsings (real Roslyn worker)",
+  () => {
+    const runnerSource = [
+      "namespace App;",
+      "",
+      "public static class Runner",
+      "{",
+      "    public static int Run()",
+      "    {",
+      "        Console.WriteLine(\"start\");",
+      "        Thread.Sleep(1);",
+      "        var items = new List<int>();",
+      "        items.Add(1);",
+      "        return items.Count;",
+      "    }",
+      "}",
+      "",
+    ].join("\n");
+    const csproj = (implicitUsings: string): string =>
+      '<Project Sdk="Microsoft.NET.Sdk">\n  <PropertyGroup>\n    <TargetFramework>net10.0</TargetFramework>\n' +
+      `    <ImplicitUsings>${implicitUsings}</ImplicitUsings>\n  </PropertyGroup>\n</Project>\n`;
+
+    async function indexProject(implicitUsings: string, workspaceId: string) {
+      const root = mkdtempSync(path.join(tmpdir(), "causoryn-implicit-usings-"));
+      try {
+        mkdirSync(path.join(root, "App"));
+        writeFileSync(path.join(root, "App", "App.csproj"), csproj(implicitUsings), "utf8");
+        writeFileSync(path.join(root, "App", "Runner.cs"), runnerSource, "utf8");
+        const service = makeService(new InMemoryGraphRepository(), root, undefined, workspaceId);
+        return await service.runIndexAsync(root);
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    }
+
+    beforeAll(() => {
+      if (!existsSync(WORKER_DLL)) {
+        const build = buildRoslynWorkerBinary();
+        if (build.status !== 0 || !existsSync(WORKER_DLL)) {
+          throw new Error(`worker build failed (exit=${String(build.status)})`);
+        }
+      }
+    }, 300_000);
+
+    it("ImplicitUsings enable: no false CS0246/CS0103, ready snapshot, verified BCL CALLS", async () => {
+      const run = await indexProject("enable", "implicit-usings-on");
+      expect(run.diagnostics.map((d) => d.code)).toEqual([]);
+      expect(run.snapshot.meta.state).toBe("ready");
+      const byId = new Map(run.snapshot.nodes.map((n) => [n.id, n]));
+      const consoleCall = run.snapshot.edges.find(
+        (e) =>
+          e.kind === "CALLS" &&
+          byId.get(e.from)?.qualifiedName === "App.Runner.Run" &&
+          byId.get(e.to)?.qualifiedName === "System.Console.WriteLine",
+      );
+      expect(consoleCall?.resolution).toBe("verified");
+    }, 300_000);
+
+    it("ImplicitUsings disable: the same sources keep their CS0246/CS0103 diagnostics", async () => {
+      const run = await indexProject("disable", "implicit-usings-off");
+      const codes = run.diagnostics.map((d) => d.code);
+      expect(codes).toContain("CS0103");
+      expect(codes).toContain("CS0246");
+      expect(run.snapshot.meta.state).toBe("partial");
+    }, 300_000);
+  },
+);
+
+/* ------------------------------------------------------------------ */
 /* Senkron köprü dürüstlüğü: runIndex .cs'i L0'da tutar                */
 /* ------------------------------------------------------------------ */
 
