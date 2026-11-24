@@ -1,46 +1,43 @@
-# fixture-contract-drift — Sözleşme Keşfi ve Drift Fixture'ı
+# fixture-contract-drift — Contract Discovery and Drift Fixture
 
-> Kanıt: TŞ v2.1 §11 (Architecture Contracts ve Contract Drift, s.11–12), §23 Faz D · wiki/sprint-5.md D1
+Fixture for contract discovery (`@causoryn/contracts`) and contract drift tests. It deliberately
+contains read-only discovery sources together with **backward-safe and breaking-candidate**
+material. The `db/` migrations are never executed; they are only read statically (Causoryn does
+not run migrations, because that would change the user's workspace).
 
-Sprint-5 Faz D diliminin sözleşme keşfi (`@causoryn/contracts`) ve drift
-testleri için fixture. TŞ §11'deki read-only keşif kaynaklarını bilinçli
-olarak **backward-safe ve breaking aday** malzemeleriyle birlikte taşır;
-`db/` migration'ları asla çalıştırılmaz, yalnızca statik okunur (TŞ §11:
-"Kullanıcının workspace'ini değiştirmek için migration çalıştırılmaz").
+## Files
 
-## Dosyalar
-
-| Dosya | İçerik | Keşif rolü |
+| File | Content | Discovery role |
 |---|---|---|
 | `openapi.yaml` | Orders Public API v1 (OpenAPI 3.1.0) | `POST /orders` + `GET /orders/{orderId}`; `CreateOrderInput` required `[amount, currency]`; `Order` required `[id, amount, currency]` |
-| `openapi-v2.yaml` | v2 hedef sürüm | **breaking_candidate malzemesi (TŞ §11: zorunlu property silinmesi):** yanıt şeması `Order`'dan zorunlu `currency` property'si tamamen silindi; **backward-safe malzemeleri:** istek şemasında `currency` zorunluluktan isteğe indirildi (required→optional; property korunur), optional `note` alanı + yeni `GET /orders` rotası |
-| `asyncapi.yaml` | Orders Events (AsyncAPI 2.6.0) | `order-created-v1` (publish) + `billing.invoice-created` (subscribe) topic'leri, payload şemaları |
-| `db/001_create_orders.sql` | `CREATE TABLE orders` (4 kolon) | SQL sözleşmesi; `INSERT INTO orders` repo ankrajıyla verified eşleşir |
-| `db/002_alter_orders.sql` | ADD/DROP/RENAME COLUMN | **breaking_candidate adayı:** `DROP COLUMN currency` (TŞ §11: DB kolon kaldırma → tüketici etkisi); RENAME tanıma dilimi |
-| `contracts/order-created.proto` | proto3 `OrderCreatedEvent` + `OrderCreatedAck` + `OrderEvents` rpc | **unknown serializer notu:** `map<string, string>` alanı sınırlı parser diliminin ötesinde → kısmen tanıma |
-| `schemas/order-created.schema.json` | JSON Schema 2020-12, `$defs/Money` + iç `$ref` | `$ref` yerel çözümleme; required `[orderId, amountMinor]` |
-| `src/services/orders-service.ts` | rota kayıtları + publish/subscribe ankrajları | verified route/topic eşleşmelerinin servis tarafı |
-| `src/repositories/order-repository.ts` | `INSERT INTO orders` | SQL sözleşmesiyle verified CONSUMES_CONTRACT (name-exact) |
-| `src/services/billing-service.ts` | `SELECT amount FROM ORDERS` | **name-similarity ankrajı:** büyük harf yazım → heuristic eşleşme (verified ASLA değil) |
+| `openapi-v2.yaml` | v2 target version | **breaking_candidate material (removal of a required property):** the required `currency` property is removed entirely from the `Order` response schema; **backward-safe material:** in the request schema `currency` changes from required to optional (required→optional; the property stays), plus an optional `note` field and a new `GET /orders` route |
+| `asyncapi.yaml` | Orders Events (AsyncAPI 2.6.0) | `order-created-v1` (publish) and `billing.invoice-created` (subscribe) topics with payload schemas |
+| `db/001_create_orders.sql` | `CREATE TABLE orders` (4 columns) | SQL contract; the repository anchor `INSERT INTO orders` matches it as `verified` |
+| `db/002_alter_orders.sql` | ADD / DROP / RENAME COLUMN | **breaking_candidate:** `DROP COLUMN currency` (removing a DB column affects consumers); the RENAME statement exercises rename recognition |
+| `contracts/order-created.proto` | proto3 `OrderCreatedEvent` + `OrderCreatedAck` + `OrderEvents` rpc | **unknown serializer note:** the `map<string, string>` field is beyond the bounded parser, so it is only partially recognized |
+| `schemas/order-created.schema.json` | JSON Schema 2020-12, `$defs/Money` + an internal `$ref` | local `$ref` resolution; required `[orderId, amountMinor]` |
+| `src/services/orders-service.ts` | route registrations + publish/subscribe anchors | service side of the `verified` route and topic matches |
+| `src/repositories/order-repository.ts` | `INSERT INTO orders` | `verified` `CONSUMES_CONTRACT` with the SQL contract (exact name) |
+| `src/services/billing-service.ts` | `SELECT amount FROM ORDERS` | **name-similarity anchor:** the upper-case spelling gives a `heuristic` match (NEVER `verified`) |
 
-## Keşif disiplini (TŞ §11)
+## Discovery discipline
 
-- produces/consumes edge'i **yalnızca** net isim, route veya schema kimliği
-  eşleşmesinde `verified`; isim benzerliği (case/separator normalize eşitlik)
-  `heuristic` kalır; daha zayıf eşleşme kenar üretmez.
-- Her aday kanıt taşır (dosya + satır aralığı); `verified` kenar kanıtsız
-  yayımlanmaz (ADR-004 Evidence First).
-- Keşif salt-okunurdur: WorkspaceAccessPolicy dışındaki dosya okunmaz;
-  migration çalıştırılmaz; spec parse'ı boyut/derinlik kotalarıyla sınırlıdır.
+- A produces/consumes edge is `verified` **only** for an exact name, route or schema identity
+  match; name similarity (case- or separator-normalized equality) stays `heuristic`; weaker
+  matches produce no edge.
+- Every candidate carries evidence (file + line range); a `verified` edge is never published
+  without evidence.
+- Discovery is read-only: no file outside the workspace access policy is read, migrations are
+  never run, and spec parsing is bounded by size and depth quotas.
 
-## Kullanım
+## Usage
 
-Fixture diskten salt-okunur okunur (`packages/contracts/test/`); drift
-karşılaştırma malzemesi (v1 ↔ v2 openapi, 001 ↔ 002 SQL) D2/D3 araçları
-için bilinçli olarak birlikte saklanır. Depoya test yazımı yapılmaz
-(ADR-008).
+The fixture is read from disk read-only by `packages/contracts/test/`. The drift comparison
+material (OpenAPI v1 ↔ v2, SQL 001 ↔ 002) is kept together on purpose for
+`causoryn_contracts` (`action: "check"` for compatibility, `action: "drift"` for drift impact).
+Nothing is written to the repository.
 
-## İlgili sayfalar
+## Related pages
 
-- wiki/architecture.md — graph sözleşmesi
-- wiki/sprint-5.md — Faz D görevleri
+- [MCP tool contracts](../../docs/en/tool-contracts.md) — `causoryn_contracts`
+- [Architecture overview](../../docs/en/architecture.md) — graph contract
