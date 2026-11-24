@@ -192,7 +192,7 @@ function contentIdentityOf(
   if (node === undefined) {
     throw new GraphRepositoryError(
       "compare/dangling-edge",
-      `Kenar ucu snapshot node'uyla eşleşmiyor (${edgeKind}): ${nodeId}`,
+      `Edge endpoint does not match any snapshot node (${edgeKind}): ${nodeId}`,
     );
   }
   return {
@@ -440,7 +440,7 @@ function resolveLimit(
   ) {
     throw new GraphRepositoryError(
       "timeline/invalid-limit",
-      `${name} tamsayı ve >= ${minimum} olmalı: ${String(requested)}`,
+      `${name} must be an integer >= ${minimum}: ${String(requested)}`,
     );
   }
   return Math.min(requested, ceiling);
@@ -462,13 +462,13 @@ export function selectSampledIndices(
   ) {
     throw new GraphRepositoryError(
       "timeline/invalid-limit",
-      `maxRevisions tamsayı ve >= ${MIN_MAX_REVISIONS} olmalı: ${String(maxRevisions)}`,
+      `maxRevisions must be an integer >= ${MIN_MAX_REVISIONS}: ${String(maxRevisions)}`,
     );
   }
   if (typeof count !== "number" || !Number.isInteger(count) || count < 0) {
     throw new GraphRepositoryError(
       "timeline/invalid-limit",
-      `count tamsayı ve >= 0 olmalı: ${String(count)}`,
+      `count must be an integer >= 0: ${String(count)}`,
     );
   }
   if (count <= maxRevisions) {
@@ -496,7 +496,7 @@ function assertPointContract(point: TimelinePointInput): void {
   ) {
     throw new GraphRepositoryError(
       "timeline/invalid-input",
-      `Nokta içeriği 'analyzed' veya 'unanalyzed' olmalı: ${point.ref}`,
+      `Point content status must be 'analyzed' or 'unanalyzed': ${point.ref}`,
     );
   }
   if (content.status === "analyzed") {
@@ -509,7 +509,7 @@ function assertPointContract(point: TimelinePointInput): void {
     if (shapeError !== null) {
       throw new GraphRepositoryError(
         "timeline/invalid-input",
-        `Analiz edilmiş nokta içerik sözleşmesi bozuk (${point.ref}): ${shapeError}`,
+        `Analyzed point content does not match the content contract (${point.ref}): ${shapeError}`,
       );
     }
     if (
@@ -518,7 +518,7 @@ function assertPointContract(point: TimelinePointInput): void {
     ) {
       throw new GraphRepositoryError(
         "timeline/invalid-input",
-        `Analiz edilmiş nokta trustWarning alanı varsa boş olmayan metin olmalı: ${point.ref}`,
+        `Analyzed point trustWarning, when present, must be a non-empty string: ${point.ref}`,
       );
     }
   } else if (
@@ -527,7 +527,7 @@ function assertPointContract(point: TimelinePointInput): void {
   ) {
     throw new GraphRepositoryError(
       "timeline/invalid-input",
-      `unanalyzed nokta neden (reason) metni taşımali: ${point.ref}`,
+      `Unanalyzed point must carry a reason string: ${point.ref}`,
     );
   }
 }
@@ -571,13 +571,13 @@ export function buildArchitectureTimeline(
   if (!Array.isArray(points)) {
     throw new GraphRepositoryError(
       "timeline/invalid-input",
-      "points bir dizi olmalı",
+      "points must be an array",
     );
   }
   if (points.length < MIN_MAX_REVISIONS) {
     throw new GraphRepositoryError(
       "timeline/insufficient-points",
-      `Zaman çizgisi en az ${MIN_MAX_REVISIONS} nokta gerektirir (${points.length} verildi)`,
+      `A timeline needs at least ${MIN_MAX_REVISIONS} points (${points.length} given)`,
     );
   }
   const seenRefs = new Set<string>();
@@ -586,7 +586,7 @@ export function buildArchitectureTimeline(
     if (seenRefs.has(point.ref)) {
       throw new GraphRepositoryError(
         "timeline/duplicate-ref",
-        `Ref iki kez verildi: ${point.ref}`,
+        `Ref was given more than once: ${point.ref}`,
       );
     }
     seenRefs.add(point.ref);
@@ -613,7 +613,7 @@ export function buildArchitectureTimeline(
     if (point === undefined) {
       throw new GraphRepositoryError(
         "timeline/invalid-input",
-        `Seçim indeksi nokta dizisi dışında: ${String(sourceIndex)}`,
+        `Selection index is outside the points array: ${String(sourceIndex)}`,
       );
     }
     const content = point.content;
@@ -873,7 +873,7 @@ function contentSetHash(contentSet: CompareContentSet): string {
     if (error instanceof DomainError) {
       throw new GraphRepositoryError(
         "compare/non-json-attribute",
-        `İçerik kümesi JSON'e serileştirilemiyor: ${error.message}`,
+        `Content set cannot be serialized to JSON: ${error.message}`,
       );
     }
     throw error;
@@ -895,7 +895,7 @@ function convertContentSetToSnapshotGraph(
   if (shapeError !== null) {
     throw new GraphRepositoryError(
       "timeline/trend-invalid-content",
-      `Trend içerik sözleşmesi bozuk: ${shapeError}`,
+      `Trend content does not match the content contract: ${shapeError}`,
     );
   }
   const nodeByKey = new Map<string, CompareNode>();
@@ -907,7 +907,7 @@ function convertContentSetToSnapshotGraph(
     if (nodeByKey.has(key)) {
       throw new GraphRepositoryError(
         "compare/duplicate-node",
-        `Aynı içerik kümesinde tekrarlanan node kimliği: ${key}`,
+        `Duplicate node identity in the same content set: ${key}`,
       );
     }
     nodeByKey.set(key, node);
@@ -941,13 +941,13 @@ function convertContentSetToSnapshotGraph(
     if (!EDGE_KIND_SET.has(edge.kind)) {
       throw new GraphRepositoryError(
         "compare/unknown-edge-kind",
-        `Bilinmeyen edge türü: ${String(edge.kind)}`,
+        `Unknown edge kind: ${String(edge.kind)}`,
       );
     }
     if (!RESOLUTION_SET.has(edge.resolution)) {
       throw new GraphRepositoryError(
         "compare/unknown-resolution",
-        `Bilinmeyen resolution değeri: ${String(edge.resolution)}`,
+        `Unknown resolution value: ${String(edge.resolution)}`,
       );
     }
     const fromKey = compareIdentityKey(edge.from);
@@ -955,7 +955,7 @@ function convertContentSetToSnapshotGraph(
     if (!nodeByKey.has(fromKey) || !nodeByKey.has(toKey)) {
       throw new GraphRepositoryError(
         "compare/dangling-edge",
-        `Kenar ucu kümedeki node ile eşleşmiyor (${edge.kind}): ${
+        `Edge endpoint does not match any node in the set (${edge.kind}): ${
           nodeByKey.has(fromKey) ? toKey : fromKey
         }`,
       );
@@ -966,7 +966,7 @@ function convertContentSetToSnapshotGraph(
     if (edgeKeys.has(edgeKey)) {
       throw new GraphRepositoryError(
         "compare/duplicate-edge",
-        `Aynı içerik kümesinde tekrarlanan kenar kimliği: ${edgeKey}`,
+        `Duplicate edge identity in the same content set: ${edgeKey}`,
       );
     }
     edgeKeys.add(edgeKey);
@@ -1185,13 +1185,13 @@ export function buildTimelineViolationTrend(
   if (!Array.isArray(points)) {
     throw new GraphRepositoryError(
       "timeline/trend-invalid-input",
-      "points bir dizi olmalı",
+      "points must be an array",
     );
   }
   if (points.length === 0) {
     throw new GraphRepositoryError(
       "timeline/trend-invalid-input",
-      "trend en az 1 nokta gerektirir (0 verildi)",
+      "a trend needs at least 1 point (0 given)",
     );
   }
   const seenRefs = new Set<string>();
@@ -1199,19 +1199,19 @@ export function buildTimelineViolationTrend(
     if (point === null || typeof point !== "object") {
       throw new GraphRepositoryError(
         "timeline/trend-invalid-input",
-        "her nokta bir nesne olmalı",
+        "every point must be an object",
       );
     }
     if (typeof point.ref !== "string" || point.ref.length === 0) {
       throw new GraphRepositoryError(
         "timeline/trend-invalid-input",
-        "nokta ref'i boş olmayan metin olmalı",
+        "point ref must be a non-empty string",
       );
     }
     if (seenRefs.has(point.ref)) {
       throw new GraphRepositoryError(
         "timeline/trend-invalid-input",
-        `Ref iki kez verildi: ${point.ref}`,
+        `Ref was given more than once: ${point.ref}`,
       );
     }
     seenRefs.add(point.ref);
@@ -1262,7 +1262,7 @@ function parseTagObjectTarget(rawTag: string): string {
   }
   throw new GraphRepositoryError(
     "timeline/invalid-range",
-    "Annotated tag nesnesinde geçerli 'object' başlığı yok",
+    "Annotated tag object has no valid 'object' header",
   );
 }
 
@@ -1293,7 +1293,7 @@ async function resolveCommitId(
       ) {
         throw new GraphRepositoryError(
           "compare/ref-not-found",
-          `Ref çözümlenemedi: ${ref}`,
+          `Ref could not be resolved: ${ref}`,
         );
       }
       throw error;
@@ -1306,12 +1306,12 @@ async function resolveCommitId(
     }
     throw new GraphRepositoryError(
       "timeline/invalid-range",
-      `Ref bir commit/tag değil (tür: ${type}): ${ref}`,
+      `Ref is not a commit or tag (type: ${type}): ${ref}`,
     );
   }
   throw new GraphRepositoryError(
     "timeline/invalid-range",
-    `Tag zinciri ${MAX_TAG_PEEL_DEPTH} derinliği aştı: ${ref}`,
+    `Tag chain exceeded depth ${MAX_TAG_PEEL_DEPTH}: ${ref}`,
   );
 }
 
@@ -1337,7 +1337,7 @@ async function resolveRangeCommitChain(
   if (from === to) {
     throw new GraphRepositoryError(
       "timeline/invalid-range",
-      `Aralık uçları aynı olamaz: ${from}`,
+      `Range endpoints must differ: ${from}`,
     );
   }
   const fromId = await resolveCommitId(repoRoot, from, options);
@@ -1352,7 +1352,7 @@ async function resolveRangeCommitChain(
     if (firstParent === undefined) {
       throw new GraphRepositoryError(
         "timeline/invalid-range",
-        `from ('${from}') — '${to}' ref'inin ilk-ebeveyn zincirinde bulunamadı (kök commit'e ulaşıldı)`,
+        `from ('${from}') was not found on the first-parent chain of '${to}' (reached the root commit)`,
       );
     }
     cursorId = firstParent;
@@ -1360,7 +1360,7 @@ async function resolveRangeCommitChain(
     if (chain.length > maxRangeWalk) {
       throw new GraphRepositoryError(
         "timeline/invalid-range",
-        `Geçmiş yürüyüşü maxRangeWalk=${maxRangeWalk} sınırını aştı; from ('${from}') bu sınır içinde bulunamadı`,
+        `History walk exceeded maxRangeWalk=${maxRangeWalk}; from ('${from}') was not found within that limit`,
       );
     }
     cursorRaw = await runGit(repoRoot, ["cat-file", "commit", cursorId], options);
@@ -1428,7 +1428,7 @@ export async function readTimelinePointFromGit(
   ) {
     throw new GraphRepositoryError(
       "timeline/invalid-input",
-      "snapshotLookup bir fonksiyon olmalı",
+      "snapshotLookup must be a function",
     );
   }
   if (
@@ -1437,7 +1437,7 @@ export async function readTimelinePointFromGit(
   ) {
     throw new GraphRepositoryError(
       "timeline/invalid-input",
-      "reconstructFromGitTree bir fonksiyon olmalı",
+      "reconstructFromGitTree must be a function",
     );
   }
 
@@ -1592,24 +1592,24 @@ export async function readTimelineTrendBaselineFromGit(
  */
 function describeManifestShapeError(parsed: unknown): string | null {
   if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
-    return "kök bir nesne olmalı";
+    return "root must be an object";
   }
   const record = parsed as Record<string, unknown>;
-  if (!Array.isArray(record.nodes)) return "nodes bir dizi değil";
-  if (!Array.isArray(record.edges)) return "edges bir dizi değil";
+  if (!Array.isArray(record.nodes)) return "nodes is not an array";
+  if (!Array.isArray(record.edges)) return "edges is not an array";
   for (const node of record.nodes) {
     if (node === null || typeof node !== "object" || Array.isArray(node)) {
-      return "node girişi bir nesne değil";
+      return "node entry is not an object";
     }
     const nodeRecord = node as Record<string, unknown>;
     if (typeof nodeRecord.kind !== "string" || nodeRecord.kind.length === 0) {
-      return "node 'kind' alanı boş olmayan metin olmalı";
+      return "node 'kind' must be a non-empty string";
     }
     if (
       typeof nodeRecord.qualifiedName !== "string" ||
       nodeRecord.qualifiedName.length === 0
     ) {
-      return "node 'qualifiedName' alanı boş olmayan metin olmalı";
+      return "node 'qualifiedName' must be a non-empty string";
     }
     // TŞ §19 (depo güvenilmez girdi): relativePath ve signature, compare'in
     // pathSegmentSet/tokenize katmanlarına .split/.replace ile girer; türü
@@ -1619,30 +1619,30 @@ function describeManifestShapeError(parsed: unknown): string | null {
       nodeRecord.relativePath !== undefined &&
       typeof nodeRecord.relativePath !== "string"
     ) {
-      return "node 'relativePath' alanı varsa metin olmalı";
+      return "node 'relativePath', when present, must be a string";
     }
     if (
       nodeRecord.signature !== undefined &&
       typeof nodeRecord.signature !== "string"
     ) {
-      return "node 'signature' alanı varsa metin olmalı";
+      return "node 'signature', when present, must be a string";
     }
   }
   for (const edge of record.edges) {
     if (edge === null || typeof edge !== "object" || Array.isArray(edge)) {
-      return "edge girişi bir nesne değil";
+      return "edge entry is not an object";
     }
     const edgeRecord = edge as Record<string, unknown>;
     if (typeof edgeRecord.kind !== "string" || edgeRecord.kind.length === 0) {
-      return "edge 'kind' alanı boş olmayan metin olmalı";
+      return "edge 'kind' must be a non-empty string";
     }
     if (typeof edgeRecord.resolution !== "string") {
-      return "edge 'resolution' alanı metin olmalı";
+      return "edge 'resolution' must be a string";
     }
     for (const side of ["from", "to"] as const) {
       const endpoint = edgeRecord[side];
       if (endpoint === null || typeof endpoint !== "object" || Array.isArray(endpoint)) {
-        return `edge '${side}' ucu bir nesne değil`;
+        return `edge '${side}' endpoint is not an object`;
       }
       const endpointRecord = endpoint as Record<string, unknown>;
       if (
@@ -1650,7 +1650,7 @@ function describeManifestShapeError(parsed: unknown): string | null {
         typeof endpointRecord.qualifiedName !== "string" ||
         endpointRecord.qualifiedName.length === 0
       ) {
-        return `edge '${side}' ucu kind/qualifiedName taşımali`;
+        return `edge '${side}' endpoint must carry kind and qualifiedName`;
       }
     }
   }
@@ -1678,7 +1678,7 @@ export async function buildArchitectureTimelineFromGit(
   if (!path.isAbsolute(repoRoot)) {
     throw new GraphRepositoryError(
       "compare/invalid-repo-root",
-      `repoRoot mutlak yol olmalı: ${repoRoot}`,
+      `repoRoot must be an absolute path: ${repoRoot}`,
     );
   }
   const hasRefs = input.refs !== undefined;
@@ -1686,7 +1686,7 @@ export async function buildArchitectureTimelineFromGit(
   if (hasRefs === hasRange) {
     throw new GraphRepositoryError(
       "timeline/invalid-input",
-      "refs veya range'ten tam olarak BİRİ verilmelidir",
+      "exactly one of refs or range must be given",
     );
   }
   if (
@@ -1695,7 +1695,7 @@ export async function buildArchitectureTimelineFromGit(
   ) {
     throw new GraphRepositoryError(
       "timeline/invalid-input",
-      "snapshotLookup bir fonksiyon olmalı",
+      "snapshotLookup must be a function",
     );
   }
   if (
@@ -1704,7 +1704,7 @@ export async function buildArchitectureTimelineFromGit(
   ) {
     throw new GraphRepositoryError(
       "timeline/invalid-input",
-      "reconstructFromGitTree bir fonksiyon olmalı",
+      "reconstructFromGitTree must be a function",
     );
   }
 
@@ -1729,7 +1729,7 @@ export async function buildArchitectureTimelineFromGit(
     if (refs.length < MIN_MAX_REVISIONS) {
       throw new GraphRepositoryError(
         "timeline/insufficient-points",
-        `Zaman çizgisi en az ${MIN_MAX_REVISIONS} ref gerektirir (${refs.length} verildi)`,
+        `A timeline needs at least ${MIN_MAX_REVISIONS} refs (${refs.length} given)`,
       );
     }
     const seen = new Set<string>();
@@ -1738,7 +1738,7 @@ export async function buildArchitectureTimelineFromGit(
       if (seen.has(ref)) {
         throw new GraphRepositoryError(
           "timeline/duplicate-ref",
-          `Ref iki kez verildi: ${ref}`,
+          `Ref was given more than once: ${ref}`,
         );
       }
       seen.add(ref);
@@ -1757,7 +1757,7 @@ export async function buildArchitectureTimelineFromGit(
     if (range === undefined) {
       throw new GraphRepositoryError(
         "timeline/invalid-input",
-        "range tanımsız olamaz",
+        "range must not be undefined",
       );
     }
     const chain = await resolveRangeCommitChain(
@@ -1770,7 +1770,7 @@ export async function buildArchitectureTimelineFromGit(
     if (chain.length < MIN_MAX_REVISIONS) {
       throw new GraphRepositoryError(
         "timeline/invalid-range",
-        `Aralık tek commit'e çözümlendi (from ve to aynı nesneyi gösteriyor): ` +
+        `Range resolved to a single commit (from and to point to the same object): ` +
           `${range.from}, ${range.to}`,
       );
     }
