@@ -39,7 +39,9 @@ Setup options:
   --tool-profile <list>  Write \`--tool-profile <list>\` into every generated \`causoryn mcp\`
                          entry: ${SETUP_TOOL_PROFILES.join(", ")}, or a comma list such as wiki,history.
                          Without it, an existing entry keeps its --tool-profile and
-                         --output-schema arguments; its env keys are always kept.
+                         --output-schema arguments. Setup owns only command, args and
+                         type; env and every other key of the entry are always kept,
+                         and a Codex startup_timeout_sec is kept unless it is below 30.
 `;
 
 function defaultCliIo(): CliIo {

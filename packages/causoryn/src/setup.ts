@@ -18,6 +18,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { insertMissingOwnedKeys } from "./owned-keys.js";
 import {
   getPersistentRuntimeDir,
   isEphemeralRuntimeDir,
@@ -35,6 +36,7 @@ import {
   HOST_CLIENT_IDS,
   SETUP_TOOL_PROFILES,
   type HostClientId,
+  type ParsedCodexMcpServer,
   type SetupAction,
   type SetupOptions,
   type SetupResult,
@@ -375,26 +377,51 @@ function buildMcpArgs(
 }
 
 /**
- * Reads the `env` object of an existing JSON Causoryn entry so a re-run keeps
- * it. Causoryn writes no env keys of its own, so every user key is kept as is.
- * A non-object `env` is rejected instead of being silently dropped.
+ * Keys of a Causoryn server entry that `causoryn setup` owns. Setup rewrites
+ * only these; every other key of an existing entry belongs to the user or the
+ * host (for example `disabled`, `autoApprove`, `alwaysAllow`, `timeout`, `env`
+ * or any unknown key) and is kept with its value and position.
+ *
+ * - JSON hosts: `command`, `args` and, for Claude Code and ZCode, `type`
+ *   (always "stdio"; Antigravity entries get no `type`, so a user-added one
+ *   is kept). In `args`, user-added `--tool-profile` / `--output-schema`
+ *   arguments are carried over (see {@link extractPreservedMcpArgs}). `env`
+ *   is not owned (Causoryn writes no env keys) but must be a JSON object.
+ * - Codex TOML `[mcp_servers.causoryn]`: `command`, `args` and
+ *   `startup_timeout_sec` (a user value of at least
+ *   {@link CODEX_MIN_STARTUP_TIMEOUT_SEC} is kept, a lower or unusable one is
+ *   replaced, and the setup output says so). The user's env keys (inline
+ *   `env = {...}`, dotted `env.KEY` or the env sub-table) are kept but always
+ *   written as the `[mcp_servers.causoryn.env]` sub-table. Other keys,
+ *   comments and `[mcp_servers.causoryn.*]` sub-tables are kept verbatim
+ *   (see `upsertCodexMcpServer`).
+ *
+ * Owned keys missing from an existing entry are inserted where a fresh entry
+ * would have them, so an up-to-date entry is byte-identical after a re-run.
  */
-function readExistingJsonEntryEnv(
-  existingEntry: unknown,
+const JSON_OWNED_ENTRY_KEYS_WITH_TYPE = ["type", "command", "args"] as const;
+const JSON_OWNED_ENTRY_KEYS_WITHOUT_TYPE = ["command", "args"] as const;
+
+/** Minimum Codex `startup_timeout_sec` setup accepts; a lower user value is raised to it. */
+const CODEX_MIN_STARTUP_TIMEOUT_SEC = 30;
+
+/**
+ * Validates the `env` of an existing JSON Causoryn entry: setup keeps it as
+ * is, and a non-object `env` is rejected instead of being silently kept or
+ * dropped.
+ */
+function assertExistingJsonEntryEnv(
+  existingEntry: Record<string, unknown>,
   fieldPath: string,
   targetPath: string,
-): Record<string, unknown> | undefined {
-  if (!isPlainObject(existingEntry) || existingEntry["env"] === undefined) {
-    return undefined;
-  }
+): void {
   const env = existingEntry["env"];
-  if (!isPlainObject(env)) {
+  if (env !== undefined && !isPlainObject(env)) {
     throw new CausorynCliError(
       "cli/malformed-json",
       `The "${fieldPath}.env" field must be a JSON object (${targetPath})`,
     );
   }
-  return { ...env };
 }
 
 function buildJsonCausorynEntry(params: {
@@ -407,19 +434,35 @@ function buildJsonCausorynEntry(params: {
   readonly fieldPath: string;
   readonly targetPath: string;
 }): Record<string, unknown> {
-  const existingArgs = isPlainObject(params.existingEntry)
-    ? params.existingEntry["args"]
-    : undefined;
-  const env = readExistingJsonEntryEnv(params.existingEntry, params.fieldPath, params.targetPath);
-  return {
-    ...(params.includeStdioType ? { type: "stdio" } : {}),
-    command: params.nodeExecutable,
-    args: buildMcpArgs(params.cliScriptPath, params.client, {
-      toolProfile: params.toolProfile,
-      preserved: extractPreservedMcpArgs(existingArgs),
-    }),
-    ...(env !== undefined ? { env } : {}),
-  };
+  const existing = isPlainObject(params.existingEntry) ? params.existingEntry : undefined;
+  if (existing !== undefined) {
+    assertExistingJsonEntryEnv(existing, params.fieldPath, params.targetPath);
+  }
+  const ownedKeys: readonly string[] = params.includeStdioType
+    ? JSON_OWNED_ENTRY_KEYS_WITH_TYPE
+    : JSON_OWNED_ENTRY_KEYS_WITHOUT_TYPE;
+  const ownedValues = new Map<string, unknown>([
+    ["type", "stdio"],
+    ["command", params.nodeExecutable],
+    [
+      "args",
+      buildMcpArgs(params.cliScriptPath, params.client, {
+        toolProfile: params.toolProfile,
+        preserved: extractPreservedMcpArgs(existing?.["args"]),
+      }),
+    ],
+  ]);
+  // Owned values are replaced in place; every other key is kept as is.
+  const entries = insertMissingOwnedKeys(
+    Object.entries(existing ?? {}).map(([key, value]): [string, unknown] =>
+      ownedKeys.includes(key) ? [key, ownedValues.get(key)] : [key, value],
+    ),
+    ([key]) => (ownedKeys.includes(key) ? key : null),
+    ownedKeys,
+    (key): [string, unknown] => [key, ownedValues.get(key)],
+  );
+  // Object.fromEntries defines own properties, so a "__proto__" key stays a key.
+  return Object.fromEntries(entries);
 }
 
 function planMcpServersJsonFile(params: {
@@ -783,16 +826,18 @@ function planCodexMcpConfig(params: {
     return;
   }
 
-  // Keep the user's --tool-profile / --output-schema arguments and env keys
-  // (inline `env = {...}`, dotted `env.KEY` or the env sub-table).
+  // Keep the user's --tool-profile / --output-schema arguments, env keys
+  // (inline `env = {...}`, dotted `env.KEY` or the env sub-table), a
+  // sufficient startup_timeout_sec and every key Causoryn does not own.
   const existingEntry = existed ? readCodexMcpServer(existingRaw) : null;
+  const timeout = resolveCodexStartupTimeout(existingEntry);
   const updated = upsertCodexMcpServer(existingRaw, {
     command: nodeExecutable,
     args: buildMcpArgs(cliScriptPath, "codex", {
       toolProfile,
       preserved: extractPreservedMcpArgs(existingEntry?.args),
     }),
-    startupTimeoutSec: 30,
+    startupTimeoutSec: timeout.seconds,
     ...(existingEntry !== null && Object.keys(existingEntry.env).length > 0
       ? { env: existingEntry.env }
       : {}),
@@ -817,8 +862,38 @@ function planCodexMcpConfig(params: {
     operation: existed ? "update" : "create",
     targetPath,
     backupPath: existed ? `${targetPath}.causoryn.backup` : null,
-    detail: "configured [mcp_servers.causoryn] (startup_timeout_sec = 30)",
+    detail: `configured [mcp_servers.causoryn] (${timeout.note})`,
   });
+}
+
+/**
+ * `startup_timeout_sec` written for Codex: the user's value when it is at
+ * least {@link CODEX_MIN_STARTUP_TIMEOUT_SEC}, otherwise the minimum. `note`
+ * tells the user what happened to their value.
+ */
+function resolveCodexStartupTimeout(existingEntry: ParsedCodexMcpServer | null): {
+  readonly seconds: number;
+  readonly note: string;
+} {
+  const minimum = CODEX_MIN_STARTUP_TIMEOUT_SEC;
+  const raw = existingEntry?.startupTimeoutSecRaw;
+  const userValue = existingEntry?.startupTimeoutSec ?? null;
+  if (userValue !== null && userValue >= minimum) {
+    return { seconds: userValue, note: `kept startup_timeout_sec = ${raw ?? String(userValue)}` };
+  }
+  if (userValue !== null) {
+    return {
+      seconds: minimum,
+      note: `raised startup_timeout_sec from ${raw ?? String(userValue)} to the required minimum of ${String(minimum)}`,
+    };
+  }
+  if (raw !== undefined) {
+    return {
+      seconds: minimum,
+      note: `replaced the unusable startup_timeout_sec value ${raw} with ${String(minimum)}`,
+    };
+  }
+  return { seconds: minimum, note: `startup_timeout_sec = ${String(minimum)}` };
 }
 
 function readSourceSkillFileSync(srcSkillFile: string): string {

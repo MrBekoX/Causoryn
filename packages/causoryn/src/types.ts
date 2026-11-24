@@ -51,6 +51,27 @@ export const SIDECAR_TOOLCHAIN_IDS: readonly SidecarToolchainId[] = [
   "cargo",
 ] as const;
 
+/**
+ * Python commands tried in order when no command is configured (POSIX:
+ * python3, then python; win32: python). Pinned copy of
+ * `PYTHON_COMMAND_CANDIDATES` from `@causoryn/adapter-python` (this package has
+ * no runtime dependency on it); `tests/python-command-candidates.test.ts`
+ * guards drift, so `causoryn doctor` probes the interpreter the Python adapter
+ * will start.
+ */
+export const PYTHON_COMMAND_CANDIDATES: {
+  readonly posix: readonly string[];
+  readonly win32: readonly string[];
+} = {
+  posix: ["python3", "python"],
+  win32: ["python"],
+};
+
+/** Default Python command candidates for `platform`, in the order they are tried. */
+export function pythonCommandCandidates(platform: NodeJS.Platform): readonly string[] {
+  return platform === "win32" ? PYTHON_COMMAND_CANDIDATES.win32 : PYTHON_COMMAND_CANDIDATES.posix;
+}
+
 export function isHostClientId(value: string): value is HostClientId {
   return (HOST_CLIENT_IDS as readonly string[]).includes(value);
 }
@@ -85,6 +106,7 @@ export class CausorynCliError extends Error {
 export interface CodexMcpServerSpec {
   readonly command: string;
   readonly args: readonly string[];
+  /** Value written for `startup_timeout_sec` (default 30); an existing line with this value is kept verbatim. */
   readonly startupTimeoutSec?: number | undefined;
   readonly env?: Readonly<Record<string, string>> | undefined;
 }
@@ -92,7 +114,10 @@ export interface CodexMcpServerSpec {
 export interface ParsedCodexMcpServer {
   readonly command: string;
   readonly args: readonly string[];
+  /** `startup_timeout_sec` as a number (TOML integer or float), or null when absent or unusable. */
   readonly startupTimeoutSec: number | null;
+  /** Raw TOML value text of `startup_timeout_sec`; undefined when the key is absent. */
+  readonly startupTimeoutSecRaw?: string | undefined;
   /**
    * Environment of the entry, merged from an inline `env = { ... }` table,
    * dotted `env.KEY = "..."` keys and the `[mcp_servers.causoryn.env]` sub-table.
