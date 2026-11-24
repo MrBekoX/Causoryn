@@ -101,12 +101,42 @@ type NodeRef struct {
 	RelativePath  string `json:"relativePath,omitempty"`
 }
 
+// NodeSpan — 1-based, inclusive declaration line range of a symbol node
+// (PROTOCOL.md "Node fields"). File, Endpoint and UnknownExternal nodes carry
+// none.
+type NodeSpan struct {
+	StartLine int `json:"startLine"`
+	EndLine   int `json:"endLine"`
+}
+
 type Node struct {
 	Kind          string         `json:"kind"`
 	QualifiedName string         `json:"qualifiedName"`
 	Language      string         `json:"language"`
 	RelativePath  string         `json:"relativePath,omitempty"`
+	Span          *NodeSpan      `json:"span,omitempty"`
 	Attributes    map[string]any `json:"attributes"`
+}
+
+// widenSpan — the smallest span covering both (nil-safe). A node declared more
+// than once (two `init` functions of one file) covers every declaration; the
+// result does not depend on the visit order.
+func widenSpan(current, next *NodeSpan) *NodeSpan {
+	if next == nil {
+		return current
+	}
+	if current == nil {
+		copied := *next
+		return &copied
+	}
+	widened := *current
+	if next.StartLine < widened.StartLine {
+		widened.StartLine = next.StartLine
+	}
+	if next.EndLine > widened.EndLine {
+		widened.EndLine = next.EndLine
+	}
+	return &widened
 }
 
 type Ambiguity struct {

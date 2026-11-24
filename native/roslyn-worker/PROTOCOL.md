@@ -198,9 +198,33 @@ Analiz tamamlandığında:
   "qualifiedName": "Causoryn.Fixture.Orders.Services.OrdersService",
   "language": "csharp",
   "relativePath": "Services/OrdersService.cs",
+  "span": { "startLine": 9, "endLine": 31 },
   "attributes": { "sourceHash": "...", "method": "GET", "path": "/api/Orders/{id}" }
 }
 ```
+
+- `span` — optional (protocol v1 stays compatible: clients ignore an unknown
+  field, and an older worker simply omits it). The 1-based, inclusive line
+  range of the declaration: Roslyn `SyntaxTree.GetLineSpan` of the
+  declaration syntax (`TypeDeclarationSyntax` / `EnumDeclarationSyntax` for
+  Class/Interface/Type, the method / constructor / property declaration for
+  Method, the top-level `LocalFunctionStatementSyntax` for Function). The range
+  is the node's `Span`: attribute lists are included, leading trivia such as
+  XML doc comments is not; it is the same range as the node's CONTAINS
+  `ast-span` evidence. A node that only appears as a resolved call target of
+  the analysis set (for example a local function declared inside a method,
+  which the declaration walk does not register) gets the span of the symbol's
+  own declaring syntax in its file, never the call site. A node declared more
+  than once in one file (method
+  overloads, two `partial` declarations of a type in the same file) gets the
+  smallest range that covers every declaration, so the result does not depend
+  on visit order. `partial` declarations in different files are different
+  nodes (the node key includes `relativePath`). File, Endpoint and
+  UnknownExternal nodes carry no `span`. The adapter
+  (`adapters/csharp-roslyn/src/node-span.ts`) accepts it only as positive
+  integers with `startLine <= endLine` inside the analyzed file and binds it to
+  that file's `relativePath` and source hash as the node `location`; anything
+  else is dropped with one warning and the node keeps its file anchor.
 
 - `kind` — TŞ §8 27-node kataloğuyla sınırlıdır; worker liste dışı kind
   üretemez (çıkış anında sert doğrulama). Kullanılanlar: `File`, `Class`,

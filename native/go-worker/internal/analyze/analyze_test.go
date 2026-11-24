@@ -270,3 +270,63 @@ func main() {
 		t.Fatalf("expected explicit ambiguity with >=2 candidates for colliding package dirs, got %+v", ambigCall)
 	}
 }
+
+func findNode(nodes []Node, kind, qname string) *Node {
+	for i := range nodes {
+		if nodes[i].Kind == kind && nodes[i].QualifiedName == qname {
+			return &nodes[i]
+		}
+	}
+	return nil
+}
+
+// Symbol nodes carry their 1-based declaration span (doc comments excluded);
+// a node declared twice is widened to cover both; File and UnknownExternal
+// nodes carry none.
+func TestSymbolNodesCarryDeclarationSpans(t *testing.T) {
+	content := "package billing\n" + // 1
+		"\n" + // 2
+		"// Total sums the items.\n" + // 3
+		"func Total(items []int) int {\n" + // 4
+		"\treturn len(items) + missing()\n" + // 5
+		"}\n" + // 6
+		"\n" + // 7
+		"type Ledger struct {\n" + // 8
+		"\tamount int\n" + // 9
+		"}\n" + // 10
+		"\n" + // 11
+		"func (l *Ledger) Record() {\n" + // 12
+		"\tl.amount = Total(nil)\n" + // 13
+		"}\n" + // 14
+		"\n" + // 15
+		"func init() {}\n" + // 16
+		"\n" + // 17
+		"func init() {\n" + // 18
+		"}\n" // 19
+	result := Analyze([]SourceFile{{RelativePath: "billing/ledger.go", SourceHash: "h", Content: content}}, 0)
+
+	expectations := []struct {
+		kind, qname        string
+		startLine, endLine int
+	}{
+		{"Function", "billing.Total", 4, 6},
+		{"Class", "billing.Ledger", 8, 10},
+		{"Method", "billing.Ledger.Record", 12, 14},
+		{"Function", "billing.init", 16, 19},
+	}
+	for _, want := range expectations {
+		node := findNode(result.Nodes, want.kind, want.qname)
+		if node == nil {
+			t.Fatalf("node %s %s not found: %+v", want.kind, want.qname, result.Nodes)
+		}
+		if node.Span == nil || node.Span.StartLine != want.startLine || node.Span.EndLine != want.endLine {
+			t.Fatalf("%s span = %+v, want %d-%d", want.qname, node.Span, want.startLine, want.endLine)
+		}
+	}
+	if file := findNode(result.Nodes, "File", "billing/ledger.go"); file == nil || file.Span != nil {
+		t.Fatalf("File node must carry no span: %+v", file)
+	}
+	if external := findNode(result.Nodes, "UnknownExternal", "missing"); external == nil || external.Span != nil {
+		t.Fatalf("UnknownExternal node must carry no span: %+v", external)
+	}
+}

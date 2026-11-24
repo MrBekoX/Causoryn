@@ -128,10 +128,23 @@ file and the result becomes `partial`.
   "qualifiedName": "services.NewOrdersService",
   "language": "go",
   "relativePath": "services/orders_service.go",
+  "span": { "startLine": 12, "endLine": 18 },
   "attributes": {}
 }
 ```
 
+- `span` — optional (protocol v1 stays compatible: clients ignore an unknown field, and an
+  older worker simply omits it). The 1-based, inclusive line range of the declaration, taken
+  from `go/ast` `Pos()`/`End()` through the request's `token.FileSet`: `FuncDecl` for Function
+  and Method nodes (from the `func` keyword to the closing brace; the doc comment is not part
+  of the declaration), `TypeSpec` for Class/Interface/Type nodes (from the type name to the
+  end of the type). It is the same range as the node's CONTAINS `ast-span` evidence. A node
+  declared more than once in one file (two `init` functions) gets the smallest range that
+  covers every declaration, so the result does not depend on visit order. File, Endpoint and
+  UnknownExternal nodes carry no `span`. The adapter (`adapters/go/src/node-span.ts`) accepts
+  the span only as positive integers with `startLine <= endLine` inside the analyzed file and
+  binds it to that file's `relativePath` and source hash as the node `location`; anything else
+  is dropped with one warning and the node keeps its file anchor.
 - `kind` — limited to the domain node catalog; the worker cannot emit other kinds. Used kinds:
   `File`, `Class` (struct), `Interface`, `Type` (other type declarations), `Function` (top-level
   func), `Method` (func with a receiver), `Endpoint`, `UnknownExternal`.

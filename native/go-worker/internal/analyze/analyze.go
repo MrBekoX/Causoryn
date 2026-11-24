@@ -537,10 +537,18 @@ func AnalyzeWithModules(files []SourceFile, moduleFiles []ModuleFile, maxNodes i
 	addNode := func(n Node) NodeRef {
 		ref := NodeRef{Kind: n.Kind, QualifiedName: n.QualifiedName, RelativePath: n.RelativePath}
 		key := nodeKey(ref)
-		if _, exists := nodeSet[key]; !exists {
+		if existing, exists := nodeSet[key]; !exists {
 			nodeSet[key] = n
+		} else if n.Span != nil {
+			existing.Span = widenSpan(existing.Span, n.Span)
+			nodeSet[key] = existing
 		}
 		return ref
+	}
+	// nodeSpan — 1-based lines of a declaration's Pos() and End() (the doc
+	// comment is outside the declaration node, so it is not included).
+	nodeSpan := func(from, to token.Pos) *NodeSpan {
+		return &NodeSpan{StartLine: fset.Position(from).Line, EndLine: fset.Position(to).Line}
 	}
 	fileRef := func(ctx *fileCtx) NodeRef {
 		return addNode(Node{
@@ -562,10 +570,10 @@ func AnalyzeWithModules(files []SourceFile, moduleFiles []ModuleFile, maxNodes i
 		if fi.recv != "" {
 			kind = "Method"
 		}
-		return addNode(Node{Kind: kind, QualifiedName: fi.qname, Language: "go", RelativePath: fi.file.relativePath, Attributes: map[string]any{}})
+		return addNode(Node{Kind: kind, QualifiedName: fi.qname, Language: "go", RelativePath: fi.file.relativePath, Span: nodeSpan(fi.decl.Pos(), fi.decl.End()), Attributes: map[string]any{}})
 	}
 	typeRef := func(ti *typeInfo) NodeRef {
-		return addNode(Node{Kind: ti.kind, QualifiedName: ti.qname, Language: "go", RelativePath: ti.file.relativePath, Attributes: map[string]any{}})
+		return addNode(Node{Kind: ti.kind, QualifiedName: ti.qname, Language: "go", RelativePath: ti.file.relativePath, Span: nodeSpan(ti.spec.Pos(), ti.spec.End()), Attributes: map[string]any{}})
 	}
 
 	declSpan := func(ctx *fileCtx, from, to token.Pos) *Span {

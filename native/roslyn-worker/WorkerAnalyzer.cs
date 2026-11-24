@@ -1040,7 +1040,7 @@ public static class WorkerAnalyzer
         string rationale)
     {
         var from = assembler.EnsureNode(fromNode.Kind, fromNode.QualifiedName, fromNode.RelativePath, null);
-        assembler.AddEdge("CONTAINS", from, toRecord, "verified",
+        assembler.AddEdge("CONTAINS", from, WithDeclarationSpan(toRecord, entry, declaration), "verified",
             SpanEvidence(entry, declaration, "ast-span", rationale), null);
     }
 
@@ -1523,7 +1523,7 @@ public static class WorkerAnalyzer
         }
 
         var relativePath = RelativePathOfDeclaration(context, symbol);
-        return context.Assembler.EnsureNode(kind, qualifiedName, relativePath, null);
+        return WithSymbolDeclarationSpan(context.Assembler.EnsureNode(kind, qualifiedName, relativePath, null), context.Entries, symbol, relativePath);
     }
 
     private static string? RelativePathOfDeclaration(CallContext context, ISymbol symbol)
@@ -2016,5 +2016,70 @@ public static class WorkerAnalyzer
             AnalyzerVersion = ProtocolConstants.AnalyzerVersion,
             Rationale = rationale,
         };
+    }
+
+    /* ------------------------------------------------------------------ */
+    /* Node spans (kept at the end of the file so cited line numbers above */
+    /* stay fixed)                                                         */
+    /* ------------------------------------------------------------------ */
+
+    /**
+     * Records the declaration line range on a symbol node (PROTOCOL.md "Node
+     * fields": optional `span`) and returns the record. It is the Roslyn
+     * `GetLineSpan` of the declaration syntax — the same range as the node's
+     * CONTAINS `ast-span` evidence (attribute lists included, leading trivia such
+     * as XML doc comments excluded). A node declared more than once in one file
+     * (method overloads, two `partial` declarations of a type) gets the smallest
+     * range that covers every declaration, so the result does not depend on
+     * visit order. Only declaration nodes reach this path (AddContains), so File,
+     * Endpoint and UnknownExternal nodes never carry a span.
+     */
+    private static NodeRecord WithDeclarationSpan(NodeRecord record, SourceEntry entry, SyntaxNode declaration)
+    {
+        var lineSpan = entry.Tree.GetLineSpan(declaration.Span);
+        var startLine = lineSpan.StartLinePosition.Line + 1;
+        var endLine = lineSpan.EndLinePosition.Line + 1;
+        var current = record.Node.Span;
+        record.Node.Span = current is null
+            ? new NodeSpanOut { StartLine = startLine, EndLine = endLine }
+            : new NodeSpanOut
+            {
+                StartLine = Math.Min(current.StartLine, startLine),
+                EndLine = Math.Max(current.EndLine, endLine),
+            };
+        return record;
+    }
+
+    /**
+     * Span of a node derived from a resolved call target (DeriveRecord): a symbol
+     * of the analysis set that the declaration walk does not register, such as a
+     * local function inside a method. The span is taken from the symbol's own
+     * declaring syntax in the node's file (every declaring reference in that
+     * file, widened), never from the call site. Symbols outside the analysis set
+     * (relativePath null → UnknownExternal) get none.
+     */
+    private static NodeRecord WithSymbolDeclarationSpan(
+        NodeRecord record,
+        IReadOnlyList<SourceEntry> entries,
+        ISymbol symbol,
+        string? relativePath)
+    {
+        if (relativePath is null || record.Node.RelativePath != relativePath)
+        {
+            return record;
+        }
+
+        foreach (var reference in symbol.DeclaringSyntaxReferences)
+        {
+            foreach (var entry in entries)
+            {
+                if (entry.RelativePath == relativePath && entry.Tree.Equals(reference.SyntaxTree))
+                {
+                    WithDeclarationSpan(record, entry, reference.GetSyntax());
+                }
+            }
+        }
+
+        return record;
     }
 }
