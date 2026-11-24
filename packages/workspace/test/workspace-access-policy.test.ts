@@ -600,7 +600,7 @@ describe("binary/boyut filtresi (TŞ §19, §20)", () => {
     expect(deniedMd.rule).toBe(".md");
     const deniedNoExt = denyOf(policy.checkFile(root, "README"));
     expect(deniedNoExt.code).toBe("workspace/path-denied");
-    expect(deniedNoExt.rule).toBe("(uzantısız)");
+    expect(deniedNoExt.rule).toBe("(no extension)");
     rmSync(root, { recursive: true, force: true });
   });
 

@@ -137,15 +137,15 @@ export const DEFAULT_MAX_FILE_BYTES = 2_000_000;
  */
 const extensionSchema = z
   .string()
-  .regex(/^\.(?:[A-Za-z0-9]+\.)*[A-Za-z0-9]+$/, "uzantı '.x' veya '.a.b' biçiminde olmalı")
+  .regex(/^\.(?:[A-Za-z0-9]+\.)*[A-Za-z0-9]+$/, "extension must have the form '.x' or '.a.b'")
   .transform((value) => value.toLowerCase());
 
 /** Null byte içeren herhangi bir yol/desen girdisi reddedilir (OWASP %00 bypass). */
 const noNullByte = (label: string) =>
   z
     .string()
-    .min(1, `${label} boş olamaz`)
-    .refine((value) => !value.includes("\0"), `${label} null byte içeremez`);
+    .min(1, `${label} must not be empty`)
+    .refine((value) => !value.includes("\0"), `${label} must not contain a null byte`);
 
 export const workspacePolicyConfigSchema = z.strictObject({
   /**
@@ -156,16 +156,16 @@ export const workspacePolicyConfigSchema = z.strictObject({
    */
   allowRoots: z
     .array(
-      noNullByte("allowRoot elemanı").refine(
+      noNullByte("allowRoot entry").refine(
         (value) => path.isAbsolute(value),
-        "allowRoot mutlak yol olmalıdır (göreli kök CWD'ye bağımlıdır)",
+        "allowRoot must be an absolute path (a relative root would depend on the CWD)",
       ),
     )
     .default([]),
   /** Default ignore listesi; verilmemişse TŞ §20 listesi kullanılır. */
-  ignore: z.array(noNullByte("ignore deseni")).default([...DEFAULT_IGNORE_PATTERNS]),
+  ignore: z.array(noNullByte("ignore pattern")).default([...DEFAULT_IGNORE_PATTERNS]),
   /** Kullanıcı ignore'ları default'ların/ignore'un ÜZERİNE eklenir (birleşim). */
-  extraIgnore: z.array(noNullByte("extraIgnore deseni")).default([]),
+  extraIgnore: z.array(noNullByte("extraIgnore pattern")).default([]),
   /** Binary uzantı kara listesi (blacklist modunda kullanılır). */
   binaryExtensions: z.array(extensionSchema).default([...DEFAULT_BINARY_EXTENSIONS]),
   /** Uzantı filtresi modu: blacklist (default) veya whitelist. */
@@ -175,9 +175,9 @@ export const workspacePolicyConfigSchema = z.strictObject({
   /** Tek dosya üst sınırı (bayt); aşımı LIMIT_EXCEEDED (TŞ §19 kaynak tüketimi). */
   maxFileBytes: z
     .number()
-    .int("maxFileBytes tam sayı olmalı")
-    .positive("maxFileBytes pozitif olmalı")
-    .max(Number.MAX_SAFE_INTEGER, "maxFileBytes güvenli tam sayı aralığında olmalı")
+    .int("maxFileBytes must be an integer")
+    .positive("maxFileBytes must be positive")
+    .max(Number.MAX_SAFE_INTEGER, "maxFileBytes must be within the safe integer range")
     .default(DEFAULT_MAX_FILE_BYTES),
 });
 
@@ -220,7 +220,7 @@ export function parseWorkspacePolicyConfig(input: unknown): ParsedPolicyConfig {
     return { ok: true, config: deepFreezeConfig(result.data) };
   }
   const issues = result.error.issues.map(
-    (issue) => `${issue.path.length > 0 ? issue.path.map(String).join(".") : "(kök)"}: ${issue.message}`,
+    (issue) => `${issue.path.length > 0 ? issue.path.map(String).join(".") : "(root)"}: ${issue.message}`,
   );
   return { ok: false, code: "workspace/policy-invalid", issues };
 }
