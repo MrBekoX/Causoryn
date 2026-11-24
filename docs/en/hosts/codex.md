@@ -53,7 +53,7 @@ npx causoryn@0.3.0 setup --client codex --uninstall --yes
 ```toml
 [mcp_servers.causoryn]
 command = "/path/to/node"
-args = ["/path/to/home/.causoryn/runtime/scripts/causoryn.mjs", "mcp", "--allow-cwd", "--auto-data-dir", "--client", "codex"]
+args = ["/home/you/.causoryn/runtime/scripts/causoryn.mjs", "mcp", "--allow-cwd", "--auto-data-dir", "--client", "codex"]
 startup_timeout_sec = 30
 ```
 
@@ -127,7 +127,7 @@ Profiles combine with commas (`wiki,history`). Precedence is `--tool-profile` > 
 # Either append the flag to the packaged entrypoint's args ...
 [mcp_servers.causoryn]
 command = "/path/to/node"
-args = ["/path/to/home/.causoryn/runtime/scripts/causoryn.mjs", "mcp", "--allow-cwd", "--auto-data-dir", "--client", "codex", "--tool-profile", "wiki,history"]
+args = ["/home/you/.causoryn/runtime/scripts/causoryn.mjs", "mcp", "--allow-cwd", "--auto-data-dir", "--client", "codex", "--tool-profile", "wiki,history"]
 startup_timeout_sec = 30
 
 # ... or set the environment variable (the only option for the monorepo bundle)
