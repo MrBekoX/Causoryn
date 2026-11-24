@@ -51,6 +51,27 @@ export const SIDECAR_TOOLCHAIN_IDS: readonly SidecarToolchainId[] = [
   "cargo",
 ] as const;
 
+/**
+ * Python commands tried in order when no command is configured (POSIX:
+ * python3, then python; win32: python). Pinned copy of
+ * `PYTHON_COMMAND_CANDIDATES` from `@causoryn/adapter-python` (this package has
+ * no runtime dependency on it); `tests/python-command-candidates.test.ts`
+ * guards drift, so `causoryn doctor` probes the interpreter the Python adapter
+ * will start.
+ */
+export const PYTHON_COMMAND_CANDIDATES: {
+  readonly posix: readonly string[];
+  readonly win32: readonly string[];
+} = {
+  posix: ["python3", "python"],
+  win32: ["python"],
+};
+
+/** Default Python command candidates for `platform`, in the order they are tried. */
+export function pythonCommandCandidates(platform: NodeJS.Platform): readonly string[] {
+  return platform === "win32" ? PYTHON_COMMAND_CANDIDATES.win32 : PYTHON_COMMAND_CANDIDATES.posix;
+}
+
 export function isHostClientId(value: string): value is HostClientId {
   return (HOST_CLIENT_IDS as readonly string[]).includes(value);
 }

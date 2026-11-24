@@ -1915,6 +1915,8 @@ export class IndexService {
     const pythonOptions = options.python ?? {};
     const envPythonScript = process.env["CAUSORYN_PYTHON_WORKER_SCRIPT"];
     this.pythonSettings = {
+      // DEFAULT_PYTHON_COMMAND selects the adapter's default resolution (python3, then
+      // python on POSIX; python on win32); an explicit pythonCommand is used as-is.
       pythonCommand: pythonOptions.pythonCommand ?? DEFAULT_PYTHON_COMMAND,
       requestTimeoutMs: pythonOptions.requestTimeoutMs ?? DEFAULT_PY_REQUEST_TIMEOUT_MS,
       workerScriptPath:

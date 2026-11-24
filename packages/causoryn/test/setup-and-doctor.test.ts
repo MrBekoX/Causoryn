@@ -52,7 +52,11 @@ const SUPPORTED_TOOLCHAIN_OUTPUT: Readonly<Record<string, string>> = {
   cargo: "cargo 1.100.0 (3acc79c0c 2026-11-05)",
 };
 
+/** `python3` is not installed here: on POSIX doctor tries python3 first, then python. */
 const supportedToolchainProbe: ToolchainProbeFn = (command) => {
+  if (command === "python3") {
+    return { available: false, version: null, detail: "ENOENT", failure: "not-found" };
+  }
   const output = SUPPORTED_TOOLCHAIN_OUTPUT[command];
   if (output === undefined) throw new Error(`unexpected toolchain probe: ${command}`);
   return { available: true, version: output, detail: "ok", output };
