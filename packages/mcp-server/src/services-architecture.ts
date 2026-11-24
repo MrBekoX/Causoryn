@@ -1150,6 +1150,7 @@ const TimelinePointSchema = z.strictObject({
   edgeCount: z.number().int().nonnegative().optional(),
   apiSurfaceNodeCount: z.number().int().nonnegative().optional(),
   unanalyzedReason: z.string().optional(),
+  trustWarning: z.string().optional(),
 });
 
 const TimelineChangesSchema = z.strictObject({
@@ -1278,6 +1279,7 @@ const ArchitectureTimelineSchema = z.strictObject({
   }),
   /** Sprint-6 E5: ihlal trendi (nokta başına C2 guard değerlendirmesi). */
   trend: TimelineViolationTrendSchema,
+  warnings: z.array(z.string()).optional(),
 });
 
 export const ArchitectureTimelineDataSchema = z.strictObject({
@@ -1337,7 +1339,7 @@ export async function architectureTimeline(
     snapshotId: null,
     status: "ok",
     coverage: null,
-    warnings: [],
+    warnings: [...timeline.warnings],
     data: {
       refs: input.refs === undefined ? null : [...input.refs],
       range: input.range === undefined ? null : { ...input.range },

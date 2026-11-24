@@ -1413,3 +1413,207 @@ describe("Wave 2A — TypeScript Incremental oldProgram Reuse Hook", { timeout: 
     expect(JSON.stringify(step4Inc.result)).toBe(JSON.stringify(step4Cold));
   });
 });
+
+describe("Post-v0.2.4 Remediation — TypeScript Anonymous CallSignature & Unresolved Callee Formatting", { timeout: 30_000 }, () => {
+  it("resolves anonymous CallSignature lib/external/workspace calls (String, Number, Boolean, expect, new External, handlers, clock, walk, resolve, close) without false unresolved edges", () => {
+    const tempRoot = mkdtempSync(path.join(os.tmpdir(), "causoryn-ts-callsig-"));
+    try {
+      mkdirSync(path.join(tempRoot, "node_modules", "fake-assert"), { recursive: true });
+      mkdirSync(path.join(tempRoot, "src"), { recursive: true });
+
+      writeFileSync(
+        path.join(tempRoot, "node_modules", "fake-assert", "package.json"),
+        JSON.stringify({ name: "fake-assert", version: "1.0.0", types: "./index.d.ts" }),
+        "utf8",
+      );
+      writeFileSync(
+        path.join(tempRoot, "node_modules", "fake-assert", "index.d.ts"),
+        [
+          "export interface Assertion {",
+          "  readonly toBe: (expected: unknown) => void;",
+          "}",
+          "export interface ExpectFn {",
+          "  (value: unknown): Assertion;",
+          "}",
+          "export declare const expect: ExpectFn;",
+          "export declare class ExternalMcpServer {",
+          "  constructor(name: string);",
+          "  registerTool(name: string): void;",
+          "}",
+          "",
+        ].join("\n"),
+        "utf8",
+      );
+
+      const depsSource = [
+        "export interface ClockDeps {",
+        "  readonly clock: () => string;",
+        "}",
+        "export const topLevelHandler = (v: number): string => String(v);",
+        "export function makePair(): { close: () => void } {",
+        "  return { close: () => {} };",
+        "}",
+        "",
+      ].join("\n");
+
+      const runnerSource = [
+        'import { expect, ExternalMcpServer } from "fake-assert";',
+        'import { type ClockDeps, makePair, topLevelHandler } from "./deps.js";',
+        "",
+        "export class Runner {",
+        "  private readonly clock: () => string;",
+        "  constructor(deps: ClockDeps) {",
+        "    this.clock = deps.clock;",
+        "  }",
+        "  async run(input: unknown, deps: ClockDeps): Promise<number> {",
+        "    const text = String(input);",
+        "    const num = Number(text);",
+        "    const flag = Boolean(num);",
+        "    const label = topLevelHandler(num);",
+        "    const nowA = this.clock();",
+        "    const nowB = deps.clock();",
+        "    const walk = (n: number): number => (n > 0 ? walk(n - 1) : 0);",
+        "    const walked = walk(2);",
+        "    const pair = makePair();",
+        "    pair.close();",
+        "    const srv = new ExternalMcpServer(label);",
+        '    srv.registerTool("demo");',
+        "    expect(flag).toBe(true);",
+        "    const resolved = await new Promise<number>((resolve) => {",
+        "      resolve(walked + nowA.length + nowB.length);",
+        "    });",
+        "    return resolved;",
+        "  }",
+        "}",
+        "",
+      ].join("\n");
+
+      const result = analyzeTypeScriptProgram({
+        workspaceId: "ws_callsig_fix",
+        rootDir: tempRoot,
+        configFiles: [],
+        sources: [
+          { relativePath: "src/deps.ts", content: depsSource },
+          { relativePath: "src/runner.ts", content: runnerSource },
+        ],
+      });
+
+      expect(result.diagnostics).toEqual([]);
+      expect(result.state).toBe("ready");
+
+      // Zero unresolved CALLS edges for any resolved lib, external, or workspace callable!
+      const unresolvedCalls = result.edges.filter(
+        (e) => e.kind === "CALLS" && e.resolution === "unresolved",
+      );
+      expect(unresolvedCalls).toEqual([]);
+
+      // Lib built-ins resolve cleanly as verified UnknownExternal with clean names (not StringConstructor.String)
+      for (const libName of ["String", "Number", "Boolean"]) {
+        const edge = findEdge(result.edges, "CALLS", "Runner.run", libName);
+        expect(edge, `expected verified CALLS edge to ${libName}`).toBeDefined();
+        expect(edge?.resolution).toBe("verified");
+        expect(edge?.to.kind).toBe("UnknownExternal");
+      }
+
+      // External node_modules imported callables (anonymous CallSignature, PropertySignature, new External)
+      const expectEdge = findEdge(result.edges, "CALLS", "Runner.run", "expect");
+      expect(expectEdge?.resolution).toBe("verified");
+      expect(expectEdge?.to.kind).toBe("UnknownExternal");
+
+      const toBeEdge = findEdge(result.edges, "CALLS", "Runner.run", "Assertion.toBe");
+      expect(toBeEdge?.resolution).toBe("verified");
+      expect(toBeEdge?.to.kind).toBe("UnknownExternal");
+
+      const serverNewEdge = findEdge(result.edges, "CALLS", "Runner.run", "ExternalMcpServer");
+      expect(serverNewEdge?.resolution).toBe("verified");
+      expect(serverNewEdge?.to.kind).toBe("UnknownExternal");
+
+      const registerToolEdge = findEdge(
+        result.edges,
+        "CALLS",
+        "Runner.run",
+        "ExternalMcpServer.registerTool",
+      );
+      expect(registerToolEdge?.resolution).toBe("verified");
+      expect(registerToolEdge?.to.kind).toBe("UnknownExternal");
+
+      // Workspace-internal top-level Handler and callable interface/class properties resolve as verified workspace nodes
+      const handlerEdge = findEdge(result.edges, "CALLS", "Runner.run", "topLevelHandler");
+      expect(handlerEdge?.resolution).toBe("verified");
+      expect(handlerEdge?.to.kind).toBe("Handler");
+
+      const depsClockEdge = findEdge(result.edges, "CALLS", "Runner.run", "ClockDeps.clock");
+      expect(depsClockEdge?.resolution).toBe("verified");
+      expect(depsClockEdge?.to.kind).toBe("Method");
+
+      const thisClockEdge = findEdge(result.edges, "CALLS", "Runner.run", "Runner.clock");
+      expect(thisClockEdge?.resolution).toBe("verified");
+      expect(thisClockEdge?.to.kind).toBe("Method");
+
+      // Local arrow helper (walk) resolves to its existing Handler node (not UnknownExternal);
+      // callback parameter (resolve) and object-literal property (pair.close) emit zero UnknownExternal nodes
+      const walkEdge = findEdge(result.edges, "CALLS", "Runner.run", "walk");
+      expect(walkEdge?.resolution).toBe("verified");
+      expect(walkEdge?.to.kind).toBe("Handler");
+      expect(result.nodes.some((n) => n.kind === "UnknownExternal" && n.qualifiedName === "walk")).toBe(false);
+      expect(result.nodes.some((n) => n.qualifiedName === "resolve")).toBe(false);
+      expect(result.nodes.some((n) => n.qualifiedName === "pair.close")).toBe(false);
+    } finally {
+      rmSync(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps genuinely unresolved calls honest (unresolved) and collapses multi-line chained call arguments cleanly (<= 120 chars)", () => {
+    const virtualRoot = path.resolve(os.tmpdir(), "causoryn-ts-unresolved-fmt");
+    const longChain = Array.from({ length: 20 }, (_, i) => `veryLongSegmentName${String(i)}`).join(".");
+    const result = analyzeTypeScriptProgram({
+      workspaceId: "ws_unres_fmt",
+      rootDir: virtualRoot,
+      configFiles: [],
+      sources: [
+        {
+          relativePath: "src/broken.ts",
+          content: [
+            'import { missingFn } from "./does-not-exist.js";',
+            "export function check(hitSymbols: readonly string[], dyn: any): void {",
+            "  missingFn();",
+            "  dyn.run();",
+            "  undeclaredExpect(",
+            '    hitSymbols.some((s) => s.startsWith("createCausorynMcpServer") && s.length > 0),',
+            "  ).not.toBe(false);",
+            `  ${longChain}();`,
+            "}",
+            "",
+          ].join("\n"),
+        },
+      ],
+    });
+
+    // Unresolved import call and `any`-typed call remain honestly unresolved
+    const missingCall = findEdge(result.edges, "CALLS", "check", "missingFn");
+    expect(missingCall?.resolution).toBe("unresolved");
+    expect(missingCall?.to.kind).toBe("UnknownExternal");
+
+    const anyCall = findEdge(result.edges, "CALLS", "check", "dyn.run");
+    expect(anyCall?.resolution).toBe("unresolved");
+    expect(anyCall?.to.kind).toBe("UnknownExternal");
+
+    // Multi-line chained call arguments collapsed cleanly to `undeclaredExpect().not.toBe` (no newlines, no dumped args!)
+    const chainedCall = findEdge(result.edges, "CALLS", "check", "undeclaredExpect().not.toBe");
+    expect(chainedCall).toBeDefined();
+    expect(chainedCall?.resolution).toBe("unresolved");
+    expect(chainedCall?.to.kind).toBe("UnknownExternal");
+
+    // Every unresolved UnknownExternal CALLS target is single-line and <= 120 chars
+    const allUnresolvedCallTargets = result.edges
+      .filter((e) => e.kind === "CALLS" && e.resolution === "unresolved")
+      .map((e) => e.to.qualifiedName);
+    expect(allUnresolvedCallTargets.length).toBeGreaterThanOrEqual(4);
+    for (const targetName of allUnresolvedCallTargets) {
+      expect(targetName).not.toContain("\n");
+      expect(targetName).not.toContain("\r");
+      expect(targetName).not.toContain("hitSymbols.some");
+      expect(targetName.length).toBeLessThanOrEqual(120);
+    }
+  });
+});

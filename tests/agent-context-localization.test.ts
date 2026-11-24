@@ -617,3 +617,282 @@ describe("Wave 2 Track 2B — LocAgent localization, CHA impact, & multi-error a
     expect(err.message).toContain("ev:broken-evidence-4");
   });
 });
+
+describe("Post-v0.2.4 Remediation — LocAgent Production-Source Priority & 1-Hop UnknownExternal Reverse-Caller Propagation", () => {
+  /**
+   * Mirrors the live benchmark topology on the Causoryn monorepo where:
+   * - `packages/mcp-server/src/server.ts` declares `createCausorynMcpServer` (NO local `registerTool` symbol!),
+   *   which calls `UnknownExternal("McpServer.registerTool")` via a verified `CALLS` edge.
+   * - Multiple test files & `Test` nodes literally match ALL 3 query concepts ("mcp", "tool", "register").
+   * - A production file `packages/preflight/src/test-plan.ts` contains "test" in its stem without being a test file.
+   */
+  function buildLiveBenchmarkLikeSnapshot(): SnapshotGraph {
+    const wsNode: SnapshotNodeInput = { kind: "Workspace", qualifiedName: WS };
+    const serverFile: SnapshotNodeInput = {
+      kind: "File",
+      qualifiedName: "packages/mcp-server/src/server.ts",
+      relativePath: "packages/mcp-server/src/server.ts",
+      location: span("packages/mcp-server/src/server.ts", 1, 1250),
+      language: "typescript",
+    };
+    const createServerFn: SnapshotNodeInput = {
+      kind: "Function",
+      qualifiedName: "createCausorynMcpServer",
+      relativePath: "packages/mcp-server/src/server.ts",
+      location: span("packages/mcp-server/src/server.ts", 1080, 1250),
+      language: "typescript",
+    };
+    const externalRegisterTool: SnapshotNodeInput = {
+      kind: "UnknownExternal",
+      qualifiedName: "McpServer.registerTool",
+    };
+
+    // High-overlap test files & Test nodes that previously hijacked ranks #1, #2, #4, #5
+    const testFile1: SnapshotNodeInput = {
+      kind: "File",
+      qualifiedName: "packages/mcp-server/test/mcp-tools-register.test.ts",
+      relativePath: "packages/mcp-server/test/mcp-tools-register.test.ts",
+      location: span("packages/mcp-server/test/mcp-tools-register.test.ts", 1, 90),
+      language: "typescript",
+    };
+    const testNode1: SnapshotNodeInput = {
+      kind: "Test",
+      qualifiedName: "MCP tools > registers all core tools",
+      relativePath: "packages/mcp-server/test/mcp-tools-register.test.ts",
+      location: span("packages/mcp-server/test/mcp-tools-register.test.ts", 10, 40),
+      language: "typescript",
+    };
+    const testFile2: SnapshotNodeInput = {
+      kind: "File",
+      qualifiedName: "tests/mcp-tool-registration.test.ts",
+      relativePath: "tests/mcp-tool-registration.test.ts",
+      location: span("tests/mcp-tool-registration.test.ts", 1, 70),
+      language: "typescript",
+    };
+    const testNode2: SnapshotNodeInput = {
+      kind: "Test",
+      qualifiedName: "registers MCP tools cleanly",
+      relativePath: "tests/mcp-tool-registration.test.ts",
+      location: span("tests/mcp-tool-registration.test.ts", 8, 30),
+      language: "typescript",
+    };
+    const specFile: SnapshotNodeInput = {
+      kind: "File",
+      qualifiedName: "src/mcp-tools-register.spec.ts",
+      relativePath: "src/mcp-tools-register.spec.ts",
+      location: span("src/mcp-tools-register.spec.ts", 1, 50),
+      language: "typescript",
+    };
+
+    // Production file whose name starts with "test-" (NOT a test file!)
+    const prodTestPlanFile: SnapshotNodeInput = {
+      kind: "File",
+      qualifiedName: "packages/preflight/src/test-plan.ts",
+      relativePath: "packages/preflight/src/test-plan.ts",
+      location: span("packages/preflight/src/test-plan.ts", 1, 300),
+      language: "typescript",
+    };
+    const derivePlanFn: SnapshotNodeInput = {
+      kind: "Function",
+      qualifiedName: "deriveExecutionPlan",
+      relativePath: "packages/preflight/src/test-plan.ts",
+      location: span("packages/preflight/src/test-plan.ts", 40, 120),
+      language: "typescript",
+    };
+    const testPlanTestFile: SnapshotNodeInput = {
+      kind: "File",
+      qualifiedName: "packages/preflight/test/execution-plan.test.ts",
+      relativePath: "packages/preflight/test/execution-plan.test.ts",
+      location: span("packages/preflight/test/execution-plan.test.ts", 1, 80),
+      language: "typescript",
+    };
+    const testPlanTestFn: SnapshotNodeInput = {
+      kind: "Function",
+      qualifiedName: "deriveExecutionPlanHelper",
+      relativePath: "packages/preflight/test/execution-plan.test.ts",
+      location: span("packages/preflight/test/execution-plan.test.ts", 5, 25),
+      language: "typescript",
+    };
+
+    const nodes: SnapshotNodeInput[] = [
+      wsNode,
+      serverFile,
+      createServerFn,
+      externalRegisterTool,
+      testFile1,
+      testNode1,
+      testFile2,
+      testNode2,
+      specFile,
+      prodTestPlanFile,
+      derivePlanFn,
+      testPlanTestFile,
+      testPlanTestFn,
+    ];
+
+    const edges: SnapshotEdgeInput[] = [
+      {
+        kind: "CONTAINS",
+        from: wsNode,
+        to: serverFile,
+        resolution: "verified",
+        evidence: [ev("packages/mcp-server/src/server.ts", "ws contains server.ts")],
+      },
+      {
+        kind: "CONTAINS",
+        from: wsNode,
+        to: testFile1,
+        resolution: "verified",
+        evidence: [ev("packages/mcp-server/test/mcp-tools-register.test.ts", "ws contains testFile1")],
+      },
+      {
+        kind: "CONTAINS",
+        from: wsNode,
+        to: testFile2,
+        resolution: "verified",
+        evidence: [ev("tests/mcp-tool-registration.test.ts", "ws contains testFile2")],
+      },
+      {
+        kind: "CONTAINS",
+        from: serverFile,
+        to: createServerFn,
+        resolution: "verified",
+        evidence: [ev("packages/mcp-server/src/server.ts", "server.ts declares createCausorynMcpServer", 1080)],
+      },
+      {
+        kind: "CALLS",
+        from: createServerFn,
+        to: externalRegisterTool,
+        resolution: "verified",
+        evidence: [ev("packages/mcp-server/src/server.ts", "createCausorynMcpServer calls McpServer.registerTool", 1111)],
+      },
+      {
+        kind: "CONTAINS",
+        from: testFile1,
+        to: testNode1,
+        resolution: "verified",
+        evidence: [ev("packages/mcp-server/test/mcp-tools-register.test.ts", "contains testNode1", 10)],
+      },
+      {
+        kind: "CONTAINS",
+        from: testFile2,
+        to: testNode2,
+        resolution: "verified",
+        evidence: [ev("tests/mcp-tool-registration.test.ts", "contains testNode2", 8)],
+      },
+      {
+        kind: "CALLS",
+        from: testNode1,
+        to: externalRegisterTool,
+        resolution: "verified",
+        evidence: [ev("packages/mcp-server/test/mcp-tools-register.test.ts", "testNode1 calls registerTool", 20)],
+      },
+      {
+        kind: "CONTAINS",
+        from: prodTestPlanFile,
+        to: derivePlanFn,
+        resolution: "verified",
+        evidence: [ev("packages/preflight/src/test-plan.ts", "contains deriveExecutionPlan", 40)],
+      },
+      {
+        kind: "CONTAINS",
+        from: testPlanTestFile,
+        to: testPlanTestFn,
+        resolution: "verified",
+        evidence: [ev("packages/preflight/test/execution-plan.test.ts", "contains helper", 5)],
+      },
+    ];
+
+    return createSnapshot({
+      workspaceId: WS,
+      revision: { id: "rev-loc-prod-priority", sequence: 1 },
+      configHash: "cfg-loc-prod",
+      analyzerFingerprint: "fp-loc-prod",
+      state: "ready",
+      createdAt: CREATED_AT,
+      nodes,
+      edges,
+    });
+  }
+
+  it("propagates matched UnknownExternal concepts 1-hop backward to production callers & containing File, outranking test files and UnknownExternal placeholders", () => {
+    const snap = buildLiveBenchmarkLikeSnapshot();
+    const res = generateAgentContext(snap, {
+      task: "Where are MCP tools registered?",
+      tokenBudget: 4096,
+    });
+
+    const top2 = res.contextItems.slice(0, 2);
+    expect(top2.length).toBe(2);
+    // Both #1 and #2 must come from packages/mcp-server/src/server.ts (createCausorynMcpServer & server.ts)
+    expect(top2.map((i) => i.qualifiedName)).toEqual([
+      "createCausorynMcpServer",
+      "packages/mcp-server/src/server.ts",
+    ]);
+    expect(top2[0]?.relativePath).toBe("packages/mcp-server/src/server.ts");
+    expect(top2[1]?.relativePath).toBe("packages/mcp-server/src/server.ts");
+
+    // Production caller & server.ts must strictly outrank all test files, Test nodes, and UnknownExternal("McpServer.registerTool")
+    const names = res.contextItems.map((i) => i.qualifiedName);
+    const serverFnIdx = names.indexOf("createCausorynMcpServer");
+    const serverFileIdx = names.indexOf("packages/mcp-server/src/server.ts");
+    const extIdx = names.indexOf("McpServer.registerTool");
+    const test1Idx = names.indexOf("packages/mcp-server/test/mcp-tools-register.test.ts");
+    const test2Idx = names.indexOf("tests/mcp-tool-registration.test.ts");
+    expect(serverFnIdx).toBe(0);
+    expect(serverFileIdx).toBe(1);
+    expect(extIdx).toBeGreaterThan(serverFileIdx);
+    expect(test1Idx).toBeGreaterThan(serverFileIdx);
+    expect(test2Idx).toBeGreaterThan(serverFileIdx);
+
+    // Same guarantee with SymbolSearchStore attached
+    const withStore = generateAgentContext(snap, {
+      task: "Where are MCP tools registered?",
+      tokenBudget: 4096,
+      symbolSearch: makePhraseSymbolStore(snap),
+    });
+    expect(withStore.contextItems[0]?.relativePath).toBe("packages/mcp-server/src/server.ts");
+    expect(withStore.contextItems[1]?.relativePath).toBe("packages/mcp-server/src/server.ts");
+
+    // Byte-deterministic regardless of snapshot.nodes / snapshot.edges ordering
+    const reversedSnap: SnapshotGraph = {
+      ...snap,
+      nodes: [...snap.nodes].reverse(),
+      edges: [...snap.edges].reverse(),
+    };
+    expect(
+      JSON.stringify(
+        generateAgentContext(reversedSnap, {
+          task: "Where are MCP tools registered?",
+          tokenBudget: 4096,
+        }),
+      ),
+    ).toBe(JSON.stringify(res));
+  });
+
+  it("does NOT penalize test files when the query explicitly asks about tests, and does NOT misclassify production src/test-plan.ts as a test file", () => {
+    const snap = buildLiveBenchmarkLikeSnapshot();
+
+    // 1) Explicit test-intent query ("tests") keeps test files at full 1.0 priority
+    const testQuery = generateAgentContext(snap, {
+      task: "Where are MCP tools registration tests?",
+      tokenBudget: 4096,
+    });
+    const top3TestQuery = testQuery.contextItems.slice(0, 3);
+    expect(
+      top3TestQuery.some(
+        (item) =>
+          item.relativePath === "packages/mcp-server/test/mcp-tools-register.test.ts" ||
+          item.relativePath === "tests/mcp-tool-registration.test.ts",
+      ),
+    ).toBe(true);
+
+    // 2) Production file `packages/preflight/src/test-plan.ts` gets full 1.0 priority over `packages/preflight/test/execution-plan.test.ts`
+    const planQuery = generateAgentContext(snap, {
+      task: "derive execution plan",
+      tokenBudget: 4096,
+    });
+    expect(planQuery.contextItems[0]?.qualifiedName).toBe("deriveExecutionPlan");
+    expect(planQuery.contextItems[0]?.relativePath).toBe("packages/preflight/src/test-plan.ts");
+  });
+});

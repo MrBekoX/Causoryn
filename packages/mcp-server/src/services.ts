@@ -13,6 +13,7 @@ import {
   type GuardFinding,
   type SnapshotRead,
   type SymbolSearchStore,
+  type WorkspaceSummaryMeta,
 } from "@causoryn/graph";
 import {
   EDGE_KINDS,
@@ -300,12 +301,12 @@ export function coverageOf(snapshot: SnapshotGraph): Coverage {
 }
 
 /** stale/partial uyarıları (envelope.warnings; TŞ §9 eski snapshot servisi). */
-export function staleWarningOf(read: SnapshotRead): string[] {
+function staleWarningFromState(state: string, stale: boolean): string[] {
   const warnings: string[] = [];
-  if (read.stale) {
+  if (stale) {
     warnings.push("yayınlanmış snapshot bayat (stale=true); yeniden indeksleme önerilir");
   }
-  if (read.snapshot.meta.state === "partial") {
+  if (state === "partial") {
     warnings.push(
       "snapshot partial durumda; coverage eksik olabilir (boş kaynak, parse tanıları veya kapsam dışı dosyalar)",
     );
@@ -314,8 +315,81 @@ export function staleWarningOf(read: SnapshotRead): string[] {
 }
 
 /** Envelope status çözümü: snapshot meta.state partial ise "partial". */
+function envelopeStatusFromState(state: string): "ok" | "partial" {
+  return state === "partial" ? "partial" : "ok";
+}
+
+function compareLanguageOrder(a: string, b: string): number {
+  const rankA = ADAPTER_LANGUAGE_ORDER.get(a);
+  const rankB = ADAPTER_LANGUAGE_ORDER.get(b);
+  if (rankA !== undefined && rankB !== undefined) {
+    return rankA - rankB;
+  }
+  if (rankA !== undefined) return -1;
+  if (rankB !== undefined) return 1;
+  return a < b ? -1 : a > b ? 1 : 0;
+}
+
+/**
+ * Zero-hydration `Coverage` builder matching `coverageOf(snapshot)` bit-for-bit
+ * from aggregated `WorkspaceSummaryMeta`.
+ */
+function coverageFromSummaryMeta(meta: WorkspaceSummaryMeta): Coverage {
+  const totalEdges = meta.edgeCount;
+  const unresolvedEdges = meta.resolutions.unresolved;
+  const resolvedEdges = totalEdges - unresolvedEdges;
+  const hasL2AstNodes = meta.languageCoverage.some(
+    (entry) => entry.hasNonFileSymbols && L2_LANGUAGES.has(entry.language),
+  );
+  const hasL1AstNodes = meta.languageCoverage.some(
+    (entry) => entry.hasNonFileSymbols && L1_LANGUAGES.has(entry.language),
+  );
+  const tier: Coverage["tier"] = hasL2AstNodes ? "L2" : hasL1AstNodes ? "L1" : "L0";
+  const coverageRatio =
+    totalEdges === 0 ? 0 : Math.round((resolvedEdges / totalEdges) * 10_000) / 10_000;
+
+  const byLanguage: Record<string, LanguageCoverage> = {};
+  const sortedCoverage = [...meta.languageCoverage].sort((a, b) =>
+    a.language < b.language ? -1 : a.language > b.language ? 1 : 0,
+  );
+  for (const entry of sortedCoverage) {
+    const langTier: LanguageCoverage["tier"] = !entry.hasNonFileSymbols
+      ? "L0"
+      : L2_LANGUAGES.has(entry.language)
+        ? "L2"
+        : "L1";
+    const langTotal = entry.verifiedEdges + entry.heuristicEdges + entry.unresolvedEdges;
+    const langResolved = entry.verifiedEdges + entry.heuristicEdges;
+    const langRatio =
+      langTotal === 0 ? 0 : Math.round((langResolved / langTotal) * 10_000) / 10_000;
+    byLanguage[entry.language] = {
+      tier: langTier,
+      files: entry.files,
+      verifiedEdges: entry.verifiedEdges,
+      heuristicEdges: entry.heuristicEdges,
+      unresolvedEdges: entry.unresolvedEdges,
+      coverageRatio: langRatio,
+    };
+  }
+
+  return {
+    tier,
+    resolvedEdges,
+    unresolvedEdges,
+    totalEdges,
+    coverageRatio,
+    byLanguage,
+  };
+}
+
+/** stale/partial uyarıları (envelope.warnings; TŞ §9 eski snapshot servisi). */
+export function staleWarningOf(read: SnapshotRead): string[] {
+  return staleWarningFromState(read.snapshot.meta.state, read.stale);
+}
+
+/** Envelope status çözümü: snapshot meta.state partial ise "partial". */
 export function envelopeStatusOf(read: SnapshotRead): "ok" | "partial" {
-  return read.snapshot.meta.state === "partial" ? "partial" : "ok";
+  return envelopeStatusFromState(read.snapshot.meta.state);
 }
 
 function countEdgesByKind(snapshot: SnapshotGraph): Record<string, number> {
@@ -467,6 +541,57 @@ export function workspaceSummary(
 ): Envelope {
   const workspaceId = input.workspaceId ?? deps.config.workspaceId;
   const rootPath = requireAuthorizedWorkspace(deps, workspaceId);
+
+  if (deps.repository.getLatestWorkspaceSummaryMeta !== undefined) {
+    const summaryMeta = deps.repository.getLatestWorkspaceSummaryMeta(workspaceId);
+    if (summaryMeta === undefined) {
+      throw new CausorynToolError(
+        "INDEX_NOT_READY",
+        `workspace için yayınlanmış snapshot yok: ${workspaceId}; indeksleme tamamlanmadan sorgu yapılamaz`,
+      );
+    }
+    const languages = [...summaryMeta.languages]
+      .sort((a, b) => compareLanguageOrder(a.language, b.language))
+      .map((entry) => ({
+        language: entry.language,
+        files: entry.files,
+      }));
+    const edgesByKind: Record<string, number> = {};
+    for (const key of Object.keys(summaryMeta.edgesByKind).sort()) {
+      edgesByKind[key] = summaryMeta.edgesByKind[key] ?? 0;
+    }
+    return buildEnvelope({
+      requestId,
+      workspaceId,
+      snapshotId: summaryMeta.snapshotId,
+      status: envelopeStatusFromState(summaryMeta.state),
+      coverage: coverageFromSummaryMeta(summaryMeta),
+      warnings: staleWarningFromState(summaryMeta.state, summaryMeta.stale),
+      data: {
+        workspaceId,
+        revision: {
+          id: summaryMeta.revisionId,
+          sequence: summaryMeta.revisionSequence,
+        },
+        snapshotState: summaryMeta.state,
+        rootPath,
+        nodeCount: summaryMeta.nodeCount,
+        edgeCount: summaryMeta.edgeCount,
+        evidenceCount: summaryMeta.evidenceCount,
+        fileCount: summaryMeta.fileCount,
+        languages,
+        frameworks: [...summaryMeta.frameworks],
+        entrypoints: [...summaryMeta.entrypoints],
+        edgesByKind,
+        resolutions: {
+          verified: summaryMeta.resolutions.verified,
+          heuristic: summaryMeta.resolutions.heuristic,
+          unresolved: summaryMeta.resolutions.unresolved,
+        },
+      },
+    });
+  }
+
   const read = requireSnapshot(deps, workspaceId);
   const snapshot = read.snapshot;
   const fileNodes = snapshot.nodes.filter((node) => node.kind === "File");
@@ -481,16 +606,7 @@ export function workspaceSummary(
     .map((node) => node.qualifiedName)
     .sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
   const languages = [...languageCounts.keys()]
-    .sort((a, b) => {
-      const rankA = ADAPTER_LANGUAGE_ORDER.get(a);
-      const rankB = ADAPTER_LANGUAGE_ORDER.get(b);
-      if (rankA !== undefined && rankB !== undefined) {
-        return rankA - rankB;
-      }
-      if (rankA !== undefined) return -1;
-      if (rankB !== undefined) return 1;
-      return a < b ? -1 : a > b ? 1 : 0;
-    })
+    .sort(compareLanguageOrder)
     .map((language) => ({
       language,
       files: languageCounts.get(language) ?? 0,
@@ -661,6 +777,41 @@ export function indexStatus(
     }
   } else {
     job = deps.jobManager.latest();
+  }
+
+  if (deps.repository.getLatestWorkspaceSummaryMeta !== undefined) {
+    const summaryMeta = deps.repository.getLatestWorkspaceSummaryMeta(workspaceId);
+    const warnings =
+      summaryMeta === undefined
+        ? ["yayınlanmış snapshot yok; refresh_index ile yeni snapshot işi başlatın"]
+        : staleWarningFromState(summaryMeta.state, summaryMeta.stale);
+
+    return buildEnvelope({
+      requestId,
+      workspaceId,
+      snapshotId: summaryMeta?.snapshotId ?? job?.snapshotId ?? null,
+      // Durum aracı: yanıtın kendisi her zaman "ok"; snapshot durumu partial
+      // ise katalogla tutarlı biçimde "partial" taşınır.
+      status: summaryMeta === undefined ? "ok" : envelopeStatusFromState(summaryMeta.state),
+      coverage: summaryMeta === undefined ? null : coverageFromSummaryMeta(summaryMeta),
+      warnings,
+      data: {
+        workspaceId,
+        jobId: job?.jobId ?? null,
+        job: job === undefined ? null : jobRecordOf(job),
+        latestSnapshot:
+          summaryMeta === undefined
+            ? null
+            : {
+                snapshotId: summaryMeta.snapshotId,
+                state: summaryMeta.state,
+                stale: summaryMeta.stale,
+                nodeCount: summaryMeta.nodeCount,
+                edgeCount: summaryMeta.edgeCount,
+                evidenceCount: summaryMeta.evidenceCount,
+              },
+      },
+    });
   }
 
   const read = deps.repository.getLatestPublished(workspaceId);

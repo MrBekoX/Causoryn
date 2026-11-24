@@ -15,13 +15,13 @@ import {
 } from "./types.js";
 
 /**
- * `causoryn` CLI komut ayrıştırıcısı ve çalıştırıcısı (`setup`, `doctor`,
- * `--version`, `--help`; `mcp` doğrudan `scripts/causoryn.mjs` tarafından
- * saf `stdout` ile `dist/mcp-server.mjs` modülüne devredilir).
+ * `causoryn` CLI command parser and runner (`setup`, `doctor`, `--version`,
+ * `--help`; `mcp` is handed off directly by `scripts/causoryn.mjs` to
+ * `dist/mcp-server.mjs` with clean `stdout` JSON-RPC framing).
  */
 
 const HELP_TEXT = `Usage:
-  causoryn mcp [--allow-cwd] [--root <path>] [--auto-data-dir] [--data-dir <path>] [--client <id>]
+  causoryn mcp [--allow-cwd] [--root <path>] [--auto-data-dir] [--data-dir <path>] [--client <id>] [--tool-profile <core|full|wiki|history>] [--output-schema <omit|full>]
   causoryn setup [--client <antigravity|claude-code|codex|zcode>...] [--all] [--all-detected] [--yes] [--dry-run] [--uninstall] [--skill | --no-skill] [--json]
   causoryn doctor [--client <antigravity|claude-code|codex|zcode>...] [--json]
   causoryn --version
@@ -63,7 +63,7 @@ function parseClientValues(raw: string): HostClientId[] {
   if (parts.length === 0) {
     throw new CausorynCliError(
       "cli/invalid-arguments",
-      `--client için geçerli bir host kimliği gerekli (${HOST_CLIENT_IDS.join(", ")})`,
+      `A valid host ID is required for --client (${HOST_CLIENT_IDS.join(", ")})`,
     );
   }
   const parsed: HostClientId[] = [];
@@ -71,7 +71,7 @@ function parseClientValues(raw: string): HostClientId[] {
     if (!isHostClientId(part)) {
       throw new CausorynCliError(
         "cli/invalid-arguments",
-        `Geçersiz --client değeri "${part}". Desteklenen değerler: ${HOST_CLIENT_IDS.join(", ")}`,
+        `Invalid --client value "${part}". Supported values: ${HOST_CLIENT_IDS.join(", ")}`,
       );
     }
     parsed.push(part);
@@ -125,7 +125,7 @@ function parseSetupFlags(args: readonly string[]): ParsedSetupCliFlags {
     } else if (arg === "--client") {
       const next = args[i + 1];
       if (next === undefined || next.startsWith("-")) {
-        throw new CausorynCliError("cli/invalid-arguments", "--client bayrağı bir değer bekliyor");
+        throw new CausorynCliError("cli/invalid-arguments", "--client flag requires a value");
       }
       clients.push(...parseClientValues(next));
       i += 1;
@@ -134,7 +134,7 @@ function parseSetupFlags(args: readonly string[]): ParsedSetupCliFlags {
     } else {
       throw new CausorynCliError(
         "cli/invalid-arguments",
-        `Bilinmeyen setup argümanı: ${arg}`,
+        `Unknown setup argument: ${arg}`,
       );
     }
   }
@@ -172,7 +172,7 @@ function parseDoctorFlags(args: readonly string[]): ParsedDoctorCliFlags {
     } else if (arg === "--client") {
       const next = args[i + 1];
       if (next === undefined || next.startsWith("-")) {
-        throw new CausorynCliError("cli/invalid-arguments", "--client bayrağı bir değer bekliyor");
+        throw new CausorynCliError("cli/invalid-arguments", "--client flag requires a value");
       }
       clients.push(...parseClientValues(next));
       i += 1;
@@ -181,7 +181,7 @@ function parseDoctorFlags(args: readonly string[]): ParsedDoctorCliFlags {
     } else {
       throw new CausorynCliError(
         "cli/invalid-arguments",
-        `Bilinmeyen doctor argümanı: ${arg}`,
+        `Unknown doctor argument: ${arg}`,
       );
     }
   }
@@ -191,7 +191,7 @@ function parseDoctorFlags(args: readonly string[]): ParsedDoctorCliFlags {
 
 function formatSetupActionsText(actions: readonly SetupAction[]): string {
   if (actions.length === 0) {
-    return "  (hiçbir değişiklik yok)\n";
+    return "  (no changes)\n";
   }
   return `${actions
     .map(
@@ -203,24 +203,24 @@ function formatSetupActionsText(actions: readonly SetupAction[]): string {
 
 function formatSetupResultText(result: SetupResult): string {
   const modeLabel = result.dryRun
-    ? "DRY-RUN ÖNİZLEME"
+    ? "DRY-RUN PREVIEW"
     : result.applied
       ? result.uninstall
-        ? "KALDIRILDI"
-        : "UYGULANDI"
-      : "DEĞİŞİKLİK YOK";
+        ? "UNINSTALLED"
+        : "APPLIED"
+      : "NO CHANGES";
   const lines: string[] = [];
   lines.push(`Causoryn Setup — ${modeLabel}`);
   if (result.stagedRuntimeDir !== null) {
     lines.push(`Staged Runtime: ${result.stagedRuntimeDir}`);
   }
   if (result.runtimeCleanedUp) {
-    lines.push("Staged Runtime Cleanup: ~/.causoryn/runtime silindi (kalan host referansı yok)");
+    lines.push("Staged Runtime Cleanup: removed ~/.causoryn/runtime (no remaining host references)");
   }
   if (result.message !== undefined && result.message.length > 0) {
     lines.push(result.message);
   }
-  lines.push("Planlanan / Uygulanan İşlemler:");
+  lines.push("Planned / Applied Actions:");
   lines.push(formatSetupActionsText(result.actions).trimEnd());
   return `${lines.join("\n")}\n`;
 }
@@ -253,8 +253,8 @@ export async function runCli(
       const confirmHandler =
         !flags.yes && !flags.dryRun && io.isInteractive === true && io.confirm !== undefined
           ? async (actions: readonly SetupAction[]): Promise<boolean> => {
-              io.stderr(`Aşağıdaki değişiklikler uygulanacak:\n${formatSetupActionsText(actions)}`);
-              return await io.confirm!("Devam edilsin mi? [y/N] ");
+              io.stderr(`The following changes will be applied:\n${formatSetupActionsText(actions)}`);
+              return await io.confirm!("Continue? [y/N] ");
             }
           : undefined;
 
@@ -308,11 +308,11 @@ export async function runCli(
 
     throw new CausorynCliError(
       "cli/invalid-arguments",
-      `Bilinmeyen alt komut: "${first}". Yardım için \`causoryn --help\` çalıştırın.`,
+      `Unknown subcommand: "${first}". Run \`causoryn --help\` for usage.`,
     );
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    io.stderr(`[causoryn] hata: ${message}\n`);
+    io.stderr(`[causoryn] error: ${message}\n`);
     return 2;
   }
 }

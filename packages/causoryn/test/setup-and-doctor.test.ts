@@ -1662,4 +1662,90 @@ describe(
       expect(setupRes.actions.some((a) => a.kind === "skill")).toBe(true);
     }
   });
+
+  it("CLI emits clear English help, setup status text, confirmation prompt, and argument error messages", async () => {
+    const sandbox = createTempDir("cli-english");
+    const fakeHome = path.join(sandbox, "home");
+    const fakeCodexHome = path.join(fakeHome, ".codex");
+    const pkgRoot = createFakePackageRoot(sandbox, "pkg");
+    mkdirSync(fakeHome, { recursive: true });
+
+    const runCaptured = async (
+      argv: readonly string[],
+      extraIo?: { readonly isInteractive?: boolean; readonly confirm?: (prompt: string) => Promise<boolean> },
+    ): Promise<{ readonly exitCode: number; readonly stdout: string; readonly stderr: string }> => {
+      const out: string[] = [];
+      const err: string[] = [];
+      const exitCode = await runCli(argv, {
+        homeDir: fakeHome,
+        codexHomeDir: fakeCodexHome,
+        packageRoot: pkgRoot,
+        ephemeralTmpDir: path.join(sandbox, "unused-tmp"),
+        io: {
+          stdout: (t) => out.push(t),
+          stderr: (t) => err.push(t),
+          ...extraIo,
+        },
+      });
+      return { exitCode, stdout: out.join(""), stderr: err.join("") };
+    };
+
+    const helpRes = await runCaptured(["--help"]);
+    expect(helpRes.exitCode).toBe(0);
+    expect(helpRes.stdout).toContain("--tool-profile");
+
+    const dryRunRes = await runCaptured(["setup", "--client", "claude-code", "--dry-run"]);
+    expect(dryRunRes.exitCode).toBe(0);
+    expect(dryRunRes.stdout).toContain("DRY-RUN PREVIEW");
+    expect(dryRunRes.stdout).toContain("Planned / Applied Actions:");
+    expect(dryRunRes.stdout).not.toMatch(/ÖNİZLEME|İşlemler|hiçbir değişiklik/);
+
+    const prompts: string[] = [];
+    const interactiveRes = await runCaptured(["setup", "--client", "claude-code"], {
+      isInteractive: true,
+      confirm: async (promptText) => {
+        prompts.push(promptText);
+        return true;
+      },
+    });
+    expect(interactiveRes.exitCode).toBe(0);
+    expect(interactiveRes.stderr).toContain("The following changes will be applied:");
+    expect(prompts[0]).toBe("Continue? [y/N] ");
+    expect(interactiveRes.stdout).toContain("APPLIED");
+    expect(interactiveRes.stdout).not.toMatch(/UYGULANDI|Devam edilsin/);
+
+    const noopRes = await runCaptured(["setup", "--client", "claude-code", "--yes"]);
+    expect(noopRes.exitCode).toBe(0);
+    expect(noopRes.stdout).toContain("NO CHANGES");
+    expect(noopRes.stdout).not.toContain("DEĞİŞİKLİK YOK");
+
+    const uninstallRes = await runCaptured([
+      "setup",
+      "--client",
+      "claude-code",
+      "--uninstall",
+      "--yes",
+    ]);
+    expect(uninstallRes.exitCode).toBe(0);
+    expect(uninstallRes.stdout).toContain("UNINSTALLED");
+    expect(uninstallRes.stdout).not.toContain("KALDIRILDI");
+
+    const badSubcmd = await runCaptured(["bogus"]);
+    expect(badSubcmd.exitCode).toBe(2);
+    expect(badSubcmd.stderr).toContain("[causoryn] error:");
+    expect(badSubcmd.stderr).toContain('Unknown subcommand: "bogus"');
+    expect(badSubcmd.stderr).not.toMatch(/Bilinmeyen|hata:/);
+
+    const badClient = await runCaptured(["setup", "--client", "invalid-host"]);
+    expect(badClient.exitCode).toBe(2);
+    expect(badClient.stderr).toContain('Invalid --client value "invalid-host"');
+
+    const badSetupArg = await runCaptured(["setup", "--unknown-flag"]);
+    expect(badSetupArg.exitCode).toBe(2);
+    expect(badSetupArg.stderr).toContain("Unknown setup argument: --unknown-flag");
+
+    const badDoctorArg = await runCaptured(["doctor", "--unknown-flag"]);
+    expect(badDoctorArg.exitCode).toBe(2);
+    expect(badDoctorArg.stderr).toContain("Unknown doctor argument: --unknown-flag");
+  });
 });

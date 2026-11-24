@@ -91,6 +91,41 @@ export interface SnapshotMetaSummary {
   readonly stale: boolean;
 }
 
+/** Per-language coverage aggregate computed without hydrating full graph rows. */
+export interface WorkspaceLanguageCoverageMeta {
+  readonly language: string;
+  readonly files: number;
+  readonly hasNonFileSymbols: boolean;
+  readonly hasSemanticEdges: boolean;
+  readonly verifiedEdges: number;
+  readonly heuristicEdges: number;
+  readonly unresolvedEdges: number;
+}
+
+/** Zero-hydration workspace summary aggregate for status and workspace_summary tools. */
+export interface WorkspaceSummaryMeta {
+  readonly snapshotId: string;
+  readonly workspaceId: string;
+  readonly state: PublishableState;
+  readonly revisionId: string;
+  readonly revisionSequence: number;
+  readonly stale: boolean;
+  readonly nodeCount: number;
+  readonly edgeCount: number;
+  readonly evidenceCount: number;
+  readonly fileCount: number;
+  readonly languages: ReadonlyArray<{ readonly language: string; readonly files: number }>;
+  readonly frameworks: readonly string[];
+  readonly entrypoints: readonly string[];
+  readonly edgesByKind: Readonly<Record<string, number>>;
+  readonly resolutions: {
+    readonly verified: number;
+    readonly heuristic: number;
+    readonly unresolved: number;
+  };
+  readonly languageCoverage: readonly WorkspaceLanguageCoverageMeta[];
+}
+
 /** Retention GC summary returned by `pruneOldSnapshots`. */
 export interface PruneSnapshotsResult {
   readonly prunedSnapshotSids: number;
@@ -152,6 +187,8 @@ export interface GraphRepository {
   getLatestPublished(workspaceId: string): SnapshotRead | undefined;
   /** Lightweight metadata summary of the latest published snapshot without hydrating rows. */
   getLatestSnapshotMeta?(workspaceId: string): SnapshotMetaSummary | undefined;
+  /** Zero-hydration workspace summary metadata for status and workspace_summary without hydrating full graph rows. */
+  getLatestWorkspaceSummaryMeta?(workspaceId: string): WorkspaceSummaryMeta | undefined;
   /** Retention GC: retains the newest `keepCount` (default 2) published snapshots and cleans up old/orphaned data. */
   pruneOldSnapshots?(
     workspaceId: string,

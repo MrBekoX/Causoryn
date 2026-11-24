@@ -388,7 +388,7 @@ describe(
     it(
       "pozitif: sembol entrypoint'ten CALLS zinciri — createOrdersRoute → OrdersService.create → " +
         "OrderRepository.save (TŞ §25/4 zincirinin service→repository parçası); " +
-        "kenar başına evidence; unresolved dal status'u partial yapar",
+        "kenar başına evidence; built-in String çağrısı da lib.es5.d.ts ile verified çözülür",
       async () => {
         const pair = await connectClient(makeContext());
         try {
@@ -398,9 +398,9 @@ describe(
             maxPaths: 10,
           });
           const envelope = expectEnvelope(result);
-          // String → UnknownExternal çağrısı unresolved olduğundan zincir orada
-          // biter: envelope status "partial" (görev sözleşmesi).
-          expect(envelope.status).toBe("partial");
+          // fixture-ts-orders'taki tüm çağrılar (OrderRepository.save, Response.json
+          // ve lib.es5.d.ts built-in String) TypeChecker ile verified çözülür.
+          expect(envelope.status).toBe("ok");
 
           const data = envelope.data as Record<string, unknown>;
           const entrypoint = data.entrypoint as Record<string, unknown>;
@@ -443,23 +443,18 @@ describe(
             );
           }
 
-          // (b) unresolved dal: zincir String'te DURUR; kenar resolution'u
-          // kendi alanında "unresolved", zincir etiketi "unresolved".
-          const unresolvedPath = paths.find(
-            (candidate) => candidate.resolution === "unresolved",
+          // (b) String dalı: lib.es5.d.ts StringConstructor anonymous call signature
+          // üzerinden external UnknownExternal olarak verified çözülür ve yaprakta biter.
+          const stringPath = paths.find(
+            (candidate) =>
+              chainOf(data, candidate).join(" -> ") ===
+              "createOrdersRoute -> OrdersService.create -> String",
           );
-          expect(unresolvedPath, "unresolved dal bulunamadı").toBeDefined();
-          expect(chainOf(data, unresolvedPath as PathView)).toEqual([
-            "createOrdersRoute",
-            "OrdersService.create",
-            "String",
-          ]);
-          const unresolvedEdge = (unresolvedPath?.edges ?? [])[1] as Record<string, unknown>;
-          expect(unresolvedEdge.resolution).toBe("unresolved");
-          // Zincir etiketiyle kenar etiketi karışmaz: aynı yolda İLK kenar
-          // verified kalır, zincir en zayıf düzeyi taşır.
-          expect((unresolvedPath?.edges ?? [])[0]?.resolution).toBe("verified");
-          expect(unresolvedPath?.stoppedReason).toBe("unresolved-edge");
+          expect(stringPath, "String dalı bulunamadı").toBeDefined();
+          expect(stringPath?.resolution).toBe("verified");
+          expect(stringPath?.stoppedReason).toBe("leaf");
+          expect((stringPath?.edges ?? [])[0]?.resolution).toBe("verified");
+          expect((stringPath?.edges ?? [])[1]?.resolution).toBe("verified");
 
           // (c) Response.json dalı verified; uydurma devam yok.
           const responsePath = paths.find(
@@ -673,50 +668,122 @@ describe(
     });
 
     it("partial: unresolved CALLS kenarında zincir o noktada biter + status partial (görev sözleşmesi)", async () => {
-      const pair = await connectClient(makeContext());
+      // Gerçekten çözülemeyen çağrı (any-tipli dynamicHook) içeren izole geçici
+      // TS workspace: hem tek-hop (Service.run) hem çok-hop (entry -> Service.run)
+      // zincirinde unresolved kenar durdurma + en zayıf kenar etiketi + partial status kanıtlanır.
+      const root = mkdtempSync(path.join(tmpdir(), "causoryn-trace-unresolved-"));
       try {
-        const result = await callTool(pair.client, "causoryn_trace_execution", {
-          entrypoint: "OrdersService.create",
-          maxDepth: 2,
-          maxPaths: 10,
-        });
-        const envelope = expectEnvelope(result);
-        expect(envelope.status).toBe("partial");
-        // Uyarı da taşınır (TŞ §10.1 örneği: unresolved akış uyarı listesinde).
-        expect(
-          (envelope.warnings as string[]).some((warning) =>
-            warning.toLowerCase().includes("unresolved"),
-          ),
-        ).toBe(true);
-
-        const data = envelope.data as Record<string, unknown>;
-        const paths = pathsOf(data);
-        expect(paths.length).toBe(2);
-
-        const savePath = paths.find(
-          (candidate) =>
-            chainOf(data, candidate).join(" -> ") ===
-            "OrdersService.create -> OrderRepository.save",
+        mkdirSync(path.join(root, "src"), { recursive: true });
+        writeFileSync(
+          path.join(root, "tsconfig.json"),
+          JSON.stringify({
+            compilerOptions: { target: "ES2022", module: "NodeNext", moduleResolution: "NodeNext" },
+            include: ["src/**/*.ts"],
+          }),
         );
-        expect(savePath).toBeDefined();
-        expect(savePath?.resolution).toBe("verified");
-        expect(savePath?.stoppedReason).toBe("leaf");
-
-        const unresolvedPath = paths.find(
-          (candidate) => candidate.stoppedReason === "unresolved-edge",
+        writeFileSync(
+          path.join(root, "src", "repo.ts"),
+          "export class Repo {\n  save(id: string): void { void id; }\n}\n",
         );
-        expect(unresolvedPath).toBeDefined();
-        expect(chainOf(data, unresolvedPath as PathView)).toEqual([
-          "OrdersService.create",
-          "String",
-        ]);
-        // Zincir durduruldu: unresolved kenar YOLDA kalır, ötesi yok.
-        expect((unresolvedPath?.edges ?? []).length).toBe(1);
-        expect((unresolvedPath?.edges ?? [])[0]?.resolution).toBe("unresolved");
-        expect(unresolvedPath?.resolution).toBe("unresolved");
-        expect(data.truncated).toBe(false);
+        writeFileSync(
+          path.join(root, "src", "service.ts"),
+          [
+            'import { Repo } from "./repo.js";',
+            "declare const dynamicHook: any;",
+            "export class Service {",
+            "  constructor(private readonly repo: Repo) {}",
+            "  run(id: string): void {",
+            "    this.repo.save(id);",
+            "    dynamicHook(id);",
+            "  }",
+            "}",
+            "export function entry(svc: Service, id: string): void {",
+            "  svc.run(id);",
+            "}",
+            "",
+          ].join("\n"),
+        );
+
+        const context = createCausorynContext(
+          {
+            workspaceId: "default",
+            allowRoots: [root],
+            results: { maxNodes: 250, maxSymbols: 100 },
+            autoIndex: true,
+          },
+          { logger: () => {} },
+        );
+        const pair = await connectClient(context);
+        try {
+          // (1) Tek-hop: Service.run -> Repo.save (verified) + dynamicHook (unresolved).
+          const result = await callTool(pair.client, "causoryn_trace_execution", {
+            entrypoint: "Service.run",
+            maxDepth: 2,
+            maxPaths: 10,
+          });
+          const envelope = expectEnvelope(result);
+          expect(envelope.status).toBe("partial");
+          // Uyarı da taşınır (TŞ §10.1 örneği: unresolved akış uyarı listesinde).
+          expect(
+            (envelope.warnings as string[]).some((warning) =>
+              warning.toLowerCase().includes("unresolved"),
+            ),
+          ).toBe(true);
+
+          const data = envelope.data as Record<string, unknown>;
+          const paths = pathsOf(data);
+          expect(paths.length).toBe(2);
+
+          const savePath = paths.find(
+            (candidate) =>
+              chainOf(data, candidate).join(" -> ") === "Service.run -> Repo.save",
+          );
+          expect(savePath).toBeDefined();
+          expect(savePath?.resolution).toBe("verified");
+          expect(savePath?.stoppedReason).toBe("leaf");
+
+          const unresolvedPath = paths.find(
+            (candidate) => candidate.stoppedReason === "unresolved-edge",
+          );
+          expect(unresolvedPath).toBeDefined();
+          expect(chainOf(data, unresolvedPath as PathView)).toEqual([
+            "Service.run",
+            "dynamicHook",
+          ]);
+          // Zincir durduruldu: unresolved kenar YOLDA kalır, ötesi yok.
+          expect((unresolvedPath?.edges ?? []).length).toBe(1);
+          expect((unresolvedPath?.edges ?? [])[0]?.resolution).toBe("unresolved");
+          expect(unresolvedPath?.resolution).toBe("unresolved");
+          expect(data.truncated).toBe(false);
+
+          // (2) Çok-hop: ilk kenar verified (entry -> Service.run), ikinci kenar
+          // unresolved (Service.run -> dynamicHook) → zincir etiketi en zayıf düzeyi taşır.
+          const multiHopResult = await callTool(pair.client, "causoryn_trace_execution", {
+            entrypoint: "entry",
+            maxDepth: 3,
+            maxPaths: 10,
+          });
+          const multiHopEnv = expectEnvelope(multiHopResult);
+          expect(multiHopEnv.status).toBe("partial");
+          const multiData = multiHopEnv.data as Record<string, unknown>;
+          const multiPaths = pathsOf(multiData);
+          const multiUnresolved = multiPaths.find(
+            (candidate) => candidate.stoppedReason === "unresolved-edge",
+          );
+          expect(multiUnresolved).toBeDefined();
+          expect(chainOf(multiData, multiUnresolved as PathView)).toEqual([
+            "entry",
+            "Service.run",
+            "dynamicHook",
+          ]);
+          expect((multiUnresolved?.edges ?? [])[0]?.resolution).toBe("verified");
+          expect((multiUnresolved?.edges ?? [])[1]?.resolution).toBe("unresolved");
+          expect(multiUnresolved?.resolution).toBe("unresolved");
+        } finally {
+          await pair.close();
+        }
       } finally {
-        await pair.close();
+        rmSync(root, { recursive: true, force: true });
       }
     });
 

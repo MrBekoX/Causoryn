@@ -31,7 +31,9 @@ import {
   type SymbolIndexEntry,
   type SymbolSearchHit,
   type SymbolSearchStore,
+  type WorkspaceLanguageCoverageMeta,
   type WorkspaceRecord,
+  type WorkspaceSummaryMeta,
 } from "@causoryn/graph";
 
 import { applySchema, SCHEMA_VERSION } from "./schema.js";
@@ -313,6 +315,12 @@ interface CachedPublishedSnapshot {
   readonly graph: SnapshotGraph;
 }
 
+interface CachedWorkspaceSummaryMeta {
+  readonly id: string;
+  readonly dataVersion: number;
+  readonly meta: Omit<WorkspaceSummaryMeta, "stale">;
+}
+
 function mapFileFactRow(row: FileFactRow): FileFactRecord {
   return {
     workspaceId: row.workspace_id,
@@ -350,6 +358,7 @@ export class SqliteGraphRepository
     { nodes: number; edges: number; evidence: number }
   >();
   private readonly publishedCache = new Map<number, CachedPublishedSnapshot>();
+  private readonly summaryMetaCache = new Map<number, CachedWorkspaceSummaryMeta>();
   private buildSerial = 0;
 
   constructor(dbPath: string) {
@@ -379,6 +388,8 @@ export class SqliteGraphRepository
       this.db.pragma("journal_mode = WAL");
       this.db.pragma("foreign_keys = ON");
       this.db.pragma("synchronous = NORMAL");
+      this.db.pragma("temp_store = MEMORY");
+      this.db.pragma("cache_size = -16000");
       applySchema(this.db);
       const maxSid = this.db
         .prepare("SELECT COALESCE(MAX(sid), 0) AS max_sid FROM snapshots")
@@ -393,6 +404,7 @@ export class SqliteGraphRepository
   close(): void {
     this.buildPositions.clear();
     this.publishedCache.clear();
+    this.summaryMetaCache.clear();
     this.db.close();
   }
 
@@ -414,6 +426,25 @@ export class SqliteGraphRepository
       id: graph.meta.id,
       dataVersion: this.currentDataVersion(),
       graph,
+    });
+  }
+
+  private cacheSummaryMeta(
+    sid: number,
+    meta: Omit<WorkspaceSummaryMeta, "stale">,
+  ): void {
+    if (this.summaryMetaCache.has(sid)) {
+      this.summaryMetaCache.delete(sid);
+    } else if (this.summaryMetaCache.size >= MAX_PUBLISHED_CACHE_ENTRIES) {
+      const oldestKey = this.summaryMetaCache.keys().next().value;
+      if (oldestKey !== undefined) {
+        this.summaryMetaCache.delete(oldestKey);
+      }
+    }
+    this.summaryMetaCache.set(sid, {
+      id: meta.snapshotId,
+      dataVersion: this.currentDataVersion(),
+      meta,
     });
   }
 
@@ -1119,6 +1150,313 @@ export class SqliteGraphRepository
   }
 
   /**
+   * Zero-hydration workspace summary aggregation inside a single deferred WAL MVCC
+   * read transaction. Computes counts, languages, entrypoints, frameworks, edge
+   * breakdowns, and per-language coverage directly via SQLite aggregates without
+   * hydrating nodes, edges, or evidence rows into JS memory.
+   */
+  getLatestWorkspaceSummaryMeta(
+    workspaceId: string,
+  ): WorkspaceSummaryMeta | undefined {
+    requireNonEmptyField("workspaceId", workspaceId);
+    return this.runInReadTransaction(() => {
+      const row = this.stmt(
+        `SELECT sid, id, build_id, workspace_id, revision_id, revision_sequence,
+                config_hash, analyzer_fingerprint, state, created_at,
+                published_at, failure_reason
+         FROM snapshots
+         WHERE workspace_id = ? AND state IN ('ready','partial')
+         ORDER BY revision_sequence DESC, published_at DESC, sid DESC
+         LIMIT 1`,
+      ).get(workspaceId) as SnapshotRow | undefined;
+      if (row === undefined || row.id === null) return undefined;
+      if (row.state !== "ready" && row.state !== "partial") return undefined;
+
+      const stale = this.isStale(row);
+      const cached = this.summaryMetaCache.get(row.sid);
+      if (
+        cached !== undefined &&
+        cached.id === row.id &&
+        cached.dataVersion === this.currentDataVersion()
+      ) {
+        return { ...cached.meta, stale };
+      }
+
+      const evidenceCount = this.countRows("evidence", row.sid);
+
+      interface NodeLangAggRow {
+        lang: string;
+        total_cnt: number;
+        file_cnt: number;
+        has_non_file_symbols: number;
+      }
+      const nodeLangRows = this.stmt(
+        `SELECT COALESCE(language, '') AS lang,
+                COUNT(*) AS total_cnt,
+                SUM(CASE WHEN kind = 'File' THEN 1 ELSE 0 END) AS file_cnt,
+                MAX(CASE WHEN kind NOT IN ('File', 'Workspace', 'UnknownExternal') THEN 1 ELSE 0 END) AS has_non_file_symbols
+         FROM nodes
+         WHERE snapshot_sid = ?
+         GROUP BY COALESCE(language, '')`,
+      ).all(row.sid) as NodeLangAggRow[];
+
+      interface MutableLangBucket {
+        files: number;
+        hasNonFileSymbols: boolean;
+        hasSemanticEdges: boolean;
+        verifiedEdges: number;
+        heuristicEdges: number;
+        unresolvedEdges: number;
+      }
+      const langBuckets = new Map<string, MutableLangBucket>();
+      const ensureBucket = (lang: string): MutableLangBucket => {
+        let bucket = langBuckets.get(lang);
+        if (bucket === undefined) {
+          bucket = {
+            files: 0,
+            hasNonFileSymbols: false,
+            hasSemanticEdges: false,
+            verifiedEdges: 0,
+            heuristicEdges: 0,
+            unresolvedEdges: 0,
+          };
+          langBuckets.set(lang, bucket);
+        }
+        return bucket;
+      };
+
+      let nodeCount = 0;
+      let fileCount = 0;
+      let majorLang: string | undefined;
+      let majorLangNodeCount = -1;
+      for (const nodeAgg of nodeLangRows) {
+        nodeCount += nodeAgg.total_cnt;
+        fileCount += nodeAgg.file_cnt;
+        if (nodeAgg.lang.length > 0) {
+          const bucket = ensureBucket(nodeAgg.lang);
+          bucket.files += nodeAgg.file_cnt;
+          if (nodeAgg.has_non_file_symbols === 1) {
+            bucket.hasNonFileSymbols = true;
+          }
+          if (
+            nodeAgg.total_cnt > majorLangNodeCount ||
+            (nodeAgg.total_cnt === majorLangNodeCount &&
+              majorLang !== undefined &&
+              nodeAgg.lang < majorLang)
+          ) {
+            majorLang = nodeAgg.lang;
+            majorLangNodeCount = nodeAgg.total_cnt;
+          }
+        }
+      }
+
+      interface EntrypointRow {
+        qualified_name: string;
+        kind: string;
+        attributes_json: string;
+      }
+      const entrypointRows = this.stmt(
+        `SELECT qualified_name, kind, attributes_json
+         FROM nodes
+         WHERE snapshot_sid = ? AND kind IN ('Endpoint', 'Handler')
+         ORDER BY qualified_name ASC`,
+      ).all(row.sid) as EntrypointRow[];
+
+      const entrypoints: string[] = [];
+      const frameworkSet = new Set<string>();
+      for (const ep of entrypointRows) {
+        entrypoints.push(ep.qualified_name);
+        if (ep.kind === "Endpoint") {
+          const parsed = parseJsonField(
+            `nodes.attributes_json:${ep.qualified_name}`,
+            ep.attributes_json,
+          );
+          if (parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)) {
+            const fw = (parsed as Record<string, unknown>).framework;
+            if (typeof fw === "string") {
+              frameworkSet.add(fw);
+            }
+          }
+        }
+      }
+      entrypoints.sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+      const frameworks = [...frameworkSet].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+
+      interface EdgeKindAggRow {
+        kind: string;
+        verified_cnt: number;
+        heuristic_cnt: number;
+        unresolved_cnt: number;
+      }
+      const edgeKindRows = this.stmt(
+        `SELECT kind,
+                SUM(CASE WHEN resolution = 'verified' THEN 1 ELSE 0 END) AS verified_cnt,
+                SUM(CASE WHEN resolution = 'heuristic' THEN 1 ELSE 0 END) AS heuristic_cnt,
+                SUM(CASE WHEN resolution NOT IN ('verified', 'heuristic') THEN 1 ELSE 0 END) AS unresolved_cnt
+         FROM edges
+         WHERE snapshot_sid = ?
+         GROUP BY kind
+         ORDER BY kind ASC`,
+      ).all(row.sid) as EdgeKindAggRow[];
+
+      const edgeKindCounts = new Map<string, number>();
+      let verified = 0;
+      let heuristic = 0;
+      let unresolved = 0;
+      for (const edgeAgg of edgeKindRows) {
+        const kindTotal =
+          edgeAgg.verified_cnt + edgeAgg.heuristic_cnt + edgeAgg.unresolved_cnt;
+        edgeKindCounts.set(edgeAgg.kind, kindTotal);
+        verified += edgeAgg.verified_cnt;
+        heuristic += edgeAgg.heuristic_cnt;
+        unresolved += edgeAgg.unresolved_cnt;
+      }
+      const edgeCount = verified + heuristic + unresolved;
+      const edgesByKind: Record<string, number> = {};
+      for (const kind of [...edgeKindCounts.keys()].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0))) {
+        edgesByKind[kind] = edgeKindCounts.get(kind) ?? 0;
+      }
+
+      // Per-language edge breakdown via majority-language complement:
+      // Every edge with `fn.language = majorLang AND fn.kind != 'Workspace'` is guaranteed
+      // to resolve to `majorLang` (and is never `Workspace --CONTAINS--> *`), so we only join
+      // the complement (`fn.language IS NULL OR fn.language != majorLang OR fn.kind = 'Workspace'`)
+      // using `idx_edges_snapshot_from`, and derive the majority bucket by exact subtraction.
+      if (edgeCount > 0 && majorLang !== undefined) {
+        interface NonMajorEdgeAggRow {
+          edge_kind: string;
+          resolution: string;
+          lang: string;
+          cnt: number;
+        }
+        const nonMajorRows = this.stmt(
+          `SELECT e.kind AS edge_kind,
+                  e.resolution AS resolution,
+                  CASE
+                    WHEN fn.kind = 'Workspace' AND e.kind = 'CONTAINS' THEN ''
+                    ELSE COALESCE(NULLIF(fn.language, ''), NULLIF(tn.language, ''), '')
+                  END AS lang,
+                  COUNT(*) AS cnt
+           FROM nodes fn
+           CROSS JOIN edges e INDEXED BY idx_edges_snapshot_from
+             ON e.snapshot_sid = fn.snapshot_sid AND e.from_id = fn.node_id
+           LEFT JOIN nodes tn
+             ON (fn.language IS NULL OR fn.language = '')
+             AND NOT (fn.kind = 'Workspace' AND e.kind = 'CONTAINS')
+             AND tn.snapshot_sid = e.snapshot_sid AND tn.node_id = e.to_id
+           WHERE fn.snapshot_sid = ?
+             AND (fn.language IS NULL OR fn.language != ? OR fn.kind = 'Workspace')
+           GROUP BY e.kind, e.resolution, lang`,
+        ).all(row.sid, majorLang) as NonMajorEdgeAggRow[];
+
+        const nonMajorByKind = new Map<
+          string,
+          { verified: number; heuristic: number; unresolved: number }
+        >();
+        for (const item of nonMajorRows) {
+          let kindTotals = nonMajorByKind.get(item.edge_kind);
+          if (kindTotals === undefined) {
+            kindTotals = { verified: 0, heuristic: 0, unresolved: 0 };
+            nonMajorByKind.set(item.edge_kind, kindTotals);
+          }
+          if (item.resolution === "verified") {
+            kindTotals.verified += item.cnt;
+          } else if (item.resolution === "heuristic") {
+            kindTotals.heuristic += item.cnt;
+          } else {
+            kindTotals.unresolved += item.cnt;
+          }
+
+          if (item.lang.length > 0) {
+            const bucket = ensureBucket(item.lang);
+            if (item.edge_kind !== "CONTAINS") {
+              bucket.hasSemanticEdges = true;
+            }
+            if (item.resolution === "verified") {
+              bucket.verifiedEdges += item.cnt;
+            } else if (item.resolution === "heuristic") {
+              bucket.heuristicEdges += item.cnt;
+            } else {
+              bucket.unresolvedEdges += item.cnt;
+            }
+          }
+        }
+
+        const majorBucket = ensureBucket(majorLang);
+        for (const edgeAgg of edgeKindRows) {
+          const excluded = nonMajorByKind.get(edgeAgg.kind);
+          const remVerified = Math.max(
+            0,
+            edgeAgg.verified_cnt - (excluded?.verified ?? 0),
+          );
+          const remHeuristic = Math.max(
+            0,
+            edgeAgg.heuristic_cnt - (excluded?.heuristic ?? 0),
+          );
+          const remUnresolved = Math.max(
+            0,
+            edgeAgg.unresolved_cnt - (excluded?.unresolved ?? 0),
+          );
+          majorBucket.verifiedEdges += remVerified;
+          majorBucket.heuristicEdges += remHeuristic;
+          majorBucket.unresolvedEdges += remUnresolved;
+          if (
+            edgeAgg.kind !== "CONTAINS" &&
+            remVerified + remHeuristic + remUnresolved > 0
+          ) {
+            majorBucket.hasSemanticEdges = true;
+          }
+        }
+      }
+
+      const sortedLangs = [...langBuckets.keys()].sort((a, b) =>
+        a < b ? -1 : a > b ? 1 : 0,
+      );
+      const languages: Array<{ readonly language: string; readonly files: number }> = [];
+      const languageCoverage: WorkspaceLanguageCoverageMeta[] = [];
+      for (const lang of sortedLangs) {
+        const bucket = langBuckets.get(lang)!;
+        if (bucket.files > 0) {
+          languages.push({ language: lang, files: bucket.files });
+        }
+        languageCoverage.push({
+          language: lang,
+          files: bucket.files,
+          hasNonFileSymbols: bucket.hasNonFileSymbols,
+          hasSemanticEdges: bucket.hasSemanticEdges,
+          verifiedEdges: bucket.verifiedEdges,
+          heuristicEdges: bucket.heuristicEdges,
+          unresolvedEdges: bucket.unresolvedEdges,
+        });
+      }
+
+      const immutableMeta: Omit<WorkspaceSummaryMeta, "stale"> = {
+        snapshotId: row.id,
+        workspaceId: row.workspace_id,
+        state: row.state,
+        revisionId: row.revision_id,
+        revisionSequence: row.revision_sequence,
+        nodeCount,
+        edgeCount,
+        evidenceCount,
+        fileCount,
+        languages,
+        frameworks,
+        entrypoints,
+        edgesByKind,
+        resolutions: {
+          verified,
+          heuristic,
+          unresolved,
+        },
+        languageCoverage,
+      };
+      this.cacheSummaryMeta(row.sid, immutableMeta);
+      return { ...immutableMeta, stale };
+    });
+  }
+
+  /**
    * Retention GC (Task 2.4b): retains only the newest `keepCount` (default 2)
    * published snapshots + last 2 failed builds for `workspaceId`, deletes orphaned
    * `symbol_fts` rows, and runs a safe WAL checkpoint outside the transaction.
@@ -1180,6 +1518,7 @@ export class SqliteGraphRepository
       const deleted = deleteSnapStmt.run(sid);
       prunedSnapshotSids += deleted.changes;
       this.publishedCache.delete(sid);
+      this.summaryMetaCache.delete(sid);
       this.buildPositions.delete(sid);
     }
 

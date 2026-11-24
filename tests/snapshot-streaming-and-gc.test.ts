@@ -19,10 +19,22 @@ import {
   type SourceSpan,
 } from "@causoryn/domain";
 import { computeStreamingContentHash } from "../packages/domain/src/snapshot.js";
-import { InMemoryGraphRepository } from "@causoryn/graph";
-import { IndexService } from "@causoryn/indexing";
+import { InMemoryGraphRepository, type GraphRepository } from "@causoryn/graph";
+import { IndexJobManager, IndexService } from "@causoryn/indexing";
 import { SqliteGraphRepository } from "@causoryn/storage-sqlite";
 import { WorkspaceAccessPolicy } from "@causoryn/workspace";
+
+import {
+  CausorynToolError,
+  EnvelopeSchema,
+  IndexStatusDataSchema,
+  WorkspaceSummaryDataSchema,
+  coverageOf,
+  indexStatus,
+  parseCausorynServerConfig,
+  workspaceSummary,
+} from "../packages/mcp-server/src/index.js";
+import type { ServiceDeps } from "../packages/mcp-server/src/services.js";
 
 const WS = "ws_stream_gc";
 const T0 = "2026-11-24T12:00:00.000Z";
@@ -595,6 +607,639 @@ describe("Task 2.4b — Warm Boot Meta, Fast Hydration, Retention GC & LocAgent 
     } finally {
       readerRepo.close();
       writerRepo.close();
+    }
+  });
+});
+
+describe("Zero-hydration WorkspaceSummaryMeta — bit-for-bit parity & <20ms status/summary", { timeout: 30_000 }, () => {
+  function makeServiceDeps(repo: GraphRepository, wsId: string, rootDir: string): ServiceDeps {
+    const config = parseCausorynServerConfig({
+      workspaceId: wsId,
+      allowRoots: [rootDir],
+      autoIndex: false,
+    });
+    const policy = WorkspaceAccessPolicy.create({ allowRoots: [rootDir] });
+    const indexService = new IndexService({
+      workspaceId: wsId,
+      policy,
+      repository: repo,
+      clock: () => T0,
+      limits: { maxFiles: config.index.maxFiles },
+    });
+    const jobManager = new IndexJobManager({
+      policy,
+      indexService,
+      clock: () => T0,
+    });
+    return {
+      config,
+      policy,
+      repository: repo,
+      symbolSearch: null,
+      jobManager,
+      outputPolicy: null,
+      wikiStore: null,
+      wikiSearch: null,
+      clock: () => T0,
+      logger: () => {},
+    };
+  }
+
+  function buildRichMultiLangSnapshot(
+    repo: GraphRepository,
+    wsId: string,
+    state: "ready" | "partial" = "ready",
+  ) {
+    const build = repo.beginBuild({
+      workspaceId: wsId,
+      revision: { id: "rev-rich-1", sequence: 1 },
+      configHash: "cfg-rich",
+      analyzerFingerprint: "fp-rich",
+      createdAt: T0,
+    });
+
+    const wsNode: GraphNode = {
+      id: nodeId({ workspaceId: wsId, kind: "Workspace", qualifiedName: wsId }),
+      kind: "Workspace",
+      qualifiedName: wsId,
+      attributes: {},
+    };
+
+    // TypeScript (L2): 2 files, 2 functions, 2 endpoints (duplicate framework + 2nd framework), 1 handler (ignored framework)
+    const tsFile1: GraphNode = {
+      id: nodeId({ workspaceId: wsId, kind: "File", qualifiedName: "src/routes.ts", relativePath: "src/routes.ts" }),
+      kind: "File",
+      qualifiedName: "src/routes.ts",
+      language: "typescript",
+      location: makeSpan("src/routes.ts", 1),
+      attributes: { relativePath: "src/routes.ts" },
+    };
+    const tsFile2: GraphNode = {
+      id: nodeId({ workspaceId: wsId, kind: "File", qualifiedName: "src/service.ts", relativePath: "src/service.ts" }),
+      kind: "File",
+      qualifiedName: "src/service.ts",
+      language: "typescript",
+      location: makeSpan("src/service.ts", 1),
+      attributes: { relativePath: "src/service.ts" },
+    };
+    const tsEp1: GraphNode = {
+      id: nodeId({ workspaceId: wsId, kind: "Endpoint", qualifiedName: "GET /orders", relativePath: "src/routes.ts" }),
+      kind: "Endpoint",
+      qualifiedName: "GET /orders",
+      language: "typescript",
+      location: makeSpan("src/routes.ts", 4),
+      attributes: { framework: "express" },
+    };
+    const tsEp2: GraphNode = {
+      id: nodeId({ workspaceId: wsId, kind: "Endpoint", qualifiedName: "POST /orders", relativePath: "src/routes.ts" }),
+      kind: "Endpoint",
+      qualifiedName: "POST /orders",
+      language: "typescript",
+      location: makeSpan("src/routes.ts", 10),
+      attributes: { framework: "fastify" },
+    };
+    const tsEp3: GraphNode = {
+      id: nodeId({ workspaceId: wsId, kind: "Endpoint", qualifiedName: "DELETE /orders", relativePath: "src/routes.ts" }),
+      kind: "Endpoint",
+      qualifiedName: "DELETE /orders",
+      language: "typescript",
+      location: makeSpan("src/routes.ts", 18),
+      attributes: { framework: "express" },
+    };
+    const tsHandler: GraphNode = {
+      id: nodeId({ workspaceId: wsId, kind: "Handler", qualifiedName: "handleOrder", relativePath: "src/routes.ts" }),
+      kind: "Handler",
+      qualifiedName: "handleOrder",
+      language: "typescript",
+      location: makeSpan("src/routes.ts", 22),
+      attributes: { framework: "should-not-appear-from-handler" },
+    };
+    const tsFn: GraphNode = {
+      id: nodeId({ workspaceId: wsId, kind: "Function", qualifiedName: "createOrder", relativePath: "src/service.ts" }),
+      kind: "Function",
+      qualifiedName: "createOrder",
+      language: "typescript",
+      location: makeSpan("src/service.ts", 5),
+      attributes: {},
+    };
+    const extUnknown: GraphNode = {
+      id: nodeId({ workspaceId: wsId, kind: "UnknownExternal", qualifiedName: "external:logger" }),
+      kind: "UnknownExternal",
+      qualifiedName: "external:logger",
+      attributes: {},
+    };
+
+    // Python (L2): 1 file, 1 function, heuristic + unresolved edges
+    const pyFile: GraphNode = {
+      id: nodeId({ workspaceId: wsId, kind: "File", qualifiedName: "py/worker.py", relativePath: "py/worker.py" }),
+      kind: "File",
+      qualifiedName: "py/worker.py",
+      language: "python",
+      location: makeSpan("py/worker.py", 1),
+      attributes: { relativePath: "py/worker.py" },
+    };
+    const pyFn: GraphNode = {
+      id: nodeId({ workspaceId: wsId, kind: "Function", qualifiedName: "run_job", relativePath: "py/worker.py" }),
+      kind: "Function",
+      qualifiedName: "run_job",
+      language: "python",
+      location: makeSpan("py/worker.py", 3),
+      attributes: {},
+    };
+
+    // Go (L1): 1 file, 1 function, ONLY CONTAINS edge (hasSemanticEdges === false)
+    const goFile: GraphNode = {
+      id: nodeId({ workspaceId: wsId, kind: "File", qualifiedName: "cmd/main.go", relativePath: "cmd/main.go" }),
+      kind: "File",
+      qualifiedName: "cmd/main.go",
+      language: "go",
+      location: makeSpan("cmd/main.go", 1),
+      attributes: { relativePath: "cmd/main.go" },
+    };
+    const goFn: GraphNode = {
+      id: nodeId({ workspaceId: wsId, kind: "Function", qualifiedName: "main", relativePath: "cmd/main.go" }),
+      kind: "Function",
+      qualifiedName: "main",
+      language: "go",
+      location: makeSpan("cmd/main.go", 5),
+      attributes: {},
+    };
+
+    // Rust (L0 degraded): ONLY a File node + Workspace --CONTAINS--> File (verified) -> must report 0 verifiedEdges & coverageRatio 0!
+    const rsFile: GraphNode = {
+      id: nodeId({ workspaceId: wsId, kind: "File", qualifiedName: "crates/lib.rs", relativePath: "crates/lib.rs" }),
+      kind: "File",
+      qualifiedName: "crates/lib.rs",
+      language: "rust",
+      location: makeSpan("crates/lib.rs", 1),
+      attributes: { relativePath: "crates/lib.rs" },
+    };
+
+    // Untyped File node (language undefined) — counted in fileCount, excluded from languages
+    const untypedFile: GraphNode = {
+      id: nodeId({ workspaceId: wsId, kind: "File", qualifiedName: "README.txt", relativePath: "README.txt" }),
+      kind: "File",
+      qualifiedName: "README.txt",
+      location: makeSpan("README.txt", 1),
+      attributes: { relativePath: "README.txt" },
+    };
+
+    // C# node referenced ONLY as edge target from language-less UnknownExternal (tests COALESCE fallback to tn.language)
+    const csClass: GraphNode = {
+      id: nodeId({ workspaceId: wsId, kind: "Class", qualifiedName: "OrderController", relativePath: "Api/OrderController.cs" }),
+      kind: "Class",
+      qualifiedName: "OrderController",
+      language: "csharp",
+      location: makeSpan("Api/OrderController.cs", 4),
+      attributes: {},
+    };
+
+    const nodes = [
+      wsNode,
+      tsFile1,
+      tsFile2,
+      tsEp1,
+      tsEp2,
+      tsEp3,
+      tsHandler,
+      tsFn,
+      extUnknown,
+      pyFile,
+      pyFn,
+      goFile,
+      goFn,
+      rsFile,
+      untypedFile,
+      csClass,
+    ];
+    for (const n of nodes) repo.addNode(build.buildId, n);
+
+    const ev: Evidence = {
+      id: evidenceId({
+        workspaceId: wsId,
+        kind: "ast-span",
+        span: makeSpan("src/routes.ts", 1),
+        analyzerId: "multi-adapter",
+        analyzerVersion: "0.2.4",
+        rationale: "synthetic evidence",
+      }),
+      kind: "ast-span",
+      span: makeSpan("src/routes.ts", 1),
+      analyzerId: "multi-adapter",
+      analyzerVersion: "0.2.4",
+      rationale: "synthetic evidence",
+    };
+    repo.addEvidence(build.buildId, ev);
+
+    const edges: GraphEdge[] = [
+      // Workspace --CONTAINS--> File (MUST be excluded from byLanguage)
+      createEdge({ workspaceId: wsId, kind: "CONTAINS", from: wsNode.id, to: tsFile1.id, resolution: "verified", evidenceIds: [ev.id] }),
+      createEdge({ workspaceId: wsId, kind: "CONTAINS", from: wsNode.id, to: tsFile2.id, resolution: "verified", evidenceIds: [ev.id] }),
+      createEdge({ workspaceId: wsId, kind: "CONTAINS", from: wsNode.id, to: pyFile.id, resolution: "verified", evidenceIds: [ev.id] }),
+      createEdge({ workspaceId: wsId, kind: "CONTAINS", from: wsNode.id, to: goFile.id, resolution: "verified", evidenceIds: [ev.id] }),
+      createEdge({ workspaceId: wsId, kind: "CONTAINS", from: wsNode.id, to: rsFile.id, resolution: "verified", evidenceIds: [ev.id] }),
+      createEdge({ workspaceId: wsId, kind: "CONTAINS", from: wsNode.id, to: untypedFile.id, resolution: "verified", evidenceIds: [ev.id] }),
+      // TypeScript semantic + contains edges
+      createEdge({ workspaceId: wsId, kind: "CONTAINS", from: tsFile1.id, to: tsEp1.id, resolution: "verified", evidenceIds: [ev.id] }),
+      createEdge({ workspaceId: wsId, kind: "ROUTES_TO", from: tsEp1.id, to: tsHandler.id, resolution: "verified", evidenceIds: [ev.id] }),
+      createEdge({ workspaceId: wsId, kind: "CALLS", from: tsHandler.id, to: tsFn.id, resolution: "heuristic", evidenceIds: [ev.id] }),
+      createEdge({ workspaceId: wsId, kind: "CALLS", from: tsFn.id, to: extUnknown.id, resolution: "unresolved", evidenceIds: [ev.id] }),
+      // Python semantic edges
+      createEdge({ workspaceId: wsId, kind: "CALLS", from: pyFn.id, to: extUnknown.id, resolution: "unresolved", evidenceIds: [ev.id] }),
+      createEdge({ workspaceId: wsId, kind: "IMPORTS", from: pyFile.id, to: pyFn.id, resolution: "heuristic", evidenceIds: [ev.id] }),
+      // Go CONTAINS only (no semantic edges)
+      createEdge({ workspaceId: wsId, kind: "CONTAINS", from: goFile.id, to: goFn.id, resolution: "verified", evidenceIds: [ev.id] }),
+      // Language-less from -> C# to (fallback to tn.language)
+      createEdge({ workspaceId: wsId, kind: "REFERENCES", from: extUnknown.id, to: csClass.id, resolution: "heuristic", evidenceIds: [ev.id] }),
+    ];
+    for (const e of edges) repo.addEdge(build.buildId, e);
+
+    return repo.publish(build.buildId, state, "2026-11-24T12:00:05.000Z");
+  }
+
+  it("matches full SnapshotGraph coverageOf + workspaceSummary + indexStatus BIT-FOR-BIT (including L0-degraded rust with Workspace--CONTAINS-->File)", () => {
+    const dbFile = path.join(tempRoot, "summary-parity.sqlite");
+    const sqliteRepo = new SqliteGraphRepository(dbFile);
+    const memoryRepo = new InMemoryGraphRepository();
+    try {
+      sqliteRepo.registerWorkspace({ id: WS, rootPath: tempRoot, createdAt: T0 });
+      memoryRepo.registerWorkspace({ id: WS, rootPath: tempRoot, createdAt: T0 });
+
+      const sqliteSnap = buildRichMultiLangSnapshot(sqliteRepo, WS, "partial");
+      const memorySnap = buildRichMultiLangSnapshot(memoryRepo, WS, "partial");
+      expect(sqliteSnap.meta.id).toBe(memorySnap.meta.id);
+
+      const sqliteMeta = sqliteRepo.getLatestWorkspaceSummaryMeta(WS);
+      const memoryMeta = memoryRepo.getLatestWorkspaceSummaryMeta(WS);
+      expect(sqliteMeta).toBeDefined();
+      expect(sqliteMeta).toEqual(memoryMeta);
+
+      // Verify exact languageCoverage details including L0 rust & hasSemanticEdges
+      const byLangMeta = new Map(sqliteMeta!.languageCoverage.map((c) => [c.language, c]));
+      expect(byLangMeta.get("rust")).toEqual({
+        language: "rust",
+        files: 1,
+        hasNonFileSymbols: false,
+        hasSemanticEdges: false,
+        verifiedEdges: 0,
+        heuristicEdges: 0,
+        unresolvedEdges: 0,
+      });
+      expect(byLangMeta.get("go")).toEqual({
+        language: "go",
+        files: 1,
+        hasNonFileSymbols: true,
+        hasSemanticEdges: false,
+        verifiedEdges: 1,
+        heuristicEdges: 0,
+        unresolvedEdges: 0,
+      });
+      expect(byLangMeta.get("typescript")).toEqual({
+        language: "typescript",
+        files: 2,
+        hasNonFileSymbols: true,
+        hasSemanticEdges: true,
+        verifiedEdges: 2,
+        heuristicEdges: 1,
+        unresolvedEdges: 1,
+      });
+      expect(byLangMeta.get("csharp")).toEqual({
+        language: "csharp",
+        files: 0,
+        hasNonFileSymbols: true,
+        hasSemanticEdges: true,
+        verifiedEdges: 0,
+        heuristicEdges: 1,
+        unresolvedEdges: 0,
+      });
+
+      // Compare zero-hydration path vs full-hydration fallback path BIT-FOR-BIT!
+      const fallbackRepo: GraphRepository = {
+        registerWorkspace: (r) => sqliteRepo.registerWorkspace(r),
+        upsertFile: (r) => sqliteRepo.upsertFile(r),
+        listFiles: (id) => sqliteRepo.listFiles(id),
+        deleteFile: (id, p) => sqliteRepo.deleteFile(id, p),
+        beginBuild: (i) => sqliteRepo.beginBuild(i),
+        getBuild: (id) => sqliteRepo.getBuild(id),
+        addNode: (id, n) => sqliteRepo.addNode(id, n),
+        addEdge: (id, e) => sqliteRepo.addEdge(id, e),
+        addEvidence: (id, ev) => sqliteRepo.addEvidence(id, ev),
+        publish: (id, st, ts) => sqliteRepo.publish(id, st, ts),
+        failBuild: (id, r) => sqliteRepo.failBuild(id, r),
+        getSnapshot: (id) => sqliteRepo.getSnapshot(id),
+        getLatestPublished: (id) => sqliteRepo.getLatestPublished(id),
+      };
+
+      const fastDeps = makeServiceDeps(sqliteRepo, WS, tempRoot);
+      const fallbackDeps = makeServiceDeps(fallbackRepo, WS, tempRoot);
+
+      const fastSummary = workspaceSummary(fastDeps, "req-sum-1", { workspaceId: WS });
+      const fallbackSummary = workspaceSummary(fallbackDeps, "req-sum-1", { workspaceId: WS });
+      expect(EnvelopeSchema.safeParse(fastSummary).success).toBe(true);
+      expect(WorkspaceSummaryDataSchema.safeParse(fastSummary.data).success).toBe(true);
+      expect(JSON.stringify(fastSummary)).toBe(JSON.stringify(fallbackSummary));
+      expect(fastSummary.coverage).toEqual(coverageOf(sqliteSnap));
+      expect(fastSummary.coverage?.byLanguage?.rust).toEqual({
+        tier: "L0",
+        files: 1,
+        verifiedEdges: 0,
+        heuristicEdges: 0,
+        unresolvedEdges: 0,
+        coverageRatio: 0,
+      });
+
+      const fastStatus = indexStatus(fastDeps, "req-idx-1", { workspaceId: WS });
+      const fallbackStatus = indexStatus(fallbackDeps, "req-idx-1", { workspaceId: WS });
+      expect(EnvelopeSchema.safeParse(fastStatus).success).toBe(true);
+      expect(IndexStatusDataSchema.safeParse(fastStatus.data).success).toBe(true);
+      expect(JSON.stringify(fastStatus)).toBe(JSON.stringify(fallbackStatus));
+
+      // Start an active build to verify stale=true parity on both endpoints
+      sqliteRepo.beginBuild({
+        workspaceId: WS,
+        revision: { id: "rev-rich-2", sequence: 2 },
+        configHash: "cfg-rich",
+        analyzerFingerprint: "fp-rich",
+        createdAt: T0,
+      });
+      const staleFastSummary = workspaceSummary(fastDeps, "req-sum-2", { workspaceId: WS });
+      const staleFallbackSummary = workspaceSummary(fallbackDeps, "req-sum-2", { workspaceId: WS });
+      expect(JSON.stringify(staleFastSummary)).toBe(JSON.stringify(staleFallbackSummary));
+
+      const staleFastStatus = indexStatus(fastDeps, "req-idx-2", { workspaceId: WS });
+      const staleFallbackStatus = indexStatus(fallbackDeps, "req-idx-2", { workspaceId: WS });
+      expect(JSON.stringify(staleFastStatus)).toBe(JSON.stringify(staleFallbackStatus));
+    } finally {
+      sqliteRepo.close();
+    }
+  });
+
+  it("calls getLatestPublished 0 times during workspaceSummary and indexStatus on a cold SqliteGraphRepository and completes in < 20ms", () => {
+    const dbFile = path.join(tempRoot, "zero-hydration-perf.sqlite");
+    const setupRepo = new SqliteGraphRepository(dbFile);
+    let expectedSnapId = "";
+    try {
+      setupRepo.registerWorkspace({ id: WS, rootPath: tempRoot, createdAt: T0 });
+      // Empty workspace checks: 0 getLatestPublished calls even when no snapshot exists
+      let emptyHydrationCalls = 0;
+      const origEmptyLatest = setupRepo.getLatestPublished.bind(setupRepo);
+      setupRepo.getLatestPublished = (wsId: string) => {
+        emptyHydrationCalls += 1;
+        return origEmptyLatest(wsId);
+      };
+      const emptyDeps = makeServiceDeps(setupRepo, WS, tempRoot);
+      const emptyIdx = indexStatus(emptyDeps, "req-empty-idx", { workspaceId: WS });
+      expect((emptyIdx.data as { latestSnapshot: unknown }).latestSnapshot).toBeNull();
+      expect(emptyIdx.coverage).toBeNull();
+      expect(() => workspaceSummary(emptyDeps, "req-empty-sum", { workspaceId: WS })).toThrow(
+        CausorynToolError,
+      );
+      expect(emptyHydrationCalls).toBe(0);
+      setupRepo.getLatestPublished = origEmptyLatest;
+
+      expectedSnapId = publishSyntheticSnapshot(setupRepo, 1, 300).snapshotId;
+    } finally {
+      setupRepo.close();
+    }
+
+    // Reopen fresh SQLite connection (cold cache)
+    const warmRepo = new SqliteGraphRepository(dbFile);
+    try {
+      let fullHydrationCalls = 0;
+      let summaryMetaCalls = 0;
+      const origGetLatestPublished = warmRepo.getLatestPublished.bind(warmRepo);
+      const origGetSummaryMeta = warmRepo.getLatestWorkspaceSummaryMeta.bind(warmRepo);
+      warmRepo.getLatestPublished = (wsId: string) => {
+        fullHydrationCalls += 1;
+        return origGetLatestPublished(wsId);
+      };
+      warmRepo.getLatestWorkspaceSummaryMeta = (wsId: string) => {
+        summaryMetaCalls += 1;
+        return origGetSummaryMeta(wsId);
+      };
+
+      const deps = makeServiceDeps(warmRepo, WS, tempRoot);
+      const t0 = performance.now();
+      const idxEnv = indexStatus(deps, "req-perf-idx", { workspaceId: WS });
+      const sumEnv = workspaceSummary(deps, "req-perf-sum", { workspaceId: WS });
+      const elapsedMs = performance.now() - t0;
+
+      expect(fullHydrationCalls).toBe(0);
+      expect(summaryMetaCalls).toBe(2);
+      expect(idxEnv.snapshotId).toBe(expectedSnapId);
+      expect(sumEnv.snapshotId).toBe(expectedSnapId);
+      expect((sumEnv.data as { nodeCount: number }).nodeCount).toBe(601);
+      expect((sumEnv.data as { edgeCount: number }).edgeCount).toBe(300);
+      expect((sumEnv.data as { evidenceCount: number }).evidenceCount).toBe(300);
+      expect(elapsedMs).toBeLessThan(20);
+    } finally {
+      warmRepo.close();
+    }
+  });
+
+  it("handles edge-case graph topologies (Workspace with majorLang, language-less edges, majorLang without semantic edges, and 0-language snapshots) identically to InMemory and coverageOf", () => {
+    const dbFile = path.join(tempRoot, "complement-edge-cases.sqlite");
+    const sqliteRepo = new SqliteGraphRepository(dbFile);
+    const memoryRepo = new InMemoryGraphRepository();
+    try {
+      sqliteRepo.registerWorkspace({ id: WS, rootPath: tempRoot, createdAt: T0 });
+      memoryRepo.registerWorkspace({ id: WS, rootPath: tempRoot, createdAt: T0 });
+
+      // Case 1: 0-language snapshot (only Workspace + untyped File + Workspace--CONTAINS-->File)
+      for (const repo of [sqliteRepo, memoryRepo] as const) {
+        const b = repo.beginBuild({
+          workspaceId: WS,
+          revision: { id: "rev-zero-lang", sequence: 1 },
+          configHash: "cfg",
+          analyzerFingerprint: "fp",
+          createdAt: T0,
+        });
+        const ws: GraphNode = {
+          id: nodeId({ workspaceId: WS, kind: "Workspace", qualifiedName: WS }),
+          kind: "Workspace",
+          qualifiedName: WS,
+          attributes: {},
+        };
+        const f: GraphNode = {
+          id: nodeId({ workspaceId: WS, kind: "File", qualifiedName: "notes.txt", relativePath: "notes.txt" }),
+          kind: "File",
+          qualifiedName: "notes.txt",
+          location: makeSpan("notes.txt", 1),
+          attributes: {},
+        };
+        const ev: Evidence = {
+          id: evidenceId({
+            workspaceId: WS,
+            kind: "ast-span",
+            span: makeSpan("notes.txt", 1),
+            analyzerId: "a",
+            analyzerVersion: "1",
+            rationale: "ws contains file",
+          }),
+          kind: "ast-span",
+          span: makeSpan("notes.txt", 1),
+          analyzerId: "a",
+          analyzerVersion: "1",
+          rationale: "ws contains file",
+        };
+        repo.addNode(b.buildId, ws);
+        repo.addNode(b.buildId, f);
+        repo.addEvidence(b.buildId, ev);
+        repo.addEdge(
+          b.buildId,
+          createEdge({
+            workspaceId: WS,
+            kind: "CONTAINS",
+            from: ws.id,
+            to: f.id,
+            resolution: "verified",
+            evidenceIds: [ev.id],
+          }),
+        );
+        repo.publish(b.buildId, "ready", "2026-11-24T12:01:00.000Z");
+      }
+      const zeroSqlite = sqliteRepo.getLatestWorkspaceSummaryMeta(WS);
+      const zeroMem = memoryRepo.getLatestWorkspaceSummaryMeta(WS);
+      expect(zeroSqlite).toEqual(zeroMem);
+      expect(zeroSqlite?.fileCount).toBe(1);
+      expect(zeroSqlite?.languages).toEqual([]);
+      expect(zeroSqlite?.languageCoverage).toEqual([]);
+
+      // Case 2: Workspace node HAS majorLang ("typescript"), majorLang has ONLY CONTAINS edges,
+      // minority language ("python") has CALLS, plus UnknownExternal -> majorLang & UnknownExternal -> UnknownExternal
+      let snap2Sqlite!: ReturnType<SqliteGraphRepository["publish"]>;
+      for (const repo of [sqliteRepo, memoryRepo] as const) {
+        const b = repo.beginBuild({
+          workspaceId: WS,
+          revision: { id: "rev-edge-cases", sequence: 2 },
+          configHash: "cfg",
+          analyzerFingerprint: "fp",
+          createdAt: T0,
+        });
+        const ws: GraphNode = {
+          id: nodeId({ workspaceId: WS, kind: "Workspace", qualifiedName: WS }),
+          kind: "Workspace",
+          qualifiedName: WS,
+          language: "typescript",
+          attributes: {},
+        };
+        const tsFile1: GraphNode = {
+          id: nodeId({ workspaceId: WS, kind: "File", qualifiedName: "a.ts", relativePath: "a.ts" }),
+          kind: "File",
+          qualifiedName: "a.ts",
+          language: "typescript",
+          location: makeSpan("a.ts", 1),
+          attributes: {},
+        };
+        const tsFn1: GraphNode = {
+          id: nodeId({ workspaceId: WS, kind: "Function", qualifiedName: "fa", relativePath: "a.ts" }),
+          kind: "Function",
+          qualifiedName: "fa",
+          language: "typescript",
+          location: makeSpan("a.ts", 2),
+          attributes: {},
+        };
+        const tsFn2: GraphNode = {
+          id: nodeId({ workspaceId: WS, kind: "Function", qualifiedName: "fb", relativePath: "a.ts" }),
+          kind: "Function",
+          qualifiedName: "fb",
+          language: "typescript",
+          location: makeSpan("a.ts", 3),
+          attributes: {},
+        };
+        const pyFile: GraphNode = {
+          id: nodeId({ workspaceId: WS, kind: "File", qualifiedName: "b.py", relativePath: "b.py" }),
+          kind: "File",
+          qualifiedName: "b.py",
+          language: "python",
+          location: makeSpan("b.py", 1),
+          attributes: {},
+        };
+        const pyFn: GraphNode = {
+          id: nodeId({ workspaceId: WS, kind: "Function", qualifiedName: "py_fn", relativePath: "b.py" }),
+          kind: "Function",
+          qualifiedName: "py_fn",
+          language: "python",
+          location: makeSpan("b.py", 2),
+          attributes: {},
+        };
+        const ext1: GraphNode = {
+          id: nodeId({ workspaceId: WS, kind: "UnknownExternal", qualifiedName: "ext:one" }),
+          kind: "UnknownExternal",
+          qualifiedName: "ext:one",
+          attributes: {},
+        };
+        const ext2: GraphNode = {
+          id: nodeId({ workspaceId: WS, kind: "UnknownExternal", qualifiedName: "ext:two" }),
+          kind: "UnknownExternal",
+          qualifiedName: "ext:two",
+          attributes: {},
+        };
+        const ev: Evidence = {
+          id: evidenceId({
+            workspaceId: WS,
+            kind: "ast-span",
+            span: makeSpan("a.ts", 1),
+            analyzerId: "a",
+            analyzerVersion: "1",
+            rationale: "ev",
+          }),
+          kind: "ast-span",
+          span: makeSpan("a.ts", 1),
+          analyzerId: "a",
+          analyzerVersion: "1",
+          rationale: "ev",
+        };
+        for (const n of [ws, tsFile1, tsFn1, tsFn2, pyFile, pyFn, ext1, ext2]) {
+          repo.addNode(b.buildId, n);
+        }
+        repo.addEvidence(b.buildId, ev);
+        // Workspace --CONTAINS--> tsFile1 (excluded!)
+        repo.addEdge(b.buildId, createEdge({ workspaceId: WS, kind: "CONTAINS", from: ws.id, to: tsFile1.id, resolution: "verified", evidenceIds: [ev.id] }));
+        // tsFile1 --CONTAINS--> tsFn1 & tsFn2 (typescript CONTAINS only!)
+        repo.addEdge(b.buildId, createEdge({ workspaceId: WS, kind: "CONTAINS", from: tsFile1.id, to: tsFn1.id, resolution: "verified", evidenceIds: [ev.id] }));
+        repo.addEdge(b.buildId, createEdge({ workspaceId: WS, kind: "CONTAINS", from: tsFile1.id, to: tsFn2.id, resolution: "verified", evidenceIds: [ev.id] }));
+        // python CALLS (semantic edge ONLY in python!)
+        repo.addEdge(b.buildId, createEdge({ workspaceId: WS, kind: "CALLS", from: pyFn.id, to: ext1.id, resolution: "unresolved", evidenceIds: [ev.id] }));
+        // UnknownExternal -> UnknownExternal (language-less on both ends — MUST NOT leak into typescript!)
+        repo.addEdge(b.buildId, createEdge({ workspaceId: WS, kind: "CALLS", from: ext1.id, to: ext2.id, resolution: "unresolved", evidenceIds: [ev.id] }));
+        // UnknownExternal -> tsFn1 (CONTAINS fallback to typescript, counted once!)
+        repo.addEdge(b.buildId, createEdge({ workspaceId: WS, kind: "CONTAINS", from: ext1.id, to: tsFn1.id, resolution: "heuristic", evidenceIds: [ev.id] }));
+
+        const pub = repo.publish(b.buildId, "ready", "2026-11-24T12:02:00.000Z");
+        if (repo === sqliteRepo) snap2Sqlite = pub;
+      }
+
+      const metaSqlite = sqliteRepo.getLatestWorkspaceSummaryMeta(WS);
+      const metaMemory = memoryRepo.getLatestWorkspaceSummaryMeta(WS);
+      expect(metaSqlite).toEqual(metaMemory);
+
+      const byLang = new Map(metaSqlite!.languageCoverage.map((c) => [c.language, c]));
+      // TypeScript has ONLY CONTAINS edges (2 verified from tsFile1 + 1 heuristic fallback from ext1; Workspace--CONTAINS excluded; ext1->ext2 CALLS NOT leaked!)
+      expect(byLang.get("typescript")).toEqual({
+        language: "typescript",
+        files: 1,
+        hasNonFileSymbols: true,
+        hasSemanticEdges: false,
+        verifiedEdges: 2,
+        heuristicEdges: 1,
+        unresolvedEdges: 0,
+      });
+      expect(byLang.get("python")).toEqual({
+        language: "python",
+        files: 1,
+        hasNonFileSymbols: true,
+        hasSemanticEdges: true,
+        verifiedEdges: 0,
+        heuristicEdges: 0,
+        unresolvedEdges: 1,
+      });
+
+      const deps = makeServiceDeps(sqliteRepo, WS, tempRoot);
+      const sum = workspaceSummary(deps, "req-edge-case", { workspaceId: WS });
+      expect(sum.coverage).toEqual(coverageOf(snap2Sqlite));
+    } finally {
+      sqliteRepo.close();
     }
   });
 });

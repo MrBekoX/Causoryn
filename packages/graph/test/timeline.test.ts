@@ -1011,4 +1011,27 @@ describe("timeline git katmanı — geçici depo (salt-okunur)", () => {
     expect(first.points.map((p) => p.ref)).toEqual(["v1", "v2", "v3"]);
     expect(JSON.stringify(first)).not.toContain("qualityScore");
   }, 30_000);
+
+  it("güven uyarısı: committed .causoryn/architecture-snapshot.json yedeği açık trustWarning ve warnings üretir", async () => {
+    const timeline = await buildArchitectureTimelineFromGit(repoRoot, {
+      refs: ["v1", "v2"],
+    });
+    expect(timeline.points[0]?.trustWarning).toBe(
+      "snapshot-loaded-from-committed-git-blob",
+    );
+    expect(timeline.points[1]?.trustWarning).toBe(
+      "snapshot-loaded-from-committed-git-blob",
+    );
+    expect(timeline.warnings).toHaveLength(2);
+    expect(timeline.warnings[0]).toContain("snapshot-loaded-from-committed-git-blob");
+    expect(timeline.warnings[1]).toContain("snapshot-loaded-from-committed-git-blob");
+
+    const trusted = await buildArchitectureTimelineFromGit(repoRoot, {
+      refs: ["v1", "v2"],
+      snapshotLookup: (_sha, ref) => (ref === "v1" ? setV1() : setV2()),
+    });
+    expect(trusted.points[0]?.trustWarning).toBeUndefined();
+    expect(trusted.points[1]?.trustWarning).toBeUndefined();
+    expect(trusted.warnings).toEqual([]);
+  }, 30_000);
 });

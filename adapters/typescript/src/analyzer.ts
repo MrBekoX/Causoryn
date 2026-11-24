@@ -1693,18 +1693,25 @@ function emitCallEdge(
   const isNew = ts.isNewExpression(call);
   const signature = isNew ? undefined : checker.getResolvedSignature(call);
   const declaration = signature?.declaration;
+  const signatureSymbol =
+    declaration !== undefined
+      ? checker.getSymbolAtLocation(ts.getNameOfDeclaration(declaration) ?? declaration)
+      : undefined;
   const targetSymbol = isNew
     ? checker.getSymbolAtLocation(call.expression)
-    : declaration !== undefined
-      ? checker.getSymbolAtLocation(ts.getNameOfDeclaration(declaration) ?? declaration)
-      : checker.getSymbolAtLocation(call.expression);
+    : (signatureSymbol ?? checker.getSymbolAtLocation(call.expression));
+  const resolvedTargetSymbol = unwrapAliasSymbol(checker, targetSymbol);
 
-  const registryHit = resolveSymbolRecord(
-    context,
-    entry,
-    targetSymbol ?? undefined,
-    declaration ?? undefined,
-  );
+  const registryHit =
+    resolveSymbolRecord(
+      context,
+      entry,
+      targetSymbol ?? undefined,
+      declaration ?? undefined,
+    ) ??
+    (!isNew && declaration !== undefined
+      ? resolveInternalCallableRecord(context, resolvedTargetSymbol, caller)
+      : undefined);
   if (registryHit !== undefined) {
     assembler.addEdge({
       kind: "CALLS",
@@ -1738,13 +1745,18 @@ function emitCallEdge(
   }
 
   if (
-    targetSymbol !== undefined &&
-    (targetSymbol.getDeclarations()?.length ?? 0) > 0 &&
-    !isInternalDeclarationOrSymbol(context, targetSymbol, declaration)
+    resolvedTargetSymbol !== undefined &&
+    (resolvedTargetSymbol.flags & ts.SymbolFlags.Alias) === 0 &&
+    (resolvedTargetSymbol.getDeclarations()?.length ?? 0) > 0 &&
+    !isInternalDeclarationOrSymbol(context, resolvedTargetSymbol, declaration)
   ) {
     // Analiz setinin dışında bildirilen sembol (lib/node_modules): açık
     // UnknownExternal node + checker dayanaklı verified kenar.
-    const externalName = externalQualifiedName(targetSymbol, declaration);
+    const externalDecl =
+      signatureSymbol !== undefined
+        ? declaration
+        : resolvedTargetSymbol.getDeclarations()?.[0];
+    const externalName = externalQualifiedName(resolvedTargetSymbol, externalDecl);
     const externalNode = assembler.ensureNode({
       kind: "UnknownExternal",
       qualifiedName: externalName,
@@ -1765,8 +1777,20 @@ function emitCallEdge(
     return;
   }
 
+  // TypeChecker tarafından kesin olarak çözümlenmiş ancak üst düzey düğüm
+  // olarak modellenmeyen yerel çağrılar (callback parametreleri, test-içi
+  // kapanışlar, anonim nesne değişmezleri, IIFE): sahte UnknownExternal
+  // (unresolved) üretmez.
+  if (
+    !isNew &&
+    declaration !== undefined &&
+    isResolvedInternalNonModeledCall(context, resolvedTargetSymbol, declaration)
+  ) {
+    return;
+  }
+
   // Hiç çözümlenemedi: uydurma sembol YOK; açık UnknownExternal + unresolved.
-  const callText = call.expression.getText(sourceFile).trim();
+  const callText = formatUnresolvedCalleeText(call.expression, sourceFile);
   const unresolvedNode = assembler.ensureNode({
     kind: "UnknownExternal",
     qualifiedName: callText,
@@ -1787,6 +1811,129 @@ function emitCallEdge(
   assembler.addWarning(
     `CALLS çözümlenemedi: ${entry.relativePath} '${callText}' (unresolved, UnknownExternal node üretildi)`,
   );
+}
+
+const MAX_UNRESOLVED_CALLEE_CHARS = 120;
+const MAX_UNRESOLVED_CALLEE_DEPTH = 16;
+
+function resolveInternalCallableRecord(
+  context: AnalysisContext,
+  symbol: ts.Symbol | undefined,
+  caller: NodeRecord,
+): NodeRecord | undefined {
+  if (symbol === undefined || (symbol.flags & ts.SymbolFlags.Alias) !== 0) {
+    return undefined;
+  }
+  const decl = symbol.getDeclarations()?.[0];
+  if (decl === undefined) return undefined;
+  const declEntry = context.entries.get(
+    canonicalPath(decl.getSourceFile().fileName),
+  );
+  if (declEntry === undefined) return undefined;
+
+  if (
+    (ts.isPropertySignature(decl) || ts.isPropertyDeclaration(decl)) &&
+    ts.isIdentifier(decl.name)
+  ) {
+    const owner = decl.parent;
+    const ownerName =
+      ts.isClassDeclaration(owner) || ts.isInterfaceDeclaration(owner)
+        ? owner.name?.text
+        : resolveClassExpressionOwnerName(context, owner);
+    if (ownerName !== undefined) {
+      const record = context.assembler.ensureNode({
+        kind: "Method",
+        qualifiedName: `${ownerName}.${decl.name.text}`,
+        relativePath: declEntry.relativePath,
+        language: declEntry.language,
+      });
+      context.registry.set(symbol, record);
+      return record;
+    }
+  }
+
+  if (
+    caller.node.kind !== "Test" &&
+    ts.isVariableDeclaration(decl) &&
+    ts.isIdentifier(decl.name)
+  ) {
+    const init = unwrapParenthesizedExpression(decl.initializer);
+    if (
+      init !== undefined &&
+      (ts.isArrowFunction(init) || ts.isFunctionExpression(init))
+    ) {
+      const record = context.assembler.ensureNode({
+        kind: "Handler",
+        qualifiedName: decl.name.text,
+        relativePath: declEntry.relativePath,
+        language: declEntry.language,
+      });
+      context.registry.set(symbol, record);
+      return record;
+    }
+  }
+
+  return undefined;
+}
+
+function isResolvedInternalNonModeledCall(
+  context: AnalysisContext,
+  resolvedTargetSymbol: ts.Symbol | undefined,
+  declaration: ts.Declaration,
+): boolean {
+  if (
+    resolvedTargetSymbol !== undefined &&
+    (resolvedTargetSymbol.flags & ts.SymbolFlags.Alias) === 0 &&
+    isInternalDeclarationOrSymbol(context, resolvedTargetSymbol, declaration)
+  ) {
+    return true;
+  }
+  return (
+    (ts.isArrowFunction(declaration) || ts.isFunctionExpression(declaration)) &&
+    ownRelativePathOf(context, declaration) !== undefined
+  );
+}
+
+function formatUnresolvedCalleeExpr(
+  expr: ts.Expression,
+  sourceFile: ts.SourceFile,
+  depth: number,
+): string {
+  if (depth >= MAX_UNRESOLVED_CALLEE_DEPTH) {
+    return expr.getText(sourceFile).trim();
+  }
+  if (
+    ts.isParenthesizedExpression(expr) ||
+    ts.isAsExpression(expr) ||
+    ts.isNonNullExpression(expr) ||
+    ts.isSatisfiesExpression(expr)
+  ) {
+    return formatUnresolvedCalleeExpr(expr.expression, sourceFile, depth + 1);
+  }
+  if (ts.isCallExpression(expr)) {
+    return `${formatUnresolvedCalleeExpr(expr.expression, sourceFile, depth + 1)}()`;
+  }
+  if (ts.isPropertyAccessExpression(expr)) {
+    const receiver = formatUnresolvedCalleeExpr(expr.expression, sourceFile, depth + 1);
+    return `${receiver}.${expr.name.text}`;
+  }
+  if (ts.isElementAccessExpression(expr)) {
+    const receiver = formatUnresolvedCalleeExpr(expr.expression, sourceFile, depth + 1);
+    return `${receiver}[]`;
+  }
+  return expr.getText(sourceFile).trim();
+}
+
+function formatUnresolvedCalleeText(
+  expr: ts.Expression,
+  sourceFile: ts.SourceFile,
+): string {
+  const raw = formatUnresolvedCalleeExpr(expr, sourceFile, 0);
+  const collapsed = raw.replace(/\s+/g, " ").trim();
+  if (collapsed.length === 0) return "<unresolved-call>";
+  return collapsed.length > MAX_UNRESOLVED_CALLEE_CHARS
+    ? collapsed.slice(0, MAX_UNRESOLVED_CALLEE_CHARS)
+    : collapsed;
 }
 
 function externalQualifiedName(

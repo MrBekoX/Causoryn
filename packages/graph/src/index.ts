@@ -128,7 +128,9 @@ export type {
   SymbolIndexEntry,
   SymbolSearchHit,
   SymbolSearchStore,
+  WorkspaceLanguageCoverageMeta,
   WorkspaceRecord,
+  WorkspaceSummaryMeta,
 } from "./repository.js";
 // Architecture Guard çekirdeği — sprint-3 C2 (TŞ §12). findViolations saf
 // motordur; MCP zarfı mcp-server katmanındadır.
@@ -303,12 +305,14 @@ export {
   TIMELINE_DEFAULTS,
   TIMELINE_POLICY_BLOB_PATH,
   TIMELINE_SNAPSHOT_BLOB_PATH,
+  TIMELINE_TRUST_WARNING_COMMITTED_GIT_BLOB,
   buildArchitectureTimeline,
   buildArchitectureTimelineFromGit,
   buildTimelineViolationTrend,
   readTimelinePointFromGit,
   readTimelineTrendBaselineFromGit,
   readTimelineTrendPolicyFromGit,
+  reconstructFileContentSetFromGitTree,
   selectSampledIndices,
   serializeSnapshotContentSet,
 } from "./timeline.js";
@@ -318,6 +322,7 @@ export type {
   ArchitectureTimelineWithTrend,
   BuildArchitectureTimelineInput,
   BuildTimelineViolationTrendInput,
+  ReadTimelinePointOptions,
   TimelineChangeSummary,
   TimelineDiffInterval,
   TimelineGitInput,
@@ -325,7 +330,9 @@ export type {
   TimelineLimits,
   TimelinePointContent,
   TimelinePointInput,
+  TimelineReconstructFromGitTree,
   TimelineSamplingReport,
+  TimelineSnapshotLookup,
   TimelineTrendBaselineResult,
   TimelineTrendMetric,
   TimelineTrendPointEvaluation,
@@ -334,6 +341,7 @@ export type {
   TimelineTrendSeries,
   TimelineTrendSeriesValue,
   TimelineTrendStep,
+  TimelineTrustWarning,
   TimelineUnanalyzedInterval,
   TimelineViolationTrend,
 } from "./timeline.js";

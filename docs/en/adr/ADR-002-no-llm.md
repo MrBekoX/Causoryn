@@ -1,128 +1,57 @@
-# ADR-002 — No-LLM Strict Boundary
+# Architecture Decision: No-LLM Strict Boundary
 
 > **Language:** [Türkçe](../../adr/ADR-002-no-llm.md) | **English** · [Documentation Hub](../README.md)
 >
-> **Evidence base:** Technical Specification (TS) v2.1 §1 (Red Line), §3.1, §3.2, §19, §24 · `wiki/decisions.md` ADR-002, K-023, K-026 · `wiki/architecture.md`
-> **Status:** **Accepted** (foundational engine boundary; current for `v0.2.4` Pre-1.0 Public Preview with `K-023`/`K-026` hybrid architecture & MCP schema boundary)
-> **Date:** 2026-11-02 (initial record), 2026-11-20 (`v0.2.0` verification), 2026-11-23 (`v0.2.4` / `K-023`–`K-026` hybrid boundary & MCP `.describe()` refinement); originates from TS v2.1 (2026-10-31)
+> **Status:** Accepted (foundational engine invariant, active across `v0.2.4` and all pre-1.0 releases)
 
 ## Context
 
-Causoryn is an evidence-backed **Unified Evidence & Knowledge Graph** engine for
-repositories and monorepos (TS v2.1 §1). Page 1 of the Technical Specification
-establishes an immutable architectural red line:
+Causoryn is a local, deterministic, evidence-backed code graph and change-verification engine for repositories and monorepos. From the outset, Causoryn enforces a strict architectural separation between **static code measurement** and **LLM reasoning**:
 
-> "No LLM shall ever be executed or invoked inside Causoryn. …
-> Causoryn produces local, deterministic analysis, graphs, verification, and
-> structured tool output. It contains no LLM API, model router, model
-> adapter/provider, inference server, embedding model, API key prompt, or
-> host-model selection logic." (TS v2.1, p. 1)
-
-Interpretation, planning, code editing, and tool orchestration belong strictly
-to the host-selected model (`Antigravity`, `Claude Code`, `Codex`,
-`ZCode (GLM)`) (TS §3.1 responsibility matrix). Causoryn produces **structured,
-evidenced data** only: MCP tools return evidence-backed data. The
-MCP server never initiates `sampling`, `elicitation`, or outbound model calls;
-and Causoryn is never a client of any text-generation or embedding service
-(TS §3.1 boundary contract).
+- No LLM is ever executed or invoked inside Causoryn.
+- Causoryn contains no LLM API client, model router, provider adapter, local inference server, embedding model, vector database, API key prompt, or host-model selection logic.
+- Interpretation, planning, code editing, and tool orchestration belong strictly to the external host coding agent (`Antigravity`, `Claude Code`, `Codex`, `ZCode (GLM)`).
+- The MCP server never initiates `sampling`, `elicitation`, or outbound model API calls.
 
 ## Decision
 
-The Causoryn engine **contains zero LLM, embedding, vector-database, or model
-API dependencies** and never performs local or remote model inference on any
-code path.
+The Causoryn engine contains **zero LLM, embedding, vector-database, or model API dependencies** and performs zero local or remote model inference on any execution path.
 
-### Prohibited Dependencies & Constructs (TS §3.2, Immutable)
+### Prohibited Dependencies & Constructs
 
-- LLM inference/provider SDKs such as `openai`, `@anthropic-ai/sdk`,
-  `@google/generative-ai`, `langchain`, or any equivalent client library.
-- `ModelProvider`, `LLMRouter`, `InferenceService`, `EmbeddingService`,
-  automatic model weight downloads, or local Ollama/vLLM/Transformers runtimes.
-- Model API key environment variables, provider endpoint settings, or
-  token/credit billing screens.
-- Vector databases or embedding models for RAG. All symbol and documentation
-  search is implemented via compiler/AST symbols, bounded graph traversal, exact
-  matching, **SQLite FTS5** (`symbol_fts` and `wiki_fts`), and documented
-  lexical ranking.
+- LLM provider/orchestration SDKs (`openai`, `@anthropic-ai/sdk`, `@google/generative-ai`, `langchain`, or equivalents).
+- `ModelProvider`, `LLMRouter`, `InferenceService`, `EmbeddingService`, model weight downloads, or local Ollama/vLLM/Transformers runtimes.
+- Model API key environment variables, provider endpoint settings, or token/credit billing UI.
+- Vector databases or embedding-based RAG. All code localization and documentation search run strictly on deterministic primitives: compiler/AST symbol tables, bounded graph traversal, path + identifier tokenization (`camelCase`/`PascalCase`/`snake_case`/`kebab-case`), **SQLite FTS5 BM25** (`symbol_fts` and `wiki_fts`), and structural degree scoring.
 
 ### Practical Engineering Consequences
 
-1. Graph `Evidence` originates exclusively from static language analyzers
-   (TypeScript Compiler API, C# Roslyn, Python `ast`, Go `go/parser`, Rust
-   `syn 3`), contract/config parsers, and verifiable file/git-commit spans;
-   host-model prose can never be indexed as `verified` evidence (TS §3.2).
-2. Retrieval and search rely strictly on deterministic primitives: compiler/AST
-   symbol tables, graph neighborhood queries, and SQLite FTS5.
-3. `packages/mcp-server` serves the host environment unidirectionally over
-   `stdio`: `stdout` carries exclusively MCP JSON-RPC frames, while all logs go
-   to `stderr` (TS §10.1).
-4. Across all **18 npm workspace packages + the monorepo root** (19
-   `package.json` manifests) in `v0.2.4`, runtime and build dependencies are
-   strictly infrastructure libraries for analysis and packaging: `zod`,
-   `@modelcontextprotocol/sdk`, `better-sqlite3`, `yaml`, `typescript`, and
-   `esbuild` (and the published `packages/causoryn` package declares
-   `"dependencies": {}` — zero external npm dependencies).
+1. **Verifiable static evidence:** Graph `Evidence` originates exclusively from static language analyzers (TypeScript Compiler API, C# Roslyn, Python `ast`, Go `go/parser`, Rust `syn` 3), contract/config parsers, and verifiable file/Git-commit spans; host-model prose can never be indexed as `verified` evidence.
+2. **Clean `stdio` transport:** `packages/mcp-server` communicates unidirectionally over `stdio`: `stdout` carries exclusively MCP JSON-RPC 2.0 frames, while all diagnostics go to `stderr`.
+3. **Minimal infrastructure dependency footprint:** Across all 18 npm workspace packages + the monorepo root (19 `package.json` manifests), runtime and build dependencies are strictly analysis and packaging libraries (`zod`, `@modelcontextprotocol/sdk`, `better-sqlite3`, `yaml`, `typescript`, `esbuild`), and the published `packages/causoryn` package declares `"dependencies": {}`.
 
-### Hybrid Architecture Exports, Optional Annotations & MCP `.describe()` (`K-023` / `K-026`)
+### Hybrid Architecture Portals & Optional Host Annotations
 
-`causoryn_export_documentation` renders a deterministic architecture portal directly from the static evidence graph with zero model calls. A caller may also supply summaries, domain groups, flows, guided tours, decisions, and risk notes via optional `annotations`. Under `K-026`, MCP Zod `.describe()` field documentation on `causoryn_export_documentation` and natural-language triggering in the `architecture-blueprint` skill empower the external host LLM to run a two-pass discovery → evidence-grounded synthesis flow while keeping the Causoryn engine **100% LLM-free**. The server validator checks the schema and enforces fail-closed grounding against the active graph/projection (`moduleId`, `nodeId`, `evidenceId`, `keyFiles`). Invalid references return `INVALID_ARGUMENT`; factual accuracy of free-form prose remains the caller's responsibility. See [Prompting & Architecture Portals](../prompting-and-architecture-portals.md) for deterministic vs. annotated prompt patterns.
+`causoryn_export_documentation` renders deterministic architecture portals directly from the static evidence graph with zero model calls. A caller (typically the external host coding agent guided by `skills/architecture-blueprint/SKILL.md`) may optionally supply structured `annotations` (domains, module notes, flows, guided tours, decisions, and risks). Causoryn validates the schema, size budgets, and graph/projection references (`moduleId`, `nodeId`, `evidenceId`, `keyFiles`) fail-closed in a single pass (collecting up to 25 errors under `INVALID_ARGUMENT`) while remaining 100% LLM-free. Factual accuracy of caller-supplied prose remains the caller's responsibility. See [Prompting & Architecture Portals](../prompting-and-architecture-portals.md).
 
 ### Scope of Determinism
 
-The same renderer version, snapshot including metadata, format, view, options,
-and annotation input produce byte-identical supported architecture artifacts.
-Static graph analysis takes file contents, workspace and ignore settings,
-analyzer versions, and toolchain versions and availability as inputs. New
-builds can change metadata such as `createdAt`, publication times, and revisions.
-MCP `requestId`, background job progress, and latency reflect runtime state.
-Optional host-generated prose is a variable input to the renderer. See
-`packages/graph/test/architecture-export.test.ts` and
-`packages/mcp-server/src/{context.ts,server.ts,services.ts}`.
+- Identical renderer version, snapshot (including metadata), format, view, effective options, and validated annotations produce **byte-identical** architecture artifacts.
+- Static graph snapshots depend on file contents, workspace/ignore configuration, analyzer versions, and toolchain availability; streaming SHA-256 snapshot IDs (`computeStreamingSnapshotId`) exclude wall-clock build timestamps so clean full builds and early-cutoff incremental builds produce identical snapshot IDs.
+- Runtime fields such as `requestId`, timestamps, job progress, and caller-supplied prose can vary across sessions.
 
 ## Rationale
 
-- **Core determinism:** Canonical graph ordering and identities are reproducible
-  for equivalent inputs (TS §8 invariant vi). Annotations are renderer inputs.
-  Graph evidence for `verified` edges comes from static sources.
-- **Evidence integrity (`ADR-004`):** Every `verified` edge must cite a
-  verifiable file path, 1-based line span, and SHA-256 `sourceHash` — a bar
-  probabilistic completions cannot satisfy.
-- **Privacy and threat model:** Causoryn analyzes the workspace locally and
-  sends no source code to model APIs or telemetry services (TS §19). An external
-  host’s data handling depends on its own configuration and provider.
-- **Clean separation of concerns (TS §3.1, K-023):** Semantic reasoning and
-  narrative synthesis live in the host agent; static measurement, fail-closed
-  grounding verification, and deterministic layout live in Causoryn.
+- **Evidence integrity:** Every `verified` edge cites a verifiable file path, 1-based line span, and SHA-256 `sourceHash` — a bar probabilistic completions cannot satisfy.
+- **Privacy and threat model:** Causoryn analyzes repositories locally and transmits zero source code to model APIs or telemetry services.
+- **Clean separation of concerns:** Semantic reasoning and narrative synthesis live in the host coding agent; static measurement, fail-closed reference validation, and deterministic layout live in Causoryn.
 
-## Consequences & Verification Proof (`v0.2.4`)
+## Verification Proof
 
-- **Honest static boundaries (`ADR-010`):** Static analysis gaps are never
-  masked with LLM guesses; they are reported transparently via `heuristic` (+
-  `ambiguity`), `unresolved` (`UnknownExternal`), `coverage`, and `warnings`
-  (see [5-Language Analyzers](../language-analyzers.md)).
-- **Manifest & SBOM verification:** `tests/smoke.test.ts` asserts that banned
-  LLM packages never appear in workspace `package.json` manifests. Furthermore,
-  the **35-file** deterministic bundle manifest
-  (`packages/mcp-server/dist/bundle-manifest.json`, covering `mcp-server.mjs`,
-  `mcp-server.mjs.LEGAL.txt`, `node_modules/better-sqlite3/LICENSE`, and N-API
-  v10 prebuilds), `packages/causoryn/THIRD-PARTY-NOTICES.md`, and the CycloneDX
-  1.5 SBOM generated by `scripts/generate-sbom.mjs` contain zero AI/inference
-  packages.
-- **F6 behavioral zero-network proof (`net-guard.cjs`):** In the release
-  security suite (`tests/security-release/helpers/net-guard.cjs`; see
-  [Security Audit](../security-pass.md)), the bundled MCP server is spawned with
-  `NODE_OPTIONS="--require .../net-guard.cjs"`, intercepting and denying all
-  in-process Node.js outbound network APIs (`dns`, `net`, `tls`, `http`,
-  `https`, `fetch`, `WebSocket`) while logging any attempt to `CAUSORYN_NETLOG`.
-  The F6 session discovers 29 registrations through `tools/list`, then calls
-  `causoryn_workspace_summary` and HTML export. `CAUSORYN_NETLOG` remains
-  **0 bytes** in that session.
-  *(Documented scope boundary: `net-guard.cjs` hooks in-process Node network
-  APIs; child-process spawning is separately constrained to static command
-  allowlists — read-only `git`, offline sidecars, and Rust's optional one-time
-  cold `cargo build --locked` fetch from `crates.io`.)*
+- **Manifest & SBOM checks:** `tests/smoke.test.ts` asserts that banned LLM packages never appear in workspace manifests; the 36-file `bundle-manifest.json`, `THIRD-PARTY-NOTICES.md`, and CycloneDX 1.5 SBOM contain zero AI/inference dependencies.
+- **Zero-network behavioral proof (`net-guard.cjs`):** The packaged-bundle security suite (`tests/security-release/helpers/net-guard.cjs`; see [Security Audit](../security-pass.md)) spawns the compiled MCP server with `NODE_OPTIONS="--require .../net-guard.cjs"`, intercepting and denying all in-process Node.js outbound network APIs (`dns`, `net`, `tls`, `http`, `https`, `fetch`, `WebSocket`). Across a full handshake, index, and export session, `CAUSORYN_NETLOG` remains **0 bytes**. *(Child-process spawning is separately restricted to static allowlists — isolated read-only `git`, offline sidecars, and Rust's optional cold `cargo build --locked` crate fetch.)*
 
-## Related Decisions & Documentation
+## Related Documentation
 
-- `ADR-001` Model-agnostic Core · `ADR-004` Evidence First · `ADR-008` Read-only Workspace Default · `ADR-010` Incomplete Feature Never Advertised as Done (TS §24; internal index: `wiki/decisions.md`)
-- [Architecture Overview](../architecture.md) · [5-Language Analyzers](../language-analyzers.md) · [Prompting & Architecture Portals](../prompting-and-architecture-portals.md) · [Security Audit](../security-pass.md)
+- [Architecture Overview](../architecture.md) · [5-Language Analyzers](../language-analyzers.md)
+- [Prompting & Architecture Portals](../prompting-and-architecture-portals.md) · [Security Audit](../security-pass.md)

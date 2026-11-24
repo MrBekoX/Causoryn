@@ -17,7 +17,9 @@ import type {
   SnapshotBuildInput,
   SnapshotMetaSummary,
   SnapshotRead,
+  WorkspaceLanguageCoverageMeta,
   WorkspaceRecord,
+  WorkspaceSummaryMeta,
 } from "./repository.js";
 import {
   requireNonEmptyField,
@@ -328,6 +330,160 @@ export class InMemoryGraphRepository implements GraphRepository {
       edgeCount: latest.graph.edges.length,
       evidenceCount: latest.graph.evidence.length,
       stale: this.isStale(latest),
+    };
+  }
+
+  getLatestWorkspaceSummaryMeta(workspaceId: string): WorkspaceSummaryMeta | undefined {
+    requireNonEmptyField("workspaceId", workspaceId);
+    let latest: PublishedEntry | undefined;
+    for (const entry of this.published.values()) {
+      if (entry.graph.meta.workspaceId !== workspaceId) continue;
+      if (latest === undefined || isNewer(entry, latest)) latest = entry;
+    }
+    if (latest === undefined) return undefined;
+    const state = latest.graph.meta.state;
+    if (state !== "ready" && state !== "partial") return undefined;
+
+    const snapshot = latest.graph;
+    let fileCount = 0;
+    const entrypoints: string[] = [];
+    const frameworkSet = new Set<string>();
+    const nodeById = new Map<string, GraphNode>();
+
+    interface MutableLangCoverage {
+      files: number;
+      hasNonFileSymbols: boolean;
+      hasSemanticEdges: boolean;
+      verifiedEdges: number;
+      heuristicEdges: number;
+      unresolvedEdges: number;
+    }
+    const langBuckets = new Map<string, MutableLangCoverage>();
+    const ensureLang = (lang: string): MutableLangCoverage => {
+      let bucket = langBuckets.get(lang);
+      if (bucket === undefined) {
+        bucket = {
+          files: 0,
+          hasNonFileSymbols: false,
+          hasSemanticEdges: false,
+          verifiedEdges: 0,
+          heuristicEdges: 0,
+          unresolvedEdges: 0,
+        };
+        langBuckets.set(lang, bucket);
+      }
+      return bucket;
+    };
+
+    for (const node of snapshot.nodes) {
+      nodeById.set(node.id, node);
+      if (node.kind === "File") {
+        fileCount += 1;
+      }
+      if (node.kind === "Endpoint" || node.kind === "Handler") {
+        entrypoints.push(node.qualifiedName);
+        if (node.kind === "Endpoint" && typeof node.attributes.framework === "string") {
+          frameworkSet.add(node.attributes.framework);
+        }
+      }
+      if (typeof node.language === "string" && node.language.length > 0) {
+        const bucket = ensureLang(node.language);
+        if (node.kind === "File") {
+          bucket.files += 1;
+        } else if (node.kind !== "Workspace" && node.kind !== "UnknownExternal") {
+          bucket.hasNonFileSymbols = true;
+        }
+      }
+    }
+
+    const edgeKindCounts = new Map<string, number>();
+    let verified = 0;
+    let heuristic = 0;
+    let unresolved = 0;
+
+    for (const edge of snapshot.edges) {
+      edgeKindCounts.set(edge.kind, (edgeKindCounts.get(edge.kind) ?? 0) + 1);
+      if (edge.resolution === "verified") {
+        verified += 1;
+      } else if (edge.resolution === "heuristic") {
+        heuristic += 1;
+      } else {
+        unresolved += 1;
+      }
+
+      const fromNode = nodeById.get(edge.from);
+      const toNode = nodeById.get(edge.to);
+      if (fromNode?.kind === "Workspace" && edge.kind === "CONTAINS") {
+        continue;
+      }
+      const lang =
+        typeof fromNode?.language === "string" && fromNode.language.length > 0
+          ? fromNode.language
+          : typeof toNode?.language === "string" && toNode.language.length > 0
+            ? toNode.language
+            : undefined;
+      if (lang === undefined) continue;
+      const bucket = ensureLang(lang);
+      if (edge.kind !== "CONTAINS") {
+        bucket.hasSemanticEdges = true;
+      }
+      if (edge.resolution === "verified") {
+        bucket.verifiedEdges += 1;
+      } else if (edge.resolution === "heuristic") {
+        bucket.heuristicEdges += 1;
+      } else {
+        bucket.unresolvedEdges += 1;
+      }
+    }
+
+    entrypoints.sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+    const frameworks = [...frameworkSet].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+
+    const sortedLangs = [...langBuckets.keys()].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+    const languages: Array<{ readonly language: string; readonly files: number }> = [];
+    const languageCoverage: WorkspaceLanguageCoverageMeta[] = [];
+    for (const lang of sortedLangs) {
+      const bucket = langBuckets.get(lang)!;
+      if (bucket.files > 0) {
+        languages.push({ language: lang, files: bucket.files });
+      }
+      languageCoverage.push({
+        language: lang,
+        files: bucket.files,
+        hasNonFileSymbols: bucket.hasNonFileSymbols,
+        hasSemanticEdges: bucket.hasSemanticEdges,
+        verifiedEdges: bucket.verifiedEdges,
+        heuristicEdges: bucket.heuristicEdges,
+        unresolvedEdges: bucket.unresolvedEdges,
+      });
+    }
+
+    const edgesByKind: Record<string, number> = {};
+    for (const kind of [...edgeKindCounts.keys()].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0))) {
+      edgesByKind[kind] = edgeKindCounts.get(kind) ?? 0;
+    }
+
+    return {
+      snapshotId: snapshot.meta.id,
+      workspaceId: snapshot.meta.workspaceId,
+      state,
+      revisionId: snapshot.meta.revision.id,
+      revisionSequence: snapshot.meta.revision.sequence,
+      stale: this.isStale(latest),
+      nodeCount: snapshot.nodes.length,
+      edgeCount: snapshot.edges.length,
+      evidenceCount: snapshot.evidence.length,
+      fileCount,
+      languages,
+      frameworks,
+      entrypoints,
+      edgesByKind,
+      resolutions: {
+        verified,
+        heuristic,
+        unresolved,
+      },
+      languageCoverage,
     };
   }
 

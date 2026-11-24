@@ -121,6 +121,74 @@ const PROXIMITY_EXCLUDED_NODE_KINDS: ReadonlySet<string> = new Set([
   "Repository",
 ]);
 
+/** Query tokens indicating explicit interest in tests, specs, fixtures, or mocks. */
+const TEST_INTENT_TOKENS: ReadonlySet<string> = new Set([
+  "test",
+  "tests",
+  "spec",
+  "specs",
+  "fixture",
+  "fixtures",
+  "vitest",
+  "jest",
+  "mock",
+]);
+
+/** Concept-weight decay for 1-hop reverse-caller propagation from matched UnknownExternal nodes. */
+const UNKNOWN_EXTERNAL_CALLER_PROPAGATION = 0.9;
+
+/** Final-score priority multipliers favoring production source over test files & external stubs. */
+const PRIORITY_MULTIPLIER_PRODUCTION = 1.0;
+const PRIORITY_MULTIPLIER_TEST = 0.45;
+const PRIORITY_MULTIPLIER_UNKNOWN_EXTERNAL = 0.35;
+
+function roundScore(value: number): number {
+  return Math.round(value * 1_000_000) / 1_000_000;
+}
+
+/**
+ * Pure O(n) test-path detector (Windows + POSIX safe, zero regexes):
+ * matches `test/` / `tests/` / `__tests__/` path segments or `*.test.*` / `*.spec.*` / `*.tests.*`
+ * filenames without misclassifying production files like `packages/preflight/src/test-plan.ts`.
+ */
+function isTestPath(rawPath: string | undefined): boolean {
+  if (rawPath === undefined || rawPath.length === 0) return false;
+  const normalized = rawPath.replace(/\\/g, "/").toLowerCase();
+  if (
+    normalized.startsWith("test/") ||
+    normalized.startsWith("tests/") ||
+    normalized.startsWith("__tests__/") ||
+    normalized.includes("/test/") ||
+    normalized.includes("/tests/") ||
+    normalized.includes("/__tests__/")
+  ) {
+    return true;
+  }
+  const lastSlash = normalized.lastIndexOf("/");
+  const fileName = lastSlash >= 0 ? normalized.slice(lastSlash + 1) : normalized;
+  const dotIdx = fileName.lastIndexOf(".");
+  const stem = dotIdx > 0 ? fileName.slice(0, dotIdx) : fileName;
+  return stem.endsWith(".test") || stem.endsWith(".spec") || stem.endsWith(".tests");
+}
+
+function isTestSourceNode(node: GraphNode): boolean {
+  if (node.kind === "Test") return true;
+  if (isTestPath(nodeIdentityRelativePath(node))) return true;
+  return node.kind === "File" && isTestPath(node.qualifiedName);
+}
+
+function hasTestIntent(
+  queryTokens: readonly string[],
+  concepts: readonly QueryConcept[],
+): boolean {
+  if (queryTokens.some((token) => TEST_INTENT_TOKENS.has(token))) {
+    return true;
+  }
+  return concepts.some((concept) =>
+    concept.exactForms.some((form) => TEST_INTENT_TOKENS.has(form)),
+  );
+}
+
 /**
  * Sözleşme node türleri (sprint-5 D7): contract ayakının SNAPSHOT
  * kaynağı — bu türlerdeki node'ların qualifiedName'leri contractSymbols
@@ -672,6 +740,15 @@ export function generateAgentContext(
   const nonContainsInDegree = new Map<string, number>();
   const nonContainsOutDegree = new Map<string, number>();
   const directContainedByFile = new Map<string, string[]>();
+  const containingFileIdByNodeId = new Map<string, string>();
+  const fileNodeByPath = new Map<string, GraphNode>();
+  const incomingCallsToExternal = new Map<string, string[]>();
+
+  for (const node of sortedNodes) {
+    if (node.kind !== "File") continue;
+    const rel = nodeIdentityRelativePath(node) ?? node.qualifiedName;
+    fileNodeByPath.set(rel.replace(/\\/g, "/"), node);
+  }
 
   for (const edge of sortedEdges) {
     evidenceByEdgeId.set(edge.id, edge.evidenceIds);
@@ -695,8 +772,22 @@ export function generateAgentContext(
         } else {
           list.push(toNode.id);
         }
+        if (!containingFileIdByNodeId.has(toNode.id)) {
+          containingFileIdByNodeId.set(toNode.id, fromNode.id);
+        }
       }
       continue;
+    }
+    if (edge.kind === "CALLS") {
+      const toNode = nodesById.get(edge.to);
+      if (toNode?.kind === "UnknownExternal") {
+        const callers = incomingCallsToExternal.get(toNode.id);
+        if (callers === undefined) {
+          incomingCallsToExternal.set(toNode.id, [edge.from]);
+        } else {
+          callers.push(edge.from);
+        }
+      }
     }
     nonContainsOutDegree.set(edge.from, (nonContainsOutDegree.get(edge.from) ?? 0) + 1);
     nonContainsInDegree.set(edge.to, (nonContainsInDegree.get(edge.to) ?? 0) + 1);
@@ -955,6 +1046,78 @@ export function generateAgentContext(
         conceptDenominator > 0 ? meaningfulMatched / conceptDenominator : 0;
       candidate.legs.add("exact-symbol");
     }
+
+    // 1-hop reverse-caller propagation from matched UnknownExternal nodes:
+    // when a query matches an external API call (e.g. `McpServer.registerTool`),
+    // propagate its matched concept weights (scaled by 0.9) 1 hop backward along
+    // incoming CALLS edges to production callers and their containing File.
+    const mergePropagatedWeights = (
+      targetNode: GraphNode,
+      sourceWeights: ReadonlyMap<number, number>,
+    ): void => {
+      const existingWeights =
+        matchedConceptWeightsByNodeId.get(targetNode.id) ?? new Map<number, number>();
+      let changed = false;
+      for (const [cid, w] of sourceWeights) {
+        const propagated = roundScore(w * UNKNOWN_EXTERNAL_CALLER_PROPAGATION);
+        const prev = existingWeights.get(cid);
+        if (prev === undefined || prev < propagated) {
+          existingWeights.set(cid, propagated);
+          changed = true;
+        }
+      }
+      if (!changed) return;
+
+      matchedConceptWeightsByNodeId.set(targetNode.id, existingWeights);
+      let totalScore = 0;
+      let meaningfulMatched = 0;
+      for (const [cid, w] of existingWeights) {
+        totalScore += w;
+        const concept = concepts[cid];
+        if (concept !== undefined && (meaningfulCount === 0 || concept.meaningful)) {
+          meaningfulMatched += 1;
+        }
+      }
+      const candidate = getCandidate(targetNode);
+      candidate.scores.exact = roundScore(totalScore);
+      candidate.coverageRatio =
+        conceptDenominator > 0 ? meaningfulMatched / conceptDenominator : 0;
+      candidate.legs.add("exact-symbol");
+    };
+
+    for (const node of sortedNodes) {
+      if (node.kind !== "UnknownExternal") continue;
+      const extWeights = matchedConceptWeightsByNodeId.get(node.id);
+      if (extWeights === undefined || extWeights.size === 0) continue;
+      const callerIds = incomingCallsToExternal.get(node.id);
+      if (callerIds === undefined) continue;
+      for (const callerId of callerIds) {
+        const callerNode = nodesById.get(callerId);
+        if (
+          callerNode === undefined ||
+          PROXIMITY_EXCLUDED_NODE_KINDS.has(callerNode.kind) ||
+          callerNode.kind === "UnknownExternal" ||
+          isTestSourceNode(callerNode)
+        ) {
+          continue;
+        }
+        mergePropagatedWeights(callerNode, extWeights);
+        const containingFileId = containingFileIdByNodeId.get(callerNode.id);
+        const callerRel = nodeIdentityRelativePath(callerNode);
+        const fileNode =
+          (containingFileId !== undefined ? nodesById.get(containingFileId) : undefined) ??
+          (callerRel !== undefined
+            ? fileNodeByPath.get(callerRel.replace(/\\/g, "/"))
+            : undefined);
+        if (
+          fileNode !== undefined &&
+          fileNode.id !== callerNode.id &&
+          !isTestSourceNode(fileNode)
+        ) {
+          mergePropagatedWeights(fileNode, extWeights);
+        }
+      }
+    }
   }
 
   // 6) graph-proximity leg: bounded BFS from lexical seeds.
@@ -1146,7 +1309,27 @@ export function generateAgentContext(
     }
   }
 
-  // 10) Sıralama: ayak sırasına göre leksik kompozit + LocAgent relevance/structural tie-breakers + kanonik fallback.
+  // 10) Production-source priority multiplier & sıralama:
+  //     When the query does not explicitly ask about tests, prioritize production
+  //     source nodes (1.0) over test files/nodes (0.45) and UnknownExternal stubs (0.35).
+  const queryMentionsTests = hasTestIntent(queryTokens, concepts);
+  for (const candidate of candidates.values()) {
+    const multiplier =
+      candidate.node.kind === "UnknownExternal"
+        ? PRIORITY_MULTIPLIER_UNKNOWN_EXTERNAL
+        : !queryMentionsTests && isTestSourceNode(candidate.node)
+          ? PRIORITY_MULTIPLIER_TEST
+          : PRIORITY_MULTIPLIER_PRODUCTION;
+    if (multiplier !== 1) {
+      candidate.scores.exact = roundScore(candidate.scores.exact * multiplier);
+      candidate.scores.proximity = roundScore(candidate.scores.proximity * multiplier);
+      candidate.scores.contract = roundScore(candidate.scores.contract * multiplier);
+      candidate.scores.freshness = roundScore(candidate.scores.freshness * multiplier);
+      candidate.scores.fts = roundScore(candidate.scores.fts * multiplier);
+    }
+  }
+
+  // Sıralama: ayak sırasına göre leksik kompozit + LocAgent relevance/structural tie-breakers + kanonik fallback.
   const ranked = [...candidates.values()].sort((a, b) => {
     const byScores =
       b.scores.exact - a.scores.exact ||

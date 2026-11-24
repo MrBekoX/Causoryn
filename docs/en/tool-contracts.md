@@ -1,169 +1,170 @@
-# MCP Tool Contracts — All 29 Published Tools (Technical Specification v2.1 §10.2 + §16A.8)
+# MCP Tool Contracts — Core & Extension Profiles
 
-> **Language:** [Türkçe](../tool-contracts.md) | **English**
+> **Language:** [Türkçe](../tool-contracts.md) | **English** · [Documentation Hub](README.md)
 >
-> **Evidence:** `packages/mcp-server/src/version.ts` `TOOL_NAMES` (29 tools; `tools/list` exposes **exclusively** this set — zero stub handlers, ADR-010) · `packages/mcp-server/src/server.ts` (tool registrations + Zod input/output schemas) · `packages/mcp-server/src/errors.ts` (fixed 15-code error table) · `packages/mcp-server/src/runtime-cli.ts` (`--output-schema-profile`, `--allow-cwd`, MCP `roots/list`, `--auto-data-dir`) · `wiki/mcp-tools.md` (historical catalog) · Verification suite: `tests/release-docs.test.ts` (asserts exact 1-to-1 set parity between the tables below and `TOOL_NAMES`).
+> **Authoritative source:** `packages/mcp-server/src/version.ts` (`CORE_TOOL_NAMES`, `WIKI_TOOL_NAMES`, `HISTORY_TOOL_NAMES`, `TOOL_NAMES`), `packages/mcp-server/src/schemas.ts`, `packages/mcp-server/src/server.ts`, `packages/mcp-server/src/errors.ts`, and `packages/mcp-server/src/runtime-cli.ts`.
 
-This document is a **concise reference**: the authoritative contract is defined in source code via each tool's Zod `inputSchema` and `outputSchema` (published as JSON Schema when `outputSchemaProfile` is `"full"` and enforced server-side in all modes). These tables provide a fast lookup surface for host models and integrators; in case of any discrepancy, the source Zod schemas prevail.
+This reference documents Causoryn's MCP tool profiles, standard response envelope, fixed error catalog, and write-permission matrix. The authoritative wire contract is defined in source via each tool's Zod input and output schemas (enforced server-side in all modes, regardless of `outputSchemaProfile`).
 
-## Standard Envelope (Technical Specification §10.1)
+---
 
-Every tool response returns the complete 10-field `EnvelopeSchema` (`z.strictObject`):
+## Tool Profiles (`--tool-profile` & `CAUSORYN_TOOL_PROFILE`)
 
-1. `schemaVersion` (`"2.0"`, locked via `SCHEMA_VERSION` in `packages/mcp-server/src/version.ts`)
-2. `requestId` (string correlation ID from the MCP transport request)
+To keep agent context windows lean and tool selection accurate, Causoryn defaults to the **11-tool `core` profile** (`tools/list <= 15,000` characters). Select profiles via `--tool-profile <value>` or the `CAUSORYN_TOOL_PROFILE` environment variable (`--tool-profile` takes precedence):
+
+| Profile | Registered Tools | Notes |
+|---|---|---|
+| `core` *(default)* | **11 tools** (`CORE_TOOL_NAMES`) | Consolidated everyday surface (`tools/list <= 15K` chars, concise 1-line English `.describe()` on every input field, `outputSchemaProfile: "omit"` by default) |
+| `wiki` | **18 tools** (`11 core + 7 wiki`) | Adds the 7 Living Wiki tools (`WIKI_TOOL_NAMES`) |
+| `history` | **13 tools** (`11 core + 2 history`) | Adds `causoryn_compare_architecture` and `causoryn_architecture_timeline` (`HISTORY_TOOL_NAMES`) |
+| `wiki,history` | **20 tools** (`11 core + 7 wiki + 2 history`) | Comma-separated profile combination |
+| `full` | **32 tools** (`29 legacy + 3 consolidated`) | Backward-compatible catalog preserving all 29 legacy tool names (with deprecation warnings pointing to their consolidated `core` replacements) alongside `causoryn_status`, `causoryn_trace`, and `causoryn_contracts` |
+
+---
+
+## Standard Envelope & Per-Language Coverage
+
+Every tool returns the strict 10-field `EnvelopeSchema` (`packages/mcp-server/src/envelope.ts`):
+
+1. `schemaVersion` (`"2.0"`)
+2. `requestId` (string correlation ID from the MCP request)
 3. `workspaceId` (`string | null`)
 4. `snapshotId` (`string | null` — `GraphSnapshot` ID for core tools; served `WikiSnapshot` ID for Wiki tools)
 5. `status` (`"ok" | "partial" | "error"`)
-6. `coverage` (`{ tier: "L0"|"L1"|"L2"|"L3"|"L4", resolvedEdges, unresolvedEdges, totalEdges, coverageRatio } | null`)
+6. `coverage` (`{ tier: "L0"|"L1"|"L2"|"L3"|"L4", resolvedEdges, unresolvedEdges, totalEdges, coverageRatio, byLanguage? } | null`)
+   - **`coverage.byLanguage`** reports per-language `{ tier, files, verifiedEdges, heuristicEdges, unresolvedEdges, coverageRatio }` (sorted keys) so strong TypeScript coverage never hides `L0` fallback in C#, Python, Go, or Rust.
 7. `warnings` (`string[]`)
-8. `data` (tool-specific payload, candidate list on `AMBIGUOUS_SYMBOL`, or `null` on other errors)
+8. `data` (tool payload, candidate list on `AMBIGUOUS_SYMBOL`, structured `{ indexing: true, status: "indexing", jobId, progress: { phase, completed, total }, retryAfterMs }` during cold-start indexing, or `null` on errors)
 9. `nextCursor` (`string | null`)
 10. `error` (`null` when `status` is `"ok"` or `"partial"`; `{ code, message, retryable, userAction }` when `status` is `"error"`)
 
-Domain and authorization errors are returned as structured envelope payloads (`isError: false` in the MCP `CallToolResult`), never as unhandled protocol crashes. Error codes come from the Technical Specification §10.1 fixed list plus three documented project extensions (`packages/mcp-server/src/errors.ts` `CAUSORYN_TOOL_ERROR_CODES`, 15 codes total; extensions governed by K-008 and K-011, with `UNSUPPORTED_LANGUAGE` retained as a reserved fixed code). Every error carries deterministic `retryable` and `userAction` guidance.
+Domain and authorization errors travel inside `envelope.error` (`isError: false`), never as unhandled protocol crashes. Every tool declares MCP `annotations` (`readOnlyHint`, `destructiveHint: false`, `openWorldHint: false`). `stdout` carries exclusively MCP JSON-RPC frames; operational logs go to `stderr` prefixed with `[causoryn]`.
 
-In addition, `packages/mcp-server/src/server.ts` declares structured MCP `annotations` (`readOnlyHint`, `destructiveHint: false`, `openWorldHint: false`) across all 29 tools: the 3 write-capable tools (`causoryn_refresh_index`, `causoryn_export_documentation`, `causoryn_wiki_build`) advertise `readOnlyHint: false`, while the remaining 26 tools advertise `readOnlyHint: true`. `stdout` carries **only** MCP JSON-RPC protocol frames; operational logs go exclusively to `stderr` with a `[causoryn]` prefix (Red Line 4).
+During cold-start background indexing, clients passing `_meta.progressToken` receive live MCP `notifications/progress` updates from the indexing `worker_threads` worker. If the bounded wait window (`CAUSORYN_INDEX_WAIT_MS`, default `15,000` ms) expires before indexing completes, snapshot-dependent tools return a structured `{ indexing: true, status: "indexing", jobId, progress, retryAfterMs }` payload instead of crashing.
 
-**Universal error handling (outside per-tool columns):** `INTERNAL_ERROR` is the catch-all bucket for unexpected internal failures on every tool (raw driver/library messages and filesystem paths are logged only to `stderr`, never leaked to the client; the client receives a generic message correlated by `requestId`). Wire-level input schema mismatches are rejected by the MCP SDK with protocol `isError: true`, whereas inputs that pass schema parsing but violate semantic constraints return an envelope `INVALID_ARGUMENT` error.
+---
 
-The same published snapshot and equivalent query inputs produce consistently ordered analysis data. The MCP `requestId` comes from the request. Job progress, timestamps, and `stale` reflect runtime state.
+## Default Core Profile (11 Tools — `--tool-profile core`)
 
-## Error Code Methodology Note (Honesty)
+| Tool | `readOnlyHint` | Inputs (primary fields) | Output (`data` summary) | Typical error codes |
+|---|---|---|---|---|
+| `causoryn_status` | `false` | `action?` (`"inspect"` [default] \| `"refresh"`), `mode?` (`"incremental"` \| `"full"`), `jobId?`, `workspace?`, `workspaceId?` | In `inspect` mode: combines capabilities, active tool list, authorization state, index job progress/freshness, and workspace summary (including `coverage.byLanguage`). In `refresh` mode: queues a non-blocking incremental or full `worker_threads` build and returns `jobId` immediately. | `WORKSPACE_NOT_AUTHORIZED`, `INVALID_ARGUMENT`, `LIMIT_EXCEEDED`, `PATH_DENIED` |
+| `causoryn_map_system` | `true` | `profile?` (`"default"` \| `"onboarding"`), `level?` (`L0`–`L3`, default `L2`), `filters?` (`kinds`, `pathPrefix`), `maxNodes?`, `cursor?`, `audience?` (`beginner`\|`intermediate`\|`maintainer`), `limits?` | In `default` profile: paginated, deterministically ordered node + edge map. In `onboarding` profile: entrypoints, central modules, topological learning order (SCC-collapsed), critical flows, tests, and risk areas. | `WORKSPACE_NOT_AUTHORIZED`, `INDEX_NOT_READY`, `INVALID_ARGUMENT`, `LIMIT_EXCEEDED` |
+| `causoryn_find_symbols` | `true` | `query`, `kind?`, `limit?`, `workspaceId?` | Ranked exact / prefix / substring lookup over `qualifiedName`; excludes `UnknownExternal` placeholders from ambiguity candidates whenever real project symbols (`Function`/`Class`/`Method`/`Interface`) match. | `WORKSPACE_NOT_AUTHORIZED`, `INDEX_NOT_READY`, `AMBIGUOUS_SYMBOL`, `SYMBOL_NOT_FOUND`, `INVALID_ARGUMENT`, `LIMIT_EXCEEDED` |
+| `causoryn_get_symbol_context` | `true` | `symbolId` (node ID or exact `qualifiedName`), `edgeKinds?`, `depth?`, `workspaceId?` | Target symbol node, deterministically ordered neighbor edges up to `depth`, and backing source-span evidence records. | `WORKSPACE_NOT_AUTHORIZED`, `INDEX_NOT_READY`, `AMBIGUOUS_SYMBOL`, `SYMBOL_NOT_FOUND`, `INVALID_ARGUMENT`, `LIMIT_EXCEEDED` |
+| `causoryn_trace` | `true` | `mode?` (`"execution"` [default] \| `"business-flow"`), `entrypoint?` / `flowSeed?`, `maxDepth?` (default `6`, clamped), `maxPaths?` (default `25`, clamped), `boundaries?`, `maxHops?`, `maxFlows?`, `maxNodes?` | In `execution` mode: bounded call/route chains over `CALLS` + `ROUTES_TO` with per-edge resolution and evidence (halts at `unresolved`). In `business-flow` mode: cross-component request/event/contract flows with honest `gap` segments. Oversized `maxDepth`/`maxPaths` are clamped with warnings rather than failing. | `WORKSPACE_NOT_AUTHORIZED`, `INDEX_NOT_READY`, `AMBIGUOUS_SYMBOL`, `SYMBOL_NOT_FOUND`, `INVALID_ARGUMENT`, `LIMIT_EXCEEDED`, `EVIDENCE_NOT_FOUND`, `PATH_DENIED`, `CONTRACT_PARSE_FAILED` |
+| `causoryn_get_agent_context` | `true` | `task`, `tokenBudget` (required), `maxProximityDepth?`, `workspaceId?` | Ranked, budget-bounded code localization combining path + `camelCase`/`PascalCase`/`snake_case`/`kebab-case` tokenization, SQLite FTS5 BM25 + structural degree ranking, graph proximity (excluding `Workspace --CONTAINS--> File` noise), contract, and freshness legs. | `WORKSPACE_NOT_AUTHORIZED`, `INDEX_NOT_READY`, `INVALID_ARGUMENT`, `LIMIT_EXCEEDED` |
+| `causoryn_preflight_change` | `true` | `intent?`, `targetSymbols?`, `targetFiles?`, `include?` (`["impact", "test-plan"]`), `baseSnapshot?`, `preflightId?`, `edgeKinds?`, `maxDepth?`, `maxPaths?`, `maxNodes?`, `maxCandidates?` | Candidate-only pre-change manifest (`candidateOnly: true`, zero disk writes; cached in in-process `PreflightManifestStore`): reverse-BFS impact candidates (excluding `CONTAINS`, including `INHERITS`/`IMPLEMENTS` with deduplicated `evidenceMap`), contract checks, and content-addressed candidate `testPlanId`. Supports focused `include: ["impact"]` or `["test-plan"]` queries. | `WORKSPACE_NOT_AUTHORIZED`, `INDEX_NOT_READY`, `AMBIGUOUS_SYMBOL`, `SYMBOL_NOT_FOUND`, `INVALID_ARGUMENT`, `LIMIT_EXCEEDED`, `PATH_DENIED` |
+| `causoryn_verify_change` | `true` | `preflightId?` / `baseSnapshot?`, `baseRef?` (trusted Git ref for rules, default `HEAD`), `targetRevision?` (`"working-tree"`), `checks?` (default `["architecture", "graph-diff", "test-plan"]`; `"contracts"` opt-in), `observedTestRun?` | Byte-deterministic post-change verification across all languages (`runIndexAsync`), loading `.causoryn/architecture.rules.yaml` and `architecture.baseline.yaml` from trusted Git `baseRef` (adding `trustWarning` if read from an untrusted working tree). Verdict: `no_findings` \| `review_required` \| `blocking_findings` \| `inconclusive`. Host-supplied test runs are always recorded as `state: "host_asserted"` with `engineVerified: false`. | `WORKSPACE_NOT_AUTHORIZED`, `INDEX_NOT_READY`, `INVALID_ARGUMENT`, `INVALID_REVISION`, `LIMIT_EXCEEDED`, `PATH_DENIED`, `POLICY_INVALID` |
+| `causoryn_contracts` | `true` | `action?` (`"check"` [default] \| `"drift"`), `contracts?` (`{name?, base, target}`), `snapshotId?`, `base?`, `target?`, `scope?`, `anchorFiles?` | In `check` mode: static compatibility classification (`backward-safe` \| `risk` \| `breaking_candidate` \| `unknown`) across OpenAPI, AsyncAPI, JSON Schema, SQL DDL, and Protobuf pairs. In `drift` mode: revision-to-revision drift and producer/consumer anchor impact. | `WORKSPACE_NOT_AUTHORIZED`, `INDEX_NOT_READY`, `INVALID_ARGUMENT`, `LIMIT_EXCEEDED`, `PATH_DENIED`, `CONTRACT_PARSE_FAILED` |
+| `causoryn_get_evidence` | `true` | `id` (`nodeId`, `edgeId`, `evidenceId`, or `finding:<sha256>`), `workspaceId?` | Source file, 1-based line span, SHA-256 `sourceHash`, analyzer provenance, rationale, and deterministic evidence chain summary. | `WORKSPACE_NOT_AUTHORIZED`, `INDEX_NOT_READY`, `INVALID_ARGUMENT`, `LIMIT_EXCEEDED`, `EVIDENCE_NOT_FOUND`, `POLICY_INVALID` |
+| `causoryn_export_documentation` | `false` | `format` (`json`\|`markdown`\|`mermaid`\|`html`\|`snapshot`), `outputDir`, `fileName?`, `view?` (`architecture` [default] \| `interactive` [HTML only] \| `full`), `options?` (`maxModules`, `pathPrefix`, `includeTests`), `annotations?` | Deterministic offline architecture portal or snapshot export written atomically (`flag: "wx"` + rename) strictly inside `output.allowedOutputDirs`. Interactive HTML (`causoryn-architecture-interactive.html`) enforces deterministic `script-src 'sha256-...'` CSP; invalid `annotations` collect up to 25 schema + graph-reference errors in a single pass. | `WORKSPACE_NOT_AUTHORIZED`, `INDEX_NOT_READY`, `INVALID_ARGUMENT`, `LIMIT_EXCEEDED`, `EXPORT_NOT_ALLOWED`, `PATH_DENIED` |
 
-Per-tool typical error codes in the tables below were compiled from two sources: (1) static inspection of `services*.ts` handlers and their error-mapping helpers (`graphErrorToToolError`, `wikiErrorToToolError`, `contractErrorToToolError`, `preflightErrorToToolError`, `verificationErrorToToolError`, `indexingErrorToToolError`), and (2) first-use governance records in `errors.ts` and `wiki/decisions.md` (K-008, K-011, K-012, K-014, K-015). Because shared helpers map broader error families, static inspection can be slightly conservative; the exact per-tool error behavior is pinned by negative unit and integration tests (see [Implementation Status](implementation-status.md)).
+---
 
-## Core Tools (22 — Technical Specification §10.2 Catalog Order)
+## Full Profile: Core & Legacy Tools (22 Tools — `--tool-profile full`)
+
+Under `--tool-profile full`, Causoryn preserves every legacy tool name for backward compatibility alongside the 3 consolidated core dispatchers (`causoryn_status`, `causoryn_trace`, `causoryn_contracts` — 32 tools total). Superseded tools return identical data with a deprecation warning pointing to their consolidated replacement:
 
 | Tool | Inputs (primary fields) | Output (`data` summary) | Typical error codes |
 |---|---|---|---|
-| `causoryn_get_capabilities` | `workspace?` | Adapter capability levels L0–L4 across 5 languages (including C# `frameworkLinkers: "aspnet-core-route-attributes (L3)"`), server identity (`SERVER_VERSION = "0.2.4"`, `SCHEMA_VERSION = "2.0"`), server limits, protocol revision, and the 29 published tool names; requires no snapshot | `WORKSPACE_NOT_AUTHORIZED` |
-| `causoryn_workspace_summary` | `workspaceId?` | Project, language, framework, entrypoint, and coverage summary derived strictly from the latest published `GraphSnapshot`; empty workspace returns `partial` | `WORKSPACE_NOT_AUTHORIZED`, `INDEX_NOT_READY`, `INVALID_ARGUMENT`, `LIMIT_EXCEEDED` |
-| `causoryn_index_status` | `jobId?` | Progress, snapshot ID, `stale` flag, and diagnostics for the specified or latest index job. Job diagnostics and warnings are each capped at 50 entries, with a truncation summary appended to warnings when needed. Returns null `job` and `jobId` when no job exists, and an actionable warning when no published snapshot exists | `WORKSPACE_NOT_AUTHORIZED`, `INVALID_ARGUMENT`, `LIMIT_EXCEEDED` |
-| `causoryn_refresh_index` | `mode` (`full` \| `incremental` — content-hash comparative refresh; B7 per-file parse reuse and file-watcher MCP surface remain open), `scope?` (explicitly rejected) | Returns `jobId` immediately while indexing runs asynchronously; writes **only** to Causoryn's authorized graph repository (`InMemoryGraphRepository` or `storage.dataDbPath` SQLite) | `WORKSPACE_NOT_AUTHORIZED`, `INVALID_ARGUMENT`, `LIMIT_EXCEEDED`, `PATH_DENIED` |
-| `causoryn_map_system` | `level` (`L0`–`L3`; `L3` covers `Function`/`Method`/`Handler`/`Endpoint`/`Test`), `filters?`, `maxNodes`, `cursor?` | Deterministically ordered node + edge pages with opaque cursor pagination | `WORKSPACE_NOT_AUTHORIZED`, `INDEX_NOT_READY`, `INVALID_ARGUMENT`, `LIMIT_EXCEEDED` |
-| `causoryn_find_symbols` | `query`, `kind?`, `limit?` | Ranked exact / prefix / substring search over `qualifiedName`; ambiguous matches return disambiguation candidates | `WORKSPACE_NOT_AUTHORIZED`, `INDEX_NOT_READY`, `AMBIGUOUS_SYMBOL`, `SYMBOL_NOT_FOUND`, `INVALID_ARGUMENT`, `LIMIT_EXCEEDED` |
-| `causoryn_get_symbol_context` | `symbolId` (node ID or `qualifiedName`), `edgeKinds?`, `depth?` | Target symbol node + deterministically ordered neighbor edges up to `depth` + backing evidence records | `WORKSPACE_NOT_AUTHORIZED`, `INDEX_NOT_READY`, `AMBIGUOUS_SYMBOL`, `SYMBOL_NOT_FOUND`, `INVALID_ARGUMENT`, `LIMIT_EXCEEDED` |
-| `causoryn_trace_execution` | `entrypoint` (endpoint name such as `'POST /orders'` or symbol ID/name), `maxDepth?`, `maxPaths?` | Bounded deterministic call paths over `CALLS` + `ROUTES_TO`; per-edge `resolution` + `evidence` kept separate; chain halts at `unresolved` edges (`status: "partial"`) | `WORKSPACE_NOT_AUTHORIZED`, `INDEX_NOT_READY`, `AMBIGUOUS_SYMBOL`, `SYMBOL_NOT_FOUND`, `INVALID_ARGUMENT`, `LIMIT_EXCEEDED`, `EVIDENCE_NOT_FOUND`, `POLICY_INVALID` |
-| `causoryn_trace_business_flow` | `flowSeed`, `boundaries?` | End-to-end business flow chains (`ROUTES_TO`/`CALLS`/`PRODUCES_CONTRACT`/`CONSUMES_CONTRACT`/`CONTAINS`, bounded BFS + reverse contract tracing); discontinuities are honestly reported via `gap` segments rather than fabricated bridges | `WORKSPACE_NOT_AUTHORIZED`, `INDEX_NOT_READY`, `AMBIGUOUS_SYMBOL`, `SYMBOL_NOT_FOUND`, `INVALID_ARGUMENT`, `LIMIT_EXCEEDED`, `PATH_DENIED`, `INVALID_REVISION`, `CONTRACT_PARSE_FAILED` |
-| `causoryn_analyze_impact` | `targets`/`diff`, `depth?`, `edgeKinds?` | Reverse-edge bounded BFS impact paths; `certainty` (`direct`\|`indirect`\|`possible`) and `resolution` (`verified`\|`heuristic`\|`unresolved`) are distinct fields; never claims "100% impacted"; unresolvable targets listed in `unresolvedTargets` | `WORKSPACE_NOT_AUTHORIZED`, `INDEX_NOT_READY`, `INVALID_ARGUMENT`, `LIMIT_EXCEEDED`, `POLICY_INVALID` |
-| `causoryn_check_architecture` | `policyId?`, `scope?` | Evaluates `.causoryn/architecture.rules.yaml` against the published snapshot: `no-cycles` (Tarjan SCC) + `forbidden-dependency` glob findings, baseline suppressions, and `orphanSuppressions`; reports findings without making CI exit-code decisions | `WORKSPACE_NOT_AUTHORIZED`, `INDEX_NOT_READY`, `INVALID_ARGUMENT`, `LIMIT_EXCEEDED`, `POLICY_INVALID`, `INVALID_REVISION` |
-| `causoryn_compare_architecture` | `baseRef`, `targetRef` | Architectural diff between two Git refs (or `working-tree`): added/removed/changed nodes, confidence-scored rename matches, edge diffs, and API surface changes via read-only Git blob reads | `WORKSPACE_NOT_AUTHORIZED`, `INDEX_NOT_READY`, `INVALID_ARGUMENT`, `INVALID_REVISION`, `POLICY_INVALID`, `LIMIT_EXCEEDED` |
-| `causoryn_get_agent_context` | `task`, `candidateScope?`, `tokenBudget` (required) | Ranked context pack (`exact-symbol` → `graph-proximity` → `contract` → `freshness` → `fts`; `symbol_fts` `fts` leg active when `storage.dataDbPath` SQLite is configured, honestly degraded in memory mode) with `estimatedTokens`, `omittedCount`, and degraded legs | `WORKSPACE_NOT_AUTHORIZED`, `INDEX_NOT_READY`, `INVALID_ARGUMENT`, `LIMIT_EXCEEDED` |
-| `causoryn_generate_onboarding` | `audience` (`beginner`\|`intermediate`\|`maintainer`) | Structured onboarding data: entrypoints, top 5 central modules, topological learning order (cycles collapsed via SCC), critical flows, tests, and risk areas; natural-language prose is left to the host model | `WORKSPACE_NOT_AUTHORIZED`, `INDEX_NOT_READY`, `INVALID_ARGUMENT`, `LIMIT_EXCEEDED` |
-| `causoryn_export_documentation` | `format` (`json`\|`markdown`\|`mermaid`\|`html`\|`snapshot`), `outputDir` (required), `fileName?`, `view?` (`architecture` [default for formats other than snapshot] \| `interactive` [HTML only] \| `full`; `wiki` explicitly rejected with `INVALID_ARGUMENT`), `options?` (`maxModules`, `pathPrefix`, `includeTests`), `annotations?` (optional caller annotations with validated references) | Deterministic visual architecture portal/diagram or raw snapshot export (`view="architecture"`: zero-JS layered SVG HTML portal, subgraph Mermaid, Architecture Brief Markdown, compact JSON + `architectureSummary.moduleIds`; `view="interactive"`: offline pan/zoom/search/evidence-drawer HTML portal; `view="full"`: raw dump; `snapshot`: canonical `architecture-snapshot.json`); atomic `.tmp` + rename writes **only** into declared `output.allowedOutputDirs` (strict offline CSP, zero CDN/analytics) | `WORKSPACE_NOT_AUTHORIZED`, `INDEX_NOT_READY`, `INVALID_ARGUMENT`, `LIMIT_EXCEEDED`, `EXPORT_NOT_ALLOWED`, `PATH_DENIED` |
-| `causoryn_preflight_change` | `intent`, `targetSymbols?`/`targetFiles?`, `baseSnapshot?` | Candidate Preflight Manifest: `impactCandidates` (`certainty`/`resolution` separate), `contractChecks`, content-addressed `testPlanId`, `limitations`, `sourceRevision`; **writes nothing to disk or workspace** (`candidateOnly: true`; cached only in in-process `PreflightManifestStore` FIFO 200) | `WORKSPACE_NOT_AUTHORIZED`, `INDEX_NOT_READY`, `AMBIGUOUS_SYMBOL`, `SYMBOL_NOT_FOUND`, `INVALID_ARGUMENT`, `LIMIT_EXCEEDED`, `PATH_DENIED` |
-| `causoryn_check_contracts` | `contracts?` (`{name?, base, target}` spec pairs), `snapshotId?` | Evaluates contract version pairs (`backward-safe`\|`risk`\|`breaking_candidate`\|`unknown`) with rule names, old/new line-span evidence, and unpaired diagnostics | `WORKSPACE_NOT_AUTHORIZED`, `INDEX_NOT_READY`, `INVALID_ARGUMENT`, `LIMIT_EXCEEDED`, `PATH_DENIED`, `CONTRACT_PARSE_FAILED` |
-| `causoryn_detect_contract_drift` | `base`, `target`, `scope?`, `anchorFiles?` | Canonical drift report: `contractChanges` (`{contractId, changeKind, summary}`), separated `breaking_candidate`/`risk`/`unknown` buckets, `PRODUCES_CONTRACT`/`CONSUMES_CONTRACT` impact graph, and `unconsumedChanges` (unresolved consumers) | `WORKSPACE_NOT_AUTHORIZED`, `INDEX_NOT_READY`, `INVALID_ARGUMENT`, `LIMIT_EXCEEDED`, `PATH_DENIED`, `CONTRACT_PARSE_FAILED` |
-| `causoryn_verify_change` | `preflightId?` / `baseSnapshot?` (at least one), `target?` | Byte-deterministic four-check verification report (`architecture`, `contracts`, `graph-diff`, `test-plan`); deterministic verdict (`no_findings` \| `review_required` \| `blocking_findings` \| `inconclusive`); test run status defaults to `not_run` (`observed` requires `evidenceRef` + sha256); **never modifies code or runs tests** | `WORKSPACE_NOT_AUTHORIZED`, `INDEX_NOT_READY`, `INVALID_ARGUMENT`, `INVALID_REVISION`, `LIMIT_EXCEEDED`, `PATH_DENIED`, `POLICY_INVALID` |
-| `causoryn_derive_test_plan` | `changeSet` (`changedSymbols`/`changedFiles`) / `preflightId?` (explicitly rejected on this surface) | Deterministic test candidates: `direct` (`TESTS` edges) + `call-site` (reverse `CALLS` BFS) + `naming` (heuristic), with `reason` + `evidenceIds` + `matchLevel` and `missingCoverageCandidates`; never executes tests; content-addressed `testplan:<sha256>` | `WORKSPACE_NOT_AUTHORIZED`, `INDEX_NOT_READY`, `INVALID_ARGUMENT`, `LIMIT_EXCEEDED` |
-| `causoryn_get_evidence` | `nodeId`/`edgeId`/`evidenceId`/`findingId` | Provenance chain (`relativePath`, `startLine`/`endLine`, `sourceHash`, `analyzerId`, `rationale`, `contextRefs`) + deterministic `chain` summary; `finding:<sha256>` IDs are re-derived from `.causoryn/architecture.rules.yaml` | `WORKSPACE_NOT_AUTHORIZED`, `INDEX_NOT_READY`, `INVALID_ARGUMENT`, `LIMIT_EXCEEDED`, `EVIDENCE_NOT_FOUND`, `POLICY_INVALID` |
-| `causoryn_architecture_timeline` | `refs`/`range`, `granularity?` | Deterministically sampled architectural diff timeline across Git points + Phase E violation trends (`no-cycles` and `forbidden-dependency` tracked separately per milestone, never collapsed into a fake quality score); skipped points listed explicitly | `WORKSPACE_NOT_AUTHORIZED`, `INDEX_NOT_READY`, `INVALID_ARGUMENT`, `INVALID_REVISION`, `POLICY_INVALID`, `LIMIT_EXCEEDED` |
+| `causoryn_get_capabilities` | `workspace?` | Adapter capability tiers L0–L4 across 5 languages, server identity (`0.2.4`, schema `2.0`), limits, and active tool names *(superseded by `causoryn_status`)* | `WORKSPACE_NOT_AUTHORIZED` |
+| `causoryn_workspace_summary` | `workspaceId?` | Project, language, framework, entrypoint, and coverage summary from the latest published snapshot *(superseded by `causoryn_status`)* | `WORKSPACE_NOT_AUTHORIZED`, `INDEX_NOT_READY`, `INVALID_ARGUMENT`, `LIMIT_EXCEEDED` |
+| `causoryn_index_status` | `jobId?` | Snapshot ID, `stale` flag, and bounded diagnostics/warnings (50-entry cap) for the latest or requested job *(superseded by `causoryn_status`)* | `WORKSPACE_NOT_AUTHORIZED`, `INVALID_ARGUMENT`, `LIMIT_EXCEEDED` |
+| `causoryn_refresh_index` | `mode` (`full` \| `incremental` — backed by `file_facts` early-cutoff caching), `scope?` (rejected) | Queues non-blocking `worker_threads` indexing into the shared external SQLite store and returns `jobId` immediately *(superseded by `causoryn_status` `action="refresh"`)* | `WORKSPACE_NOT_AUTHORIZED`, `INVALID_ARGUMENT`, `LIMIT_EXCEEDED`, `PATH_DENIED` |
+| `causoryn_map_system` | `level` (`L0`–`L3`), `filters?`, `maxNodes?`, `cursor?`, `profile?` | Paginated L0–L3 architecture map (or onboarding guide when `profile="onboarding"`) | `WORKSPACE_NOT_AUTHORIZED`, `INDEX_NOT_READY`, `INVALID_ARGUMENT`, `LIMIT_EXCEEDED` |
+| `causoryn_find_symbols` | `query`, `kind?`, `limit?` | Ranked symbol search with disambiguation candidates (excluding `UnknownExternal` noise when real symbols match) | `WORKSPACE_NOT_AUTHORIZED`, `INDEX_NOT_READY`, `AMBIGUOUS_SYMBOL`, `SYMBOL_NOT_FOUND`, `INVALID_ARGUMENT`, `LIMIT_EXCEEDED` |
+| `causoryn_get_symbol_context` | `symbolId`, `edgeKinds?`, `depth?` | Target symbol node + ordered neighbor edges + evidence records | `WORKSPACE_NOT_AUTHORIZED`, `INDEX_NOT_READY`, `AMBIGUOUS_SYMBOL`, `SYMBOL_NOT_FOUND`, `INVALID_ARGUMENT`, `LIMIT_EXCEEDED` |
+| `causoryn_trace_execution` | `entrypoint`, `maxDepth?` (clamped), `maxPaths?` (clamped) | Bounded `CALLS` + `ROUTES_TO` execution chains with per-edge resolution and evidence *(superseded by `causoryn_trace`)* | `WORKSPACE_NOT_AUTHORIZED`, `INDEX_NOT_READY`, `AMBIGUOUS_SYMBOL`, `SYMBOL_NOT_FOUND`, `INVALID_ARGUMENT`, `LIMIT_EXCEEDED`, `EVIDENCE_NOT_FOUND`, `POLICY_INVALID` |
+| `causoryn_trace_business_flow` | `flowSeed`, `boundaries?` | End-to-end business and contract flow chains with honest `gap` segments *(superseded by `causoryn_trace` `mode="business-flow"`)* | `WORKSPACE_NOT_AUTHORIZED`, `INDEX_NOT_READY`, `AMBIGUOUS_SYMBOL`, `SYMBOL_NOT_FOUND`, `INVALID_ARGUMENT`, `LIMIT_EXCEEDED`, `PATH_DENIED`, `INVALID_REVISION`, `CONTRACT_PARSE_FAILED` |
+| `causoryn_analyze_impact` | `targets`, `depth?`, `edgeKinds?` | Reverse-edge BFS impact paths (excluding `CONTAINS`, including `INHERITS`/`IMPLEMENTS`, deduplicated `evidenceMap`) *(superseded by `causoryn_preflight_change`)* | `WORKSPACE_NOT_AUTHORIZED`, `INDEX_NOT_READY`, `INVALID_ARGUMENT`, `LIMIT_EXCEEDED`, `POLICY_INVALID` |
+| `causoryn_check_architecture` | `policyId?`, `scope?` | Evaluates `.causoryn/architecture.rules.yaml` (`no-cycles` SCC + `forbidden-dependency`) + baseline suppressions *(superseded by `causoryn_verify_change`)* | `WORKSPACE_NOT_AUTHORIZED`, `INDEX_NOT_READY`, `INVALID_ARGUMENT`, `LIMIT_EXCEEDED`, `POLICY_INVALID`, `INVALID_REVISION` |
+| `causoryn_compare_architecture` | `baseRef`, `targetRef` | Architectural diff across two Git refs (supporting `HEAD~N`/`HEAD^`) or `working-tree` via read-only Git blob reads *(also available via `--tool-profile history`)* | `WORKSPACE_NOT_AUTHORIZED`, `INDEX_NOT_READY`, `INVALID_ARGUMENT`, `INVALID_REVISION`, `POLICY_INVALID`, `LIMIT_EXCEEDED` |
+| `causoryn_get_agent_context` | `task`, `candidateScope?`, `tokenBudget` | Budget-bounded code localization across path/identifier FTS5 BM25, graph proximity, contract, and freshness legs | `WORKSPACE_NOT_AUTHORIZED`, `INDEX_NOT_READY`, `INVALID_ARGUMENT`, `LIMIT_EXCEEDED` |
+| `causoryn_generate_onboarding` | `audience` (`beginner`\|`intermediate`\|`maintainer`) | Structured onboarding guide (entrypoints, central modules, topological learning order, risks) *(superseded by `causoryn_map_system` `profile="onboarding"`)* | `WORKSPACE_NOT_AUTHORIZED`, `INDEX_NOT_READY`, `INVALID_ARGUMENT`, `LIMIT_EXCEEDED` |
+| `causoryn_export_documentation` | `format`, `outputDir`, `fileName?`, `view?`, `options?`, `annotations?` | Offline architecture portal/diagram or snapshot export into `output.allowedOutputDirs` (`view: "wiki"` explicitly rejected) | `WORKSPACE_NOT_AUTHORIZED`, `INDEX_NOT_READY`, `INVALID_ARGUMENT`, `LIMIT_EXCEEDED`, `EXPORT_NOT_ALLOWED`, `PATH_DENIED` |
+| `causoryn_preflight_change` | `intent`, `targetSymbols?`/`targetFiles?`, `baseSnapshot?`, `include?` | Candidate-only preflight manifest (`candidateOnly: true`, zero disk writes) | `WORKSPACE_NOT_AUTHORIZED`, `INDEX_NOT_READY`, `AMBIGUOUS_SYMBOL`, `SYMBOL_NOT_FOUND`, `INVALID_ARGUMENT`, `LIMIT_EXCEEDED`, `PATH_DENIED` |
+| `causoryn_check_contracts` | `contracts`, `snapshotId?` | Static compatibility evaluation across OpenAPI, AsyncAPI, JSON Schema, SQL, and Protobuf pairs *(superseded by `causoryn_contracts`)* | `WORKSPACE_NOT_AUTHORIZED`, `INDEX_NOT_READY`, `INVALID_ARGUMENT`, `LIMIT_EXCEEDED`, `PATH_DENIED`, `CONTRACT_PARSE_FAILED` |
+| `causoryn_detect_contract_drift` | `base`, `target`, `scope?`, `anchorFiles?` | Revision-to-revision contract drift and producer/consumer impact *(superseded by `causoryn_contracts` `action="drift"`)* | `WORKSPACE_NOT_AUTHORIZED`, `INDEX_NOT_READY`, `INVALID_ARGUMENT`, `LIMIT_EXCEEDED`, `PATH_DENIED`, `CONTRACT_PARSE_FAILED` |
+| `causoryn_verify_change` | `preflightId?` / `baseSnapshot?`, `baseRef?`, `targetRevision?`, `checks?`, `observedTestRun?` | Byte-deterministic verification report; trusted `baseRef` rule loading; host test runs always normalized to `state: "host_asserted"` | `WORKSPACE_NOT_AUTHORIZED`, `INDEX_NOT_READY`, `INVALID_ARGUMENT`, `INVALID_REVISION`, `LIMIT_EXCEEDED`, `PATH_DENIED`, `POLICY_INVALID` |
+| `causoryn_derive_test_plan` | `changeSet` (`changedSymbols`/`changedFiles`) or `preflightId` | Content-addressed candidate test plan (`direct` / `call-site` / `naming`) resolving saved `preflightId` manifests; never executes tests *(superseded by `causoryn_preflight_change`)* | `WORKSPACE_NOT_AUTHORIZED`, `INDEX_NOT_READY`, `INVALID_ARGUMENT`, `LIMIT_EXCEEDED` |
+| `causoryn_get_evidence` | `id` (`nodeId`/`edgeId`/`evidenceId`/`findingId`) | Source span, SHA-256 hash, analyzer provenance, and deterministic evidence chain | `WORKSPACE_NOT_AUTHORIZED`, `INDEX_NOT_READY`, `INVALID_ARGUMENT`, `LIMIT_EXCEEDED`, `EVIDENCE_NOT_FOUND`, `POLICY_INVALID` |
+| `causoryn_architecture_timeline` | `refs`/`range`, `granularity?` | Sampled multi-revision architecture diff timeline + violation trends over read-only Git history / SQLite snapshots *(also available via `--tool-profile history`)* | `WORKSPACE_NOT_AUTHORIZED`, `INDEX_NOT_READY`, `INVALID_ARGUMENT`, `INVALID_REVISION`, `POLICY_INVALID`, `LIMIT_EXCEEDED` |
 
 ### Architecture Export Details
 
-- `architecture` is the MCP default for `json`, `markdown`, `mermaid`, and `html` (default HTML filename: `causoryn-architecture.html`). `interactive` is available for `html` only and defaults to `causoryn-architecture-interactive.html` (`EXPORT_INTERACTIVE_HTML_FILE_NAME`) when `fileName` is omitted, preventing silent overwrite of the zero-JS `causoryn-architecture.html` artifact. Select `view="full"` for the legacy raw dump. With `view` omitted or set to `full`, `format="snapshot"` emits the canonical `CompareContentSet` used by comparison tools.
-- `options` and `annotations` are accepted only for `architecture` and `interactive`. `maxModules` defaults to 32 and accepts 2–100. The summary's `architectureSummary.moduleIds` provides the exact canonical module IDs for annotating the same projection.
-- **MCP JSON Schema `.describe()` guidance & natural-language triggering (`K-026`):** `causoryn_export_documentation` exposes descriptive Zod `.describe()` documentation across all top-level input fields (`workspaceId`, `format`, `outputDir`, `fileName`, `view`, `options`, `annotations`) and nested schema objects (`domains`, `moduleNotes`, `flows`, `guidedTour`, `decisions`, `risks`). Both the tool description and the `architecture-blueprint` skill (triggered from natural-language prompts in English or Turkish without naming the skill) guide the host LLM through the 2-step workflow (`format: "json", view: "architecture"` → inspect `architectureSummary.moduleIds` → `format: "html", view: "interactive"` with validated `annotations`), or omitting `annotations` for a purely structural deterministic export. Causoryn validates the schema, budgets, and supplied `moduleId`, `nodeId`, `evidenceId`, and `keyFiles` references fail-closed; free-form commentary remains the caller's interpretation. See [Prompting & Architecture Portals Guide](prompting-and-architecture-portals.md).
-- Byte equality applies to file contents for the same snapshot, format, view, effective options, and validated annotations. `packages/graph/test/architecture-export.test.ts` covers equality across four formats and both HTML views when the same graph's arrays are reversed.
+- `architecture` is the default `view` for `json`, `markdown`, `mermaid`, and `html` (default HTML filename: `causoryn-architecture.html`). `interactive` is HTML-only and defaults to `causoryn-architecture-interactive.html` so it never overwrites the zero-JS artifact.
+- Interactive HTML exports enforce a deterministic `script-src 'sha256-...'` Content Security Policy (zero `'unsafe-inline'` script permission).
+- Optional `annotations` are validated in a single pass, collecting up to 25 schema and graph-membership errors together in `INVALID_ARGUMENT` rather than stopping on the first error. See [Prompting & Architecture Portals Guide](prompting-and-architecture-portals.md) and `skills/architecture-blueprint/SKILL.md`.
 
-## Wiki Tools (7 — Technical Specification §16A.8; `wiki_build` Is the Sole Writer)
+---
+
+## Wiki Profile Tools (7 Tools — `--tool-profile wiki` or `full`)
+
+`causoryn_wiki_build` is the sole write-capable Wiki tool (writing strictly to Causoryn's external SQLite data-root).
 
 | Tool | Inputs (primary fields) | Output (`data` summary) | Typical error codes |
 |---|---|---|---|
-| `causoryn_wiki_build` | `workspaceId?`, `mode` (`full`\|`incremental`), `revision?`, `scope?` (explicitly rejected) | Projects the published `GraphSnapshot` into a deterministic `WikiSnapshot` and atomically publishes **only** to the authorized data-root SQLite (`wiki.dataDbPath` or `--auto-data-dir`); falls back gracefully to `full` + `fallbackReason` when incremental preconditions are unavailable | `WORKSPACE_NOT_AUTHORIZED`, `INDEX_NOT_READY`, `INVALID_ARGUMENT`, `PATH_DENIED`, `EXPORT_NOT_ALLOWED` |
-| `causoryn_wiki_get_tree` | `parentId?`, `depth?`, `limit?`, `cursor?` | 12-root-category hierarchy in taxonomy order with `childCount`, `coverage`, and `freshness`; empty categories remain `no_data` without filler prose | `WORKSPACE_NOT_AUTHORIZED`, `INDEX_NOT_READY`, `WIKI_PAGE_NOT_FOUND`, `INVALID_ARGUMENT` |
-| `causoryn_wiki_get_page` | `pageId`, `sections?` (`sectionKey` filter), `limit?`, `cursor?` | Single page: generated Markdown sections, `evidenceRefs` + deduplicated `sourceRefs` provenance, `coverage`, and `freshness`; overlay annotations are not returned on this MCP surface (§16A.6 local UI/CLI flow) | `WORKSPACE_NOT_AUTHORIZED`, `INDEX_NOT_READY`, `WIKI_PAGE_NOT_FOUND`, `INVALID_ARGUMENT` |
-| `causoryn_wiki_search` | `query`, `snapshotId?`, `limit?`, `cursor?` (extra filter fields return explicit `INVALID_ARGUMENT` in `v0.2.4`) | Phrase-escaped multi-column FTS5 search ranked by exact symbol/route > title > module > BM25 > graph proximity; returns `matchedFields`, `evidenceIds`, `snippet`, and `skippedRankLegs`; zero embeddings (Red Line 1) | `WORKSPACE_NOT_AUTHORIZED`, `INDEX_NOT_READY`, `INVALID_ARGUMENT`, `EVIDENCE_NOT_FOUND`, `LIMIT_EXCEEDED` |
-| `causoryn_wiki_get_links` | `pageId`, `direction?`, `linkKinds?`, `limit?`, `cursor?` | `outgoing` + `incoming` (reverse-index backlinks) with `resolution` + `evidenceRefs`; unresolved targets preserved with `toPageId: null` + `brokenLinkDiagnostics` (K-013 #4) | `WORKSPACE_NOT_AUTHORIZED`, `INDEX_NOT_READY`, `WIKI_PAGE_NOT_FOUND`, `INVALID_ARGUMENT` |
-| `causoryn_wiki_get_versions` | `pageId?`, `refs?`, `limit?`, `cursor?` | Reports stored `WikiSnapshot` revisions as `available` (`contentHash`, `linkSetHash`, `templateVersion`, `coverage`); resolves Git branch/tag/commit aliases via read-only `git cat-file -t` (`working-tree` resolves without requiring `.git`) | `WORKSPACE_NOT_AUTHORIZED`, `INDEX_NOT_READY`, `WIKI_PAGE_NOT_FOUND`, `INVALID_ARGUMENT`, `INVALID_REVISION` |
-| `causoryn_wiki_diff` | `base`, `target`, `pageId?` | `addedPages`, `removedPages`, `changedSections`, `addedLinks`, `removedLinks`, `coverageDelta` (`{pageId, previous, current, reason?}`), `unresolvedDifferences`, and `contractChanges` (`{contractId, changeKind, summary}`, K-013 #7) | `WORKSPACE_NOT_AUTHORIZED`, `INDEX_NOT_READY`, `WIKI_PAGE_NOT_FOUND`, `INVALID_ARGUMENT`, `INVALID_REVISION`, `PATH_DENIED`, `LIMIT_EXCEEDED` |
+| `causoryn_wiki_build` | `workspaceId?`, `mode` (`full`\|`incremental`), `revision?`, `scope?` (rejected) | Projects the published `GraphSnapshot` into a deterministic `WikiSnapshot` in external SQLite (`wiki.dataDbPath` or `--auto-data-dir`) | `WORKSPACE_NOT_AUTHORIZED`, `INDEX_NOT_READY`, `INVALID_ARGUMENT`, `PATH_DENIED`, `EXPORT_NOT_ALLOWED` |
+| `causoryn_wiki_get_tree` | `parentId?`, `depth?`, `limit?`, `cursor?` | 12-root-category taxonomy tree with `childCount`, `coverage`, and `freshness`; empty categories remain `no_data` without filler prose | `WORKSPACE_NOT_AUTHORIZED`, `INDEX_NOT_READY`, `WIKI_PAGE_NOT_FOUND`, `INVALID_ARGUMENT` |
+| `causoryn_wiki_get_page` | `pageId`, `sections?`, `limit?`, `cursor?` | Generated Markdown sections, `evidenceRefs` + deduplicated `sourceRefs`, `coverage`, and `freshness` | `WORKSPACE_NOT_AUTHORIZED`, `INDEX_NOT_READY`, `WIKI_PAGE_NOT_FOUND`, `INVALID_ARGUMENT` |
+| `causoryn_wiki_search` | `query`, `snapshotId?`, `limit?`, `cursor?` (extra filter fields return `INVALID_ARGUMENT` in `0.2.4`) | Phrase-escaped multi-column FTS5 search ranked by exact symbol/route > title > module > BM25; zero embeddings | `WORKSPACE_NOT_AUTHORIZED`, `INDEX_NOT_READY`, `INVALID_ARGUMENT`, `EVIDENCE_NOT_FOUND`, `LIMIT_EXCEEDED` |
+| `causoryn_wiki_get_links` | `pageId`, `direction?`, `linkKinds?`, `limit?`, `cursor?` | Outgoing + reverse-indexed backlinks with resolution + `brokenLinkDiagnostics` for unresolved targets (`toPageId: null`) | `WORKSPACE_NOT_AUTHORIZED`, `INDEX_NOT_READY`, `WIKI_PAGE_NOT_FOUND`, `INVALID_ARGUMENT` |
+| `causoryn_wiki_get_versions` | `pageId?`, `refs?`, `limit?`, `cursor?` | Stored `WikiSnapshot` revision availability (`contentHash`, `linkSetHash`, `templateVersion`, `coverage`); resolves Git aliases read-only (`working-tree` works without `.git`) | `WORKSPACE_NOT_AUTHORIZED`, `INDEX_NOT_READY`, `WIKI_PAGE_NOT_FOUND`, `INVALID_ARGUMENT`, `INVALID_REVISION` |
+| `causoryn_wiki_diff` | `base`, `target`, `pageId?` | `addedPages`, `removedPages`, `changedSections`, `addedLinks`, `removedLinks`, `coverageDelta`, `unresolvedDifferences`, and `contractChanges` | `WORKSPACE_NOT_AUTHORIZED`, `INDEX_NOT_READY`, `WIKI_PAGE_NOT_FOUND`, `INVALID_ARGUMENT`, `INVALID_REVISION`, `PATH_DENIED`, `LIMIT_EXCEEDED` |
 
-## Server Identity, 5-Language Capability Matrix & Fixed 15 Error Codes
+---
 
-### 1. Server Identity & Protocol Constants (`packages/mcp-server/src/version.ts`)
+## Server Identity, 5-Language Matrix & Fixed Error Codes
 
-- `SERVER_NAME = "causoryn"` — reported as `serverInfo.name` in the MCP `initialize` handshake.
-- `SERVER_VERSION = "0.2.4"` — Pre-1.0 Public Preview version (K-022 / K-024..K-026; locked across root `package.json`, `packages/causoryn/package.json`, and `server.json`; per ADR-010, `1.0.0` is not declared while `[Unreleased]` 1.0.0 release gates remain open).
-- `SCHEMA_VERSION = "2.0"` — populated in `envelope.schemaVersion` across all 29 tools.
-- `protocol.revision` — `LATEST_PROTOCOL_VERSION` re-exported from `@modelcontextprotocol/sdk`.
+### 1. Server Identity (`packages/mcp-server/src/version.ts`)
 
-### 2. `causoryn_get_capabilities` 5-Language Adapter Matrix (`INDEXED_ADAPTERS`)
+- `SERVER_NAME = "causoryn"` · `SERVER_VERSION = "0.2.4"` (Pre-1.0) · `SCHEMA_VERSION = "2.0"`.
 
-`causoryn_get_capabilities` projects `INDEXED_ADAPTERS` (`packages/indexing/src/index.ts:168-223`) without requiring an indexed snapshot. Internal per-language worker protocol versions intentionally remain `"0.1.0"` to preserve persistent SQLite `analyzerFingerprint` backward compatibility (K-022):
+### 2. 5-Language Adapter Matrix (`INDEXED_ADAPTERS`)
 
-| Language (`language`) | `analyzerId` | `astParse` | `symbolResolution` | `frameworkLinkers` | Execution Model |
+| Language | `analyzerId` | `astParse` | `symbolResolution` | `frameworkLinkers` | Execution Model |
 |---|---|---|---|---|---|
-| `typescript` | `ts-adapter` | `L1` | `L2` | `express+nextjs` | In-process TypeScript Compiler API (`TypeChecker`, TS/JS/CJS + confined `tsconfig.json`/`jsconfig.json` + Express/Next.js App Router L3 + BDD `Test`/`TESTS`) |
-| `csharp` | `roslyn-worker` | `L1` | `L2` | `aspnet-core-route-attributes (L3)` | `dotnet exec` Roslyn sidecar (`@causoryn/sidecar-ipc`; ASP.NET Core controller attributes + Minimal API `MapGet`/`MapPost`) |
-| `python` | `python-worker` | `L1` | `L2` | `decorator-route-pattern (L3)` | `python -B` stdlib `ast` sidecar (zero third-party dependencies) |
-| `go` | `go-worker` | `L1` | `heuristic-only (semantik L2 yok)` | `http-router-registration (L3)` | Go stdlib `go/parser` + `go/ast` sidecar (`net/http`, `gin`, `echo`, `chi`) |
-| `rust` | `rust-worker` | `L1` | `heuristic-heavy` | `attribute-macro-route (L3)` | Rust `syn` 3 sidecar (`axum`, `actix-web`, `rocket` attribute macros) |
+| `typescript` | `ts-adapter` | `L1` | `L2` | `express+nextjs` | In-process TS Compiler API (`TypeChecker`, TS/JS/CJS, monorepo workspace resolution, CHA `INHERITS`/`IMPLEMENTS`, confined `tsconfig`/`jsconfig`, Express/Next.js L3, BDD `Test`/`TESTS`) |
+| `csharp` | `roslyn-worker` | `L1` | `L2` | `aspnet-core-route-attributes (L3)` | Isolated `dotnet exec` Roslyn sidecar (`SemanticModel`, CHA `INHERITS`/`IMPLEMENTS`, read-only `obj/project.assets.json` NuGet discovery, ASP.NET Core routes) |
+| `python` | `python-worker` | `L1` | `L2` | `decorator-route-pattern (L3)` | Isolated `python -I -B -X utf8` stdlib `ast` sidecar |
+| `go` | `go-worker` | `L1` | `heuristic-only (semantik L2 yok)` | `http-router-registration (L3)` | Isolated Go stdlib `go/parser` + `go/ast` sidecar (`GOTOOLCHAIN=local`, `GOWORK=off`, `GOPROXY=off`, directory + `go.mod` package keying) |
+| `rust` | `rust-worker` | `L1` | `heuristic-heavy` | `attribute-macro-route (L3)` | Isolated Rust `syn` 3 sidecar (trusted Cargo `cwd` + SHA-256 binary pinning; 2-segment suffix matches honestly labeled `heuristic`) |
 
-### 3. Fixed 15 Error Codes (`CAUSORYN_TOOL_ERROR_CODES`)
+### 3. Fixed 15 Active Error Codes (`CAUSORYN_TOOL_ERROR_CODES`)
 
-All domain, policy, and workspace errors travel inside `envelope.error` (`{ code, message, retryable, userAction }`) with `isError: false`. Only `INDEX_NOT_READY` and `INTERNAL_ERROR` set `retryable: true`:
+Only `INDEX_NOT_READY` and `INTERNAL_ERROR` set `retryable: true`; all `userAction` strings are clear English instructions:
 
-| Error Code (`code`) | `retryable` | Origin / Governance | Meaning & Client Action (`userAction`) |
-|---|---|---|---|
-| `WORKSPACE_NOT_AUTHORIZED` | `false` | Spec §10.1 fixed base | `workspaceId` mismatch or unauthorized/empty `allowRoots`; authorize the workspace root |
-| `PATH_DENIED` | `false` | Spec §10.1 fixed base | Ignored/secret path, path traversal/null-byte rejection, or unconfigured `wiki.dataDbPath` write attempt |
-| `INDEX_NOT_READY` | `true` | Spec §10.1 fixed base | No published `ready`/`partial` `GraphSnapshot` or `WikiSnapshot` yet; retry after `causoryn_refresh_index` or `causoryn_wiki_build` |
-| `AMBIGUOUS_SYMBOL` | `false` | Spec §10.1 fixed base | Multiple symbol candidates matched; `envelope.data` carries candidates (narrow by `kind`/`limit` or pass exact node ID) |
-| `LIMIT_EXCEEDED` | `false` | Spec §10.1 fixed base | Request exceeded `maxNodes`, `maxSymbols`, `maxDepth`, `maxPaths`, or Wiki `limit` (cap 200) |
-| `INVALID_ARGUMENT` | `false` | Project extension (K-008) | Semantic validation failure after schema parsing, malformed `cursor`, unsupported export view or combination, invalid annotation reference, or explicitly rejected `scope` and extra Wiki search filters |
-| `EVIDENCE_NOT_FOUND` | `false` | Project extension (K-008) | Unknown `nodeId`, `edgeId`, `evidenceId`, `findingId`, or `wikiSnapshotId` |
-| `SYMBOL_NOT_FOUND` | `false` | Project extension (K-011) | Symbol ID, `qualifiedName`, `entrypoint`, or `flowSeed` not present in the published snapshot |
-| `POLICY_INVALID` | `false` | Spec §10.1 fixed base (K-012) | Missing or invalid `.causoryn/architecture.rules.yaml` or `.causoryn/architecture.baseline.yaml` |
-| `INVALID_REVISION` | `false` | Spec §10.1 fixed base (K-012 / K-013 #6) | Unresolvable Git ref/alias or missing `.causoryn/architecture-snapshot.json` blob at that revision |
-| `EXPORT_NOT_ALLOWED` | `false` | Spec §10.1 fixed base (K-012) | Target `outputDir` is outside declared `output.allowedOutputDirs` (default deny) |
-| `WIKI_PAGE_NOT_FOUND` | `false` | Spec §10.1 fixed base (K-014) | Requested `pageId` or `parentId` does not exist in the target `WikiSnapshot` |
-| `CONTRACT_PARSE_FAILED` | `false` | Spec §10.1 fixed base (K-015) | OpenAPI/AsyncAPI/JSON Schema/SQL/Proto spec failed parsing or exceeded byte/quota limits |
-| `UNSUPPORTED_LANGUAGE` | `false` | Spec §10.1 reserved fixed code | Retained for Spec §10.1 schema parity; currently not thrown because missing sidecars degrade gracefully to L0/L1 file nodes |
-| `INTERNAL_ERROR` | `true` | Spec §10.1 fixed base | Unexpected internal failure; raw details are logged only to `stderr` while the client receives a sanitized message with `requestId` |
-
-### 4. Pagination & Server Limits
-
-- **Opaque cursors (`packages/mcp-server/src/cursor.ts`):** Base64url-encoded `{ "v": 1, "o": <int> }` offset tokens. Undecodable or tampered cursors return `INVALID_ARGUMENT`; on the final page, both `envelope.nextCursor` and `data.nextCursor` are `null`.
-- **Configured server limits (`causoryn_get_capabilities.data.limits`):** `maxFiles`, `maxFileBytes`, `maxNodes` (default 250), `maxSymbols` (default 100), `maxDepth` (default 3), `maxPaths` (default 50); paginated Wiki tools default to `limit = 50` with a hard cap of `200` (K-013 #5).
-
-## Write-Permission Matrix (Red Line 2)
-
-| Tool | MCP `readOnlyHint` | Permitted Write Target / In-Memory Side Effect |
+| Error Code | `retryable` | Meaning & Client Action |
 |---|---|---|
-| `causoryn_refresh_index` | `false` | Causoryn's own graph index repository only — defaults to in-process `InMemoryGraphRepository` in bare stdio wiring, or writes to `storage.dataDbPath` SQLite data-root (absolute path strictly outside `allowRoots`, via `CAUSORYN_CONFIG` or `--auto-data-dir`). Source workspace is scanned strictly read-only; first-run Rust/Go sidecar builds default to external toolchain `target`/cache directories (e.g., `~/.causoryn/cache/rust-worker-target`) |
-| `causoryn_export_documentation` | `false` | Declared `output.allowedOutputDirs` only (atomic `.tmp` + rename; bare default `[]` → `EXPORT_NOT_ALLOWED`; `--auto-data-dir` provisions an external workspace-scoped `exports/` directory) |
-| `causoryn_wiki_build` | `false` | Declared `wiki.dataDbPath` SQLite data-root only (strictly outside `allowRoots`; `--auto-data-dir` wires `wiki.dataDbPath` to the external workspace SQLite database; `openWikiStores` also initializes the single workspace row in `wiki.dataDbPath` on server startup) |
-| `causoryn_preflight_change` / `causoryn_verify_change` | `true` | **Writes zero bytes to disk or the working tree** (`candidateOnly` locked to `true`, verify-only type guard); `preflight_change` caches its manifest solely in the in-process `PreflightManifestStore` (FIFO cap 200) so `verify_change(preflightId)` can resolve it |
-| All other tools (24 tools) | `true` | Strictly read-only (the user's source workspace is never modified under any condition — ADR-008) |
+| `WORKSPACE_NOT_AUTHORIZED` | `false` | Authorize the workspace root using `--root <path>`, `--allow-cwd`, MCP `roots/list`, or `allowRoots` in `CAUSORYN_CONFIG` |
+| `PATH_DENIED` | `false` | Path escapes workspace, matches UNC/device pre-check, hits ignore/binary rules, or attempts an unconfigured `wiki.dataDbPath` write |
+| `INDEX_NOT_READY` | `true` | No published snapshot exists yet; wait for background indexing or run `causoryn_status(action="refresh")` / `causoryn_wiki_build` |
+| `AMBIGUOUS_SYMBOL` | `false` | Multiple symbol candidates matched; `envelope.data` lists candidates (narrow by `kind`/`limit` or pass an exact node ID) |
+| `LIMIT_EXCEEDED` | `false` | Request exceeded configured ceiling (`maxNodes`, `maxSymbols`, `maxFileBytes`, or Wiki `limit` cap 200) |
+| `INVALID_ARGUMENT` | `false` | Semantic validation failure, malformed cursor, unsupported view combination, or invalid annotation references |
+| `EVIDENCE_NOT_FOUND` | `false` | Unknown `nodeId`, `edgeId`, `evidenceId`, `findingId`, or `wikiSnapshotId` |
+| `SYMBOL_NOT_FOUND` | `false` | Symbol ID, `qualifiedName`, `entrypoint`, or `flowSeed` not found in the published snapshot |
+| `POLICY_INVALID` | `false` | Missing or invalid `.causoryn/architecture.rules.yaml` or `.causoryn/architecture.baseline.yaml` |
+| `INVALID_REVISION` | `false` | Unresolvable or disallowed Git ref/alias or missing snapshot blob at that revision |
+| `EXPORT_NOT_ALLOWED` | `false` | Target `outputDir` is outside declared `output.allowedOutputDirs` (default deny) |
+| `WIKI_PAGE_NOT_FOUND` | `false` | Requested `pageId` or `parentId` does not exist in the target `WikiSnapshot` |
+| `CONTRACT_PARSE_FAILED` | `false` | Contract spec failed parsing or exceeded parser safety quotas |
+| `UNSUPPORTED_LANGUAGE` | `false` | Reserved catalog code; missing sidecars degrade gracefully to L0/L1 file nodes instead of throwing |
+| `INTERNAL_ERROR` | `true` | Unexpected internal failure; raw details stay on `stderr` while the client receives a generic `requestId`-correlated message |
 
-## Reuse Principle (No Duplicate Wiki Refresh/Export Tools)
+### 4. Pagination, Limits & Write Permissions
 
-`causoryn_refresh_index` does not automatically rebuild the `WikiSnapshot` in v0.2.4; regenerating the Wiki projection is performed explicitly via `causoryn_wiki_build`. `causoryn_export_documentation` supports `view: "architecture" | "interactive" | "full"`, `options`, and fail-closed `annotations`, while `view: "wiki"` remains explicitly rejected with `INVALID_ARGUMENT` (ADR-010: incomplete surfaces are never silently ignored). Separate `wiki_refresh` or `wiki_export` tools are intentionally **not** introduced, keeping the tool catalog locked at 22 + 7 = 29 tools.
+- **Opaque cursors:** Base64url-encoded `{ "v": 1, "o": <int> }` offset tokens; tampered cursors return `INVALID_ARGUMENT`.
+- **Write permissions:** Only index refresh (`causoryn_status` `action="refresh"` / `causoryn_refresh_index`), `causoryn_export_documentation`, and `causoryn_wiki_build` advertise `readOnlyHint: false`, and all three write strictly to authorized external data-root or `output.allowedOutputDirs` locations — never into analyzed source files.
+- **`outputSchemaProfile`:** Defaults to `"omit"` (`--output-schema full` or `CAUSORYN_MCP_OUTPUT_SCHEMA_PROFILE=full` re-enables full wire `outputSchema`). Server-side `outputSchema.parse(envelope)` runs on every response in both modes.
 
-## Zero-Config CLI, Dynamic Root Binding & `outputSchemaProfile` Contract
-
-`packages/mcp-server/src/runtime-cli.ts` and `packages/mcp-server/src/server.ts` support deterministic programmatic embedding, bare stdio execution, CLI coding agents, and desktop IDE plugins under identical fail-closed security invariants:
-
-1. **`--output-schema-profile omit|full` and Server-Side Schema Enforcement:**
-   - Precedence (`resolveEffectiveOutputSchemaProfile`): `--output-schema-profile <full|omit>` CLI flag > `CAUSORYN_MCP_OUTPUT_SCHEMA_PROFILE` environment variable > (`hasCliActivation ? "omit" : "full"`).
-   - **Programmatic & bare stdio mode (`outputSchemaProfile: "full"`):** `createCausorynMcpServer(context)` and zero-argument `node dist/mcp-server.mjs` publish the full JSON Schema `outputSchema` on all 29 tools in `tools/list` and enforce `allowRoots: []` (default deny) when `CAUSORYN_CONFIG` is absent.
-   - **CLI / Plugin activation mode (`causoryn mcp --allow-cwd --auto-data-dir [--client <id>]`):** Defaults to `outputSchemaProfile: "omit"` so `tools/list` omits bulky per-tool `outputSchema` JSON definitions over the wire, saving substantial LLM context-window tokens in CLI clients (override anytime via `--output-schema-profile full` or `CAUSORYN_MCP_OUTPUT_SCHEMA_PROFILE=full`). **Even in `omit` mode, the server executes `registration.outputSchema.parse(envelope)` (`server.ts:562-564`) on every response before returning**.
-2. **Safe `--allow-cwd` Filter & Dynamic MCP `roots/list` Binding (`attachMcpRootsWorkspaceBinder`):**
-   - `inspectProjectRootSafety` rejects unsafe candidate roots fail-closed: filesystem roots (`/`, `C:\`), `$HOME`, Causoryn data directories (`~/.causoryn`, `ZCODE_PLUGIN_DATA`, `--data-dir`), plugin/bundle installation directories (`~/.gemini`, `~/.antigravity`, `~/.claude/plugins`, `~/.zcode/plugins`, `~/.codex/plugins`, `~/.agents/plugins`, `CLAUDE_PLUGIN_ROOT`, `ZCODE_PLUGIN_ROOT`, `bundle-manifest.json`), sensitive user directories (`~/.ssh`, `~/.aws`, `~/.gnupg`, `~/.kube`, `~/.claude`, `~/.codex`, `~/.zcode`), and OS system directories (`/etc`, `/usr`, `/System`, `C:\Windows`, `C:\Program Files`).
-   - When `cwd` is a safe project directory (typical CLI sessions), Causoryn binds immediately at startup. When launched with an unsafe `cwd` (typical desktop IDEs starting in `$HOME`, `/`, or the plugin install folder), Causoryn starts safely with `allowRoots: []` and performs single-flight MCP `roots/list` synchronization on `oninitialized`, `beforeToolCall`, and live `notifications/roots/list_changed` events, atomically rebinding `DynamicCausorynContext` to the first safe `file://` workspace root.
-3. **Out-of-Tree `--auto-data-dir` Provisioning (`buildWorkspaceAutoConfig`):**
-   - Resolves the base data directory (`--data-dir` > `ZCODE_PLUGIN_DATA` > `~/.causoryn`), derives a deterministic `<slug>-<hash12>` folder from the canonical primary root, and wires `storage.dataDbPath` + `wiki.dataDbPath` (`graph[-<client>].sqlite`) and `output.allowedOutputDirs` (`exports/`) under `~/.causoryn/workspaces/<slug>-<hash12>/`.
-   - Before creating a single directory, every ancestor prefix is checked against symlink/dangling-link escapes (CWE-59) and verified to reside strictly outside all `allowRoots` (ADR-008); directories are created with `0o700` permissions and re-verified via `realpathSync` after creation against TOCTOU races.
+---
 
 ## Related Documentation
 
-- [Documentation Index](README.md) — entry point for all English and Turkish documentation
-- [Prompting & Architecture Portals Guide](prompting-and-architecture-portals.md) — deterministic and Host-LLM annotated architecture portal guide
-- [Architecture Overview](architecture.md) — monorepo package map and dependency boundaries
-- [CLI & Configuration](cli-and-configuration.md) — CLI flags, environment variables, and `CAUSORYN_CONFIG` reference
-- [Language Analyzers](language-analyzers.md) — 5-language AST/semantic adapters and resolution honesty
-- [Living Wiki Specification](wiki-spec.md) — Living Wiki Engine design contract and current status
-- [Implementation Status](implementation-status.md) — phase-by-phase verification evidence
-- [Compatibility Matrix](compatibility-matrix.md) — host × verification result matrix
-- Historical/source references: `wiki/mcp-tools.md` · `packages/mcp-server/src/errors.ts`
+- [5-Minute Quickstart Tutorial](tutorial-5-minutes.md) · [Documentation Hub](README.md)
+- [Prompting & Architecture Portals Guide](prompting-and-architecture-portals.md)
+- [CLI & Configuration](cli-and-configuration.md) · [Architecture Overview](architecture.md)
+- [5-Language Analyzers](language-analyzers.md) · [Living Wiki Specification](wiki-spec.md)
+- [Implementation Status](implementation-status.md) · [Compatibility Matrix](compatibility-matrix.md)

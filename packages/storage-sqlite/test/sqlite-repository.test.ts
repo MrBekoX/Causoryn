@@ -1151,3 +1151,117 @@ describe("Task 1.7 — SqliteGraphRepository build_leases ve recoverOrphanBuilds
     }
   });
 });
+
+describe("SqliteGraphRepository.getLatestWorkspaceSummaryMeta — zero-hydration SQLite aggregation", () => {
+  it("returns undefined before publish, aggregates counts/entrypoints/frameworks/resolutions/languageCoverage, and tracks stale & external invalidation", () => {
+    const file = dbPath("summary-meta.sqlite");
+    const repo = new SqliteGraphRepository(file);
+    try {
+      repo.registerWorkspace({
+        id: WS,
+        rootPath: "D:/fixture/orders",
+        createdAt: CREATED_AT,
+      });
+
+      // No snapshot published yet (even while building)
+      expect(repo.getLatestWorkspaceSummaryMeta(WS)).toBeUndefined();
+      const { build } = buildOrderSnapshot(repo, 1);
+      expect(repo.getLatestWorkspaceSummaryMeta(WS)).toBeUndefined();
+
+      const graph = repo.publish(build.buildId, "ready", PUBLISHED_AT);
+      const summary = repo.getLatestWorkspaceSummaryMeta(WS);
+      expect(summary).toBeDefined();
+      expect(summary?.snapshotId).toBe(graph.meta.id);
+      expect(summary?.workspaceId).toBe(WS);
+      expect(summary?.state).toBe("ready");
+      expect(summary?.revisionId).toBe("rev-1");
+      expect(summary?.revisionSequence).toBe(1);
+      expect(summary?.stale).toBe(false);
+      expect(summary?.nodeCount).toBe(4);
+      expect(summary?.edgeCount).toBe(2);
+      expect(summary?.evidenceCount).toBe(2);
+      expect(summary?.fileCount).toBe(0);
+      expect(summary?.languages).toEqual([]);
+      expect(summary?.frameworks).toEqual([]);
+      expect(summary?.entrypoints).toEqual(["POST /orders"]);
+      expect(summary?.edgesByKind).toEqual({ CALLS: 1, ROUTES_TO: 1 });
+      expect(summary?.resolutions).toEqual({ verified: 2, heuristic: 0, unresolved: 0 });
+      expect(summary?.languageCoverage).toEqual([
+        {
+          language: "typescript",
+          files: 0,
+          hasNonFileSymbols: true,
+          hasSemanticEdges: true,
+          verifiedEdges: 2,
+          heuristicEdges: 0,
+          unresolvedEdges: 0,
+        },
+      ]);
+
+      // Active newer build flips stale -> true immediately (never stale-cached)
+      const nextBuild = buildOrderSnapshot(repo, 2).build;
+      expect(repo.getLatestWorkspaceSummaryMeta(WS)?.stale).toBe(true);
+
+      // Failing the newer build flips stale back -> false
+      repo.failBuild(nextBuild.buildId, "cancelled");
+      expect(repo.getLatestWorkspaceSummaryMeta(WS)?.stale).toBe(false);
+
+      // External connection write invalidates any cached summary via PRAGMA data_version
+      const external = new Database(file);
+      try {
+        external
+          .prepare("UPDATE nodes SET attributes_json = ? WHERE kind = 'Endpoint'")
+          .run(JSON.stringify({ framework: "express" }));
+      } finally {
+        external.close();
+      }
+      expect(repo.getLatestWorkspaceSummaryMeta(WS)?.frameworks).toEqual(["express"]);
+    } finally {
+      repo.close();
+    }
+  });
+
+  it("pins an MVCC read transaction so concurrent publish + pruneOldSnapshots cannot tear getLatestWorkspaceSummaryMeta", () => {
+    const file = dbPath("summary-meta-mvcc.sqlite");
+    const writer = new SqliteGraphRepository(file);
+    const reader = new SqliteGraphRepository(file);
+    try {
+      writer.registerWorkspace({
+        id: WS,
+        rootPath: "D:/fixture/orders",
+        createdAt: CREATED_AT,
+      });
+      const b1 = buildOrderSnapshot(writer, 1);
+      const snap1 = writer.publish(b1.build.buildId, "ready", PUBLISHED_AT);
+
+      const readerInternal = reader as unknown as {
+        countRows: (table: "nodes" | "edges" | "evidence", sid: number) => number;
+      };
+      const origCountRows = readerInternal.countRows.bind(reader);
+      let injected = false;
+      readerInternal.countRows = (table, sid) => {
+        if (!injected) {
+          injected = true;
+          const b2 = buildOrderSnapshot(writer, 2);
+          writer.publish(b2.build.buildId, "ready", PUBLISHED_AT_2);
+          const gc = writer.pruneOldSnapshots(WS, 1);
+          expect(gc.prunedSnapshotSids).toBe(1);
+        }
+        return origCountRows(table, sid);
+      };
+
+      const meta = reader.getLatestWorkspaceSummaryMeta(WS);
+      readerInternal.countRows = origCountRows;
+
+      expect(injected).toBe(true);
+      expect(meta?.snapshotId).toBe(snap1.meta.id);
+      expect(meta?.nodeCount).toBe(4);
+      expect(meta?.edgeCount).toBe(2);
+      expect(meta?.evidenceCount).toBe(2);
+      expect(meta?.stale).toBe(false);
+    } finally {
+      reader.close();
+      writer.close();
+    }
+  });
+});

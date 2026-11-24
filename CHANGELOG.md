@@ -1,258 +1,189 @@
 # Changelog
 
-Bu projedeki tüm önemli değişiklikler bu dosyada belgelenir. Format
-[Keep a Changelog](https://keepachangelog.com/tr/1.1.0/) temel alınır;
-sürümleme [SemVer](https://semver.org/lang/tr/) ilkelerini izler.
+All notable changes to this project will be documented in this file.
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
+and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-**1.0.0 kapıları** (henüz sağlanmadı — ADR-010 gereği 1.0.0 ilan edilmez; bkz. [docs/implementation-status.md](docs/implementation-status.md) Sprint 7 bölümü, F9 ve K-022 kararları):
+### Added
 
-- Antigravity host kurulum + smoke koşumu (öncül: `agy` CLI'nin makinede bulunması; TŞ §22 "agy CLI yoksa çalıştırılmadı diye açıkça raporla")
-- ZCode GUI içi gerçek kurulum + tools/list smoke koşumu (kırmızı çizgi 6, kullanıcı kurulumunu bozmama kısıtıyla)
-- macOS/Linux/ARM canlı host dağıtım doğrulaması (TŞ §22 Release satırı; `.github/workflows/ci.yml` `ubuntu-latest` + `windows-latest` + `macos-latest` CI matrisi K-020/K-022 ile eklendi; canlı macOS/ARM64 host smoke hâlâ açık)
-- MCP SDK v1.x → v2 hattına yükseltme (TŞ §6 hedefi; K-009 sapma kaydının kapatılması — bugüne dek 1.32.2)
-- `causoryn_refresh_index mode=incremental` K-020 ile araç yüzeyinde mevcut. Watcher için MCP aracı ve per-file parse reuse açık (B7 Partial).
-- adapters/csharp-roslyn (ve diğer sidecar dillerde) TESTS kenarı üretimi (`adapters/typescript` `Test` node + `TESTS` kenarı üretimi 2026-11-18 K-020 ile aktifleştirildi; C#/Python/Go/Rust'ta `derive_test_plan` `direct` sinyali hâlâ açık)
-- OpenAPI keşfine yanıt-şeması drift'i eklenmesi (K-015(5) sadakat sınırı), TŞ §11 event versiyon uyumsuzluk kuralı (K-015(4)) ve SQL RENAME → `unknown` sınıflamasının netleştirilmesi (K-015(3))
-- compare_architecture/architecture_timeline için `.causoryn/architecture-snapshot.json` iş akışı otomasyonu (`causoryn_export_documentation(format="snapshot")` ile izinli `output.allowedOutputDirs` dizinine kanonik blob üreticisi 2026-11-18 K-020 ile eklendi; workspace içine otomatik yazma kırmızı çizgi 2 gereği yapılmaz)
-- wiki_search sorgu filtrelerinin (pageKind/language/…) araç yüzeyine açılması, `WIKI_NOTE_CONFLICT` için TOOL_ERROR_GUIDANCE kaydı eklenmesi ve incremental wiki yayımında link/FTS indekslerinin tam graph'tan yeniden yazmasının daraltılması
-- E6 offline visualizer'ın gerçek tarayıcı koşusuyla doğrulanması (`causoryn_export_documentation(format="html", view="interactive")` MCP yüzeyi v0.2.2'de açıldı)
-- Bundle fidelity: default lib (`.d.ts`) dosyalarının bundle'a katılması veya doküman sınırlaması (çıplak `packages/mcp-server/dist/` 35-dosya F1 klonunda `.d.ts` yoktur; açık kaynak dağıtım paketi `packages/causoryn` içinde `dist/typescript-lib/lib*.d.ts` sahnelemesi ve `resolveTypeScriptLibDir` ile 2026-11-19 K-021'de `state: "ready"` kanıtlandı — docs/security-pass.md Dürüstlük 1)
-- Rate-limit/concurrency resource budget (K-010 kapsam dışı beyanı) (adanmış secret-scan kapısı 2026-11-17/18'de `scripts/secret-scan.mjs` ile eklendi ve 2026-11-20 K-022'de 13 kök + 13 kök metin dosyasına genişletildi)
-- ~~npm audit 10 moderate dev-toolchain uyarısının (minimatch) çözülmesi~~ — **Kapatıldı (2026-11-20, K-022):** `eslint@10.15.0` ve `typescript-eslint@8.73.0` yükseltmesiyle `npm audit` **0 güvenlik açığı** (`0 vulnerabilities`) döndürür.
+- **Lean English-first MCP surface & `--tool-profile` (`core|full|wiki|history`):**
+  - Default `--tool-profile core` (and `CAUSORYN_TOOL_PROFILE`) registers **11 consolidated tools** (`causoryn_status`, `causoryn_map_system`, `causoryn_find_symbols`, `causoryn_get_symbol_context`, `causoryn_trace`, `causoryn_get_agent_context`, `causoryn_preflight_change`, `causoryn_verify_change`, `causoryn_contracts`, `causoryn_get_evidence`, `causoryn_export_documentation`) keeping `tools/list <= 15,000` characters (`--output-schema omit` by default, server-side Zod validation always active).
+  - Extension profiles add Living Wiki (`--tool-profile wiki`, 7 tools) and Git architecture history (`--tool-profile history`, 2 tools), while `--tool-profile full` preserves all 29 legacy tool names plus the 3 consolidated core tools (32 total) with deprecation notices.
+- **Non-blocking `worker_threads` WAL indexing & MCP progress notifications:**
+  - Dedicated background indexing worker (`packages/indexing/src/index-worker.ts` / `dist/index-worker.mjs`) runs full and incremental analysis off the MCP event loop over SQLite WAL (`PRAGMA busy_timeout=5000`), streaming `notifications/progress` when clients send `_meta.progressToken` and returning structured `{ status: "indexing", jobId, progress, retryAfterMs }` on cold-start timeouts.
+- **Per-file incremental indexing with early cutoff (`file_facts`):**
+  - SQLite schema v4 adds the `file_facts` table (`content_hash`, `public_interface_hash`, `imported_paths_json`, serialized per-file graph facts) and TypeScript `oldProgram` reuse so body/comment edits re-analyze only the changed file (early cutoff) while preserving byte-identical deterministic snapshot IDs.
+- **Warm boot, streaming SHA-256 snapshot IDs & SQLite retention GC:**
+  - Streaming SHA-256 snapshot hashing (`computeStreamingSnapshotId`) removes monolithic string allocation; lightweight `getLatestSnapshotMeta` avoids full graph hydration on boot; `MAX_PUBLISHED_CACHE_ENTRIES = 1` reduces warm RSS; `pruneOldSnapshots` retains the latest 2 published snapshots and cleans orphan `symbol_fts` entries.
+- **Shared workspace SQLite DB (`graph.sqlite`) with heartbeat single-writer leases:**
+  - All MCP hosts share a single `<slug>-<hash12>/graph.sqlite` per workspace (`--client` stays a diagnostic label), coordinated by the `build_leases` table (`lease_id`, `owner_pid`, `host_label`, `heartbeat_at`, `expires_at`), dead-PID / expired orphan `building` recovery (`recoverOrphanBuilds`), and explicit `waiting_for_peer` reporting.
+- **Semantic fidelity & code localization upgrades:**
+  - TypeScript monorepo workspace package resolution (`package.json` `name`/`exports`/`types`/`main`/`workspaces` confined strictly inside `rootDir`).
+  - Class Hierarchy Analysis (`INHERITS` and `IMPLEMENTS` edges) for TypeScript (`TypeChecker`) and C# Roslyn (`INamedTypeSymbol.BaseType` / `Interfaces`), propagated through `analyze_impact` and `preflight_change`.
+  - Read-only C# NuGet reference discovery from `obj/project.assets.json` (bounded, symlink/UNC-guarded).
+  - Per-language `coverage.byLanguage` breakdown in MCP envelopes so one language never hides L0 degradation in another.
+  - Identifier + path tokenization (`camelCase`, `PascalCase`, `snake_case`, `kebab-case`) with SQLite FTS5 BM25 + structural degree ranking in `causoryn_get_agent_context`.
+- **Real-repo evaluation & open-source developer documentation:**
+  - Added the 5-minute copy-paste tutorial ([`docs/en/tutorial-5-minutes.md`](docs/en/tutorial-5-minutes.md)) on `examples/fixture-ts-orders`, cleaned internal specification/sprint jargon from `README.md`, `packages/causoryn/README.md`, and `docs/en/**`, translated root `CHANGELOG.md` and `packages/causoryn/src/cli.ts` outputs to English, and added a real-repository precision/recall/latency benchmark harness plus SQLite/git-blob timeline fallbacks.
+
+### Changed
+
+- **Edge resolution honesty & verification accuracy:**
+  - Go adapter keys packages by directory path + `go.mod` module path (fixing multi-file package resolution and preventing false cross-directory `verified` matches across separate `package main` directories).
+  - Rust adapter labels 2-segment suffix matches (`Type::method` / `mod::fn`) honestly as `heuristic` with `unverified-module-prefix-suffix-match` ambiguity instead of `verified`.
+  - `causoryn_verify_change` defaults `checks` to `["architecture", "graph-diff", "test-plan"]` (running `contracts` only when requested or contract pairs exist), projects working trees asynchronously across all languages (`runIndexAsync`), loads `.causoryn/architecture.rules.yaml` and `architecture.baseline.yaml` from trusted Git `baseRef` (`HEAD` by default) with an explicit `trustWarning` when falling back to an untrusted working tree, and records host-supplied test runs strictly as `state: "host_asserted"` (`engineVerified: false`, `hostAssertedPassed`).
+  - `causoryn_derive_test_plan` resolves saved `preflightId` manifests from `PreflightManifestStore`; `analyze_impact` excludes noisy `CONTAINS` edges from reverse BFS; `causoryn_trace` clamps oversized `maxDepth`/`maxPaths` with warnings; `find_symbols` excludes `UnknownExternal` placeholders when real project symbols match; `architecture-annotations.ts` collects up to 25 validation errors in a single pass; `errors.ts` provides accurate English `userAction` guidance.
+- **CLI `setup` & `doctor` ergonomics:**
+  - `setup` no longer false-positives on bare `~/.gemini` (requires `~/.gemini/antigravity` or `~/.gemini/config/mcp_config.json`), writes zero files when zero hosts are detected without `--client`/`--all`, is strictly idempotent (`noop`), preserves the first original `*.causoryn.backup` forever (writing timestamped secondary backups on later edits), cleans `.tmp` files in `try/finally`, and writes the absolute Node binary (`process.execPath`) instead of bare `"node"`.
+  - `doctor` accepts absolute Node executable paths and reports `NOT CONFIGURED` (0 configured hosts) and `DEGRADED` (host/probe warnings) instead of false `HEALTHY`.
+
+### Security
+
+- **Untrusted-repository toolchain isolation:**
+  - Cargo probes/builds run in trusted `native/rust-worker` `cwd` with `CARGO_BUILD_RUSTC_WRAPPER=""` and `causoryn-rust-worker.sha256.json` source-fingerprint + `O_NOFOLLOW` binary SHA-256 verification.
+  - Read-only Git invocations enforce `GIT_CONFIG_NOSYSTEM=1`, `GIT_CONFIG_GLOBAL=<devNull>`, `GIT_ATTR_NOSYSTEM=1`, `GIT_NO_LAZY_FETCH=1`, `GIT_LFS_SKIP_SMUDGE=1`, `GIT_OPTIONAL_LOCKS=0`, and pre-subcommand `-c` overrides (`core.fsmonitor=false`, `core.hooksPath`, `core.sshCommand=false`, `diff.external=false`, `protocol.allow=never`, `protocol.ext.allow=never`, `safe.bareRepository=explicit`) plus safe `rev-parse --verify --end-of-options` support for `HEAD~N`/`HEAD^`.
+  - Go worker forces `GOTOOLCHAIN=local`, `GOWORK=off`, `GOPROXY=off` and removes `GOENV` from the env allowlist; Python worker launches with `["-I", "-B", "-X", "utf8", scriptPath]` in the worker directory; Roslyn worker pins `cwd` and `DOTNET_STARTUP_HOOKS=""`; `doctor` probes run in `os.tmpdir()`; `sidecar-ipc` enforces `shell: false`, `windowsHide: true`, and non-empty `cwd`.
+- **Win32 UNC lexical pre-check, `$HOME` ancestor rejection & SHA-256 CSP:**
+  - Shared `assertNotUncOrDevicePath` rejects `\\host\share`, `//host/share`, and `\\?\`/`\\.\` paths lexically before any `fs.*` syscall (preventing SMB/NTLM credential leaks); `inspectProjectRootSafety` also rejects `$HOME` ancestors (`C:\Users`, `/home`, `/Users`) and `/tmp`, `/var`, `/bin`, `/sbin`, `/lib`, `/dev`.
+  - Interactive HTML architecture portal replaces `script-src 'unsafe-inline'` with a deterministic `script-src 'sha256-<hash>'` Content Security Policy.
+  - Hermetic 3-job release workflow separation (`verify-and-test` -> clean `build-and-pack` with `verify-package-ready.mjs` immediately before `npm pack` -> `publish`).
+
+### Remaining 1.0.0 Release Gates (Pre-1.0 Honesty Policy — `1.0.0` Not Declared)
+
+`1.0.0` will not be declared until the remaining open gates below are closed (see [`docs/en/implementation-status.md`](docs/en/implementation-status.md) and [`docs/en/BACKLOG.md`](docs/en/BACKLOG.md)):
+
+- Live Antigravity `agy` CLI installation and smoke run (requires `agy` CLI on the host machine; currently reported `NOT RUN`).
+- Live ZCode desktop GUI installation and `tools/list` smoke run (deferred so automated runs never mutate user desktop profiles).
+- Live macOS and Linux ARM64 interactive host CLI/GUI smoke verification (3-OS GitHub Actions CI runs green on `ubuntu-latest`, `windows-latest`, and `macos-15`).
+- MCP TypeScript SDK upgrade from v1.x (`^1.32.2`) to stable v2.
+- Live Architecture watcher MCP surface (per-file incremental `file_facts` caching with early cutoff and TypeScript `oldProgram` reuse are now implemented; exposing the in-process file watcher over MCP remains open).
+- `Test` node and `TESTS` edge extraction in the 4 sidecar languages (C#, Python, Go, Rust; currently active for TypeScript/JavaScript only).
+- Contract discovery & drift fidelity extensions: OpenAPI response-schema drift, event-version mismatch rule, and SQL RENAME classification refinement (`unknown`).
+- Automated read-only workflow ergonomics for `.causoryn/architecture-snapshot.json` comparisons across Git revisions without writing into analyzed workspaces.
+- Living Wiki surface refinements: exposing `wiki_search` query filters (`kinds`/`scope`/`language`/…), registering `WIKI_NOTE_CONFLICT` in MCP error guidance alongside consented local note write flows, and narrowing incremental wiki link/FTS rewrites.
+- Real-browser acceptance verification of the offline visualizer (`apps/visualizer`) alongside the existing `causoryn_export_documentation(format="html", view="interactive")` MCP surface.
+- Bare monorepo bundle default lib (`.d.ts`) scope decision (`packages/causoryn` already bundles `dist/typescript-lib/lib*.d.ts` and reaches `state: "ready"`).
+- Rate-limit/concurrency resource budget enforcement across concurrent MCP requests (`scripts/secret-scan.mjs` across 13 roots + 13 root files and `npm audit` with **0 vulnerabilities** are already closed).
 
 ## [0.2.4] - 2026-11-24
 
 ### Added
 
-- **Doğal dil skill tetikleme & 17 çiftli Diátaxis TR/EN dokümantasyon rehberi (`K-026`):** `docs/prompting-and-architecture-portals.md` ve `docs/en/prompting-and-architecture-portals.md` rehberi (Deterministik vs. Host-LLM Anotasyonlu mimari portal tarifleri) eklendi; `skills/architecture-blueprint/SKILL.md` ön-metnine iki dilli (TR/EN) doğal dil tetiklemeleri ve Host-LLM reddetmeme kuralı, `skills/causoryn/SKILL.md`'ye görsel portal yönlendirmesi, `skills/map-system/SKILL.md` ile `integrations/zcode/causoryn/skills/map-system/SKILL.md`'ye `L3`/`Test` ve 10 alanlı envelope eşlemesi eklendi.
-- **MCP araç şema açıklamaları (`K-026`):** `causoryn_export_documentation` aracının açıklaması ve Zod şemasına tüm `view`, `options` (`includeTests` varsayılan `true`) ve `annotations` (`title`, `architectureStyle`, `executiveSummary`, `domains`, `moduleNotes` modül-bazlı `keyFiles`, `flows`, `guidedTour`, `decisions`, `risks`) alanları için açıklayıcı `.describe()` JSON Schema metinleri eklendi.
+- **Natural-language skill triggering & 17-pair bilingual documentation hub:** Added `docs/prompting-and-architecture-portals.md` and `docs/en/prompting-and-architecture-portals.md` (Deterministic vs. Host-LLM Annotated portal recipes), bilingual natural-language triggers and Host-LLM guidance in `skills/architecture-blueprint/SKILL.md`, visual portal routing in `skills/causoryn/SKILL.md`, and `L3`/`Test` + 10-field envelope updates in `skills/map-system/SKILL.md` and ZCode's `map-system` skill.
+- **Rich MCP schema descriptions:** Added Zod `.describe()` JSON Schema descriptions across `causoryn_export_documentation` top-level fields (`view`, `options`, `annotations`) and nested annotation objects (`domains`, `moduleNotes`, `flows`, `guidedTour`, `decisions`, `risks`).
 
 ### Changed
 
-- **Temiz Diátaxis README ve iki dilli dokümantasyon yenilemesi (`K-026`):** Kök `README.md`, `packages/causoryn/README.md` ve 17 çiftli TR/EN `docs/` + `docs/en/` merkezi sürüm kirliliğinden arındırıldı; Deterministik vs. Host-LLM Anotasyonlu örnek prompt'lar, `npx causoryn@latest setup|doctor` hızlı başlangıç ve güncel `v0.2.4` + `K-025` güvenlik/CI kanıtları tüm belgelere senkronlandı.
-- **CI runner ve Dependabot kararlılığı (PR #20, #23):** `.github/workflows/ci.yml` sabit `macos-15` runner'ına geçirildi, `.github/workflows/release.yml` `actions/attest-build-provenance@v4.2.2`'ye yükseltildi, `.github/dependabot.yml` monorepo npm workspaces için tek kök `directory: "/"` ve `typescript` `version-update:semver-major` korumasıyla güncellendi, `tests/ci-workflow.test.ts` izinli repo listesi + 40-karakter SHA + `# vX.Y.Z` semver yorumu sözleşmesiyle Dependabot uyumlu hâle getirildi.
+- **Diátaxis documentation refresh:** Cleaned version noise from `README.md`, `packages/causoryn/README.md`, and the 17-pair `docs/` + `docs/en/` documentation hub; aligned Quick Start (`npx causoryn@latest setup|doctor`) and Deterministic vs. Annotated example prompts.
+- **CI runner & Dependabot stability:** Pinned CI macOS jobs to `macos-15`, upgraded `actions/attest-build-provenance` to `v4.2.2`, unified Dependabot npm workspaces under `directory: "/"` with a TypeScript major-bump guard, and aligned workflow tests with Dependabot SHA + `# vX.Y.Z` comments.
 
 ### Security
 
-- **27 CodeQL HIGH güvenlik bulgusunun kalıcı giderilmesi (PR #24 — `0` açık CodeQL uyarısı):**
-  - **13 `js/polynomial-redos` giderimi:** `adapters/typescript`, `packages/contracts` (SQL/Protobuf), `packages/graph`, `packages/mcp-server` ve `packages/wiki` içindeki geri izlemeli regex'ler doğrusal `O(n)` karakter döngülerine ve çakışmasız önek/dilimleme kontrollerine geçirildi.
-  - **URL konak doğrulaması & wildcard şablon sertleştirmesi:** `packages/contracts/src/json-schema-discovery.ts` `includes("json-schema.org")` yerine sıkı WHATWG `URL` doğrulaması (`http:`/`https:`, boş `username`/`password`/`port`, geçerli `json-schema.org` / `*.json-schema.org` konak adı) uygular; `adapters/typescript/src/tsconfig-loader.ts` tekli `*` ikamesini `O(n)` `indexOf`/`slice` ile yapar.
-  - **9 üretim `js/file-system-race` (TOCTOU) giderimi:** Yeni ortak `packages/mcp-server/src/safe-file-read.ts` (`open`/`openSync` + `O_NOFOLLOW` + `fstat` + sınırlı parça okuma) tüm MCP politika/doğrulama servislerine bağlandı; `packages/indexing/src/watcher.ts`, `packages/preflight/src/source-revision.ts`, `packages/mcp-server/src/runtime-cli.ts`, `packages/causoryn/src/setup.ts` ve `scripts/export-public-tree.mjs` (`O_RDWR | O_NOFOLLOW` + `ftruncateSync` + açık offset `writeSync`) tek-fd atomik okuma/yazmaya geçirildi.
-  - **3 `js/insecure-temporary-file` giderimi:** `tests/bench-release/{benchmark.test,fixture}.ts` tüm geçici dizinleri `mkdtempSync`'e ve dosya/dizin izinlerini `flag: "wx"`, `mode: 0o600` / `0o700` olarak sertleştirdi.
-- **CI/CD ve tedarik zinciri sertleştirmesi (`K-025`):**
-  - `.github/workflows/security.yml`: fail-closed `zizmor` iş akışı statik denetimi, PR `dependency-review-action` (`high`+ açık ve modern SPDX copyleft lisans engeli) ve çoklu-ekosistem `npm audit --audit-level=high` + fail-closed `--locked-mode` NuGet JSON taraması eklendi.
-  - `.github/workflows/codeql.yml` ve `.github/workflows/scorecard.yml`: 5 dilli CodeQL v4 SAST (`javascript-typescript`, `python`, `csharp`, `go`, `actions`) ve OpenSSF Scorecard (`publish_results: true`, SARIF yüklemeli) iş akışları eklendi.
-  - `.github/workflows/release.yml` ve `.github/workflows/ci.yml`: 2-job SLSA yayın ayrımı (`build-and-verify` salt-okunur + `step-security/harden-runner` → `attest-and-publish` OIDC/provenance, sıfır `NPM_TOKEN`), `-p:RestoreLockedMode=true` (`packages.lock.json`), `export-public-tree.mjs --verify-temp --ref HEAD` kapısı, 4 ekosistemde 7 günlük Dependabot soğuma süresi (`.github/dependabot.yml`) ve `tests/ci-workflow.test.ts` sözleşme testleri eklendi.
+- **27 CodeQL HIGH alerts resolved (0 open alerts):**
+  - Replaced 13 polynomial ReDoS backtracking regexes across `adapters/typescript`, `packages/contracts` (SQL/Protobuf), `packages/graph`, `packages/mcp-server`, and `packages/wiki` with linear-time `O(n)` scanners.
+  - Hardened `packages/contracts/src/json-schema-discovery.ts` with strict WHATWG `URL` hostname validation (`json-schema.org` / `*.json-schema.org`) and linear wildcard substitution in `tsconfig-loader.ts`.
+  - Eliminated 9 production filesystem race (TOCTOU) findings via shared `packages/mcp-server/src/safe-file-read.ts` (`O_NOFOLLOW` + `fstat` + bounded chunked reads) and single-fd atomic writes in `watcher.ts`, `source-revision.ts`, `runtime-cli.ts`, `setup.ts`, and `export-public-tree.mjs`.
+  - Hardened temporary test files in `tests/bench-release/{benchmark.test,fixture}.ts` (`mkdtempSync`, `flag: "wx"`, `0o600`/`0o700`).
+- **CI/CD & supply-chain security hardening:**
+  - Added `.github/workflows/security.yml` (`zizmor`, PR `dependency-review-action`, `npm audit --audit-level=high`, fail-closed `--locked-mode` NuGet JSON audit), `.github/workflows/codeql.yml` (5-language CodeQL v4 SAST), `.github/workflows/scorecard.yml` (OpenSSF Scorecard SARIF), `step-security/harden-runner`, `-p:RestoreLockedMode=true`, `export-public-tree.mjs --verify-temp --ref HEAD`, 7-day Dependabot cooldown, and `tests/ci-workflow.test.ts` contract guards.
 
 ## [0.2.3] - 2026-11-23
 
 ### Added
 
-- **JavaScript & Modern TS Uzantıları (`adapters/typescript`, `packages/indexing`, `K-024` — yeni dil adapter'ı eklenmeden):** Mevcut süreç-içi `ts-adapter` artık `.ts`, `.tsx`, `.mts`, `.cts` yanında `.js`, `.jsx`, `.mjs`, `.cjs` dosyalarını da `allowJs: true`, `checkJs: false` ve varsayılan `jsx: ts.JsxEmit.Preserve` ile tam analiz eder; JS dosya/sembolleri `language: "javascript"`, TS dosya/sembolleri `language: "typescript"` olarak etiketlenir. ESM `import`/`export ... from` yanında CommonJS `require("literal")`, `exports.<fn>`, `module.exports.<fn>`, `module.exports = function ...` ve JS/CJS Express ile Next.js App Router rotaları çıkarılır.
-- **Güvenli Salt-Okunur `tsconfig.json` / `jsconfig.json` Yükleyici (`adapters/typescript/src/tsconfig-loader.ts`):** `baseUrl`, `paths` (`@/*`, `~/*`), `jsx`, `moduleResolution` (`Bundler` / `NodeNext`), `experimentalDecorators`, JSONC yorumları, kök-içi `extends` zincirleri ve monorepo iç-içe yapılandırmaları (`frontend/tsconfig.json` vb.) deterministik biçimde okunur; `IndexService` politika-onaylı config dosyalarını analizöre aktarır ve `tsconfig*`/`jsconfig*` değişikliklerinde artımlı önbelleği geçersiz kılar.
-- **Evrensel Ignore Keşfi & Akıllı `bin/` Ayrımı (`packages/workspace`, `packages/mcp-server`):**
-  - `DEFAULT_IGNORE_PATTERNS` içindeki 7 TŞ §20 deseni (dahil `**/bin/**`) ve `src/build/keep.ts` erişilebilirliği korunurken 14 kesin ekosistem önbellek/vendor dizini (`vendor`, `Pods`, `.gradle`, `.angular`, `.expo`, `.idea`, `.dart_tool`, `.terraform`, `.tox`, `.nox`, `.parcel-cache`, `.vite`, `*.min.js`, `*.min.mjs`) ve 20 ikili/ML/sourcemap uzantısı (`.map`, `.whl`, `.parquet`, `.onnx`, `.pt`, `.safetensors`, `.gguf` vb.) varsayılanlara eklendi.
-  - `workspace-ignore-discovery.ts` kök `.gitignore` yanında `.git/info/exclude` ve sınırlı derinlik/bütçeli iç-içe `.gitignore` dosyalarını okur.
-  - `buildWorkspaceAutoConfig` açık `ignore` verilmediğinde kaba `**/bin/**` desenini yalnızca `.NET` çıktı dizinleriyle (`**/bin/{Debug,Release,x64,x86,AnyCPU}/**` ve tespit edilen `.csproj`/`.fsproj`/`.vbproj` altındaki `<proje>/bin/**`) değiştirir; böylece Node/CLI `bin/*.ts|js` ve Rust `src/bin/*.rs` kaynakları korunur.
-- **Olay Döngüsünü Bloklamayan `collectInventoryAsync` (`packages/indexing`):** Envanter taraması her 64 girişte `setImmediate` ile nefes alarak büyük repolarda MCP el sıkışmasının ve eşzamanlı isteklerin gecikmesini önler; senkron `collectInventory` ile bayt-düzeyinde özdeş sıralı çıktı üretir.
+- **JavaScript & modern TS extensions (`adapters/typescript`, `packages/indexing`):** Extended the in-process `ts-adapter` to analyze `.js`, `.jsx`, `.mjs`, `.cjs` alongside `.ts`, `.tsx`, `.mts`, `.cts` (`allowJs: true`, `checkJs: false`, `jsx: Preserve`), supporting ESM + CommonJS (`require`, `exports`, `module.exports`) and JS/CJS Express and Next.js App Router routes.
+- **Root-confined `tsconfig.json` / `jsconfig.json` loader (`adapters/typescript/src/tsconfig-loader.ts`):** Deterministic read-only loading of `baseUrl`, `paths`, `jsx`, `moduleResolution`, `experimentalDecorators`, JSONC comments, in-root `extends` chains, and nested monorepo configs with incremental cache invalidation.
+- **Universal ignore discovery & smart `bin/` handling (`packages/workspace`, `packages/mcp-server`):** Added ecosystem cache/vendor directories and binary/ML/sourcemap extensions, read `.gitignore` + `.git/info/exclude` + bounded nested `.gitignore` files, and replaced blunt `**/bin/**` with `.NET`-specific output globs so Node `bin/*.ts|js` and Rust `src/bin/*.rs` sources remain indexed.
+- **Non-blocking `collectInventoryAsync` (`packages/indexing`):** Yields to the event loop every 64 entries while producing byte-identical sorted inventory output.
 
 ### Changed
 
-- **Etkileşimli HTML Varsayılan Dosya Adı (`packages/graph`):** `causoryn_export_documentation(format="html", view="interactive")` çağrısında `fileName` verilmediğinde varsayılan çıktı adı `causoryn-architecture-interactive.html` (`EXPORT_INTERACTIVE_HTML_FILE_NAME`) olur; böylece varsayılan sıfır-JS `causoryn-architecture.html` çıktısının üzerine sessizce yazılması önlenir.
+- **Distinct interactive HTML default filename (`packages/graph`):** `causoryn_export_documentation(format="html", view="interactive")` defaults to `causoryn-architecture-interactive.html` so it never overwrites the zero-JS `causoryn-architecture.html`.
 
 ### Security
 
-- **Polinom Zamanlı Sıfır-RegExp Glob Eşleştirici (`packages/workspace/src/ignore-matcher.ts`):** `ignore-matcher.ts` geri izlemeli (backtracking) RegExp derlemesi yerine deterministik iki-işaretçili polinom-zamanlı glob eşleştiricisine geçirildi (ReDoS ve desen-önbellek döngüsü kapatıldı).
-- **Kök-İçi Hapsedilmiş TS Derleyici Konağı & Sınırlı `O_NOFOLLOW` Okumalar (`adapters/typescript`, `packages/mcp-server`, `packages/indexing`):** `configureConfinedCompilerHost` ile TypeScript derleyici ve modül çözümleyici konağı yalnızca yetkili `rootDir` ve paketli `typescript-lib` dizinleriyle sınırlandırıldı (`ts.sys` disk sızıntısı ve wildcard-gizli `..` kaçışı engellendi); `tsconfig`/`jsconfig`, `.gitignore`/`.git/info/exclude` ve dosya envanteri okumalarına `O_NOFOLLOW`, `fstat` `(dev, ino)` doğrulaması ve döngü/DAG bütçeleri eklendi; `writeDocumentation` geçici dosya oluşturma yolu `flag: "wx"` + `EEXIST` korumasıyla sertleştirildi.
+- **Polynomial zero-RegExp glob matcher (`packages/workspace/src/ignore-matcher.ts`):** Replaced backtracking regex compilation with a deterministic two-pointer glob matcher.
+- **Confined TS compiler host & `O_NOFOLLOW` reads:** `configureConfinedCompilerHost` restricts compiler reads to `rootDir` and bundled `typescript-lib`; `tsconfig`/`jsconfig`, ignore files, and inventory enforce `O_NOFOLLOW` + `(dev, ino)` verification; `writeDocumentation` uses `flag: "wx"` + `EEXIST` guards.
 
 ## [0.2.2] - 2026-11-22
 
 ### Added
 
-- **Visual Architecture Projection & Layered SVG Layout (`packages/graph`):** Adaptif dizin-ağacı modül kümeleme (`projectArchitecture`, varsayılan `maxModules: 32`, `UnknownExternal` gürültüsünü dışlayıp `externalSummary` içinde dürüstçe özetler, Tarjan SCC ile döngüsel bağımlılıkları tespit eder) ve sıfır-bağımlılıklı Sugiyama tarzı katmanlı SVG yerleşim + Bezier eğri yönlendirme motoru (`computeArchitectureLayout`, `renderArchitectureSvg`, `renderFlowStripSvg`).
-- **Multi-View Visual `causoryn_export_documentation` & Fail-Closed Host-LLM `annotations` (`packages/graph`, `packages/mcp-server`):**
-  - Varsayılan `view: "architecture"`: **sıfır-JS, katı offline CSP'li** (`default-src 'none'`) 5 sekmeli katmanlı SVG Offline Architecture Portalı (`html`), subgraph-gruplu render edilebilir `flowchart TB` (`mermaid`), gömülü Mermaid + modül/akış/kontrat/risk özeti (`markdown`) ve `meta.id` uyumlu kompakt blueprint (`json`) üretir; yanıt `data.architectureSummary.moduleIds` listesini döndürür.
-  - Opt-in `view: "interactive"` (yalnızca `format: "html"`): pan/zoom, anlık arama, dil/döngü/test filtreleri, 1-hop komşuluk vurgulu sağ Inspector Drawer, tıklanabilir kaynak-satır kanıtları ve Mermaid kopyalama içeren offline etkileşimli portal (`VIEWER_CSP_POLICY`, sıfır `innerHTML`, sıfır `fetch`/CDN).
-  - Opsiyonel fail-closed `annotations` (`title`, `architectureStyle`, `executiveSummary`, `domains`, `moduleNotes`, `flows`, `guidedTour`, `decisions`, `risks`): platformdaki Host LLM'in Causoryn MCP araçlarıyla keşfettiği mimari anlatıyı tüm `moduleId`/`nodeId`/`evidenceId`/`keyFiles` kimliklerini doğrulayarak portala gömer (Causoryn çekirdeği %100 LLM-free kalır — ADR-002).
-  - `view: "full"` ile eski ham snapshot dökümü geriye uyumlu korunur; 29 araç kataloğu sabit tutulur.
-- **Opsiyonel Host-LLM Skill’i (`skills/architecture-blueprint/SKILL.md`):** Beşinci kanonik skill, dört host’ta harici modelin MCP kanıtından hareketle anotasyon hazırlamasına yardımcı olur. Dışa aktarım sabit snapshot, format, görünüm, seçenekler ve aynı anotasyon girdisiyle tekrarlanır. Modelin hazırladığı anlatı değişebilir. [ADR-002](docs/adr/ADR-002-no-llm.md)
+- **Visual architecture projection & layered SVG layout (`packages/graph`):** Adaptive directory-tree module clustering (`maxModules` default `32`, Tarjan SCC cycle detection) and zero-dependency Sugiyama-style layered SVG layout (`computeArchitectureLayout`, `renderArchitectureSvg`, `renderFlowStripSvg`).
+- **Multi-view `causoryn_export_documentation` & fail-closed Host-LLM `annotations`:** Default `view: "architecture"` (zero-JS offline HTML portal, subgraph Mermaid, Architecture Brief Markdown, compact JSON blueprint), opt-in `view: "interactive"` offline HTML portal, optional fail-closed 9-field `annotations`, and legacy `view: "full"`.
+- **Fifth canonical skill (`skills/architecture-blueprint/SKILL.md`):** Guides host coding agents through grounded visual portal synthesis while keeping Causoryn 100% LLM-free.
 
 ### Performance & Fixed
 
-- **PRAGMA `data_version` korumalı SQLite snapshot önbelleği (`packages/storage-sqlite`, `packages/mcp-server`):** Sıcak okumalarda tam 80k+ satırlık snapshot yeniden kurulumunu önleyen sınırlı (max 4 giriş) `SnapshotGraph` önbelleği ve `startDeferredIndex()` içine ertelenmiş kalıcı snapshot yüklemesi (büyük tam-yığın repolarda sıcak sorgular ~100–300x hızlandı).
-- **Dinamik `causoryn doctor` paket sürümü (`packages/causoryn`):** `CAUSORYN_PACKAGE_VERSION` artık `packages/causoryn/package.json` dosyasından dinamik okunur.
+- **`PRAGMA data_version`-guarded SQLite snapshot cache (`packages/storage-sqlite`, `packages/mcp-server`):** Cached warm snapshots across reads with cross-connection invalidation and deferred persistent snapshot loading into `startDeferredIndex()`.
+- **Dynamic `causoryn doctor` version (`packages/causoryn`):** Reads `CAUSORYN_PACKAGE_VERSION` dynamically from `packages/causoryn/package.json`.
 
 ## [0.2.1] - 2026-11-22
 
 ### Fixed
 
-- **Non-blocking MCP startup (`cli-stdio.ts`, `runtime-cli.ts`, `context.ts`):** `causoryn mcp --allow-cwd --auto-data-dir` artık büyük repolarda MCP `initialize` ve `tools/list` el sıkışmasından önce senkron indeksleme yapmaz (`deferAutoIndex: true` + `oninitialized` sonrası arka plan tam async indeksleme); büyük tam-yığın projelerde `initialize` süresi timeout yerine `< 500 ms` seviyesine indirildi.
-- **Gerçek-dünya build/venv/cache ignore + kök `.gitignore` uyumu (`packages/workspace`, `runtime-cli.ts`):** `.next`, `.nuxt`, `.svelte-kit`, `.turbo`, `.cache`, `.venv`, `venv`, `__pycache__`, `.pytest_cache`, `.mypy_cache`, `.ruff_cache`, `target`, `coverage`, `.vs`, `.dotnet`, `.dotnet-home`, `.codex-build` ve `.nupkg`/`.snupkg`/`.pdb` ikilileri varsayılan dışlamaya alındı; `buildWorkspaceAutoConfig` kök `.gitignore` desenlerini negasyon-güvenli biçimde `extraIgnore` ile birleştirir.
-- **Polyglot paylaşımlı dış düğüm birleştirme (`packages/indexing`):** İki veya daha fazla dil analizörü aynı `relativePath=null` dış/sanal düğümü (`UnknownExternal`, örn. `Request`) ürettiğinde snapshot oluşturma artık çökmez; kanonik düğüm paylaşılırken dosya-bağlı çakışmalar fail-closed reddedilmeye devam eder.
-- **O(1) SQLite pozisyon sayacı & toplu transaction yazımı (`packages/storage-sqlite`, `packages/graph`, `packages/indexing`):** `SqliteGraphRepository` içindeki `addNode`/`addEdge`/`addEvidence` O(N²) `MAX(position)` alt sorguları O(1) sayaçla değiştirildi ve toplu build/envanter yazımları `runInTransaction` ile tek atomik SQLite transaction'ında yürütülür.
-- **Yanıt bütçesi koruması (`packages/mcp-server`):** `causoryn_index_status` yanıtındaki `job.diagnostics` ve `job.warnings` dizileri büyük projelerde MCP bağlam penceresini taşmaması için 50 kayıt + kısaltma özeti ile sınırlandı.
-- **Release workflow (`release.yml`):** `npm publish "./$TGZ_FILE"` öneki ile yerel tarball yolunun npm tarafından GitHub repo kısayolu sanılması giderildi.
+- **Non-blocking MCP startup (`cli-stdio.ts`, `runtime-cli.ts`, `context.ts`):** Deferred initial indexing until after MCP `initialize` (`deferAutoIndex: true`), keeping handshake latency under `< 500 ms` on large repositories.
+- **Real-world build/venv/cache exclusions & root `.gitignore` support:** Added `.next`, `.nuxt`, `.svelte-kit`, `.turbo`, `.cache`, `.venv`, `venv`, `__pycache__`, `target`, `coverage`, `.vs`, `.dotnet`, and binary exclusions merged with root `.gitignore`.
+- **Polyglot shared external node deduplication (`packages/indexing`):** Shared pathless `UnknownExternal` nodes merge cleanly across language adapters while file-bound collisions still fail closed.
+- **O(1) SQLite position counters & bulk transactions (`packages/storage-sqlite`):** Replaced O(N^2) `MAX(position)` subqueries with O(1) counters inside atomic transactions.
+- **Response budget protection (`packages/mcp-server`):** Capped `causoryn_index_status` `job.diagnostics` and `job.warnings` to 50 entries with a truncation summary.
+- **Release workflow (`release.yml`):** Prefixed local tarball publish argument (`./$TGZ_FILE`) so npm treats it as a local archive.
 
 ## [0.2.0] - 2026-11-20
 
-### Sürüm kararı (K-022)
+### Release Decision
 
-**0.2.0 Pre-1.0 Public Preview** — **1.0.0 DEĞİL (ADR-010).** Uzak `v0.1.0`
-etiketi `4c9c188f` üzerinde kilitli kaldığından ve Sprint 8 çok-dil genişlemesi,
-K-019/K-020/K-021/K-022 teslimleriyle ürün yüzeyi anlamlı biçimde genişlediğinden
-yeni minor SemVer **`0.2.0`** yayımlandı (`package.json`, `packages/causoryn/package.json`,
-`SERVER_VERSION`, `server.json` ve 4 host pazaryeri manifesti senkron). Yukarıdaki
-`[Unreleased]` 1.0.0 kapıları kapanmadan `1.0.0` ilan edilmez.
+**`0.2.0` Pre-1.0 release — explicitly NOT `1.0.0`.** Because historical `v0.1.0` remains frozen at `4c9c188f` and multi-language analysis, persistent SQLite indexing, 4-host CLI/plugin distribution, and open-source supply-chain governance substantially expanded the product surface, minor version `0.2.0` was published while keeping `1.0.0` gated on the open items in `[Unreleased]`.
 
 ### Added
 
-- **Çok-dil derin analiz (Sprint 8, K-018):** `native/python-worker` (stdlib `ast`),
-  `native/go-worker` (stdlib `go/parser`), `native/rust-worker` (`syn` 2) sidecar'ları,
-  `adapters/{python,go,rust}`, 5-dil birleşik `INDEXED_ADAPTERS` ve dürüst resolution/tier
-  etiketleri (`workspace_summary.languages` + `coverageOf.tier` + 29 MCP aracı
-  `annotations`/`readOnlyHint`, K-019).
-- **Pre-1.0 mühendislik iyileştirmeleri (K-020):** opsiyonel kalıcı SQLite graph deposu
-  (`storage.dataDbPath`) + `symbol_fts` Agent GPS `fts` ayağı, `causoryn_refresh_index(mode="incremental")`,
-  TypeScript BDD `Test`/`TESTS` çıkarımı, `causoryn_export_documentation(format="snapshot")`,
-  ortak `@causoryn/sidecar-ipc` süreç çekirdeği ve GitHub Actions CI iş akışı.
-- **Açık kaynak çoklu-host dağıtım (`packages/causoryn`, K-021):** `causoryn` tek npm
-  paketi (`setup`/`doctor`/`mcp`), 4 host pazaryeri manifesti (Antigravity, Claude Code,
-  Codex, ZCode/GLM), 4 kanonik `skills/`, sıfır-ayar `--allow-cwd` + MCP `roots/list` +
-  `--auto-data-dir`, `dist/typescript-lib/lib*.d.ts` sahnelemesi ve `mcpName` + `server.json`
-  MCP Registry kimliği (`io.github.mrbekox/causoryn`).
-- **Açık kaynak yayın yönetişimi & tedarik zinciri (K-022):**
-  - `MIT` lisansı (`Causoryn Contributors`), `THIRD-PARTY-NOTICES.md` ve paketlenen
-    üçüncü taraf lisans metinleri (`licenses/`).
-  - `SECURITY.md`, `CONTRIBUTING.md`, `CODE_OF_CONDUCT.md`, `.github/ISSUE_TEMPLATE/*`,
-    `.github/PULL_REQUEST_TEMPLATE.md` ve `.github/dependabot.yml`.
-  - `.github/workflows/ci.yml`: tüm eylemler 40-karakter commit SHA'ya sabitlendi;
-    `ubuntu-latest` + `windows-latest` + `macos-latest` matrisi, deterministik Release
-    Roslyn derlemesi, `cargo build --locked` ve `verify-package-ready.mjs` eklendi.
-  - `.github/workflows/release.yml`: SHA-sabitli etiket/sürüm doğrulaması, `SHA256SUMS.txt`,
-    CycloneDX SBOM (`causoryn-sbom.cdx.json`), `actions/attest-build-provenance` ve
-    `NPM_TOKEN`'sız OIDC Trusted Publishing (`npm publish --provenance --access public`).
-  - `scripts/export-public-tree.mjs`: Seçenek 1 temiz kamuya açık repo dışa aktarıcısı
-    (`raw/`, `wiki/`, `docs/superpowers/` ve iç prompt dosyalarını dışlar, `.gitignore`
-    iç araç satırlarını temizler ve fail-closed sızıntı doğrulaması yapar).
+- **5-language deep analysis:** Added `native/python-worker` (stdlib `ast`), `native/go-worker` (stdlib `go/parser`), and `native/rust-worker` (`syn`) sidecars with `adapters/{python,go,rust}`, unified 5-language `INDEXED_ADAPTERS`, and MCP `readOnlyHint` tool annotations.
+- **Persistent SQLite storage & incremental refresh:** Optional `storage.dataDbPath` SQLite graph store + `symbol_fts`, `causoryn_refresh_index(mode="incremental")`, TypeScript BDD `Test`/`TESTS` extraction, `causoryn_export_documentation(format="snapshot")`, shared `@causoryn/sidecar-ipc`, and GitHub Actions CI.
+- **Multi-host open-source distribution (`packages/causoryn`):** Unified npm package (`causoryn setup|doctor|mcp`), 4-host marketplace manifests (Antigravity, Claude Code, Codex, ZCode/GLM), canonical `skills/`, zero-config `--allow-cwd` + MCP `roots/list` + `--auto-data-dir`, bundled `dist/typescript-lib/lib*.d.ts`, and MCP Registry identity (`io.github.mrbekox/causoryn`).
+- **Governance & supply-chain provenance:** `MIT` license, `THIRD-PARTY-NOTICES.md` + `licenses/`, `SECURITY.md`, `CONTRIBUTING.md`, `CODE_OF_CONDUCT.md`, `.github` templates & Dependabot, SHA-pinned 3-OS CI, CycloneDX 1.5 SBOM + `SHA256SUMS.txt` + OIDC Trusted Publishing, and clean public-tree exporter (`scripts/export-public-tree.mjs`).
 
 ### Changed
 
-- C# `INDEXED_ADAPTERS` `frameworkLinkers` etiketi `"aspnet-core-route-attributes (L3)"`
-  olarak netleştirildi ve `docs/project-overview.tr-en.md` (TR & EN) senkronize edildi.
-- `README.md` ve `packages/causoryn/README.md` genel "zero-compile" ifadesi yerine
-  bileşen bazlı çalışma zamanı / derleme / çevrimdışı matrisine geçirildi (Go `go run`
-  ve Rust soğuk `cargo build --locked` `crates.io` davranışı açıkça belgeli).
-- `integrations/zcode/.claude-plugin/marketplace.json` `owner` alanı (`claude plugin validate --strict`
-  uyumu) ve dev-fixture uyarıları eklendi; tüm kullanıcıya dönük dokümanlardan yerel
-  makine yolları ve kişisel kullanıcı adı temizlendi.
+- Clarified C# `frameworkLinkers` label as `"aspnet-core-route-attributes (L3)"`.
+- Replaced generic "zero-compile" wording with a component-level runtime, compilation, and offline matrix (explicitly documenting Go `go run` and cold Rust `cargo build --locked` `crates.io` behavior).
+- Cleaned local paths and personal identifiers from all user-facing docs.
 
 ### Security
 
-- `scripts/secret-scan.mjs` 12 dizin kökü (`.github`, `.claude-plugin`, `.agents`, `docs`,
-  `skills` dahil) + 13 kök metin dosyasına ve genişletilmiş token/yerel-profil-yolu
-  desenlerine yükseltildi.
-- `eslint@10.15.0` ve `typescript-eslint@8.73.0` yükseltmesiyle `npm audit` **0 güvenlik
-  açığı** (`0 vulnerabilities`) seviyesine getirildi.
-- Deterministik Release Roslyn derlemesi (`-c Release -p:DebugType=none -p:ContinuousIntegrationBuild=true -p:SatelliteResourceLanguages=en`)
-  ile yerel makine PDB yollarının DLL içine sızması engellendi.
+- Expanded `scripts/secret-scan.mjs` across 13 directory roots + 13 root text files.
+- Upgraded `eslint@10.15.0` and `typescript-eslint@8.73.0`, reaching **0 vulnerabilities** in `npm audit`.
+- Enabled deterministic Release Roslyn compilation (`-p:DebugType=none -p:ContinuousIntegrationBuild=true -p:SatelliteResourceLanguages=en`) with zero PDB path leakage.
 
 ## [0.1.0] - 2026-11-09
 
-### Sürüm kararı (F9)
+### Release Decision
 
-**0.1.0 public snapshot** — 1.0.0 DEĞİL. Kök `package.json` `version` alanı
-`0.1.0` olarak korunmuştur (değişiklik gerekmedi; karar bu değerin
-korunmasıdır) ve `SERVER_VERSION` ile birebirdir. Gerekçe (ADR-010: eksik
-özellik Done ilan edilmez): 29 aracın tamamı gerçek implementasyondur ve
-release test matrisi (güvenlik 9/9, benchmark, 2/3 host smoke) + changelog
-sağlanmıştır; ancak 1.0.0'ın gerektirdiği üç hostun TAMAMI koşumla
-doğrulanmış olma (Antigravity NOT RUN), platform dağıtım genişliği
-(yalnızca Windows doğrulanmış) ve belgeli sadakat sınırlarının
-kapatılmış olma barajı henüz sağlanmadı — ayrıntılı sayım yukarıdaki
-Unreleased bölümünde ve `docs/implementation-status.md` Sprint 7 bölümündedir.
+**`0.1.0` public snapshot — NOT `1.0.0`.** Root `package.json` and `SERVER_VERSION` remained `0.1.0` because all 29 tools, the 9/9 security matrix, benchmarks, and initial host smoke runs shipped while full cross-host verification (Antigravity `NOT RUN`), multi-platform live smoke, and documented fidelity boundaries remained open for `1.0.0`.
 
 ### Added
 
-- **MCP motoru:** 29 gerçek araç `tools/list` ile yayımlanır (TŞ §10.2'nin 22
-  çekirdeği + §16A.8'in 7 wiki aracı; boş handler yok — ADR-010). Standart
-  envelope (`schemaVersion` "2.0"), sabit hata kodu tablosu (TŞ §10.1 + 3
-  proje uzantısı: INVALID_ARGUMENT, EVIDENCE_NOT_FOUND, SYMBOL_NOT_FOUND —
-  K-008/K-011) ve retryable/userAction rehberi.
-- **Core özellikler:** yetenek/workspace özeti/indeks işleri (A), mimari harita +
-  sembol arama/bağlam + çağrı izi (B), etki analizi + Architecture Guard
-  (policy DSL, Tarjan SCC) + git diff/timeline + Agent GPS + onboarding +
-  deterministik export (C).
-- **Living Wiki (C2, TŞ §16A):** WikiProjectionEngine, SQLite wiki şeması,
-  çift yönlü linkler + broken-link diagnostics, FTS5 çok ayaklı arama,
-  sürümler/diff (K-013(7) contractChanges dahil), incremental invalidation
-  (link-düzeyi sınırla), annotation overlay (CAS, WIKI_NOTE_CONFLICT), offline
-  markdown+HTML export. 7 wiki aracı; `wiki_build` tek yazma aracıdır.
-- **Differentiation (D, TŞ §11/§14/§15):** sözleşme keşfi (OpenAPI/AsyncAPI/
-  SQL/JSON Schema/protobuf; parse güvenlik kotaları), compatibility + drift
-  çekirdekleri, business flow tracing, candidate-only Preflight Manifest
-  (kod yazmaz), derive_test_plan (test çalıştırmaz, "geçti" iddiası üretmez).
-- **Agent Change Guard (E, TŞ §10.4):** `causoryn_verify_change` — 4 denetim,
-  deterministik 8-kuralı verdict zinciri (no_findings | review_required |
-  blocking_findings | inconclusive), test durumu dürüstlüğü (not_run
-  varsayılan; observed yalnızca evidenceRef+sha256 kanıtıyla), byte-deterministik
-  rapor (sprint kapısı: aynı girdi → bit-bit aynı rapor).
-- **Offline visualizer (E6):** `apps/visualizer` — sıfır bağımlılıklı
-  deterministik HTML+SVG viewer (inline CSS/JS, kısıtlayıcı CSP,
-  verified/heuristic/unresolved ayrımı, selection→evidence paneli).
-- **C# desteği (B1/B9):** Roslyn sidecar worker (`native/roslyn-worker`, dotnet
-  build 0 hata disiplini) + graceful fallback (worker yok → L0/L1, açık
-  coverage raporu) + analyzerFingerprint fp2.
-- **Paketleme (F1):** esbuild bundle `packages/mcp-server/dist/mcp-server.mjs`
-  + external vendored `better-sqlite3` (`dist/node_modules/`); deterministik
-  üretim (iki build bit-bit aynı, `dist/bundle-manifest.json` sıralı sha256).
-  Artefakt dürüst biçimde "bundle + vendored runtime"dir; tek dosya DEĞİLDİR
-  (native .node gömülemez — ADR-010).
-- **Host entegrasyonları (F2–F5):** ZCode dev marketplace + plugin manifest
-  doğrulaması; Claude Code `.mcp.json`/`claude mcp add` kılavuzu + gerçek
-  smoke koşumu (geçici config diziniyle, kullanıcı config'i temiz —
-  **2.1.322 ile 2026-11-10'da uçtan uca yeniden doğrulandı**); Codex
-  `config.toml`/`codex mcp add` kılavuzu + add→list→remove gerçek smoke
-  (temizlik kanıtlı; config.toml yedek/geri yükleme disipliniyle 2026-11-10'da
-  yeniden koşuldu); Antigravity plugin.json+mcp.json doküman örneği (agy CLI
-  yok — kurulum/smoke NOT RUN, ADR-010).
-- **Güvenlik turu (F6, TŞ §22):** paketlenmiş bundle üzerinde 9/9 PASS —
-  symlink/traversal, secret leakage (statik canary + davranışsal yemler),
-  symlink TOCTOU, poisoned source comment/prompt injection, oversized files,
-  malicious Git refs (bundle spawn'da davranışsal kanıt: gerçek commit SHA
-  `git cat-file` ile çözülür, kötü ref → `INVALID_REVISION`), network denied
-  (netguard preload, sıfır ağ), offline HTML XSS/CSP, stdout disiplini
-  (5 bağımsız spawn oturumu). F6 paketi 32/32 test; güvenlik suite'i toplamı
-  36/36 (2026-11-10 final turunda tümü yeniden koşuldu).
-- **Benchmark (F7, TŞ §21):** 1.000 dosya deterministik fixture üzerinde MCP
-  protokol düzeyi ölçümler — sıcak `workspace_summary` 11.8 ms, küçük sembol
-  bağlamı 13.0 ms, 200-node map 10.7 ms (medyan; `npm run bench`, 2026-11-10
-  koşumu; TŞ §21 rakamları tasarım hedefidir, sonuç değil).
+- **MCP server engine:** 29 implemented tools (22 core + 7 Living Wiki; zero stub handlers), standard 10-field envelope (`schemaVersion: "2.0"`), fixed error code catalog with deterministic `retryable`/`userAction` guidance.
+- **Core architecture & graph features:** Capability/workspace/index inspection, L0–L3 architecture map, symbol lookup and neighborhood context, execution tracing, reverse-BFS impact analysis, Architecture Guard YAML policy DSL + Tarjan SCC, read-only Git diff/timeline, Agent GPS context packing, onboarding reports, and deterministic exports.
+- **Living Wiki engine:** `WikiProjectionEngine`, SQLite `wiki_*` schema, 11-kind bidirectional links + `brokenLinkDiagnostics`, FTS5 search, Git/snapshot versions and diffs (including `contractChanges`), incremental invalidation, CAS annotation overlay, and offline Markdown/HTML export.
+- **Contracts, preflight & change guard:** OpenAPI, AsyncAPI, SQL DDL, JSON Schema, and Protobuf discovery + compatibility/drift evaluation; business-flow tracing; candidate-only `causoryn_preflight_change`; `causoryn_derive_test_plan` (no test execution); and byte-deterministic `causoryn_verify_change` with honest test-status tracking.
+- **Offline visualizer & C# Roslyn support:** Zero-dependency offline HTML+SVG viewer (`apps/visualizer`) and C# Roslyn sidecar (`native/roslyn-worker`) with graceful L0/L1 fallback.
+- **Multi-file deterministic bundle & host guides:** `esbuild` bundle (`packages/mcp-server/dist/mcp-server.mjs`) + external vendored `better-sqlite3` (`dist/bundle-manifest.json`; intentionally multi-file because native `.node` addons cannot be inlined); Claude Code live CLI smoke (`claude 2.1.322`, re-verified 2026-11-10), Codex CLI registration smoke (`codex-cli 0.163.0`, 2026-11-10), ZCode manifest validation, and Antigravity manifest docs (`agy` CLI absent — `NOT RUN`).
+- **Packaged-bundle security audit (9/9 PASS):** Symlink/path traversal, secret leakage (static canary + behavioral baits), symlink TOCTOU, poisoned comments / prompt injection, oversized files, malicious Git refs (live bundle `git cat-file` proof + `INVALID_REVISION`), network denied (`net-guard.cjs` preload, zero egress), offline HTML XSS/CSP, and `stdout` framing discipline (**5 independent spawn** sessions; 32/32 bundle tests, 36/36 total security suite on 2026-11-10).
+- **1,000-file TypeScript benchmarks (2026-11-10 run):** MCP protocol-layer medians of `11.8 ms` (`workspace_summary`), `13.0 ms` (`get_symbol_context`), and `10.7 ms` (`map_system`, 200 nodes) via `npm run bench`.
 
 ### Documentation
 
-- `docs/architecture.md` (kod-face paket haritası, 12 workspace paketi +
-  visualizer + roslyn-worker), `docs/tool-contracts.md` (29 araç sözleşme
-  özeti), `docs/compatibility-matrix.md` (host × sonuç; not-run satırları
-  dürüst), `docs/hosts/*` (3 host kılavuzu + ZCode README),
-  `docs/security-pass.md`, `docs/benchmarks.md`,
-  `docs/implementation-status.md` (tüm fazların ADR-010 dürüst tablosu) ve bu
-  changelog. Wiki kayıtları (sprint sayfaları, K-001..K-016 kararları)
-  `wiki/` altında tutulur.
+- Added `docs/architecture.md`, `docs/tool-contracts.md`, `docs/compatibility-matrix.md`, `docs/hosts/*`, `docs/security-pass.md`, `docs/benchmarks.md`, `docs/implementation-status.md`, and this changelog.
 
 ### Security
 
-- Workspace salt-okunur (ADR-008); yazma yalnızca beyanlı data-root/output
-  dizinine; explicit root authorization + default deny; symlink/junction
-  escape ve TOCTOU post-open re-check; SQL parametre bağlama; INTERNAL_ERROR
-  bilgi sızdırmazlığı; git salt-okunur allowlist (cat-file/ls-tree; shell
-  interpolation yok); HTML export'larda CSP + tam escape + sıfır harici
-  kaynak; LLM/embedding/model bağımlılığı yok (ADR-002) ve sıfır ağ çıkışı
-  (netguard ile davranışsal kanıt).
+- Strictly read-only workspace analysis; explicit root authorization with default deny; symlink/junction escape and post-open TOCTOU re-checks; parameterized SQL; sanitized `INTERNAL_ERROR` responses; shell-free read-only Git allowlist; strict offline CSP + HTML escaping; zero LLM/embedding dependencies and zero runtime network egress.
 
-## İlgili sayfalar
+## Related Documentation
 
-- [docs/implementation-status.md](docs/implementation-status.md) — faz faz durum ve kanıt
-- [docs/compatibility-matrix.md](docs/compatibility-matrix.md) — host × sonuç
-- [docs/security-pass.md](docs/security-pass.md) · [docs/benchmarks.md](docs/benchmarks.md)
+- [docs/en/implementation-status.md](docs/en/implementation-status.md) — implementation status and open 1.0.0 gates
+- [docs/en/compatibility-matrix.md](docs/en/compatibility-matrix.md) — host verification matrix
+- [docs/en/security-pass.md](docs/en/security-pass.md) · [docs/en/benchmarks.md](docs/en/benchmarks.md)
