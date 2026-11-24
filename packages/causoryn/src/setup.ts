@@ -61,19 +61,19 @@ function assertRegularOrAbsentTarget(filePath: string): boolean {
     }
     throw new CausorynCliError(
       "cli/io-error",
-      `Hedef dosya durumu okunamadı (${filePath}): ${err instanceof Error ? err.message : String(err)}`,
+      `Could not read the target file status (${filePath}): ${err instanceof Error ? err.message : String(err)}`,
     );
   }
   if (st.isSymbolicLink()) {
     throw new CausorynCliError(
       "cli/io-error",
-      `Güvenlik nedeniyle sembolik bağlantı üzerine yazılamaz (CWE-59): ${filePath}`,
+      `Refusing to write through a symbolic link for security reasons (CWE-59): ${filePath}`,
     );
   }
   if (!st.isFile()) {
     throw new CausorynCliError(
       "cli/io-error",
-      `Hedef yol düzenli bir dosya değil: ${filePath}`,
+      `The target path is not a regular file: ${filePath}`,
     );
   }
   return true;
@@ -100,8 +100,22 @@ interface PlannedExecution {
   readonly projectedConfigs: ReadonlyMap<string, string>;
 }
 
-export const NO_CLIENTS_DETECTED_MESSAGE =
-  "No supported MCP host clients were detected. No files were written. Specify a client explicitly with `--client claude-code|codex|antigravity|zcode` or pass `--all` to configure all supported hosts.";
+function buildNoClientsDetectedMessage(uninstall: boolean): string {
+  const command = uninstall ? "causoryn setup --uninstall" : "causoryn setup";
+  return [
+    "No supported MCP host was detected, so nothing was changed.",
+    `Name the host explicitly (supported: ${HOST_CLIENT_IDS.join(", ")}), for example:`,
+    `  ${command} --client claude-code`,
+    `  ${command} --client codex --client zcode`,
+    `  ${command} --all    (every supported host)`,
+  ].join("\n");
+}
+
+/** Guidance returned (and printed by the CLI) when setup finds no host and no `--client` / `--all`. */
+export const NO_CLIENTS_DETECTED_MESSAGE = buildNoClientsDetectedMessage(false);
+
+/** Uninstall variant of {@link NO_CLIENTS_DETECTED_MESSAGE}. */
+export const NO_CLIENTS_DETECTED_UNINSTALL_MESSAGE = buildNoClientsDetectedMessage(true);
 
 export function resolveDefaultPackageRoot(): string {
   return path.dirname(path.dirname(fileURLToPath(import.meta.url)));
@@ -228,13 +242,13 @@ function parseJsonObjectStrict(raw: string, filePath: string): Record<string, un
   } catch (error) {
     throw new CausorynCliError(
       "cli/malformed-json",
-      `Bozuk JSON konfigürasyon dosyası (${filePath}): ${error instanceof Error ? error.message : String(error)}`,
+      `Malformed JSON configuration file (${filePath}): ${error instanceof Error ? error.message : String(error)}`,
     );
   }
   if (!isPlainObject(parsed)) {
     throw new CausorynCliError(
       "cli/malformed-json",
-      `JSON kök değeri bir nesne olmalı (${filePath})`,
+      `The JSON root value must be an object (${filePath})`,
     );
   }
   return parsed;
@@ -298,7 +312,7 @@ function planMcpServersJsonFile(params: {
   if (existingServersRaw !== undefined && !isPlainObject(existingServersRaw)) {
     throw new CausorynCliError(
       "cli/malformed-json",
-      `"mcpServers" alanı bir JSON nesnesi olmalı (${targetPath})`,
+      `The "mcpServers" field must be a JSON object (${targetPath})`,
     );
   }
   const servers: Record<string, unknown> = existingServersRaw
@@ -313,7 +327,7 @@ function planMcpServersJsonFile(params: {
         operation: "noop",
         targetPath,
         backupPath: null,
-        detail: "causoryn MCP kaydı zaten mevcut değil",
+        detail: "unchanged: no causoryn MCP entry to remove",
       });
       return;
     }
@@ -343,7 +357,7 @@ function planMcpServersJsonFile(params: {
       operation: "remove",
       targetPath,
       backupPath: `${targetPath}.causoryn.backup`,
-      detail: "mcpServers.causoryn kaldırıldı",
+      detail: "removed mcpServers.causoryn",
     });
     return;
   }
@@ -379,7 +393,7 @@ function planMcpServersJsonFile(params: {
     operation: existed ? "update" : "create",
     targetPath,
     backupPath: existed ? `${targetPath}.causoryn.backup` : null,
-    detail: "mcpServers.causoryn yapılandırıldı",
+    detail: "configured mcpServers.causoryn",
   });
 }
 
@@ -409,7 +423,7 @@ function planZcodeMcpConfig(params: {
   if (mcpRaw !== undefined && !isPlainObject(mcpRaw)) {
     throw new CausorynCliError(
       "cli/malformed-json",
-      `"mcp" alanı bir JSON nesnesi olmalı (${targetPath})`,
+      `The "mcp" field must be a JSON object (${targetPath})`,
     );
   }
   const mcpObj: Record<string, unknown> = mcpRaw ? { ...mcpRaw } : {};
@@ -418,7 +432,7 @@ function planZcodeMcpConfig(params: {
   if (serversRaw !== undefined && !isPlainObject(serversRaw)) {
     throw new CausorynCliError(
       "cli/malformed-json",
-      `"mcp.servers" alanı bir JSON nesnesi olmalı (${targetPath})`,
+      `The "mcp.servers" field must be a JSON object (${targetPath})`,
     );
   }
   const hadServersDefined = isPlainObject(serversRaw);
@@ -432,7 +446,7 @@ function planZcodeMcpConfig(params: {
         operation: "noop",
         targetPath,
         backupPath: null,
-        detail: "ZCode mcp.servers.causoryn kaydı mevcut değil",
+        detail: "unchanged: no ZCode mcp.servers.causoryn entry to remove",
       });
       return;
     }
@@ -471,7 +485,7 @@ function planZcodeMcpConfig(params: {
       operation: "remove",
       targetPath,
       backupPath: `${targetPath}.causoryn.backup`,
-      detail: "ZCode mcp.servers.causoryn kaldırıldı",
+      detail: "removed ZCode mcp.servers.causoryn",
     });
     return;
   }
@@ -484,7 +498,7 @@ function planZcodeMcpConfig(params: {
     if (fallbackServers !== undefined && !isPlainObject(fallbackServers)) {
       throw new CausorynCliError(
         "cli/malformed-json",
-        `"mcpServers" alanı bir JSON nesnesi olmalı (${fallbackPath})`,
+        `The "mcpServers" field must be a JSON object (${fallbackPath})`,
       );
     }
     if (isPlainObject(fallbackServers)) {
@@ -538,8 +552,8 @@ function planZcodeMcpConfig(params: {
     targetPath,
     backupPath: existed ? `${targetPath}.causoryn.backup` : null,
     detail: !hadServersDefined && existsSync(fallbackPath)
-      ? "mcp.servers.causoryn yapılandırıldı (~/.agents/mcp.json fallback sunucuları korundu)"
-      : "mcp.servers.causoryn yapılandırıldı",
+      ? "configured mcp.servers.causoryn (kept the fallback servers from ~/.agents/mcp.json)"
+      : "configured mcp.servers.causoryn",
   });
 }
 
@@ -566,7 +580,7 @@ function planCodexMcpConfig(params: {
         operation: "noop",
         targetPath,
         backupPath: null,
-        detail: "Codex config.toml mevcut değil",
+        detail: "unchanged: Codex config.toml does not exist",
       });
       return;
     }
@@ -578,7 +592,7 @@ function planCodexMcpConfig(params: {
         operation: "noop",
         targetPath,
         backupPath: null,
-        detail: "[mcp_servers.causoryn] zaten mevcut değil",
+        detail: "unchanged: no [mcp_servers.causoryn] table to remove",
       });
       return;
     }
@@ -590,7 +604,7 @@ function planCodexMcpConfig(params: {
       operation: "remove",
       targetPath,
       backupPath: `${targetPath}.causoryn.backup`,
-      detail: "[mcp_servers.causoryn] kaldırıldı",
+      detail: "removed [mcp_servers.causoryn]",
     });
     return;
   }
@@ -620,7 +634,7 @@ function planCodexMcpConfig(params: {
     operation: existed ? "update" : "create",
     targetPath,
     backupPath: existed ? `${targetPath}.causoryn.backup` : null,
-    detail: "[mcp_servers.causoryn] yapılandırıldı (startup_timeout_sec = 30)",
+    detail: "configured [mcp_servers.causoryn] (startup_timeout_sec = 30)",
   });
 }
 
@@ -634,19 +648,19 @@ function readSourceSkillFileSync(srcSkillFile: string): string {
     if (code === "ENOENT" || code === "EISDIR" || code === "ENOTDIR") {
       throw new CausorynCliError(
         "cli/io-error",
-        `Kaynak skill dosyası bulunamadı: ${srcSkillFile}`,
+        `Source skill file not found: ${srcSkillFile}`,
       );
     }
     throw new CausorynCliError(
       "cli/io-error",
-      `Kaynak skill dosyası okunamadı (${srcSkillFile}): ${err instanceof Error ? err.message : String(err)}`,
+      `Could not read the source skill file (${srcSkillFile}): ${err instanceof Error ? err.message : String(err)}`,
     );
   }
   try {
     if (!fstatSync(fd).isFile()) {
       throw new CausorynCliError(
         "cli/io-error",
-        `Kaynak skill dosyası bulunamadı: ${srcSkillFile}`,
+        `Source skill file not found: ${srcSkillFile}`,
       );
     }
     return readFileSync(fd, "utf8");
@@ -686,7 +700,7 @@ function planSkillsForClient(params: {
           operation: "remove",
           targetPath: destSkillFile,
           backupPath: null,
-          detail: `Skill kaldırıldı: ${skillName}`,
+          detail: `removed skill ${skillName}`,
         });
       }
       continue;
@@ -713,7 +727,7 @@ function planSkillsForClient(params: {
       operation: existed ? "update" : "create",
       targetPath: destSkillFile,
       backupPath: null,
-      detail: `Skill kuruldu: ${skillName}`,
+      detail: `installed skill ${skillName}`,
     });
   }
 }
@@ -957,7 +971,7 @@ function buildExecutionPlan(options: ExtendedSetupOptions): {
           if ((err as NodeJS.ErrnoException).code !== "ENOENT") {
             throw new CausorynCliError(
               "cli/io-error",
-              `Hedef dosya durumu okunamadı (${secondaryPath}): ${err instanceof Error ? err.message : String(err)}`,
+              `Could not read the target file status (${secondaryPath}): ${err instanceof Error ? err.message : String(err)}`,
             );
           }
         }
@@ -1052,7 +1066,12 @@ export async function runSetup(options: ExtendedSetupOptions = {}): Promise<Exte
   const dryRun = options.dryRun === true;
   const uninstall = options.uninstall === true;
   const { homeDir, codexHomeDir, claudeConfigDir, packageRoot, plan } = buildExecutionPlan(options);
-  const noClientsMsg = plan.noClientsDetected ? { message: NO_CLIENTS_DETECTED_MESSAGE } : {};
+  const noClientsMsg = plan.noClientsDetected
+    ? {
+        noClientsDetected: true,
+        message: uninstall ? NO_CLIENTS_DETECTED_UNINSTALL_MESSAGE : NO_CLIENTS_DETECTED_MESSAGE,
+      }
+    : {};
 
   if (dryRun) {
     return {
@@ -1088,7 +1107,7 @@ export async function runSetup(options: ExtendedSetupOptions = {}): Promise<Exte
     if (options.confirm === undefined) {
       throw new CausorynCliError(
         "cli/confirmation-required",
-        "Kurulum onayı gerekli: değişiklikleri uygulamak için `--yes` veya önizlemek için `--dry-run` kullanın.",
+        "Setup needs confirmation: pass `--yes` to apply the changes or `--dry-run` to preview them.",
       );
     }
     const approved = await options.confirm(plan.actions);

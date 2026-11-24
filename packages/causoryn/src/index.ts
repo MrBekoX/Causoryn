@@ -15,6 +15,8 @@ export {
   type CliIo,
   type CodexMcpServerSpec,
   type DoctorHostStatus,
+  type DoctorLegacyIndexCheck,
+  type DoctorLegacyIndexFile,
   type DoctorNodeCheck,
   type DoctorOptions,
   type DoctorReport,

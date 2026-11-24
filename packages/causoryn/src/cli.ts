@@ -20,6 +20,9 @@ import {
  * `dist/mcp-server.mjs` with clean `stdout` JSON-RPC framing).
  */
 
+/** Exit code of `causoryn setup` when no host was detected and none was named (nothing changed). */
+const SETUP_NO_HOST_EXIT_CODE = 1;
+
 const HELP_TEXT = `Usage:
   causoryn mcp [--allow-cwd] [--root <path>] [--auto-data-dir] [--data-dir <path>] [--client <id>] [--tool-profile <core|full|wiki|history>] [--output-schema <omit|full>]
   causoryn setup [--client <antigravity|claude-code|codex|zcode>...] [--all] [--all-detected] [--yes] [--dry-run] [--uninstall] [--skill | --no-skill] [--json]
@@ -272,6 +275,15 @@ export async function runCli(
         installSkills: flags.installSkills,
         confirm: confirmHandler,
       });
+
+      if (result.noClientsDetected === true) {
+        // Nothing was configured: guide the user on stderr and fail so scripts notice.
+        if (flags.json) {
+          io.stdout(`${JSON.stringify(result, null, 2)}\n`);
+        }
+        io.stderr(`[causoryn] ${result.message ?? "No supported MCP host was detected."}\n`);
+        return SETUP_NO_HOST_EXIT_CODE;
+      }
 
       if (flags.json) {
         io.stdout(`${JSON.stringify(result, null, 2)}\n`);
