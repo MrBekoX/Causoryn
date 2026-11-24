@@ -65,7 +65,7 @@ You therefore do not need to know any skill or tool name — ask for the outcome
 
 ### C. Prompts That Need Another Tool Profile
 
-These tools are not registered in the default `core` profile. Add the profile to the server arguments in your host config (for example `causoryn mcp --allow-cwd --auto-data-dir --tool-profile wiki`) or set `CAUSORYN_TOOL_PROFILE`, then restart the host. Without the profile the agent will not see these tools at all.
+These tools are not registered in the default `core` profile. Add the profile to the server arguments in your host config (for example `causoryn mcp --allow-cwd --auto-data-dir --tool-profile wiki`) or set `CAUSORYN_TOOL_PROFILE`, then restart the host; `npx causoryn@latest setup --tool-profile wiki --yes` writes the flag into the host entries for you. Without the profile the agent will not see these tools at all.
 
 | Goal | Copy-paste prompt (English) | Kopyala-yapıştır prompt (Türkçe) | Tools | Required profile |
 |---|---|---|---|---|
@@ -73,7 +73,7 @@ These tools are not registered in the default `core` profile. Add the profile to
 | **Architecture history** | `"Compare the architecture of main and HEAD~5 with Causoryn and list added, removed, and renamed modules."` | `"Causoryn ile main ve HEAD~5 arasındaki mimariyi karşılaştır; eklenen, silinen ve yeniden adlandırılan modülleri listele."` | `causoryn_compare_architecture`, `causoryn_architecture_timeline` | `--tool-profile history` (or `full`) |
 | **Old prompts with legacy tool names** | Prompts or scripts that call `causoryn_index_status`, `causoryn_trace_execution`, `causoryn_check_contracts`, ... by name | — | The 29 legacy names (deprecated where a core replacement exists) | `--tool-profile full` |
 
-The history tools compare the `.causoryn/architecture-snapshot.json` files committed at each ref (written with `causoryn_export_documentation` `format: "snapshot"`); a ref without that file returns `INVALID_REVISION`.
+The history tools use the published local index for a ref when it provably matches that ref's content (and for `working-tree`); otherwise they read the `.causoryn/architecture-snapshot.json` committed at the ref (written with `causoryn_export_documentation` `format: "snapshot"`) and add the trust warning `snapshot-loaded-from-committed-git-blob`. A ref with neither source returns `INVALID_REVISION`.
 
 ---
 
@@ -228,7 +228,7 @@ Every `moduleId`, `keyFiles` path and `evidenceId` below stands for a value copi
 | `WORKSPACE_NOT_AUTHORIZED` | No authorized root: not bound via `--root`, `--allow-cwd`, MCP `roots/list` or `CAUSORYN_CONFIG.allowRoots`. | Start the host from a safe project directory or let it send `roots/list`; `causoryn_status` shows `authorized: false` in this state. Run `npx causoryn@latest doctor` to inspect the configuration. |
 | `INDEX_NOT_READY`, or `status: "partial"` with `data.status: "indexing"` | No published snapshot yet, or the first index is still running. | Wait `retryAfterMs` and call `causoryn_status` (`action: "inspect"`); if no job is running, start one with `causoryn_status({ action: "refresh" })`. |
 | Agent says a wiki or history tool does not exist | The server runs the default `core` profile. | Add `--tool-profile wiki`, `history` or `wiki,history` (or set `CAUSORYN_TOOL_PROFILE`) and restart the host ([§2.C](#c-prompts-that-need-another-tool-profile)). |
-| `INVALID_REVISION` from a history tool | The ref has no committed `.causoryn/architecture-snapshot.json`. | Export `format: "snapshot"`, commit it at the refs you want to compare, then retry. |
+| `INVALID_REVISION` from a history tool | The ref is not the revision the local index provably matches and has no committed `.causoryn/architecture-snapshot.json`. | Export `format: "snapshot"`, commit it at the refs you want to compare, then retry. |
 
 To run a read-only health check of the runtime, the language sidecars and the installed host configs and skills:
 

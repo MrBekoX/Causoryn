@@ -26,7 +26,7 @@ npx causoryn@0.3.0 setup --client antigravity --uninstall --yes
 
 ### What `setup --client antigravity` writes
 
-`setup` adds or replaces the `causoryn` key in `mcpServers` of the primary `~/.gemini/config/mcp_config.json`, and of the secondary `~/.gemini/antigravity/mcp_config.json` **only if that file already exists**. Other keys are kept. The entry has no `type` field:
+`setup` adds the `causoryn` key (or updates only `command` and `args` of an existing entry, keeping its other keys) in `mcpServers` of the primary `~/.gemini/config/mcp_config.json`, and of the secondary `~/.gemini/antigravity/mcp_config.json` **only if that file already exists**. Other keys are kept. The entry has no `type` field:
 
 ```json
 {

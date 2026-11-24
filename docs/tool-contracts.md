@@ -259,7 +259,7 @@ Analiz edilen çalışma alanı her zaman salt okunurdur. Yazmalar yalnızca Cau
 
 ## Başlatma, kök bağlama ve veri dizini (özet)
 
-Paketlenmiş sunucu (`causoryn mcp`, `packages/mcp-server/src/cli-stdio.ts`'ten derlenir) bir çalışma alanı kökünü `--root`, `CAUSORYN_CONFIG.allowRoots`, güvenli bir geçerli dizin (`--allow-cwd`) veya ilk güvenli MCP `roots/list` girdisinden bağlar. Güvensiz adaylar (dosya sistemi kökleri, `$HOME` ve ataları, Causoryn veri ve plugin dizinleri, hassas ve sistem dizinleri, UNC/aygıt yolları) reddedilir. `--auto-data-dir`, çalışma alanının dışında `<base>/workspaces/<slug>-<hash12>/graph.sqlite` ve `exports/` hazırlar (taban: `--data-dir` > `ZCODE_PLUGIN_DATA` > `~/.causoryn`). Hiç kök yoksa sunucu `allowRoots: []` ile başlar ve çalışma alanı araçları `WORKSPACE_NOT_AUTHORIZED` döner. Tüm ayrıntılar: [CLI ve Konfigürasyon](cli-and-configuration.md).
+Paketlenmiş sunucu (`causoryn mcp`, `packages/mcp-server/src/cli-stdio.ts`'ten derlenir) bir çalışma alanı kökünü `--root`, `CAUSORYN_CONFIG.allowRoots`, güvenli bir geçerli dizin (`--allow-cwd`) veya ilk güvenli MCP `roots/list` girdisinden bağlar. Güvensiz adaylar (dosya sistemi kökleri, `$HOME` ve ataları, Causoryn veri ve plugin dizinleri, hassas ve sistem dizinleri, UNC/aygıt yolları) reddedilir. `--auto-data-dir`, çalışma alanının dışında `<base>/workspaces/<slug>-<hash12>/graph.sqlite` ve `exports/` hazırlar (taban: her host için `--data-dir` > `~/.causoryn`; `ZCODE_PLUGIN_DATA` yalnızca `~/.causoryn` kullanılamadığında yedek). Hiç kök yoksa sunucu `allowRoots: []` ile başlar ve çalışma alanı araçları `WORKSPACE_NOT_AUTHORIZED` döner. Tüm ayrıntılar: [CLI ve Konfigürasyon](cli-and-configuration.md).
 
 ---
 

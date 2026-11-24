@@ -48,7 +48,7 @@ npx causoryn@0.3.0 setup --client claude-code --uninstall --yes
 
 ### `setup --client claude-code` neyi yazar
 
-`setup`, `~/.claude.json` dosyasındaki **üst düzey** `mcpServers` nesnesine `causoryn` anahtarını ekler ya da mevcut anahtarı değiştirir (bu, Claude Code'un user scope'udur; sunucu böylece her projede kullanılabilir, `--allow-cwd` ise Claude Code'un başlatıldığı proje dizinini bağlar). Dosyadaki diğer anahtarlar korunur:
+`setup`, `~/.claude.json` dosyasındaki **üst düzey** `mcpServers` nesnesine `causoryn` anahtarını ekler ya da mevcut bir kayıtta yalnızca sahibi olduğu anahtarları (`command`, `args`, `type`) günceller (bu, Claude Code'un user scope'udur; sunucu böylece her projede kullanılabilir, `--allow-cwd` ise Claude Code'un başlatıldığı proje dizinini bağlar). Dosyadaki diğer anahtarlar korunur:
 
 ```json
 {

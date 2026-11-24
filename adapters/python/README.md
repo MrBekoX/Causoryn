@@ -30,9 +30,12 @@ sözleşmesiyle ID'sizdir.
 - **Timeout/çökme/bozuk yanıt → L0/L1 fallback:** motor ÇÖKMEZ;
   `workerAvailable=false`, `state=partial`, `coverageRatio=0`, File
   node'ları (sourceHash'li) korunur, explicit `warnings` + stderr log.
-- **Spawn güvenliği (kırmızı çizgi 6):** komut LİTERAL `python` (varsayılan;
-  `pythonCommand` seçeneğiyle override), argümanlar SABİT
-  `["-B", workerScriptPath]`. Worker script yolu repo içi sabittir;
+- **Spawn güvenliği (kırmızı çizgi 6):** komut `python` (varsayılan; POSIX'te
+  önce `python3` denenir; `pythonCommand` seçeneğiyle override), analiz edilen
+  workspace dışındaki `PATH` girdilerinden mutlak yola çözümlenir; argümanlar
+  SABİT `["-I", "-B", "-X", "utf8", workerScriptPath]` (izole mod, bytecode
+  yazımı yok, UTF-8 stdio) ve `cwd` = worker script dizini. Worker script yolu
+  mutlak olmalıdır ve repo içi sabittir;
   `CAUSORYN_PYTHON_WORKER_SCRIPT` ortam değişkeniyle config düzeyinde
   override edilebilir. İstek içeriği yalnızca stdin JSON'da taşınır.
 - **Env allowlist:** worker yalnızca `PATH`, `SystemRoot`, `COMSPEC`,

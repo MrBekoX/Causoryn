@@ -70,13 +70,14 @@ The other legacy names (the eight tools that keep their names in `core`, the two
 tools and the seven `wiki` tools) are also part of `full`.
 
 **Selecting a profile.** Precedence is `--tool-profile <list>` > `CAUSORYN_TOOL_PROFILE` >
-`core`; unknown names stop the server at startup.
+`CAUSORYN_CONFIG.toolProfile` > `core`; unknown names stop the server at startup.
 
 - This fixture launches the bare bundle entrypoint, which reads **no command-line flags**. To
   get the legacy names, add `"CAUSORYN_TOOL_PROFILE": "full"` (or `wiki`, `history`,
   `wiki,history`) to the `env` block of `mcpServers.causoryn` in `.zcode-plugin/plugin.json`.
 - The packaged CLI entry written by `npx causoryn@0.3.0 setup --client zcode --yes` accepts
-  the flag: append `"--tool-profile", "full"` to its `args` in `~/.zcode/cli/config.json`.
+  the flag: run `npx causoryn@0.3.0 setup --client zcode --tool-profile full --yes`, or append
+  `"--tool-profile", "full"` to its `args` in `~/.zcode/cli/config.json`; re-running setup keeps it.
   `--output-schema full` additionally advertises output schemas in `tools/list`.
 
 ### Response envelope and error codes

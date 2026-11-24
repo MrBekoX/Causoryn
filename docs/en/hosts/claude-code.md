@@ -48,7 +48,7 @@ npx causoryn@0.3.0 setup --client claude-code --uninstall --yes
 
 ### What `setup --client claude-code` writes
 
-`setup` adds or replaces the `causoryn` key in the **top-level** `mcpServers` object of `~/.claude.json` (Claude Code's user scope, so the server is available in every project; `--allow-cwd` then binds the project directory Claude Code was started in). Other keys in the file are kept:
+`setup` adds the `causoryn` key to the **top-level** `mcpServers` object of `~/.claude.json`, or updates only the keys it owns (`command`, `args`, `type`) in an existing entry (Claude Code's user scope, so the server is available in every project; `--allow-cwd` then binds the project directory Claude Code was started in). Other keys in the file are kept:
 
 ```json
 {
