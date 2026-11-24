@@ -6,7 +6,7 @@
 export const SERVER_NAME = "causoryn";
 
 /** MCP serverInfo.version (kept in sync with package.json). */
-export const SERVER_VERSION = "0.2.4";
+export const SERVER_VERSION = "0.3.0";
 
 /** Envelope schemaVersion carried on every tool response. */
 export const SCHEMA_VERSION = "2.0";

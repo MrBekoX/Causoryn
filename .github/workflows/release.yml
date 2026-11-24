@@ -195,6 +195,11 @@ jobs:
           mkdir -p ../../release-artifacts
           npm pack --pack-destination ../../release-artifacts
 
+      # Checksums are taken immediately after `npm pack`, before any smoke/test step
+      # runs against the packed tarball, so SHA256SUMS.txt describes the artifact exactly as packed.
+      - name: Generate SHA256SUMS.txt and CycloneDX SBOM
+        run: node scripts/generate-sbom.mjs --artifacts-dir release-artifacts
+
       - name: Smoke-test packed tarball in isolated prefix (CLI + doctor + MCP initialize)
         env:
           RELEASE_TAG: ${{ github.ref_name }}
@@ -282,9 +287,6 @@ jobs:
             });
             child.stdin.write(initReq);
           '
-
-      - name: Generate SHA256SUMS.txt and CycloneDX SBOM
-        run: node scripts/generate-sbom.mjs --artifacts-dir release-artifacts
 
       - name: Upload verified release artifacts
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
