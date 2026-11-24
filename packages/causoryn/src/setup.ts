@@ -402,8 +402,8 @@ function buildMcpArgs(
 const JSON_OWNED_ENTRY_KEYS_WITH_TYPE = ["type", "command", "args"] as const;
 const JSON_OWNED_ENTRY_KEYS_WITHOUT_TYPE = ["command", "args"] as const;
 
-/** Minimum Codex `startup_timeout_sec` Causoryn needs (first start can build the index). */
-export const CODEX_MIN_STARTUP_TIMEOUT_SEC = 30;
+/** Minimum Codex `startup_timeout_sec` setup accepts; a lower user value is raised to it. */
+const CODEX_MIN_STARTUP_TIMEOUT_SEC = 30;
 
 /**
  * Validates the `env` of an existing JSON Causoryn entry: setup keeps it as
