@@ -36,7 +36,7 @@
  *   JSON sha256 özeti (ilk 16 hex) — csharp opts kuralının aynısı.
  * - refpack: worker'ın GERÇEKTEN yüklediği ref pack'leri (worker yanıt
  *   warnings'inden türetilir — ReferenceResolver.cs:144 canonical satırı
- *   "referans paketi yüklendi: <pack> <sürüm> (<tfmDir>)"); pack hiç
+ *   "reference pack loaded: <pack> <version> (<tfmDir>)"); pack hiç
  *   bulunamadıysa "fallback-corelib" (System.Private.CoreLib runtime ref),
  *   keşif bilgisi yoksa "unavailable" — hiçbir koşulda uydurma sürüm
  *   yazılmaz.

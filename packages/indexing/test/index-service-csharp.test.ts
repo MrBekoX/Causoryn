@@ -246,7 +246,7 @@ describe.skipIf(!workerReady)(
       expect(segments).toContain("roslyn-worker@0.1.0");
       // Ref-pack: worker healthy koştu → NETCore.App.Ref sürümü yüklü
       // (bu makinede packs dizini SDK ile gelir; ReferenceResolver.cs:144
-      // formatı: "referans paketi yüklendi: <pack> <sürüm> (<tfmDir>)").
+      // formatı: "reference pack loaded: <pack> <version> (<tfmDir>)").
       const netCore = segments.find((s) => s.startsWith("refpack="));
       expect(netCore).toBeDefined();
       expect(netCore).toContain("Microsoft.NETCore.App.Ref@");
