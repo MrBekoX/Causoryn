@@ -17,8 +17,27 @@ import {
   formatDoctorReportText,
   runDoctor,
   runSetup,
+  type ToolchainProbeFn,
 } from "../packages/causoryn/src/index.js";
 import { defaultToolchainProbe } from "../packages/causoryn/src/doctor.js";
+
+/**
+ * Probe that answers like supported sidecar toolchains. Doctor checks the
+ * version floors (Python >= 3.10, Go >= 1.22, .NET 10 runtime), so the output
+ * must look like the real `--version` / `--list-runtimes` output.
+ */
+const SUPPORTED_TOOLCHAIN_OUTPUT: Readonly<Record<string, string>> = {
+  dotnet: "Microsoft.NETCore.App 10.0.11 [/usr/share/dotnet/shared/Microsoft.NETCore.App]",
+  python: "Python 3.12.4",
+  go: "go version go1.22.5 linux/amd64",
+  cargo: "cargo 1.100.0 (3acc79c0c 2026-11-05)",
+};
+
+const supportedToolchainProbe: ToolchainProbeFn = (command) => {
+  const output = SUPPORTED_TOOLCHAIN_OUTPUT[command];
+  if (output === undefined) throw new Error(`unexpected toolchain probe: ${command}`);
+  return { available: true, version: output, detail: "ok", output };
+};
 
 const tempDirs: string[] = [];
 
@@ -144,7 +163,7 @@ describe("doctor: legacy per-host index files (graph-<client>.sqlite)", { timeou
       codexHomeDir: fakeCodex,
       packageRoot: pkgRoot,
       nodeVersion: "24.10.0",
-      probeToolchain: () => ({ available: true, version: "1.0", detail: "ok" }),
+      probeToolchain: supportedToolchainProbe,
     });
     // Strictly read-only: nothing created, changed, or deleted.
     expect(snapshotTree(fakeHome)).toEqual(before);
@@ -187,7 +206,7 @@ describe("doctor: legacy per-host index files (graph-<client>.sqlite)", { timeou
       packageRoot: pkgRoot,
       clients: ["claude-code"],
       nodeVersion: "24.10.0",
-      probeToolchain: () => ({ available: true, version: "1.0", detail: "ok" }),
+      probeToolchain: supportedToolchainProbe,
     });
     expect(healthy.overallStatus).toBe("HEALTHY");
     expect(healthy.legacyIndexFiles.status).toBe("warn");
@@ -207,7 +226,7 @@ describe("doctor: legacy per-host index files (graph-<client>.sqlite)", { timeou
       codexHomeDir: path.join(fakeHome, ".codex"),
       packageRoot: pkgRoot,
       nodeVersion: "24.10.0",
-      probeToolchain: () => ({ available: true, version: "1.0", detail: "ok" }),
+      probeToolchain: supportedToolchainProbe,
     });
     expect(absent.legacyIndexFiles.status).toBe("ok");
     expect(absent.legacyIndexFiles.files).toEqual([]);
@@ -221,7 +240,7 @@ describe("doctor: legacy per-host index files (graph-<client>.sqlite)", { timeou
       codexHomeDir: path.join(fakeHome, ".codex"),
       packageRoot: pkgRoot,
       nodeVersion: "24.10.0",
-      probeToolchain: () => ({ available: true, version: "1.0", detail: "ok" }),
+      probeToolchain: supportedToolchainProbe,
     });
     expect(clean.legacyIndexFiles.status).toBe("ok");
     expect(formatDoctorReportText(clean)).toContain("[Legacy Index Files] OK");
@@ -289,7 +308,7 @@ describe("Task 1.1 & 1.8b — doctor.ts probe cwd isolation, absolute node path 
         packageRoot: pkgRoot,
         clients: ["claude-code"],
         nodeVersion: "24.10.0",
-        probeToolchain: () => ({ available: true, version: "1.0", detail: "ok" }),
+        probeToolchain: supportedToolchainProbe,
       });
       expect(okReport.hosts["claude-code"].entrypointExists, `valid script with ${nodeCmd}`).toBe(true);
 
@@ -305,7 +324,7 @@ describe("Task 1.1 & 1.8b — doctor.ts probe cwd isolation, absolute node path 
         packageRoot: pkgRoot,
         clients: ["claude-code"],
         nodeVersion: "24.10.0",
-        probeToolchain: () => ({ available: true, version: "1.0", detail: "ok" }),
+        probeToolchain: supportedToolchainProbe,
       });
       expect(brokenReport.hosts["claude-code"].entrypointExists, `missing script with ${nodeCmd}`).toBe(false);
       expect(brokenReport.hosts["claude-code"].status).toBe("error");
@@ -326,7 +345,7 @@ describe("Task 1.1 & 1.8b — doctor.ts probe cwd isolation, absolute node path 
       codexHomeDir: fakeCodex,
       packageRoot: pkgRoot,
       nodeVersion: "24.10.0",
-      probeToolchain: () => ({ available: true, version: "1.0", detail: "ok" }),
+      probeToolchain: supportedToolchainProbe,
     });
     expect(emptyReport.healthy).toBe(false);
     expect(emptyReport.overallStatus).toBe("NOT CONFIGURED");
@@ -350,7 +369,7 @@ describe("Task 1.1 & 1.8b — doctor.ts probe cwd isolation, absolute node path 
       packageRoot: pkgRoot,
       clients: ["claude-code"],
       nodeVersion: "24.10.0",
-      probeToolchain: () => ({ available: true, version: "1.0", detail: "ok" }),
+      probeToolchain: supportedToolchainProbe,
     });
     expect(warnReport.hosts["claude-code"].status).toBe("warn");
     expect(warnReport.healthy).toBe(false);
@@ -375,7 +394,7 @@ describe("Task 1.1 & 1.8b — doctor.ts probe cwd isolation, absolute node path 
       packageRoot: pkgRoot,
       clients: ["claude-code"],
       nodeVersion: "24.10.0",
-      probeToolchain: () => ({ available: true, version: "1.0", detail: "ok" }),
+      probeToolchain: supportedToolchainProbe,
     });
     expect(healthyReport.hosts["claude-code"].status).toBe("ok");
     expect(healthyReport.healthy).toBe(true);
@@ -389,7 +408,7 @@ describe("Task 1.1 & 1.8b — doctor.ts probe cwd isolation, absolute node path 
       codexHomeDir: fakeCodex,
       packageRoot: pkgRoot,
       nodeVersion: "24.10.0",
-      probeToolchain: () => ({ available: true, version: "1.0", detail: "ok" }),
+      probeToolchain: supportedToolchainProbe,
     });
     expect(allHostsSingleOk.configuredCount).toBe(1);
     expect(allHostsSingleOk.overallStatus).toBe("HEALTHY");
@@ -410,7 +429,7 @@ describe("Task 1.1 & 1.8b — doctor.ts probe cwd isolation, absolute node path 
       codexHomeDir: fakeCodex,
       packageRoot: pkgRoot,
       nodeVersion: "24.10.0",
-      probeToolchain: () => ({ available: true, version: "1.0", detail: "ok" }),
+      probeToolchain: supportedToolchainProbe,
     });
     expect(mixedReport.configuredCount).toBe(2);
     expect(mixedReport.hosts["claude-code"].status).toBe("ok");

@@ -158,8 +158,20 @@ export interface SetupResult {
 
 export interface ToolchainProbeOutcome {
   readonly available: boolean;
+  /** First non-empty output line of a successful probe. */
   readonly version: string | null;
   readonly detail: string;
+  /** Full stdout + stderr text of a successful probe (multi-line output such as `dotnet --list-runtimes`). */
+  readonly output?: string | undefined;
+  /**
+   * Why an unavailable probe failed (defaults to `not-found`):
+   * - `not-found`: no such command (informational).
+   * - `exited`: the command ran but exited non-zero, typically a version-manager shim or
+   *   proxy (rustup, pyenv, asdf) with no toolchain selected; treated as not installed.
+   * - `error`: the probe could not complete (timeout, permission denied, other spawn
+   *   error), so an installed toolchain is unusable; a warning.
+   */
+  readonly failure?: "not-found" | "exited" | "error" | undefined;
 }
 
 export type ToolchainProbeFn = (
@@ -189,8 +201,19 @@ export interface DoctorRuntimeCheck {
 
 export interface DoctorToolchainStatus {
   readonly id: SidecarToolchainId;
+  /** Whether the probe command ran successfully. */
   readonly available: boolean;
+  /** Parsed toolchain version (for `dotnet`: the best Microsoft.NETCore.App runtime found), or null. */
   readonly version: string | null;
+  /** Supported minimum version, or null when none is pinned (`cargo`). */
+  readonly minimumVersion: string | null;
+  /**
+   * `ok`: usable and at or above the minimum. `warn`: installed but below the minimum,
+   * its version could not be read, or the probe timed out / could not be started —
+   * makes the report `DEGRADED`. `absent`: not installed, or the command exits without
+   * a usable toolchain; informational only (that language uses L0/L1 analysis).
+   */
+  readonly status: "ok" | "warn" | "absent";
   readonly mode: "sidecar-ready" | "l0-l1-fallback";
   readonly detail: string;
 }
