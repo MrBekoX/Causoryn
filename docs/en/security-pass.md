@@ -6,7 +6,7 @@
 >
 > **Threat model in one paragraph:** Causoryn analyzes repositories it does not trust. Source files, comments, configuration files, Git metadata, and toolchain configuration inside an analyzed workspace are treated as data, never as instructions or executable configuration. Causoryn makes no model or telemetry calls, writes nothing into the workspace, keeps its own database in a separate data directory, and returns results only over MCP `stdio`.
 
-**Bundle identity:** `packages/mcp-server/dist/mcp-server.mjs` SHA-256 `f6f63741b8582be317f144461ea0e3438c55c94616efff5e1193476179ee3078`. `dist/bundle-manifest.json` records this digest together with `index-worker.mjs`, `mcp-server.mjs.LEGAL.txt`, and the vendored native SQLite runtime (36 entries). The digest identifies one local build; the dated results below describe the test sessions listed in the matrix.
+**Bundle identity:** `packages/mcp-server/dist/mcp-server.mjs` SHA-256 `cfd754374e6cea577d0e3d5abbcfe844ef7aaf094b71abdb44274b630967247e`. `dist/bundle-manifest.json` records this digest together with `index-worker.mjs`, `mcp-server.mjs.LEGAL.txt`, and the vendored native SQLite runtime (36 entries). The digest identifies one local build; the dated results below describe the test sessions listed in the matrix.
 
 ## 1. Runtime Security Boundaries
 
