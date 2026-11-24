@@ -234,7 +234,7 @@ export interface IndexServiceOptions {
    * (e.g., "claude-code", "codex", "antigravity"). Does not affect snapshot IDs.
    */
   readonly hostLabel?: string;
-  /** Build lease TTL in milliseconds (default: 30_000). */
+  /** Build lease TTL in milliseconds (default: 120_000). */
   readonly leaseTtlMs?: number;
   /** Heartbeat renewal interval in milliseconds (default: 10_000). */
   readonly leaseHeartbeatIntervalMs?: number;
@@ -1529,7 +1529,14 @@ function computeTsContextPaths(
   return allTsEntries.filter((entry) => contextSet.has(entry.relativePath));
 }
 
-const DEFAULT_BUILD_LEASE_TTL_MS = 30_000;
+/**
+ * Default build-lease TTL. TTL only decides liveness across hosts (same host is
+ * PID-primary). The worker holds the SQLite write lock for the whole build write
+ * phase (measured: tens of seconds on a ~500-file repo), during which main-thread
+ * renewals are skipped; 120 s keeps a wide margin over that gap while a crashed
+ * foreign-host build is still recovered within two minutes.
+ */
+const DEFAULT_BUILD_LEASE_TTL_MS = 120_000;
 const DEFAULT_BUILD_LEASE_HEARTBEAT_MS = 10_000;
 /** Default bound on waiting for a live peer build (15 minutes: longer than the 10 minute lease staleness ceiling, so a dead owner whose PID was reused is always recovered within the wait). */
 export const DEFAULT_PEER_WAIT_TIMEOUT_MS = 15 * 60_000;
@@ -1795,7 +1802,7 @@ export class IndexService {
   private readonly tolerateConcurrentPublishRace: boolean;
   /** Optional diagnostic host/client label stored in build_leases.host_label. */
   private readonly hostLabel: string | undefined;
-  /** Single-writer build lease TTL in ms (default 30_000). */
+  /** Single-writer build lease TTL in ms (default 120_000). */
   private readonly leaseTtlMs: number;
   /** Heartbeat renewal interval in ms (default 10_000). */
   private readonly leaseHeartbeatIntervalMs: number;
