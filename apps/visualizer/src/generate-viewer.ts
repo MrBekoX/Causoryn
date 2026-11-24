@@ -263,7 +263,7 @@ function orderedViewerView(input: ViewerInput): OrderedViewerView {
     if (!nodeIds.has(edge.from) || !nodeIds.has(edge.to)) {
       throw new ViewerError(
         "viewer/dangling-edge",
-        `Kenar ucu bilinmeyen node'a işaret ediyor; finalize edilmiş snapshot kullanın: ${edge.id}`,
+        `Edge endpoint points to an unknown node; use a finalized snapshot: ${edge.id}`,
       );
     }
   }
@@ -638,7 +638,7 @@ const VIEWER_APP_JS = `
     if (!ids.length) {
       var note = document.createElement("p");
       note.className = "panel-note";
-      note.textContent = "Bu öğe için gömülü kanıt yok.";
+      note.textContent = "No embedded evidence for this item.";
       panelBody.appendChild(note);
     }
     for (var j = 0; j < ids.length; j++) {
@@ -647,7 +647,7 @@ const VIEWER_APP_JS = `
       var head = document.createElement("h3");
       var record = evidenceById[ids[j]];
       if (!record) {
-        head.textContent = ids[j] + " — gömülü kaydı yok";
+        head.textContent = ids[j] + " — no embedded record";
         item.appendChild(head);
       } else {
         head.textContent = record.id + " (" + record.kind + ")";
@@ -655,7 +655,7 @@ const VIEWER_APP_JS = `
         var dl = document.createElement("dl");
         addTerm(dl, "Konum", spanText(record.span));
         addTerm(dl, "Analyzer", record.analyzerId + " @ " + record.analyzerVersion);
-        addTerm(dl, "Gerekçe", record.rationale);
+        addTerm(dl, "Rationale", record.rationale);
         item.appendChild(dl);
       }
       panelBody.appendChild(item);
@@ -771,16 +771,16 @@ function metaSection(meta: ViewerGraphMeta): string {
 function legendSection(): string {
   const lines: string[] = [];
   lines.push("<section>");
-  lines.push("<h2>Çözüm seviyeleri</h2>");
+  lines.push("<h2>Resolution levels</h2>");
   lines.push('<ul class="legend">');
   lines.push(
-    '<li><span class="legend-swatch swatch-verified"></span>verified (resolved) — düz yeşil ok</li>',
+    '<li><span class="legend-swatch swatch-verified"></span>verified (resolved) — solid green arrow</li>',
   );
   lines.push(
-    '<li><span class="legend-swatch swatch-heuristic"></span>heuristic — kesikli sarı ok</li>',
+    '<li><span class="legend-swatch swatch-heuristic"></span>heuristic — dashed amber arrow</li>',
   );
   lines.push(
-    '<li><span class="legend-swatch swatch-unresolved"></span>unresolved — noktalı gri ok</li>',
+    '<li><span class="legend-swatch swatch-unresolved"></span>unresolved — dotted grey arrow</li>',
   );
   lines.push("</ul>");
   lines.push("</section>");
@@ -842,7 +842,7 @@ export function generateViewerHtml(input: ViewerInput): string {
   const isEmpty = view.nodes.length === 0;
   const lines: string[] = [];
   lines.push("<!DOCTYPE html>");
-  lines.push('<html lang="tr">');
+  lines.push('<html lang="en">');
   lines.push("<head>");
   lines.push('<meta charset="utf-8">');
   lines.push(`<meta http-equiv="Content-Security-Policy" content="${VIEWER_CSP_POLICY}">`);
@@ -856,7 +856,7 @@ export function generateViewerHtml(input: ViewerInput): string {
   lines.push("<body>");
   lines.push("<h1>Causoryn Architecture Viewer</h1>");
   lines.push(
-    '<p class="viewer-note">Çevrimdışı görüntüleyici — hiçbir ağ isteği yapmaz; tüm içerik bu tek dosyada gömülüdür.</p>',
+    '<p class="viewer-note">Offline viewer — makes no network requests; all content is embedded in this single file.</p>',
   );
   lines.push(metaSection(view.meta));
   lines.push(legendSection());
@@ -865,7 +865,7 @@ export function generateViewerHtml(input: ViewerInput): string {
     `<h2>Graph (${String(view.nodes.length)} node / ${String(view.edges.length)} edge)${isEmpty ? ' data-empty="true"' : ""}</h2>`,
   );
   if (isEmpty) {
-    lines.push('<div class="graph-warning" data-empty="true">Graf boş — snapshot node/edge içermiyor.</div>');
+    lines.push('<div class="graph-warning" data-empty="true">Empty graph — the snapshot contains no nodes or edges.</div>');
   }
   lines.push(svgBody(view));
   lines.push("</section>");
@@ -875,7 +875,7 @@ export function generateViewerHtml(input: ViewerInput): string {
   lines.push(
     '<button id="evidence-panel-close" type="button">Kapat</button>',
   );
-  lines.push('<h2 id="evidence-panel-title">Kanıt</h2>');
+  lines.push('<h2 id="evidence-panel-title">Evidence</h2>');
   lines.push('<div id="evidence-panel-body"></div>');
   lines.push("</aside>");
   lines.push('<script id="causoryn-data" type="application/json">');
@@ -885,7 +885,7 @@ export function generateViewerHtml(input: ViewerInput): string {
   lines.push(VIEWER_APP_JS);
   lines.push("</script>");
   lines.push(
-    "<noscript><p>Betikler kapalıyken kanıt paneli çalışmaz; hiçbir ağ isteği yapılmaz.</p></noscript>",
+    "<noscript><p>The evidence panel needs scripts enabled; no network requests are made.</p></noscript>",
   );
   lines.push("</body>");
   lines.push("</html>");

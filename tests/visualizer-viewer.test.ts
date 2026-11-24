@@ -414,7 +414,7 @@ describe("visualizer — partial: boş graph → boş iskelet + uyarı", () => {
   it("boş graph uyarısı + boş SVG iskeleti üretir", () => {
     const html = generateViewerHtml(EMPTY);
     expect(html).toContain('data-empty="true"');
-    expect(html).toContain("Graf boş");
+    expect(html).toContain("Empty graph");
     // Boş SVG iskeleti yine de mevcut (viewBox'lı).
     expect(html).toContain("<svg");
     expect(html).toContain('viewBox="0 0');
