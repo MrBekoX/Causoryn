@@ -245,7 +245,7 @@ func parseRequest(line string) ([]analyze.SourceFile, []analyze.ModuleFile, int,
 		return nil, nil, 0, echo, invalidArgument("files must contain at least 1 file")
 	}
 	if len(inputs) > analyze.MaxFileCount {
-		return nil, nil, 0, echo, limitExceeded(fmt.Sprintf("files count limit exceeded: %d > %d", len(inputs), analyze.MaxFileCount))
+		return nil, nil, 0, echo, limitExceeded(fmt.Sprintf("file count limit exceeded: %d > %d", len(inputs), analyze.MaxFileCount))
 	}
 
 	var moduleFiles []analyze.ModuleFile
@@ -255,7 +255,7 @@ func parseRequest(line string) ([]analyze.SourceFile, []analyze.ModuleFile, int,
 			return nil, nil, 0, echo, invalidArgument("moduleFiles array is invalid: " + err.Error())
 		}
 		if len(rawMods) > analyze.MaxFileCount {
-			return nil, nil, 0, echo, limitExceeded(fmt.Sprintf("moduleFiles count limit exceeded: %d > %d", len(rawMods), analyze.MaxFileCount))
+			return nil, nil, 0, echo, limitExceeded(fmt.Sprintf("module file count limit exceeded: %d > %d", len(rawMods), analyze.MaxFileCount))
 		}
 		seenMods := map[string]bool{}
 		moduleFiles = make([]analyze.ModuleFile, 0, len(rawMods))
