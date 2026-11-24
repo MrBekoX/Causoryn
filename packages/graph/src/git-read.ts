@@ -491,6 +491,16 @@ const SAFE_DIRECTORY_CACHE_ENV_KEYS = [
   "GIT_CONFIG_NOSYSTEM",
 ] as const;
 
+/** git's boolean parsing for environment values (`git_env_bool`): true/yes/on/1 and non-zero integers. */
+function isGitBooleanTrue(value: string | undefined): boolean {
+  if (value === undefined) return false;
+  const normalized = value.trim().toLowerCase();
+  if (normalized === "" || normalized === "false" || normalized === "no" || normalized === "off") return false;
+  if (normalized === "true" || normalized === "yes" || normalized === "on") return true;
+  const asNumber = Number(normalized);
+  return Number.isInteger(asNumber) && asNumber !== 0;
+}
+
 function buildUserConfigReadEnv(untrustedRoots: readonly string[]): Record<string, string> {
   const env: Record<string, string> = {};
   for (const [key, value] of Object.entries(process.env)) {
@@ -522,7 +532,14 @@ async function readProtectedSafeDirectories(runtime: GitRuntime): Promise<readon
 
   const env = buildUserConfigReadEnv(runtime.untrustedRoots);
   const values: string[] = [];
-  for (const scope of ["--system", "--global"]) {
+  // `git config --system` reads the system file even when the user's
+  // environment sets GIT_CONFIG_NOSYSTEM, but git itself then ignores that file
+  // for every normal operation. Mirror git: with GIT_CONFIG_NOSYSTEM set, the
+  // system scope is not part of the user's protected configuration.
+  const scopes = isGitBooleanTrue(process.env["GIT_CONFIG_NOSYSTEM"])
+    ? ["--global"]
+    : ["--system", "--global"];
+  for (const scope of scopes) {
     try {
       const { stdout } = await gitProcessRunner(
         runtime.gitPath,

@@ -2524,6 +2524,32 @@ function resolveWorkspacePackageModule(params: {
   return undefined;
 }
 
+/** Cached real-path root keys (workspace roots are few; realpath runs once per root). */
+const REAL_ROOT_KEY_CACHE = new Map<string, string | undefined>();
+const MAX_REAL_ROOT_KEY_CACHE = 64;
+
+/**
+ * Returns `<canonical real root>/` when the root's real path differs from the
+ * given root key, or `undefined` when it is the same or cannot be determined.
+ */
+function realRootKeyWithSlashOf(normalizedRoot: string, rootKeyWithSlash: string): string | undefined {
+  if (REAL_ROOT_KEY_CACHE.has(normalizedRoot)) return REAL_ROOT_KEY_CACHE.get(normalizedRoot);
+  let result: string | undefined;
+  try {
+    const real = ts.sys?.realpath?.(normalizedRoot);
+    if (typeof real === "string" && real.length > 0 && !real.includes("\0")) {
+      const realKey = canonicalKey(stripNonRootTrailingSlash(normalizePosixAbsolute(real)));
+      const withSlash = realKey.endsWith("/") ? realKey : `${realKey}/`;
+      result = withSlash === rootKeyWithSlash ? undefined : withSlash;
+    }
+  } catch {
+    result = undefined;
+  }
+  if (REAL_ROOT_KEY_CACHE.size >= MAX_REAL_ROOT_KEY_CACHE) REAL_ROOT_KEY_CACHE.clear();
+  REAL_ROOT_KEY_CACHE.set(normalizedRoot, result);
+  return result;
+}
+
 /**
  * Her `containingFile` için en yakın ata `ScopedTsConfig` ile modül çözer;
  * monorepo workspace paket çözümlemesi, Bundler fallback ve bellek-içi alias
@@ -2572,6 +2598,12 @@ export function resolveScopedModuleName(params: {
           return libKey.endsWith("/") ? libKey : `${libKey}/`;
         })();
 
+  // TypeScript realpaths resolved files, so a root given by an alias of its real
+  // path (for example a Windows 8.3 short name such as C:\Users\RUNNER~1\...)
+  // must also accept files under the real root; otherwise every node_modules
+  // import of such a workspace becomes a false TS2307.
+  const realRootKeyWithSlash = realRootKeyWithSlashOf(normalizedRoot, rootKeyWithSlash);
+
   // SEC-03: Çözümlenen dosya mutlaka workspace kökü veya TS lib dizini içinde kalmalıdır.
   const isAllowedResolved = (
     resolved: ts.ResolvedModuleFull | undefined,
@@ -2579,6 +2611,9 @@ export function resolveScopedModuleName(params: {
     if (resolved === undefined) return undefined;
     const resolvedKey = canonicalKey(resolved.resolvedFileName);
     if (resolvedKey.startsWith(rootKeyWithSlash)) return resolved;
+    if (realRootKeyWithSlash !== undefined && resolvedKey.startsWith(realRootKeyWithSlash)) {
+      return resolved;
+    }
     if (
       allowedLibKeyWithSlash !== undefined &&
       resolvedKey.startsWith(allowedLibKeyWithSlash)
