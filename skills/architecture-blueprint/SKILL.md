@@ -18,7 +18,7 @@ part of the default `core` tool profile.
 ## Architecture Discovery and Export
 
 ### Step 1: Verify Snapshot Health & Coverage Boundaries
-1. Call `causoryn_status` `{"action": "inspect"}` to confirm a published snapshot exists (`data.index.latestSnapshot`). If indexing is pending or `stale: true`, call `causoryn_status` `{"action": "refresh", "mode": "incremental"}` and poll `causoryn_status` `{"action": "inspect", "jobId": "<jobId>"}` until the job is `done`.
+1. Call `causoryn_status` `{"action": "inspect"}` to confirm a published snapshot exists (`data.index.latestSnapshot`). If indexing is pending or `stale: true`, call `causoryn_status` `{"action": "refresh", "mode": "incremental"}` and poll `causoryn_status` `{"action": "inspect", "jobId": "<jobId>"}` until the job reaches a terminal status: `done` (a new snapshot was published), `reused` (nothing changed, or a concurrent build already published an identical snapshot — keep using it) or `failed` (read its error).
 2. From `data.summary` and the envelope `coverage`, capture exact languages, analyzed file counts, entrypoints, per-language `coverage.byLanguage` tiers (`L0`/`L1`/`L2`), and the edge resolution breakdown (`verified` / `heuristic` / `unresolved`).
 
 ### Step 2: Map Modules, Centrality, Entrypoints & Risks
