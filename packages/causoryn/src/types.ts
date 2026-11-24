@@ -55,6 +55,15 @@ export function isHostClientId(value: string): value is HostClientId {
   return (HOST_CLIENT_IDS as readonly string[]).includes(value);
 }
 
+/**
+ * Tool profiles accepted by `causoryn setup --tool-profile`. Pinned copy of
+ * `TOOL_PROFILES` from `@causoryn/mcp-server` (this package has no runtime
+ * dependency on it); `tests/causoryn-setup-tool-profile.test.ts` guards drift.
+ */
+export const SETUP_TOOL_PROFILES = ["core", "full", "wiki", "history"] as const;
+
+export type SetupToolProfile = (typeof SETUP_TOOL_PROFILES)[number];
+
 export type CausorynCliErrorCode =
   | "cli/invalid-arguments"
   | "cli/malformed-json"
@@ -84,6 +93,11 @@ export interface ParsedCodexMcpServer {
   readonly command: string;
   readonly args: readonly string[];
   readonly startupTimeoutSec: number | null;
+  /**
+   * Environment of the entry, merged from an inline `env = { ... }` table,
+   * dotted `env.KEY = "..."` keys and the `[mcp_servers.causoryn.env]` sub-table.
+   */
+  readonly env: Readonly<Record<string, string>>;
 }
 
 export interface StagePersistentRuntimeOptions {
@@ -113,7 +127,14 @@ export interface SetupOptions {
   readonly ephemeralTmpDir?: string | undefined;
   readonly clients?: readonly HostClientId[] | undefined;
   readonly all?: boolean | undefined;
+  /** Explicit alias of the default selection: configure the hosts detected on this machine. */
   readonly allDetected?: boolean | undefined;
+  /**
+   * Tool profile list (`core`, `full`, `wiki`, `history` or a comma list) written as
+   * `--tool-profile <list>` into every generated `causoryn mcp` entry. When omitted,
+   * an existing `--tool-profile` argument of the entry is kept.
+   */
+  readonly toolProfile?: string | undefined;
   readonly nodeExecutable?: string | undefined;
   readonly yes?: boolean | undefined;
   readonly dryRun?: boolean | undefined;
