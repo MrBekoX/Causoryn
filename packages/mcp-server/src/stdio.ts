@@ -27,13 +27,13 @@ function main(): void {
       parsed = JSON.parse(rawConfig) as unknown;
     } catch (error) {
       console.error(
-        `[causoryn] CAUSORYN_CONFIG geçerli JSON değil: ${error instanceof Error ? error.message : String(error)}`,
+        `[causoryn] CAUSORYN_CONFIG is not valid JSON: ${error instanceof Error ? error.message : String(error)}`,
       );
       process.exit(2);
     }
   } else {
     console.error(
-      "[causoryn] CAUSORYN_CONFIG tanımsız; allowRoots: [] güvenli default kullanılıyor (workspace araçları WORKSPACE_NOT_AUTHORIZED döner)",
+      "[causoryn] CAUSORYN_CONFIG is not set; using the safe default allowRoots: [] (workspace tools return WORKSPACE_NOT_AUTHORIZED)",
     );
   }
 
@@ -42,7 +42,7 @@ function main(): void {
     context = createCausorynContext(parsed);
   } catch (error) {
     console.error(
-      `[causoryn] başlatma başarısız: ${error instanceof Error ? error.message : String(error)}`,
+      `[causoryn] startup failed: ${error instanceof Error ? error.message : String(error)}`,
     );
     process.exit(2); // never döner; context akış aşağısında tanımlıdır
   }
@@ -57,7 +57,7 @@ function main(): void {
     })
     .catch((error: unknown) => {
       console.error(
-        `[causoryn] stdio transport başlatılamadı: ${error instanceof Error ? error.message : String(error)}`,
+        `[causoryn] failed to start the stdio transport: ${error instanceof Error ? error.message : String(error)}`,
       );
       process.exit(1);
     });
