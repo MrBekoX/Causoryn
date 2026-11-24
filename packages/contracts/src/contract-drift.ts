@@ -136,7 +136,7 @@ function assertDiscoveryOutput(value: unknown, label: string): void {
   if (!isPlainObject(value) || !Array.isArray(value["contracts"]) || !Array.isArray(value["diagnostics"])) {
     throw new ContractDiscoveryError(
       "contracts/invalid-input",
-      `${label} DiscoveryOutput doğrulanamadı (contracts/invalid-input): contracts ve diagnostics dizileri zorunludur`,
+      `${label} DiscoveryOutput failed validation (contracts/invalid-input): the contracts and diagnostics arrays are required`,
     );
   }
 }
@@ -158,14 +158,14 @@ function assertEvidenceSpans(value: unknown, label: string): void {
   if (!Array.isArray(value) || value.length === 0) {
     throw new ContractDiscoveryError(
       "contracts/invalid-input",
-      `${label} kenarı evidence'sız olamaz (contracts/invalid-input): en az bir kanıt span zorunludur (Evidence First)`,
+      `${label} edge must carry evidence (contracts/invalid-input): at least one evidence span is required (Evidence First)`,
     );
   }
   for (const span of value) {
     if (!isPlainObject(span) || !isNonEmptyString(span["relativePath"])) {
       throw new ContractDiscoveryError(
         "contracts/invalid-input",
-        `${label} kenarı evidence span doğrulanamadı (contracts/invalid-input): relativePath boş olmayan string olmalıdır`,
+        `${label} edge evidence span failed validation (contracts/invalid-input): relativePath must be a non-empty string`,
       );
     }
     const startLine = span["startLine"];
@@ -178,7 +178,7 @@ function assertEvidenceSpans(value: unknown, label: string): void {
     ) {
       throw new ContractDiscoveryError(
         "contracts/invalid-input",
-        `${label} kenarı evidence span doğrulanamadı (contracts/invalid-input): startLine/endLine 1 tabanlı tam sayı ve startLine ≤ endLine olmalıdır`,
+        `${label} edge evidence span failed validation (contracts/invalid-input): startLine/endLine must be 1-based integers with startLine ≤ endLine`,
       );
     }
   }
@@ -193,38 +193,38 @@ function assertEdges(value: readonly ContractEdgeCandidate[], label: string): re
   if (!Array.isArray(value)) {
     throw new ContractDiscoveryError(
       "contracts/invalid-input",
-      `${label} kenar listesi (contracts/invalid-input): dizi olmalıdır`,
+      `${label} edge list (contracts/invalid-input): must be an array`,
     );
   }
   for (const edge of value) {
     if (!isPlainObject(edge)) {
       throw new ContractDiscoveryError(
         "contracts/invalid-input",
-        `${label} kenar adayı doğrulanamadı (contracts/invalid-input): kenar bir eşleme (object) olmalıdır`,
+        `${label} edge candidate failed validation (contracts/invalid-input): the edge must be a mapping (object)`,
       );
     }
     if (!isNonEmptyString(edge["fromSymbol"]) || !isNonEmptyString(edge["toContractId"])) {
       throw new ContractDiscoveryError(
         "contracts/invalid-input",
-        `${label} kenar adayı doğrulanamadı (contracts/invalid-input): fromSymbol/toContractId boş olmayan string olmalıdır`,
+        `${label} edge candidate failed validation (contracts/invalid-input): fromSymbol/toContractId must be non-empty strings`,
       );
     }
     if (!EDGE_KINDS.has(edge["edgeKind"] as string)) {
       throw new ContractDiscoveryError(
         "contracts/invalid-input",
-        `${label} kenar adayı doğrulanamadı (contracts/invalid-input): edgeKind PRODUCES_CONTRACT|CONSUMES_CONTRACT olmalıdır`,
+        `${label} edge candidate failed validation (contracts/invalid-input): edgeKind must be PRODUCES_CONTRACT|CONSUMES_CONTRACT`,
       );
     }
     if (!EDGE_RESOLUTIONS.has(edge["resolution"] as string)) {
       throw new ContractDiscoveryError(
         "contracts/invalid-input",
-        `${label} kenar adayı doğrulanamadı (contracts/invalid-input): resolution verified|heuristic olmalıdır`,
+        `${label} edge candidate failed validation (contracts/invalid-input): resolution must be verified|heuristic`,
       );
     }
     if (!EDGE_MATCH_BASES.has(edge["matchBasis"] as string)) {
       throw new ContractDiscoveryError(
         "contracts/invalid-input",
-        `${label} kenar adayı doğrulanamadı (contracts/invalid-input): matchBasis route|topic-id|name-exact|name-similarity olmalıdır`,
+        `${label} edge candidate failed validation (contracts/invalid-input): matchBasis must be route|topic-id|name-exact|name-similarity`,
       );
     }
     assertEvidenceSpans(edge["evidence"], label);
@@ -340,7 +340,7 @@ export function detectContractDrift(input: ContractDriftInput): ContractDriftRes
         .map((finding) => finding.ruleId);
       if (markers.length > 0) {
         unchangedNotes.push(
-          `${evaluation.matchKey}: değişiklik yok; değerlendirme notu: ${markers.join(", ")}`,
+          `${evaluation.matchKey}: no change; assessment note: ${markers.join(", ")}`,
         );
       }
       continue;
@@ -401,21 +401,21 @@ export function detectContractDrift(input: ContractDriftInput): ContractDriftRes
     if (!hasConsumerEdge && record !== undefined) {
       unconsumedChanges.push(record);
       unconsumedNotes.push(
-        `unconsumed: ${matchKey} — tüketici kenarı (CONSUMES_CONTRACT) bulunamadı; tüketici etkisi değerlendirilemedi`,
+        `unconsumed: ${matchKey} — no consumer edge (CONSUMES_CONTRACT) found; consumer impact could not be assessed`,
       );
     }
   }
 
   const rationale: string[] = [
-    `karşılaştırılan çift: ${String(report.evaluations.length)}; değişen: ${String(changedPairs)}; değişmeyen: ${String(unchangedPairs)}`,
+    `compared pairs: ${String(report.evaluations.length)}; changed: ${String(changedPairs)}; unchanged: ${String(unchangedPairs)}`,
   ];
   if (changedPairs === 0) {
-    rationale.push("yapısal değişiklik bulunamadı; drift boş");
+    rationale.push("no structural change found; drift is empty");
   }
   rationale.push(...unchangedNotes);
   rationale.push(...unconsumedNotes);
   for (const finding of report.unattachedFindings) {
-    rationale.push(`unattached bulgu: ${finding.ruleId} — ${finding.summary}`);
+    rationale.push(`unattached finding: ${finding.ruleId} — ${finding.summary}`);
   }
 
   return {

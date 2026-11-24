@@ -165,7 +165,7 @@ function assertValidDiscoveryOutput(value: unknown, label: string): DiscoveryOut
   if (!isPlainObject(value) || !Array.isArray(value["contracts"]) || !Array.isArray(value["diagnostics"])) {
     throw new ContractDiscoveryError(
       "contracts/invalid-input",
-      `${label} DiscoveryOutput doğrulanamadı (contracts/invalid-input): contracts ve diagnostics dizileri zorunludur`,
+      `${label} DiscoveryOutput failed validation (contracts/invalid-input): the contracts and diagnostics arrays are required`,
     );
   }
   return value as unknown as DiscoveryOutput;
@@ -180,7 +180,7 @@ function assertValidCandidate(value: unknown, label: string): ContractCandidate 
   ) {
     throw new ContractDiscoveryError(
       "contracts/invalid-input",
-      `${label} ContractCandidate doğrulanamadı (contracts/invalid-input): properties/diagnostics dizileri ve evidence zorunludur`,
+      `${label} ContractCandidate failed validation (contracts/invalid-input): the properties/diagnostics arrays and evidence are required`,
     );
   }
   return value as unknown as ContractCandidate;
@@ -279,9 +279,9 @@ export function evaluateContractPair(
       ruleId: "serializer-unknown",
       classification: "unknown",
       summary:
-        "serializer/bilinmeyen yapı işareti: " +
+        "serializer/unknown-structure marker: " +
         markers.join(" | ") +
-        " — TŞ §11: uyumluluk serializer/runtime'a göre farklılaşabilir; unknown üretilir",
+        " — compatibility can differ by serializer/runtime, so the result is unknown",
       evidence: pairEvidence,
     });
   }
@@ -302,8 +302,8 @@ export function evaluateContractPair(
             ruleId: "required-property-relaxed",
             classification: "backward-safe",
             summary:
-              `property "${name}" her iki sürümde de var; yalnızca zorunluluk gevşedi ` +
-              "(required→optional) — eski gönderenler hâlâ geçerli",
+              `property "${name}" exists in both versions; only its requiredness was relaxed ` +
+              "(required→optional) — existing senders remain valid",
             property: name,
             evidence: pairEvidence,
           });
@@ -317,8 +317,8 @@ export function evaluateContractPair(
             ruleId: "optional-property-made-required",
             classification: "risk",
             summary:
-              `property "${name}" base'de opsiyonelken target'ta zorunlu oldu ` +
-              "(TŞ §11: nullable→required → risk; keşif sadakati required listesi)",
+              `property "${name}" was optional in base and is required in target ` +
+              "(nullable→required → risk; discovery tracks the required list, not nullability)",
             property: name,
             evidence: pairEvidence,
           });
@@ -337,8 +337,8 @@ export function evaluateContractPair(
                 ruleId: "required-property-removed",
                 classification: "breaking_candidate",
                 summary:
-                  `zorunlu property "${name}" target sürümünde yok ` +
-                  "(TŞ §11: zorunlu property silinmesi → breaking_candidate)",
+                  `required property "${name}" is missing in the target version ` +
+                  "(removing a required property → breaking_candidate)",
                 property: name,
                 evidence: pairEvidence,
               }
@@ -346,8 +346,8 @@ export function evaluateContractPair(
                 ruleId: "optional-property-removed",
                 classification: "risk",
                 summary:
-                  `opsiyonel property "${name}" target sürümünde yok — opsiyonel ekleme ` +
-                  "kuralının tersi; risk düzeyinde işaretlenir (breaking iddiası TŞ'de sayılmaz)",
+                  `optional property "${name}" is missing in the target version — the inverse of the ` +
+                  "optional-addition rule; flagged as risk (not counted as a breaking change)",
                 property: name,
                 evidence: pairEvidence,
               },
@@ -370,8 +370,8 @@ export function evaluateContractPair(
                 ruleId: "added-required-property",
                 classification: "risk",
                 summary:
-                  `target'ta YENİ zorunlu property "${name}" — eski üreticiler göndermez; ` +
-                  "risk düzeyinde işaretlenir (breaking iddiası TŞ'de sayılmaz)",
+                  `NEW required property "${name}" in target — existing producers do not send it; ` +
+                  "flagged as risk (not counted as a breaking change)",
                 property: name,
                 evidence: pairEvidence,
               }
@@ -379,7 +379,7 @@ export function evaluateContractPair(
                 ruleId: "optional-property-added",
                 classification: "backward-safe",
                 summary:
-                  `yeni opsiyonel property "${name}" (TŞ §11 kuralı: yeni opsiyonel alan → ` +
+                  `new optional property "${name}" (rule: a new optional field → ` +
                   "backward-safe)",
                 property: name,
                 evidence: pairEvidence,
@@ -398,8 +398,8 @@ export function evaluateContractPair(
       ruleId: "discovery-partial",
       classification: "unknown",
       summary:
-        "certainty=partial aday nedeniyle eksik-liste temelli şu kural değerlendirmeleri " +
-        "bastırıldı (uydurma iddia üretilmedi): " +
+        "these rule evaluations rely on a complete property list and were suppressed because " +
+        "a candidate has certainty=partial (no fabricated claim was produced): " +
         suppressed.join(", "),
       evidence: pairEvidence,
     });
@@ -409,7 +409,7 @@ export function evaluateContractPair(
     findings.push({
       ruleId: "no-change-detected",
       classification: "backward-safe",
-      summary: "bu kural setinde yapısal fark bulunamadı — backward-safe",
+      summary: "no structural difference found under this rule set — backward-safe",
       evidence: pairEvidence,
     });
   }
@@ -492,8 +492,8 @@ export function checkContractCompatibility(
         classification: "breaking_candidate",
         summary:
           ruleId === "removed-endpoint"
-            ? `endpoint kaldırıldı: ${candidate.method} ${candidate.route} (TŞ §11 kuralı: endpoint silme → breaking_candidate)`
-            : `route'ta metot değişti: ${candidate.method} ${candidate.route} hedefte yok; kalan metotlar hedefte başka metotlarla sürüyor (TŞ §11 kuralı: metot değişimi → breaking_candidate)`,
+            ? `endpoint removed: ${candidate.method} ${candidate.route} (rule: removing an endpoint → breaking_candidate)`
+            : `method changed on route: ${candidate.method} ${candidate.route} is missing in the target; the route remains in the target with other methods (rule: a method change → breaking_candidate)`,
         evidence: targetSpan === undefined ? [candidate.evidence] : [candidate.evidence, targetSpan],
       },
     ],
@@ -511,7 +511,7 @@ export function checkContractCompatibility(
       {
         ruleId: "added-endpoint",
         classification: "backward-safe",
-        summary: `target'ta yeni endpoint: ${candidate.method} ${candidate.route} (ekleme; mevcut istemcileri etkilemez)`,
+        summary: `new endpoint in target: ${candidate.method} ${candidate.route} (addition; does not affect existing clients)`,
         evidence: [candidate.evidence],
       },
     ],
@@ -603,8 +603,8 @@ export function checkContractCompatibility(
             ruleId: "removed-contract",
             classification: "breaking_candidate",
             summary:
-              `sözleşmenin tamamı target'ta yok: ${key} — zorunlu property silinmesi ` +
-              "kuralının sözleşme ölçeğindeki türevi (TŞ §11)",
+              `the entire contract is missing in target: ${key} — the contract-level form of the ` +
+              "required-property-removal rule",
             evidence: [baseCandidate.evidence],
           },
         ],
@@ -624,7 +624,7 @@ export function checkContractCompatibility(
           {
             ruleId: "added-contract",
             classification: "backward-safe",
-            summary: `target'ta yeni sözleşme: ${key} (ekleme; K-013(7) changeKind added)`,
+            summary: `new contract in target: ${key} (addition; changeKind added)`,
             evidence: [targetCandidate.evidence],
           },
         ],
@@ -651,8 +651,8 @@ export function checkContractCompatibility(
       classification: rule.classification,
       summary:
         rule.ruleId === "column-dropped"
-          ? `${diagnostic.message} — TŞ §11: DB kolon kaldırma → tüketiciler için aday etki`
-          : `${diagnostic.message} — TŞ §11 rename için sınıflama saymaz; unknown (uydurma karar yok)`,
+          ? `${diagnostic.message} — dropping a DB column is a candidate impact for consumers`
+          : `${diagnostic.message} — renames are not classified; unknown (no fabricated verdict)`,
       ...(property === undefined ? {} : { property }),
       evidence: [lineSpan(diagnostic)],
     };

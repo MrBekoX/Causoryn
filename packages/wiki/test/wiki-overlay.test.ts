@@ -928,7 +928,7 @@ describe("Reindex not koruma — iki senaryo (bit-bit)", () => {
       expect(ordersOverlay?.renderedMarkdown).toContain("host_model_proposal");
       expect(ordersOverlay?.renderedMarkdown).toContain("verified=false");
       expect(ordersOverlay?.renderedMarkdown).toContain(HOST_BODY);
-      expect(ordersOverlay?.renderedMarkdown).not.toContain("Overlay notu");
+      expect(ordersOverlay?.renderedMarkdown).not.toContain("Overlay note");
 
       // Sayfa kompozisyonu: overlay, generated içeriğin DIŞINA eklenir.
       const generated = reindexed.sections
@@ -1025,7 +1025,7 @@ describe("renderAnnotationBlock", () => {
   it("human bloğu golden dizeyle bit-bit eşittir (determinizm pini)", () => {
     expect(renderAnnotationBlock(human)).toBe(
       [
-        "> **[Overlay notu — human]** sectionKey:`dependencies` · annotationId:`annot-human-1` · annotationVersion=2 · origin=human_note",
+        "> **[Overlay note — human]** sectionKey:`dependencies` · annotationId:`annot-human-1` · annotationVersion=2 · origin=human_note",
         ">",
         "> İlk satır",
         "> İkinci satır",
@@ -1037,7 +1037,7 @@ describe("renderAnnotationBlock", () => {
     const hostBlock = renderAnnotationBlock(host);
     expect(hostBlock).toBe(
       [
-        "> **[AI ÖNERİSİ — host_model_proposal, verified=false]** sectionKey:`summary` · annotationId:`annot-host-1` · annotationVersion=0 · origin=host_model_proposal",
+        "> **[AI PROPOSAL — host_model_proposal, verified=false]** sectionKey:`summary` · annotationId:`annot-host-1` · annotationVersion=0 · origin=host_model_proposal",
         ">",
         "> Model önerisi gövdesi",
       ].join("\n"),

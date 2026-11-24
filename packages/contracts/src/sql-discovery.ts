@@ -237,10 +237,10 @@ export function discoverSqlContracts(
   text: string,
 ): DiscoveryOutput {
   if (typeof workspaceId !== "string" || workspaceId.trim().length === 0) {
-    throw new ContractDiscoveryError("contracts/invalid-input", "workspaceId boş olamaz");
+    throw new ContractDiscoveryError("contracts/invalid-input", "workspaceId must not be empty");
   }
   if (typeof text !== "string") {
-    throw new ContractDiscoveryError("contracts/invalid-input", "text string olmalı");
+    throw new ContractDiscoveryError("contracts/invalid-input", "text must be a string");
   }
   // Boyut kotası yaml/json yollarıyla simetriktir (kırmızı çizgi 6; TŞ §19):
   // saf çekirdek sınırsız metin kabul etmez (takım denetimi bulgusu 1).
@@ -320,7 +320,7 @@ export function discoverSqlContracts(
           code: "contracts/sql-drop-column",
           message:
             "ALTER TABLE " + table + " DROP COLUMN " + actions.dropColumn +
-            " — kolon kaldırma; tüketici etkisi adayı (TŞ §11)",
+            " — column removal; candidate consumer impact",
           line: statement.startLine,
         });
         const existing = builds.get(table);
@@ -370,7 +370,7 @@ export function discoverSqlContracts(
         code: "contracts/sql-drop-table",
         message:
           "DROP TABLE " + table +
-          " — tablo kaldırma; sözleşme değil değişim olayı (keşif adayı üretmez)",
+          " — table removal; a change event, not a contract (no discovery candidate produced)",
         line: statement.startLine,
       });
     }

@@ -99,7 +99,7 @@ function assertSurface(
   if (!Array.isArray(value)) {
     throw new WikiProjectionError(
       "wiki/invalid-contract-surface",
-      `${label} sözleşme yüzeyi doğrulanamadı (wiki/invalid-contract-surface): dizi olmalıdır`,
+      `${label} contract surface failed validation (wiki/invalid-contract-surface): must be an array`,
     );
   }
   for (const entry of value) {
@@ -108,7 +108,7 @@ function assertSurface(
       if (typeof fieldValue !== "string" || fieldValue.length === 0) {
         throw new WikiProjectionError(
           "wiki/invalid-contract-surface",
-          `${label} sözleşme yüzeyi doğrulanamadı (wiki/invalid-contract-surface): ${field} boş olmayan string olmalıdır`,
+          `${label} contract surface failed validation (wiki/invalid-contract-surface): ${field} must be a non-empty string`,
         );
       }
     }
@@ -197,7 +197,7 @@ export function computeWikiContractChanges(
       changes.push({
         contractId: targetEntry.contractId,
         changeKind: "added",
-        summary: `${targetEntry.qualifiedName} added: hedef WikiSnapshot'ın graph sözleşme yüzeyinde yeni kayıt`,
+        summary: `${targetEntry.qualifiedName} added: new entry in the target WikiSnapshot's graph contract surface`,
       });
       continue;
     }
@@ -205,7 +205,7 @@ export function computeWikiContractChanges(
       changes.push({
         contractId: baseEntry.contractId,
         changeKind: "removed",
-        summary: `${baseEntry.qualifiedName} removed: hedef WikiSnapshot'ın graph sözleşme yüzeyinde kayıt yok`,
+        summary: `${baseEntry.qualifiedName} removed: no entry in the target WikiSnapshot's graph contract surface`,
       });
       continue;
     }
@@ -219,7 +219,7 @@ export function computeWikiContractChanges(
         contractId: targetEntry.contractId,
         changeKind: "modified",
         summary:
-          `${targetEntry.qualifiedName} modified: sözleşme içerik karması değişti ` +
+          `${targetEntry.qualifiedName} modified: contract content hash changed ` +
           `(base=${baseEntry.contentHash.slice(0, SUMMARY_HASH_PREFIX)} → ` +
           `target=${targetEntry.contentHash.slice(0, SUMMARY_HASH_PREFIX)})`,
       });

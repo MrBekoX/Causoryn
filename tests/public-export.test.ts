@@ -193,7 +193,7 @@ describe("scripts/export-public-tree.mjs — Seçenek 1 temiz açık kaynak dı�
       { cwd: os.tmpdir(), encoding: "utf8", shell: false },
     );
     expect(res.status, res.stderr).toBe(0);
-    expect(res.stdout).toContain("PUBLIC_EXPORT YEŞİL");
+    expect(res.stdout).toContain("PUBLIC_EXPORT PASS");
     expect(existsSync(path.join(outDir, "raw"))).toBe(false);
     expect(existsSync(path.join(outDir, "LICENSE"))).toBe(true);
   });
@@ -206,7 +206,7 @@ describe("scripts/export-public-tree.mjs — Seçenek 1 temiz açık kaynak dı�
       { cwd: os.tmpdir(), encoding: "utf8", shell: false },
     );
     expect(res.status, res.stderr).toBe(0);
-    expect(res.stdout).toContain("PUBLIC_EXPORT YEŞİL");
+    expect(res.stdout).toContain("PUBLIC_EXPORT PASS");
     const pathMatch = res.stdout.match(/→\s*(.+?)\s*(?:\(|$)/m);
     const exportedTmp = pathMatch?.[1]?.trim();
     if (exportedTmp) {
@@ -226,7 +226,7 @@ describe("scripts/export-public-tree.mjs — Seçenek 1 temiz açık kaynak dı�
       { cwd: os.tmpdir(), encoding: "utf8", shell: false },
     );
     expect(redRes.status).toBe(1);
-    expect(redRes.stderr).toContain("PUBLIC_EXPORT KIRMIZI");
+    expect(redRes.stderr).toContain("PUBLIC_EXPORT FAIL");
     const leakedTmpDirs = readdirSync(os.tmpdir()).filter(
       (name) => name.startsWith("causoryn-export-gate-") && !tmpBefore.has(name),
     );
@@ -240,7 +240,7 @@ describe("scripts/export-public-tree.mjs — Seçenek 1 temiz açık kaynak dı�
     writeFileSync(path.join(nonEmptyDir, "existing.txt"), "data", "utf8");
 
     expect(() => exportPublicTree({ repoRoot: repoDir, outDir: nonEmptyDir, ref: "HEAD" })).toThrow(
-      /boş|empty/i,
+      /must be empty/i,
     );
   });
 
@@ -269,7 +269,7 @@ describe("scripts/export-public-tree.mjs — Seçenek 1 temiz açık kaynak dı�
     const outDir = path.join(createTempDir("causoryn-pubexport-leak-"), "out");
 
     expect(() => exportPublicTree({ repoRoot: leakyRepo, outDir, ref: "HEAD" })).toThrow(
-      /PUBLIC_EXPORT KIRMIZI|doğrulama başarısız/i,
+      /PUBLIC_EXPORT FAIL — verification failed/,
     );
   });
 
