@@ -28,7 +28,9 @@ jobs:
         os:
           - ubuntu-latest
           - windows-latest
-          - macos-latest
+          # Pin stable macos-15 instead of floating macos-latest (macos-26-arm64),
+          # which suffers recurring 15-minute hosted runner acquisition timeouts.
+          - macos-15
     steps:
       - name: Harden Runner (Linux)
         if: runner.os == 'Linux'
