@@ -1,185 +1,276 @@
-# Tool Sözleşmeleri — Yayımlanan 29 Araç (TŞ v2.1 §10.2 + §16A.8)
+# MCP Araç Sözleşmeleri — Core, Wiki, History ve Full Profilleri
 
-> Kanıt: `packages/mcp-server/src/version.ts` `TOOL_NAMES` (29 araç; `tools/list`
-> TAM OLARAK bu kümeyi sunar — boş handler yok, ADR-010) ·
-> `packages/mcp-server/src/server.ts` (araç kayıtları + input/output schema'lar) ·
-> `packages/mcp-server/src/errors.ts` (sabit hata kodu tablosu) ·
-> `wiki/mcp-tools.md` (katalog) · Doğrulama testi: `tests/release-docs.test.ts`
-> (tablo kümesi ↔ `TOOL_NAMES` birebir; bu dosyada başka araç adı geçemez) · **Dil / Language:** **Türkçe** | [English](en/tool-contracts.md)
+> **Dil / Language:** **Türkçe** | [English](en/tool-contracts.md) · [Dokümantasyon Merkezi](README.md)
+>
+> **Durum:** Causoryn 0.3.0'ı yansıtır (11 araçlı varsayılan `core` araç profili; `wiki`, `history` ve `full` profilleri `--tool-profile` ile isteğe bağlı açılır). Sunucunun nasıl başlatıldığı için bkz. [CLI ve Konfigürasyon](cli-and-configuration.md).
+>
+> **Doğruluk kaynağı:** `packages/mcp-server/src/version.ts` (`CORE_TOOL_NAMES`, `WIKI_TOOL_NAMES`, `HISTORY_TOOL_NAMES`, `TOOL_NAMES`, `DEPRECATED_TOOL_REPLACEMENTS`), `packages/mcp-server/src/server.ts` (kayıtlar, profil çözümleme, annotations, deprecation ve indeksleme envelope'ları), `packages/mcp-server/src/schemas.ts` (wire girdi şemaları), `packages/mcp-server/src/services*.ts` (handler'lar ve veri şemaları), `packages/mcp-server/src/errors.ts` (sabit hata tablosu), `packages/mcp-server/src/envelope.ts`, `packages/mcp-server/src/runtime-cli.ts`. Doğrulama: `tests/release-docs.test.ts`, bu sayfadaki legacy/full ve wiki tablolarının tam olarak 29 legacy/full aracı listelediğini (İngilizce sürümde ayrıca tam olarak 11 core aracını) denetler; `tests/mcp-tool-surface-budget.test.ts` core `tools/list` bütçesini denetler.
 
-Bu sayfa **özet**tir: yetkili sözleşme kaynak kodun `inputSchema`/`outputSchema`
-alanlarıdır (Zod; yanıtta JSON Schema olarak yayınlanır). Tablo, host modelinin
-hızlı referansı içindir; uyuşmazlıkta kaynak şema esastır.
+Bu sayfa bir **başvuru özetidir**. Yetkili wire sözleşmesi, kaynak koddaki her aracın Zod girdi şeması ve çıktı (data) şemasıdır. Sunucu her yanıt envelope'unu her iki çıktı şeması modunda da kendi çıktı şemasına göre doğrular (bkz. [Çıktı şeması profili ve doğrulama](#çıktı-şeması-profili-ve-doğrulama)). Bu sayfa ile kaynak kod uyuşmazsa kaynak kod esastır.
 
-## Standart envelope (TŞ §10.1)
+---
 
-Her yanıt 10 alanlı `EnvelopeSchema` (`z.strictObject`) sözleşmesini eksiksiz taşır:
-`schemaVersion` ("2.0") + `requestId` + `workspaceId` + `snapshotId` +
-`status` (ok | partial | error) + `coverage` + `warnings` + `data` + `nextCursor` +
-`error` (10. alan; ok/partial durumunda `null`, hata durumunda `{code, message, retryable, userAction}`).
-Hata kodları TŞ §10.1 sabit seti + üç proje uzantısıdır
-(`packages/mcp-server/src/errors.ts` `CAUSORYN_TOOL_ERROR_CODES`, 15 kod; uzantılar K-008/K-011 ile kayıtlı, `UNSUPPORTED_LANGUAGE` rezerve sabit koddur);
-her hata `retryable` + `userAction` rehberi taşır. Ayrıca `packages/mcp-server/src/server.ts`
-yayımlanan 29 aracın tamamında yapısal MCP `annotations` (`readOnlyHint`, `destructiveHint: false`, `openWorldHint: false`)
-sunar: yazma matrisindeki 3 araçta (`causoryn_refresh_index`, `causoryn_export_documentation`, `causoryn_wiki_build`)
-`readOnlyHint: false`, geri kalan 26 araçta `readOnlyHint: true` beyan edilir. stdout yalnızca MCP protokol
-trafiğidir; loglar `[causoryn]` önekiyle stderr'e gider (kırmızı kural 4).
+## Araç profilleri (`--tool-profile` ve `CAUSORYN_TOOL_PROFILE`)
 
-**Evrensel kodlar (tablodan ayrı):** `INTERNAL_ERROR` her araçta beklenmeyen hata
-kovasıdır (ham mesaj istemciye sızmaz, requestId korelasyonlu genel mesaj döner);
-girdi şeması reddi SDK düzeyinde `isError` ile döner, şemayı geçen anlamsal girdi
-hatası `INVALID_ARGUMENT` ile raporlanır.
+Causoryn, `tools/list` içinde yalnızca etkin profilin araçlarını kaydeder. Varsayılan `core` profili host modelinin bağlamını küçük tutar: `tests/mcp-tool-surface-budget.test.ts`, core `tools/list` yükünün 15.000 karakterde veya altında, `causoryn_export_documentation` girdisinin de 1.800 karakterde veya altında kaldığını doğrular.
 
-Aynı yayımlanmış snapshot ve eşdeğer sorgu girdileri, sabit sıralamalı analiz verisi üretir. MCP `requestId` istekten gelir. İş ilerlemesi, zaman damgaları ve `stale` bilgisi çalışma anındaki durumu yansıtır.
+| Profil | Kayıtlı araçlar | Notlar |
+|---|---|---|
+| `core` *(varsayılan)* | **11** (`CORE_TOOL_NAMES`) | Birleştirilmiş günlük kullanım yüzeyi. `causoryn_export_documentation`, `causoryn_preflight_change` ve `causoryn_verify_change` için yalın wire şemaları (sunucu tarafında tam şemalarla aynı doğrulama). |
+| `wiki` | **18** (11 core + 7 `WIKI_TOOL_NAMES`) | Living Wiki araçlarını ekler. |
+| `history` | **13** (11 core + 2 `HISTORY_TOOL_NAMES`) | `causoryn_compare_architecture` ve `causoryn_architecture_timeline` araçlarını ekler. |
+| `wiki,history` | **20** | Profiller virgülle birleştirilir; tekrarlar yok sayılır. |
+| `full` | **32** (29 `TOOL_NAMES` + `causoryn_status`, `causoryn_trace`, `causoryn_contracts`) | Geriye dönük uyumlu katalog. `full` her şeyi içerdiği için `full,wiki` ile `full` eşdeğerdir. Yerine yenisi gelen legacy araçlar deprecated olarak işaretlenir (aşağıya bakın). Export, preflight ve verify için full-profil girdi şemaları kullanılır. |
 
-## Hata kodu yöntem notu (dürüstlük)
+**Seçim sırası** (`runtime-cli.ts` `resolveEffectiveToolProfile`): `--tool-profile <list>` > `CAUSORYN_TOOL_PROFILE` > `core`. Bilinmeyen veya boş profil adları başlangıçta bir kullanım hatasıyla (çıkış kodu `2`) reddedilir. Sunucu programatik olarak gömüldüğünde `createCausorynMcpServer(context, { toolProfile })` önce bu seçeneği, sonra `CAUSORYN_CONFIG`'in isteğe bağlı `toolProfile` alanını, sonra `core`'u kullanır; geçersiz adlar istisna fırlatır.
 
-Tablodaki kodlar iki kaynaktan derlenmiştir (2026-11-09): (1) `services*.ts`
-handler gövdelerinin ve çağırdıkları hata-eşleme yardımcılarının
-(`graphErrorToToolError`, `wikiErrorToToolError`, `contractErrorToToolError`,
-`preflightErrorToToolError`, `verificationErrorToToolError`,
-`indexingErrorToToolError`) statik taraması; (2) `errors.ts` başlığındaki ve
-`wiki/decisions.md` K-008/K-011/K-012/K-014/K-015'teki ilk-kullanım kayıtları.
-Statik tarama paylaşılan yardımcılar nedeniyle aşırı/dar kalabilir; kesin
-eşleme kaynak kod + testlerdir (her aracın negatif testleri hata kodunu
-sabitler — bkz. `docs/implementation-status.md`).
+**`full` içinde deprecation:** `DEPRECATED_TOOL_REPLACEMENTS` içindeki her ad için araç açıklaması `(Deprecated: use <replacement>)` ile biter ve hata olmayan her envelope `[Deprecated in favor of <replacement>] Legacy tool <name> will be removed in a future release.` uyarısını alır. Veri yükü değişmez. Bkz. [Legacy araç karşılıkları](#legacy-araç-karşılıkları).
 
-## Çekirdek 22 araç (TŞ §10.2 katalog sırası)
+---
 
-| Araç | Girdi (ana alanlar) | Çıktı (data özeti) | Tipik hata kodları |
-|---|---|---|---|
-| `causoryn_get_capabilities` | `workspace?` | Adapter düzeyleri L0–L4 (5 dil; C# `frameworkLinkers: "aspnet-core-route-attributes (L3)"`), sunucu kimliği (`SERVER_VERSION = "0.2.4"`, `SCHEMA_VERSION = "2.0"`), sunucu limitleri, protokol revizyonu, yayımlanan araç listesi; snapshot gerektirmez | `WORKSPACE_NOT_AUTHORIZED` |
-| `causoryn_workspace_summary` | `workspaceId?` | Proje/framework/entrypoint/coverage özeti; sayılar yayınlanmış snapshot'tan türetilir; boş workspace `partial` | `WORKSPACE_NOT_AUTHORIZED`, `INDEX_NOT_READY`, `INVALID_ARGUMENT`, `LIMIT_EXCEEDED` |
-| `causoryn_index_status` | `jobId?` | Son (veya verilen) işin progress/snapshot/stale/tanıları. İşin tanıları ve uyarıları ayrı ayrı 50 kayıtla sınırlandırılır, gerektiğinde kısaltma özeti uyarılara eklenir. İş yoksa `job` ve `jobId` null döner, yayımlanmış snapshot yoksa yönlendirici uyarı eklenir | `WORKSPACE_NOT_AUTHORIZED`, `INVALID_ARGUMENT`, `LIMIT_EXCEEDED` |
-| `causoryn_refresh_index` | `mode` (`full` \| `incremental` — içerik karması karşılaştırmalı yenileme; B7 per-file parse reuse ve watcher MCP yüzeyi açık), `scope?` (açık ret) | Anında `jobId`; iş arka planda koşar; yalnızca izinli graph deposuna (`InMemoryGraphRepository` veya `storage.dataDbPath` SQLite) yazar | `WORKSPACE_NOT_AUTHORIZED`, `INVALID_ARGUMENT`, `LIMIT_EXCEEDED`, `PATH_DENIED` |
-| `causoryn_map_system` | `level` (L0–L3; L3 `Function`/`Method`/`Handler`/`Endpoint`/`Test` kapsar), `filters?`, `maxNodes`, `cursor?` | Deterministik sıralı node+edge sayfaları; gerçek cursor sayfalama | `WORKSPACE_NOT_AUTHORIZED`, `INDEX_NOT_READY`, `INVALID_ARGUMENT`, `LIMIT_EXCEEDED` |
-| `causoryn_find_symbols` | `query`, `kind?`, `limit?` | qualifiedName üzerinde tam/önek/içerir dereceli arama; belirsiz ad → aday listesi | `WORKSPACE_NOT_AUTHORIZED`, `INDEX_NOT_READY`, `AMBIGUOUS_SYMBOL`, `SYMBOL_NOT_FOUND`, `INVALID_ARGUMENT`, `LIMIT_EXCEEDED` |
-| `causoryn_get_symbol_context` | `symbolId` (node kimliği veya qualifiedName), `edgeKinds?`, `depth?` | Sembol node'u + derinliğe kadar komşu kenarlar + kanıt kayıtları | `WORKSPACE_NOT_AUTHORIZED`, `INDEX_NOT_READY`, `AMBIGUOUS_SYMBOL`, `SYMBOL_NOT_FOUND`, `INVALID_ARGUMENT`, `LIMIT_EXCEEDED` |
-| `causoryn_trace_execution` | `entrypoint` (endpoint adı/sembol), `maxDepth?`, `maxPaths?` | CALLS+ROUTES_TO üzerinde sınırlı çağrı yolları; kenar başına resolution+evidence ayrı; unresolved kenarda zincir durur (`partial`) | `WORKSPACE_NOT_AUTHORIZED`, `INDEX_NOT_READY`, `AMBIGUOUS_SYMBOL`, `SYMBOL_NOT_FOUND`, `INVALID_ARGUMENT`, `LIMIT_EXCEEDED`, `EVIDENCE_NOT_FOUND`, `POLICY_INVALID` |
-| `causoryn_trace_business_flow` | `flowSeed`, `boundaries?` | İş akışı zincirleri (ROUTES_TO/CALLS/PRODUCES/CONSUMES_CONTRACT/CONTAINS, bounded BFS + ters kontrat izleme); kopukluk `gap` segmentiyle dürüst raporlanır | `WORKSPACE_NOT_AUTHORIZED`, `INDEX_NOT_READY`, `AMBIGUOUS_SYMBOL`, `SYMBOL_NOT_FOUND`, `INVALID_ARGUMENT`, `LIMIT_EXCEEDED`, `PATH_DENIED`, `INVALID_REVISION`, `CONTRACT_PARSE_FAILED` |
-| `causoryn_analyze_impact` | `targets`/`diff`, `depth?`, `edgeKinds?` | Ters kenar bounded BFS etki yolları; certainty×resolution AYRI alanlar; "%100 etkilenecek" üretilmez; çözülemeyen hedefler `unresolvedTargets` | `WORKSPACE_NOT_AUTHORIZED`, `INDEX_NOT_READY`, `INVALID_ARGUMENT`, `LIMIT_EXCEEDED`, `POLICY_INVALID` |
-| `causoryn_check_architecture` | `policyId?`, `scope?` | `.causoryn/architecture.rules.yaml` değerlendirmesi: no-cycles (Tarjan SCC) + forbidden-dependency bulguları; baseline suppression + orphanSuppressions | `WORKSPACE_NOT_AUTHORIZED`, `INDEX_NOT_READY`, `INVALID_ARGUMENT`, `LIMIT_EXCEEDED`, `POLICY_INVALID`, `INVALID_REVISION` |
-| `causoryn_compare_architecture` | `baseRef`, `targetRef` | İki git ref arası mimari diff: node ek/çıkar/değişen kümeleri, belgeli confidence'lı rename, kenar + API yüzeyi değişimleri; salt-okunur git okuma | `WORKSPACE_NOT_AUTHORIZED`, `INDEX_NOT_READY`, `INVALID_ARGUMENT`, `INVALID_REVISION`, `POLICY_INVALID`, `LIMIT_EXCEEDED` |
-| `causoryn_get_agent_context` | `task`, `candidateScope?`, `tokenBudget` (zorunlu) | exact-symbol → graph-proximity → contract → freshness → fts ayaklı bağlam paketi (`storage.dataDbPath` SQLite ile `symbol_fts` `fts` ayağı aktif; bellek-içi depoda degrade raporlanır); `estimatedTokens`, `omittedCount`, degrade ayaklar açık | `WORKSPACE_NOT_AUTHORIZED`, `INDEX_NOT_READY`, `INVALID_ARGUMENT`, `LIMIT_EXCEEDED` |
-| `causoryn_generate_onboarding` | `audience` (beginner/intermediate/maintainer) | Yapısal onboarding verisi: giriş noktaları, ilk 5 merkezi modül, öğrenme sırası (SCC), kritik akışlar, riskli alanlar; doğal dil host modelin işidir | `WORKSPACE_NOT_AUTHORIZED`, `INDEX_NOT_READY`, `INVALID_ARGUMENT`, `LIMIT_EXCEEDED` |
-| `causoryn_export_documentation` | `format` (json/markdown/mermaid/html/snapshot), `outputDir` (zorunlu), `fileName?`, `view?` (`architecture` [snapshot dışındaki formatlarda varsayılan] / `interactive` [yalnızca HTML] / `full`; `wiki` açık `INVALID_ARGUMENT` reddi), `options?` (`maxModules`, `pathPrefix`, `includeTests`), `annotations?` (isteğe bağlı, referansları doğrulanan istemci anotasyonları) | Deterministik görsel mimari portalı/diyagramı veya ham snapshot dışa aktarma (`view="architecture"`: sıfır-JS katmanlı SVG HTML portalı, subgraph Mermaid, Architecture Brief Markdown, kompakt JSON + `architectureSummary.moduleIds`; `view="interactive"`: pan/zoom/arama/kanıt çekmeceli offline HTML; `view="full"`: ham döküm; `snapshot`: kanonik `architecture-snapshot.json`); yazma YALNIZCA `output.allowedOutputDirs` beyanlı dizinine atomiktir (.tmp+rename) | `WORKSPACE_NOT_AUTHORIZED`, `INDEX_NOT_READY`, `INVALID_ARGUMENT`, `LIMIT_EXCEEDED`, `EXPORT_NOT_ALLOWED`, `PATH_DENIED` |
-| `causoryn_preflight_change` | `intent`, `targetSymbols?`/`targetFiles?`, `baseSnapshot?` | ADAY Preflight Manifest: impactCandidates (certainty/resolution ayrı), contractChecks, testPlanId, limitations, sourceRevision; **diske kod/veri yazmaz** (candidateOnly sabit true; manifest yalnızca süreç-içi `PreflightManifestStore` FIFO 200 bellekte tutulur) | `WORKSPACE_NOT_AUTHORIZED`, `INDEX_NOT_READY`, `AMBIGUOUS_SYMBOL`, `SYMBOL_NOT_FOUND`, `INVALID_ARGUMENT`, `LIMIT_EXCEEDED`, `PATH_DENIED` |
-| `causoryn_check_contracts` | `contracts?` ({name?, base, target} spec çiftleri), `snapshotId?` | backward-safe/risk/breaking_candidate/unknown sınıflaması; kural adı + eski/yeni satır kanıtı; çift-bağlanamayan tanılar ayrı | `WORKSPACE_NOT_AUTHORIZED`, `INDEX_NOT_READY`, `INVALID_ARGUMENT`, `LIMIT_EXCEEDED`, `PATH_DENIED`, `CONTRACT_PARSE_FAILED` |
-| `causoryn_detect_contract_drift` | `base`, `target`, `scope?`, `anchorFiles?` | Canonical drift: contractChanges ({contractId, changeKind, summary}), breaking/risk/unknown ayrı, PRODUCES/CONSUMES_CONTRACT etki grafı, `unconsumedChanges` (unresolved consumers) | `WORKSPACE_NOT_AUTHORIZED`, `INDEX_NOT_READY`, `INVALID_ARGUMENT`, `LIMIT_EXCEEDED`, `PATH_DENIED`, `CONTRACT_PARSE_FAILED` |
-| `causoryn_verify_change` | `preflightId?` / `baseSnapshot?` (en az biri), `target?` | Dört denetimli doğrulama raporu: architecture/contracts/graph-diff/test-plan; verdict sabit kural zincirinden: no_findings \| review_required \| blocking_findings \| inconclusive; test durumu `not_run` varsayılan (observed yalnızca evidenceRef+sha256 kanıtıyla); rapor byte-deterministik; **kod yazmaz, test çalıştırmaz** | `WORKSPACE_NOT_AUTHORIZED`, `INDEX_NOT_READY`, `INVALID_ARGUMENT`, `INVALID_REVISION`, `LIMIT_EXCEEDED`, `PATH_DENIED`, `POLICY_INVALID` |
-| `causoryn_derive_test_plan` | `changeSet` (changedSymbols/changedFiles) / `preflightId?` (bu yüzeyde açık ret) | Test adayları: direct (TESTS kenarı) + call-site (ters CALLS BFS) + naming (heuristic); reason+evidenceIds+matchLevel; `missingCoverageCandidates`; test ÇALIŞTIRILMAZ, plan kimliği `testplan:<sha256>` | `WORKSPACE_NOT_AUTHORIZED`, `INDEX_NOT_READY`, `INVALID_ARGUMENT`, `LIMIT_EXCEEDED` |
-| `causoryn_get_evidence` | `nodeId`/`edgeId`/`evidenceId`/`findingId` | Kanıt zinciri: relativePath+startLine/endLine+sourceHash+analyzerId+rationale; `targetId`/`chain` özeti; finding:<sha256> policy'den türetilir | `WORKSPACE_NOT_AUTHORIZED`, `INDEX_NOT_READY`, `INVALID_ARGUMENT`, `LIMIT_EXCEEDED`, `EVIDENCE_NOT_FOUND`, `POLICY_INVALID` |
-| `causoryn_architecture_timeline` | `refs`/`range`, `granularity?` | Git noktalarında deterministik örneklenmiş diff zaman çizelgesi + Faz E ihlal trendi (no-cycles/forbidden nokta başına ayrı; kalite tek sayıya indirgenmez); atlanan noktalar açık listelenir | `WORKSPACE_NOT_AUTHORIZED`, `INDEX_NOT_READY`, `INVALID_ARGUMENT`, `INVALID_REVISION`, `POLICY_INVALID`, `LIMIT_EXCEEDED` |
+## Standart envelope ve dil başına kapsam
+
+Her araç katı, 10 alanlı `EnvelopeSchema`'yı (`packages/mcp-server/src/envelope.ts`, `z.strictObject`) döner:
+
+1. `schemaVersion` — her zaman `"2.0"` (`SCHEMA_VERSION`).
+2. `requestId` — dizge olarak MCP istek kimliği.
+3. `workspaceId` — `string | null`.
+4. `snapshotId` — `string | null`: graph araçları için `GraphSnapshot` kimliği, wiki araçları için sunulan `WikiSnapshot` kimliği; snapshot okumayan araçlar için (örneğin bir refresh isteği veya yalnızca yetenek sorgulayan bir çağrı) `null`.
+5. `status` — `"ok" | "partial" | "error"`. `partial`, sonucun kullanılabilir ama eksik olduğu anlamına gelir (kısmi snapshot, çözülemeyen zincir, süren indeksleme).
+6. `coverage` — `{ tier, resolvedEdges, unresolvedEdges, totalEdges, coverageRatio, byLanguage? } | null`. `tier`, `L0`–`L4` aralığındadır.
+   - **`coverage.byLanguage`**, dile göre anahtarlanmış (anahtarları sıralı) isteğe bağlı bir kayıttır ve `{ tier (L0|L1|L2), files, verifiedEdges, heuristicEdges, unresolvedEdges, coverageRatio }` taşır; böylece güçlü TypeScript kapsamı, C#, Python, Go veya Rust'taki bir `L0` fallback'ini gizleyemez.
+7. `warnings` — `string[]` (bayat snapshot, kırpılan limitler, deprecation, güven uyarıları, degrade olan ayaklar).
+8. `data` — araç yükü; `AMBIGUOUS_SYMBOL` durumunda aday listesi; indeksleme-sürüyor nesnesi (aşağıda); diğer hatalarda `null`.
+9. `nextCursor` — `string | null` (opak sayfalama cursor'ı).
+10. `error` — `status` `ok` veya `partial` iken `null`; `status` `error` iken `{ code, message, retryable, userAction }`.
+
+Alan, politika ve yetkilendirme hataları MCP `isError: false` ile `envelope.error` içinde taşınır; asla protokol çökmesi değildir. Wire şemasını geçemeyen girdiler MCP SDK tarafından protokol düzeyinde `isError: true` ile reddedilir; şemayı geçip anlamsal kuralları ihlal eden girdiler bir `INVALID_ARGUMENT` envelope'u döner. `INTERNAL_ERROR`, her araçtaki beklenmeyen hatalar için genel kovadır: ham mesaj yalnızca `stderr`'e loglanır ve istemci `requestId`'yi içeren genel bir mesaj alır.
+
+`stdout` yalnızca MCP JSON-RPC çerçevelerini taşır; operasyonel loglar `[causoryn]` önekiyle `stderr`'e gider. Her araç `destructiveHint: false` ve `openWorldHint: false` içeren MCP `annotations` beyan eder; `readOnlyHint` aşağıda araç başına listelenmiştir.
+
+Aynı yayımlanmış snapshot ve eşdeğer girdiler için analiz verisi deterministik olarak sıralanır. `requestId`, iş ilerlemesi, zaman damgaları ve `stale` çalışma zamanı durumunu yansıtır.
+
+### İndeksleme, güncellik ve ilerleme
+
+- **Sınırlı bekleme:** `causoryn_status`, `causoryn_get_capabilities`, `causoryn_index_status` ve `causoryn_refresh_index` dışındaki herhangi bir aracı çalıştırmadan önce sunucu ilk indeks için `CAUSORYN_INDEX_WAIT_MS` kadar (varsayılan `15000`; `0` = bekleme) bekler. İndeksleme, süreç-içi asenkron bir fallback'le birlikte bir `worker_threads` worker'ında çalışır; böylece MCP olay döngüsü yanıt vermeye devam eder.
+- **İndeksleme-sürüyor envelope'u:** Bir indeks işi çalışırken bir graph aracı `INDEX_NOT_READY` ile başarısız olacaksa sunucu `status: "partial"`, `snapshotId: null` ve `data: { indexing: true, status: "indexing", jobId, progress: { phase, completed, total: 100 }, retryAfterMs: 3000 }` ile birlikte işi adlandıran bir uyarı döner. Wiki araçları bu dönüşümün dışındadır ve her zamanki gibi `INDEX_NOT_READY` döner.
+- **İlerleme bildirimleri:** `_meta.progressToken` gönderen istemciler, çağrı ilk indeksi beklerken MCP `notifications/progress` alır (en iyi çaba; kapanmış bir taşıma çağrıyı asla başarısız kılmaz).
+- **Bayat snapshot:** Yeniden indeksleme sürerken, snapshot taşıyan wiki dışı yanıtlar `stale=true: background re-indexing is currently running; serving latest published snapshot` uyarısını alır. Okuyucular her zaman en son yayımlanmış snapshot'ı görür, asla yarım oluşturulmuş olanı değil.
+
+---
+
+## Varsayılan `core` profili (11 araç — `--tool-profile core`)
+
+`Yerine geçtiği` sütunu, core aracın davranışını kapsadığı `DEPRECATED_TOOL_REPLACEMENTS` legacy araçlarını listeler. `readOnlyHint: false`, Causoryn'e ait konumlara yazabilen araçları işaretler (analiz edilen kaynak ağacına asla yazmazlar).
+
+| Araç | `readOnlyHint` | Yerine geçtiği | Girdiler (ana alanlar) | Çıktı (`data` özeti) | Tipik hata kodları |
+|---|---|---|---|---|---|
+| `causoryn_status` | `false` | `causoryn_get_capabilities`, `causoryn_workspace_summary`, `causoryn_index_status`, `causoryn_refresh_index` | `action?` (`inspect` varsayılan \| `refresh`), `mode?` (`incremental` varsayılan \| `full`; yalnızca refresh), `jobId?`, `workspace?` (yetki denetimi yapılacak yol), `workspaceId?` | **`inspect`**: `{ capabilities, authorized, indexing, retryAfterMs?, index, summary }` — `capabilities` = sunucu kimliği, protokol revizyonu, 5 adapter, limitler ve etkin profilin araçları; `index` = iş kaydı (tanılar ve uyarılar her biri 50 ile sınırlı), en son snapshot meta verisi ve `stale`; `summary` = çalışma alanı özeti (diller, framework'ler, giriş noktaları, edge türleri, çözümleme sayıları) veya ilk snapshot'tan önce `null`. Yetkili kök yokken hata yerine `status: "ok"`, `authorized: false` ve bir uyarı döner; ilk indeks snapshot olmadan çalışırken `retryAfterMs` ile `partial` döner. Çağrılması CLI modunda ertelenmiş ilk indeksi de başlatır. **`refresh`**: bir arka plan işini kuyruğa alır ve hemen `{ jobId, mode, scope, status, progressPercent, createdAt, startedAt }` döner (`snapshotId: null`). | `WORKSPACE_NOT_AUTHORIZED`, `INVALID_ARGUMENT`, `LIMIT_EXCEEDED`, `PATH_DENIED` |
+| `causoryn_map_system` | `true` | `causoryn_generate_onboarding` | `profile?` (`default` \| `onboarding`), `level?` (`L0`–`L3`, varsayılan `L2`; `L4` reddedilir), `filters?` (`kinds`, `pathPrefix`), `maxNodes?` (≤ `results.maxNodes`), `cursor?`, `audience?` (`beginner` \| `intermediate` \| `maintainer`, varsayılan `maintainer`), `limits?` (`entryPointLimit`, `topModuleCount`, `maxLearningSteps`, `maxCriticalFlows`; diğer anahtarlar reddedilir), `workspaceId?` | **`default`**: düzeye göre deterministik node sayfası (`L0` Workspace/Repository/Project, `L1` Module/Package/File/Namespace/Config, `L2` Class/Interface/Type, `L3` Function/Method/Handler/Endpoint/Test); önce `qualifiedName`'e sonra kimliğe göre sıralanır; ayrıca sayfadaki node'lar arasındaki edge'ler, `totalNodes`, `returned`, `truncated` ve `nextCursor`. **`onboarding`**: giriş noktaları, en merkezi modüller, topolojik öğrenme sırası (döngüler SCC ile daraltılır), kritik akışlar, testler ve risk alanları yapısal veri olarak; düz yazı host modele bırakılır. | `WORKSPACE_NOT_AUTHORIZED`, `INDEX_NOT_READY`, `INVALID_ARGUMENT`, `LIMIT_EXCEEDED` |
+| `causoryn_find_symbols` | `true` | — | `query` (boş reddedilir), `kind?`, `limit?` (≤ `results.maxSymbols`), `workspaceId?` | `qualifiedName` üzerinde büyük/küçük harf duyarsız dereceli arama: önce tam eşleşme, sonra önek, sonra alt dizge; eşitlikler ad ve kimlikle bozulur. Aynı adla gerçek bir çalışma alanı tanımı eşleştiğinde `UnknownExternal` yer tutucuları düşürülür (`kind` verilmedikçe). Birden fazla farklı tam eşleşme `data.candidates` ile `AMBIGUOUS_SYMBOL` döner. | `WORKSPACE_NOT_AUTHORIZED`, `INDEX_NOT_READY`, `AMBIGUOUS_SYMBOL`, `SYMBOL_NOT_FOUND`, `INVALID_ARGUMENT`, `LIMIT_EXCEEDED` |
+| `causoryn_get_symbol_context` | `true` | — | `symbolId` (node kimliği veya tam `qualifiedName`), `edgeKinds?` (geçerli edge türleri olmalı), `depth?` (varsayılan `1`, ≤ `results.maxDepth`), `workspaceId?` | Hedef node, deterministik BFS sırasıyla `depth`'e kadar komşu edge'ler (`results.maxNodes` ile sınırlı; `truncated` ve bir uyarıyla) ve dayanak kaynak-aralığı kanıt kayıtları. | `WORKSPACE_NOT_AUTHORIZED`, `INDEX_NOT_READY`, `AMBIGUOUS_SYMBOL`, `SYMBOL_NOT_FOUND`, `INVALID_ARGUMENT`, `LIMIT_EXCEEDED` |
+| `causoryn_trace` | `true` | `causoryn_trace_execution`, `causoryn_trace_business_flow` | `mode?` (`execution` varsayılan \| `business-flow`), `entrypoint?` veya `flowSeed?` (biri zorunlu), `maxDepth?` / `maxPaths?` (execution; varsayılanlar `6` / `25`, `results.maxDepth` / `results.maxPaths` değerlerine kırpılır, `0` reddedilir), `boundaries?`, `maxHops?`, `maxFlows?`, `maxNodes?` (business-flow), `workspaceId?` | **`execution`**: bir endpoint'ten (örneğin `POST /orders`) veya sembolden `CALLS` + `ROUTES_TO` üzerinde sınırlı, deterministik çağrı yolları; her edge kendi `resolution` değerini ve kanıtını korur; zincir `unresolved` bir edge'de durur (`status: "partial"`). Varsayılan konfigürasyonda etkin derinlik 3'tür, çünkü varsayılan `6` değeri `results.maxDepth = 3`'e kırpılır; tavanın üzerindeki açık değerler bir uyarıyla kırpılır. **`business-flow`**: `ROUTES_TO` / `CALLS` / `PRODUCES_CONTRACT` / `CONSUMES_CONTRACT` / `CONTAINS` üzerinde zincirler (sınırlı BFS artı ters kontrat izleme); kopukluklar `gap` segmentleri olarak raporlanır, asla köprülenmez. | `WORKSPACE_NOT_AUTHORIZED`, `INDEX_NOT_READY`, `AMBIGUOUS_SYMBOL`, `SYMBOL_NOT_FOUND`, `INVALID_ARGUMENT`, `LIMIT_EXCEEDED`, `EVIDENCE_NOT_FOUND`, `PATH_DENIED`, `POLICY_INVALID`, `INVALID_REVISION`, `CONTRACT_PARSE_FAILED` |
+| `causoryn_get_agent_context` | `true` | — | `task` (yalnızca arama sorgusu olarak kullanılır), `tokenBudget` (zorunlu), `maxProximityDepth?` (tavan 4), `candidateScope?` (rezerve, reddedilir), `workspaceId?` | `exact-symbol`, `graph-proximity`, `contract`, `freshness` ve `fts` ayaklarını birleştiren, derecelendirilmiş ve bütçeyle sınırlı bağlam öğeleri (öğe başına `estimatedTokens`, `omittedCount`, `candidateCount`). Sorgular ve tanımlayıcılar yol, camelCase, PascalCase, kısaltma, snake_case ve kebab-case sınırlarına göre parçalanır; `fts` ayağı yalnızca tırnaklı alfanümerik terimlerle SQLite FTS5 (`symbol_fts`) kullanır. Graph yakınlığı Workspace/Repository merkezlerini ve yukarı yönlü `CONTAINS` adımlarını atlar. Girdisi olmayan ayaklar `degradedLegs` içinde listelenir (örneğin `storage.dataDbPath` yapılandırılmadığında `fts`). Görev metni asla öğe `reason` dizgelerine kopyalanmaz. | `WORKSPACE_NOT_AUTHORIZED`, `INDEX_NOT_READY`, `INVALID_ARGUMENT`, `LIMIT_EXCEEDED` |
+| `causoryn_preflight_change` | `true` | `causoryn_analyze_impact`, `causoryn_derive_test_plan` | `intent?`, `targetSymbols?`, `targetFiles?`, `include?` (`impact`, `test-plan`), `baseSnapshot?`, `preflightId?`, `edgeKinds?`, `maxDepth?`, `maxPaths?`, `maxNodes?`, `maxCandidates?`, `workspaceId?`; `full` profili ayrıca `includeContracts?`, `includeTestPlan?`, `maxDisambiguationCandidates?` kabul eder | **Varsayılan** (`include` verilmedikçe `intent` zorunlu): yalnızca aday Preflight Manifest — `preflightId` (`preflight:<sha256>`), `baseSnapshotId`, `candidateOnly: true`, `identifiedTargets`, `impactCandidates` (`certainty` ve `resolution` ayrı alanlar olarak), `contractChecks`, içerik adresli `testPlanId` artı gömülü `testPlan`, `requiresDisambiguation` / `candidateTargets`, `limitations`, `sourceRevision`. **`intent`/`targetFiles` olmadan `targetSymbols` ile `include: ["impact"]`**: ters edge etki raporu (legacy `analyze_impact` ile aynı). **Hedef olmadan `preflightId` ile `include: ["test-plan"]`**: saklanan bir manifest için test planı (legacy `derive_test_plan` ile aynı). Diske hiçbir şey yazmaz; manifest yalnızca bellekte önbelleğe alınır (bkz. [Dürüst sınırlar](#dürüst-sınırlar)). | `WORKSPACE_NOT_AUTHORIZED`, `INDEX_NOT_READY`, `AMBIGUOUS_SYMBOL`, `SYMBOL_NOT_FOUND`, `INVALID_ARGUMENT`, `LIMIT_EXCEEDED`, `PATH_DENIED`, `POLICY_INVALID` |
+| `causoryn_verify_change` | `true` | `causoryn_check_architecture` | `preflightId?` / `baseSnapshot?` (yalnızca-mimari kısayolu dışında en az biri), `baseRef?` (kurallar için güvenilir Git ref'i; varsayılan manifest head'i veya `HEAD`; `working-tree` reddedilir), `targetRevision?` (`working-tree`), `checks?` (varsayılan `architecture`, `graph-diff`, `test-plan`; `contracts` isteğe bağlı), `observedTestRun?`, `workspaceId?` | Bayt-deterministik rapor: `reportId`, `verdict` (`no_findings` \| `review_required` \| `blocking_findings` \| `inconclusive`), `verdictNote`, `verdictRationale`, `incompleteChecks`, `disclaimers`, `architectureFindings`, `contractDrift`, `tests`, `unknowns`, denetim başına sonuçlar (`architecture`, `contracts`, `graphDiff`, `testPlan`), isteğe bağlı `preflightAlignment` ve `trustWarning`. Çalışma ağacı geçici bir bellek-içi depoya yeniden indekslenir; gerçek depo ve veri deposuna dokunulmaz. Kurallar ve baseline güvenilir `baseRef`'ten okunur; yalnızca çalışma ağacında varlarsa `architecture-rules-loaded-from-untrusted-working-tree` uyarısıyla kullanılırlar. `preflightId`/`baseSnapshot` olmadan `checks: ["architecture"]`, en son yayımlanmış snapshot'ı taban olarak kullanır. Test durumu `not_run`'dır; host `observedTestRun` sağladığında `engineVerified: false` ile `host_asserted` olur. | `WORKSPACE_NOT_AUTHORIZED`, `INDEX_NOT_READY`, `INVALID_ARGUMENT`, `INVALID_REVISION`, `LIMIT_EXCEEDED`, `PATH_DENIED`, `POLICY_INVALID` |
+| `causoryn_contracts` | `true` | `causoryn_check_contracts`, `causoryn_detect_contract_drift` | `action?` (`check` varsayılan \| `drift`), `contracts?` (`{ name?, base, target }`, 1–25 çift; `check` için zorunlu), `snapshotId?`, `base?` / `target?` (her biri 1–25 spec yolu; `drift` için zorunlu), `scope?` (eşleşme anahtarı filtresi), `anchorFiles?` (1–25), `workspaceId?` | **`check`**: çift başına değerlendirmeler; `backward-safe` \| `risk` \| `breaking_candidate` \| `unknown` olarak sınıflandırılır; kural adları ve eski/yeni satır aralığı kanıtıyla, `unattachedFindings` ve sınıflandırmaya göre bir özet. Desteklenen spec'ler: OpenAPI, AsyncAPI, JSON Schema, SQL DDL, Protobuf. **`drift`**: `contractChanges` (`{ contractId, changeKind, summary }`), ayrı `breakingCandidates` / `risks` / `unknowns`, `anchorFiles`'tan `PRODUCES_CONTRACT` / `CONSUMES_CONTRACT` üzerinden `impactedEdges`, `unconsumedChanges`, `rationale`. | `WORKSPACE_NOT_AUTHORIZED`, `INDEX_NOT_READY`, `INVALID_ARGUMENT`, `LIMIT_EXCEEDED`, `PATH_DENIED`, `CONTRACT_PARSE_FAILED` |
+| `causoryn_get_evidence` | `true` | — | `id` (bir `node:`, `edge:`, `evidence:` veya `finding:` kimliği), `workspaceId?` | Köken zinciri: `relativePath`, 1 tabanlı `startLine`/`endLine`, `sourceHash` (SHA-256), `analyzerId`, `rationale`, `contextRefs`, kısmi/eksik alan işaretçileri ve deterministik bir `chain` özeti. `finding:<sha256>` kimlikleri `.causoryn/architecture.rules.yaml`'dan yeniden türetilir. | `WORKSPACE_NOT_AUTHORIZED`, `INDEX_NOT_READY`, `INVALID_ARGUMENT`, `LIMIT_EXCEEDED`, `EVIDENCE_NOT_FOUND`, `POLICY_INVALID` |
+| `causoryn_export_documentation` | `false` | — | `format` (`json` \| `markdown` \| `mermaid` \| `html` \| `snapshot`), `outputDir` (zorunlu), `fileName?` (ayırıcı içermeyen yalın ad), `view?` (snapshot dışı formatlarda varsayılan `architecture` \| `interactive` (yalnızca HTML) \| `full`; `wiki` reddedilir), `options?` (`maxModules`, `pathPrefix`, `includeTests`), `annotations?`, `workspaceId?` | `{ path, format, bytes, atomic: true, view?, architectureSummary? }`; `architectureSummary`, `moduleCount`, `edgeCount`, `cycleCount`, `entrypointCount`, `contractCount`, `flowCount`, `annotated` ve kanonik `moduleIds` değerlerini taşır. Dosya yalnızca `output.allowedOutputDirs` içine yazılır (bkz. [Mimari dışa aktarma ayrıntıları](#mimari-dışa-aktarma-ayrıntıları)). | `WORKSPACE_NOT_AUTHORIZED`, `INDEX_NOT_READY`, `INVALID_ARGUMENT`, `LIMIT_EXCEEDED`, `EXPORT_NOT_ALLOWED`, `PATH_DENIED` |
+
+**Core girdi şeması notu:** `core` profilinde `causoryn_export_documentation` yalın bir şema duyurur (`view` bir dizgedir, `annotations` genel bir nesnedir, `options.maxModules` wire düzeyinde 1–200 kabul eder) ve `causoryn_verify_change`, `observedTestRun`'ı genel bir nesne olarak duyurur. Handler'lar yine de tam doğrulamayı uygular: bilinmeyen görünümler, aralık dışı `maxModules` (izin verilen aralık 2–100) ve geçersiz anotasyonlar `INVALID_ARGUMENT` döner; `observedTestRun` ise katı kayda göre ayrıştırılır (`state`, `evidenceRef`, `observedCount`, isteğe bağlı `evidenceSha256`, `evidenceIds`, `passedCount`, `failedCount`, `testNames`).
+
+---
+
+## Legacy araç karşılıkları
+
+`DEPRECATED_TOOL_REPLACEMENTS` (`packages/mcp-server/src/version.ts`). Bu legacy adlar yalnızca `full` profilinde vardır.
+
+| Legacy araç (yalnızca `full`) | Core karşılığı | Eşdeğer core çağrısı |
+|---|---|---|
+| `causoryn_get_capabilities` | `causoryn_status` | `action: "inspect"` → `data.capabilities` |
+| `causoryn_workspace_summary` | `causoryn_status` | `action: "inspect"` → `data.summary` |
+| `causoryn_index_status` | `causoryn_status` | `action: "inspect"` (isteğe bağlı `jobId`) → `data.index` |
+| `causoryn_refresh_index` | `causoryn_status` | `action: "refresh"`, `mode: "incremental" \| "full"` (legacy aracın rezerve `scope` alanının karşılığı yoktur; `causoryn_status` girdi şeması `scope` kabul etmez) |
+| `causoryn_generate_onboarding` | `causoryn_map_system` | `profile: "onboarding"`, `audience`, `limits` |
+| `causoryn_trace_execution` | `causoryn_trace` | `mode: "execution"`, `entrypoint` |
+| `causoryn_trace_business_flow` | `causoryn_trace` | `mode: "business-flow"`, `flowSeed` (veya `entrypoint`) |
+| `causoryn_analyze_impact` | `causoryn_preflight_change` | `include: ["impact"]`, `targetSymbols`, isteğe bağlı `maxDepth`/`maxPaths`/`maxNodes`/`edgeKinds` |
+| `causoryn_derive_test_plan` | `causoryn_preflight_change` | `include: ["test-plan"]`, `preflightId` (bir `changeSet` çağrısı, `targetSymbols`/`targetFiles` ile normal bir preflight'a karşılık gelir) |
+| `causoryn_check_architecture` | `causoryn_verify_change` | `checks: ["architecture"]` (kurallar çalışma ağacı yerine güvenilir `baseRef`'ten) |
+| `causoryn_check_contracts` | `causoryn_contracts` | `action: "check"`, `contracts` |
+| `causoryn_detect_contract_drift` | `causoryn_contracts` | `action: "drift"`, `base`, `target`, `anchorFiles?` |
+
+`causoryn_map_system`, `causoryn_find_symbols`, `causoryn_get_symbol_context`, `causoryn_get_agent_context`, `causoryn_preflight_change`, `causoryn_verify_change`, `causoryn_get_evidence` ve `causoryn_export_documentation` her profilde adlarını korur. `causoryn_compare_architecture`, `causoryn_architecture_timeline` ve 7 wiki aracı deprecated değildir; isteğe bağlı açılan uzantılardır.
+
+---
+
+## Çekirdek (legacy) katalog — full profil: wiki dışı 22 araç (`--tool-profile full`)
+
+Bu bölüm adındaki "çekirdek", wiki dışı 22 aracın tarihsel katalog adıdır; varsayılan `core` profili (11 araç) **değildir** — o profil için bkz. yukarıdaki varsayılan `core` profili tablosu. `--tool-profile full`, 29 legacy adın tamamını (bu tablo ile aşağıdaki wiki tablosu) ve 3 birleştirilmiş aracı (`causoryn_status`, `causoryn_trace`, `causoryn_contracts`) kaydeder (32 araç). İki history aracı `--tool-profile history` ile de kullanılabilir.
+
+| Araç | `readOnlyHint` | Girdiler (ana alanlar) | Çıktı (`data` özeti) | Tipik hata kodları |
+|---|---|---|---|---|
+| `causoryn_get_capabilities` | `true` | `workspace?` | Sunucu kimliği (`name`, `version`, `schemaVersion`), protokol revizyonu, `astParse` / `symbolResolution` / `frameworkLinkers` düzeyleriyle 5 adapter, yapılandırılmış limitler ve 29 `TOOL_NAMES` (statik bir liste; `causoryn_status` ise etkin profilin araçlarını raporlar). Snapshot gerektirmez. *Deprecated → `causoryn_status`.* | `WORKSPACE_NOT_AUTHORIZED` |
+| `causoryn_workspace_summary` | `true` | `workspaceId?` | En son yayımlanmış snapshot'tan revizyon, snapshot durumu, dosya/node/edge/kanıt sayıları, diller, framework'ler, giriş noktaları, türe göre edge'ler ve çözümleme sayıları. *Deprecated → `causoryn_status`.* | `WORKSPACE_NOT_AUTHORIZED`, `INDEX_NOT_READY`, `INVALID_ARGUMENT`, `LIMIT_EXCEEDED` |
+| `causoryn_index_status` | `true` | `jobId?` | İstenen veya en son iş (tanılar ve uyarılar her biri 50 ile sınırlı, bir kısaltma notuyla), en son snapshot meta verisi ve `stale`. İş yok → `job` ve `jobId` `null`; snapshot yok → hata değil, bir uyarı; bilinmeyen `jobId` → `INVALID_ARGUMENT`. *Deprecated → `causoryn_status`.* | `WORKSPACE_NOT_AUTHORIZED`, `INVALID_ARGUMENT`, `LIMIT_EXCEEDED` |
+| `causoryn_refresh_index` | `false` | `mode` (`full` \| `incremental`), `scope?` (reddedilir) | Bir arka plan indeks işini kuyruğa alır ve `jobId`'sini hemen döner. `incremental`, değişmemiş dosya başına olguları `file_facts` tablosundan yeniden kullanır (içerik karması ve public-interface karmasıyla erken kesme). Yalnızca Causoryn'in kendi graph deposuna yazar. *Deprecated → `causoryn_status` `action: "refresh"`.* | `WORKSPACE_NOT_AUTHORIZED`, `INVALID_ARGUMENT`, `LIMIT_EXCEEDED`, `PATH_DENIED` |
+| `causoryn_map_system` | `true` | Core ile aynı | Core ile aynı (harita sayfası veya onboarding profili). | `WORKSPACE_NOT_AUTHORIZED`, `INDEX_NOT_READY`, `INVALID_ARGUMENT`, `LIMIT_EXCEEDED` |
+| `causoryn_find_symbols` | `true` | `query`, `kind?`, `limit?` | Core ile aynı. | `WORKSPACE_NOT_AUTHORIZED`, `INDEX_NOT_READY`, `AMBIGUOUS_SYMBOL`, `SYMBOL_NOT_FOUND`, `INVALID_ARGUMENT`, `LIMIT_EXCEEDED` |
+| `causoryn_get_symbol_context` | `true` | `symbolId`, `edgeKinds?`, `depth?` | Core ile aynı. | `WORKSPACE_NOT_AUTHORIZED`, `INDEX_NOT_READY`, `AMBIGUOUS_SYMBOL`, `SYMBOL_NOT_FOUND`, `INVALID_ARGUMENT`, `LIMIT_EXCEEDED` |
+| `causoryn_trace_execution` | `true` | `entrypoint`, `maxDepth?`, `maxPaths?` | `causoryn_trace` `mode: "execution"` ile aynı yürütme yolları. *Deprecated → `causoryn_trace`.* | `WORKSPACE_NOT_AUTHORIZED`, `INDEX_NOT_READY`, `AMBIGUOUS_SYMBOL`, `SYMBOL_NOT_FOUND`, `INVALID_ARGUMENT`, `LIMIT_EXCEEDED`, `EVIDENCE_NOT_FOUND`, `POLICY_INVALID` |
+| `causoryn_trace_business_flow` | `true` | `flowSeed`, `boundaries?`, `maxHops?`, `maxFlows?`, `maxNodes?` | `causoryn_trace` `mode: "business-flow"` ile aynı şekilde, dürüst `gap` segmentleriyle iş akışı zincirleri. *Deprecated → `causoryn_trace`.* | `WORKSPACE_NOT_AUTHORIZED`, `INDEX_NOT_READY`, `AMBIGUOUS_SYMBOL`, `SYMBOL_NOT_FOUND`, `INVALID_ARGUMENT`, `LIMIT_EXCEEDED`, `PATH_DENIED`, `INVALID_REVISION`, `CONTRACT_PARSE_FAILED` |
+| `causoryn_analyze_impact` | `true` | `targets` (node kimlikleri veya nitelikli adlar), `depth?`, `maxPaths?`, `maxNodes?`, `edgeKinds?` | Ters edge üzerinde sınırlı BFS: `affectedNodes`, `paths`, `certainty`'ye göre bir özet (`direct` \| `indirect` \| `possible`), `truncated` / `truncatedBy`, uygulanan `limits` (tavanlar: derinlik 8, yol 20, node 250; daha büyük istekler bir gerekçeyle azaltılır) ve `unresolvedTargets`. Varsayılan edge türleri `CONTAINS`'i dışlar, `INHERITS` / `IMPLEMENTS`'i içerir; `resolution` ayrı bir alan olarak kalır. Asla "%100 etkilenir" iddiasında bulunmaz. *Deprecated → `causoryn_preflight_change`.* | `WORKSPACE_NOT_AUTHORIZED`, `INDEX_NOT_READY`, `INVALID_ARGUMENT`, `LIMIT_EXCEEDED`, `POLICY_INVALID` |
+| `causoryn_check_architecture` | `true` | `policyId?` (rezerve, reddedilir), `scope?` (rezerve, reddedilir) | `.causoryn/architecture.rules.yaml`'ı **çalışma ağacından** değerlendirir (Tarjan SCC ile `no-cycles`, `forbidden-dependency` glob'ları); `.causoryn/architecture.baseline.yaml`'dan baseline bastırmaları ve `orphanSuppressions`. Bulguları raporlar; CI çıkış kodlarına karar vermez. *Deprecated → `causoryn_verify_change` `checks: ["architecture"]`.* | `WORKSPACE_NOT_AUTHORIZED`, `INDEX_NOT_READY`, `INVALID_ARGUMENT`, `LIMIT_EXCEEDED`, `POLICY_INVALID`, `INVALID_REVISION` |
+| `causoryn_compare_architecture` | `true` | `baseRef`, `targetRef` (branch, tag, commit, `HEAD~1` / `HEAD^` gibi güvenli göreli biçimler veya `working-tree`) | İki ref'te commit edilmiş `.causoryn/architecture-snapshot.json` dosyaları arasında eklenen / kaldırılan / değişen node'lar, güven puanlı yeniden adlandırma eşleşmeleri, edge farkları ve API yüzeyi değişiklikleri; sertleştirilmiş salt-okunur Git çağrılarıyla okunur (checkout yok). Bu dosyası olmayan bir ref `INVALID_REVISION` döner. *History uzantısı (`--tool-profile history` veya `full`).* | `WORKSPACE_NOT_AUTHORIZED`, `INDEX_NOT_READY`, `INVALID_ARGUMENT`, `INVALID_REVISION`, `POLICY_INVALID`, `LIMIT_EXCEEDED` |
+| `causoryn_get_agent_context` | `true` | `task`, `tokenBudget`, `maxProximityDepth?`, `candidateScope?` (reddedilir) | Core ile aynı. | `WORKSPACE_NOT_AUTHORIZED`, `INDEX_NOT_READY`, `INVALID_ARGUMENT`, `LIMIT_EXCEEDED` |
+| `causoryn_generate_onboarding` | `true` | `audience` (`beginner` \| `intermediate` \| `maintainer`), `limits?`, `focus?` (rezerve, reddedilir) | `causoryn_map_system` `profile: "onboarding"` ile aynı yapısal onboarding verisi. *Deprecated → `causoryn_map_system`.* | `WORKSPACE_NOT_AUTHORIZED`, `INDEX_NOT_READY`, `INVALID_ARGUMENT`, `LIMIT_EXCEEDED` |
+| `causoryn_export_documentation` | `false` | Core ile aynı alanlar; wire şemasında tam tiplenmiş `options` ve `annotations` ile | Core ile aynı. | `WORKSPACE_NOT_AUTHORIZED`, `INDEX_NOT_READY`, `INVALID_ARGUMENT`, `LIMIT_EXCEEDED`, `EXPORT_NOT_ALLOWED`, `PATH_DENIED` |
+| `causoryn_preflight_change` | `true` | Core alanları artı `includeContracts?`, `includeTestPlan?`, `maxDisambiguationCandidates?` | Core ile aynı. | `WORKSPACE_NOT_AUTHORIZED`, `INDEX_NOT_READY`, `AMBIGUOUS_SYMBOL`, `SYMBOL_NOT_FOUND`, `INVALID_ARGUMENT`, `LIMIT_EXCEEDED`, `PATH_DENIED` |
+| `causoryn_check_contracts` | `true` | `contracts` (1–25 çift), `snapshotId?` | `causoryn_contracts` `action: "check"` ile aynı. *Deprecated → `causoryn_contracts`.* | `WORKSPACE_NOT_AUTHORIZED`, `INDEX_NOT_READY`, `INVALID_ARGUMENT`, `LIMIT_EXCEEDED`, `PATH_DENIED`, `CONTRACT_PARSE_FAILED` |
+| `causoryn_detect_contract_drift` | `true` | `base`, `target`, `scope?`, `anchorFiles?` | `causoryn_contracts` `action: "drift"` ile aynı. *Deprecated → `causoryn_contracts`.* | `WORKSPACE_NOT_AUTHORIZED`, `INDEX_NOT_READY`, `INVALID_ARGUMENT`, `LIMIT_EXCEEDED`, `PATH_DENIED`, `CONTRACT_PARSE_FAILED` |
+| `causoryn_verify_change` | `true` | Wire şemasında `observedTestRun` tiplenmiş olarak core alanları | Core ile aynı. | `WORKSPACE_NOT_AUTHORIZED`, `INDEX_NOT_READY`, `INVALID_ARGUMENT`, `INVALID_REVISION`, `LIMIT_EXCEEDED`, `PATH_DENIED`, `POLICY_INVALID` |
+| `causoryn_derive_test_plan` | `true` | `changeSet` (`changedSymbols` ve/veya `changedFiles`) veya `preflightId` alanlarından tam olarak biri; `maxDepth?`, `maxCandidates?` | `matchLevel` değeri `direct` (`TESTS` edge'leri), `call-site` (ters `CALLS` BFS) veya `naming` (sezgisel) olan deterministik test adayları; her biri `reason` ve `evidenceIds` ile; `missingCoverageCandidates`; `unresolvedTargets`; içerik adresli `planId` (`testplan:<sha256>`). Bir `preflightId` bellek-içi manifest deposundan çözülür. **Testleri asla çalıştırmaz.** *Deprecated → `causoryn_preflight_change`.* | `WORKSPACE_NOT_AUTHORIZED`, `INDEX_NOT_READY`, `INVALID_ARGUMENT`, `LIMIT_EXCEEDED` |
+| `causoryn_get_evidence` | `true` | `id` | Core ile aynı. | `WORKSPACE_NOT_AUTHORIZED`, `INDEX_NOT_READY`, `INVALID_ARGUMENT`, `LIMIT_EXCEEDED`, `EVIDENCE_NOT_FOUND`, `POLICY_INVALID` |
+| `causoryn_architecture_timeline` | `true` | `refs` (≥ 2) veya `range` (`{ from, to }`) alanlarından tam olarak biri; `maxRevisions?` (varsayılan 12, tavan 60), `maxRangeWalk?` (varsayılan 100, tavan 500), `granularity?` (rezerve, reddedilir) | Git noktaları arasındaki fark aralıklarının örneklenmiş zaman çizelgesi (uç noktalar korunur); analiz edilmemiş noktalar ve aralıklar açıkça listelenir; ayrıca her ref'te commit edilmiş kurallara göre değerlendirilen, metrik başına ayrı ihlal eğilimleri (`no-cycles`, `forbidden-dependency`) — asla birleşik bir kalite puanı değil. Her nokta o ref'te commit edilmiş `.causoryn/architecture-snapshot.json`'ı okur ve `trustWarning: "snapshot-loaded-from-committed-git-blob"` taşır. *History uzantısı.* | `WORKSPACE_NOT_AUTHORIZED`, `INDEX_NOT_READY`, `INVALID_ARGUMENT`, `INVALID_REVISION`, `POLICY_INVALID`, `LIMIT_EXCEEDED` |
 
 ### Mimari dışa aktarma ayrıntıları
 
-- `architecture`, `json`, `markdown`, `mermaid` ve `html` için MCP varsayılanıdır (`html` varsayılan dosya adı `causoryn-architecture.html`). `interactive` yalnızca `html` ile kullanılır ve `fileName` atlandığında varsayılan olarak `causoryn-architecture-interactive.html` (`EXPORT_INTERACTIVE_HTML_FILE_NAME`) yazar; böylece sıfır-JS `causoryn-architecture.html` dosyasının üzerine yazılmaz. Eski ham döküm için `view="full"` seçilir. `format="snapshot"`, `view` atlandığında veya `full` seçildiğinde karşılaştırma araçlarının tükettiği kanonik `CompareContentSet` üretir.
-- `options` ve `annotations` yalnızca `architecture` ve `interactive` görünümlerinde kabul edilir. `maxModules` varsayılanı 32, aralığı 2–100'dür. Özet içindeki `architectureSummary.moduleIds` aynı projeksiyonun anotasyonları için birebir referans kümesidir.
-- **MCP JSON Schema `.describe()` rehberliği ve doğal-dil tetikleme (`K-026`):** `causoryn_export_documentation` tüm üst düzey girdi alanlarında (`workspaceId`, `format`, `outputDir`, `fileName`, `view`, `options`, `annotations`) ve iç içe şema nesnelerinde (`domains`, `moduleNotes`, `flows`, `guidedTour`, `decisions`, `risks`) açıklayıcı Zod `.describe()` metinleri yayınlar. Araç açıklaması ve `architecture-blueprint` skill'i (İngilizce ve Türkçe doğal-dil istemleriyle tetiklenir) host LLM'e 2 adımlı akışı (`format: "json", view: "architecture"` → `architectureSummary.moduleIds` okuma → `format: "html", view: "interactive"` + doğrulanmış `annotations`) veya salt-yapısal deterministik çıktı için `annotations` atlamayı açıkça tarif eder. Causoryn şemayı, bütçeleri ve gönderilen `moduleId`, `nodeId`, `evidenceId` ile `keyFiles` referanslarını fail-closed doğrular; serbest metin yorumları gönderenin değerlendirmesidir. Bkz. [Prompt ve Mimari Portal Rehberi](prompting-and-architecture-portals.md).
-- Bayt eşitliği aynı snapshot, format, görünüm, etkin seçenekler ve doğrulanmış anotasyonlar için dosya içeriğine uygulanır. `packages/graph/test/architecture-export.test.ts`, aynı grafikte dizi sıraları ters çevrildiğinde dört formatın ve iki HTML görünümünün eşitliğini kapsar.
+- **Görünümler ve varsayılan dosya adları:** `architecture`; `json`, `markdown`, `mermaid` ve `html` için varsayılan görünümdür (`causoryn-architecture.json`, `.md`, `.mmd`, `.html`). `interactive` yalnızca HTML içindir ve varsayılan olarak `causoryn-architecture-interactive.html` (`EXPORT_INTERACTIVE_HTML_FILE_NAME`) yazar; böylece sıfır-JS dosyasının üzerine asla yazmaz. `view: "full"` filtrelenmemiş ham dökümdür ve `options` veya `annotations` ile birleştirilemez. `format: "snapshot"` (view atlanmış veya `full`), karşılaştırma araçlarının kullandığı kanonik `architecture-snapshot.json` içerik kümesini yazar. `view: "wiki"` `INVALID_ARGUMENT` ile reddedilir; wiki sayfaları wiki araçlarına aittir.
+- **Projeksiyon seçenekleri** (yalnızca `architecture` ve `interactive`): `maxModules` 2–100 (varsayılan 32), `pathPrefix` (göreli POSIX öneki, ≤ 260 karakter, `..` veya NUL yok), `includeTests` (varsayılan `true`). `architectureSummary.moduleIds`, aynı projeksiyon için `annotations` içinde referans verilecek tam modül kimliklerini döner.
+- **Anotasyonlar:** host tarafından yazılan isteğe bağlı `title`, `architectureStyle`, `executiveSummary`, `domains`, `moduleNotes`, `flows`, `guidedTour`, `decisions`, `risks`. Her `moduleId`, `nodeId`, `evidenceId` ve `keyFiles` yolu projeksiyona ve snapshot'a göre denetlenir; en fazla 25 şema ve referans hatası tek bir `INVALID_ARGUMENT` mesajında toplanır (`MAX_VALIDATION_ERRORS`). Alan bütçeleri [Prompting ve Mimari Portallar Rehberi](prompting-and-architecture-portals.md)'nde listelenmiştir; `architecture-blueprint` skill'i (`skills/architecture-blueprint/SKILL.md`) tam şablonu taşır.
+- **Çevrimdışı güvenlik:** sıfır-JS HTML `default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'` kullanır. Etkileşimli HTML, `'unsafe-inline'` script'i, CDN'i ve ağ çağrısı olmayan, hash ile sabitlenmiş bir `script-src 'sha256-<hash>'` script politikası kullanır.
+- **Atomik yazım:** içerik `<target>.tmp` dosyasına (`flag: "wx"` ile oluşturulur) yazılır ve hedefin üzerine yeniden adlandırılır; hedef `output.allowedOutputDirs` için `OutputAccessPolicy`'den geçmelidir (listenin dışındaysa veya liste boşsa `EXPORT_NOT_ALLOWED`; `fileName` içindeki ayırıcılar, traversal, NUL baytları veya symlink kaçışları için `PATH_DENIED`).
+- **Determinizm:** aynı snapshot, format, görünüm, etkin seçenekler ve doğrulanmış anotasyonlar bayt bayt özdeş dosyalar üretir (`packages/graph/test/architecture-export.test.ts`).
 
-## Wiki 7 aracı (TŞ §16A.8; `wiki_build` tek yazma aracıdır)
+---
 
-| Araç | Girdi (ana alanlar) | Çıktı (data özeti) | Tipik hata kodları |
-|---|---|---|---|
-| `causoryn_wiki_build` | `workspaceId?`, `mode` (full\|incremental), `revision?`, `scope?` (açık ret) | Yayımlanmış graph'tan deterministik WikiSnapshot üretir ve YALNIZCA `wiki.dataDbPath` beyanlı (veya `--auto-data-dir` ile hazırlanan) izinli data-root SQLite'ına atomik yazar; incremental desteklenmiyorsa graceful full + `fallbackReason` | `WORKSPACE_NOT_AUTHORIZED`, `INDEX_NOT_READY`, `INVALID_ARGUMENT`, `PATH_DENIED`, `EXPORT_NOT_ALLOWED` |
-| `causoryn_wiki_get_tree` | `parentId?`, `depth?`, `limit?`, `cursor?` | 12 kök kategorili sayfa ağacı (taksonomi sırası, childCount, coverage/freshness); boş kategori `no_data` (dolgusuz) | `WORKSPACE_NOT_AUTHORIZED`, `INDEX_NOT_READY`, `WIKI_PAGE_NOT_FOUND`, `INVALID_ARGUMENT` |
-| `causoryn_wiki_get_page` | `pageId`, `sectionKey?`, bölüm sayfalama | Tek sayfa: generated bölümler, evidenceRefs provenance, coverage/freshness; overlay anotasyonlar bu araçta dönmez (§16A.6 ayrı yerel akış) | `WORKSPACE_NOT_AUTHORIZED`, `INDEX_NOT_READY`, `WIKI_PAGE_NOT_FOUND`, `INVALID_ARGUMENT` |
-| `causoryn_wiki_search` | `query`, `snapshotId?`, `limit?`, `cursor?` (ek filtreler bu dilimde açık `INVALID_ARGUMENT`) | Kaçışlı çok alanlı FTS5 arama; sıralama exact route > başlık > modül > BM25 > graph yakınlığı; matchedFields+evidenceIds+snippet; embedding yok (kırmızı çizgi 1) | `WORKSPACE_NOT_AUTHORIZED`, `INDEX_NOT_READY`, `INVALID_ARGUMENT`, `EVIDENCE_NOT_FOUND`, `LIMIT_EXCEEDED` |
-| `causoryn_wiki_get_links` | `pageId`, `direction?`, `linkKinds?`, sayfalama | outgoing+incoming (backlink) bağlantılar, resolution+evidence; bozuk link `toPageId:null` + brokenLinkDiagnostics (kayıt korunur) | `WORKSPACE_NOT_AUTHORIZED`, `INDEX_NOT_READY`, `WIKI_PAGE_NOT_FOUND`, `INVALID_ARGUMENT` |
-| `causoryn_wiki_get_versions` | `pageId?`, `refs?`, sayfalama | Yayımlanmış WikiSnapshot revizyonu `available` (contentHash/linkSetHash/coverage); git alias'ları salt-okunur cat-file ile çözülür (`working-tree` `.git` olmadan da çözülür) | `WORKSPACE_NOT_AUTHORIZED`, `INDEX_NOT_READY`, `WIKI_PAGE_NOT_FOUND`, `INVALID_ARGUMENT`, `INVALID_REVISION` |
-| `causoryn_wiki_diff` | `base`, `target`, `pageId?` | added/removedPages, changedSections, link farkları, coverageDelta ({previous,current,reason?}), unresolvedDifferences, contractChanges (K-013 #7) | `WORKSPACE_NOT_AUTHORIZED`, `INDEX_NOT_READY`, `WIKI_PAGE_NOT_FOUND`, `INVALID_ARGUMENT`, `INVALID_REVISION`, `PATH_DENIED`, `LIMIT_EXCEEDED` |
+## Wiki profili araçları (7 araç — `--tool-profile wiki` veya `full`)
 
-## Sunucu sürümü, 5-dil yetenek matrisi ve sabit 15 hata kodu
+7 wiki aracının tamamı yalnızca `--tool-profile wiki` (veya `full`) ile kaydedilir. Sayfa türleri, veri modeli, depolama ve limitler için ayrıntılı başvuru [Living Wiki Spesifikasyonu](wiki-spec.md)'dur; bu bölüm wire sözleşmesini özetler. Wiki araçları, `wiki.dataDbPath` ile adlandırılan SQLite dosyasındaki ayrı bir `WikiSnapshot` deposunu okur ve yazar (`--auto-data-dir` tarafından otomatik ayarlanır). Bu yoksa `causoryn_wiki_build` `PATH_DENIED`, okuma araçları ise `INDEX_NOT_READY` döner. Yazan tek wiki aracı `causoryn_wiki_build`'dir. Sayfalamalı wiki araçlarında varsayılan `limit = 50`'dir; `200` üzerindeki değerler `LIMIT_EXCEEDED` döner.
 
-### 1. Sunucu kimliği ve protokol sabitleri (`packages/mcp-server/src/version.ts`)
+| Araç | `readOnlyHint` | Girdiler (ana alanlar) | Çıktı (`data` özeti) | Tipik hata kodları |
+|---|---|---|---|---|
+| `causoryn_wiki_build` | `false` | `mode` (`full` \| `incremental`), `revision?`, `scope?` (rezerve, reddedilir), `workspaceId?` | En son yayımlanmış `GraphSnapshot`'ı deterministik bir `WikiSnapshot`'a yansıtır ve wiki deposuna atomik olarak yayımlar. `incremental` değişmemiş sayfaları yeniden kullanır; ön koşulları sağlanmadığında tam derlemeye düşer ve `fallbackReason` ile bir uyarı raporlar. Çözülemeyen bağlantı hedefleri `toPageId: null` ile korunur ve kırık bağlantı olarak sayılır. | `WORKSPACE_NOT_AUTHORIZED`, `INDEX_NOT_READY`, `INVALID_ARGUMENT`, `PATH_DENIED`, `EXPORT_NOT_ALLOWED` |
+| `causoryn_wiki_get_tree` | `true` | `snapshotId?`, `parentId?`, `depth?` (1–8), `limit?`, `cursor?` | Taksonomi sırasındaki 12 kök kategori altında `childCount`, `coverage` ve `freshness` ile sayfa hiyerarşisi; boş kategoriler dolgu metni olmadan `no_data` olarak kalır. | `WORKSPACE_NOT_AUTHORIZED`, `INDEX_NOT_READY`, `WIKI_PAGE_NOT_FOUND`, `INVALID_ARGUMENT` |
+| `causoryn_wiki_get_page` | `true` | `pageId`, `snapshotId?`, `sections?` (bölüm anahtarı filtresi), `limit?`, `cursor?` | Tek sayfa: üretilmiş Markdown bölümleri, `evidenceRefs` ve tekilleştirilmiş `sourceRefs`, `coverage`, `freshness`. Overlay anotasyonlar bu araç tarafından döndürülmez. | `WORKSPACE_NOT_AUTHORIZED`, `INDEX_NOT_READY`, `WIKI_PAGE_NOT_FOUND`, `INVALID_ARGUMENT` |
+| `causoryn_wiki_search` | `true` | `query`, `snapshotId?`, `limit?`, `cursor?`; `kinds`, `scope`, `language`, `revision`, `resolution` rezervedir ve `INVALID_ARGUMENT` döner | Çok sütunlu FTS5 araması; sorgunun tamamı kaçışlı tek bir FTS5 öbeği olarak eşleştirilir. Sıralama: tam sembol/route, sonra başlık, sonra modül, sonra BM25; `matchedFields`, `evidenceIds`, `snippet` döner. Graph-yakınlık ayağı henüz beslenmiyor ve `skippedRankLegs` içinde `graphProximity` olarak raporlanır. Embedding yok. | `WORKSPACE_NOT_AUTHORIZED`, `INDEX_NOT_READY`, `INVALID_ARGUMENT`, `EVIDENCE_NOT_FOUND`, `LIMIT_EXCEEDED` |
+| `causoryn_wiki_get_links` | `true` | `pageId`, `direction?` (`incoming` \| `outgoing` \| `both`, varsayılan `both`), `linkKinds?`, `snapshotId?`, `limit?`, `cursor?` | `resolution` ve `evidenceRefs` ile `outgoing` bağlantılar ve ters indekslenmiş `incoming` geri bağlantılar; çözülemeyen hedefler `toPageId: null` olarak kalır ve `brokenLinkDiagnostics` içinde görünür (hata değil, veri). | `WORKSPACE_NOT_AUTHORIZED`, `INDEX_NOT_READY`, `WIKI_PAGE_NOT_FOUND`, `INVALID_ARGUMENT` |
+| `causoryn_wiki_get_versions` | `true` | `pageId?`, `refs?` (1–200 Git ref'i), `limit?`, `cursor?` | Yalnızca **en son yayımlanmış** `WikiSnapshot`'ı okur: onun için tek bir `available` girdisi döner (`pageId` ile: o sayfanın `revisionRef`, `contentHash`, `linkSetHash`, `templateVersion`, `coverage` değerleri). İstenen her ref `git cat-file -t` ile salt-okunur çözülür (`working-tree`, `.git` olmadan çözülür; çözülemeyen bir ref çağrıyı `INVALID_REVISION` ile başarısız kılar) ve yalnızca o snapshot'ın `revisionRef`'ine (varsayılan `working-tree`) eşitse `available` olur; çözülen diğer her ref bir gerekçeyle `not_available` olarak listelenir. | `WORKSPACE_NOT_AUTHORIZED`, `INDEX_NOT_READY`, `WIKI_PAGE_NOT_FOUND`, `INVALID_ARGUMENT`, `INVALID_REVISION` |
+| `causoryn_wiki_diff` | `true` | `base`, `target` (`wikiSnapshotId` değerleri tercih edilir; bir `revisionRef` yalnızca en son yayımlanmış WikiSnapshot için çözülür), `pageId?` | `addedPages`, `removedPages`, `changedSections`, `addedLinks`, `removedLinks`, `coverageDelta` (`{ pageId, previous, current, reason? }`), `unresolvedDifferences`, `contractChanges` (`{ contractId, changeKind, summary }`). | `WORKSPACE_NOT_AUTHORIZED`, `INDEX_NOT_READY`, `WIKI_PAGE_NOT_FOUND`, `INVALID_ARGUMENT`, `INVALID_REVISION`, `PATH_DENIED`, `LIMIT_EXCEEDED` |
 
-- `SERVER_NAME = "causoryn"` — MCP `initialize` el sıkışmasındaki `serverInfo.name`.
-- `SERVER_VERSION = "0.2.4"` — Pre-1.0 Public Preview sürümü (K-022 / K-024..K-026; kök `package.json`, `packages/causoryn/package.json` ve `server.json` ile kilitlidir; ADR-010 gereği açık 1.0.0 kapıları kapanmadan `1.0.0` ilan edilmez).
-- `SCHEMA_VERSION = "2.0"` — 29 aracın tamamında `envelope.schemaVersion` alanı.
-- `protocol.revision` — `@modelcontextprotocol/sdk` üzerinden `LATEST_PROTOCOL_VERSION`.
+Yeniden indeksleme wiki'yi yeniden oluşturmaz. Wiki'nin yeni graph snapshot'ını izlemesi gerektiğinde bir yenilemeden sonra `causoryn_wiki_build`'i çağırın. Ayrı wiki yenileme veya wiki dışa aktarma araçları yoktur.
 
-### 2. `causoryn_get_capabilities` 5-dil adapter matrisi (`INDEXED_ADAPTERS`)
+---
 
-`causoryn_get_capabilities` aracı snapshot gerektirmeden `packages/indexing/src/index.ts` içindeki `INDEXED_ADAPTERS` kaydını döndürür. Kalıcı SQLite `analyzerFingerprint` geriye dönük uyumu için iç dil analizör protokol sürümleri bilinçli olarak `"0.1.0"` değerinde tutulur (K-022):
+## Sunucu kimliği, dil matrisi ve hata kodları
 
-| Dil (`language`) | `analyzerId` | `astParse` | `symbolResolution` | `frameworkLinkers` | Çalışma modeli |
+### 1. Sunucu kimliği (`packages/mcp-server/src/version.ts`)
+
+- `SERVER_NAME = "causoryn"` — MCP `initialize` yanıtındaki `serverInfo.name`.
+- `SERVER_VERSION` — `package.json` ile senkron tutulur; bu sürüm için `0.3.0`. `1.0.0` ilan edilmemiştir.
+- `SCHEMA_VERSION = "2.0"` — her araçta `envelope.schemaVersion`.
+- `protocol.revision` — `@modelcontextprotocol/sdk` (1.32.2) üzerinden yeniden dışa aktarılan `LATEST_PROTOCOL_VERSION`. Causoryn yalnızca bir stdio sunucusu çalıştırır.
+
+### 2. Dil adapter matrisi (`INDEXED_ADAPTERS`, `packages/indexing/src/index.ts`)
+
+`causoryn_status` (`data.capabilities.adapters`) ve `causoryn_get_capabilities` bu tabloyu snapshot gerektirmeden yansıtır. Kalıcı SQLite analizör parmak izinin kararlı kalması için adapter başına protokol sürümleri `"0.1.0"` olarak kalır.
+
+| Dil | `analyzerId` | `astParse` | `symbolResolution` | `frameworkLinkers` | Çalışma modeli |
 |---|---|---|---|---|---|
-| `typescript` | `ts-adapter` | `L1` | `L2` | `express+nextjs` | Süreç-içi TypeScript Compiler API (`TypeChecker`, TS/JS/CJS + kök-hapsedilmiş `tsconfig.json`/`jsconfig.json` + Express/Next.js App Router L3 + BDD `Test`/`TESTS`) |
-| `csharp` | `roslyn-worker` | `L1` | `L2` | `aspnet-core-route-attributes (L3)` | `dotnet exec` Roslyn sidecar (`@causoryn/sidecar-ipc`; ASP.NET Core controller attribute + Minimal API `MapGet`/`MapPost`) |
-| `python` | `python-worker` | `L1` | `L2` | `decorator-route-pattern (L3)` | `python -B` stdlib `ast` sidecar (sıfır dış bağımlılık) |
-| `go` | `go-worker` | `L1` | `heuristic-only (semantik L2 yok)` | `http-router-registration (L3)` | Go stdlib `go/parser` + `go/ast` sidecar (`net/http`, `gin`, `echo`, `chi`) |
-| `rust` | `rust-worker` | `L1` | `heuristic-heavy` | `attribute-macro-route (L3)` | Rust `syn` 3 sidecar (`axum`, `actix-web`, `rocket` öznitelik makroları) |
+| `typescript` | `ts-adapter` | `L1` | `L2` | `express+nextjs` | TS/JS/CJS için süreç-içi TypeScript Compiler API (`TypeChecker`); kökle sınırlandırılmış `tsconfig.json`/`jsconfig.json`, monorepo çalışma alanı çözümlemesi, `INHERITS`/`IMPLEMENTS` edge'leri, Express ve Next.js App Router route'ları, BDD `Test`/`TESTS` node'ları. |
+| `csharp` | `roslyn-worker` | `L1` | `L2` | `aspnet-core-route-attributes (L3)` | `dotnet exec` Roslyn sidecar'ı (`SemanticModel`, `INHERITS`/`IMPLEMENTS`, salt-okunur `obj/project.assets.json` NuGet referans keşfi, ASP.NET Core controller öznitelikleri ve Minimal API `MapGet`/`MapPost`); `DOTNET_STARTUP_HOOKS` temizlenerek başlatılır. |
+| `python` | `python-worker` | `L1` | `L2` | `decorator-route-pattern (L3)` | `python -I -B -X utf8` olarak başlatılan stdlib `ast` sidecar'ı (izole mod, bytecode yazımı yok); üçüncü taraf bağımlılık yok. |
+| `go` | `go-worker` | `L1` | `heuristic-only (semantik L2 yok)` | `http-router-registration (L3)` | `GOTOOLCHAIN=local`, `GOWORK=off`, `GOPROXY=off` ile stdlib `go/parser` + `go/ast` sidecar'ı (`net/http`, `gin`, `echo`, `chi`). `symbolResolution` değeri birebir çalışma zamanı etiketidir; Go için semantik L2 çözümlemesi olmadığı anlamına gelir. |
+| `rust` | `rust-worker` | `L1` | `heuristic-heavy` | `attribute-macro-route (L3)` | `syn` 3 sidecar'ı (`axum`, `actix-web`, `rocket` öznitelik makroları); güvenilir bir çalışma dizininden harici bir hedef dizine Cargo ile derlenir ve bir `causoryn-rust-worker.sha256.json` bütünlük dosyasıyla pinlenir. |
 
-### 3. Sabit 15 hata kodu tablosu (`CAUSORYN_TOOL_ERROR_CODES`)
+Eksik isteğe bağlı araç zincirleri indekslemeyi başarısız kılmaz: dil `L0`/`L1` dosya node'larına düşer ve `coverage.byLanguage` bunu görünür kılar. Bkz. [Dil Analizörleri](language-analyzers.md) ve [Güvenlik Denetimi](security-pass.md).
 
-Tüm iş-mantığı ve yetkilendirme hataları protokol hatası olarak değil, `isError: false` ile `envelope.error` (`{ code, message, retryable, userAction }`) içinde döner; yalnızca `INDEX_NOT_READY` ve `INTERNAL_ERROR` kodlarında `retryable: true` beyan edilir:
+### 3. Sabit hata kodları (`CAUSORYN_TOOL_ERROR_CODES`, 15 kod)
 
-| Hata kodu (`code`) | `retryable` | Kaynak / yönetişim | Özeti ve istemci aksiyonu (`userAction`) |
+Tüm alan, politika ve çalışma alanı hataları `isError: false` ile `envelope.error` (`{ code, message, retryable, userAction }`) içinde taşınır. Yalnızca `INDEX_NOT_READY` ve `INTERNAL_ERROR` `retryable: true` ayarlar. `userAction`, sabit `TOOL_ERROR_GUIDANCE` tablosundan gelir. Bazı `userAction` dizgeleri hâlâ legacy araçları adlandırır (örneğin "run refresh_index", "Run get_capabilities", "wiki_get_tree"); `core` profilinde bunların yerine `action: "refresh"` veya `action: "inspect"` ile `causoryn_status` kullanın.
+
+| Hata kodu | `retryable` | Köken | Anlamı ve istemci aksiyonu |
 |---|---|---|---|
-| `WORKSPACE_NOT_AUTHORIZED` | `false` | TŞ §10.1 sabit set | `workspaceId` uyuşmazlığı veya `allowRoots` dışında/boş kök; çalışma alanı kökünü yetkili listeye ekletin |
-| `PATH_DENIED` | `false` | TŞ §10.1 sabit set | Ignore politikası, traversal/null-byte reddi veya beyansız `wiki.dataDbPath` yazma denemesi |
-| `INDEX_NOT_READY` | `true` | TŞ §10.1 sabit set | Yayımlanmış `ready`/`partial` GraphSnapshot veya WikiSnapshot henüz yok; `causoryn_refresh_index` / `causoryn_wiki_build` sonrası yeniden deneyin |
-| `AMBIGUOUS_SYMBOL` | `false` | TŞ §10.1 sabit set | Birden fazla sembol eşleşti; `envelope.data` aday listesini taşır (`kind`/`limit` veya tam kimlikle daraltın) |
-| `LIMIT_EXCEEDED` | `false` | TŞ §10.1 sabit set | `maxNodes`, `maxSymbols`, `maxDepth`, `maxPaths` veya Wiki `limit` (tavan 200) aşıldı |
-| `INVALID_ARGUMENT` | `false` | Proje uzantısı (K-008) | Zod şemasını geçen anlamsal girdi hatası, bozuk `cursor`, desteklenmeyen export görünümü/kombinasyonu, geçersiz anotasyon referansı veya açık reddedilen `scope` ve ek Wiki arama filtreleri |
-| `EVIDENCE_NOT_FOUND` | `false` | Proje uzantısı (K-008) | Snapshot'ta bulunmayan `nodeId`/`edgeId`/`evidenceId`/`findingId` veya `wikiSnapshotId` |
-| `SYMBOL_NOT_FOUND` | `false` | Proje uzantısı (K-011) | Snapshot'ta bulunmayan sembol kimliği, `qualifiedName` veya `entrypoint`/`flowSeed` |
-| `POLICY_INVALID` | `false` | TŞ §10.1 sabit set (K-012) | `.causoryn/architecture.rules.yaml` veya baseline dosyası eksik/şema dışı |
-| `INVALID_REVISION` | `false` | TŞ §10.1 sabit set (K-012/K-013 #6) | Çözümlenemeyen Git ref/alias veya ref içinde `.causoryn/architecture-snapshot.json` blob'u yok |
-| `EXPORT_NOT_ALLOWED` | `false` | TŞ §10.1 sabit set (K-012) | Hedef `outputDir` sunucunun `output.allowedOutputDirs` beyanında değil (default deny) |
-| `WIKI_PAGE_NOT_FOUND` | `false` | TŞ §10.1 sabit set (K-014) | İlgili `WikiSnapshot` içinde `pageId` veya `parentId` bulunamadı |
-| `CONTRACT_PARSE_FAILED` | `false` | TŞ §10.1 sabit set (K-015) | OpenAPI/AsyncAPI/JSON Schema/SQL/Proto sözleşme dosyası ayrıştırılamadı veya boyut kotasını aştı |
-| `UNSUPPORTED_LANGUAGE` | `false` | TŞ §10.1 rezerve sabit kod | Mevcut dilimde eksik sidecar'lar L0/L1 dosya düğümlerine zarifçe düştüğü için servislerce fırlatılmaz; şema uyumu için rezerve tutulur |
-| `INTERNAL_ERROR` | `true` | TŞ §10.1 sabit set | Beklenmeyen iç hata; ham sürücü/dosya yolu detayı yalnızca `stderr`'e yazılır, istemciye `requestId` korelasyonlu genel mesaj döner |
+| `WORKSPACE_NOT_AUTHORIZED` | `false` | Temel katalog | `workspaceId` uyuşmazlığı, yetkili köklerin dışındaki bir `workspace` yolu veya boş `allowRoots`. Kökü `--root <path>`, `--allow-cwd`, MCP `roots/list` veya `CAUSORYN_CONFIG` içindeki `allowRoots` ile yetkilendirin. |
+| `PATH_DENIED` | `false` | Temel katalog | Yol çalışma alanından kaçıyor, bir UNC/aygıt yolu, ignore veya ikili kurallarına takılıyor, traversal veya NUL baytı içeriyor ya da yapılandırılmamış bir `wiki.dataDbPath`'i hedefliyor. |
+| `INDEX_NOT_READY` | `true` | Temel katalog | Henüz yayımlanmış `ready`/`partial` bir `GraphSnapshot` (veya `WikiSnapshot`) yok. Arka plan indeksini bekleyin veya `causoryn_status` `action: "refresh"` çalıştırın (wiki araçları için `causoryn_wiki_build`). |
+| `AMBIGUOUS_SYMBOL` | `false` | Temel katalog | Birden fazla sembol eşleşti; `envelope.data.candidates` bunları listeler. `kind`/`limit`/`pathPrefix` ile daraltın veya tam bir node kimliği verin. |
+| `LIMIT_EXCEEDED` | `false` | Temel katalog | Bir istek yapılandırılmış bir tavanı aştı (`maxNodes`, `maxSymbols`, sembol bağlamı için `maxDepth`, wiki `limit` > 200) veya çalışma alanı `index.maxFiles` değerini aştı. |
+| `INVALID_ARGUMENT` | `false` | Proje uzantısı | Şema ayrıştırmasından sonraki anlamsal doğrulama hatası: bozuk cursor, bilinmeyen `jobId` veya `preflightId`, desteklenmeyen görünüm veya kombinasyon, geçersiz anotasyon referansı, rezerve alanlar (`scope`, `policyId`, `focus`, `granularity`, `candidateScope`, ek wiki arama filtreleri). |
+| `EVIDENCE_NOT_FOUND` | `false` | Proje uzantısı | Bilinmeyen `node`, `edge`, `evidence`, `finding` veya `WikiSnapshot` kimliği. |
+| `SYMBOL_NOT_FOUND` | `false` | Proje uzantısı | Sembol kimliği, `qualifiedName`, `entrypoint` veya `flowSeed` yayımlanmış snapshot'ta yok. |
+| `POLICY_INVALID` | `false` | Temel katalog | Eksik veya geçersiz `.causoryn/architecture.rules.yaml` ya da `.causoryn/architecture.baseline.yaml`. |
+| `INVALID_REVISION` | `false` | Temel katalog | Çözülemeyen veya izin verilmeyen Git ref'i ya da o ref'te analiz edilebilir bir `.causoryn/architecture-snapshot.json` yok. |
+| `EXPORT_NOT_ALLOWED` | `false` | Temel katalog | `outputDir`, `output.allowedOutputDirs` dışında veya liste boş (varsayılan ret). |
+| `WIKI_PAGE_NOT_FOUND` | `false` | Temel katalog | `pageId` veya `parentId` hedef `WikiSnapshot` içinde yok. |
+| `CONTRACT_PARSE_FAILED` | `false` | Temel katalog | Bir OpenAPI, AsyncAPI, JSON Schema, SQL veya Protobuf spec'i ayrıştırılamadı ya da ayrıştırıcı boyut sınırlarını aştı. |
+| `UNSUPPORTED_LANGUAGE` | `false` | Temel katalog (rezerve) | Katalog eşliği için tutulur; eksik sidecar'lar `L0`/`L1` dosya node'larına düştüğü için bugün fırlatılmaz. |
+| `INTERNAL_ERROR` | `true` | Temel katalog | Beklenmeyen hata; ayrıntılar `stderr`'de kalır, istemci `requestId` içeren arındırılmış bir mesaj alır. |
+
+### Hata kodu yöntem notu
+
+Araç başına "tipik hata kodları" sütunları, `services*.ts` handler'larının ve eşleme yardımcılarının (`graphErrorToToolError`, `wikiErrorToToolError`, `contractErrorToToolError`, `preflightErrorToToolError`, `verificationErrorToToolError`, `indexingErrorToToolError`) statik okumasından gelir. Paylaşılan yardımcılar hata ailelerinin tamamını eşlediği için bir sütun, belirli bir aracın nadiren ürettiği veya hiç üretmediği bir kodu listeleyebilir. Birleştirilmiş core araçlar için sütun, kapsadıkları legacy araçların birleşimidir. Kesin davranış, negatif birim ve entegrasyon testleriyle sabitlenmiştir (bkz. [Uygulama Durumu](implementation-status.md)). `INTERNAL_ERROR` her araç için geçerlidir ve sütunlarda tekrarlanmaz.
 
 ### 4. Sayfalama ve sunucu limitleri
 
-- **Opak cursor (`packages/mcp-server/src/cursor.ts`):** `{ "v": 1, "o": <int> }` yapısının `base64url` kodlamasıdır. Bozuk veya kurcalanmış cursor `INVALID_ARGUMENT` döndürür; son sayfada hem `envelope.nextCursor` hem `data.nextCursor` `null` olur.
-- **Varsayılan limitler (`causoryn_get_capabilities.data.limits`):** `maxFiles`, `maxFileBytes`, `maxNodes` (varsayılan 250), `maxSymbols` (varsayılan 100), `maxDepth` (varsayılan 3), `maxPaths` (varsayılan 50); Wiki sayfalamalı araçlarında `limit` varsayılan 50, üst sınır 200'dür (K-013 #5).
+- **Opak cursor'lar** (`packages/mcp-server/src/cursor.ts`): base64url ile kodlanmış `{ "v": 1, "o": <offset> }`. Çözülemeyen, kurcalanmış veya eski biçimli cursor'lar `INVALID_ARGUMENT` döner. Son sayfada `envelope.nextCursor` `null`'dır.
+- **Yapılandırılmış limitler** (`capabilities.limits` içinde raporlanır; `CAUSORYN_CONFIG` içinde ayarlanır): `index.maxFiles` 50.000, `maxFileBytes` 2.000.000, `results.maxNodes` 250, `results.maxSymbols` 100, `results.maxDepth` 3, `results.maxPaths` 50.
+- **Araç düzeyi tavanlar:** kontrat araçları liste başına en fazla 25 çift, spec yolu veya anchor dosyası kabul eder; wiki sayfaları varsayılan 50, tavan 200; `maxProximityDepth` tavanı 4; etki analizi tavanı derinlik 8, 20 yol, 250 node; zaman çizelgesi tavanı 60 revizyon ve 500 commit'lik tarama; preflight manifest deposu 200 girdi tutar.
 
-## Yazma izin matrisi (kırmızı çizgi 2)
+---
 
-| Araç | MCP `readOnlyHint` | Yazabileceği yer / bellek-içi yan etki |
+## Yazma izni matrisi
+
+Analiz edilen çalışma alanı her zaman salt okunurdur. Yazmalar yalnızca Causoryn'e ait konumlara gider.
+
+| Araç | `readOnlyHint` | İzin verilen yazma hedefi / yan etki |
 |---|---|---|
-| `causoryn_refresh_index` | `false` | Yalnızca Causoryn kendi indeks deposu — varsayılan çıplak stdio kablolamasında süreç-içi `InMemoryGraphRepository` veya beyan edilmişse (`CAUSORYN_CONFIG` ya da `--auto-data-dir`) `storage.dataDbPath` SQLite data-root (`allowRoots` dışında, mutlak yol; kaynak workspace salt-okunur taranır; Rust/Go sidecar ilk derlemeleri kendi toolchain `target`/cache dizinlerini — ör. `~/.causoryn/cache/rust-worker-target` — kullanabilir) |
-| `causoryn_export_documentation` | `false` | Yalnızca `output.allowedOutputDirs` beyanlı dizin (atomik `.tmp` + rename; çıplak modda varsayılan `[]` → `EXPORT_NOT_ALLOWED`; `--auto-data-dir` modunda workspace-dışı `exports/` dizini otomatik tanımlanır) |
-| `causoryn_wiki_build` | `false` | Yalnızca `wiki.dataDbPath` beyanlı data-root SQLite (workspace dışı, mutlak yol; `--auto-data-dir` modunda `storage.dataDbPath` ile aynı workspace-dışı SQLite dosyasına bağlanır; ayrıca sunucu başlangıcında `openWikiStores` tanımlı `wiki.dataDbPath` üzerinde tekil workspace kaydını ilklendirir) |
-| `causoryn_preflight_change` / `causoryn_verify_change` | `true` | **Diske ve çalışma ağacına hiçbir yere yazmaz** (`candidateOnly` sabit `true`, verify-only tip kilidi); `preflight_change` ürettiği manifesti `verify_change(preflightId)` çözümü için yalnızca süreç-içi `PreflightManifestStore` belleğinde (FIFO tavan 200) tutar |
-| Diğer tüm araçlar (24 araç) | `true` | Salt okunur (workspace hiçbir koşulda yazılmaz — ADR-008) |
+| `causoryn_status` | `false` | `action: "inspect"` hiçbir şey yazmaz. `action: "refresh"`, yalnızca Causoryn'in graph deposuna yazan bir indeks işini kuyruğa alır: `storage.dataDbPath` ayarsızken süreç-içi `InMemoryGraphRepository`, aksi hâlde o SQLite dosyası (`allowRoots`'un kesinlikle dışında mutlak yol). |
+| `causoryn_refresh_index` *(full)* | `false` | `causoryn_status` `action: "refresh"` ile aynı hedef. |
+| `causoryn_export_documentation` | `false` | Yalnızca beyan edilmiş `output.allowedOutputDirs` (atomik `.tmp` + rename). Varsayılan liste boştur (`EXPORT_NOT_ALLOWED`); `--auto-data-dir`, kaynak ağacının dışındaki çalışma alanı `exports/` dizinini ekler. |
+| `causoryn_wiki_build` *(wiki veya full)* | `false` | Yalnızca `wiki.dataDbPath` SQLite dosyası (`allowRoots`'un kesinlikle dışında; `--auto-data-dir` ile graph deposuyla aynı `graph.sqlite`). |
+| `causoryn_preflight_change` / `causoryn_verify_change` | `true` | Diske sıfır bayt. `preflight_change`, `verify_change` ve `include: ["test-plan"]` çağrılarının `preflightId`'yi çözebilmesi için manifestini süreç-içi `PreflightManifestStore` (FIFO, 200 girdi) içinde tutar; `verify_change` çalışma ağacını geçici bir bellek-içi depoya indeksler. |
+| Diğer tüm araçlar | `true` | Salt okunur. |
 
-## Tekrar kullanma ilkesi
+İndekslemenin kendisi (herhangi bir yenileme veya ilk indeks), ilk kullanımda Rust worker'ını harici Cargo hedef dizinine (varsayılan `~/.causoryn/cache/rust-worker-target`, geçersiz kılma `CAUSORYN_RUST_TARGET_DIR`) derleyebilir ve SHA-256 pinini oraya kaydedebilir — asla çalışma alanının içine değil. `--auto-data-dir` ile aynı çalışma alanını açan tüm host'lar tek bir `graph.sqlite` paylaşır; `build_leases` tablosu (heartbeat kiraları, varsayılan TTL 30 sn) eşzamanlı iki yayımcıyı önler.
 
-`causoryn_refresh_index` WikiSnapshot'ı otomatik güncellemez; wiki yenileme
-`causoryn_wiki_build`'in kendisidir. `causoryn_export_documentation`
-`view: "architecture" | "interactive" | "full"` görünümlerini, `options` ve fail-closed
-`annotations` alanlarını destekler; `view: "wiki"` Living Wiki dilimine ait olduğundan
-açık `INVALID_ARGUMENT` ile reddedilir (ADR-010). Ayrı `wiki_refresh`/`wiki_export`
-aracı AÇILMAZ — `wiki/mcp-tools.md` katalog ilkesiyle aynıdır.
+---
 
-## Sıfır-ayar CLI, dinamik kök bağlama ve `outputSchemaProfile` sözleşmesi
+## Dürüst sınırlar
 
-`packages/mcp-server/src/runtime-cli.ts` ve `packages/mcp-server/src/server.ts`, hem deterministik gömülü/test kullanımını hem de sıfır-ayar CLI ve masaüstü IDE eklentilerini aynı güvenlik sınırlarıyla destekler:
+- **Test çalıştırma yok:** `causoryn_verify_change`, `causoryn_preflight_change` (test-plan bölümü) ve `causoryn_derive_test_plan` testleri asla çalıştırmaz. Host `observedTestRun` geçmedikçe test durumu `not_run`'dır; host verisi her zaman `engineVerified: false` ile `state: "host_asserted"` olarak saklanır, asla motor tarafından doğrulanmış olarak değil.
+- **`no_findings` bir doğruluk garantisi değildir:** her doğrulama raporu `disclaimers` taşır. `causoryn_verify_change` içinde `contracts` denetimini istemek şu anda `not_evaluated` (verdict `inconclusive`, bir uyarıyla) verir, çünkü o aracın önce/sonra spec çiftleri yoktur; kontrat denetimleri için `causoryn_contracts` kullanın.
+- **Preflight manifestleri bellekte yaşar:** sunucu yeniden başladığında kaybolurlar. Bilinmeyen veya depodan çıkarılmış bir `preflightId` `INVALID_ARGUMENT` döner; bunun yerine `baseSnapshot` geçin.
+- **History araçları commit edilmiş snapshot dosyalarını okur:** `causoryn_compare_architecture` ve `causoryn_architecture_timeline`, `.causoryn/architecture-snapshot.json`'ı her ref'te commit edildiği hâliyle okur (`format: "snapshot"` ile oluşturup commit edin). Geçmiş kaynak ağaçlarını yeniden analiz etmezler; zaman çizelgesi noktaları `snapshot-loaded-from-committed-git-blob` olarak işaretlenir.
+- **Kural kaynağı farklıdır:** `causoryn_check_architecture` kuralları çalışma ağacından okur; `causoryn_verify_change` ise güvenilir `baseRef`'ten okur ve çalışma ağacına düşmek zorunda kaldığında uyarır.
+- **Sıcak başlangıçta otomatik yenileme yok:** SQLite deposunda zaten yayımlanmış bir snapshot varsa sunucu onu sunar ve kendiliğinden yeniden indekslemez. Kod değişikliklerinden sonra `causoryn_status`'u `action: "refresh"` ile çalıştırın.
+- **Dosya izleyici aracı yok:** dosyaları izleyen bir MCP aracı yoktur; yeniden indeksleme her zaman açıkça istenir.
+- **Rezerve alanlar yok sayılmaz, reddedilir:** `scope` (refresh, wiki build, wiki search), `policyId`, `focus`, `granularity`, `candidateScope` ve ek wiki arama filtreleri `INVALID_ARGUMENT` döner; `level: "L4"` `causoryn_map_system` tarafından reddedilir.
+- **Arama ayakları görünür biçimde degrade olur:** agent-context `fts` ayağı bir SQLite deposuna ihtiyaç duyar; wiki aramasının graph-yakınlık ayağı `skippedRankLegs` içinde raporlanır.
 
-1. **`--output-schema-profile omit|full` ve sunucu-içi şema doğrulaması:**
-   - Öncelik sırası (`resolveEffectiveOutputSchemaProfile`): `--output-schema-profile <full|omit>` bayrağı > `CAUSORYN_MCP_OUTPUT_SCHEMA_PROFILE` ortam değişkeni > (`hasCliActivation ? "omit" : "full"`).
-   - **Programatik ve çıplak mod (`outputSchemaProfile: "full"`):** `createCausorynMcpServer(context)` ve sıfır argümanlı `node dist/mcp-server.mjs` çağrısı varsayılan olarak 29 aracın tamamında tam JSON Schema `outputSchema` yayınlar ve `CAUSORYN_CONFIG` yoksa `allowRoots: []` (default deny) uygular.
-   - **CLI / Plugin modu (`causoryn mcp --allow-cwd --auto-data-dir [--client <id>]`):** CLI ajanlarında (Claude Code, Codex, ZCode, Antigravity) `tools/list` yanıtındaki büyük JSON Schema yükünün host modelinin bağlam penceresini (context token) tüketmemesi için varsayılan `outputSchemaProfile: "omit"` kullanılır (`--output-schema-profile full` veya `CAUSORYN_MCP_OUTPUT_SCHEMA_PROFILE=full` ile tam şema açılabilir). **`omit` modunda dahi sunucu her araç yanıtını döndürmeden önce `registration.outputSchema.parse(envelope)` (`server.ts:562-564`) çalıştırır**, ardından sonucu serileştirir.
-2. **Güvenli `--allow-cwd` filtresi ve dinamik MCP `roots/list` bağlaması (`attachMcpRootsWorkspaceBinder`):**
-   - `inspectProjectRootSafety`, dosya sistemi köklerini (`/`, `C:\`), kullanıcı ev dizinini (`$HOME`), Causoryn veri dizinlerini (`~/.causoryn`, `ZCODE_PLUGIN_DATA`, `--data-dir`), eklenti/bundle kurulum dizinlerini (`~/.gemini`, `~/.antigravity`, `~/.claude/plugins`, `~/.zcode/plugins`, `~/.codex/plugins`, `~/.agents/plugins`, `CLAUDE_PLUGIN_ROOT`, `ZCODE_PLUGIN_ROOT`, `bundle-manifest.json`), hassas kullanıcı dizinlerini (`~/.ssh`, `~/.aws`, `~/.gnupg`, `~/.kube`, `~/.claude`, `~/.codex`, `~/.zcode`) ve işletim sistemi dizinlerini (`/etc`, `/usr`, `/System`, `C:\Windows`, `C:\Program Files`) fail-closed reddeder.
-   - Başlangıç `cwd` güvenli bir proje diziniyse anında bağlanır; masaüstü IDE'lerde olduğu gibi uygunsuz bir `cwd` ile başlatıldığında sunucu `allowRoots: []` ile güvenli başlar ve `oninitialized`, `beforeToolCall` ile `notifications/roots/list_changed` kancalarında single-flight MCP `roots/list` sorgusu üzerinden ilk güvenli `file://` köküne atomik olarak bağlanır (`DynamicCausorynContext.rebind`).
-3. **Kaynak ağacı dışı `--auto-data-dir` hazırlama (`buildWorkspaceAutoConfig`):**
-   - Taban veri dizinini (`--data-dir` > `ZCODE_PLUGIN_DATA` > `~/.causoryn`) çözer ve birincil yetkili kökün kanonik yolundan `<slug>-<hash12>` kimliği türeterek `~/.causoryn/workspaces/<slug>-<hash12>/` altında `graph[-<client>].sqlite` (`storage.dataDbPath` + `wiki.dataDbPath`) ve `exports/` (`output.allowedOutputDirs`) yollarını otomatik hazırlar.
-   - Tek bir klasör bile oluşturulmadan önce tüm üst dizinlerin sembolik/sarkan bağ içermediği (CWE-59) ve yetkili `allowRoots` ağaçlarının kesinlikle dışında kaldığı (ADR-008) doğrulanır; dizinler `0o700` izniyle açılır ve oluşturma sonrasında `realpathSync` ile TOCTOU kontrolü tekrarlanır.
+---
 
-## İlgili sayfalar
+## Çıktı şeması profili ve doğrulama
 
-- [Dokümantasyon İndeksi](README.md) — tüm TR/EN dokümanların giriş sayfası
-- [Prompt ve Mimari Portal Rehberi](prompting-and-architecture-portals.md) — deterministik ve Host-LLM anotasyonlu mimari dışa aktarım kılavuzu
-- [docs/architecture.md](architecture.md) — paket haritası ve bağımlılık sınırları
-- [docs/cli-and-configuration.md](cli-and-configuration.md) — CLI bayrakları, ortam değişkenleri ve `CAUSORYN_CONFIG` şeması
-- [docs/language-analyzers.md](language-analyzers.md) — 5 dil analizörü ve çözümleme dürüstlüğü
-- [docs/wiki-spec.md](wiki-spec.md) — Living Wiki Engine tasarım ve uygulama sözleşmesi
-- [docs/implementation-status.md](implementation-status.md) — araç yüzeylerinin faz faz kanıtları
-- [docs/compatibility-matrix.md](compatibility-matrix.md) — host × sonuç matrisi
-- `wiki/mcp-tools.md` — katalog ve yazma izni ilkesi · `packages/mcp-server/src/errors.ts` — kod tablosu
+- **Wire profili:** `--output-schema <omit|full>` (takma adı `--output-schema-profile`) > `CAUSORYN_MCP_OUTPUT_SCHEMA_PROFILE` > `omit` (`runtime-cli.ts` `resolveEffectiveOutputSchemaProfile`). `createCausorynMcpServer` gömülü kullanımda da varsayılan olarak `omit` kullanır. Geçersiz değerler başlangıçta reddedilir.
+- **`omit`**, host bağlamından tasarruf etmek için `outputSchema`'yı `tools/list` dışında bırakır; sunucu yine de her envelope'u döndürmeden önce aracın çıktı şemasıyla ayrıştırır (`server.ts` içinde `registration.outputSchema.parse(envelope)`). Bu denetimden geçemeyen bir yanıt bir `INTERNAL_ERROR` envelope'uyla değiştirilir.
+- **`full`**, her aracın JSON Schema `outputSchema`'sını yayımlar; MCP SDK ardından her çağrıda `structuredContent`'i buna göre doğrular.
+- Her sonuç envelope'u hem `structuredContent` olarak hem de `content[0]` içinde JSON metni olarak taşır.
+
+## Başlatma, kök bağlama ve veri dizini (özet)
+
+Paketlenmiş sunucu (`causoryn mcp`, `packages/mcp-server/src/cli-stdio.ts`'ten derlenir) bir çalışma alanı kökünü `--root`, `CAUSORYN_CONFIG.allowRoots`, güvenli bir geçerli dizin (`--allow-cwd`) veya ilk güvenli MCP `roots/list` girdisinden bağlar. Güvensiz adaylar (dosya sistemi kökleri, `$HOME` ve ataları, Causoryn veri ve plugin dizinleri, hassas ve sistem dizinleri, UNC/aygıt yolları) reddedilir. `--auto-data-dir`, çalışma alanının dışında `<base>/workspaces/<slug>-<hash12>/graph.sqlite` ve `exports/` hazırlar (taban: `--data-dir` > `ZCODE_PLUGIN_DATA` > `~/.causoryn`). Hiç kök yoksa sunucu `allowRoots: []` ile başlar ve çalışma alanı araçları `WORKSPACE_NOT_AUTHORIZED` döner. Tüm ayrıntılar: [CLI ve Konfigürasyon](cli-and-configuration.md).
+
+---
+
+## İlgili belgeler
+
+- [5 Dakikalık Hızlı Başlangıç Eğitimi (İngilizce)](en/tutorial-5-minutes.md) · [Dokümantasyon Merkezi](README.md)
+- [Prompting ve Mimari Portallar Rehberi](prompting-and-architecture-portals.md) — deterministik ve host anotasyonlu mimari portallar
+- [CLI ve Konfigürasyon](cli-and-configuration.md) — bayraklar, ortam değişkenleri, `CAUSORYN_CONFIG`, veri dizini
+- [Mimari Özeti](architecture.md) — paket haritası ve bağımlılık sınırları
+- [Dil Analizörleri](language-analyzers.md) — 5 adapter ve çözümleme dürüstlüğü
+- [Living Wiki Spesifikasyonu](wiki-spec.md) — wiki motoru tasarımı ve durumu
+- [Uygulama Durumu](implementation-status.md) — yetenek başına doğrulama kanıtı
+- [Uyumluluk Matrisi](compatibility-matrix.md) — host × doğrulama sonuçları
+- [Güvenlik Denetimi](security-pass.md) — araç zinciri izolasyonu, export CSP, yol güvenliği
