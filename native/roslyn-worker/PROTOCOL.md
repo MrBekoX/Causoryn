@@ -114,7 +114,7 @@ Analiz tamamlandığında:
   },
   "coverageRatio": 1.0,
   "unsupportedConstructs": [...],
-  "warnings": ["referans paketi yüklendi: ..."],
+  "warnings": ["reference pack loaded: ..."],
   "diagnostics": [{ "relativePath": "...", "code": "CS0246", "message": "...", "line": 15 }],
   "nodes": [...], "edges": [...], "evidence": [...]
 }

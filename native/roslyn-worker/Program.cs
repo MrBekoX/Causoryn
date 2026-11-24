@@ -57,7 +57,7 @@ public static class Program
         using var reader = new StreamReader(stdin, new UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
         var lineReader = new LimitedLineReader(reader);
 
-        Log($"worker başladı — protokol v{ProtocolConstants.ProtocolVersion}, analyzer {ProtocolConstants.AnalyzerId} v{ProtocolConstants.AnalyzerVersion}");
+        Log($"worker started — protocol v{ProtocolConstants.ProtocolVersion}, analyzer {ProtocolConstants.AnalyzerId} v{ProtocolConstants.AnalyzerVersion}");
 
         try
         {
@@ -71,9 +71,9 @@ public static class Program
                     var limitResponse = Error(
                         null,
                         ProtocolErrorCodes.LimitExceeded,
-                        $"istek satırı {ProtocolConstants.MaxRequestLineChars:N0} karakter sınırını aştı; satır atlandı");
+                        $"request line exceeded the {ProtocolConstants.MaxRequestLineChars:N0} character limit; line skipped");
                     writer.WriteLine(JsonSerializer.Serialize(limitResponse, ProtocolJson.Options));
-                    Log("istek satırı sınırı aşıldı — satır atlandı");
+                    Log("request line limit exceeded — line skipped");
                     continue;
                 }
 
@@ -89,16 +89,16 @@ public static class Program
 
                 var response = HandleLine(line);
                 writer.WriteLine(JsonSerializer.Serialize(response, ProtocolJson.Options));
-                Log($"istek işlendi: id={DescribeId(response.Id)} status={response.Status}");
+                Log($"request processed: id={DescribeId(response.Id)} status={response.Status}");
             }
         }
         catch (IOException ex)
         {
-            Log($"kablo hatası, worker sonlanıyor: {ex.Message}");
+            Log($"wire error, worker exiting: {ex.Message}");
             return 1;
         }
 
-        Log("stdin EOF — worker kapanıyor");
+        Log("stdin EOF — worker shutting down");
         return 0;
     }
 
@@ -185,13 +185,13 @@ public static class Program
         try
         {
             var request = JsonSerializer.Deserialize<WorkerRequest>(line, ProtocolJson.Options)
-                ?? throw new ProtocolException(ProtocolErrorCodes.InvalidArgument, "istek JSON'u boş olamaz");
+                ?? throw new ProtocolException(ProtocolErrorCodes.InvalidArgument, "request JSON must not be empty");
 
             if (request.Type != "analyze")
             {
                 throw new ProtocolException(
                     ProtocolErrorCodes.InvalidArgument,
-                    $"bilinmeyen istek türü: '{request.Type}' (desteklenen: 'analyze')");
+                    $"unknown request type: '{request.Type}' (supported: 'analyze')");
             }
 
             return WorkerAnalyzer.Analyze(request);
@@ -202,7 +202,7 @@ public static class Program
         }
         catch (JsonException ex)
         {
-            return Error(TryExtractId(line), ProtocolErrorCodes.InvalidArgument, $"istek JSON'u ayrıştırılamadı: {ex.Message}");
+            return Error(TryExtractId(line), ProtocolErrorCodes.InvalidArgument, $"request JSON could not be parsed: {ex.Message}");
         }
         catch (Exception ex)
         {
@@ -210,7 +210,7 @@ public static class Program
             return Error(
                 TryExtractId(line),
                 ProtocolErrorCodes.InternalError,
-                "worker içinde beklenmeyen hata oluştu (stderr günlüklerine bakın)");
+                "unexpected error inside the worker (see the stderr log)");
         }
     }
 
@@ -240,8 +240,8 @@ public static class Program
 
     private static string DescribeId(JsonElement? id) => id switch
     {
-        null => "(yok)",
-        { ValueKind: JsonValueKind.String } element => element.GetString() ?? "(boş)",
+        null => "(none)",
+        { ValueKind: JsonValueKind.String } element => element.GetString() ?? "(empty)",
         _ => id.Value.GetRawText(),
     };
 

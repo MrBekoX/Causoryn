@@ -117,7 +117,7 @@ public static class WorkerAnalyzer
             {
                 throw new ProtocolException(
                     ProtocolErrorCodes.InternalError,
-                    $"TŞ §8 node kataloğu dışı tür üretilemez: {kind}");
+                    $"node kind outside the catalog cannot be emitted: {kind}");
             }
 
             var key = NodeKey(kind, qualifiedName, relativePath);
@@ -160,7 +160,7 @@ public static class WorkerAnalyzer
             {
                 throw new ProtocolException(
                     ProtocolErrorCodes.InternalError,
-                    $"TŞ §8 edge kataloğu dışı tür üretilemez: {kind}");
+                    $"edge kind outside the catalog cannot be emitted: {kind}");
             }
 
             // Güvenlik bulgusu 4: ucu admit edilmemiş (limit aşımı) kenar
@@ -329,7 +329,7 @@ public static class WorkerAnalyzer
             {
                 throw new ProtocolException(
                     ProtocolErrorCodes.InvalidArgument,
-                    $"Aynı kaynak yolu iki kez verildi: {relativePath}");
+                    $"Same source path was given twice: {relativePath}");
             }
 
             SyntaxTree tree;
@@ -346,7 +346,7 @@ public static class WorkerAnalyzer
                 {
                     RelativePath = relativePath,
                     Code = "ADAPTER_INTERNAL",
-                    Message = $"dosya ayrıştırılamadı, analiz setinden çıkarıldı: {ex.Message}",
+                    Message = $"file could not be parsed and was removed from the analysis set: {ex.Message}",
                     Line = 0,
                 });
                 continue;
@@ -417,12 +417,12 @@ public static class WorkerAnalyzer
                 {
                     RelativePath = entry.RelativePath,
                     Code = "ADAPTER_INTERNAL",
-                    Message = $"derleme tanı aşaması tamamlanamadı ({ex.GetType().Name}); girdi derinliği kod bütçesini aşıyor",
+                    Message = $"compilation diagnostics phase could not complete ({ex.GetType().Name}); input nesting depth exceeds the code budget",
                     Line = 0,
                 });
             }
 
-            warnings.Add("tanı aşaması tamamlanamadı: " + ex.Message);
+            warnings.Add("diagnostics phase could not complete: " + ex.Message);
         }
 
         diagnostics.Sort((a, b) =>
@@ -464,10 +464,10 @@ public static class WorkerAnalyzer
                 {
                     RelativePath = phaseEntry.RelativePath,
                     Code = "ADAPTER_INTERNAL",
-                    Message = "çözümleme aşaması derinlik sınırına takıldı (InsufficientExecutionStackException); aşama bu dosya için atlandı",
+                    Message = "resolution phase hit the depth limit (InsufficientExecutionStackException); phase skipped for this file",
                     Line = 0,
                 });
-                warnings.Add($"çözümleme derinlik sınırı: {phaseEntry.RelativePath} (aşama atlandı)");
+                warnings.Add($"resolution depth limit: {phaseEntry.RelativePath} (phase skipped)");
             }
             catch (Exception ex)
             {
@@ -478,7 +478,7 @@ public static class WorkerAnalyzer
                     Message = ex.Message,
                     Line = 0,
                 });
-                warnings.Add($"çözümleme aşaması hata verdi: {phaseEntry.RelativePath} ({ex.GetType().Name})");
+                warnings.Add($"resolution phase failed: {phaseEntry.RelativePath} ({ex.GetType().Name})");
             }
         }
 
@@ -536,7 +536,7 @@ public static class WorkerAnalyzer
             {
                 RelativePath = string.Empty,
                 Code = "RESPONSE_TRUNCATED",
-                Message = $"yanıt node bütçesi aşıldı (maxNodes={nodeLimit.ToString(System.Globalization.CultureInfo.InvariantCulture)}); aşan node/kenarlar yayınlanmadı",
+                Message = $"response node budget exceeded (maxNodes={nodeLimit.ToString(System.Globalization.CultureInfo.InvariantCulture)}); excess nodes/edges were not emitted",
                 Line = 0,
             });
         }
@@ -574,31 +574,31 @@ public static class WorkerAnalyzer
     {
         if (request.Id.ValueKind is JsonValueKind.Undefined or JsonValueKind.Null)
         {
-            throw new ProtocolException(ProtocolErrorCodes.InvalidArgument, "'id' alanı zorunludur");
+            throw new ProtocolException(ProtocolErrorCodes.InvalidArgument, "'id' field is required");
         }
 
         if (string.IsNullOrWhiteSpace(request.Type))
         {
-            throw new ProtocolException(ProtocolErrorCodes.InvalidArgument, "'type' alanı zorunludur");
+            throw new ProtocolException(ProtocolErrorCodes.InvalidArgument, "'type' field is required");
         }
 
         if (request.ProtocolVersion is not null && request.ProtocolVersion != ProtocolConstants.ProtocolVersion)
         {
             throw new ProtocolException(
                 ProtocolErrorCodes.InvalidArgument,
-                $"Desteklenmeyen protokol sürümü: '{request.ProtocolVersion}' (desteklenen: '{ProtocolConstants.ProtocolVersion}')");
+                $"Unsupported protocol version: '{request.ProtocolVersion}' (supported: '{ProtocolConstants.ProtocolVersion}')");
         }
 
         if (request.ExtensionData is { Count: > 0 })
         {
             throw new ProtocolException(
                 ProtocolErrorCodes.InvalidArgument,
-                $"İstek bilinmeyen alan içeriyor: {string.Join(", ", request.ExtensionData.Keys)}");
+                $"Request contains unknown field(s): {string.Join(", ", request.ExtensionData.Keys)}");
         }
 
         if (request.Files is null || request.Files.Count == 0)
         {
-            throw new ProtocolException(ProtocolErrorCodes.InvalidArgument, "'files' alanı zorunludur (en az bir kaynak)");
+            throw new ProtocolException(ProtocolErrorCodes.InvalidArgument, "'files' field is required (at least one source)");
         }
 
         // Kaynak sınırları (TŞ §9 resource budget; K-010: yalnızca boyut
@@ -607,7 +607,7 @@ public static class WorkerAnalyzer
         {
             throw new ProtocolException(
                 ProtocolErrorCodes.LimitExceeded,
-                $"files sayısı sınırı aşıldı: {request.Files.Count} > {ProtocolConstants.MaxFileCount}");
+                $"file count limit exceeded: {request.Files.Count} > {ProtocolConstants.MaxFileCount}");
         }
 
         // Güvenlik bulgusu 4: maxNodes aralık denetimi — null → sert tavan;
@@ -617,7 +617,7 @@ public static class WorkerAnalyzer
         {
             throw new ProtocolException(
                 ProtocolErrorCodes.InvalidArgument,
-                $"maxNodes 1..{ProtocolConstants.MaxResponseNodes} aralığında olmalı; gelen: {request.MaxNodes?.ToString(System.Globalization.CultureInfo.InvariantCulture) ?? "null"}");
+                $"maxNodes must be in the range 1..{ProtocolConstants.MaxResponseNodes}; received: {request.MaxNodes?.ToString(System.Globalization.CultureInfo.InvariantCulture) ?? "null"}");
         }
 
         foreach (var file in request.Files)
@@ -626,14 +626,14 @@ public static class WorkerAnalyzer
             {
                 throw new ProtocolException(
                     ProtocolErrorCodes.InvalidArgument,
-                    "files[] girdisi 'path' ve 'content' alanlarını zorunlu kılar");
+                    "files[] entry requires the 'path' and 'content' fields");
             }
 
             if (file.ExtensionData is { Count: > 0 })
             {
                 throw new ProtocolException(
                     ProtocolErrorCodes.InvalidArgument,
-                    $"files[] girdisi bilinmeyen alan içeriyor: {string.Join(", ", file.ExtensionData.Keys)}");
+                    $"files[] entry contains unknown field(s): {string.Join(", ", file.ExtensionData.Keys)}");
             }
 
             var contentBytes = Encoding.UTF8.GetByteCount(file.Content);
@@ -641,7 +641,7 @@ public static class WorkerAnalyzer
             {
                 throw new ProtocolException(
                     ProtocolErrorCodes.LimitExceeded,
-                    $"dosya içerik boyutu sınırı aşıldı: {file.Path} ({contentBytes} bayt > {ProtocolConstants.MaxFileContentBytes})");
+                    $"file content size limit exceeded: {file.Path} ({contentBytes} bytes > {ProtocolConstants.MaxFileContentBytes})");
             }
         }
     }
@@ -653,7 +653,7 @@ public static class WorkerAnalyzer
         {
             throw new ProtocolException(
                 ProtocolErrorCodes.InvalidArgument,
-                $"Mutlak kaynak yolu kabul edilmez: {raw}");
+                $"Absolute source paths are not accepted: {raw}");
         }
 
         foreach (var segment in posix.Split('/'))
@@ -662,14 +662,14 @@ public static class WorkerAnalyzer
             {
                 throw new ProtocolException(
                     ProtocolErrorCodes.InvalidArgument,
-                    $"Kaynak yolu boş/geçersiz segment içeriyor: {raw}");
+                    $"Source path contains an empty/invalid segment: {raw}");
             }
 
             if (segment == "..")
             {
                 throw new ProtocolException(
                     ProtocolErrorCodes.InvalidArgument,
-                    $"Kaynak yolu kök dışına çıkıyor: {raw}");
+                    $"Source path escapes the workspace root: {raw}");
             }
         }
 
@@ -779,7 +779,7 @@ public static class WorkerAnalyzer
         }
 
         AddContains(assembler, entry, typeDecl, fileNode, record,
-            $"CONTAINS: {entry.RelativePath} dosyasındaki {qualifiedName} {kind.ToLowerInvariant()} bildirimi AST span kanıtıyla eşlendi.");
+            $"CONTAINS: the {kind.ToLowerInvariant()} declaration {qualifiedName} in {entry.RelativePath} was matched by AST span evidence.");
 
         if (typeDecl is ClassDeclarationSyntax classDecl)
         {
@@ -848,7 +848,7 @@ public static class WorkerAnalyzer
         }
 
         AddContains(assembler, entry, declaration, ownerRecord.Node, record,
-            $"CONTAINS: {ownerQualifiedName} bildirimi içindeki {memberName} üyesi AST span kanıtıyla eşlendi.");
+            $"CONTAINS: member {memberName} inside the {ownerQualifiedName} declaration was matched by AST span evidence.");
     }
 
     private static void RegisterTopLevelLocalFunction(
@@ -871,7 +871,7 @@ public static class WorkerAnalyzer
         }
 
         AddContains(assembler, entry, localFunction, fileNode, record,
-            $"CONTAINS: {entry.RelativePath} dosyasındaki {qualifiedName} yerel fonksiyon bildirimi AST span kanıtıyla eşlendi.");
+            $"CONTAINS: the local function declaration {qualifiedName} in {entry.RelativePath} was matched by AST span evidence.");
     }
 
     private static string TypeKindOf(TypeDeclarationSyntax typeDecl) => typeDecl switch
@@ -903,7 +903,7 @@ public static class WorkerAnalyzer
         }
 
         AddContains(assembler, entry, enumDecl, fileNode, record,
-            $"CONTAINS: {entry.RelativePath} dosyasındaki {qualifiedName} enum bildirimi AST span kanıtıyla eşlendi.");
+            $"CONTAINS: the enum declaration {qualifiedName} in {entry.RelativePath} was matched by AST span evidence.");
     }
 
     private static void AddContains(
@@ -1057,7 +1057,7 @@ public static class WorkerAnalyzer
 
                     assembler.AddEdge(edgeKind, ownerRecord, targetRecord, "verified",
                         SpanEvidence(entry, baseTypeSyntax, "semantic-symbol",
-                            $"{edgeKind}: {ownerRecord.Node.QualifiedName} bildirimi Roslyn semantic model ile {targetRecord.Node.QualifiedName} tipine çözümlendi (verified)."),
+                            $"{edgeKind}: the {ownerRecord.Node.QualifiedName} declaration was resolved to type {targetRecord.Node.QualifiedName} by the Roslyn semantic model (verified)."),
                         null);
                     continue;
                 }
@@ -1071,7 +1071,7 @@ public static class WorkerAnalyzer
                 var externalRecord = assembler.EnsureExternal(externalName);
                 assembler.AddEdge(edgeKind, ownerRecord, externalRecord, "verified",
                     SpanEvidence(entry, baseTypeSyntax, "semantic-symbol",
-                        $"{edgeKind}: {ownerRecord.Node.QualifiedName} bildirimi analiz seti dışındaki {externalName} tipine çözümlendi; dış kaynak açık UnknownExternal node olarak temsil edildi."),
+                        $"{edgeKind}: the {ownerRecord.Node.QualifiedName} declaration was resolved to type {externalName} outside the analysis set; the external source is represented as an explicit UnknownExternal node."),
                     null);
                 continue;
             }
@@ -1093,10 +1093,10 @@ public static class WorkerAnalyzer
             var unresolvedTarget = assembler.EnsureExternal(rawName);
             assembler.AddEdge(unresolvedKind, ownerRecord, unresolvedTarget, "unresolved",
                 SpanEvidence(entry, baseTypeSyntax, "ast-span",
-                    $"{unresolvedKind}: {ownerRecord.Node.QualifiedName} içindeki '{rawName}' kalıtım hedefi çözümlenemedi; açık UnknownExternal node üzerinde unresolved işaretlendi."),
+                    $"{unresolvedKind}: inheritance target '{rawName}' in {ownerRecord.Node.QualifiedName} could not be resolved; marked unresolved on an explicit UnknownExternal node."),
                 null);
             assembler.AddWarning(
-                $"{unresolvedKind} çözümlenemedi: {entry.RelativePath} '{ownerRecord.Node.QualifiedName}' -> '{rawName}' (unresolved, UnknownExternal node üretildi)");
+                $"{unresolvedKind} unresolved: {entry.RelativePath} '{ownerRecord.Node.QualifiedName}' -> '{rawName}' (unresolved, UnknownExternal node emitted)");
         }
     }
 
@@ -1193,11 +1193,11 @@ public static class WorkerAnalyzer
         {
             RelativePath = context.Entry.RelativePath,
             Code = "ADAPTER_INTERNAL",
-            Message = $"AST gezinme derinliği {MaxTraversalDepth} sınırını aştı; derin alt ağaçlar atlandı",
+            Message = $"AST traversal depth exceeded the {MaxTraversalDepth} limit; deep subtrees were skipped",
             Line = lineSpan.IsValid ? lineSpan.StartLinePosition.Line + 1 : 0,
         });
         context.Assembler.AddWarning(
-            $"AST derinlik sınırı aşıldı: {context.Entry.RelativePath} (derin alt ağaçlar atlandı)");
+            $"AST depth limit exceeded: {context.Entry.RelativePath} (deep subtrees skipped)");
     }
 
     private static NodeRecord? CallerFor(CallContext context, SyntaxNode node)
@@ -1250,7 +1250,7 @@ public static class WorkerAnalyzer
             EmitUnresolvedCall(context, caller, invocation, expressionText, new AmbiguityOut
             {
                 Candidates = info.CandidateSymbols.Select(s => s.ToDisplayString()).ToList(),
-                Reason = "Aşırı yükleme belirsizliği; semantik model tek aday seçemedi.",
+                Reason = "Overload ambiguity; the semantic model could not select a single candidate.",
             });
             return;
         }
@@ -1266,7 +1266,7 @@ public static class WorkerAnalyzer
         {
             context.Assembler.AddEdge("CALLS", caller, target, "verified",
                 SpanEvidence(context.Entry, invocation, "semantic-symbol",
-                    $"CALLS: {caller.Node.QualifiedName} içindeki çağrı ifadesi Roslyn semantic model ile {target.Node.QualifiedName} sembolüne çözümlendi (verified)."),
+                    $"CALLS: the call expression in {caller.Node.QualifiedName} was resolved to symbol {target.Node.QualifiedName} by the Roslyn semantic model (verified)."),
                 null);
             return;
         }
@@ -1278,7 +1278,7 @@ public static class WorkerAnalyzer
         var external = context.Assembler.EnsureExternal(externalName);
         context.Assembler.AddEdge("CALLS", caller, external, "verified",
             SpanEvidence(context.Entry, invocation, "semantic-symbol",
-                $"CALLS: {caller.Node.QualifiedName} içindeki çağrı analiz seti dışındaki {externalName} sembolüne çözümlendi; dış kaynak açık UnknownExternal node olarak temsil edildi."),
+                $"CALLS: the call in {caller.Node.QualifiedName} was resolved to symbol {externalName} outside the analysis set; the external source is represented as an explicit UnknownExternal node."),
             null);
     }
 
@@ -1297,7 +1297,7 @@ public static class WorkerAnalyzer
             EmitUnresolvedCall(context, caller, creation, expressionText, new AmbiguityOut
             {
                 Candidates = info.CandidateSymbols.Select(s => s.ToDisplayString()).ToList(),
-                Reason = "Kurucu aşırı yükleme belirsizliği; semantik model tek aday seçemedi.",
+                Reason = "Constructor overload ambiguity; the semantic model could not select a single candidate.",
             });
             return;
         }
@@ -1316,7 +1316,7 @@ public static class WorkerAnalyzer
         {
             context.Assembler.AddEdge("CALLS", caller, target, "verified",
                 SpanEvidence(context.Entry, creation, "semantic-symbol",
-                    $"CALLS: {caller.Node.QualifiedName} içindeki nesne oluşturma {target.Node.QualifiedName} sınıfına çözümlendi (semantic-symbol, verified)."),
+                    $"CALLS: the object creation in {caller.Node.QualifiedName} was resolved to class {target.Node.QualifiedName} (semantic-symbol, verified)."),
                 null);
             return;
         }
@@ -1325,7 +1325,7 @@ public static class WorkerAnalyzer
         var external = context.Assembler.EnsureExternal(externalName);
         context.Assembler.AddEdge("CALLS", caller, external, "verified",
             SpanEvidence(context.Entry, creation, "semantic-symbol",
-                $"CALLS: {caller.Node.QualifiedName} içindeki nesne oluşturma analiz seti dışındaki {externalName} sınıfına çözümlendi; dış kaynak açık UnknownExternal node olarak temsil edildi."),
+                $"CALLS: the object creation in {caller.Node.QualifiedName} was resolved to class {externalName} outside the analysis set; the external source is represented as an explicit UnknownExternal node."),
             null);
     }
 
@@ -1339,10 +1339,10 @@ public static class WorkerAnalyzer
         var target = context.Assembler.EnsureExternal(callText);
         context.Assembler.AddEdge("CALLS", caller, target, "unresolved",
             SpanEvidence(context.Entry, callSite, "ast-span",
-                $"CALLS: {caller.Node.QualifiedName} içindeki '{callText}' çağrısı çözümlenemedi; uydurma hedef yerine açık UnknownExternal node üzerinde unresolved işaretlendi."),
+                $"CALLS: the call '{callText}' in {caller.Node.QualifiedName} could not be resolved; marked unresolved on an explicit UnknownExternal node instead of a fabricated target."),
             ambiguity);
         context.Assembler.AddWarning(
-            $"CALLS çözümlenemedi: {context.Entry.RelativePath} '{callText}' (unresolved, UnknownExternal node üretildi)");
+            $"CALLS unresolved: {context.Entry.RelativePath} '{callText}' (unresolved, UnknownExternal node emitted)");
     }
 
     private static NodeRecord? ResolveTargetRecord(CallContext context, ISymbol symbol)
@@ -1495,7 +1495,7 @@ public static class WorkerAnalyzer
         if (!pathValue.HasValue || pathValue.Value is not string path)
         {
             assembler.AddWarning(
-                $"Minimal API rotası modellenmedi: {context.Entry.RelativePath} '{name}(...)' — rota kalıbı sabit string değil");
+                $"Minimal API route not modeled: {context.Entry.RelativePath} '{name}(...)' — the route pattern is not a constant string");
             return;
         }
 
@@ -1506,7 +1506,7 @@ public static class WorkerAnalyzer
             if (verbs.Count == 0)
             {
                 assembler.AddWarning(
-                    $"Minimal API rotası modellenmedi: {context.Entry.RelativePath} 'MapMethods(...)' — HTTP fiilleri sabit string dizisi değil");
+                    $"Minimal API route not modeled: {context.Entry.RelativePath} 'MapMethods(...)' — the HTTP verbs are not a constant string array");
                 return;
             }
         }
@@ -1530,20 +1530,20 @@ public static class WorkerAnalyzer
             }
 
             var basisText = semanticBasis
-                ? "EndpointRouteBuilderExtensions uzantı metodu semantic model ile doğrulandı"
-                : "bilinen ad kuralı (semantic model uzantı metodunu çözümlemedi)";
+                ? "EndpointRouteBuilderExtensions extension method verified by the semantic model"
+                : "known-name rule (the semantic model did not resolve the extension method)";
             var resolution = semanticBasis ? "verified" : "heuristic";
             AmbiguityOut? ambiguity = semanticBasis
                 ? null
                 : new AmbiguityOut
                 {
                     Candidates = new List<string> { name },
-                    Reason = "Minimal API kayıt metodu ad kuralı ile tanındı; Microsoft.AspNetCore.Builder semantiği çözümlenemedi.",
+                    Reason = "Minimal API registration method recognized by the name rule; Microsoft.AspNetCore.Builder semantics could not be resolved.",
                 };
 
             assembler.AddEdge("ROUTES_TO", endpoint, handlerRecord, resolution,
                 SpanEvidence(context.Entry, invocation, "route-attribute",
-                    $"ROUTES_TO: '{verb} {path}' minimal API kaydı ({basisText}) {handlerRecord.Node.QualifiedName} handler'ına çözümlendi."),
+                    $"ROUTES_TO: minimal API registration '{verb} {path}' ({basisText}) was resolved to handler {handlerRecord.Node.QualifiedName}."),
                 ambiguity);
         }
     }
@@ -1586,7 +1586,7 @@ public static class WorkerAnalyzer
             if (expression is AnonymousFunctionExpressionSyntax)
             {
                 context.Assembler.AddWarning(
-                    $"Route handler modellenmedi: {context.Entry.RelativePath} minimal API kaydı — inline/anonymous handler unsupportedConstructs kapsamında");
+                    $"Route handler not modeled: {context.Entry.RelativePath} minimal API registration — inline/anonymous handlers are listed under unsupportedConstructs");
                 return null;
             }
 
@@ -1612,7 +1612,7 @@ public static class WorkerAnalyzer
                 }
 
                 context.Assembler.AddWarning(
-                    $"ROUTES_TO çözümlenemedi: {context.Entry.RelativePath} minimal API handler sembolü bulunamadı ('{expression}')");
+                    $"ROUTES_TO unresolved: {context.Entry.RelativePath} minimal API handler symbol not found ('{expression}')");
                 return null;
             }
 
@@ -1654,7 +1654,7 @@ public static class WorkerAnalyzer
         if (classRoute is null || classRoute.Template is null)
         {
             assembler.AddWarning(
-                $"Controller rotası modellenmedi: {controller.QualifiedName} — [Route] özniteliği yok; convention routing kalıbı statik olarak belirlenemez (unsupportedConstructs: convention-routing-templates)");
+                $"Controller route not modeled: {controller.QualifiedName} — no [Route] attribute; a convention routing template cannot be determined statically (unsupportedConstructs: convention-routing-templates)");
             return;
         }
 
@@ -1685,7 +1685,7 @@ public static class WorkerAnalyzer
                 if (actionRecord is null)
                 {
                     assembler.AddWarning(
-                        $"ROUTES_TO çözümlenemedi: {controller.QualifiedName}.{method.Identifier.ValueText} action kaydı registry'de yok");
+                        $"ROUTES_TO unresolved: {controller.QualifiedName}.{method.Identifier.ValueText} action is not in the symbol registry");
                     continue;
                 }
 
@@ -1713,17 +1713,17 @@ public static class WorkerAnalyzer
                     ambiguity = new AmbiguityOut
                     {
                         Candidates = unresolvedNames,
-                        Reason = "ASP.NET Core öznitelik tipleri semantic model ile Microsoft.AspNetCore.Mvc köküne çözümlenemedi; bilinen ad kuralı uygulandı (TŞ §8 heuristic).",
+                        Reason = "ASP.NET Core attribute types could not be resolved to the Microsoft.AspNetCore.Mvc namespace by the semantic model; the known-name rule was applied (heuristic).",
                     };
                 }
 
                 var basisText = allSemantic
-                    ? "öznitelik tipleri semantic model ile Microsoft.AspNetCore.Mvc köküne çözümlendi"
-                    : "bilinen ad kuralı (semantic model öznitelik tipini çözümlemedi)";
+                    ? "attribute types resolved to the Microsoft.AspNetCore.Mvc namespace by the semantic model"
+                    : "known-name rule (the semantic model did not resolve the attribute type)";
 
                 assembler.AddEdge("ROUTES_TO", endpoint, actionRecord, resolution,
                     SpanEvidence(entry, verbAttribute.Node, "route-attribute",
-                        $"ROUTES_TO: '{verbAttribute.Verb} {template}' controller route kaydı ({basisText}) {actionRecord.Node.QualifiedName} action'ına çözümlendi."),
+                        $"ROUTES_TO: controller route registration '{verbAttribute.Verb} {template}' ({basisText}) was resolved to action {actionRecord.Node.QualifiedName}."),
                     ambiguity);
             }
         }

@@ -101,7 +101,7 @@ const HALF_LINE_SCRIPT = `process.stdout.write('{"id":"x"}'); setTimeout(() => {
 /** Anında stderr yazıp çıkan sahte süreç (worker crash fallback). */
 const CRASH_SCRIPT = `process.stderr.write('sahte worker cakildi'); process.exit(1);`;
 /** Geçerli PROTOCOL.md v1 hata yanıtı yazıp çıkan sahte süreç (bulgu: status:'error' ayrımı). */
-const WORKER_ERROR_SCRIPT = `process.stdout.write(JSON.stringify({ id: 'analyze:adapter-b2-worker-error', protocolVersion: '1', status: 'error', error: { code: 'LIMIT_EXCEEDED', message: 'dosya sayısı sınırı aşıldı: 5001 > 5000' } }) + '\\n'); process.exit(0);`;
+const WORKER_ERROR_SCRIPT = `process.stdout.write(JSON.stringify({ id: 'analyze:adapter-b2-worker-error', protocolVersion: '1', status: 'error', error: { code: 'LIMIT_EXCEEDED', message: 'file count limit exceeded: 5001 > 5000' } }) + '\\n'); process.exit(0);`;
 
 /* ------------------------------------------------------------------ */
 /* Testler                                                             */
@@ -324,7 +324,7 @@ describe.skipIf(!dotnetAvailable)("adapters/csharp-roslyn (sprint-2 B2)", () => 
       result.warnings.some(
         (warning) =>
           warning.includes("LIMIT_EXCEEDED") &&
-          warning.includes("dosya sayısı sınırı"),
+          warning.includes("file count limit exceeded"),
       ),
     ).toBe(true);
     expect(result.nodes.length).toBe(FIXTURE_FILES.length);
@@ -577,7 +577,7 @@ describe("worker status:error fallback gerekçesi (denetim bulgusu 9)", () => {
               status: "error",
               error: {
                 code: "LIMIT_EXCEEDED",
-                message: "files sayısı sınırı aşıldı: 5001 > 5000",
+                message: "file count limit exceeded: 5001 > 5000",
               },
             }),
           ),
