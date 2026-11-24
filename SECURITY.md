@@ -2,11 +2,12 @@
 
 ## Supported Versions
 
-Causoryn is currently in **Pre-1.0 Public Preview (`0.2.x`)**. Security fixes are provided for the latest `0.2.x` release line:
+Causoryn is currently **pre-1.0 (`0.3.x`)**. Security fixes are provided for the latest `0.3.x` release line:
 
 | Version | Supported |
 |---|---|
-| `0.2.x` | Yes |
+| `0.3.x` | Yes |
+| `0.2.x` | No (upgrade to `0.3.x`; see the migration notes in `CHANGELOG.md`) |
 | `< 0.2.0` (`0.1.0` snapshot) | No |
 
 ## Reporting a Vulnerability

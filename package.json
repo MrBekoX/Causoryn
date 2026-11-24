@@ -1,9 +1,9 @@
 {
   "name": "causoryn-monorepo",
-  "version": "0.2.4",
+  "version": "0.3.0",
   "private": true,
-  "_versionDecision": "K-022 (2026-11-20): 0.2.0 Pre-1.0 Public Preview (1.0.0 ilan edilmedi; uzak v0.1.0 etiketi 4c9c188f üzerinde kilitli kaldığından yeni minor SemVer'e yükseltildi — ADR-010, bkz. CHANGELOG.md). SERVER_VERSION ile birebir.",
-  "description": "Causoryn — LLM çalıştırmayan, yerel ve deterministik kod analizi MCP motoru (TŞ v2.1).",
+  "_versionDecision": "2026-11-24: 0.3.0 pre-1.0 release (1.0.0 is not declared). Minor bump because the default MCP tool surface changed in a breaking way (29 legacy tools -> 11-tool core profile; legacy names remain available with --tool-profile full). See CHANGELOG.md. Must stay equal to SERVER_VERSION.",
+  "description": "Causoryn: a local, deterministic code-analysis MCP engine that runs no LLM.",
   "type": "module",
   "license": "MIT",
   "engines": {
