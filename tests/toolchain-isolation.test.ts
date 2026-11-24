@@ -366,7 +366,7 @@ describe("Task 1.1: Rust / Cargo toolchain isolation & binary integrity pinning"
           existsSync(path.join(buildTargetDir, "debug", WORKER_BINARY_NAME)),
         ).toBe(true);
       } finally {
-        rmSync(tmpDir, { recursive: true, force: true });
+        rmSync(tmpDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
       }
     },
     180_000,
@@ -517,7 +517,7 @@ describe("Task 1.1: Rust / Cargo toolchain isolation & binary integrity pinning"
         expect(spawnCount).toBe(0);
       }
     } finally {
-      rmSync(tmpDir, { recursive: true, force: true });
+      rmSync(tmpDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
     }
   });
 
@@ -572,7 +572,7 @@ describe("Task 1.1: Rust / Cargo toolchain isolation & binary integrity pinning"
         expect(writtenMeta.sourceFingerprint).toBe(expectedFp);
         expect(writtenMeta.binarySha256).toBe(rebuiltSha);
       } finally {
-        rmSync(tmpDir, { recursive: true, force: true });
+        rmSync(tmpDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
       }
     },
     180_000,
@@ -645,7 +645,7 @@ describe("Task 1.1: Python isolated mode (-I -B -X utf8) & trusted cwd", () => {
 
       expect(existsSync(markerFile)).toBe(false);
     } finally {
-      rmSync(tmpDir, { recursive: true, force: true });
+      rmSync(tmpDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
     }
   }, 30_000);
 });
