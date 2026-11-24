@@ -25,7 +25,7 @@ export const NodeKindSchema = z.enum(NODE_KINDS);
  * kuralıyla aynı semantiği şema düzeyine taşır (çıktı değeri kırpılmaz).
  */
 const NonEmptyString = z.string().refine((value) => value.trim().length > 0, {
-  message: "Alan boş veya yalnızca boşluk olamaz",
+  message: "Field must not be empty or whitespace-only",
 });
 
 export const EdgeKindSchema = z.enum(EDGE_KINDS);
@@ -41,7 +41,7 @@ export const SourceSpanSchema = z
     sourceHash: NonEmptyString,
   })
   .refine((span) => span.endLine >= span.startLine, {
-    message: "endLine, startLine'dan küçük olamaz",
+    message: "endLine must not be less than startLine",
     path: ["endLine"],
   });
 
@@ -86,7 +86,7 @@ export const GraphEdgeSchema = z
       ctx.addIssue({
         code: "custom",
         message:
-          "verified kenar en az bir kanıt taşımak zorundadır (TŞ §8 invariant i, ADR-004)",
+          "A verified edge must carry at least one piece of evidence",
         path: ["evidenceIds"],
       });
     }
@@ -129,7 +129,7 @@ export const SnapshotSchema = z
       if (nodeIds.has(node.id)) {
         ctx.addIssue({
           code: "custom",
-          message: `Aynı kimlikte birden fazla node: ${node.id}`,
+          message: `Duplicate node id: ${node.id}`,
           path: ["nodes"],
         });
       }
@@ -141,7 +141,7 @@ export const SnapshotSchema = z
       if (evidenceIds.has(evidence.id)) {
         ctx.addIssue({
           code: "custom",
-          message: `Aynı kimlikte birden fazla evidence: ${evidence.id}`,
+          message: `Duplicate evidence id: ${evidence.id}`,
           path: ["evidence"],
         });
       }
@@ -153,7 +153,7 @@ export const SnapshotSchema = z
       if (edgeIds.has(edge.id)) {
         ctx.addIssue({
           code: "custom",
-          message: `Aynı kimlikte birden fazla edge: ${edge.id}`,
+          message: `Duplicate edge id: ${edge.id}`,
           path: ["edges"],
         });
       }
@@ -162,14 +162,14 @@ export const SnapshotSchema = z
       if (!nodeIds.has(edge.from)) {
         ctx.addIssue({
           code: "custom",
-          message: `Kenar ucu bilinmeyen node'a işaret ediyor (dangling): ${edge.from}`,
+          message: `Edge endpoint points to an unknown node (dangling): ${edge.from}`,
           path: ["edges"],
         });
       }
       if (!nodeIds.has(edge.to)) {
         ctx.addIssue({
           code: "custom",
-          message: `Kenar ucu bilinmeyen node'a işaret ediyor (dangling): ${edge.to}`,
+          message: `Edge endpoint points to an unknown node (dangling): ${edge.to}`,
           path: ["edges"],
         });
       }
@@ -177,7 +177,7 @@ export const SnapshotSchema = z
         if (!evidenceIds.has(evidenceId)) {
           ctx.addIssue({
             code: "custom",
-            message: `Kenar kanıtı bilinmeyen evidence kaydına işaret ediyor: ${evidenceId}`,
+            message: `Edge evidence points to an unknown evidence record: ${evidenceId}`,
             path: ["edges"],
           });
         }

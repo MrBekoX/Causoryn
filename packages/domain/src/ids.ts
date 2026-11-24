@@ -40,7 +40,7 @@ function requireNonEmpty(field: string, value: string): void {
   if (value.trim().length === 0) {
     throw new DomainError(
       "domain/empty-required-field",
-      `Zorunlu alan boş olamaz: ${field}`,
+      `Required field must not be empty: ${field}`,
     );
   }
 }
@@ -105,7 +105,7 @@ export function nodeId(input: NodeIdInput): string {
   if (!NODE_KIND_SET.has(input.kind)) {
     throw new DomainError(
       "domain/unknown-node-kind",
-      `Bilinmeyen node türü: ${String(input.kind)}`,
+      `Unknown node kind: ${String(input.kind)}`,
     );
   }
   return nodeIdUnchecked(input);
@@ -128,7 +128,7 @@ export function edgeId(input: EdgeIdInput): string {
   if (!EDGE_KIND_SET.has(input.kind)) {
     throw new DomainError(
       "domain/unknown-edge-kind",
-      `Bilinmeyen edge türü: ${String(input.kind)}`,
+      `Unknown edge kind: ${String(input.kind)}`,
     );
   }
   return edgeIdUnchecked(input);
@@ -172,19 +172,19 @@ export function createEdge(input: CreateEdgeInput): GraphEdge {
   if (!EDGE_KIND_SET.has(input.kind)) {
     throw new DomainError(
       "domain/unknown-edge-kind",
-      `Bilinmeyen edge türü: ${String(input.kind)}`,
+      `Unknown edge kind: ${String(input.kind)}`,
     );
   }
   if (!RESOLUTION_SET.has(input.resolution)) {
     throw new DomainError(
       "domain/unknown-resolution",
-      `Bilinmeyen resolution değeri: ${String(input.resolution)}`,
+      `Unknown resolution value: ${String(input.resolution)}`,
     );
   }
   if (input.resolution === "verified" && input.evidenceIds.length === 0) {
     throw new DomainError(
       "domain/verified-edge-requires-evidence",
-      "verified kenar en az bir kanıt gerektirir (TŞ §8 invariant i, ADR-004)",
+      "A verified edge requires at least one piece of evidence",
     );
   }
   return {

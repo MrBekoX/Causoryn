@@ -162,7 +162,7 @@ function asJsonValue(value: unknown): JsonValue {
       if (!Number.isFinite(value)) {
         throw new DomainError(
           "domain/non-finite-number",
-          `Snapshot JSON'e sonlu olmayan sayı yazılamaz: ${String(value)}`,
+          `Cannot write a non-finite number to snapshot JSON: ${String(value)}`,
         );
       }
       return value;
@@ -190,7 +190,7 @@ function asJsonValue(value: unknown): JsonValue {
     default:
       throw new DomainError(
         "domain/non-json-value",
-        `Snapshot JSON'e serileştirilemez değer: ${typeof value}`,
+        `Value cannot be serialized to snapshot JSON: ${typeof value}`,
       );
   }
 }
@@ -516,7 +516,7 @@ export function createSnapshot(input: SnapshotInput): SnapshotGraph {
     if (nodesByKey.has(key)) {
       throw new DomainError(
         "domain/duplicate-node",
-        `Aynı kimlikte birden fazla node: ${key}`,
+        `Duplicate node id: ${key}`,
       );
     }
     nodesByKey.set(key, makeNode(input.workspaceId, nodeInput));
@@ -542,7 +542,7 @@ export function createSnapshot(input: SnapshotInput): SnapshotGraph {
       const ref = from === undefined ? edgeInput.from : edgeInput.to;
       throw new DomainError(
         "domain/dangling-edge",
-        `Kenar ucu bilinmeyen node'a işaret ediyor (${missing}): ${nodeKey(ref)}`,
+        `Edge endpoint points to an unknown node (${missing}): ${nodeKey(ref)}`,
       );
     }
     const evidenceIds: string[] = [];
@@ -570,7 +570,7 @@ export function createSnapshot(input: SnapshotInput): SnapshotGraph {
     if (seenEdgeIds.has(edge.id)) {
       throw new DomainError(
         "domain/duplicate-edge",
-        `Aynı kimlikte birden fazla edge: ${edge.id}`,
+        `Duplicate edge id: ${edge.id}`,
       );
     }
     seenEdgeIds.add(edge.id);
@@ -620,7 +620,7 @@ export function createSnapshot(input: SnapshotInput): SnapshotGraph {
       .join("; ");
     throw new DomainError(
       "domain/snapshot-invariant-violation",
-      `Snapshot invariant ihlali: ${detail}`,
+      `Snapshot invariant violation: ${detail}`,
     );
   }
 
