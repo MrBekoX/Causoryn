@@ -6,7 +6,6 @@ import {
   readdirSync,
   readFileSync,
   rmSync,
-  statSync,
   writeFileSync,
 } from "node:fs";
 import os from "node:os";
@@ -14,6 +13,8 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { afterEach, describe, expect, it } from "vitest";
+
+import { fileSnapshot } from "./helpers/file-snapshot.js";
 
 import {
   CANONICAL_SKILL_NAMES,
@@ -252,8 +253,8 @@ describe("Task 1.8a — setup.ts DX hardening", () => {
 
     const claudeBackupPath = path.join(fakeHome, ".claude.json.causoryn.backup");
     expect(readFileSync(claudeBackupPath, "utf8")).toBe(originalClaude);
-    const claudeMtimeAfterFirst = statSync(path.join(fakeHome, ".claude.json")).mtimeMs;
-    const backupMtimeAfterFirst = statSync(claudeBackupPath).mtimeMs;
+    const claudeMtimeAfterFirst = fileSnapshot(path.join(fakeHome, ".claude.json")).mtimeMs;
+    const backupMtimeAfterFirst = fileSnapshot(claudeBackupPath).mtimeMs;
 
     // Second run with identical inputs: MUST be a true no-op!
     const second = await runSetup({
@@ -267,9 +268,10 @@ describe("Task 1.8a — setup.ts DX hardening", () => {
     expect(second.applied).toBe(false);
     expect(second.actions.every((a) => a.operation === "noop")).toBe(true);
     expect(second.actions.every((a) => a.backupPath === null)).toBe(true);
-    expect(statSync(path.join(fakeHome, ".claude.json")).mtimeMs).toBe(claudeMtimeAfterFirst);
-    expect(statSync(claudeBackupPath).mtimeMs).toBe(backupMtimeAfterFirst);
-    expect(readFileSync(claudeBackupPath, "utf8")).toBe(originalClaude);
+    expect(fileSnapshot(path.join(fakeHome, ".claude.json")).mtimeMs).toBe(claudeMtimeAfterFirst);
+    const backupAfter = fileSnapshot(claudeBackupPath);
+    expect(backupAfter.mtimeMs).toBe(backupMtimeAfterFirst);
+    expect(backupAfter.text).toBe(originalClaude);
   });
 
   it("preserves the original .causoryn.backup forever across subsequent modifications and cleans up .tmp files on renameSync failure", async () => {

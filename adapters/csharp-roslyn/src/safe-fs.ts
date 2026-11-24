@@ -114,7 +114,8 @@ export function readBoundedFileNoFollow(filePath: string, realRoot: string, maxB
   let fd: number;
   try
   {
-    fd = openSync(realFile, flags);
+    // Read-only open (no file is created); the mode argument only documents that.
+    fd = openSync(realFile, flags, 0o600);
   }
   catch
   {

@@ -24,6 +24,8 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterAll, describe, expect, it } from "vitest";
+
+import { fileSnapshot } from "./helpers/file-snapshot.js";
 import {
   isWithinUntrustedRoots,
   resolveExecutable,
@@ -489,7 +491,7 @@ describe("Rust worker builds from a staged crate copy outside the analyzed works
       const first = await analyze("b4-first");
       expect(first.workerAvailable).toBe(true);
       const cachedBin = path.join(cacheRoot, "debug", WORKER_BINARY_NAME);
-      expect(existsSync(cachedBin)).toBe(true);
+      expect(fileSnapshot(cachedBin).size).toBeGreaterThan(0);
 
       // Overwrite the cached binary IN PLACE (same file), keeping the old pin.
       const tamperedBytes = Buffer.from("tampered-bytes-not-a-valid-executable");
