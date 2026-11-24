@@ -17,6 +17,22 @@ import { existsSync } from "node:fs";
 import path from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import { fileURLToPath } from "node:url";
+import { isFullyQualifiedPath, resolveExecutable, sanitizePathValue } from "./executable.js";
+
+export {
+  collectUntrustedRoots,
+  isFullyQualifiedPath,
+  isWithinUntrustedRoots,
+  processCwdUntrustedRoot,
+  readPathVariable,
+  resolveExecutable,
+  resolveWindowsSystemExecutable,
+  sanitizePathValue,
+  trustedSearchDirectories,
+  trustedWorkingDirectory,
+  type ExecutableSearchEnv,
+  type ResolveExecutableOptions,
+} from "./executable.js";
 
 /** Tek yanıt satırı ve stderr birikimi için varsayılan karakter bütçesi (64 MiB). */
 export const DEFAULT_RESPONSE_MAX_CHARS = 64 * 1024 * 1024;
@@ -128,6 +144,48 @@ export function buildAllowlistedWorkerEnv(
   return env;
 }
 
+/** `unavailable` outcome without starting a process. */
+export function workerUnavailable(detail: string): WorkerRunOutcome {
+  return { status: "unavailable", response: null, stderr: "", detail };
+}
+
+/**
+ * Returns `env` with its PATH sanitized (empty, relative and untrusted-root
+ * entries removed) so tools started by the worker cannot be picked up from
+ * the analyzed workspace either.
+ */
+export function withSanitizedPath(
+  env: Readonly<Record<string, string>>,
+  untrustedRoots: readonly string[],
+): Record<string, string> {
+  const next: Record<string, string> = { ...env };
+  for (const key of Object.keys(next)) {
+    if (key.toUpperCase() !== "PATH") continue;
+    const sanitized = sanitizePathValue(next[key] ?? "", untrustedRoots);
+    if (sanitized.length > 0) next[key] = sanitized;
+    else delete next[key];
+  }
+  return next;
+}
+
+/**
+ * Resolves a configured worker command to an absolute executable using the
+ * child's PATH (never the cwd, never an untrusted-root PATH entry).
+ */
+export function resolveWorkerCommand(
+  command: string,
+  env: Readonly<Record<string, string>>,
+  untrustedRoots: readonly string[],
+): { readonly command: string } | { readonly detail: string } {
+  const resolved = resolveExecutable(command, { env, untrustedRoots });
+  if (resolved === null) {
+    return {
+      detail: `worker process was not started: executable "${command}" was not found on PATH outside the analyzed workspace (relative paths are not accepted)`,
+    };
+  }
+  return { command: resolved };
+}
+
 /**
  * Tek satır JSON istek/yanıt protokolüyle çalışan sidecar worker sürecini
  * başlatır, bütçe ve zaman aşımı sınırlarıyla izler ve ilk geçerli JSON
@@ -136,6 +194,17 @@ export function buildAllowlistedWorkerEnv(
 export function runLineJsonWorker(
   input: RunLineJsonWorkerInput,
 ): Promise<WorkerRunOutcome> {
+  // Bare or relative command names are refused: on Windows they are looked
+  // up in the child cwd before PATH. Callers resolve tools with
+  // resolveExecutable() first.
+  if (!isFullyQualifiedPath(input.command)) {
+    return Promise.resolve({
+      status: "unavailable",
+      response: null,
+      stderr: "",
+      detail: `worker process was not started: the command must be an absolute path (got: ${input.command})`,
+    });
+  }
   if (
     input.cwd !== undefined &&
     (input.cwd.trim().length === 0 || input.cwd.includes("\0"))
@@ -144,7 +213,7 @@ export function runLineJsonWorker(
       status: "unavailable",
       response: null,
       stderr: "",
-      detail: "worker süreci başlatılamadı: geçersiz veya boş cwd",
+      detail: "worker process could not be started: invalid or empty cwd",
     });
   }
 
@@ -209,7 +278,7 @@ export function runLineJsonWorker(
         status: "unavailable",
         response: null,
         stderr: "",
-        detail: `worker süreci başlatılamadı: ${detail}`,
+        detail: `worker process could not be started: ${detail}`,
       });
       return;
     }
@@ -220,7 +289,7 @@ export function runLineJsonWorker(
           status: "timeout",
           response: null,
           stderr: stderrText,
-          detail: `worker ${String(input.requestTimeoutMs)} ms içinde yanıt vermedi (zaman aşımı); süreç sonlandırıldı — sonraki istek taze süreçle yürütülür`,
+          detail: `worker did not respond within ${String(input.requestTimeoutMs)} ms (timeout); the process was terminated and the next request uses a fresh process`,
         },
         child,
       );
@@ -233,7 +302,7 @@ export function runLineJsonWorker(
           status: "unavailable",
           response: null,
           stderr: stderrText,
-          detail: `worker süreci başlatılamadı: ${detail}`,
+          detail: `worker process could not be started: ${detail}`,
         },
         child,
       );
@@ -248,7 +317,7 @@ export function runLineJsonWorker(
             status: "unavailable",
             response: null,
             stderr: stderrText,
-            detail: `worker stderr çıktısı ${String(stderrMaxChars)} karakter sınırını aştı; süreç sonlandırıldı — sonraki istek taze süreçle ve L0/L1 fallback ile yürütülür`,
+            detail: `worker stderr output exceeded the ${String(stderrMaxChars)} character limit; the process was terminated and the next request uses a fresh process with L0/L1 fallback`,
           },
           child,
         );
@@ -265,7 +334,7 @@ export function runLineJsonWorker(
             status: "unavailable",
             response: null,
             stderr: stderrText,
-            detail: `worker yanıt satırı ${String(responseMaxChars)} karakter sınırını aştı; süreç sonlandırıldı — sonraki istek taze süreçle ve L0/L1 fallback ile yürütülür`,
+            detail: `worker response line exceeded the ${String(responseMaxChars)} character limit; the process was terminated and the next request uses a fresh process with L0/L1 fallback`,
           },
           child,
         );
@@ -291,7 +360,7 @@ export function runLineJsonWorker(
               status: "unavailable",
               response: null,
               stderr: stderrText,
-              detail: `worker yanıtı geçerli JSON değil: ${detail}`,
+              detail: `worker response is not valid JSON: ${detail}`,
             },
             child,
           );
@@ -319,8 +388,8 @@ export function runLineJsonWorker(
           stderr: stderrText,
           detail:
             signal !== null
-              ? `worker sinyal ile sonlandı (${signal})`
-              : `worker çıktı (exit=${String(code ?? "bilinmiyor")}); stderr: ${stderrText.slice(0, 200).trim() || "(boş)"}`,
+              ? `worker terminated by signal (${signal})`
+              : `worker exited (exit=${String(code ?? "unknown")}); stderr: ${stderrText.slice(0, 200).trim() || "(empty)"}`,
         },
         child,
         true,
@@ -339,7 +408,7 @@ export function runLineJsonWorker(
           status: "unavailable",
           response: null,
           stderr: stderrText,
-          detail: `istek worker'a yazılamadı: ${detail}`,
+          detail: `request could not be written to the worker: ${detail}`,
         },
         child,
       );

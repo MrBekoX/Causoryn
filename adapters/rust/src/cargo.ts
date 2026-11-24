@@ -1,27 +1,43 @@
 /**
- * cargo toolchain yardımcıları — @causoryn/adapter-rust (M1-Rust).
+ * cargo toolchain helpers — @causoryn/adapter-rust (M1-Rust).
  *
- * Kırmızı çizgi 6 (spawn güvenliği) — LİTERAL komut disiplini: bu modül
- * spawn çağrılarının TAMAMINDA SABİT LİTERAL komut ("cargo") kullanır;
- * toolchain konumu komut argümanı DEĞİL, child env PATH'ine ÖNEKLENEN
- * sabit dizindir (cargo-home). Argümanlar tamamen sabittir:
- * ["build", "--manifest-path", <repo-içi sabit manifest yolu>] — shell
- * YOKTUR; kaynak içerikleri yalnızca stdin üzerinden taşınır (worker istek
- * gövdesinde). Statik güvenlik kuralı (literal komut + sabit argüman;
- * değişken komut → spawn yasak) için üç savunma katmanı:
- *   1. Komut her yerde LİTERAL "cargo"; konum override'ı CAUSORYN_CARGO_HOME
- *      env'iyle PATH öneki olarak yapılır (yol filtresinden geçmek zorunda).
- *   2. isSafeDirPath: override dizininde kontrol/kabuk meta karakterleri
- *      reddedilir (shell:false olsa da savunma).
- *   3. "cargo" PATH'te yoksa cargo-home dizini PATH'e öneklemeyle eklenir;
- *      hiçbiri yoksa probe/build başarısız → adapter açık warning ile
- *      L0/L1'e düşer (motor çökmez).
+ * Spawn safety (red line 6):
+ * - cargo is resolved to an ABSOLUTE path (cargo-home bin first, then PATH;
+ *   never the cwd, never a PATH entry inside the analyzed workspace) and is
+ *   started with fixed arguments and shell:false; source contents only
+ *   travel over the worker's stdin.
+ * - The worker crate is built from a staged copy in a Causoryn-controlled
+ *   cache directory (buildRustWorkerFromStagedSource), so cargo and rustup
+ *   config discovery never walks into the analyzed repository.
+ * - isSafeCommandPath / isSafeAbsoluteDirPath filter override directories
+ *   (control and shell meta characters) before any process is started.
+ * - When cargo is missing the probe/build fails and the adapter falls back
+ *   to L0/L1 with an explicit warning (the engine does not crash).
  */
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
-import { existsSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { delimiter, dirname, join } from "node:path";
-import { defaultWorkerManifestPath } from "./types.js";
+import { randomBytes } from "node:crypto";
+import {
+  constants as fsConstants,
+  copyFileSync,
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  realpathSync,
+  renameSync,
+  rmSync,
+} from "node:fs";
+import { basename, delimiter, dirname, isAbsolute, join, resolve } from "node:path";
+import {
+  isFullyQualifiedPath,
+  isWithinUntrustedRoots,
+  resolveExecutable,
+  resolveWindowsSystemExecutable,
+  sanitizePathValue,
+  trustedWorkingDirectory,
+} from "@causoryn/sidecar-ipc";
+import { WORKER_BINARY_NAME } from "./types.js";
 
 /**
  * cargo build alt sürecine geçilen ortam değişkeni allowlist'i (savunma
@@ -142,6 +158,7 @@ export function resolveCargoHomeDir(): string | null {
 export function buildToolEnv(
   allowlist: readonly string[],
   prependDir: string | null,
+  untrustedRoots: readonly string[] = [],
 ): Record<string, string> {
   const env: Record<string, string> = {};
   for (const key of allowlist) {
@@ -162,38 +179,66 @@ export function buildToolEnv(
   if (allowlist.includes("CARGO_HOME")) {
     env["CARGO_BUILD_RUSTC_WRAPPER"] = "";
     env["CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER"] = "";
+    env["RUSTC_WRAPPER"] = "";
+    env["RUSTC_WORKSPACE_WRAPPER"] = "";
   }
   if (prependDir !== null && isSafeCommandPath(prependDir)) {
     env["PATH"] = prependDir + delimiter + (env["PATH"] ?? "");
   }
+  if (env["PATH"] !== undefined) {
+    // Tools cargo starts (rustc, linker) must not come from the workspace.
+    const sanitized = sanitizePathValue(env["PATH"], untrustedRoots);
+    if (sanitized.length > 0) env["PATH"] = sanitized;
+    else delete env["PATH"];
+  }
   return env;
 }
 
-function resolveTrustedCargoCwd(manifestPath?: string): string {
-  const candidate = dirname(manifestPath ?? defaultWorkerManifestPath());
-  return existsSync(candidate) ? candidate : tmpdir();
-}
-
-function probeCargo(manifestPath?: string): boolean {
-  const cargoHome = resolveCargoHomeDir();
-  const probe = spawnSync("cargo", ["--version"], {
-    encoding: "utf8",
-    shell: false,
-    windowsHide: true,
-    cwd: resolveTrustedCargoCwd(manifestPath),
-    timeout: 15_000,
-    env: buildToolEnv(CARGO_ENV_ALLOWLIST, cargoHome),
-  });
-  return probe.status === 0;
+export interface CargoResolutionOptions {
+  /** cargo-home bin directory searched before PATH; default resolveCargoHomeDir(). */
+  readonly cargoHomeDir?: string | null;
+  /** Analyzed workspace root(s): PATH entries inside them are never searched. */
+  readonly untrustedRoots?: readonly string[];
 }
 
 /**
- * cargo toolchain'i kullanılabilir mi? LİTERAL "cargo" komutu PATH
- * (öncelikli olarak cargo-home önekli) üzerinden güvenilen cwd'de yoklanır;
+ * Resolves cargo to an absolute executable: cargo-home bin first, then PATH;
+ * never the cwd, never a PATH entry inside an untrusted root.
+ */
+export function resolveCargoExecutable(options: CargoResolutionOptions = {}): string | null {
+  const cargoHome =
+    options.cargoHomeDir !== undefined ? options.cargoHomeDir : resolveCargoHomeDir();
+  return resolveExecutable("cargo", {
+    env: process.env,
+    untrustedRoots: options.untrustedRoots ?? [],
+    prependDirs: cargoHome !== null && isSafeCommandPath(cargoHome) ? [cargoHome] : [],
+  });
+}
+
+/**
+ * cargo toolchain'i kullanılabilir mi? cargo is resolved to an absolute path
+ * and probed with `--version` from its own directory (a trusted cwd: rustup
+ * would otherwise read a `rust-toolchain.toml` from the cwd's ancestors).
  * process.cwd() asla miraslanmaz.
  */
-export function isCargoAvailable(manifestPath?: string): boolean {
-  return probeCargo(manifestPath);
+export function isCargoAvailable(
+  _manifestPath?: string,
+  options: CargoResolutionOptions = {},
+): boolean {
+  const cargo = resolveCargoExecutable(options);
+  if (cargo === null) return false;
+  const untrustedRoots = options.untrustedRoots ?? [];
+  const cwd = trustedWorkingDirectory([dirname(cargo)], untrustedRoots);
+  if (cwd === null) return false;
+  const probe = spawnSync(cargo, ["--version"], {
+    encoding: "utf8",
+    shell: false,
+    windowsHide: true,
+    cwd,
+    timeout: 15_000,
+    env: buildToolEnv(CARGO_ENV_ALLOWLIST, null, untrustedRoots),
+  });
+  return probe.status === 0;
 }
 
 /** cargo build koşum sonucu — adapter fallback kararı buna göre verir. */
@@ -208,26 +253,29 @@ export interface CargoBuildOutcome {
 
 /**
  * cargo build zaman aşımında doğrudan cargo sürecinin ÖTESİNDE rustc/
- * codegen TORUN süreçlerini de sonlandırır (win32): LİTERAL "taskkill" +
- * /pid <KENDİ çocuğumuzun sayısal pid'i> /T (ağaç) /F (zorla) — go
- * worker taskkill deseninin (adapters/go worker-process killProcessTree)
- * cargo build karşılığı. Torunlar finite süreçlerdir (derleme bitince
- * kendiliklerinden çıkarlar); ağaç-kill savunma derinliğidir. pid kullanıcı
- * girdisi DEĞİLDİR; shell yoktur; argümanlar istek içeriğinden
- * türetilmez (kırmızı çizgi 6). taskkill başlatılamazsa doğrudan kill
+ * codegen TORUN süreçlerini de sonlandırır (win32):
+ * %SystemRoot%\System32\taskkill.exe (absolute, its own directory as cwd) +
+ * /pid <KENDİ çocuğumuzun sayısal pid'i> /T (ağaç) /F (zorla). pid kullanıcı
+ * girdisi DEĞİLDİR; shell yoktur. taskkill başlatılamazsa doğrudan kill
  * zaten uygulanmıştır.
  */
-function killBuildTree(spawnFn: CargoSpawnFunction, child: ChildProcess | null): void {
+function killBuildTree(
+  spawnFn: CargoSpawnFunction,
+  child: ChildProcess | null,
+  env: Readonly<Record<string, string>>,
+): void {
   if (process.platform !== "win32") return;
   const pid = child?.pid;
   if (pid === undefined) return;
+  const taskkill = resolveWindowsSystemExecutable("taskkill.exe");
   try {
     const killer = spawnFn(
-      "taskkill", // LİTERAL komut — kırmızı çizgi 6
+      taskkill,
       ["/pid", String(pid), "/T", "/F"],
       {
         stdio: ["ignore", "pipe", "pipe"],
-        env: buildToolEnv(CARGO_ENV_ALLOWLIST, null),
+        env,
+        cwd: dirname(taskkill),
         shell: false,
         windowsHide: true,
       },
@@ -241,16 +289,21 @@ function killBuildTree(spawnFn: CargoSpawnFunction, child: ChildProcess | null):
   }
 }
 
+function buildFailure(spawnError: string): Promise<CargoBuildOutcome> {
+  return Promise.resolve({ status: null, stdout: "", stderr: "", spawnError });
+}
+
 /**
- * cargo build'i LİTERAL "cargo" komutu + sabit argümanlarla çalıştırır
- * (shell yok; child env allowlist'li ve cargo-home PATH ön ekli).
+ * cargo build'i absolute cargo path + sabit argümanlarla çalıştırır
+ * (shell yok; child env allowlist'li, PATH sanitized). cwd is the
+ * manifest's directory, which must not be inside an untrusted root.
  * Zaman aşımında süreç kill edilir (win32'de ağaç-kill ile) ve
  * status=null döner; çağıran bunu "derlenemedi" olarak raporlar.
  */
 export function runCargoBuild(input: {
   manifestPath: string;
   timeoutMs: number;
-  /** Yazılabilir derleme hedef dizini (CARGO_TARGET_DIR); isSafeCommandPath ile doğrulanır. */
+  /** Yazılabilir derleme hedef dizini (--target-dir + CARGO_TARGET_DIR); isSafeCommandPath ile doğrulanır. */
   targetDir?: string;
   /**
    * Her çıktı akışı (stdout/stderr) için char üst sınırı; tanımsızsa 64M
@@ -259,24 +312,20 @@ export function runCargoBuild(input: {
    * kill + status:null; saklanan kuyruk baştan bütçeye kırpılır.
    */
   outputMaxChars?: number;
+  /** Explicit absolute cargo executable; default resolveCargoExecutable(). */
+  cargoExecutable?: string;
+  /** cargo-home bin directory searched before PATH. */
+  cargoHomeDir?: string | null;
+  /** Analyzed workspace root(s): cargo never runs with a cwd inside them. */
+  untrustedRoots?: readonly string[];
   /** Test enjeksiyonu; default node:child_process.spawn. */
   spawnFn?: CargoSpawnFunction;
 }): Promise<CargoBuildOutcome> {
-  if (!isSafeCommandPath(input.manifestPath)) {
-    return Promise.resolve({
-      status: null,
-      stdout: "",
-      stderr: "",
-      spawnError: "cargo build reddedildi: geçersiz manifestPath yolu",
-    });
+  if (!isSafeCommandPath(input.manifestPath) || !isAbsolute(input.manifestPath)) {
+    return buildFailure("cargo build refused: invalid manifestPath (it must be a safe absolute path)");
   }
   if (input.targetDir !== undefined && !isSafeCommandPath(input.targetDir)) {
-    return Promise.resolve({
-      status: null,
-      stdout: "",
-      stderr: "",
-      spawnError: "cargo build reddedildi: geçersiz CARGO_TARGET_DIR yolu",
-    });
+    return buildFailure("cargo build refused: invalid CARGO_TARGET_DIR path");
   }
   const inheritedTargetDir = process.env["CARGO_TARGET_DIR"];
   if (
@@ -285,21 +334,55 @@ export function runCargoBuild(input: {
     inheritedTargetDir.length > 0 &&
     !isSafeCommandPath(inheritedTargetDir)
   ) {
-    return Promise.resolve({
-      status: null,
-      stdout: "",
-      stderr: "",
-      spawnError:
-        "cargo build reddedildi: geçersiz ortam CARGO_TARGET_DIR yolu",
+    return buildFailure("cargo build refused: invalid CARGO_TARGET_DIR path in the environment");
+  }
+  const untrustedRoots = input.untrustedRoots ?? [];
+  const cargoCwd = dirname(input.manifestPath);
+  if (isWithinUntrustedRoots(cargoCwd, untrustedRoots)) {
+    return buildFailure(
+      `cargo build refused: the crate directory is inside the analyzed workspace (${cargoCwd})`,
+    );
+  }
+  let cargo: string | null;
+  if (input.cargoExecutable !== undefined) {
+    cargo = isFullyQualifiedPath(input.cargoExecutable) ? input.cargoExecutable : null;
+  } else {
+    cargo = resolveCargoExecutable({
+      ...(input.cargoHomeDir !== undefined ? { cargoHomeDir: input.cargoHomeDir } : {}),
+      untrustedRoots,
     });
+  }
+  if (cargo === null) {
+    return buildFailure(
+      "cargo build was not started: cargo was not found on PATH or in the cargo home directory outside the analyzed workspace",
+    );
   }
   const spawnFn = input.spawnFn ?? spawn;
   const outputMaxChars = input.outputMaxChars ?? DEFAULT_BUILD_OUTPUT_MAX_CHARS;
+  const childEnv = buildToolEnv(
+    CARGO_ENV_ALLOWLIST,
+    input.cargoHomeDir !== undefined ? input.cargoHomeDir : resolveCargoHomeDir(),
+    untrustedRoots,
+  );
+  if (input.targetDir !== undefined) {
+    childEnv["CARGO_TARGET_DIR"] = input.targetDir;
+  }
+  const useLocked =
+    input.targetDir !== undefined &&
+    existsSync(join(cargoCwd, "Cargo.lock"));
+  const cargoArgs = [
+    "build",
+    ...(useLocked ? ["--locked"] : []),
+    "--manifest-path",
+    input.manifestPath,
+    ...(input.targetDir !== undefined ? ["--target-dir", input.targetDir] : []),
+  ];
+
   return new Promise((resolveBuild) => {
     let settled = false;
     let stdoutText = "";
     let stderrText = "";
-    let child: import("node:child_process").ChildProcess | null = null;
+    let child: ChildProcess | null = null;
 
     const finish = (outcome: CargoBuildOutcome): void => {
       if (settled) return;
@@ -316,47 +399,30 @@ export function runCargoBuild(input: {
       child?.kill();
       // win32: rustc/codegen torun süreçleri de sonlandırılır (savunma
       // derinliği; go worker taskkill deseni).
-      killBuildTree(spawnFn, child);
+      killBuildTree(spawnFn, child, childEnv);
       finish({
         status: null,
         stdout: stdoutText,
         stderr: stderrText,
-        spawnError: `cargo build ${String(input.timeoutMs)} ms içinde tamamlanmadı (zaman aşımı); süreç sonlandırıldı`,
+        spawnError: `cargo build did not finish within ${String(input.timeoutMs)} ms (timeout); the process was terminated`,
       });
     }, input.timeoutMs);
 
-    const childEnv = buildToolEnv(CARGO_ENV_ALLOWLIST, resolveCargoHomeDir());
-    if (input.targetDir !== undefined) {
-      childEnv["CARGO_TARGET_DIR"] = input.targetDir;
-    }
-
-    const cargoCwd = dirname(input.manifestPath);
-    const useLocked =
-      input.targetDir !== undefined &&
-      existsSync(join(cargoCwd, "Cargo.lock"));
-    const cargoArgs = useLocked
-      ? ["build", "--locked", "--manifest-path", input.manifestPath]
-      : ["build", "--manifest-path", input.manifestPath];
-
     try {
-      child = spawnFn(
-        "cargo", // LİTERAL komut — kırmızı çizgi 6
-        cargoArgs,
-        {
-          stdio: ["ignore", "pipe", "pipe"],
-          env: childEnv,
-          cwd: cargoCwd,
-          shell: false,
-          windowsHide: true,
-        },
-      );
+      child = spawnFn(cargo, cargoArgs, {
+        stdio: ["ignore", "pipe", "pipe"],
+        env: childEnv,
+        cwd: cargoCwd,
+        shell: false,
+        windowsHide: true,
+      });
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error);
       finish({
         status: null,
         stdout: "",
         stderr: "",
-        spawnError: `cargo süreci başlatılamadı: ${detail}`,
+        spawnError: `cargo process could not be started: ${detail}`,
       });
       return;
     }
@@ -367,7 +433,7 @@ export function runCargoBuild(input: {
         status: null,
         stdout: stdoutText,
         stderr: stderrText,
-        spawnError: `cargo süreci başlatılamadı: ${detail}`,
+        spawnError: `cargo process could not be started: ${detail}`,
       });
     });
 
@@ -384,7 +450,7 @@ export function runCargoBuild(input: {
           status: null,
           stdout: stdoutText,
           stderr: stderrText,
-          spawnError: `cargo build ${stream} çıktısı ${String(outputMaxChars)} karakter sınırını aştı; süreç sonlandırıldı`,
+          spawnError: `cargo build ${stream} output exceeded the ${String(outputMaxChars)} character limit; the process was terminated`,
         });
         return;
       }
@@ -404,4 +470,202 @@ export function runCargoBuild(input: {
       });
     });
   });
+}
+
+/* ------------------------------------------------------------------ */
+/* Staged worker build (outside the analyzed workspace)                */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Path with symlinks resolved for its nearest existing ancestor (the
+ * remaining, not yet existing segments are appended lexically).
+ */
+function realpathOfNearestExisting(target: string): string {
+  let current = resolve(target);
+  const rest: string[] = [];
+  for (;;) {
+    try {
+      const real = realpathSync.native(current);
+      return rest.length === 0 ? real : join(real, ...rest.reverse());
+    } catch {
+      const parent = dirname(current);
+      if (parent === current) return resolve(target);
+      rest.push(basename(current));
+      current = parent;
+    }
+  }
+}
+
+function insideUntrusted(target: string, untrustedRoots: readonly string[]): boolean {
+  return (
+    isWithinUntrustedRoots(target, untrustedRoots) ||
+    isWithinUntrustedRoots(realpathOfNearestExisting(target), untrustedRoots)
+  );
+}
+
+/** Copies regular files of `srcDir` into `destDir` recursively (symlinks are skipped). */
+function copyRegularTree(srcDir: string, destDir: string): void {
+  mkdirSync(destDir, { recursive: true });
+  for (const entry of readdirSync(srcDir, { withFileTypes: true })) {
+    if (entry.isSymbolicLink()) continue;
+    const from = join(srcDir, entry.name);
+    const to = join(destDir, entry.name);
+    if (entry.isDirectory()) {
+      copyRegularTree(from, to);
+    } else if (entry.isFile()) {
+      copyFileSync(from, to, fsConstants.COPYFILE_EXCL);
+    }
+  }
+}
+
+function copyRegularFileIfPresent(from: string, to: string): void {
+  const st = (() => {
+    try {
+      return lstatSync(from);
+    } catch {
+      return null;
+    }
+  })();
+  if (st !== null && st.isFile()) {
+    copyFileSync(from, to, fsConstants.COPYFILE_EXCL);
+  }
+}
+
+export interface StagedRustWorkerBuildInput {
+  /** The packaged worker crate's Cargo.toml (read only; never built in place). */
+  readonly sourceManifestPath: string;
+  /** Causoryn-controlled cache directory (must be outside the workspace). */
+  readonly cacheRoot: string;
+  /** Where the freshly built binary is COPIED to (never hardlinked). */
+  readonly destinationBinaryPath: string;
+  /** Analyzed workspace root(s). */
+  readonly untrustedRoots: readonly string[];
+  readonly timeoutMs: number;
+  readonly cargoHomeDir?: string | null;
+  readonly cargoExecutable?: string;
+  readonly outputMaxChars?: number;
+  readonly spawnFn?: CargoSpawnFunction;
+}
+
+export interface StagedRustWorkerBuildOutcome {
+  readonly ok: boolean;
+  /** destinationBinaryPath when ok; otherwise null. */
+  readonly binaryPath: string | null;
+  /** English diagnostic when not ok. */
+  readonly detail: string;
+}
+
+/**
+ * Builds the Rust worker from a STAGED copy of its crate (Cargo.toml,
+ * Cargo.lock, build.rs, src/**) inside a fresh directory under `cacheRoot`:
+ * cargo's cwd is that directory, `--manifest-path` and `--target-dir` point
+ * inside it and `--locked` is used. cargo config discovery and rustup's
+ * toolchain-file discovery both walk the cwd's ancestors, so building in the
+ * package directory (e.g. <repo>/node_modules/...) would read the analyzed
+ * repository's `.cargo/config.toml` / `rust-toolchain.toml`. Every build uses
+ * a new target directory, and the output is copied (not linked) to the
+ * destination, so the result is always freshly produced bytes. Refuses to
+ * build when the cache directory is inside the analyzed workspace.
+ */
+export async function buildRustWorkerFromStagedSource(
+  input: StagedRustWorkerBuildInput,
+): Promise<StagedRustWorkerBuildOutcome> {
+  const fail = (detail: string): StagedRustWorkerBuildOutcome => ({ ok: false, binaryPath: null, detail });
+  for (const [label, value] of [
+    ["worker manifest path", input.sourceManifestPath],
+    ["Rust build cache directory", input.cacheRoot],
+    ["worker binary destination", input.destinationBinaryPath],
+  ] as const) {
+    if (!isSafeCommandPath(value) || !isFullyQualifiedPath(value)) {
+      return fail(`Rust worker build refused: the ${label} must be a safe absolute path (got: ${value})`);
+    }
+  }
+  for (const target of [input.cacheRoot, dirname(input.destinationBinaryPath)]) {
+    if (insideUntrusted(target, input.untrustedRoots)) {
+      return fail(
+        `Rust worker build refused: the build cache directory (${target}) is inside the analyzed workspace; ` +
+          "set CAUSORYN_RUST_TARGET_DIR to a directory outside the workspace",
+      );
+    }
+  }
+  const sourceDir = dirname(input.sourceManifestPath);
+  const sourceManifest = lstatSync(input.sourceManifestPath, { throwIfNoEntry: false });
+  if (sourceManifest === undefined || !sourceManifest.isFile()) {
+    return fail(`Rust worker manifest not found: ${input.sourceManifestPath}`);
+  }
+
+  let stagingDir: string;
+  try {
+    const stagingParent = join(input.cacheRoot, "staging");
+    mkdirSync(stagingParent, { recursive: true });
+    stagingDir = mkdtempSync(join(stagingParent, "build-"));
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    return fail(`Rust worker build staging directory could not be created: ${detail}`);
+  }
+  const cleanup = (): void => {
+    try {
+      rmSync(stagingDir, { recursive: true, force: true, maxRetries: 3 });
+    } catch {
+      // best effort
+    }
+  };
+  if (insideUntrusted(stagingDir, input.untrustedRoots)) {
+    cleanup();
+    return fail(`Rust worker build refused: the staging directory resolves inside the analyzed workspace (${stagingDir})`);
+  }
+
+  try {
+    copyRegularFileIfPresent(input.sourceManifestPath, join(stagingDir, "Cargo.toml"));
+    copyRegularFileIfPresent(join(sourceDir, "Cargo.lock"), join(stagingDir, "Cargo.lock"));
+    copyRegularFileIfPresent(join(sourceDir, "build.rs"), join(stagingDir, "build.rs"));
+    copyRegularTree(join(sourceDir, "src"), join(stagingDir, "src"));
+  } catch (error) {
+    cleanup();
+    const detail = error instanceof Error ? error.message : String(error);
+    return fail(`Rust worker crate could not be staged for the build: ${detail}`);
+  }
+
+  const targetDir = join(stagingDir, "target");
+  const build = await runCargoBuild({
+    manifestPath: join(stagingDir, "Cargo.toml"),
+    targetDir,
+    timeoutMs: input.timeoutMs,
+    untrustedRoots: input.untrustedRoots,
+    ...(input.cargoExecutable !== undefined ? { cargoExecutable: input.cargoExecutable } : {}),
+    ...(input.cargoHomeDir !== undefined ? { cargoHomeDir: input.cargoHomeDir } : {}),
+    ...(input.outputMaxChars !== undefined ? { outputMaxChars: input.outputMaxChars } : {}),
+    ...(input.spawnFn !== undefined ? { spawnFn: input.spawnFn } : {}),
+  });
+  if (build.status !== 0) {
+    cleanup();
+    const tail =
+      build.spawnError ||
+      build.stderr.trim().slice(-300) ||
+      build.stdout.trim().slice(-300) ||
+      "(no output)";
+    return fail(`cargo build failed (exit=${String(build.status ?? "unknown")}): ${tail}`);
+  }
+
+  const builtBinary = join(targetDir, "debug", WORKER_BINARY_NAME);
+  const built = lstatSync(builtBinary, { throwIfNoEntry: false });
+  if (built === undefined || !built.isFile()) {
+    cleanup();
+    return fail(`cargo build succeeded but the worker binary was not produced: ${builtBinary}`);
+  }
+
+  // Copy (never hardlink) into place: write a temporary sibling, then rename.
+  const tmpBinary = `${input.destinationBinaryPath}.tmp-${String(process.pid)}-${randomBytes(6).toString("hex")}`;
+  try {
+    mkdirSync(dirname(input.destinationBinaryPath), { recursive: true });
+    copyFileSync(builtBinary, tmpBinary, fsConstants.COPYFILE_EXCL);
+    renameSync(tmpBinary, input.destinationBinaryPath);
+  } catch (error) {
+    rmSync(tmpBinary, { force: true });
+    cleanup();
+    const detail = error instanceof Error ? error.message : String(error);
+    return fail(`freshly built Rust worker binary could not be copied into the cache: ${detail}`);
+  }
+  cleanup();
+  return { ok: true, binaryPath: input.destinationBinaryPath, detail: "" };
 }

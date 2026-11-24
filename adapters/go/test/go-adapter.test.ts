@@ -28,6 +28,7 @@ import { fileURLToPath } from "node:url";
 import { beforeAll, describe, expect, it } from "vitest";
 import { EventEmitter } from "node:events";
 import { createSnapshot } from "@causoryn/domain";
+import { resolveWindowsSystemExecutable } from "@causoryn/sidecar-ipc";
 import {
   analyzeGoWorkspace,
   runGoWorkerAnalyze,
@@ -37,6 +38,8 @@ import {
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
 const WORKER_DIR = join(REPO_ROOT, "native", "go-worker");
 const WORKER_BIN_DIR = join(WORKER_DIR, "bin");
+/** Absolute fake prebuilt-binary path for spawn-injected tests (never started). */
+const FAKE_ABSOLUTE_WORKER_BINARY = join(WORKER_BIN_DIR, "sahte-worker");
 const FIXTURE_DIR = join(REPO_ROOT, "examples", "fixture-go-app");
 
 const FIXTURE_FILES = [
@@ -1325,7 +1328,7 @@ describe("adapters/go graceful fallback (M1-Go)", { timeout: 20_000 }, () => {
     expect(
       result.warnings.some(
         (warning) =>
-          warning.includes("Go worker kullanılamıyor") &&
+          warning.includes("Go worker unavailable") &&
           warning.includes("L0/L1"),
       ),
     ).toBe(true);
@@ -1338,7 +1341,7 @@ describe("adapters/go graceful fallback (M1-Go)", { timeout: 20_000 }, () => {
       files: fixtureFiles(),
       options: {
         requestTimeoutMs: 400,
-        goWorkerBinaryPath: "sahte-worker",
+        goWorkerBinaryPath: FAKE_ABSOLUTE_WORKER_BINARY,
         spawnProcess: (command, args, options) => {
           void command;
           void args;
@@ -1353,7 +1356,7 @@ describe("adapters/go graceful fallback (M1-Go)", { timeout: 20_000 }, () => {
     expect(capture.child).not.toBeNull();
     expect(capture.child?.killed).toBe(true);
     expect(
-      result.warnings.some((warning) => warning.includes("zaman aşımı")),
+      result.warnings.some((warning) => warning.includes("timeout")),
     ).toBe(true);
   });
 
@@ -1363,7 +1366,7 @@ describe("adapters/go graceful fallback (M1-Go)", { timeout: 20_000 }, () => {
       files: fixtureFiles(),
       options: {
         requestTimeoutMs: 30_000,
-        goWorkerBinaryPath: "sahte-worker",
+        goWorkerBinaryPath: FAKE_ABSOLUTE_WORKER_BINARY,
         spawnProcess: (command, args, options) => {
           void command;
           void args;
@@ -1387,7 +1390,7 @@ describe("adapters/go graceful fallback (M1-Go)", { timeout: 20_000 }, () => {
       files: [{ path: "Big/Big.go", content: bigContent }, ...fixtureFiles()],
       options: {
         requestTimeoutMs: 30_000,
-        goWorkerBinaryPath: "sahte-worker",
+        goWorkerBinaryPath: FAKE_ABSOLUTE_WORKER_BINARY,
         spawnProcess: (command, args, options) => {
           void command;
           void args;
@@ -1406,7 +1409,7 @@ describe("adapters/go graceful fallback (M1-Go)", { timeout: 20_000 }, () => {
       files: fixtureFiles(),
       options: {
         requestTimeoutMs: 30_000,
-        goWorkerBinaryPath: "sahte-worker",
+        goWorkerBinaryPath: FAKE_ABSOLUTE_WORKER_BINARY,
         spawnProcess: (command, args, options) => {
           void command;
           void args;
@@ -1436,7 +1439,7 @@ describe("adapters/go graceful fallback (M1-Go)", { timeout: 20_000 }, () => {
         workspaceId: "adapter-go-invalid",
         files: [{ path: "D:/outside/x.go", content: "package x" }],
       }),
-    ).rejects.toThrowError(/Mutlak kaynak yolu/);
+    ).rejects.toThrowError(/Absolute source paths are not accepted/);
   });
 
   it("negatif girdi: '..' kaçışı ve duplicate path adapter API yüzeyinde reddedilir", async () => {
@@ -1445,7 +1448,7 @@ describe("adapters/go graceful fallback (M1-Go)", { timeout: 20_000 }, () => {
         workspaceId: "adapter-go-escape",
         files: [{ path: "../escape.go", content: "package x" }],
       }),
-    ).rejects.toThrowError(/kök dışına çıkıyor/);
+    ).rejects.toThrowError(/escapes the workspace root/);
     await expect(
       analyzeGoWorkspace({
         workspaceId: "adapter-go-duplicate",
@@ -1454,7 +1457,7 @@ describe("adapters/go graceful fallback (M1-Go)", { timeout: 20_000 }, () => {
           { path: "a.go", content: "package a" },
         ],
       }),
-    ).rejects.toThrowError(/iki kez verildi/);
+    ).rejects.toThrowError(/was given twice/);
   });
 });
 
@@ -1596,7 +1599,7 @@ describe("worker-process env sınırlaması (M1-Go)", { timeout: 20_000 }, () =>
       },
     });
     expect(outcome.status).toBe("unavailable");
-    expect(outcome.detail).toContain("sınır");
+    expect(outcome.detail).toContain("limit");
     expect(killed.length).toBe(1);
   });
 
@@ -1675,7 +1678,7 @@ describe("worker-process env sınırlaması (M1-Go)", { timeout: 20_000 }, () =>
       },
     });
     expect(outcome.status).toBe("unavailable");
-    expect(outcome.detail).toContain("sınırını aştı");
+    expect(outcome.detail).toContain("character limit");
     // Saklanan kuyruk bütçeye kırpılır: birikim sınırsız büyüyemez.
     expect(outcome.stderr.length).toBeLessThanOrEqual(64);
     expect(killed.length).toBe(1);
@@ -1735,7 +1738,7 @@ describe("worker-process env sınırlaması (M1-Go)", { timeout: 20_000 }, () =>
     // İkinci spawn: LİTERAL "taskkill" + SADECE kendi çocuğumuzun sayısal
     // pid'i (/T ağaç, /F zorla). Kullanıcı girdisi interpole edilmez.
     expect(spawned.length).toBe(2);
-    expect(spawned[1]?.command).toBe("taskkill");
+    expect(spawned[1]?.command).toBe(resolveWindowsSystemExecutable("taskkill.exe"));
     expect(spawned[1]?.args).toEqual(["/pid", "4242", "/T", "/F"]);
   });
 
