@@ -2078,6 +2078,142 @@ export function loadWorkspacePackages(
   return { packages, warnings };
 }
 
+/**
+ * Module-format scope of one workspace `package.json`: TypeScript decides
+ * whether a `.ts`/`.tsx`/`.js`/`.jsx` file is ESM or CommonJS under
+ * `module: node16/nodenext` from the `"type"` field of the nearest
+ * `package.json` (`.mts`/`.cts` force the format by extension).
+ */
+export interface PackageModuleScope {
+  /** Workspace-relative POSIX directory prefix ("" for the workspace root). */
+  readonly dirPrefix: string;
+  readonly manifestRelativePath: string;
+  /** `"module"` or `"commonjs"`; absent when the field is missing or has another value. */
+  readonly moduleType?: "module" | "commonjs";
+}
+
+/** Deterministic result of `loadPackageModuleScopes`. */
+export interface LoadedPackageModuleScopes {
+  /** Sorted by `manifestRelativePath`. */
+  readonly scopes: readonly PackageModuleScope[];
+  readonly warnings: readonly string[];
+}
+
+/** Upper bound on ancestor directories probed for a `package.json`. */
+const MAX_PACKAGE_SCOPE_DIRS = 4096;
+
+function invalidPackageJsonWarning(relativePath: string): string {
+  return `ignored invalid package.json: ${relativePath}`;
+}
+
+/**
+ * Collects the module-format scopes (`package.json` `"type"`) for every
+ * workspace directory that is an ancestor of an analyzed source file — exactly
+ * the directories TypeScript walks when it computes a file's
+ * `impliedNodeFormat`. Unlike `loadWorkspacePackages`, nameless manifests count
+ * (the `"type"` field applies regardless of `"name"`).
+ *
+ * Read-only and root-confined: in-memory `packageFiles` are used when given;
+ * otherwise each ancestor `package.json` is read through the same symlink- and
+ * size-guarded disk reader as tsconfig files. `node_modules` paths are skipped
+ * (the compiler host already serves those declaration package manifests).
+ */
+export function loadPackageModuleScopes(
+  packageFiles: readonly TsAdapterSourceFile[] | undefined,
+  rootDirOnDisk: string | undefined,
+  sourceRelativePaths: readonly string[],
+): LoadedPackageModuleScopes {
+  const warnings: string[] = [];
+  const warningSeen = new Set<string>();
+  const addWarning = (message: string): void => {
+    if (warnings.length >= MAX_TSCONFIG_WARNINGS) return;
+    if (warningSeen.has(message)) return;
+    warningSeen.add(message);
+    warnings.push(message);
+  };
+
+  const dirByKey = new Map<string, string>([[canonicalRelKey(""), ""]]);
+  for (const rel of sourceRelativePaths) {
+    const valid = validateRelativeConfigPath(rel);
+    if (valid === undefined) continue;
+    if (valid.split("/").some((seg) => seg.toLowerCase() === "node_modules")) continue;
+    let dir = relativeDirPrefix(valid);
+    while (dir.length > 0) {
+      const key = canonicalRelKey(dir);
+      if (dirByKey.has(key)) break;
+      dirByKey.set(key, dir);
+      dir = relativeDirPrefix(dir);
+    }
+  }
+  const sortedDirs = [...dirByKey.values()].sort((a, b) => {
+    const depthDiff = segmentDepth(a) - segmentDepth(b);
+    if (depthDiff !== 0) return depthDiff;
+    return a < b ? -1 : a > b ? 1 : 0;
+  });
+  if (sortedDirs.length > MAX_PACKAGE_SCOPE_DIRS) {
+    addWarning(
+      `package.json module-format lookup limited to ${String(MAX_PACKAGE_SCOPE_DIRS)} of ${String(sortedDirs.length)} source directories; deeper directories inherit the nearest probed scope`,
+    );
+    sortedDirs.length = MAX_PACKAGE_SCOPE_DIRS;
+  }
+
+  let readManifest: ((relativePath: string) => string | undefined) | undefined;
+  if (packageFiles !== undefined) {
+    const contentByKey = new Map<string, { relativePath: string; content: string }>();
+    const sortedInputs = [...packageFiles].sort((a, b) =>
+      a.relativePath < b.relativePath ? -1 : a.relativePath > b.relativePath ? 1 : 0,
+    );
+    for (const file of sortedInputs) {
+      const validRel = validateRelativeConfigPath(file.relativePath);
+      if (validRel === undefined || !isWorkspacePackageJsonPath(validRel)) continue;
+      if (utf8Encode(file.content).byteLength > MAX_PACKAGE_JSON_BYTES) {
+        addWarning(`package.json exceeds the 256 KB limit: ${validRel}`);
+        continue;
+      }
+      const key = canonicalRelKey(validRel);
+      if (!contentByKey.has(key)) {
+        contentByKey.set(key, { relativePath: validRel, content: file.content });
+      }
+    }
+    readManifest = (relativePath) => contentByKey.get(canonicalRelKey(relativePath))?.content;
+  } else if (rootDirOnDisk !== undefined) {
+    readManifest = createDiskConfigReader(rootDirOnDisk, addWarning);
+  }
+
+  const scopes: PackageModuleScope[] = [];
+  if (readManifest !== undefined) {
+    for (const dir of sortedDirs) {
+      const manifestRelativePath = dir === "" ? "package.json" : `${dir}/package.json`;
+      const content = readManifest(manifestRelativePath);
+      if (content === undefined) continue;
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(content);
+      } catch {
+        addWarning(invalidPackageJsonWarning(manifestRelativePath));
+        continue;
+      }
+      if (!isPlainRecord(parsed)) continue;
+      const rawType = ownProperty(parsed, "type");
+      const moduleType =
+        rawType === "module" || rawType === "commonjs" ? rawType : undefined;
+      scopes.push({
+        dirPrefix: dir,
+        manifestRelativePath,
+        ...(moduleType === undefined ? {} : { moduleType }),
+      });
+    }
+  }
+  scopes.sort((a, b) =>
+    a.manifestRelativePath < b.manifestRelativePath
+      ? -1
+      : a.manifestRelativePath > b.manifestRelativePath
+        ? 1
+        : 0,
+  );
+  return { scopes, warnings };
+}
+
 function parseBarePackageSpecifier(
   moduleName: string,
 ): { readonly packageName: string; readonly subpath: string } | undefined {
