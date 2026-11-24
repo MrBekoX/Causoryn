@@ -550,7 +550,8 @@ function readBoundedPluginManifestSync(manifestPath: string): string | null {
   let fd: number;
   try {
     // O_NOFOLLOW bilinçli olarak eklenmez: symlink'li paket/eklenti manifestleri desteklenir.
-    fd = openSync(manifestPath, fsConstants.O_RDONLY);
+    // Read-only open (no file is created); the mode argument only documents that.
+    fd = openSync(manifestPath, fsConstants.O_RDONLY, 0o600);
   } catch {
     return null;
   }

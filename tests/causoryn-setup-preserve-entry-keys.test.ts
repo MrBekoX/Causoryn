@@ -5,13 +5,14 @@ import {
   readdirSync,
   readFileSync,
   rmSync,
-  statSync,
   writeFileSync,
 } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
+
+import { fileSnapshot } from "./helpers/file-snapshot.js";
 
 import {
   CANONICAL_SKILL_NAMES,
@@ -200,13 +201,13 @@ describe("causoryn setup keeps the keys Causoryn does not own (JSON hosts)", () 
 
       // Re-running is a no-op: no write, no backup, identical bytes and mtime.
       const backupsBefore = listBackups(path.dirname(target));
-      const raw = readFileSync(target, "utf8");
-      const mtimeMs = statSync(target).mtimeMs;
+      const { text: raw, mtimeMs } = fileSnapshot(target);
       const again = await setupAll(sb, [client]);
       expect(again.applied).toBe(false);
       expect(again.actions.every((a) => a.operation === "noop" && a.backupPath === null)).toBe(true);
-      expect(readFileSync(target, "utf8")).toBe(raw);
-      expect(statSync(target).mtimeMs).toBe(mtimeMs);
+      const after = fileSnapshot(target);
+      expect(after.text).toBe(raw);
+      expect(after.mtimeMs).toBe(mtimeMs);
       expect(listBackups(path.dirname(target))).toEqual(backupsBefore);
     },
   );
@@ -224,7 +225,8 @@ describe("causoryn setup keeps the keys Causoryn does not own (JSON hosts)", () 
     const before = new Map(
       JSON_HOSTS.map((client) => {
         const file = configPathFor(sb, client);
-        return [client, { raw: readFileSync(file, "utf8"), mtimeMs: statSync(file).mtimeMs }] as const;
+        const snap = fileSnapshot(file);
+        return [client, { raw: snap.text, mtimeMs: snap.mtimeMs }] as const;
       }),
     );
     const res = await runCliIn(sb, ["setup", "--client", JSON_HOSTS.join(","), "--no-skill", "--yes"]);
@@ -232,8 +234,9 @@ describe("causoryn setup keeps the keys Causoryn does not own (JSON hosts)", () 
     expect(res.stdout).toContain("NO CHANGES");
     for (const client of JSON_HOSTS) {
       const file = configPathFor(sb, client);
-      expect(readFileSync(file, "utf8"), client).toBe(before.get(client)?.raw);
-      expect(statSync(file).mtimeMs, client).toBe(before.get(client)?.mtimeMs);
+      const after = fileSnapshot(file);
+      expect(after.text, client).toBe(before.get(client)?.raw);
+      expect(after.mtimeMs, client).toBe(before.get(client)?.mtimeMs);
       expect(listBackups(path.dirname(file)), client).toEqual([]);
     }
   });
@@ -334,12 +337,13 @@ describe("causoryn setup keeps the keys Causoryn does not own (Codex TOML)", () 
 
     // Re-running: no write, no extra backup.
     const backups = listBackups(sb.codexHome);
-    const mtimeMs = statSync(target).mtimeMs;
+    const { mtimeMs } = fileSnapshot(target);
     const again = await runCliIn(sb, ["setup", "--client", "codex", "--no-skill", "--yes"]);
     expect(again.exitCode).toBe(0);
     expect(again.stdout).toContain("NO CHANGES");
-    expect(readFileSync(target, "utf8")).toBe(raw);
-    expect(statSync(target).mtimeMs).toBe(mtimeMs);
+    const after = fileSnapshot(target);
+    expect(after.text).toBe(raw);
+    expect(after.mtimeMs).toBe(mtimeMs);
     expect(listBackups(sb.codexHome)).toEqual(backups);
   });
 
@@ -352,13 +356,13 @@ describe("causoryn setup keeps the keys Causoryn does not own (Codex TOML)", () 
       "startup_timeout_sec = 45.5",
       "enabled = true",
     ]);
-    const raw = readFileSync(target, "utf8");
-    const mtimeMs = statSync(target).mtimeMs;
+    const { text: raw, mtimeMs } = fileSnapshot(target);
     const result = await setupAll(sb, ["codex"]);
     expect(result.applied).toBe(false);
     expect(result.actions.every((a) => a.operation === "noop" && a.backupPath === null)).toBe(true);
-    expect(readFileSync(target, "utf8")).toBe(raw);
-    expect(statSync(target).mtimeMs).toBe(mtimeMs);
+    const after = fileSnapshot(target);
+    expect(after.text).toBe(raw);
+    expect(after.mtimeMs).toBe(mtimeMs);
     expect(listBackups(sb.codexHome)).toEqual([]);
   });
 
