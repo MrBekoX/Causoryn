@@ -7,6 +7,7 @@ import {
   createDynamicCausorynContext,
   inspectProjectRootSafety,
   parseMcpCliArgs,
+  prepareWorkspaceDatabase,
   resolveEffectiveOutputSchemaProfile,
   resolveEffectiveToolProfile,
   resolveIndexWaitTimeoutMs,
@@ -41,7 +42,7 @@ function hasNonEmptyAllowRoots(value: unknown): boolean {
   return Array.isArray(allowRoots) && allowRoots.length > 0;
 }
 
-function main(): void {
+async function main(): Promise<void> {
   let cliArgs: ParsedMcpCliArgs;
   let outputSchemaProfile: OutputSchemaProfile;
   let toolProfile: string;
@@ -92,6 +93,8 @@ function main(): void {
           ...(cliArgs.client !== undefined ? { client: cliArgs.client } : {}),
           rawBaseConfig: parsed,
         });
+        // Legacy graph-<client>.sqlite -> graph.sqlite before any connection opens.
+        await prepareWorkspaceDatabase(config);
         activeContext = createDynamicCausorynContext(
           createCausorynContext(config, {
             deferAutoIndex: true,
@@ -110,6 +113,7 @@ function main(): void {
             ...(cliArgs.client !== undefined ? { client: cliArgs.client } : {}),
             rawBaseConfig: parsed,
           });
+          await prepareWorkspaceDatabase(config);
           activeContext = createDynamicCausorynContext(
             createCausorynContext(config, {
               deferAutoIndex: true,
@@ -236,4 +240,9 @@ function main(): void {
     });
 }
 
-main();
+main().catch((error: unknown) => {
+  console.error(
+    `[causoryn] startup failed: ${error instanceof Error ? error.message : String(error)}`,
+  );
+  process.exit(2);
+});

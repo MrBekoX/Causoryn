@@ -4,7 +4,12 @@ import path from "node:path";
 
 import { GraphRepositoryError, InMemoryGraphRepository } from "@causoryn/graph";
 import type { GraphRepository, SymbolSearchStore } from "@causoryn/graph";
-import { IndexJobManager, IndexService } from "@causoryn/indexing";
+import {
+  IndexJobManager,
+  IndexService,
+  isTerminalIndexJobStatus,
+  type IndexJobStatus,
+} from "@causoryn/indexing";
 import { OutputAccessPolicy, WorkspaceAccessPolicy } from "@causoryn/workspace";
 import {
   SqliteGraphRepository,
@@ -57,7 +62,7 @@ import { PreflightManifestStore } from "./preflight-store.js";
 
 export interface IndexWaitProgress {
   readonly jobId: string;
-  readonly status: "queued" | "running" | "done" | "failed";
+  readonly status: IndexJobStatus;
   readonly phase?: string;
   readonly progress: number;
   readonly total: number;
@@ -126,7 +131,11 @@ export interface CausorynContext {
   readonly close: () => void;
   /**
    * Starts deferred background indexing idempotently (invoked after MCP
-   * `oninitialized` so `initialize` / `tools/list` never block).
+   * `oninitialized` so `initialize` / `tools/list` never block). Cold start:
+   * a full index job. Warm start (a published snapshot exists): tools keep
+   * answering from that snapshot immediately (labelled stale while the check
+   * runs) and a background incremental freshness check is queued in the
+   * indexing worker so edited files are picked up without an explicit refresh.
    */
   readonly startDeferredIndex?: () => void;
   /**
@@ -227,12 +236,12 @@ export function createCausorynContext(
             : undefined;
         if (existing !== undefined) {
           logger(
-            `kalıcı index yüklendi: workspace=${config.workspaceId} snapshot=${existing.snapshot.meta.id} state=${existing.snapshot.meta.state}`,
+            `persistent index loaded: workspace=${config.workspaceId} snapshot=${existing.snapshot.meta.id} state=${existing.snapshot.meta.state}`,
           );
         } else {
           const run = indexService.runIndex(config.allowRoots[0] as string);
           logger(
-            `index hazır: workspace=${config.workspaceId} snapshot=${run.snapshotId} files=${String(run.fileCount)} state=${run.state}`,
+            `index ready: workspace=${config.workspaceId} snapshot=${run.snapshotId} files=${String(run.fileCount)} state=${run.state}`,
           );
         }
       }
@@ -276,7 +285,11 @@ export function createCausorynContext(
           config.storage.dataDbPath !== undefined &&
           hasPublishedSnapshotFast()
         ) {
-          logger(`persistent index ready: workspace=${config.workspaceId}`);
+          // Warm start: never block; verify freshness in the background.
+          const freshnessJob = jobManager.refreshIndex(rootToIndex, { mode: "incremental" });
+          logger(
+            `persistent index loaded: workspace=${config.workspaceId}; background freshness check started (jobId=${freshnessJob.jobId})`,
+          );
           return;
         }
         const bootJob = jobManager.refreshIndex(rootToIndex, { mode: "full" });
@@ -309,11 +322,7 @@ export function createCausorynContext(
       const targetJobId = initialBootJobId ?? getActiveIndexJob()?.jobId;
       if (targetJobId === undefined) return;
       const initialRecord = jobManager.status(targetJobId);
-      if (
-        initialRecord === undefined ||
-        initialRecord.status === "done" ||
-        initialRecord.status === "failed"
-      ) {
+      if (initialRecord === undefined || isTerminalIndexJobStatus(initialRecord.status)) {
         return;
       }
       if (opts.signal?.aborted) return;
@@ -325,7 +334,7 @@ export function createCausorynContext(
           : 15_000;
 
       const emitProgress = async (
-        status: "queued" | "running" | "done" | "failed",
+        status: IndexJobStatus,
         progress: number,
         message: string,
         phase?: string,
@@ -356,7 +365,7 @@ export function createCausorynContext(
         return `[${phase}] Indexing workspace (${String(percent)}%)`;
       };
 
-      let lastStatus: "queued" | "running" | "done" | "failed" = initialRecord.status;
+      let lastStatus: IndexJobStatus = initialRecord.status;
       let lastProgress: number = initialRecord.progressPercent;
       let lastPhase: string = initialRecord.progress?.phase ?? initialRecord.status;
 
@@ -389,15 +398,17 @@ export function createCausorynContext(
         ) {
           unsubscribeProgress = jobManager.subscribeProgress(targetJobId, (event) => {
             const snap = jobManager.status(targetJobId);
-            const status: "queued" | "running" | "done" | "failed" =
+            const status: IndexJobStatus =
               snap?.status ??
               (event.phase === "done"
                 ? "done"
-                : event.phase === "failed"
-                  ? "failed"
-                  : event.phase === "queued"
-                    ? "queued"
-                    : "running");
+                : event.phase === "reused"
+                  ? "reused"
+                  : event.phase === "failed"
+                    ? "failed"
+                    : event.phase === "queued"
+                      ? "queued"
+                      : "running");
             const progress = snap?.progressPercent ?? lastProgress;
             lastStatus = status;
             lastProgress = progress;
@@ -476,7 +487,9 @@ export function createCausorynContext(
               finalRecord.progressPercent,
               finalRecord.status === "done"
                 ? `[${finalPhase ?? "done"}] Workspace indexing complete`
-                : `[${finalPhase ?? finalRecord.status}] Workspace indexing ${finalRecord.status}`,
+                : finalRecord.status === "reused"
+                  ? `[${finalPhase ?? "reused"}] Workspace index is current; no new snapshot was published`
+                  : `[${finalPhase ?? finalRecord.status}] Workspace indexing ${finalRecord.status}`,
               finalPhase,
             );
           }
@@ -509,7 +522,7 @@ export function createCausorynContext(
         try {
           (jobManager as { close?: () => void }).close?.();
         } catch (error) {
-          logger(`index job manager kapatılamadı: ${errorText(error)}`);
+          logger(`could not close the index job manager: ${errorText(error)}`);
         } finally {
           try {
             activeWiki.close();
@@ -547,10 +560,10 @@ function validateDataDbPath(
 ): string {
   const issues: string[] = [];
   if (!path.isAbsolute(declared)) {
-    issues.push(`${fieldName} mutlak yol olmalı: ${declared}`);
+    issues.push(`${fieldName} must be an absolute path: ${declared}`);
   }
   if (declared.includes("\0")) {
-    issues.push(`${fieldName} null byte içeremez`);
+    issues.push(`${fieldName} must not contain a NUL byte`);
   }
   const declaredResolved = path.resolve(declared);
   const stripWin32DevicePrefix = (value: string): string => {
@@ -575,7 +588,7 @@ function validateDataDbPath(
     const rootComparable = normalizeComparable(path.resolve(root));
     if (isSameOrInside(declaredComparable, rootComparable)) {
       issues.push(
-        `${fieldName} yetkili workspace kökünün içinde olamaz (kaynak dosyalara yazım yasak, ADR-008): ${declared}`,
+        `${fieldName} must not be inside an authorized workspace root (writing to source files is forbidden): ${declared}`,
       );
       break;
     }
@@ -585,7 +598,7 @@ function validateDataDbPath(
   }
   if (allowRoots.length === 0) {
     throw new CausorynConfigError([
-      `${fieldName} beyanı için yetkili workspace kökü yok (allowRoots boş): ${declared}`,
+      `${fieldName} is declared but no workspace root is authorized (allowRoots is empty): ${declared}`,
     ]);
   }
   const parentDir = path.dirname(declaredResolved);
@@ -594,12 +607,12 @@ function validateDataDbPath(
     parentStat = statSync(parentDir);
   } catch {
     throw new CausorynConfigError([
-      `${fieldName} üst dizini mevcut değil: ${parentDir} (beyanlı dizinler diskte VAR OLMALIDIR — OutputAccessPolicy disiplini)`,
+      `${fieldName} parent directory does not exist: ${parentDir} (declared directories must already exist on disk)`,
     ]);
   }
   if (!parentStat.isDirectory()) {
     throw new CausorynConfigError([
-      `${fieldName} üst dizini bir dizin değil: ${parentDir}`,
+      `${fieldName} parent path is not a directory: ${parentDir}`,
     ]);
   }
 
@@ -608,7 +621,7 @@ function validateDataDbPath(
     realTargets.push(realpathSync(parentDir));
   } catch (error) {
     throw new CausorynConfigError([
-      `${fieldName} üst dizini gerçek yolu çözümlenemedi (güven kaynağı kurulamıyor; sessiz devam yoktur): ${parentDir} — ${errorText(error)}`,
+      `${fieldName} parent directory real path could not be resolved (refusing to continue): ${parentDir} — ${errorText(error)}`,
     ]);
   }
   // CWE-59 savunması: SQLite ana dosyası ve WAL/SHM/journal yan dosyaları için
@@ -626,14 +639,14 @@ function validateDataDbPath(
     } catch (error) {
       if ((error as NodeJS.ErrnoException | undefined)?.code !== "ENOENT") {
         throw new CausorynConfigError([
-          `${fieldName} hedef/yan dosya durumu doğrulanamadı: ${artifactPath} — ${errorText(error)}`,
+          `${fieldName} target/side file status could not be verified: ${artifactPath} — ${errorText(error)}`,
         ]);
       }
     }
     if (artifactLstat !== undefined) {
       if (artifactLstat.isDirectory()) {
         throw new CausorynConfigError([
-          `${fieldName} hedef/yan yolu bir dizin olamaz: ${artifactPath}`,
+          `${fieldName} target/side path must not be a directory: ${artifactPath}`,
         ]);
       }
       try {
@@ -642,7 +655,7 @@ function validateDataDbPath(
         realTargets.push(realpathSync(path.dirname(realArtifact)));
       } catch (error) {
         throw new CausorynConfigError([
-          `${fieldName} gerçek yolu çözümlenemedi (sarkan/kırık symlink reddedildi): ${artifactPath} — ${errorText(error)}`,
+          `${fieldName} real path could not be resolved (dangling/broken symlink rejected): ${artifactPath} — ${errorText(error)}`,
         ]);
       }
     }
@@ -653,7 +666,7 @@ function validateDataDbPath(
       realRoot = realpathSync(path.resolve(root));
     } catch (error) {
       throw new CausorynConfigError([
-        `${fieldName} doğrulanamadı — allowRoot gerçek yolu çözümlenemedi (güven kaynağı kurulamıyor; sessiz devam yoktur): ${root} — ${errorText(error)}`,
+        `${fieldName} could not be verified: the allowRoot real path could not be resolved (refusing to continue): ${root} — ${errorText(error)}`,
       ]);
     }
     const realRootComparable = normalizeComparable(realRoot);
@@ -661,7 +674,7 @@ function validateDataDbPath(
       const realTargetComparable = normalizeComparable(realTarget);
       if (isSameOrInside(realTargetComparable, realRootComparable)) {
         throw new CausorynConfigError([
-          `${fieldName} gerçek yolu workspace kökünün içinde (symlink kaçışı reddedildi): ${declared}`,
+          `${fieldName} real path is inside a workspace root (symlink escape rejected): ${declared}`,
         ]);
       }
     }
@@ -714,7 +727,7 @@ function openStorageRepository(
     sqliteRepo = new SqliteGraphRepository(resolvedStoragePath);
   } catch (error) {
     throw new CausorynConfigError([
-      `storage.dataDbPath açılamadı: ${errorText(error)}`,
+      `storage.dataDbPath could not be opened: ${errorText(error)}`,
     ]);
   }
   const declaredRoot = config.allowRoots[0];
@@ -734,12 +747,12 @@ function openStorageRepository(
       } else {
         sqliteRepo.close();
         throw new CausorynConfigError([
-          `storage.dataDbPath workspace kaydı yazılamadı: ${errorText(error)}`,
+          `storage.dataDbPath workspace record could not be written: ${errorText(error)}`,
         ]);
       }
     }
   }
-  logger(`storage veri kökü hazır: ${resolvedStoragePath}`);
+  logger(`storage data root ready: ${resolvedStoragePath}`);
   return {
     repository: sqliteRepo,
     symbolSearch: sqliteRepo,
@@ -747,7 +760,7 @@ function openStorageRepository(
       try {
         sqliteRepo.close();
       } catch (error) {
-        logger(`storage veri kökü kapatılamadı: ${errorText(error)}`);
+        logger(`could not close the storage data root: ${errorText(error)}`);
       }
     },
   };
@@ -788,7 +801,7 @@ function openWikiStores(
         : error instanceof Error
           ? error.message
           : String(error);
-    throw new CausorynConfigError([`wiki.dataDbPath açılamadı: ${detail}`]);
+    throw new CausorynConfigError([`wiki.dataDbPath could not be opened: ${detail}`]);
   }
 
   // SqliteWikiStore FK sözleşmesi workspace satırı ister; tek workspace
@@ -814,7 +827,7 @@ function openWikiStores(
         graphStore?.close();
         const detail = error instanceof Error ? error.message : String(error);
         throw new CausorynConfigError([
-          `wiki.dataDbPath workspace kaydı yazılamadı: ${detail}`,
+          `wiki.dataDbPath workspace record could not be written: ${detail}`,
         ]);
       }
     } finally {
@@ -832,9 +845,9 @@ function openWikiStores(
   } catch (error) {
     store.close();
     const detail = error instanceof Error ? error.message : String(error);
-    throw new CausorynConfigError([`wiki arama bağlantısı açılamadı: ${detail}`]);
+    throw new CausorynConfigError([`wiki search connection could not be opened: ${detail}`]);
   }
-  logger(`wiki veri kökü hazır: ${declaredResolved}`);
+  logger(`wiki data root ready: ${declaredResolved}`);
   return {
     store,
     search,
@@ -842,12 +855,12 @@ function openWikiStores(
       try {
         readDb.close();
       } catch (error) {
-        logger(`wiki arama bağlantısı kapatılamadı: ${errorText(error)}`);
+        logger(`could not close the wiki search connection: ${errorText(error)}`);
       }
       try {
         store.close();
       } catch (error) {
-        logger(`wiki veri kökü kapatılamadı: ${errorText(error)}`);
+        logger(`could not close the wiki data root: ${errorText(error)}`);
       }
     },
   };

@@ -9,6 +9,7 @@ import {
 import { IndexingError } from "./errors.js";
 import {
   IndexService,
+  type BuildLeaseEvent,
   type BuildLeaseInfo,
   type GoIndexOptions,
   type IndexDiagnostic,
@@ -16,6 +17,7 @@ import {
   type IndexPeerStatus,
   type IndexProgressCallback,
   type IndexProgressPhase,
+  type IndexRunOutcome,
   type IndexRunResult,
   type PythonIndexOptions,
   type RustIndexOptions,
@@ -50,6 +52,10 @@ export interface IndexWorkerTaskInput {
   readonly hostLabel?: string;
   readonly leaseTtlMs?: number;
   readonly leaseHeartbeatIntervalMs?: number;
+  /** Main thread's process instance id (lease owner identity shared by the process). */
+  readonly processInstanceId?: string;
+  readonly peerWaitTimeoutMs?: number;
+  readonly leaseStaleCeilingMs?: number;
   /** Optional fixed ISO timestamp for deterministic clock injection in tests. */
   readonly fixedClockIso?: string;
 }
@@ -64,6 +70,8 @@ export interface IndexWorkerResultSummary {
   readonly warnings: readonly string[];
   readonly diagnostics: readonly IndexDiagnostic[];
   readonly published: boolean;
+  /** Explicit run outcome (see `IndexRunOutcome`); only `published` publishes. */
+  readonly outcome?: IndexRunOutcome;
   readonly reanalyzedFiles?: number;
   readonly cachedFiles?: number;
   readonly earlyCutoffApplied?: boolean;
@@ -80,6 +88,12 @@ export type IndexWorkerMessage =
       readonly completed: number;
       readonly total: number;
       readonly message: string;
+    }
+  | {
+      /** The worker acquired/released the workspace build lease (main thread renews it). */
+      readonly type: "lease";
+      readonly event: "acquired" | "released";
+      readonly leaseId: string;
     }
   | {
       readonly type: "done";
@@ -110,6 +124,7 @@ function summarizeRunResult(result: IndexRunResult): IndexWorkerResultSummary {
     warnings: [...result.warnings],
     diagnostics: result.diagnostics.map((d) => ({ ...d })),
     published: result.published,
+    outcome: result.outcome,
     ...(result.reanalyzedFiles === undefined
       ? {}
       : { reanalyzedFiles: result.reanalyzedFiles }),
@@ -136,6 +151,7 @@ export async function runIndexWorkerTask(
   payload: IndexWorkerTaskInput,
   onProgress: IndexProgressCallback | undefined,
   SqliteRepoCtor: SqliteRepositoryConstructor,
+  onLeaseEvent?: (event: BuildLeaseEvent) => void,
 ): Promise<IndexWorkerResultSummary> {
   const repository = new SqliteRepoCtor(payload.dbPath);
   try {
@@ -162,6 +178,16 @@ export async function runIndexWorkerTask(
       ...(payload.leaseHeartbeatIntervalMs === undefined
         ? {}
         : { leaseHeartbeatIntervalMs: payload.leaseHeartbeatIntervalMs }),
+      ...(payload.processInstanceId === undefined
+        ? {}
+        : { processInstanceId: payload.processInstanceId }),
+      ...(payload.peerWaitTimeoutMs === undefined
+        ? {}
+        : { peerWaitTimeoutMs: payload.peerWaitTimeoutMs }),
+      ...(payload.leaseStaleCeilingMs === undefined
+        ? {}
+        : { leaseStaleCeilingMs: payload.leaseStaleCeilingMs }),
+      ...(onLeaseEvent === undefined ? {} : { onLeaseEvent }),
     });
 
     const runOptions = onProgress === undefined ? {} : { onProgress };
@@ -235,6 +261,14 @@ export function startIndexWorker(SqliteRepoCtor: SqliteRepositoryConstructor): v
           port.postMessage(progressMsg);
         },
         SqliteRepoCtor,
+        (event) => {
+          const leaseMsg: IndexWorkerMessage = {
+            type: "lease",
+            event: event.type,
+            leaseId: event.leaseId,
+          };
+          port.postMessage(leaseMsg);
+        },
       );
       const doneMsg: IndexWorkerMessage = { type: "done", result };
       port.postMessage(doneMsg);

@@ -389,9 +389,9 @@ suppressions:
           checks: ["graph-diff"],
         }),
       );
-      // Must NOT emit synchronous L0 degradation warning ("senkron koşum ... derin sembol analizini yürütemez")
+      // Must NOT emit synchronous L0 degradation warning ("synchronous run cannot perform deep ... symbol analysis")
       expect(
-        envelope.warnings.some((w) => w.includes("senkron koşum") || w.includes("sync-run-degraded")),
+        envelope.warnings.some((w) => w.includes("synchronous run cannot perform deep") || w.includes("sync-run-degraded")),
       ).toBe(false);
       const data = VerifyChangeDataSchema.parse(envelope.data);
       // Unchanged workspace against async base snapshot should have 0 node diff!

@@ -51,7 +51,7 @@ function assertCanonicalRootIsDirectory(canonicalRoot: string): void {
   if (!rootStat.isDirectory()) {
     throw new IndexingError(
       "indexing/internal",
-      "envanter kökü bir dizin değil (authorizeRoot kararıyla çelişki)",
+      "inventory root is not a directory (contradicts the authorizeRoot decision)",
     );
   }
 }
@@ -183,7 +183,7 @@ export function collectInventory(
       if (entries.length > maxFiles) {
         throw new IndexingError(
           "indexing/limit-exceeded",
-          `dosya sayısı index.maxFiles sınırını (${String(maxFiles)}) aştı`,
+          `file count exceeded the index.maxFiles limit (${String(maxFiles)})`,
         );
       }
     }
@@ -253,7 +253,7 @@ export async function collectInventoryAsync(
       if (entries.length > maxFiles) {
         throw new IndexingError(
           "indexing/limit-exceeded",
-          `dosya sayısı index.maxFiles sınırını (${String(maxFiles)}) aştı`,
+          `file count exceeded the index.maxFiles limit (${String(maxFiles)})`,
         );
       }
     }

@@ -3,7 +3,7 @@ import { fileURLToPath } from "node:url";
 import { isMainThread, parentPort, workerData } from "node:worker_threads";
 
 import { IndexingError } from "./errors.js";
-import type { IndexProgressCallback } from "./index-service.js";
+import type { BuildLeaseEvent, IndexProgressCallback } from "./index-service.js";
 import {
   hasIndexWorkerStarted,
   isWorkerTaskPayload,
@@ -55,9 +55,10 @@ export async function runIndexWorkerTask(
   payload: IndexWorkerTaskInput,
   onProgress?: IndexProgressCallback,
   SqliteRepoCtor?: SqliteRepositoryConstructor,
+  onLeaseEvent?: (event: BuildLeaseEvent) => void,
 ): Promise<IndexWorkerResultSummary> {
   const RepoCtor = SqliteRepoCtor ?? (await loadDefaultSqliteRepositoryCtor());
-  return runIndexWorkerTaskCore(payload, onProgress, RepoCtor);
+  return runIndexWorkerTaskCore(payload, onProgress, RepoCtor, onLeaseEvent);
 }
 
 function isSameFileUrl(urlA: string, urlB: string): boolean {

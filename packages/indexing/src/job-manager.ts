@@ -8,10 +8,14 @@ import type { WorkspaceAccessPolicy } from "@causoryn/workspace";
 import { IndexingError } from "./errors.js";
 import {
   IndexService,
+  clearBuildLeaseActiveLocally,
+  markBuildLeaseActiveLocally,
+  type ExternalLeaseHeartbeat,
   type IndexDiagnostic,
   type IndexProgressCallback,
   type IndexProgressEvent,
   type IndexProgressPhase,
+  type IndexRunOutcome,
   type IndexRunResult,
   type IndexWorkerServiceConfig,
 } from "./index-service.js";
@@ -65,8 +69,23 @@ import type {
 /** Refresh iş türleri (TŞ §10.2 "mode"). */
 export type IndexJobMode = "full" | "incremental";
 
-/** İş yaşam döngüsü durumları. */
-export type IndexJobStatus = "queued" | "running" | "done" | "failed";
+/**
+ * Job lifecycle states. Terminal states:
+ * - `done`: this job published a new snapshot (outcome `published`).
+ * - `reused`: the job completed without publishing; an existing snapshot is
+ *   current (outcome `unchanged` or `reused_peer`).
+ * - `failed`: the job errored, was cancelled, or gave up waiting for a live
+ *   peer build (outcome `failed` / `peer_busy`).
+ */
+export type IndexJobStatus = "queued" | "running" | "done" | "reused" | "failed";
+
+/** Honest terminal outcome of a job (`null` while queued/running). */
+export type IndexJobOutcome = IndexRunOutcome | "failed";
+
+/** True for terminal job states (`done`, `reused`, `failed`). */
+export function isTerminalIndexJobStatus(status: IndexJobStatus): boolean {
+  return status === "done" || status === "reused" || status === "failed";
+}
 
 /** Başarısız işin uygulama düzeyi hata kaydı (IndexingError kodu). */
 export interface IndexJobError {
@@ -94,6 +113,10 @@ export interface IndexJobRecord {
    */
   readonly changeSet: readonly string[];
   readonly status: IndexJobStatus;
+  /** Terminal outcome; `null` while queued/running. Only `published` means a new snapshot. */
+  readonly outcome: IndexJobOutcome | null;
+  /** True only when this job published a new snapshot (`outcome === "published"`). */
+  readonly published: boolean;
   readonly progressPercent: number;
   /** Structured progress state updated continuously during worker/in-process indexing. */
   readonly progress: IndexJobProgress;
@@ -299,6 +322,8 @@ function progressPercentFromEvent(
   switch (event.phase) {
     case "queued":
       return 0;
+    case "waiting_for_peer":
+      return Math.max(fallbackPercent, 5);
     case "inventory":
       return event.total > 0 && event.completed >= event.total ? 15 : 5;
     case "analyzing": {
@@ -311,9 +336,74 @@ function progressPercentFromEvent(
     case "publishing":
       return 95;
     case "done":
+    case "reused":
       return 100;
     case "failed":
       return fallbackPercent;
+  }
+}
+
+/**
+ * Outcome of a finished run. Results always carry `outcome`; the fallback
+ * derivation only guards against a summary without it (never reports a
+ * non-publishing run as published).
+ */
+function runOutcomeOf(result: IndexRunResult | IndexWorkerResultSummary): IndexRunOutcome {
+  if (result.outcome !== undefined) return result.outcome;
+  if (result.published) return "published";
+  if (result.waitingForPeer === true) return "peer_busy";
+  if (result.reused === true) return "reused_peer";
+  return "unchanged";
+}
+
+interface TerminalJobView {
+  readonly status: "done" | "reused" | "failed";
+  readonly phase: IndexProgressPhase;
+  readonly message: string;
+  readonly error: IndexJobError | null;
+}
+
+/** Honest terminal status/message for a completed run (finding: no `done` without publish). */
+function terminalViewOf(
+  outcome: IndexRunOutcome,
+  result: IndexRunResult | IndexWorkerResultSummary,
+): TerminalJobView {
+  switch (outcome) {
+    case "published":
+      return {
+        status: "done",
+        phase: "done",
+        message: `Published snapshot ${result.snapshotId}`,
+        error: null,
+      };
+    case "unchanged":
+      return {
+        status: "reused",
+        phase: "reused",
+        message: `No changes; snapshot ${result.snapshotId} is current`,
+        error: null,
+      };
+    case "reused_peer":
+      return {
+        status: "reused",
+        phase: "reused",
+        message: `A concurrent build published snapshot ${result.snapshotId} first; reused it`,
+        error: null,
+      };
+    case "peer_busy": {
+      const holder = result.peerLease;
+      const holderText =
+        holder === undefined
+          ? "a live peer"
+          : `pid=${String(holder.ownerPid)} on ${holder.hostname ?? "unknown host"}`;
+      const message = `A concurrent index build (${holderText}) still holds the build lease; this job gave up waiting and published nothing. Snapshot ${result.snapshotId} is still served`;
+      return {
+        status: "failed",
+        phase: "failed",
+        message,
+        error: { code: "indexing/peer-busy", message },
+      };
+    }
   }
 }
 
@@ -354,6 +444,8 @@ export class IndexJobManager {
   private draining = false;
   private lastJobId: string | undefined;
   private activeWorker: Worker | undefined;
+  /** Stops lease tracking (main-thread heartbeat) of the active worker job. */
+  private activeWorkerLeaseCleanup: ((release: boolean) => void) | undefined;
   private closed = false;
 
   constructor(options: IndexJobManagerOptions) {
@@ -401,26 +493,26 @@ export class IndexJobManager {
     if (this.closed) {
       throw new IndexingError(
         "indexing/internal",
-        "IndexJobManager kapatıldı; yeni indeksleme işi kabul edilmiyor",
+        "IndexJobManager is closed; no new indexing jobs are accepted",
       );
     }
     if (input.mode !== "full" && input.mode !== "incremental") {
       throw new IndexingError(
         "indexing/unsupported-mode",
-        `mode "${input.mode as string}" desteklenmiyor (full | incremental)`,
+        `mode "${input.mode as string}" is not supported (full | incremental)`,
       );
     }
     if (input.scope !== undefined) {
       throw new IndexingError(
         "indexing/unsupported-mode",
-        "scope dar kapsamlı yeniden indeksleme desteklenmiyor; sonraki dilimde değerlendirilecek",
+        "scoped re-indexing (scope) is not supported; use mode=full or mode=incremental",
       );
     }
     const decision = this.policy.authorizeRoot(rootPath);
     if (!decision.allowed) {
       throw new IndexingError(
         "indexing/root-not-authorized",
-        `kök yetkilendirilmedi (${decision.code}): ${decision.reason}`,
+        `root is not authorized (${decision.code}): ${decision.reason}`,
       );
     }
 
@@ -431,6 +523,8 @@ export class IndexJobManager {
       scope: null,
       changeSet: Object.freeze([...(input.changeSet ?? [])].sort()),
       status: "queued",
+      outcome: null,
+      published: false,
       progressPercent: 0,
       progress: {
         phase: "queued",
@@ -514,9 +608,9 @@ export class IndexJobManager {
   waitForJob(jobId: string): Promise<IndexJobRecord> {
     const existing = this.records.get(jobId);
     if (existing === undefined) {
-      return Promise.reject(new Error(`bilinmeyen jobId: ${jobId}`));
+      return Promise.reject(new Error(`unknown jobId: ${jobId}`));
     }
-    if (existing.status === "done" || existing.status === "failed") {
+    if (isTerminalIndexJobStatus(existing.status)) {
       return Promise.resolve(existing);
     }
     return new Promise<IndexJobRecord>((resolve, reject) => {
@@ -539,6 +633,11 @@ export class IndexJobManager {
 
     const worker = this.activeWorker;
     this.activeWorker = undefined;
+    // Release the worker's lease from the main thread so the next context
+    // (e.g. after a roots rebind) never waits for a terminated build.
+    const leaseCleanup = this.activeWorkerLeaseCleanup;
+    this.activeWorkerLeaseCleanup = undefined;
+    leaseCleanup?.(true);
     if (worker !== undefined) {
       void worker.terminate().catch(() => {});
     }
@@ -546,16 +645,14 @@ export class IndexJobManager {
     const cancelledMessage = "Indexing job cancelled: job manager closed";
     const cancelJob = (jobId: string): void => {
       const current = this.records.get(jobId);
-      if (
-        current !== undefined &&
-        current.status !== "done" &&
-        current.status !== "failed"
-      ) {
+      if (current !== undefined && !isTerminalIndexJobStatus(current.status)) {
         this.records.set(
           jobId,
           freezeRecord({
             ...current,
             status: "failed",
+            outcome: "failed",
+            published: false,
             progress: {
               phase: "failed",
               completed: current.progress.completed,
@@ -744,6 +841,15 @@ export class IndexJobManager {
       ...(serviceConfig.hostLabel === undefined ? {} : { hostLabel: serviceConfig.hostLabel }),
       leaseTtlMs: serviceConfig.leaseTtlMs,
       leaseHeartbeatIntervalMs: serviceConfig.leaseHeartbeatIntervalMs,
+      ...(serviceConfig.processInstanceId === undefined
+        ? {}
+        : { processInstanceId: serviceConfig.processInstanceId }),
+      ...(serviceConfig.peerWaitTimeoutMs === undefined
+        ? {}
+        : { peerWaitTimeoutMs: serviceConfig.peerWaitTimeoutMs }),
+      ...(serviceConfig.leaseStaleCeilingMs === undefined
+        ? {}
+        : { leaseStaleCeilingMs: serviceConfig.leaseStaleCeilingMs }),
       ...(this.workerFixedClockIso === undefined
         ? {}
         : { fixedClockIso: this.workerFixedClockIso }),
@@ -776,15 +882,35 @@ export class IndexJobManager {
             });
       this.activeWorker = worker;
 
+      // Main-thread lease tracking (finding 2): the worker reports the lease
+      // it acquired; the main thread renews it on its own connection so a
+      // worker whose event loop is busy analyzing never looks expired, and
+      // releases it when the worker finishes, crashes or is terminated.
+      let trackedLeaseId: string | undefined;
+      let externalHeartbeat: ExternalLeaseHeartbeat | undefined;
+      const stopLeaseTracking = (release: boolean): void => {
+        externalHeartbeat?.stop({ release });
+        externalHeartbeat = undefined;
+        if (trackedLeaseId !== undefined) {
+          clearBuildLeaseActiveLocally(trackedLeaseId);
+          trackedLeaseId = undefined;
+        }
+      };
+      this.activeWorkerLeaseCleanup = stopLeaseTracking;
+
       const clearActiveWorker = (): void => {
         if (this.activeWorker === worker) {
           this.activeWorker = undefined;
+        }
+        if (this.activeWorkerLeaseCleanup === stopLeaseTracking) {
+          this.activeWorkerLeaseCleanup = undefined;
         }
       };
 
       const finishResolve = (summary: IndexWorkerResultSummary): void => {
         if (settled) return;
         settled = true;
+        stopLeaseTracking(true);
         clearActiveWorker();
         void worker.terminate().catch(() => {});
         resolve(summary);
@@ -793,8 +919,15 @@ export class IndexJobManager {
       const finishReject = (error: unknown): void => {
         if (settled) return;
         settled = true;
+        const heldLease = trackedLeaseId !== undefined;
+        stopLeaseTracking(true);
         clearActiveWorker();
         void worker.terminate().catch(() => {});
+        if (heldLease && !this.closed) {
+          // The worker died holding the lease: its building row (if any) is
+          // now lease-less, so recover it right away (stale flag stays honest).
+          this.indexService.recoverOrphanBuildsNow();
+        }
         reject(error);
       };
 
@@ -802,6 +935,18 @@ export class IndexJobManager {
         if (this.closed) return;
         if (raw === null || typeof raw !== "object") return;
         const msg = raw as IndexWorkerMessage;
+        if (msg.type === "lease") {
+          if (typeof msg.leaseId !== "string" || msg.leaseId.length === 0) return;
+          if (msg.event === "acquired") {
+            stopLeaseTracking(false);
+            trackedLeaseId = msg.leaseId;
+            markBuildLeaseActiveLocally(msg.leaseId);
+            externalHeartbeat = this.indexService.startExternalLeaseHeartbeat(msg.leaseId);
+          } else if (msg.leaseId === trackedLeaseId) {
+            stopLeaseTracking(false);
+          }
+          return;
+        }
         if (msg.type === "progress") {
           this.emitProgress(jobId, {
             phase: msg.phase,
@@ -933,6 +1078,8 @@ export class IndexJobManager {
       const failed = freezeRecord({
         ...latestBeforeFail,
         status: "failed",
+        outcome: "failed",
+        published: false,
         progress: {
           phase: "failed",
           completed: latestBeforeFail.progress.completed,
@@ -953,26 +1100,30 @@ export class IndexJobManager {
 
     const latestBeforeDone = this.records.get(jobId) ?? running;
     const totalFiles = result.fileCount;
+    const outcome = runOutcomeOf(result);
+    const terminal = terminalViewOf(outcome, result);
     const done = freezeRecord({
       ...latestBeforeDone,
-      status: "done",
-      progressPercent: 100,
+      status: terminal.status,
+      outcome,
+      published: outcome === "published",
+      progressPercent: terminal.status === "failed" ? latestBeforeDone.progressPercent : 100,
       progress: {
-        phase: "done",
+        phase: terminal.phase,
         completed: totalFiles,
         total: totalFiles,
-        message: `Published snapshot ${result.snapshotId}`,
+        message: terminal.message,
       },
       finishedAt: this.clock(),
-      snapshotId: result.snapshotId,
-      snapshotState: result.state,
+      snapshotId: terminal.status === "failed" ? null : result.snapshotId,
+      snapshotState: terminal.status === "failed" ? null : result.state,
       stale: result.stale,
       fileCount: result.fileCount,
       tsFileCount: result.tsFileCount,
       csFileCount: result.csFileCount,
       diagnostics: result.diagnostics,
       warnings: result.warnings,
-      error: null,
+      error: terminal.error,
       executionMode,
       ...(result.reanalyzedFiles === undefined
         ? {}
@@ -997,6 +1148,8 @@ export class IndexJobManager {
         freezeRecord({
           ...current,
           status: "failed",
+          outcome: "failed",
+          published: false,
           progress: {
             phase: "failed",
             completed: current.progress.completed,
@@ -1021,7 +1174,7 @@ export class IndexJobManager {
     this.waiters.delete(jobId);
     for (const waiter of list) {
       if (record === undefined) {
-        waiter.reject(new Error(`iş kaydı kayboldu: ${jobId}`));
+        waiter.reject(new Error(`job record was lost: ${jobId}`));
       } else {
         waiter.resolve(record);
       }
@@ -1042,7 +1195,7 @@ export class IndexJobManager {
     while (this.records.size > this.maxJobs) {
       let oldestTerminal: string | undefined;
       for (const [jobId, record] of this.records) {
-        if (record.status === "done" || record.status === "failed") {
+        if (isTerminalIndexJobStatus(record.status)) {
           oldestTerminal = jobId;
           break;
         }
@@ -1055,7 +1208,7 @@ export class IndexJobManager {
       if (list !== undefined) {
         this.waiters.delete(jobId);
         for (const waiter of list) {
-          waiter.reject(new Error(`iş kaydı sınır aşımıyla düşürüldü: ${jobId}`));
+          waiter.reject(new Error(`job record was evicted (maxJobs limit): ${jobId}`));
         }
       }
     }
