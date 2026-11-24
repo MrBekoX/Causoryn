@@ -33,6 +33,7 @@ import {
   CANONICAL_SKILL_NAMES,
   CausorynCliError,
   HOST_CLIENT_IDS,
+  SETUP_TOOL_PROFILES,
   type HostClientId,
   type SetupAction,
   type SetupOptions,
@@ -266,7 +267,101 @@ function resolveSkillsSourceDir(packageRoot: string): string {
   return inPkg;
 }
 
-function buildMcpArgs(cliScriptPath: string, client: HostClientId): string[] {
+/**
+ * Validates and normalizes a `--tool-profile` value (`core`, `full`, `wiki`,
+ * `history` or a comma list; duplicates removed, order kept), mirroring
+ * `parseToolProfile` of `@causoryn/mcp-server`.
+ */
+export function normalizeSetupToolProfile(raw: string): string {
+  const supported = SETUP_TOOL_PROFILES.join(", ");
+  const trimmed = raw.trim();
+  if (trimmed.length === 0) {
+    throw new CausorynCliError(
+      "cli/invalid-arguments",
+      `--tool-profile cannot be empty. Supported values: ${supported} (or a comma-separated combination such as wiki,history)`,
+    );
+  }
+  const profiles: string[] = [];
+  for (const part of trimmed.split(",")) {
+    const token = part.trim();
+    if (!(SETUP_TOOL_PROFILES as readonly string[]).includes(token)) {
+      throw new CausorynCliError(
+        "cli/invalid-arguments",
+        `Invalid --tool-profile value "${token}". Supported values: ${supported} (or a comma-separated combination such as wiki,history)`,
+      );
+    }
+    if (!profiles.includes(token)) {
+      profiles.push(token);
+    }
+  }
+  return profiles.join(",");
+}
+
+const TOOL_PROFILE_FLAG = "--tool-profile";
+const OUTPUT_SCHEMA_FLAGS: ReadonlySet<string> = new Set([
+  "--output-schema",
+  "--output-schema-profile",
+]);
+
+/**
+ * `causoryn mcp` arguments a user may add to a Causoryn entry by hand (the
+ * installed skills tell them to). Re-running setup keeps them verbatim, in the
+ * user's spelling (`--flag value` or `--flag=value`); the last occurrence wins,
+ * as in the server's own argument parser.
+ */
+interface PreservedMcpArgs {
+  readonly toolProfile: readonly string[];
+  readonly outputSchema: readonly string[];
+}
+
+const NO_PRESERVED_MCP_ARGS: PreservedMcpArgs = { toolProfile: [], outputSchema: [] };
+
+function extractPreservedMcpArgs(existingArgs: unknown): PreservedMcpArgs {
+  if (!Array.isArray(existingArgs)) {
+    return NO_PRESERVED_MCP_ARGS;
+  }
+  let toolProfile: readonly string[] = [];
+  let outputSchema: readonly string[] = [];
+  for (let i = 0; i < existingArgs.length; i += 1) {
+    const token: unknown = existingArgs[i];
+    if (typeof token !== "string") continue;
+    const eqIdx = token.indexOf("=");
+    const flag = token.startsWith("--") && eqIdx > 0 ? token.slice(0, eqIdx) : token;
+    const isToolProfile = flag === TOOL_PROFILE_FLAG;
+    if (!isToolProfile && !OUTPUT_SCHEMA_FLAGS.has(flag)) continue;
+    let captured: readonly string[];
+    if (flag !== token) {
+      captured = [token];
+    } else {
+      const next: unknown = existingArgs[i + 1];
+      if (typeof next === "string" && !next.startsWith("--")) {
+        captured = [token, next];
+        i += 1;
+      } else {
+        captured = [token];
+      }
+    }
+    if (isToolProfile) {
+      toolProfile = captured;
+    } else {
+      outputSchema = captured;
+    }
+  }
+  return { toolProfile, outputSchema };
+}
+
+interface McpArgsCustomization {
+  /** Normalized `--tool-profile` value from the setup flag; overrides the preserved one. */
+  readonly toolProfile?: string | undefined;
+  readonly preserved: PreservedMcpArgs;
+}
+
+function buildMcpArgs(
+  cliScriptPath: string,
+  client: HostClientId,
+  customization: McpArgsCustomization,
+): string[] {
+  const { toolProfile, preserved } = customization;
   return [
     cliScriptPath,
     "mcp",
@@ -274,7 +369,57 @@ function buildMcpArgs(cliScriptPath: string, client: HostClientId): string[] {
     "--auto-data-dir",
     "--client",
     client,
+    ...(toolProfile !== undefined ? [TOOL_PROFILE_FLAG, toolProfile] : preserved.toolProfile),
+    ...preserved.outputSchema,
   ];
+}
+
+/**
+ * Reads the `env` object of an existing JSON Causoryn entry so a re-run keeps
+ * it. Causoryn writes no env keys of its own, so every user key is kept as is.
+ * A non-object `env` is rejected instead of being silently dropped.
+ */
+function readExistingJsonEntryEnv(
+  existingEntry: unknown,
+  fieldPath: string,
+  targetPath: string,
+): Record<string, unknown> | undefined {
+  if (!isPlainObject(existingEntry) || existingEntry["env"] === undefined) {
+    return undefined;
+  }
+  const env = existingEntry["env"];
+  if (!isPlainObject(env)) {
+    throw new CausorynCliError(
+      "cli/malformed-json",
+      `The "${fieldPath}.env" field must be a JSON object (${targetPath})`,
+    );
+  }
+  return { ...env };
+}
+
+function buildJsonCausorynEntry(params: {
+  readonly includeStdioType: boolean;
+  readonly nodeExecutable: string;
+  readonly cliScriptPath: string;
+  readonly client: HostClientId;
+  readonly toolProfile: string | undefined;
+  readonly existingEntry: unknown;
+  readonly fieldPath: string;
+  readonly targetPath: string;
+}): Record<string, unknown> {
+  const existingArgs = isPlainObject(params.existingEntry)
+    ? params.existingEntry["args"]
+    : undefined;
+  const env = readExistingJsonEntryEnv(params.existingEntry, params.fieldPath, params.targetPath);
+  return {
+    ...(params.includeStdioType ? { type: "stdio" } : {}),
+    command: params.nodeExecutable,
+    args: buildMcpArgs(params.cliScriptPath, params.client, {
+      toolProfile: params.toolProfile,
+      preserved: extractPreservedMcpArgs(existingArgs),
+    }),
+    ...(env !== undefined ? { env } : {}),
+  };
 }
 
 function planMcpServersJsonFile(params: {
@@ -282,6 +427,7 @@ function planMcpServersJsonFile(params: {
   readonly targetPath: string;
   readonly nodeExecutable: string;
   readonly cliScriptPath: string;
+  readonly toolProfile: string | undefined;
   readonly uninstall: boolean;
   readonly includeStdioType: boolean;
   readonly actions: SetupAction[];
@@ -293,6 +439,7 @@ function planMcpServersJsonFile(params: {
     targetPath,
     nodeExecutable,
     cliScriptPath,
+    toolProfile,
     uninstall,
     includeStdioType,
     actions,
@@ -362,12 +509,16 @@ function planMcpServersJsonFile(params: {
     return;
   }
 
-  const entry: Record<string, unknown> = {
-    ...(includeStdioType ? { type: "stdio" } : {}),
-    command: nodeExecutable,
-    args: buildMcpArgs(cliScriptPath, client),
-  };
-  servers["causoryn"] = entry;
+  servers["causoryn"] = buildJsonCausorynEntry({
+    includeStdioType,
+    nodeExecutable,
+    cliScriptPath,
+    client,
+    toolProfile,
+    existingEntry: servers["causoryn"],
+    fieldPath: "mcpServers.causoryn",
+    targetPath,
+  });
   const nextDoc: Record<string, unknown> = {
     ...doc,
     mcpServers: servers,
@@ -401,13 +552,22 @@ function planZcodeMcpConfig(params: {
   readonly homeDir: string;
   readonly nodeExecutable: string;
   readonly cliScriptPath: string;
+  readonly toolProfile: string | undefined;
   readonly uninstall: boolean;
   readonly actions: SetupAction[];
   readonly writes: FileWriteInstruction[];
   readonly projectedConfigs: Map<string, string>;
 }): void {
-  const { homeDir, nodeExecutable, cliScriptPath, uninstall, actions, writes, projectedConfigs } =
-    params;
+  const {
+    homeDir,
+    nodeExecutable,
+    cliScriptPath,
+    toolProfile,
+    uninstall,
+    actions,
+    writes,
+    projectedConfigs,
+  } = params;
   const targetPath = path.join(homeDir, ".zcode", "cli", "config.json");
   const fallbackPath = path.join(homeDir, ".agents", "mcp.json");
 
@@ -517,11 +677,16 @@ function planZcodeMcpConfig(params: {
     }
   }
 
-  servers["causoryn"] = {
-    type: "stdio",
-    command: nodeExecutable,
-    args: buildMcpArgs(cliScriptPath, "zcode"),
-  };
+  servers["causoryn"] = buildJsonCausorynEntry({
+    includeStdioType: true,
+    nodeExecutable,
+    cliScriptPath,
+    client: "zcode",
+    toolProfile,
+    existingEntry: servers["causoryn"],
+    fieldPath: "mcp.servers.causoryn",
+    targetPath,
+  });
 
   const nextDoc: Record<string, unknown> = {
     ...doc,
@@ -561,13 +726,22 @@ function planCodexMcpConfig(params: {
   readonly codexHomeDir: string;
   readonly nodeExecutable: string;
   readonly cliScriptPath: string;
+  readonly toolProfile: string | undefined;
   readonly uninstall: boolean;
   readonly actions: SetupAction[];
   readonly writes: FileWriteInstruction[];
   readonly projectedConfigs: Map<string, string>;
 }): void {
-  const { codexHomeDir, nodeExecutable, cliScriptPath, uninstall, actions, writes, projectedConfigs } =
-    params;
+  const {
+    codexHomeDir,
+    nodeExecutable,
+    cliScriptPath,
+    toolProfile,
+    uninstall,
+    actions,
+    writes,
+    projectedConfigs,
+  } = params;
   const targetPath = path.join(codexHomeDir, "config.toml");
   const existed = assertConfigAndBackupTargetsSafe(targetPath);
   const existingRaw = existed ? readFileSync(targetPath, "utf8") : "";
@@ -609,10 +783,19 @@ function planCodexMcpConfig(params: {
     return;
   }
 
+  // Keep the user's --tool-profile / --output-schema arguments and env keys
+  // (inline `env = {...}`, dotted `env.KEY` or the env sub-table).
+  const existingEntry = existed ? readCodexMcpServer(existingRaw) : null;
   const updated = upsertCodexMcpServer(existingRaw, {
     command: nodeExecutable,
-    args: buildMcpArgs(cliScriptPath, "codex"),
+    args: buildMcpArgs(cliScriptPath, "codex", {
+      toolProfile,
+      preserved: extractPreservedMcpArgs(existingEntry?.args),
+    }),
     startupTimeoutSec: 30,
+    ...(existingEntry !== null && Object.keys(existingEntry.env).length > 0
+      ? { env: existingEntry.env }
+      : {}),
   });
   if (existed && existingRaw === updated) {
     projectedConfigs.set(path.resolve(targetPath), existingRaw);
@@ -920,6 +1103,19 @@ function buildExecutionPlan(options: ExtendedSetupOptions): {
       ? options.nodeExecutable.trim()
       : process.execPath;
 
+  let toolProfile: string | undefined;
+  if (options.toolProfile !== undefined) {
+    if (uninstall) {
+      throw new CausorynCliError(
+        "cli/invalid-arguments",
+        "--tool-profile cannot be combined with --uninstall",
+      );
+    }
+    toolProfile = normalizeSetupToolProfile(options.toolProfile);
+  }
+
+  // Host selection: --client > --all > detected hosts. `allDetected` (--all-detected)
+  // is an explicit alias of the default and selects the detected hosts as well.
   let selectedClients: HostClientId[];
   let noClientsDetected = false;
   if (options.clients !== undefined && options.clients.length > 0) {
@@ -956,6 +1152,7 @@ function buildExecutionPlan(options: ExtendedSetupOptions): {
           targetPath: primaryPath,
           nodeExecutable,
           cliScriptPath,
+          toolProfile,
           uninstall,
           includeStdioType: false,
           actions,
@@ -981,6 +1178,7 @@ function buildExecutionPlan(options: ExtendedSetupOptions): {
             targetPath: secondaryPath,
             nodeExecutable,
             cliScriptPath,
+            toolProfile,
             uninstall,
             includeStdioType: false,
             actions,
@@ -996,6 +1194,7 @@ function buildExecutionPlan(options: ExtendedSetupOptions): {
           targetPath: getClaudeConfigFilePath(homeDir, claudeConfigDir),
           nodeExecutable,
           cliScriptPath,
+          toolProfile,
           uninstall,
           includeStdioType: true,
           actions,
@@ -1009,6 +1208,7 @@ function buildExecutionPlan(options: ExtendedSetupOptions): {
           codexHomeDir,
           nodeExecutable,
           cliScriptPath,
+          toolProfile,
           uninstall,
           actions,
           writes,
@@ -1021,6 +1221,7 @@ function buildExecutionPlan(options: ExtendedSetupOptions): {
           homeDir,
           nodeExecutable,
           cliScriptPath,
+          toolProfile,
           uninstall,
           actions,
           writes,
