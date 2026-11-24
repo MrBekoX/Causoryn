@@ -1321,7 +1321,7 @@ describe("causoryn_get_agent_context contract ayağı", { timeout: 60_000 }, () 
       const degraded = data.degradedLegs as Array<Record<string, unknown>>;
       const contractLeg = degraded.find((leg) => leg.leg === "contract");
       expect(contractLeg).toBeDefined();
-      expect(String(contractLeg?.reason)).toContain("sözleşme kaydı yok");
+      expect(String(contractLeg?.reason)).toContain("no contract records");
     } finally {
       context.close();
     }

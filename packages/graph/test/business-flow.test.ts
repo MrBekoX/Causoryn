@@ -437,7 +437,7 @@ describe("traceBusinessFlow — negatif (kopuk zincir ve çözülemeyen seed)", 
     expect(gap?.edge).toBeNull();
     expect(gap?.to).toBeNull();
     expect(gap?.resolution).toBeNull();
-    expect(gap?.reason).toContain("köprü üretilmedi");
+    expect(gap?.reason).toContain("no bridge was invented");
     // Kopukluğun ÖNCESİ dürüst raporlanır: verified ROUTES_TO segmenti.
     expect(flow?.segments[0]?.certainty).toBe("verified");
     expect(flow?.hasGap).toBe(true);
@@ -478,7 +478,7 @@ describe("traceBusinessFlow — negatif (kopuk zincir ve çözülemeyen seed)", 
     );
     const result = traceBusinessFlow(ambiguous, { flowSeed: ambiguousName });
     expect(result.seed).toBeNull();
-    expect(result.unresolvedSeed?.reason).toContain("belirsiz");
+    expect(result.unresolvedSeed?.reason).toContain("ambiguous seed");
     expect(result.unresolvedSeed?.reason).toContain(
       nid("Handler", ambiguousName, "src/a.ts"),
     );
@@ -851,10 +851,10 @@ describe("traceBusinessFlow — kontrat devamsızlık rationale'i", () => {
     // Dürüstlük: rationale gerçek durumu adlandırır.
     expect(
       result.rationales.some(
-        (entry) => entry.includes("kontrat") && entry.includes("producer/consumer kenarı bulunamadı"),
+        (entry) => entry.includes("contract") && entry.includes("no other producer/consumer edge"),
       ),
     ).toBe(true);
-    expect(result.rationales.some((entry) => entry.includes("döngü koruması"))).toBe(false);
+    expect(result.rationales.some((entry) => entry.includes("cycle guard"))).toBe(false);
   });
 
   it("kontrat olmayan node'larda tüm devam kenarları ziyaret edilmişse 'döngü koruması' rationale'i korunur", () => {
@@ -868,7 +868,7 @@ describe("traceBusinessFlow — kontrat devamsızlık rationale'i", () => {
       ],
     );
     const result = traceBusinessFlow(looped, { flowSeed: "loopA" });
-    expect(result.rationales.some((entry) => entry.includes("döngü koruması"))).toBe(true);
+    expect(result.rationales.some((entry) => entry.includes("cycle guard"))).toBe(true);
   });
 
   it("paket girişi (index.ts) traceBusinessFlow'u dışa açar", () => {

@@ -209,7 +209,7 @@ export function compareIdentityKey(identity: CompareNodeIdentity): string {
   if (!NODE_KIND_SET.has(identity.kind)) {
     throw new GraphRepositoryError(
       "compare/unknown-node-kind",
-      `Bilinmeyen node türü: ${String(identity.kind)}`,
+      `Unknown node kind: ${String(identity.kind)}`,
     );
   }
   if (
@@ -218,7 +218,7 @@ export function compareIdentityKey(identity: CompareNodeIdentity): string {
   ) {
     throw new GraphRepositoryError(
       "compare/empty-qualified-name",
-      `qualifiedName boş olamaz: ${String(identity.qualifiedName)}`,
+      `qualifiedName must not be empty: ${String(identity.qualifiedName)}`,
     );
   }
   return canonicalJson([
@@ -267,13 +267,13 @@ function validateContentSet(set: CompareContentSet): ValidatedSet {
     if (node.language !== undefined && node.language.trim().length === 0) {
       throw new GraphRepositoryError(
         "compare/invalid-node-field",
-        `language boş olamaz: ${key}`,
+        `language must not be empty: ${key}`,
       );
     }
     if (node.signature !== undefined && node.signature.trim().length === 0) {
       throw new GraphRepositoryError(
         "compare/invalid-node-field",
-        `signature boş olamaz: ${key}`,
+        `signature must not be empty: ${key}`,
       );
     }
     try {
@@ -282,7 +282,7 @@ function validateContentSet(set: CompareContentSet): ValidatedSet {
       if (error instanceof DomainError) {
         throw new GraphRepositoryError(
           "compare/non-json-attribute",
-          `attributes JSON'e serileştirilemiyor (${key}): ${error.message}`,
+          `attributes cannot be serialized to JSON (${key}): ${error.message}`,
         );
       }
       throw error;
@@ -290,7 +290,7 @@ function validateContentSet(set: CompareContentSet): ValidatedSet {
     if (nodesByKey.has(key)) {
       throw new GraphRepositoryError(
         "compare/duplicate-node",
-        `Aynı içerik kümesinde tekrarlanan node kimliği: ${key}`,
+        `Duplicate node identity in the same content set: ${key}`,
       );
     }
     nodesByKey.set(key, { key, node, identity: identityOfNode(node) });
@@ -301,13 +301,13 @@ function validateContentSet(set: CompareContentSet): ValidatedSet {
     if (!EDGE_KIND_SET.has(edge.kind)) {
       throw new GraphRepositoryError(
         "compare/unknown-edge-kind",
-        `Bilinmeyen edge türü: ${String(edge.kind)}`,
+        `Unknown edge kind: ${String(edge.kind)}`,
       );
     }
     if (!RESOLUTION_SET.has(edge.resolution)) {
       throw new GraphRepositoryError(
         "compare/unknown-resolution",
-        `Bilinmeyen resolution değeri: ${String(edge.resolution)}`,
+        `Unknown resolution value: ${String(edge.resolution)}`,
       );
     }
     const fromKey = compareIdentityKey(edge.from);
@@ -316,7 +316,7 @@ function validateContentSet(set: CompareContentSet): ValidatedSet {
       const missing = nodesByKey.has(fromKey) ? edge.to : edge.from;
       throw new GraphRepositoryError(
         "compare/dangling-edge",
-        `Kenar ucu kümedeki node ile eşleşmiyor (${edge.kind}): ${compareIdentityKey(missing)}`,
+        `Edge endpoint does not match any node in the set (${edge.kind}): ${compareIdentityKey(missing)}`,
       );
     }
     // Kenar kimliği (kind, from, to): domain'deki duplicate-edge invariant'ı
@@ -327,7 +327,7 @@ function validateContentSet(set: CompareContentSet): ValidatedSet {
     if (edgeKeys.has(edgeKey)) {
       throw new GraphRepositoryError(
         "compare/duplicate-edge",
-        `Aynı içerik kümesinde tekrarlanan kenar kimliği: ${edgeKey}`,
+        `Duplicate edge identity in the same content set: ${edgeKey}`,
       );
     }
     edgeKeys.add(edgeKey);
@@ -581,12 +581,12 @@ export function diffContentSets(
   // 2) Rename matching: taban çıkarılanları sırayla, en iyi hedef adayla eşle.
   const removedCandidates = baseOnlyKeys.map((key) => {
     const node = baseSet.nodesByKey.get(key);
-    if (node === undefined) throw new Error("remove adayı kayboldu");
+    if (node === undefined) throw new Error("internal error: removed rename candidate is missing");
     return node;
   });
   const addedCandidates = targetOnlyKeys.map((key) => {
     const node = targetSet.nodesByKey.get(key);
-    if (node === undefined) throw new Error("add adayı kayboldu");
+    if (node === undefined) throw new Error("internal error: added rename candidate is missing");
     return node;
   });
 
