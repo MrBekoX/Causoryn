@@ -246,7 +246,7 @@ describe.skipIf(!workerReady)(
       expect(segments).toContain("roslyn-worker@0.1.0");
       // Ref-pack: worker healthy koştu → NETCore.App.Ref sürümü yüklü
       // (bu makinede packs dizini SDK ile gelir; ReferenceResolver.cs:144
-      // formatı: "referans paketi yüklendi: <pack> <sürüm> (<tfmDir>)").
+      // formatı: "reference pack loaded: <pack> <version> (<tfmDir>)").
       const netCore = segments.find((s) => s.startsWith("refpack="));
       expect(netCore).toBeDefined();
       expect(netCore).toContain("Microsoft.NETCore.App.Ref@");
@@ -371,7 +371,7 @@ describe.skipIf(!workerReady)(
       // (fingerprint'in kaynağı — ReferenceResolver.cs:144 formatı).
       expect(
         runLocal.warnings.some(
-          (w) => w.startsWith("referans paketi yüklendi: Microsoft.NETCore.App.Ref"),
+          (w) => w.startsWith("reference pack loaded: Microsoft.NETCore.App.Ref"),
         ),
       ).toBe(true);
     });
@@ -571,8 +571,8 @@ describe("analyzerFingerprint fp2 şeması (birim)", () => {
     delete process.env["DOTNET_ROOT"];
     try {
       const context = extractRoslynRefPackContext([
-        "referans paketi yüklendi: Microsoft.AspNetCore.App.Ref 10.0.11 (C:\\Program Files\\dotnet\\packs\\Microsoft.AspNetCore.App.Ref\\10.0.11\\ref\\net10.0)",
-        "referans paketi yüklendi: Microsoft.NETCore.App.Ref 10.0.11 (C:\\Program Files\\dotnet\\packs\\Microsoft.NETCore.App.Ref\\10.0.11\\ref\\net10.0)",
+        "reference pack loaded: Microsoft.AspNetCore.App.Ref 10.0.11 (C:\\Program Files\\dotnet\\packs\\Microsoft.AspNetCore.App.Ref\\10.0.11\\ref\\net10.0)",
+        "reference pack loaded: Microsoft.NETCore.App.Ref 10.0.11 (C:\\Program Files\\dotnet\\packs\\Microsoft.NETCore.App.Ref\\10.0.11\\ref\\net10.0)",
       ]);
       expect(context).not.toBeNull();
       expect(context?.packs).toHaveLength(2);
@@ -593,7 +593,7 @@ describe("analyzerFingerprint fp2 şeması (birim)", () => {
     delete process.env["DOTNET_ROOT"];
     try {
       const fallback = extractRoslynRefPackContext([
-        "Microsoft.NETCore.App.Ref pack bulunamadı; çalışma zamanı düşüşü: yalnızca System.Private.CoreLib.dll referansı eklendi.",
+        "Microsoft.NETCore.App.Ref pack not found; runtime fallback: only the System.Private.CoreLib.dll reference was added.",
       ]);
       expect(fallback).not.toBeNull();
       expect(fallback?.packs).toHaveLength(0);
@@ -699,7 +699,7 @@ describe("analyzerFingerprint fp2 şeması (birim)", () => {
       // env keşfi SANMAMALI (prefix ayıraçsız eşleşme false-positive).
       process.env["DOTNET_ROOT"] = "C:\\dotnet";
       const evil = extractRoslynRefPackContext([
-        "referans paketi yüklendi: Microsoft.NETCore.App.Ref 10.0.11 (C:\\dotnet-evil\\packs\\Microsoft.NETCore.App.Ref\\10.0.11\\ref\\net10.0)",
+        "reference pack loaded: Microsoft.NETCore.App.Ref 10.0.11 (C:\\dotnet-evil\\packs\\Microsoft.NETCore.App.Ref\\10.0.11\\ref\\net10.0)",
       ]);
       expect(evil?.source).toBe("worker-discovered");
 
@@ -708,7 +708,7 @@ describe("analyzerFingerprint fp2 şeması (birim)", () => {
       // false-negative güvenli ama bilgi kaybı gereksizdir).
       process.env["DOTNET_ROOT"] = "c:\\dotnet";
       const real = extractRoslynRefPackContext([
-        "referans paketi yüklendi: Microsoft.NETCore.App.Ref 10.0.11 (C:\\dotnet\\packs\\Microsoft.NETCore.App.Ref\\10.0.11\\ref\\net10.0)",
+        "reference pack loaded: Microsoft.NETCore.App.Ref 10.0.11 (C:\\dotnet\\packs\\Microsoft.NETCore.App.Ref\\10.0.11\\ref\\net10.0)",
       ]);
       expect(real?.source).toBe("env-dotnet-root");
     } finally {

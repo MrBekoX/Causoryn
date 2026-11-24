@@ -159,7 +159,7 @@ file and the result becomes `partial`.
   "to":   { "kind": "Method", "qualifiedName": "services.OrdersService.GetOrders", "relativePath": "services/orders_service.go" },
   "resolution": "heuristic",
   "evidence": [ { "kind": "ast-span", "span": {...}, "analyzerId": "go-worker", "analyzerVersion": "0.1.0", "rationale": "..." } ],
-  "ambiguity": { "candidates": ["services.OrdersService.GetOrders"], "reason": "..." }
+  "ambiguity": { "candidates": ["services.OrdersService.GetOrders"], "reason": "unique method name rule; ..." }
 }
 ```
 

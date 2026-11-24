@@ -87,7 +87,7 @@ const HALF_LINE_SCRIPT = `process.stdout.write('{"id":"x"}'); setTimeout(() => {
 /** Anında stderr yazıp çıkan sahte süreç (worker crash fallback). */
 const CRASH_SCRIPT = `process.stderr.write('sahte worker cakildi'); process.exit(1);`;
 /** Geçerli PROTOCOL.md v1 hata yanıtı yazıp çıkan sahte süreç. */
-const WORKER_ERROR_SCRIPT = `process.stdout.write(JSON.stringify({ id: 'analyze:adapter-rust-worker-error', protocolVersion: '1', status: 'error', error: { code: 'LIMIT_EXCEEDED', message: 'dosya sayısı sınırı aşıldı: 5001 > 5000' } }) + '\\n'); process.exit(0);`;
+const WORKER_ERROR_SCRIPT = `process.stdout.write(JSON.stringify({ id: 'analyze:adapter-rust-worker-error', protocolVersion: '1', status: 'error', error: { code: 'LIMIT_EXCEEDED', message: 'file count limit exceeded: 5001 > 5000' } }) + '\\n'); process.exit(0);`;
 
 /* ------------------------------------------------------------------ */
 /* Testler                                                             */
@@ -337,7 +337,7 @@ describe.skipIf(!cargoAvailable)("adapters/rust (M1)", () => {
       result.warnings.some(
         (warning) =>
           warning.includes("LIMIT_EXCEEDED") &&
-          warning.includes("dosya sayısı sınırı"),
+          warning.includes("file count limit exceeded"),
       ),
     ).toBe(true);
     expect(result.nodes.length).toBe(FIXTURE_FILES.length);

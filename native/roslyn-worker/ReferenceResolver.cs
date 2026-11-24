@@ -53,18 +53,18 @@ public static class ReferenceResolver
                 paths.Add(coreLib);
                 seenFileNames.Add(Path.GetFileName(coreLib));
                 warnings.Add(
-                    "Microsoft.NETCore.App.Ref pack bulunamadı; çalışma zamanı düşüşü: " +
-                    $"yalnızca {Path.GetFileName(coreLib)} referansı eklendi. BCL tiplerinden " +
-                    "türeyen semboller çözümsüz kalabilir (kaynak-içi CALLS/CONTAINS etkilenmez).");
+                    "Microsoft.NETCore.App.Ref pack not found; runtime fallback: " +
+                    $"only the {Path.GetFileName(coreLib)} reference was added. Symbols derived " +
+                    "from BCL types may stay unresolved (in-source CALLS/CONTAINS are not affected).");
             }
         }
 
         if (!aspNetCoreAdded)
         {
             warnings.Add(
-                "Microsoft.AspNetCore.App.Ref pack bulunamadı; controller/minimal API " +
-                "öz nitelikleri semantik olarak çözümlenemez — bilinen-ad kuralı ile " +
-                "heuristic ROUTES_TO üretilir (TŞ §8 resolution kuralı).");
+                "Microsoft.AspNetCore.App.Ref pack not found; controller/minimal API " +
+                "attributes cannot be resolved semantically — heuristic ROUTES_TO " +
+                "edges are produced by the known-name rule.");
         }
 
         if (extraDirs is { Count: > 0 })
@@ -75,13 +75,13 @@ public static class ReferenceResolver
             {
                 if (processedDirs >= MaxExtraReferenceDirs)
                 {
-                    warnings.Add($"referenceDirs üst sınırı ({MaxExtraReferenceDirs}) aşıldı; kalan girdiler atlandı");
+                    warnings.Add($"referenceDirs limit ({MaxExtraReferenceDirs}) exceeded; remaining entries skipped");
                     break;
                 }
 
                 if (string.IsNullOrWhiteSpace(rawDir) || rawDir.Contains('\0'))
                 {
-                    warnings.Add("geçersiz boş/null-byte referenceDirs girdisi atlandı");
+                    warnings.Add("invalid empty/null-byte referenceDirs entry skipped");
                     continue;
                 }
 
@@ -90,7 +90,7 @@ public static class ReferenceResolver
                 // BEFORE any filesystem call (prevents SMB/NTLM leak and rejects drive-relative paths).
                 if (IsUncOrDevicePath(dir) || !Path.IsPathFullyQualified(dir))
                 {
-                    warnings.Add($"güvensiz veya göreli referenceDirs girdisi reddedildi: {dir}");
+                    warnings.Add($"unsafe or relative referenceDirs entry rejected: {dir}");
                     continue;
                 }
 
@@ -105,19 +105,19 @@ public static class ReferenceResolver
                     var dirInfo = new DirectoryInfo(normalizedDir);
                     if (IsSymlinkOrReparsePoint(dirInfo))
                     {
-                        warnings.Add($"symlink/reparse-point referenceDirs girdisi reddedildi: {dir}");
+                        warnings.Add($"symlink/reparse-point referenceDirs entry rejected: {dir}");
                         continue;
                     }
 
                     if (dirInfo.Attributes == (FileAttributes)(-1) || !Directory.Exists(normalizedDir))
                     {
-                        warnings.Add($"referenceDirs girdisi yok: {dir} (atlandı)");
+                        warnings.Add($"referenceDirs entry does not exist: {dir} (skipped)");
                         continue;
                     }
                 }
                 catch
                 {
-                    warnings.Add($"referenceDirs girdisi doğrulanamadı: {dir} (atlandı)");
+                    warnings.Add($"referenceDirs entry could not be verified: {dir} (skipped)");
                     continue;
                 }
 
@@ -125,7 +125,7 @@ public static class ReferenceResolver
                 addedExtraDlls += AddExtraDlls(normalizedDir, paths, seenFileNames, MaxExtraReferenceDlls - addedExtraDlls);
                 if (addedExtraDlls >= MaxExtraReferenceDlls)
                 {
-                    warnings.Add($"referenceDirs DLL üst sınırı ({MaxExtraReferenceDlls}) aşıldı; kalan DLL'ler atlandı");
+                    warnings.Add($"referenceDirs DLL limit ({MaxExtraReferenceDlls}) exceeded; remaining DLLs skipped");
                     break;
                 }
             }
@@ -245,7 +245,7 @@ public static class ReferenceResolver
             }
 
             AddDlls(tfmDir, paths, seenFileNames);
-            warnings.Add($"referans paketi yüklendi: {packName} {versionDir} ({tfmDir})");
+            warnings.Add($"reference pack loaded: {packName} {versionDir} ({tfmDir})");
             return true;
         }
 

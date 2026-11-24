@@ -91,7 +91,7 @@ function writeFakeScripts(): void {
   // Geçerli PROTOCOL.md v1 hata yanıtı yazıp çıkan süreç.
   writeFileSync(
     FAKE_ERROR_PATH,
-    "process.stdout.write(JSON.stringify({ id: 'analyze:adapter-go-worker-error', protocolVersion: '1', status: 'error', error: { code: 'LIMIT_EXCEEDED', message: 'dosya sayısı sınırı aşıldı: 5001 > 5000' } }) + '\\n'); process.exit(0);\n",
+    "process.stdout.write(JSON.stringify({ id: 'analyze:adapter-go-worker-error', protocolVersion: '1', status: 'error', error: { code: 'LIMIT_EXCEEDED', message: 'files count limit exceeded: 5001 > 5000' } }) + '\\n'); process.exit(0);\n",
     "utf8",
   );
 }
@@ -1424,7 +1424,7 @@ describe("adapters/go graceful fallback (M1-Go)", { timeout: 20_000 }, () => {
       result.warnings.some(
         (warning) =>
           warning.includes("LIMIT_EXCEEDED") &&
-          warning.includes("dosya sayısı sınırı"),
+          warning.includes("files count limit exceeded"),
       ),
     ).toBe(true);
     expect(result.nodes.length).toBe(FIXTURE_FILES.length);

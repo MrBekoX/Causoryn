@@ -134,19 +134,19 @@ fn validate_path(path: &str) -> Result<(), ProtocolError> {
             && path.as_bytes()[0].is_ascii_alphabetic())
     {
         return Err(invalid(format!(
-            "Mutlak kaynak yolu kabul edilmez: {path}"
+            "Absolute source paths are not accepted: {path}"
         )));
     }
 
     for segment in path.split('/') {
         if segment.is_empty() || segment == "." {
             return Err(invalid(format!(
-                "Kaynak yolu boş/geçersiz segment içeriyor: {path}"
+                "Source path contains an empty or invalid segment: {path}"
             )));
         }
         if segment == ".." {
             return Err(invalid(format!(
-                "Kaynak yolu kök dışına çıkıyor: {path}"
+                "Source path escapes the workspace root: {path}"
             )));
         }
     }
@@ -156,16 +156,16 @@ fn validate_path(path: &str) -> Result<(), ProtocolError> {
 
 fn process_request(line: &str) -> Result<Value, ProtocolError> {
     let value: Value = serde_json::from_str(line)
-        .map_err(|e| invalid(format!("istek JSON'u ayrıştırılamadı: {e}")))?;
+        .map_err(|e| invalid(format!("request JSON could not be parsed: {e}")))?;
     let obj = value
         .as_object()
-        .ok_or_else(|| invalid("istek JSON'u bir nesne olmalı".to_string()))?;
+        .ok_or_else(|| invalid("request JSON must be an object".to_string()))?;
 
     let id = obj
         .get("id")
-        .ok_or_else(|| invalid("id zorunludur".to_string()))?;
+        .ok_or_else(|| invalid("id is required".to_string()))?;
     if !id.is_string() && !id.is_number() {
-        return Err(invalid("id string ya da sayı olmalıdır".to_string()));
+        return Err(invalid("id must be a string or a number".to_string()));
     }
     let id = id.clone();
 
@@ -175,24 +175,24 @@ fn process_request(line: &str) -> Result<Value, ProtocolError> {
             key.as_str(),
             "id" | "type" | "protocolVersion" | "files" | "maxNodes"
         ) {
-            return Err(invalid(format!("bilinmeyen üst-düzey alan: '{key}'")));
+            return Err(invalid(format!("unknown top-level field: '{key}'")));
         }
     }
 
     let typ = obj
         .get("type")
         .and_then(Value::as_str)
-        .ok_or_else(|| invalid("type zorunludur".to_string()))?;
+        .ok_or_else(|| invalid("type is required".to_string()))?;
     if typ != "analyze" {
         return Err(invalid(format!(
-            "bilinmeyen istek türü: '{typ}' (desteklenen: 'analyze')"
+            "unknown request type: '{typ}' (supported: 'analyze')"
         )));
     }
 
     if let Some(pv) = obj.get("protocolVersion") {
         if pv.as_str() != Some(PROTOCOL_VERSION) {
             return Err(invalid(format!(
-                "desteklenmeyen protocolVersion: {pv} (desteklenen: '{PROTOCOL_VERSION}')"
+                "unsupported protocolVersion: {pv} (supported: '{PROTOCOL_VERSION}')"
             )));
         }
     }
@@ -203,14 +203,14 @@ fn process_request(line: &str) -> Result<Value, ProtocolError> {
     let max_nodes = match obj.get("maxNodes") {
         Some(value) => {
             if value.is_boolean() || !(value.is_i64() || value.is_u64()) {
-                return Err(invalid("maxNodes tam sayı olmalıdır".to_string()));
+                return Err(invalid("maxNodes must be an integer".to_string()));
             }
             let raw = value
                 .as_i64()
-                .ok_or_else(|| invalid("maxNodes tam sayı olmalıdır".to_string()))?;
+                .ok_or_else(|| invalid("maxNodes must be an integer".to_string()))?;
             if raw < 1 || raw > MAX_RESPONSE_NODES as i64 {
                 return Err(invalid(format!(
-                    "maxNodes 1..{MAX_RESPONSE_NODES} aralığında olmalıdır: {raw}"
+                    "maxNodes must be in the range 1..{MAX_RESPONSE_NODES}: {raw}"
                 )));
             }
             Some(raw as usize)
@@ -220,16 +220,16 @@ fn process_request(line: &str) -> Result<Value, ProtocolError> {
 
     let files = obj
         .get("files")
-        .ok_or_else(|| invalid("files zorunludur".to_string()))?;
+        .ok_or_else(|| invalid("files is required".to_string()))?;
     let arr = files
         .as_array()
-        .ok_or_else(|| invalid("files bir dizi olmalıdır".to_string()))?;
+        .ok_or_else(|| invalid("files must be an array".to_string()))?;
     if arr.is_empty() {
-        return Err(invalid("files en az 1 dosya içermelidir".to_string()));
+        return Err(invalid("files must contain at least 1 file".to_string()));
     }
     if arr.len() > MAX_FILE_COUNT {
         return Err(limit_exceeded(format!(
-            "dosya sayısı sınırı aşıldı: {} > {}",
+            "file count limit exceeded: {} > {}",
             arr.len(),
             MAX_FILE_COUNT
         )));
@@ -240,30 +240,30 @@ fn process_request(line: &str) -> Result<Value, ProtocolError> {
     for file in arr {
         let fobj = file
             .as_object()
-            .ok_or_else(|| invalid("files[] girdisi nesne olmalıdır".to_string()))?;
+            .ok_or_else(|| invalid("files[] entry must be an object".to_string()))?;
         for key in fobj.keys() {
             if !matches!(key.as_str(), "path" | "content") {
-                return Err(invalid(format!("files[] bilinmeyen alan: '{key}'")));
+                return Err(invalid(format!("files[] unknown field: '{key}'")));
             }
         }
         let path = fobj
             .get("path")
             .and_then(Value::as_str)
-            .ok_or_else(|| invalid("files[].path string olmalıdır".to_string()))?;
+            .ok_or_else(|| invalid("files[].path must be a string".to_string()))?;
         let content = fobj
             .get("content")
             .and_then(Value::as_str)
-            .ok_or_else(|| invalid("files[].content string olmalıdır".to_string()))?;
+            .ok_or_else(|| invalid("files[].content must be a string".to_string()))?;
 
         validate_path(path)?;
         if !seen.insert(path.to_string()) {
             return Err(invalid(format!(
-                "aynı kaynak yolu iki kez verildi: {path}"
+                "the same source path was given twice: {path}"
             )));
         }
         if content.len() > MAX_FILE_CONTENT_BYTES {
             return Err(limit_exceeded(format!(
-                "dosya içerik sınırı aşıldı: {} bayt > {} bayt ({})",
+                "file content limit exceeded: {} bytes > {} bytes ({})",
                 content.len(),
                 MAX_FILE_CONTENT_BYTES,
                 path

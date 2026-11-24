@@ -105,7 +105,7 @@ func handleRoute(ctx *analysisContext, fi *funcInfo, match *routeMatch, call *as
 
 	if _, isLit := match.handler.(*ast.FuncLit); isLit {
 		*ctx.warnings = append(*ctx.warnings, fmt.Sprintf(
-			"%s: inline anonim route handler '%s %s' (%s:%d) — Endpoint korunur, ROUTES_TO üretilmez",
+			"%s: inline anonymous route handler '%s %s' (%s:%d) — the Endpoint is kept, no ROUTES_TO is produced",
 			AnalyzerID, match.verb, match.path, fi.file.relativePath, line,
 		))
 		return
@@ -114,7 +114,7 @@ func handleRoute(ctx *analysisContext, fi *funcInfo, match *routeMatch, call *as
 	target := classifyHandler(ctx, fi, match.handler)
 	if target == nil {
 		*ctx.warnings = append(*ctx.warnings, fmt.Sprintf(
-			"%s: '%s %s' route handler'ı çözümlenemedi (%s:%d)",
+			"%s: the route handler for '%s %s' could not be resolved (%s:%d)",
 			AnalyzerID, match.verb, match.path, fi.file.relativePath, line,
 		))
 		return
@@ -137,7 +137,7 @@ func handleRoute(ctx *analysisContext, fi *funcInfo, match *routeMatch, call *as
 			AnalyzerID:      AnalyzerID,
 			AnalyzerVersion: AnalyzerVersion,
 			Rationale: fmt.Sprintf(
-				"ROUTES_TO: '%s %s' route kayıt çağrısı (http.HandleFunc / gin-echo-chi kalıbı) %s handler'ına çözümlendi (%s).",
+				"ROUTES_TO: route registration call '%s %s' (http.HandleFunc / gin-echo-chi pattern) resolved to handler %s (%s).",
 				match.verb, match.path, target.ref.QualifiedName, resolutionText,
 			),
 		}},
@@ -155,7 +155,7 @@ func classifyHandler(ctx *analysisContext, fi *funcInfo, expr ast.Expr) *callTar
 				ref:        NodeRef{Kind: "Function", QualifiedName: samePkg.qname, RelativePath: samePkg.file.relativePath},
 				resolution: ResolutionVerified,
 				rationale: fmt.Sprintf(
-					"ROUTES_TO: %s aynı dizindeki '%s' paketi içindeki tanımlı handler fonksiyonudur (go/ast, verified).",
+					"ROUTES_TO: %s is a handler function defined in package '%s' in the same directory (go/ast, verified).",
 					samePkg.qname, fi.pkg,
 				),
 			}
@@ -164,7 +164,7 @@ func classifyHandler(ctx *analysisContext, fi *funcInfo, expr ast.Expr) *callTar
 			ref:        NodeRef{Kind: "UnknownExternal", QualifiedName: h.Name},
 			resolution: ResolutionUnresolved,
 			rationale: fmt.Sprintf(
-				"ROUTES_TO: '%s' handler adı hiçbir tanımlı sembolle eşleşmedi (unresolved).",
+				"ROUTES_TO: handler name '%s' did not match any defined symbol (unresolved).",
 				h.Name,
 			),
 		}

@@ -30,7 +30,7 @@ fn main() {
     let handle = std::thread::Builder::new()
         .stack_size(256 * 1024 * 1024)
         .spawn(run_loop)
-        .expect("çalışma thread'i başlatılamadı");
+        .expect("failed to start the worker thread");
     let code = handle.join().unwrap_or(1);
     std::process::exit(code);
 }
@@ -42,7 +42,7 @@ fn run_loop() -> i32 {
     let mut writer = BufWriter::new(stdout.lock());
 
     log(&format!(
-        "worker başladı — protokol v{}, analyzer {} v{}",
+        "worker started — protocol v{}, analyzer {} v{}",
         protocol::PROTOCOL_VERSION,
         protocol::ANALYZER_ID,
         protocol::ANALYZER_VERSION
@@ -58,14 +58,14 @@ fn run_loop() -> i32 {
                         Value::Null,
                         "LIMIT_EXCEEDED",
                         &format!(
-                            "istek satırı {} bayt sınırını aştı; satır atlandı",
+                            "request line exceeded the {} byte limit; line skipped",
                             protocol::MAX_REQUEST_LINE_BYTES
                         ),
                     );
                     if !write_response(&mut writer, &response) {
                         return 1;
                     }
-                    log("istek satırı sınırı aşıldı — satır atlandı");
+                    log("request line limit exceeded — line skipped");
                     continue;
                 }
 
@@ -78,23 +78,23 @@ fn run_loop() -> i32 {
                     return 1;
                 }
                 log(&format!(
-                    "istek işlendi: id={} status={}",
+                    "request processed: id={} status={}",
                     describe_id(response.get("id").cloned().unwrap_or(Value::Null)),
                     response
                         .get("status")
                         .and_then(Value::as_str)
-                        .unwrap_or("(yok)")
+                        .unwrap_or("(none)")
                 ));
             }
             Ok(None) => break, // EOF
             Err(err) => {
-                log(&format!("kablo hatası, worker sonlanıyor: {err}"));
+                log(&format!("wire error, worker exiting: {err}"));
                 return 1;
             }
         }
     }
 
-    log("stdin EOF — worker kapanıyor");
+    log("stdin EOF — worker shutting down");
     0
 }
 
@@ -102,17 +102,17 @@ fn write_response<W: Write>(writer: &mut W, response: &Value) -> bool {
     match serde_json::to_string(response) {
         Ok(line) => {
             if writeln!(writer, "{line}").is_err() {
-                log("yanıt yazılamadı (kablo hatası)");
+                log("failed to write the response (wire error)");
                 return false;
             }
             if writer.flush().is_err() {
-                log("yanıt flush edilemedi (kablo hatası)");
+                log("failed to flush the response (wire error)");
                 return false;
             }
             true
         }
         Err(err) => {
-            log(&format!("yanıt serileştirilemedi: {err}"));
+            log(&format!("failed to serialize the response: {err}"));
             false
         }
     }
@@ -120,7 +120,7 @@ fn write_response<W: Write>(writer: &mut W, response: &Value) -> bool {
 
 fn describe_id(id: Value) -> String {
     match id {
-        Value::Null => "(yok)".to_string(),
+        Value::Null => "(none)".to_string(),
         Value::String(s) => s,
         other => other.to_string(),
     }

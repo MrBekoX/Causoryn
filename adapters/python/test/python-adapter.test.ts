@@ -71,7 +71,7 @@ const HALF_LINE_SCRIPT = `process.stdout.write('{"id":"x"}'); setTimeout(() => {
 /** Anında stderr yazıp çıkan sahte süreç (worker crash fallback). */
 const CRASH_SCRIPT = `process.stderr.write('sahte worker cakildi'); process.exit(1);`;
 /** Geçerli PROTOCOL.md v1 hata yanıtı yazıp çıkan sahte süreç. */
-const WORKER_ERROR_SCRIPT = `process.stdout.write(JSON.stringify({ id: 'analyze:adapter-python-worker-error', protocolVersion: '1', status: 'error', error: { code: 'LIMIT_EXCEEDED', message: 'dosya sayısı sınırı aşıldı: 5001 > 5000' } }) + '\\n'); process.exit(0);`;
+const WORKER_ERROR_SCRIPT = `process.stdout.write(JSON.stringify({ id: 'analyze:adapter-python-worker-error', protocolVersion: '1', status: 'error', error: { code: 'LIMIT_EXCEEDED', message: 'file count limit exceeded: 5001 > 5000' } }) + '\\n'); process.exit(0);`;
 
 // Python yokluğunda koşulamayan blok: meşru skip.
 describe.skipIf(!pythonAvailable)("adapters/python (M1-Python)", () => {

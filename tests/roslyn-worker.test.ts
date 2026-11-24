@@ -757,7 +757,59 @@ describe.skipIf(!workerReady)("roslyn-worker B1 (PROTOCOL.md v1)", () => {
     );
     expect(depthDiag).toBeDefined();
     expect(depthDiag?.relativePath).toBe("Deep/Deep.cs");
-    expect(depthDiag?.message).toContain("derin");
+    expect(depthDiag?.message).toContain("AST traversal depth exceeded");
+  });
+
+  /* ---------------- Runtime text language ---------------- */
+
+  it("runtime text: stderr log, protocol errors, rationales and warnings are English", () => {
+    const turkishLetters = /[çğıöşüÇĞİÖŞÜ]/;
+    expect(analyzeStderr).toContain("worker started — protocol v1");
+    expect(negativeById["neg-unknown-type"]?.error?.message).toContain(
+      "unknown request type: ",
+    );
+    expect(negativeById["neg-bad-version"]?.error?.message).toContain(
+      "Unsupported protocol version: ",
+    );
+    expect(negativeById["neg-absolute-path"]?.error?.message).toContain(
+      "Absolute source paths are not accepted: ",
+    );
+    expect(negativeById["neg-duplicate"]?.error?.message).toContain(
+      "Same source path was given twice: ",
+    );
+    expect(manyFilesResponse?.error?.message).toBe("file count limit exceeded: 5001 > 5000");
+    expect(bigFileResponse?.error?.message).toContain("file content size limit exceeded: ");
+
+    const verifiedCall = findEdge(
+      analyzeResponse,
+      (edge) =>
+        edge.kind === "CALLS" &&
+        edge.from.qualifiedName ===
+          "Causoryn.Fixture.Orders.Controllers.OrdersController.GetById" &&
+        edge.to.qualifiedName ===
+          "Causoryn.Fixture.Orders.Services.OrdersService.GetById",
+    );
+    expect(verifiedCall?.evidence[0]?.rationale).toBe(
+      "CALLS: the call expression in Causoryn.Fixture.Orders.Controllers.OrdersController.GetById " +
+        "was resolved to symbol Causoryn.Fixture.Orders.Services.OrdersService.GetById " +
+        "by the Roslyn semantic model (verified).",
+    );
+
+    const texts = [
+      ...(analyzeResponse?.evidence ?? []).map((evidence) => evidence.rationale),
+      ...(analyzeResponse?.edges ?? []).flatMap((edge) => [
+        ...edge.evidence.map((evidence) => evidence.rationale),
+        edge.ambiguity?.reason ?? "",
+      ]),
+      ...(analyzeResponse?.warnings ?? []),
+      ...(depthRun.lines.map((line) => parseLine(line)).flatMap((response) => [
+        ...(response.warnings ?? []),
+        ...(response.diagnostics ?? []).map((diag) => diag.message),
+      ])),
+      ...Object.values(negativeById).map((response) => response?.error?.message ?? ""),
+    ];
+    expect(texts.length).toBeGreaterThan(10);
+    expect(texts.filter((text) => turkishLetters.test(text))).toEqual([]);
   });
 
   /* ---------------- Partial ---------------- */
