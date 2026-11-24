@@ -1,6 +1,8 @@
 import { workspacePolicyConfigSchema, type WorkspacePolicyConfig } from "@causoryn/workspace";
 import { z } from "zod";
 
+import { tryParseToolProfile } from "./tool-profile.js";
+
 /**
  * Causoryn MCP server konfigürasyonu — TŞ v2.1 §20 `causoryn.config`
  * sözdiziminin Faz A dilimi. Workspace dilimi (allowRoots/ignore/uzantı/
@@ -83,8 +85,20 @@ export const causorynServerConfigSchema = workspacePolicyConfigSchema.extend({
       dataDbPath: z.string().min(1).optional(),
     })
     .default({}),
-  /** Optional default tool profile (e.g., "core", "full", "wiki", "history", or comma-separated). */
-  toolProfile: z.string().min(1).optional(),
+  /**
+   * Optional default tool profile ("core", "full", "wiki", "history" or a
+   * comma-separated combination). Used when neither `--tool-profile` nor
+   * `CAUSORYN_TOOL_PROFILE` is set; validated with the same parser as both.
+   */
+  toolProfile: z
+    .string()
+    .superRefine((value, ctx) => {
+      const parsed = tryParseToolProfile(value);
+      if (!parsed.ok) {
+        ctx.addIssue({ code: "custom", message: parsed.message });
+      }
+    })
+    .optional(),
 });
 
 export type CausorynServerConfig = z.infer<typeof causorynServerConfigSchema>;

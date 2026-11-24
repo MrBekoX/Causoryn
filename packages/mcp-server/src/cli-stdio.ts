@@ -8,16 +8,11 @@ import {
   inspectProjectRootSafety,
   parseMcpCliArgs,
   prepareWorkspaceDatabase,
-  resolveEffectiveOutputSchemaProfile,
-  resolveEffectiveToolProfile,
-  resolveIndexWaitTimeoutMs,
+  resolveMcpServerSettings,
+  type McpServerSettings,
   type ParsedMcpCliArgs,
 } from "./runtime-cli.js";
-import {
-  createCausorynMcpServer,
-  type BeforeToolCallContext,
-  type OutputSchemaProfile,
-} from "./server.js";
+import { createCausorynMcpServer, type BeforeToolCallContext } from "./server.js";
 import { SERVER_NAME, SERVER_VERSION } from "./version.js";
 
 /**
@@ -44,12 +39,8 @@ function hasNonEmptyAllowRoots(value: unknown): boolean {
 
 async function main(): Promise<void> {
   let cliArgs: ParsedMcpCliArgs;
-  let outputSchemaProfile: OutputSchemaProfile;
-  let toolProfile: string;
   try {
     cliArgs = parseMcpCliArgs(process.argv.slice(2));
-    outputSchemaProfile = resolveEffectiveOutputSchemaProfile(cliArgs, process.env);
-    toolProfile = resolveEffectiveToolProfile(cliArgs, process.env);
   } catch (error) {
     console.error(
       `[causoryn] CLI argument error: ${error instanceof Error ? error.message : String(error)}`,
@@ -73,6 +64,18 @@ async function main(): Promise<void> {
       "[causoryn] CAUSORYN_CONFIG unset; using safe default allowRoots: [] (workspace tools return WORKSPACE_NOT_AUTHORIZED)",
     );
   }
+
+  // Same resolver as the bare stdio.ts entry (flags > environment > CAUSORYN_CONFIG).
+  let settings: McpServerSettings;
+  try {
+    settings = resolveMcpServerSettings(cliArgs, process.env, parsed);
+  } catch (error) {
+    console.error(
+      `[causoryn] configuration error: ${error instanceof Error ? error.message : String(error)}`,
+    );
+    process.exit(2);
+  }
+  const { outputSchemaProfile, toolProfile, indexWaitTimeoutMs } = settings;
 
   let activeContext: CausorynContext;
   let beforeToolCallHook:
@@ -152,8 +155,6 @@ async function main(): Promise<void> {
     );
     process.exit(2);
   }
-
-  const indexWaitTimeoutMs = resolveIndexWaitTimeoutMs(process.env);
 
   const server = createCausorynMcpServer(activeContext, {
     outputSchemaProfile,

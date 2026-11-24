@@ -1,7 +1,11 @@
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 
 import { createCausorynContext, type CausorynContext } from "./context.js";
-import { parseMcpCliArgs, resolveEffectiveToolProfile } from "./runtime-cli.js";
+import {
+  parseMcpCliArgs,
+  resolveMcpServerSettings,
+  type McpServerSettings,
+} from "./runtime-cli.js";
 import { createCausorynMcpServer } from "./server.js";
 import { SERVER_NAME, SERVER_VERSION } from "./version.js";
 
@@ -37,6 +41,18 @@ function main(): void {
     );
   }
 
+  // Same resolver as the `causoryn mcp` entry (cli-stdio.ts); this entry takes
+  // no CLI flags, so only the environment and CAUSORYN_CONFIG apply.
+  let settings: McpServerSettings;
+  try {
+    settings = resolveMcpServerSettings(parseMcpCliArgs([]), process.env, parsed);
+  } catch (error) {
+    console.error(
+      `[causoryn] configuration error: ${error instanceof Error ? error.message : String(error)}`,
+    );
+    process.exit(2);
+  }
+
   let context: CausorynContext;
   try {
     context = createCausorynContext(parsed);
@@ -47,8 +63,11 @@ function main(): void {
     process.exit(2); // never döner; context akış aşağısında tanımlıdır
   }
 
-  const toolProfile = resolveEffectiveToolProfile(parseMcpCliArgs([]), process.env);
-  const server = createCausorynMcpServer(context, { toolProfile });
+  const server = createCausorynMcpServer(context, {
+    outputSchemaProfile: settings.outputSchemaProfile,
+    toolProfile: settings.toolProfile,
+    indexWaitTimeoutMs: settings.indexWaitTimeoutMs,
+  });
   server
     .connect(new StdioServerTransport())
     .then(() => {

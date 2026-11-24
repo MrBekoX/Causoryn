@@ -20,7 +20,10 @@ import {
   parseArchitectureBaseline,
   parseArchitecturePolicy,
   readTimelinePointFromGit,
+  TIMELINE_SNAPSHOT_BLOB_PATH,
+  WORKING_TREE_REF,
   writeDocumentation,
+  type TimelineTrustWarning,
 } from "@causoryn/graph";
 import { z } from "zod";
 
@@ -38,6 +41,7 @@ import {
   staleWarningOf,
   type ServiceDeps,
 } from "./services.js";
+import { createTrustedHistorySources } from "./trusted-history.js";
 
 /**
  * Faz C uygulama servisleri (sprint-3 C8 — C1–C7 çekirdek modüllerinin MCP
@@ -634,6 +638,19 @@ export const CompareArchitectureDataSchema = z.strictObject({
   diff: ArchitectureDiffSchema,
 });
 
+/** Envelope warning for a compare side read from an unverified snapshot file. */
+function untrustedSnapshotWarning(
+  trustWarning: TimelineTrustWarning,
+  side: "baseRef" | "targetRef",
+  ref: string,
+): string {
+  const source =
+    ref === WORKING_TREE_REF
+      ? `the working-tree file ${TIMELINE_SNAPSHOT_BLOB_PATH}`
+      : `the committed git blob ${TIMELINE_SNAPSHOT_BLOB_PATH}`;
+  return `${trustWarning}: ${side} '${ref}' was loaded from ${source}, which this engine did not produce or verify; index the workspace (or check out that commit and index it) for a verified point`;
+}
+
 /**
  * causoryn_compare_architecture (TŞ §13 Architecture Diff; C3): iki git
  * ref'inin `.causoryn/architecture-snapshot.json` blob'ları salt-okunur
@@ -642,6 +659,11 @@ export const CompareArchitectureDataSchema = z.strictObject({
  * qualifiedName + imza parmak izi + yol benzerliğiyle heuristiktir ve
  * confidence BELGELIDIR (bantlar + skorlar çıktıda taşınır). Blob'u
  * olmayan/bozuk içerikli revizyon → INVALID_REVISION (uydurma içerik yok).
+ *
+ * Trust order per side (see trusted-history.ts): the local index snapshot
+ * when it is verified to be that commit's content, or for `working-tree`;
+ * otherwise the snapshot file, reported in `warnings` with
+ * `snapshot-loaded-from-committed-git-blob`.
  */
 export async function compareArchitecture(
   deps: ServiceDeps,
@@ -650,20 +672,38 @@ export async function compareArchitecture(
 ): Promise<Envelope> {
   const workspaceId = input.workspaceId ?? deps.config.workspaceId;
   const canonicalRoot = requireAuthorizedWorkspace(deps, workspaceId);
+  const trusted = createTrustedHistorySources(deps, workspaceId, canonicalRoot);
+  const pointOptions = {
+    snapshotLookup: trusted.snapshotLookup,
+    reconstructFromGitTree: trusted.reconstructFromGitTree,
+  };
+  const trustWarnings: string[] = [];
 
   const diff = await runGraphAsync(deps.logger, async () => {
-    const basePoint = await readTimelinePointFromGit(canonicalRoot, input.baseRef);
+    const basePoint = await readTimelinePointFromGit(canonicalRoot, input.baseRef, pointOptions);
     if (basePoint.status !== "analyzed") {
       throw new GraphRepositoryError(
         "compare/blob-not-found",
         `baseRef '${input.baseRef}' could not be analyzed: ${basePoint.reason}`,
       );
     }
-    const targetPoint = await readTimelinePointFromGit(canonicalRoot, input.targetRef);
+    if (basePoint.trustWarning !== undefined) {
+      trustWarnings.push(untrustedSnapshotWarning(basePoint.trustWarning, "baseRef", input.baseRef));
+    }
+    const targetPoint = await readTimelinePointFromGit(
+      canonicalRoot,
+      input.targetRef,
+      pointOptions,
+    );
     if (targetPoint.status !== "analyzed") {
       throw new GraphRepositoryError(
         "compare/blob-not-found",
         `targetRef '${input.targetRef}' could not be analyzed: ${targetPoint.reason}`,
+      );
+    }
+    if (targetPoint.trustWarning !== undefined) {
+      trustWarnings.push(
+        untrustedSnapshotWarning(targetPoint.trustWarning, "targetRef", input.targetRef),
       );
     }
     return diffContentSets(basePoint.contentSet, targetPoint.contentSet);
@@ -675,7 +715,7 @@ export async function compareArchitecture(
     snapshotId: null,
     status: "ok",
     coverage: null,
-    warnings: [],
+    warnings: [...trustWarnings, ...trusted.notes()],
     data: {
       baseRef: input.baseRef,
       targetRef: input.targetRef,
@@ -1308,6 +1348,10 @@ export const ArchitectureTimelineDataSchema = z.strictObject({
  * Policy blob'u olmayan/bozuk ref'lerde trend noktası coded 'unavailable'
  * olur (sıfır ihlal UYDURULMAZ); diff aralıkları (Sprint-3 davranışı)
  * etkilenmez.
+ *
+ * Points whose commit content is verified against the local index are read
+ * from the index snapshot instead of the committed snapshot file (see
+ * trusted-history.ts); the others keep their committed-file trust warning.
  */
 export async function architectureTimeline(
   deps: ServiceDeps,
@@ -1324,12 +1368,15 @@ export async function architectureTimeline(
     );
   }
 
+  const trusted = createTrustedHistorySources(deps, workspaceId, canonicalRoot);
   const timeline: ArchitectureTimeline = await runGraphAsync(deps.logger, () =>
     buildArchitectureTimelineFromGit(canonicalRoot, {
       ...(input.refs === undefined ? {} : { refs: input.refs }),
       ...(input.range === undefined ? {} : { range: input.range }),
       ...(input.maxRevisions === undefined ? {} : { maxRevisions: input.maxRevisions }),
       ...(input.maxRangeWalk === undefined ? {} : { maxRangeWalk: input.maxRangeWalk }),
+      snapshotLookup: trusted.snapshotLookup,
+      reconstructFromGitTree: trusted.reconstructFromGitTree,
     }),
   );
 
@@ -1339,7 +1386,7 @@ export async function architectureTimeline(
     snapshotId: null,
     status: "ok",
     coverage: null,
-    warnings: [...timeline.warnings],
+    warnings: [...timeline.warnings, ...trusted.notes()],
     data: {
       refs: input.refs === undefined ? null : [...input.refs],
       range: input.range === undefined ? null : { ...input.range },
