@@ -34,35 +34,91 @@ import { applyWikiSchema } from "./wiki-schema.js";
  *   (wiki-schema.ts, TŞ §16A.7) aynı migration transaction'ında uygulanır.
  *   Graph tabloları olduğu gibi kalır; v1 damgalı veritabanları idempotent
  *   DDL ile v2'ye yükselir.
- * - Wave 1 Track C (Task 1.7 + SQLite CVE savunma derinliği): SCHEMA_VERSION 3 —
- *   tek paylaşımlı workspace DB için heartbeat'li tek-yazıcı `build_leases`
- *   tablosu eklenir; yeni DB'lerde (`user_version === 0`) tablo oluşturmadan
- *   önce `PRAGMA page_size = 4096` (CVE-2026-119375 küçük WAL sayfası savunması)
- *   uygulanır; `symbol_fts` varsayılan `detail=full` ile korunur (asla
- *   `detail=none` kullanılmaz — CVE-2026-119373 savunması). v1/v2 → v3 geçişi
- *   tek transaction içinde geriye uyumludur.
+ * - Wave 1 Track C (Task 1.7): SCHEMA_VERSION 3 — adds the heartbeat-renewed
+ *   single-writer `build_leases` table for the shared per-workspace DB.
+ *   v1/v2 -> v3 migration is backward compatible inside one transaction.
  * - Wave 2 Track 2C (Tasks 2.4, 2.6 & LocAgent FTS5): SCHEMA_VERSION 4 —
  *   adds `file_facts` table for per-file incremental indexing with early cutoff
  *   (`public_interface_hash` + `imported_paths_json`) and upgrades `symbol_fts`
- *   to `(symbol, search_text, node_id UNINDEXED, snapshot_sid UNINDEXED)` (still
- *   default `detail=full`, CVE-2026-119373 hardened) with LocAgent path+camelCase
- *   tokenization. v1/v2/v3 -> v4 migration runs in a single atomic transaction.
+ *   to `(symbol, search_text, node_id UNINDEXED, snapshot_sid UNINDEXED)` (default
+ *   `detail=full`) with LocAgent path+camelCase tokenization. v1/v2/v3 -> v4
+ *   migration runs in a single atomic transaction.
+ * - Task 1.7 follow-up: SCHEMA_VERSION 5 — `build_leases` gains `hostname`
+ *   (os.hostname() of the lease owner; PID liveness is only meaningful on the
+ *   same machine) and `owner_instance` (per-process instance id that detects
+ *   PID reuse and stale same-process leases). Added with `ALTER TABLE ... ADD
+ *   COLUMN` (nullable), so v3/v4 lease rows stay readable; rows written by an
+ *   older build carry NULL and are treated as "unknown host" (TTL only).
+ * - Forward guard: a database stamped with a NEWER `user_version` than this build
+ *   understands is refused with `SchemaTooNewError` (code
+ *   `storage/schema-too-new`) instead of being silently used, so two different
+ *   schema versions never write the same file. The runtime CLI then falls back
+ *   to a version-specific file (`graph.schema-<N>.sqlite`).
+ * - SQLite security notes (corrected): better-sqlite3@13.2.0 bundles SQLite
+ *   3.54.1 (`select sqlite_version()`), which already contains the fixes for
+ *   CVE-2026-119373 and CVE-2026-119375. `page_size = 4096` is SQLite's default
+ *   page size and is NOT a mitigation, so it is no longer set explicitly. The
+ *   real mitigation for CVE-2026-119375 is to never open untrusted database/WAL
+ *   files: Causoryn only opens databases inside its own data directory.
  */
 
-export const SCHEMA_VERSION = 4;
+export const SCHEMA_VERSION = 5;
 
-/** Şemayı uygular (sürüm < SCHEMA_VERSION ise); DDL tamamen statiktir. */
+/**
+ * Typed refusal for a database whose `user_version` is newer than this build's
+ * `SCHEMA_VERSION`. Carries both versions so callers can pick a fallback file.
+ */
+export class SchemaTooNewError extends Error {
+  readonly code = "storage/schema-too-new";
+  readonly foundVersion: number;
+  readonly supportedVersion: number;
+
+  constructor(foundVersion: number, supportedVersion: number = SCHEMA_VERSION) {
+    super(
+      `Database schema v${String(foundVersion)} is newer than this Causoryn build supports (v${String(supportedVersion)}); refusing to open it`,
+    );
+    this.name = "SchemaTooNewError";
+    this.foundVersion = foundVersion;
+    this.supportedVersion = supportedVersion;
+  }
+}
+
+/**
+ * Reads `PRAGMA user_version` of an existing SQLite file through a read-only
+ * connection without creating, migrating or writing anything. Returns
+ * `undefined` when the file does not exist.
+ */
+export function readSqliteUserVersion(dbPath: string): number | undefined {
+  let db: Database.Database;
+  try {
+    db = new Database(dbPath, { readonly: true, fileMustExist: true });
+  } catch (error) {
+    if ((error as { code?: unknown } | undefined)?.code === "SQLITE_CANTOPEN") {
+      return undefined;
+    }
+    throw error;
+  }
+  try {
+    const version = db.pragma("user_version", { simple: true });
+    if (typeof version !== "number" || !Number.isInteger(version)) {
+      throw new Error(`Could not read SQLite user_version: ${String(version)}`);
+    }
+    return version;
+  } finally {
+    db.close();
+  }
+}
+
+/** Applies the schema when `user_version < SCHEMA_VERSION`; the DDL is fully static. */
 export function applySchema(db: Database.Database): void {
   const version = db.pragma("user_version", { simple: true });
   if (typeof version !== "number" || !Number.isInteger(version)) {
-    throw new Error(`SQLite user_version okunamadı: ${String(version)}`);
+    throw new Error(`Could not read SQLite user_version: ${String(version)}`);
   }
-  if (version >= SCHEMA_VERSION) return;
-  if (version === 0) {
-    // Defense-in-depth (CVE-2026-119375): enforce standard 4096-byte pages
-    // before any table or WAL page is initialized on a brand-new database.
-    db.pragma("page_size = 4096");
+  if (version > SCHEMA_VERSION) {
+    throw new SchemaTooNewError(version, SCHEMA_VERSION);
   }
+  if (version === SCHEMA_VERSION) return;
   db.transaction(() => {
     db.exec(`
       CREATE TABLE IF NOT EXISTS workspaces (
@@ -119,6 +175,8 @@ export function applySchema(db: Database.Database): void {
         lease_id TEXT NOT NULL,
         owner_pid INTEGER NOT NULL,
         host_label TEXT,
+        hostname TEXT,
+        owner_instance TEXT,
         acquired_at TEXT NOT NULL,
         heartbeat_at TEXT NOT NULL,
         expires_at TEXT NOT NULL
@@ -228,7 +286,23 @@ export function applySchema(db: Database.Database): void {
       }
     }
 
+    // v3/v4 -> v5: existing build_leases tables gain the nullable lease
+    // identity columns (CREATE TABLE IF NOT EXISTS above is a no-op for them).
+    const leaseColumns = new Set(
+      (
+        db.prepare("SELECT name FROM pragma_table_info('build_leases')").all() as Array<{
+          name: string;
+        }>
+      ).map((column) => column.name),
+    );
+    if (!leaseColumns.has("hostname")) {
+      db.exec("ALTER TABLE build_leases ADD COLUMN hostname TEXT;");
+    }
+    if (!leaseColumns.has("owner_instance")) {
+      db.exec("ALTER TABLE build_leases ADD COLUMN owner_instance TEXT;");
+    }
+
     applyWikiSchema(db);
-    db.exec("PRAGMA user_version = 4;");
+    db.exec("PRAGMA user_version = 5;");
   })();
 }

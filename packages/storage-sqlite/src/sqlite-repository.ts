@@ -36,7 +36,15 @@ import {
   type WorkspaceSummaryMeta,
 } from "@causoryn/graph";
 
+import {
+  currentLeaseHostname,
+  evaluateBuildLeaseLiveness,
+  PROCESS_LEASE_INSTANCE_ID,
+  type BuildLeaseLivenessContext,
+} from "./build-lease.js";
 import { applySchema, SCHEMA_VERSION } from "./schema.js";
+
+export { defaultIsPidAlive } from "./build-lease.js";
 
 /**
  * SQLite GraphRepository — GraphRepository sözleşmesinin kalıcı
@@ -127,6 +135,8 @@ interface BuildLeaseRow {
   lease_id: string;
   owner_pid: number;
   host_label: string | null;
+  hostname: string | null;
+  owner_instance: string | null;
   acquired_at: string;
   heartbeat_at: string;
   expires_at: string;
@@ -141,12 +151,34 @@ export interface BuildLeaseRecord {
   readonly leaseId: string;
   readonly ownerPid: number;
   readonly hostLabel: string | null;
+  /** `os.hostname()` of the lease owner (NULL for rows written before schema v5). */
+  readonly hostname: string | null;
+  /** Per-process owner instance id (NULL for rows written before schema v5). */
+  readonly ownerInstance: string | null;
   readonly acquiredAt: string;
   readonly heartbeatAt: string;
   readonly expiresAt: string;
 }
 
-export interface AcquireBuildLeaseInput {
+/**
+ * Liveness options shared by `acquireBuildLease` and `recoverOrphanBuilds`.
+ * `hostname` / `processInstanceId` identify the CALLER; when the caller
+ * acquires, they are also recorded as the new owner's identity.
+ */
+export interface BuildLeaseLivenessOptions {
+  /** Caller hostname (default `os.hostname()`). */
+  readonly hostname?: string;
+  /** Caller per-process instance id (default: this module's process instance id). */
+  readonly processInstanceId?: string;
+  /** Optional PID liveness predicate (defaults to `defaultIsPidAlive`). */
+  readonly isPidAlive?: (pid: number) => boolean;
+  /** Same-process registry probe (see `evaluateBuildLeaseLiveness`). */
+  readonly isLocalLeaseActive?: (leaseId: string) => boolean | undefined;
+  /** Hard heartbeat staleness ceiling in ms (default 10 minutes). */
+  readonly staleCeilingMs?: number;
+}
+
+export interface AcquireBuildLeaseInput extends BuildLeaseLivenessOptions {
   readonly workspaceId: string;
   readonly buildId: string;
   readonly leaseId: string;
@@ -154,47 +186,38 @@ export interface AcquireBuildLeaseInput {
   readonly hostLabel?: string;
   readonly nowIso: string;
   readonly ttlMs: number;
-  /** Optional PID liveness predicate (defaults to `defaultIsPidAlive`). */
-  readonly isPidAlive?: (pid: number) => boolean;
+}
+
+/** Result of a heartbeat renewal on a dedicated heartbeat connection. */
+export type BuildLeaseRenewOutcome = "renewed" | "lost" | "busy";
+
+/**
+ * Dedicated, short-busy-timeout SQLite connection used to renew a build lease
+ * from a thread that must never block (the MCP main thread renews leases held
+ * by its indexing worker thread).
+ */
+export interface BuildLeaseHeartbeatConnection {
+  renew(
+    workspaceId: string,
+    leaseId: string,
+    nowIso: string,
+    ttlMs: number,
+  ): BuildLeaseRenewOutcome;
+  release(workspaceId: string, leaseId: string): void;
+  close(): void;
 }
 
 export type AcquireBuildLeaseResult =
   | { readonly acquired: true; readonly lease: BuildLeaseRecord }
   | { readonly acquired: false; readonly holder: BuildLeaseRecord };
 
-export interface RecoverOrphanBuildsOptions {
+export interface RecoverOrphanBuildsOptions extends BuildLeaseLivenessOptions {
   readonly nowIso?: string;
-  readonly isPidAlive?: (pid: number) => boolean;
 }
 
 export interface RecoverOrphanBuildsResult {
   readonly recoveredBuildIds: readonly string[];
   readonly clearedLease: boolean;
-}
-
-/**
- * Checks whether a local OS PID is alive using `process.kill(pid, 0)`.
- * - `pid <= 0` or non-integer -> false (never sends signal to process group 0 / -1).
- * - Success or `EPERM` -> true (process exists).
- * - `ESRCH` / `EINVAL` -> false (process confirmed dead).
- */
-export function defaultIsPidAlive(pid: number): boolean {
-  if (!Number.isInteger(pid) || pid <= 0) {
-    return false;
-  }
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    const code = (error as NodeJS.ErrnoException | undefined)?.code;
-    if (code === "EPERM") {
-      return true;
-    }
-    if (code === "ESRCH" || code === "EINVAL") {
-      return false;
-    }
-    return false;
-  }
 }
 
 function mapBuildLeaseRow(row: BuildLeaseRow): BuildLeaseRecord {
@@ -204,6 +227,8 @@ function mapBuildLeaseRow(row: BuildLeaseRow): BuildLeaseRecord {
     leaseId: row.lease_id,
     ownerPid: row.owner_pid,
     hostLabel: row.host_label,
+    hostname: row.hostname,
+    ownerInstance: row.owner_instance,
     acquiredAt: row.acquired_at,
     heartbeatAt: row.heartbeat_at,
     expiresAt: row.expires_at,
@@ -215,20 +240,56 @@ function computeExpiresAtIso(nowIso: string, ttlMs: number): string {
   if (typeof ttlMs !== "number" || !Number.isFinite(ttlMs) || ttlMs <= 0) {
     throw new GraphRepositoryError(
       "graph/invalid-limit",
-      `ttlMs pozitif sonlu sayı olmalı: ${String(ttlMs)}`,
+      `ttlMs must be a positive finite number: ${String(ttlMs)}`,
     );
   }
   const baseMs = Date.parse(nowIso);
   return new Date(baseMs + Math.floor(ttlMs)).toISOString();
 }
 
-function isLeaseExpired(expiresAt: string, nowIso: string): boolean {
-  const expiresMs = Date.parse(expiresAt);
-  const nowMs = Date.parse(nowIso);
-  if (!Number.isFinite(expiresMs)) return true;
-  if (!Number.isFinite(nowMs)) return false;
-  return expiresMs <= nowMs;
+function livenessContextOf(
+  nowIso: string,
+  options: BuildLeaseLivenessOptions,
+): BuildLeaseLivenessContext {
+  return {
+    nowIso,
+    ...(options.hostname === undefined ? {} : { hostname: options.hostname }),
+    ...(options.processInstanceId === undefined
+      ? {}
+      : { processInstanceId: options.processInstanceId }),
+    ...(options.isPidAlive === undefined ? {} : { isPidAlive: options.isPidAlive }),
+    ...(options.isLocalLeaseActive === undefined
+      ? {}
+      : { isLocalLeaseActive: options.isLocalLeaseActive }),
+    ...(options.staleCeilingMs === undefined
+      ? {}
+      : { staleCeilingMs: options.staleCeilingMs }),
+  };
 }
+
+function isLeaseRowAlive(row: BuildLeaseRow, context: BuildLeaseLivenessContext): boolean {
+  return evaluateBuildLeaseLiveness(
+    {
+      leaseId: row.lease_id,
+      ownerPid: row.owner_pid,
+      hostname: row.hostname,
+      ownerInstance: row.owner_instance,
+      heartbeatAt: row.heartbeat_at,
+      expiresAt: row.expires_at,
+    },
+    context,
+  ).alive;
+}
+
+function isSqliteBusyError(error: unknown): boolean {
+  const code = (error as { code?: unknown } | undefined)?.code;
+  return (
+    typeof code === "string" &&
+    (code.startsWith("SQLITE_BUSY") || code.startsWith("SQLITE_LOCKED"))
+  );
+}
+
+const DEFAULT_HEARTBEAT_BUSY_TIMEOUT_MS = 50;
 
 function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -241,7 +302,7 @@ function parseJsonField(field: string, text: string): JsonValue {
   } catch (error) {
     throw new GraphRepositoryError(
       "storage/corrupt-row",
-      `JSON sütunu çözümlenemedi (${field}): ${errorText(error)}`,
+      `Could not parse JSON column (${field}): ${errorText(error)}`,
     );
   }
   return parsed as JsonValue;
@@ -371,20 +432,18 @@ export class SqliteGraphRepository
       if (typeof version !== "number" || !Number.isInteger(version)) {
         throw new GraphRepositoryError(
           "storage/schema-corrupt",
-          `user_version okunamadı: ${String(version)}`,
+          `Could not read SQLite user_version: ${String(version)}`,
         );
       }
       if (version > SCHEMA_VERSION) {
+        // Forward guard: never write a database stamped by a newer schema.
         throw new GraphRepositoryError(
           "storage/schema-too-new",
-          `Veritabanı şeması bu paketten daha yeni (v${version} > v${SCHEMA_VERSION})`,
+          `Database schema v${String(version)} is newer than this Causoryn build supports (v${String(SCHEMA_VERSION)}); refusing to open ${dbPath}`,
         );
       }
-      if (version === 0) {
-        // Defense-in-depth (CVE-2026-119375): set 4096-byte page size before
-        // initializing WAL or creating any tables on a brand-new database.
-        this.db.pragma("page_size = 4096");
-      }
+      // No explicit page_size: 4096 is SQLite's default and is not a security
+      // control (see schema.ts header for the corrected CVE notes).
       this.db.pragma("journal_mode = WAL");
       this.db.pragma("foreign_keys = ON");
       this.db.pragma("synchronous = NORMAL");
@@ -406,6 +465,70 @@ export class SqliteGraphRepository
     this.publishedCache.clear();
     this.summaryMetaCache.clear();
     this.db.close();
+  }
+
+  /** Default lease owner instance id recorded by this repository's process (thread). */
+  get leaseOwnerInstance(): string {
+    return PROCESS_LEASE_INSTANCE_ID;
+  }
+
+  /**
+   * Opens a separate connection to the same database file whose only job is
+   * to renew/release one build lease without ever blocking the caller for
+   * long: `busy_timeout` is short and a busy database yields `"busy"` (the
+   * caller simply retries on its next tick).
+   */
+  openBuildLeaseHeartbeat(
+    options: { readonly busyTimeoutMs?: number } = {},
+  ): BuildLeaseHeartbeatConnection {
+    const busyTimeoutMs =
+      options.busyTimeoutMs !== undefined &&
+      Number.isInteger(options.busyTimeoutMs) &&
+      options.busyTimeoutMs >= 0
+        ? options.busyTimeoutMs
+        : DEFAULT_HEARTBEAT_BUSY_TIMEOUT_MS;
+    const db = new Database(this.dbPath, { fileMustExist: true });
+    try {
+      db.pragma(`busy_timeout = ${String(busyTimeoutMs)}`);
+    } catch (error) {
+      db.close();
+      throw error;
+    }
+    const renewStmt = db.prepare(
+      `UPDATE build_leases
+       SET heartbeat_at = ?, expires_at = ?
+       WHERE workspace_id = ? AND lease_id = ?`,
+    );
+    const releaseStmt = db.prepare(
+      `DELETE FROM build_leases WHERE workspace_id = ? AND lease_id = ?`,
+    );
+    let closed = false;
+    return {
+      renew: (workspaceId, leaseId, nowIso, ttlMs): BuildLeaseRenewOutcome => {
+        if (closed) return "lost";
+        const nextExpiresAt = computeExpiresAtIso(nowIso, ttlMs);
+        try {
+          const result = renewStmt.run(nowIso, nextExpiresAt, workspaceId, leaseId);
+          return result.changes === 1 ? "renewed" : "lost";
+        } catch (error) {
+          if (isSqliteBusyError(error)) return "busy";
+          throw error;
+        }
+      },
+      release: (workspaceId, leaseId): void => {
+        if (closed) return;
+        try {
+          releaseStmt.run(workspaceId, leaseId);
+        } catch (error) {
+          if (!isSqliteBusyError(error)) throw error;
+        }
+      },
+      close: (): void => {
+        if (closed) return;
+        closed = true;
+        db.close();
+      },
+    };
   }
 
   private currentDataVersion(): number {
@@ -454,7 +577,11 @@ export class SqliteGraphRepository
     }
     const tx = this.db.transaction(fn);
     try {
-      return tx();
+      // BEGIN IMMEDIATE: take the write lock up front. A deferred transaction
+      // that reads first and writes later fails with SQLITE_BUSY_SNAPSHOT
+      // ("database is locked", no busy wait) whenever another connection --
+      // e.g. the main-thread lease heartbeat -- commits in between.
+      return tx.immediate();
     } catch (error) {
       // Rollback sonrasında bellek-içi pozisyon önbelleği sıfırlanır.
       this.buildPositions.clear();
@@ -502,7 +629,7 @@ export class SqliteGraphRepository
     if (exists !== undefined) {
       throw new GraphRepositoryError(
         "graph/duplicate-workspace",
-        `Workspace zaten kayıtlı: ${record.id}`,
+        `Workspace is already registered: ${record.id}`,
       );
     }
     this.runWrite(
@@ -539,7 +666,7 @@ export class SqliteGraphRepository
     ) {
       throw new GraphRepositoryError(
         "graph/invalid-file-size",
-        `file.sizeBytes negatif olmayan tam sayı olmalı: ${String(record.sizeBytes)}`,
+        `file.sizeBytes must be a non-negative integer: ${String(record.sizeBytes)}`,
       );
     }
     this.runWrite(
@@ -600,7 +727,7 @@ export class SqliteGraphRepository
     if (active !== undefined) {
       throw new GraphRepositoryError(
         "graph/build-already-active",
-        `Aynı revizyon için aktif build var: ${input.workspaceId}#${input.revision.id}@${input.revision.sequence}`,
+        `An active build already exists for the same revision: ${input.workspaceId}#${input.revision.id}@${input.revision.sequence}`,
       );
     }
     this.buildSerial += 1;
@@ -652,7 +779,7 @@ export class SqliteGraphRepository
     if (exists !== undefined) {
       throw new GraphRepositoryError(
         "graph/duplicate-node",
-        `Aynı node kimliği build içinde zaten var: ${node.id}`,
+        `Node id already exists in this build: ${node.id}`,
       );
     }
     const location = node.location;
@@ -720,7 +847,7 @@ export class SqliteGraphRepository
         const missing = endpoint === edge.from ? "from" : "to";
         throw new GraphRepositoryError(
           "graph/dangling-edge",
-          `Kenar ucu bilinmeyen node'a işaret ediyor (${missing}): ${endpoint}`,
+          `Edge endpoint points to an unknown node (${missing}): ${endpoint}`,
         );
       }
     }
@@ -731,7 +858,7 @@ export class SqliteGraphRepository
     if (exists !== undefined) {
       throw new GraphRepositoryError(
         "graph/duplicate-edge",
-        `Aynı edge kimliği build içinde zaten var: ${edge.id}`,
+        `Edge id already exists in this build: ${edge.id}`,
       );
     }
     const ambiguityJson =
@@ -784,7 +911,7 @@ export class SqliteGraphRepository
       if (result.changes !== 1) {
         throw new GraphRepositoryError(
           "graph/build-not-active",
-          `Aktif build yok: ${buildId}`,
+          `No active build: ${buildId}`,
         );
       }
       this.stmt(
@@ -802,14 +929,17 @@ export class SqliteGraphRepository
     });
     let publishedGraph: SnapshotGraph;
     try {
-      publishedGraph = publishTx();
+      // IMMEDIATE: publish reads the whole build before its UPDATE; holding
+      // the write lock from BEGIN prevents a concurrent commit (lease
+      // heartbeat, peer) from invalidating that read snapshot.
+      publishedGraph = publishTx.immediate();
     } catch (error) {
       if (error instanceof GraphRepositoryError) throw error;
       // SQLite hatası (ör. aynı deterministik kimliğe çakışan UNIQUE
       // kısıtı): transaction zaten geri alındı; yarım durum yoktur.
       throw new GraphRepositoryError(
         "graph/publish-failed",
-        `Yayımlama işlemi başarısız, depo değişmedi: ${errorText(error)}`,
+        `Publish failed; the store was not changed: ${errorText(error)}`,
       );
     }
     if (prunedDuringPublish && !this.db.inTransaction) {
@@ -834,7 +964,7 @@ export class SqliteGraphRepository
       if (result.changes === 0) {
         throw new GraphRepositoryError(
           "graph/build-not-active",
-          `Aktif build yok: ${buildId}`,
+          `No active build: ${buildId}`,
         );
       }
       if (existing !== undefined) {
@@ -865,7 +995,7 @@ export class SqliteGraphRepository
     if (!Number.isInteger(input.ownerPid) || input.ownerPid <= 0) {
       throw new GraphRepositoryError(
         "graph/invalid-limit",
-        `ownerPid pozitif tam sayı olmalı: ${String(input.ownerPid)}`,
+        `ownerPid must be a positive integer: ${String(input.ownerPid)}`,
       );
     }
     const expiresAt = computeExpiresAtIso(input.nowIso, input.ttlMs);
@@ -873,19 +1003,26 @@ export class SqliteGraphRepository
       input.hostLabel !== undefined && input.hostLabel.trim().length > 0
         ? input.hostLabel.trim()
         : null;
-    const isPidAlive = input.isPidAlive ?? defaultIsPidAlive;
+    const hostname =
+      input.hostname !== undefined && input.hostname.trim().length > 0
+        ? input.hostname.trim()
+        : currentLeaseHostname();
+    const ownerInstance = input.processInstanceId ?? PROCESS_LEASE_INSTANCE_ID;
+    const livenessContext = livenessContextOf(input.nowIso, {
+      ...input,
+      hostname,
+      processInstanceId: ownerInstance,
+    });
 
     const execute = (): AcquireBuildLeaseResult => {
       const existing = this.stmt(
         `SELECT workspace_id, build_id, lease_id, owner_pid, host_label,
-                acquired_at, heartbeat_at, expires_at
+                hostname, owner_instance, acquired_at, heartbeat_at, expires_at
          FROM build_leases WHERE workspace_id = ? LIMIT 1`,
       ).get(input.workspaceId) as BuildLeaseRow | undefined;
 
       if (existing !== undefined) {
-        const expired = isLeaseExpired(existing.expires_at, input.nowIso);
-        const alive = !expired && isPidAlive(existing.owner_pid);
-        if (alive) {
+        if (isLeaseRowAlive(existing, livenessContext)) {
           return { acquired: false, holder: mapBuildLeaseRow(existing) };
         }
         this.runWrite(
@@ -897,13 +1034,15 @@ export class SqliteGraphRepository
       this.runWrite(
         `INSERT INTO build_leases
            (workspace_id, build_id, lease_id, owner_pid, host_label,
-            acquired_at, heartbeat_at, expires_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+            hostname, owner_instance, acquired_at, heartbeat_at, expires_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         input.workspaceId,
         input.buildId,
         input.leaseId,
         input.ownerPid,
         hostLabel,
+        hostname,
+        ownerInstance,
         input.nowIso,
         input.nowIso,
         expiresAt,
@@ -917,6 +1056,8 @@ export class SqliteGraphRepository
           leaseId: input.leaseId,
           ownerPid: input.ownerPid,
           hostLabel,
+          hostname,
+          ownerInstance,
           acquiredAt: input.nowIso,
           heartbeatAt: input.nowIso,
           expiresAt,
@@ -990,7 +1131,7 @@ export class SqliteGraphRepository
     requireNonEmptyField("workspaceId", workspaceId);
     const row = this.stmt(
       `SELECT workspace_id, build_id, lease_id, owner_pid, host_label,
-              acquired_at, heartbeat_at, expires_at
+              hostname, owner_instance, acquired_at, heartbeat_at, expires_at
        FROM build_leases WHERE workspace_id = ? LIMIT 1`,
     ).get(workspaceId) as BuildLeaseRow | undefined;
     return row === undefined ? undefined : mapBuildLeaseRow(row);
@@ -1001,11 +1142,12 @@ export class SqliteGraphRepository
    * build leases for `workspaceId`:
    * - A `building` row is orphaned if:
    *   (i) no lease row exists for `workspaceId` (e.g., legacy v0.2.4 crash), OR
-   *   (ii) the lease's `expires_at <= nowIso`, OR
-   *   (iii) the lease's `owner_pid` is confirmed dead (`!isPidAlive(pid)`), OR
-   *   (iv) the live lease belongs to a different `build_id`.
+   *   (ii) the lease holder is dead under the liveness rule of
+   *        `evaluateBuildLeaseLiveness` (dead PID on this host, expired TTL for
+   *        a foreign/unknown host, PID reuse, stale heartbeat ceiling, ...), OR
+   *   (iii) the live lease belongs to a different `build_id`.
    * - Orphan `building` rows are transitioned to `state = 'failed'`,
-   *   `failure_reason = 'orphan-build-recovered'`, and expired/dead lease rows are deleted.
+   *   `failure_reason = 'orphan-build-recovered'`, and dead lease rows are deleted.
    */
   recoverOrphanBuilds(
     workspaceId: string,
@@ -1014,19 +1156,17 @@ export class SqliteGraphRepository
     requireNonEmptyField("workspaceId", workspaceId);
     const nowIso = options.nowIso ?? new Date().toISOString();
     requireTimestamp("nowIso", nowIso);
-    const isPidAlive = options.isPidAlive ?? defaultIsPidAlive;
+    const livenessContext = livenessContextOf(nowIso, options);
 
     const execute = (): RecoverOrphanBuildsResult => {
       const lease = this.stmt(
         `SELECT workspace_id, build_id, lease_id, owner_pid, host_label,
-                acquired_at, heartbeat_at, expires_at
+                hostname, owner_instance, acquired_at, heartbeat_at, expires_at
          FROM build_leases WHERE workspace_id = ? LIMIT 1`,
       ).get(workspaceId) as BuildLeaseRow | undefined;
 
       const leaseIsLive =
-        lease !== undefined &&
-        !isLeaseExpired(lease.expires_at, nowIso) &&
-        isPidAlive(lease.owner_pid);
+        lease !== undefined && isLeaseRowAlive(lease, livenessContext);
 
       const buildingRows = this.stmt(
         `SELECT sid, build_id FROM snapshots
@@ -1470,7 +1610,7 @@ export class SqliteGraphRepository
     if (!Number.isInteger(keepCount) || keepCount < 1) {
       throw new GraphRepositoryError(
         "graph/invalid-limit",
-        `keepCount pozitif tam sayı olmalı: ${String(keepCount)}`,
+        `keepCount must be a positive integer: ${String(keepCount)}`,
       );
     }
     const result = this.db.inTransaction
@@ -1651,7 +1791,7 @@ export class SqliteGraphRepository
     if (row === undefined) {
       throw new GraphRepositoryError(
         "graph/unknown-snapshot",
-        `Snapshot ya da build kimliği bulunamadı: ${snapshotId}`,
+        `Snapshot or build id not found: ${snapshotId}`,
       );
     }
     for (const entry of entries) {
@@ -1677,7 +1817,7 @@ export class SqliteGraphRepository
     } catch (error) {
       throw new GraphRepositoryError(
         "storage/driver-error",
-        `SQLite yazma hatası: ${errorText(error)}`,
+        `SQLite write error: ${errorText(error)}`,
       );
     }
   }
@@ -1695,7 +1835,7 @@ export class SqliteGraphRepository
     if (row === undefined) {
       throw new GraphRepositoryError(
         "graph/unknown-snapshot",
-        `Snapshot ya da build kimliği bulunamadı: ${snapshotId}`,
+        `Snapshot or build id not found: ${snapshotId}`,
       );
     }
     for (const entry of entries) {
@@ -1722,7 +1862,7 @@ export class SqliteGraphRepository
     } catch (error) {
       throw new GraphRepositoryError(
         "storage/driver-error",
-        `SQLite yazma hatası: ${errorText(error)}`,
+        `SQLite write error: ${errorText(error)}`,
       );
     }
   }
@@ -1737,7 +1877,7 @@ export class SqliteGraphRepository
     if (!Number.isInteger(effectiveLimit) || effectiveLimit < 1) {
       throw new GraphRepositoryError(
         "graph/invalid-limit",
-        `limit pozitif tam sayı olmalı: ${String(effectiveLimit)}`,
+        `limit must be a positive integer: ${String(effectiveLimit)}`,
       );
     }
     if (snapshotId !== undefined) {
@@ -1817,7 +1957,7 @@ export class SqliteGraphRepository
     } catch (error) {
       throw new GraphRepositoryError(
         "storage/driver-error",
-        `SQLite FTS arama hatası: ${errorText(error)}`,
+        `SQLite FTS search error: ${errorText(error)}`,
       );
     }
     return rows.map((row) => ({
@@ -1842,7 +1982,7 @@ export class SqliteGraphRepository
     } catch (error) {
       throw new GraphRepositoryError(
         "storage/driver-error",
-        `SQLite yazma hatası: ${errorText(error)}`,
+        `SQLite write error: ${errorText(error)}`,
       );
     }
   }
@@ -1859,7 +1999,7 @@ export class SqliteGraphRepository
     if (row === undefined) {
       throw new GraphRepositoryError(
         "graph/build-not-active",
-        `Aktif build yok: ${buildId}`,
+        `No active build: ${buildId}`,
       );
     }
     return row;
@@ -1917,7 +2057,7 @@ export class SqliteGraphRepository
     if (!spanComplete && spanAny) {
       throw new GraphRepositoryError(
         "storage/corrupt-row",
-        `Node konum sütunları eksik: ${row.node_id}`,
+        `Node location columns are missing: ${row.node_id}`,
       );
     }
     const span =
@@ -1953,7 +2093,7 @@ export class SqliteGraphRepository
     if (!Array.isArray(parsedEvidenceIds)) {
       throw new GraphRepositoryError(
         "storage/corrupt-row",
-        `edge.evidence_ids_json dizi değil: ${row.edge_id}`,
+        `edge.evidence_ids_json is not an array: ${row.edge_id}`,
       );
     }
     let ambiguity: GraphEdge["ambiguity"];
@@ -1989,7 +2129,7 @@ export class SqliteGraphRepository
     if (!spanComplete && spanAny) {
       throw new GraphRepositoryError(
         "storage/corrupt-row",
-        `Evidence konum sütunları eksik: ${row.evidence_id}`,
+        `Evidence location columns are missing: ${row.evidence_id}`,
       );
     }
     const span =
@@ -2050,13 +2190,13 @@ export class SqliteGraphRepository
     if (row.state !== "ready" && row.state !== "partial") {
       throw new GraphRepositoryError(
         "storage/corrupt-row",
-        `Yayımlanmamış snapshot okunamaz: ${String(row.id)}`,
+        `An unpublished snapshot cannot be read: ${String(row.id)}`,
       );
     }
     if (row.id === null || !SNAPSHOT_ID_PATTERN.test(row.id)) {
       throw new GraphRepositoryError(
         "storage/corrupt-snapshot",
-        `Snapshot kimliği geçersiz veya bozuk: ${String(row.id)}`,
+        `Snapshot id is invalid or corrupt: ${String(row.id)}`,
       );
     }
 
@@ -2108,7 +2248,7 @@ export class SqliteGraphRepository
     if (row.state !== "ready" && row.state !== "partial") {
       throw new GraphRepositoryError(
         "storage/corrupt-row",
-        `Yayımlanmamış snapshot okunamaz: ${String(row.id)}`,
+        `An unpublished snapshot cannot be read: ${String(row.id)}`,
       );
     }
     const cached = this.publishedCache.get(row.sid);

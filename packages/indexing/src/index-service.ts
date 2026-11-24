@@ -240,7 +240,46 @@ export interface IndexServiceOptions {
   readonly leaseHeartbeatIntervalMs?: number;
   /** Optional PID liveness predicate for lease recovery (test seam). */
   readonly isPidAlive?: (pid: number) => boolean;
+  /**
+   * Per-process lease owner instance id. Defaults to the repository's
+   * `leaseOwnerInstance` (or a per-module random id). Worker threads receive
+   * the main thread's id so the whole process shares one instance id.
+   */
+  readonly processInstanceId?: string;
+  /**
+   * Maximum time an async run waits for a live peer that holds the workspace
+   * build lease before giving up with outcome `peer_busy` (default 15 minutes;
+   * env `CAUSORYN_PEER_WAIT_TIMEOUT_MS`). `0` disables waiting.
+   */
+  readonly peerWaitTimeoutMs?: number;
+  /** Initial poll interval while waiting for a peer (default 100 ms, doubles up to 2 s). */
+  readonly peerPollIntervalMs?: number;
+  /**
+   * Hard heartbeat staleness ceiling after which any lease is considered dead
+   * (PID-reuse guard; default 10 minutes; env `CAUSORYN_LEASE_STALE_CEILING_MS`).
+   */
+  readonly leaseStaleCeilingMs?: number;
+  /** Notified when this service acquires/releases a build lease (worker -> main thread bridge). */
+  readonly onLeaseEvent?: (event: BuildLeaseEvent) => void;
 }
+
+/** Build lease lifecycle notification emitted by `IndexService`. */
+export interface BuildLeaseEvent {
+  readonly type: "acquired" | "released";
+  readonly leaseId: string;
+}
+
+/**
+ * Honest outcome of one indexing run:
+ * - `published`: a new snapshot was published by this run.
+ * - `unchanged`: no index-relevant change; the current snapshot was kept.
+ * - `reused_peer`: a concurrent build published the snapshot this run reuses
+ *   (either it won the publish race, or this run waited for it and the
+ *   inventory matched, so nothing was re-analyzed).
+ * - `peer_busy`: a live peer still holds the build lease; this run did not
+ *   build anything and the previously published snapshot is still served.
+ */
+export type IndexRunOutcome = "published" | "unchanged" | "reused_peer" | "peer_busy";
 
 /** Explicit peer status when another live process currently holds the build lease. */
 export type IndexPeerStatus = "waiting_for_peer";
@@ -252,23 +291,48 @@ export interface BuildLeaseInfo {
   readonly leaseId: string;
   readonly ownerPid: number;
   readonly hostLabel: string | null;
+  /** `os.hostname()` of the owner (schema v5; absent/NULL for older rows). */
+  readonly hostname?: string | null;
+  /** Per-process owner instance id (schema v5; absent/NULL for older rows). */
+  readonly ownerInstance?: string | null;
   readonly acquiredAt: string;
   readonly heartbeatAt: string;
   readonly expiresAt: string;
 }
 
+/** Liveness inputs forwarded to the repository's lease rule (see storage-sqlite build-lease.ts). */
+export interface BuildLeaseLivenessOptions {
+  readonly processInstanceId?: string;
+  readonly isPidAlive?: (pid: number) => boolean;
+  readonly isLocalLeaseActive?: (leaseId: string) => boolean | undefined;
+  readonly staleCeilingMs?: number;
+}
+
+/** Non-blocking dedicated heartbeat connection (structural match for SqliteGraphRepository). */
+export interface BuildLeaseHeartbeatConnection {
+  renew(
+    workspaceId: string,
+    leaseId: string,
+    nowIso: string,
+    ttlMs: number,
+  ): "renewed" | "lost" | "busy";
+  release(workspaceId: string, leaseId: string): void;
+  close(): void;
+}
+
 /** Optional build-lease & orphan-recovery capability implemented by persistent repositories. */
 export interface BuildLeaseStore {
-  acquireBuildLease(input: {
-    readonly workspaceId: string;
-    readonly buildId: string;
-    readonly leaseId: string;
-    readonly ownerPid: number;
-    readonly hostLabel?: string;
-    readonly nowIso: string;
-    readonly ttlMs: number;
-    readonly isPidAlive?: (pid: number) => boolean;
-  }):
+  acquireBuildLease(
+    input: {
+      readonly workspaceId: string;
+      readonly buildId: string;
+      readonly leaseId: string;
+      readonly ownerPid: number;
+      readonly hostLabel?: string;
+      readonly nowIso: string;
+      readonly ttlMs: number;
+    } & BuildLeaseLivenessOptions,
+  ):
     | { readonly acquired: true; readonly lease?: BuildLeaseInfo }
     | { readonly acquired: false; readonly holder: BuildLeaseInfo };
   renewBuildLease(
@@ -281,10 +345,7 @@ export interface BuildLeaseStore {
   getActiveBuildLease(workspaceId: string): BuildLeaseInfo | undefined;
   recoverOrphanBuilds(
     workspaceId: string,
-    options?: {
-      readonly nowIso?: string;
-      readonly isPidAlive?: (pid: number) => boolean;
-    },
+    options?: { readonly nowIso?: string } & BuildLeaseLivenessOptions,
   ): { readonly recoveredBuildIds: readonly string[]; readonly clearedLease: boolean };
   bindBuildLeaseBuildId?(
     workspaceId: string,
@@ -292,6 +353,12 @@ export interface BuildLeaseStore {
     buildId: string,
   ): boolean;
   withImmediateTransaction?<T>(fn: () => T): T;
+  /** Opens a dedicated, short-busy-timeout connection for main-thread lease renewal. */
+  openBuildLeaseHeartbeat?(options?: {
+    readonly busyTimeoutMs?: number;
+  }): BuildLeaseHeartbeatConnection;
+  /** Default lease owner instance id of this repository's process (thread). */
+  readonly leaseOwnerInstance?: string;
 }
 
 /** Per-file cached analysis fact stored in `file_facts` (structural match for SqliteGraphRepository). */
@@ -325,10 +392,12 @@ export interface FileFactStore {
 export type IndexProgressPhase =
   | "queued"
   | "inventory"
+  | "waiting_for_peer"
   | "analyzing"
   | "building"
   | "publishing"
   | "done"
+  | "reused"
   | "failed";
 
 /** Structured progress event emitted during async / worker-thread indexing. */
@@ -363,6 +432,10 @@ export interface IndexWorkerServiceConfig {
   readonly hostLabel?: string;
   readonly leaseTtlMs: number;
   readonly leaseHeartbeatIntervalMs: number;
+  /** Main-thread process instance id shared with the worker thread. */
+  readonly processInstanceId?: string;
+  readonly peerWaitTimeoutMs?: number;
+  readonly leaseStaleCeilingMs?: number;
 }
 
 /** Adapter tanı kaydının uygulama düzeyi karşılığı (parser detayı sızmaz). */
@@ -393,6 +466,8 @@ export interface IndexRunResult {
    * yeniden kullanıldı (yalnızca files tablosu tazelendi).
    */
   readonly published: boolean;
+  /** Explicit run outcome; `published` is true only for outcome `published`. */
+  readonly outcome: IndexRunOutcome;
   /** Number of source files re-analyzed during this indexing run (Task 2.6). */
   readonly reanalyzedFiles?: number;
   /** Number of unchanged source files reused from `file_facts` cache (Task 2.6). */
@@ -459,7 +534,7 @@ function toGraphNode(
   if (location !== undefined && location.sourceHash.length === 0) {
     throw new IndexingError(
       "indexing/internal",
-      `adapter node'u envanterde olmayan dosyaya işaret ediyor: ${relativePath ?? "?"}`,
+      `adapter node points to a file that is not in the inventory: ${relativePath ?? "?"}`,
     );
   }
   return {
@@ -1456,12 +1531,101 @@ function computeTsContextPaths(
 
 const DEFAULT_BUILD_LEASE_TTL_MS = 30_000;
 const DEFAULT_BUILD_LEASE_HEARTBEAT_MS = 10_000;
+/** Default bound on waiting for a live peer build (15 minutes: longer than the 10 minute lease staleness ceiling, so a dead owner whose PID was reused is always recovered within the wait). */
+export const DEFAULT_PEER_WAIT_TIMEOUT_MS = 15 * 60_000;
+const DEFAULT_PEER_POLL_INTERVAL_MS = 100;
+const MAX_PEER_POLL_INTERVAL_MS = 2_000;
+const PEER_WAIT_PROGRESS_INTERVAL_MS = 5_000;
+/** Busy timeout of the main-thread heartbeat connection: never block the MCP loop. */
+const EXTERNAL_HEARTBEAT_BUSY_TIMEOUT_MS = 50;
+
+/** Fallback per-module process instance id (used when the repository exposes none). */
+const MODULE_PROCESS_INSTANCE_ID = randomUUID();
+
+/**
+ * Build leases held by builds that are active in THIS thread (IndexService
+ * builds, and worker leases the job manager tracks on the main thread).
+ * Positive-only: absence never proves a lease is dead (see liveness rule).
+ */
+const LOCALLY_ACTIVE_BUILD_LEASES = new Set<string>();
+
+/** Marks a lease as held by a build that is active in this thread. */
+export function markBuildLeaseActiveLocally(leaseId: string): void {
+  LOCALLY_ACTIVE_BUILD_LEASES.add(leaseId);
+}
+
+/** Removes a lease from this thread's active-build registry. */
+export function clearBuildLeaseActiveLocally(leaseId: string): void {
+  LOCALLY_ACTIVE_BUILD_LEASES.delete(leaseId);
+}
+
+/** `true` when an active build in this thread holds `leaseId`; otherwise `undefined` (unknown). */
+export function isBuildLeaseActiveLocally(leaseId: string): boolean | undefined {
+  return LOCALLY_ACTIVE_BUILD_LEASES.has(leaseId) ? true : undefined;
+}
+
+function positiveMsOrDefault(
+  option: number | undefined,
+  envName: string,
+  fallback: number,
+  allowZero = false,
+): number {
+  const valid = (value: number): boolean =>
+    Number.isFinite(value) && (allowZero ? value >= 0 : value > 0);
+  if (option !== undefined && valid(option)) return option;
+  const raw = process.env[envName]?.trim();
+  if (raw !== undefined && raw.length > 0) {
+    const parsed = Number(raw);
+    if (valid(parsed)) return parsed;
+  }
+  return fallback;
+}
+
+function sleepMs(ms: number): Promise<void> {
+  // Intentionally NOT unref'd: inside a worker thread an unref'd timer would
+  // let the thread exit while it is waiting for a peer.
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
+}
+
+/** SQLite busy/locked failures (raw better-sqlite3 errors or wrapped driver errors). */
+function isSqliteBusyError(error: unknown): boolean {
+  const code = (error as { code?: unknown } | undefined)?.code;
+  if (
+    typeof code === "string" &&
+    (code.startsWith("SQLITE_BUSY") || code.startsWith("SQLITE_LOCKED"))
+  ) {
+    return true;
+  }
+  return error instanceof Error && /database is (locked|busy)/i.test(error.message);
+}
+
+function describeLeaseHolder(holder: BuildLeaseInfo | undefined): string {
+  if (holder === undefined) return "a live peer build";
+  const host =
+    holder.hostname !== undefined && holder.hostname !== null ? holder.hostname : "unknown host";
+  const label = holder.hostLabel !== null ? `, client=${holder.hostLabel}` : "";
+  return `pid=${String(holder.ownerPid)} on ${host}${label}, heartbeat=${holder.heartbeatAt}, expiresAt=${holder.expiresAt}`;
+}
 
 interface ActiveBuildLeaseHandle {
   readonly leaseId: string;
+  /** Renews the lease now (phase boundaries); never throws. */
+  readonly renewNow: () => void;
   readonly stop: () => void;
   readonly release: () => void;
 }
+
+/** Main-thread heartbeat for a lease held by an indexing worker thread. */
+export interface ExternalLeaseHeartbeat {
+  /** Stops renewing; `release: true` also deletes the lease row (worker exit/crash/close). */
+  stop(options: { readonly release: boolean }): void;
+}
+
+type LeaseClaim =
+  | { readonly kind: "claimed"; readonly lease: ActiveBuildLeaseHandle | null }
+  | { readonly kind: "result"; readonly result: IndexRunResult };
 
 function toEvidence(workspaceId: string, input: {
   readonly kind: string;
@@ -1637,6 +1801,17 @@ export class IndexService {
   private readonly leaseHeartbeatIntervalMs: number;
   /** Optional PID liveness predicate for lease recovery (test seam). */
   private readonly isPidAlive: ((pid: number) => boolean) | undefined;
+  /** Per-process lease owner instance id (shared with worker threads). */
+  private readonly processInstanceId: string;
+  /** Upper bound on waiting for a live peer build (ms; 0 = do not wait). */
+  private readonly peerWaitTimeoutMs: number;
+  /** Initial peer poll interval (ms). */
+  private readonly peerPollIntervalMs: number;
+  /** Hard lease heartbeat staleness ceiling (ms). */
+  private readonly leaseStaleCeilingMs: number | undefined;
+  private readonly onLeaseEvent: ((event: BuildLeaseEvent) => void) | undefined;
+  /** Leases currently held by runs of this service (renewed at phase boundaries). */
+  private readonly heldLeases = new Set<ActiveBuildLeaseHandle>();
   private workspaceRegistered = false;
   private runCount = 0;
 
@@ -1659,6 +1834,31 @@ export class IndexService {
         ? options.leaseHeartbeatIntervalMs
         : DEFAULT_BUILD_LEASE_HEARTBEAT_MS;
     this.isPidAlive = options.isPidAlive;
+    const repositoryInstance = (this.repository as Partial<BuildLeaseStore>).leaseOwnerInstance;
+    this.processInstanceId =
+      options.processInstanceId !== undefined && options.processInstanceId.trim().length > 0
+        ? options.processInstanceId
+        : typeof repositoryInstance === "string" && repositoryInstance.length > 0
+          ? repositoryInstance
+          : MODULE_PROCESS_INSTANCE_ID;
+    this.peerWaitTimeoutMs = positiveMsOrDefault(
+      options.peerWaitTimeoutMs,
+      "CAUSORYN_PEER_WAIT_TIMEOUT_MS",
+      DEFAULT_PEER_WAIT_TIMEOUT_MS,
+      true,
+    );
+    this.peerPollIntervalMs = positiveMsOrDefault(
+      options.peerPollIntervalMs,
+      "CAUSORYN_PEER_POLL_INTERVAL_MS",
+      DEFAULT_PEER_POLL_INTERVAL_MS,
+    );
+    const ceiling = positiveMsOrDefault(
+      options.leaseStaleCeilingMs,
+      "CAUSORYN_LEASE_STALE_CEILING_MS",
+      0,
+    );
+    this.leaseStaleCeilingMs = ceiling > 0 ? ceiling : undefined;
+    this.onLeaseEvent = options.onLeaseEvent;
     const policyConfig = options.policy.config;
     const hashInput: JsonValue = {
       workspaceId: this.workspaceId,
@@ -1766,10 +1966,35 @@ export class IndexService {
     try {
       this.repository.recoverOrphanBuilds(this.workspaceId, {
         nowIso,
-        ...(this.isPidAlive === undefined ? {} : { isPidAlive: this.isPidAlive }),
+        ...this.leaseLivenessOptions(),
       });
     } catch {
       // Best-effort recovery; startup/build continues cleanly if workspace is not registered yet.
+    }
+  }
+
+  /** Recovers orphaned builds now (job manager calls this after a worker crash/exit). */
+  recoverOrphanBuildsNow(): void {
+    this.recoverOrphanBuildsIfSupported(this.clock());
+  }
+
+  /** Liveness inputs for the repository lease rule (hostname defaults to os.hostname()). */
+  private leaseLivenessOptions(): BuildLeaseLivenessOptions {
+    return {
+      processInstanceId: this.processInstanceId,
+      isLocalLeaseActive: isBuildLeaseActiveLocally,
+      ...(this.isPidAlive === undefined ? {} : { isPidAlive: this.isPidAlive }),
+      ...(this.leaseStaleCeilingMs === undefined
+        ? {}
+        : { staleCeilingMs: this.leaseStaleCeilingMs }),
+    };
+  }
+
+  private emitLeaseEvent(event: BuildLeaseEvent): void {
+    try {
+      this.onLeaseEvent?.(event);
+    } catch {
+      // Lease notifications are advisory; never fail a build because of them.
     }
   }
 
@@ -1778,7 +2003,7 @@ export class IndexService {
     leaseId: string,
   ): ActiveBuildLeaseHandle {
     let released = false;
-    const timer = setInterval(() => {
+    const renewNow = (): void => {
       if (released) return;
       try {
         leaseStore.renewBuildLease(
@@ -1790,25 +2015,128 @@ export class IndexService {
       } catch {
         // Best-effort heartbeat; DB may have been closed concurrently.
       }
-    }, this.leaseHeartbeatIntervalMs);
+    };
+    // In-thread timer: keeps the lease fresh whenever this thread's event loop
+    // is free. It starves during long synchronous analysis, which is why the
+    // job manager also renews from the main thread and runs renew at every
+    // phase boundary (renewNow via progress events).
+    const timer = setInterval(renewNow, this.leaseHeartbeatIntervalMs);
     timer.unref();
 
     const stop = (): void => {
       clearInterval(timer);
     };
 
-    const release = (): void => {
-      if (released) return;
-      released = true;
-      stop();
+    const handle: ActiveBuildLeaseHandle = {
+      leaseId,
+      renewNow,
+      stop,
+      release: (): void => {
+        if (released) return;
+        released = true;
+        stop();
+        this.heldLeases.delete(handle);
+        clearBuildLeaseActiveLocally(leaseId);
+        try {
+          leaseStore.releaseBuildLease(this.workspaceId, leaseId);
+        } catch {
+          // Best-effort release; publish/failBuild may have already cleared the lease.
+        }
+        this.emitLeaseEvent({ type: "released", leaseId });
+      },
+    };
+    this.heldLeases.add(handle);
+    markBuildLeaseActiveLocally(leaseId);
+    this.emitLeaseEvent({ type: "acquired", leaseId });
+    return handle;
+  }
+
+  /** Renews every lease held by this service (called at phase boundaries). */
+  private renewHeldLeases(): void {
+    for (const handle of this.heldLeases) {
+      handle.renewNow();
+    }
+  }
+
+  /** Wraps run options so every progress event (phase boundary) renews held leases. */
+  private withPhaseBoundaryRenewal(options: IndexRunOptions): IndexRunOptions {
+    const forward = options.onProgress;
+    return {
+      ...options,
+      onProgress: (event): void => {
+        this.renewHeldLeases();
+        forward?.(event);
+      },
+    };
+  }
+
+  /**
+   * Starts a main-thread heartbeat for a lease held by an indexing worker
+   * thread. Uses a dedicated connection with a very short busy timeout so the
+   * MCP event loop never blocks on the worker's write transactions; a busy
+   * tick is simply retried on the next interval. Returns `undefined` for
+   * repositories without lease support.
+   */
+  startExternalLeaseHeartbeat(leaseId: string): ExternalLeaseHeartbeat | undefined {
+    if (!isBuildLeaseStore(this.repository)) return undefined;
+    const store = this.repository;
+    let connection: BuildLeaseHeartbeatConnection | undefined;
+    if (typeof store.openBuildLeaseHeartbeat === "function") {
       try {
-        leaseStore.releaseBuildLease(this.workspaceId, leaseId);
+        connection = store.openBuildLeaseHeartbeat({
+          busyTimeoutMs: EXTERNAL_HEARTBEAT_BUSY_TIMEOUT_MS,
+        });
       } catch {
-        // Best-effort release; publish/failBuild may have already cleared the lease.
+        connection = undefined;
+      }
+    }
+    let lost = false;
+    let stopped = false;
+    const renew = (): void => {
+      if (lost || stopped) return;
+      try {
+        if (connection !== undefined) {
+          const outcome = connection.renew(
+            this.workspaceId,
+            leaseId,
+            this.clock(),
+            this.leaseTtlMs,
+          );
+          if (outcome === "lost") lost = true;
+        } else if (
+          !store.renewBuildLease(this.workspaceId, leaseId, this.clock(), this.leaseTtlMs)
+        ) {
+          lost = true;
+        }
+      } catch {
+        // Best-effort; retried on the next tick.
       }
     };
-
-    return { leaseId, stop, release };
+    const timer = setInterval(renew, this.leaseHeartbeatIntervalMs);
+    timer.unref();
+    return {
+      stop: ({ release }): void => {
+        if (stopped) return;
+        stopped = true;
+        clearInterval(timer);
+        if (release) {
+          try {
+            if (connection !== undefined) {
+              connection.release(this.workspaceId, leaseId);
+            } else {
+              store.releaseBuildLease(this.workspaceId, leaseId);
+            }
+          } catch {
+            // Best-effort release.
+          }
+        }
+        try {
+          connection?.close();
+        } catch {
+          // Ignore close failures.
+        }
+      },
+    };
   }
 
   /**
@@ -1890,6 +2218,11 @@ export class IndexService {
       ...(this.hostLabel === undefined ? {} : { hostLabel: this.hostLabel }),
       leaseTtlMs: this.leaseTtlMs,
       leaseHeartbeatIntervalMs: this.leaseHeartbeatIntervalMs,
+      processInstanceId: this.processInstanceId,
+      peerWaitTimeoutMs: this.peerWaitTimeoutMs,
+      ...(this.leaseStaleCeilingMs === undefined
+        ? {}
+        : { leaseStaleCeilingMs: this.leaseStaleCeilingMs }),
     };
   }
 
@@ -1946,8 +2279,9 @@ export class IndexService {
    */
   async runIndexAsync(
     rootPath: string,
-    options: IndexRunOptions = {},
+    rawOptions: IndexRunOptions = {},
   ): Promise<IndexRunResult> {
+    const options = this.withPhaseBoundaryRenewal(rawOptions);
     options.onProgress?.({
       phase: "inventory",
       completed: 0,
@@ -1961,7 +2295,17 @@ export class IndexService {
       total: prepared.entries.length,
       message: `Collected ${String(prepared.entries.length)} workspace files`,
     });
-    return this.runPipelineAsync(prepared, options);
+    // Finding 6: claim the single-writer lease BEFORE analysis so a second
+    // host waits (and can reuse the peer's snapshot) instead of re-analyzing.
+    const claim = await this.claimBuildLeaseAsync(prepared, options, []);
+    if (claim.kind === "result") {
+      return claim.result;
+    }
+    try {
+      return await this.runPipelineAsync(prepared, options, claim.lease);
+    } finally {
+      claim.lease?.release();
+    }
   }
 
   /**
@@ -2020,8 +2364,9 @@ export class IndexService {
   async runIncrementalIndexAsync(
     rootPath: string,
     changeSet: readonly string[] = [],
-    options: IndexRunOptions = {},
+    rawOptions: IndexRunOptions = {},
   ): Promise<IndexRunResult> {
+    const options = this.withPhaseBoundaryRenewal(rawOptions);
     options.onProgress?.({
       phase: "inventory",
       completed: 0,
@@ -2049,10 +2394,10 @@ export class IndexService {
         (latest.snapshot.meta.state === "ready" || latest.snapshot.meta.state === "partial")
       ) {
         options.onProgress?.({
-          phase: "done",
+          phase: "reused",
           completed: totalLangFiles,
           total: totalLangFiles,
-          message: "No source changes detected; reused published snapshot",
+          message: `No changes; snapshot ${latest.snapshot.meta.id} is current`,
         });
         return this.noOpResult(
           prepared.entries,
@@ -2064,17 +2409,196 @@ export class IndexService {
         );
       }
     }
-    if (latestMeta !== undefined && !degradedSyncSnapshot) {
-      const incremental = await this.tryRunIncrementalPipelineAsync(
-        prepared,
-        latestMeta,
-        options,
-      );
-      if (incremental !== undefined) {
-        return incremental;
-      }
+    const claim = await this.claimBuildLeaseAsync(prepared, options, changeSet);
+    if (claim.kind === "result") {
+      return claim.result;
     }
-    return this.runPipelineAsync(prepared, options);
+    try {
+      if (latestMeta !== undefined && !degradedSyncSnapshot) {
+        const incremental = await this.tryRunIncrementalPipelineAsync(
+          prepared,
+          latestMeta,
+          options,
+          claim.lease,
+        );
+        if (incremental !== undefined) {
+          return incremental;
+        }
+      }
+      return await this.runPipelineAsync(prepared, options, claim.lease);
+    } finally {
+      claim.lease?.release();
+    }
+  }
+
+  /**
+   * Claims the workspace build lease before any analysis (finding 6).
+   * - No lease-capable repository -> `{ kind: "claimed", lease: null }`.
+   * - Lease free (or the holder is dead under the liveness rule) -> claimed.
+   * - Live holder -> polls with exponential backoff (progress phase
+   *   `waiting_for_peer`), bounded by `peerWaitTimeoutMs`. Once claimed after
+   *   waiting, the inventory is re-checked against the snapshot the peer
+   *   published; if it matches, the peer snapshot is reused WITHOUT analysis
+   *   (outcome `reused_peer`). On timeout the run returns outcome `peer_busy`
+   *   (or throws when nothing has ever been published).
+   */
+  private async claimBuildLeaseAsync(
+    prepared: PreparedRun,
+    options: IndexRunOptions,
+    changeSet: readonly string[],
+  ): Promise<LeaseClaim> {
+    if (!isBuildLeaseStore(this.repository)) {
+      return { kind: "claimed", lease: null };
+    }
+    const leaseStore = this.repository;
+    this.recoverOrphanBuildsIfSupported(this.clock());
+    const latestBeforeWait = this.readLatestPublishedMeta()?.snapshotId;
+    const startedAt = performance.now();
+    let pollMs = this.peerPollIntervalMs;
+    let lastProgressAt = Number.NEGATIVE_INFINITY;
+    let waited = false;
+    let lastHolder: BuildLeaseInfo | undefined;
+
+    for (;;) {
+      const leaseId = randomUUID();
+      let acquired: ReturnType<BuildLeaseStore["acquireBuildLease"]> | undefined;
+      try {
+        acquired = leaseStore.acquireBuildLease({
+          workspaceId: this.workspaceId,
+          buildId: `pending:${leaseId}`,
+          leaseId,
+          ownerPid: process.pid,
+          ...(this.hostLabel === undefined ? {} : { hostLabel: this.hostLabel }),
+          nowIso: this.clock(),
+          ttlMs: this.leaseTtlMs,
+          ...this.leaseLivenessOptions(),
+        });
+      } catch (error) {
+        // A peer holding the write lock longer than busy_timeout (e.g. while
+        // publishing a large snapshot) is a reason to wait, not to fail.
+        if (!isSqliteBusyError(error)) throw error;
+        acquired = undefined;
+      }
+      if (acquired === undefined) {
+        waited = true;
+        if (performance.now() - startedAt >= this.peerWaitTimeoutMs) {
+          throw new IndexingError(
+            "indexing/internal",
+            `The workspace database stayed locked by a concurrent writer for ${String(this.peerWaitTimeoutMs)} ms; gave up claiming the build lease`,
+          );
+        }
+        await sleepMs(Math.max(1, pollMs));
+        pollMs = Math.min(pollMs * 2, MAX_PEER_POLL_INTERVAL_MS);
+        continue;
+      }
+      if (acquired.acquired) {
+        const lease = this.startLeaseHeartbeat(leaseStore, leaseId);
+        if (!waited) {
+          return { kind: "claimed", lease };
+        }
+        const reused = this.tryReusePeerSnapshot(
+          prepared,
+          latestBeforeWait,
+          lastHolder,
+          changeSet,
+        );
+        if (reused !== undefined) {
+          lease.release();
+          options.onProgress?.({
+            phase: "reused",
+            completed: this.countLanguageEntries(prepared),
+            total: this.countLanguageEntries(prepared),
+            message: `A concurrent build published snapshot ${reused.snapshotId} first; reused it`,
+          });
+          return { kind: "result", result: reused };
+        }
+        return { kind: "claimed", lease };
+      }
+
+      lastHolder = acquired.holder;
+      const elapsed = performance.now() - startedAt;
+      if (elapsed >= this.peerWaitTimeoutMs) {
+        const latest = this.repository.getLatestPublished(this.workspaceId);
+        if (latest !== undefined) {
+          return {
+            kind: "result",
+            result: this.waitingForPeerResult(
+              latest,
+              acquired.holder,
+              prepared.entries.length,
+              prepared.tsEntries.length,
+              prepared.csEntries.length,
+              [],
+              [],
+              waited ? elapsed : undefined,
+            ),
+          };
+        }
+        throw new GraphRepositoryError(
+          "graph/build-already-active",
+          `A concurrent index build (${describeLeaseHolder(acquired.holder)}) holds the build lease for workspace ${this.workspaceId} and no snapshot has been published yet; gave up waiting after ${String(Math.round(elapsed))} ms`,
+        );
+      }
+      waited = true;
+      const now = performance.now();
+      if (now - lastProgressAt >= PEER_WAIT_PROGRESS_INTERVAL_MS) {
+        lastProgressAt = now;
+        options.onProgress?.({
+          phase: "waiting_for_peer",
+          completed: 0,
+          total: 0,
+          message: `Waiting for a concurrent index build (${describeLeaseHolder(acquired.holder)}) to finish`,
+        });
+      }
+      const remaining = this.peerWaitTimeoutMs - (performance.now() - startedAt);
+      await sleepMs(Math.max(1, Math.min(pollMs, remaining)));
+      pollMs = Math.min(pollMs * 2, MAX_PEER_POLL_INTERVAL_MS);
+    }
+  }
+
+  /**
+   * After waiting for a peer: if the peer published a snapshot with the same
+   * configuration and the current inventory has no index-relevant change
+   * relative to it, return a `reused_peer` result (no analysis).
+   */
+  private tryReusePeerSnapshot(
+    prepared: PreparedRun,
+    latestBeforeWait: string | undefined,
+    peer: BuildLeaseInfo | undefined,
+    changeSet: readonly string[],
+  ): IndexRunResult | undefined {
+    const latestMeta = this.readLatestPublishedMeta();
+    if (latestMeta === undefined || latestMeta.snapshotId === latestBeforeWait) {
+      return undefined;
+    }
+    if (latestMeta.configHash !== this.configHash) return undefined;
+    if (latestMeta.analyzerFingerprint.includes("sync-run-degraded")) return undefined;
+    if (this.analyzeChanges(prepared.entries)) return undefined;
+    const latest = this.repository.getLatestPublished(this.workspaceId);
+    if (
+      latest === undefined ||
+      (latest.snapshot.meta.state !== "ready" && latest.snapshot.meta.state !== "partial")
+    ) {
+      return undefined;
+    }
+    const totalLangFiles = this.countLanguageEntries(prepared);
+    const base = this.noOpResult(
+      prepared.entries,
+      prepared.tsEntries.length,
+      prepared.csEntries.length,
+      latest,
+      changeSet,
+      totalLangFiles,
+    );
+    this.runCount = Math.max(this.runCount, latest.snapshot.meta.revision.sequence);
+    return {
+      ...base,
+      reused: true,
+      outcome: "reused_peer",
+      warnings: [
+        `A concurrent build (${describeLeaseHolder(peer)}) published snapshot ${latest.snapshot.meta.id} while this run waited; the workspace inventory matches it, so it was reused without re-analysis`,
+      ],
+    };
   }
 
   private countLanguageEntries(prepared: PreparedRun): number {
@@ -2408,7 +2932,7 @@ export class IndexService {
         };
         diagnostics.push(converted);
         warnings.push(
-          `tanı: ${converted.relativePath}:${String(converted.line)} ${converted.code} ${converted.message}`,
+          `diagnostic: ${converted.relativePath}:${String(converted.line)} ${converted.code} ${converted.message}`,
         );
       }
       warnings.push(...adapterResult.warnings);
@@ -2484,6 +3008,7 @@ export class IndexService {
       readonly analyzerFingerprint: string;
     },
     options: IndexRunOptions,
+    claimedLease?: ActiveBuildLeaseHandle | null,
   ): Promise<IndexRunResult | undefined> {
     if (!isFileFactStore(this.repository)) return undefined;
     if (prevMeta.configHash !== this.configHash) return undefined;
@@ -2724,7 +3249,7 @@ export class IndexService {
         for (const diag of res.diagnostics) {
           diagnostics.push(toDiagnostic(diag));
           warnings.push(
-            `tanı: ${diag.relativePath}:${String(diag.line)} ${diag.code} ${diag.message}`,
+            `diagnostic: ${diag.relativePath}:${String(diag.line)} ${diag.code} ${diag.message}`,
           );
         }
         warnings.push(...res.warnings);
@@ -2783,6 +3308,7 @@ export class IndexService {
       prepared.csEntries.length,
       warnings,
       diagnostics,
+      claimedLease,
     );
     if (buildAttempt.kind === "reused") {
       return buildAttempt.result;
@@ -2952,11 +3478,12 @@ export class IndexService {
       // özellik zinciri TS daraltmasını taşımadığı için açık daraltma.
       state: latest.snapshot.meta.state === "ready" ? "ready" : "partial",
       warnings: [
-        "incremental no-op: dil analizleri için anlamlı değişiklik yok; mevcut snapshot korundu, files tablosu tazelendi",
-        `değişiklik kümesi: ${changeSet.length === 0 ? "(boş)" : changeSet.join(", ")}`,
+        "incremental no-op: no index-relevant change; the current snapshot was kept and the files table was refreshed",
+        `change set: ${changeSet.length === 0 ? "(empty)" : changeSet.join(", ")}`,
       ],
       diagnostics: [],
       published: false,
+      outcome: "unchanged",
       reanalyzedFiles: 0,
       cachedFiles: cachedLanguageFileCount,
       earlyCutoffApplied: false,
@@ -2986,7 +3513,7 @@ export class IndexService {
     if (!rootDecision.allowed) {
       throw new IndexingError(
         "indexing/root-not-authorized",
-        `kök yetkilendirilmedi (${rootDecision.code}): ${rootDecision.reason}`,
+        `root is not authorized (${rootDecision.code}): ${rootDecision.reason}`,
       );
     }
     this.ensureWorkspaceRegistered();
@@ -3128,6 +3655,7 @@ export class IndexService {
       diagnostics,
       published: false,
       reused: true,
+      outcome: "reused_peer",
     };
   }
 
@@ -3145,13 +3673,12 @@ export class IndexService {
     csFileCount: number,
     warnings: readonly string[],
     diagnostics: readonly IndexDiagnostic[],
+    waitedMs?: number,
   ): IndexRunResult {
     this.runCount = Math.max(this.runCount, latest.snapshot.meta.revision.sequence);
-    const holderDetails =
-      holder === undefined
-        ? "live peer build active"
-        : `pid=${String(holder.ownerPid)}${holder.hostLabel !== null ? `, host=${holder.hostLabel}` : ""}, expiresAt=${holder.expiresAt}`;
-    const peerWarning = `waiting_for_peer: concurrent index build active in live peer (${holderDetails}); reused existing published snapshot without overwriting`;
+    const waitedText =
+      waitedMs === undefined ? "" : ` after waiting ${String(Math.round(waitedMs))} ms`;
+    const peerWarning = `waiting_for_peer: a concurrent index build (${describeLeaseHolder(holder)}) still holds the build lease${waitedText}; this run built nothing and the existing published snapshot ${latest.snapshot.meta.id} is still served`;
     return {
       snapshotId: latest.snapshot.meta.id,
       snapshot: latest.snapshot,
@@ -3166,6 +3693,7 @@ export class IndexService {
       reused: true,
       waitingForPeer: true,
       peerStatus: "waiting_for_peer",
+      outcome: "peer_busy",
       ...(holder === undefined ? {} : { peerLease: holder }),
     };
   }
@@ -3250,6 +3778,7 @@ export class IndexService {
     csFileCount: number,
     warnings: readonly string[],
     diagnostics: readonly IndexDiagnostic[],
+    preClaimed?: ActiveBuildLeaseHandle | null,
   ):
     | {
         readonly kind: "opened";
@@ -3260,9 +3789,12 @@ export class IndexService {
     this.recoverOrphanBuildsIfSupported(createdAt);
     this.syncRunCountBeforeBuild(entries, analyzerFingerprint);
 
-    let activeLease: ActiveBuildLeaseHandle | undefined;
+    let activeLease: ActiveBuildLeaseHandle | undefined =
+      preClaimed === null ? undefined : preClaimed;
     const leaseStore = isBuildLeaseStore(this.repository) ? this.repository : undefined;
-    if (leaseStore !== undefined) {
+    if (leaseStore !== undefined && preClaimed === undefined) {
+      // Synchronous path: claim at open time without waiting (async runs
+      // claim before analysis in claimBuildLeaseAsync).
       const leaseId = randomUUID();
       const provisionalBuildId = `pending:${leaseId}`;
       const acquired = leaseStore.acquireBuildLease({
@@ -3273,7 +3805,7 @@ export class IndexService {
         ...(this.hostLabel === undefined ? {} : { hostLabel: this.hostLabel }),
         nowIso: createdAt,
         ttlMs: this.leaseTtlMs,
-        ...(this.isPidAlive === undefined ? {} : { isPidAlive: this.isPidAlive }),
+        ...this.leaseLivenessOptions(),
       });
       if (!acquired.acquired) {
         const latest = this.repository.getLatestPublished(this.workspaceId);
@@ -3293,7 +3825,7 @@ export class IndexService {
         }
         throw new GraphRepositoryError(
           "graph/build-already-active",
-          `waiting_for_peer: live peer (pid=${String(acquired.holder.ownerPid)}) holds active build lease for workspace ${this.workspaceId}`,
+          `waiting_for_peer: a concurrent index build (${describeLeaseHolder(acquired.holder)}) holds the build lease for workspace ${this.workspaceId} and no snapshot has been published yet`,
         );
       }
       activeLease = this.startLeaseHeartbeat(leaseStore, leaseId);
@@ -3402,7 +3934,7 @@ export class IndexService {
             "concurrent snapshot publish race (graph/publish-failed): reused existing published snapshot",
           );
         }
-        throw new IndexingError("indexing/internal", `graph deposu reddetti: ${error.message}`);
+        throw new IndexingError("indexing/internal", `graph store rejected the operation: ${error.message}`);
       }
       this.failBuild(buildId, error);
     }
@@ -3410,7 +3942,7 @@ export class IndexService {
       this.indexPublishedSymbols(snapshot);
     } catch (error) {
       if (error instanceof GraphRepositoryError) {
-        throw new IndexingError("indexing/internal", `graph deposu reddetti: ${error.message}`);
+        throw new IndexingError("indexing/internal", `graph store rejected the operation: ${error.message}`);
       }
       throw error;
     }
@@ -3430,6 +3962,7 @@ export class IndexService {
       warnings,
       diagnostics,
       published: true,
+      outcome: "published",
       ...(incrementalTelemetry === undefined ? {} : incrementalTelemetry),
     };
   }
@@ -3548,10 +4081,10 @@ export class IndexService {
           // sözleşmesiyle aynı mutabakat garantisi).
           this.syncInventoryRecords(entries);
           warnings.push(
-            "workspace analiz edilebilir TypeScript/TSX/C#/Python/Go/Rust kaynağı içermiyor; coverage sıfır (partial yayınlendi)",
+            "the workspace contains no analyzable TypeScript/TSX/C#/Python/Go/Rust sources; coverage is zero (published as partial)",
           );
           for (const entry of entries) {
-            warnings.push(`dosya envanterde ama dil adapter kapsamı dışında: ${entry.relativePath}`);
+            warnings.push(`file is in the inventory but outside every language adapter: ${entry.relativePath}`);
           }
           emptyLanguageRun = true;
         } else {
@@ -3587,7 +4120,7 @@ export class IndexService {
             };
             diagnostics.push(converted);
             warnings.push(
-              `tanı: ${converted.relativePath}:${String(converted.line)} ${converted.code} ${converted.message}`,
+              `diagnostic: ${converted.relativePath}:${String(converted.line)} ${converted.code} ${converted.message}`,
             );
           }
           warnings.push(...adapterResult.warnings);
@@ -3614,7 +4147,7 @@ export class IndexService {
           // Senkron köprü: derin analiz yok — L0 envanter düzeyi + explicit
           // warning. worker başlatılmaz; uydurma sembol/kenar üretilmez.
           warnings.push(
-            `senkron koşum C# derin sembol analizini yürütemez (Roslyn worker async koşar): ${String(csEntries.length)} dosya L0 envanter düzeyinde listelendi; tam birleşik analiz için runIndexAsync/refresh işi kullanın`,
+            `synchronous run cannot perform deep C# symbol analysis (the Roslyn worker runs asynchronously): ${String(csEntries.length)} files listed at L0 inventory level; use runIndexAsync or a refresh job for full analysis`,
           );
           const l0Nodes: SnapshotNodeInput[] = csEntries.map((entry) => ({
             kind: "File",
@@ -3657,7 +4190,7 @@ export class IndexService {
         for (const l0 of syncL0Languages) {
           if (l0.entries.length === 0) continue;
           warnings.push(
-            `senkron koşum ${l0.label} derin sembol analizini yürütemez (${l0.workerName} async koşar): ${String(l0.entries.length)} dosya L0 envanter düzeyinde listelendi; tam birleşik analiz için runIndexAsync/refresh işi kullanın`,
+            `synchronous run cannot perform deep ${l0.label} symbol analysis (the ${l0.workerName} runs asynchronously): ${String(l0.entries.length)} files listed at L0 inventory level; use runIndexAsync or a refresh job for full analysis`,
           );
           const l0Nodes: SnapshotNodeInput[] = l0.entries.map((entry) => ({
             kind: "File",
@@ -3770,6 +4303,7 @@ export class IndexService {
   private async runPipelineAsync(
     prepared: PreparedRun,
     options: IndexRunOptions = {},
+    claimedLease?: ActiveBuildLeaseHandle | null,
   ): Promise<IndexRunResult> {
     const {
       canonicalRoot,
@@ -3834,7 +4368,7 @@ export class IndexService {
         };
         diagnostics.push(converted);
         warnings.push(
-          `tanı: ${converted.relativePath}:${String(converted.line)} ${converted.code} ${converted.message}`,
+          `diagnostic: ${converted.relativePath}:${String(converted.line)} ${converted.code} ${converted.message}`,
         );
       }
       warnings.push(...adapterResult.warnings);
@@ -3867,7 +4401,7 @@ export class IndexService {
       for (const diagnostic of csharpResult.diagnostics) {
         diagnostics.push(toDiagnostic(diagnostic));
         warnings.push(
-          `tanı: ${diagnostic.relativePath}:${String(diagnostic.line)} ${diagnostic.code} ${diagnostic.message}`,
+          `diagnostic: ${diagnostic.relativePath}:${String(diagnostic.line)} ${diagnostic.code} ${diagnostic.message}`,
         );
       }
       warnings.push(...csharpResult.warnings);
@@ -3895,7 +4429,7 @@ export class IndexService {
       for (const diagnostic of pythonResult.diagnostics) {
         diagnostics.push(toDiagnostic(diagnostic));
         warnings.push(
-          `tanı: ${diagnostic.relativePath}:${String(diagnostic.line)} ${diagnostic.code} ${diagnostic.message}`,
+          `diagnostic: ${diagnostic.relativePath}:${String(diagnostic.line)} ${diagnostic.code} ${diagnostic.message}`,
         );
       }
       warnings.push(...pythonResult.warnings);
@@ -3928,7 +4462,7 @@ export class IndexService {
       for (const diagnostic of goResult.diagnostics) {
         diagnostics.push(toDiagnostic(diagnostic));
         warnings.push(
-          `tanı: ${diagnostic.relativePath}:${String(diagnostic.line)} ${diagnostic.code} ${diagnostic.message}`,
+          `diagnostic: ${diagnostic.relativePath}:${String(diagnostic.line)} ${diagnostic.code} ${diagnostic.message}`,
         );
       }
       warnings.push(...goResult.warnings);
@@ -3957,7 +4491,7 @@ export class IndexService {
       for (const diagnostic of rustResult.diagnostics) {
         diagnostics.push(toDiagnostic(diagnostic));
         warnings.push(
-          `tanı: ${diagnostic.relativePath}:${String(diagnostic.line)} ${diagnostic.code} ${diagnostic.message}`,
+          `diagnostic: ${diagnostic.relativePath}:${String(diagnostic.line)} ${diagnostic.code} ${diagnostic.message}`,
         );
       }
       warnings.push(...rustResult.warnings);
@@ -4043,6 +4577,7 @@ export class IndexService {
       csEntries.length,
       warnings,
       diagnostics,
+      claimedLease,
     );
     if (buildAttempt.kind === "reused") {
       return buildAttempt.result;
@@ -4076,10 +4611,10 @@ export class IndexService {
           rsEntries.length === 0
         ) {
           warnings.push(
-            "workspace analiz edilebilir TypeScript/TSX/C#/Python/Go/Rust kaynağı içermiyor; coverage sıfır (partial yayınlendi)",
+            "the workspace contains no analyzable TypeScript/TSX/C#/Python/Go/Rust sources; coverage is zero (published as partial)",
           );
           for (const entry of entries) {
-            warnings.push(`dosya envanterde ama dil adapter kapsamı dışında: ${entry.relativePath}`);
+            warnings.push(`file is in the inventory but outside every language adapter: ${entry.relativePath}`);
           }
           emptyLanguageRun = true;
         } else {
@@ -4311,7 +4846,7 @@ export class IndexService {
         }
         throw new IndexingError(
           "indexing/internal",
-          `iki adapter aynı node kimliğini üretti: ${key}`,
+          `two adapters produced the same node id: ${key}`,
         );
       }
       const node = toGraphNode(this.workspaceId, nodeInput, contentHashByPath);
@@ -4327,7 +4862,7 @@ export class IndexService {
         const missing = from === undefined ? edgeInput.from : edgeInput.to;
         throw new IndexingError(
           "indexing/internal",
-          `adapter kenarı bilinmeyen node'a işaret ediyor: ${nodeRefKey(missing)}`,
+          `adapter edge points to an unknown node: ${nodeRefKey(missing)}`,
         );
       }
       const evidenceIds: string[] = [];
@@ -4369,7 +4904,7 @@ export class IndexService {
       if (fileNode === undefined || sourceHash === undefined) {
         throw new IndexingError(
           "indexing/internal",
-          `File node envanterle eşleşmedi: ${nodeInput.relativePath}`,
+          `File node does not match the inventory: ${nodeInput.relativePath}`,
         );
       }
       const inventoryEvidence = toEvidence(this.workspaceId, {
@@ -4382,7 +4917,7 @@ export class IndexService {
         },
         analyzerId: "causoryn-indexing",
         analyzerVersion: INDEXING_VERSION,
-        rationale: "dosya envanteri: WorkspaceAccessPolicy izinli kaynak dosya",
+        rationale: "file inventory: source file allowed by WorkspaceAccessPolicy",
       });
       this.repository.addEvidence(buildId, inventoryEvidence);
       this.repository.addEdge(
@@ -4408,7 +4943,7 @@ export class IndexService {
     const reason = error instanceof Error ? error.message : String(error);
     this.repository.failBuild(buildId, reason);
     if (error instanceof GraphRepositoryError) {
-      throw new IndexingError("indexing/internal", `graph deposu reddetti: ${reason}`);
+      throw new IndexingError("indexing/internal", `graph store rejected the operation: ${reason}`);
     }
     throw error;
   }
@@ -4418,7 +4953,7 @@ export class IndexService {
     try {
       this.repository.registerWorkspace({
         id: this.workspaceId,
-        rootPath: this.policy.config.allowRoots[0] ?? "(root yetkilendirmesi runIndex'te yapılır)",
+        rootPath: this.policy.config.allowRoots[0] ?? "(root is authorized when indexing runs)",
         createdAt: this.clock(),
       });
       this.workspaceRegistered = true;

@@ -687,7 +687,12 @@ describe("WorkspaceWatcher — debounce max-wait (güvenlik bulgusu 2)", { timeo
         harness.watcher.stop();
         await waitFor(() => {
           const jobs = harness.manager.jobs();
-          return jobs.length > 0 && jobs.every((job) => job.status === "done");
+          // `reused` is the honest terminal state of a no-op job that used
+          // to be reported as `done` (Task 1.7 criterion 5); both are success.
+          return (
+            jobs.length > 0 &&
+            jobs.every((job) => job.status === "done" || job.status === "reused")
+          );
         }, "kuyruktaki işler bitti");
         const latest = harness.repository.getLatestPublished("default");
         expect(latest).toBeDefined();

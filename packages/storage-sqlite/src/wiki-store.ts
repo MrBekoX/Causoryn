@@ -361,7 +361,7 @@ function requireEnum<T extends string>(
   if (typeof value !== "string" || !allowed.has(value)) {
     throw new WikiStoreError(
       "wiki/invalid-field",
-      `${field} geçersiz değer: ${String(value)} (izinli: ${[...allowed].join(",")})`,
+      `${field} has an invalid value: ${String(value)} (allowed: ${[...allowed].join(",")})`,
     );
   }
   return value as T;
@@ -383,7 +383,7 @@ function requireNonNegativeInt(field: string, value: number): number {
   ) {
     throw new WikiStoreError(
       "wiki/invalid-field",
-      `${field} negatif olmayan tam sayı olmalı: ${String(value)}`,
+      `${field} must be a non-negative integer: ${String(value)}`,
     );
   }
   return value;
@@ -396,7 +396,7 @@ function requireEvidenceRefs(
   if (refs === undefined) {
     throw new WikiStoreError(
       "wiki/invalid-field",
-      `${field} zorunludur (boş dizi geçerlidir)`,
+      `${field} is required (an empty array is valid)`,
     );
   }
   for (const ref of refs) {
@@ -433,7 +433,7 @@ function parseJsonField(field: string, text: string): JsonValue {
   } catch (error) {
     throw new WikiStoreError(
       "wiki/corrupt-row",
-      `JSON sütunu çözümlenemedi (${field}): ${errorText(error)}`,
+      `Could not parse JSON column (${field}): ${errorText(error)}`,
     );
   }
   return parsed as JsonValue;
@@ -447,7 +447,7 @@ function readEvidenceRefsJson(
   if (!Array.isArray(parsed)) {
     throw new WikiStoreError(
       "wiki/corrupt-row",
-      `${field} dizi değil`,
+      `${field} is not an array`,
     );
   }
   return (parsed as unknown[]).map((entry, index) => {
@@ -466,7 +466,7 @@ function readEvidenceRefsJson(
     ) {
       throw new WikiStoreError(
         "wiki/corrupt-row",
-        `${field}[${index}] EvidenceRef alanları eksik/bozuk`,
+        `${field}[${index}] EvidenceRef fields are missing or corrupt`,
       );
     }
     return {
@@ -597,26 +597,25 @@ export class SqliteWikiStore {
     }
     try {
       this.db.pragma("busy_timeout = 5000");
-      const initialVersion = this.db.pragma("user_version", { simple: true });
-      if (initialVersion === 0) {
-        this.db.pragma("page_size = 4096");
-      }
-      this.db.pragma("journal_mode = WAL");
-      this.db.pragma("foreign_keys = ON");
-      this.db.pragma("synchronous = NORMAL");
       const version = this.db.pragma("user_version", { simple: true });
       if (typeof version !== "number" || !Number.isInteger(version)) {
         throw new WikiStoreError(
           "wiki/schema-corrupt",
-          `user_version okunamadı: ${String(version)}`,
+          `Could not read SQLite user_version: ${String(version)}`,
         );
       }
       if (version > SCHEMA_VERSION) {
+        // Forward guard BEFORE any pragma that could write the file.
         throw new WikiStoreError(
           "wiki/schema-too-new",
-          `Veritabanı şeması bu paketten daha yeni (v${version} > v${SCHEMA_VERSION})`,
+          `Database schema v${String(version)} is newer than this Causoryn build supports (v${String(SCHEMA_VERSION)}); refusing to open it`,
         );
       }
+      // No explicit page_size: 4096 is SQLite's default and not a security
+      // control (see schema.ts header for the corrected CVE notes).
+      this.db.pragma("journal_mode = WAL");
+      this.db.pragma("foreign_keys = ON");
+      this.db.pragma("synchronous = NORMAL");
       applySchema(this.db);
     } catch (error) {
       if (this.owned) this.db.close();
@@ -652,7 +651,7 @@ export class SqliteWikiStore {
     if (active !== undefined) {
       throw new WikiStoreError(
         "wiki/build-already-active",
-        `Aynı graph snapshot için aktif wiki build var: ${input.workspaceId}/${input.graphSnapshotId}`,
+        `An active wiki build already exists for the same graph snapshot: ${input.workspaceId}/${input.graphSnapshotId}`,
       );
     }
     let result: Database.RunResult;
@@ -675,7 +674,7 @@ export class SqliteWikiStore {
       ) {
         throw new WikiStoreError(
           "wiki/build-already-active",
-          `Aynı graph snapshot için aktif wiki build var (yarış): ${input.workspaceId}/${input.graphSnapshotId}`,
+          `An active wiki build already exists for the same graph snapshot (race): ${input.workspaceId}/${input.graphSnapshotId}`,
         );
       }
       throw error;
@@ -702,7 +701,7 @@ export class SqliteWikiStore {
     if (exists !== undefined) {
       throw new WikiStoreError(
         "wiki/duplicate-page",
-        `Aynı page kimliği wiki build içinde zaten var: ${page.id}`,
+        `Page id already exists in this wiki build: ${page.id}`,
       );
     }
     const detail = page.coverage.detail;
@@ -735,7 +734,7 @@ export class SqliteWikiStore {
     if (typeof section.generatedMarkdown !== "string") {
       throw new WikiStoreError(
         "wiki/invalid-field",
-        "section.generatedMarkdown metin olmalı",
+        "section.generatedMarkdown must be a string",
       );
     }
     requireEnum("section.status", section.status, SECTION_STATUSES);
@@ -746,7 +745,7 @@ export class SqliteWikiStore {
     if (exists !== undefined) {
       throw new WikiStoreError(
         "wiki/duplicate-section",
-        `Aynı section kimliği wiki build içinde zaten var: ${section.id}`,
+        `Section id already exists in this wiki build: ${section.id}`,
       );
     }
     this.runWrite(
@@ -778,7 +777,7 @@ export class SqliteWikiStore {
     if (link.resolution === "verified" && refs.length === 0) {
       throw new WikiStoreError(
         "wiki/verified-link-evidence-required",
-        `verified Wiki linki en az bir Evidence gerektirir (TŞ §16A.7): ${link.id}`,
+        `A verified wiki link requires at least one evidence reference: ${link.id}`,
       );
     }
     const exists = this.stmt(
@@ -787,7 +786,7 @@ export class SqliteWikiStore {
     if (exists !== undefined) {
       throw new WikiStoreError(
         "wiki/duplicate-link",
-        `Aynı link kimliği wiki build içinde zaten var: ${link.id}`,
+        `Link id already exists in this wiki build: ${link.id}`,
       );
     }
     this.runWrite(
@@ -825,7 +824,7 @@ export class SqliteWikiStore {
     if (exists !== undefined) {
       throw new WikiStoreError(
         "wiki/duplicate-version",
-        `Aynı sayfa için wiki build içinde zaten sürüm var: ${version.pageId}`,
+        `A version for this page already exists in this wiki build: ${version.pageId}`,
       );
     }
     this.runWrite(
@@ -907,7 +906,7 @@ export class SqliteWikiStore {
       if (result.changes !== 1) {
         throw new WikiStoreError(
           "wiki/build-not-active",
-          `Aktif wiki build yok: ${String(wikiSid)}`,
+          `No active wiki build: ${String(wikiSid)}`,
         );
       }
       const published = this.requireWikiRow(wikiSid);
@@ -919,7 +918,7 @@ export class SqliteWikiStore {
       if (error instanceof WikiStoreError) throw error;
       throw new WikiStoreError(
         "wiki/publish-failed",
-        `Wiki yayımlama işlemi başarısız, depo değişmedi: ${errorText(error)}`,
+        `Wiki publish failed; the store was not changed: ${errorText(error)}`,
       );
     }
   }
@@ -936,7 +935,7 @@ export class SqliteWikiStore {
     if (result.changes === 0) {
       throw new WikiStoreError(
         "wiki/build-not-active",
-        `Aktif wiki build yok: ${String(wikiSid)}`,
+        `No active wiki build: ${String(wikiSid)}`,
       );
     }
   }
@@ -990,7 +989,7 @@ export class SqliteWikiStore {
     if (!Number.isInteger(effectiveLimit) || effectiveLimit < 1) {
       throw new WikiStoreError(
         "wiki/invalid-limit",
-        `limit pozitif tam sayı olmalı: ${String(effectiveLimit)}`,
+        `limit must be a positive integer: ${String(effectiveLimit)}`,
       );
     }
     const phrase = `"${trimmed.replaceAll('"', '""')}"`;
@@ -1047,7 +1046,7 @@ export class SqliteWikiStore {
     ) {
       throw new WikiStoreError(
         "wiki/invalid-field",
-        "annotation.verified boolean olmalı",
+        "annotation.verified must be a boolean",
       );
     }
     requireNonNegativeInt(
@@ -1058,7 +1057,7 @@ export class SqliteWikiStore {
     if (typeof annotation.body !== "string") {
       throw new WikiStoreError(
         "wiki/invalid-field",
-        "annotation.body metin olmalı",
+        "annotation.body must be a string",
       );
     }
     const exists = this.stmt(
@@ -1067,7 +1066,7 @@ export class SqliteWikiStore {
     if (exists !== undefined) {
       throw new WikiStoreError(
         "wiki/duplicate-annotation",
-        `Aynı anotasyon kimliği zaten var: ${annotation.id}`,
+        `Annotation id already exists: ${annotation.id}`,
       );
     }
     try {
@@ -1104,7 +1103,7 @@ export class SqliteWikiStore {
       ) {
         throw new WikiStoreError(
           "wiki/duplicate-annotation",
-          `Aynı anotasyon kimliği zaten var (eşzamanlı yazım yarışı kaybedildi): ${annotation.id}`,
+          `Annotation id already exists (lost a concurrent write race): ${annotation.id}`,
         );
       }
       throw error;
@@ -1174,7 +1173,7 @@ export class SqliteWikiStore {
     if (input.body !== undefined && typeof input.body !== "string") {
       throw new WikiStoreError(
         "wiki/invalid-field",
-        "annotation.body metin olmalı",
+        "annotation.body must be a string",
       );
     }
     if (input.sectionKey !== undefined) {
@@ -1190,7 +1189,7 @@ export class SqliteWikiStore {
     ) {
       throw new WikiStoreError(
         "wiki/invalid-field",
-        "annotation.verified boolean veya null olmalı",
+        "annotation.verified must be a boolean or null",
       );
     }
     const current = this.stmt(
@@ -1201,7 +1200,7 @@ export class SqliteWikiStore {
     if (current === undefined) {
       throw new WikiStoreError(
         "wiki/annotation-not-found",
-        `Anotasyon bulunamadı: ${input.id}`,
+        `Annotation not found: ${input.id}`,
       );
     }
     const result = this.runWrite(
@@ -1227,7 +1226,7 @@ export class SqliteWikiStore {
     if (result.changes !== 1) {
       throw new WikiStoreError(
         "wiki/annotation-conflict",
-        `Anotasyon sürüm çakışması (beklenen ${String(input.expectedAnnotationVersion)}, güncel ${String(current.annotation_version)}): ${input.id}`,
+        `Annotation version conflict (expected ${String(input.expectedAnnotationVersion)}, current ${String(current.annotation_version)}): ${input.id}`,
       );
     }
     const updated = this.stmt(
@@ -1238,7 +1237,7 @@ export class SqliteWikiStore {
     if (updated === undefined) {
       throw new WikiStoreError(
         "wiki/annotation-not-found",
-        `Güncellenen anotasyon okunamadı: ${input.id}`,
+        `Could not read the updated annotation: ${input.id}`,
       );
     }
     return annotationFromRow(updated);
@@ -1262,7 +1261,7 @@ export class SqliteWikiStore {
     if (result.changes !== 1) {
       throw new WikiStoreError(
         "wiki/annotation-not-found",
-        `Anotasyon bulunamadı: ${id}`,
+        `Annotation not found: ${id}`,
       );
     }
   }
@@ -1292,7 +1291,7 @@ export class SqliteWikiStore {
     ) {
       throw new WikiStoreError(
         "wiki/invalid-field",
-        `alias.matchConfidence 0..1 aralığında olmalı: ${String(confidence)}`,
+        `alias.matchConfidence must be within 0..1: ${String(confidence)}`,
       );
     }
     const exists = this.stmt(
@@ -1302,7 +1301,7 @@ export class SqliteWikiStore {
     if (exists !== undefined) {
       throw new WikiStoreError(
         "wiki/duplicate-alias",
-        `Aynı alias zaten var: ${alias.pageId}/${alias.alias}`,
+        `Alias already exists: ${alias.pageId}/${alias.alias}`,
       );
     }
     this.runWrite(
@@ -1360,7 +1359,7 @@ export class SqliteWikiStore {
     } catch (error) {
       throw new WikiStoreError(
         "storage/driver-error",
-        `SQLite yazma hatası: ${errorText(error)}`,
+        `SQLite write error: ${errorText(error)}`,
       );
     }
   }
@@ -1388,7 +1387,7 @@ export class SqliteWikiStore {
     if (row === undefined) {
       throw new WikiStoreError(
         "wiki/unknown-snapshot",
-        `Wiki snapshot satırı bulunamadı: ${String(wikiSid)}`,
+        `Wiki snapshot row not found: ${String(wikiSid)}`,
       );
     }
     return row;
@@ -1399,7 +1398,7 @@ export class SqliteWikiStore {
     if (row.status !== "building") {
       throw new WikiStoreError(
         "wiki/build-not-active",
-        `Aktif wiki build yok (durum: ${row.status}): ${String(wikiSid)}`,
+        `No active wiki build (status: ${row.status}): ${String(wikiSid)}`,
       );
     }
     return row;
@@ -1410,7 +1409,7 @@ export class SqliteWikiStore {
     if (row.id === null || (row.status !== "ready" && row.status !== "partial")) {
       throw new WikiStoreError(
         "wiki/corrupt-row",
-        `Yayımlanmamış wiki snapshot okunamaz: sid=${String(row.sid)} status=${row.status}`,
+        `An unpublished wiki snapshot cannot be read: sid=${String(row.sid)} status=${row.status}`,
       );
     }
     const snapshot: WikiSnapshot = {

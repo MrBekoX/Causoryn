@@ -517,7 +517,7 @@ describe("IndexService.runIndex — senkron koşum Python/Go/Rust derin analiz y
       for (const lang of ["Python", "Go", "Rust"]) {
         expect(
           run.warnings.some(
-            (w) => w.includes(`senkron koşum ${lang} derin sembol analizini yürütemez`) && w.includes("runIndexAsync"),
+            (w) => w.includes(`synchronous run cannot perform deep ${lang} symbol analysis`) && w.includes("runIndexAsync"),
           ),
           `senkron köprü uyarısı eksik: ${lang}`,
         ).toBe(true);

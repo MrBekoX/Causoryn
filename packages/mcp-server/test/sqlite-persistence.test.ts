@@ -108,7 +108,7 @@ describe("SQLite kalıcılık, Agent GPS FTS5, incremental refresh ve map_system
         autoIndex: false,
         storage: { dataDbPath: "goreli/graph.sqlite" },
       },
-      /storage\.dataDbPath mutlak yol olmalı/,
+      /storage\.dataDbPath must be an absolute path/,
     );
 
     // Null byte reddedilir.
@@ -119,7 +119,7 @@ describe("SQLite kalıcılık, Agent GPS FTS5, incremental refresh ve map_system
         autoIndex: false,
         storage: { dataDbPath: `${path.join(tempRoot, "bad")}\0graph.sqlite` },
       },
-      /storage\.dataDbPath null byte içeremez/,
+      /storage\.dataDbPath must not contain a NUL byte/,
     );
 
     // Boş allowRoots reddedilir.
@@ -130,7 +130,7 @@ describe("SQLite kalıcılık, Agent GPS FTS5, incremental refresh ve map_system
         autoIndex: false,
         storage: { dataDbPath: path.join(tempRoot, "graph.sqlite") },
       },
-      /allowRoots boş/,
+      /allowRoots is empty/,
     );
 
     // Üst dizini mevcut olmayan yol reddedilir.
@@ -141,7 +141,7 @@ describe("SQLite kalıcılık, Agent GPS FTS5, incremental refresh ve map_system
         autoIndex: false,
         storage: { dataDbPath: path.join(tempRoot, "yok-dizin", "graph.sqlite") },
       },
-      /üst dizini mevcut değil/,
+      /parent directory does not exist/,
     );
 
     // Üst dizini normal dosya olan yol reddedilir.
@@ -154,7 +154,7 @@ describe("SQLite kalıcılık, Agent GPS FTS5, incremental refresh ve map_system
         autoIndex: false,
         storage: { dataDbPath: path.join(regularFile, "graph.sqlite") },
       },
-      /üst dizini bir dizin değil/,
+      /parent path is not a directory/,
     );
 
     // allowRoots[0] içindeki yol reddedilir (ADR-008 kaynak ağacı yazım yasağı).
@@ -165,7 +165,7 @@ describe("SQLite kalıcılık, Agent GPS FTS5, incremental refresh ve map_system
         autoIndex: false,
         storage: { dataDbPath: path.join(FIXTURE_ROOT, "graph.sqlite") },
       },
-      /workspace kökünün içinde/,
+      /inside an authorized workspace root/,
     );
 
     // Çok köklü yapılandırmada allowRoots[1] içindeki yol da reddedilir.
@@ -178,7 +178,7 @@ describe("SQLite kalıcılık, Agent GPS FTS5, incremental refresh ve map_system
         autoIndex: false,
         storage: { dataDbPath: path.join(secondRoot, "graph.sqlite") },
       },
-      /workspace kökünün içinde/,
+      /inside an authorized workspace root/,
     );
   });
 
@@ -204,7 +204,7 @@ describe("SQLite kalıcılık, Agent GPS FTS5, incremental refresh ve map_system
       expect(summary1.status).toBe("ok");
       persistedSnapshotId = summary1.snapshotId as string;
       expect(persistedSnapshotId).toMatch(/^snapshot:/);
-      expect(logsStart1.some((msg) => msg.startsWith("index hazır:"))).toBe(true);
+      expect(logsStart1.some((msg) => msg.startsWith("index ready:"))).toBe(true);
     } finally {
       await pair1.close();
     }
@@ -227,10 +227,10 @@ describe("SQLite kalıcılık, Agent GPS FTS5, incremental refresh ve map_system
       expect(
         logsStart2.some(
           (msg) =>
-            msg.includes("kalıcı index yüklendi:") && msg.includes(persistedSnapshotId),
+            msg.includes("persistent index loaded:") && msg.includes(persistedSnapshotId),
         ),
       ).toBe(true);
-      expect(logsStart2.some((msg) => msg.startsWith("index hazır:"))).toBe(false);
+      expect(logsStart2.some((msg) => msg.startsWith("index ready:"))).toBe(false);
       expect(ctx2.repository.getLatestPublished("default")?.snapshot.meta.id).toBe(
         persistedSnapshotId,
       );
@@ -536,7 +536,9 @@ describe("SQLite kalıcılık, Agent GPS FTS5, incremental refresh ve map_system
       );
       const noOpJobId = (noOpRefresh.data as Record<string, unknown>).jobId as string;
       const noOpFinished = await ctx1.jobManager.waitForJob(noOpJobId);
-      expect(noOpFinished.status).toBe("done");
+      // No-op: nothing published -> `reused` / `unchanged`, never `done`.
+      expect(noOpFinished.status).toBe("reused");
+      expect(noOpFinished.outcome).toBe("unchanged");
       expect(noOpFinished.snapshotId).toBe(snapshotSeq1);
       expect(noOpFinished.warnings.some((w) => w.includes("incremental no-op"))).toBe(true);
 

@@ -15,16 +15,45 @@
  * yayımlaması ve overlay (anotasyon/alias) kalıcılığı sağlar.
  */
 export { GraphRepositoryError } from "@causoryn/graph";
-export { applySchema, SCHEMA_VERSION } from "./schema.js";
 export {
+  applySchema,
+  readSqliteUserVersion,
+  SCHEMA_VERSION,
+  SchemaTooNewError,
+} from "./schema.js";
+export {
+  currentLeaseHostname,
+  DEFAULT_LEASE_STALE_CEILING_MS,
   defaultIsPidAlive,
+  evaluateBuildLeaseLiveness,
+  PROCESS_LEASE_INSTANCE_ID,
+} from "./build-lease.js";
+export type {
+  BuildLeaseLiveness,
+  BuildLeaseLivenessContext,
+  BuildLeaseLivenessInput,
+  BuildLeaseLivenessReason,
+} from "./build-lease.js";
+export {
+  LEGACY_WORKSPACE_DB_PATTERN,
+  listLegacyWorkspaceDatabases,
+  migrateLegacyWorkspaceDatabase,
+} from "./legacy-migration.js";
+export type {
+  LegacyDbCandidateReport,
+  LegacyMigrationResult,
+} from "./legacy-migration.js";
+export {
   ORPHAN_BUILD_FAILURE_REASON,
   SqliteGraphRepository,
 } from "./sqlite-repository.js";
 export type {
   AcquireBuildLeaseInput,
   AcquireBuildLeaseResult,
+  BuildLeaseHeartbeatConnection,
+  BuildLeaseLivenessOptions,
   BuildLeaseRecord,
+  BuildLeaseRenewOutcome,
   FileFactRecord,
   PruneSnapshotsOptions,
   PruneSnapshotsResult,
