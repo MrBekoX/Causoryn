@@ -211,20 +211,20 @@ function normalizeRelativePath(raw: string): string {
   if (posix.startsWith("/") || /^[a-zA-Z]:/.test(posix)) {
     throw new DomainError(
       "adapter/absolute-source-path",
-      `Mutlak kaynak yolu kabul edilmez: ${raw}`,
+      `Absolute source paths are not accepted: ${raw}`,
     );
   }
   for (const segment of posix.split("/")) {
     if (segment === "" || segment === ".") {
       throw new DomainError(
         "adapter/invalid-source-path",
-        `Kaynak yolu boş/geçersiz segment içeriyor: ${raw}`,
+        `Source path contains an empty or invalid segment: ${raw}`,
       );
     }
     if (segment === "..") {
       throw new DomainError(
         "adapter/source-path-escape",
-        `Kaynak yolu kök dışına çıkıyor: ${raw}`,
+        `Source path escapes the root: ${raw}`,
       );
     }
   }
@@ -409,7 +409,7 @@ type AnalysisRun = TypeScriptIncrementalAnalysisRun;
 
 function runAnalysis(input: TypeScriptAdapterInput): AnalysisRun {
   if (input.workspaceId.trim().length === 0) {
-    throw new DomainError("adapter/empty-workspace-id", "workspaceId boş olamaz");
+    throw new DomainError("adapter/empty-workspace-id", "workspaceId must not be empty");
   }
   const rootPosix = normalizeRootPosix(input.rootDir);
   // Mutlaklık: POSIX ("/...") veya Windows sürücü harfi ("D:/...").
@@ -417,7 +417,7 @@ function runAnalysis(input: TypeScriptAdapterInput): AnalysisRun {
   if (!isAbsolute) {
     throw new DomainError(
       "adapter/invalid-root-dir",
-      `rootDir mutlak dizin olmalı: ${input.rootDir}`,
+      `rootDir must be an absolute directory: ${input.rootDir}`,
     );
   }
 
@@ -431,7 +431,7 @@ function runAnalysis(input: TypeScriptAdapterInput): AnalysisRun {
     if (entries.has(absoluteKey) || entryByRelativePath.has(relativePath)) {
       throw new DomainError(
         "adapter/duplicate-source-path",
-        `Aynı kaynak yolu iki kez verildi: ${source.relativePath}`,
+        `The same source path was given twice: ${source.relativePath}`,
       );
     }
     const entry: SourceEntry = {
@@ -562,7 +562,7 @@ function runAnalysis(input: TypeScriptAdapterInput): AnalysisRun {
       diagnostics.push({
         relativePath: entry.relativePath,
         code: "ADAPTER_INTERNAL",
-        message: "Program bu kaynak için SourceFile üretmedi",
+        message: "The TypeScript program produced no SourceFile for this source",
         line: 0,
       });
       return;
@@ -886,7 +886,7 @@ function extractDeclarations(
         ownerRecord,
         memberRecord,
         member,
-        `CONTAINS: ${ownerRecord.node.qualifiedName} ${ownerKind.toLowerCase()} bildirimi içindeki ${memberName} üyesi AST span kanıtıyla eşlendi.`,
+        `CONTAINS: member ${memberName} of the ${ownerRecord.node.qualifiedName} ${ownerKind.toLowerCase()} declaration, matched by AST span evidence.`,
       );
     }
   };
@@ -908,7 +908,7 @@ function extractDeclarations(
         fileNode,
         record,
         statement,
-        `CONTAINS: ${entry.relativePath} dosyasındaki ${name} ${kind.toLowerCase()} bildirimi AST span kanıtıyla eşlendi.`,
+        `CONTAINS: ${kind.toLowerCase()} declaration ${name} in ${entry.relativePath}, matched by AST span evidence.`,
       );
       registerMembers(statement, record, kind);
       continue;
@@ -928,7 +928,7 @@ function extractDeclarations(
         fileNode,
         record,
         statement,
-        `CONTAINS: ${entry.relativePath} dosyasındaki ${name} fonksiyon bildirimi AST span kanıtıyla eşlendi.`,
+        `CONTAINS: function declaration ${name} in ${entry.relativePath}, matched by AST span evidence.`,
       );
       continue;
     }
@@ -958,7 +958,7 @@ function extractDeclarations(
           fileNode,
           record,
           statement,
-          `CONTAINS: ${entry.relativePath} dosyasındaki ${declaration.name.text} handler bağlaması AST span kanıtıyla eşlendi.`,
+          `CONTAINS: handler binding ${declaration.name.text} in ${entry.relativePath}, matched by AST span evidence.`,
         );
       }
       continue;
@@ -1144,7 +1144,7 @@ function extractTestDefinitions(
           fileNode,
           testRecord,
           node,
-          `CONTAINS: ${entry.relativePath} dosyasındaki '${qualifiedName}' test tanımı AST span kanıtıyla eşlendi.`,
+          `CONTAINS: test definition '${qualifiedName}' in ${entry.relativePath}, matched by AST span evidence.`,
         );
         testCallbacks.set(testMatch.callback, testRecord);
         walk(node.expression, suiteChain);
@@ -1239,7 +1239,7 @@ function extractImports(
           sourceFile,
           specifier.node,
           "ast-span",
-          `IMPORTS: ${entry.relativePath} dosyasındaki '${specifier.text}' beyanı TypeChecker tarafından ${record.targetRelativePath} dosyasına çözümlendi.`,
+          `IMPORTS: '${specifier.text}' in ${entry.relativePath} was resolved by the TypeChecker to ${record.targetRelativePath}.`,
         ),
       });
       continue;
@@ -1262,11 +1262,11 @@ function extractImports(
             sourceFile,
             specifier.node,
             "ast-span",
-            `IMPORTS: '${specifier.text}' Node.js çekirdek modülü olarak bilinen kural ile sınıflandırıldı (heuristic); dış kaynak açık UnknownExternal node olarak temsil edildi.`,
+            `IMPORTS: '${specifier.text}' was classified as a Node.js core module by a known rule (heuristic); the external source is represented as an explicit UnknownExternal node.`,
           ),
           ambiguity: {
             candidates: [specifier.text],
-            reason: "Node.js builtin sınıflandırması; semantik çözümleme yok.",
+            reason: "Node.js builtin classification; no semantic resolution.",
           },
         });
         continue;
@@ -1281,7 +1281,7 @@ function extractImports(
           sourceFile,
           specifier.node,
           "ast-span",
-          `IMPORTS: ${entry.relativePath} dosyasındaki '${specifier.text}' analizi dışındaki modüle çözümlendi; dış kaynak açık UnknownExternal node olarak temsil edildi.`,
+          `IMPORTS: '${specifier.text}' in ${entry.relativePath} resolved to a module outside the analysis set; the external source is represented as an explicit UnknownExternal node.`,
         ),
       });
       continue;
@@ -1309,11 +1309,11 @@ function extractImports(
           sourceFile,
           specifier.node,
           "ast-span",
-          `IMPORTS: '${specifier.text}' TypeChecker tarafından çözümlenemedi; relative aday yolu ${candidate} analizi içinde eşleşti (heuristic).`,
+          `IMPORTS: '${specifier.text}' was not resolved by the TypeChecker; the relative candidate path ${candidate} matched inside the analysis set (heuristic).`,
         ),
         ambiguity: {
           candidates: [candidate],
-          reason: "TypeChecker modülü çözümlemedi; dosya yolu aday eşleşmesi.",
+          reason: "The TypeChecker did not resolve the module; file-path candidate match.",
         },
       });
       continue;
@@ -1333,11 +1333,11 @@ function extractImports(
         sourceFile,
         specifier.node,
         "ast-span",
-        `IMPORTS: '${specifier.text}' çözümlenemedi; uydurma hedef yerine açık UnknownExternal node üzerinde unresolved işaretlendi.`,
+        `IMPORTS: '${specifier.text}' could not be resolved; marked unresolved on an explicit UnknownExternal node instead of inventing a target.`,
       ),
     });
     assembler.addWarning(
-      `IMPORTS çözümlenemedi: ${entry.relativePath} -> '${specifier.text}' (unresolved, UnknownExternal node üretildi)`,
+      `IMPORTS unresolved: ${entry.relativePath} -> '${specifier.text}' (unresolved, UnknownExternal node created)`,
     );
   }
 }
@@ -1607,7 +1607,7 @@ function tryRoutePattern(
   if (handlerArg === undefined) return true;
   if (!ts.isIdentifier(handlerArg) && !ts.isPropertyAccessExpression(handlerArg)) {
     assembler.addWarning(
-      `Route handler modellenmedi: ${entry.relativePath} '${verb} ${pathText}' (inline/anonymous handler unsupportedConstructs kapsamında)`,
+      `Route handler not modeled: ${entry.relativePath} '${verb} ${pathText}' (inline/anonymous handlers are listed in unsupportedConstructs)`,
     );
     return true;
   }
@@ -1643,7 +1643,7 @@ function tryRoutePattern(
         sourceFile,
         call,
         "route-attribute",
-        `ROUTES_TO: '${verb} ${pathText}' route kaydı ${handlerRecord.node.qualifiedName} handler'ına TypeChecker ile çözümlendi.`,
+        `ROUTES_TO: route registration '${verb} ${pathText}' was resolved by the TypeChecker to handler ${handlerRecord.node.qualifiedName}.`,
       ),
     );
     return true;
@@ -1662,14 +1662,14 @@ function tryRoutePattern(
         sourceFile,
         call,
         "route-attribute",
-        `ROUTES_TO: '${verb} ${pathText}' route kaydındaki handler analiz seti dışındaki ${handlerSymbol.getName()} sembolüne çözümlendi; açık UnknownExternal node kullanıldı.`,
+        `ROUTES_TO: the handler of route registration '${verb} ${pathText}' resolved to symbol ${handlerSymbol.getName()} outside the analysis set; an explicit UnknownExternal node was used.`,
       ),
     );
     return true;
   }
 
   assembler.addWarning(
-    `ROUTES_TO çözümlenemedi: ${entry.relativePath} '${verb} ${pathText}' -> handler sembolü bulunamadı (Endpoint node'u korundu, kenar üretilmedi)`,
+    `ROUTES_TO unresolved: ${entry.relativePath} '${verb} ${pathText}' -> handler symbol not found (Endpoint node kept, no edge created)`,
   );
   return true;
 }
@@ -1723,7 +1723,7 @@ function emitCallEdge(
         sourceFile,
         call,
         "semantic-symbol",
-        `CALLS: ${caller.node.qualifiedName} içindeki çağrı ifadesi TypeChecker ile ${registryHit.node.qualifiedName} sembolüne çözümlendi (verified).`,
+        `CALLS: call expression in ${caller.node.qualifiedName} was resolved by the TypeChecker to symbol ${registryHit.node.qualifiedName} (verified).`,
       ),
     });
     if (caller.node.kind === "Test" && registryHit.node.kind !== "Test") {
@@ -1737,7 +1737,7 @@ function emitCallEdge(
           sourceFile,
           call,
           "semantic-symbol",
-          `TESTS: ${caller.node.qualifiedName} testi içindeki çağrı ifadesi TypeChecker ile ${registryHit.node.qualifiedName} sembolüne çözümlendi (verified).`,
+          `TESTS: call expression in test ${caller.node.qualifiedName} was resolved by the TypeChecker to symbol ${registryHit.node.qualifiedName} (verified).`,
         ),
       });
     }
@@ -1771,7 +1771,7 @@ function emitCallEdge(
         sourceFile,
         call,
         "semantic-symbol",
-        `CALLS: ${caller.node.qualifiedName} içindeki çağrı analiz seti dışındaki ${externalName} sembolüne çözümlendi; dış kaynak açık UnknownExternal node olarak temsil edildi.`,
+        `CALLS: call in ${caller.node.qualifiedName} resolved to symbol ${externalName} outside the analysis set; the external source is represented as an explicit UnknownExternal node.`,
       ),
     });
     return;
@@ -1805,11 +1805,11 @@ function emitCallEdge(
       sourceFile,
       call,
       "ast-span",
-      `CALLS: ${caller.node.qualifiedName} içindeki '${callText}' çağrısı çözümlenemedi; uydurma hedef yerine açık UnknownExternal node üzerinde unresolved işaretlendi.`,
+      `CALLS: call '${callText}' in ${caller.node.qualifiedName} could not be resolved; marked unresolved on an explicit UnknownExternal node instead of inventing a target.`,
     ),
   });
   assembler.addWarning(
-    `CALLS çözümlenemedi: ${entry.relativePath} '${callText}' (unresolved, UnknownExternal node üretildi)`,
+    `CALLS unresolved: ${entry.relativePath} '${callText}' (unresolved, UnknownExternal node created)`,
   );
 }
 
@@ -2247,7 +2247,7 @@ function emitNextRouteEdge(
       sourceFile,
       anchor,
       "route-attribute",
-      `ROUTES_TO: '${method} ${routePath}' Next.js App Router kural exportu (${entry.relativePath}) ${handlerRecord.node.qualifiedName} sembolüne TypeChecker ile çözümlendi.`,
+      `ROUTES_TO: Next.js App Router convention export '${method} ${routePath}' (${entry.relativePath}) was resolved by the TypeChecker to symbol ${handlerRecord.node.qualifiedName}.`,
     ),
   });
   context.framework.edges.push(edge);
@@ -2283,7 +2283,7 @@ function collectNextRouteHandlers(
       const record = handlerRecordOf(name);
       if (record === undefined) {
         assembler.addWarning(
-          `Next.js route handler çözümlenemedi: ${entry.relativePath} '${name.text}' (kenar üretilmedi)`,
+          `Next.js route handler unresolved: ${entry.relativePath} '${name.text}' (no edge created)`,
         );
         continue;
       }
@@ -2310,7 +2310,7 @@ function collectNextRouteHandlers(
         const record = handlerRecordOf(declaration.name);
         if (record === undefined) {
           assembler.addWarning(
-            `Next.js route handler çözümlenemedi: ${entry.relativePath} '${declaration.name.text}' (kenar üretilmedi)`,
+            `Next.js route handler unresolved: ${entry.relativePath} '${declaration.name.text}' (no edge created)`,
           );
           continue;
         }
@@ -2333,7 +2333,7 @@ function collectNextRouteHandlers(
     context.framework.diagnostics.push({
       relativePath: entry.relativePath,
       code: "FRAMEWORK_PATTERN_UNKNOWN",
-      message: `Next.js App Router kural dosyası ('${entry.relativePath}') tanınan HTTP fiil exportu içermiyor (beklenen: export function GET|POST|... veya export const GET = ...); kenar üretilmedi, node icat edilmedi.`,
+      message: `Next.js App Router route file ('${entry.relativePath}') has no recognized HTTP verb export (expected: export function GET|POST|... or export const GET = ...); no edge created, no node invented.`,
       line: firstStatementLine(sourceFile),
     });
   }
@@ -2399,8 +2399,8 @@ function collectNextPageHandler(
     relativePath: entry.relativePath,
     code: "FRAMEWORK_PATTERN_UNKNOWN",
     message: defaultExportSeen
-      ? `Next.js App Router sayfa dosyası ('${entry.relativePath}') isimsiz/anonim default export içeriyor; sembol icat edilmez, kenar üretilmedi.`
-      : `Next.js App Router sayfa dosyası ('${entry.relativePath}') tanınan default export içermiyor; kenar üretilmedi, node icat edilmedi.`,
+      ? `Next.js App Router page file ('${entry.relativePath}') has an unnamed/anonymous default export; no symbol invented, no edge created.`
+      : `Next.js App Router page file ('${entry.relativePath}') has no recognized default export; no edge created, no node invented.`,
     line: firstStatementLine(sourceFile),
   });
 }
@@ -2976,7 +2976,7 @@ function extractCjsExportStatement(
     fileNode,
     record,
     statement,
-    `CONTAINS: ${entry.relativePath} dosyasındaki CommonJS export ${match.exportName} bildirimi AST span kanıtıyla eşlendi.`,
+    `CONTAINS: CommonJS export ${match.exportName} in ${entry.relativePath}, matched by AST span evidence.`,
   );
 }
 
@@ -3421,7 +3421,7 @@ function tryRegisterClassExpression(
     fileNode,
     classRecord,
     statement,
-    `CONTAINS: ${entry.relativePath} dosyasındaki ${declaration.name.text} class ifadesi AST span kanıtıyla eşlendi.`,
+    `CONTAINS: class expression ${declaration.name.text} in ${entry.relativePath}, matched by AST span evidence.`,
   );
   registerMembers(unwrappedInit, classRecord, "Class");
   return true;
@@ -3507,7 +3507,7 @@ function extractHeritageClauses(
           sourceFile,
           heritageType,
           "semantic-symbol",
-          `${edgeKind}: ${ownerRecord.node.qualifiedName} bildirimi TypeChecker ile ${targetRecord.node.qualifiedName} sembolüne çözümlendi (verified).`,
+          `${edgeKind}: declaration ${ownerRecord.node.qualifiedName} was resolved by the TypeChecker to symbol ${targetRecord.node.qualifiedName} (verified).`,
         ),
       });
       return;
@@ -3534,7 +3534,7 @@ function extractHeritageClauses(
           sourceFile,
           heritageType,
           "semantic-symbol",
-          `${edgeKind}: ${ownerRecord.node.qualifiedName} bildirimi analiz seti dışındaki ${externalName} sembolüne çözümlendi; dış kaynak açık UnknownExternal node olarak temsil edildi.`,
+          `${edgeKind}: declaration ${ownerRecord.node.qualifiedName} resolved to symbol ${externalName} outside the analysis set; the external source is represented as an explicit UnknownExternal node.`,
         ),
       });
       return;
@@ -3556,11 +3556,11 @@ function extractHeritageClauses(
         sourceFile,
         heritageType,
         "ast-span",
-        `${edgeKind}: ${ownerRecord.node.qualifiedName} içindeki '${rawText}' kalıtım hedefi çözümlenemedi; açık UnknownExternal node üzerinde unresolved işaretlendi.`,
+        `${edgeKind}: heritage target '${rawText}' of ${ownerRecord.node.qualifiedName} could not be resolved; marked unresolved on an explicit UnknownExternal node.`,
       ),
     });
     assembler.addWarning(
-      `${edgeKind} çözümlenemedi: ${entry.relativePath} '${ownerRecord.node.qualifiedName}' -> '${rawText}' (unresolved, UnknownExternal node üretildi)`,
+      `${edgeKind} unresolved: ${entry.relativePath} '${ownerRecord.node.qualifiedName}' -> '${rawText}' (unresolved, UnknownExternal node created)`,
     );
   };
 

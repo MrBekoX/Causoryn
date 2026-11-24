@@ -470,7 +470,7 @@ function checkPrototypeInjection(
   const proto: unknown = Object.getPrototypeOf(obj);
   if (proto !== Object.prototype && proto !== null) {
     addWarning(
-      `tsconfig içinde güvensiz __proto__ anahtarı algılandı ve yoksayıldı: ${contextLabel}`,
+      `unsafe __proto__ key detected in tsconfig and ignored: ${contextLabel}`,
     );
   }
 }
@@ -494,7 +494,7 @@ function extractSafeCompilerOptions(
       out.baseUrl = joinPosixAbs(rootPosix, resolvedBase.relativePath);
     } else {
       addWarning(
-        `kök dışına çıkan tsconfig baseUrl reddedildi: ${configRelativePath} -> ${rawBaseUrl}`,
+        `rejected tsconfig baseUrl that escapes the root: ${configRelativePath} -> ${rawBaseUrl}`,
       );
     }
   }
@@ -507,7 +507,7 @@ function extractSafeCompilerOptions(
     for (const key of Object.getOwnPropertyNames(rawPaths)) {
       if (FORBIDDEN_KEYS.has(key)) {
         addWarning(
-          `tsconfig paths içinde güvensiz '${key}' anahtarı reddedildi: ${configRelativePath}`,
+          `rejected unsafe '${key}' key in tsconfig paths: ${configRelativePath}`,
         );
         continue;
       }
@@ -518,7 +518,7 @@ function extractSafeCompilerOptions(
         if (!cappedWarned) {
           cappedWarned = true;
           addWarning(
-            `tsconfig paths giriş sınırı (${String(MAX_PATHS_ENTRIES)}) aşıldı; kalan girdiler kesildi: ${configRelativePath}`,
+            `tsconfig paths entry limit (${String(MAX_PATHS_ENTRIES)}) exceeded; remaining entries were dropped: ${configRelativePath}`,
           );
         }
         break;
@@ -621,7 +621,7 @@ function sanitizePathsWithinRoot(
         : undefined;
   if (effectiveBaseRel === undefined) {
     addWarning(
-      `kök dışına çıkan tsconfig paths tabanı reddedildi: ${configRelativePath}`,
+      `rejected tsconfig paths base that escapes the root: ${configRelativePath}`,
     );
     const { paths: _omit, pathsBasePath: _omitBase, ...rest } = options;
     return rest;
@@ -633,7 +633,7 @@ function sanitizePathsWithinRoot(
     for (const target of targets) {
       if (!isSafePathTargetWithinRoot(effectiveBaseRel, target)) {
         addWarning(
-          `kök dışına çıkan tsconfig paths hedefi reddedildi: ${configRelativePath} ('${pattern}' -> '${target}')`,
+          `rejected tsconfig paths target that escapes the root: ${configRelativePath} ('${pattern}' -> '${target}')`,
         );
         continue;
       }
@@ -716,7 +716,7 @@ function readBoundedTextFromFd(
     const fdStat = nodeFs.fstatSync(fd);
     if (!fdStat.isFile()) return undefined;
     if (fdStat.size > MAX_TSCONFIG_BYTES) {
-      addWarning(`tsconfig boyutu 256 KB sınırını aşıyor: ${relPath}`);
+      addWarning(`config file exceeds the 256 KB limit: ${relPath}`);
       return undefined;
     }
     if (
@@ -724,7 +724,7 @@ function readBoundedTextFromFd(
       leafStat.ino !== 0 &&
       (fdStat.ino !== leafStat.ino || fdStat.dev !== leafStat.dev)
     ) {
-      addWarning(`tsconfig okuma sırasında değişti (TOCTOU): ${relPath}`);
+      addWarning(`config file changed while being read (TOCTOU): ${relPath}`);
       return undefined;
     }
     const buf = new Uint8Array(MAX_TSCONFIG_BYTES + 1);
@@ -741,7 +741,7 @@ function readBoundedTextFromFd(
       totalRead += bytesRead;
     }
     if (totalRead > MAX_TSCONFIG_BYTES) {
-      addWarning(`tsconfig boyutu okuma sonrası 256 KB sınırını aşıyor: ${relPath}`);
+      addWarning(`config file exceeds the 256 KB limit after reading: ${relPath}`);
       return undefined;
     }
     return decodeUtf8(buf.subarray(0, totalRead));
@@ -770,7 +770,7 @@ function createDiskConfigReader(
   addWarning: (msg: string) => void,
 ): ((relativePath: string) => string | undefined) | undefined {
   if (isUncOrDevicePath(rootDirOnDisk) || rootDirOnDisk.includes("\0")) {
-    addWarning(`UNC/aygıt rootDir için disk okuması reddedildi`);
+    addWarning(`disk read refused for a UNC/device rootDir`);
     return undefined;
   }
   const nodeFs = getNodeFs();
@@ -783,7 +783,7 @@ function createDiskConfigReader(
     return undefined;
   }
   if (rootStat.isSymbolicLink() || !rootStat.isDirectory()) {
-    addWarning(`symlink veya dizin olmayan rootDir için disk tsconfig okuması atlandı`);
+    addWarning(`skipped disk config read: rootDir is a symlink or not a directory`);
     return undefined;
   }
 
@@ -794,7 +794,7 @@ function createDiskConfigReader(
     return undefined;
   }
   if (isUncOrDevicePath(rawRealRoot)) {
-    addWarning(`UNC/aygıt rootDir için disk okuması reddedildi`);
+    addWarning(`disk read refused for a UNC/device rootDir`);
     return undefined;
   }
   const realRootPosix = stripNonRootTrailingSlash(
@@ -811,7 +811,7 @@ function createDiskConfigReader(
     if (relPath === undefined) return undefined;
     if (!relPath.toLowerCase().endsWith(".json")) return undefined;
     if (hasForbiddenDiskSegment(relPath)) {
-      addWarning(`yasaklı segment içeren tsconfig reddedildi: ${relPath}`);
+      addWarning(`rejected config path with a forbidden segment: ${relPath}`);
       return undefined;
     }
 
@@ -831,7 +831,7 @@ function createDiskConfigReader(
         return undefined;
       }
       if (stat.isSymbolicLink()) {
-        addWarning(`symlink tsconfig reddedildi (CWE-59): ${relPath}`);
+        addWarning(`rejected symlinked config file (CWE-59): ${relPath}`);
         return undefined;
       }
       const isLast = i === segments.length - 1;
@@ -840,7 +840,7 @@ function createDiskConfigReader(
       } else {
         if (!stat.isFile()) return undefined;
         if (stat.size > MAX_TSCONFIG_BYTES) {
-          addWarning(`tsconfig boyutu 256 KB sınırını aşıyor: ${relPath}`);
+          addWarning(`config file exceeds the 256 KB limit: ${relPath}`);
           return undefined;
         }
         leafStat = stat;
@@ -856,7 +856,7 @@ function createDiskConfigReader(
     }
     const realTargetKey = canonicalKey(realTargetRaw);
     if (!realTargetKey.startsWith(rootPrefixWithSlash)) {
-      addWarning(`kök dışına çıkan tsconfig reddedildi (CWE-59): ${relPath}`);
+      addWarning(`rejected config file that resolves outside the root (CWE-59): ${relPath}`);
       return undefined;
     }
 
@@ -943,11 +943,11 @@ export function loadWorkspaceTsConfigs(
     for (const file of sortedInputs) {
       const validRel = validateRelativeConfigPath(file.relativePath);
       if (validRel === undefined) {
-        addWarning(`geçersiz tsconfig yolu yoksayıldı: ${file.relativePath}`);
+        addWarning(`ignored invalid tsconfig path: ${file.relativePath}`);
         continue;
       }
       if (utf8Encode(file.content).byteLength > MAX_TSCONFIG_BYTES) {
-        addWarning(`tsconfig boyutu 256 KB sınırını aşıyor: ${validRel}`);
+        addWarning(`tsconfig exceeds the 256 KB limit: ${validRel}`);
         continue;
       }
       const key = canonicalRelKey(validRel);
@@ -1001,7 +1001,7 @@ export function loadWorkspaceTsConfigs(
     }
     const parsed = ts.parseConfigFileTextToJson(entry.relativePath, entry.content);
     if (parsed.error !== undefined || !isPlainRecord(parsed.config)) {
-      addWarning(`geçersiz tsconfig JSONC yoksayıldı: ${entry.relativePath}`);
+      addWarning(`ignored invalid tsconfig JSONC: ${entry.relativePath}`);
       parsedCache.set(canonRel, null);
       return undefined;
     }
@@ -1017,14 +1017,14 @@ export function loadWorkspaceTsConfigs(
   ): ResolveOutcome => {
     if (depth > MAX_EXTENDS_DEPTH) {
       addWarning(
-        `tsconfig extends derinlik sınırı (${String(MAX_EXTENDS_DEPTH)}) aşıldı: ${entry.relativePath}`,
+        `tsconfig extends depth limit (${String(MAX_EXTENDS_DEPTH)}) exceeded: ${entry.relativePath}`,
       );
       return { options: undefined, globallyCacheable: false };
     }
     const canonRel = canonicalRelKey(entry.relativePath);
     if (visited.has(canonRel)) {
       addWarning(
-        `döngüsel tsconfig extends zinciri algılandı: ${entry.relativePath}`,
+        `circular tsconfig extends chain detected: ${entry.relativePath}`,
       );
       return { options: undefined, globallyCacheable: false };
     }
@@ -1045,7 +1045,7 @@ export function loadWorkspaceTsConfigs(
 
     if (totalVisits >= MAX_TOTAL_RESOLVE_VISITS) {
       addWarning(
-        `tsconfig extends ziyaret bütçesi (${String(MAX_TOTAL_RESOLVE_VISITS)}) aşıldı; kalan zincir kesildi`,
+        `tsconfig extends visit budget (${String(MAX_TOTAL_RESOLVE_VISITS)}) exceeded; the remaining chain was cut`,
       );
       return { options: undefined, globallyCacheable: false };
     }
@@ -1070,7 +1070,7 @@ export function loadWorkspaceTsConfigs(
         if (typeof item !== "string") continue;
         if (extendsList.length >= MAX_EXTENDS_ENTRIES) {
           addWarning(
-            `tsconfig extends giriş sınırı (${String(MAX_EXTENDS_ENTRIES)}) aşıldı: ${entry.relativePath}`,
+            `tsconfig extends entry limit (${String(MAX_EXTENDS_ENTRIES)}) exceeded: ${entry.relativePath}`,
           );
           break;
         }
@@ -1086,7 +1086,7 @@ export function loadWorkspaceTsConfigs(
         if (spec.length === 0) continue;
         if (isAbsoluteOrUnsafeExtendsSpec(spec)) {
           addWarning(
-            `mutlak/güvensiz tsconfig extends reddedildi: ${entry.relativePath} -> ${spec}`,
+            `rejected absolute/unsafe tsconfig extends: ${entry.relativePath} -> ${spec}`,
           );
           continue;
         }
@@ -1097,7 +1097,7 @@ export function loadWorkspaceTsConfigs(
         const resolved = resolveRelativeWithinRoot(dirPrefix, spec);
         if (!resolved.ok) {
           addWarning(
-            `kök dışına çıkan tsconfig extends reddedildi: ${entry.relativePath} -> ${spec}`,
+            `rejected tsconfig extends that escapes the root: ${entry.relativePath} -> ${spec}`,
           );
           continue;
         }
@@ -1119,7 +1119,7 @@ export function loadWorkspaceTsConfigs(
         }
         if (parentEntry === undefined) {
           addWarning(
-            `tsconfig extends hedefi bulunamadı: ${entry.relativePath} -> ${spec}`,
+            `tsconfig extends target not found: ${entry.relativePath} -> ${spec}`,
           );
           continue;
         }
@@ -1161,7 +1161,7 @@ export function loadWorkspaceTsConfigs(
   const activeEntries = sortedActiveEntries.slice(0, MAX_SCOPED_CONFIGS);
   if (sortedActiveEntries.length > MAX_SCOPED_CONFIGS) {
     addWarning(
-      `aktif tsconfig/jsconfig sınırı (${String(MAX_SCOPED_CONFIGS)}) aşıldı; kalan yapılandırmalar kesildi`,
+      `active tsconfig/jsconfig limit (${String(MAX_SCOPED_CONFIGS)}) exceeded; remaining configs were dropped`,
     );
   }
 
@@ -1840,7 +1840,7 @@ function parseSafePackageManifest(
   try {
     parsed = JSON.parse(content);
   } catch {
-    addWarning(`geçersiz package.json yoksayıldı: ${relativePath}`);
+    addWarning(invalidPackageJsonWarning(relativePath));
     return {};
   }
   if (!isPlainRecord(parsed)) return {};
@@ -1963,7 +1963,7 @@ export function loadWorkspacePackages(
         continue;
       }
       if (utf8Encode(file.content).byteLength > MAX_PACKAGE_JSON_BYTES) {
-        addWarning(`package.json boyutu 256 KB sınırını aşıyor: ${validRel}`);
+        addWarning(`package.json exceeds the 256 KB limit: ${validRel}`);
         continue;
       }
       if (rawByCanonRel.size >= MAX_WORKSPACE_MANIFESTS) break;

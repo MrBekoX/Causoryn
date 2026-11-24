@@ -489,7 +489,7 @@ describe("Wave 2A — TypeScript Monorepo Workspace Package Resolution", { timeo
     ]) {
       const uncRes = loadWorkspacePackages("/virtual", undefined, uncRoot);
       expect(uncRes.packages.size).toBe(0);
-      expect(uncRes.warnings.some((w) => w.includes("UNC/aygıt"))).toBe(true);
+      expect(uncRes.warnings.some((w) => w.includes("UNC/device"))).toBe(true);
     }
 
     // 2) Slash-heavy workspaces patterns (classic O(n^2) trigger for /^\/+|\/+$/g) must finish in O(n) linear time.
