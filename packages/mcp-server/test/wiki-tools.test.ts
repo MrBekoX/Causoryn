@@ -1178,7 +1178,7 @@ describe("causoryn_wiki_get_versions", { timeout: 60_000 }, () => {
       expect(versions[0]?.availability).toBe("available");
       expect(String(versions[0]?.contentHash)).toMatch(/^[0-9a-f]{64}$/);
       expect(String(versions[0]?.linkSetHash)).toMatch(/^[0-9a-f]{64}$/);
-      expect(versions[0]?.templateVersion).toBe("1.0.0");
+      expect(versions[0]?.templateVersion).toBe("1.1.0");
       const coverage = versions[0]?.coverage as Record<string, unknown>;
       expect(typeof coverage.status).toBe("string");
 

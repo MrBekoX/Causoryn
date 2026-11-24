@@ -120,4 +120,4 @@ export const WIKI_ROOT_CATEGORY_BY_KEY: ReadonlyMap<string, WikiRootCategory> =
  * sabiti taşır; şablon değişince sürüm yükseltilir ve tüm sayfa
  * contentHash'leri değişir (W6 invalidation anahtarı).
  */
-export const WIKI_TEMPLATE_VERSION = "1.0.0";
+export const WIKI_TEMPLATE_VERSION = "1.1.0";
