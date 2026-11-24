@@ -463,9 +463,9 @@ describe("1. Canonical skills/ (YAML frontmatter + ADR-010 tool honesty)", () =>
       "utf8",
     );
     const requiredTokens = [
-      "causoryn_workspace_summary",
+      "causoryn_status",
       "causoryn_map_system",
-      "causoryn_generate_onboarding",
+      '"profile": "onboarding"',
       "causoryn_export_documentation",
       "architectureSummary.moduleIds",
       "annotations",
@@ -536,7 +536,8 @@ describe("1. Canonical skills/ (YAML frontmatter + ADR-010 tool honesty)", () =>
     );
     expect(zcodeMapSkill).not.toContain("Faz A");
     expect(zcodeMapSkill).toContain("architecture-blueprint");
-    expect(zcodeMapSkill).toContain("causoryn_trace_execution");
+    expect(zcodeMapSkill).toContain("causoryn_trace");
+    expect(zcodeMapSkill).not.toContain("causoryn_trace_execution");
     expect(zcodeMapSkill).toMatch(/L3[^\n]*Test/);
     expect(zcodeMapSkill).toContain("nextCursor, error");
   });
