@@ -206,7 +206,7 @@ public static class Program
         }
         catch (Exception ex)
         {
-            Log($"beklenmeyen hata: {ex}");
+            Log($"unexpected error: {ex}");
             return Error(
                 TryExtractId(line),
                 ProtocolErrorCodes.InternalError,
