@@ -80,10 +80,10 @@ const SEMVER_PATTERN = /^\d+\.\d+\.\d+$/;
 
 /** Kırmızı kural 6 — dürüst matris satırı (skip çıktısında görünür). */
 const INSTALL_ATTEMPT_NOT_RUN_REASON =
-  "kurulum denemesi NOT RUN: zcode CLI yok (which/where/zcode --help/zcode plugin --help → command not found; " +
-  "tek yürütülebilir Electron GUI uygulamasıdır, kurulum Settings → Plugin Management GUI'sinden yapılır — " +
-  "GUI başlatma kullanıcı masaüstünde ikincil pencere açar, denenmedi; kullanıcı gerçek kurulumu " +
-  "(~/.zcode/cli/plugins/*) yalnızca salt okundu, yazılmadı — sahte kurulum yapılmadı (kırmızı kural 6))";
+  "install attempt NOT RUN: no zcode CLI (which/where/zcode --help/zcode plugin --help → command not found; " +
+  "the only executable is the Electron GUI app and installation happens in Settings → Plugin Management — " +
+  "launching the GUI opens a window on the user desktop, so it was not attempted; the real install dir " +
+  "(~/.zcode/cli/plugins/*) was only read, never written — no fake install was performed)";
 
 interface ValidationIssue {
   readonly path: string;
@@ -358,9 +358,10 @@ describe("dev marketplace (.claude-plugin/marketplace.json)", () => {
     ).toBe(true);
   });
 
+  // vitest `skip` is a boolean; the honest NOT RUN reason travels in the test title instead.
   it(
-    "PARTIAL (not run): CLI kurulum denemesi koşulamadı — zcode CLI yok",
-    { skip: INSTALL_ATTEMPT_NOT_RUN_REASON },
+    `PARTIAL (not run): ${INSTALL_ATTEMPT_NOT_RUN_REASON}`,
+    { skip: true },
     () => {
       // Bu gövde koşmaz; koşması skip sebebini geçersiz kılardı.
       expect.fail("skip devre dışı bırakılmamalıydı");

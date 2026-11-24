@@ -97,9 +97,11 @@ const BUNDLE_ENTRY_PATH = path.join(
   "mcp-server.mjs",
 );
 const BUNDLE_PRESENT = existsSync(BUNDLE_ENTRY_PATH);
-const BUNDLE_SKIP_REASON = BUNDLE_PRESENT
-  ? false
-  : "bundle yok — önce npm run build:bundle (packages/mcp-server)";
+/** vitest `skip` is a boolean: skip the bundle-dependent checks only when the bundle is absent. */
+const BUNDLE_SKIP = !BUNDLE_PRESENT;
+if (BUNDLE_SKIP) {
+  console.warn("[plugin-package] bundle missing — run npm run build:bundle --workspace packages/mcp-server first");
+}
 
 const SERVER_TS = readFileSync(
   path.join(REPO_ROOT, "packages", "mcp-server", "src", "server.ts"),
@@ -120,7 +122,7 @@ function extractErrorCodes(source: string): string[] {
     /export const CAUSORYN_TOOL_ERROR_CODES = \[([\s\S]*?)\] as const/,
   );
   if (block === null) return [];
-  return [...block[1].matchAll(/"([A-Z_]+)"/g)].map((m) => m[1] as string);
+  return [...(block[1] ?? "").matchAll(/"([A-Z_]+)"/g)].map((m) => m[1] as string);
 }
 
 const ERRORS_TS = readFileSync(
@@ -149,7 +151,7 @@ function extractToolNames(versionSource: string): string[] {
     /export const TOOL_NAMES = \[([\s\S]*?)\] as const/,
   );
   if (block === null) return [];
-  return [...block[1].matchAll(/"([a-z_]+)"/g)].map((m) => m[1] as string);
+  return [...(block[1] ?? "").matchAll(/"([a-z_]+)"/g)].map((m) => m[1] as string);
 }
 
 function extractCoreToolNames(versionSource: string): string[] {
@@ -157,7 +159,7 @@ function extractCoreToolNames(versionSource: string): string[] {
     /export const CORE_TOOL_NAMES = \[([\s\S]*?)\] as const/,
   );
   if (block === null) return [];
-  return [...block[1].matchAll(/"([a-z_]+)"/g)].map((m) => m[1] as string);
+  return [...(block[1] ?? "").matchAll(/"([a-z_]+)"/g)].map((m) => m[1] as string);
 }
 
 const TOOL_NAMES_FROM_SOURCE = extractToolNames(VERSION_TS);
@@ -735,7 +737,7 @@ function readPluginFile(relativePath: string): string {
 describe("plugin manifest (.zcode-plugin/plugin.json)", () => {
   it(
     "POZİTİF: geçerli JSON; zorunlu alanlar tam; mcpServers girdisi derlenmiş server dist girişine işaret eder",
-    { skip: BUNDLE_SKIP_REASON },
+    { skip: BUNDLE_SKIP },
     () => {
       // Yayımlanan set server.ts'ten dinamik çıkarılır; çekirdek 5 araç
       // (sprint-1 görev 6-7: get_evidence görev 7 ile eklendi) her zaman
@@ -759,7 +761,7 @@ describe("plugin manifest (.zcode-plugin/plugin.json)", () => {
 
   it(
     "BAĞLANTI: mcpServers yalnızca causoryn girdisini taşır; dist girişi diskte var",
-    { skip: BUNDLE_SKIP_REASON },
+    { skip: BUNDLE_SKIP },
     () => {
       const manifest = asRecord(JSON.parse(readPluginFile(MANIFEST_REL)) as unknown);
       expect(manifest).not.toBeUndefined();
