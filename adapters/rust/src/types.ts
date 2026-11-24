@@ -153,6 +153,12 @@ export interface AnalyzeRustWorkspaceInput {
   /** Opaque workspace kimliği; boş/boşluk DomainError ile reddedilir. */
   readonly workspaceId: string;
   readonly files: readonly RustSourceFile[];
+  /**
+   * Absolute root of the analyzed workspace (optional). PATH entries inside
+   * it are never used to resolve toolchain executables; the process cwd is
+   * always treated the same way.
+   */
+  readonly workspaceRoot?: string;
   readonly options?: Partial<RustAdapterOptions>;
 }
 

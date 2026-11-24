@@ -17,6 +17,7 @@
 import { delimiter as pathDelimiter, dirname, join } from "node:path";
 import {
   buildAllowlistedWorkerEnv,
+  isFullyQualifiedPath,
   runLineJsonWorker,
   type SidecarSpawnFunction,
   type WorkerRunOutcome,
@@ -86,19 +87,22 @@ export function runWorkerAnalyze(
     input.workerBinaryName.includes("/") ||
     input.workerBinaryName.includes("\\") ||
     input.workerBinaryName === ".." ||
-    input.workerBinaryName === "."
+    input.workerBinaryName === "." ||
+    !isFullyQualifiedPath(input.workerDir)
   ) {
     return Promise.resolve({
       status: "unavailable",
       response: null,
       stderr: "",
-      detail: "geçersiz worker binary yolu (güvenlik filtresi reddetti)",
+      detail: "invalid worker binary path (rejected by the safety filter; the worker directory must be absolute)",
     });
   }
 
+  // Started by its absolute path: a bare binary name would be looked up in
+  // the cwd first on Windows.
   const workerBinaryPath = join(input.workerDir, input.workerBinaryName);
   return runLineJsonWorker({
-    command: input.workerBinaryName,
+    command: workerBinaryPath,
     args: [],
     env: buildWorkerEnv(input.workerDir),
     cwd: dirname(workerBinaryPath),

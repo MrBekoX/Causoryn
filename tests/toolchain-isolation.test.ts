@@ -199,7 +199,7 @@ describe("Task 1.1: Sidecar IPC hardening", () => {
   it("always sets shell:false and windowsHide:true on spawn", async () => {
     const captured: SidecarSpawnOptions[] = [];
     const outcome = await runLineJsonWorker({
-      command: "worker-bin",
+      command: path.join(os.tmpdir(), "worker-bin"),
       args: [],
       env: { PATH: "/bin" },
       cwd: REPO_ROOT,
@@ -221,7 +221,7 @@ describe("Task 1.1: Sidecar IPC hardening", () => {
     let spawned = false;
     for (const badCwd of ["", "   ", "\t\n"]) {
       const outcome = await runLineJsonWorker({
-        command: "worker-bin",
+        command: path.join(os.tmpdir(), "worker-bin"),
         args: [],
         env: { PATH: "/bin" },
         cwd: badCwd,

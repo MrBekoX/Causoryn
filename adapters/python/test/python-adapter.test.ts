@@ -188,7 +188,7 @@ describe.skipIf(!pythonAvailable)("adapters/python (M1-Python)", () => {
     expect(
       result.warnings.some(
         (warning) =>
-          warning.includes("Python worker kullanılamıyor") && warning.includes("L0/L1"),
+          warning.includes("Python worker unavailable") && warning.includes("L0/L1"),
       ),
     ).toBe(true);
   });
@@ -214,7 +214,7 @@ describe.skipIf(!pythonAvailable)("adapters/python (M1-Python)", () => {
     expect(capture.child).not.toBeNull();
     expect(capture.child?.killed).toBe(true);
     expect(
-      result.warnings.some((warning) => warning.includes("zaman aşımı")),
+      result.warnings.some((warning) => warning.includes("timeout")),
     ).toBe(true);
   });
 
@@ -259,7 +259,7 @@ describe.skipIf(!pythonAvailable)("adapters/python (M1-Python)", () => {
       result.warnings.some((warning) => warning.includes("LIMIT_EXCEEDED")),
     ).toBe(true);
     expect(
-      result.warnings.some((warning) => warning.includes("worker hatası")),
+      result.warnings.some((warning) => warning.includes("worker error")),
     ).toBe(true);
   });
 
@@ -407,7 +407,7 @@ describe("adapters/python runWorkerAnalyze", () => {
       },
     });
     expect(outcome.status).toBe("unavailable");
-    expect(outcome.detail).toContain("sınırını aştı");
+    expect(outcome.detail).toContain("character limit");
     // Saklanan kuyruk bütçeye kırpılır: birikim sınırsız büyüyemez.
     expect(outcome.stderr.length).toBeLessThanOrEqual(64);
     expect(killed.length).toBe(1);

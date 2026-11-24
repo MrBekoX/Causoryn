@@ -420,7 +420,7 @@ describe("Rust yazılabilir CARGO_TARGET_DIR önbelleği ve fallback zinciri", (
         "Cargo.toml",
       );
 
-      // 1) targetDir tanımlı + Cargo.lock mevcut → ["build", "--locked", "--manifest-path", manifestPath]
+      // 1) targetDir tanımlı + Cargo.lock mevcut → ["build", "--locked", "--manifest-path", manifestPath, "--target-dir", targetDir]
       const lockedArgs: Array<readonly string[]> = [];
       const lockedOutcome = await runCargoBuild({
         manifestPath: repoManifest,
@@ -437,7 +437,7 @@ describe("Rust yazılabilir CARGO_TARGET_DIR önbelleği ve fallback zinciri", (
       });
       expect(lockedOutcome.status).toBe(0);
       expect(lockedArgs).toEqual([
-        ["build", "--locked", "--manifest-path", repoManifest],
+        ["build", "--locked", "--manifest-path", repoManifest, "--target-dir", safeTarget],
       ]);
 
       // 2) targetDir tanımsız (Cargo.lock mevcut olsa bile) → ["build", "--manifest-path", manifestPath]
@@ -481,7 +481,7 @@ describe("Rust yazılabilir CARGO_TARGET_DIR önbelleği ve fallback zinciri", (
       });
       expect(unlockedOutcome.status).toBe(0);
       expect(unlockedArgs).toEqual([
-        ["build", "--manifest-path", unlockedManifest],
+        ["build", "--manifest-path", unlockedManifest, "--target-dir", safeTarget],
       ]);
     } finally {
       rmSync(tmpDir, { recursive: true, force: true });

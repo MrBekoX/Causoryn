@@ -81,7 +81,7 @@ function normalizeRelativePath(raw: string): string {
   if (posix.startsWith("/") || /^[a-zA-Z]:/.test(posix)) {
     throw new DomainError(
       "adapter/absolute-source-path",
-      `Mutlak kaynak yolu kabul edilmez: ${raw}`,
+      `Absolute source paths are not accepted: ${raw}`,
     );
   }
 
@@ -89,14 +89,14 @@ function normalizeRelativePath(raw: string): string {
     if (segment.length === 0 || segment === ".") {
       throw new DomainError(
         "adapter/invalid-source-path",
-        `Kaynak yolu boş/geçersiz segment içeriyor: ${raw}`,
+        `Source path contains an empty or invalid segment: ${raw}`,
       );
     }
 
     if (segment === "..") {
       throw new DomainError(
         "adapter/source-path-escape",
-        `Kaynak yolu kök dışına çıkıyor: ${raw}`,
+        `Source path escapes the workspace root: ${raw}`,
       );
     }
   }
@@ -209,7 +209,7 @@ function mapNode(raw: unknown, skipped: string[]): SnapshotNodeInput | null {
   }
 
   if (typeof kind !== "string" || !NODE_KIND_SET.has(kind)) {
-    skipped.push(`katalog dışı node türü atlandı: ${String(kind)}`);
+    skipped.push(`skipped a node with a kind outside the catalog: ${String(kind)}`);
     return null;
   }
 
@@ -230,19 +230,19 @@ function mapEdge(raw: unknown, skipped: string[]): SnapshotEdgeInput | null {
   const kind = raw["kind"];
   const resolution = raw["resolution"];
   if (typeof kind !== "string" || !EDGE_KIND_SET.has(kind)) {
-    skipped.push(`katalog dışı edge türü atlandı: ${String(kind)}`);
+    skipped.push(`skipped an edge with a kind outside the catalog: ${String(kind)}`);
     return null;
   }
 
   if (typeof resolution !== "string" || !RESOLUTION_SET.has(resolution)) {
-    skipped.push(`geçersiz resolution değeri olan kenar atlandı: ${String(resolution)}`);
+    skipped.push(`skipped an edge with an invalid resolution value: ${String(resolution)}`);
     return null;
   }
 
   const from = mapNodeRef(raw["from"]);
   const to = mapNodeRef(raw["to"]);
   if (from === null || to === null) {
-    skipped.push("geçersiz kenar ucu atlandı");
+    skipped.push("skipped an edge with an invalid endpoint");
     return null;
   }
 
@@ -317,7 +317,7 @@ function mapWorkerResponse(
 ): MappedWorkerResponse | null {
   if (!isRecord(payload)) return null;
   if (payload["id"] !== expectedId) {
-    skipped.push("worker yanıtı id echo eşleşmedi");
+    skipped.push("worker response id did not match the request id");
     return null;
   }
 
@@ -331,13 +331,13 @@ function mapWorkerResponse(
     const code =
       error !== null && typeof error["code"] === "string"
         ? error["code"]
-        : "bilinmeyen";
+        : "unknown";
     const message =
       error !== null && typeof error["message"] === "string"
         ? error["message"]
         : "";
     skipped.push(
-      `worker hatası ${code}${message.length > 0 ? `: ${message}` : ""} — istek kaynak sınırlarını (dosya boyutu/sayısı) kontrol edin`,
+      `worker error ${code}${message.length > 0 ? `: ${message}` : ""} — check the request resource limits (file size/count)`,
     );
     return null;
   }
@@ -392,7 +392,7 @@ function fallbackResult(
   skipped: string[],
 ): PythonAdapterResult {
   const warningLines = [
-    `${reason} — L0/L1 dosya düzeyine düşüldü`,
+    `${reason} — fell back to L0/L1 file-level facts`,
     ...(stderr.trim().length > 0
       ? [`worker stderr: ${stderr.trim().slice(0, 200)}`]
       : []),
@@ -432,7 +432,7 @@ export async function analyzePythonWorkspace(
 ): Promise<PythonAdapterResult> {
   const { workspaceId, files } = input;
   if (workspaceId.trim().length === 0) {
-    throw new DomainError("adapter/empty-workspace-id", "workspaceId boş olamaz");
+    throw new DomainError("adapter/empty-workspace-id", "workspaceId must not be empty");
   }
 
   // 1) Girdi normalizasyonu (sıralı, çakışmasız — deterministik istek).
@@ -447,7 +447,7 @@ export async function analyzePythonWorkspace(
     if (seen.has(relativePath)) {
       throw new DomainError(
         "adapter/duplicate-source-path",
-        `Aynı kaynak yolu iki kez verildi: ${relativePath}`,
+        `The same source path was given twice: ${relativePath}`,
       );
     }
 
@@ -477,6 +477,7 @@ export async function analyzePythonWorkspace(
   const outcome: WorkerRunOutcome = await runWorkerAnalyze({
     pythonCommand: options.pythonCommand,
     workerScriptPath: options.workerScriptPath,
+    ...(input.workspaceRoot !== undefined ? { untrustedRoots: [input.workspaceRoot] } : {}),
     requestPayload: request,
     requestTimeoutMs: options.requestTimeoutMs,
     responseMaxChars: options.responseMaxChars,
@@ -512,12 +513,12 @@ export async function analyzePythonWorkspace(
   // dürüstçe ayırt eder (ayrıntı warnings'te).
   const isWorkerRejection =
     outcome.status === "ok" &&
-    skipped.some((line) => line.startsWith("worker hatası"));
+    skipped.some((line) => line.startsWith("worker error"));
   const reason =
     outcome.status === "ok"
       ? isWorkerRejection
-        ? "Python worker isteği reddetti (worker status:\"error\"); ayrıntı warnings'te"
-        : "Python worker kullanılamıyor (yanıt sözleşmeye aykırı)"
-      : `Python worker kullanılamıyor (${outcome.detail})`;
+        ? "Python worker rejected the request (worker status:\"error\"); details are in the warnings"
+        : "Python worker unavailable (the response violates the protocol)"
+      : `Python worker unavailable (${outcome.detail})`;
   return fallbackResult(entries, reason, outcome.stderr, skipped);
 }
