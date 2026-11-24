@@ -151,10 +151,25 @@ Analiz tamamlandığında:
   "qualifiedName": "services.orders_service.create_order",
   "language": "python",
   "relativePath": "services/orders_service.py",
+  "span": { "startLine": 14, "endLine": 22 },
   "attributes": { "sourceHash": "...", "method": "POST", "path": "/orders" }
 }
 ```
 
+- `span` — optional (protocol v1 stays compatible: clients ignore an unknown
+  field, and an older worker simply omits it). The 1-based, inclusive line
+  range of the declaration from the `ast` positions `lineno`..`end_lineno` of
+  the `def` / `async def` / `class` statement (Function, Method, Class nodes).
+  Decorators are not part of the range (since Python 3.8 `lineno` is the
+  `def`/`class` line); it is the same range as the node's CONTAINS `ast-span`
+  evidence. A node declared more than once in one file (a property getter and
+  its setter, a redefined function) gets the smallest range that covers every
+  declaration, so the result does not depend on visit order. File, Endpoint and
+  UnknownExternal nodes carry no `span`. The adapter
+  (`adapters/python/src/node-span.ts`) accepts it only as positive integers with
+  `startLine <= endLine` inside the analyzed file and binds it to that file's
+  `relativePath` and source hash as the node `location`; anything else is
+  dropped with one warning and the node keeps its file anchor.
 - `kind` — TŞ §8 27-node kataloğuyla sınırlıdır; worker liste dışı kind
   üretemez (çıkış anında sert doğrulama). Kullanılanlar: `File`,
   `Function`, `Method`, `Class`, `Endpoint`, `UnknownExternal`.

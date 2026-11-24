@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -55,6 +56,36 @@ func TestParseRequestModuleFiles(t *testing.T) {
 	}
 	if errResp.Status != "error" || errResp.Error.Code != "INVALID_ARGUMENT" {
 		t.Fatalf("expected INVALID_ARGUMENT for duplicate moduleFiles, got %+v", errResp)
+	}
+}
+
+// The file count limit messages use the same wording as the Roslyn, Python
+// and Rust workers ("file count limit exceeded: N > M").
+func TestFileCountLimitMessages(t *testing.T) {
+	files := make([]string, 0, 5001)
+	for i := 0; i < 5001; i++ {
+		files = append(files, `{"path":"f`+strconv.Itoa(i)+`.go","content":"package f\n"}`)
+	}
+	var errResp errorResponse
+	tooManyFiles := `{"id":"l1","type":"analyze","files":[` + strings.Join(files, ",") + `]}`
+	if err := json.Unmarshal(processLine(tooManyFiles), &errResp); err != nil {
+		t.Fatalf("failed to unmarshal error response: %v", err)
+	}
+	if errResp.Error.Code != "LIMIT_EXCEEDED" || errResp.Error.Message != "file count limit exceeded: 5001 > 5000" {
+		t.Fatalf("expected the shared file count limit message, got %+v", errResp.Error)
+	}
+
+	mods := make([]string, 0, 5001)
+	for i := 0; i < 5001; i++ {
+		mods = append(mods, `{"relativePath":"m`+strconv.Itoa(i)+`/go.mod","content":"module m\n"}`)
+	}
+	errResp = errorResponse{}
+	tooManyMods := `{"id":"l2","type":"analyze","files":[{"path":"main.go","content":"package main\n"}],"moduleFiles":[` + strings.Join(mods, ",") + `]}`
+	if err := json.Unmarshal(processLine(tooManyMods), &errResp); err != nil {
+		t.Fatalf("failed to unmarshal error response: %v", err)
+	}
+	if errResp.Error.Code != "LIMIT_EXCEEDED" || errResp.Error.Message != "module file count limit exceeded: 5001 > 5000" {
+		t.Fatalf("expected the module file count limit message, got %+v", errResp.Error)
 	}
 }
 

@@ -34,6 +34,12 @@ import {
 } from "@causoryn/domain";
 import { resolveCausorynAssetRoot } from "@causoryn/sidecar-ipc";
 import { join } from "node:path";
+import {
+  mapNodeLocation,
+  nodeSpanSources,
+  nodeSpanWarnings,
+  type NodeSpanSource,
+} from "./node-span.js";
 import { runWorkerAnalyze, type WorkerRunOutcome } from "./worker-process.js";
 import {
   DEFAULT_PYTHON_COMMAND,
@@ -200,7 +206,12 @@ function mapAmbiguity(raw: unknown): { candidates: string[]; reason: string } | 
   return { candidates: [...candidates], reason };
 }
 
-function mapNode(raw: unknown, skipped: string[]): SnapshotNodeInput | null {
+function mapNode(
+  raw: unknown,
+  skipped: string[],
+  spanSources: ReadonlyMap<string, NodeSpanSource>,
+  rejectedSpans: string[],
+): SnapshotNodeInput | null {
   if (!isRecord(raw)) return null;
   const kind = raw["kind"];
   const qualifiedName = raw["qualifiedName"];
@@ -216,11 +227,18 @@ function mapNode(raw: unknown, skipped: string[]): SnapshotNodeInput | null {
   const language = raw["language"];
   const relativePath = raw["relativePath"];
   const attributes = raw["attributes"];
-  return {
+  const ref = {
     kind: kind as NodeKind,
+    qualifiedName,
+    ...(typeof relativePath === "string" ? { relativePath } : {}),
+  };
+  const location = mapNodeLocation(raw["span"], ref, spanSources, rejectedSpans);
+  return {
+    kind: ref.kind,
     qualifiedName,
     ...(typeof language === "string" ? { language } : {}),
     ...(typeof relativePath === "string" ? { relativePath } : {}),
+    ...(location !== undefined ? { location } : {}),
     attributes: isRecord(attributes) ? { ...attributes } : {},
   };
 }
@@ -314,6 +332,7 @@ function mapWorkerResponse(
   payload: unknown,
   expectedId: string,
   skipped: string[],
+  spanSources: ReadonlyMap<string, NodeSpanSource>,
 ): MappedWorkerResponse | null {
   if (!isRecord(payload)) return null;
   if (payload["id"] !== expectedId) {
@@ -346,9 +365,11 @@ function mapWorkerResponse(
   if (!Array.isArray(payload["nodes"])) return null;
   if (!Array.isArray(payload["edges"])) return null;
 
+  const rejectedSpans: string[] = [];
   const nodes = payload["nodes"]
-    .map((node) => mapNode(node, skipped))
+    .map((node) => mapNode(node, skipped, spanSources, rejectedSpans))
     .filter((node): node is SnapshotNodeInput => node !== null);
+  skipped.push(...nodeSpanWarnings(rejectedSpans));
   const edges = payload["edges"]
     .map((edge) => mapEdge(edge, skipped))
     .filter((edge): edge is SnapshotEdgeInput => edge !== null);
@@ -488,7 +509,12 @@ export async function analyzePythonWorkspace(
 
   const skipped: string[] = [];
   if (outcome.status === "ok") {
-    const mapped = mapWorkerResponse(outcome.response, request.id, skipped);
+    const mapped = mapWorkerResponse(
+      outcome.response,
+      request.id,
+      skipped,
+      nodeSpanSources(entries),
+    );
     if (mapped !== null) {
       return {
         analyzerId: PYTHON_WORKER_ADAPTER_ID,

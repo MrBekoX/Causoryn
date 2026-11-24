@@ -413,7 +413,7 @@ class FileAnalyzer:
             name = statement.name
             kind = "Method" if in_class else "Function"
             qualified = f"{prefix}.{name}"
-            self.collector.add_node(kind, qualified, self.path)
+            self.collector.add_node(kind, qualified, self.path, span=declaration_span(statement))
             self.collector.add_contains(
                 parent, self.ref(kind, qualified),
                 self.evidence(
@@ -439,7 +439,7 @@ class FileAnalyzer:
         if isinstance(statement, ast.ClassDef):
             name = statement.name
             qualified = f"{prefix}.{name}"
-            self.collector.add_node("Class", qualified, self.path)
+            self.collector.add_node("Class", qualified, self.path, span=declaration_span(statement))
             self.collector.add_contains(
                 parent, self.ref("Class", qualified),
                 self.evidence(
@@ -871,14 +871,17 @@ class RequestCollector:
         qualified_name: str,
         relative_path: Optional[str],
         attributes: Optional[Dict[str, Any]] = None,
+        span: Optional[Dict[str, int]] = None,
     ) -> None:
         key = (kind, qualified_name, relative_path or "")
         if key in self._nodes:
+            widen_node_span(self._nodes[key], span)
             return
         node: Dict[str, Any] = {"kind": kind, "qualifiedName": qualified_name}
         node["language"] = "python"
         if relative_path is not None:
             node["relativePath"] = relative_path
+        widen_node_span(node, span)
         node["attributes"] = attributes if attributes is not None else {}
         self._nodes[key] = node
         if kind == "File" and relative_path is not None:
@@ -1188,6 +1191,37 @@ def main() -> int:
 
     log("EOF — worker exiting normally")
     return 0
+
+
+# ---------------------------------------------------------------------------
+# Node spans (PROTOCOL.md "Node fields": optional `span`)
+# ---------------------------------------------------------------------------
+
+def declaration_span(statement: ast.AST) -> Optional[Dict[str, int]]:
+    """1-based, inclusive declaration lines of a def/class statement
+    (``lineno``..``end_lineno``; decorators are outside the range since
+    Python 3.8). None when the AST carries no usable positions."""
+    start = getattr(statement, "lineno", None)
+    end = getattr(statement, "end_lineno", None)
+    if not isinstance(start, int) or not isinstance(end, int) or start < 1 or end < start:
+        return None
+    return {"startLine": start, "endLine": end}
+
+
+def widen_node_span(node: Dict[str, Any], span: Optional[Dict[str, int]]) -> None:
+    """Records `span` on `node`. A node declared more than once (a property
+    getter and its setter, a redefined function) gets the smallest range that
+    covers every declaration, so the result does not depend on visit order."""
+    if span is None:
+        return
+    current = node.get("span")
+    if current is None:
+        node["span"] = dict(span)
+        return
+    node["span"] = {
+        "startLine": min(current["startLine"], span["startLine"]),
+        "endLine": max(current["endLine"], span["endLine"]),
+    }
 
 
 if __name__ == "__main__":

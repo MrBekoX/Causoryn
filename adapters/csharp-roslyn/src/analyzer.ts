@@ -44,6 +44,12 @@ import {
   realpathSync,
 } from "node:fs";
 import { isAbsolute, join, posix as pathPosix } from "node:path";
+import {
+  mapNodeLocation,
+  nodeSpanSources,
+  nodeSpanWarnings,
+  type NodeSpanSource,
+} from "./node-span.js";
 import { resolveCSharpProjects } from "./project-model.js";
 import {
   isInsideRealDir,
@@ -264,7 +270,12 @@ function mapAmbiguity(raw: unknown): { candidates: string[]; reason: string } | 
   return { candidates: [...candidates], reason };
 }
 
-function mapNode(raw: unknown, skipped: string[]): SnapshotNodeInput | null
+function mapNode(
+  raw: unknown,
+  skipped: string[],
+  spanSources: ReadonlyMap<string, NodeSpanSource>,
+  rejectedSpans: string[],
+): SnapshotNodeInput | null
 {
   if (!isRecord(raw)) return null;
   const kind = raw["kind"];
@@ -283,11 +294,18 @@ function mapNode(raw: unknown, skipped: string[]): SnapshotNodeInput | null
   const language = raw["language"];
   const relativePath = raw["relativePath"];
   const attributes = raw["attributes"];
-  return {
+  const ref = {
     kind: kind as NodeKind,
+    qualifiedName,
+    ...(typeof relativePath === "string" ? { relativePath } : {}),
+  };
+  const location = mapNodeLocation(raw["span"], ref, spanSources, rejectedSpans);
+  return {
+    kind: ref.kind,
     qualifiedName,
     ...(typeof language === "string" ? { language } : {}),
     ...(typeof relativePath === "string" ? { relativePath } : {}),
+    ...(location !== undefined ? { location } : {}),
     attributes: isRecord(attributes) ? { ...attributes } : {},
   };
 }
@@ -391,6 +409,7 @@ function mapWorkerResponse(
   payload: unknown,
   expectedId: string,
   skipped: string[],
+  spanSources: ReadonlyMap<string, NodeSpanSource>,
 ): MappedWorkerResponse | null
 {
   if (!isRecord(payload)) return null;
@@ -427,9 +446,11 @@ function mapWorkerResponse(
   if (!Array.isArray(payload["nodes"])) return null;
   if (!Array.isArray(payload["edges"])) return null;
 
+  const rejectedSpans: string[] = [];
   const nodes = payload["nodes"]
-    .map((node) => mapNode(node, skipped))
+    .map((node) => mapNode(node, skipped, spanSources, rejectedSpans))
     .filter((node): node is SnapshotNodeInput => node !== null);
+  skipped.push(...nodeSpanWarnings(rejectedSpans));
   const edges = payload["edges"]
     .map((edge) => mapEdge(edge, skipped))
     .filter((edge): edge is SnapshotEdgeInput => edge !== null);
@@ -985,7 +1006,12 @@ export async function analyzeCSharpWorkspace(
   const skipped: string[] = [...projectModel.warnings];
   if (outcome.status === "ok")
   {
-    const mapped = mapWorkerResponse(outcome.response, request.id, skipped);
+    const mapped = mapWorkerResponse(
+      outcome.response,
+      request.id,
+      skipped,
+      nodeSpanSources(entries),
+    );
     if (mapped !== null)
     {
       return {
