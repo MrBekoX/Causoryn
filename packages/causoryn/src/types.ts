@@ -55,6 +55,15 @@ export function isHostClientId(value: string): value is HostClientId {
   return (HOST_CLIENT_IDS as readonly string[]).includes(value);
 }
 
+/**
+ * Tool profiles accepted by `causoryn setup --tool-profile`. Pinned copy of
+ * `TOOL_PROFILES` from `@causoryn/mcp-server` (this package has no runtime
+ * dependency on it); `tests/causoryn-setup-tool-profile.test.ts` guards drift.
+ */
+export const SETUP_TOOL_PROFILES = ["core", "full", "wiki", "history"] as const;
+
+export type SetupToolProfile = (typeof SETUP_TOOL_PROFILES)[number];
+
 export type CausorynCliErrorCode =
   | "cli/invalid-arguments"
   | "cli/malformed-json"
@@ -84,6 +93,11 @@ export interface ParsedCodexMcpServer {
   readonly command: string;
   readonly args: readonly string[];
   readonly startupTimeoutSec: number | null;
+  /**
+   * Environment of the entry, merged from an inline `env = { ... }` table,
+   * dotted `env.KEY = "..."` keys and the `[mcp_servers.causoryn.env]` sub-table.
+   */
+  readonly env: Readonly<Record<string, string>>;
 }
 
 export interface StagePersistentRuntimeOptions {
@@ -113,7 +127,14 @@ export interface SetupOptions {
   readonly ephemeralTmpDir?: string | undefined;
   readonly clients?: readonly HostClientId[] | undefined;
   readonly all?: boolean | undefined;
+  /** Explicit alias of the default selection: configure the hosts detected on this machine. */
   readonly allDetected?: boolean | undefined;
+  /**
+   * Tool profile list (`core`, `full`, `wiki`, `history` or a comma list) written as
+   * `--tool-profile <list>` into every generated `causoryn mcp` entry. When omitted,
+   * an existing `--tool-profile` argument of the entry is kept.
+   */
+  readonly toolProfile?: string | undefined;
   readonly nodeExecutable?: string | undefined;
   readonly yes?: boolean | undefined;
   readonly dryRun?: boolean | undefined;
@@ -137,8 +158,20 @@ export interface SetupResult {
 
 export interface ToolchainProbeOutcome {
   readonly available: boolean;
+  /** First non-empty output line of a successful probe. */
   readonly version: string | null;
   readonly detail: string;
+  /** Full stdout + stderr text of a successful probe (multi-line output such as `dotnet --list-runtimes`). */
+  readonly output?: string | undefined;
+  /**
+   * Why an unavailable probe failed (defaults to `not-found`):
+   * - `not-found`: no such command (informational).
+   * - `exited`: the command ran but exited non-zero, typically a version-manager shim or
+   *   proxy (rustup, pyenv, asdf) with no toolchain selected; treated as not installed.
+   * - `error`: the probe could not complete (timeout, permission denied, other spawn
+   *   error), so an installed toolchain is unusable; a warning.
+   */
+  readonly failure?: "not-found" | "exited" | "error" | undefined;
 }
 
 export type ToolchainProbeFn = (
@@ -168,8 +201,19 @@ export interface DoctorRuntimeCheck {
 
 export interface DoctorToolchainStatus {
   readonly id: SidecarToolchainId;
+  /** Whether the probe command ran successfully. */
   readonly available: boolean;
+  /** Parsed toolchain version (for `dotnet`: the best Microsoft.NETCore.App runtime found), or null. */
   readonly version: string | null;
+  /** Supported minimum version, or null when none is pinned (`cargo`). */
+  readonly minimumVersion: string | null;
+  /**
+   * `ok`: usable and at or above the minimum. `warn`: installed but below the minimum,
+   * its version could not be read, or the probe timed out / could not be started —
+   * makes the report `DEGRADED`. `absent`: not installed, or the command exits without
+   * a usable toolchain; informational only (that language uses L0/L1 analysis).
+   */
+  readonly status: "ok" | "warn" | "absent";
   readonly mode: "sidecar-ready" | "l0-l1-fallback";
   readonly detail: string;
 }

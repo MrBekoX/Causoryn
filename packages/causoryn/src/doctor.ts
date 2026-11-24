@@ -43,6 +43,7 @@ import {
 
 const SIDECAR_PROBE_TIMEOUT_MS = 5_000;
 const REQUIRED_NODE_MAJOR = 24;
+const WINDOWS_COMMAND_NOT_FOUND_EXIT = 9009;
 
 export const DOCTOR_PROBE_ENV_ALLOWLIST = [
   "PATH",
@@ -100,6 +101,9 @@ export function defaultToolchainProbe(
         available: false,
         version: null,
         detail: String(code),
+        // Only a missing executable is "not installed"; a timeout or EACCES means
+        // an installed toolchain cannot be used.
+        failure: code === "ENOENT" ? "not-found" : "error",
       };
     }
     if (res.status !== 0) {
@@ -108,16 +112,26 @@ export function defaultToolchainProbe(
         available: false,
         version: null,
         detail: stderrLine.length > 0 ? stderrLine : `exit ${String(res.status)}`,
+        // Exit code 9009 is the Windows "command not found" code, also returned by
+        // the Microsoft Store `python.exe` alias when Python is not installed. Any
+        // other non-zero exit is usually a version-manager shim or proxy (rustup,
+        // pyenv, asdf) without a selected toolchain.
+        failure:
+          process.platform === "win32" && res.status === WINDOWS_COMMAND_NOT_FOUND_EXIT
+            ? "not-found"
+            : "exited",
       };
     }
-    const combined = `${res.stdout ?? ""}\n${res.stderr ?? ""}`
+    const output = `${res.stdout ?? ""}\n${res.stderr ?? ""}`.trim();
+    const firstLine = output
       .split(/\r?\n/)
       .map((line) => line.trim())
       .find((line) => line.length > 0);
     return {
       available: true,
-      version: combined ?? cmd,
+      version: firstLine ?? cmd,
       detail: "ok",
+      output,
     };
   };
 
@@ -300,28 +314,220 @@ function checkRuntime(
   };
 }
 
+interface ToolchainVersionCheck {
+  /** Parsed version, or null when the probe output carries none. */
+  readonly version: string | null;
+  /** Why the toolchain does not meet the requirement, or null when it does. */
+  readonly problem: string | null;
+}
+
+interface SidecarToolchainSpec {
+  readonly id: SidecarToolchainId;
+  readonly cmd: string;
+  readonly args: readonly string[];
+  readonly label: string;
+  readonly minimumVersion: string | null;
+  readonly check: (output: string) => ToolchainVersionCheck;
+}
+
+interface NumericVersion {
+  readonly major: number;
+  readonly minor: number;
+  readonly patch: number;
+  readonly text: string;
+}
+
+function toNumericVersion(match: RegExpExecArray): NumericVersion {
+  const major = Number.parseInt(match[1] ?? "0", 10);
+  const minor = Number.parseInt(match[2] ?? "0", 10);
+  const patch = Number.parseInt(match[3] ?? "0", 10);
+  const text = [match[1], match[2], match[3]].filter((part) => part !== undefined).join(".");
+  return { major, minor, patch, text: `${text}${match[4] ?? ""}` };
+}
+
+function compareNumericVersion(a: NumericVersion, b: NumericVersion): number {
+  return a.major - b.major || a.minor - b.minor || a.patch - b.patch;
+}
+
+function firstOutputLine(output: string): string {
+  return (
+    output
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .find((line) => line.length > 0) ?? ""
+  );
+}
+
+function unreadableVersion(cmd: string, args: readonly string[], output: string): ToolchainVersionCheck {
+  return {
+    version: null,
+    problem: `Could not read a version from the \`${[cmd, ...args].join(" ")}\` output ("${firstOutputLine(output)}")`,
+  };
+}
+
+/** Checks `<prefix><major>.<minor>[.<patch>]` against a `major.minor` floor. */
+function checkVersionFloor(params: {
+  readonly output: string;
+  readonly pattern: RegExp;
+  readonly label: string;
+  readonly minimum: { readonly major: number; readonly minor: number };
+  readonly cmd: string;
+  readonly args: readonly string[];
+}): ToolchainVersionCheck {
+  const match = params.pattern.exec(params.output);
+  if (match === null) {
+    return unreadableVersion(params.cmd, params.args, params.output);
+  }
+  const version = toNumericVersion(match);
+  const floor: NumericVersion = { ...params.minimum, patch: 0, text: "" };
+  if (compareNumericVersion(version, floor) < 0) {
+    return {
+      version: version.text,
+      problem: `${params.label} ${version.text} is below the supported minimum ${String(params.minimum.major)}.${String(params.minimum.minor)}`,
+    };
+  }
+  return { version: version.text, problem: null };
+}
+
+const REQUIRED_DOTNET_RUNTIME_MAJOR = 10;
+const NETCORE_RUNTIME_LINE = /^Microsoft\.NETCore\.App (\d+)\.(\d+)\.(\d+)(\S*)/gm;
+
+/**
+ * The Roslyn worker targets `net10.0` and is started with `dotnet exec`, so it
+ * needs a Microsoft.NETCore.App 10.x runtime: the default roll-forward policy
+ * (`Minor`) never moves to another major version
+ * (https://learn.microsoft.com/dotnet/core/versions/selection#framework-dependent-apps-roll-forward).
+ * `dotnet --list-runtimes` works without an SDK, unlike `dotnet --version`.
+ */
+function checkDotnetRuntimes(output: string): ToolchainVersionCheck {
+  const runtimes = [...output.matchAll(NETCORE_RUNTIME_LINE)].map((m) => toNumericVersion(m));
+  const supported = runtimes
+    .filter((runtime) => runtime.major === REQUIRED_DOTNET_RUNTIME_MAJOR)
+    .sort(compareNumericVersion);
+  const best = supported[supported.length - 1];
+  if (best !== undefined) {
+    return { version: best.text, problem: null };
+  }
+  const installed = runtimes.map((runtime) => runtime.text).join(", ");
+  return {
+    version: null,
+    problem: `No .NET ${String(REQUIRED_DOTNET_RUNTIME_MAJOR)} runtime (Microsoft.NETCore.App ${String(REQUIRED_DOTNET_RUNTIME_MAJOR)}.x) found; installed Microsoft.NETCore.App runtimes: ${installed.length > 0 ? installed : "none"}. The C# worker targets net${String(REQUIRED_DOTNET_RUNTIME_MAJOR)}.0, and the default roll-forward policy does not run it on another major version`,
+  };
+}
+
+const SIDECAR_TOOLCHAIN_SPECS: readonly SidecarToolchainSpec[] = [
+  {
+    id: "dotnet",
+    cmd: "dotnet",
+    args: ["--list-runtimes"],
+    label: ".NET runtime",
+    minimumVersion: `${String(REQUIRED_DOTNET_RUNTIME_MAJOR)}.0`,
+    check: checkDotnetRuntimes,
+  },
+  {
+    id: "python",
+    cmd: "python",
+    args: ["--version"],
+    label: "Python",
+    minimumVersion: "3.10",
+    check: (output) =>
+      checkVersionFloor({
+        output,
+        pattern: /\bPython (\d+)\.(\d+)(?:\.(\d+))?/,
+        label: "Python",
+        minimum: { major: 3, minor: 10 },
+        cmd: "python",
+        args: ["--version"],
+      }),
+  },
+  {
+    id: "go",
+    cmd: "go",
+    args: ["version"],
+    label: "Go",
+    minimumVersion: "1.22",
+    check: (output) =>
+      checkVersionFloor({
+        output,
+        pattern: /\bgo(\d+)\.(\d+)(?:\.(\d+))?/,
+        label: "Go",
+        minimum: { major: 1, minor: 22 },
+        cmd: "go",
+        args: ["version"],
+      }),
+  },
+  {
+    id: "cargo",
+    cmd: "cargo",
+    args: ["--version"],
+    label: "Cargo",
+    minimumVersion: null,
+    check: (output) => {
+      const match = /\bcargo (\d+)\.(\d+)\.(\d+)/.exec(output);
+      return match === null
+        ? unreadableVersion("cargo", ["--version"], output)
+        : { version: toNumericVersion(match).text, problem: null };
+    },
+  },
+];
+
+const L0_L1_FALLBACK_NOTE = "this language falls back to L0/L1 file-level analysis";
+
+function evaluateSidecarToolchain(
+  spec: SidecarToolchainSpec,
+  res: ToolchainProbeOutcome,
+): DoctorToolchainStatus {
+  const base = { id: spec.id, available: res.available, minimumVersion: spec.minimumVersion };
+  if (!res.available) {
+    const probeCommand = `\`${[spec.cmd, ...spec.args].join(" ")}\``;
+    if (res.failure === "error") {
+      return {
+        ...base,
+        version: null,
+        status: "warn",
+        mode: "l0-l1-fallback",
+        detail: `${probeCommand} probe failed (${res.detail}) — ${L0_L1_FALLBACK_NOTE} until the toolchain works`,
+      };
+    }
+    return {
+      ...base,
+      version: null,
+      status: "absent",
+      mode: "l0-l1-fallback",
+      detail:
+        res.failure === "exited"
+          ? `Not usable: ${probeCommand} exited without a working toolchain (${res.detail}); treated as not installed — ${L0_L1_FALLBACK_NOTE}`
+          : `Not found (${res.detail}) — ${L0_L1_FALLBACK_NOTE}`,
+    };
+  }
+  const check = spec.check(res.output ?? res.version ?? "");
+  if (check.problem !== null) {
+    return {
+      ...base,
+      version: check.version,
+      status: "warn",
+      mode: "l0-l1-fallback",
+      detail: `${check.problem} — unsupported: the sidecar may fail, and this language then falls back to L0/L1 file-level analysis`,
+    };
+  }
+  return {
+    ...base,
+    version: check.version,
+    status: "ok",
+    mode: "sidecar-ready",
+    detail: `${spec.label} ${check.version ?? ""}${spec.minimumVersion !== null ? `, minimum ${spec.minimumVersion}` : ""}`,
+  };
+}
+
 function probeSidecarToolchains(
   probe: ToolchainProbeFn,
 ): Record<SidecarToolchainId, DoctorToolchainStatus> {
-  const specs: ReadonlyArray<{ id: SidecarToolchainId; cmd: string; args: readonly string[] }> = [
-    { id: "dotnet", cmd: "dotnet", args: ["--version"] },
-    { id: "python", cmd: "python", args: ["--version"] },
-    { id: "go", cmd: "go", args: ["version"] },
-    { id: "cargo", cmd: "cargo", args: ["--version"] },
-  ];
-
   const out = {} as Record<SidecarToolchainId, DoctorToolchainStatus>;
-  for (const spec of specs) {
-    const res = probe(spec.cmd, spec.args, SIDECAR_PROBE_TIMEOUT_MS);
-    out[spec.id] = {
-      id: spec.id,
-      available: res.available,
-      version: res.version,
-      mode: res.available ? "sidecar-ready" : "l0-l1-fallback",
-      detail: res.available
-        ? `${res.version ?? spec.cmd} (sidecar ready)`
-        : `Not found (${res.detail}) — this language falls back to L0/L1 file-level analysis`,
-    };
+  for (const spec of SIDECAR_TOOLCHAIN_SPECS) {
+    out[spec.id] = evaluateSidecarToolchain(
+      spec,
+      probe(spec.cmd, spec.args, SIDECAR_PROBE_TIMEOUT_MS),
+    );
   }
   return out;
 }
@@ -689,16 +895,15 @@ export type DoctorReportWithStatus = DoctorReport & {
   readonly configuredCount: number;
 };
 
+/**
+ * A toolchain that is installed but unusable (below its minimum version, version
+ * unreadable, or the probe timed out / could not start) degrades the report; an
+ * absent one (including a shim that exits without a toolchain) does not.
+ */
 function hasToolchainProbeWarn(
   toolchains: Readonly<Record<SidecarToolchainId, DoctorToolchainStatus>>,
 ): boolean {
-  for (const tcId of SIDECAR_TOOLCHAIN_IDS) {
-    const tc = toolchains[tcId] as DoctorToolchainStatus & { readonly status?: string };
-    if (tc.status === "warn") {
-      return true;
-    }
-  }
-  return false;
+  return SIDECAR_TOOLCHAIN_IDS.some((tcId) => toolchains[tcId].status === "warn");
 }
 
 export function computeDoctorOverallStatus(
@@ -826,9 +1031,18 @@ export function formatDoctorReportText(
       "Summary: No MCP host is configured yet. Run `causoryn setup --client <antigravity|claude-code|codex|zcode>` or `causoryn setup --all`.",
     );
   } else if (overallStatus === "DEGRADED") {
-    lines.push(
-      "Summary: One or more configured hosts or probes reported warnings. Run `causoryn setup --yes` to restore full alignment.",
-    );
+    const clientsInScope =
+      selectedClients !== undefined && selectedClients.length > 0 ? selectedClients : HOST_CLIENT_IDS;
+    if (clientsInScope.some((client) => report.hosts[client].status === "warn")) {
+      lines.push(
+        "Summary: One or more configured hosts reported warnings. Run `causoryn setup --yes` to restore full alignment.",
+      );
+    }
+    if (hasToolchainProbeWarn(report.toolchains)) {
+      lines.push(
+        "Summary: A sidecar toolchain is installed but unusable (see [Sidecar Toolchains]); install a supported version or fix it, then run `causoryn doctor` again.",
+      );
+    }
   }
   lines.push("");
   lines.push(`[Node.js] ${report.node.ok ? "OK" : "ERROR"} — ${report.node.detail}`);
@@ -844,7 +1058,7 @@ export function formatDoctorReportText(
   lines.push("[Sidecar Toolchains]");
   for (const tcId of SIDECAR_TOOLCHAIN_IDS) {
     const tc = report.toolchains[tcId];
-    lines.push(`  - ${tc.id}: ${tc.mode} (${tc.detail})`);
+    lines.push(`  - ${tc.id}: ${tc.status.toUpperCase()} — ${tc.mode} (${tc.detail})`);
   }
   lines.push("");
   lines.push("[Hosts]");

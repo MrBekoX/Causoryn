@@ -34,10 +34,29 @@ import {
   stagePersistentRuntime,
   upsertCodexMcpServer,
   validateTomlStructure,
+  type ToolchainProbeFn,
 } from "../src/index.js";
 import { isLinuxMusl } from "../src/doctor.js";
 
 const CAUSORYN_PKG_DIR = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
+
+/**
+ * Probe that answers like supported sidecar toolchains. Doctor checks the
+ * version floors (Python >= 3.10, Go >= 1.22, .NET 10 runtime), so the output
+ * must look like the real `--version` / `--list-runtimes` output.
+ */
+const SUPPORTED_TOOLCHAIN_OUTPUT: Readonly<Record<string, string>> = {
+  dotnet: "Microsoft.NETCore.App 10.0.11 [/usr/share/dotnet/shared/Microsoft.NETCore.App]",
+  python: "Python 3.12.4",
+  go: "go version go1.22.5 linux/amd64",
+  cargo: "cargo 1.100.0 (3acc79c0c 2026-11-05)",
+};
+
+const supportedToolchainProbe: ToolchainProbeFn = (command) => {
+  const output = SUPPORTED_TOOLCHAIN_OUTPUT[command];
+  if (output === undefined) throw new Error(`unexpected toolchain probe: ${command}`);
+  return { available: true, version: output, detail: "ok", output };
+};
 
 /**
  * Track 3 TDD Suite — `packages/causoryn` (`toml-patch`, `runtime-stage`,
@@ -688,7 +707,7 @@ describe("setup wizard (4 hosts, backups, fail-closed, ZCode fallback, Antigravi
       args: [expectedCliScript, "mcp", "--allow-cwd", "--auto-data-dir", "--client", "zcode"],
     });
 
-    // All 4 skills installed in each of the 4 hosts' skill roots
+    // All 5 skills installed in each of the 4 hosts' skill roots
     const skillRoots = [
       path.join(fakeHome, ".gemini", "config", "skills"),
       path.join(fakeHome, ".claude", "skills"),
@@ -808,7 +827,7 @@ describe("doctor (strictly read-only health check + injectable toolchain seam + 
         if (command === "cargo") {
           return { available: false, version: null, detail: "ENOENT" };
         }
-        return { available: true, version: `${command} 1.0.0`, detail: "ok" };
+        return supportedToolchainProbe(command, args, timeoutMs);
       },
     });
 
@@ -893,7 +912,7 @@ describe("doctor (strictly read-only health check + injectable toolchain seam + 
       codexHomeDir: fakeCodexHome,
       packageRoot: pkgRoot,
       nodeVersion: "24.19.2",
-      probeToolchain: () => ({ available: true, version: "1.0", detail: "ok" }),
+      probeToolchain: supportedToolchainProbe,
     });
 
     expect(missingCmdReport.healthy).toBe(false);
@@ -936,7 +955,7 @@ describe("doctor (strictly read-only health check + injectable toolchain seam + 
         packageRoot: pkgRoot,
         clients: ["antigravity"],
         nodeVersion: "24.19.2",
-        probeToolchain: () => ({ available: true, version: "1.0", detail: "ok" }),
+        probeToolchain: supportedToolchainProbe,
       });
       expect(secReport.healthy).toBe(false);
       expect(secReport.hosts["antigravity"].configValid).toBe(false);
@@ -988,7 +1007,7 @@ describe("doctor (strictly read-only health check + injectable toolchain seam + 
       homeDir: fakeHome,
       codexHomeDir: fakeCodexHome,
       packageRoot: pkgRoot,
-      probeToolchain: () => ({ available: true, version: "1.0", detail: "ok" }),
+      probeToolchain: supportedToolchainProbe,
     });
     expect(doctorExit).toBe(0);
     const doctorJson = JSON.parse(outChunks.join("")) as { healthy: boolean; overallStatus: string };
@@ -1233,7 +1252,7 @@ describe(
       codexHomeDir: fakeCodexHome,
       packageRoot: noDllPkg,
       nodeVersion: "24.16.0",
-      probeToolchain: () => ({ available: true, version: "1.0", detail: "ok" }),
+      probeToolchain: supportedToolchainProbe,
     });
     expect(noDllReport.runtime.nativeWorkersPresent).toBe(false);
     expect(noDllReport.runtime.ok).toBe(false);
@@ -1259,7 +1278,7 @@ describe(
       codexHomeDir: fakeCodexHome,
       packageRoot: noDllPkg,
       nodeVersion: "24.16.0",
-      probeToolchain: () => ({ available: true, version: "1.0", detail: "ok" }),
+      probeToolchain: supportedToolchainProbe,
     });
     expect(releaseDllReport.runtime.nativeWorkersPresent).toBe(true);
     expect(releaseDllReport.runtime.ok).toBe(true);
@@ -1278,7 +1297,7 @@ describe(
       arch: "x64",
       isMusl: true,
       nodeVersion: "24.16.0",
-      probeToolchain: () => ({ available: true, version: "1.0", detail: "ok" }),
+      probeToolchain: supportedToolchainProbe,
     });
     expect(muslMissingReport.runtime.sqlitePrebuildPresent).toBe(false);
     expect(muslMissingReport.overallStatus).toBe("UNHEALTHY");
@@ -1298,7 +1317,7 @@ describe(
       arch: "x64",
       isMusl: true,
       nodeVersion: "24.16.0",
-      probeToolchain: () => ({ available: true, version: "1.0", detail: "ok" }),
+      probeToolchain: supportedToolchainProbe,
     });
     expect(muslOkReport.runtime.sqlitePrebuildPresent).toBe(true);
     expect(muslOkReport.runtime.ok).toBe(true);
@@ -1356,7 +1375,7 @@ describe(
       packageRoot: npxPkg,
       env: envWithClaudeDir,
       nodeVersion: "24.16.0",
-      probeToolchain: () => ({ available: true, version: "1.0", detail: "ok" }),
+      probeToolchain: supportedToolchainProbe,
     });
     expect(doctorReport.healthy).toBe(true);
     expect(doctorReport.hosts["claude-code"].detected).toBe(true);
