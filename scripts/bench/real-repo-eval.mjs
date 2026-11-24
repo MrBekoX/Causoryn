@@ -11,6 +11,14 @@
  *   - Zero external dependencies (Node.js >= 24 built-ins only), `shell: false`
  *     everywhere, read-only against target workspaces (ADR-008), and `try/finally`
  *     cleanup of every temporary directory.
+ *   - CALLS edge breakdown (`selfRepo.edgeBreakdown`, see `calls-breakdown.mjs`):
+ *     after the cold process exits, Causoryn's OWN `graph.sqlite` in the
+ *     benchmark's temp data dir is opened read-only (`readonly: true,
+ *     fileMustExist: true`) by the short-lived child `read-edge-breakdown.mjs`
+ *     with the better-sqlite3 driver bundled inside the unpacked tarball
+ *     (`dist/node_modules/better-sqlite3`), so no dependency is added. Only the
+ *     latest published snapshot is counted. Informational: it never changes
+ *     SLO pass/fail.
  *
  * Usage:
  *   node scripts/bench/real-repo-eval.mjs
@@ -35,6 +43,8 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
+
+import { compareWithMcpCoverage, formatEdgeBreakdownMarkdown } from "./calls-breakdown.mjs";
 
 const execFile = promisify(execFileCallback);
 
@@ -300,6 +310,73 @@ function measureSqliteFootprint(dataDir) {
     totalSqliteBytes,
     totalSqliteMb: round(totalSqliteBytes / (1024 * 1024), 2),
     files: sqliteFiles,
+  };
+}
+
+function errorMessage(error) {
+  return error instanceof Error ? error.message : String(error);
+}
+
+const READ_EDGE_BREAKDOWN_SCRIPT = path.join(SCRIPT_DIR, "read-edge-breakdown.mjs");
+
+/**
+ * CALLS edge breakdown + per-language unresolved ratio, read from Causoryn's
+ * own `graph.sqlite` in the benchmark's temp data dir (read-only, must exist)
+ * with the better-sqlite3 driver bundled inside the unpacked tarball. The read
+ * runs in a short-lived child process (`read-edge-breakdown.mjs`) so the
+ * native addon is never loaded into this process (on Windows a loaded `.node`
+ * file stays locked and would block temp-dir cleanup). Only the latest
+ * published snapshot is counted, and it must be the snapshot the MCP status
+ * call reported. Informational: never affects SLO pass/fail; on any failure
+ * the reason is reported instead of numbers.
+ */
+function measureEdgeBreakdown(packageRoot, dataDir, snapshotId, coverage) {
+  const dbFiles = collectFilesRecursive(dataDir).filter(
+    (filePath) => path.basename(filePath) === "graph.sqlite",
+  );
+  if (dbFiles.length !== 1) {
+    return {
+      available: false,
+      reason: `expected exactly one graph.sqlite under the benchmark data dir, found ${String(dbFiles.length)}`,
+    };
+  }
+  const dbFile = dbFiles[0];
+
+  let stdout;
+  try {
+    stdout = execFileSync(
+      process.execPath,
+      [READ_EDGE_BREAKDOWN_SCRIPT, packageRoot, dbFile, typeof snapshotId === "string" ? snapshotId : ""],
+      {
+        cwd: os.tmpdir(),
+        shell: false,
+        windowsHide: true,
+        encoding: "utf8",
+        timeout: RPC_TIMEOUT_MS,
+        maxBuffer: 16 * 1024 * 1024,
+        stdio: ["ignore", "pipe", "pipe"],
+      },
+    );
+  } catch (error) {
+    const stderr = typeof error?.stderr === "string" ? error.stderr.trim() : "";
+    return {
+      available: false,
+      reason: `edge breakdown reader failed: ${stderr.length > 0 ? stderr : errorMessage(error)}`,
+    };
+  }
+
+  let breakdown;
+  try {
+    breakdown = JSON.parse(stdout);
+  } catch (error) {
+    return { available: false, reason: `edge breakdown reader returned invalid JSON: ${errorMessage(error)}` };
+  }
+  return {
+    available: true,
+    source: "graph.sqlite (read-only, latest published snapshot)",
+    databaseFile: path.relative(dataDir, dbFile).split(path.sep).join("/"),
+    ...breakdown,
+    consistencyWithMcpCoverage: compareWithMcpCoverage(breakdown, coverage),
   };
 }
 
@@ -809,7 +886,7 @@ async function measureWorkspaceInternalUnresolvedImports(client, repoRoot) {
   };
 }
 
-async function evaluateSelfRepo(causorynMjs, repoRoot, tmpRoot, timeoutMs) {
+async function evaluateSelfRepo(causorynMjs, packageRoot, repoRoot, tmpRoot, timeoutMs) {
   const dataDir = path.join(tmpRoot, "self-repo-data");
   mkdirSync(dataDir, { recursive: true });
 
@@ -909,6 +986,23 @@ async function evaluateSelfRepo(causorynMjs, repoRoot, tmpRoot, timeoutMs) {
   // 2) SQLite footprint after retention GC
   const sqlite = measureSqliteFootprint(dataDir);
 
+  // 2b) CALLS edge breakdown + per-language unresolved ratio (read-only DB read,
+  //     after the cold process exited; latest published snapshot only).
+  const edgeBreakdown = measureEdgeBreakdown(
+    packageRoot,
+    dataDir,
+    indexMetrics.latestSnapshot.snapshotId,
+    indexMetrics.coverage,
+  );
+  if (edgeBreakdown.available) {
+    const c = edgeBreakdown.calls;
+    console.error(
+      `[eval] CALLS breakdown (${String(c.total)}): verifiedInternal=${String(c.verifiedInternal)}, verifiedExternal=${String(c.verifiedExternal)}, heuristic=${String(c.heuristic)}, unresolved=${String(c.unresolved)}`,
+    );
+  } else {
+    console.error(`[eval] CALLS breakdown not measured: ${edgeBreakdown.reason}`);
+  }
+
   // 3) Warm restart handshake against the EXACT SAME data-dir
   const warmClient = new McpStdioClient(causorynMjs, repoRoot, dataDir);
   let warmHandshakeMs;
@@ -951,6 +1045,7 @@ async function evaluateSelfRepo(causorynMjs, repoRoot, tmpRoot, timeoutMs) {
     unresolvedEdges,
     totalEdges,
     unresolvedEdgePct,
+    edgeBreakdown,
     workspaceInternalUnresolvedImports,
     coverageByLanguage: coverage?.byLanguage ?? {},
     agentContext: agentContextResult,
@@ -1590,7 +1685,7 @@ function formatMarkdownReport(report) {
       `| Max event-loop stall (250ms pings) | ${V024_BASELINE.maxEventLoopStallMs.toLocaleString("en-US")} ms | ${String(s.maxEventLoopStallMs)} ms (p95 ${String(s.p95EventLoopStallMs)} ms, n=${String(s.statusPingCount)}) | < ${String(SLO.maxEventLoopStallMs)} ms | ${passBadge(s.slos.eventLoopStallPassed)} |`,
     );
     lines.push(
-      `| Unresolved edge % | ${String(V024_BASELINE.unresolvedEdgePct)}% | ${String(s.unresolvedEdgePct)}% (${String(s.unresolvedEdges)}/${String(s.totalEdges)}) | < ${String(SLO.maxUnresolvedEdgePct)}% | ${passBadge(s.slos.unresolvedEdgePctPassed)} |`,
+      `| Unresolved edge % (all edge kinds; external calls count as resolved, see CALLS breakdown) | ${String(V024_BASELINE.unresolvedEdgePct)}% | ${String(s.unresolvedEdgePct)}% (${String(s.unresolvedEdges)}/${String(s.totalEdges)}) | < ${String(SLO.maxUnresolvedEdgePct)}% | ${passBadge(s.slos.unresolvedEdgePctPassed)} |`,
     );
     if (s.workspaceInternalUnresolvedImports !== undefined) {
       const wsUnres = s.workspaceInternalUnresolvedImports;
@@ -1618,6 +1713,10 @@ function formatMarkdownReport(report) {
       `Snapshot: \`${s.snapshot.snapshotId}\` · state=\`${s.snapshot.state}\` · ${s.snapshot.nodeCount.toLocaleString("en-US")} nodes · ${s.snapshot.edgeCount.toLocaleString("en-US")} edges · ${s.snapshot.evidenceCount.toLocaleString("en-US")} evidence`,
     );
     lines.push("");
+
+    if (s.edgeBreakdown !== undefined) {
+      lines.push(...formatEdgeBreakdownMarkdown(s.edgeBreakdown));
+    }
 
     const langEntries = Object.entries(s.coverageByLanguage);
     if (langEntries.length > 0) {
@@ -1742,6 +1841,7 @@ async function main() {
       console.error(`[eval] Section 1: Evaluating self-repo (${cli.repoRoot})...`);
       report.selfRepo = await evaluateSelfRepo(
         unpacked.causorynMjs,
+        unpacked.packageRoot,
         cli.repoRoot,
         tmpRoot,
         cli.timeoutMs,

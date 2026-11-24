@@ -6,7 +6,7 @@
 
 **Causoryn** is a **local, deterministic, zero-LLM compiler-grade code graph and `preflight -> verify` change guard** for AI coding agents over MCP (`stdio`). It builds evidence-backed graphs for **TypeScript / JavaScript**, **C# / Roslyn**, **Python**, **Go**, and **Rust** strictly read-only, defaults to a lean **11-tool `core` profile** (with `--tool-profile wiki`, `history`, and backward-compatible `full` covering all 29 legacy tools), and ships **5 canonical agent skills**.
 
-> **Pre-1.0 release status:** `0.2.4` is a **Pre-1.0** release (not `1.0.0`).
+> **Pre-1.0 release status:** `0.3.0` is a **Pre-1.0** release (not `1.0.0`). The default tool surface is now the 11-tool `core` profile; pass `--tool-profile full` to keep the 29 legacy tool names.
 > Package architecture note: `causoryn` is a multi-file runtime package (`dist/mcp-server.mjs`
 > + `dist/index-worker.mjs` + vendored N-API v10 `better-sqlite3` prebuild binaries
 > + `dist/typescript-lib/` + `native/` sidecar workers + 5 canonical `skills/`),
@@ -168,7 +168,7 @@ Active envelope error codes exported in `CAUSORYN_TOOL_ERROR_CODES` (15 codes):
 - `UNSUPPORTED_LANGUAGE`
 - `INTERNAL_ERROR`
 
-Reserved catalog identifiers not emitted as envelope errors in `0.2.4` (6 codes; 21 total identifiers):
+Reserved catalog identifiers not emitted as envelope errors in `0.3.0` (6 codes; 21 total identifiers):
 - `UNRESOLVED_FLOW`
 - `STALE_PREFLIGHT`
 - `CANCELLED`

@@ -12,9 +12,9 @@
 > NOT RUN; ZCode satırı yalnızca manifest doğrulama iddia eder; FİNAL turu blokları bayat
 > sürüm/sayı iddialarını kırmızıya düşürür).
 
-Motor kimliği: `causoryn@0.2.4` (`SERVER_VERSION` — Pre-1.0 Public Preview; tarihsel F1–F9 koşumları
+Motor kimliği: `causoryn@0.3.0` (`SERVER_VERSION` — Pre-1.0 Public Preview; tarihsel F1–F9 koşumları
 `causoryn@0.1.0` ile yapıldı), stdio MCP, `tools/list` TAM OLARAK 29 araç (`TOOL_NAMES`,
-`packages/mcp-server/src/version.ts`). Dağıtım paketi `packages/causoryn` (`npx causoryn@0.2.4 setup`)
+`packages/mcp-server/src/version.ts`). Dağıtım paketi `packages/causoryn` (`npx causoryn@0.3.0 setup`)
 ve monorepo F1 bundle'ı (`packages/mcp-server/dist/mcp-server.mjs` + vendored
 `node_modules/better-sqlite3/`) aynı motoru çalıştırır (artefakt kasıtlı olarak tek dosya değildir —
 native `.node` gömülemez, ADR-010). Yerel canlı host doğrulama ortamı: Windows 10.0.26300 x64,
@@ -56,7 +56,7 @@ Node ≥ 24; 3-OS GitHub Actions CI matrisi (`.github/workflows/ci.yml`: `ubuntu
 2. **ZCode satırı bilinçli olarak manifest ve izole CLI-config düzeyindedir:** kırmızı çizgi 6, smoke
    testlerin kullanıcının gerçek ZCode kurulumuna kalıcı değişiklik bırakmasını yasaklar; GUI-only
    pazaryeri kurulumu bu kısıtla canlı koşulmaz. Kurulum adımları ([docs/hosts/zcode.md](hosts/zcode.md),
-   `integrations/zcode/causoryn/README.md` ve `npx causoryn@0.2.4 setup --client zcode --yes`)
+   `integrations/zcode/causoryn/README.md` ve `npx causoryn@0.3.0 setup --client zcode --yes`)
    belgelenmiştir ve etkileşimli masaüstü GUI bu oturumda yürütülmedi (`NOT RUN`).
 3. **stdout temizliği iki katmandır:** her hostta aynı motor koştuğundan süreç-düzeyi disiplin tek
    kanıtla taşınır (birim test + F6'nın 5 bağımsız spawn oturumu — final turda F6-K7 ile 4'ten 5'e

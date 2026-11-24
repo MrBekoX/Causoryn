@@ -6,7 +6,7 @@
 
 ## Güncel çalışma zamanı güvenlik sınırları (`v0.2.4`)
 
-**Bundle kimliği:** `packages/mcp-server/dist/mcp-server.mjs` SHA-256 `fdb1ac8b3d7c75d187de3d406704f5068140e8ec693a2f4acbc4c8a13fd2fbbd`. `dist/bundle-manifest.json` bu özeti, `dist/index-worker.mjs` iş parçacığı işçisini ve native SQLite çalışma zamanı dahil 36 dosya kaydını taşır. Bu özet yerel artefaktı tanımlar. Aşağıdaki F6 sonuçları, tabloda belirtilen tarihsel test oturumlarına aittir.
+**Bundle kimliği:** `packages/mcp-server/dist/mcp-server.mjs` SHA-256 `56066a348616faad4c6ca62ecdd247e4fca5101d5104a6572bb66e75045c8cbb`. `dist/bundle-manifest.json` bu özeti, `dist/index-worker.mjs` iş parçacığı işçisini ve native SQLite çalışma zamanı dahil 36 dosya kaydını taşır. Bu özet yerel artefaktı tanımlar. Aşağıdaki F6 sonuçları, tabloda belirtilen tarihsel test oturumlarına aittir.
 
 - `causoryn_export_documentation`, `output.allowedOutputDirs` ile doğrulanan hedeflerde artefaktı `flag: "wx"` + `EEXIST` korumalı geçici dosyadan atomik yeniden adlandırarak yazar; `view="interactive"` varsayılan adı `causoryn-architecture-interactive.html` olduğundan sıfır-JS `causoryn-architecture.html` çıktısının üzerine sessizce yazmaz. `--auto-data-dir` export dizinini kaynak ağacının dışında açar. Elle yetkilendirilen bir export dizini kaynak ağacının içinde de olabilir. Bildirilmemiş dizin `EXPORT_NOT_ALLOWED`, güvensiz dosya adı veya kaçış `PATH_DENIED` döndürür. Kaynak dayanakları `packages/graph/src/export.ts`, `packages/workspace/src/output-policy.ts` ve `packages/mcp-server/src/runtime-cli.ts` dosyalarıdır.
 - **Evrensel uyumluluk savunma derinliği (`v0.2.3`, `K-024`):**

@@ -1,59 +1,179 @@
 # Connecting Causoryn to Codex CLI (`stdio` MCP)
 
-> **Language:** [Türkçe](../../hosts/codex.md) | **English** · [Compatibility Matrix](../compatibility-matrix.md)
+> **Language:** [Türkçe](../../hosts/codex.md) | **English** · [Documentation Hub](../README.md) · [Compatibility Matrix](../compatibility-matrix.md)
 
-**Verification record:** Live Codex CLI runs verified `codex mcp add` -> `list` -> `remove` -> `list` on `codex-cli 0.163.0` (`2026-11-10`) and `codex plugin marketplace add` + `mcp add/list` on `codex-cli 0.169.0` (`2026-11-19`).
+> **Status:** reflects Causoryn 0.3.0 (default `core` tool profile with 11 tools; one shared per-workspace `graph.sqlite` for all hosts). See [CLI & Configuration](../cli-and-configuration.md) for the full flag reference and [MCP Tool Contracts](../tool-contracts.md) for the tool catalog.
 
-Causoryn is a local, deterministic, zero-LLM MCP code graph and change-guard engine (`causoryn@0.2.4`). Unlike Claude Code, `codex mcp add` writes to user-wide `$CODEX_HOME/config.toml` (default `~/.codex/config.toml`) rather than a per-project scope.
+> **Sources checked for this page:** `packages/causoryn/src/{setup.ts,toml-patch.ts,doctor.ts,cli.ts}`, `packages/causoryn/.codex-plugin/{plugin.json,mcp.json}`, `.agents/plugins/marketplace.json`, `packages/mcp-server/src/{stdio.ts,cli-stdio.ts,runtime-cli.ts,config.ts}`, `packages/mcp-server/scripts/build-bundle.mjs`.
+
+Causoryn is a local, deterministic MCP server for code intelligence. It makes no LLM or network API calls. Unlike Claude Code, `codex mcp add` **has no project or local scope**: registrations go to the user-wide `~/.codex/config.toml` (or `$CODEX_HOME/config.toml`). Use a dedicated name such as `causoryn-smoke` for temporary smoke runs and clean up with `codex mcp remove`.
+
+## Verification record
+
+Live Codex CLI runs (all on builds **before 0.3.0**; a live re-run against 0.3.0 is not recorded yet):
+
+| Date | Codex CLI | What was executed | Result |
+|---|---|---|---|
+| `2026-11-08` | `codex-cli 0.163.0` | `codex mcp --help`, `codex mcp add --help`, `codex mcp list --help`, `codex mcp remove --help`; manual `stdout` check on `causoryn@0.1.0` | Syntax confirmed; `stdout` carried 2 pure JSON-RPC lines (`initialize`, `tools/list` with the 29-tool catalog of that release) |
+| `2026-11-10` | `codex-cli 0.163.0` | `codex mcp add causoryn-smoke` → `codex mcp list` (present) → `codex mcp remove` → `codex mcp list` (absent), monorepo bundle | Lifecycle confirmed; `config.toml` restored from backup afterwards (see the re-serialization note in section 5.5) |
+| `2026-11-19` | `codex-cli 0.169.0` | `codex plugin marketplace add` (root `.agents/plugins/marketplace.json`), `codex mcp add` / `codex mcp list`, packaged `causoryn setup` | Marketplace accepted; registration listed |
+
+Automated coverage of the 0.3.0 code paths used on this page: `tests/causoryn-setup.test.ts`, `tests/causoryn-doctor.test.ts`, `packages/causoryn/test/setup-and-doctor.test.ts` (isolated temporary `$HOME`, TOML patching), `tests/open-source-distribution.test.ts` (packed `.tgz` handshake and manifest parity), and `tests/mcp-tool-surface-budget.test.ts` (core `tools/list` size).
+
+## Choose an installation path
+
+| Path | Who it is for | What runs |
+|---|---|---|
+| **A. `npx causoryn@0.3.0 setup`** (recommended) | End users | Packaged entrypoint `scripts/causoryn.mjs mcp --allow-cwd --auto-data-dir --client codex`, registered in `config.toml` with the absolute Node binary |
+| **B. Codex plugin marketplace** | End users who prefer plugins | `npx -y --package causoryn@0.3.0 causoryn mcp …` from `.codex-plugin/mcp.json` |
+| **C. Manual registration** (`codex mcp add` or `config.toml`) | Contributors working from a source checkout | Monorepo bundle `packages/mcp-server/dist/mcp-server.mjs` (configured only through `CAUSORYN_CONFIG`) |
 
 ---
 
-## 1. Quick Setup (Recommended)
-
-### Option A — One-Command CLI (`npx causoryn setup`)
+## 1. Option A — One-command setup
 
 ```bash
-# Preview planned changes without modifying any files (read-only)
-npx causoryn@latest setup --client codex --dry-run
+# Preview the planned changes without writing anything
+npx causoryn@0.3.0 setup --client codex --dry-run
 
-# Surgically patch $CODEX_HOME/config.toml [mcp_servers.causoryn] + install 5 skills into ~/.agents/skills/
-npx causoryn@latest setup --client codex --yes
+# Patch [mcp_servers.causoryn] in $CODEX_HOME/config.toml and install the 5 skills into ~/.agents/skills/
+npx causoryn@0.3.0 setup --client codex --yes
 
-# Read-only health & alignment check
-npx causoryn@latest doctor
+# Read-only health and alignment check
+npx causoryn@0.3.0 doctor --client codex
 
-# Clean removal (removes [mcp_servers.causoryn] + 5 Causoryn skills)
-npx causoryn@latest setup --client codex --uninstall --yes
+# Clean removal ([mcp_servers.causoryn] and its sub-tables + the 5 Causoryn skills)
+npx causoryn@0.3.0 setup --client codex --uninstall --yes
 ```
 
-- **Surgical TOML patching & permanent backup:** Unlike `codex mcp add` (which re-serializes the entire `config.toml`), `causoryn setup` patches only `[mcp_servers.causoryn]` with `startup_timeout_sec = 30` and the absolute Node binary (`process.execPath`), preserves comments, neighbor servers, and `[mcp_servers.causoryn.tools.*]` sub-tables, and preserves your original `config.toml.causoryn.backup` forever.
-- **`CODEX_HOME` support:** Respects `$CODEX_HOME/config.toml` when set, defaulting to `~/.codex/config.toml`.
-- **Default lean tool profile:** Boots with the **11-tool `core` profile** (`tools/list <= 15,000` chars). Pass `--tool-profile wiki,history` or `--tool-profile full` (or set `CAUSORYN_TOOL_PROFILE`) for extended catalogs ([MCP Tool Contracts](../tool-contracts.md)).
+### What `setup --client codex` writes
 
-### Option B — Native Codex Plugin Marketplace
+`setup` writes exactly this table (`renderCausorynSections` in `packages/causoryn/src/toml-patch.ts`):
 
-The repository root `.agents/plugins/marketplace.json` and packaged `packages/causoryn/.codex-plugin/plugin.json` (+ `.codex-plugin/mcp.json`) follow the Codex plugin marketplace schema (`startup_timeout_sec: 30`, `--allow-cwd --auto-data-dir --client codex`).
+```toml
+[mcp_servers.causoryn]
+command = "/path/to/node"
+args = ["/home/you/.causoryn/runtime/scripts/causoryn.mjs", "mcp", "--allow-cwd", "--auto-data-dir", "--client", "codex"]
+startup_timeout_sec = 30
+```
+
+- **Target file:** `$CODEX_HOME/config.toml` when `CODEX_HOME` is set, otherwise `~/.codex/config.toml` (`resolveEffectiveCodexHomeDir`). `doctor` reads the same file. Codex counts as detected when that directory or file exists.
+- **Surgical TOML patching:** unlike `codex mcp add`, `setup` does not re-serialize the file. Comments, top-level keys, neighbouring `[mcp_servers.<other>]` tables, and `[mcp_servers.causoryn.tools.*]` approval sub-tables are kept unchanged (only runs of blank lines between tables are normalized), and the file's line-ending style (`\n` or `\r\n`) is preserved. The `[mcp_servers.causoryn]` table itself is replaced as a whole, and an existing `[mcp_servers.causoryn.env]` table is dropped.
+- **`startup_timeout_sec = 30`** gives cold Node.js + SQLite start-up enough headroom.
+- **Absolute Node binary:** `command` is the `process.execPath` of the Node.js that ran `setup` (Node.js ≥ 24 is required).
+- **Persistent runtime:** when `setup` runs from an `_npx` cache or the OS temp directory, it first copies the package to `~/.causoryn/runtime` and points `args[0]` there, so the registration survives `npx` cache eviction.
+- **Skills:** the five canonical skills `causoryn`, `map-system`, `preflight-change`, `verify-change`, and `architecture-blueprint` are written to `~/.agents/skills/<name>/SKILL.md` (in your home directory, not under `CODEX_HOME`). Pass `--no-skill` to skip them. `architecture-blueprint` guides Codex in drafting optional `annotations` from MCP evidence; to export without annotations, call `causoryn_export_documentation` directly ([architecture export contract](../tool-contracts.md)). Skills are guidance text for the host model: a tool a skill mentions can only be called if the active tool profile registers it.
+
+### How `setup` behaves (all hosts)
+
+- **Detection:** without `--client` or `--all`, only detected hosts are configured; if none is detected, nothing is written.
+- **Confirmation:** without `--yes` (and without `--dry-run`), an interactive terminal shows the plan and asks `Continue? [y/N]`; a non-interactive shell stops with a "confirmation required" error and writes nothing.
+- **Backups:** before an existing `config.toml` is modified for the first time, the original is copied to `config.toml.causoryn.backup`. That file is never overwritten; later modifications create additional `config.toml.causoryn.<timestamp>-<nonce>.backup` copies.
+- **Atomic, idempotent writes:** temporary file + rename, existing file mode kept (new files `0600`); an identical second run reports `noop`.
+- **Fail-closed parsing:** malformed TOML (unclosed strings, arrays, or tables, a line without `=`, an empty table header, or a duplicated table header such as two `[mcp_servers.causoryn]` tables) stops the run with `cli/malformed-toml` before anything is written. Symbolic-link targets are refused.
+- **Exit codes:** `setup` exits `0` on success and `2` on any error.
+- **Uninstall:** removes `[mcp_servers.causoryn]` and every `[mcp_servers.causoryn.*]` sub-table, the five skill directories, and `~/.causoryn/runtime` when no other host config still references it.
+
+### `doctor` checks
+
+`causoryn doctor` is read-only. It checks Node.js ≥ 24, the runtime files in the package root and in `~/.causoryn/runtime`, the `dotnet` / `python` / `go` / `cargo` toolchains (a missing one is reported as `l0-l1-fallback`: that language falls back to file-level analysis), and each host. For Codex it validates the TOML structure, reads `[mcp_servers.causoryn]`, checks that the entry script exists when `command` is a Node binary, and checks the five skills. Host status is `OK`, `WARN`, `NOT-CONFIGURED`, or `ERROR`; the overall result is `HEALTHY`, `DEGRADED`, `NOT CONFIGURED`, or `UNHEALTHY`, and `doctor` exits `0` only for `HEALTHY` (otherwise `1`).
+
+## 2. Option B — Native Codex plugin marketplace
+
+The root `.agents/plugins/marketplace.json` follows the Codex plugin marketplace schema:
+
+- `source: { "source": "npm", "package": "causoryn", "version": "0.3.0" }`
+- `policy.installation: "AVAILABLE"` and `policy.authentication: "ON_INSTALL"`. Causoryn needs no credentials or API keys; `"ON_INSTALL"` satisfies the marketplace policy schema for install-time confirmation.
+
+The installed package's `.codex-plugin/plugin.json` ships the skills (`"skills": "./skills"`) and points `mcpServers` at `./.codex-plugin/mcp.json`:
+
+```json
+{
+  "mcpServers": {
+    "causoryn": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "--package",
+        "causoryn@0.3.0",
+        "causoryn",
+        "mcp",
+        "--allow-cwd",
+        "--auto-data-dir",
+        "--client",
+        "codex"
+      ],
+      "startup_timeout_sec": 30
+    }
+  }
+}
+```
+
+The Codex plugin starts the server through `npx` with an exact version, so the first start needs the npm registry or a warm `npx` cache. (The Claude Code and ZCode plugins use `plugin-mcp-launcher.mjs` instead.)
+
+## 3. Tool profiles in Codex
+
+The server starts with the `core` profile: 11 tools (`causoryn_status`, `causoryn_map_system`, `causoryn_find_symbols`, `causoryn_get_symbol_context`, `causoryn_trace`, `causoryn_get_agent_context`, `causoryn_preflight_change`, `causoryn_verify_change`, `causoryn_contracts`, `causoryn_get_evidence`, `causoryn_export_documentation`). The core `tools/list` response stays under 15,000 characters because `outputSchema` is omitted by default (`--output-schema full` adds it back; responses are validated against their schemas either way).
+
+| Profile | Adds |
+|---|---|
+| `wiki` | the 7 `causoryn_wiki_*` tools |
+| `history` | `causoryn_compare_architecture`, `causoryn_architecture_timeline` |
+| `full` | all 29 legacy tools plus `causoryn_status`, `causoryn_trace`, `causoryn_contracts` (32 tools); superseded legacy tools carry a deprecation note |
+
+Profiles combine with commas (`wiki,history`). Precedence is `--tool-profile` > `CAUSORYN_TOOL_PROFILE` > `core`; an unknown name stops the server at startup. In Codex:
+
+```toml
+# Either append the flag to the packaged entrypoint's args ...
+[mcp_servers.causoryn]
+command = "/path/to/node"
+args = ["/home/you/.causoryn/runtime/scripts/causoryn.mjs", "mcp", "--allow-cwd", "--auto-data-dir", "--client", "codex", "--tool-profile", "wiki,history"]
+startup_timeout_sec = 30
+
+# ... or set the environment variable (the only option for the monorepo bundle)
+[mcp_servers.causoryn.env]
+CAUSORYN_TOOL_PROFILE = "full"
+```
+
+- With `codex mcp add`, pass `--env CAUSORYN_TOOL_PROFILE=full`.
+- Re-running `causoryn setup` rewrites `[mcp_servers.causoryn]` and drops `[mcp_servers.causoryn.env]`, so apply the change again afterwards.
+- For the marketplace plugin, the manifest lives in the installed plugin and should not be edited. Whether Codex forwards `CAUSORYN_TOOL_PROFILE` from its own environment to plugin servers has not been verified; use Option A or C if you need a non-default profile.
+
+## 4. Data directory and first run
+
+- With `--auto-data-dir` (or `--data-dir <abs>`), the index lives at `<base>/workspaces/<slug>-<hash12>/graph.sqlite`, with export output under `<base>/workspaces/<slug>-<hash12>/exports/`. The base is `--data-dir` > `ZCODE_PLUGIN_DATA` > `~/.causoryn`.
+- **One database per workspace for all hosts.** Codex, Claude Code, Antigravity, and ZCode open the same `graph.sqlite` when they use the same base directory. `--client codex` is only a diagnostic label (recorded as `build_leases.host_label`). A `build_leases` single-writer lease prevents two processes from publishing a snapshot at the same time.
+- Releases before 0.3.0 used per-host `graph-<client>.sqlite` files. They are not migrated; the first 0.3.0 start indexes into `graph.sqlite`.
+- Directories are created with mode `0700` and must lie strictly outside every authorized project root. Nothing is written into the analyzed source tree.
+- Indexing runs in a `worker_threads` worker. With the packaged entrypoint (Options A and B), a tool call made before the first index is published waits up to `CAUSORYN_INDEX_WAIT_MS` (default `15000`; `0` = do not wait) and then returns `status: "partial"` with `data.status: "indexing"`, `jobId`, `progress`, and `retryAfterMs`. `causoryn_status` answers immediately.
+- `--allow-cwd` binds the directory Codex starts the server in, after a safety check that refuses `$HOME`, filesystem roots, system directories, `~/.codex`, plugin install directories, and the Causoryn data directory. When the start directory is refused, the server waits for a safe root from MCP `roots/list`; until then workspace tools return `WORKSPACE_NOT_AUTHORIZED`. Start Codex inside the project, or add `"--root", "/path/to/your-project"` to `args`.
 
 ---
 
-## 2. Monorepo Developer Workflow (`packages/mcp-server/dist/`)
+## 5. Option C — Manual registration from a source checkout
+
+### 5.1 Build the bundle
 
 ```bash
 npm run build:bundle --workspace packages/mcp-server
 ```
 
-Keep the full `packages/mcp-server/dist/` directory intact (`mcp-server.mjs`, `index-worker.mjs`, `mcp-server.mjs.LEGAL.txt`, `bundle-manifest.json`, and vendored `node_modules/better-sqlite3/`).
+The script exists only in `packages/mcp-server/package.json` (running it at the repository root without `--workspace` fails with `Missing script`). The deterministic output is described by a 36-entry `bundle-manifest.json`:
 
-### Method A — Manual `config.toml` Entry
-
-```toml
-[mcp_servers.causoryn]
-command = "node"
-args = ["/path/to/causoryn/packages/mcp-server/dist/mcp-server.mjs"]
-startup_timeout_sec = 30
+```text
+packages/mcp-server/dist/
+├── bundle-manifest.json         ← sorted SHA-256 manifest (36 entries)
+├── mcp-server.mjs               ← stdio entrypoint (built from src/stdio.ts)
+├── index-worker.mjs             ← indexing worker_threads entrypoint
+├── mcp-server.mjs.LEGAL.txt     ← third-party license notices emitted by esbuild
+└── node_modules/better-sqlite3/ ← native module (LICENSE, package.json, lib/, prebuilds/)
 ```
 
-### Method B — `codex mcp add`
+Keep the whole `dist/` directory together: the native `.node` prebuilds cannot be inlined into `mcp-server.mjs`.
+
+This bundle reads **no command-line flags**. Its configuration comes only from `CAUSORYN_CONFIG` (strict JSON schema, `parseCausorynServerConfig` in `packages/mcp-server/src/config.ts`) and `CAUSORYN_TOOL_PROFILE`. Without `CAUSORYN_CONFIG` it starts fail-closed with `allowRoots: []`, so workspace tools return `WORKSPACE_NOT_AUTHORIZED`. Without `storage.dataDbPath` the graph is kept in memory and rebuilt on every start.
+
+### 5.2 Method A — `codex mcp add` (recommended over manual edits)
 
 ```bash
 codex mcp add causoryn \
@@ -61,24 +181,83 @@ codex mcp add causoryn \
   -- node /path/to/causoryn/packages/mcp-server/dist/mcp-server.mjs
 ```
 
-### Verification & Cleanup
+Syntax (`codex mcp add --help`): `codex mcp add [OPTIONS] <NAME> (--url <URL> | -- <COMMAND>...)`. Everything after `--` is the server launch command.
+
+### 5.3 Method B — `config.toml` table (manual edit)
+
+```toml
+[mcp_servers.causoryn]
+command = "node"
+args = ["/path/to/causoryn/packages/mcp-server/dist/mcp-server.mjs"]
+startup_timeout_sec = 30
+
+[mcp_servers.causoryn.env]
+CAUSORYN_CONFIG = '{"allowRoots":["/path/to/your-project"]}'
+```
+
+- Use an **absolute** path in `args`; Codex spawns MCP servers independently of your current directory.
+- To persist the index, extend `CAUSORYN_CONFIG` with `"storage":{"dataDbPath":"/path/to/causoryn-data/graph.sqlite"}` (and the same path for `"wiki":{"dataDbPath":…}`); the parent directory must exist and lie outside every authorized root.
+
+### 5.4 Verification
 
 ```bash
-codex mcp list
-codex mcp get causoryn
+codex mcp list            # human-readable output
+codex mcp list --json     # machine-readable output
+codex mcp get causoryn    # single entry
+```
+
+Expected: `causoryn` is listed with the command `node /path/to/causoryn/packages/mcp-server/dist/mcp-server.mjs`.
+
+**Honest limitations (`0.163.0` live evidence, `2026-11-10`; unchanged in `0.169.0`):**
+
+- `codex mcp list` performs **no live health check**: it reads `config.toml` without spawning the server, so there is no `Connected` / `Failed` probe as in Claude Code. The actual spawn and handshake happen inside a live Codex session (and are covered separately by the automated `stdio` spawn tests and the Claude Code live runs).
+- `codex mcp add` does not validate the script path: registering an invalid path (`node Z:/definitely/not/here.mjs`) succeeds and shows as `enabled` in `list`; it only fails at session start.
+- An unknown name is a hard error: `codex mcp get no-such-server-xyz` → `Error: No MCP server named 'no-such-server-xyz' found.` (exit `1`).
+
+### 5.5 Cleanup and smoke discipline
+
+```bash
 codex mcp remove causoryn
 ```
 
-**Honest Codex CLI limitations:**
-- `codex mcp list` reads `config.toml` without spawning the server process; live process spawn happens inside an active Codex session.
-- `codex mcp add`/`remove` re-serialize `~/.codex/config.toml` from scratch (which may alter formatting of neighboring tables). Back up `config.toml` before manual smoke runs.
+For non-permanent tests, register under a dedicated name and confirm removal afterwards:
 
-### `stdout` Hygiene
+```bash
+codex mcp add causoryn-smoke -- node /path/to/causoryn/packages/mcp-server/dist/mcp-server.mjs
+codex mcp list
+codex mcp remove causoryn-smoke
+codex mcp list   # causoryn-smoke is gone
+```
 
-Causoryn writes exclusively MCP JSON-RPC 2.0 frames to `stdout`; all operational diagnostics go to `stderr` prefixed with `[causoryn]`.
+**TOML re-serialization warning (`0.163.0` live finding, `2026-11-10`):** `codex mcp add` and `codex mcp remove` parse and re-serialize `~/.codex/config.toml` from scratch. The `causoryn` block is added and removed cleanly, but formatting of neighbouring `[mcp_servers.*]` tables may change (for example key order inside `env`, or `startup_timeout_sec = 120` rewritten as `120.0`). Byte-level invariance is not guaranteed by `codex mcp`. Back up the file before manual smoke tests and compare hashes afterwards:
 
-## Related Pages
+```bash
+cp ~/.codex/config.toml /tmp/config.toml.bak
+sha256sum ~/.codex/config.toml   # before
+# ... add → list → remove → list ...
+sha256sum ~/.codex/config.toml   # after; restore the backup if formatting drifted
+```
 
-- [5-Minute Quickstart Tutorial](../tutorial-5-minutes.md) · [CLI & Configuration](../cli-and-configuration.md)
+`causoryn setup` avoids this by patching only its own table (section 1).
+
+## 6. `stdout` hygiene
+
+Every Causoryn entrypoint writes **only MCP JSON-RPC 2.0 frames** to `stdout`; all diagnostics go to `stderr` with a `[causoryn]` (or `[causoryn-launcher]`) prefix, so log lines never interfere with Codex's JSON-RPC pipe.
+
+## 7. Troubleshooting
+
+| Symptom | Cause and fix |
+|---|---|
+| `setup` stops with `cli/malformed-toml` | `config.toml` has a syntax problem or a duplicated table header. Fix it or restore `config.toml.causoryn.backup`; nothing was written. |
+| Codex reports a start-up timeout | Cold start exceeded the configured timeout. Keep `startup_timeout_sec = 30` (or higher) on the entry. |
+| `doctor` shows `ERROR` for the entry script | `~/.causoryn/runtime` or the original install was removed. Re-run `npx causoryn@0.3.0 setup --client codex --yes`. |
+| Server exits at start with "Unsupported Node.js version" | Node.js < 24. Install Node.js 24+ and re-run `setup`. |
+| Custom `env` or extra `args` disappeared | Re-running `setup` replaces `[mcp_servers.causoryn]` and drops `[mcp_servers.causoryn.env]`. Re-apply them. |
+| Workspace tools return `WORKSPACE_NOT_AUTHORIZED` | The start directory was refused by `--allow-cwd` and no usable root was reported, or the bare bundle has no `allowRoots`. See section 4 or 5.1. |
+| Wiki or history tools are missing from `tools/list` | Default `core` profile. See section 3. |
+
+## Related pages
+
+- [5-Minute Quickstart](../tutorial-5-minutes.md) · [CLI & Configuration](../cli-and-configuration.md) · [MCP Tool Contracts](../tool-contracts.md)
 - [Compatibility Matrix](../compatibility-matrix.md) · [Türkçe sürüm](../../hosts/codex.md)
 - Other host guides: [Claude Code](claude-code.md) · [ZCode](zcode.md) · [Antigravity](antigravity.md)

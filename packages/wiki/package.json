@@ -1,6 +1,6 @@
 {
   "name": "@causoryn/wiki",
-  "version": "0.2.4",
+  "version": "0.3.0",
   "private": true,
   "license": "MIT",
   "description": "WikiProjectionEngine: GraphSnapshot → WikiSnapshot deterministik projeksiyonu, TŞ §16A.1 sayfa taksonomisi, no_data dürüstlüğü, coverageDelta ve offline export (TŞ v2.1 §16A.9; ADR-011/012).",
@@ -9,9 +9,9 @@
     ".": "./src/index.ts"
   },
   "dependencies": {
-    "@causoryn/contracts": "0.2.4",
-    "@causoryn/domain": "0.2.4",
-    "@causoryn/workspace": "0.2.4",
+    "@causoryn/contracts": "0.3.0",
+    "@causoryn/domain": "0.3.0",
+    "@causoryn/workspace": "0.3.0",
     "zod": "^4.6.7"
   }
 }

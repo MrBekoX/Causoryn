@@ -707,8 +707,8 @@ describe(".github/workflows/release.yml — üç-job hermetik OIDC Trusted Publi
       ["buildPack.package", bpPkgBuildIdx],
       ["buildPack.verifyReady", bpVerifyReadyIdx],
       ["buildPack.pack", bpPackIdx],
-      ["buildPack.smoke", bpSmokeIdx],
       ["buildPack.sbom", bpSbomIdx],
+      ["buildPack.smoke", bpSmokeIdx],
       ["buildPack.upload", bpUploadIdx],
     ] as const;
 
@@ -727,6 +727,12 @@ describe(".github/workflows/release.yml — üç-job hermetik OIDC Trusted Publi
     expect(
       bpPackIdx - bpVerifyReadyIdx,
       "verify-package-ready.mjs, build-and-pack içinde npm pack adımının HEMEN öncesindeki son kapı olmalı",
+    ).toBe(1);
+    // SHA256SUMS.txt + SBOM are generated IMMEDIATELY after npm pack, before any smoke/test
+    // step runs against the packed tarball, so the checksums describe the artifact exactly as packed.
+    expect(
+      bpSbomIdx - bpPackIdx,
+      "generate-sbom.mjs (SHA256SUMS.txt + SBOM) must be the step immediately after npm pack in build-and-pack",
     ).toBe(1);
 
     // Job 3: publish
