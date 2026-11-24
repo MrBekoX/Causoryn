@@ -224,7 +224,7 @@ describe("SqliteGraphRepository — şema ve bağlantı", () => {
         expect(tables, `tablo yok: ${table}`).toContain(table);
       }
       expect(probe.pragma("page_size", { simple: true })).toBe(4096);
-      expect(probe.pragma("user_version", { simple: true })).toBe(4);
+      expect(probe.pragma("user_version", { simple: true })).toBe(5);
       probe.close();
     } finally {
       repo.close();
@@ -766,15 +766,18 @@ describe("SqliteGraphRepository — symbol_fts (temel)", () => {
         { symbol: "order_item", nodeId: graph.nodes[3]!.id },
       ]);
       const ordered = repo.searchSymbols("order", 10);
-      expect(ordered.map((hit) => hit.symbol)).toEqual(
-        expect.arrayContaining([
-          "createOrder",
-          "listOrders",
-          "order_item",
-          "order_total",
-        ]),
-      );
-      expect(ordered).toHaveLength(4);
+      // Exact BM25 order (weights symbol=2.0, search_text=1.0): the snake_case
+      // symbols carry "order" in the weighted `symbol` column and rank first;
+      // camelCase symbols match only through their LocAgent `search_text`
+      // tokens. The two snake_case documents score identically, so the tie is
+      // broken by node_id ASC (order_total -> nodes[2], order_item -> nodes[3]).
+      expect(graph.nodes[2]!.id < graph.nodes[3]!.id).toBe(true);
+      expect(ordered.map((hit) => hit.symbol)).toEqual([
+        "order_total",
+        "order_item",
+        "createOrder",
+        "listOrders",
+      ]);
       // Farklı token eşleşmez (alt-dize semantiği yok).
       expect(repo.searchSymbols("nomatchsymbol")).toEqual([]);
     } finally {
