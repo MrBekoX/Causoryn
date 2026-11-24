@@ -367,7 +367,7 @@ describe("serializeInteractiveArchitectureHtml — etkileşimli offline E6+ port
     const cspHash = cspHashMatch?.[1] ?? "";
 
     // Strictly 2 <script> blocks: 1 non-executable JSON island + 1 executable script matching SHA-256 hash
-    const allScripts = [...html.matchAll(/<script\b([^>]*)>([\s\S]*?)<\/script\s*>/gi)];
+    const allScripts = [...html.matchAll(/<script\b([^>]*)>([\s\S]*?)<\/script\b[^>]*>/gi)];
     expect(allScripts).toHaveLength(2);
     const jsonScripts = allScripts.filter((m) => (m[1] ?? "").includes('type="application/json"'));
     const execScripts = allScripts.filter((m) => !(m[1] ?? "").includes('type="application/json"'));
@@ -384,7 +384,7 @@ describe("serializeInteractiveArchitectureHtml — etkileşimli offline E6+ port
     let htmlWithoutScripts = html;
     for (let previous = ""; previous !== htmlWithoutScripts; ) {
       previous = htmlWithoutScripts;
-      htmlWithoutScripts = htmlWithoutScripts.replace(/<script\b[^>]*>[\s\S]*?<\/script\s*>/gi, "");
+      htmlWithoutScripts = htmlWithoutScripts.replace(/<script\b[^>]*>[\s\S]*?<\/script\b[^>]*>/gi, "");
     }
     expect(/<script\b/i.test(htmlWithoutScripts)).toBe(false);
     expect(/\son[a-z]+\s*=/i.test(htmlWithoutScripts)).toBe(false);
