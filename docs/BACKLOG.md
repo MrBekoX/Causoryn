@@ -81,7 +81,7 @@ Sert bağımlılık omurgası: **Temel → Derin eşleme → Mimari zekâ → S�
 
 ### Kapı listesi dışındaki bilinen 0.3.0 sınırları
 
-- **Sidecar node span'leri:** C#, Python, Go ve Rust sembol node'ları bildirim span'leri yerine bir dosya çapası (`startLine = endLine = 1`) taşır; yalnızca TypeScript/JavaScript node'ları gerçek span taşır. Kenar kanıt span'leri her dilde satır doğruluğundadır.
+- **Endpoint node span'leri:** Endpoint node'ları (tüm dillerde) dosya çapasını (`startLine = endLine = 1`) korur; sembol node'ları artık her dilde gerçek bildirim span'lerini taşır.
 - **Host smoke güncelliği:** Claude Code ve Codex canlı CLI koşumları 0.3.0'dan önce kaydedildi; 0.3.0 araç profilleri yalnızca otomatik testlerle kapsanır ([uyumluluk matrisi](compatibility-matrix.md)).
 
 ## 5. 1.0 Sonrası Adaylar ve Küçük Teknik Borçlar

@@ -81,7 +81,7 @@ Hard dependency spine: **Foundation → Deep mapping → Architecture intelligen
 
 ### Known 0.3.0 boundaries outside the gate list
 
-- **Sidecar node spans:** C#, Python, Go and Rust symbol nodes carry a file anchor (`startLine = endLine = 1`) instead of their declaration span; only TypeScript/JavaScript nodes carry real spans. Edge evidence spans are line-accurate in every language.
+- **Endpoint node spans:** Endpoint nodes (all languages) keep the file anchor (`startLine = endLine = 1`); symbol nodes in every language now carry real declaration spans.
 - **Host smoke freshness:** the Claude Code and Codex live CLI runs were recorded before 0.3.0; the 0.3.0 tool profiles are covered only by automated tests ([compatibility matrix](compatibility-matrix.md)).
 
 ## 5. Post-1.0 Candidates and Minor Technical Debt
