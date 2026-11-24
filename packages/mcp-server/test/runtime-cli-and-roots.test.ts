@@ -557,7 +557,7 @@ describe("isSafeProjectRoot — güvenli proje kökü filtresi", { timeout: 20_0
 });
 
 describe("buildWorkspaceAutoConfig — otomatik veri dizini ve paylaşımlı workspace DB", { timeout: 30_000 }, () => {
-  it("taban veri dizini önceliğini (--data-dir > ZCODE_PLUGIN_DATA > ~/.causoryn) uygular ve tüm istemciler için paylaşımlı graph.sqlite yolunu hazırlar", () => {
+  it("applies the base data dir precedence (--data-dir > ~/.causoryn; ZCODE_PLUGIN_DATA only as a fallback) and prepares one shared graph.sqlite for every client", () => {
     const sandbox = createTempSandbox();
     try {
       const treeBefore = listTreeRelative(sandbox.projectADir);
@@ -622,7 +622,10 @@ describe("buildWorkspaceAutoConfig — otomatik veri dizini ve paylaşımlı wor
         expect(statSync(exportsDir).mode & 0o777).toBe(0o700);
       }
 
-      // 2) --data-dir yokken ZCODE_PLUGIN_DATA ikinci öncelik + client verilmezse graph.sqlite
+      // 2) Without --data-dir, a set ZCODE_PLUGIN_DATA no longer moves the index away
+      //    from ~/.causoryn: ZCode shares graph.sqlite with the other hosts
+      //    (ZCODE_PLUGIN_DATA is only used when ~/.causoryn cannot be written —
+      //    see tests/zcode-shared-data-dir.test.ts).
       const zcodeDataDir = path.join(sandbox.rootDir, "zcode-data");
       const cfg2 = buildWorkspaceAutoConfig({
         roots: [sandbox.projectADir],
@@ -630,10 +633,11 @@ describe("buildWorkspaceAutoConfig — otomatik veri dizini ve paylaşımlı wor
         homeDir: sandbox.fakeHome,
         env: { ZCODE_PLUGIN_DATA: zcodeDataDir },
       });
-      expect(cfg2.storage.dataDbPath?.startsWith(path.join(zcodeDataDir, "workspaces"))).toBe(
-        true,
-      );
+      expect(
+        cfg2.storage.dataDbPath?.startsWith(path.join(sandbox.fakeHome, ".causoryn", "workspaces")),
+      ).toBe(true);
       expect(path.basename(cfg2.storage.dataDbPath ?? "")).toBe("graph.sqlite");
+      expect(existsSync(zcodeDataDir)).toBe(false);
 
       // 3) İkisi de yokken ~/.causoryn üçüncü öncelik + CAUSORYN_CONFIG içindeki açık alanlar korunur
       const cfg3 = buildWorkspaceAutoConfig({

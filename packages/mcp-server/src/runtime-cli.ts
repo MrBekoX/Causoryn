@@ -1,4 +1,5 @@
 import {
+  accessSync,
   chmodSync,
   closeSync,
   constants as fsConstants,
@@ -950,11 +951,60 @@ export function isSafeProjectRoot(
   return inspectProjectRootSafety(candidatePath, options).safe;
 }
 
-export function resolveBaseDataDir(options: {
+/** Where a base data directory candidate came from. */
+export type DataDirSource = "--data-dir" | "home" | "ZCODE_PLUGIN_DATA";
+
+export interface DataDirCandidate {
+  readonly dir: string;
+  readonly source: DataDirSource;
+}
+
+export interface DataDirCandidates {
+  /** The base data directory every host resolves the same way. */
+  readonly primary: DataDirCandidate;
+  /** Used only when `primary` cannot hold the workspace data directory. */
+  readonly fallback?: DataDirCandidate;
+}
+
+export interface BaseDataDirOptions {
   readonly dataDir?: string;
   readonly homeDir?: string;
   readonly env?: NodeJS.ProcessEnv;
-}): string {
+}
+
+/** Validates `ZCODE_PLUGIN_DATA` when set (fail-closed even when unused). */
+function readZcodePluginDataDir(env: NodeJS.ProcessEnv): string | undefined {
+  const zcodeDataDir = env["ZCODE_PLUGIN_DATA"]?.trim();
+  if (zcodeDataDir === undefined || zcodeDataDir.length === 0) {
+    return undefined;
+  }
+  if (zcodeDataDir.includes("\0")) {
+    throw new CausorynConfigError(["ZCODE_PLUGIN_DATA must not contain a NUL byte"]);
+  }
+  if (isUncOrDevicePath(zcodeDataDir)) {
+    throw new CausorynConfigError([
+      `ZCODE_PLUGIN_DATA must not be a UNC or Win32 device path: ${zcodeDataDir}`,
+    ]);
+  }
+  if (!path.isAbsolute(zcodeDataDir)) {
+    throw new CausorynConfigError([
+      `ZCODE_PLUGIN_DATA must be an absolute path: ${zcodeDataDir}`,
+    ]);
+  }
+  return path.resolve(zcodeDataDir);
+}
+
+/**
+ * Resolves the base data directory candidates. Precedence: `--data-dir`
+ * (explicit; no fallback) > `~/.causoryn`. `~/.causoryn` is the base for
+ * every host, so Claude Code, Codex, Antigravity and ZCode share one
+ * `workspaces/<slug>-<hash12>/graph.sqlite` per workspace. `ZCODE_PLUGIN_DATA`
+ * (the ZCode plugin's persistent data directory) is only a fallback for when
+ * `~/.causoryn` cannot be created or written; nothing documents a ZCode
+ * restriction on writing to `~/.causoryn` (the plugin's MCP server is an
+ * ordinary user process).
+ */
+export function resolveDataDirCandidates(options: BaseDataDirOptions): DataDirCandidates {
   const explicitDataDir = options.dataDir?.trim();
   if (explicitDataDir !== undefined && explicitDataDir.length > 0) {
     if (explicitDataDir.includes("\0")) {
@@ -968,35 +1018,47 @@ export function resolveBaseDataDir(options: {
     if (!path.isAbsolute(explicitDataDir)) {
       throw new CausorynConfigError([`--data-dir must be an absolute path: ${explicitDataDir}`]);
     }
-    return path.resolve(explicitDataDir);
+    return { primary: { dir: path.resolve(explicitDataDir), source: "--data-dir" } };
   }
 
   const env = options.env ?? process.env;
-  const zcodeDataDir = env["ZCODE_PLUGIN_DATA"]?.trim();
-  if (zcodeDataDir !== undefined && zcodeDataDir.length > 0) {
-    if (zcodeDataDir.includes("\0")) {
-      throw new CausorynConfigError(["ZCODE_PLUGIN_DATA must not contain a NUL byte"]);
-    }
-    if (isUncOrDevicePath(zcodeDataDir)) {
-      throw new CausorynConfigError([
-        `ZCODE_PLUGIN_DATA must not be a UNC or Win32 device path: ${zcodeDataDir}`,
-      ]);
-    }
-    if (!path.isAbsolute(zcodeDataDir)) {
-      throw new CausorynConfigError([
-        `ZCODE_PLUGIN_DATA must be an absolute path: ${zcodeDataDir}`,
-      ]);
-    }
-    return path.resolve(zcodeDataDir);
-  }
-
+  const zcodeDataDir = readZcodePluginDataDir(env);
   const homeDir = options.homeDir ?? os.homedir();
   if (isUncOrDevicePath(homeDir)) {
+    if (zcodeDataDir !== undefined) {
+      return { primary: { dir: zcodeDataDir, source: "ZCODE_PLUGIN_DATA" } };
+    }
     throw new CausorynConfigError([
       `homeDir must not be a UNC or Win32 device path: ${homeDir}`,
     ]);
   }
-  return path.resolve(homeDir, ".causoryn");
+  const homeDataDir = path.resolve(homeDir, ".causoryn");
+  return {
+    primary: { dir: homeDataDir, source: "home" },
+    ...(zcodeDataDir !== undefined && !isSameComparablePath(zcodeDataDir, homeDataDir)
+      ? { fallback: { dir: zcodeDataDir, source: "ZCODE_PLUGIN_DATA" as const } }
+      : {}),
+  };
+}
+
+/** The primary base data directory (`--data-dir` > `~/.causoryn`). */
+export function resolveBaseDataDir(options: BaseDataDirOptions): string {
+  return resolveDataDirCandidates(options).primary.dir;
+}
+
+/**
+ * A data directory that exists as a non-directory or cannot be created or
+ * written. Unlike symlink / inside-workspace violations (security errors that
+ * always stop startup), this one lets startup move on to a fallback base.
+ */
+class DataDirUnusableError extends CausorynConfigError {
+  readonly reason: string;
+
+  constructor(issue: string, reason: string) {
+    super([issue]);
+    this.name = "DataDirUnusableError";
+    this.reason = reason;
+  }
 }
 
 function isSlugTrimChar(code: number): boolean {
@@ -1059,9 +1121,10 @@ function assertNotSymlinkDirectory(targetDir: string): void {
       ]);
     }
     if (!st.isDirectory()) {
-      throw new CausorynConfigError([
+      throw new DataDirUnusableError(
         `the data directory path is not a directory: ${targetDir}`,
-      ]);
+        `${targetDir} is not a directory`,
+      );
     }
   } catch (error) {
     if (error instanceof CausorynConfigError) throw error;
@@ -1279,6 +1342,83 @@ export async function prepareWorkspaceDatabase(
   }
 }
 
+interface PreparedWorkspaceDataDir {
+  readonly exportsDir: string;
+  readonly dbPath: string;
+}
+
+/**
+ * Validates and creates `<baseDataDir>/workspaces/<workspaceDirName>` and its
+ * `exports/` directory, then picks the database file. Every path is checked
+ * to lie outside the authorized roots and to contain no symlinked component
+ * BEFORE anything is created (ADR-008 + CWE-59), and re-checked by real path
+ * afterwards (TOCTOU). A base that cannot be created or written throws
+ * `DataDirUnusableError`; security violations throw `CausorynConfigError`.
+ */
+function prepareWorkspaceDataDir(
+  baseDataDir: string,
+  workspaceDirName: string,
+  effectiveRoots: readonly string[],
+  canonicalRoots: readonly string[],
+  logger: ((message: string) => void) | undefined,
+): PreparedWorkspaceDataDir {
+  const workspacesDir = path.join(baseDataDir, "workspaces");
+  const workspaceDataDir = path.join(workspacesDir, workspaceDirName);
+  const exportsDir = path.join(workspaceDataDir, "exports");
+  // Single shared workspace SQLite database across all MCP host clients;
+  // the host client id is preserved strictly as a diagnostic/host label.
+  const sharedDbPath = path.join(workspaceDataDir, SHARED_WORKSPACE_DB_FILE);
+
+  // Yazmadan ÖNCE hem sözcüksel hem gerçek-ata yollarının workspace dışında
+  // kaldığını ve hiçbir önek/ata dizinin sembolik/dangling bağ olmadığını
+  // doğrula (ADR-008 + CWE-59: kaynak ağaca tek klasör bile açılamaz).
+  assertStrictlyOutsideWorkspaceRoots(
+    [baseDataDir, workspacesDir, workspaceDataDir, exportsDir, sharedDbPath],
+    effectiveRoots,
+    canonicalRoots,
+  );
+  assertNotSymlinkDirectory(baseDataDir);
+  assertNotSymlinkDirectory(workspacesDir);
+  assertNotSymlinkDirectory(workspaceDataDir);
+  assertNotSymlinkDirectory(exportsDir);
+  assertDataDirAncestorsSafe(exportsDir, effectiveRoots, canonicalRoots);
+
+  try {
+    mkdirSync(workspaceDataDir, { recursive: true, mode: 0o700 });
+    mkdirSync(exportsDir, { recursive: true, mode: 0o700 });
+    accessSync(workspaceDataDir, fsConstants.W_OK);
+    accessSync(exportsDir, fsConstants.W_OK);
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException | undefined)?.code ?? "unknown error";
+    throw new DataDirUnusableError(
+      `the data directory could not be created or is not writable: ${workspaceDataDir} (${code})`,
+      `${code} while creating ${workspaceDataDir}`,
+    );
+  }
+  if (process.platform !== "win32") {
+    try {
+      chmodSync(workspaceDataDir, 0o700);
+      chmodSync(exportsDir, 0o700);
+    } catch {
+      // Dosya sistemi izin daraltmayı desteklemiyorsa sessiz geçilir.
+    }
+  }
+
+  // Oluşturma sonrası realpath doğrulaması (TOCTOU savunması).
+  const realWorkspaceDataDir = stripWin32DevicePrefix(realpathSync(workspaceDataDir));
+  const realExportsDir = stripWin32DevicePrefix(realpathSync(exportsDir));
+  assertStrictlyOutsideWorkspaceRoots(
+    [realWorkspaceDataDir, realExportsDir],
+    effectiveRoots,
+    canonicalRoots,
+  );
+
+  // Schema forward guard (Task 1.7 criterion 4): never share a file with a
+  // newer schema version; fall back to graph.schema-<N>.sqlite instead.
+  const dbPath = selectWorkspaceDbPath(workspaceDataDir, logger);
+  return { exportsDir, dbPath };
+}
+
 /**
  * CLI köklerini, `--auto-data-dir` / `--data-dir` kurulumunu ve isteğe bağlı
  * `CAUSORYN_CONFIG` taban alanlarını birleştirerek doğrulanmış `CausorynServerConfig`
@@ -1372,7 +1512,7 @@ export function buildWorkspaceAutoConfig(
     }
   });
 
-  const baseDataDir = resolveBaseDataDir({
+  const candidates = resolveDataDirCandidates({
     ...(options.dataDir !== undefined ? { dataDir: options.dataDir } : {}),
     ...(options.homeDir !== undefined ? { homeDir: options.homeDir } : {}),
     ...(options.env !== undefined ? { env: options.env } : {}),
@@ -1381,50 +1521,39 @@ export function buildWorkspaceAutoConfig(
   const primaryRoot = canonicalRoots[0] as string;
   const slug = deriveWorkspaceSlug(primaryRoot);
   const hash12 = sha256Hex(utf8Encode(normalizeComparablePath(primaryRoot))).slice(0, 12);
-  const workspacesDir = path.join(baseDataDir, "workspaces");
-  const workspaceDataDir = path.join(workspacesDir, `${slug}-${hash12}`);
-  const exportsDir = path.join(workspaceDataDir, "exports");
-  // Single shared workspace SQLite database across all MCP host clients;
-  // `options.client` is preserved strictly as a diagnostic/host label.
-  const sharedDbPath = path.join(workspaceDataDir, SHARED_WORKSPACE_DB_FILE);
+  const workspaceDirName = `${slug}-${hash12}`;
 
-  // Yazmadan ÖNCE hem sözcüksel hem gerçek-ata yollarının workspace dışında
-  // kaldığını ve hiçbir önek/ata dizinin sembolik/dangling bağ olmadığını
-  // doğrula (ADR-008 + CWE-59: kaynak ağaca tek klasör bile açılamaz).
-  assertStrictlyOutsideWorkspaceRoots(
-    [baseDataDir, workspacesDir, workspaceDataDir, exportsDir, sharedDbPath],
-    effectiveRoots,
-    canonicalRoots,
-  );
-  assertNotSymlinkDirectory(baseDataDir);
-  assertNotSymlinkDirectory(workspacesDir);
-  assertNotSymlinkDirectory(workspaceDataDir);
-  assertNotSymlinkDirectory(exportsDir);
-  assertDataDirAncestorsSafe(exportsDir, effectiveRoots, canonicalRoots);
-
-  mkdirSync(workspaceDataDir, { recursive: true, mode: 0o700 });
-  mkdirSync(exportsDir, { recursive: true, mode: 0o700 });
-  if (process.platform !== "win32") {
-    try {
-      chmodSync(workspaceDataDir, 0o700);
-      chmodSync(exportsDir, 0o700);
-    } catch {
-      // Dosya sistemi izin daraltmayı desteklemiyorsa sessiz geçilir.
+  let prepared: PreparedWorkspaceDataDir;
+  try {
+    prepared = prepareWorkspaceDataDir(
+      candidates.primary.dir,
+      workspaceDirName,
+      effectiveRoots,
+      canonicalRoots,
+      options.logger,
+    );
+  } catch (error) {
+    const fallback = candidates.fallback;
+    if (fallback === undefined || !(error instanceof DataDirUnusableError)) {
+      throw error;
     }
+    const log =
+      options.logger ??
+      ((message: string): void => {
+        console.error(message);
+      });
+    log(
+      `[causoryn] ${candidates.primary.dir} cannot hold the index (${error.reason}); using ${fallback.source} (${fallback.dir}) instead. This index is not shared with hosts that use ${candidates.primary.dir}; fix that directory, or pass --data-dir to choose the location explicitly.`,
+    );
+    prepared = prepareWorkspaceDataDir(
+      fallback.dir,
+      workspaceDirName,
+      effectiveRoots,
+      canonicalRoots,
+      options.logger,
+    );
   }
-
-  // Oluşturma sonrası realpath doğrulaması (TOCTOU savunması).
-  const realWorkspaceDataDir = stripWin32DevicePrefix(realpathSync(workspaceDataDir));
-  const realExportsDir = stripWin32DevicePrefix(realpathSync(exportsDir));
-  assertStrictlyOutsideWorkspaceRoots(
-    [realWorkspaceDataDir, realExportsDir],
-    effectiveRoots,
-    canonicalRoots,
-  );
-
-  // Schema forward guard (Task 1.7 criterion 4): never share a file with a
-  // newer schema version; fall back to graph.schema-<N>.sqlite instead.
-  const dbPath = selectWorkspaceDbPath(workspaceDataDir, options.logger);
+  const { exportsDir, dbPath } = prepared;
 
   const baseStorage = isPlainObject(rawBase["storage"]) ? rawBase["storage"] : {};
   const baseWiki = isPlainObject(rawBase["wiki"]) ? rawBase["wiki"] : {};
