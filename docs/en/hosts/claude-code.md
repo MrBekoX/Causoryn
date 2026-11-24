@@ -57,7 +57,7 @@ npx causoryn@0.3.0 setup --client claude-code --uninstall --yes
       "type": "stdio",
       "command": "/path/to/node",
       "args": [
-        "/path/to/home/.causoryn/runtime/scripts/causoryn.mjs",
+        "/home/you/.causoryn/runtime/scripts/causoryn.mjs",
         "mcp",
         "--allow-cwd",
         "--auto-data-dir",
