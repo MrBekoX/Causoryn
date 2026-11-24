@@ -230,7 +230,7 @@ export function compileGuardGlob(pattern: string): GuardGlob {
   if (pattern.length > MAX_GLOB_LENGTH) {
     throw new GuardError(
       "guard/pattern-too-long",
-      `Glob deseni çok uzun (${pattern.length} > ${MAX_GLOB_LENGTH})`,
+      `Glob pattern is too long (${pattern.length} > ${MAX_GLOB_LENGTH})`,
     );
   }
   let wildcards = 0;
@@ -239,20 +239,20 @@ export function compileGuardGlob(pattern: string): GuardGlob {
     if (UNSUPPORTED_GLOB_CHARS.has(ch)) {
       throw new GuardError(
         "guard/pattern-unsupported-syntax",
-        `Glob deseninde desteklenmeyen karakter: '${ch}' (yalnızca **, *, ? desteklenir)`,
+        `Unsupported character in glob pattern: '${ch}' (only **, * and ? are supported)`,
       );
     }
   }
   if (pattern.includes("***")) {
     throw new GuardError(
       "guard/pattern-unsupported-syntax",
-      "Glob deseninde üç veya daha fazla ardışık '*' desteklenmez",
+      "Three or more consecutive '*' characters are not supported in a glob pattern",
     );
   }
   if (wildcards > MAX_GLOB_WILDCARDS) {
     throw new GuardError(
       "guard/pattern-too-complex",
-      `Glob deseni çok karmaşık (${wildcards} wildcard > ${MAX_GLOB_WILDCARDS})`,
+      `Glob pattern is too complex (${wildcards} wildcards > ${MAX_GLOB_WILDCARDS})`,
     );
   }
 
@@ -283,7 +283,7 @@ const EdgeKindSchema = z.enum(EDGE_KINDS);
  * kuralıyla aynı semantik (değer kırpılmaz, olduğu gibi taşınır).
  */
 const NonEmptyString = z.string().refine((value) => value.trim().length > 0, {
-  message: "Alan boş veya yalnızca boşluk olamaz",
+  message: "Field must not be empty or whitespace-only",
 });
 
 const RuleIdSchema = NonEmptyString;
@@ -330,7 +330,7 @@ const PolicySchema = z
       if (seen.has(rule.id)) {
         ctx.addIssue({
           code: "custom",
-          message: `Kural kimliği tekrarlandı: ${rule.id}`,
+          message: `Duplicate rule id: ${rule.id}`,
           path: ["rules"],
         });
       }
@@ -366,7 +366,7 @@ const SuppressionSchema = z.strictObject({
   date: z
     .string()
     .refine(isValidCalendarDate, {
-      message: "date YYYY-MM-DD biçiminde geçerli bir takvim günü olmalı",
+      message: "date must be a valid calendar day in YYYY-MM-DD format",
     }),
   // NonEmptyString: boş from/to '^$' glob'una derlenip baskılamayı sessizce
   // no-op yapmaz; şema reddiyle yüzeye çıkar.
@@ -438,7 +438,7 @@ function parseYamlOrThrow(text: string, yamlErrorCode: string): unknown {
     if (error instanceof YAMLParseError) {
       throw new GuardError(
         yamlErrorCode,
-        `YAML çözümlenemedi: ${error.message}`,
+        `YAML could not be parsed: ${error.message}`,
       );
     }
     throw error;
@@ -454,11 +454,11 @@ function requireSchema<T>(
   const result = schema.safeParse(document);
   if (!result.success) {
     const issues = result.error.issues.map(
-      (issue) => `${issue.path.join(".") || "(kök)"}: ${issue.message}`,
+      (issue) => `${issue.path.join(".") || "(root)"}: ${issue.message}`,
     );
     throw new GuardError(
       code,
-      `Şema doğrulaması başarısız: ${issues.join("; ")}`,
+      `Schema validation failed: ${issues.join("; ")}`,
       issues,
     );
   }

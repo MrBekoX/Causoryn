@@ -450,7 +450,7 @@ describe("buildPreflightManifest — negatif (breaking candidate)", () => {
     expect(manifest.candidateTargets).toHaveLength(1);
     const entry = manifest.candidateTargets[0];
     expect(entry?.target).toBe(SVC);
-    expect(entry?.reason).toContain("belirsiz");
+    expect(entry?.reason).toContain("ambiguous target");
     expect(entry?.candidates).toHaveLength(2);
     expect(entry?.candidates.map((candidate) => candidate.matchBasis)).toEqual([
       "exact-name",

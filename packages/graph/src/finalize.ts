@@ -98,7 +98,7 @@ export function finalizeSnapshotGraph(
       const missing = from === undefined ? edge.from : edge.to;
       throw new GraphRepositoryError(
         "graph/dangling-edge",
-        `Kenar ucu bilinmeyen node'a işaret ediyor (${edge.id}): ${missing}`,
+        `Edge endpoint points to an unknown node (${edge.id}): ${missing}`,
       );
     }
     const evidence: SnapshotEvidenceInput[] = edge.evidenceIds.map((ref) => {
@@ -106,7 +106,7 @@ export function finalizeSnapshotGraph(
       if (item === undefined) {
         throw new GraphRepositoryError(
           "graph/unknown-evidence-ref",
-          `Kenar bilinmeyen kanıta işaret ediyor (${edge.id}): ${ref}`,
+          `Edge points to unknown evidence (${edge.id}): ${ref}`,
         );
       }
       return toEvidenceInput(item);

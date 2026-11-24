@@ -246,7 +246,7 @@ function assertValidProfile(profile: OnboardingProfile): void {
   ) {
     throw new GraphRepositoryError(
       "graph/onboarding-invalid-input",
-      `Bilinmeyen onboarding profili: ${String(profile)}`,
+      `Unknown onboarding profile: ${String(profile)}`,
     );
   }
 }
@@ -270,7 +270,7 @@ function resolveLimits(
     if (typeof value !== "number" || !Number.isInteger(value) || value <= 0) {
       throw new GraphRepositoryError(
         "graph/onboarding-invalid-input",
-        `Onboarding limiti pozitif tam sayı olmalı (${key}): ${String(value)}`,
+        `Onboarding limit must be a positive integer (${key}): ${String(value)}`,
       );
     }
   }
@@ -375,7 +375,7 @@ export function generateOnboarding(
   if (state !== "ready" && state !== "partial") {
     throw new GraphRepositoryError(
       "graph/onboarding-snapshot-state",
-      `onboarding yalnızca ready/partial snapshot üzerinde çalışır; snapshot durumu: ${String(state)}`,
+      `onboarding only runs on a ready or partial snapshot; snapshot state: ${String(state)}`,
     );
   }
 
@@ -438,8 +438,8 @@ export function generateOnboarding(
     warnings.push({
       code: "onboarding/no-entry-endpoint",
       message:
-        "Snapshot'ta Endpoint node'u bulunamadı; giriş noktaları türetilemedi. " +
-        "Unresolved kenar uçları 'riskli alanlar' bölümünde raporlanır.",
+        "No Endpoint node was found in the snapshot, so entry points could not be derived. " +
+        "Unresolved edge endpoints are reported in the riskAreas section.",
     });
   }
   entryPoints.sort((a, b) => {
@@ -606,7 +606,7 @@ export function generateOnboarding(
   if (totalLearningSteps > limits.maxLearningSteps) {
     warnings.push({
       code: "onboarding/learning-order-truncated",
-      message: `Öğrenme sırası tavana indirildi: ${limits.maxLearningSteps}/${totalLearningSteps} adım gösteriliyor.`,
+      message: `Learning order was clamped to the ceiling: showing ${limits.maxLearningSteps}/${totalLearningSteps} steps.`,
     });
   }
 

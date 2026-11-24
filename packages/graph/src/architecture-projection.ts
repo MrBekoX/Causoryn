@@ -61,7 +61,7 @@ export const ArchitectureProjectionOptionsSchema = z
           !v.includes("\0") &&
           normalizePosixPath(v).length > 0,
         {
-          message: "pathPrefix geçerli göreli yol öneki olmalıdır",
+          message: "pathPrefix must be a valid relative path prefix",
         },
       )
       .optional()
@@ -772,7 +772,7 @@ function assertNoDanglingEdges(snapshot: SnapshotGraph): void {
     if (!ids.has(edge.from) || !ids.has(edge.to)) {
       throw new GraphRepositoryError(
         "export/dangling-edge",
-        `Kenar ucu bilinmeyen node: ${edge.id}`,
+        `Edge endpoint points to an unknown node: ${edge.id}`,
       );
     }
   }
@@ -787,7 +787,7 @@ export function projectArchitecture(
     const issue = parsedOpts.error.issues[0];
     throw new GraphRepositoryError(
       "export/invalid-options",
-      `Geçersiz mimari projeksiyon seçenekleri: ${issue?.message ?? parsedOpts.error.message}`,
+      `Invalid architecture projection options: ${issue?.message ?? parsedOpts.error.message}`,
     );
   }
   assertNoDanglingEdges(snapshot);
