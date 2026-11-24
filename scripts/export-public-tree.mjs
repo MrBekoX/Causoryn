@@ -177,7 +177,7 @@ function rewriteOptionalFileInPlace(filePath, transform) {
     while (offset < outBuf.length) {
       const written = writeSync(fd, outBuf, offset, outBuf.length - offset, offset);
       if (written <= 0) {
-        throw new Error(`Dosya yerinde yazılamadı: ${filePath}`);
+        throw new Error(`Could not write the file in place: ${filePath}`);
       }
       offset += written;
     }
@@ -239,7 +239,7 @@ export function verifyPublicTree(exportedDir) {
   if (!existsSync(exportedDir) || !statSync(exportedDir).isDirectory()) {
     return {
       ok: false,
-      findings: [`hedef dizin mevcut değil: ${exportedDir}`],
+      findings: [`target directory does not exist: ${exportedDir}`],
       fileCount: 0,
     };
   }
@@ -247,7 +247,7 @@ export function verifyPublicTree(exportedDir) {
   for (const requiredRel of REQUIRED_PUBLIC_FILES) {
     const full = path.join(exportedDir, ...requiredRel.split("/"));
     if (!existsSync(full) || !statSync(full).isFile()) {
-      findings.push(`eksik zorunlu açık kaynak dosyası: ${requiredRel}`);
+      findings.push(`missing required open-source file: ${requiredRel}`);
     }
   }
 
@@ -256,7 +256,7 @@ export function verifyPublicTree(exportedDir) {
     const relPosix = toPosixRel(exportedDir, fullPath);
 
     if (isExcludedRelPath(relPosix)) {
-      findings.push(`dışlanan yol sızıntısı: ${relPosix}`);
+      findings.push(`excluded path leaked into export: ${relPosix}`);
       continue;
     }
 
@@ -326,16 +326,16 @@ export function exportPublicTree(options) {
   const ref = options.ref ?? "HEAD";
 
   if (typeof ref !== "string" || !SAFE_GIT_REF_RE.test(ref) || ref.includes("..")) {
-    throw new Error(`Geçersiz Git ref reddedildi (fail-closed): ${String(ref)}`);
+    throw new Error(`Rejected invalid Git ref (fail-closed): ${String(ref)}`);
   }
 
   if (existsSync(outDir)) {
     const stat = statSync(outDir);
     if (!stat.isDirectory()) {
-      throw new Error(`Hedef yol bir dizin değil: ${outDir}`);
+      throw new Error(`Target path is not a directory: ${outDir}`);
     }
     if (readdirSync(outDir).length > 0) {
-      throw new Error(`Hedef çıkış dizini boş olmalı (fail-closed): ${outDir}`);
+      throw new Error(`Target output directory must be empty (fail-closed): ${outDir}`);
     }
   } else {
     mkdirSync(outDir, { recursive: true });
@@ -360,7 +360,7 @@ export function exportPublicTree(options) {
   const verification = verifyPublicTree(outDir);
   if (!verification.ok) {
     throw new Error(
-      `PUBLIC_EXPORT KIRMIZI — doğrulama başarısız (${verification.findings.length} bulgu):\n` +
+      `PUBLIC_EXPORT FAIL — verification failed (${verification.findings.length} finding(s)):\n` +
         verification.findings.map((f) => `  - ${f}`).join("\n"),
     );
   }
@@ -397,15 +397,15 @@ function parseCliArgs(argv) {
     } else if (arg === "--verify-temp") {
       verifyTemp = true;
     } else {
-      throw new Error(`Bilinmeyen argüman: ${String(arg)}`);
+      throw new Error(`Unknown argument: ${String(arg)}`);
     }
   }
 
   if (verifyTemp && outDir) {
-    throw new Error("--verify-temp ve --out aynı anda kullanılamaz.");
+    throw new Error("--verify-temp and --out cannot be used together.");
   }
   if (!verifyTemp && !outDir) {
-    throw new Error("Zorunlu --out <boş-hedef-dizin> veya --verify-temp parametresi eksik.");
+    throw new Error("Missing required --out <empty-target-dir> or --verify-temp option.");
   }
 
   return { outDir, ref, repoRoot, verifyTemp };
@@ -429,7 +429,7 @@ if (isMainModule) {
       ref: cli.ref,
     });
     console.log(
-      `PUBLIC_EXPORT YEŞİL — ref=${result.ref}, ${result.exportedFiles.length} dosya temiz aktarıldı → ${result.outDir}`,
+      `PUBLIC_EXPORT PASS — ref=${result.ref}, ${result.exportedFiles.length} file(s) exported clean → ${result.outDir}`,
     );
   } catch (error) {
     console.error(error instanceof Error ? error.message : String(error));
