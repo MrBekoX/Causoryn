@@ -201,7 +201,11 @@ function stripNonRootTrailingSlash(normalized: string): string {
   if (normalized === "/" || /^[a-zA-Z]:\/$/.test(normalized)) {
     return normalized;
   }
-  return normalized.replace(/\/+$/, "");
+  let end = normalized.length;
+  while (end > 0 && normalized.charCodeAt(end - 1) === 47) {
+    end -= 1;
+  }
+  return end === normalized.length ? normalized : normalized.slice(0, end);
 }
 
 function canonicalKey(p: string): string {
@@ -1485,10 +1489,12 @@ function resolveViaVirtualAlias(
     if (baseDir !== undefined) {
       for (const match of matchScopedPathPatterns(moduleName, scopedConfig.paths)) {
         for (const rawTarget of match.targets) {
-          // SEC-11: Fonksiyon ikamesi '$&' / "$'" özel kalıp genişlemesini önler.
-          const substituted = rawTarget.includes("*")
-            ? rawTarget.replace("*", () => match.matchedStar)
-            : rawTarget;
+          // SEC-11: Dilimleme ikamesi '$&' / "$'" özel kalıp genişlemesini önler ve tek '*' semantiğini korur.
+          const starIdx = rawTarget.indexOf("*");
+          const substituted =
+            starIdx >= 0
+              ? `${rawTarget.slice(0, starIdx)}${match.matchedStar}${rawTarget.slice(starIdx + 1)}`
+              : rawTarget;
           const targetPosix = toPosix(substituted);
           if (targetPosix.startsWith("/") || /^[a-zA-Z]:/.test(targetPosix)) {
             continue;

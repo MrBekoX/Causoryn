@@ -1,4 +1,3 @@
-import { readFile, stat } from "node:fs/promises";
 import path from "node:path";
 
 import {
@@ -34,6 +33,10 @@ import { graphErrorToToolError, GuardFindingSchema } from "./services-architectu
 import { CausorynToolError } from "./errors.js";
 import { buildEnvelope, type Envelope } from "./envelope.js";
 import type { PreflightManifestStore } from "./preflight-store.js";
+import {
+  readOptionalBoundedTextFile,
+  type BoundedTextReadResult,
+} from "./safe-file-read.js";
 
 /**
  * Faz E uygulama servisi (sprint-6 causoryn_verify_change — Agent Change
@@ -381,41 +384,16 @@ function projectWorkingTree(
   return { snapshot: run.snapshot, warnings: run.warnings };
 }
 
-/** Policy/baseline okuma sonucu (services-architecture readOptionalTextFile örüntüsü). */
-type GuardTextRead =
-  | { readonly status: "ok"; readonly text: string }
-  | { readonly status: "missing" }
-  | { readonly status: "too-large"; readonly bytes: number };
-
 /**
- * Guard dosyasını TŞ §20 "dosya başına byte" bütçesiyle okur (stat ÖNCE,
- * byteLength SONRA — stat/read yarışına karşı iki katman; check_architecture
- * disiplini). Eksik dosya "missing".
+ * Guard dosyasını TŞ §20 "dosya başına byte" bütçesiyle tek file handle
+ * üzerinden sınırlı okur (CWE-367 TOCTOU'ya karşı open+fstat+bounded read).
+ * Eksik dosya "missing".
  */
-async function readGuardText(
+function readGuardText(
   absolutePath: string,
   maxBytes: number,
-): Promise<GuardTextRead> {
-  let statSize: number | undefined;
-  try {
-    statSize = (await stat(absolutePath)).size;
-  } catch {
-    return { status: "missing" };
-  }
-  if (statSize > maxBytes) {
-    return { status: "too-large", bytes: statSize };
-  }
-  let text: string;
-  try {
-    text = await readFile(absolutePath, "utf8");
-  } catch {
-    return { status: "missing" };
-  }
-  const bytes = Buffer.byteLength(text, "utf8");
-  if (bytes > maxBytes) {
-    return { status: "too-large", bytes };
-  }
-  return { status: "ok", text };
+): Promise<BoundedTextReadResult> {
+  return readOptionalBoundedTextFile(absolutePath, maxBytes);
 }
 
 /**

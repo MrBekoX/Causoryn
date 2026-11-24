@@ -6,7 +6,7 @@
 
 ## Current Runtime Security Boundaries (`v0.2.3`)
 
-**Bundle identity:** `packages/mcp-server/dist/mcp-server.mjs` SHA-256 `833bf422bab99ac70f3acb8f7e8a96b1d76918f69f872122cb40e5455855f92f`. `dist/bundle-manifest.json` records this hash and 35 entries including the native SQLite runtime. The hash identifies the local artifact. The F6 results below describe the dated test sessions in the matrix.
+**Bundle identity:** `packages/mcp-server/dist/mcp-server.mjs` SHA-256 `b2b2197054f1cec5546a82645138947eea504b607ba47f0126e53c833fde3415`. `dist/bundle-manifest.json` records this hash and 35 entries including the native SQLite runtime. The hash identifies the local artifact. The F6 results below describe the dated test sessions in the matrix.
 
 - `causoryn_export_documentation` writes to destinations authorized by `output.allowedOutputDirs` using an exclusive `flag: "wx"` + `EEXIST`-guarded temporary file and atomic rename; `view="interactive"` defaults to `causoryn-architecture-interactive.html` so it never overwrites the zero-JS `causoryn-architecture.html`. `--auto-data-dir` puts exports outside the source tree. A manually authorized export directory may be inside that tree. An undeclared directory returns `EXPORT_NOT_ALLOWED`. An unsafe file name or path escape returns `PATH_DENIED`. See `packages/graph/src/export.ts`, `packages/workspace/src/output-policy.ts`, and `packages/mcp-server/src/runtime-cli.ts`.
 - **Universal compatibility defense-in-depth (`v0.2.3`, `K-024`):**

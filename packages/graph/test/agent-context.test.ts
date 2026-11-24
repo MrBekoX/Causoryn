@@ -818,3 +818,67 @@ describe("generateAgentContext — partial (degrade)", () => {
     expect(result.candidateCount).toBe(0);
   });
 });
+
+describe("generateAgentContext — CodeQL #17 splitIdentifierTokens paritesi ve ReDoS koruması", () => {
+  it("camelCase ve ACRONYM sınırlarını (HTTPServer, XMLHttpRequest, getURLPath) birebir ayırır", () => {
+    const snapshot = createSnapshot({
+      workspaceId: WORKSPACE_ID,
+      revision: { id: "rev-acronym", sequence: 1 },
+      configHash: "cfg",
+      analyzerFingerprint: "fp",
+      state: "ready",
+      createdAt: "2026-11-05T00:00:00Z",
+      nodes: [
+        { kind: "Class", qualifiedName: "net.HTTPServer", relativePath: "src/http.ts" },
+        { kind: "Class", qualifiedName: "net.XMLHttpRequest", relativePath: "src/xhr.ts" },
+        { kind: "Function", qualifiedName: "net.getURLPath", relativePath: "src/url.ts" },
+        { kind: "Class", qualifiedName: "net.IOError", relativePath: "src/io.ts" },
+      ],
+      edges: [],
+    });
+
+    const httpServer = generateAgentContext(snapshot, { task: "http server" });
+    expect(httpServer.contextItems[0]?.qualifiedName).toBe("net.HTTPServer");
+    expect(httpServer.contextItems[0]?.scores.exact).toBe(2);
+    // "httpserver" bölündüğü için tek parça olarak eşleşmez.
+    expect(generateAgentContext(snapshot, { task: "httpserver" }).contextItems).toEqual([]);
+
+    const xhr = generateAgentContext(snapshot, { task: "xml http request" });
+    expect(xhr.contextItems[0]?.qualifiedName).toBe("net.XMLHttpRequest");
+    expect(xhr.contextItems[0]?.scores.exact).toBe(3);
+
+    const urlPath = generateAgentContext(snapshot, { task: "get url path" });
+    expect(urlPath.contextItems[0]?.qualifiedName).toBe("net.getURLPath");
+    expect(urlPath.contextItems[0]?.scores.exact).toBe(3);
+
+    const ioErr = generateAgentContext(snapshot, { task: "io error" });
+    expect(ioErr.contextItems[0]?.qualifiedName).toBe("net.IOError");
+    expect(ioErr.contextItems[0]?.scores.exact).toBe(2);
+  });
+
+  it("40.000 büyük harfli adversarial identifier O(n) sürede işlenir (polynomial ReDoS yok)", () => {
+    const longUpper = "A".repeat(40_000);
+    const snapshot = createSnapshot({
+      workspaceId: WORKSPACE_ID,
+      revision: { id: "rev-redos-upper", sequence: 1 },
+      configHash: "cfg",
+      analyzerFingerprint: "fp",
+      state: "ready",
+      createdAt: "2026-11-05T00:00:00Z",
+      nodes: [
+        { kind: "Class", qualifiedName: `app.${longUpper}`, relativePath: "src/long.ts" },
+      ],
+      edges: [],
+    });
+
+    const start = performance.now();
+    const result = generateAgentContext(snapshot, {
+      task: longUpper.toLowerCase(),
+      tokenBudget: 4096,
+    });
+    const elapsedMs = performance.now() - start;
+
+    expect(result.candidateCount).toBe(1);
+    expect(elapsedMs).toBeLessThan(250);
+  });
+});

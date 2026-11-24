@@ -1,5 +1,13 @@
 import { Buffer } from "node:buffer";
-import { watch as fsWatch, type FSWatcher, statSync, readFileSync } from "node:fs";
+import {
+  closeSync,
+  constants as fsConstants,
+  fstatSync,
+  openSync,
+  readSync,
+  watch as fsWatch,
+  type FSWatcher,
+} from "node:fs";
 import path from "node:path";
 
 import { sha256Hex, utf8Encode } from "@causoryn/domain";
@@ -152,14 +160,17 @@ function toPosix(nativeRelative: string): string {
   return nativeRelative.split(path.sep).join("/");
 }
 
+const READ_CHUNK_BYTES = 64 * 1024;
+
 /**
  * Tek dosyanın güncel içerik karması. TŞ §19 TOCTOU sözleşmesi bu açma
  * noktasında da uygulanır (workspace-access-policy.ts:27-32; envanterdeki
- * karşılığı inventory.ts:69-85): (1) leksik sınır + null byte koruması,
- * (2) açılıştan ÖNCE stat/boyut koruması, (3) okuma sonrası
- * `policy.checkFile` ile YENİDEN denetim (realpath kapsamı + ignore +
- * boyut). checkPath ile hash arasında symlink takasıyla kök dışına
- * çıkan dosya hash'LENMEZ.
+ * karşılığı inventory.ts:75-121): (1) leksik sınır + null byte koruması,
+ * (2) `O_RDONLY | O_NOFOLLOW` ile tek fd açılıp `fstatSync` + sınırlı
+ * `readSync` (≤ `maxFileBytes + 1`) okuması (TOCTOU yarış penceresi yok),
+ * (3) okuma sonrası `policy.checkFile` ile YENİDEN denetim (realpath kapsamı
+ * + ignore + boyut). checkPath ile hash arasında symlink takasıyla kök
+ * dışına çıkan dosya hash'LENMEZ.
  *
  * Dönüş: string = içerik karması; null = yok/dizin/kural-dışı (silinme-
  * benzeri semantik: indekslenmişse değişim sayılır, hiç indekslenmemişse
@@ -186,22 +197,58 @@ export function hashWorkspaceFile(
   if (absolute !== canonicalRoot && !absolute.startsWith(canonicalRoot + path.sep)) {
     return null;
   }
+  const openFlags = fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0);
+  let fd: number;
   try {
-    const st = statSync(absolute);
-    if (!st.isFile()) return null; // dosya değil (dizin/silinmiş) → yok sayılır
-    if (st.size > maxFileBytes) return undefined; // okunmaz: konservatif değişim
-  } catch {
-    return null; // ENOENT vb. → yok sayılır (silinme fingerprints tarafında)
+    fd = openSync(absolute, openFlags);
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException | null | undefined)?.code;
+    if (
+      code === "ENOENT" ||
+      code === "ENOTDIR" ||
+      code === "EISDIR" ||
+      code === "ELOOP"
+    ) {
+      return null; // yok/dizin/symlink → yok sayılır (silinme fingerprints tarafında)
+    }
+    return undefined; // açılamadı: konservatif değişim
   }
   let content: string;
+  let sizeBytes: number;
   try {
-    content = readFileSync(absolute, "utf8");
+    const fdStat = fstatSync(fd);
+    if (!fdStat.isFile()) return null; // dosya değil (dizin/FIFO vb.) → yok sayılır
+    if (fdStat.size > maxFileBytes) return undefined; // okunmaz: konservatif değişim
+    const chunks: Buffer[] = [];
+    let totalRead = 0;
+    const hardCap = maxFileBytes + 1;
+    while (totalRead < hardCap) {
+      const toRead = Math.min(READ_CHUNK_BYTES, hardCap - totalRead);
+      const chunk = Buffer.allocUnsafe(toRead);
+      const bytesRead = readSync(fd, chunk, 0, toRead, null);
+      if (bytesRead <= 0) break;
+      chunks.push(bytesRead === toRead ? chunk : chunk.subarray(0, bytesRead));
+      totalRead += bytesRead;
+    }
+    if (totalRead > maxFileBytes) {
+      return undefined; // okuma sırasında boyut sınırı aşıldı: konservatif değişim
+    }
+    content = Buffer.concat(chunks, totalRead).toString("utf8");
+    sizeBytes = Buffer.byteLength(content, "utf8");
+    if (sizeBytes > maxFileBytes) {
+      return undefined;
+    }
   } catch {
-    return undefined; // açılamadı: konservatif değişim
+    return undefined; // okunamadı: konservatif değişim
+  } finally {
+    try {
+      closeSync(fd);
+    } catch {
+      // Kapatma hatası yutulur.
+    }
   }
   // TŞ §19 "file handle sonrası path tekrar kontrolü": okunan gerçek
   // boyutla politika kararı YENİDEN alınır; deny → workspace dışı içerik.
-  const sizeBytes = Buffer.byteLength(content, "utf8");
   const postDecision = policy.checkFile(canonicalRoot, relativePosix, sizeBytes);
   if (!postDecision.allowed) {
     return null;

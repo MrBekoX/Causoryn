@@ -218,10 +218,12 @@ function validateProjection(projection: WikiProjection): WikiProjection {
  * [a-z0-9-] kümesine zorlanır. Sonuç ayraçsız, ".." içermez, boş ise "page".
  */
 function exportFileSlug(page: WikiPage): string {
-  const slug = page.slug
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "");
+  const dashed = page.slug.toLowerCase().replace(/[^a-z0-9]+/g, "-");
+  let start = 0;
+  let end = dashed.length;
+  while (start < end && dashed.charCodeAt(start) === 45) start += 1;
+  while (end > start && dashed.charCodeAt(end - 1) === 45) end -= 1;
+  const slug = dashed.slice(start, end);
   return slug.length > 0 ? slug : "page";
 }
 

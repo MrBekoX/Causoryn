@@ -1198,4 +1198,68 @@ describe("Track 1 — Audit Remediation Regression Tests (SEC-02/03/04/06/10/11,
     expect(frontendCfg?.paths?.get("@root/*")).toEqual(["./shared/*"]);
     expect(frontendCfg?.jsx).toBeDefined();
   });
+
+  it("CodeQL #9/#10/#23: handles '$&'/'$''/'$$' in path alias substitution via single-star slicing and strips adversarial trailing slashes in linear time", () => {
+    const result = analyzeTypeScriptProgram({
+      workspaceId: "ws_codeql_alias_and_slashes",
+      rootDir: `${VIRTUAL_ROOT}${"/".repeat(30_000)}`,
+      configFiles: [
+        {
+          relativePath: "tsconfig.json",
+          content: JSON.stringify({
+            compilerOptions: {
+              baseUrl: ".",
+              paths: {
+                "@/*": ["./src/*"],
+              },
+            },
+          }),
+        },
+      ],
+      sources: [
+        {
+          relativePath: "src/$&first.ts",
+          content: "export function firstFn(): number { return 1; }\n",
+        },
+        {
+          relativePath: "src/$'second.ts",
+          content: "export function secondFn(): number { return 2; }\n",
+        },
+        {
+          relativePath: "src/$$third.ts",
+          content: "export function thirdFn(): number { return 3; }\n",
+        },
+        {
+          relativePath: "src/entry.ts",
+          content: [
+            'import { firstFn } from "@/$&first";',
+            'import { secondFn } from "@/$\'second";',
+            'import { thirdFn } from "@/$$third";',
+            "export function sum(): number { return firstFn() + secondFn() + thirdFn(); }",
+            "",
+          ].join("\n"),
+        },
+      ],
+    });
+
+    expect(result.state).toBe("ready");
+    expect(findEdge(result, "IMPORTS", "src/entry.ts", "src/$&first.ts")?.resolution).toBe("verified");
+    expect(findEdge(result, "IMPORTS", "src/entry.ts", "src/$'second.ts")?.resolution).toBe("verified");
+    expect(findEdge(result, "IMPORTS", "src/entry.ts", "src/$$third.ts")?.resolution).toBe("verified");
+    expect(findEdge(result, "CALLS", "sum", "firstFn")?.resolution).toBe("verified");
+    expect(findEdge(result, "CALLS", "sum", "secondFn")?.resolution).toBe("verified");
+    expect(findEdge(result, "CALLS", "sum", "thirdFn")?.resolution).toBe("verified");
+
+    // Adversarial trailing slashes in loadWorkspaceTsConfigs complete in linear time
+    const start = performance.now();
+    const loaded = loadWorkspaceTsConfigs(`${VIRTUAL_ROOT}${"/".repeat(30_000)}`, [
+      {
+        relativePath: "tsconfig.json",
+        content: JSON.stringify({ compilerOptions: { paths: { "@/*": ["./src/*"] } } }),
+      },
+    ]);
+    expect(performance.now() - start).toBeLessThan(200);
+    expect(loaded.warnings).toEqual([]);
+    expect(loaded.configs).toHaveLength(1);
+  });
 });

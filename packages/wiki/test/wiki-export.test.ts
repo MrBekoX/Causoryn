@@ -644,6 +644,61 @@ describe("exportWikiOffline (determinizm)", () => {
   });
 });
 
+describe("exportFileSlug — CodeQL #20 tire kırpma paritesi ve ReDoS koruması", () => {
+  it("baştaki/sondaki tireleri ve uzun adversarial slug girdilerini O(n) sürede dosya adına indirger", () => {
+    const projection: WikiProjection = {
+      snapshot: {
+        id: "wiki:export-slug-redos",
+        workspaceId: WS,
+        graphSnapshotId: "snap:export-slug-redos",
+        revisionRef: "rev-slug-redos",
+        status: "ready",
+        builtAt: BUILT_AT,
+        templateVersion: WIKI_TEMPLATE_VERSION,
+      },
+      pages: [
+        page({
+          id: "page:11111111",
+          kind: "module",
+          title: "Trimmed",
+          slug: "---Hello__World---",
+        }),
+        page({
+          id: "page:22222222",
+          kind: "module",
+          title: "AllDashes",
+          slug: "-".repeat(50_000),
+        }),
+        page({
+          id: "page:33333333",
+          kind: "module",
+          title: "Wrapped",
+          slug: `${"-".repeat(25_000)}alpha${"-".repeat(25_000)}`,
+        }),
+        page({
+          id: "page:44444444",
+          kind: "module",
+          title: "MidDashes",
+          slug: `a${"-".repeat(50_000)}b`,
+        }),
+      ],
+      sections: [],
+      warnings: [],
+    };
+
+    const start = performance.now();
+    const files = buildWikiExportFileSet(projection);
+    const elapsedMs = performance.now() - start;
+
+    const names = files.map((file) => file.relativePath);
+    expect(names).toContain(`${WIKI_EXPORT_MARKDOWN_DIR_NAME}/hello-world.md`);
+    expect(names).toContain(`${WIKI_EXPORT_MARKDOWN_DIR_NAME}/page.md`);
+    expect(names).toContain(`${WIKI_EXPORT_MARKDOWN_DIR_NAME}/alpha.md`);
+    expect(names).toContain(`${WIKI_EXPORT_MARKDOWN_DIR_NAME}/a-b.md`);
+    expect(elapsedMs).toBeLessThan(250);
+  });
+});
+
 /* ------------------------------------------------------------------ */
 /* Yardımcılar                                                         */
 /* ------------------------------------------------------------------ */

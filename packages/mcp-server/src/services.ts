@@ -1,4 +1,3 @@
-import { readFileSync, statSync } from "node:fs";
 import path from "node:path";
 
 import { LATEST_PROTOCOL_VERSION } from "@modelcontextprotocol/sdk/types.js";
@@ -38,6 +37,10 @@ import { decodeCursor, encodeCursor } from "./cursor.js";
 import type { CausorynServerConfig } from "./config.js";
 import { CausorynToolError } from "./errors.js";
 import { buildEnvelope, type Coverage, type Envelope } from "./envelope.js";
+import {
+  readOptionalBoundedTextFileSync,
+  type BoundedTextReadResult,
+} from "./safe-file-read.js";
 import { SCHEMA_VERSION, SERVER_NAME, SERVER_VERSION, TOOL_NAMES } from "./version.js";
 
 /**
@@ -1875,43 +1878,16 @@ const EVIDENCE_POLICY_DIR = ".causoryn";
 const EVIDENCE_POLICY_FILE = "architecture.rules.yaml";
 const EVIDENCE_BASELINE_FILE = "architecture.baseline.yaml";
 
-/** Policy/baseline okuma sonucu: okundu, yok ya da bütçe aşımı. */
-type EvidencePolicyRead =
-  | { readonly status: "ok"; readonly text: string }
-  | { readonly status: "missing" }
-  | { readonly status: "too-large"; readonly bytes: number };
-
 /**
  * Policy/baseline dosyasını TŞ §20 "dosya başına byte" bütçesiyle SENKRON
- * okur (get_evidence senkron araç yüzeyini korur). Denetim iki katmandır
- * (okuma öncesi stat + okuma sonrası byteLength — stat/read yarışına
- * karşı savunma); checkArchitecture'ın readOptionalTextFile semantiğinin
- * sync karşılığıdır.
+ * olarak tek fd üzerinden sınırlı okur (CWE-367 TOCTOU'ya karşı
+ * openSync+fstatSync+bounded readSync).
  */
 function readOptionalPolicyTextSync(
   absolutePath: string,
   maxBytes: number,
-): EvidencePolicyRead {
-  let statSize: number | undefined;
-  try {
-    statSize = statSync(absolutePath).size;
-  } catch {
-    return { status: "missing" };
-  }
-  if (statSize > maxBytes) {
-    return { status: "too-large", bytes: statSize };
-  }
-  let text: string;
-  try {
-    text = readFileSync(absolutePath, "utf8");
-  } catch {
-    return { status: "missing" };
-  }
-  const bytes = Buffer.byteLength(text, "utf8");
-  if (bytes > maxBytes) {
-    return { status: "too-large", bytes };
-  }
-  return { status: "ok", text };
+): BoundedTextReadResult {
+  return readOptionalBoundedTextFileSync(absolutePath, maxBytes);
 }
 
 /**

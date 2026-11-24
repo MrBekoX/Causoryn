@@ -1,9 +1,14 @@
 import {
   chmodSync,
+  closeSync,
+  constants as fsConstants,
   existsSync,
+  fstatSync,
   lstatSync,
   mkdirSync,
+  openSync,
   readFileSync,
+  readSync,
   realpathSync,
   statSync,
 } from "node:fs";
@@ -382,6 +387,51 @@ function hasPluginInstallMarkers(
   );
 }
 
+const MAX_PLUGIN_MANIFEST_BYTES = 64 * 1024;
+const PLUGIN_MANIFEST_CHUNK_BYTES = 16 * 1024;
+
+function readBoundedPluginManifestSync(manifestPath: string): string | null {
+  let fd: number;
+  try {
+    // O_NOFOLLOW bilinçli olarak eklenmez: symlink'li paket/eklenti manifestleri desteklenir.
+    fd = openSync(manifestPath, fsConstants.O_RDONLY);
+  } catch {
+    return null;
+  }
+
+  try {
+    const fdStat = fstatSync(fd);
+    if (!fdStat.isFile() || fdStat.size > MAX_PLUGIN_MANIFEST_BYTES) {
+      return null;
+    }
+    const maxRead = MAX_PLUGIN_MANIFEST_BYTES + 1;
+    const chunks: Buffer[] = [];
+    let totalBytes = 0;
+    while (totalBytes < maxRead) {
+      const toRead = Math.min(PLUGIN_MANIFEST_CHUNK_BYTES, maxRead - totalBytes);
+      const buf = Buffer.allocUnsafe(toRead);
+      const bytesRead = readSync(fd, buf, 0, toRead, null);
+      if (bytesRead === 0) {
+        break;
+      }
+      chunks.push(bytesRead === buf.length ? buf : buf.subarray(0, bytesRead));
+      totalBytes += bytesRead;
+    }
+    if (totalBytes > MAX_PLUGIN_MANIFEST_BYTES) {
+      return null;
+    }
+    return Buffer.concat(chunks, totalBytes).toString("utf8");
+  } catch {
+    return null;
+  } finally {
+    try {
+      closeSync(fd);
+    } catch {
+      // Kapatma hatası yoksayılır.
+    }
+  }
+}
+
 function hasCausorynNamedPluginManifest(
   dirPath: string,
   forbiddenEntries: readonly ResolvedDirEntry[] = [],
@@ -400,8 +450,9 @@ function hasCausorynNamedPluginManifest(
   ];
   for (const manifestPath of manifestCandidates) {
     try {
-      if (!statSync(manifestPath).isFile()) continue;
-      const parsed: unknown = JSON.parse(readFileSync(manifestPath, "utf8"));
+      const raw = readBoundedPluginManifestSync(manifestPath);
+      if (raw === null) continue;
+      const parsed: unknown = JSON.parse(raw);
       if (isPlainObject(parsed) && parsed["name"] === "causoryn") {
         return true;
       }
@@ -713,12 +764,26 @@ export function resolveBaseDataDir(options: {
   return path.resolve(homeDir, ".causoryn");
 }
 
-function deriveWorkspaceSlug(canonicalRoot: string): string {
+function isSlugTrimChar(code: number): boolean {
+  return code === 46 /* '.' */ || code === 95 /* '_' */ || code === 45 /* '-' */;
+}
+
+function trimSlugEdges(value: string): string {
+  let start = 0;
+  let end = value.length;
+  while (start < end && isSlugTrimChar(value.charCodeAt(start))) {
+    start += 1;
+  }
+  while (end > start && isSlugTrimChar(value.charCodeAt(end - 1))) {
+    end -= 1;
+  }
+  return value.slice(start, end);
+}
+
+export function deriveWorkspaceSlug(canonicalRoot: string): string {
   const base = path.basename(canonicalRoot).toLowerCase();
-  const cleaned = base
-    .replace(/[^a-z0-9._-]+/g, "-")
-    .replace(/^[._-]+|[._-]+$/g, "")
-    .slice(0, 48);
+  const normalized = base.replace(/[^a-z0-9._-]+/g, "-");
+  const cleaned = trimSlugEdges(normalized).slice(0, 48);
   if (cleaned.length === 0 || cleaned === "." || cleaned === "..") {
     return "workspace";
   }

@@ -25,6 +25,7 @@ import {
 import {
   buildWikiRootCategorySections,
   wikiBuildContext,
+  wikiSlugify,
   WIKI_ROOT_CATEGORY_TEMPLATES,
 } from "../src/projection.js";
 
@@ -696,5 +697,23 @@ describe("kök kategori şablonları invariant", () => {
       expect(coveredKinds.has(category.kind), `kategori ${category.kind} şablonsuz`).toBe(true);
     }
     expect(coveredKinds.size).toBe(WIKI_ROOT_CATEGORIES.length);
+  });
+});
+
+describe("wikiSlugify — CodeQL #21 tire kırpma paritesi ve ReDoS koruması", () => {
+  it("uç durumları (boş, yalnız tire, karma ayraç) ve 50k tireli girdileri O(n) sürede normalize eder", () => {
+    expect(wikiSlugify("")).toBe("page");
+    expect(wikiSlugify("---")).toBe("page");
+    expect(wikiSlugify("///...")).toBe("page");
+    expect(wikiSlugify("POST /orders")).toBe("post-orders");
+    expect(wikiSlugify("---Foo___Bar---")).toBe("foo-bar");
+
+    const start = performance.now();
+    expect(wikiSlugify("-".repeat(50_000))).toBe("page");
+    expect(wikiSlugify(`${"-".repeat(25_000)}orders${"-".repeat(25_000)}`)).toBe("orders");
+    expect(wikiSlugify(`a${"-".repeat(50_000)}b`)).toBe("a-b");
+    const elapsedMs = performance.now() - start;
+
+    expect(elapsedMs).toBeLessThan(250);
   });
 });

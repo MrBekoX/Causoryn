@@ -334,4 +334,51 @@ describe("scripts/export-public-tree.mjs — Seçenek 1 temiz açık kaynak dı�
     expect(linuxCheck.ok).toBe(false);
     expect(linuxCheck.findings.some((f) => f.includes("local-user-profile-path"))).toBe(true);
   });
+
+  it("GÜVENLİK (#37, #38): yerinde fd yeniden yazımı kısalan CRLF .gitignore ve eslint.config.js dosyalarında artık bayt/NUL bırakmaz ve temiz içerikleri bayt-bayt korur", async () => {
+    const { exportPublicTree } = await loadExporter();
+    // 1) CRLF + uzun iç satırlar kaldırıldığında dosya ciddi oranda kısalır -> ftruncate + offset-0 writeSync doğrulaması
+    const crlfRepo = createSyntheticGitRepo({
+      ".gitattributes": ".gitignore -text\neslint.config.js -text\n",
+      ".gitignore": [
+        "node_modules/",
+        "   .mimosa/   ",
+        "   .video_agent/   ",
+        "dist/",
+        "",
+      ].join("\r\n"),
+      "eslint.config.js": [
+        "export default [{ ignores: [",
+        '    ".mimosa/**",   ',
+        '    ".video_agent/**",   ',
+        '  "dist/**",',
+        "] }];",
+        "",
+      ].join("\r\n"),
+    });
+    const outCrlf = path.join(createTempDir("causoryn-pubexport-crlf-"), "out");
+    const crlfRes = exportPublicTree({ repoRoot: crlfRepo, outDir: outCrlf, ref: "HEAD" });
+    expect(crlfRes.verification.ok, JSON.stringify(crlfRes.verification.findings)).toBe(true);
+
+    const sanitizedGitignore = readFileSync(path.join(outCrlf, ".gitignore"), "utf8");
+    expect(sanitizedGitignore).toBe(["node_modules/", "dist/", ""].join("\r\n"));
+    expect(sanitizedGitignore.includes("\0")).toBe(false);
+
+    const sanitizedEslint = readFileSync(path.join(outCrlf, "eslint.config.js"), "utf8");
+    expect(sanitizedEslint).toBe(
+      ["export default [{ ignores: [", '  "dist/**",', "] }];", ""].join("\r\n"),
+    );
+    expect(sanitizedEslint.includes("\0")).toBe(false);
+
+    // 2) Değişiklik gerektirmeyen temiz .gitignore bayt-bayt korunur ve eslint.config.js yokken hata vermez
+    const cleanGitignore = "node_modules/\ndist/\n";
+    const unchangedRepo = createSyntheticGitRepo({
+      ".gitignore": cleanGitignore,
+    });
+    const outUnchanged = path.join(createTempDir("causoryn-pubexport-unchanged-"), "out");
+    const unchangedRes = exportPublicTree({ repoRoot: unchangedRepo, outDir: outUnchanged, ref: "HEAD" });
+    expect(unchangedRes.verification.ok, JSON.stringify(unchangedRes.verification.findings)).toBe(true);
+    expect(readFileSync(path.join(outUnchanged, ".gitignore"), "utf8")).toBe(cleanGitignore);
+    expect(existsSync(path.join(outUnchanged, "eslint.config.js"))).toBe(false);
+  });
 });

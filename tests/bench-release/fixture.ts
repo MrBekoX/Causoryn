@@ -326,7 +326,7 @@ export function writeFixture(
   }
   for (const entry of model.entries) {
     const abs = entryAbsPath(rootResolved, entry.relativePath);
-    writeFileSync(abs, entry.content, "utf8");
+    writeFileSync(abs, entry.content, { encoding: "utf8", flag: "wx" });
   }
   return { root: rootResolved, fileCount: model.fileCount, hash: model.hash };
 }

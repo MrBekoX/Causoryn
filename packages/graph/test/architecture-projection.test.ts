@@ -583,4 +583,69 @@ describe("validateArchitectureAnnotations — fail-closed Host-LLM grounding", (
       expect.objectContaining({ code: "export/invalid-options" }),
     );
   });
+
+  it("CodeQL #16/#18 (ReDoS): normalizePosixPath baştaki/sondaki '/' karakterlerini O(n) kırpar ve 50k '/' içeren yolda donmaz", () => {
+    // Fonksiyonel parite: baştaki/sondaki eğik çizgiler ve ters eğik çizgiler normalize edilir.
+    const slashNodeA = makeNode("Function", "fnA", "///src/orders/a.ts///", "typescript", 1, 5);
+    const slashNodeB = makeNode("Function", "fnB", "\\\\src\\orders\\b.ts\\\\", "typescript", 1, 5);
+    const paritySnap = createSnapshot({
+      workspaceId: WS,
+      revision: { id: "rev-slash-parity", sequence: 1 },
+      configHash: "cfg-slash",
+      analyzerFingerprint: "ts-adapter@0.2.2",
+      state: "ready",
+      createdAt: CREATED_AT,
+      nodes: [slashNodeA, slashNodeB],
+      edges: [],
+    });
+    const parityProj = projectArchitecture(paritySnap, { pathPrefix: "///src/orders///" });
+    expect(parityProj.summary.pathPrefixApplied).toBe("src/orders");
+    const parityFiles = parityProj.modules.flatMap((m) => m.files);
+    expect(parityFiles).toContain("src/orders/a.ts");
+    expect(parityFiles).toContain("src/orders/b.ts");
+
+    const modForA = parityProj.modules.find((m) => m.files.includes("src/orders/a.ts"));
+    expect(modForA).toBeDefined();
+    const validatedParity = validateArchitectureAnnotations(
+      {
+        moduleNotes: [
+          {
+            moduleId: modForA!.id,
+            summary: "Slash normalization parity",
+            keyFiles: ["///src\\orders/a.ts///"],
+          },
+        ],
+      },
+      parityProj,
+      paritySnap,
+    );
+    expect(validatedParity.moduleNotes[0]?.keyFiles).toEqual(["src/orders/a.ts"]);
+
+    // Adversarial ReDoS yükü: "a" + "/".repeat(50_000) + "b" -> /^\/+|\/+$/g ile O(n^2) (~1.3s/çağrı).
+    const adversarialPath = `a${"/".repeat(50_000)}b`;
+    const advNode = makeNode("Function", "advFn", adversarialPath, "typescript", 1, 5);
+    const advSnap = createSnapshot({
+      workspaceId: WS,
+      revision: { id: "rev-redos-slash", sequence: 1 },
+      configHash: "cfg-redos",
+      analyzerFingerprint: "ts-adapter@0.2.2",
+      state: "ready",
+      createdAt: CREATED_AT,
+      nodes: [advNode],
+      edges: [],
+    });
+
+    const tProjStart = performance.now();
+    // pathPrefix eşleşmediği için buildFileTree derinliği oluşmaz; normalizePosixPath doğrudan sınanır.
+    const advProj = projectArchitecture(advSnap, { pathPrefix: "unrelated" });
+    const projMs = performance.now() - tProjStart;
+    expect(advProj.modules).toEqual([]);
+    expect(projMs).toBeLessThan(300);
+
+    const tAnnStart = performance.now();
+    const validatedAdv = validateArchitectureAnnotations({}, advProj, advSnap);
+    const annMs = performance.now() - tAnnStart;
+    expect(validatedAdv.moduleNotes).toEqual([]);
+    expect(annMs).toBeLessThan(300);
+  });
 });

@@ -145,10 +145,12 @@ function deepFreeze<T>(value: T): T {
 
 /** Route/slug güvenli normalize: [a-z0-9-] dışı her karakter "-" olur. */
 export function wikiSlugify(raw: string): string {
-  const slug = raw
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "");
+  const dashed = raw.toLowerCase().replace(/[^a-z0-9]+/g, "-");
+  let start = 0;
+  let end = dashed.length;
+  while (start < end && dashed.charCodeAt(start) === 45) start += 1;
+  while (end > start && dashed.charCodeAt(end - 1) === 45) end -= 1;
+  const slug = dashed.slice(start, end);
   return slug.length > 0 ? slug : "page";
 }
 

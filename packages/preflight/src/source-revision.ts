@@ -1,4 +1,6 @@
-import { lstat, readFile, stat } from "node:fs/promises";
+import { Buffer } from "node:buffer";
+import { constants as fsConstants } from "node:fs";
+import { lstat, open, stat } from "node:fs/promises";
 import path from "node:path";
 
 import type { PreflightSourceRevision } from "./manifest.js";
@@ -104,25 +106,55 @@ type GitDirResolution =
   | { readonly kind: "unsupported-outside-root" }
   | { readonly kind: "ok"; readonly gitDir: string };
 
+const READ_CHUNK_BYTES = 64 * 1024;
+
 /**
- * Kota denetimli metin okuma: dosya yoksa metin değil; boyutu kota üstündeyse
- * OKUNMAZ ve aşım notlar'a yazılır (TŞ §19; sessiz okuma yok). Return
- * undefined hem "yok" hem "kota aşıldı" için mümkündür — ayrım notes'tadır.
+ * Kota denetimli fd tabanlı metin okuma: dosya yoksa metin değil; boyutu kota
+ * üstündeyse OKUNMAZ (ve okuma sırasında büyüse dahi kota+1 baytla sınırlı
+ * kalır) ve aşım notlar'a yazılır (TŞ §19; sessiz okuma yok, TOCTOU yarış
+ * penceresi yok). Return undefined hem "yok" hem "kota aşıldı" için
+ * mümkündür — ayrım notes'tadır.
  */
 async function readTextWithinQuota(
   filePath: string,
   label: string,
   notes: string[],
 ): Promise<string | undefined> {
-  const fileStat = await stat(filePath).catch(() => undefined);
-  if (fileStat === undefined || !fileStat.isFile()) return undefined;
-  if (fileStat.size > MAX_GIT_METADATA_BYTES) {
-    notes.push(
-      `${label} boyut kotası aşıldı (${String(fileStat.size)} bayt > ${String(MAX_GIT_METADATA_BYTES)}); TŞ §19 kaynak tüketimi sınırı gereği okuma yapılmadı`,
-    );
+  const openFlags = fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0);
+  const handle = await open(filePath, openFlags).catch(() => undefined);
+  if (handle === undefined) return undefined;
+  try {
+    const fileStat = await handle.stat().catch(() => undefined);
+    if (fileStat === undefined || !fileStat.isFile()) return undefined;
+    if (fileStat.size > MAX_GIT_METADATA_BYTES) {
+      notes.push(
+        `${label} boyut kotası aşıldı (${String(fileStat.size)} bayt > ${String(MAX_GIT_METADATA_BYTES)}); TŞ §19 kaynak tüketimi sınırı gereği okuma yapılmadı`,
+      );
+      return undefined;
+    }
+    const chunks: Buffer[] = [];
+    let totalBytes = 0;
+    const hardCap = MAX_GIT_METADATA_BYTES + 1;
+    while (totalBytes < hardCap) {
+      const toRead = Math.min(READ_CHUNK_BYTES, hardCap - totalBytes);
+      const chunk = Buffer.allocUnsafe(toRead);
+      const { bytesRead } = await handle.read(chunk, 0, toRead, null);
+      if (bytesRead <= 0) break;
+      chunks.push(bytesRead === toRead ? chunk : chunk.subarray(0, bytesRead));
+      totalBytes += bytesRead;
+    }
+    if (totalBytes > MAX_GIT_METADATA_BYTES) {
+      notes.push(
+        `${label} boyut kotası aşıldı (${String(totalBytes)} bayt > ${String(MAX_GIT_METADATA_BYTES)}); TŞ §19 kaynak tüketimi sınırı gereği okuma yapılmadı`,
+      );
+      return undefined;
+    }
+    return Buffer.concat(chunks, totalBytes).toString("utf8");
+  } catch {
     return undefined;
+  } finally {
+    await handle.close().catch(() => undefined);
   }
-  return readFile(filePath, "utf8").catch(() => undefined);
 }
 
 /** gitdir çözümlemesi: .git dizin olabilir veya "gitdir:" satırlı dosya. */

@@ -1,8 +1,12 @@
 import {
   chmodSync,
+  closeSync,
+  constants as fsConstants,
   existsSync,
+  fstatSync,
   lstatSync,
   mkdirSync,
+  openSync,
   readFileSync,
   renameSync,
   rmSync,
@@ -544,6 +548,41 @@ function planCodexMcpConfig(params: {
   });
 }
 
+function readSourceSkillFileSync(srcSkillFile: string): string {
+  let fd: number;
+  try {
+    // O_NOFOLLOW bilinçli olarak eklenmez: symlink'li npm/pnpm kurulumları desteklenir.
+    fd = openSync(srcSkillFile, fsConstants.O_RDONLY);
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException | undefined)?.code;
+    if (code === "ENOENT" || code === "EISDIR" || code === "ENOTDIR") {
+      throw new CausorynCliError(
+        "cli/io-error",
+        `Kaynak skill dosyası bulunamadı: ${srcSkillFile}`,
+      );
+    }
+    throw new CausorynCliError(
+      "cli/io-error",
+      `Kaynak skill dosyası okunamadı (${srcSkillFile}): ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+  try {
+    if (!fstatSync(fd).isFile()) {
+      throw new CausorynCliError(
+        "cli/io-error",
+        `Kaynak skill dosyası bulunamadı: ${srcSkillFile}`,
+      );
+    }
+    return readFileSync(fd, "utf8");
+  } finally {
+    try {
+      closeSync(fd);
+    } catch {
+      // Kapatma hatası yoksayılır.
+    }
+  }
+}
+
 function planSkillsForClient(params: {
   readonly homeDir: string;
   readonly claudeConfigDir: string | null;
@@ -578,13 +617,7 @@ function planSkillsForClient(params: {
     }
 
     const srcSkillFile = path.join(skillsSourceDir, skillName, "SKILL.md");
-    if (!existsSync(srcSkillFile) || !statSync(srcSkillFile).isFile()) {
-      throw new CausorynCliError(
-        "cli/io-error",
-        `Kaynak skill dosyası bulunamadı: ${srcSkillFile}`,
-      );
-    }
-    const content = readFileSync(srcSkillFile, "utf8");
+    const content = readSourceSkillFileSync(srcSkillFile);
     const existed = assertRegularOrAbsentTarget(destSkillFile);
     writes.push({ targetPath: destSkillFile, content, createBackup: false, defaultMode: 0o644 });
     actions.push({

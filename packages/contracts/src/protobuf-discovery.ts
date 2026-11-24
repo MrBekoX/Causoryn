@@ -202,8 +202,12 @@ export function discoverProtobufContracts(
           messageFields.set(qualified, []);
         }
 
+        if (!trimmedLine.endsWith(";") || /[\r\n\u2028\u2029]/.test(trimmedLine)) {
+          continue;
+        }
+
         const mapMatch = trimmedLine.match(
-          /^map\s*<\s*([A-Za-z_][\w.]*)\s*,\s*([A-Za-z_][\w.]*)\s*>\s+([A-Za-z_]\w*)\s*=\s*\d+.*;$/u,
+          /^map\s*<\s*([A-Za-z_][\w.]*)\s*,\s*([A-Za-z_][\w.]*)\s*>\s+([A-Za-z_]\w*)\s*=\s*\d+/u,
         );
         if (mapMatch !== null) {
           const key = mapMatch[1] ?? "";
@@ -226,7 +230,7 @@ export function discoverProtobufContracts(
         }
 
         const fieldMatch = trimmedLine.match(
-          /^(repeated\s+)?([A-Za-z_][\w.]*)\s+([A-Za-z_]\w*)\s*=\s*\d+.*;$/u,
+          /^(repeated\s+)?([A-Za-z_][\w.]*)\s+([A-Za-z_]\w*)\s*=\s*\d+/u,
         );
         if (fieldMatch !== null) {
           const repeated = fieldMatch[1] !== undefined;

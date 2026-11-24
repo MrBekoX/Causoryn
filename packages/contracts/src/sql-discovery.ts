@@ -139,11 +139,12 @@ interface ColumnParse {
 
 function parseColumn(part: string): ColumnParse | undefined {
   if (TABLE_CONSTRAINT_KEYWORDS.test(part)) return undefined;
-  const nameMatch = part.match(/^\s*["`[]?([A-Za-z_][\w$]*)["`\]]?\s+([\s\S]+)$/u);
+  const nameMatch = part.match(/^\s*["`[]?([A-Za-z_][\w$]*)["`\]]?\s+/u);
   if (nameMatch === null) return undefined;
   const name = nameMatch[1];
   if (name === undefined) return undefined;
-  const rest = nameMatch[2] ?? "";
+  const rest = part.slice(nameMatch[0].length);
+  if (rest.length === 0) return undefined;
 
   const required = /\bNOT\s+NULL\b/iu.test(rest);
   let depth = 0;
@@ -203,10 +204,15 @@ function parseAlterActions(action: string): {
   readonly renameColumn?: { readonly from: string; readonly to: string };
   readonly renameTable?: string;
 } {
-  const addMatch = action.match(/^ADD\s+(?:COLUMN\s+)?["`[]?(.+)$/i);
-  if (addMatch !== null) {
-    const column = parseColumn(addMatch[1] ?? "");
-    if (column !== undefined) return { addColumn: column };
+  if (!/[\r\n\u2028\u2029]/.test(action)) {
+    const addMatch = action.match(/^ADD\s+(?:COLUMN\s+)?["`[]?/i);
+    if (addMatch !== null) {
+      const rest = action.slice(addMatch[0].length);
+      if (rest.length > 0) {
+        const column = parseColumn(rest);
+        if (column !== undefined) return { addColumn: column };
+      }
+    }
   }
   const dropMatch = action.match(/^DROP\s+(?:COLUMN\s+)?["`[]?([A-Za-z_][\w$]*)["`\]]?\s*$/i);
   if (dropMatch !== null) {
@@ -276,10 +282,14 @@ export function discoverSqlContracts(
     }
     if (/^\s*ALTER\s+TABLE\b/i.test(statement.text)) {
       const flat = statement.text.replace(/\s+/gu, " ");
-      const match = flat.match(/ALTER\s+TABLE\s+(?:ONLY\s+)?["`[]?([A-Za-z_][\w$]*)["`\]]?\s+(.+)$/i);
+      const match = flat.match(
+        /^\s*ALTER\s+TABLE\s+(?:ONLY\s+)?["`[]?([A-Za-z_][\w$]*)["`\]]?\s+/i,
+      );
       const table = match?.[1];
-      if (table === undefined) continue;
-      const actions = parseAlterActions(match?.[2] ?? "");
+      if (match === null || table === undefined) continue;
+      const rest = flat.slice(match[0].length);
+      if (rest.length === 0) continue;
+      const actions = parseAlterActions(rest);
       if (actions.addColumn !== undefined) {
         const existing = builds.get(table) ?? {
           name: table,

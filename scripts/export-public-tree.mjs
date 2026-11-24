@@ -12,14 +12,19 @@
  */
 import { execFileSync } from "node:child_process";
 import {
+  closeSync,
+  constants as fsConstants,
   existsSync,
+  fstatSync,
+  ftruncateSync,
   mkdirSync,
   mkdtempSync,
+  openSync,
   readdirSync,
   readFileSync,
   rmSync,
   statSync,
-  writeFileSync,
+  writeSync,
 } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -147,26 +152,64 @@ function walkFiles(dir, out = []) {
   return out;
 }
 
+function rewriteOptionalFileInPlace(filePath, transform) {
+  let fd;
+  try {
+    fd = openSync(filePath, fsConstants.O_RDWR | (fsConstants.O_NOFOLLOW ?? 0));
+  } catch (err) {
+    if (err && typeof err === "object" && "code" in err && err.code === "ENOENT") {
+      return;
+    }
+    throw err;
+  }
+  try {
+    if (!fstatSync(fd).isFile()) {
+      return;
+    }
+    const raw = readFileSync(fd, "utf8");
+    const updated = transform(raw);
+    if (updated === raw) {
+      return;
+    }
+    ftruncateSync(fd, 0);
+    const outBuf = Buffer.from(updated, "utf8");
+    let offset = 0;
+    while (offset < outBuf.length) {
+      const written = writeSync(fd, outBuf, offset, outBuf.length - offset, offset);
+      if (written <= 0) {
+        throw new Error(`Dosya yerinde yazılamadı: ${filePath}`);
+      }
+      offset += written;
+    }
+  } finally {
+    try {
+      closeSync(fd);
+    } catch {
+      // Kapanış hatası birincil I/O hatasını gölgelememeli.
+    }
+  }
+}
+
 function sanitizeGitignore(exportedDir) {
   const gitignorePath = path.join(exportedDir, ".gitignore");
-  if (!existsSync(gitignorePath)) return;
-  const raw = readFileSync(gitignorePath, "utf8");
-  const eol = raw.includes("\r\n") ? "\r\n" : "\n";
-  const filtered = raw
-    .split(/\r?\n/)
-    .filter((line) => !/^\s*\.(?:mimosa|video_agent)\/?\s*$/.test(line));
-  writeFileSync(gitignorePath, filtered.join(eol), "utf8");
+  rewriteOptionalFileInPlace(gitignorePath, (raw) => {
+    const eol = raw.includes("\r\n") ? "\r\n" : "\n";
+    return raw
+      .split(/\r?\n/)
+      .filter((line) => !/^\s*\.(?:mimosa|video_agent)\/?\s*$/.test(line))
+      .join(eol);
+  });
 }
 
 function sanitizeEslintConfig(exportedDir) {
   const eslintPath = path.join(exportedDir, "eslint.config.js");
-  if (!existsSync(eslintPath)) return;
-  const raw = readFileSync(eslintPath, "utf8");
-  const eol = raw.includes("\r\n") ? "\r\n" : "\n";
-  const filtered = raw
-    .split(/\r?\n/)
-    .filter((line) => !/^\s*["']\.(?:mimosa|video_agent)\/\*\*["']\s*,?\s*$/.test(line));
-  writeFileSync(eslintPath, filtered.join(eol), "utf8");
+  rewriteOptionalFileInPlace(eslintPath, (raw) => {
+    const eol = raw.includes("\r\n") ? "\r\n" : "\n";
+    return raw
+      .split(/\r?\n/)
+      .filter((line) => !/^\s*["']\.(?:mimosa|video_agent)\/\*\*["']\s*,?\s*$/.test(line))
+      .join(eol);
+  });
 }
 
 function pruneExcludedPaths(exportedDir) {

@@ -36,6 +36,7 @@ import {
   resolveBaseDataDir,
   resolveEffectiveOutputSchemaProfile,
 } from "../src/index.js";
+import { deriveWorkspaceSlug } from "../src/runtime-cli.js";
 
 /**
  * K-021 Track 2 — Sıfır-ayar MCP CLI bayrakları, güvenli --allow-cwd,
@@ -1735,6 +1736,97 @@ describe("stdio.ts — gerçek alt-süreç CLI modları ve geriye dönük uyumlu
         expect(ctx.policy.checkPath(sandbox.projectADir, "src/alpha.ts").allowed).toBe(true);
       } finally {
         ctx.close();
+      }
+    } finally {
+      sandbox.cleanup();
+    }
+  });
+
+  it("güvenlik (#19): deriveWorkspaceSlug ReDoS girdilerinde O(n) sürede tamamlanır ve kenar karakterlerini doğru kırpar", () => {
+    expect(deriveWorkspaceSlug("/tmp/---...___Alpha_Service---...")).toBe("alpha_service");
+    expect(deriveWorkspaceSlug("/tmp/---...___")).toBe("workspace");
+    expect(deriveWorkspaceSlug("/tmp/..")).toBe("workspace");
+    expect(deriveWorkspaceSlug("/tmp/.")).toBe("workspace");
+
+    // 40.000 karakterlik adversariyel girdi: eski /^[._-]+|[._-]+$/g regex'i O(n^2) (~1s+) patlar;
+    // O(n) döngü < 50ms içinde tamamlanmalı.
+    const adversarial = `/workspace/a${"-".repeat(40_000)}b`;
+    const started = performance.now();
+    const slug = deriveWorkspaceSlug(adversarial);
+    const elapsedMs = performance.now() - started;
+
+    expect(slug).toBe(`a${"-".repeat(47)}`);
+    expect(elapsedMs).toBeLessThan(100);
+  });
+
+  it("güvenlik (#29): hasCausorynNamedPluginManifest 64 KiB üzeri veya dizin plugin.json adaylarını güvenli atlar; normal/symlink causoryn manifestlerini reddetmeye devam eder", () => {
+    const sandbox = createTempSandbox();
+    try {
+      // 1) >64 KiB plugin.json (name: "causoryn" içerse bile) bütçe dışı olduğundan güvenli atlanır
+      const hugeManifestProject = path.join(sandbox.fakeHome, "projects", "huge-manifest-app");
+      mkdirSync(hugeManifestProject, { recursive: true });
+      writeFileSync(
+        path.join(hugeManifestProject, "plugin.json"),
+        JSON.stringify({ name: "causoryn", padding: "x".repeat(70 * 1024) }),
+        "utf8",
+      );
+      expect(
+        isSafeProjectRoot(hugeManifestProject, {
+          homeDir: sandbox.fakeHome,
+          env: {},
+        }),
+      ).toBe(true);
+
+      // 2) plugin.json bir dizin ise istisna atmadan güvenli atlanır
+      const dirManifestProject = path.join(sandbox.fakeHome, "projects", "dir-manifest-app");
+      mkdirSync(path.join(dirManifestProject, "plugin.json"), { recursive: true });
+      expect(
+        isSafeProjectRoot(dirManifestProject, {
+          homeDir: sandbox.fakeHome,
+          env: {},
+        }),
+      ).toBe(true);
+
+      // 3) Normal boyutlu causoryn plugin.json hâlâ eklenti dizini olarak reddedilir
+      const normalPluginDir = path.join(sandbox.fakeHome, "projects", "causoryn-plugin-copy");
+      mkdirSync(normalPluginDir, { recursive: true });
+      writeFileSync(
+        path.join(normalPluginDir, "plugin.json"),
+        JSON.stringify({ name: "causoryn", version: "0.2.0" }),
+        "utf8",
+      );
+      expect(
+        isSafeProjectRoot(normalPluginDir, {
+          homeDir: sandbox.fakeHome,
+          env: {},
+        }),
+      ).toBe(false);
+
+      // 4) Symlink'li plugin.json (OS izin veriyorsa) O_NOFOLLOW kullanılmadığı için hâlâ tespit edilir
+      const linkedPluginDir = path.join(sandbox.fakeHome, "projects", "symlinked-plugin-copy");
+      mkdirSync(linkedPluginDir, { recursive: true });
+      const manifestTarget = path.join(sandbox.rootDir, "real-causoryn-plugin.json");
+      writeFileSync(
+        manifestTarget,
+        JSON.stringify({ name: "causoryn", version: "0.2.0" }),
+        "utf8",
+      );
+      let symlinkCreated = false;
+      try {
+        symlinkSync(manifestTarget, path.join(linkedPluginDir, "plugin.json"), "file");
+        symlinkCreated = true;
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException | undefined)?.code !== "EPERM") {
+          throw err;
+        }
+      }
+      if (symlinkCreated) {
+        expect(
+          isSafeProjectRoot(linkedPluginDir, {
+            homeDir: sandbox.fakeHome,
+            env: {},
+          }),
+        ).toBe(false);
       }
     } finally {
       sandbox.cleanup();

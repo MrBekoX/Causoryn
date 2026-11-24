@@ -121,6 +121,42 @@ describe("discoverSqlContracts", () => {
     );
     expect(() => discoverSqlContracts("ws-1", "db/ok.sql", CREATE_SQL)).not.toThrow();
   });
+
+  it("güvenlik (#11/#14/#15): ReDoS karşıtı doğrusal süre ve kenar SQL ALTER/CREATE biçimleri", () => {
+    const payloads = [
+      "ALTER TABLE users " + " ".repeat(30_000) + "\n",
+      "ALTER TABLE users ADD " + " ".repeat(30_000) + "\n",
+      "ALTER TABLE users ADD COLUMN " + " ".repeat(30_000) + "\n",
+      "CREATE TABLE evil (\n  col" + " ".repeat(30_000) + "\n);",
+      "ALTER TABLE " + "1 ".repeat(15_000) + ";",
+    ];
+
+    for (const sql of payloads) {
+      const start = performance.now();
+      const out = discoverSqlContracts("ws-1", "db/redos.sql", sql);
+      const elapsedMs = performance.now() - start;
+      expect(elapsedMs).toBeLessThan(200);
+      expect(Array.isArray(out.contracts)).toBe(true);
+    }
+
+    // ALTER TABLE ONLY + tırnaklı kolon + kısaltılmış ADD (COLUMN olmadan) + boşluklu geçersiz kolon
+    const edgeSql = [
+      'CREATE TABLE "accounts" (',
+      '  "id" UUID NOT NULL,',
+      "  empty_col   ",
+      ");",
+      'ALTER TABLE ONLY "accounts" ADD COLUMN "email" VARCHAR(120) NOT NULL;',
+      "ALTER TABLE accounts ADD label TEXT;",
+    ].join("\n");
+    const edgeOut = discoverSqlContracts("ws-1", "db/edge.sql", edgeSql);
+    expect(edgeOut.contracts).toHaveLength(1);
+    expect(edgeOut.contracts[0]?.name).toBe("accounts");
+    expect(edgeOut.contracts[0]?.properties).toEqual([
+      { name: "id", type: "UUID", required: true },
+      { name: "email", type: "VARCHAR(120)", required: true },
+      { name: "label", type: "TEXT", required: false },
+    ]);
+  });
 });
 
 /* ------------------------------------------------------------------ */
@@ -240,5 +276,55 @@ describe("discoverProtobufContracts", () => {
       "contracts/limit-exceeded",
     );
     expect(() => discoverProtobufContracts("ws-1", "ok.proto", PROTO_OK)).not.toThrow();
+  });
+
+  it("güvenlik (#12/#13): map ve alan kalıpları ReDoS girdilerinde < 200ms tamamlanır; iç içe bloklar korunur", () => {
+    const adversarialMap =
+      'syntax = "proto3";\nmessage EvilMap {\n  map<A,A> A=0' + "0".repeat(30_000) + "!\n}\n";
+    const startMap = performance.now();
+    const mapOut = discoverProtobufContracts("ws-1", "evil-map.proto", adversarialMap);
+    expect(performance.now() - startMap).toBeLessThan(200);
+    expect(mapOut.contracts[0]?.properties).toEqual([]);
+
+    const adversarialField =
+      'syntax = "proto3";\nmessage EvilField {\n  A A=0' + "0".repeat(30_000) + "!\n}\n";
+    const startField = performance.now();
+    const fieldOut = discoverProtobufContracts("ws-1", "evil-field.proto", adversarialField);
+    expect(performance.now() - startField).toBeLessThan(200);
+    expect(fieldOut.contracts[0]?.properties).toEqual([]);
+
+    // İç içe message/enum/oneof, reserved/option/yorumlar, field options ve U+2028 reddi
+    const nestedProto = [
+      'syntax = "proto3";',
+      "package acme.v1;",
+      "message Outer {",
+      "  // yorum satırı",
+      "  option deprecated = false;",
+      "  reserved 99;",
+      "  enum Status {",
+      "    STATUS_UNSPECIFIED = 0;",
+      "  }",
+      "  message Inner {",
+      "    repeated string tags = 1 [deprecated = true];",
+      "    map<string, int32> counts = 2 [deprecated = true];",
+      "  }",
+      "  oneof choice {",
+      "    string a = 3;",
+      "  }",
+      "  string id = 1;",
+      "  string spoof = 2\u2028;",
+      "}",
+    ].join("\n");
+    const nestedOut = discoverProtobufContracts("ws-1", "nested.proto", nestedProto);
+    const outer = nestedOut.contracts.find((c) => c.name === "acme.v1.Outer");
+    const inner = nestedOut.contracts.find((c) => c.name === "acme.v1.Inner");
+    expect(outer?.properties).toEqual([{ name: "id", type: "string", required: false }]);
+    expect(inner?.properties).toEqual([
+      { name: "tags", type: "repeated string", required: false },
+      { name: "counts", type: "map<string,int32>", required: false },
+    ]);
+    expect(nestedOut.diagnostics.some((d) => d.code === "contracts/protobuf-unbalanced-block")).toBe(
+      false,
+    );
   });
 });
