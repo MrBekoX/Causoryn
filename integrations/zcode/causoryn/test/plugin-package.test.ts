@@ -710,7 +710,7 @@ function extractDeprecatedReplacements(versionSource: string): Record<string, st
   );
   if (block === null) return {};
   const out: Record<string, string> = {};
-  for (const m of block[1].matchAll(/(causoryn_[a-z_]+):\s*"(causoryn_[a-z_]+)"/g)) {
+  for (const m of (block[1] ?? "").matchAll(/(causoryn_[a-z_]+):\s*"(causoryn_[a-z_]+)"/g)) {
     out[m[1] as string] = m[2] as string;
   }
   return out;
