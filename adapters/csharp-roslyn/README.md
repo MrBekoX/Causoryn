@@ -105,6 +105,32 @@ const snapshot = createSnapshot({
 | `requestTimeoutMs` | `30000` | aşım → kill + L0/L1 fallback |
 | `spawnProcess` | `node:child_process.spawn` | yalnızca test enjeksiyonu |
 
+## MSBuild project model (implicit global usings, one compilation per project)
+
+When `rootDir` is given, `resolveCSharpProjects` (`src/project-model.ts`) reads
+`.csproj` and the nearest `Directory.Build.props` (never above `rootDir`)
+strictly read-only and sends the worker a `projects` field
+(`native/roslyn-worker/PROTOCOL.md`, "Projects"):
+
+- **Ownership:** a source belongs to the nearest ancestor directory holding a
+  `.csproj`; each project is compiled separately (no CS7022/duplicate-type
+  artifacts across projects). Sources outside every project share one
+  compilation, as before.
+- **Global usings:** `<ImplicitUsings>` `enable`/`true` (case-insensitive) adds
+  the SDK defaults for `Microsoft.NET.Sdk`, `.Web`, `.Worker` and
+  `.WindowsDesktop` (`UseWPF` / `UseWindowsForms`) as listed on Microsoft Learn
+  (https://learn.microsoft.com/dotnet/core/project-sdk/overview#implicit-using-directives);
+  `System.Net.Http` is omitted for .NET Framework targets. `<Using Include/Remove>`
+  with `Alias` / `Static` metadata is honored in MSBuild import order
+  (`Directory.Build.props` → SDK defaults → project file).
+- **ProjectReference:** resolved to owning projects of the analysis set; the
+  worker references the transitive closure.
+- **Not evaluated (explicit warning when they touch a modeled setting):** MSBuild
+  conditions other than `'$(P)' == 'v'` / `!=` on a modeled property, property
+  functions/`$(...)` values, `<Choose>`, `<Import>`ed files, `Using Update`,
+  `Directory.Build.targets`, SDKs outside the documented table (for example
+  `Microsoft.NET.Sdk.Razor`, `MSTest.Sdk`).
+
 ## Testler
 
 ```bash
