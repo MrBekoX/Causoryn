@@ -1,11 +1,12 @@
 import readline from "node:readline/promises";
 
 import { formatDoctorReportText, runDoctor } from "./doctor.js";
-import { runSetup } from "./setup.js";
+import { normalizeSetupToolProfile, runSetup } from "./setup.js";
 import {
   CAUSORYN_PACKAGE_VERSION,
   CausorynCliError,
   HOST_CLIENT_IDS,
+  SETUP_TOOL_PROFILES,
   isHostClientId,
   type CliIo,
   type HostClientId,
@@ -25,10 +26,20 @@ const SETUP_NO_HOST_EXIT_CODE = 1;
 
 const HELP_TEXT = `Usage:
   causoryn mcp [--allow-cwd] [--root <path>] [--auto-data-dir] [--data-dir <path>] [--client <id>] [--tool-profile <core|full|wiki|history>] [--output-schema <omit|full>]
-  causoryn setup [--client <antigravity|claude-code|codex|zcode>...] [--all] [--all-detected] [--yes] [--dry-run] [--uninstall] [--skill | --no-skill] [--json]
+  causoryn setup [--client <antigravity|claude-code|codex|zcode>...] [--all] [--all-detected] [--tool-profile <list>] [--yes] [--dry-run] [--uninstall] [--skill | --no-skill] [--json]
   causoryn doctor [--client <antigravity|claude-code|codex|zcode>...] [--json]
   causoryn --version
   causoryn --help
+
+Setup options:
+  --client <id>          Configure only the named host(s); repeat the flag or use a comma list.
+  --all                  Configure every supported host, detected or not.
+  --all-detected         Explicit alias of the default: configure only the hosts detected on
+                         this machine (used when neither --client nor --all is given).
+  --tool-profile <list>  Write \`--tool-profile <list>\` into every generated \`causoryn mcp\`
+                         entry: ${SETUP_TOOL_PROFILES.join(", ")}, or a comma list such as wiki,history.
+                         Without it, an existing entry keeps its --tool-profile and
+                         --output-schema arguments; its env keys are always kept.
 `;
 
 function defaultCliIo(): CliIo {
@@ -86,6 +97,7 @@ interface ParsedSetupCliFlags {
   readonly clients: HostClientId[];
   readonly all: boolean;
   readonly allDetected: boolean;
+  readonly toolProfile: string | undefined;
   readonly yes: boolean;
   readonly dryRun: boolean;
   readonly uninstall: boolean;
@@ -98,6 +110,7 @@ function parseSetupFlags(args: readonly string[]): ParsedSetupCliFlags {
   const clients: HostClientId[] = [];
   let all = false;
   let allDetected = false;
+  let toolProfile: string | undefined;
   let yes = false;
   let dryRun = false;
   let uninstall = false;
@@ -134,6 +147,18 @@ function parseSetupFlags(args: readonly string[]): ParsedSetupCliFlags {
       i += 1;
     } else if (arg.startsWith("--client=")) {
       clients.push(...parseClientValues(arg.slice("--client=".length)));
+    } else if (arg === "--tool-profile") {
+      const next = args[i + 1];
+      if (next === undefined || next.startsWith("-")) {
+        throw new CausorynCliError(
+          "cli/invalid-arguments",
+          `--tool-profile flag requires a value (${SETUP_TOOL_PROFILES.join(", ")}, or a comma-separated combination)`,
+        );
+      }
+      toolProfile = normalizeSetupToolProfile(next);
+      i += 1;
+    } else if (arg.startsWith("--tool-profile=")) {
+      toolProfile = normalizeSetupToolProfile(arg.slice("--tool-profile=".length));
     } else {
       throw new CausorynCliError(
         "cli/invalid-arguments",
@@ -142,10 +167,18 @@ function parseSetupFlags(args: readonly string[]): ParsedSetupCliFlags {
     }
   }
 
+  if (toolProfile !== undefined && uninstall) {
+    throw new CausorynCliError(
+      "cli/invalid-arguments",
+      "--tool-profile cannot be combined with --uninstall",
+    );
+  }
+
   return {
     clients,
     all,
     allDetected,
+    toolProfile,
     yes,
     dryRun,
     uninstall,
@@ -269,6 +302,7 @@ export async function runCli(
         ...(flags.clients.length > 0 ? { clients: flags.clients } : {}),
         all: flags.all,
         allDetected: flags.allDetected,
+        ...(flags.toolProfile !== undefined ? { toolProfile: flags.toolProfile } : {}),
         yes: flags.yes,
         dryRun: flags.dryRun,
         uninstall: flags.uninstall,

@@ -5,6 +5,8 @@ import { fileURLToPath } from "node:url";
 import ts from "typescript";
 import { describe, expect, it } from "vitest";
 
+import { readCodexMcpServer } from "../packages/causoryn/src/toml-patch.js";
+
 /**
  * Regression guard: every user-facing runtime string of the `causoryn` CLI
  * package (setup, doctor, toml-patch, runtime staging, bin script, plugin
@@ -102,5 +104,13 @@ describe("causoryn CLI package runtime strings are English", () => {
     };
     visit(sf);
     expect(texts.filter((text) => TURKISH_LETTERS.test(text))).toEqual(["kurulum onayı", "ok  değil"]);
+  });
+});
+
+describe("causoryn TOML patch errors are English", () => {
+  it("reports a non-array Codex `args` value in English (no Turkish letters needed to be Turkish)", () => {
+    expect(() =>
+      readCodexMcpServer('[mcp_servers.causoryn]\ncommand = "node"\nargs = "not-an-array"\n'),
+    ).toThrow(/^Expected a TOML array: "not-an-array"$/);
   });
 });
