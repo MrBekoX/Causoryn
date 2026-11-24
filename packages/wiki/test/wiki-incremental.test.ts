@@ -1012,7 +1012,7 @@ describe("SQLite — atomik publish, stale, not koruma", () => {
       // Aynı wiki id UNIQUE → publish tek transaction içinde geri alınır.
       expect(() =>
         store.publishWiki(sid, stepC.projection.snapshot.id, "ready", T4),
-      ).toThrow(/Wiki yayımlama/i);
+      ).toThrow(/Wiki publish failed/i);
       expect(store.getLatestPublishedWiki(WS)?.snapshot.id).toBe(
         stepC.projection.snapshot.id,
       );

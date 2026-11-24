@@ -586,7 +586,7 @@ describe("wiki store — negatif", () => {
     try {
       store.beginWikiBuild(wikiMeta(GRAPH_SNAPSHOT_ID));
       expect(() => store.beginWikiBuild(wikiMeta(GRAPH_SNAPSHOT_ID))).toThrow(
-        /aktif wiki build/i,
+        /active wiki build/i,
       );
     } finally {
       store.close();
@@ -731,7 +731,7 @@ describe("wiki store — partial", () => {
       const probe = new Database(p, { readonly: true });
       try {
         const version = probe.pragma("user_version", { simple: true });
-        expect(version).toBe(4);
+        expect(version).toBe(5);
         const tables = probe
           .prepare(
             "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'wiki_%' ORDER BY name",

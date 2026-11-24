@@ -466,7 +466,7 @@ describe("IndexService.runIndex — senkron koşum C# derin analiz yürütmez (B
       expect(
         run.warnings.some(
           (w) =>
-            w.includes("senkron koşum") &&
+            w.includes("synchronous run cannot perform deep") &&
             w.includes("C#") &&
             w.includes("runIndexAsync"),
         ),
@@ -495,7 +495,7 @@ describe("IndexService.runIndex — senkron koşum C# derin analiz yürütmez (B
       (n) => n.kind === "File" && n.language === "csharp",
     );
     expect(csFiles.length).toBe(4);
-    expect(run.warnings.some((w) => w.includes("senkron koşum"))).toBe(true);
+    expect(run.warnings.some((w) => w.includes("synchronous run cannot perform deep"))).toBe(true);
   }, 60_000);
 
   it("negatif: yetkisiz kök runIndexAsync'te de IndexingError ile reddedilir", async () => {
@@ -744,7 +744,7 @@ describe("runIndexAsync — boş workspace dürüstlüğü (denetim bulgusu B1)"
       // yalnızca TypeScript/TSX/C# sayıyordu — geride kalmıştı).
       expect(
         run.warnings.some((w) =>
-          w.includes("analiz edilebilir TypeScript/TSX/C#/Python/Go/Rust kaynağı içermiyor"),
+          w.includes("contains no analyzable TypeScript/TSX/C#/Python/Go/Rust sources"),
         ),
       ).toBe(true);
       expect(run.warnings.some((w) => w.includes("README.md"))).toBe(true);

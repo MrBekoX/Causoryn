@@ -1778,7 +1778,7 @@ describe("stdio.ts — gerçek alt-süreç CLI modları ve geriye dönük uyumlu
           homeDir: sandbox.fakeHome,
           env: { ZCODE_PLUGIN_DATA: "relative-zcode-data" },
         }),
-      ).toThrow(/ZCODE_PLUGIN_DATA mutlak yol olmalı/);
+      ).toThrow(/ZCODE_PLUGIN_DATA must be an absolute path/);
     } finally {
       sandbox.cleanup();
     }

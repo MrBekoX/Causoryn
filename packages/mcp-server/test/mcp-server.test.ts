@@ -1185,7 +1185,11 @@ describe("MCP server — protokol düzeyi", { timeout: 30_000 }, () => {
       const status = await callTool(pair.client, "causoryn_index_status", { jobId });
       const statusData = statusDataOf(expectEnvelope(status));
       const job = statusData.job as Record<string, unknown>;
-      expect(job.status).toBe("done");
+      // A no-op job published nothing, so it is never reported `done`
+      // (Task 1.7 criterion 5): status `reused`, outcome `unchanged`.
+      expect(job.status).toBe("reused");
+      expect(job.outcome).toBe("unchanged");
+      expect(job.published).toBe(false);
       expect(job.mode).toBe("incremental");
       expect(job.snapshotId).toBe(initialSnapshotId);
       expect((job.warnings as string[]).some((w) => w.includes("incremental no-op"))).toBe(true);
