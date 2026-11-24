@@ -32,7 +32,7 @@
 | **Core MCP server & SQLite** (`dist/mcp-server.mjs` + `dist/index-worker.mjs` + N-API v10 `better-sqlite3` prebuilds) | **Node.js >= 24** | Zero-compile | 100% offline |
 | **TypeScript / JavaScript** (L2 + L3: `.ts/.tsx/.mts/.cts/.js/.jsx/.mjs/.cjs`, ESM + CJS, `tsconfig`/`jsconfig` paths, monorepo workspaces, CHA `INHERITS`/`IMPLEMENTS`) | In-process TS Compiler API + bundled `dist/typescript-lib/lib*.d.ts` | Zero-compile | 100% offline |
 | **C# / Roslyn** (L2 + L3: CHA `INHERITS`/`IMPLEMENTS`, read-only `obj/project.assets.json` NuGet discovery) | **.NET 10 runtime** (`dotnet exec`, isolated `DOTNET_STARTUP_HOOKS=""`) | Prebuilt deterministic Release Roslyn DLL (zero-compile) | 100% offline |
-| **Python** (L2 + L3) | **Python 3.10+** (`python -I -B -X utf8`, stdlib `ast`) | Zero-compile | 100% offline |
+| **Python** (L2 + L3) | **Python 3.10+** (`python3` then `python` on macOS/Linux, `python` on Windows; run as `-I -B -X utf8`, stdlib `ast`) | Zero-compile | 100% offline |
 | **Go** (L1/heuristic + L3: directory + `go.mod` package keying) | **Go 1.22+** (`GOTOOLCHAIN=local`, `GOWORK=off`, `GOPROXY=off`, stdlib `go/parser`) | On-demand `go run` (or `CAUSORYN_GO_WORKER_BIN`) | 100% offline |
 | **Rust** (L1/heuristic + L3: isolated Cargo `cwd` + SHA-256 binary pinning) | **Rust / Cargo** (`syn` 3 sidecar) | On-demand `cargo build --locked` into `~/.causoryn/cache/rust-worker-target` | An uncached build can fetch locked crates from `crates.io`; a populated cache supports offline use |
 
@@ -59,12 +59,18 @@ npx causoryn@latest setup --client claude-code --yes
 npx causoryn@latest setup --client codex --yes
 npx causoryn@latest setup --client zcode --yes
 
-# Verify installation health (read-only; reports HEALTHY, DEGRADED, NOT CONFIGURED, or UNHEALTHY)
+# Opt into extra tool profiles (written into the host entry; kept on later re-runs)
+npx causoryn@latest setup --client claude-code --tool-profile core,history --yes
+
+# Verify installation health (read-only; reports HEALTHY, DEGRADED, NOT CONFIGURED, or UNHEALTHY;
+# a toolchain below its floor — Python 3.10, Go 1.22, .NET 10 runtime — reports DEGRADED)
 npx causoryn@latest doctor
 
 # Cleanly remove Causoryn from a host (cleans up ~/.causoryn/runtime when no remaining host points to it)
 npx causoryn@latest setup --client claude-code --uninstall --yes
 ```
+
+With no detected host and no `--client`/`--all`, `setup` writes nothing and exits with code 1. Re-running `setup` only rewrites the keys it owns (`command`, `args` with your `--tool-profile`/`--output-schema` kept, `type: "stdio"` for Claude Code and ZCode, and Codex `startup_timeout_sec`, raised to at least 30); `env`, `disabled`, `autoApprove`, `alwaysAllow`, `timeout` and any other key you added keep their value and position, and an up-to-date entry is not rewritten.
 
 ### Option B: Native Host Plugin Marketplaces
 
@@ -78,7 +84,7 @@ npx causoryn@latest setup --client claude-code --uninstall --yes
      ```
    - Or run `npx causoryn@latest setup --client claude-code --yes` (`~/.claude.json` + `~/.claude/skills/`).
 3. **Codex** (Codex CLI / Desktop):
-   - Add the repository marketplace (`.agents/plugins/marketplace.json` + `.codex-plugin/plugin.json`) via Codex plugin management, or run `npx causoryn@latest setup --client codex --yes` (`$CODEX_HOME/config.toml` `[mcp_servers.causoryn]` with `startup_timeout_sec = 30` + `~/.agents/skills/`).
+   - Add the repository marketplace (`.agents/plugins/marketplace.json` + `.codex-plugin/plugin.json`) via Codex plugin management, or run `npx causoryn@latest setup --client codex --yes` (`$CODEX_HOME/config.toml` `[mcp_servers.causoryn]` with `startup_timeout_sec` of at least 30 — a higher value you set is kept — + `~/.agents/skills/`).
 4. **ZCode (GLM)**:
    - Open **Plugin Marketplace -> New / Discover**, add `https://github.com/MrBekoX/Causoryn` (uses root `marketplace.json` and `.zcode-plugin/plugin.json`), and install `causoryn`.
    - Or run `npx causoryn@latest setup --client zcode --yes` (writes `~/.zcode/cli/config.json` `mcp.servers.causoryn` while preserving any existing `~/.agents/mcp.json` fallback servers, plus `~/.zcode/skills/`).
