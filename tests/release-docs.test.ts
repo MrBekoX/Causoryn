@@ -235,10 +235,33 @@ describe("NEGATİF: compatibility-matrix.md koşulmayan hostu geçmiş sayamaz",
   });
 });
 
-describe("F9 / K-022: sürüm kararı — 0.2.4 Pre-1.0 Public Preview (1.0.0 DEĞİL)", () => {
-  it("CHANGELOG.md Keep a Changelog formatında, [0.2.4]..[0.2.0] - tarih ve tarihsel [0.1.0] - tarih girişli", () => {
+/**
+ * Returns the body of one CHANGELOG version section (`## [<version>] ...` up to
+ * the next `## [` heading), failing loudly if the heading is missing.
+ */
+function changelogSection(text: string, version: string): string {
+  const normalized = text.replace(/\r\n/g, "\n");
+  const heading = `## [${version}]`;
+  const start = normalized.indexOf(heading);
+  expect(start, `CHANGELOG must contain a "${heading}" heading`).toBeGreaterThanOrEqual(0);
+  const next = normalized.indexOf("\n## [", start + heading.length);
+  return normalized.slice(start, next === -1 ? undefined : next);
+}
+
+/** Returns one `### <title>` subsection of a CHANGELOG version section. */
+function changelogSubsection(section: string, title: string): string {
+  const heading = `\n### ${title}\n`;
+  const start = section.indexOf(heading);
+  expect(start, `CHANGELOG section must contain "### ${title}"`).toBeGreaterThanOrEqual(0);
+  const next = section.indexOf("\n### ", start + heading.length);
+  return section.slice(start, next === -1 ? undefined : next);
+}
+
+describe("F9 / K-022: sürüm kararı — 0.3.0 Pre-1.0 (1.0.0 DEĞİL)", () => {
+  it("CHANGELOG.md Keep a Changelog formatında, [0.3.0]..[0.2.0] - tarih ve tarihsel [0.1.0] - tarih girişli", () => {
     const text = readDoc("changelog");
     expect(text).toContain("Keep a Changelog");
+    expect(text).toMatch(/^## \[0\.3\.0\] - \d{4}-\d{2}-\d{2}$/m);
     expect(text).toMatch(/^## \[0\.2\.4\] - \d{4}-\d{2}-\d{2}$/m);
     expect(text).toMatch(/^## \[0\.2\.3\] - \d{4}-\d{2}-\d{2}$/m);
     expect(text).toMatch(/^## \[0\.2\.2\] - \d{4}-\d{2}-\d{2}$/m);
@@ -247,19 +270,44 @@ describe("F9 / K-022: sürüm kararı — 0.2.4 Pre-1.0 Public Preview (1.0.0 DE
     expect(text).toMatch(/^## \[0\.1\.0\] - \d{4}-\d{2}-\d{2}$/m);
   });
 
-  it("kök package.json version === SERVER_VERSION === 0.2.4 (karar üç yüzeyde tutarlı)", () => {
+  it("kök package.json version === SERVER_VERSION === 0.3.0 (karar üç yüzeyde tutarlı)", () => {
     const pkg = JSON.parse(readFileSync(DOC_PATHS.rootPkg, "utf8")) as {
       version?: string;
     };
-    expect(pkg.version).toBe("0.2.4");
+    expect(pkg.version).toBe("0.3.0");
     expect(pkg.version).toBe(SERVER_VERSION);
   });
 
-  it("karar gerekçesi CHANGELOG'da Pre-1.0 dürüstlük ilkesiyle yazılı (1.0.0 ilan edilmez)", () => {
+  it("the release rationale is written in the CHANGELOG [0.3.0] Release Decision (pre-1.0 honesty policy, explicitly NOT 1.0.0, gates in [Unreleased]) with the breaking change and its migration path", () => {
     const text = readDoc("changelog");
-    expect(text).toContain("0.2.4");
-    expect(text).toMatch(/pre-1\.0/i);
-    expect(text).toMatch(/1\.0\.0/);
+    const section = changelogSection(text, "0.3.0");
+
+    // Release Decision: states the pre-1.0 honesty policy, refuses 1.0.0 explicitly,
+    // names the version surfaces kept in sync, and points to the open gates.
+    const decision = changelogSubsection(section, "Release Decision");
+    expect(decision).toMatch(/\*\*`0\.3\.0` is a Pre-1\.0 release — explicitly NOT `1\.0\.0`\.\*\*/);
+    expect(decision).toMatch(/breaking/i);
+    expect(decision).toContain("SERVER_VERSION");
+    expect(decision).toContain("package.json");
+    expect(decision).toContain("`[Unreleased]`");
+
+    // The breaking default-surface change is named with both numbers, and the
+    // migration path to the legacy names is spelled out (flag + env var).
+    const breaking = changelogSubsection(section, "Breaking Changes");
+    expect(breaking).toMatch(/29 to 11 tools/);
+    for (const tool of CORE_TOOL_NAMES) {
+      expect(breaking, `Breaking Changes must list core tool ${tool}`).toContain(`\`${tool}\``);
+    }
+    const migration = changelogSubsection(section, "Migration");
+    expect(migration).toContain("--tool-profile full");
+    expect(migration).toContain("CAUSORYN_TOOL_PROFILE=full");
+    expect(migration).toContain("--output-schema full");
+    expect(migration).toContain(`all ${String(TOOL_NAMES.length)} legacy names`);
+
+    // The open 1.0.0 gates stay under [Unreleased], not under a released version.
+    const unreleased = changelogSection(text, "Unreleased");
+    expect(unreleased).toMatch(/^### Remaining 1\.0\.0 Release Gates/m);
+    expect(section).not.toMatch(/^### Remaining 1\.0\.0 Release Gates/m);
   });
 });
 
@@ -382,9 +430,10 @@ describe("DENETİM DÖNGÜSÜ: CHANGELOG [Unreleased] 1.0.0 kapıları F9 sayım
   function unreleasedSection(): string {
     const text = readDoc("changelog");
     const start = text.indexOf("## [Unreleased]");
-    const end = text.indexOf("## [0.2.4]");
+    // The [Unreleased] section ends at the newest released version heading.
+    const end = text.indexOf("## [0.3.0]");
     expect(start, "## [Unreleased] başlığı olmalı").toBeGreaterThanOrEqual(0);
-    expect(end, "## [0.2.4] başlığı olmalı").toBeGreaterThan(start);
+    expect(end, "## [0.3.0] başlığı olmalı").toBeGreaterThan(start);
     return text.slice(start, end);
   }
 
@@ -766,8 +815,8 @@ describe("BAĞIMSIZ DENETİM DÖNGÜSÜ (2026-11-18): doküman↔kod tam parite 
   it("CHANGELOG.md ve docs/implementation-status.md: secret-scan + npm audit (0 açık) kapanış notu ve antigravity-plugin.test.ts satır sayısı diskle senkron", () => {
     const changelog = readDoc("changelog");
     const start = changelog.indexOf("## [Unreleased]");
-    const end = changelog.indexOf("## [0.2.4]");
-    expect(end, "## [0.2.4] başlığı olmalı").toBeGreaterThan(start);
+    const end = changelog.indexOf("## [0.3.0]");
+    expect(end, "## [0.3.0] başlığı olmalı").toBeGreaterThan(start);
     const unreleased = changelog.slice(start, end);
     expect(unreleased).toMatch(/Rate-limit\/concurrency resource budget/i);
     expect(unreleased).toContain("scripts/secret-scan.mjs");
@@ -814,12 +863,12 @@ describe("BAĞIMSIZ DENETİM DÖNGÜSÜ (2026-11-18): doküman↔kod tam parite 
       plugins?: Array<{ version?: string }>;
     };
     expect(zcodeMarketplace.owner?.name).toBe("Causoryn Contributors");
-    expect(zcodeMarketplace.plugins?.[0]?.version).toBe("0.2.4");
+    expect(zcodeMarketplace.plugins?.[0]?.version).toBe("0.3.0");
 
     const rootReadme = readFileSync(path.join(REPO_ROOT, "README.md"), "utf8");
     const pkgReadme = readFileSync(path.join(REPO_ROOT, "packages", "causoryn", "README.md"), "utf8");
     for (const readme of [rootReadme, pkgReadme]) {
-      expect(readme).toContain("0.2.4");
+      expect(readme).toContain("0.3.0");
       expect(readme).toMatch(/Pre-1\.0/i);
       expect(readme).not.toMatch(/Public Preview/i);
       expect(readme).not.toContain("single zero-compile npm package");
@@ -1305,7 +1354,7 @@ describe("Wave 3 Track 3B: Jargon-free public English docs, 5-minute tutorial & 
     expect(compat).toContain("11");
   });
 
-  it("keeps root CHANGELOG.md English-first with Wave 1/2/3 Unreleased entries and zero 1.0.0 release claims", () => {
+  it("keeps root CHANGELOG.md English-first with the Wave 1/2/3 changes released under [0.3.0] and zero 1.0.0 release claims", () => {
     const changelog = readFileSync(path.join(REPO_ROOT, "CHANGELOG.md"), "utf8");
     expect(changelog).toContain("All notable changes to this project will be documented in this file");
     expect(changelog).not.toContain("Bu projedeki");
@@ -1314,14 +1363,31 @@ describe("Wave 3 Track 3B: Jargon-free public English docs, 5-minute tutorial & 
     expect(changelog).not.toMatch(/\bK-0\d\d\b/);
     expect(changelog).not.toMatch(/^## \[1\.0\.0\]/m);
 
-    const unreleased = changelog.slice(
-      changelog.indexOf("## [Unreleased]"),
-      changelog.indexOf("## [0.2.4]"),
-    );
-    expect(unreleased).toContain("--tool-profile");
-    expect(unreleased).toContain("worker_threads");
-    expect(unreleased).toContain("file_facts");
-    expect(unreleased).toContain("build_leases");
-    expect(unreleased).toContain("tutorial-5-minutes.md");
+    const released = changelogSection(changelog, "0.3.0");
+    expect(released).toMatch(/^## \[0\.3\.0\] - \d{4}-\d{2}-\d{2}$/m);
+    expect(released).toContain("--tool-profile");
+    expect(released).toContain("worker_threads");
+    expect(released).toContain("file_facts");
+    expect(released).toContain("build_leases");
+    expect(released).toContain("tutorial-5-minutes.md");
+  });
+
+  it("keeps every historical CHANGELOG entry from the pre-translation (0.2.4) CHANGELOG, translated to English", () => {
+    const changelog = readFileSync(path.join(REPO_ROOT, "CHANGELOG.md"), "utf8");
+    // Facts that the 0.2.4 CHANGELOG recorded per release; an English rewrite must not drop them.
+    const historicalFacts: ReadonlyArray<readonly [string, readonly string[]]> = [
+      ["0.2.4", ["PR #20, #23", "PR #24", "includeTests", "js/insecure-temporary-file", "2-job SLSA", "publish_results: true"]],
+      ["0.2.3", ['language: "javascript"', "module.exports = function", "NodeNext", "frontend/tsconfig.json", ".safetensors", "**/bin/{Debug,Release,x64,x86,AnyCPU}/**", "setImmediate", "EXPORT_INTERACTIVE_HTML_FILE_NAME", "ts.sys"]],
+      ["0.2.2", ["externalSummary", "default-src 'none'", "architectureSummary.moduleIds", "VIEWER_CSP_POLICY", "max 4 entries", "100–300x"]],
+      ["0.2.1", ["oninitialized", ".pytest_cache", "runInTransaction", "50 entries"]],
+      ["0.2.0", ["coverageOf.tier", "symbol_fts", "4 canonical `skills/`", "Causoryn Contributors", "causoryn-sbom.cdx.json", "docs/superpowers/", "claude plugin validate --strict", "PDB"]],
+      ["0.1.0", ["only Windows was verified", "EVIDENCE_NOT_FOUND", "SYMBOL_NOT_FOUND", "8-rule verdict chain", "inconclusive", "evidenceRef", "parse safety quotas", "fp2", "bit-identical", "5 independent spawn"]],
+    ];
+    for (const [version, facts] of historicalFacts) {
+      const section = changelogSection(changelog, version);
+      for (const fact of facts) {
+        expect(section, `CHANGELOG [${version}] lost historical detail: ${fact}`).toContain(fact);
+      }
+    }
   });
 });
