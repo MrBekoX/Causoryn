@@ -365,6 +365,28 @@ describe("git-read: protected safe.directory entries are forwarded", () => {
     });
   }, 60_000);
 
+  it("honours the user's GIT_CONFIG_NOSYSTEM: a system-level safe.directory=* (as on CI runner images) is not forwarded", async () => {
+    const systemDir = mkdtempSync(path.join(os.tmpdir(), "causoryn-git-system-"));
+    cleanup.push(systemDir);
+    const systemConfig = path.join(systemDir, "gitconfig");
+    writeFileSync(systemConfig, "[safe]\n\tdirectory = *\n", "utf8");
+    // With GIT_CONFIG_NOSYSTEM=1 git itself ignores the system file, so the
+    // user's effective protected configuration has no safe.directory entry.
+    await withEnv({ ...ownerEnv(homeWithoutEntry), GIT_CONFIG_SYSTEM: systemConfig }, async () => {
+      const error = await rejection(() => resolveGitCommitRef(repo, "HEAD"));
+      expect(error.code).toBe("compare/git-unavailable");
+      expect(error.message).toContain("owned by a different user");
+    });
+    // Without GIT_CONFIG_NOSYSTEM the system entry is part of the user's
+    // protected configuration and is forwarded.
+    await withEnv(
+      { ...ownerEnv(homeWithoutEntry), GIT_CONFIG_NOSYSTEM: undefined, GIT_CONFIG_SYSTEM: systemConfig },
+      async () => {
+        expect((await resolveGitCommitRef(repo, "HEAD")).length).toBe(40);
+      },
+    );
+  }, 60_000);
+
   it("the global config is not consulted for anything except safe.directory (repo reads stay isolated)", async () => {
     const hostileHome = mkdtempSync(path.join(os.tmpdir(), "causoryn-git-home-hostile-"));
     cleanup.push(hostileHome);
