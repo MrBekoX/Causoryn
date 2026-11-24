@@ -85,6 +85,7 @@ export class CausorynCliError extends Error {
 export interface CodexMcpServerSpec {
   readonly command: string;
   readonly args: readonly string[];
+  /** Value written for `startup_timeout_sec` (default 30); an existing line with this value is kept verbatim. */
   readonly startupTimeoutSec?: number | undefined;
   readonly env?: Readonly<Record<string, string>> | undefined;
 }
@@ -92,7 +93,10 @@ export interface CodexMcpServerSpec {
 export interface ParsedCodexMcpServer {
   readonly command: string;
   readonly args: readonly string[];
+  /** `startup_timeout_sec` as a number (TOML integer or float), or null when absent or unusable. */
   readonly startupTimeoutSec: number | null;
+  /** Raw TOML value text of `startup_timeout_sec`; undefined when the key is absent. */
+  readonly startupTimeoutSecRaw?: string | undefined;
   /**
    * Environment of the entry, merged from an inline `env = { ... }` table,
    * dotted `env.KEY = "..."` keys and the `[mcp_servers.causoryn.env]` sub-table.

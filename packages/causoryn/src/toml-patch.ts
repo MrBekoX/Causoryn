@@ -1,3 +1,4 @@
+import { insertMissingOwnedKeys } from "./owned-keys.js";
 import {
   CausorynCliError,
   type CodexMcpServerSpec,
@@ -461,14 +462,108 @@ export function validateTomlStructure(rawToml: string): void {
   parseTomlDocument(rawToml);
 }
 
+/**
+ * Keys of `[mcp_servers.causoryn]` that Causoryn writes, in the order of a
+ * fresh table. Every other key of an existing table is kept verbatim.
+ */
+const CAUSORYN_OWNED_TABLE_KEYS = ["command", "args", "startup_timeout_sec"] as const;
+
+type CausorynOwnedTableKey = (typeof CAUSORYN_OWNED_TABLE_KEYS)[number];
+
+function specStartupTimeoutSec(spec: CodexMcpServerSpec): number {
+  return spec.startupTimeoutSec ?? DEFAULT_STARTUP_TIMEOUT_SEC;
+}
+
+function renderOwnedTableLine(key: CausorynOwnedTableKey, spec: CodexMcpServerSpec): string {
+  switch (key) {
+    case "command":
+      return `command = ${formatTomlBasicString(spec.command)}`;
+    case "args":
+      return `args = [${spec.args.map((arg) => formatTomlBasicString(arg)).join(", ")}]`;
+    case "startup_timeout_sec":
+      return `startup_timeout_sec = ${String(specStartupTimeoutSec(spec))}`;
+  }
+}
+
+/** Owned key (or "env") an assignment of the main table sets; null for a key Causoryn does not own. */
+function ownedTableKeyOf(rawKey: string | null): CausorynOwnedTableKey | "env" | null {
+  if (rawKey === null) return null;
+  const first = splitTomlKeyPath(rawKey)?.[0];
+  if (first === "env") return "env";
+  return (CAUSORYN_OWNED_TABLE_KEYS as readonly string[]).includes(first ?? "")
+    ? (first as CausorynOwnedTableKey)
+    : null;
+}
+
+/** Whether an existing owned value already equals the spec value (then its line is kept verbatim). */
+function ownedTableValueUnchanged(
+  key: CausorynOwnedTableKey,
+  rawValue: string,
+  spec: CodexMcpServerSpec,
+): boolean {
+  try {
+    switch (key) {
+      case "command":
+        return unescapeTomlString(rawValue) === spec.command;
+      case "args": {
+        const existing = parseTomlStringArray(rawValue);
+        return existing.length === spec.args.length && existing.every((arg, i) => arg === spec.args[i]);
+      }
+      case "startup_timeout_sec":
+        return parseTomlNumber(rawValue) === specStartupTimeoutSec(spec);
+    }
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Rewrites an existing `[mcp_servers.causoryn]` table in place: the owned keys
+ * get the spec values (a line whose value is already right stays verbatim; a
+ * dotted key under an owned name is replaced too), env keys move to the env
+ * sub-table, and every other key, comment and blank line keeps its text and
+ * position. Missing owned keys are inserted where a fresh table has them.
+ */
+function rewriteCausorynMainTableLines(section: TomlSection, spec: CodexMcpServerSpec): string[] {
+  interface BodyItem {
+    readonly owned: CausorynOwnedTableKey | null;
+    readonly lines: readonly string[];
+  }
+  const items: BodyItem[] = [];
+  const seen = new Set<CausorynOwnedTableKey>();
+  for (const unit of splitSectionUnits(section)) {
+    const owner = ownedTableKeyOf(unit.key);
+    if (owner === "env") continue;
+    if (owner === null) {
+      items.push({ owned: null, lines: unit.lines });
+      continue;
+    }
+    // A repeated owned key is invalid TOML; only the first one is rewritten.
+    if (seen.has(owner)) continue;
+    seen.add(owner);
+    const keepVerbatim =
+      unit.key !== null &&
+      unit.value !== null &&
+      splitTomlKeyPath(unit.key)?.length === 1 &&
+      ownedTableValueUnchanged(owner, unit.value, spec);
+    items.push({ owned: owner, lines: keepVerbatim ? unit.lines : [renderOwnedTableLine(owner, spec)] });
+  }
+  const complete = insertMissingOwnedKeys(
+    items,
+    (item) => item.owned,
+    CAUSORYN_OWNED_TABLE_KEYS,
+    (key): BodyItem => ({
+      owned: key as CausorynOwnedTableKey,
+      lines: [renderOwnedTableLine(key as CausorynOwnedTableKey, spec)],
+    }),
+  );
+  return [section.lines[0] ?? `[${CAUSORYN_TABLE}]`, ...complete.flatMap((item) => item.lines)];
+}
+
 function renderCausorynSections(spec: CodexMcpServerSpec): TomlSection[] {
-  const timeoutSec = spec.startupTimeoutSec ?? DEFAULT_STARTUP_TIMEOUT_SEC;
-  const formattedArgs = spec.args.map((arg) => formatTomlBasicString(arg)).join(", ");
   const mainLines = [
     `[${CAUSORYN_TABLE}]`,
-    `command = ${formatTomlBasicString(spec.command)}`,
-    `args = [${formattedArgs}]`,
-    `startup_timeout_sec = ${String(timeoutSec)}`,
+    ...CAUSORYN_OWNED_TABLE_KEYS.map((key) => renderOwnedTableLine(key, spec)),
   ];
 
   const out: TomlSection[] = [
@@ -557,7 +652,7 @@ export function upsertCodexMcpServer(existingToml: string, spec: CodexMcpServerS
           outputSections.push({
             header: firstReplacement.header,
             leadingComments: section.leadingComments,
-            lines: firstReplacement.lines,
+            lines: rewriteCausorynMainTableLines(section, spec),
           });
           for (let i = 1; i < replacement.length; i += 1) {
             const extra = replacement[i];
@@ -686,36 +781,110 @@ function parseTomlStringArray(rawValue: string): string[] {
   return items;
 }
 
-/** Calls `onAssignment` for every top-level `key = value` of a section body (header line skipped). */
-function forEachSectionAssignment(
-  section: TomlSection,
-  onAssignment: (key: string, value: string) => void,
-): void {
+/**
+ * One piece of a section body: a `key = value` assignment with all of its raw
+ * lines (a value can span lines), or a single blank / comment line
+ * (`key` and `value` null).
+ */
+interface SectionUnit {
+  readonly lines: readonly string[];
+  readonly key: string | null;
+  readonly value: string | null;
+}
+
+/** Splits a section body (header line skipped) into assignments and blank / comment lines. */
+function splitSectionUnits(section: TomlSection): SectionUnit[] {
   const state: ScanState = {
     inMultilineBasic: false,
     inMultilineLiteral: false,
     bracketDepth: 0,
     braceDepth: 0,
   };
+  const units: SectionUnit[] = [];
+  let pending: { lines: string[]; code: string } | null = null;
 
-  let pendingAssignment = "";
   for (let i = 1; i < section.lines.length; i += 1) {
     const line = section.lines[i] ?? "";
     const { effectiveCode } = scanTomlLine(line, i + 1, state);
-    if (effectiveCode.length === 0) continue;
-    pendingAssignment =
-      pendingAssignment.length === 0 ? effectiveCode : `${pendingAssignment} ${effectiveCode}`;
-    if (state.bracketDepth > 0 || state.braceDepth > 0) {
-      continue;
+    const open =
+      state.inMultilineBasic ||
+      state.inMultilineLiteral ||
+      state.bracketDepth > 0 ||
+      state.braceDepth > 0;
+    if (pending === null) {
+      if (effectiveCode.length === 0 && !open) {
+        units.push({ lines: [line], key: null, value: null });
+        continue;
+      }
+      pending = { lines: [line], code: effectiveCode };
+    } else {
+      pending.lines.push(line);
+      if (effectiveCode.length > 0) {
+        pending.code = `${pending.code} ${effectiveCode}`;
+      }
     }
+    if (open) continue;
 
-    const eqIdx = findTopLevelEquals(pendingAssignment);
-    const assignment = pendingAssignment;
-    pendingAssignment = "";
-    if (eqIdx <= 0) continue;
-
-    onAssignment(assignment.slice(0, eqIdx).trim(), assignment.slice(eqIdx + 1).trim());
+    const eqIdx = findTopLevelEquals(pending.code);
+    units.push({
+      lines: pending.lines,
+      key: eqIdx > 0 ? pending.code.slice(0, eqIdx).trim() : null,
+      value: eqIdx > 0 ? pending.code.slice(eqIdx + 1).trim() : null,
+    });
+    pending = null;
   }
+  if (pending !== null) {
+    units.push({ lines: pending.lines, key: null, value: null });
+  }
+  return units;
+}
+
+/** Calls `onAssignment` for every top-level `key = value` of a section body (header line skipped). */
+function forEachSectionAssignment(
+  section: TomlSection,
+  onAssignment: (key: string, value: string) => void,
+): void {
+  for (const unit of splitSectionUnits(section)) {
+    if (unit.key !== null && unit.value !== null) {
+      onAssignment(unit.key, unit.value);
+    }
+  }
+}
+
+/**
+ * Splits a (possibly dotted) TOML key into its unquoted parts:
+ * `env . "A.B"` gives `["env", "A.B"]`. Returns null for a key it cannot read.
+ */
+function splitTomlKeyPath(rawKey: string): string[] | null {
+  const parts: string[] = [];
+  for (const piece of splitTopLevel(rawKey, ".")) {
+    const trimmed = piece.trim();
+    if (trimmed.startsWith('"') || trimmed.startsWith("'")) {
+      try {
+        parts.push(unescapeTomlString(trimmed));
+      } catch {
+        return null;
+      }
+    } else if (/^[A-Za-z0-9_-]+$/.test(trimmed)) {
+      parts.push(trimmed);
+    } else {
+      return null;
+    }
+  }
+  return parts.length > 0 ? parts : null;
+}
+
+const TOML_DECIMAL_NUMBER = /^[+-]?(?:0|[1-9](?:_?\d)*)(?:\.\d(?:_?\d)*)?(?:[eE][+-]?\d(?:_?\d)*)?$/;
+const TOML_PREFIXED_INTEGER = /^0(?:x[0-9A-Fa-f](?:_?[0-9A-Fa-f])*|o[0-7](?:_?[0-7])*|b[01](?:_?[01])*)$/;
+
+/** Reads a finite TOML integer or float (`30`, `1_000`, `45.5`, `0x1E`); null otherwise. */
+function parseTomlNumber(rawValue: string): number | null {
+  const trimmed = rawValue.trim();
+  if (!TOML_DECIMAL_NUMBER.test(trimmed) && !TOML_PREFIXED_INTEGER.test(trimmed)) {
+    return null;
+  }
+  const parsed = Number(trimmed.replace(/_/g, ""));
+  return Number.isFinite(parsed) ? parsed : null;
 }
 
 /** Parses a single (bare or quoted) TOML key; dotted keys are rejected. */
@@ -792,13 +961,6 @@ function setEnvEntry(env: Record<string, string>, key: string, value: string): v
   Object.defineProperty(env, key, { value, enumerable: true, writable: true, configurable: true });
 }
 
-/** `env.KEY` / `env."KEY"` dotted key in the main table: returns the raw env key part, or null. */
-function dottedEnvKeyPart(key: string): string | null {
-  if (!key.startsWith("env")) return null;
-  const rest = key.slice("env".length).trimStart();
-  return rest.startsWith(".") ? rest.slice(1) : null;
-}
-
 /** Parses an inline `{ KEY = "value", ... }` env table. */
 function parseTomlInlineEnvTable(rawValue: string, into: Record<string, string>): void {
   const trimmed = rawValue.trim();
@@ -829,31 +991,46 @@ export function readCodexMcpServer(rawToml: string): ParsedCodexMcpServer | null
     return null;
   }
 
-  const found: { command: string | null; args: string[]; startupTimeoutSec: number | null } = {
+  const found: {
+    command: string | null;
+    args: string[];
+    startupTimeoutSec: number | null;
+    startupTimeoutSecRaw: string | undefined;
+  } = {
     command: null,
     args: [],
     startupTimeoutSec: null,
+    startupTimeoutSecRaw: undefined,
   };
   const env: Record<string, string> = {};
 
   forEachSectionAssignment(target, (key, val) => {
-    if (key === "command") {
+    const keyPath = splitTomlKeyPath(key);
+    if (keyPath === null) return;
+    const [first] = keyPath;
+    if (first === "env") {
+      if (keyPath.length === 1) {
+        parseTomlInlineEnvTable(val, env);
+        return;
+      }
+      if (keyPath.length > 2) {
+        throw new CausorynCliError(
+          "cli/malformed-toml",
+          `Unsupported TOML key in ${CAUSORYN_ENV_TABLE}: ${key.trim()}`,
+        );
+      }
+      const envKey = keyPath[1] as string;
+      setEnvEntry(env, envKey, parseTomlEnvValue(val, envKey));
+      return;
+    }
+    if (keyPath.length !== 1) return;
+    if (first === "command") {
       found.command = unescapeTomlString(val);
-    } else if (key === "args") {
+    } else if (first === "args") {
       found.args = parseTomlStringArray(val);
-    } else if (key === "startup_timeout_sec") {
-      const parsedNum = Number.parseInt(val, 10);
-      if (Number.isFinite(parsedNum)) {
-        found.startupTimeoutSec = parsedNum;
-      }
-    } else if (key === "env") {
-      parseTomlInlineEnvTable(val, env);
-    } else {
-      const dotted = dottedEnvKeyPart(key);
-      if (dotted !== null) {
-        const envKey = parseTomlSimpleKey(dotted, CAUSORYN_ENV_TABLE);
-        setEnvEntry(env, envKey, parseTomlEnvValue(val, envKey));
-      }
+    } else if (first === "startup_timeout_sec") {
+      found.startupTimeoutSec = parseTomlNumber(val);
+      found.startupTimeoutSecRaw = val;
     }
   });
 
@@ -872,6 +1049,9 @@ export function readCodexMcpServer(rawToml: string): ParsedCodexMcpServer | null
     command: found.command,
     args: found.args,
     startupTimeoutSec: found.startupTimeoutSec,
+    ...(found.startupTimeoutSecRaw !== undefined
+      ? { startupTimeoutSecRaw: found.startupTimeoutSecRaw }
+      : {}),
     env,
   };
 }
