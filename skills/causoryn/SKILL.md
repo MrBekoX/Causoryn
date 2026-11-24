@@ -17,8 +17,9 @@ text synthesized by the host LLM — omit them to export directly from the graph
 
 ## Tool Surface (default `core` profile)
 
-`causoryn setup` registers the server without `--tool-profile`, so the host sees the default
-`core` profile: exactly the 11 tools below. Call only these tools by default.
+`causoryn setup` registers the server without `--tool-profile` unless it is run with
+`--tool-profile <list>`, so by default the host sees the `core` profile: exactly the 11 tools
+below. Call only these tools by default.
 
 | Tool | Use it for |
 | --- | --- |
@@ -41,7 +42,7 @@ active. Never call a tool that is missing from that list: the server answers `To
 
 - Architecture history: `causoryn_compare_architecture` (diff two git refs) and `causoryn_architecture_timeline` (evolution across refs) require `--tool-profile history` (also part of `--tool-profile full`).
 - Living Wiki: `causoryn_wiki_build`, `causoryn_wiki_get_tree`, `causoryn_wiki_get_page`, `causoryn_wiki_search`, `causoryn_wiki_get_links`, `causoryn_wiki_get_versions`, and `causoryn_wiki_diff` require `--tool-profile wiki` plus `wiki.dataDbPath` in the authorized data root.
-- To enable a profile, add it to the `causoryn mcp` arguments of the host's MCP server entry (for example `--tool-profile history`, or a comma-separated combination such as `--tool-profile wiki,history`), or set the `CAUSORYN_TOOL_PROFILE` environment variable in that entry, then restart the host. Re-running `causoryn setup` rewrites the entry back to the default profile.
+- To enable a profile, add it to the `causoryn mcp` arguments of the host's MCP server entry (for example `--tool-profile history`, or a comma-separated combination such as `--tool-profile wiki,history`), or set the `CAUSORYN_TOOL_PROFILE` environment variable in that entry, then restart the host. `causoryn setup --tool-profile <list>` (for example `causoryn setup --tool-profile history`) writes the flag for every configured host; re-running `causoryn setup` without the flag keeps the profile, `env`, and other keys already in the entry.
 - Call an optional tool only after `data.capabilities.tools` lists it; otherwise tell the user which profile is needed instead of calling it.
 - Older prompts may name legacy tools such as `causoryn_index_status` or `causoryn_analyze_impact`; those exist only under `--tool-profile full`. Use the core tool from the table above instead.
 
@@ -49,7 +50,7 @@ active. Never call a tool that is missing from that list: the server answers `To
 
 ### 1. Readiness & Snapshot Health
 1. Call `causoryn_status` `{"action": "inspect"}` once. Read `data.capabilities` (language adapters and their L0–L3 levels, server limits, active `tools`), `data.index.latestSnapshot` (`snapshotId`, `stale`), `data.index.job` (`status`, `progressPercent`), and `data.summary` (languages, file counts, entrypoints, edge `resolutions`).
-2. With `deferAutoIndex`, indexing may start lazily on the first snapshot-dependent call or an explicit refresh. While `data.indexing` is `true`, wait `data.retryAfterMs` and poll `causoryn_status` `{"action": "inspect", "jobId": "<jobId>"}`.
+2. With `deferAutoIndex`, indexing may start lazily on the first snapshot-dependent call or an explicit refresh. While `data.indexing` is `true`, wait `data.retryAfterMs` and poll `causoryn_status` `{"action": "inspect", "jobId": "<jobId>"}` until the job reaches a terminal status: `done` (a new snapshot was published), `reused` (nothing changed, or a concurrent build already published an identical snapshot — keep using it) or `failed` (read its error).
 3. If no snapshot is published (`INDEX_NOT_READY`) and no job is active, or `data.index.latestSnapshot.stale` is `true`, call `causoryn_status` `{"action": "refresh", "mode": "incremental"}` and poll the returned `data.jobId` as in step 2.
 
 ### 2. Discover (Map, Symbols, Flows & Ranked Context)

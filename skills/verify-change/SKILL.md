@@ -27,7 +27,7 @@ tool profile.
    - If `architecture` reports rule violations or `POLICY_INVALID`, re-run the rules alone against the latest snapshot with `causoryn_verify_change` `{"checks": ["architecture"]}` and inspect offending edges with `causoryn_get_evidence` `{"id": "<edge or finding id>"}`.
    - If API/schema specs changed, check the pair with `causoryn_contracts` `{"action": "check", "contracts": [{"base": "<old spec path>", "target": "<new spec path>"}]}`.
    - For spec drift and the producers/consumers it touches, call `causoryn_contracts` `{"action": "drift", "base": ["<old spec path>"], "target": ["<new spec path>"]}`.
-   - Comparing two committed git revisions needs `causoryn_compare_architecture`, which is only available with `--tool-profile history` (or `--tool-profile full`); `INVALID_REVISION` indicates an unresolvable ref or missing snapshot blob.
+   - Comparing two committed git revisions needs `causoryn_compare_architecture`, which is only available with `--tool-profile history` (or `--tool-profile full`); each side uses the published local index when it provably matches that revision (or `working-tree`) and otherwise the committed `.causoryn/architecture-snapshot.json`, flagged with `snapshot-loaded-from-committed-git-blob` in `warnings`; `INVALID_REVISION` indicates an unresolvable ref or a ref with neither source.
    - Without that profile, do not call it: tell the user to add `--tool-profile history` to the `causoryn mcp` arguments of the host's MCP entry and restart the host.
 
 ## Strict Honesty Boundaries

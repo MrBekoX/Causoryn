@@ -259,7 +259,7 @@ Indexing itself (any refresh or the initial index) may also build the Rust worke
 
 ## Startup, Root Binding & Data Directory (Summary)
 
-The packaged server (`causoryn mcp`, built from `packages/mcp-server/src/cli-stdio.ts`) binds a workspace root from `--root`, `CAUSORYN_CONFIG.allowRoots`, a safe current directory (`--allow-cwd`), or the first safe MCP `roots/list` entry. Unsafe candidates (filesystem roots, `$HOME` and its ancestors, Causoryn data and plugin directories, sensitive and system directories, UNC/device paths) are rejected. `--auto-data-dir` provisions `<base>/workspaces/<slug>-<hash12>/graph.sqlite` and `exports/` outside the workspace (base: `--data-dir` > `ZCODE_PLUGIN_DATA` > `~/.causoryn`). Without any root the server starts with `allowRoots: []` and workspace tools return `WORKSPACE_NOT_AUTHORIZED`. Full details: [CLI & Configuration](cli-and-configuration.md).
+The packaged server (`causoryn mcp`, built from `packages/mcp-server/src/cli-stdio.ts`) binds a workspace root from `--root`, `CAUSORYN_CONFIG.allowRoots`, a safe current directory (`--allow-cwd`), or the first safe MCP `roots/list` entry. Unsafe candidates (filesystem roots, `$HOME` and its ancestors, Causoryn data and plugin directories, sensitive and system directories, UNC/device paths) are rejected. `--auto-data-dir` provisions `<base>/workspaces/<slug>-<hash12>/graph.sqlite` and `exports/` outside the workspace (base: `--data-dir` > `~/.causoryn` for every host; `ZCODE_PLUGIN_DATA` only as a fallback when `~/.causoryn` is unusable). Without any root the server starts with `allowRoots: []` and workspace tools return `WORKSPACE_NOT_AUTHORIZED`. Full details: [CLI & Configuration](cli-and-configuration.md).
 
 ---
 

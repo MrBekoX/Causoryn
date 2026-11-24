@@ -58,8 +58,8 @@ startup_timeout_sec = 30
 ```
 
 - **Target file:** `$CODEX_HOME/config.toml` when `CODEX_HOME` is set, otherwise `~/.codex/config.toml` (`resolveEffectiveCodexHomeDir`). `doctor` reads the same file. Codex counts as detected when that directory or file exists.
-- **Surgical TOML patching:** unlike `codex mcp add`, `setup` does not re-serialize the file. Comments, top-level keys, neighbouring `[mcp_servers.<other>]` tables, and `[mcp_servers.causoryn.tools.*]` approval sub-tables are kept unchanged (only runs of blank lines between tables are normalized), and the file's line-ending style (`\n` or `\r\n`) is preserved. The `[mcp_servers.causoryn]` table itself is replaced as a whole, and an existing `[mcp_servers.causoryn.env]` table is dropped.
-- **`startup_timeout_sec = 30`** gives cold Node.js + SQLite start-up enough headroom.
+- **Surgical TOML patching:** unlike `codex mcp add`, `setup` does not re-serialize the file. Comments, top-level keys, neighbouring `[mcp_servers.<other>]` tables, and `[mcp_servers.causoryn.tools.*]` approval sub-tables are kept unchanged (only runs of blank lines between tables are normalized), and the file's line-ending style (`\n` or `\r\n`) is preserved. Inside `[mcp_servers.causoryn]`, setup updates only `command`, `args` (keeping your `--tool-profile` and `--output-schema` arguments) and `startup_timeout_sec`; every other key and the `[mcp_servers.causoryn.env]` table keep their values and positions, and an up-to-date table is not rewritten.
+- **`startup_timeout_sec = 30`** gives cold Node.js + SQLite start-up enough headroom. A value of `30` or more that you set is kept as written; a lower or unusable value is raised to `30`, and the setup output says so.
 - **Absolute Node binary:** `command` is the `process.execPath` of the Node.js that ran `setup` (Node.js ≥ 24 is required).
 - **Persistent runtime:** when `setup` runs from an `_npx` cache or the OS temp directory, it first copies the package to `~/.causoryn/runtime` and points `args[0]` there, so the registration survives `npx` cache eviction.
 - **Skills:** the five canonical skills `causoryn`, `map-system`, `preflight-change`, `verify-change`, and `architecture-blueprint` are written to `~/.agents/skills/<name>/SKILL.md` (in your home directory, not under `CODEX_HOME`). Pass `--no-skill` to skip them. `architecture-blueprint` guides Codex in drafting optional `annotations` from MCP evidence; to export without annotations, call `causoryn_export_documentation` directly ([architecture export contract](../tool-contracts.md)). Skills are guidance text for the host model: a tool a skill mentions can only be called if the active tool profile registers it.
@@ -71,7 +71,7 @@ startup_timeout_sec = 30
 - **Backups:** before an existing `config.toml` is modified for the first time, the original is copied to `config.toml.causoryn.backup`. That file is never overwritten; later modifications create additional `config.toml.causoryn.<timestamp>-<nonce>.backup` copies.
 - **Atomic, idempotent writes:** temporary file + rename, existing file mode kept (new files `0600`); an identical second run reports `noop`.
 - **Fail-closed parsing:** malformed TOML (unclosed strings, arrays, or tables, a line without `=`, an empty table header, or a duplicated table header such as two `[mcp_servers.causoryn]` tables) stops the run with `cli/malformed-toml` before anything is written. Symbolic-link targets are refused.
-- **Exit codes:** `setup` exits `0` on success and `2` on any error.
+- **Exit codes:** `setup` exits `0` on success, `1` when no host was detected and none was named, and `2` on any error.
 - **Uninstall:** removes `[mcp_servers.causoryn]` and every `[mcp_servers.causoryn.*]` sub-table, the five skill directories, and `~/.causoryn/runtime` when no other host config still references it.
 
 ### `doctor` checks
@@ -136,7 +136,7 @@ CAUSORYN_TOOL_PROFILE = "full"
 ```
 
 - With `codex mcp add`, pass `--env CAUSORYN_TOOL_PROFILE=full`.
-- `npx causoryn@latest setup --client codex --tool-profile wiki,history --yes` writes the flag for you. Re-running `causoryn setup` keeps `[mcp_servers.causoryn.env]`, the `--tool-profile` and `--output-schema` arguments, and other keys of the table such as a changed `startup_timeout_sec`; pass `setup --tool-profile <list>` to change the profile.
+- `npx causoryn@latest setup --client codex --tool-profile wiki,history --yes` writes the flag for you. Re-running `causoryn setup` keeps `[mcp_servers.causoryn.env]`, the `--tool-profile` and `--output-schema` arguments, and other keys of the table, and a `startup_timeout_sec` of 30 or more; pass `setup --tool-profile <list>` to change the profile.
 - For the marketplace plugin, the manifest lives in the installed plugin and should not be edited. Whether Codex forwards `CAUSORYN_TOOL_PROFILE` from its own environment to plugin servers has not been verified; use Option A or C if you need a non-default profile.
 
 ## 4. Data directory and first run

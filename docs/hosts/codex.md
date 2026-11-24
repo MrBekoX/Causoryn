@@ -58,8 +58,8 @@ startup_timeout_sec = 30
 ```
 
 - **Hedef dosya:** `CODEX_HOME` tanımlıysa `$CODEX_HOME/config.toml`, değilse `~/.codex/config.toml` (`resolveEffectiveCodexHomeDir`). `doctor` aynı dosyayı okur. Bu dizin ya da dosya mevcutsa Codex algılanmış sayılır.
-- **Cerrahi TOML yaması:** `codex mcp add`'in aksine `setup` dosyayı yeniden serileştirmez. Yorumlar, üst düzey anahtarlar, komşu `[mcp_servers.<other>]` tabloları ve `[mcp_servers.causoryn.tools.*]` onay alt tabloları olduğu gibi korunur (yalnızca tablolar arasındaki ardışık boş satırlar normalleştirilir) ve dosyanın satır sonu biçimi (`\n` veya `\r\n`) korunur. `[mcp_servers.causoryn]` tablosunun kendisi bütünüyle değiştirilir ve mevcut bir `[mcp_servers.causoryn.env]` tablosu kaldırılır.
-- **`startup_timeout_sec = 30`**, soğuk Node.js + SQLite açılışına yeterli pay bırakır.
+- **Cerrahi TOML yaması:** `codex mcp add`'in aksine `setup` dosyayı yeniden serileştirmez. Yorumlar, üst düzey anahtarlar, komşu `[mcp_servers.<other>]` tabloları ve `[mcp_servers.causoryn.tools.*]` onay alt tabloları olduğu gibi korunur (yalnızca tablolar arasındaki ardışık boş satırlar normalleştirilir) ve dosyanın satır sonu biçimi (`\n` veya `\r\n`) korunur. `[mcp_servers.causoryn]` içinde setup yalnızca `command`, `args` (`--tool-profile` ve `--output-schema` argümanlarınız korunarak) ve `startup_timeout_sec` alanlarını günceller; diğer her anahtar ve `[mcp_servers.causoryn.env]` tablosu değerini ve konumunu korur, güncel bir tablo yeniden yazılmaz.
+- **`startup_timeout_sec = 30`**, soğuk Node.js + SQLite açılışına yeterli pay bırakır. Sizin ayarladığınız `30` veya daha yüksek bir değer olduğu gibi korunur; daha düşük veya kullanılamaz bir değer `30`'a yükseltilir ve setup çıktısı bunu belirtir.
 - **Mutlak Node binary'si:** `command`, `setup`'ı çalıştıran Node.js'in `process.execPath` değeridir (Node.js ≥ 24 gerekir).
 - **Kalıcı runtime:** `setup` bir `_npx` önbelleğinden ya da işletim sisteminin temp dizininden çalıştırıldığında paketi önce `~/.causoryn/runtime` altına kopyalar ve `args[0]`'ı oraya yönlendirir; böylece kayıt `npx` önbelleği temizlendiğinde de çalışmaya devam eder.
 - **Skill'ler:** beş kanonik skill — `causoryn`, `map-system`, `preflight-change`, `verify-change` ve `architecture-blueprint` — `~/.agents/skills/<name>/SKILL.md` altına yazılır (`CODEX_HOME` altına değil, ev dizininize). Atlamak için `--no-skill` verin. `architecture-blueprint`, Codex'in MCP kanıtlarından isteğe bağlı `annotations` taslağı hazırlamasına rehberlik eder; annotation'sız export için doğrudan `causoryn_export_documentation` çağırın ([mimari export sözleşmesi](../tool-contracts.md)). Skill'ler host modeli için yönlendirme metnidir: bir skill'in andığı araç ancak etkin araç profili onu kaydediyorsa çağrılabilir.
@@ -71,7 +71,7 @@ startup_timeout_sec = 30
 - **Yedekler:** mevcut bir `config.toml` ilk kez değiştirilmeden önce orijinali `config.toml.causoryn.backup` dosyasına kopyalanır. Bu dosyanın üzerine asla yazılmaz; sonraki değişiklikler ek `config.toml.causoryn.<timestamp>-<nonce>.backup` kopyaları oluşturur.
 - **Atomik, idempotent yazımlar:** geçici dosya + rename; mevcut dosya kipi korunur (yeni dosyalar `0600`); aynı ikinci koşu `noop` raporlar.
 - **Fail-closed ayrıştırma:** bozuk TOML (kapanmamış string, dizi veya tablolar, `=` içermeyen bir satır, boş bir tablo başlığı ya da iki `[mcp_servers.causoryn]` tablosu gibi tekrarlanan bir tablo başlığı), hiçbir şey yazılmadan koşuyu `cli/malformed-toml` ile durdurur. Sembolik link hedefleri reddedilir.
-- **Çıkış kodları:** `setup` başarıda `0`, herhangi bir hatada `2` ile çıkar.
+- **Çıkış kodları:** `setup` başarıda `0`, hiçbir host algılanmadığında ve hiçbiri adlandırılmadığında `1`, herhangi bir hatada `2` ile çıkar.
 - **Kaldırma:** `[mcp_servers.causoryn]` tablosunu ve tüm `[mcp_servers.causoryn.*]` alt tablolarını, beş skill dizinini ve — başka hiçbir host config'i ona hâlâ başvurmuyorsa — `~/.causoryn/runtime` dizinini kaldırır.
 
 ### `doctor` denetimleri
@@ -136,7 +136,7 @@ CAUSORYN_TOOL_PROFILE = "full"
 ```
 
 - `codex mcp add` ile `--env CAUSORYN_TOOL_PROFILE=full` verin.
-- `npx causoryn@latest setup --client codex --tool-profile wiki,history --yes` bayrağı sizin yerinize yazar. `causoryn setup`'ı yeniden çalıştırmak `[mcp_servers.causoryn.env]` tablosunu, `--tool-profile` ve `--output-schema` argümanlarını ve tablonun değiştirilmiş bir `startup_timeout_sec` gibi diğer anahtarlarını korur; profili değiştirmek için `setup --tool-profile <list>` verin.
+- `npx causoryn@latest setup --client codex --tool-profile wiki,history --yes` bayrağı sizin yerinize yazar. `causoryn setup`'ı yeniden çalıştırmak `[mcp_servers.causoryn.env]` tablosunu, `--tool-profile` ve `--output-schema` argümanlarını ve tablonun diğer anahtarlarını, ayrıca 30 veya daha yüksek bir `startup_timeout_sec` değerini korur; profili değiştirmek için `setup --tool-profile <list>` verin.
 - Pazaryeri plugin'inde manifest kurulu plugin'in içinde bulunur ve düzenlenmemelidir. Codex'in `CAUSORYN_TOOL_PROFILE` değerini kendi ortamından plugin sunucularına aktarıp aktarmadığı doğrulanmamıştır; varsayılan dışında bir profile ihtiyacınız varsa Seçenek A veya C'yi kullanın.
 
 ## 4. Veri dizini ve ilk çalıştırma
