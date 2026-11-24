@@ -127,7 +127,7 @@ Analiz tamamlandığında:
   },
   "coverageRatio": 0.64,
   "unsupportedConstructs": [...],
-  "warnings": ["app.py: 'flask_app.get' dekoratör yolu literal string değil; ..."],
+  "warnings": ["app.py: the route path of decorator 'flask_app.get' is not a literal string; ..."],
   "diagnostics": [{ "relativePath": "broken.py", "code": "SyntaxError", "message": "...", "line": 1 }],
   "nodes": [...], "edges": [...], "evidence": [...]
 }
@@ -189,7 +189,7 @@ Analiz tamamlandığında:
   "evidence": [ { "kind": "ast-span", "span": {...}, "analyzerId": "python-worker",
                   "analyzerVersion": "0.1.0", "rationale": "CALLS: ... (heuristic; ...)." } ],
   "ambiguity": { "candidates": ["services.orders_service.create_order"],
-                 "reason": "import edilen modül sembolü; Python ad bağlamı dinamiktir, ..." }
+                 "reason": "imported module symbol; Python name binding is dynamic, ..." }
 }
 ```
 
@@ -261,8 +261,8 @@ verified) → `services.orders_service.create_order` (heuristic; import) →
 `monkey-patching`, `runtime-dependency-injection`,
 `dynamic-import (importlib/__import__)`, `local-variable-type-inference`
 (yerel değişkene atanan nesnenin metot çağrısı çözülmez),
-`module-level-calls (caller'sız)`, `decorator-arg-non-literal-path`,
-`function-level-imports (yalnızca modül düzeyi import tablosu)`.
+`module-level-calls (no caller)`, `decorator-arg-non-literal-path`,
+`function-level-imports (module-level import table only)`.
 
 ## 4. Hata yanıtı — `status: "error"`
 

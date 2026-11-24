@@ -111,9 +111,9 @@ UNSUPPORTED_CONSTRUCTS = [
     "runtime-dependency-injection",
     "dynamic-import (importlib/__import__)",
     "local-variable-type-inference",
-    "module-level-calls (caller'sız)",
+    "module-level-calls (no caller)",
     "decorator-arg-non-literal-path",
-    "function-level-imports (yalnızca modül düzeyi import tablosu)",
+    "function-level-imports (module-level import table only)",
 ]
 
 _DRIVE_LETTER = re.compile(r"^[A-Za-z]:")
@@ -199,27 +199,27 @@ def valid_id(value: Any) -> bool:
 def validate_relative_path(raw: Any) -> Tuple[Optional[str], Optional[str]]:
     """POSIX workspace-relative yol sözleşmesi. (path, hata_mesajı) döner."""
     if not isinstance(raw, str) or len(raw) == 0:
-        return None, "files[].path boş olamaz"
+        return None, "files[].path must not be empty"
     if "\\" in raw:
-        return None, f"files[].path POSIX olmalı (backslash kabul edilmez): {raw}"
+        return None, f"files[].path must be a POSIX path (backslashes are not accepted): {raw}"
     if raw.startswith("/"):
-        return None, f"files[].path mutlak yol kabul edilmez: {raw}"
+        return None, f"files[].path must not be an absolute path: {raw}"
     if _DRIVE_LETTER.match(raw):
-        return None, f"files[].path sürücü harfli mutlak yol kabul edilmez: {raw}"
+        return None, f"files[].path must not be an absolute path with a drive letter: {raw}"
     for segment in raw.split("/"):
         if len(segment) == 0:
-            return None, f"files[].path boş segment içeriyor: {raw}"
+            return None, f"files[].path contains an empty segment: {raw}"
         if segment == ".":
-            return None, f"files[].path '.' segment içeriyor: {raw}"
+            return None, f"files[].path contains a '.' segment: {raw}"
         if segment == "..":
-            return None, f"files[].path kök dışına çıkıyor ('..'): {raw}"
+            return None, f"files[].path escapes the workspace root ('..'): {raw}"
     return raw, None
 
 
 def validate_request(payload: Any) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
     """(istek, None) ya da (None, error_response) döner."""
     if not isinstance(payload, dict):
-        return None, error_response(None, "INVALID_ARGUMENT", "istek bir JSON nesnesi olmalı")
+        return None, error_response(None, "INVALID_ARGUMENT", "request must be a JSON object")
 
     raw_id = payload.get("id")
     echoed_id: Any = raw_id if valid_id(raw_id) else None
@@ -229,17 +229,19 @@ def validate_request(payload: Any) -> Tuple[Optional[Dict[str, Any]], Optional[D
         return None, error_response(
             echoed_id,
             "INVALID_ARGUMENT",
-            f"bilinmeyen istek alan(lar)ı: {', '.join(unknown)}",
+            f"unknown request field(s): {', '.join(unknown)}",
         )
 
     if "id" not in payload or not valid_id(raw_id):
-        return None, error_response(None, "INVALID_ARGUMENT", "id string veya sayı olmalı (zorunlu)")
+        return None, error_response(
+            None, "INVALID_ARGUMENT", "id is required and must be a string or a number"
+        )
 
     if payload.get("type") != "analyze":
         return None, error_response(
             echoed_id,
             "INVALID_ARGUMENT",
-            f"type 'analyze' olmalı: {payload.get('type')!r}",
+            f"type must be 'analyze': {payload.get('type')!r}",
         )
 
     protocol_version = payload.get("protocolVersion")
@@ -247,62 +249,63 @@ def validate_request(payload: Any) -> Tuple[Optional[Dict[str, Any]], Optional[D
         return None, error_response(
             echoed_id,
             "INVALID_ARGUMENT",
-            f"desteklenmeyen protocolVersion: {protocol_version!r}",
+            f"unsupported protocolVersion: {protocol_version!r}",
         )
 
     max_nodes = payload.get("maxNodes")
     if max_nodes is not None:
         if isinstance(max_nodes, bool) or not isinstance(max_nodes, int):
-            return None, error_response(echoed_id, "INVALID_ARGUMENT", "maxNodes tam sayı olmalı")
+            return None, error_response(echoed_id, "INVALID_ARGUMENT", "maxNodes must be an integer")
         if not (1 <= max_nodes <= MAX_RESPONSE_NODES):
             return None, error_response(
                 echoed_id,
                 "INVALID_ARGUMENT",
-                f"maxNodes 1..{MAX_RESPONSE_NODES} aralığında olmalı: {max_nodes}",
+                f"maxNodes must be in the range 1..{MAX_RESPONSE_NODES}: {max_nodes}",
             )
 
     files = payload.get("files")
     if not isinstance(files, list) or len(files) == 0:
-        return None, error_response(echoed_id, "INVALID_ARGUMENT", "files boş olmayan bir dizi olmalı")
+        return None, error_response(echoed_id, "INVALID_ARGUMENT", "files must be a non-empty array")
     if len(files) > MAX_FILE_COUNT:
         return None, error_response(
             echoed_id,
             "LIMIT_EXCEEDED",
-            f"dosya sayısı sınırı aşıldı: {len(files)} > {MAX_FILE_COUNT}",
+            f"file count limit exceeded: {len(files)} > {MAX_FILE_COUNT}",
         )
 
     seen_paths: set = set()
     for index, item in enumerate(files):
         if not isinstance(item, dict):
             return None, error_response(
-                echoed_id, "INVALID_ARGUMENT", f"files[{index}] bir nesne olmalı"
+                echoed_id, "INVALID_ARGUMENT", f"files[{index}] must be an object"
             )
         unknown_file_keys = sorted(set(item.keys()) - _ALLOWED_FILE_KEYS)
         if unknown_file_keys:
             return None, error_response(
                 echoed_id,
                 "INVALID_ARGUMENT",
-                f"files[{index}] bilinmeyen alan içeriyor: {', '.join(unknown_file_keys)}",
+                f"files[{index}] contains unknown field(s): {', '.join(unknown_file_keys)}",
             )
         path, path_error = validate_relative_path(item.get("path"))
         if path_error is not None:
             return None, error_response(echoed_id, "INVALID_ARGUMENT", path_error)
         if path in seen_paths:
             return None, error_response(
-                echoed_id, "INVALID_ARGUMENT", f"aynı kaynak yolu iki kez verildi: {path}"
+                echoed_id, "INVALID_ARGUMENT", f"the same source path was given twice: {path}"
             )
         seen_paths.add(path)
         content = item.get("content")
         if not isinstance(content, str):
             return None, error_response(
-                echoed_id, "INVALID_ARGUMENT", f"files[{index}].content string olmalı"
+                echoed_id, "INVALID_ARGUMENT", f"files[{index}].content must be a string"
             )
         content_bytes = len(content.encode("utf-8"))
         if content_bytes > MAX_FILE_CONTENT_BYTES:
             return None, error_response(
                 echoed_id,
                 "LIMIT_EXCEEDED",
-                f"dosya içeriği sınırı aşıldı: {path} ({content_bytes} > {MAX_FILE_CONTENT_BYTES} bayt)",
+                f"file content size limit exceeded: {path} "
+                f"({content_bytes} > {MAX_FILE_CONTENT_BYTES} bytes)",
             )
 
     request: Dict[str, Any] = {
@@ -416,8 +419,8 @@ class FileAnalyzer:
                 self.evidence(
                     "ast-span",
                     statement,
-                    f"CONTAINS: {self.path} dosyasındaki {qualified} {kind.lower()} "
-                    "bildirimi AST span kanıtıyla eşlendi.",
+                    f"CONTAINS: the {kind.lower()} declaration {qualified} in {self.path} "
+                    "was matched with AST span evidence.",
                 ),
             )
             if prefix == self.module:
@@ -442,8 +445,8 @@ class FileAnalyzer:
                 self.evidence(
                     "ast-span",
                     statement,
-                    f"CONTAINS: {self.path} dosyasındaki {qualified} class bildirimi "
-                    "AST span kanıtıyla eşlendi.",
+                    f"CONTAINS: the class declaration {qualified} in {self.path} "
+                    "was matched with AST span evidence.",
                 ),
             )
             if prefix == self.module:
@@ -475,8 +478,8 @@ class FileAnalyzer:
                 # 'sessiz kesim yoktur' disipliniyle açık uyarı yazılır.
                 if func.attr in HTTP_VERB_DECORATORS or func.attr in ROUTE_NAMED_DECORATORS:
                     self.collector.add_warning(
-                        f"{self.path}: '{ast.unparse(func)}' dekoratör taşıyıcısı basit ad değil; "
-                        f"{handler_qn} için endpoint üretilmedi"
+                        f"{self.path}: decorator carrier '{ast.unparse(func)}' is not a simple name; "
+                        f"no endpoint was produced for {handler_qn}"
                     )
                 continue
             carrier = func.value.id
@@ -495,8 +498,8 @@ class FileAnalyzer:
 
             if path is None:
                 self.collector.add_warning(
-                    f"{self.path}: '{carrier}.{attr}' dekoratör yolu literal string değil; "
-                    f"{handler_qn} için endpoint üretilmedi"
+                    f"{self.path}: the route path of decorator '{carrier}.{attr}' is not a "
+                    f"literal string; no endpoint was produced for {handler_qn}"
                 )
                 continue
 
@@ -512,8 +515,8 @@ class FileAnalyzer:
                     self.evidence(
                         "route-attribute",
                         decorator,
-                        f"ROUTES_TO: {ast.unparse(decorator)} dekoratörü {handler_qn} "
-                        "handler'ına bağlı (verified).",
+                        f"ROUTES_TO: {ast.unparse(decorator)} is bound to handler "
+                        f"{handler_qn} (verified).",
                     ),
                 )
 
@@ -628,16 +631,16 @@ class FileAnalyzer:
                 target_kind, target_qn = self.module_symbols[name]
                 finish(
                     "verified", self.ref(target_kind, target_qn),
-                    f"CALLS: {owner_qn} → {target_qn} hedefi aynı modülde tanımlı "
-                    f"'{name}' AST isim bağlamıyla çözümlendi (verified).",
+                    f"CALLS: {owner_qn} → {target_qn} resolved via the AST name binding of "
+                    f"'{name}' defined in the same module (verified).",
                 )
             elif name in self.import_bindings:
                 self._resolve_imported(name, [], owner_qn, finish)
             else:
                 finish(
                     "unresolved", self.external_ref(name),
-                    f"CALLS: {owner_qn} → {name} çözümlenemedi (unresolved); "
-                    "uydurma hedef üretilmedi.",
+                    f"CALLS: {owner_qn} → {name} could not be resolved (unresolved); "
+                    "no fabricated target was produced.",
                 )
             return
 
@@ -647,8 +650,8 @@ class FileAnalyzer:
                 source = ast.unparse(func)
                 finish(
                     "unresolved", self.external_ref(source),
-                    f"CALLS: {owner_qn} → {source} çözümlenemedi (unresolved); "
-                    "uydurma hedef üretilmedi.",
+                    f"CALLS: {owner_qn} → {source} could not be resolved (unresolved); "
+                    "no fabricated target was produced.",
                 )
                 return
 
@@ -660,14 +663,14 @@ class FileAnalyzer:
                 if member is not None:
                     finish(
                         "verified", self.ref(member[0], member[1]),
-                        f"CALLS: {owner_qn} → {member[1]} hedefi 'self.{rest[0]}' "
-                        f"sarmalayan sınıf {owner_class_qn} üye tablosuyla çözümlendi (verified).",
+                        f"CALLS: {owner_qn} → {member[1]} resolved 'self.{rest[0]}' via the "
+                        f"member table of the enclosing class {owner_class_qn} (verified).",
                     )
                 else:
                     finish(
                         "unresolved", self.external_ref(".".join(chain)),
-                        f"CALLS: {owner_qn} → {'.'.join(chain)} çözümlenemedi (unresolved); "
-                        "uydurma hedef üretilmedi.",
+                        f"CALLS: {owner_qn} → {'.'.join(chain)} could not be resolved (unresolved); "
+                        "no fabricated target was produced.",
                     )
                 return
 
@@ -679,21 +682,21 @@ class FileAnalyzer:
                     if member is not None:
                         finish(
                             "verified", self.ref(member[0], member[1]),
-                            f"CALLS: {owner_qn} → {member[1]} hedefi aynı modülde tanımlı "
-                            f"{target_qn} sınıf üye tablosuyla çözümlendi (verified).",
+                            f"CALLS: {owner_qn} → {member[1]} resolved via the member table "
+                            f"of class {target_qn} defined in the same module (verified).",
                         )
                     else:
                         finish(
                             "unresolved", self.external_ref(".".join(chain)),
-                            f"CALLS: {owner_qn} → {'.'.join(chain)} çözümlenemedi (unresolved); "
-                            "uydurma hedef üretilmedi.",
+                            f"CALLS: {owner_qn} → {'.'.join(chain)} could not be resolved (unresolved); "
+                            "no fabricated target was produced.",
                         )
                     return
                 # Modül düzeyi fonksiyon niteliği (ör. func.attr) çözümlenmez.
                 finish(
                     "unresolved", self.external_ref(".".join(chain)),
-                    f"CALLS: {owner_qn} → {'.'.join(chain)} çözümlenemedi (unresolved); "
-                    "uydurma hedef üretilmedi.",
+                    f"CALLS: {owner_qn} → {'.'.join(chain)} could not be resolved (unresolved); "
+                    "no fabricated target was produced.",
                 )
                 return
 
@@ -703,16 +706,16 @@ class FileAnalyzer:
 
             finish(
                 "unresolved", self.external_ref(".".join(chain)),
-                f"CALLS: {owner_qn} → {'.'.join(chain)} çözümlenemedi (unresolved); "
-                "uydurma hedef üretilmedi.",
+                f"CALLS: {owner_qn} → {'.'.join(chain)} could not be resolved (unresolved); "
+                "no fabricated target was produced.",
             )
             return
 
         source = ast.unparse(func)
         finish(
             "unresolved", self.external_ref(source),
-            f"CALLS: {owner_qn} → {source} çözümlenemedi (unresolved); "
-            "uydurma hedef üretilmedi.",
+            f"CALLS: {owner_qn} → {source} could not be resolved (unresolved); "
+            "no fabricated target was produced.",
         )
 
     def _dotted_chain(self, node: ast.AST) -> Optional[List[str]]:
@@ -762,30 +765,30 @@ class FileAnalyzer:
                         "heuristic",
                         {"kind": target_kind, "qualifiedName": target_qn,
                          "relativePath": target_relative_path},
-                        f"CALLS: {owner_qn} → {target_qn} import edilen modül sembolü "
-                        "üzerinden çözümlendi (heuristic; tam type inference yok).",
+                        f"CALLS: {owner_qn} → {target_qn} resolved through an imported "
+                        "module symbol (heuristic; no full type inference).",
                         {
                             "candidates": [target_qn],
-                            "reason": "import edilen modül sembolü; Python ad bağlamı "
-                                      "dinamiktir, kesin çözümleme yapılmadı",
+                            "reason": "imported module symbol; Python name binding is dynamic, "
+                                      "so no definitive resolution was made",
                         },
                     )
                 else:
                     finish(
                         "heuristic",
                         self.external_ref(target_qn),
-                        f"CALLS: {owner_qn} → {target_qn} import bildirimi dayanağıyla "
-                        "dış sembol olarak eşlendi (heuristic; semantik doğrulama yok).",
+                        f"CALLS: {owner_qn} → {target_qn} matched as an external symbol "
+                        "based on the import statement (heuristic; no semantic verification).",
                         {
                             "candidates": [target_qn],
-                            "reason": "analiz seti dışı import; semantik doğrulama yok",
+                            "reason": "import outside the analysis set; no semantic verification",
                         },
                     )
             else:
                 finish(
                     "unresolved", self.external_ref(binding_name),
-                    f"CALLS: {owner_qn} → {binding_name} çözümlenemedi (unresolved); "
-                    "uydurma hedef üretilmedi.",
+                    f"CALLS: {owner_qn} → {binding_name} could not be resolved (unresolved); "
+                    "no fabricated target was produced.",
                 )
             return
 
@@ -805,12 +808,12 @@ class FileAnalyzer:
                         "heuristic",
                         {"kind": member_kind, "qualifiedName": member_qn,
                          "relativePath": member_path},
-                        f"CALLS: {owner_qn} → {member_qn} import edilen sınıf sembolü "
-                        "üye tablosuyla çözümlendi (heuristic; tam type inference yok).",
+                        f"CALLS: {owner_qn} → {member_qn} resolved via the member table "
+                        "of an imported class symbol (heuristic; no full type inference).",
                         {
                             "candidates": [member_qn],
-                            "reason": "import edilen modül sembolü; Python ad bağlamı "
-                                      "dinamiktir, kesin çözümleme yapılmadı",
+                            "reason": "imported module symbol; Python name binding is dynamic, "
+                                      "so no definitive resolution was made",
                         },
                     )
                     return
@@ -818,12 +821,12 @@ class FileAnalyzer:
                 "heuristic",
                 {"kind": target_kind, "qualifiedName": symbol_qn,
                  "relativePath": target_relative_path},
-                f"CALLS: {owner_qn} → {symbol_qn} import edilen modül sembolü "
-                "üzerinden çözümlendi (heuristic; tam type inference yok).",
+                f"CALLS: {owner_qn} → {symbol_qn} resolved through an imported "
+                "module symbol (heuristic; no full type inference).",
                 {
                     "candidates": [symbol_qn],
-                    "reason": "import edilen modül sembolü; Python ad bağlamı "
-                              "dinamiktir, kesin çözümleme yapılmadı",
+                    "reason": "imported module symbol; Python name binding is dynamic, "
+                              "so no definitive resolution was made",
                 },
             )
             return
@@ -833,11 +836,11 @@ class FileAnalyzer:
         finish(
             "heuristic",
             self.external_ref(external_qn),
-            f"CALLS: {owner_qn} → {external_qn} import bildirimi dayanağıyla dış "
-            "sembol olarak eşlendi (heuristic; semantik doğrulama yok).",
+            f"CALLS: {owner_qn} → {external_qn} matched as an external symbol "
+            "based on the import statement (heuristic; no semantic verification).",
             {
                 "candidates": [external_qn],
-                "reason": "analiz seti dışı import; semantik doğrulama yok",
+                "reason": "import outside the analysis set; no semantic verification",
             },
         )
 
@@ -984,8 +987,9 @@ class RequestCollector:
                 {
                     "relativePath": "",
                     "code": "RESPONSE_TRUNCATED",
-                    "message": f"node bütçesi aşıldı: {max_nodes} node yayınlandı; "
-                               "aşan node'lar ve uçları yayınlanmayan kenarlar düşürüldü",
+                    "message": f"node budget exceeded: {max_nodes} nodes published; "
+                               "the excess nodes and the edges whose endpoints were "
+                               "not published were dropped",
                     "line": 0,
                 }
             )
@@ -1000,13 +1004,13 @@ class RequestCollector:
         # Çıkışta sert doğrulama: worker liste dışı tür üretemez.
         for node in nodes:
             if node["kind"] not in NODE_KINDS:
-                raise ValueError(f"katalog dışı node türü: {node['kind']}")
+                raise ValueError(f"node kind outside the catalog: {node['kind']}")
         for edge in edges:
             if edge["kind"] not in EDGE_KINDS or edge["resolution"] not in RESOLUTIONS:
-                raise ValueError("katalog dışı kenar")
+                raise ValueError("edge kind or resolution outside the catalog")
         for item in evidence_list:
             if item["kind"] not in EVIDENCE_KINDS:
-                raise ValueError(f"katalog dışı evidence türü: {item['kind']}")
+                raise ValueError(f"evidence kind outside the catalog: {item['kind']}")
 
         total_edges = len(edges)
         verified_edges = sum(1 for edge in edges if edge["resolution"] == "verified")
@@ -1056,7 +1060,7 @@ def analyze_request(request: Dict[str, Any]) -> Dict[str, Any]:
             collector.add_diagnostic(
                 relative_path,
                 "SyntaxError",
-                str(error.msg or "sözdizimi hatası"),
+                str(error.msg or "syntax error"),
                 error.lineno or 0,
             )
             collector.add_file_node(relative_path, sha256_hex(content))
@@ -1065,7 +1069,7 @@ def analyze_request(request: Dict[str, Any]) -> Dict[str, Any]:
             collector.add_diagnostic(
                 relative_path,
                 "ADAPTER_INTERNAL",
-                f"AST ayrıştırması tamamlanamadı: {error}",
+                f"AST parsing could not be completed: {error}",
                 0,
             )
             collector.add_file_node(relative_path, sha256_hex(content))
@@ -1080,7 +1084,7 @@ def analyze_request(request: Dict[str, Any]) -> Dict[str, Any]:
             collector.add_diagnostic(
                 analyzer.path,
                 "ADAPTER_INTERNAL",
-                f"AST gezinme derinliği {MAX_AST_DEPTH} aşıldı; derin alt ağaçlar atlandı",
+                f"AST traversal depth {MAX_AST_DEPTH} exceeded; deeper subtrees were skipped",
                 0,
             )
 
@@ -1101,7 +1105,7 @@ def handle_line(line: str) -> Dict[str, Any]:
         # fırlatır; yakalanmazsa süreci öldürür ve 'bozuk satır döngüyü
         # düşürmez' sözleşmesi ihlal olur (tests/python-worker.test.ts
         # 'derin iç içe JSON satırı' regresyon testi).
-        return error_response(None, "INVALID_ARGUMENT", f"satır geçerli JSON değil: {error}")
+        return error_response(None, "INVALID_ARGUMENT", f"line is not valid JSON: {error}")
 
     request, error = validate_request(payload)
     if error is not None:
@@ -1110,11 +1114,11 @@ def handle_line(line: str) -> Dict[str, Any]:
     try:
         return analyze_request(request)
     except Exception as unexpected:  # noqa: BLE001 — döngü yaşamaya devam eder
-        log(f"beklenmeyen analiz hatası: {unexpected!r}")
+        log(f"unexpected analysis error: {unexpected!r}")
         return error_response(
             request["id"],
             "INTERNAL_ERROR",
-            f"analiz beklenmeyen bir hatayla karşılaştı: {type(unexpected).__name__}",
+            f"analysis failed with an unexpected error: {type(unexpected).__name__}",
         )
 
 
@@ -1145,7 +1149,7 @@ def main() -> int:
     stdin_buf = sys.stdin.buffer
     stdout_buf = sys.stdout.buffer
 
-    log(f"worker başladı — protokol v{PROTOCOL_VERSION}, analyzer {ANALYZER_ID} v{ANALYZER_VERSION}")
+    log(f"worker started — protocol v{PROTOCOL_VERSION}, analyzer {ANALYZER_ID} v{ANALYZER_VERSION}")
 
     try:
         while True:
@@ -1156,10 +1160,10 @@ def main() -> int:
                     error_response(
                         None,
                         "LIMIT_EXCEEDED",
-                        f"istek satırı {MAX_REQUEST_LINE_BYTES} bayt sınırını aştı; satır atlandı",
+                        f"request line exceeded the {MAX_REQUEST_LINE_BYTES} byte limit; line skipped",
                     ),
                 )
-                log("istek satırı sınırı aşıldı — satır atlandı")
+                log("request line limit exceeded — line skipped")
                 continue
             if line is None or eof:
                 break  # EOF
@@ -1171,18 +1175,18 @@ def main() -> int:
             except UnicodeDecodeError as error:
                 write_response(
                     stdout_buf,
-                    error_response(None, "INVALID_ARGUMENT", f"satır UTF-8 değil: {error}"),
+                    error_response(None, "INVALID_ARGUMENT", f"line is not valid UTF-8: {error}"),
                 )
                 continue
 
             response = handle_line(text)
             write_response(stdout_buf, response)
-            log(f"istek işlendi: id={describe_id(response.get('id'))} status={response.get('status')}")
+            log(f"request processed: id={describe_id(response.get('id'))} status={response.get('status')}")
     except (BrokenPipeError, OSError) as error:
-        log(f"kablo hatası, worker sonlanıyor: {error}")
+        log(f"stdio pipe error, worker exiting: {error}")
         return 1
 
-    log("EOF — worker normal biçimde sonlanıyor")
+    log("EOF — worker exiting normally")
     return 0
 
 
