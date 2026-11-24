@@ -34,7 +34,7 @@ export const INDEX_WORKER_PATH = path.join(DIST_DIR, "index-worker.mjs");
 export const DIST_NODE_MODULES = path.join(DIST_DIR, "node_modules");
 export const MANIFEST_PATH = path.join(DIST_DIR, "bundle-manifest.json");
 export const BUILD_SCRIPT = path.join(PKG_DIR, "scripts", "build-bundle.mjs");
-export const READY_MARKER = "causoryn mcp server hazir";
+export const READY_MARKER = "causoryn mcp server ready";
 
 export interface JsonRpcMessage {
   readonly jsonrpc?: unknown;

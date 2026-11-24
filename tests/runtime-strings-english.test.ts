@@ -45,7 +45,7 @@ const INTERNAL_CODES =
  * other entry points and test harnesses, so it is changed in one coordinated
  * step rather than per file.
  */
-const ALLOWED_LITERALS = new Set(["causoryn mcp server hazir ("]);
+const ALLOWED_LITERALS = new Set<string>([]);
 
 function listSourceFiles(dir: string): string[] {
   const out: string[] = [];

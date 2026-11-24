@@ -142,14 +142,14 @@ When `dotnet`, `python`, `go`, or `cargo` is missing, crashes, or times out, the
 
 ---
 
-## 6. `fp2` `analyzerFingerprint` & Internal Analyzer Versions
+## 6. `fp3` `analyzerFingerprint` & Internal Analyzer Versions
 
 ### 6.1 Fingerprint Schema
 
-`packages/indexing/src/fingerprint.ts` computes the positional `fp2` fingerprint so persisted snapshots and `file_facts` are not reused across toolchain or reference-pack changes:
+`packages/indexing/src/fingerprint.ts` computes the positional `fp3` fingerprint so persisted snapshots and `file_facts` are not reused across toolchain or reference-pack changes:
 
 ```text
-fp2|ts-adapter@0.1.0|roslyn-worker@0.1.0|refpack=<pack>@<version>@<tfmDir>;...|refsrc=<source>|opts=<sha256-16>
+fp3|ts-adapter@0.1.0|roslyn-worker@0.1.0|refpack=<pack>@<version>@<tfmDir>;...|refsrc=<source>|opts=<sha256-16>
    [|python-worker@0.1.0|pystate=<status>|pyopts=<sha256-16>]
    [|go-worker@0.1.0|gostate=<status>|goopts=<sha256-16>]
    [|rust-worker@0.1.0|ruststate=<status>|rustopts=<sha256-16>]
@@ -163,7 +163,7 @@ fp2|ts-adapter@0.1.0|roslyn-worker@0.1.0|refpack=<pack>@<version>@<tfmDir>;...|r
 
 The package and MCP server versions follow releases (0.3.0), but `ts-adapter`, `roslyn-worker`, `python-worker`, `go-worker`, and `rust-worker` (and `native/rust-worker/Cargo.toml`) stay at `0.1.0`:
 
-1. `analyzerVersion` is part of every evidence record (and therefore of evidence IDs) and of the `fp2` fingerprint.
+1. `analyzerVersion` is part of every evidence record (and therefore of evidence IDs) and of the `fp3` fingerprint.
 2. Bumping it on packaging-only releases, when extraction semantics and NDJSON `protocolVersion: "1"` did not change, would invalidate every persisted graph and churn evidence hashes.
 3. Internal analyzer versions therefore track extraction semantics, independent of the package release.
 

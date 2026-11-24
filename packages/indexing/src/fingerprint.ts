@@ -69,8 +69,12 @@ import {
   type JsonValue,
 } from "@causoryn/domain";
 
-/** fp2: adapter + ref-pack + ayarlar bağlamını taşıyan şema sürümü. */
-export const ANALYZER_FINGERPRINT_SCHEMA_VERSION = "fp2";
+/**
+ * Fingerprint schema version. fp3 (0.3.0) supersedes fp2: node spans, ESM/CJS
+ * module-format detection and the English evidence text changed analyzer output,
+ * so snapshots and file_facts written by earlier builds must not be reused.
+ */
+export const ANALYZER_FINGERPRINT_SCHEMA_VERSION = "fp3";
 
 /** Worker'ın yüklediği tek ref-pack kaydı (ReferenceResolver.cs:144). */
 export interface RoslynRefPackEntry {

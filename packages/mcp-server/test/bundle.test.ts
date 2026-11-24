@@ -80,7 +80,7 @@ const CONFIG = {
   autoIndex: true,
 };
 
-const READY_MARKER = "causoryn mcp server hazir";
+const READY_MARKER = "causoryn mcp server ready";
 
 interface JsonRpcMessage {
   readonly jsonrpc?: unknown;

@@ -110,7 +110,7 @@ const PLUGIN_ROOT_TOKEN = DOLLAR_BRACE + "PLUGIN_ROOT}";
 const EXPECTED_SERVER_KEY = "causoryn";
 const EXPECTED_LOCAL_ENTRY = "scripts/mcp-server.mjs";
 const EXPECTED_PORTABLE_ENTRY = `${PLUGIN_ROOT_TOKEN}/${EXPECTED_LOCAL_ENTRY}`;
-const READY_MARKER = "causoryn mcp server hazir";
+const READY_MARKER = "causoryn mcp server ready";
 
 /* ------------------------------------------------------------------ */
 /* Yardımcılar: katı JSON parse + şema doğrulayıcılar                  */

@@ -675,7 +675,7 @@ describe("SQLite kalıcılık, Agent GPS FTS5, incremental refresh ve map_system
       workspaceId: "default",
       revision: { id: "working-tree", sequence: 1 },
       configHash: "cfg-l3-test",
-      analyzerFingerprint: "fp2|ts-adapter@0.1.0",
+      analyzerFingerprint: "fp3|ts-adapter@0.1.0",
       createdAt: FIXED_NOW,
     });
     repo.addNode(build.buildId, {

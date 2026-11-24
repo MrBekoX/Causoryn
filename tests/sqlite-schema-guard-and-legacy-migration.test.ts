@@ -32,7 +32,7 @@ const LOADER_ENTRY = path.join(
   "loader",
   "register-strip.mjs",
 );
-const READY_MARKER = "causoryn mcp server hazir";
+const READY_MARKER = "causoryn mcp server ready";
 
 let tempRoot: string;
 

@@ -112,7 +112,7 @@ const snapshot = createSnapshot({
 ```
 
 Aynı .go dosyaları indexed snapshot'a TS/C# graph'ıyla birlikte katılır
-(analyzerFingerprint fp2 şeması packages/indexing'ten; Go adapter'ının
+(analyzerFingerprint fp3 şeması packages/indexing'ten; Go adapter'ının
 INDEXED_ADAPTERS/get_capabilities kaydı ayrı entegrasyon dilimidir).
 
 ## Doğrulama
