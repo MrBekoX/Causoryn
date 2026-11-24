@@ -65,7 +65,7 @@ Bu nedenle hiçbir skill veya araç adını bilmeniz gerekmez — sonucu isteyin
 
 ### C. Başka bir araç profili gerektiren prompt'lar
 
-Bu araçlar varsayılan `core` profilinde kayıtlı değildir. Profili host yapılandırmanızdaki sunucu argümanlarına ekleyin (örneğin `causoryn mcp --allow-cwd --auto-data-dir --tool-profile wiki`) veya `CAUSORYN_TOOL_PROFILE` değişkenini ayarlayın, ardından host'u yeniden başlatın. Profil olmadan ajan bu araçları hiç görmez.
+Bu araçlar varsayılan `core` profilinde kayıtlı değildir. Profili host yapılandırmanızdaki sunucu argümanlarına ekleyin (örneğin `causoryn mcp --allow-cwd --auto-data-dir --tool-profile wiki`) veya `CAUSORYN_TOOL_PROFILE` değişkenini ayarlayın, ardından host'u yeniden başlatın; `npx causoryn@latest setup --tool-profile wiki --yes` bayrağı host kayıtlarına sizin yerinize yazar. Profil olmadan ajan bu araçları hiç görmez.
 
 | Amaç | Kopyala-yapıştır prompt (Türkçe) | Copy-paste prompt (English) | Araçlar | Gereken profil |
 |---|---|---|---|---|
@@ -73,7 +73,7 @@ Bu araçlar varsayılan `core` profilinde kayıtlı değildir. Profili host yap�
 | **Mimari geçmişi** | `"Causoryn ile main ve HEAD~5 arasındaki mimariyi karşılaştır; eklenen, silinen ve yeniden adlandırılan modülleri listele."` | `"Compare the architecture of main and HEAD~5 with Causoryn and list added, removed, and renamed modules."` | `causoryn_compare_architecture`, `causoryn_architecture_timeline` | `--tool-profile history` (veya `full`) |
 | **Legacy araç adları kullanan eski prompt'lar** | `causoryn_index_status`, `causoryn_trace_execution`, `causoryn_check_contracts`, ... araçlarını adıyla çağıran prompt'lar veya betikler | — | 29 legacy ad (core karşılığı olanlar deprecated) | `--tool-profile full` |
 
-Geçmiş (history) araçları, her ref'te commit edilmiş `.causoryn/architecture-snapshot.json` dosyalarını karşılaştırır (bu dosyalar `causoryn_export_documentation` `format: "snapshot"` ile yazılır); bu dosyası olmayan bir ref `INVALID_REVISION` döner.
+Geçmiş (history) araçları bir ref için, o ref'in içeriğiyle eşleştiği kanıtlandığında (ve `working-tree` için) yayımlanmış yerel indeksi kullanır; aksi hâlde o ref'te commit edilmiş `.causoryn/architecture-snapshot.json` dosyasını okur (bu dosyalar `causoryn_export_documentation` `format: "snapshot"` ile yazılır) ve `snapshot-loaded-from-committed-git-blob` güven uyarısını ekler. İki kaynağı da olmayan bir ref `INVALID_REVISION` döner.
 
 ---
 
@@ -228,7 +228,7 @@ Aşağıdaki her `moduleId`, `keyFiles` yolu ve `evidenceId`, Adım 1'deki `arch
 | `WORKSPACE_NOT_AUTHORIZED` | Yetkili kök yok: `--root`, `--allow-cwd`, MCP `roots/list` veya `CAUSORYN_CONFIG.allowRoots` ile bağlanmamış. | Host'u güvenli bir proje dizininden başlatın veya `roots/list` göndermesine izin verin; bu durumda `causoryn_status` `authorized: false` gösterir. Yapılandırmayı incelemek için `npx causoryn@latest doctor` çalıştırın. |
 | `INDEX_NOT_READY` veya `data.status: "indexing"` ile `status: "partial"` | Henüz yayımlanmış snapshot yok veya ilk indeksleme hâlâ sürüyor. | `retryAfterMs` kadar bekleyip `causoryn_status` (`action: "inspect"`) çağırın; çalışan bir iş yoksa `causoryn_status({ action: "refresh" })` ile bir tane başlatın. |
 | Ajan bir wiki veya history aracının olmadığını söylüyor | Sunucu varsayılan `core` profilini çalıştırıyor. | `--tool-profile wiki`, `history` veya `wiki,history` ekleyin (ya da `CAUSORYN_TOOL_PROFILE` ayarlayın) ve host'u yeniden başlatın ([§2.C](#c-başka-bir-araç-profili-gerektiren-promptlar)). |
-| Bir history aracından `INVALID_REVISION` | Ref'te commit edilmiş bir `.causoryn/architecture-snapshot.json` yok. | `format: "snapshot"` ile dışa aktarın, karşılaştırmak istediğiniz ref'lerde commit edin ve yeniden deneyin. |
+| Bir history aracından `INVALID_REVISION` | Ref, yerel indeksin eşleştiği kanıtlanan revizyon değil ve ref'te commit edilmiş bir `.causoryn/architecture-snapshot.json` yok. | `format: "snapshot"` ile dışa aktarın, karşılaştırmak istediğiniz ref'lerde commit edin ve yeniden deneyin. |
 
 Çalışma zamanının, dil sidecar'larının ve kurulu host yapılandırmaları ile skill'lerin salt okunur sağlık kontrolünü çalıştırmak için:
 

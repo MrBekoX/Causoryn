@@ -48,7 +48,7 @@ npx causoryn@0.3.0 setup --client claude-code --uninstall --yes
 
 ### `setup --client claude-code` neyi yazar
 
-`setup`, `~/.claude.json` dosyasındaki **üst düzey** `mcpServers` nesnesine `causoryn` anahtarını ekler ya da mevcut anahtarı değiştirir (bu, Claude Code'un user scope'udur; sunucu böylece her projede kullanılabilir, `--allow-cwd` ise Claude Code'un başlatıldığı proje dizinini bağlar). Dosyadaki diğer anahtarlar korunur:
+`setup`, `~/.claude.json` dosyasındaki **üst düzey** `mcpServers` nesnesine `causoryn` anahtarını ekler ya da mevcut bir kayıtta yalnızca sahibi olduğu anahtarları (`command`, `args`, `type`) günceller (bu, Claude Code'un user scope'udur; sunucu böylece her projede kullanılabilir, `--allow-cwd` ise Claude Code'un başlatıldığı proje dizinini bağlar). Dosyadaki diğer anahtarlar korunur:
 
 ```json
 {
@@ -76,12 +76,12 @@ npx causoryn@0.3.0 setup --client claude-code --uninstall --yes
 
 ### `setup` nasıl davranır (tüm host'lar)
 
-- **Algılama:** `--client` veya `--all` olmadan `setup` yalnızca algılanan host'ları yapılandırır. `~/.claude.json` veya `~/.claude` mevcutsa (ya da `CLAUDE_CONFIG_DIR` ile o dizin veya içindeki `.claude.json` mevcutsa) Claude Code algılanmış sayılır. Hiçbir host algılanmazsa hiçbir dosya yazılmaz ve komut bir client'ın nasıl seçileceğini yazdırır.
+- **Algılama:** `--client` veya `--all` olmadan `setup` yalnızca algılanan host'ları yapılandırır. `~/.claude.json` veya `~/.claude` mevcutsa (ya da `CLAUDE_CONFIG_DIR` ile o dizin veya içindeki `.claude.json` mevcutsa) Claude Code algılanmış sayılır. Hiçbir host algılanmazsa hiçbir dosya yazılmaz, komut bir client'ın nasıl seçileceğini `stderr`'e yazdırır ve `1` ile çıkar.
 - **Onay:** `--yes` olmadan (ve `--dry-run` olmadan) etkileşimli bir terminal planı gösterir ve `Continue? [y/N]` diye sorar. Etkileşimsiz bir kabukta komut "confirmation required" hatasıyla durur ve hiçbir şey yazmaz.
 - **Yedekler:** mevcut bir config ilk kez değiştirilmeden önce orijinali `~/.claude.json.causoryn.backup` dosyasına kopyalanır. Bu dosyanın üzerine asla yazılmaz; sonraki değişiklikler ek `~/.claude.json.causoryn.<timestamp>-<nonce>.backup` kopyaları oluşturur. Yeni oluşturulan bir dosyanın yedeği alınmaz.
 - **Atomik, idempotent yazımlar:** her dosya geçici bir kardeş dosyaya yazılır ve mevcut dosya kipi korunarak rename ile yerine alınır (yeni config dosyaları `0600` kipiyle oluşturulur). Aynı ikinci koşu `noop` raporlar ve hiçbir dosyaya ya da yedeğe dokunmaz.
 - **Fail-closed ayrıştırma:** geçerli JSON olmayan ya da `mcpServers` alanı nesne olmayan bir config, hiçbir şey yazılmadan koşuyu `cli/malformed-json` ile durdurur. Sembolik link hedefleri ve normal olmayan dosyalar reddedilir.
-- **Çıkış kodları:** `setup` başarıda (dry run, no-op, reddedilen onay sorusu veya algılanan host olmaması dahil) `0`, herhangi bir hatada `2` ile çıkar.
+- **Çıkış kodları:** `setup` başarıda (dry run, no-op ve reddedilen onay sorusu dahil) `0`, hiçbir host algılanmadığında ve hiçbiri adlandırılmadığında `1` (hiçbir şey yazılmaz), herhangi bir hatada `2` ile çıkar.
 - **Kaldırma:** `--uninstall`, `mcpServers.causoryn` girdisini (geriye boş bir `mcpServers` nesnesi kalır) ve beş skill dizinini siler; `~/.causoryn/runtime` dizinini ise yalnızca başka hiçbir host config'i ona hâlâ başvurmuyorsa kaldırır.
 
 ### `doctor` denetimleri
@@ -132,17 +132,17 @@ Sunucu `core` profiliyle başlar: 11 araç (`causoryn_status`, `causoryn_map_sys
 | `history` | `causoryn_compare_architecture`, `causoryn_architecture_timeline` |
 | `full` | 29 legacy aracın tamamı artı `causoryn_status`, `causoryn_trace`, `causoryn_contracts` (32 araç); yerini yeni araçlara bırakan legacy araçlar bir deprecation notu taşır |
 
-Profiller virgülle birleştirilir (`wiki,history`). Öncelik sırası `--tool-profile` > `CAUSORYN_TOOL_PROFILE` > `core` şeklindedir; bilinmeyen bir profil adı sunucuyu başlangıçta durdurur. Claude Code'da:
+Profiller virgülle birleştirilir (`wiki,history`). Öncelik sırası `--tool-profile` > `CAUSORYN_TOOL_PROFILE` > `CAUSORYN_CONFIG.toolProfile` > `core` şeklindedir; verilen her değer doğrulanır ve bilinmeyen bir profil adı sunucuyu başlangıçta durdurur. Claude Code'da:
 
-- **`setup`'ın yazdığı girdi:** `args` dizisinin sonuna `"--tool-profile", "wiki,history"` ekleyin ya da `~/.claude.json` içindeki `causoryn` girdisine `"env": { "CAUSORYN_TOOL_PROFILE": "full" }` ekleyin. `setup`'ı yeniden çalıştırmak `causoryn` girdisinin tamamını yeniden yazar; bu yüzden değişikliği ardından tekrar uygulayın.
+- **`setup`'ın yazdığı girdi:** `npx causoryn@latest setup --client claude-code --tool-profile wiki,history --yes` çalıştırın ya da elle `args` dizisinin sonuna `"--tool-profile", "wiki,history"` ekleyin veya `~/.claude.json` içindeki `causoryn` girdisine `"env": { "CAUSORYN_TOOL_PROFILE": "full" }` ekleyin. `setup`'ı yeniden çalıştırmak girdinin `env` nesnesini, `--tool-profile` ve `--output-schema` argümanlarını ve eklediğiniz diğer anahtarları (örneğin `disabled`) korur; profili değiştirmek için `setup --tool-profile <list>` verin.
 - **`claude mcp add`:** paketli giriş noktası (kurulu npm paketi): `claude mcp add causoryn -s local -- node /path/to/node_modules/causoryn/scripts/causoryn.mjs mcp --allow-cwd --auto-data-dir --client claude-code --tool-profile full`. Monorepo bundle (CLI bayrağı okumaz): `claude mcp add causoryn -s local -e CAUSORYN_TOOL_PROFILE=full -- node /path/to/causoryn/packages/mcp-server/dist/mcp-server.mjs`.
 - **Pazaryeri plugin'i:** manifest kurulu plugin'in içinde bulunur ve düzenlenmemelidir. `CAUSORYN_TOOL_PROFILE` yalnızca Claude Code onu kendi ortamından plugin MCP sunucularına aktarırsa etkili olur; bu doğrulanmamıştır. Varsayılan dışında bir profile ihtiyacınız varsa Seçenek A veya C'yi kullanın.
 
 ## 4. Veri dizini ve ilk çalıştırma
 
-- `--auto-data-dir` (veya `--data-dir <abs>`) ile indeks `<base>/workspaces/<slug>-<hash12>/graph.sqlite` konumunda, export çıktısı ise `<base>/workspaces/<slug>-<hash12>/exports/` altında tutulur. Taban dizin önceliği `--data-dir` > `ZCODE_PLUGIN_DATA` > `~/.causoryn` şeklindedir.
+- `--auto-data-dir` (veya `--data-dir <abs>`) ile indeks `<base>/workspaces/<slug>-<hash12>/graph.sqlite` konumunda, export çıktısı ise `<base>/workspaces/<slug>-<hash12>/exports/` altında tutulur. Taban dizin önceliği her host için aynıdır: `--data-dir` > `~/.causoryn` (`ZCODE_PLUGIN_DATA` yalnızca `~/.causoryn` oluşturulamadığında veya yazılamadığında yedek).
 - **Tüm host'lar için workspace başına tek veritabanı.** Claude Code, Codex, Antigravity ve ZCode aynı taban dizini kullandıklarında aynı `graph.sqlite` dosyasını açar. `--client claude-code` yalnızca bir tanılama etiketidir (`build_leases.host_label` olarak kaydedilir). `build_leases` tek-yazar kirası (single-writer lease), iki sürecin aynı anda snapshot yayımlamasını engeller.
-- 0.3.0 öncesi sürümler host başına `graph-<client>.sqlite` dosyaları kullanıyordu. Bu dosyalar taşınmaz; 0.3.0'ın ilk açılışı `graph.sqlite` içine indeksler.
+- 0.3.0 öncesi sürümler host başına `graph-<client>.sqlite` dosyaları kullanıyordu. `graph.sqlite` henüz yoksa 0.3.0'ın ilk açılışı en yeni geçerli olanı bir kez ona kopyalar; eski dosyalar yerinde kalır ve `causoryn doctor` bunları listeler, böylece silebilirsiniz. `fp3` analizör parmak izi yine de 0.3.0'ın ilk açılışında bir kez yeniden indekslemeye yol açar.
 - Dizinler `0700` kipiyle oluşturulur ve her yetkili proje kökünün kesinlikle dışında bulunmalıdır (sözcüksel ve gerçek yol denetimleri; sembolik linkli üst dizinler reddedilir). Analiz edilen kaynak ağacına hiçbir şey yazılmaz.
 - İndeksleme bir `worker_threads` worker'ında çalışır. Paketli giriş noktasıyla (Seçenek A ve B), ilk indeks yayımlanmadan önce yapılan bir araç çağrısı en fazla `CAUSORYN_INDEX_WAIT_MS` kadar bekler (varsayılan `15000`; `0` = bekleme) ve ardından `data.status: "indexing"`, `jobId`, `progress` ve `retryAfterMs` ile birlikte `status: "partial"` döndürür. `causoryn_status` hemen yanıt verir.
 - `--allow-cwd` güvenli olmayan başlangıç dizinlerini reddeder (örneğin `$HOME`, bir dosya sistemi kökü, sistem dizinleri, `~/.claude`, plugin kurulum dizinleri veya Causoryn veri dizini). Bu durumda sunucu yetkili bir kök olmadan başlar ve host'un MCP `roots/list` üzerinden bildirdiği ilk güvenli `file://` kökünü bağlar; o zamana kadar workspace araçları `WORKSPACE_NOT_AUTHORIZED` döndürür. Claude Code'u projenin içinde başlatın ya da `--root /path/to/your-project` verin.

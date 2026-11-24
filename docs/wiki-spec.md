@@ -53,13 +53,13 @@ Araç profilleri `packages/mcp-server/src/version.ts` içinde tanımlanır (`TOO
 | `wiki,history` | 20 (11 core + 7 wiki + 2 history) | 7'sinin tamamı |
 | `full` | 32 (29 legacy ad + `causoryn_status`, `causoryn_trace`, `causoryn_contracts`) | 7'sinin tamamı |
 
-Seçim sırası: `--tool-profile <list>` > `CAUSORYN_TOOL_PROFILE` > `core`. Profiller virgülle birleştirilir. `full` profilinde yerini yeni araçlara bırakmış legacy araçlar bir kullanımdan kaldırma (deprecation) notu taşır; wiki araçları kullanımdan kaldırılmamıştır ve `wiki` ile `full` profillerinde aynı şekilde davranır.
+Seçim sırası: `--tool-profile <list>` > `CAUSORYN_TOOL_PROFILE` > `CAUSORYN_CONFIG.toolProfile` > `core`. Profiller virgülle birleştirilir. `full` profilinde yerini yeni araçlara bırakmış legacy araçlar bir kullanımdan kaldırma (deprecation) notu taşır; wiki araçları kullanımdan kaldırılmamıştır ve `wiki` ile `full` profillerinde aynı şekilde davranır.
 
 ### 2.2 Veri kökü
 
 `causoryn_wiki_build`'in yazdığı ve okuma araçlarının okuduğu SQLite veritabanı, yetkilendirilmiş her çalışma alanı kökünün dışında bulunur:
 
-1. **Sıfır-ayar (`--auto-data-dir` veya `--data-dir <path>`):** `buildWorkspaceAutoConfig` (`runtime-cli.ts`) taban dizini çözümler (`--data-dir` > `ZCODE_PLUGIN_DATA` > `~/.causoryn`) ve hem `storage.dataDbPath` hem `wiki.dataDbPath` değerini aynı dosyaya, `<base>/workspaces/<slug>-<hash12>/graph.sqlite` yoluna ayarlar. Tüm host'lar bu tek veritabanını paylaşır; dolayısıyla bir host'tan oluşturulan wiki, aynı veri dizinini kullanan her host tarafından görülür. Dizinler `0700` moduyla oluşturulur ve oluşturmadan önce ve sonra yetkilendirilmiş köklerin kesinlikle dışında oldukları denetlenir.
+1. **Sıfır-ayar (`--auto-data-dir` veya `--data-dir <path>`):** `buildWorkspaceAutoConfig` (`runtime-cli.ts`) taban dizini çözümler (her host için `--data-dir` > `~/.causoryn`; `ZCODE_PLUGIN_DATA` yalnızca `~/.causoryn` kullanılamadığında yedek) ve hem `storage.dataDbPath` hem `wiki.dataDbPath` değerini aynı dosyaya, `<base>/workspaces/<slug>-<hash12>/graph.sqlite` yoluna ayarlar. Tüm host'lar bu tek veritabanını paylaşır; dolayısıyla bir host'tan oluşturulan wiki, aynı veri dizinini kullanan her host tarafından görülür. Dizinler `0700` moduyla oluşturulur ve oluşturmadan önce ve sonra yetkilendirilmiş köklerin kesinlikle dışında oldukları denetlenir.
 2. **Açık konfigürasyon:** `CAUSORYN_CONFIG` içinde `wiki.dataDbPath` değerini çalışma alanının dışındaki mutlak bir yola ayarlayın. Bu yol başlangıçta `validateDataDbPath` (`context.ts`) tarafından doğrulanır; bkz. [§9](#9-yazma-izinleri-ve-güvenlik-sınırları).
 
 `wiki` konfigürasyon nesnesi yalnızca `dataDbPath` kabul eder (`config.ts`, katı şema); diğer anahtarlar başlangıçta reddedilir.
@@ -359,7 +359,7 @@ Aynı sayfa çifti arasındaki aynı türden birden çok edge tek bir bağlantı
 
 ## 7. Depolama şeması (`wiki_*`, `wiki_fts`)
 
-`packages/storage-sqlite/src/wiki-schema.ts` içinde tanımlanır ve ana şemayla birlikte uygulanır (`user_version = 4`). Tüm DDL ve DML, bağlı parametreli statik SQL'dir.
+`packages/storage-sqlite/src/wiki-schema.ts` içinde tanımlanır ve ana şemayla birlikte uygulanır (`user_version = 5`). Tüm DDL ve DML, bağlı parametreli statik SQL'dir.
 
 | Tablo | Anahtar | Notlar |
 |---|---|---|
@@ -390,7 +390,7 @@ Yalnızca `--tool-profile wiki`, `wiki,history` veya `full` altında kullanılab
 - **Sayfalama:** opak base64url cursor `{ "v": 1, "o": <offset> }`; `limit` varsayılanı 50, en fazla 200 (üzerinde `LIMIT_EXCEEDED`); bozuk bir cursor `INVALID_ARGUMENT` verir; son sayfada `nextCursor` `null` olur ve sayfalamalı beş araçta `envelope.nextCursor`, `data.nextCursor`'a eşittir.
 - **Snapshot seçimi:** açık bir `snapshotId`, aynı çalışma alanının yayımlanmış bir `WikiSnapshot`'ı olmalıdır (aksi halde `EVIDENCE_NOT_FOUND`); verilmezse en son yayımlanmış `WikiSnapshot` kullanılır (hiç yoksa veya wiki veri kökü yapılandırılmamışsa `INDEX_NOT_READY`).
 - **İndeksleme:** status dışındaki diğer araçlar gibi wiki araçları da ilk graf indeksi için `CAUSORYN_INDEX_WAIT_MS` süresine kadar bekler. Core araçlardan farklı olarak, bir wiki aracının `INDEX_NOT_READY` sonucu hata envelope'u olarak kalır (`partial` bir "indexing" envelope'una dönüştürülmez) ve wiki yanıtları, core araçların aldığı arka plan yeniden indeksleme `stale=true` uyarısını almaz.
-- **Dizgeler:** alan adları, enum değerleri ve hata kodları kararlı tanımlayıcılardır. Uyarı metinleri, `reason` / `summary` dizgeleri, hata mesajları ve üretilen Markdown etiketleri serbest metindir; serbest metni ayrıştırmayın. Wiki motorunun (`packages/wiki`) ve `services-wiki.ts`'in metinleri İngilizcedir; SQLite wiki deposundan (`packages/storage-sqlite/src/wiki-store.ts`) ve salt okunur Git çalıştırıcısından (`packages/graph/src/git-read.ts`) gelen bazı hata mesajları ise hâlâ Türkçedir.
+- **Dizgeler:** alan adları, enum değerleri ve hata kodları kararlı tanımlayıcılardır. Uyarı metinleri, `reason` / `summary` dizgeleri, hata mesajları ve üretilen Markdown etiketleri serbest metindir; serbest metni ayrıştırmayın. Bu metinlerin tamamı (wiki motoru `packages/wiki`, `services-wiki.ts`, SQLite wiki deposu `packages/storage-sqlite/src/wiki-store.ts` ve salt okunur Git çalıştırıcısı `packages/graph/src/git-read.ts` dahil) sade İngilizcedir.
 
 ### 8.2 Hata kodları
 
@@ -755,7 +755,7 @@ Her wiki aracının `wiki-tools.test.ts` içinde pozitif, negatif ve kısmi sonu
 9. Çevrimdışı wiki export'u yalnızca kütüphane düzeyindedir; `causoryn_export_documentation(view="wiki")` `INVALID_ARGUMENT` döndürür.
 10. Alias'lar (`wiki_aliases`) build tarafından yazılmaz veya kullanılmaz; yeniden adlandırma tespiti etkin değildir.
 11. Wiki sayfaları için MCP resources yayımlanmaz.
-12. Uyarı, `reason` ve `summary` metinleri ile üretilen Markdown etiketleri İngilizcedir; ancak SQLite wiki deposundan (`packages/storage-sqlite/src/wiki-store.ts`) ve salt okunur Git çalıştırıcısından (`packages/graph/src/git-read.ts`) gelen bazı hata mesajları hâlâ Türkçedir.
+12. Uyarı, `reason` ve `summary` metinleri, hata mesajları ve üretilen Markdown etiketleri İngilizce serbest metindir; istemciler mesaj ifadelerine değil kodlara ve enum değerlerine dayanmalıdır.
 13. Planlanan konfigürasyon anahtarları (`enabled`, `autoBuildOnSnapshot`, `includeManualNotesInSearch`, `includeManualNotesInExport`, `historicalSnapshotRetention`, `offlineExportDefault`) ve planlanan metrikler (`wiki_projection_duration`, `wiki_fts_update_duration`, `wiki_stale_queries`, `wiki_orphaned_notes`, …) mevcut değildir; katı konfigürasyon şeması bu anahtarları reddeder. `pagesRegenerated` ve `brokenLinks`, `causoryn_wiki_build` yanıtlarında raporlanır.
 
 ## 12. Diğer ilgili dokümanlar

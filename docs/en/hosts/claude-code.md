@@ -48,7 +48,7 @@ npx causoryn@0.3.0 setup --client claude-code --uninstall --yes
 
 ### What `setup --client claude-code` writes
 
-`setup` adds or replaces the `causoryn` key in the **top-level** `mcpServers` object of `~/.claude.json` (Claude Code's user scope, so the server is available in every project; `--allow-cwd` then binds the project directory Claude Code was started in). Other keys in the file are kept:
+`setup` adds the `causoryn` key to the **top-level** `mcpServers` object of `~/.claude.json`, or updates only the keys it owns (`command`, `args`, `type`) in an existing entry (Claude Code's user scope, so the server is available in every project; `--allow-cwd` then binds the project directory Claude Code was started in). Other keys in the file are kept:
 
 ```json
 {
@@ -76,12 +76,12 @@ npx causoryn@0.3.0 setup --client claude-code --uninstall --yes
 
 ### How `setup` behaves (all hosts)
 
-- **Detection:** without `--client` or `--all`, `setup` configures only detected hosts. Claude Code counts as detected when `~/.claude.json` or `~/.claude` exists (or, with `CLAUDE_CONFIG_DIR`, that directory or its `.claude.json`). If nothing is detected, no file is written and the command prints how to pick a client.
+- **Detection:** without `--client` or `--all`, `setup` configures only detected hosts. Claude Code counts as detected when `~/.claude.json` or `~/.claude` exists (or, with `CLAUDE_CONFIG_DIR`, that directory or its `.claude.json`). If nothing is detected, no file is written, the command prints how to pick a client on `stderr`, and it exits `1`.
 - **Confirmation:** without `--yes` (and without `--dry-run`), an interactive terminal shows the plan and asks `Continue? [y/N]`. In a non-interactive shell the command stops with a "confirmation required" error and writes nothing.
 - **Backups:** before an existing config is modified for the first time, the original is copied to `~/.claude.json.causoryn.backup`. That file is never overwritten; later modifications create additional `~/.claude.json.causoryn.<timestamp>-<nonce>.backup` copies. A newly created file gets no backup.
 - **Atomic, idempotent writes:** each file is written to a temporary sibling and renamed into place, keeping the existing file mode (new config files are created `0600`). A second identical run reports `noop` and touches no file or backup.
 - **Fail-closed parsing:** a config that is not valid JSON, or whose `mcpServers` is not an object, stops the run with `cli/malformed-json` before anything is written. Symbolic-link targets and non-regular files are refused.
-- **Exit codes:** `setup` exits `0` on success (including dry runs, no-ops, a declined prompt, or no detected host) and `2` on any error.
+- **Exit codes:** `setup` exits `0` on success (including dry runs, no-ops, and a declined prompt), `1` when no host was detected and none was named (nothing is written), and `2` on any error.
 - **Uninstall:** `--uninstall` deletes `mcpServers.causoryn` (an empty `mcpServers` object remains) and the five skill directories, and removes `~/.causoryn/runtime` only when no other host config still references it.
 
 ### `doctor` checks
@@ -132,17 +132,17 @@ The server starts with the `core` profile: 11 tools (`causoryn_status`, `causory
 | `history` | `causoryn_compare_architecture`, `causoryn_architecture_timeline` |
 | `full` | all 29 legacy tools plus `causoryn_status`, `causoryn_trace`, `causoryn_contracts` (32 tools); superseded legacy tools carry a deprecation note |
 
-Profiles combine with commas (`wiki,history`). Precedence is `--tool-profile` > `CAUSORYN_TOOL_PROFILE` > `core`; an unknown name stops the server at startup. In Claude Code:
+Profiles combine with commas (`wiki,history`). Precedence is `--tool-profile` > `CAUSORYN_TOOL_PROFILE` > `CAUSORYN_CONFIG.toolProfile` > `core`; every supplied value is validated and an unknown name stops the server at startup. In Claude Code:
 
-- **Entry written by `setup`:** append `"--tool-profile", "wiki,history"` to `args`, or add `"env": { "CAUSORYN_TOOL_PROFILE": "full" }` to the `causoryn` entry in `~/.claude.json`. Re-running `setup` rewrites the whole `causoryn` entry, so apply the change again afterwards.
+- **Entry written by `setup`:** run `npx causoryn@latest setup --client claude-code --tool-profile wiki,history --yes`, or append `"--tool-profile", "wiki,history"` to `args` or add `"env": { "CAUSORYN_TOOL_PROFILE": "full" }` to the `causoryn` entry in `~/.claude.json` by hand. Re-running `setup` keeps the entry's `env`, `--tool-profile` and `--output-schema` arguments and other keys you added (for example `disabled`); pass `setup --tool-profile <list>` to change the profile.
 - **`claude mcp add`:** packaged entrypoint (installed npm package): `claude mcp add causoryn -s local -- node /path/to/node_modules/causoryn/scripts/causoryn.mjs mcp --allow-cwd --auto-data-dir --client claude-code --tool-profile full`. Monorepo bundle (reads no CLI flags): `claude mcp add causoryn -s local -e CAUSORYN_TOOL_PROFILE=full -- node /path/to/causoryn/packages/mcp-server/dist/mcp-server.mjs`.
 - **Marketplace plugin:** the manifest lives in the installed plugin and should not be edited. `CAUSORYN_TOOL_PROFILE` takes effect only if Claude Code passes it from its own environment to plugin MCP servers; this has not been verified. Use Option A or C if you need a non-default profile.
 
 ## 4. Data directory and first run
 
-- With `--auto-data-dir` (or `--data-dir <abs>`), the index lives at `<base>/workspaces/<slug>-<hash12>/graph.sqlite`, with export output under `<base>/workspaces/<slug>-<hash12>/exports/`. The base is `--data-dir` > `ZCODE_PLUGIN_DATA` > `~/.causoryn`.
+- With `--auto-data-dir` (or `--data-dir <abs>`), the index lives at `<base>/workspaces/<slug>-<hash12>/graph.sqlite`, with export output under `<base>/workspaces/<slug>-<hash12>/exports/`. The base is `--data-dir` > `~/.causoryn`, the same for every host (`ZCODE_PLUGIN_DATA` is only a fallback when `~/.causoryn` cannot be created or written).
 - **One database per workspace for all hosts.** Claude Code, Codex, Antigravity, and ZCode open the same `graph.sqlite` when they use the same base directory. `--client claude-code` is only a diagnostic label (recorded as `build_leases.host_label`). A `build_leases` single-writer lease prevents two processes from publishing a snapshot at the same time.
-- Releases before 0.3.0 used per-host `graph-<client>.sqlite` files. They are not migrated; the first 0.3.0 start indexes into `graph.sqlite`.
+- Releases before 0.3.0 used per-host `graph-<client>.sqlite` files. When `graph.sqlite` does not exist yet, the first 0.3.0 start copies the newest valid one into it once; the legacy files stay in place and `causoryn doctor` lists them so you can delete them. The `fp3` analyzer fingerprint still makes the first 0.3.0 start re-index once.
 - Directories are created with mode `0700` and must lie strictly outside every authorized project root (lexical and real-path checks, symlinked ancestors refused). Nothing is written into the analyzed source tree.
 - Indexing runs in a `worker_threads` worker. With the packaged entrypoint (Options A and B), a tool call made before the first index is published waits up to `CAUSORYN_INDEX_WAIT_MS` (default `15000`; `0` = do not wait) and then returns `status: "partial"` with `data.status: "indexing"`, `jobId`, `progress`, and `retryAfterMs`. `causoryn_status` answers immediately.
 - `--allow-cwd` refuses unsafe start directories (for example `$HOME`, a filesystem root, system directories, `~/.claude`, plugin install directories, or the Causoryn data directory). In that case the server starts with no authorized root and binds the first safe `file://` root the host reports through MCP `roots/list`; until then workspace tools return `WORKSPACE_NOT_AUTHORIZED`. Start Claude Code inside the project, or pass `--root /path/to/your-project`.

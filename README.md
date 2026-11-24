@@ -29,7 +29,7 @@ AI coding agents frequently explore repositories with ad-hoc `grep` and partial 
 
 - **Zero-LLM static engine:** Analysis, symbol lookup, FTS5 BM25 code localization, blast-radius preflight, change verification, and documentation exports run locally with zero model calls, zero API keys, and zero embeddings ([No-LLM Architecture Policy](docs/en/adr/ADR-002-no-llm.md)).
 - **Evidence-backed resolution honesty:** Every graph edge carries `verified`, `heuristic`, or `unresolved` resolution; every `verified` edge cites verifiable file/line/SHA-256 provenance, and `coverage.byLanguage` reports per-language fidelity so one strong language never masks degradation in another.
-- **Read-only workspace guarantee:** Analyzed repositories are never modified. A single shared SQLite WAL index (`graph.sqlite`) with heartbeat single-writer leases, non-blocking `worker_threads` indexing, and per-file `file_facts` early-cutoff caching lives strictly outside your source tree; automatic setup isolates exports there too, while manual `output.allowedOutputDirs` governs explicit export destinations ([CLI & Configuration](docs/en/cli-and-configuration.md)).
+- **Read-only workspace guarantee:** Analyzed repositories are never modified. A single shared SQLite WAL index (`graph.sqlite`, the same for every host) with heartbeat single-writer leases (PID liveness on the same host), non-blocking `worker_threads` indexing, and per-file `file_facts` early-cutoff caching lives strictly outside your source tree; automatic setup isolates exports there too, while manual `output.allowedOutputDirs` governs explicit export destinations ([CLI & Configuration](docs/en/cli-and-configuration.md)).
 - **Lean agent surface (`--tool-profile`):** Defaults to **11 consolidated `core` tools** (`tools/list <= 15,000` chars) to reduce prompt overhead and tool confusion, while `--tool-profile wiki`, `--tool-profile history`, and `--tool-profile full` (all 29 legacy tools + 3 consolidated aliases) remain one flag away.
 - **Offline visual architecture portals:** Generate zero-JS layered SVG portals (`causoryn-architecture.html`), interactive pan/zoom/search/Evidence Inspector portals (`causoryn-architecture-interactive.html` protected by deterministic `script-src 'sha256-...'` CSP), subgraph Mermaid diagrams, Architecture Briefs, and fail-closed Host-LLM `annotations`.
 - **End-to-end change guard:** `Discover -> Preflight -> Edit -> Verify -> Explain` across 4 coding agent hosts, including trusted baseline-commit rule loading and honest `host_asserted` test-status reporting.
@@ -58,13 +58,16 @@ npx causoryn@latest setup --all-detected --dry-run
 # Configure all detected hosts (preserves original *.causoryn.backup forever and stages ~/.causoryn/runtime)
 npx causoryn@latest setup --all-detected --yes
 
-# Or configure a specific host explicitly
+# Or configure a specific host explicitly (setup exits 1 with guidance when no host is detected and none is named)
 npx causoryn@latest setup --client antigravity --yes
 npx causoryn@latest setup --client claude-code --yes
 npx causoryn@latest setup --client codex --yes
 npx causoryn@latest setup --client zcode --yes
 
-# Verify runtime, language sidecars, and host alignment (100% read-only)
+# Register an optional tool profile; re-running setup keeps your env, --tool-profile and other entry keys
+npx causoryn@latest setup --client claude-code --tool-profile wiki,history --yes
+
+# Verify runtime, sidecar toolchain minimums (.NET 10, Python 3.10, Go 1.22), host alignment and legacy index files (100% read-only)
 npx causoryn@latest doctor
 
 # Uninstall cleanly from a host
@@ -242,11 +245,11 @@ Causoryn is **not** a single-file JS artifact — its runtime properties vary tr
 | **Core MCP server & SQLite** (`dist/mcp-server.mjs` + `dist/index-worker.mjs` + N-API v10 `better-sqlite3` prebuilds) | **Node.js >= 24** | Zero-compile | 100% offline |
 | **TypeScript / JavaScript** (L2 + L3: `.ts/.tsx/.mts/.cts/.js/.jsx/.mjs/.cjs`, ESM + CJS, `tsconfig`/`jsconfig`, monorepo workspaces, CHA `INHERITS`/`IMPLEMENTS`) | In-process TS Compiler API + bundled `dist/typescript-lib/lib*.d.ts` | Zero-compile | 100% offline |
 | **C# / Roslyn** (L2 + L3: `SemanticModel`, CHA `INHERITS`/`IMPLEMENTS`, read-only `obj/project.assets.json` NuGet discovery) | **.NET 10 runtime** (`dotnet exec`, isolated `DOTNET_STARTUP_HOOKS=""`) | Prebuilt deterministic Release Roslyn DLL (zero-compile) | 100% offline |
-| **Python** (L2 + L3) | **Python 3.10+** (`python -I -B -X utf8`, stdlib `ast`) | Zero-compile | 100% offline |
+| **Python** (L2 + L3) | **Python 3.10+** (`python -I -B -X utf8`, `python3` tried first on POSIX, stdlib `ast`) | Zero-compile | 100% offline |
 | **Go** (L1/heuristic + L3: directory + `go.mod` package keying) | **Go 1.22+** (`GOTOOLCHAIN=local`, `GOWORK=off`, `GOPROXY=off`, stdlib `go/parser`) | On-demand `go run` (or prebuilt `CAUSORYN_GO_WORKER_BIN`) | 100% offline |
-| **Rust** (L1/heuristic + L3: isolated Cargo `cwd` + SHA-256 binary pinning) | **Rust / Cargo** (`syn` 3 sidecar) | On-demand `cargo build --locked` into `~/.causoryn/cache/rust-worker-target` | An uncached build can fetch locked crates from `crates.io`; a populated cache supports offline use |
+| **Rust** (L1/heuristic + L3: staged crate build outside the workspace + SHA-256 binary pinning) | **Rust / Cargo** (`syn` 3 sidecar) | On-demand `cargo build --locked` of a staged crate copy in `~/.causoryn/cache/rust-worker-target` | An uncached build can fetch locked crates from `crates.io`; a populated cache supports offline use |
 
-Missing optional sidecar toolchains (`dotnet`, `python`, `go`, `cargo`) never crash the server — they degrade honestly to L0/L1 file-level provenance (`npx causoryn@latest doctor` inspects sidecar readiness).
+Missing optional sidecar toolchains (`dotnet`, `python`, `go`, `cargo`) never crash the server — they degrade honestly to L0/L1 file-level provenance (`npx causoryn@latest doctor` inspects sidecar readiness). Every tool the MCP server starts is resolved to an absolute path outside the analyzed workspace.
 
 ---
 

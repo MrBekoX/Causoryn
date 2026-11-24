@@ -58,20 +58,20 @@ startup_timeout_sec = 30
 ```
 
 - **Hedef dosya:** `CODEX_HOME` tanımlıysa `$CODEX_HOME/config.toml`, değilse `~/.codex/config.toml` (`resolveEffectiveCodexHomeDir`). `doctor` aynı dosyayı okur. Bu dizin ya da dosya mevcutsa Codex algılanmış sayılır.
-- **Cerrahi TOML yaması:** `codex mcp add`'in aksine `setup` dosyayı yeniden serileştirmez. Yorumlar, üst düzey anahtarlar, komşu `[mcp_servers.<other>]` tabloları ve `[mcp_servers.causoryn.tools.*]` onay alt tabloları olduğu gibi korunur (yalnızca tablolar arasındaki ardışık boş satırlar normalleştirilir) ve dosyanın satır sonu biçimi (`\n` veya `\r\n`) korunur. `[mcp_servers.causoryn]` tablosunun kendisi bütünüyle değiştirilir ve mevcut bir `[mcp_servers.causoryn.env]` tablosu kaldırılır.
-- **`startup_timeout_sec = 30`**, soğuk Node.js + SQLite açılışına yeterli pay bırakır.
+- **Cerrahi TOML yaması:** `codex mcp add`'in aksine `setup` dosyayı yeniden serileştirmez. Yorumlar, üst düzey anahtarlar, komşu `[mcp_servers.<other>]` tabloları ve `[mcp_servers.causoryn.tools.*]` onay alt tabloları olduğu gibi korunur (yalnızca tablolar arasındaki ardışık boş satırlar normalleştirilir) ve dosyanın satır sonu biçimi (`\n` veya `\r\n`) korunur. `[mcp_servers.causoryn]` içinde setup yalnızca `command`, `args` (`--tool-profile` ve `--output-schema` argümanlarınız korunarak) ve `startup_timeout_sec` alanlarını günceller; diğer her anahtar ve `[mcp_servers.causoryn.env]` tablosu değerini ve konumunu korur, güncel bir tablo yeniden yazılmaz.
+- **`startup_timeout_sec = 30`**, soğuk Node.js + SQLite açılışına yeterli pay bırakır. Sizin ayarladığınız `30` veya daha yüksek bir değer olduğu gibi korunur; daha düşük veya kullanılamaz bir değer `30`'a yükseltilir ve setup çıktısı bunu belirtir.
 - **Mutlak Node binary'si:** `command`, `setup`'ı çalıştıran Node.js'in `process.execPath` değeridir (Node.js ≥ 24 gerekir).
 - **Kalıcı runtime:** `setup` bir `_npx` önbelleğinden ya da işletim sisteminin temp dizininden çalıştırıldığında paketi önce `~/.causoryn/runtime` altına kopyalar ve `args[0]`'ı oraya yönlendirir; böylece kayıt `npx` önbelleği temizlendiğinde de çalışmaya devam eder.
 - **Skill'ler:** beş kanonik skill — `causoryn`, `map-system`, `preflight-change`, `verify-change` ve `architecture-blueprint` — `~/.agents/skills/<name>/SKILL.md` altına yazılır (`CODEX_HOME` altına değil, ev dizininize). Atlamak için `--no-skill` verin. `architecture-blueprint`, Codex'in MCP kanıtlarından isteğe bağlı `annotations` taslağı hazırlamasına rehberlik eder; annotation'sız export için doğrudan `causoryn_export_documentation` çağırın ([mimari export sözleşmesi](../tool-contracts.md)). Skill'ler host modeli için yönlendirme metnidir: bir skill'in andığı araç ancak etkin araç profili onu kaydediyorsa çağrılabilir.
 
 ### `setup` nasıl davranır (tüm host'lar)
 
-- **Algılama:** `--client` veya `--all` olmadan yalnızca algılanan host'lar yapılandırılır; hiçbiri algılanmazsa hiçbir şey yazılmaz.
+- **Algılama:** `--client` veya `--all` olmadan yalnızca algılanan host'lar yapılandırılır; hiçbiri algılanmazsa hiçbir şey yazılmaz ve `setup` `stderr`'e yönlendirme yazarak `1` ile çıkar.
 - **Onay:** `--yes` olmadan (ve `--dry-run` olmadan) etkileşimli bir terminal planı gösterir ve `Continue? [y/N]` diye sorar; etkileşimsiz bir kabuk "confirmation required" hatasıyla durur ve hiçbir şey yazmaz.
 - **Yedekler:** mevcut bir `config.toml` ilk kez değiştirilmeden önce orijinali `config.toml.causoryn.backup` dosyasına kopyalanır. Bu dosyanın üzerine asla yazılmaz; sonraki değişiklikler ek `config.toml.causoryn.<timestamp>-<nonce>.backup` kopyaları oluşturur.
 - **Atomik, idempotent yazımlar:** geçici dosya + rename; mevcut dosya kipi korunur (yeni dosyalar `0600`); aynı ikinci koşu `noop` raporlar.
 - **Fail-closed ayrıştırma:** bozuk TOML (kapanmamış string, dizi veya tablolar, `=` içermeyen bir satır, boş bir tablo başlığı ya da iki `[mcp_servers.causoryn]` tablosu gibi tekrarlanan bir tablo başlığı), hiçbir şey yazılmadan koşuyu `cli/malformed-toml` ile durdurur. Sembolik link hedefleri reddedilir.
-- **Çıkış kodları:** `setup` başarıda `0`, herhangi bir hatada `2` ile çıkar.
+- **Çıkış kodları:** `setup` başarıda `0`, hiçbir host algılanmadığında ve hiçbiri adlandırılmadığında `1`, herhangi bir hatada `2` ile çıkar.
 - **Kaldırma:** `[mcp_servers.causoryn]` tablosunu ve tüm `[mcp_servers.causoryn.*]` alt tablolarını, beş skill dizinini ve — başka hiçbir host config'i ona hâlâ başvurmuyorsa — `~/.causoryn/runtime` dizinini kaldırır.
 
 ### `doctor` denetimleri
@@ -121,7 +121,7 @@ Sunucu `core` profiliyle başlar: 11 araç (`causoryn_status`, `causoryn_map_sys
 | `history` | `causoryn_compare_architecture`, `causoryn_architecture_timeline` |
 | `full` | 29 legacy aracın tamamı artı `causoryn_status`, `causoryn_trace`, `causoryn_contracts` (32 araç); yerini yeni araçlara bırakan legacy araçlar bir deprecation notu taşır |
 
-Profiller virgülle birleştirilir (`wiki,history`). Öncelik sırası `--tool-profile` > `CAUSORYN_TOOL_PROFILE` > `core` şeklindedir; bilinmeyen bir profil adı sunucuyu başlangıçta durdurur. Codex'te:
+Profiller virgülle birleştirilir (`wiki,history`). Öncelik sırası `--tool-profile` > `CAUSORYN_TOOL_PROFILE` > `CAUSORYN_CONFIG.toolProfile` > `core` şeklindedir; verilen her değer doğrulanır ve bilinmeyen bir profil adı sunucuyu başlangıçta durdurur. Codex'te:
 
 ```toml
 # Ya bayrağı paketli giriş noktasının args dizisine ekleyin ...
@@ -136,14 +136,14 @@ CAUSORYN_TOOL_PROFILE = "full"
 ```
 
 - `codex mcp add` ile `--env CAUSORYN_TOOL_PROFILE=full` verin.
-- `causoryn setup`'ı yeniden çalıştırmak `[mcp_servers.causoryn]` tablosunu yeniden yazar ve `[mcp_servers.causoryn.env]` tablosunu kaldırır; bu yüzden değişikliği ardından tekrar uygulayın.
+- `npx causoryn@latest setup --client codex --tool-profile wiki,history --yes` bayrağı sizin yerinize yazar. `causoryn setup`'ı yeniden çalıştırmak `[mcp_servers.causoryn.env]` tablosunu, `--tool-profile` ve `--output-schema` argümanlarını ve tablonun diğer anahtarlarını, ayrıca 30 veya daha yüksek bir `startup_timeout_sec` değerini korur; profili değiştirmek için `setup --tool-profile <list>` verin.
 - Pazaryeri plugin'inde manifest kurulu plugin'in içinde bulunur ve düzenlenmemelidir. Codex'in `CAUSORYN_TOOL_PROFILE` değerini kendi ortamından plugin sunucularına aktarıp aktarmadığı doğrulanmamıştır; varsayılan dışında bir profile ihtiyacınız varsa Seçenek A veya C'yi kullanın.
 
 ## 4. Veri dizini ve ilk çalıştırma
 
-- `--auto-data-dir` (veya `--data-dir <abs>`) ile indeks `<base>/workspaces/<slug>-<hash12>/graph.sqlite` konumunda, export çıktısı ise `<base>/workspaces/<slug>-<hash12>/exports/` altında tutulur. Taban dizin önceliği `--data-dir` > `ZCODE_PLUGIN_DATA` > `~/.causoryn` şeklindedir.
+- `--auto-data-dir` (veya `--data-dir <abs>`) ile indeks `<base>/workspaces/<slug>-<hash12>/graph.sqlite` konumunda, export çıktısı ise `<base>/workspaces/<slug>-<hash12>/exports/` altında tutulur. Taban dizin önceliği her host için aynıdır: `--data-dir` > `~/.causoryn` (`ZCODE_PLUGIN_DATA` yalnızca `~/.causoryn` oluşturulamadığında veya yazılamadığında yedek).
 - **Tüm host'lar için workspace başına tek veritabanı.** Codex, Claude Code, Antigravity ve ZCode aynı taban dizini kullandıklarında aynı `graph.sqlite` dosyasını açar. `--client codex` yalnızca bir tanılama etiketidir (`build_leases.host_label` olarak kaydedilir). `build_leases` tek-yazar kirası (single-writer lease), iki sürecin aynı anda snapshot yayımlamasını engeller.
-- 0.3.0 öncesi sürümler host başına `graph-<client>.sqlite` dosyaları kullanıyordu. Bu dosyalar taşınmaz; 0.3.0'ın ilk açılışı `graph.sqlite` içine indeksler.
+- 0.3.0 öncesi sürümler host başına `graph-<client>.sqlite` dosyaları kullanıyordu. `graph.sqlite` henüz yoksa 0.3.0'ın ilk açılışı en yeni geçerli olanı bir kez ona kopyalar; eski dosyalar yerinde kalır ve `causoryn doctor` bunları listeler, böylece silebilirsiniz. `fp3` analizör parmak izi yine de 0.3.0'ın ilk açılışında bir kez yeniden indekslemeye yol açar.
 - Dizinler `0700` kipiyle oluşturulur ve her yetkili proje kökünün kesinlikle dışında bulunmalıdır. Analiz edilen kaynak ağacına hiçbir şey yazılmaz.
 - İndeksleme bir `worker_threads` worker'ında çalışır. Paketli giriş noktasıyla (Seçenek A ve B), ilk indeks yayımlanmadan önce yapılan bir araç çağrısı en fazla `CAUSORYN_INDEX_WAIT_MS` kadar bekler (varsayılan `15000`; `0` = bekleme) ve ardından `data.status: "indexing"`, `jobId`, `progress` ve `retryAfterMs` ile birlikte `status: "partial"` döndürür. `causoryn_status` hemen yanıt verir.
 - `--allow-cwd`, Codex'in sunucuyu başlattığı dizini bir güvenlik denetiminden sonra bağlar; bu denetim `$HOME`, dosya sistemi köklerini, sistem dizinlerini, `~/.codex`, plugin kurulum dizinlerini ve Causoryn veri dizinini reddeder. Başlangıç dizini reddedildiğinde sunucu MCP `roots/list` üzerinden güvenli bir kök gelmesini bekler; o zamana kadar workspace araçları `WORKSPACE_NOT_AUTHORIZED` döndürür. Codex'i projenin içinde başlatın ya da `args` dizisine `"--root", "/path/to/your-project"` ekleyin.
@@ -252,7 +252,7 @@ Her Causoryn giriş noktası `stdout`'a **yalnızca MCP JSON-RPC 2.0 çerçevele
 | Codex bir başlangıç zaman aşımı bildiriyor | Soğuk açılış yapılandırılmış zaman aşımını aştı. Girdide `startup_timeout_sec = 30` (veya daha yüksek) değerini koruyun. |
 | `doctor` giriş betiği için `ERROR` gösteriyor | `~/.causoryn/runtime` ya da orijinal kurulum kaldırılmış. `npx causoryn@0.3.0 setup --client codex --yes` komutunu yeniden çalıştırın. |
 | Sunucu açılışta "Unsupported Node.js version" ile çıkıyor | Node.js < 24. Node.js 24+ kurun ve `setup`'ı yeniden çalıştırın. |
-| Özel `env` ya da ek `args` kayboldu | `setup`'ı yeniden çalıştırmak `[mcp_servers.causoryn]` tablosunu değiştirir ve `[mcp_servers.causoryn.env]` tablosunu kaldırır. Bunları yeniden uygulayın. |
+| Ek `args` kayboldu | `setup`'ı yeniden çalıştırmak argüman listesini yeniden üretir ve yalnızca `--tool-profile` ile `--output-schema` argümanlarınızı (ayrıca `[mcp_servers.causoryn.env]` tablosunu ve tablonun diğer anahtarlarını) korur. Diğer argümanları yeniden uygulayın veya profil için `setup --tool-profile <list>` kullanın. |
 | Workspace araçları `WORKSPACE_NOT_AUTHORIZED` döndürüyor | Başlangıç dizini `--allow-cwd` tarafından reddedildi ve kullanılabilir bir kök bildirilmedi ya da çıplak bundle'da `allowRoots` yok. Bkz. bölüm 4 veya 5.1. |
 | Wiki veya history araçları `tools/list` içinde yok | Varsayılan `core` profili etkin. Bkz. bölüm 3. |
 

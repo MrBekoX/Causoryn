@@ -58,20 +58,20 @@ startup_timeout_sec = 30
 ```
 
 - **Target file:** `$CODEX_HOME/config.toml` when `CODEX_HOME` is set, otherwise `~/.codex/config.toml` (`resolveEffectiveCodexHomeDir`). `doctor` reads the same file. Codex counts as detected when that directory or file exists.
-- **Surgical TOML patching:** unlike `codex mcp add`, `setup` does not re-serialize the file. Comments, top-level keys, neighbouring `[mcp_servers.<other>]` tables, and `[mcp_servers.causoryn.tools.*]` approval sub-tables are kept unchanged (only runs of blank lines between tables are normalized), and the file's line-ending style (`\n` or `\r\n`) is preserved. The `[mcp_servers.causoryn]` table itself is replaced as a whole, and an existing `[mcp_servers.causoryn.env]` table is dropped.
-- **`startup_timeout_sec = 30`** gives cold Node.js + SQLite start-up enough headroom.
+- **Surgical TOML patching:** unlike `codex mcp add`, `setup` does not re-serialize the file. Comments, top-level keys, neighbouring `[mcp_servers.<other>]` tables, and `[mcp_servers.causoryn.tools.*]` approval sub-tables are kept unchanged (only runs of blank lines between tables are normalized), and the file's line-ending style (`\n` or `\r\n`) is preserved. Inside `[mcp_servers.causoryn]`, setup updates only `command`, `args` (keeping your `--tool-profile` and `--output-schema` arguments) and `startup_timeout_sec`; every other key and the `[mcp_servers.causoryn.env]` table keep their values and positions, and an up-to-date table is not rewritten.
+- **`startup_timeout_sec = 30`** gives cold Node.js + SQLite start-up enough headroom. A value of `30` or more that you set is kept as written; a lower or unusable value is raised to `30`, and the setup output says so.
 - **Absolute Node binary:** `command` is the `process.execPath` of the Node.js that ran `setup` (Node.js ≥ 24 is required).
 - **Persistent runtime:** when `setup` runs from an `_npx` cache or the OS temp directory, it first copies the package to `~/.causoryn/runtime` and points `args[0]` there, so the registration survives `npx` cache eviction.
 - **Skills:** the five canonical skills `causoryn`, `map-system`, `preflight-change`, `verify-change`, and `architecture-blueprint` are written to `~/.agents/skills/<name>/SKILL.md` (in your home directory, not under `CODEX_HOME`). Pass `--no-skill` to skip them. `architecture-blueprint` guides Codex in drafting optional `annotations` from MCP evidence; to export without annotations, call `causoryn_export_documentation` directly ([architecture export contract](../tool-contracts.md)). Skills are guidance text for the host model: a tool a skill mentions can only be called if the active tool profile registers it.
 
 ### How `setup` behaves (all hosts)
 
-- **Detection:** without `--client` or `--all`, only detected hosts are configured; if none is detected, nothing is written.
+- **Detection:** without `--client` or `--all`, only detected hosts are configured; if none is detected, nothing is written and `setup` exits `1` with guidance on `stderr`.
 - **Confirmation:** without `--yes` (and without `--dry-run`), an interactive terminal shows the plan and asks `Continue? [y/N]`; a non-interactive shell stops with a "confirmation required" error and writes nothing.
 - **Backups:** before an existing `config.toml` is modified for the first time, the original is copied to `config.toml.causoryn.backup`. That file is never overwritten; later modifications create additional `config.toml.causoryn.<timestamp>-<nonce>.backup` copies.
 - **Atomic, idempotent writes:** temporary file + rename, existing file mode kept (new files `0600`); an identical second run reports `noop`.
 - **Fail-closed parsing:** malformed TOML (unclosed strings, arrays, or tables, a line without `=`, an empty table header, or a duplicated table header such as two `[mcp_servers.causoryn]` tables) stops the run with `cli/malformed-toml` before anything is written. Symbolic-link targets are refused.
-- **Exit codes:** `setup` exits `0` on success and `2` on any error.
+- **Exit codes:** `setup` exits `0` on success, `1` when no host was detected and none was named, and `2` on any error.
 - **Uninstall:** removes `[mcp_servers.causoryn]` and every `[mcp_servers.causoryn.*]` sub-table, the five skill directories, and `~/.causoryn/runtime` when no other host config still references it.
 
 ### `doctor` checks
@@ -121,7 +121,7 @@ The server starts with the `core` profile: 11 tools (`causoryn_status`, `causory
 | `history` | `causoryn_compare_architecture`, `causoryn_architecture_timeline` |
 | `full` | all 29 legacy tools plus `causoryn_status`, `causoryn_trace`, `causoryn_contracts` (32 tools); superseded legacy tools carry a deprecation note |
 
-Profiles combine with commas (`wiki,history`). Precedence is `--tool-profile` > `CAUSORYN_TOOL_PROFILE` > `core`; an unknown name stops the server at startup. In Codex:
+Profiles combine with commas (`wiki,history`). Precedence is `--tool-profile` > `CAUSORYN_TOOL_PROFILE` > `CAUSORYN_CONFIG.toolProfile` > `core`; every supplied value is validated and an unknown name stops the server at startup. In Codex:
 
 ```toml
 # Either append the flag to the packaged entrypoint's args ...
@@ -136,14 +136,14 @@ CAUSORYN_TOOL_PROFILE = "full"
 ```
 
 - With `codex mcp add`, pass `--env CAUSORYN_TOOL_PROFILE=full`.
-- Re-running `causoryn setup` rewrites `[mcp_servers.causoryn]` and drops `[mcp_servers.causoryn.env]`, so apply the change again afterwards.
+- `npx causoryn@latest setup --client codex --tool-profile wiki,history --yes` writes the flag for you. Re-running `causoryn setup` keeps `[mcp_servers.causoryn.env]`, the `--tool-profile` and `--output-schema` arguments, and other keys of the table, and a `startup_timeout_sec` of 30 or more; pass `setup --tool-profile <list>` to change the profile.
 - For the marketplace plugin, the manifest lives in the installed plugin and should not be edited. Whether Codex forwards `CAUSORYN_TOOL_PROFILE` from its own environment to plugin servers has not been verified; use Option A or C if you need a non-default profile.
 
 ## 4. Data directory and first run
 
-- With `--auto-data-dir` (or `--data-dir <abs>`), the index lives at `<base>/workspaces/<slug>-<hash12>/graph.sqlite`, with export output under `<base>/workspaces/<slug>-<hash12>/exports/`. The base is `--data-dir` > `ZCODE_PLUGIN_DATA` > `~/.causoryn`.
+- With `--auto-data-dir` (or `--data-dir <abs>`), the index lives at `<base>/workspaces/<slug>-<hash12>/graph.sqlite`, with export output under `<base>/workspaces/<slug>-<hash12>/exports/`. The base is `--data-dir` > `~/.causoryn`, the same for every host (`ZCODE_PLUGIN_DATA` is only a fallback when `~/.causoryn` cannot be created or written).
 - **One database per workspace for all hosts.** Codex, Claude Code, Antigravity, and ZCode open the same `graph.sqlite` when they use the same base directory. `--client codex` is only a diagnostic label (recorded as `build_leases.host_label`). A `build_leases` single-writer lease prevents two processes from publishing a snapshot at the same time.
-- Releases before 0.3.0 used per-host `graph-<client>.sqlite` files. They are not migrated; the first 0.3.0 start indexes into `graph.sqlite`.
+- Releases before 0.3.0 used per-host `graph-<client>.sqlite` files. When `graph.sqlite` does not exist yet, the first 0.3.0 start copies the newest valid one into it once; the legacy files stay in place and `causoryn doctor` lists them so you can delete them. The `fp3` analyzer fingerprint still makes the first 0.3.0 start re-index once.
 - Directories are created with mode `0700` and must lie strictly outside every authorized project root. Nothing is written into the analyzed source tree.
 - Indexing runs in a `worker_threads` worker. With the packaged entrypoint (Options A and B), a tool call made before the first index is published waits up to `CAUSORYN_INDEX_WAIT_MS` (default `15000`; `0` = do not wait) and then returns `status: "partial"` with `data.status: "indexing"`, `jobId`, `progress`, and `retryAfterMs`. `causoryn_status` answers immediately.
 - `--allow-cwd` binds the directory Codex starts the server in, after a safety check that refuses `$HOME`, filesystem roots, system directories, `~/.codex`, plugin install directories, and the Causoryn data directory. When the start directory is refused, the server waits for a safe root from MCP `roots/list`; until then workspace tools return `WORKSPACE_NOT_AUTHORIZED`. Start Codex inside the project, or add `"--root", "/path/to/your-project"` to `args`.
@@ -252,7 +252,7 @@ Every Causoryn entrypoint writes **only MCP JSON-RPC 2.0 frames** to `stdout`; a
 | Codex reports a start-up timeout | Cold start exceeded the configured timeout. Keep `startup_timeout_sec = 30` (or higher) on the entry. |
 | `doctor` shows `ERROR` for the entry script | `~/.causoryn/runtime` or the original install was removed. Re-run `npx causoryn@0.3.0 setup --client codex --yes`. |
 | Server exits at start with "Unsupported Node.js version" | Node.js < 24. Install Node.js 24+ and re-run `setup`. |
-| Custom `env` or extra `args` disappeared | Re-running `setup` replaces `[mcp_servers.causoryn]` and drops `[mcp_servers.causoryn.env]`. Re-apply them. |
+| Extra `args` disappeared | Re-running `setup` regenerates the argument list and keeps only your `--tool-profile` and `--output-schema` arguments (plus `[mcp_servers.causoryn.env]` and other keys of the table). Re-apply other arguments, or use `setup --tool-profile <list>` for the profile. |
 | Workspace tools return `WORKSPACE_NOT_AUTHORIZED` | The start directory was refused by `--allow-cwd` and no usable root was reported, or the bare bundle has no `allowRoots`. See section 4 or 5.1. |
 | Wiki or history tools are missing from `tools/list` | Default `core` profile. See section 3. |
 
