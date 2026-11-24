@@ -10,7 +10,7 @@
  *   stderrMaxChars bütçeleri, stdin EPIPE yutma.
  *
  * Güvenlik (kırmızı çizgi 6): komut LİTERAL "python" (config override'lı),
- * argümanlar SABİT ["-B", workerScriptPath]; istek içeriği yalnızca stdin
+ * argümanlar SABİT ["-I", "-B", "-X", "utf8", workerScriptPath]; istek içeriği yalnızca stdin
  * üzerinden taşınır.
  */
 import { dirname } from "node:path";

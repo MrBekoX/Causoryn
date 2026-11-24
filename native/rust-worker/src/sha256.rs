@@ -1,7 +1,7 @@
 //! Bağımlılıksız SHA-256 (FIPS 180-4) — M1-Rust.
 //!
 //! Evidence.span.sourceHash, istek dosya içeriğinin UTF-8 SHA-256 özetidir
-//! (TŞ §8). M1 diliminin bağımlılık sözleşmesi yalnızca syn 2 + serde_json
+//! (TŞ §8). M1 diliminin bağımlılık sözleşmesi yalnızca syn 3 + serde_json
 //! izin verdiğinden sha2 vb. crates.io paketi eklenmez; burada saf Rust
 //! uygulanır. Doğrulama: tests/rust-worker.test.ts ve adapters/rust testi,
 //! worker'ın ürettiği sourceHash'i Node `crypto.createHash("sha256")`

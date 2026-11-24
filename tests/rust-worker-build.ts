@@ -11,7 +11,7 @@
  * Komut LİTERAL "cargo"dur (kırmızı çizgi 6; adapters/rust/src/cargo.ts
  * disiplini); toolchain konumu child env PATH'ine sabit cargo-home
  * önekiyle verilir — komut değişkeni YOKTUR. İlk derleme crates.io'dan
- * syn 2 + serde_json çeker (dakikalar sürebilir) → timeout 600s.
+ * syn 3 + serde_json çeker (dakikalar sürebilir) → timeout 600s.
  */
 
 import { spawn, spawnSync } from "node:child_process";
