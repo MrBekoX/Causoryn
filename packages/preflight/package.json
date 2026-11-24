@@ -3,7 +3,7 @@
   "version": "0.3.0",
   "private": true,
   "license": "MIT",
-  "description": "Preflight çekirdeği (sprint-5 D4+D6): build_preflight_manifest — intent + hedef kümesinden impactCandidates/certainty (packages/graph), contractChecks (D2/D3 eşlemesi), testPlanId referansı, limitations ve git-read salt-okunur sourceRevision birleştiren ADAY manifest; sembole bağlanamayan hedef requiresDisambiguation + aday listesi üretir, otomatik kesinleştirme yoktur, manifest hiçbir koşulda kod yazmaz (TŞ v2.1 §10.2/§10.3). derive_test_plan — TESTS kenarları, test-dosyası isimlendirme bağlamı ve değişen CALLS noktalarından deterministik test adayları (TŞ v2.1 §15).",
+  "description": "Preflight core: candidate-only change manifests (impact candidates, contract checks, test-plan reference, limitations and a read-only source revision) and deterministic test-plan derivation. It never writes code.",
   "type": "module",
   "exports": {
     ".": "./src/index.ts"

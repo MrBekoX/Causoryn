@@ -1,43 +1,40 @@
-# Go Worker stdin/stdout Protokolü — v1
+# Go Worker stdin/stdout Protocol — v1
 
-> Kanıt: TŞ v2.1 §7 (dil adapter'ları), §8 (Unified Evidence & Knowledge
-> Graph sözleşmesi), §23 (dil planı — M1-Go dilimi). Alan adları,
-> `packages/domain/src/snapshot.ts`'teki createSnapshot GİRDİ sözleşmesiyle
-> (SnapshotNodeInput / SnapshotEdgeInput / SnapshotEvidenceInput — NodeRef
-> uçlu, ID'siz) birebir hizalıdır. Desen kaynağı:
-> `native/roslyn-worker/PROTOCOL.md` v1 (kanıtlanmış sidecar örüntüsü).
+> Field names match the `createSnapshot` INPUT contract in
+> `packages/domain/src/snapshot.ts` (`SnapshotNodeInput` / `SnapshotEdgeInput` /
+> `SnapshotEvidenceInput` — ID-less, with `NodeRef` endpoints). The wire pattern follows
+> `native/roslyn-worker/PROTOCOL.md` v1. The source of truth for the resolution rules below is
+> `internal/analyze/analyze.go` and `internal/analyze/routes.go`.
 
-**Causoryn Go sidecar worker** — LLM çalıştırmayan, yerel ve deterministik
-Go çözümleyicisi. Süreç stdin'den satır satır istek okur, her isteğe tek
-satır JSON yanıt döner ve analiz boyunca kullanıcı workspace'ine HİÇBİR
-YAZMA yapmaz (ADR-008; analiz tamamen bellek-içindedir — go/parser kaynakları
-stdin'den alır, diskte hiçbir şey derlemez).
+**Causoryn Go sidecar worker** — a local, deterministic Go analyzer that runs no LLM. The
+process reads requests line by line from stdin, answers each request with exactly one JSON line,
+and never writes to the user's workspace (analysis is entirely in memory: `go/parser` receives
+the sources from stdin and nothing is compiled on disk).
 
-- **Taşıma:** yerel stdio; satır-bazlı JSON (her mesaj birebir tek satır).
-- **Kodlama:** BOM'suz UTF-8; JSON içi yeni satırlar `\n` kaçış dizisidir,
-  bu yüzden framing bozulmaz.
-- **stdout disiplini (kırmızı çizgi):** stdout'ta YALNIZCA protokol satırları
-  taşınır; tüm loglar `stderr`'e yazılır (`[go-worker] ` öneki ile).
-- **Kodlama kuralı:** JSON anahtarları domain'deki alan adlarıyla aynıdır
-  (camelCase); opsiyonel alanlar `null` yerine YOK olarak yazılır — tek
-  istisna `id` alanıdır (hata yanıtlarında açıkça `null` taşınır).
-- **Bağımlılık:** Yalnızca Go stdlib (`go/parser` + `go/ast` + `go/token` +
-  `crypto/sha256` + `encoding/json`); go.mod'da dış modül YOKTUR.
+- **Transport:** local stdio; line-delimited JSON (every message is exactly one line).
+- **Encoding:** UTF-8 without BOM; newlines inside JSON are `\n` escapes, so framing never breaks.
+- **stdout discipline:** stdout carries ONLY protocol lines; all logs go to `stderr` (prefix
+  `[go-worker] `).
+- **Encoding rule:** JSON keys are the domain field names (camelCase); optional fields are
+  omitted instead of `null`. The only exception is `id`, which is an explicit `null` in error
+  responses when the request line could not be parsed.
+- **Dependencies:** Go standard library only (`go/parser`, `go/ast`, `go/token`,
+  `crypto/sha256`, `encoding/json`); `go.mod` declares no external module.
 
-## 1. Mesaj çerçeveleme
+## 1. Message framing
 
 ```
-stdout ← {"id":...,"status":"ready",...}\n     (istek başına tam olarak bir satır)
-stderr ← [go-worker] ...                       (loglar; protokolün parçası değil)
+stdout ← {"id":...,"status":"ready",...}\n     (exactly one line per request)
+stderr ← [go-worker] ...                       (logs; not part of the protocol)
 ```
 
-- İstemci, worker sürecini başlatır ve stdin'e istek satırları yazar.
-- Her boş olmayan satır bir istektir; boş satırlar sessizce atlanır.
-- Worker süreci istemci stdin'i kapattığında (EOF) `0` çıkış kodu ile biter.
-  Yalnızca stdio kablosu kırılırsa `1` ile biter.
-- Son satırda newline olmasa da boş olmayan satır istek olarak işlenir.
+- The client starts the worker process and writes request lines to its stdin.
+- Every non-empty line is a request; empty lines are skipped silently.
+- The process exits with code `0` when the client closes stdin (EOF), and with `1` only if the
+  stdio pipe itself breaks.
+- A final non-empty line without a trailing newline is still processed as a request.
 
-## 2. İstek — `type: "analyze"`
+## 2. Request — `type: "analyze"`
 
 ```json
 {
@@ -45,41 +42,50 @@ stderr ← [go-worker] ...                       (loglar; protokolün parçası 
   "type": "analyze",
   "protocolVersion": "1",
   "files": [
-    { "path": "cmd/app/main.go", "content": "... kaynak kod ..." }
+    { "path": "cmd/app/main.go", "content": "... source code ..." }
+  ],
+  "moduleFiles": [
+    { "relativePath": "go.mod", "content": "module example.com/app\n\ngo 1.27\n" }
   ],
   "maxNodes": 100000
 }
 ```
 
-| Alan | Tür | Kural |
+| Field | Type | Rule |
 |---|---|---|
-| `id` | string \| sayı | **Zorunlu.** Yanıtta birebir (ham JSON olarak) echo edilir. |
-| `type` | string | **Zorunlu.** Yalnızca `"analyze"` desteklenir. |
-| `protocolVersion` | string | Opsiyonel. Varsa `"1"` olmalıdır. |
-| `files` | dizi | **Zorunlu, en az 1.** Bellek-içi kaynak çantası. |
-| `files[].path` | string | **Zorunlu.** Workspace-relative POSIX yolu. Mutlak yol, `""`/`.`/`..` segmentleri reddedilir. Aynı yol iki kez verilemez. |
-| `files[].content` | string | **Zorunlu.** Tam kaynak kod. |
-| `maxNodes` | tam sayı | Opsiyonel. Yanıt node bütçesi; `1..MaxResponseNodes` aralığında olmalı, dışı `INVALID_ARGUMENT`. Verilmezse `MaxResponseNodes` uygulanır. |
+| `id` | string \| number | **Required.** Echoed verbatim (as raw JSON) in the response. |
+| `type` | string | **Required.** Only `"analyze"` is supported. |
+| `protocolVersion` | string | Optional. If present it must be `"1"`. |
+| `files` | array | **Required, at least 1.** In-memory bag of Go sources. |
+| `files[].path` | string | **Required.** Workspace-relative POSIX path. Absolute paths (including drive letters) and `""` / `.` / `..` segments are rejected. The same path cannot appear twice. |
+| `files[].content` | string | **Required.** Full source text. |
+| `moduleFiles` | array | Optional. `go.mod` files used for exact import resolution (section 3, "Package identity"). At most `MaxFileCount` entries. |
+| `moduleFiles[].relativePath` | string | **Required.** Workspace-relative POSIX path of the `go.mod` file (same path rules as `files[].path`; duplicates rejected). Note the key is `relativePath`, not `path`. |
+| `moduleFiles[].content` | string | **Required.** Full `go.mod` text; only the `module` directive is read. |
+| `maxNodes` | integer | Optional. Response node budget; must be within `1..MaxResponseNodes`, otherwise `INVALID_ARGUMENT`. Defaults to `MaxResponseNodes`. |
 
-İstek nesnesinde (ve `files[]` öğelerinde) bilinmeyen alan →
-`INVALID_ARGUMENT` (kesin şema reddi, Zod strictObject disipliniyle aynı).
+An unknown field in the request object, in `files[]` or in `moduleFiles[]` → `INVALID_ARGUMENT`
+(strict schema, the same discipline as Zod `strictObject`).
 
-### Kaynak sınırları (TŞ §9 resource budget; K-010: yalnızca boyut limitleri)
+The Causoryn indexing pipeline sends every `go.mod` file of the workspace inventory as
+`moduleFiles` (`packages/indexing/src/index-service.ts`). Direct callers that omit it get the
+weaker no-`go.mod` rules described below.
 
-| Sınır | Değer | Aşım davranışı |
+### Resource limits (size limits only)
+
+| Limit | Value | Behavior when exceeded |
 |---|---|---|
-| `MaxRequestLineChars` | 64.000.000 char | Satır newline'a kadar DISCARD edilir; `id: null` + `LIMIT_EXCEEDED` yanıtı yazılır, döngü devam eder. |
-| `MaxFileCount` | 5.000 dosya/istek | İstek reddedilir: `LIMIT_EXCEEDED`. |
-| `MaxFileContentBytes` | 2.000.000 bayt/dosya (UTF-8) | İstek reddedilir: `LIMIT_EXCEEDED`. |
-| `MaxResponseNodes` | 250.000 node/yanıt | Sert tavan ya da istek bütçesi dolunca aşan node'lar YAYINLANMAZ; uçları yayınlanmayan kenarlar da düşer (dangling yok). Yanıta `RESPONSE_TRUNCATED` tanısı düşer ve `status: "partial"` olur — sessiz kesim yoktur. |
+| `MaxRequestLineChars` | 64,000,000 chars | The line is DISCARDED up to its newline; a response with `id: null` and `LIMIT_EXCEEDED` is written and the loop continues. |
+| `MaxFileCount` | 5,000 files per request (also applies to `moduleFiles`) | Request rejected: `LIMIT_EXCEEDED`. |
+| `MaxFileContentBytes` | 2,000,000 bytes per file (UTF-8; also applies to `moduleFiles`) | Request rejected: `LIMIT_EXCEEDED`. |
+| `MaxResponseNodes` | 250,000 nodes per response | When the hard ceiling or the request budget is reached, the extra nodes are NOT emitted and edges whose endpoints were not emitted are dropped too (no dangling edges). The response gets a `RESPONSE_TRUNCATED` diagnostic and `status: "partial"` — truncation is never silent. |
 
-Sınırlar sabittir (protokol v1'de istekte yapılandırılamaz) ve aynı girdiye
-deterministik davranışı korur. AST gezinme derinliği 1000'i aşan gövdeler
-çağrı çıkarımına DAHİL EDİLMEZ; dosya başına bir kez `GO_AST_DEPTH` tanısı +
-uyarı verilir ve analiz `partial` olur (Go yığınları büyüdüğü için çökme
-riski düşüktür; sınırın amacı sınırlı iş + dürüst rapordur).
+The limits are fixed (not configurable per request in protocol v1) and keep the behavior
+deterministic for identical input. Function bodies whose AST walk depth exceeds 1000 are
+EXCLUDED from call extraction; a `GO_AST_DEPTH` diagnostic and a warning are emitted once per
+file and the result becomes `partial`.
 
-## 3. Yanıt — `status: "ready" | "partial"`
+## 3. Response — `status: "ready" | "partial"`
 
 ```json
 {
@@ -104,49 +110,47 @@ riski düşüktür; sınırın amacı sınırlı iş + dürüst rapordur).
 }
 ```
 
-- `status: "ready"` → tanı ve uyarı yok; `"partial"` → en az bir tanı/uyarı
-  var (TŞ §7: "Parser başarısızsa yalnızca kanıtlanabilen bilgi sunulur").
-  Tanılar go/parser `scanner.ErrorList`'ten (kod `GOPARSE`, satır 1 tabanlı,
-  bilinmiyorsa 0) ve `RESPONSE_TRUNCATED`/`GO_AST_DEPTH`'ten toplanır.
-- `coverageRatio` = verified kenar / toplam kenar (4 ondalık; kenar yoksa
-  1.0 — boş kümede vacuous truthful, bilinçli karar).
-- `evidence` = YAYINLANAN kenarların taşıdığı kanıtların küme içinde tekil
-  (dedupe) listesi. Kenarın kendisi `evidence` alanında aynı kayıtları taşır.
-- `capabilities.symbolResolution: false` **dürüstlük beyanıdır**: go/types
-  semantik model KULLANILMAZ; aşağıdaki tablodaki kurallar AST + ad
-  kuralıdır (heuristic).
+- `status: "ready"` → no diagnostics and no warnings; `"partial"` → at least one diagnostic or
+  warning (when a parser fails, only what can be proven is reported). Diagnostics come from the
+  `go/parser` `scanner.ErrorList` (code `GOPARSE`, 1-based line, `0` if unknown) and from
+  `RESPONSE_TRUNCATED` / `GO_AST_DEPTH`.
+- `coverageRatio` = verified edges / all edges (4 decimals; `1.0` when there are no edges).
+- `evidence` = de-duplicated list of the evidence carried by the EMITTED edges; each edge also
+  carries the same records in its own `evidence` field.
+- `capabilities.symbolResolution: false` is an **honesty statement**: no `go/types` semantic
+  model is used. The rules below are AST plus naming and path rules.
 
-### Node alanları (domain GraphNode karşılığı — ID'siz)
+### Node fields (domain GraphNode equivalent — no IDs)
 
 ```json
 {
   "kind": "Function",
-  "qualifiedName": "services.OrdersService",
+  "qualifiedName": "services.NewOrdersService",
   "language": "go",
   "relativePath": "services/orders_service.go",
-  "attributes": { "sourceHash": "..." }
+  "attributes": {}
 }
 ```
 
-- `kind` — TŞ §8 27-node kataloğuyla sınırlıdır; worker liste dışı kind
-  üretemez. Kullanılanlar: `File`, `Class` (struct), `Interface`,
-  `Type` (diğer type decl), `Function` (top-level func), `Method`
-  (alıcılı func), `Endpoint`, `UnknownExternal`.
-- `qualifiedName` kuralları:
-  - Top-level func: `<package>.<FuncAd>` (ör. `main.ordersHandler`).
-  - Metot: `<package>.<TipAd>.<MetotAd>` (pointer alıcı `*T` → `T`;
-    generic alıcı `T[...]` → temel ad; ör. `services.OrdersService.GetOrders`).
-  - Tip: `<package>.<TipAd>` (struct → Class, interface → Interface,
-    diğer → Type).
-  - File: relativePath'in kendisi.
-  - Endpoint: `"<METHOD> <path>"` (ör. `"* /orders"`, `"GET /users"`).
-  - UnknownExternal: çağrı ifadesinin kaynak metni (ör.
-    `json.NewEncoder(w).Encode`) veya bare ident adı.
-- `attributes` — File: `sourceHash` (UTF-8 SHA-256, 64 hex); Endpoint:
-  `method` + `path` (`http.HandleFunc` HTTP fiili taşımadığından method
-  `"*"` olur). Diğer türlerde `{}`.
+- `kind` — limited to the domain node catalog; the worker cannot emit other kinds. Used kinds:
+  `File`, `Class` (struct), `Interface`, `Type` (other type declarations), `Function` (top-level
+  func), `Method` (func with a receiver), `Endpoint`, `UnknownExternal`.
+- `qualifiedName` rules:
+  - Top-level func: `<package>.<FuncName>` (e.g. `main.ordersHandler`).
+  - Method: `<package>.<TypeName>.<MethodName>` (pointer receiver `*T` → `T`; generic receiver
+    `T[...]` → base name; e.g. `services.OrdersService.GetOrders`).
+  - Type: `<package>.<TypeName>` (struct → Class, interface → Interface, other → Type).
+  - File: the `relativePath` itself.
+  - Endpoint: `"<METHOD> <path>"` (e.g. `"* /orders"`, `"GET /users"`).
+  - UnknownExternal: the source text of the call expression (e.g. `json.NewEncoder(w).Encode`)
+    or the bare identifier.
+  - `<package>` is the package clause name only. Two packages with the same name in different
+    directories can therefore produce the same `qualifiedName`; their nodes stay distinct
+    because the node key also includes `relativePath`.
+- `attributes` — File: `sourceHash` (SHA-256 of the UTF-8 content, 64 hex); Endpoint: `method`
+  and `path` (`http.HandleFunc` carries no HTTP verb, so `method` is `"*"`). `{}` for other kinds.
 
-### Edge alanları (domain GraphEdge karşılığı — ID'siz)
+### Edge fields (domain GraphEdge equivalent — no IDs)
 
 ```json
 {
@@ -155,23 +159,20 @@ riski düşüktür; sınırın amacı sınırlı iş + dürüst rapordur).
   "to":   { "kind": "Method", "qualifiedName": "services.OrdersService.GetOrders", "relativePath": "services/orders_service.go" },
   "resolution": "heuristic",
   "evidence": [ { "kind": "ast-span", "span": {...}, "analyzerId": "go-worker", "analyzerVersion": "0.1.0", "rationale": "..." } ],
-  "ambiguity": { "candidates": ["services.OrdersService.GetOrders"], "reason": "benzersiz metot adı kuralı; ..." }
+  "ambiguity": { "candidates": ["services.OrdersService.GetOrders"], "reason": "..." }
 }
 ```
 
-- `from`/`to` domain **NodeRef** biçimidir (kind + qualifiedName +
-  relativePath); ID alanı YOKTUR — ID'ler domain normalizer'da
-  (`createSnapshot`) deterministik üretilir. **Worker KİMLİK ÜRETMEZ.**
-- Worker'ın ürettiği kenar türleri: `CONTAINS`, `CALLS`, `ROUTES_TO`.
-  (IMPORTS üretülmez — `import` → IMPORTS kenarı bu dilimde yoktur;
-  `capabilities.importEdges: false` açık beyan. import bilgisi yalnızca
-  çağrı çözümlemede "analiz seti dışı package" ayrımı için kullanılır.)
-- UnknownExternal node'lar `relativePath` TAŞIMAZ (set dışı sembolün
-  dosyası yoktur).
-- Aynı (kind, from, to) üçlüsü tek kenarda birleşir; kanıtlar birleştirilir
-  (dedupe).
+- `from` / `to` use the domain **NodeRef** shape (kind + qualifiedName + relativePath); there is
+  NO ID field. IDs are derived deterministically by the domain normalizer (`createSnapshot`).
+  **The worker never generates identities.**
+- Edge kinds produced: `CONTAINS`, `CALLS`, `ROUTES_TO`. IMPORTS edges are not produced
+  (`capabilities.importEdges: false`); import declarations are used only to resolve calls.
+- UnknownExternal nodes carry NO `relativePath` (a symbol outside the analysis set has no file).
+- Edges with the same (kind, from, to) are merged into one edge; their evidence is merged and
+  de-duplicated.
 
-### Evidence alanları (domain Evidence karşılığı — ID'siz)
+### Evidence fields (domain Evidence equivalent — no IDs)
 
 ```json
 {
@@ -183,54 +184,82 @@ riski düşüktür; sınırın amacı sınırlı iş + dürüst rapordur).
 }
 ```
 
-- `span` her zaman mevcuttur; satırlar 1 tabanlıdır ve kaynak dosya
-  içeriği ile birebir eşleşir.
-- Kanıt türleri: `ast-span` (CONTAINS + CALLS) ve `route-registration`
-  (ROUTES_TO). `route-registration`, Go route kayıt ÇAĞRI kalıbı için
-  dürüst addır — C#'ın `route-attribute` (öznitelik) kanıtıyla karıştırılmaz;
-  `Evidence.kind` domain şemasında bilinçli olarak serbest string'dir
-  (packages/domain graph-schema.ts notu).
+- `span` is always present; lines are 1-based and match the source file content exactly.
+- Evidence kinds: `ast-span` (CONTAINS and CALLS) and `route-registration` (ROUTES_TO).
+  `route-registration` is the honest name for Go's route registration CALL pattern and must not
+  be confused with C#'s `route-attribute` evidence; `Evidence.kind` is deliberately a free
+  string in the domain schema.
 
-### Resolution kuralı (TŞ §8) — dürüstlük tablosu
+### Package identity
 
-| # | Kalıp | resolution | Hedef |
+- A Go package is keyed by **(directory of the file, package clause name)**. Files in the same
+  directory with the same package clause form one package; packages with the same name in
+  different directories (for example `cmd/api` and `cmd/worker`, both `package main`) are
+  separate packages and are never linked to each other as `verified`.
+- `_test` packages are not import targets, and `package main` is never an import target.
+- `go.mod` module paths (from `moduleFiles`) map import paths to directories: an import path
+  equal to a module path resolves to that module's root directory, and `<modulePath>/<sub>`
+  resolves to `<moduleRoot>/<sub>`. When modules are nested, the longest matching module path
+  wins.
+- For an unaliased import resolved through `go.mod` to a directory that holds exactly one
+  package, the declared package name is also accepted as the local name when it differs from
+  the last path segment (for example directory `my-pkg` with `package mypkg`, or a `/v2` path).
+
+### Resolution rules — honesty table
+
+Bare identifier calls and selector calls (`X.Sel(...)`) are classified as follows. Builtins
+(`len`, `make`, `append`, `new`, ... — `goBuiltins` in `model.go`) never produce an edge.
+
+| # | Pattern | resolution | Target |
 |---|---|---|---|
-| 1 | Bare ident çağrı; ad aynı package'ta tanımlı top-level func | `verified` | Function node (go/ast declaration eşleşmesi — kaynak-içi sembol) |
-| 2 | Bare ident çağrı; ad builtin (`len`, `make`, ...) | — | Kenar ÜRETİLMEZ (unsupportedConstructs'ta beyan) |
-| 3 | Bare ident çağrı; ad bulunamadı | `unresolved` | UnknownExternal(ad) — uydurma hedef yok |
-| 4 | `pkg.Func`; pkg analiz setindeki package clause adı VE Func tanımlı | `heuristic` + ambiguity | Function node (ad kuralı; go/types yok) |
-| 5 | `pkg.X`; pkg analiz setinde ama X tanımlı değil | `unresolved` | UnknownExternal("pkg.X") |
-| 6 | Selector; temel ident bir import local adı (set dışı package; zincirli akış dahil) | `heuristic` + ambiguity | UnknownExternal(çağrı metni) |
-| 7 | `x.M()` / `x.field.M()`; M adı sette tam bir metotta benzersiz | `heuristic` + ambiguity | Method node (benzersiz metot adı kuralı) |
-| 8 | `x.M()`; M birden fazla metotta | `unresolved` + ambiguity (adaylar) | UnknownExternal(çağrı metni) |
-| 9 | `x.M()`; M bir arayüz metodu adı (somut gerçekleme sette yok) | `heuristic` + ambiguity | UnknownExternal(çağrı metni; aday = arayüz.M) |
-| 10 | Hiç eşleşmeyen selector / zincir | `unresolved` | UnknownExternal(çağrı metni) |
+| 1 | Bare identifier; a top-level func with that name exists in the SAME package (same directory + same package name) | `verified` | Function node |
+| 2 | Bare identifier; builtin | — | No edge |
+| 3 | Bare identifier; no such func in the same package (a func with that name in another directory does not count) | `unresolved` | UnknownExternal(name) |
+| 4 | `alias.F()` where `alias` is an import local name and the import path resolves through a `go.mod` module path to a directory holding exactly one package: `F` is a top-level func of that package | `verified` | Function node |
+| 5 | Same as 4, but `F` is not defined in that package | `unresolved` | UnknownExternal(call text) |
+| 6 | Import path resolves through `go.mod` to a directory holding several packages, and more than one of them defines `F` | `unresolved` + ambiguity (candidates) | UnknownExternal(call text) |
+| 7 | Import path resolves through `go.mod`, but the directory is not in the analysis set (or holds several packages of which at most one defines `F`) | `heuristic` + ambiguity | UnknownExternal(call text) |
+| 8 | Import path matches no `go.mod` module, and the caller's file lies under a directory governed by a provided `go.mod` (the import is a standard-library or third-party package) | `heuristic` + ambiguity | UnknownExternal(call text) |
+| 9 | No `go.mod` governs the caller: the import matches exactly one workspace package, by directory suffix (import path equals or ends with `/<dir>`) or, failing that, by package name; `F` is defined there | `heuristic` + ambiguity (reason names the match rule) | Function node |
+| 10 | Same as 9, but `F` is not defined in the matched package | `unresolved` | UnknownExternal(call text) |
+| 11 | No `go.mod` governs the caller and the import matches several workspace packages: more than one defines `F` | `unresolved` + ambiguity (candidates) | UnknownExternal(call text) |
+| 12 | Same as 11, but exactly one matched package defines `F` | `heuristic` + ambiguity (all directory candidates) | Function node |
+| 13 | Same as 11, but none of them defines `F` | `unresolved` | UnknownExternal(call text) |
+| 14 | No `go.mod` governs the caller and no workspace package matches (standard-library or third-party package) | `heuristic` + ambiguity | UnknownExternal(call text) |
+| 15 | Chained selector whose leftmost base identifier is an import local name (e.g. `json.NewEncoder(w).Encode`) | `heuristic` + ambiguity | UnknownExternal(call text) |
+| 16 | `x.M()` / `x.field.M()` where `x` is not an import name and exactly one method named `M` exists in the analysis set | `heuristic` + ambiguity | Method node (unique method name rule) |
+| 17 | `x.M()` and methods named `M` exist on more than one type | `unresolved` + ambiguity (candidates) | UnknownExternal(call text) |
+| 18 | `x.M()` and `M` is only an interface method name (no concrete method in the set) | `heuristic` + ambiguity (candidates = `Interface.M`) | UnknownExternal(call text) |
+| 19 | Selector with no match at all, a selector whose base is not an identifier, or another call form (func literal call, generic instantiation, ...) | `unresolved` | UnknownExternal(call text) |
 
-`verified` yalnızca #1'de (ve route kaydında named handler için) kullanılır:
-go/ast, adı aynı package scope'undaki bir top-level func declaration ile
-birebir eşler (gölgeleme uyumsuzluğu AST'ten ayırt edilemez; bilinçli,
-belgelenmiş yaklaşımdır — semantic-type-resolution unsupportedConstructs'ta).
+`verified` is used only in rows 1 and 4 (and for named route handlers, below). Row 1 matches the
+name to a top-level func declaration in the same package scope through `go/ast`; local
+shadowing cannot be told apart from the AST alone and is a documented boundary
+(`semantic-type-resolution` in `unsupportedConstructs`). Row 4 requires the exact `go.mod`
+module-path mapping; without `go.mod`, package-qualified calls are at most `heuristic`.
+Candidate labels include the file path when two candidates share a `qualifiedName`.
 
-### Route tespiti (L3)
+### Route detection (L3)
 
-Tanınan kayıt kalıpları: `Handle`, `HandleFunc` (method `"*"`), `GET`,
-`POST`, `PUT`, `DELETE`, `PATCH`, `HEAD`, `OPTIONS` (büyük/küçük harf
-duyarsız — chi `Get`, gin/echo `GET` aynen). İki koruma şarttır: (1) ilk
-argüman string literal ve `/` önekli, (2) en az iki argüman. Tanınan kayıt
-çağrıları CALLS ÜRETMEZ (semantikleri Endpoint + ROUTES_TO ile tam temsil
-edilir). Handler çözümü: named func (aynı package) → `verified`; selector →
-yukarıdaki tablo (heuristic/unresolved); func literal → inline anonim
-handler: Endpoint KORUNUR, ROUTES_TO ÜRETİLMEZ + uyarı
-(`inline-anonymous-route-handlers`).
+Recognized registration calls (`routes.go`): a selector call `x.Name(...)` on an identifier where
+`Name` is, case-insensitively, `Handle` or `HandleFunc` (method `"*"`), `GET`, `POST`, `PUT`,
+`DELETE`, `PATCH`, `HEAD` or `OPTIONS` (so chi `Get` and gin/echo `GET` both match). Two guards
+are required: (1) the first argument is a string literal starting with `/`, and (2) there are at
+least two arguments. Recognized registration calls produce NO `CALLS` edge; they are fully
+represented by the Endpoint node and its `ROUTES_TO` edge.
 
-### unsupportedConstructs (bu dilimde modellenmeyenler)
+Handler resolution: an identifier naming a top-level func of the same package → `verified`; any
+other identifier → `unresolved` (UnknownExternal); a selector or other expression → the CALLS
+table above; a func literal (inline anonymous handler) → the Endpoint is KEPT, no `ROUTES_TO` is
+produced, and a warning is added (`inline-anonymous-route-handlers`).
 
-`semantic-type-resolution` (go/types yok — ad kuralı heuristic'leri),
-`inline-anonymous-route-handlers`, `builtin-function-calls`,
-`closure-call-attribution` (func literal içindeki çağrılar kapsayan adlı
-fonksiyona yazılır).
+### `unsupportedConstructs` (not modeled)
 
-## 4. Hata yanıtı — `status: "error"`
+`semantic-type-resolution` (no `go/types` — naming and path rules only),
+`inline-anonymous-route-handlers`, `builtin-function-calls`, `closure-call-attribution` (calls
+inside a func literal are attributed to the enclosing named function).
+
+## 4. Error response — `status: "error"`
 
 ```json
 {
@@ -241,76 +270,86 @@ fonksiyona yazılır).
 }
 ```
 
-- İstek düzeyi sorunlar (şema ihlali, mutlak yol, `..` kaçışı, duplicate
-  yol, bilinmeyen `type`, bilinmeyen `protocolVersion`, bozuk JSON) tüm
-  isteği reddeder; döngü DEVAM EDER — sonraki satır işlenir.
-- `id`, satır ayrıştırılabilirse istemcinin gönderdiği değerle echo edilir;
-  ayrıştırılamazsa `null`. Bozuk satır döngüyü düşürmez.
-- Kodlar yalnızca TŞ §10.1 + K-008 kümesinden: `INVALID_ARGUMENT`,
-  `INTERNAL_ERROR`, `LIMIT_EXCEEDED`. Worker kendi hata kodu icat etmez.
-  Beklenmeyen panic `recover` ile yakalanır → `INTERNAL_ERROR` yanıtı;
-  süreç yaşar.
-- Dosya düzeyi ayrıştırma sorunları HATA DEĞİLDİR → `status:"partial"` +
-  `diagnostics`; graph yine üretilir (parse edilebilen kısımlar katkı verir).
+- Request-level problems (schema violation, absolute path, `..` escape, duplicate path, unknown
+  `type`, unknown `protocolVersion`, malformed JSON) reject the whole request; the loop
+  CONTINUES with the next line.
+- `id` is echoed with the client's value when the line can be parsed, otherwise `null`. A
+  malformed line never stops the loop.
+- Error codes come only from the fixed set `INVALID_ARGUMENT`, `INTERNAL_ERROR`,
+  `LIMIT_EXCEEDED`; the worker never invents its own codes. An unexpected panic is caught with
+  `recover` → `INTERNAL_ERROR` response; the process keeps running.
+- File-level parse problems are NOT errors → `status: "partial"` plus `diagnostics`; the graph
+  is still produced from the parseable parts.
 
-## 5. Sürüm alanı
+## 5. Version fields
 
-- `protocolVersion` istekte opsiyoneldir; mevcutsa `"1"` olmalıdır.
-- Yanıt her zaman `protocolVersion: "1"` taşır; `worker.analyzerVersion`
-  model.go `AnalyzerVersion` (0.1.0) sabitiyle senkronudur ve
-  `Evidence.analyzerVersion`'a yazılır.
-- Kırılabilir değişiklik → sürüm artışı; yeni alan eklemek sürüm artışı
-  gerektirmez.
+- `protocolVersion` is optional in requests; if present it must be `"1"`.
+- Responses always carry `protocolVersion: "1"`; `worker.analyzerVersion` matches the
+  `AnalyzerVersion` constant in `model.go` (`0.1.0`) and is written to `Evidence.analyzerVersion`.
+- A breaking change bumps the version; adding a new optional field (such as `moduleFiles`) does
+  not.
 
-## 6. Determinizm sözleşmesi (TŞ §8 invariant iv/vi)
+## 6. Determinism contract
 
-- Aynı `files` girdisi → birebir aynı yanıt satırı (test bunu iki koşum
-  arasında bayt-bayt doğrular; `go run` ve binary modu aynı graph'ı üretir).
-- Kaynaklar relativePath'e göre sıralanır; node/edge/evidence çıktısı
-  kanonik anahtarla sıralanır; saat okunmaz; map yineleme sırası çıktıya
-  sırtlanmaz.
+- Identical `files` and `moduleFiles` input → byte-identical response line (tested across two
+  runs; `go run` and binary mode produce the same graph).
+- Sources are sorted by relativePath; node, edge and evidence output is sorted by canonical
+  keys; no clock is read; map iteration order never leaks into the output.
 
-## 7. Kabül koşusu (fixture)
+## 7. Acceptance runs
 
-`examples/fixture-go-app/` (4 dosya: go.mod, main.go, services/
-orders_service.go, repositories/orders_repository.go) stdin üzerinden
-gönderilir; kabul testleri `adapters/go/test/go-adapter.test.ts`
-(`npx vitest run adapters/go/test/go-adapter.test.ts`). Test bootstrap'ı go
-mevcutken worker derlemesini HER TURDA koşturur (`go build ./...` ve `-o
-bin/go-worker-test.exe`) ve başarısız derlemede suite'i AÇIKÇA fail eder —
-derleme regresyonu sessiz skip/yeşil ile geçiştirilmez; skip yalnızca Go
-toolchain bulunamadığında meşrudur (koşulamadı olarak raporlanır):
+- **Fixture:** `examples/fixture-go-app/` (`main.go`, `services/orders_service.go`,
+  `repositories/orders_repository.go`; its `go.mod` documents that the fixture is a real Go
+  module). The acceptance suite `adapters/go/test/go-adapter.test.ts`
+  (`npx vitest run adapters/go/test/go-adapter.test.ts`) sends the three `.go` files without
+  `moduleFiles`. When Go is available its bootstrap builds the worker on every run
+  (`go build ./...` and `-o bin/go-worker-test.exe`) and fails the suite explicitly on a build
+  error; a skip is legitimate only when no Go toolchain is found (reported as not run).
+  - **Positive:** `ordersHandler → newOrderService → OrdersService.GetOrders →
+    OrdersRepository.FindAll` and `createOrderHandler → ... → Save`; same-package bare
+    identifiers `verified`; package-qualified calls without `go.mod` and unique method names
+    `heuristic`; untyped selector calls `unresolved`; `"* /orders"`, `"* /orders/create"` and
+    `"* /health"` `ROUTES_TO` edges `verified`; node and edge kinds within the domain catalog;
+    evidence lines match the fixture text.
+  - **Package identity:** a multi-file package resolves cross-file calls in the same directory as
+    `verified`; two `package main` directories never produce a cross-directory `verified` edge;
+    with `moduleFiles`, a `<modulePath>/pkg` import resolves exactly (`verified`), and without
+    `go.mod` a basename collision is never `verified` and carries explicit ambiguity.
+  - **Negative:** empty / missing `files`, a `..` segment, an absolute path, a duplicate path, an
+    unknown top-level field, an unknown `files[]` field, a missing `id`, an unknown `type`, an
+    unknown `protocolVersion` or malformed JSON → `INVALID_ARGUMENT` with the `id` echoed; the
+    worker keeps running after a malformed line. Limits: 2 MB of content and 5001 files →
+    `LIMIT_EXCEEDED`; `maxNodes` out of range → `INVALID_ARGUMENT`.
+  - **Partial:** syntax error → `status: "partial"` with `GOPARSE` diagnostics and the graph still
+    produced; `maxNodes` truncation → `RESPONSE_TRUNCATED` without dangling edges; depth over 1000
+    → `GO_AST_DEPTH`; inline anonymous handler → Endpoint kept plus a warning.
+  - **Determinism:** the same request gives a byte-identical response line in two runs.
+- **Go unit tests:** `go test ./...` in `native/go-worker` runs
+  `internal/analyze/analyze_test.go` (multi-file packages, dual `package main` directories,
+  `go.mod` exact resolution and basename-ambiguity honesty) and `cmd/worker/main_test.go`
+  (`moduleFiles` request parsing).
 
-- **Pozitif:** `ordersHandler → newOrderService → OrdersService.GetOrders →
-  OrdersRepository.FindAll` ve `createOrderHandler → ... → Save` zincirleri;
-  bare-ident verified, package-qualified + benzersiz metot adı heuristic,
-  tip çözümsüz selector unresolved; `"* /orders"`, `"* /orders/create"`,
-  `"* /health"` ROUTES_TO verified; node/edge türleri TŞ §8 kataloğu içinde;
-  evidence satırları fixture metniyle eşleşir.
-- **Negatif:** boş `files` / eksik `files` / `..` segmenti / mutlak yol /
-  duplicate path / bilinmeyen üst-düzey alan / files[] bilinmeyen alan /
-  eksik `id` / bilinmeyen `type` / bilinmeyen `protocolVersion` / bozuk
-  JSON → `INVALID_ARGUMENT` + id echo; bozuk satırdan sonra worker
-  yaşamaya devam eder. Sınırlar: 2 MB içerik ve 5001 dosya →
-  `LIMIT_EXCEEDED`; `maxNodes` aralık dışı → `INVALID_ARGUMENT`.
-- **Partial:** sözdizimi hatası → `status:"partial"` + `GOPARSE` tanıları,
-  graph yine üretilir; `maxNodes` kırpma → `RESPONSE_TRUNCATED` + dangling
-  kenar yok; 1000+ derinlik → `GO_AST_DEPTH`; inline anonim handler →
-  Endpoint korunur + uyarı.
-- **Determinizm:** aynı istek iki koşumda birebir aynı yanıt satırı.
+When the full Causoryn indexer analyzes `examples/fixture-go-app`, it also sends the fixture's
+`go.mod` (module `causoryn.fixture.go-orders`), so the package-qualified calls
+`newOrderService → services.NewOrdersService` and
+`newOrderService → repositories.NewOrdersRepository` resolve as `verified` through row 4.
 
-## 8. Spawn kararı (adapter tarafı)
+## 8. Spawn modes (adapter side)
 
-- **Varsayılan: `go run ./cmd/worker`** (cwd = native/go-worker). Gerekçe:
-  worker kaynağı repo-içi tek doğruluk kaynağıdır; derleme GOCACHE'te
-  cache'lenir (ısınmış koşum saniyeler içindedir); derleme hatası stderr'de
-  açıkça görünür ve unavailable fallback gerekçesine yazılır; release
-  paketinde binary artefaktı taşımaya gerek bırakmaz. İlk soğuk derleme
-  dakikayı aşabilir → adapter default timeout 120 sn (Roslyn'deki 30 sn'den
-  farklı, belgeli sapma).
-- **Önceden derlenmiş binary:** `goWorkerBinaryPath` opsiyonu ya da
-  `CAUSORYN_GO_WORKER_BIN` env → spawn [binaryPath, []]. Test konvansiyonu:
-  `go build -o native/go-worker/bin/go-worker-test.exe ./cmd/worker`
-  (bin/ gitignore kapsamındadır). Release paketlemesi bu yolu kullanır.
-- Her iki modda komut config sabitidir; argüman dizisi SABİT; shell YOK;
-  istek içeriği yalnızca stdin'de taşınır.
+- **Default: `go run ./cmd/worker`** with `cwd` = `native/go-worker`. The worker source in the
+  repository stays the single source of truth; builds are cached in `GOCACHE` (warm runs take
+  seconds); build errors are visible on `stderr` and are recorded in the unavailable-fallback
+  reason; no binary artifact has to ship. The first cold build can take over a minute, so the
+  adapter's default request timeout is 120 s (`DEFAULT_REQUEST_TIMEOUT_MS` in
+  `adapters/go/src/types.ts`).
+- **Prebuilt binary:** the `goWorkerBinaryPath` option or the `CAUSORYN_GO_WORKER_BIN`
+  environment variable → spawn `[binaryPath, []]`. Test convention:
+  `go build -o native/go-worker/bin/go-worker-test.exe ./cmd/worker` (`bin/` is git-ignored).
+- In both modes the command comes from configuration, the argument array is FIXED, there is no
+  shell (`shell: false`), and request content travels only on stdin. The child environment is
+  built from an allowlist with `GOTOOLCHAIN=local`, `GOWORK=off` and `GOPROXY=off`
+  (`adapters/go/src/worker-process.ts`), so a workspace cannot trigger toolchain downloads,
+  workspace-mode overrides or module fetches. On Windows in `go run` mode, the adapter kills the
+  whole process tree (`taskkill /T /F`) so the compiled worker does not outlive `go`.
+- When the worker is unavailable or fails, the adapter falls back to L0/L1 file-level output and
+  says so in a warning.

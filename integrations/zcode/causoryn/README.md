@@ -1,112 +1,133 @@
 # Causoryn for ZCode
 
-> **Monorepo Development Fixture:** This directory (`integrations/zcode/causoryn`) is a local monorepo development/testing fixture. End users can install Causoryn via `npx causoryn@0.3.0 setup --client zcode --yes` or by adding the repository root marketplace (`https://github.com/MrBekoX/Causoryn`, root `marketplace.json`) in ZCode.
+> **Monorepo development fixture:** this directory (`integrations/zcode/causoryn`) is a local development and test fixture of the Causoryn monorepo. End users install Causoryn with `npx causoryn@0.3.0 setup --client zcode --yes` or by adding the repository root marketplace (`https://github.com/MrBekoX/Causoryn`, root `marketplace.json`) in ZCode. See the [ZCode host guide](../../../docs/en/hosts/zcode.md).
 
-> Evidence: TŞ v2.1 §17, §25/8 · wiki/decisions.md K-002 (ZCode as fourth host adapter) · wiki/mcp-tools.md (tool catalog) · packages/mcp-server (implemented tools)
-
-**Causoryn** is a local, **LLM-free** code-analysis engine exposed to ZCode as a `stdio` MCP server. It builds a read-only graph of an authorized workspace (files, symbols, calls) with source evidence. The distribution package also provides `architecture-blueprint` for preparing optional caller-supplied `annotations`. With the same snapshot and export inputs the artifact is reproducible. Fresh host-model prose may vary. [ZCode host guide](../../../docs/en/hosts/zcode.md)
+**Causoryn** is a local, **LLM-free** code-analysis engine exposed to ZCode as a `stdio` MCP server. It builds a read-only graph of an authorized workspace (files, symbols, calls, routes, contracts, tests) in which every edge carries source evidence. The distribution package also ships the `architecture-blueprint` skill for preparing optional, caller-supplied `annotations`. With the same snapshot and export inputs, exported artifacts are reproducible; prose written by the host model can vary.
 
 ## What it provides
 
-- One MCP server (`causoryn`, `type: "stdio"`, launched with `node`) from
+- One MCP server (`causoryn`, `type: "stdio"`, launched with `node`) declared in
   `.zcode-plugin/plugin.json`.
 - One routing skill: `skills/map-system/SKILL.md` teaches the host model when and how to
   call `causoryn_map_system`.
-- Tool profiles: **11 consolidated core tools** by default (`core` profile, keeping `tools/list` lean) and **32 tools** under `--tool-profile full` (the 29 legacy tools plus the 3 consolidated core tools `causoryn_status`, `causoryn_trace`, and `causoryn_contracts`; empty handlers are never advertised):
+- Tool profiles. The server registers only the tools of the active profile in `tools/list`:
+
+| Profile | Registered tools |
+| --- | --- |
+| `core` *(default)* | the 11 consolidated tools listed below |
+| `wiki` | `core` + the 7 Living Wiki tools (18) |
+| `history` | `core` + the 2 architecture-history tools (13) |
+| `wiki,history` | `core` + both extensions (20) |
+| `full` | the 29 legacy tool names plus `causoryn_status`, `causoryn_trace` and `causoryn_contracts` (32), for backward compatibility |
+
+Empty handlers are never advertised: every registered tool is implemented.
+
+### Default `core` profile (11 tools)
 
 | Tool | Purpose |
 | --- | --- |
-| `causoryn_status` | Consolidated core status & refresh tool (`action: "inspect"` default for capabilities, coverage tiers, workspace summary, and index job progress; `action: "refresh"` to queue a background `full` or `incremental` re-index job). |
-| `causoryn_trace` | Consolidated core trace tool (`mode: "execution"` default for bounded `CALLS`/`ROUTES_TO` call paths; `mode: "business-flow"` for cross-component request/event/contract flows with honest `gap` segments). |
-| `causoryn_contracts` | Consolidated core contract tool (`action: "check"` default for OpenAPI/AsyncAPI/JSON Schema/SQL/Protobuf compatibility; `action: "drift"` for producer/consumer drift impact). |
-| `causoryn_get_capabilities` | Adapter levels (L0–L4), server limits, protocol revision, published tool list. Needs no snapshot. |
-| `causoryn_workspace_summary` | Project / language / entrypoint / edge-coverage summary derived from the published graph snapshot. |
-| `causoryn_index_status` | Index job status: latest (or given `jobId`) job progress, published snapshot, stale flag and diagnostics. |
-| `causoryn_refresh_index` | Starts a `full` or `incremental` snapshot indexing job and returns a `jobId`. The job runs in the background and writes only to the authorized Causoryn data root. |
-| `causoryn_map_system` | Architecture map pages at `level` L0–L3 with `filters`, `maxNodes` and `cursor` pagination. |
-| `causoryn_find_symbols` | Ranked symbol search over qualified names, with `AMBIGUOUS_SYMBOL` candidate disambiguation. |
-| `causoryn_get_symbol_context` | Symbol node + neighboring edges to the requested depth (`edgeKinds` filter, deterministic ordering) + evidence records; accepts a node id or a qualified name (ambiguous names return `AMBIGUOUS_SYMBOL` candidates). |
-| `causoryn_trace_execution` | Call-chain paths from an entrypoint (framework endpoint name like `POST /orders`, a symbol name or node id) over `CALLS` + `ROUTES_TO` edges with bounded deterministic DFS: per-edge resolution + evidence stay in separate fields, a chain carrying a heuristic edge is labeled `heuristic` (never presented as verified), chains stop at `unresolved` edges (status `partial`); `maxDepth`/`maxPaths` are config-capped and truncation is reported via `truncated` + warnings. |
-| `causoryn_trace_business_flow` | Cross-component business flows (TŞ §14) from a `flowSeed` (node id or fully qualified name) over `ROUTES_TO`/`CALLS`/`PRODUCES_CONTRACT`/`CONSUMES_CONTRACT`/`CONTAINS` edges with bounded BFS and reverse contract-edge tracking: each segment carries its own certainty (`verified|heuristic|possible|gap`) and resolution; breaks are reported as honest `gap` segments (never bridged by invention, status `partial`); limits are ceiling-trimmed per TŞ §20 with `truncated` + rationales. An ambiguous seed answers `AMBIGUOUS_SYMBOL` with candidates, an unknown seed `SYMBOL_NOT_FOUND`. |
-| `causoryn_analyze_impact` | Impact analysis from target symbols over reverse edges with bounded BFS: explainable `impactPaths` where certainty (`direct|indirect|possible`) and resolution (`verified|heuristic|unresolved`) stay in separate fields; no "100% affected" claims; unresolved targets are reported, not guessed (TŞ §13). |
-| `causoryn_check_architecture` | Architecture Guard: evaluates `.causoryn/architecture.rules.yaml` (no-cycles via Tarjan SCC, forbidden-dependency glob rules) against the published snapshot; findings follow the TŞ §12 contract with optional baseline suppressions (reason/owner/date) and orphan-suppression reporting. Reports findings only — never decides CI outcomes. |
-| `causoryn_compare_architecture` | Architecture diff between two git refs (`baseRef`/`targetRef`): added/removed/changed nodes, documented-confidence rename matching, edge changes and API-surface changes. Snapshot blobs are read via read-only git (cat-file; no checkout/reset/clean); an unanalyzable revision answers `INVALID_REVISION`. |
-| `causoryn_get_agent_context` | AI Agent GPS: the task text is used as a search query only (never echoed into output); ranked context package (`exact-symbol` → `graph-proximity` → `contract` → `freshness` → `fts` legs) with `tokenBudget`, `estimatedTokens`, `omittedCount` and explicitly reported degraded legs. |
-| `causoryn_generate_onboarding` | Onboarding data for `audience` beginner/intermediate/maintainer: entry points, top-5 high-centrality modules, learning order (cycles collapsed via SCC), critical flows, tests, unknown edges and risk areas — structural data with template rationales only. |
-| `causoryn_export_documentation` | Exports the published snapshot (`json`, `markdown`, `mermaid`, `html`, or `snapshot`). For visual formats, `view: "architecture"` is the default, `"interactive"` is HTML-only, and `"full"` returns the raw graph. Optional `annotations` are validated against the projection. `format: "snapshot"` produces the comparison input and accepts only the raw view. Writes are atomic under `output.allowedOutputDirs`. Unauthorized directories return `EXPORT_NOT_ALLOWED`. |
-| `causoryn_preflight_change` | Candidate-only Preflight Manifest (TŞ §10.2/§10.3) from `intent` + `targetSymbols`/`targetFiles`: impact candidates (certainty and resolution in separate fields), `contractChecks`, `testPlanId` (content-addressed reference to the embedded derive-test-plan output), `limitations` and `sourceRevision` (read-only file-based HEAD resolution; no command execution). **It never writes code or touches the working tree** — `candidateOnly` is fixed `true`. Unresolvable targets are reported via `requiresDisambiguation` + `candidateTargets` (no automatic disambiguation); target files require a WorkspaceAccessPolicy allow decision (fail-closed). |
-| `causoryn_check_contracts` | Architecture contract evaluation (TŞ §11): reads contract spec version pairs (`contracts: [{name?, base, target}]`, read-only discovery behind WorkspaceAccessPolicy) and classifies each pair `backward-safe` / `risk` / `breaking_candidate` / `unknown` with rule-named findings carrying old/new line evidence. The verdict is static evidence only: where serializer/runtime behavior is unknowable, `unknown` is produced and never hides breaking evidence. |
-| `causoryn_detect_contract_drift` | Contract drift detection (TŞ §11) between two spec-file revisions (`base`/`target`, optional `scope` narrowing): K-013(7) `contractChanges` (`{contractId, changeKind, summary}`), breaking-candidate/risk/unknown items in separate fields, the `PRODUCES_CONTRACT`/`CONSUMES_CONTRACT` impact graph (edge resolution is never upgraded; consumer/producer anchors are scanned from `anchorFiles`) and changes without a consumer edge are honestly reported in `unconsumedChanges` (unresolved consumers). |
-| `causoryn_verify_change` | Agent Change Guard (TŞ §10.2/§10.4): post-change architectural integrity check — **it writes no code and only verifies** ("kod yazmaz, yalnızca doğrular"); it never touches the working tree and never runs tests. Compares the base publication (from a `preflightId` manifest produced in this server process via `causoryn_preflight_change`, or an explicit `baseSnapshot` id — at least one is required; when both are given they must refer to the same base) against a deterministic working-tree projection over four checks: `architecture` (guard rules from `.causoryn/architecture.rules.yaml`; a missing policy file leaves the check `not_evaluated` instead of failing the tool), `contracts` (not evaluable from this surface — the TŞ §10.4 input carries no spec pairs, so a requested contracts check is reported `not_evaluated` rather than guessed), `graph-diff` and `test-plan` (D6 candidates with honest run status: `not_run` by default; `observed` only with an evidence-backed host run record — `evidenceRef` required; a `passed` claim is only possible with evidence AND a genuinely passing report). The verdict comes from a fixed deterministic rule chain — `no_findings | review_required | blocking_findings | inconclusive` — and **`no_findings` is not a correctness/safety guarantee**: every report carries disclaimers, `incompleteChecks` and per-rule rationale. The report is byte-deterministic: the same working tree + the same base produce a bit-identical report (sprint gate); when tests were not run the report never says "passed". |
-| `causoryn_derive_test_plan` | Test Intelligence (TŞ §15): deterministic test candidates from `TESTS` edges (`direct`), changed call-site chains (`call-site`) and test-file naming context (`naming`, always heuristic); every candidate carries `reason` + `evidenceIds` + `matchLevel`; changed symbols without incoming `TESTS` edges are listed as `missingCoverageCandidates`. Tests are NEVER executed and no "these tests passed" claim is produced; the plan id is content-addressed (`testplan:<sha256>`) and matches `causoryn_preflight_change`'s `testPlanId`. `preflightId` input is explicitly rejected in this slice (no manifest store here — preflight resolution lives in `causoryn_verify_change`). |
-| `causoryn_get_evidence` | Evidence provenance (source file/line records) for a node or edge id. |
-| `causoryn_architecture_timeline` | Architecture timeline over git `refs` or a bounded history `range`: deterministic even-interval sampling (`maxRevisions`, ends preserved, skipped points listed explicitly) and per-interval diff summaries derived from the compare core; unanalyzable points/intervals are reported explicitly, no numbers are fabricated. |
-| `causoryn_wiki_build` | **The only writing wiki tool**: projects the published graph snapshot into a deterministic `WikiSnapshot` (page tree, bidirectional links + broken-link diagnostics, page versions, FTS index) and publishes it atomically into the SQLite file declared at `wiki.dataDbPath` — the ONLY writable target (the authorized Causoryn data root; never the source tree; undeclared servers deny writes). `mode: full | incremental` — incremental regenerates only the affected pages with contentHash protection and degrades to a graceful full rebuild with an explicit `fallbackReason` when incremental is unsupported (§16A.5). |
-| `causoryn_wiki_get_tree` | Wiki page tree (read-only): 12 root categories + child pages in taxonomy order with `childCount`, coverage/freshness, subtree `depth` cap and cursor/limit pagination; empty categories are listed as `no_data`, never filled in. |
-| `causoryn_wiki_get_page` | Single wiki page (read-only): generated-layer sections (with `sectionKey` filter + section pagination), `evidenceRefs` provenance, page-level `sourceRefs`, coverage and freshness. Overlay annotations are not served here (TŞ §16A.6: separate local UI/CLI flow with explicit user consent). |
-| `causoryn_wiki_search` | Wiki search (read-only): escaped multi-field FTS5 query ranked exact symbol/route > title > module > BM25 > graph proximity, with `matchedFields` + `evidenceIds` relevance explanation, snippets and cursor pagination. No embedding/vector score exists (the engine is LLM-free); the proximity leg is reported as skipped when no proximity data is provided. |
-| `causoryn_wiki_get_links` | Page links (read-only): outgoing + incoming (backlinks derived from the reverse index, never duplicated) with resolution + evidence; links whose target could not be resolved are preserved with `toPageId: null` and surfaced in `brokenLinkDiagnostics` (never silently dropped). |
-| `causoryn_wiki_get_versions` | Accessible git/snapshot revisions (read-only): the published wiki revision is `available` (per-page versions carry `contentHash`/`linkSetHash`/`templateVersion`/`coverage`); `refs` aliases (commit/tag/branch) are resolved via read-only git (`cat-file`, no checkout/reset/clean) — an unresolvable alias answers `INVALID_REVISION`, a resolved revision without a stored wiki build answers `not_available` with the reason. |
-| `causoryn_wiki_diff` | Wiki snapshot diff (read-only; the working tree is never touched): `addedPages`/`removedPages`, `changedSections`, `addedLinks`/`removedLinks`, per-page `coverageDelta` (`{previous, current, reason?}`) and `unresolvedDifferences`. `contractChanges` (`{contractId, changeKind, summary}` — K-013(7)) is computed from the contract node surfaces behind both wiki snapshots; an unresolvable back graph answers `[]` with an explicit resolution warning, two empty surfaces answer a real `[]`. |
+| `causoryn_status` | Capabilities, coverage tiers, workspace summary and index job progress (`action: "inspect"`, default); queues a background `incremental` or `full` re-index job (`action: "refresh"`). |
+| `causoryn_map_system` | Architecture map pages at `level` L0–L3 with `filters`, `maxNodes` and `cursor` pagination; `profile: "onboarding"` returns structured onboarding data (entry points, central modules, learning order, critical flows, risk areas). |
+| `causoryn_find_symbols` | Ranked symbol search over qualified names; several exact matches return `AMBIGUOUS_SYMBOL` with candidates. |
+| `causoryn_get_symbol_context` | Symbol node, neighboring edges up to the requested depth (`edgeKinds` filter, deterministic order) and the backing evidence records. |
+| `causoryn_trace` | Bounded call paths over `CALLS` + `ROUTES_TO` from an endpoint or symbol (`mode: "execution"`, default), or cross-component request/event/contract flows with honest `gap` segments (`mode: "business-flow"`). Every edge keeps its own resolution and evidence. |
+| `causoryn_get_agent_context` | Ranked, token-budgeted context package for a task; the task text is used only as a search query and degraded legs are reported explicitly. |
+| `causoryn_preflight_change` | Candidate-only Preflight Manifest: impact candidates (certainty and resolution in separate fields), contract checks, test plan, limitations and a read-only source revision. `include: ["impact"]` / `include: ["test-plan"]` return the impact report or the test plan alone. It never writes code. |
+| `causoryn_verify_change` | Post-change verification against a preflight manifest or base snapshot: architecture rules, contracts, graph diff and test plan, with the verdict `no_findings`, `review_required`, `blocking_findings` or `inconclusive`. It writes no code and runs no tests; `no_findings` is not a correctness or safety guarantee. |
+| `causoryn_contracts` | OpenAPI / AsyncAPI / JSON Schema / SQL / Protobuf compatibility checks (`action: "check"`, default) and producer/consumer drift impact (`action: "drift"`). |
+| `causoryn_get_evidence` | Evidence provenance (source file, lines, hash, analyzer, rationale) for a node, edge, evidence or finding ID. |
+| `causoryn_export_documentation` | Exports the published snapshot as `json`, `markdown`, `mermaid`, `html` or `snapshot`. Visual formats default to `view: "architecture"`; `"interactive"` is HTML-only and `"full"` returns the raw graph. Optional `annotations` are validated against the projection. Files are written atomically and only under `output.allowedOutputDirs`; other directories return `EXPORT_NOT_ALLOWED`. |
 
-All responses use the standard envelope: `schemaVersion, requestId, workspaceId,
-snapshotId, status, coverage, warnings, data, nextCursor`, with the fixed envelope
-error codes exported by the compiled server as `CAUSORYN_TOOL_ERROR_CODES`
+### Opt-in profiles
+
+- **`wiki`** adds the Living Wiki tools: `causoryn_wiki_build` (the only wiki tool that
+  writes, and only to the declared `wiki.dataDbPath`), `causoryn_wiki_get_tree`,
+  `causoryn_wiki_get_page`, `causoryn_wiki_search`, `causoryn_wiki_get_links`,
+  `causoryn_wiki_get_versions` and `causoryn_wiki_diff`.
+- **`history`** adds `causoryn_compare_architecture` (architecture diff between two Git refs,
+  read through read-only Git) and `causoryn_architecture_timeline` (sampled architecture
+  history over refs or a bounded range).
+- **`full`** keeps every legacy tool name from releases before 0.3.0. Legacy tools that a
+  core tool replaces are marked deprecated in their description and response warnings; their
+  data is unchanged:
+
+| Legacy tool (`full` only) | Core replacement |
+| --- | --- |
+| `causoryn_get_capabilities` | `causoryn_status` (`action: "inspect"`) |
+| `causoryn_workspace_summary` | `causoryn_status` (`action: "inspect"`) |
+| `causoryn_index_status` | `causoryn_status` (`action: "inspect"`) |
+| `causoryn_refresh_index` | `causoryn_status` (`action: "refresh"`) |
+| `causoryn_generate_onboarding` | `causoryn_map_system` (`profile: "onboarding"`) |
+| `causoryn_trace_execution` | `causoryn_trace` (`mode: "execution"`) |
+| `causoryn_trace_business_flow` | `causoryn_trace` (`mode: "business-flow"`) |
+| `causoryn_analyze_impact` | `causoryn_preflight_change` (`include: ["impact"]`) |
+| `causoryn_derive_test_plan` | `causoryn_preflight_change` (`include: ["test-plan"]`) |
+| `causoryn_check_architecture` | `causoryn_verify_change` (`checks: ["architecture"]`) |
+| `causoryn_check_contracts` | `causoryn_contracts` (`action: "check"`) |
+| `causoryn_detect_contract_drift` | `causoryn_contracts` (`action: "drift"`) |
+
+The other legacy names (the eight tools that keep their names in `core`, the two `history`
+tools and the seven `wiki` tools) are also part of `full`.
+
+**Selecting a profile.** Precedence is `--tool-profile <list>` > `CAUSORYN_TOOL_PROFILE` >
+`core`; unknown names stop the server at startup.
+
+- This fixture launches the bare bundle entrypoint, which reads **no command-line flags**. To
+  get the legacy names, add `"CAUSORYN_TOOL_PROFILE": "full"` (or `wiki`, `history`,
+  `wiki,history`) to the `env` block of `mcpServers.causoryn` in `.zcode-plugin/plugin.json`.
+- The packaged CLI entry written by `npx causoryn@0.3.0 setup --client zcode --yes` accepts
+  the flag: append `"--tool-profile", "full"` to its `args` in `~/.zcode/cli/config.json`.
+  `--output-schema full` additionally advertises output schemas in `tools/list`.
+
+### Response envelope and error codes
+
+All responses use the standard 10-field envelope: `schemaVersion, requestId, workspaceId,
+snapshotId, status, coverage, warnings, data, nextCursor, error`. The fixed envelope error
+codes are exported by the compiled server as `CAUSORYN_TOOL_ERROR_CODES`
 (`WORKSPACE_NOT_AUTHORIZED`, `PATH_DENIED`, `INDEX_NOT_READY`, `AMBIGUOUS_SYMBOL`,
 `LIMIT_EXCEEDED`, `INVALID_ARGUMENT`, `EVIDENCE_NOT_FOUND`, `SYMBOL_NOT_FOUND`,
-`POLICY_INVALID`, `INVALID_REVISION`, `EXPORT_NOT_ALLOWED`,
-`WIKI_PAGE_NOT_FOUND`, `CONTRACT_PARSE_FAILED`, `UNSUPPORTED_LANGUAGE`,
-`INTERNAL_ERROR`). Of these,
-`INVALID_ARGUMENT`, `EVIDENCE_NOT_FOUND` and `SYMBOL_NOT_FOUND` are project
-extensions beyond the TŞ §10.1 base list, while `POLICY_INVALID`,
-`INVALID_REVISION`, `EXPORT_NOT_ALLOWED`, `WIKI_PAGE_NOT_FOUND` and
-`CONTRACT_PARSE_FAILED` are TŞ
-§10.1 base codes first exercised by the Faz C guard / git-revision /
-export-authorization tools, the Faz C2 wiki tools and the Faz D contract
-tools respectively (see the
-header note in `packages/mcp-server/src/errors.ts`); the set is exactly what
-the server can place in `envelope.error.code`.
+`POLICY_INVALID`, `INVALID_REVISION`, `EXPORT_NOT_ALLOWED`, `WIKI_PAGE_NOT_FOUND`,
+`CONTRACT_PARSE_FAILED`, `UNSUPPORTED_LANGUAGE`, `INTERNAL_ERROR`). This set is exactly what
+the server can place in `envelope.error.code` (see `packages/mcp-server/src/errors.ts`).
+Domain, policy and authorization errors are returned inside the envelope; they never crash the
+MCP connection.
 
 ## Requirements
 
-- **Node.js >= 24** (the plugin launches the server with `node`; the monorepo targets
-  the same engine via `engines`).
+- **Node.js >= 24** (the plugin launches the server with `node`; the monorepo targets the same
+  engine via `engines`).
 - The compiled server bundle of the Causoryn monorepo:
-  `packages/mcp-server/dist/mcp-server.mjs`. In this source layout the manifest resolves
-  it as `${CLAUDE_PLUGIN_ROOT}/../../../packages/mcp-server/dist/mcp-server.mjs` — run
-  `npm run build:bundle` (in `packages/mcp-server`) if the file is missing. The bundle
-  keeps `better-sqlite3` external: the native `.node` binaries cannot be embedded in a
-  single file, so the build also copies the runtime (`lib/` + `prebuilds/`) next to the
-  bundle as `dist/node_modules/better-sqlite3/`; the artifact is honestly
-  "mcp-server.mjs + its vendored runtime", not a single file.
+  `packages/mcp-server/dist/mcp-server.mjs`. The manifest resolves it as
+  `${CLAUDE_PLUGIN_ROOT}/../../../packages/mcp-server/dist/mcp-server.mjs`; run
+  `npm run build:bundle --workspace packages/mcp-server` if the file is missing. The bundle
+  keeps `better-sqlite3` external: its native `.node` binaries cannot be embedded, so the build
+  copies the runtime (`lib/` + `prebuilds/`) next to the bundle as
+  `dist/node_modules/better-sqlite3/`, together with the `index-worker.mjs` indexing worker.
+  The whole `packages/mcp-server/dist/` directory must stay together; it is not a single file.
 - A workspace root you authorize (see below).
 
 ## Installation
 
-1. Build the monorepo once: `npm install` (repo root) and `npm run build:bundle`
-   (in `packages/mcp-server`) in the Causoryn checkout that contains this plugin under
-   `integrations/zcode/causoryn`.
-2. In ZCode, open **Settings → Plugin Management → Discover** and add the marketplace
-   root via the **+** button as a local directory: this repo's `integrations/zcode`
-   directory. Its `.claude-plugin/marketplace.json` (dev marketplace `causoryn-dev`)
-   lists `causoryn` with a relative directory source (`./causoryn`). ZCode exposes no
-   plugin CLI — verified in sprint-7 F2 (`zcode --help` / `zcode plugin --help` are
-   not available; the desktop app manages plugins in this GUI, per the official
-   `zcode-guide` diagnosing-plugins documentation) — so installation is a GUI step,
-   not a command.
+1. Build the monorepo once in the Causoryn checkout that contains this plugin under
+   `integrations/zcode/causoryn`: `npm install` (repository root), then
+   `npm run build:bundle --workspace packages/mcp-server`.
+2. In ZCode, open **Settings → Plugin Management → Discover** and add the marketplace root
+   with the **+** button as a local directory: this repository's `integrations/zcode`
+   directory. Its `.claude-plugin/marketplace.json` (development marketplace `causoryn-dev`)
+   lists `causoryn` with the relative directory source `./causoryn`. ZCode has no plugin CLI
+   (`zcode --help` / `zcode plugin --help` are not available; the desktop app manages plugins
+   in this GUI), so installation is a GUI step, not a command. This GUI step is not run by the
+   automated test suites.
 3. Install **causoryn** from the market list and keep it enabled.
-4. Configure the workspace root declaration (next section), then reload the plugin so
-   the MCP server picks up the new config.
+4. Configure the workspace root declaration (next section), then reload the plugin so the
+   MCP server picks up the new config.
 
-Since Sprint-7 F1 the manifest points at the esbuild bundle
-(`dist/mcp-server.mjs`, TŞ §17.1: "the plugin package's `scripts/mcp-server.mjs` must be
-genuinely compiled; it must not point at the root TS source"). The bundle and its vendored
-`better-sqlite3` runtime are build artifacts and are never committed; CI/release steps
-produce them.
+The bundle and its vendored `better-sqlite3` runtime are build artifacts and are never
+committed; CI and release steps produce them.
 
 ## Workspace root declaration (allowRoots)
 
-The server reads its entire configuration from the `CAUSORYN_CONFIG` environment
+The bundle entrypoint reads its entire configuration from the `CAUSORYN_CONFIG` environment
 variable (JSON). The plugin wires it through user configuration:
 
 ```json
@@ -127,7 +148,7 @@ variable (JSON). The plugin wires it through user configuration:
 }
 ```
 
-Set **Causoryn server config (JSON)** in the plugin settings to, for example:
+Set **Causoryn server config (JSON)** in the plugin settings, for example:
 
 ```json
 {"allowRoots":["C:/projects/my-app"], "workspaceId": "my-app"}
@@ -137,47 +158,35 @@ Set **Causoryn server config (JSON)** in the plugin settings to, for example:
 - The default `{"allowRoots":[]}` denies everything: workspace tools answer
   `WORKSPACE_NOT_AUTHORIZED` and nothing is indexed. This is deliberate (explicit
   authorization, default deny).
-- `output.allowedOutputDirs` (optional array) declares the ONLY directories
-  `causoryn_export_documentation` may write to. Declared directories must already
-  exist; with no declaration (the default) every export answers
-  `EXPORT_NOT_ALLOWED` and nothing is written (explicit output authorization,
-  default deny — TŞ §16 export security).
-- `wiki.dataDbPath` (optional absolute path) declares the ONLY file
-  `causoryn_wiki_build` may write (the authorized Causoryn data root SQLite
-  database, TŞ §16A.8). The path must be absolute, its parent directory must
-  exist, and it must lie OUTSIDE the `allowRoots` workspace root (the source
-  tree is never written; violations refuse to start the server). With no
-  declaration (the default) `causoryn_wiki_build` answers `PATH_DENIED` and
-  the wiki read tools answer `INDEX_NOT_READY` — explicit data-root
-  authorization, default deny.
-- No credentials, tokens or API keys exist in this plugin — the engine is fully local.
+- `storage.dataDbPath` (optional absolute path) declares the SQLite file for the persistent
+  graph index. It must lie outside every `allowRoots` root and its parent directory must
+  exist; otherwise the server refuses to start. Without it the graph is kept in memory and
+  nothing is written to disk.
+- `output.allowedOutputDirs` (optional array) declares the only directories
+  `causoryn_export_documentation` may write to. Declared directories must already exist;
+  without a declaration (the default) every export answers `EXPORT_NOT_ALLOWED` and nothing
+  is written.
+- `wiki.dataDbPath` (optional absolute path, `wiki` or `full` profile) declares the only file
+  `causoryn_wiki_build` may write. The same rules apply: absolute path, existing parent
+  directory, outside the workspace root. Without it `causoryn_wiki_build` answers
+  `PATH_DENIED` and the wiki read tools answer `INDEX_NOT_READY`.
+- No credentials, tokens or API keys exist in this plugin; the engine is fully local.
 
 ## Security model
 
-- **Read-only analysis.** Causoryn reads the authorized source tree. SQLite writes go to the data root outside the workspace, and export writes require `output.allowedOutputDirs` (ADR-008).
-- **Explicit root authorization.** Only roots listed in `allowRoots` are indexable;
-  symlink escapes, ignore rules and size/binary filters are enforced by the workspace
-  access policy (TŞ §9).
-- **LLM-free analysis and rendering.** The MCP server makes no model or embedding calls (ADR-002). The host model executes separately and can supply optional annotations.
-- **Clean stdio.** The server process writes only MCP protocol traffic to stdout; logs
-  go to stderr.
+- **Read-only analysis.** Causoryn reads the authorized source tree and never writes to it.
+  SQLite writes go only to the declared data files outside the workspace, and export writes
+  require `output.allowedOutputDirs`.
+- **Explicit root authorization.** Only roots listed in `allowRoots` are indexable; symlink
+  escapes, ignore rules and size/binary filters are enforced by the workspace access policy.
+- **LLM-free analysis and rendering.** The MCP server makes no model or embedding calls. The
+  host model runs separately and can supply optional annotations.
+- **Clean stdio.** The server process writes only MCP protocol traffic to `stdout`; logs go to
+  `stderr`.
 
 ## Scope note
 
-Faz A published the five core tools; sprint-2 Faz B added `causoryn_index_status`
-and `causoryn_refresh_index` (index job management), `causoryn_get_symbol_context`
-(Code Explorer relations + evidence) and `causoryn_trace_execution` (bounded
-deterministic call-chain paths with per-edge resolution and evidence). Sprint-3
-Faz C added `causoryn_analyze_impact`, `causoryn_check_architecture`,
-`causoryn_compare_architecture`, `causoryn_get_agent_context`,
-`causoryn_generate_onboarding`, `causoryn_export_documentation` and
-`causoryn_architecture_timeline`. Sprint-4 Faz C2 (Living Wiki, TŞ §16A)
-added the seven wiki tools with `causoryn_wiki_build` as the only writing tool.
-Sprint-5 Faz D (Differentiation, TŞ §10.2/§11/§14/§15) added
-`causoryn_trace_business_flow`, `causoryn_preflight_change`,
-`causoryn_check_contracts`, `causoryn_detect_contract_drift` and
-`causoryn_derive_test_plan`. Sprint-6 Faz E (Agent Change Guard, TŞ §10.4)
-added `causoryn_verify_change` — the change-verification companion of the
-product cycle Discover → Preflight → Agent Edits → **Verify** → Explain: it
-writes no code, it only verifies, and it never runs tests (29 tools total).
-`0.3.0` includes the visual architecture views and optional annotations on the existing export tool, plus lean tool profiles (new in `0.3.0`; `core` exposes 11 consolidated tools by default, including `causoryn_status`, `causoryn_trace`, and `causoryn_contracts`, while `--tool-profile full` exposes all 32 tools — the 29 legacy tools plus the 3 consolidated core aliases). [Tool contracts](../../../docs/en/tool-contracts.md)
+Causoryn 0.3.0 changed the default tool surface: the `core` profile with 11 consolidated tools
+replaces the 29-tool catalog of earlier releases as the default. The legacy names remain
+available unchanged with `CAUSORYN_TOOL_PROFILE=full` (this fixture) or `--tool-profile full`
+(packaged CLI). Full tool contracts: [MCP Tool Contracts](../../../docs/en/tool-contracts.md).
