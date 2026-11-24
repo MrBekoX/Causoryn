@@ -121,6 +121,39 @@ export const MAX_PROJECT_ASSETS_BYTES = 8 * 1024 * 1024;
 /** Maximum number of local NuGet reference directories forwarded to Roslyn. */
 export const MAX_NUGET_REFERENCE_DIRS = 64;
 
+/** Maximum size of one `.csproj` / `Directory.Build.props` file read by the project model (1 MiB). */
+export const MAX_PROJECT_FILE_BYTES = 1024 * 1024;
+
+/** Maximum number of MSBuild projects forwarded to the worker (mirrors Protocol.cs MaxProjectCount). */
+export const MAX_CSHARP_PROJECTS = 1024;
+
+/** One `global using` directive the .NET SDK generates for a project (MSBuild `Using` item). */
+export interface CSharpGlobalUsing {
+  /** Dotted namespace or type name (`Include`). */
+  readonly name: string;
+  /** `Alias` metadata: `global using Alias = global::Name;`. */
+  readonly alias?: string;
+  /** `Static="true"`: `global using static global::Name;`. */
+  readonly static?: boolean;
+}
+
+/** One SDK-style project of the analysis set, as sent in the worker `projects` field. */
+export interface CSharpProjectSpec {
+  /** Workspace-relative POSIX path of the `.csproj` file. */
+  readonly path: string;
+  /** `AssemblyName` property when set to a plain name (InternalsVisibleTo matching). */
+  readonly assemblyName?: string;
+  readonly globalUsings: readonly CSharpGlobalUsing[];
+  /** Workspace-relative paths of referenced projects that own analyzed sources. */
+  readonly projectReferences: readonly string[];
+}
+
+/** Result of the read-only MSBuild project model discovery. */
+export interface CSharpProjectDiscoveryResult {
+  readonly projects: readonly CSharpProjectSpec[];
+  readonly warnings: readonly string[];
+}
+
 /** Result of read-only NuGet `obj/project.assets.json` reference directory discovery. */
 export interface NugetReferenceDiscoveryResult {
   readonly referenceDirs: readonly string[];
