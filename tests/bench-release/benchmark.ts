@@ -267,7 +267,10 @@ export async function runBenchmark(
     }
 
     // (4) MCP protokol bağlantısı.
-    const server = createCausorynMcpServer(context);
+    // The spec targets (warm workspace_summary, neighborhood, bounded map) are measured on the
+    // same tools as earlier runs; causoryn_workspace_summary is a legacy name that only the
+    // full profile registers (the default core profile folds it into causoryn_status).
+    const server = createCausorynMcpServer(context, { toolProfile: "full" });
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
     client = new Client({ name: "causoryn-bench", version: "0.0.0" });
     await server.connect(serverTransport);
