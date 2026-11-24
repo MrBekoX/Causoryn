@@ -1846,9 +1846,12 @@ describe("wikiDiff eksiksizliği + K-013 #2 mod disiplini", { timeout: 60_000 },
       expect(data.contractChanges).toEqual([]);
       const warnings = envelope.warnings as string[];
       expect(
-        warnings.some((warning) => warning.includes("arka graph snapshot'ı çözümlenemedi")),
+        warnings.some((warning) => warning.includes("backing graph snapshot") && warning.includes("could not be resolved")),
       ).toBe(true);
-      expect(warnings.some((warning) => warning.includes("K-013 #7"))).toBe(true);
+      expect(
+        warnings.some((warning) => warning.includes("the contract surface could not be compared")),
+      ).toBe(true);
+      expect(warnings.some((warning) => warning.includes("K-013"))).toBe(false);
     } finally {
       context.close();
     }

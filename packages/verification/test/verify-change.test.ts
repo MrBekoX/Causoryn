@@ -626,7 +626,7 @@ describe("verifyChange — negatif", () => {
         targetSnapshot: base,
         preflightId: manifestOf(base).preflightId,
       }),
-    ).toThrowError(/preflight-not-found|çözümlenemedi/);
+    ).toThrowError(/preflight-not-found|could not be resolved/);
   });
 
   it("policy dışı dosya → verification/file-not-authorized (gerçek WorkspaceAccessPolicy)", () => {
@@ -1204,6 +1204,7 @@ describe("verifyChange — E3 test durumu dürüstlüğü", () => {
       })),
     );
     expect(candidatesJson).not.toContain("geçti");
+    expect(candidatesJson).not.toMatch(/\bpassed\b/i);
     // Tüm aday durumları not_run.
     expect(report.checks.testPlan.candidateStatuses.length).toBeGreaterThanOrEqual(1);
     for (const entry of report.checks.testPlan.candidateStatuses) {
@@ -1212,6 +1213,8 @@ describe("verifyChange — E3 test durumu dürüstlüğü", () => {
     // Limitations/unknowns'ta da koşum-sonuç iddiası metni yok.
     expect(canonicalJson(report.limitations)).not.toContain("geçti");
     expect(canonicalJson(report.unknowns)).not.toContain("geçti");
+    expect(canonicalJson(report.limitations)).not.toMatch(/\bpassed\b/i);
+    expect(canonicalJson(report.unknowns)).not.toMatch(/\bpassed\b/i);
   });
 
   it("partial: karma — bir aday observed, diğer aday not_run (explicit testNames bağlaması)", () => {

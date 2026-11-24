@@ -79,14 +79,14 @@ function cmpTr(a: string, b: string): number {
  * olarak raporlanır (sessiz eksiklik yok; K-012 örüntüsü).
  */
 const DIRTY_NOT_DETERMINED_NOTE =
-  "sourceRevision.dirty üretilmedi: HEAD çözümlemesi yalnızca salt-okunur dosya okumasıyla yapılır (komut çalıştırma yok); dirty bilgisi doğrulanabilir girdiyle manifest input'unda verilebilir";
+  "sourceRevision.dirty not determined: HEAD is resolved only by read-only file reads (no commands are run); a verifiable dirty value can be supplied in the manifest input";
 
 /**
  * Ref adı doğrulaması: beyaz liste desenine uymayan ad reddedilir.
  */
 function assertSafeRefName(refName: string): string {
   if (!SAFE_REF_NAME_PATTERN.test(refName) || refName.includes("..")) {
-    throw new Error(`güvensiz ref adı reddedildi: ${JSON.stringify(refName)}`);
+    throw new Error(`unsafe ref name rejected: ${JSON.stringify(refName)}`);
   }
   return refName;
 }
@@ -96,7 +96,7 @@ function assertRefPathWithinGitDir(gitDir: string, refName: string): string {
   const refPath = path.join(gitDir, ...refName.split("/"));
   const relative = path.relative(gitDir, refPath);
   if (relative.startsWith("..") || path.isAbsolute(relative)) {
-    throw new Error(`ref yolu gitDir dışına çıkıyor: ${refName}`);
+    throw new Error(`ref path escapes gitDir: ${refName}`);
   }
   return refPath;
 }
@@ -128,7 +128,7 @@ async function readTextWithinQuota(
     if (fileStat === undefined || !fileStat.isFile()) return undefined;
     if (fileStat.size > MAX_GIT_METADATA_BYTES) {
       notes.push(
-        `${label} boyut kotası aşıldı (${String(fileStat.size)} bayt > ${String(MAX_GIT_METADATA_BYTES)}); TŞ §19 kaynak tüketimi sınırı gereği okuma yapılmadı`,
+        `${label} exceeds the size quota (${String(fileStat.size)} bytes > ${String(MAX_GIT_METADATA_BYTES)}); not read because of the resource consumption limit`,
       );
       return undefined;
     }
@@ -145,7 +145,7 @@ async function readTextWithinQuota(
     }
     if (totalBytes > MAX_GIT_METADATA_BYTES) {
       notes.push(
-        `${label} boyut kotası aşıldı (${String(totalBytes)} bayt > ${String(MAX_GIT_METADATA_BYTES)}); TŞ §19 kaynak tüketimi sınırı gereği okuma yapılmadı`,
+        `${label} exceeds the size quota (${String(totalBytes)} bytes > ${String(MAX_GIT_METADATA_BYTES)}); not read because of the resource consumption limit`,
       );
       return undefined;
     }
@@ -167,7 +167,7 @@ async function resolveGitDir(
   if (dotGitStat === undefined) return { kind: "missing" };
   if (dotGitStat.isDirectory()) return { kind: "ok", gitDir: dotGit };
   if (!dotGitStat.isFile()) return { kind: "missing" };
-  const content = await readTextWithinQuota(dotGit, ".git işaretçi dosyası", notes);
+  const content = await readTextWithinQuota(dotGit, ".git pointer file", notes);
   if (content === undefined) return { kind: "missing" };
   const match = content.match(/^gitdir:\s*(.+)\s*$/m);
   const gitdir = match?.[1]?.trim();
@@ -196,7 +196,7 @@ async function readRefFile(
   } catch {
     return undefined; // güvenlik reddi: ref okunmaz, hata olarak yayılmaz
   }
-  const content = await readTextWithinQuota(refPath, "ref dosyası", notes);
+  const content = await readTextWithinQuota(refPath, "ref file", notes);
   if (content === undefined) return undefined;
   const sha = content.trim();
   return HEAD_SHA_PATTERN.test(sha) ? sha.toLowerCase() : undefined;
@@ -253,13 +253,13 @@ async function resolveHeadSha(
 }
 
 const NOT_A_GIT_REPO_NOTE =
-  "sourceRevision çözülemedi: kök bir git deposu değil (.git yok); manifest kaynak revizyonsuz üretildi";
+  "sourceRevision not resolved: the root is not a git repository (no .git); the manifest was built without a source revision";
 
 const GITDIR_OUTSIDE_ROOT_NOTE =
-  "sourceRevision çözülemedi: .git dosyasındaki gitdir gösterimi repo kökü dışına çözülüyor; bu biçim desteklenmiyor";
+  "sourceRevision not resolved: the gitdir pointer in the .git file resolves outside the repository root; this layout is not supported";
 
 const HEAD_UNRESOLVED_NOTE =
-  "sourceRevision çözülemedi: .git/HEAD okunamadı veya işaret ettiği ref çözümlenemedi (detached/ref/packed-refs); manifest kaynak revizyonsuz üretildi";
+  "sourceRevision not resolved: .git/HEAD could not be read or the ref it points to could not be resolved (detached/ref/packed-refs); the manifest was built without a source revision";
 
 /**
  * Çalışma ağacının kaynak revizyonunu çözer:
@@ -273,13 +273,13 @@ export async function resolveSourceRevision(
 ): Promise<SourceRevisionResolution> {
   if (typeof repoRoot !== "string" || repoRoot.length === 0 || !path.isAbsolute(repoRoot)) {
     throw new Error(
-      `resolveSourceRevision: repoRoot mutlak yol olmalı: ${String(repoRoot)}`,
+      `resolveSourceRevision: repoRoot must be an absolute path: ${String(repoRoot)}`,
     );
   }
   const rootStat = await stat(repoRoot).catch(() => undefined);
   if (rootStat === undefined || !rootStat.isDirectory()) {
     throw new Error(
-      `resolveSourceRevision: repoRoot bir dizin değil: ${repoRoot}`,
+      `resolveSourceRevision: repoRoot is not a directory: ${repoRoot}`,
     );
   }
 

@@ -177,10 +177,10 @@ export function graphErrorToToolError(
   // Ortam/hata sınıfı (git yok, komut başarısız, yazma hatası) →
   // retryable=true INTERNAL_ERROR. Orijinal mesaj + modül kodu YALNIZCA
   // enjekte edilen logger'a (stderr) yazılır; istemci mesajı geneldir.
-  log?.(`graf sözleşme hatası ${code} INTERNAL_ERROR'a eşlendi: ${error.message}`);
+  log?.(`graph contract error ${code} mapped to INTERNAL_ERROR: ${error.message}`);
   return new CausorynToolError(
     "INTERNAL_ERROR",
-    "Beklenmeyen iç hata; ayrıntılar sunucu loglarında",
+    "Unexpected internal error; see the server logs for details",
   );
 }
 
@@ -449,13 +449,13 @@ export async function checkArchitecture(
   if (input.policyId !== undefined) {
     throw new CausorynToolError(
       "INVALID_ARGUMENT",
-      "policyId bu araç yüzeyinde henüz açılmadı; bu dilimde yalnızca workspace kökündeki .causoryn/architecture.rules.yaml değerlendirilir",
+      "policyId is not supported by this tool yet; only .causoryn/architecture.rules.yaml at the workspace root is evaluated",
     );
   }
   if (input.scope !== undefined) {
     throw new CausorynToolError(
       "INVALID_ARGUMENT",
-      `scope dar kapsamlı guard değerlendirmesi bu araç yüzeyinde desteklenmiyor (${input.scope}); kapsam kural başına policy dosyasında tanımlanır (scope: modules|files|all)`,
+      `a narrowed guard evaluation scope is not supported by this tool (${input.scope}); define scope per rule in the policy file (scope: modules|files|all)`,
     );
   }
 
@@ -470,13 +470,13 @@ export async function checkArchitecture(
   if (policyRead.status === "too-large") {
     throw new CausorynToolError(
       "LIMIT_EXCEEDED",
-      `${POLICY_RELATIVE_PATH} ${String(policyRead.bytes)} byte ile config.maxFileBytes tavanını (${String(maxPolicyBytes)}) aşıyor (TŞ §20 dosya başına byte bütçesi); policy dosyasını küçültün veya kuralları bölün`,
+      `${POLICY_RELATIVE_PATH} is ${String(policyRead.bytes)} bytes, which exceeds the config.maxFileBytes ceiling (${String(maxPolicyBytes)}) for a single file; shrink the policy file or split its rules`,
     );
   }
   if (policyRead.status !== "ok") {
     throw new CausorynToolError(
       "POLICY_INVALID",
-      `policy dosyası bulunamadı: ${POLICY_RELATIVE_PATH} (workspace köküne göre); guard değerlendirmesi için kural dosyası oluşturun`,
+      `policy file not found: ${POLICY_RELATIVE_PATH} (relative to the workspace root); create the rules file to run the guard evaluation`,
     );
   }
   const policyText = policyRead.text;
@@ -487,7 +487,7 @@ export async function checkArchitecture(
   if (baselineRead.status === "too-large") {
     throw new CausorynToolError(
       "LIMIT_EXCEEDED",
-      `${BASELINE_RELATIVE_PATH} ${String(baselineRead.bytes)} byte ile config.maxFileBytes tavanını (${String(maxPolicyBytes)}) aşıyor (TŞ §20 dosya başına byte bütçesi); baseline dosyasını küçültün`,
+      `${BASELINE_RELATIVE_PATH} is ${String(baselineRead.bytes)} bytes, which exceeds the config.maxFileBytes ceiling (${String(maxPolicyBytes)}) for a single file; shrink the baseline file`,
     );
   }
   const baselineText = baselineRead.status === "ok" ? baselineRead.text : null;
@@ -513,7 +513,7 @@ export async function checkArchitecture(
   const warnings = [...staleWarningOf(read)];
   if (findings.violations.length === 0) {
     warnings.push(
-      "guard değerlendirmesi tamamlandı; kural ihlali bulunamadı (boş bulgu seti hat değil, raporlanan sonuçtur)",
+      "guard evaluation completed; no rule violations found (an empty finding set is a reported result, not an error)",
     );
   }
 
@@ -656,14 +656,14 @@ export async function compareArchitecture(
     if (basePoint.status !== "analyzed") {
       throw new GraphRepositoryError(
         "compare/blob-not-found",
-        `baseRef '${input.baseRef}' analiz edilemedi: ${basePoint.reason}`,
+        `baseRef '${input.baseRef}' could not be analyzed: ${basePoint.reason}`,
       );
     }
     const targetPoint = await readTimelinePointFromGit(canonicalRoot, input.targetRef);
     if (targetPoint.status !== "analyzed") {
       throw new GraphRepositoryError(
         "compare/blob-not-found",
-        `targetRef '${input.targetRef}' analiz edilemedi: ${targetPoint.reason}`,
+        `targetRef '${input.targetRef}' could not be analyzed: ${targetPoint.reason}`,
       );
     }
     return diffContentSets(basePoint.contentSet, targetPoint.contentSet);
@@ -771,7 +771,7 @@ export function getAgentContext(
   if (input.candidateScope !== undefined) {
     throw new CausorynToolError(
       "INVALID_ARGUMENT",
-      "candidateScope bu araç yüzeyinde henüz açılmadı (aday evresi şimdilik tüm yayınlanmış snapshot); görevi task metniyle daraltın",
+      "candidateScope is not supported by this tool yet (candidates currently come from the whole published snapshot); narrow the task through the task text instead",
     );
   }
 
@@ -925,7 +925,7 @@ export function generateOnboardingTool(
   if (input.focus !== undefined) {
     throw new CausorynToolError(
       "INVALID_ARGUMENT",
-      "focus bu araç yüzeyinde henüz açılmadı (rapor şimdilik tüm yayınlanmış snapshot için üretilir)",
+      "focus is not supported by this tool yet (the report currently covers the whole published snapshot)",
     );
   }
 
@@ -1069,14 +1069,14 @@ export function exportDocumentationTool(
     if (input.view === "wiki") {
       throw new CausorynToolError(
         "INVALID_ARGUMENT",
-        'view="wiki" bu araç yüzeyinde desteklenmez; wiki görünümü Living Wiki araçlarına aittir (izinli view değerleri: architecture, interactive, full)',
+        'view="wiki" is not supported by this tool; the wiki view belongs to the Living Wiki tools (allowed view values: architecture, interactive, full)',
       );
     }
     const parsedView = exportDocumentationViewSchema.safeParse(input.view);
     if (!parsedView.success) {
       throw new CausorynToolError(
         "INVALID_ARGUMENT",
-        `Bilinmeyen view: ${input.view}; izinli değerler: ${EXPORT_DOCUMENTATION_VIEWS.join(", ")}`,
+        `unknown view: ${input.view}; allowed values: ${EXPORT_DOCUMENTATION_VIEWS.join(", ")}`,
       );
     }
     effectiveView = parsedView.data;
@@ -1089,7 +1089,7 @@ export function exportDocumentationTool(
     // output listesi de export yazma reddinin tam karşılığıdır (default deny).
     throw new CausorynToolError(
       "EXPORT_NOT_ALLOWED",
-      "sunucu konfigürasyonunda output.allowedOutputDirs beyanı yok (default deny); yazma hedefi beyan edilmeden export yapılamaz",
+      "the server configuration declares no output.allowedOutputDirs (default deny); export is not possible without a declared output directory",
     );
   }
   const outputPolicy = deps.outputPolicy;
@@ -1320,7 +1320,7 @@ export async function architectureTimeline(
   if (input.granularity !== undefined) {
     throw new CausorynToolError(
       "INVALID_ARGUMENT",
-      `granularity bu araç yüzeyinde henüz açılmadı (${input.granularity}); nokta seçimi şimdilik refs sırasıyla yapılır`,
+      `granularity is not supported by this tool yet (${input.granularity}); timeline points currently follow the order of refs`,
     );
   }
 

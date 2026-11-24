@@ -96,7 +96,7 @@ export class CausorynConfigError extends Error {
   readonly issues: readonly string[];
 
   constructor(issues: readonly string[]) {
-    super(`Causoryn server konfigürasyonu geçersiz: ${issues.join("; ")}`);
+    super(`invalid Causoryn server configuration: ${issues.join("; ")}`);
     this.name = "CausorynConfigError";
     this.issues = issues;
   }
@@ -110,7 +110,7 @@ export function parseCausorynServerConfig(input: unknown): CausorynServerConfig 
   }
   const issues = result.error.issues.map(
     (issue) =>
-      `${issue.path.length > 0 ? issue.path.map(String).join(".") : "(kök)"}: ${issue.message}`,
+      `${issue.path.length > 0 ? issue.path.map(String).join(".") : "(root)"}: ${issue.message}`,
   );
   throw new CausorynConfigError(issues);
 }

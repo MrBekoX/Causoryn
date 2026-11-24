@@ -125,10 +125,10 @@ export function contractErrorToToolError(
   ) {
     return new CausorynToolError("CONTRACT_PARSE_FAILED", error.message);
   }
-  log?.(`sözleşme kodu ${code} INTERNAL_ERROR'a eşlendi: ${error.message}`);
+  log?.(`contract error code ${code} mapped to INTERNAL_ERROR: ${error.message}`);
   return new CausorynToolError(
     "INTERNAL_ERROR",
-    "Beklenmeyen iç hata; ayrıntılar sunucu loglarında",
+    "Unexpected internal error; see the server logs for details",
   );
 }
 
@@ -153,7 +153,7 @@ export function preflightErrorToToolError(error: {
   }
   return new CausorynToolError(
     "INTERNAL_ERROR",
-    "Beklenmeyen iç hata; ayrıntılar sunucu loglarında",
+    "Unexpected internal error; see the server logs for details",
   );
 }
 
@@ -346,7 +346,7 @@ function resolveEnvelopeSnapshot(
   if (read === undefined || read.snapshot.meta.workspaceId !== workspaceId) {
     throw new CausorynToolError(
       "INVALID_REVISION",
-      `snapshotId çözümlenemedi: ${snapshotId} — bu workspace için yayınlanmış snapshot kimliği olmalı`,
+      `snapshotId could not be resolved: ${snapshotId} — it must be a snapshot ID published for this workspace`,
     );
   }
   return read;
@@ -604,14 +604,14 @@ export async function detectContractDriftTool(
       scopedContractIds.has(record.contractId),
     );
     rationale.push(
-      `scope daraltması uygulandı: ${String(input.scope.length)} matchKey; eşleşmeyen çiftlerin kayıtları rapordan düşürüldü`,
+      `scope filter applied: ${String(input.scope.length)} matchKey(s); records of non-matching pairs were dropped from the report`,
     );
   }
 
   const warnings = staleWarningOf(read);
   if (input.anchorFiles === undefined && contractChanges.length > 0) {
     warnings.push(
-      "anchorFiles verilmedi: tüketici/üretici ankrajları taranamadı; etki grafı boş ve tüm değişiklikler unconsumedChanges'te (unresolved consumers — TŞ §11)",
+      "anchorFiles not provided: consumer/producer anchors could not be scanned; the impact graph is empty and every change is listed in unconsumedChanges (unresolved consumers)",
     );
   }
 
@@ -913,7 +913,7 @@ export function deriveTestPlan(
   const warnings = staleWarningOf(read);
   if (plan.truncated) {
     warnings.push(
-      `test planı sınırla kesildi (${plan.truncatedBy.join(", ")}); kesilmeyen adaylar mevcut olabilir (limitleri artırın; tavanlar TŞ §20 resource budget)`,
+      `test plan truncated by limits (${plan.truncatedBy.join(", ")}); more candidates may exist (raise the limits; ceilings are set by the resource budget)`,
     );
   }
 
@@ -1065,18 +1065,18 @@ export async function preflightChange(
     );
   } else {
     hostLimitations.push(
-      "test planı türetilmedi (includeTestPlan=false); testPlanId manifest'e bağlanmadı",
+      "test plan not derived (includeTestPlan=false); no testPlanId is attached to the manifest",
     );
   }
   if (input.includeContracts === false) {
     hostLimitations.push(
-      "sözleşme denetimi istenmedi (includeContracts=false); contractChecks boş bırakıldı",
+      "contract check not requested (includeContracts=false); contractChecks left empty",
     );
   } else {
     // Dürüst boşluk: sözleşme denetimi kaydı için D2/D3 sürüm çifti girdisi
     // gerekir; preflight girdisi taşımadığından kayıt ÜRETİLMEZ (uydurma yok).
     hostLimitations.push(
-      "sözleşme denetimi kaydı türetilmedi: preflight girdisinde sözleşme sürüm çifti yoktur (contractChecks boş; sözleşme değerlendirmesi causoryn_check_contracts/causoryn_detect_contract_drift araçlarındadır)",
+      "no contract check record derived: the preflight input has no contract version pair (contractChecks is empty; use causoryn_check_contracts or causoryn_detect_contract_drift to evaluate contracts)",
     );
   }
 
@@ -1133,7 +1133,7 @@ export async function preflightChange(
   const warnings = staleWarningOf(read);
   if (manifest.requiresDisambiguation) {
     warnings.push(
-      `${String(manifest.candidateTargets.length)} hedef sembole kesin bağlanamadı; candidateTargets ADAYDIR ve otomatik kesinleştirilmez (TŞ §10.3)`,
+      `${String(manifest.candidateTargets.length)} target(s) could not be linked to a single symbol; candidateTargets are only candidates and are not resolved automatically`,
     );
   }
 
@@ -1336,12 +1336,12 @@ export function traceBusinessFlow(
   const gapFlowCount = result.flows.filter((flow) => flow.hasGap).length;
   if (gapFlowCount > 0) {
     warnings.push(
-      `${String(gapFlowCount)} akış gap segmenti taşıyor: runtime feature flag/reflection/dinamik dispatch/existing olmayan kenar yüzünden kesin akış bilinmez; kopukluk uydurma köprüyle DEĞİL gap segmentiyle raporlandı (TŞ §14)`,
+      `${String(gapFlowCount)} flow(s) contain a gap segment: the exact flow is unknown because of runtime feature flags, reflection, dynamic dispatch, or missing edges; the break is reported as a gap segment, NOT bridged with a guessed edge`,
     );
   }
   if (result.truncated) {
     warnings.push(
-      `akış keşfi sınırla kesildi (${result.truncatedBy.join(", ")}); kesilmeyen akışlar mevcut olabilir (limitleri artırın; tavanlar TŞ §20 resource budget)`,
+      `flow discovery truncated by limits (${result.truncatedBy.join(", ")}); more flows may exist (raise the limits; ceilings are set by the resource budget)`,
     );
   }
 

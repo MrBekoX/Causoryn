@@ -593,7 +593,7 @@ function resolveBaseSnapshot(
   if (read === undefined || read.snapshot.meta.workspaceId !== workspaceId) {
     throw new CausorynToolError(
       "INVALID_REVISION",
-      `baseSnapshot çözümlenemedi: ${snapshotId} — bu workspace için yayınlanmış snapshot kimliği olmalı`,
+      `baseSnapshot could not be resolved: ${snapshotId} — it must be a snapshot ID published for this workspace`,
     );
   }
   return read;
@@ -624,7 +624,7 @@ export async function verifyChangeTool(
   if (input.preflightId === undefined && input.baseSnapshot === undefined) {
     throw new CausorynToolError(
       "INVALID_ARGUMENT",
-      "preflightId veya baseSnapshot gerekli: en az biri verilmelidir (TŞ §10.2 'preflightId/baseSnapshot'); preflightId için önce causoryn_preflight_change çağırın",
+      "preflightId or baseSnapshot is required: provide at least one; to get a preflightId, call causoryn_preflight_change first",
     );
   }
 
@@ -645,7 +645,7 @@ export async function verifyChangeTool(
       // katmanı aynı sözleşmeyi yeniden koşar.
       throw new CausorynToolError(
         "INVALID_ARGUMENT",
-        `preflightId çözümlenemedi: bilinmeyen kimlik — ${input.preflightId}; manifest yalnızca bu sunucu sürecinde causoryn_preflight_change ile üretildiyse çözülür (depo süreç-içidir), aksi hâlde değişiklik kümesini baseSnapshot kimliğiyle verin`,
+        `preflightId could not be resolved: unknown ID ${input.preflightId}; a manifest can only be resolved if causoryn_preflight_change created it in this server process (the store is in-memory); otherwise identify the change set with a baseSnapshot ID`,
       );
     }
     if (baseSnapshotId === undefined) {
@@ -656,7 +656,7 @@ export async function verifyChangeTool(
       // kimlik çifti uydurma hizalamaya yol açamaz).
       throw new CausorynToolError(
         "INVALID_ARGUMENT",
-        `preflightId ile baseSnapshot uyumsuz: manifest tabanı ${manifest.baseSnapshotId}, verilen baseSnapshot ${baseSnapshotId} — aynı taban yayın kimliğini verin veya yalnızca birini belirtin`,
+        `preflightId and baseSnapshot do not match: the manifest base is ${manifest.baseSnapshotId} but baseSnapshot is ${baseSnapshotId}; pass the same base snapshot ID or only one of them`,
       );
     }
   }
@@ -665,7 +665,7 @@ export async function verifyChangeTool(
     // tabanı yazıldı); savunma katmanı — uydurma taban yoktur.
     throw new CausorynToolError(
       "INVALID_ARGUMENT",
-      "preflightId veya baseSnapshot gerekli: en az biri verilmelidir (TŞ §10.2 'preflightId/baseSnapshot')",
+      "preflightId or baseSnapshot is required: provide at least one",
     );
   }
   const baseRead = resolveBaseSnapshot(deps, workspaceId, baseSnapshotId);

@@ -112,7 +112,7 @@ export interface VerifyVerdictRule {
  * mümkündür; kapı testi ham substring aramasıdır).
  */
 export const NO_FINDINGS_CORE_DISCLAIMER =
-  "no_findings yalnızca kurallı kontrollerin sorunsuz sonuçlandığını gösterir; kod doğruluğu veya güvenlik garantisi değildir; testler koşulmadıysa davranış değişimi doğrulanmamıştır";
+  "no_findings only means the rule-based checks completed without issues; it is not a guarantee of code correctness or security; if tests were not run, behavior changes are unverified";
 
 /**
  * Tekil denetim durumu:
@@ -134,7 +134,7 @@ export type VerifyCheckStatus =
  * no_findings güvenli/doğru kod garantisi değildir.
  */
 export const NO_FINDINGS_DISCLAIMER =
-  "no_findings güvenli/doğru kod garantisi DEĞİLDİR: yalnızca istenen denetimlerde bulgu üretilmediğini ifade eder (TŞ §10.4)";
+  "no_findings is NOT a guarantee of safe or correct code: it only means the requested checks produced no findings";
 
 /** TŞ §10.4 girdisindeki targetRevision; bu çekirdek yalnızca working-tree destekler. */
 export type VerifyTargetRevision = "working-tree";
