@@ -789,11 +789,22 @@ describe("git okuma katmanı — geçici depo (salt-okunur cat-file/ls-tree)", (
     expect(filtered["LC_ALL"]).toBe("C.UTF-8");
     expect(filtered["TZ"]).toBe("UTC");
 
+    const expectedNull = process.platform === "win32" ? "NUL" : "/dev/null";
+    expect(filtered["GIT_ATTR_NOSYSTEM"]).toBe("1");
+    expect(filtered["GIT_CONFIG_GLOBAL"]).toBe(expectedNull);
     expect(filtered["GIT_CONFIG_NOSYSTEM"]).toBe("1");
+    expect(filtered["GIT_LFS_SKIP_SMUDGE"]).toBe("1");
+    expect(filtered["GIT_NO_LAZY_FETCH"]).toBe("1");
+    expect(filtered["GIT_OPTIONAL_LOCKS"]).toBe("0");
     expect(filtered["GIT_TERMINAL_PROMPT"]).toBe("0");
     expect(Object.keys(filtered).sort()).toEqual([
       "COMSPEC",
+      "GIT_ATTR_NOSYSTEM",
+      "GIT_CONFIG_GLOBAL",
       "GIT_CONFIG_NOSYSTEM",
+      "GIT_LFS_SKIP_SMUDGE",
+      "GIT_NO_LAZY_FETCH",
+      "GIT_OPTIONAL_LOCKS",
       "GIT_TERMINAL_PROMPT",
       "HOME",
       "LANG",

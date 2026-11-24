@@ -29,6 +29,12 @@ export type { WorkerRunOutcome } from "@causoryn/sidecar-ipc";
  * worker'ı arka planda kalmasın diye win32'de LİTERAL "taskkill" + kendi
  * çocuğumuzun sayısal pid'i (/T ağaç, /F zorla) uygulanır (kırmızı çizgi 6).
  */
+const GO_ISOLATION_ENV_OVERRIDES = {
+  GOTOOLCHAIN: "local",
+  GOWORK: "off",
+  GOPROXY: "off",
+} as const;
+
 function killProcessTree(
   spawnProcess: SpawnFunction,
   closing: ChildProcess,
@@ -42,7 +48,9 @@ function killProcessTree(
       ["/pid", String(pid), "/T", "/F"],
       {
         stdio: ["pipe", "pipe", "pipe"],
-        env: buildAllowlistedWorkerEnv(WORKER_ENV_ALLOWLIST),
+        env: buildAllowlistedWorkerEnv(WORKER_ENV_ALLOWLIST, GO_ISOLATION_ENV_OVERRIDES),
+        shell: false,
+        windowsHide: true,
       },
     );
     killer.on("error", () => {});
@@ -88,7 +96,7 @@ export function runGoWorkerAnalyze(
   return runLineJsonWorker({
     command,
     args,
-    env: buildAllowlistedWorkerEnv(WORKER_ENV_ALLOWLIST),
+    env: buildAllowlistedWorkerEnv(WORKER_ENV_ALLOWLIST, GO_ISOLATION_ENV_OVERRIDES),
     cwd: input.workerDir,
     requestPayload: input.requestPayload,
     requestTimeoutMs: input.requestTimeoutMs,

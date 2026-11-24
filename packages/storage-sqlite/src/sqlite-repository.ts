@@ -117,6 +117,115 @@ interface WorkspaceRow {
   created_at: string;
 }
 
+interface BuildLeaseRow {
+  workspace_id: string;
+  build_id: string;
+  lease_id: string;
+  owner_pid: number;
+  host_label: string | null;
+  acquired_at: string;
+  heartbeat_at: string;
+  expires_at: string;
+}
+
+export const ORPHAN_BUILD_FAILURE_REASON = "orphan-build-recovered";
+
+/** Active single-writer build lease metadata stored in `build_leases`. */
+export interface BuildLeaseRecord {
+  readonly workspaceId: string;
+  readonly buildId: string;
+  readonly leaseId: string;
+  readonly ownerPid: number;
+  readonly hostLabel: string | null;
+  readonly acquiredAt: string;
+  readonly heartbeatAt: string;
+  readonly expiresAt: string;
+}
+
+export interface AcquireBuildLeaseInput {
+  readonly workspaceId: string;
+  readonly buildId: string;
+  readonly leaseId: string;
+  readonly ownerPid: number;
+  readonly hostLabel?: string;
+  readonly nowIso: string;
+  readonly ttlMs: number;
+  /** Optional PID liveness predicate (defaults to `defaultIsPidAlive`). */
+  readonly isPidAlive?: (pid: number) => boolean;
+}
+
+export type AcquireBuildLeaseResult =
+  | { readonly acquired: true; readonly lease: BuildLeaseRecord }
+  | { readonly acquired: false; readonly holder: BuildLeaseRecord };
+
+export interface RecoverOrphanBuildsOptions {
+  readonly nowIso?: string;
+  readonly isPidAlive?: (pid: number) => boolean;
+}
+
+export interface RecoverOrphanBuildsResult {
+  readonly recoveredBuildIds: readonly string[];
+  readonly clearedLease: boolean;
+}
+
+/**
+ * Checks whether a local OS PID is alive using `process.kill(pid, 0)`.
+ * - `pid <= 0` or non-integer -> false (never sends signal to process group 0 / -1).
+ * - Success or `EPERM` -> true (process exists).
+ * - `ESRCH` / `EINVAL` -> false (process confirmed dead).
+ */
+export function defaultIsPidAlive(pid: number): boolean {
+  if (!Number.isInteger(pid) || pid <= 0) {
+    return false;
+  }
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException | undefined)?.code;
+    if (code === "EPERM") {
+      return true;
+    }
+    if (code === "ESRCH" || code === "EINVAL") {
+      return false;
+    }
+    return false;
+  }
+}
+
+function mapBuildLeaseRow(row: BuildLeaseRow): BuildLeaseRecord {
+  return {
+    workspaceId: row.workspace_id,
+    buildId: row.build_id,
+    leaseId: row.lease_id,
+    ownerPid: row.owner_pid,
+    hostLabel: row.host_label,
+    acquiredAt: row.acquired_at,
+    heartbeatAt: row.heartbeat_at,
+    expiresAt: row.expires_at,
+  };
+}
+
+function computeExpiresAtIso(nowIso: string, ttlMs: number): string {
+  requireTimestamp("nowIso", nowIso);
+  if (typeof ttlMs !== "number" || !Number.isFinite(ttlMs) || ttlMs <= 0) {
+    throw new GraphRepositoryError(
+      "graph/invalid-limit",
+      `ttlMs pozitif sonlu sayı olmalı: ${String(ttlMs)}`,
+    );
+  }
+  const baseMs = Date.parse(nowIso);
+  return new Date(baseMs + Math.floor(ttlMs)).toISOString();
+}
+
+function isLeaseExpired(expiresAt: string, nowIso: string): boolean {
+  const expiresMs = Date.parse(expiresAt);
+  const nowMs = Date.parse(nowIso);
+  if (!Number.isFinite(expiresMs)) return true;
+  if (!Number.isFinite(nowMs)) return false;
+  return expiresMs <= nowMs;
+}
+
 function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
@@ -159,9 +268,6 @@ export class SqliteGraphRepository
     requireNonEmptyField("dbPath", dbPath);
     this.db = new Database(dbPath);
     try {
-      this.db.pragma("journal_mode = WAL");
-      this.db.pragma("foreign_keys = ON");
-      this.db.pragma("synchronous = NORMAL");
       this.db.pragma("busy_timeout = 5000");
       const version = this.db.pragma("user_version", { simple: true });
       if (typeof version !== "number" || !Number.isInteger(version)) {
@@ -176,6 +282,14 @@ export class SqliteGraphRepository
           `Veritabanı şeması bu paketten daha yeni (v${version} > v${SCHEMA_VERSION})`,
         );
       }
+      if (version === 0) {
+        // Defense-in-depth (CVE-2026-119375): set 4096-byte page size before
+        // initializing WAL or creating any tables on a brand-new database.
+        this.db.pragma("page_size = 4096");
+      }
+      this.db.pragma("journal_mode = WAL");
+      this.db.pragma("foreign_keys = ON");
+      this.db.pragma("synchronous = NORMAL");
       applySchema(this.db);
       const maxSid = this.db
         .prepare("SELECT COALESCE(MAX(sid), 0) AS max_sid FROM snapshots")
@@ -552,6 +666,9 @@ export class SqliteGraphRepository
           `Aktif build yok: ${buildId}`,
         );
       }
+      this.stmt(
+        `DELETE FROM build_leases WHERE workspace_id = ? AND build_id = ?`,
+      ).run(row.workspace_id, buildId);
       this.buildPositions.delete(row.sid);
       this.cachePublished(row.sid, graph);
       return graph;
@@ -570,25 +687,256 @@ export class SqliteGraphRepository
   }
 
   failBuild(buildId: string, reason: string): void {
+    requireNonEmptyField("buildId", buildId);
     requireNonEmptyField("reason", reason);
-    const existing = this.stmt(
-      `SELECT sid FROM snapshots WHERE build_id = ? AND state = 'building' LIMIT 1`,
-    ).get(buildId) as { sid: number } | undefined;
-    const result = this.runWrite(
-      `UPDATE snapshots SET state = 'failed', failure_reason = ?
-       WHERE build_id = ? AND state = 'building'`,
-      reason,
-      buildId,
-    );
-    if (result.changes === 0) {
+    const runFail = (): void => {
+      const existing = this.stmt(
+        `SELECT sid, workspace_id FROM snapshots WHERE build_id = ? AND state = 'building' LIMIT 1`,
+      ).get(buildId) as { sid: number; workspace_id: string } | undefined;
+      const result = this.runWrite(
+        `UPDATE snapshots SET state = 'failed', failure_reason = ?
+         WHERE build_id = ? AND state = 'building'`,
+        reason,
+        buildId,
+      );
+      if (result.changes === 0) {
+        throw new GraphRepositoryError(
+          "graph/build-not-active",
+          `Aktif build yok: ${buildId}`,
+        );
+      }
+      if (existing !== undefined) {
+        this.runWrite(
+          `DELETE FROM build_leases WHERE workspace_id = ? AND build_id = ?`,
+          existing.workspace_id,
+          buildId,
+        );
+        this.buildPositions.delete(existing.sid);
+      }
+    };
+    if (this.db.inTransaction) {
+      runFail();
+    } else {
+      this.db.transaction(runFail).immediate();
+    }
+  }
+
+  /**
+   * Acquires the single-writer build lease for `workspaceId` atomically via
+   * `BEGIN IMMEDIATE`. If an existing lease is expired or owned by a confirmed-dead
+   * PID, it is replaced atomically; if held by a live peer, returns `{ acquired: false, holder }`.
+   */
+  acquireBuildLease(input: AcquireBuildLeaseInput): AcquireBuildLeaseResult {
+    this.requireWorkspace(input.workspaceId);
+    requireNonEmptyField("buildId", input.buildId);
+    requireNonEmptyField("leaseId", input.leaseId);
+    if (!Number.isInteger(input.ownerPid) || input.ownerPid <= 0) {
       throw new GraphRepositoryError(
-        "graph/build-not-active",
-        `Aktif build yok: ${buildId}`,
+        "graph/invalid-limit",
+        `ownerPid pozitif tam sayı olmalı: ${String(input.ownerPid)}`,
       );
     }
-    if (existing !== undefined) {
-      this.buildPositions.delete(existing.sid);
-    }
+    const expiresAt = computeExpiresAtIso(input.nowIso, input.ttlMs);
+    const hostLabel =
+      input.hostLabel !== undefined && input.hostLabel.trim().length > 0
+        ? input.hostLabel.trim()
+        : null;
+    const isPidAlive = input.isPidAlive ?? defaultIsPidAlive;
+
+    const execute = (): AcquireBuildLeaseResult => {
+      const existing = this.stmt(
+        `SELECT workspace_id, build_id, lease_id, owner_pid, host_label,
+                acquired_at, heartbeat_at, expires_at
+         FROM build_leases WHERE workspace_id = ? LIMIT 1`,
+      ).get(input.workspaceId) as BuildLeaseRow | undefined;
+
+      if (existing !== undefined) {
+        const expired = isLeaseExpired(existing.expires_at, input.nowIso);
+        const alive = !expired && isPidAlive(existing.owner_pid);
+        if (alive) {
+          return { acquired: false, holder: mapBuildLeaseRow(existing) };
+        }
+        this.runWrite(
+          `DELETE FROM build_leases WHERE workspace_id = ?`,
+          input.workspaceId,
+        );
+      }
+
+      this.runWrite(
+        `INSERT INTO build_leases
+           (workspace_id, build_id, lease_id, owner_pid, host_label,
+            acquired_at, heartbeat_at, expires_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        input.workspaceId,
+        input.buildId,
+        input.leaseId,
+        input.ownerPid,
+        hostLabel,
+        input.nowIso,
+        input.nowIso,
+        expiresAt,
+      );
+
+      return {
+        acquired: true,
+        lease: {
+          workspaceId: input.workspaceId,
+          buildId: input.buildId,
+          leaseId: input.leaseId,
+          ownerPid: input.ownerPid,
+          hostLabel,
+          acquiredAt: input.nowIso,
+          heartbeatAt: input.nowIso,
+          expiresAt,
+        },
+      };
+    };
+
+    return this.db.inTransaction
+      ? execute()
+      : this.db.transaction(execute).immediate();
+  }
+
+  /** Runs `fn` inside a `BEGIN IMMEDIATE` SQLite transaction (reentrant if already in transaction). */
+  withImmediateTransaction<T>(fn: () => T): T {
+    return this.db.inTransaction ? fn() : this.db.transaction(fn).immediate();
+  }
+
+  /** Updates the `build_id` bound to an already-acquired lease row. */
+  bindBuildLeaseBuildId(
+    workspaceId: string,
+    leaseId: string,
+    buildId: string,
+  ): boolean {
+    requireNonEmptyField("workspaceId", workspaceId);
+    requireNonEmptyField("leaseId", leaseId);
+    requireNonEmptyField("buildId", buildId);
+    const result = this.runWrite(
+      `UPDATE build_leases SET build_id = ? WHERE workspace_id = ? AND lease_id = ?`,
+      buildId,
+      workspaceId,
+      leaseId,
+    );
+    return result.changes === 1;
+  }
+
+  /** Renews heartbeat and expiration timestamp for an active lease owned by `leaseId`. */
+  renewBuildLease(
+    workspaceId: string,
+    leaseId: string,
+    nowIso: string,
+    ttlMs: number,
+  ): boolean {
+    requireNonEmptyField("workspaceId", workspaceId);
+    requireNonEmptyField("leaseId", leaseId);
+    const nextExpiresAt = computeExpiresAtIso(nowIso, ttlMs);
+    const result = this.runWrite(
+      `UPDATE build_leases
+       SET heartbeat_at = ?, expires_at = ?
+       WHERE workspace_id = ? AND lease_id = ?`,
+      nowIso,
+      nextExpiresAt,
+      workspaceId,
+      leaseId,
+    );
+    return result.changes === 1;
+  }
+
+  /** Idempotently releases a lease row owned by `leaseId`. */
+  releaseBuildLease(workspaceId: string, leaseId: string): void {
+    requireNonEmptyField("workspaceId", workspaceId);
+    requireNonEmptyField("leaseId", leaseId);
+    this.runWrite(
+      `DELETE FROM build_leases WHERE workspace_id = ? AND lease_id = ?`,
+      workspaceId,
+      leaseId,
+    );
+  }
+
+  /** Returns the current lease row for `workspaceId`, if any. */
+  getActiveBuildLease(workspaceId: string): BuildLeaseRecord | undefined {
+    requireNonEmptyField("workspaceId", workspaceId);
+    const row = this.stmt(
+      `SELECT workspace_id, build_id, lease_id, owner_pid, host_label,
+              acquired_at, heartbeat_at, expires_at
+       FROM build_leases WHERE workspace_id = ? LIMIT 1`,
+    ).get(workspaceId) as BuildLeaseRow | undefined;
+    return row === undefined ? undefined : mapBuildLeaseRow(row);
+  }
+
+  /**
+   * Atomically recovers orphaned `building` snapshot rows and expired/dead-PID
+   * build leases for `workspaceId`:
+   * - A `building` row is orphaned if:
+   *   (i) no lease row exists for `workspaceId` (e.g., legacy v0.2.4 crash), OR
+   *   (ii) the lease's `expires_at <= nowIso`, OR
+   *   (iii) the lease's `owner_pid` is confirmed dead (`!isPidAlive(pid)`), OR
+   *   (iv) the live lease belongs to a different `build_id`.
+   * - Orphan `building` rows are transitioned to `state = 'failed'`,
+   *   `failure_reason = 'orphan-build-recovered'`, and expired/dead lease rows are deleted.
+   */
+  recoverOrphanBuilds(
+    workspaceId: string,
+    options: RecoverOrphanBuildsOptions = {},
+  ): RecoverOrphanBuildsResult {
+    requireNonEmptyField("workspaceId", workspaceId);
+    const nowIso = options.nowIso ?? new Date().toISOString();
+    requireTimestamp("nowIso", nowIso);
+    const isPidAlive = options.isPidAlive ?? defaultIsPidAlive;
+
+    const execute = (): RecoverOrphanBuildsResult => {
+      const lease = this.stmt(
+        `SELECT workspace_id, build_id, lease_id, owner_pid, host_label,
+                acquired_at, heartbeat_at, expires_at
+         FROM build_leases WHERE workspace_id = ? LIMIT 1`,
+      ).get(workspaceId) as BuildLeaseRow | undefined;
+
+      const leaseIsLive =
+        lease !== undefined &&
+        !isLeaseExpired(lease.expires_at, nowIso) &&
+        isPidAlive(lease.owner_pid);
+
+      const buildingRows = this.stmt(
+        `SELECT sid, build_id FROM snapshots
+         WHERE workspace_id = ? AND state = 'building'
+         ORDER BY sid ASC`,
+      ).all(workspaceId) as Array<{ sid: number; build_id: string }>;
+
+      const recoveredBuildIds: string[] = [];
+      for (const row of buildingRows) {
+        const ownedByLiveLease =
+          lease !== undefined && leaseIsLive && lease.build_id === row.build_id;
+        if (ownedByLiveLease) {
+          continue;
+        }
+        const updated = this.runWrite(
+          `UPDATE snapshots SET state = 'failed', failure_reason = ?
+           WHERE sid = ? AND state = 'building'`,
+          ORPHAN_BUILD_FAILURE_REASON,
+          row.sid,
+        );
+        if (updated.changes > 0) {
+          this.buildPositions.delete(row.sid);
+          recoveredBuildIds.push(row.build_id);
+        }
+      }
+
+      let clearedLease = false;
+      if (lease !== undefined && !leaseIsLive) {
+        const deleted = this.runWrite(
+          `DELETE FROM build_leases WHERE workspace_id = ? AND lease_id = ?`,
+          workspaceId,
+          lease.lease_id,
+        );
+        clearedLease = deleted.changes > 0;
+      }
+
+      return { recoveredBuildIds, clearedLease };
+    };
+
+    return this.db.inTransaction
+      ? execute()
+      : this.db.transaction(execute).immediate();
   }
 
   getSnapshot(snapshotId: string): SnapshotRead | undefined {

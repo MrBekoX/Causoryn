@@ -299,6 +299,39 @@ describe.skipIf(!pythonAvailable)("adapters/python (M1-Python)", () => {
     expect(Object.keys(env).every((key) => key !== "PYTHONPATH")).toBe(true);
     expect(env["PATH"]).toBeDefined();
   });
+
+  it("izolasyon (Task 1.1): python -I -B -X utf8 ve güvenilen cwd=dirname(workerScriptPath) ile başlatılır", async () => {
+    const captured: Array<{
+      args: readonly string[];
+      cwd?: string;
+      shell?: false;
+      windowsHide?: true;
+    }> = [];
+    const result = await analyzePythonWorkspace({
+      workspaceId: "adapter-python-isolation",
+      files: fixtureFiles(),
+      options: {
+        requestTimeoutMs: 30_000,
+        spawnProcess: (_cmd, args, options) => {
+          captured.push({
+            args,
+            ...(options.cwd !== undefined ? { cwd: options.cwd } : {}),
+            ...(options.shell !== undefined ? { shell: options.shell } : {}),
+            ...(options.windowsHide !== undefined
+              ? { windowsHide: options.windowsHide }
+              : {}),
+          });
+          return spawn("node", ["-e", CRASH_SCRIPT], options);
+        },
+      },
+    });
+    expect(result.workerAvailable).toBe(false);
+    expect(captured).toHaveLength(1);
+    expect(captured[0]?.args).toEqual(["-I", "-B", "-X", "utf8", WORKER_SCRIPT]);
+    expect(captured[0]?.cwd).toBe(dirname(WORKER_SCRIPT));
+    expect(captured[0]?.shell).toBe(false);
+    expect(captured[0]?.windowsHide).toBe(true);
+  });
 });
 
 /* ------------------------------------------------------------------ */

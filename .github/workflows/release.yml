@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Release tag to build and publish (e.g. v0.2.4); workflow must be dispatched on that tag ref"
+        description: "Release tag to build and publish (e.g. v0.2.5); workflow must be dispatched on that tag ref"
         required: true
         type: string
 
@@ -19,8 +19,8 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  build-and-verify:
-    name: Build, Verify & Pack (Isolated)
+  verify-and-test:
+    name: Verify & Test (Read-Only)
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
@@ -127,9 +127,6 @@ jobs:
       - name: Build distribution package
         run: npm run build:package --workspace packages/causoryn
 
-      - name: Verify distribution package readiness
-        run: node packages/causoryn/scripts/verify-package-ready.mjs
-
       - name: Lint
         run: npm run lint
 
@@ -141,6 +138,56 @@ jobs:
 
       - name: Run tests
         run: npm test
+
+  build-and-pack:
+    name: Hermetic Build & Pack (Zero Tests)
+    needs: verify-and-test
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    permissions:
+      contents: read
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@aebdcf6156ab6691adf63218240e476564a1ed4c # v2.23.0
+        with:
+          egress-policy: audit
+          disable-sudo-and-containers: true
+
+      - name: Clean checkout of release ref
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "24"
+          # Hermetic SLSA build: explicitly disable package-manager-cache (defaults to true in v7;
+          # prevents Actions cache poisoning) and omit registry-url (no static .npmrc token).
+          package-manager-cache: false
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@0f4a354dd5547a28c70b7853dbd95d5b67886e73 # v6.1.0
+        with:
+          dotnet-version: "10.0.x"
+
+      - name: Install dependencies
+        run: npm ci --ignore-scripts
+
+      - name: Build Roslyn worker (deterministic Release, locked)
+        run: dotnet build native/roslyn-worker/Causoryn.RoslynWorker.csproj -c Release -p:DebugType=none -p:ContinuousIntegrationBuild=true -p:SatelliteResourceLanguages=en -p:RestoreLockedMode=true
+
+      - name: Build packages and adapters
+        run: npm run build
+
+      - name: Build MCP server bundle
+        run: npm run build:bundle --workspace packages/mcp-server
+
+      - name: Build distribution package
+        run: npm run build:package --workspace packages/causoryn
+
+      - name: Verify distribution package readiness
+        run: node packages/causoryn/scripts/verify-package-ready.mjs
 
       - name: Pack distribution tarball
         working-directory: packages/causoryn
@@ -175,7 +222,17 @@ jobs:
             echo "CLI version mismatch: expected ${EXPECTED_VERSION}, got ${ACTUAL_VERSION}" >&2
             exit 1
           fi
-          HOME="$SMOKE_DIR/home" "$SMOKE_DIR/node_modules/.bin/causoryn" doctor --json
+          DOCTOR_OUT=""
+          DOCTOR_EXIT=0
+          DOCTOR_OUT=$(HOME="$SMOKE_DIR/home" "$SMOKE_DIR/node_modules/.bin/causoryn" doctor --json) || DOCTOR_EXIT=$?
+          DOCTOR_OUT="$DOCTOR_OUT" DOCTOR_EXIT="$DOCTOR_EXIT" node -e '
+            const exitCode = Number(process.env.DOCTOR_EXIT);
+            const report = JSON.parse(process.env.DOCTOR_OUT || "{}");
+            if (exitCode !== 1 || report.node?.ok !== true || report.runtime?.ok !== true || report.overallStatus !== "NOT CONFIGURED") {
+              console.error("Unexpected doctor smoke result:", { exitCode, overallStatus: report.overallStatus, nodeOk: report.node?.ok, runtimeOk: report.runtime?.ok });
+              process.exit(1);
+            }
+          '
           HOME="$SMOKE_DIR/home" SMOKE_BIN="$SMOKE_DIR/node_modules/.bin/causoryn" SMOKE_CWD="$SMOKE_DIR/workspace" node -e '
             const cp = require("node:child_process");
             const bin = process.env.SMOKE_BIN;
@@ -236,9 +293,9 @@ jobs:
           path: release-artifacts/
           retention-days: 5
 
-  attest-and-publish:
+  publish:
     name: Attest & Publish (OIDC)
-    needs: build-and-verify
+    needs: build-and-pack
     runs-on: ubuntu-latest
     environment: release
     timeout-minutes: 15

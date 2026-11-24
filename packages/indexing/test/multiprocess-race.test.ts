@@ -355,7 +355,7 @@ describe("IndexService — çoklu-süreç SQLite yarış kurtarması", { timeout
         tolerateConcurrentPublishRace: true,
       });
 
-      // Dosya değiştirilir ve repoA sequence=2 için aktif bir 'building' satırı açar.
+      // Dosya değiştirilir ve repoA sequence=2 için aktif bir 'building' satırı + canlı lease açar.
       writeFileSync(
         path.join(arena.workspaceDir, "src", "orders.ts"),
         "export function activeBuildOrder(): string { return 'v2'; }\n",
@@ -368,9 +368,21 @@ describe("IndexService — çoklu-süreç SQLite yarış kurtarması", { timeout
         analyzerFingerprint: "fp-test",
         createdAt: T1,
       });
+      repoA.acquireBuildLease({
+        workspaceId: "default",
+        buildId: activeBuild.buildId,
+        leaseId: "lease-live-peer-a",
+        ownerPid: process.pid,
+        hostLabel: "claude-code",
+        nowIso: T1,
+        ttlMs: 30_000,
+      });
 
       const syncFallback = serviceB.runIndex(arena.workspaceDir);
       expect(syncFallback.published).toBe(false);
+      expect(syncFallback.reused).toBe(true);
+      expect(syncFallback.waitingForPeer).toBe(true);
+      expect(syncFallback.peerStatus).toBe("waiting_for_peer");
       expect(syncFallback.snapshotId).toBe(initial.snapshotId);
       expect(syncFallback.stale).toBe(true);
       expect(
@@ -379,11 +391,15 @@ describe("IndexService — çoklu-süreç SQLite yarış kurtarması", { timeout
 
       const asyncFallback = await serviceB.runIndexAsync(arena.workspaceDir);
       expect(asyncFallback.published).toBe(false);
+      expect(asyncFallback.waitingForPeer).toBe(true);
+      expect(asyncFallback.peerStatus).toBe("waiting_for_peer");
       expect(asyncFallback.snapshotId).toBe(initial.snapshotId);
       expect(asyncFallback.stale).toBe(true);
 
       const incFallback = await serviceB.runIncrementalIndexAsync(arena.workspaceDir);
       expect(incFallback.published).toBe(false);
+      expect(incFallback.waitingForPeer).toBe(true);
+      expect(incFallback.peerStatus).toBe("waiting_for_peer");
       expect(incFallback.snapshotId).toBe(initial.snapshotId);
       expect(incFallback.stale).toBe(true);
 
@@ -412,6 +428,15 @@ describe("IndexService — çoklu-süreç SQLite yarış kurtarması", { timeout
         configHash: "cfg-hash",
         analyzerFingerprint: "fp-test",
         createdAt: T0,
+      });
+      repoA.acquireBuildLease({
+        workspaceId: "default",
+        buildId: active.buildId,
+        leaseId: "lease-live-peer-initial",
+        ownerPid: process.pid,
+        hostLabel: "codex",
+        nowIso: T0,
+        ttlMs: 30_000,
       });
 
       const serviceB = new IndexService({
@@ -741,11 +766,19 @@ describe(
       };
 
       try {
-        // Asset kökünde rust-worker ikilisi de Cargo.toml da YOK; yalnızca yazılabilir önbellekte var!
+        // Asset kökünde rust-worker ikilisi YOK ama bütünlük parmak izi için Cargo.toml var;
+        // yürütülebilir ikili ve doğrulanan .sha256.json kaydı yazılabilir önbellekte.
         mkdirSync(path.join(fakeAssetRoot, "native", "python-worker"), { recursive: true });
         writeFileSync(
           path.join(fakeAssetRoot, "native", "python-worker", "worker.py"),
           "# marker\n",
+          "utf8",
+        );
+        const fakeRustManifest = path.join(fakeAssetRoot, "native", "rust-worker", "Cargo.toml");
+        mkdirSync(path.dirname(fakeRustManifest), { recursive: true });
+        writeFileSync(
+          fakeRustManifest,
+          '[package]\nname = "causoryn-rust-worker"\nversion = "0.1.0"\n',
           "utf8",
         );
         mkdirSync(cachedDebugDir, { recursive: true });
@@ -780,6 +813,21 @@ describe(
           writeFileSync(cachedBinaryPath, fakeUnixWorker, "utf8");
           chmodSync(cachedBinaryPath, 0o755);
         }
+
+        const {
+          computeRustWorkerSourceFingerprint,
+          readRegularFileSha256NoFollow,
+          rustWorkerIntegrityPath,
+        } = await import("../../../adapters/rust/src/analyzer.js");
+        const sourceFingerprint = computeRustWorkerSourceFingerprint(fakeRustManifest);
+        const binarySha256 = readRegularFileSha256NoFollow(cachedBinaryPath);
+        expect(sourceFingerprint).not.toBeNull();
+        expect(binarySha256).not.toBeNull();
+        writeFileSync(
+          rustWorkerIntegrityPath(cachedBinaryPath),
+          JSON.stringify({ sourceFingerprint, binarySha256 }, null, 2),
+          "utf8",
+        );
 
         writeFileSync(
           path.join(workspaceDir, "src", "lib.rs"),

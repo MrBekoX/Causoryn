@@ -1,10 +1,15 @@
 import path from "node:path";
 
 import {
+  assertValidGitRef,
+  GraphRepositoryError,
   GuardError,
   InMemoryGraphRepository,
   parseArchitectureBaseline,
   parseArchitecturePolicy,
+  readGitBlob,
+  resolveGitCommitRef,
+  WORKING_TREE_REF,
   type ArchitectureBaseline,
   type ArchitecturePolicy,
   type SnapshotRead,
@@ -147,9 +152,8 @@ function rethrowAsToolError(error: unknown, requestId: string): never {
   if (error instanceof IndexingError) {
     throw indexingErrorToToolError(error, requestId);
   }
-  if (error instanceof GuardError) {
-    // Guard policy/baseline şema reddi: guard/* kodlarının sabit eşlemesi
-    // (graphErrorToToolError → POLICY_INVALID; check_architecture sözleşmesi).
+  if (error instanceof GuardError || error instanceof GraphRepositoryError) {
+    // Guard policy/baseline schema rejection or invalid git ref → POLICY_INVALID / INVALID_REVISION.
     throw graphErrorToToolError(error);
   }
   throw error;
@@ -174,14 +178,16 @@ export const VerifyChangeInputSchema = z.strictObject({
   preflightId: z.string().min(1).optional(),
   /** Taban yayın kimliği; preflightId ile birlikte UYUMLU olmalıdır. */
   baseSnapshot: z.string().min(1).optional(),
+  /** Optional trusted git ref (commit/branch/tag) from which architecture rules/baseline are loaded (defaults to manifest HEAD or "HEAD"). */
+  baseRef: z.string().min(1).optional(),
   /** TŞ §10.4 "targetRevision": çekirdek yalnızca working-tree destekler. */
   targetRevision: z.literal("working-tree").optional(),
-  /** TŞ §10.4 "checks": dört denetimin boş olmayan alt kümesi; yoksa tamamı. */
+  /** Subset of checks; defaults to ["architecture", "graph-diff", "test-plan"] ("contracts" runs only when explicitly requested). */
   checks: z.enum(["architecture", "contracts", "graph-diff", "test-plan"])
     .array()
     .min(1)
     .optional(),
-  /** E3: host koşum kaydı — evidenceRef ZORUNLU (kanıtsız iddia şema reddi). */
+  /** E3: host-supplied test run record (always reported as state: "host_asserted", engineVerified: false). */
   observedTestRun: OBSERVED_TEST_RUN_SCHEMA.optional(),
 });
 
@@ -298,7 +304,7 @@ const TestPlanCheckResultSchema = z.strictObject({
       candidateId: z.string(),
       testNodeId: z.string(),
       testQualifiedName: z.string(),
-      status: z.enum(["not_run", "observed"]),
+      status: z.enum(["not_run", "host_asserted"]),
     }),
   ),
   missingCoverageCandidates: z.array(
@@ -355,23 +361,29 @@ export const VerifyChangeDataSchema = z.strictObject({
     })
     .optional(),
   limitations: z.array(z.string()),
+  trustWarning: z.string().optional(),
 });
 
 /* ------------------------------------------------------------------ */
 /* Yardımcılar: hedef projeksiyon + guard girdisi + taban çözümü        */
 /* ------------------------------------------------------------------ */
 
+const DEFAULT_VERIFY_CHECKS = ["architecture", "graph-diff", "test-plan"] as const;
+const ARCHITECTURE_POLICY_BLOB_PATH = ".causoryn/architecture.rules.yaml";
+const ARCHITECTURE_BASELINE_BLOB_PATH = ".causoryn/architecture.baseline.yaml";
+const UNTRUSTED_WORKING_TREE_RULES_WARNING =
+  "architecture-rules-loaded-from-untrusted-working-tree" as const;
+
 /**
- * Working-tree projeksiyonu (TŞ §10.4 target): IndexService ATIK bir
- * InMemoryGraphRepository üzerine koşulur. Gerçek repository ve veri kökü
- * DEĞİŞMEZ (verify salt-okunur doğrulamadır); projeksiyon snapshot kimliği
- * createdAt'i içermediğinden aynı ağaç + aynı config = aynı kimlik
- * (byte-determinizm sprint kapısı; bkz. dosya başlığı).
+ * Asynchronous working-tree projection using a scratch InMemoryGraphRepository
+ * so the real repository and workspace stay strictly read-only AND multi-language
+ * sidecars (C#, Python, Go, Rust) run at full L1/L2 parity against the async
+ * base snapshot instead of falsely degrading to L0.
  */
-function projectWorkingTree(
+async function projectWorkingTree(
   deps: VerificationServiceDeps,
   canonicalRoot: string,
-): { readonly snapshot: SnapshotGraph; readonly warnings: readonly string[] } {
+): Promise<{ readonly snapshot: SnapshotGraph; readonly warnings: readonly string[] }> {
   const scratch = new InMemoryGraphRepository();
   const projectionService = new IndexService({
     workspaceId: deps.config.workspaceId,
@@ -380,7 +392,7 @@ function projectWorkingTree(
     clock: deps.clock,
     limits: { maxFiles: deps.config.index.maxFiles },
   });
-  const run = projectionService.runIndex(canonicalRoot);
+  const run = await projectionService.runIndexAsync(canonicalRoot);
   return { snapshot: run.snapshot, warnings: run.warnings };
 }
 
@@ -396,25 +408,141 @@ function readGuardText(
   return readOptionalBoundedTextFile(absolutePath, maxBytes);
 }
 
+async function tryReadTrustedGitBlob(
+  canonicalRoot: string,
+  ref: string,
+  blobPath: string,
+  maxBytes: number,
+): Promise<{ readonly status: "ok"; readonly text: string } | { readonly status: "missing" }> {
+  try {
+    const text = await readGitBlob(canonicalRoot, ref, blobPath, {
+      maxBufferBytes: maxBytes,
+    });
+    const bytes = Buffer.byteLength(text, "utf8");
+    if (bytes > maxBytes) {
+      throw new CausorynToolError(
+        "LIMIT_EXCEEDED",
+        `${blobPath} at git ref ${ref} (${String(bytes)} bytes) exceeds config.maxFileBytes (${String(maxBytes)})`,
+      );
+    }
+    return { status: "ok", text };
+  } catch (error) {
+    if (error instanceof CausorynToolError) throw error;
+    if (error instanceof GraphRepositoryError) {
+      if (/maxBuffer/i.test(error.message)) {
+        throw new CausorynToolError(
+          "LIMIT_EXCEEDED",
+          `${blobPath} at git ref ${ref} exceeds config.maxFileBytes (${String(maxBytes)})`,
+        );
+      }
+      if (
+        error.code === "compare/blob-not-found" ||
+        error.code === "compare/ref-not-found" ||
+        error.code === "compare/git-unavailable" ||
+        error.code === "compare/git-command-failed"
+      ) {
+        return { status: "missing" };
+      }
+    }
+    throw error;
+  }
+}
+
 /**
- * Guard girdisi: architecture denetimi istendiyse workspace kökündeki
- * policy (ve varsa baseline) çözümlenir. Policy YOKSA undefined döner
- * (çekirdekte not_evaluated → inconclusive; aracın TAMAMI reddedilmez);
- * şema reddi graphErrorToToolError üzerinden POLICY_INVALID olur (runVerification).
+ * Loads architecture policy and baseline with git-ref trust precedence:
+ * 1. Inside a git repository, loads `.causoryn/architecture.rules.yaml` (and if
+ *    present, `.causoryn/architecture.baseline.yaml`) from the trusted base ref
+ *    (`baseRef`, manifest `sourceRevision.head`, or `HEAD`) via `readGitBlob`.
+ *    When rules are loaded from the trusted base commit, an untracked/modified
+ *    working-tree baseline is NOT loaded so agents cannot bypass rules in the
+ *    same diff.
+ * 2. Falls back to the working tree ONLY when the workspace is not a git repo or
+ *    the policy file does not exist in the base commit, emitting an explicit
+ *    `trustWarning` (`"architecture-rules-loaded-from-untrusted-working-tree"`).
  */
 async function loadGuardInputs(
   deps: VerificationServiceDeps,
   canonicalRoot: string,
   architectureRequested: boolean,
+  trustedBaseRef: string,
+  explicitBaseRef: string | undefined,
 ): Promise<{
   readonly guardPolicy: ArchitecturePolicy | undefined;
   readonly guardBaseline: ArchitectureBaseline | undefined;
   readonly warning: string | undefined;
+  readonly trustWarning: typeof UNTRUSTED_WORKING_TREE_RULES_WARNING | undefined;
 }> {
   if (!architectureRequested) {
-    return { guardPolicy: undefined, guardBaseline: undefined, warning: undefined };
+    return {
+      guardPolicy: undefined,
+      guardBaseline: undefined,
+      warning: undefined,
+      trustWarning: undefined,
+    };
   }
+  if (explicitBaseRef !== undefined) {
+    if (explicitBaseRef === WORKING_TREE_REF) {
+      throw new CausorynToolError(
+        "INVALID_ARGUMENT",
+        "baseRef must be a git commit, branch, or tag ref (working-tree cannot be used as a trusted base ref)",
+      );
+    }
+    assertValidGitRef(explicitBaseRef);
+    try {
+      await resolveGitCommitRef(canonicalRoot, explicitBaseRef);
+    } catch (error) {
+      if (error instanceof GraphRepositoryError) {
+        throw graphErrorToToolError(error);
+      }
+      throw error;
+    }
+  }
+
   const maxBytes = deps.config.maxFileBytes;
+
+  // 1) Try trusted git base ref first (only when ref is a valid non-working-tree git ref).
+  let canQueryGitRef = false;
+  if (trustedBaseRef !== WORKING_TREE_REF) {
+    try {
+      assertValidGitRef(trustedBaseRef);
+      canQueryGitRef = true;
+    } catch (error) {
+      if (explicitBaseRef !== undefined) {
+        throw error;
+      }
+      canQueryGitRef = false;
+    }
+  }
+
+  if (canQueryGitRef) {
+    const gitPolicyRead = await tryReadTrustedGitBlob(
+      canonicalRoot,
+      trustedBaseRef,
+      ARCHITECTURE_POLICY_BLOB_PATH,
+      maxBytes,
+    );
+    if (gitPolicyRead.status === "ok") {
+      const gitBaselineRead = await tryReadTrustedGitBlob(
+        canonicalRoot,
+        trustedBaseRef,
+        ARCHITECTURE_BASELINE_BLOB_PATH,
+        maxBytes,
+      );
+      const policy = parseArchitecturePolicy(gitPolicyRead.text);
+      const baseline =
+        gitBaselineRead.status === "ok"
+          ? parseArchitectureBaseline(gitBaselineRead.text)
+          : undefined;
+      return {
+        guardPolicy: policy,
+        guardBaseline: baseline,
+        warning: undefined,
+        trustWarning: undefined,
+      };
+    }
+  }
+
+  // 2) Fallback: non-git workspace or untracked policy file — load from working tree with explicit trust warning.
   const policyRead = await readGuardText(
     path.join(canonicalRoot, ".causoryn", "architecture.rules.yaml"),
     maxBytes,
@@ -422,7 +550,7 @@ async function loadGuardInputs(
   if (policyRead.status === "too-large") {
     throw new CausorynToolError(
       "LIMIT_EXCEEDED",
-      `.causoryn/architecture.rules.yaml ${String(policyRead.bytes)} byte ile config.maxFileBytes tavanını (${String(maxBytes)}) aşıyor (TŞ §20 dosya başına byte bütçesi); policy dosyasını küçültün veya kuralları bölün`,
+      `.causoryn/architecture.rules.yaml (${String(policyRead.bytes)} bytes) exceeds config.maxFileBytes (${String(maxBytes)}); reduce the policy file size`,
     );
   }
   if (policyRead.status !== "ok") {
@@ -430,7 +558,8 @@ async function loadGuardInputs(
       guardPolicy: undefined,
       guardBaseline: undefined,
       warning:
-        "architecture denetimi değerlendirilemedi: workspace kökünde .causoryn/architecture.rules.yaml bulunamadı; guard kural dosyası oluşturun (yokluğu hataya değil, denetimin koşulamamasına yol açar — TŞ §10.4 inconclusive)",
+        "architecture check could not be evaluated: .causoryn/architecture.rules.yaml was not found in the base commit or workspace root",
+      trustWarning: undefined,
     };
   }
   const baselineRead = await readGuardText(
@@ -440,13 +569,18 @@ async function loadGuardInputs(
   if (baselineRead.status === "too-large") {
     throw new CausorynToolError(
       "LIMIT_EXCEEDED",
-      `.causoryn/architecture.baseline.yaml ${String(baselineRead.bytes)} byte ile config.maxFileBytes tavanını (${String(maxBytes)}) aşıyor (TŞ §20 dosya başına byte bütçesi); baseline dosyasını küçültün`,
+      `.causoryn/architecture.baseline.yaml (${String(baselineRead.bytes)} bytes) exceeds config.maxFileBytes (${String(maxBytes)}); reduce the baseline file size`,
     );
   }
   const policy = parseArchitecturePolicy(policyRead.text);
   const baseline =
     baselineRead.status === "ok" ? parseArchitectureBaseline(baselineRead.text) : undefined;
-  return { guardPolicy: policy, guardBaseline: baseline, warning: undefined };
+  return {
+    guardPolicy: policy,
+    guardBaseline: baseline,
+    warning: undefined,
+    trustWarning: UNTRUSTED_WORKING_TREE_RULES_WARNING,
+  };
 }
 
 /** Taban yayın kimliğini çözer (services-differentiation resolveEnvelopeSnapshot örüntüsü). */
@@ -537,22 +671,27 @@ export async function verifyChangeTool(
   const baseRead = resolveBaseSnapshot(deps, workspaceId, baseSnapshotId);
   const baseSnapshot = baseRead.snapshot;
 
-  // 4) Hedef projeksiyon: working-tree (atık depo; gerçek repo değişmez).
-  const projection = projectWorkingTree(deps, canonicalRoot);
-
-  // 5) Guard girdisi (yalnızca architecture istendiyse yüklenir). Parse şema
-  //    reddi (bozuk YAML/şema → GuardError) runVerification sarmalının
-  //    DIŞINDA kaldığı için INTERNAL_ERROR'a düşüyordu (denetim bulgusu);
-  //    async red aynı tek eşleme zinciriyle POLICY_INVALID'a düşer
-  //    (check_architecture sözleşmesi; başlık sözü bu yolda da dürüsttür).
-  const requestedChecks = input.checks ?? ["architecture", "contracts", "graph-diff", "test-plan"];
-  const architectureRequested = requestedChecks.includes("architecture");
-  const contractsRequested = requestedChecks.includes("contracts");
-  const guard = await loadGuardInputs(deps, canonicalRoot, architectureRequested).catch(
-    (error: unknown) => rethrowAsToolError(error, requestId),
+  // 4) Asynchronous working-tree projection (scratch repo; real repo untouched).
+  const projection = await projectWorkingTree(deps, canonicalRoot).catch((error: unknown) =>
+    rethrowAsToolError(error, requestId),
   );
 
-  // 6) Çekirdek çağrısı: saf verifyChange — kod yazmaz, test çalıştırmaz.
+  // 5) Guard inputs: default checks exclude unevaluable "contracts" so default
+  //    verify_change calls do not automatically degrade to inconclusive.
+  //    Rules/baseline are loaded from the trusted base git ref first.
+  const requestedChecks = input.checks ?? [...DEFAULT_VERIFY_CHECKS];
+  const architectureRequested = requestedChecks.includes("architecture");
+  const contractsRequested = requestedChecks.includes("contracts");
+  const trustedBaseRef = input.baseRef ?? manifest?.sourceRevision?.head ?? "HEAD";
+  const guard = await loadGuardInputs(
+    deps,
+    canonicalRoot,
+    architectureRequested,
+    trustedBaseRef,
+    input.baseRef,
+  ).catch((error: unknown) => rethrowAsToolError(error, requestId));
+
+  // 6) Core verification call (pure, read-only, never executes tests).
   const report: VerificationReport = runVerification(() =>
     verifyChange({
       baseSnapshot,
@@ -560,9 +699,6 @@ export async function verifyChangeTool(
       checks: requestedChecks,
       ...(input.preflightId === undefined ? {} : { preflightId: input.preflightId }),
       resolvePreflight: (id: string) => deps.preflightStore?.get(id),
-      // Dosya yetkilendirmesi: WorkspaceAccessPolicy kararı fail-closed
-      // çekirdeğe enjekte edilir (red kararı verification/file-not-authorized
-      // → PATH_DENIED; sessiz düşürme yok).
       authorizeFile: (file: string) => {
         const decision = deps.policy.checkFile(canonicalRoot, file);
         return decision.allowed
@@ -578,17 +714,11 @@ export async function verifyChangeTool(
       },
       ...(guard.guardPolicy === undefined ? {} : { guardPolicy: guard.guardPolicy }),
       ...(guard.guardBaseline === undefined ? {} : { guardBaseline: guard.guardBaseline }),
-      // contractDrift bilinçli olarak VERİLMEZ: TŞ §10.4 girdisinde sözleşme
-      // spec çifti yoktur; istemciden sınıflama kaydı kabul edilmez (TŞ §11).
-      // E3: observed koşum kaydı exactOptionalPropertyTypes disipliniyle
-      // normalize edilir (zod optional'ının `| undefined` alanları çekirdek
-      // sözleşmesine bire bir alan-indirmeyle taşınır; boş alan YAZILMAZ;
-      // ayırıcı TŞ §10.4 koşum bloğuyla aynı `state` dağarcığındadır).
       ...(input.observedTestRun === undefined
         ? {}
         : {
             observedTestRun: {
-              state: "observed" as const,
+              state: input.observedTestRun.state,
               evidenceRef: input.observedTestRun.evidenceRef,
               ...(input.observedTestRun.evidenceSha256 === undefined
                 ? {}
@@ -611,14 +741,18 @@ export async function verifyChangeTool(
     }),
   requestId);
 
-
-  // 7) Envelope: taban yayın çapası + dürüstlük uyarıları.
+  // 7) Envelope: anchor to base snapshot + honesty & trust warnings.
   const warnings = staleWarningOf(baseRead);
   warnings.push(...projection.warnings);
   if (guard.warning !== undefined) warnings.push(guard.warning);
+  if (guard.trustWarning !== undefined) {
+    warnings.push(
+      `${guard.trustWarning}: .causoryn/architecture.rules.yaml was loaded from the untrusted working tree (not found in git ref ${trustedBaseRef}); verify rules were not weakened in this diff`,
+    );
+  }
   if (contractsRequested && report.checks.contracts.status === "not_evaluated") {
     warnings.push(
-      "contracts denetimi bu araç yüzeyinde değerlendirilemedi: TŞ §10.4 girdisinde sözleşme spec çifti yoktur; sözleşme drift'i için causoryn_check_contracts / causoryn_detect_contract_drift çıktılarıyla ayrı değerlendirme yapın (verdict inconclusive — tamamlanmamış değerlendirme review_required sayılmaz)",
+      "contracts check could not be evaluated on this tool surface without explicit before/after contract spec pairs; run causoryn_check_contracts or causoryn_detect_contract_drift separately (verdict is inconclusive)",
     );
   }
 
@@ -629,7 +763,10 @@ export async function verifyChangeTool(
     status: envelopeStatusOf(baseRead),
     coverage: coverageOf(baseSnapshot),
     warnings,
-    data: report,
+    data: {
+      ...report,
+      ...(guard.trustWarning === undefined ? {} : { trustWarning: guard.trustWarning }),
+    },
   });
 }
 

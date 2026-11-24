@@ -145,6 +145,36 @@ describe.skipIf(!cargoAvailable)("adapters/rust (M1)", () => {
     expect(calls?.evidence?.[0]?.analyzerId).toBe("rust-worker");
   });
 
+  it("dürüstlük (Task 1.5): 2-segment son ek eşleşmesi (Type::method / mod::fn) verified DEĞİL heuristic + ambiguity döner", () => {
+    const svcNew = (positive?.edges ?? []).find(
+      (edge) =>
+        edge.kind === "CALLS" &&
+        edge.from.qualifiedName === "crate::list_orders" &&
+        edge.to.qualifiedName === "crate::services::OrdersService::new",
+    );
+    expect(svcNew).toBeDefined();
+    expect(svcNew?.resolution).toBe("heuristic");
+    expect(svcNew?.resolution).not.toBe("verified");
+    expect(svcNew?.ambiguity?.candidates).toEqual([
+      "crate::services::OrdersService::new",
+    ]);
+    expect(svcNew?.ambiguity?.reason).toContain(
+      "unverified-module-prefix-suffix-match",
+    );
+
+    const repoNew = (positive?.edges ?? []).find(
+      (edge) =>
+        edge.kind === "CALLS" &&
+        edge.from.qualifiedName === "crate::services::OrdersService::new" &&
+        edge.to.qualifiedName === "crate::repositories::OrderRepository::new",
+    );
+    expect(repoNew).toBeDefined();
+    expect(repoNew?.resolution).toBe("heuristic");
+    expect(repoNew?.ambiguity?.reason).toContain(
+      "unverified-module-prefix-suffix-match",
+    );
+  });
+
   it("pozitif: ROUTES_TO zinciri worker çıktısında ayakta", () => {
     const route = (positive?.edges ?? []).find(
       (edge) =>

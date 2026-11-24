@@ -21,7 +21,11 @@ import type { GraphRepository, SymbolSearchStore } from "@causoryn/graph";
 import type { IndexJobManager, IndexService } from "@causoryn/indexing";
 import type { SqliteWikiStore } from "@causoryn/storage-sqlite";
 import type { WikiSearchStore } from "@causoryn/wiki";
-import type { OutputAccessPolicy, WorkspaceAccessPolicy } from "@causoryn/workspace";
+import {
+  isUncOrDevicePath,
+  type OutputAccessPolicy,
+  type WorkspaceAccessPolicy,
+} from "@causoryn/workspace";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { RootsListChangedNotificationSchema } from "@modelcontextprotocol/sdk/types.js";
 
@@ -260,7 +264,13 @@ function isSameOrInsideComparable(targetPath: string, containerPath: string): bo
  * ile çözerek symlink/8.3 kısa yol kaçışlarını yakalar.
  */
 function resolveRealOrLexical(inputPath: string): string {
+  if (isUncOrDevicePath(inputPath)) {
+    return inputPath;
+  }
   const abs = path.resolve(inputPath);
+  if (isUncOrDevicePath(abs)) {
+    return abs;
+  }
   const tailSegments: string[] = [];
   let cursor = abs;
   while (true) {
@@ -316,6 +326,24 @@ function isInsideResolvedDirs(
       isSameOrInsideComparable(targetPath, entry.real) ||
       isSameOrInsideComparable(realTargetPath, entry.raw) ||
       isSameOrInsideComparable(realTargetPath, entry.real)
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function isSameAsResolvedDirs(
+  targetPath: string,
+  realTargetPath: string,
+  entries: readonly ResolvedDirEntry[],
+): boolean {
+  for (const entry of entries) {
+    if (
+      isSameComparablePath(targetPath, entry.raw) ||
+      isSameComparablePath(targetPath, entry.real) ||
+      isSameComparablePath(realTargetPath, entry.raw) ||
+      isSameComparablePath(realTargetPath, entry.real)
     ) {
       return true;
     }
@@ -560,6 +588,26 @@ const POSIX_SYSTEM_DIRS = [
   "/proc",
   "/sys",
   "/root",
+  "/bin",
+  "/sbin",
+  "/lib",
+  "/dev",
+] as const;
+
+/**
+ * Exact-match denied directories on POSIX: these bare roots are rejected, while
+ * nested project subdirectories (e.g. `/tmp/causoryn-test-xxx` or macOS
+ * `/var/folders/.../T/causoryn-test-xxx`) remain allowed.
+ */
+const POSIX_EXACT_DENIED_DIRS = [
+  "/tmp",
+  "/private/tmp",
+  "/var",
+  "/private/var",
+  "/var/tmp",
+  "/private/var/tmp",
+  "/home",
+  "/Users",
 ] as const;
 
 const WINDOWS_FALLBACK_SYSTEM_DIRS = [
@@ -628,6 +676,29 @@ function deriveSystemDirs(env: NodeJS.ProcessEnv): ResolvedDirEntry[] {
   return entries;
 }
 
+function deriveExactDeniedDirs(): ResolvedDirEntry[] {
+  const rawDirs: string[] = [];
+  const osTmp = os.tmpdir().trim();
+  if (osTmp.length > 0 && !isUncOrDevicePath(osTmp)) {
+    rawDirs.push(osTmp);
+  }
+  if (process.platform !== "win32") {
+    for (const dir of POSIX_EXACT_DENIED_DIRS) {
+      rawDirs.push(dir);
+    }
+  }
+
+  const seen = new Set<string>();
+  const entries: ResolvedDirEntry[] = [];
+  for (const rawDir of rawDirs) {
+    const comparable = normalizeComparablePath(rawDir);
+    if (seen.has(comparable)) continue;
+    seen.add(comparable);
+    entries.push(toResolvedDirEntry(rawDir));
+  }
+  return entries;
+}
+
 /**
  * Aday çalışma dizininin güvenli bir proje kökü olup olmadığını ayrıntılı
  * gerekçesiyle denetler.
@@ -640,7 +711,17 @@ export function inspectProjectRootSafety(
     return { safe: false, reason: "boş veya geçersiz yol" };
   }
 
+  // Lexical UNC / Win32 device path pre-check BEFORE any filesystem syscall
+  // (prevents outbound SMB/NTLM handshake via realpathSync / statSync).
+  if (isUncOrDevicePath(candidatePath) || isUncOrDevicePath(candidatePath.trim())) {
+    return { safe: false, reason: "unc-or-device-path" };
+  }
+
   const lexicalCandidate = path.resolve(candidatePath);
+  if (isUncOrDevicePath(lexicalCandidate)) {
+    return { safe: false, reason: "unc-or-device-path" };
+  }
+
   let real: string;
   try {
     real = stripWin32DevicePrefix(realpathSync(lexicalCandidate));
@@ -656,12 +737,18 @@ export function inspectProjectRootSafety(
     return { safe: false, reason: `dosya sistemi kökü reddedildi: ${real}` };
   }
 
-  // 2) Kullanıcı ev dizini ($HOME)
+  // 2) Kullanıcı ev dizini ($HOME) ve tüm üst ataları (ör. /home, /Users, C:\Users)
   const rawHome = options.homeDir ?? os.homedir();
-  if (rawHome.trim().length > 0) {
+  if (rawHome.trim().length > 0 && !isUncOrDevicePath(rawHome)) {
     const realHome = resolveRealOrLexical(rawHome);
     if (isSameComparablePath(real, rawHome) || isSameComparablePath(real, realHome)) {
       return { safe: false, reason: `kullanıcı ev dizini ($HOME) reddedildi: ${real}` };
+    }
+    if (
+      isSameOrInsideComparable(rawHome, real) ||
+      isSameOrInsideComparable(realHome, real)
+    ) {
+      return { safe: false, reason: "home-ancestor-directory" };
     }
   }
 
@@ -675,6 +762,7 @@ export function inspectProjectRootSafety(
   ];
   for (const rawDataDir of dataDirs) {
     if (rawDataDir === undefined || rawDataDir.trim().length === 0) continue;
+    if (isUncOrDevicePath(rawDataDir)) continue;
     const realDataDir = resolveRealOrLexical(rawDataDir);
     if (
       isSameOrInsideComparable(real, rawDataDir) ||
@@ -696,9 +784,14 @@ export function inspectProjectRootSafety(
     return { safe: false, reason: "sensitive-directory" };
   }
 
-  // 6) OS sistem kök/sistem dizinleri (/etc, /private/etc, /System, /usr, /proc, /sys, /root, C:\Windows, Program Files, ProgramData)
+  // 6) OS sistem kök/sistem dizinleri (/etc, /private/etc, /System, /usr, /proc, /sys, /root, /bin, /sbin, /lib, /dev, C:\Windows, Program Files, ProgramData)
+  //    ve tam eşleşmeli geçici/sistem kökleri (/tmp, /var, os.tmpdir() — alt dizinlere izin verilir)
   const systemEntries = deriveSystemDirs(env);
   if (isInsideResolvedDirs(lexicalCandidate, real, systemEntries)) {
+    return { safe: false, reason: "system-directory" };
+  }
+  const exactDeniedEntries = deriveExactDeniedDirs();
+  if (isSameAsResolvedDirs(lexicalCandidate, real, exactDeniedEntries)) {
     return { safe: false, reason: "system-directory" };
   }
 
@@ -740,6 +833,11 @@ export function resolveBaseDataDir(options: {
     if (explicitDataDir.includes("\0")) {
       throw new CausorynConfigError(["--data-dir null byte içeremez"]);
     }
+    if (isUncOrDevicePath(explicitDataDir)) {
+      throw new CausorynConfigError([
+        `--data-dir UNC veya Win32 cihaz yolu olamaz: ${explicitDataDir}`,
+      ]);
+    }
     if (!path.isAbsolute(explicitDataDir)) {
       throw new CausorynConfigError([`--data-dir mutlak yol olmalı: ${explicitDataDir}`]);
     }
@@ -752,6 +850,11 @@ export function resolveBaseDataDir(options: {
     if (zcodeDataDir.includes("\0")) {
       throw new CausorynConfigError(["ZCODE_PLUGIN_DATA null byte içeremez"]);
     }
+    if (isUncOrDevicePath(zcodeDataDir)) {
+      throw new CausorynConfigError([
+        `ZCODE_PLUGIN_DATA UNC veya Win32 cihaz yolu olamaz: ${zcodeDataDir}`,
+      ]);
+    }
     if (!path.isAbsolute(zcodeDataDir)) {
       throw new CausorynConfigError([
         `ZCODE_PLUGIN_DATA mutlak yol olmalı: ${zcodeDataDir}`,
@@ -761,6 +864,11 @@ export function resolveBaseDataDir(options: {
   }
 
   const homeDir = options.homeDir ?? os.homedir();
+  if (isUncOrDevicePath(homeDir)) {
+    throw new CausorynConfigError([
+      `homeDir UNC veya Win32 cihaz yolu olamaz: ${homeDir}`,
+    ]);
+  }
   return path.resolve(homeDir, ".causoryn");
 }
 
@@ -971,16 +1079,35 @@ export function buildWorkspaceAutoConfig(
     Object.hasOwn(rawBase, "allowRoots") && Array.isArray(rawBase["allowRoots"])
       ? (rawBase["allowRoots"] as unknown[])
       : [];
+  const rawRoots: string[] =
+    options.roots.length > 0
+      ? [...options.roots]
+      : baseAllowRoots.map((entry) => String(entry));
+  for (const rawRoot of rawRoots) {
+    if (isUncOrDevicePath(rawRoot) || isUncOrDevicePath(rawRoot.trim())) {
+      throw new CausorynConfigError([
+        `allowRoot UNC veya Win32 cihaz yolu olamaz: ${rawRoot}`,
+      ]);
+    }
+  }
   const effectiveRoots: string[] =
     options.roots.length > 0
       ? options.roots.map((r) => path.resolve(r))
-      : baseAllowRoots.map((entry) => String(entry));
+      : rawRoots;
+  for (const resolvedRoot of effectiveRoots) {
+    if (isUncOrDevicePath(resolvedRoot)) {
+      throw new CausorynConfigError([
+        `allowRoot UNC veya Win32 cihaz yolu olamaz: ${resolvedRoot}`,
+      ]);
+    }
+  }
 
   if (!options.autoDataDir || effectiveRoots.length === 0) {
     const firstRoot = effectiveRoots[0];
     const canDiscoverPrimary =
       firstRoot !== undefined &&
       typeof firstRoot === "string" &&
+      !isUncOrDevicePath(firstRoot) &&
       path.isAbsolute(firstRoot) &&
       !firstRoot.includes("\0");
     const discovery = canDiscoverPrimary
@@ -1004,7 +1131,7 @@ export function buildWorkspaceAutoConfig(
   }
 
   const canonicalRoots: string[] = effectiveRoots.map((root) => {
-    if (!path.isAbsolute(root) || root.includes("\0")) {
+    if (isUncOrDevicePath(root) || !path.isAbsolute(root) || root.includes("\0")) {
       throw new CausorynConfigError([`allowRoot geçersiz veya mutlak yol değil: ${root}`]);
     }
     try {
@@ -1033,11 +1160,9 @@ export function buildWorkspaceAutoConfig(
   const workspacesDir = path.join(baseDataDir, "workspaces");
   const workspaceDataDir = path.join(workspacesDir, `${slug}-${hash12}`);
   const exportsDir = path.join(workspaceDataDir, "exports");
-  const dbFileName =
-    options.client !== undefined
-      ? `graph-${options.client.toLowerCase()}.sqlite`
-      : "graph.sqlite";
-  const dbPath = path.join(workspaceDataDir, dbFileName);
+  // Single shared workspace SQLite database across all MCP host clients;
+  // `options.client` is preserved strictly as a diagnostic/host label.
+  const dbPath = path.join(workspaceDataDir, "graph.sqlite");
 
   // Yazmadan ÖNCE hem sözcüksel hem gerçek-ata yollarının workspace dışında
   // kaldığını ve hiçbir önek/ata dizinin sembolik/dangling bağ olmadığını
@@ -1304,8 +1429,9 @@ export function attachMcpRootsWorkspaceBinder(
       rebindRoot(cwdCheck.canonicalRoot);
       currentBoundRoot = cwdCheck.canonicalRoot;
       initialSyncDone = true;
+      const clientTag = options.client !== undefined ? `, client=${options.client}` : "";
       log(
-        `[causoryn] --allow-cwd ile güvenli çalışma alanı bağlandı: ${cwdCheck.canonicalRoot} (workspaceId=${dynamicContext.config.workspaceId})`,
+        `[causoryn] --allow-cwd ile güvenli çalışma alanı bağlandı: ${cwdCheck.canonicalRoot} (workspaceId=${dynamicContext.config.workspaceId}${clientTag})`,
       );
     } else {
       log(
@@ -1384,8 +1510,9 @@ export function attachMcpRootsWorkspaceBinder(
     try {
       rebindRoot(selectedRoot);
       currentBoundRoot = selectedRoot;
+      const clientTag = options.client !== undefined ? `, client=${options.client}` : "";
       log(
-        `[causoryn] MCP roots/list ile çalışma alanı bağlandı: ${selectedRoot} (workspaceId=${dynamicContext.config.workspaceId})`,
+        `[causoryn] MCP roots/list ile çalışma alanı bağlandı: ${selectedRoot} (workspaceId=${dynamicContext.config.workspaceId}${clientTag})`,
       );
     } catch (error) {
       log(

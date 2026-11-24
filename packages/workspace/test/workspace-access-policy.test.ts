@@ -407,13 +407,18 @@ describe("Windows yol davranışı (TŞ §19)", () => {
     rmSync(root, { recursive: true, force: true });
   });
 
-  it("pozitif: \\\\?\\ önekli candidate ve allowRoot eşleşmesi çözülür", { skip: !IS_WIN }, () => {
+  it("negatif: \\\\?\\ aygıt öneki ve UNC yolları dosya sistemi erişiminden önce sözcüksel reddedilir (Task 1.3)", { skip: !IS_WIN }, () => {
     const root = makeRoot();
     seedFixture(root);
     const prefixedRoot = `\\\\?\\${root}`;
-    const policy = policyFor(prefixedRoot);
-    expectAllowed(policy.authorizeRoot(root)); // beyan \\?\ ile, kullanım düz yol
-    expectAllowed(policy.checkPath(root, `\\\\?\\${path.join(root, "src", "code.ts")}`));
+    expect(() => policyFor(prefixedRoot)).toThrowError(WorkspacePolicyError);
+    const policy = policyFor(root);
+    expect(denyOf(policy.authorizeRoot(prefixedRoot)).code).toBe("workspace/root-not-authorized");
+    expect(denyOf(policy.checkPath(root, `\\\\?\\${path.join(root, "src", "code.ts")}`)).code).toBe(
+      "workspace/path-denied",
+    );
+    expect(denyOf(policy.authorizeRoot("\\\\10.0.0.1\\share")).code).toBe("workspace/root-not-authorized");
+    expect(denyOf(policy.checkPath(root, "\\\\?\\UNC\\server\\share")).code).toBe("workspace/path-denied");
     rmSync(root, { recursive: true, force: true });
   });
 

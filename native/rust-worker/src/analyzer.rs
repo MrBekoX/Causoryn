@@ -5,10 +5,11 @@
 //!   impl fn → Method (CONTAINS File→tip, tip→Method).
 //! - CALLS resolution üçlüsü:
 //!     * aynı modülde tanımlı fn'e doğrudan (bare) çağrı → verified,
-//!     * nitelikli yol çağrısı (a::B::c / B::c) → analiz seti isim
-//!       tablosunda TEK eşleşme → verified (modül önekleri tam
-//!       doğrulanmaz — belgeli sınırlama), çok eşleşme → heuristic +
-//!       ambiguity, hiç eşleşme yok → unresolved + UnknownExternal,
+//!     * nitelikli yol çağrısı (a::B::c / B::c) → son 2 segment eşleşmesi
+//!       modül öneklerini ve `use` import'larını doğrulamadığından
+//!       heuristic + explicit ambiguity ("unverified-module-prefix-suffix-match"),
+//!       çok eşleşme → heuristic + çoklu aday ambiguity, hiç eşleşme yok →
+//!       unresolved + UnknownExternal,
 //!     * metot çağrısı (x.foo()) → alıcı türü çözülmez (trait dispatch
 //!       bu dilimde yok) → heuristic; tek isim tablosu adayı hedef,
 //!       çok aday → ambiguity, aday yok → unresolved.
@@ -506,10 +507,24 @@ impl<'a> CallVisitor<'a> {
             1 => {
                 let target = candidates[0].clone();
                 let rationale = format!(
-                    "CALLS: nitelikli yol çağrısı '{call_text}' → '{t}' isim tablosunda tek eşleşme (verified; modül önekleri bu dilimde tam doğrulanmaz — belgeli sınırlama).",
+                    "CALLS: nitelikli yol çağrısı '{call_text}' → '{t}' son 2 segment ('{type_name}::{name}') ile eşleşti; modül önekleri ve use import'ları doğrulanmadığından heuristic işaretlendi (unverified-module-prefix-suffix-match).",
                     t = target.qualified
                 );
-                self.emit_call_edge(target, "verified", start_line, end_line, rationale, None);
+                let ambiguity = json!({
+                    "candidates": [target.qualified.clone()],
+                    "reason": format!(
+                        "unverified-module-prefix-suffix-match: '{call_text}' → '{t}' yalnızca son 2 segment ('{type_name}::{name}') eşleşmesine dayanır; modül önekleri ve use import'ları doğrulanmadı",
+                        t = target.qualified
+                    ),
+                });
+                self.emit_call_edge(
+                    target,
+                    "heuristic",
+                    start_line,
+                    end_line,
+                    rationale,
+                    Some(ambiguity),
+                );
             }
             _ => {
                 let candidates_names: Vec<String> =
@@ -1206,4 +1221,91 @@ fn node_ref_value(key: &NodeKey) -> Value {
         value["relativePath"] = Value::String(key.rel_path.clone());
     }
     value
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn find_call<'a>(edges: &'a [Value], from: &str, to: &str) -> Option<&'a Value> {
+        edges.iter().find(|e| {
+            e["kind"] == "CALLS"
+                && e["from"]["qualifiedName"] == from
+                && e["to"]["qualifiedName"] == to
+        })
+    }
+
+    #[test]
+    fn two_segment_suffix_match_emits_heuristic_with_explicit_ambiguity_never_verified() {
+        let files = vec![
+            FileEntry {
+                path: "src/main.rs".to_string(),
+                content: [
+                    "fn local_helper() {}",
+                    "fn entry() {",
+                    "    local_helper();",
+                    "    let _s = other::services::OrdersService::new();",
+                    "    other_mod::util::compute();",
+                    "}",
+                ]
+                .join("\n"),
+            },
+            FileEntry {
+                path: "src/services.rs".to_string(),
+                content: [
+                    "pub struct OrdersService;",
+                    "impl OrdersService {",
+                    "    pub fn new() -> Self { OrdersService }",
+                    "}",
+                ]
+                .join("\n"),
+            },
+            FileEntry {
+                path: "src/util.rs".to_string(),
+                content: "pub fn compute() -> u32 { 42 }\n".to_string(),
+            },
+        ];
+
+        let result = analyze(&json!("rust-honesty-1"), &files, 0);
+        let edges = result["edges"].as_array().expect("edges array");
+
+        // 1) Same-module bare call remains verified.
+        let local = find_call(edges, "crate::entry", "crate::local_helper")
+            .expect("same-module bare call edge");
+        assert_eq!(local["resolution"], "verified");
+
+        // 2) 2-segment suffix match for Type::method MUST be heuristic + explicit ambiguity (NEVER verified).
+        let svc_new = find_call(edges, "crate::entry", "crate::services::OrdersService::new")
+            .expect("OrdersService::new edge");
+        assert_eq!(svc_new["resolution"], "heuristic");
+        assert_eq!(
+            svc_new["ambiguity"]["candidates"],
+            json!(["crate::services::OrdersService::new"])
+        );
+        assert!(
+            svc_new["ambiguity"]["reason"]
+                .as_str()
+                .unwrap_or("")
+                .contains("unverified-module-prefix-suffix-match"),
+            "expected unverified-module-prefix-suffix-match reason, got: {:?}",
+            svc_new["ambiguity"]
+        );
+
+        // 3) 2-segment suffix match for mod::fn MUST be heuristic + explicit ambiguity (NEVER verified).
+        let util_fn = find_call(edges, "crate::entry", "crate::util::compute")
+            .expect("util::compute edge");
+        assert_eq!(util_fn["resolution"], "heuristic");
+        assert_eq!(
+            util_fn["ambiguity"]["candidates"],
+            json!(["crate::util::compute"])
+        );
+        assert!(
+            util_fn["ambiguity"]["reason"]
+                .as_str()
+                .unwrap_or("")
+                .contains("unverified-module-prefix-suffix-match"),
+            "expected unverified-module-prefix-suffix-match reason, got: {:?}",
+            util_fn["ambiguity"]
+        );
+    }
 }

@@ -12,6 +12,7 @@
  * argümanlar SABİT ["exec", workerDllPath]; istek içeriği yalnızca stdin
  * üzerinden taşınır.
  */
+import { dirname } from "node:path";
 import {
   buildAllowlistedWorkerEnv,
   runLineJsonWorker,
@@ -45,13 +46,24 @@ export interface RunWorkerAnalyzeInput {
   readonly spawnProcess?: SpawnFunction;
 }
 
+const DOTNET_ISOLATION_ENV_OVERRIDES = {
+  DOTNET_STARTUP_HOOKS: "",
+  DOTNET_CLI_TELEMETRY_OPTOUT: "1",
+  DOTNET_NOLOGO: "1",
+  DOTNET_SKIP_FIRST_TIME_EXPERIENCE: "1",
+} as const;
+
 export function runWorkerAnalyze(
   input: RunWorkerAnalyzeInput,
 ): Promise<WorkerRunOutcome> {
   return runLineJsonWorker({
     command: input.dotnetCommand,
     args: ["exec", input.workerDllPath],
-    env: buildAllowlistedWorkerEnv(WORKER_ENV_ALLOWLIST),
+    env: buildAllowlistedWorkerEnv(
+      WORKER_ENV_ALLOWLIST,
+      DOTNET_ISOLATION_ENV_OVERRIDES,
+    ),
+    cwd: dirname(input.workerDllPath),
     requestPayload: input.requestPayload,
     requestTimeoutMs: input.requestTimeoutMs,
     responseMaxChars: input.responseMaxChars ?? DEFAULT_RESPONSE_MAX_CHARS,

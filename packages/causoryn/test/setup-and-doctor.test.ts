@@ -443,7 +443,8 @@ describe("runtime-stage (_npx / tmpdir detection + atomic persistent staging)", 
       clients: ["claude-code", "codex"],
       yes: true,
     });
-    expect(liveRerun.applied).toBe(true);
+    expect(liveRerun.applied).toBe(false);
+    expect(liveRerun.actions.every((a) => a.operation === "noop")).toBe(true);
     expect(liveRerun.stagedRuntimeDir).toBeNull();
     expect(existsSync(sentinelPath)).toBe(true);
 
@@ -618,7 +619,7 @@ describe("setup wizard (4 hosts, backups, fail-closed, ZCode fallback, Antigravi
       ) as { mcpServers: Record<string, { command: string; args: string[] }> };
       expect(agyJson.mcpServers["existingAgy"]).toBeDefined();
       expect(agyJson.mcpServers["causoryn"]).toEqual({
-        command: "node",
+        command: process.execPath,
         args: [
           expectedCliScript,
           "mcp",
@@ -641,7 +642,7 @@ describe("setup wizard (4 hosts, backups, fail-closed, ZCode fallback, Antigravi
     expect(claudeJson.mcpServers["existingClaude"]).toBeDefined();
     expect(claudeJson.mcpServers["causoryn"]).toEqual({
       type: "stdio",
-      command: "node",
+      command: process.execPath,
       args: [
         expectedCliScript,
         "mcp",
@@ -683,7 +684,7 @@ describe("setup wizard (4 hosts, backups, fail-closed, ZCode fallback, Antigravi
     });
     expect(zcodeJson.mcp.servers["causoryn"]).toEqual({
       type: "stdio",
-      command: "node",
+      command: process.execPath,
       args: [expectedCliScript, "mcp", "--allow-cwd", "--auto-data-dir", "--client", "zcode"],
     });
 
@@ -968,7 +969,7 @@ describe("doctor (strictly read-only health check + injectable toolchain seam + 
 
     outChunks.length = 0;
     const setupExit = await runCli(
-      ["setup", "--client", "claude-code", "--no-skill", "--yes", "--json"],
+      ["setup", "--client", "claude-code", "--yes", "--json"],
       {
         io,
         homeDir: fakeHome,
@@ -990,8 +991,9 @@ describe("doctor (strictly read-only health check + injectable toolchain seam + 
       probeToolchain: () => ({ available: true, version: "1.0", detail: "ok" }),
     });
     expect(doctorExit).toBe(0);
-    const doctorJson = JSON.parse(outChunks.join("")) as { healthy: boolean };
+    const doctorJson = JSON.parse(outChunks.join("")) as { healthy: boolean; overallStatus: string };
     expect(doctorJson.healthy).toBe(true);
+    expect(doctorJson.overallStatus).toBe("HEALTHY");
     expect(errChunks).toEqual([]);
   });
 
@@ -1261,7 +1263,8 @@ describe(
     });
     expect(releaseDllReport.runtime.nativeWorkersPresent).toBe(true);
     expect(releaseDllReport.runtime.ok).toBe(true);
-    expect(releaseDllReport.healthy).toBe(true);
+    expect(releaseDllReport.overallStatus).toBe("NOT CONFIGURED");
+    expect(releaseDllReport.healthy).toBe(false);
 
     // 4) Linux musl checks linuxmusl-x64.node instead of linux-x64.node
     const glibcOnlyPkg = createFakePackageRoot(sandbox, "glibc-only-pkg", {
@@ -1278,6 +1281,7 @@ describe(
       probeToolchain: () => ({ available: true, version: "1.0", detail: "ok" }),
     });
     expect(muslMissingReport.runtime.sqlitePrebuildPresent).toBe(false);
+    expect(muslMissingReport.overallStatus).toBe("UNHEALTHY");
     expect(muslMissingReport.healthy).toBe(false);
     expect(
       muslMissingReport.runtime.missingPaths.some((p) => p.endsWith("linuxmusl-x64.node")),
@@ -1297,7 +1301,9 @@ describe(
       probeToolchain: () => ({ available: true, version: "1.0", detail: "ok" }),
     });
     expect(muslOkReport.runtime.sqlitePrebuildPresent).toBe(true);
-    expect(muslOkReport.healthy).toBe(true);
+    expect(muslOkReport.runtime.ok).toBe(true);
+    expect(muslOkReport.overallStatus).toBe("NOT CONFIGURED");
+    expect(muslOkReport.healthy).toBe(false);
   });
 
   it("setup, doctor, and runtime-stage respect CLAUDE_CONFIG_DIR and preserve THIRD-PARTY-NOTICES.md + licenses/", async () => {

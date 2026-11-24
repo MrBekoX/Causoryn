@@ -214,6 +214,7 @@ describe("SqliteGraphRepository — şema ve bağlantı", () => {
         "workspaces",
         "files",
         "snapshots",
+        "build_leases",
         "nodes",
         "edges",
         "evidence",
@@ -221,6 +222,8 @@ describe("SqliteGraphRepository — şema ve bağlantı", () => {
       ]) {
         expect(tables, `tablo yok: ${table}`).toContain(table);
       }
+      expect(probe.pragma("page_size", { simple: true })).toBe(4096);
+      expect(probe.pragma("user_version", { simple: true })).toBe(3);
       probe.close();
     } finally {
       repo.close();
@@ -1028,6 +1031,112 @@ describe("v0.2.1 SqliteGraphRepository.runInTransaction ve O(1) position sayacı
       expectRepoError("storage/corrupt-snapshot", () => {
         repo.getLatestPublished(WS);
       });
+    } finally {
+      repo.close();
+    }
+  });
+});
+
+describe("Task 1.7 — SqliteGraphRepository build_leases ve recoverOrphanBuilds", () => {
+  it("acquire / renew / release / publish-cleanup / failBuild-cleanup yaşam döngüsünü atomik yürütür", () => {
+    const repo = makeRepo("leases.sqlite");
+    try {
+      const built = buildOrderSnapshot(repo, 1);
+      const acq1 = repo.acquireBuildLease({
+        workspaceId: WS,
+        buildId: built.build.buildId,
+        leaseId: "lease-1",
+        ownerPid: process.pid,
+        hostLabel: "claude-code",
+        nowIso: CREATED_AT,
+        ttlMs: 30_000,
+      });
+      expect(acq1.acquired).toBe(true);
+      expect(repo.getActiveBuildLease(WS)?.leaseId).toBe("lease-1");
+      expect(repo.getActiveBuildLease(WS)?.hostLabel).toBe("claude-code");
+
+      // Canlı lease varken ikinci edinen reddedilir ve mevcut holder döner.
+      const acq2 = repo.acquireBuildLease({
+        workspaceId: WS,
+        buildId: "build-other",
+        leaseId: "lease-2",
+        ownerPid: process.pid,
+        hostLabel: "codex",
+        nowIso: CREATED_AT,
+        ttlMs: 30_000,
+        isPidAlive: () => true,
+      });
+      expect(acq2.acquired).toBe(false);
+      if (!acq2.acquired) {
+        expect(acq2.holder.leaseId).toBe("lease-1");
+        expect(acq2.holder.hostLabel).toBe("claude-code");
+      }
+
+      // Yenileme doğru leaseId ile başarılı, yanlış leaseId ile false döner.
+      expect(repo.renewBuildLease(WS, "wrong-lease", PUBLISHED_AT, 30_000)).toBe(false);
+      expect(repo.renewBuildLease(WS, "lease-1", PUBLISHED_AT, 30_000)).toBe(true);
+      expect(repo.getActiveBuildLease(WS)?.heartbeatAt).toBe(PUBLISHED_AT);
+
+      // publish() eşleşen lease satırını atomik olarak temizler.
+      repo.publish(built.build.buildId, "ready", PUBLISHED_AT);
+      expect(repo.getActiveBuildLease(WS)).toBeUndefined();
+
+      // failBuild() de eşleşen lease satırını atomik olarak temizler.
+      const built2 = buildOrderSnapshot(repo, 2);
+      const acq3 = repo.acquireBuildLease({
+        workspaceId: WS,
+        buildId: built2.build.buildId,
+        leaseId: "lease-3",
+        ownerPid: process.pid,
+        nowIso: PUBLISHED_AT,
+        ttlMs: 30_000,
+      });
+      expect(acq3.acquired).toBe(true);
+      repo.failBuild(built2.build.buildId, "aborted");
+      expect(repo.getActiveBuildLease(WS)).toBeUndefined();
+
+      // releaseBuildLease idempotenttir (olmayan lease için fırlatmaz).
+      expect(() => repo.releaseBuildLease(WS, "lease-3")).not.toThrow();
+    } finally {
+      repo.close();
+    }
+  });
+
+  it("recoverOrphanBuilds canlı lease'i korur; lease'siz, süresi dolmuş veya ölü PID'li building satırlarını kurtarır", () => {
+    const repo = makeRepo("orphan-unit.sqlite");
+    try {
+      const liveBuild = buildOrderSnapshot(repo, 1).build;
+      const orphanBuild = buildOrderSnapshot(repo, 2).build;
+      repo.acquireBuildLease({
+        workspaceId: WS,
+        buildId: liveBuild.buildId,
+        leaseId: "lease-live",
+        ownerPid: process.pid,
+        nowIso: CREATED_AT,
+        ttlMs: 30_000,
+      });
+
+      // Canlı lease liveBuild'i korur, ama lease ile eşleşmeyen orphanBuild kurtarılır!
+      const partialRecovery = repo.recoverOrphanBuilds(WS, {
+        nowIso: CREATED_AT,
+        isPidAlive: () => true,
+      });
+      expect(partialRecovery.recoveredBuildIds).toEqual([orphanBuild.buildId]);
+      expect(partialRecovery.clearedLease).toBe(false);
+      expect(repo.getBuild(liveBuild.buildId)?.state).toBe("building");
+      expect(repo.getBuild(orphanBuild.buildId)?.state).toBe("failed");
+      expect(repo.getBuild(orphanBuild.buildId)?.failureReason).toBe("orphan-build-recovered");
+      expect(repo.getActiveBuildLease(WS)?.leaseId).toBe("lease-live");
+
+      // Süre dolduğunda (PUBLISHED_AT = CREATED_AT + 5 dk > 30 sn) liveBuild ve lease temizlenir.
+      const fullRecovery = repo.recoverOrphanBuilds(WS, {
+        nowIso: PUBLISHED_AT,
+        isPidAlive: () => true,
+      });
+      expect(fullRecovery.recoveredBuildIds).toEqual([liveBuild.buildId]);
+      expect(fullRecovery.clearedLease).toBe(true);
+      expect(repo.getBuild(liveBuild.buildId)?.state).toBe("failed");
+      expect(repo.getActiveBuildLease(WS)).toBeUndefined();
     } finally {
       repo.close();
     }

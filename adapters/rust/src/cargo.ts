@@ -19,7 +19,9 @@
  */
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { existsSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { delimiter, dirname, join } from "node:path";
+import { defaultWorkerManifestPath } from "./types.js";
 
 /**
  * cargo build alt sürecine geçilen ortam değişkeni allowlist'i (savunma
@@ -72,7 +74,9 @@ export type CargoSpawnFunction = (
   options: {
     readonly stdio: ["ignore", "pipe", "pipe"];
     readonly env: Readonly<Record<string, string>>;
+    readonly cwd?: string;
     readonly shell?: false;
+    readonly windowsHide?: true;
   },
 ) => ChildProcess;
 
@@ -93,18 +97,35 @@ export function isSafeCommandPath(value: string): boolean {
 }
 
 /**
+ * CARGO_HOME / RUSTUP_HOME için mutlak ve yerel dizin doğrulaması:
+ * - boş / kontrol karakteri / kabuk meta karakteri reddedilir,
+ * - UNC (\\host\share, //host/share) ve Win32 device (\\?\, \\.\) yolları reddedilir,
+ * - göreli yollar (ör. ".cargo", "./evil") güvenilmeyen cwd'ye çözülebileceğinden reddedilir,
+ * - ".." kaçış segmenti reddedilir.
+ */
+export function isSafeAbsoluteDirPath(value: string): boolean {
+  if (!isSafeCommandPath(value)) return false;
+  if (/^(?:\\\\|\/\/|\/\\|\\\/)/.test(value)) return false;
+  const isAbs = value.startsWith("/") || /^[a-zA-Z]:[\\/]/.test(value);
+  if (!isAbs) return false;
+  if (value.split(/[\\/]/).includes("..")) return false;
+  return true;
+}
+
+/**
  * cargo-home dizinini çözümler: (1) CAUSORYN_CARGO_HOME env override'ı
- * (config kuralı — güvenlik filtresinden geçmek zorunda), (2)
+ * (config kuralı — mutlak yerel yol filtresinden geçmek zorunda), (2)
  * %USERPROFILE%\.cargo\bin / $HOME/.cargo/bin sabit aday yolu. Hiçbiri
  * yoksa null — çağıran PATH'siz default PATH ile devam eder ya da düşer.
  */
 export function resolveCargoHomeDir(): string | null {
   const override = process.env["CAUSORYN_CARGO_HOME"];
   if (override !== undefined && override.trim().length > 0) {
-    return isSafeCommandPath(override) ? override : null;
+    const trimmed = override.trim();
+    return isSafeAbsoluteDirPath(trimmed) ? trimmed : null;
   }
   const home = process.env["USERPROFILE"] ?? process.env["HOME"];
-  if (home !== undefined && home.length > 0) {
+  if (home !== undefined && home.length > 0 && isSafeAbsoluteDirPath(home)) {
     return join(home, ".cargo", "bin");
   }
   return null;
@@ -114,6 +135,9 @@ export function resolveCargoHomeDir(): string | null {
  * Tool süreçleri için allowlist'li ortam kurar; cargo-home dizini
  * biliniyorsa PATH'in başına ÖNEKLENİR — böylece LİTERAL "cargo" komutu
  * PATH çözümlemesiyle o dizinden bulunur (komut değişkeni YOKTUR).
+ * Cargo toolchain ortamında CARGO_HOME/RUSTUP_HOME mutlak yerel yol
+ * doğrulamasından geçer ve CARGO_BUILD_RUSTC_WRAPPER /
+ * CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER zorla boşaltılır.
  */
 export function buildToolEnv(
   allowlist: readonly string[],
@@ -126,8 +150,18 @@ export function buildToolEnv(
       if (key === "CARGO_TARGET_DIR" && !isSafeCommandPath(value)) {
         continue;
       }
+      if (
+        (key === "CARGO_HOME" || key === "RUSTUP_HOME") &&
+        !isSafeAbsoluteDirPath(value)
+      ) {
+        continue;
+      }
       env[key] = value;
     }
+  }
+  if (allowlist.includes("CARGO_HOME")) {
+    env["CARGO_BUILD_RUSTC_WRAPPER"] = "";
+    env["CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER"] = "";
   }
   if (prependDir !== null && isSafeCommandPath(prependDir)) {
     env["PATH"] = prependDir + delimiter + (env["PATH"] ?? "");
@@ -135,11 +169,18 @@ export function buildToolEnv(
   return env;
 }
 
-function probeCargo(): boolean {
+function resolveTrustedCargoCwd(manifestPath?: string): string {
+  const candidate = dirname(manifestPath ?? defaultWorkerManifestPath());
+  return existsSync(candidate) ? candidate : tmpdir();
+}
+
+function probeCargo(manifestPath?: string): boolean {
   const cargoHome = resolveCargoHomeDir();
   const probe = spawnSync("cargo", ["--version"], {
     encoding: "utf8",
     shell: false,
+    windowsHide: true,
+    cwd: resolveTrustedCargoCwd(manifestPath),
     timeout: 15_000,
     env: buildToolEnv(CARGO_ENV_ALLOWLIST, cargoHome),
   });
@@ -148,10 +189,11 @@ function probeCargo(): boolean {
 
 /**
  * cargo toolchain'i kullanılabilir mi? LİTERAL "cargo" komutu PATH
- * (öncelikli olarak cargo-home önekli) üzerinden çözümlenerek yoklanır.
+ * (öncelikli olarak cargo-home önekli) üzerinden güvenilen cwd'de yoklanır;
+ * process.cwd() asla miraslanmaz.
  */
-export function isCargoAvailable(): boolean {
-  return probeCargo();
+export function isCargoAvailable(manifestPath?: string): boolean {
+  return probeCargo(manifestPath);
 }
 
 /** cargo build koşum sonucu — adapter fallback kararı buna göre verir. */
@@ -183,7 +225,12 @@ function killBuildTree(spawnFn: CargoSpawnFunction, child: ChildProcess | null):
     const killer = spawnFn(
       "taskkill", // LİTERAL komut — kırmızı çizgi 6
       ["/pid", String(pid), "/T", "/F"],
-      { stdio: ["ignore", "pipe", "pipe"], env: buildToolEnv(CARGO_ENV_ALLOWLIST, null) },
+      {
+        stdio: ["ignore", "pipe", "pipe"],
+        env: buildToolEnv(CARGO_ENV_ALLOWLIST, null),
+        shell: false,
+        windowsHide: true,
+      },
     );
     killer.on("error", () => {}); // taskkill yoksa/hata verirse doğrudan kill yeterli
     killer.once("exit", () => {
@@ -283,9 +330,10 @@ export function runCargoBuild(input: {
       childEnv["CARGO_TARGET_DIR"] = input.targetDir;
     }
 
+    const cargoCwd = dirname(input.manifestPath);
     const useLocked =
       input.targetDir !== undefined &&
-      existsSync(join(dirname(input.manifestPath), "Cargo.lock"));
+      existsSync(join(cargoCwd, "Cargo.lock"));
     const cargoArgs = useLocked
       ? ["build", "--locked", "--manifest-path", input.manifestPath]
       : ["build", "--manifest-path", input.manifestPath];
@@ -297,7 +345,9 @@ export function runCargoBuild(input: {
         {
           stdio: ["ignore", "pipe", "pipe"],
           env: childEnv,
+          cwd: cargoCwd,
           shell: false,
+          windowsHide: true,
         },
       );
     } catch (error) {

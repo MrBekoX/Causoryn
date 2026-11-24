@@ -596,10 +596,14 @@ export class SqliteWikiStore {
       this.owned = false;
     }
     try {
+      this.db.pragma("busy_timeout = 5000");
+      const initialVersion = this.db.pragma("user_version", { simple: true });
+      if (initialVersion === 0) {
+        this.db.pragma("page_size = 4096");
+      }
       this.db.pragma("journal_mode = WAL");
       this.db.pragma("foreign_keys = ON");
       this.db.pragma("synchronous = NORMAL");
-      this.db.pragma("busy_timeout = 5000");
       const version = this.db.pragma("user_version", { simple: true });
       if (typeof version !== "number" || !Number.isInteger(version)) {
         throw new WikiStoreError(

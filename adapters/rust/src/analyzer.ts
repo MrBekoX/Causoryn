@@ -37,8 +37,21 @@ import {
   type SnapshotNodeInput,
   type SourceSpan,
 } from "@causoryn/domain";
-import { existsSync } from "node:fs";
-import { join } from "node:path";
+import { createHash, randomBytes } from "node:crypto";
+import {
+  closeSync,
+  constants as fsConstants,
+  fstatSync,
+  lstatSync,
+  openSync,
+  readdirSync,
+  readSync,
+  renameSync,
+  rmSync,
+  type Stats,
+  writeFileSync,
+} from "node:fs";
+import { dirname, join } from "node:path";
 import {
   isCargoAvailable,
   resolveCargoHomeDir,
@@ -73,6 +86,11 @@ function resolveCargoHome(options: Partial<RustAdapterOptions> | undefined): str
   return resolveCargoHomeDir();
 }
 
+export interface AnalyzeRustWorkspaceOptions extends Partial<RustAdapterOptions> {
+  /** false iken eksik/bozuk worker binary'si otomatik derlenmez, güvenli reddedilir. */
+  readonly autoBuild?: boolean;
+}
+
 interface ResolvedRuntimeOptions {
   readonly workerDir: string;
   readonly workerBinaryName: string;
@@ -82,10 +100,11 @@ interface ResolvedRuntimeOptions {
   readonly cargoBuildTimeoutMs: number;
   readonly hasSpawnInjection: boolean;
   readonly hasExplicitWorkerDir: boolean;
+  readonly autoBuild: boolean;
 }
 
 function resolveOptions(
-  partial?: Partial<RustAdapterOptions>,
+  partial?: AnalyzeRustWorkspaceOptions,
 ): ResolvedRuntimeOptions {
   const cargoHome = resolveCargoHome(partial);
   const envWorkerDir = process.env["CAUSORYN_RUST_WORKER_DIR"];
@@ -105,6 +124,7 @@ function resolveOptions(
       partial?.cargoBuildTimeoutMs ?? DEFAULT_CARGO_BUILD_TIMEOUT_MS,
     hasSpawnInjection: partial?.spawnProcess !== undefined,
     hasExplicitWorkerDir,
+    autoBuild: partial?.autoBuild !== false,
   };
 }
 
@@ -142,8 +162,314 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 /* ------------------------------------------------------------------ */
-/* Worker binary sağlama: yoksa LİTERAL "cargo" ile derle              */
+/* Worker binary bütünlük doğrulaması ve sağlama (Task 1.1)            */
 /* ------------------------------------------------------------------ */
+
+const HEX_SHA256_RE = /^[0-9a-f]{64}$/;
+const NOFOLLOW_READ_FLAGS =
+  fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0);
+const INTEGRITY_META_MAX_BYTES = 64 * 1024;
+
+export interface RustWorkerIntegrityRecord {
+  readonly sourceFingerprint: string;
+  readonly binarySha256: string;
+}
+
+/** Önbellekteki worker binary'si için yan-dosya bütünlük kaydı yolu. */
+export function rustWorkerIntegrityPath(binaryPath: string): string {
+  return `${binaryPath}.sha256.json`;
+}
+
+function lstatOrNull(filePath: string): Stats | null {
+  try {
+    return lstatSync(filePath);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Dosyayı lstatSync + O_NOFOLLOW + fstatSync kimlik eşleşmesiyle okur.
+ * Symlink / dizin / özel dosya veya açma-arası değişim (TOCTOU) reddedilir.
+ */
+function readRegularFileBytesNoFollow(
+  filePath: string,
+  maxBytes?: number,
+): Buffer | null {
+  const st = lstatOrNull(filePath);
+  if (st === null || st.isSymbolicLink() || !st.isFile()) {
+    return null;
+  }
+  if (maxBytes !== undefined && st.size > maxBytes) {
+    return null;
+  }
+  let fd: number | null = null;
+  try {
+    fd = openSync(filePath, NOFOLLOW_READ_FLAGS);
+    const fdStat = fstatSync(fd);
+    if (!fdStat.isFile()) return null;
+    if (st.ino !== 0 && (fdStat.dev !== st.dev || fdStat.ino !== st.ino)) {
+      return null;
+    }
+    const chunks: Buffer[] = [];
+    const buf = Buffer.allocUnsafe(64 * 1024);
+    let total = 0;
+    for (;;) {
+      const read = readSync(fd, buf, 0, buf.length, null);
+      if (read <= 0) break;
+      total += read;
+      if (maxBytes !== undefined && total > maxBytes) {
+        return null;
+      }
+      chunks.push(Buffer.from(buf.subarray(0, read)));
+    }
+    return Buffer.concat(chunks, total);
+  } catch {
+    return null;
+  } finally {
+    if (fd !== null) {
+      try {
+        closeSync(fd);
+      } catch {
+        // ignore close failure
+      }
+    }
+  }
+}
+
+/**
+ * Düzenli dosyayı O_NOFOLLOW ile akışlı okuyup SHA-256 hex özetini üretir.
+ * Symlink, özel dosya veya TOCTOU sapmasında null döner.
+ */
+export function readRegularFileSha256NoFollow(filePath: string): string | null {
+  const st = lstatOrNull(filePath);
+  if (st === null || st.isSymbolicLink() || !st.isFile()) {
+    return null;
+  }
+  let fd: number | null = null;
+  try {
+    fd = openSync(filePath, NOFOLLOW_READ_FLAGS);
+    const fdStat = fstatSync(fd);
+    if (!fdStat.isFile()) return null;
+    if (st.ino !== 0 && (fdStat.dev !== st.dev || fdStat.ino !== st.ino)) {
+      return null;
+    }
+    const hash = createHash("sha256");
+    const buf = Buffer.allocUnsafe(64 * 1024);
+    for (;;) {
+      const read = readSync(fd, buf, 0, buf.length, null);
+      if (read <= 0) break;
+      hash.update(buf.subarray(0, read));
+    }
+    return hash.digest("hex");
+  } catch {
+    return null;
+  } finally {
+    if (fd !== null) {
+      try {
+        closeSync(fd);
+      } catch {
+        // ignore close failure
+      }
+    }
+  }
+}
+
+function collectSortedRsFiles(srcDir: string): string[] {
+  const results: string[] = [];
+  const walk = (currentDir: string, relPrefix: string): void => {
+    let entries;
+    try {
+      entries = readdirSync(currentDir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    entries.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+    for (const entry of entries) {
+      if (entry.isSymbolicLink()) continue;
+      const fullPath = join(currentDir, entry.name);
+      const relPosix =
+        relPrefix.length === 0 ? entry.name : `${relPrefix}/${entry.name}`;
+      if (entry.isDirectory()) {
+        walk(fullPath, relPosix);
+      } else if (entry.isFile() && entry.name.endsWith(".rs")) {
+        results.push(relPosix);
+      }
+    }
+  };
+  walk(srcDir, "");
+  results.sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+  return results;
+}
+
+/**
+ * Rust worker kaynağının deterministik SHA-256 parmak izini hesaplar:
+ * Cargo.toml + Cargo.lock + sıralı src/**\/*.rs. Manifest yoksa null döner.
+ */
+export function computeRustWorkerSourceFingerprint(
+  manifestPath: string,
+): string | null {
+  const cargoToml = readRegularFileBytesNoFollow(manifestPath);
+  if (cargoToml === null) {
+    return null;
+  }
+  const workerRoot = dirname(manifestPath);
+  const hash = createHash("sha256");
+  hash.update("Cargo.toml\0");
+  hash.update(String(cargoToml.length));
+  hash.update("\0");
+  hash.update(cargoToml);
+
+  const cargoLock = readRegularFileBytesNoFollow(join(workerRoot, "Cargo.lock"));
+  if (cargoLock !== null) {
+    hash.update("Cargo.lock\0");
+    hash.update(String(cargoLock.length));
+    hash.update("\0");
+    hash.update(cargoLock);
+  } else {
+    hash.update("Cargo.lock:absent\0");
+  }
+
+  const srcDir = join(workerRoot, "src");
+  for (const relPosix of collectSortedRsFiles(srcDir)) {
+    const rsBytes = readRegularFileBytesNoFollow(
+      join(srcDir, ...relPosix.split("/")),
+    );
+    if (rsBytes === null) {
+      return null;
+    }
+    hash.update(`src/${relPosix}\0`);
+    hash.update(String(rsBytes.length));
+    hash.update("\0");
+    hash.update(rsBytes);
+  }
+
+  return hash.digest("hex");
+}
+
+/** Bütünlük yan-dosyasını (<binaryPath>.sha256.json) atomik yazar. */
+export function writeRustWorkerIntegrityMetadata(
+  binaryPath: string,
+  record: RustWorkerIntegrityRecord,
+): void {
+  const metaPath = rustWorkerIntegrityPath(binaryPath);
+  const tmpPath = `${metaPath}.tmp.${String(process.pid)}.${randomBytes(6).toString("hex")}`;
+  const payload = `${JSON.stringify(record, null, 2)}\n`;
+  let fd: number | null = null;
+  try {
+    fd = openSync(
+      tmpPath,
+      fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL,
+      0o600,
+    );
+    writeFileSync(fd, payload, "utf8");
+    closeSync(fd);
+    fd = null;
+    renameSync(tmpPath, metaPath);
+  } catch (error) {
+    if (fd !== null) {
+      try {
+        closeSync(fd);
+      } catch {
+        // ignore
+      }
+    }
+    try {
+      rmSync(tmpPath, { force: true });
+    } catch {
+      // ignore
+    }
+    throw error;
+  }
+}
+
+/**
+ * Önbellekteki binary'yi çalıştırmadan önce doğrular:
+ * 1) lstatSync düzenli dosya kontrolü (symlink reddi),
+ * 2) O_NOFOLLOW binary SHA-256 hesabı,
+ * 3) <binaryPath>.sha256.json regular-file + O_NOFOLLOW okuması,
+ * 4) sourceFingerprint VE binarySha256 birebir eşleşmesi.
+ */
+export function verifyRustWorkerBinaryIntegrity(
+  binaryPath: string,
+  expectedSourceFingerprint: string | null,
+): { readonly valid: boolean; readonly reason: string } {
+  if (expectedSourceFingerprint === null) {
+    return {
+      valid: false,
+      reason: "sourceFingerprint hesaplanamadı (Cargo.toml eksik veya okunamadı)",
+    };
+  }
+  const st = lstatOrNull(binaryPath);
+  if (st === null) {
+    return { valid: false, reason: "worker binary mevcut değil" };
+  }
+  if (st.isSymbolicLink() || !st.isFile()) {
+    return {
+      valid: false,
+      reason: "worker binary symlink veya düzenli dosya değil (reddedildi)",
+    };
+  }
+  const actualBinarySha256 = readRegularFileSha256NoFollow(binaryPath);
+  if (actualBinarySha256 === null) {
+    return {
+      valid: false,
+      reason: "worker binary O_NOFOLLOW ile doğrulanamadı",
+    };
+  }
+  const metaPath = rustWorkerIntegrityPath(binaryPath);
+  const metaRaw = readRegularFileBytesNoFollow(
+    metaPath,
+    INTEGRITY_META_MAX_BYTES,
+  );
+  if (metaRaw === null) {
+    return {
+      valid: false,
+      reason: "bütünlük yan-dosyası (.sha256.json) eksik veya düzenli dosya değil",
+    };
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(metaRaw.toString("utf8"));
+  } catch {
+    return {
+      valid: false,
+      reason: "bütünlük yan-dosyası (.sha256.json) geçerli JSON değil",
+    };
+  }
+  if (!isRecord(parsed)) {
+    return {
+      valid: false,
+      reason: "bütünlük yan-dosyası (.sha256.json) geçersiz şema",
+    };
+  }
+  const recordedSource = parsed["sourceFingerprint"];
+  const recordedBinary = parsed["binarySha256"];
+  if (
+    typeof recordedSource !== "string" ||
+    !HEX_SHA256_RE.test(recordedSource) ||
+    typeof recordedBinary !== "string" ||
+    !HEX_SHA256_RE.test(recordedBinary)
+  ) {
+    return {
+      valid: false,
+      reason: "bütünlük yan-dosyası geçersiz SHA-256 alanı içeriyor",
+    };
+  }
+  if (recordedSource !== expectedSourceFingerprint) {
+    return {
+      valid: false,
+      reason: "sourceFingerprint uyuşmuyor (worker kaynağı değişmiş)",
+    };
+  }
+  if (recordedBinary !== actualBinarySha256) {
+    return {
+      valid: false,
+      reason: "binarySha256 uyuşmuyor (kurcalanmış veya bozuk binary)",
+    };
+  }
+  return { valid: true, reason: "" };
+}
 
 interface WorkerBinaryProbe {
   readonly available: boolean;
@@ -152,20 +478,27 @@ interface WorkerBinaryProbe {
 }
 
 /**
- * Worker binary'si yoksa LİTERAL "cargo" komutuyla (cargo-home PATH
- * ön ekli) derler. cargo toolchain'i yoksa/derleme başarısızsa
- * available=false döner — analyzer açık warning ile L0/L1'e düşer.
- *
- * Not: spawn enjeksiyonlu TEST koşumlarında build adımı atlanır; testler
- * binary'yi kendi bootstrap'ında derler ve sahte süreçler spawnProcess
- * ile verilir (build'ci test kontekstinde gereksiz yere cargo koşturmaz).
+ * Worker binary'sini sağlar ve önbellekteki binary için yürütme öncesi
+ * SHA-256 + sourceFingerprint + symlink-reddi bütünlük doğrulaması yapar.
+ * Uyuşmazlık/kurcalanma durumunda temiz yeniden derleme yapılır (autoBuild=false
+ * ise güvenli reddedilir ve L0/L1'e düşülür).
  */
 async function ensureWorkerBinary(
   options: ResolvedRuntimeOptions,
 ): Promise<WorkerBinaryProbe> {
+  const manifestPath = defaultWorkerManifestPath();
+
   if (options.hasExplicitWorkerDir) {
     const binaryPath = join(options.workerDir, options.workerBinaryName);
-    if (existsSync(binaryPath)) {
+    const st = lstatOrNull(binaryPath);
+    if (st !== null) {
+      if (st.isSymbolicLink() || !st.isFile()) {
+        return {
+          available: false,
+          workerDir: options.workerDir,
+          detail: `worker binary symlink veya düzenli dosya değil (reddedildi): ${binaryPath}`,
+        };
+      }
       return { available: true, workerDir: options.workerDir, detail: "" };
     }
 
@@ -174,7 +507,15 @@ async function ensureWorkerBinary(
       return { available: true, workerDir: options.workerDir, detail: "" };
     }
 
-    if (!isCargoAvailable()) {
+    if (!options.autoBuild) {
+      return {
+        available: false,
+        workerDir: options.workerDir,
+        detail: `Rust worker binary bulunamadı ve autoBuild kapalı: ${binaryPath}`,
+      };
+    }
+
+    if (!isCargoAvailable(manifestPath)) {
       return {
         available: false,
         workerDir: options.workerDir,
@@ -184,7 +525,7 @@ async function ensureWorkerBinary(
     }
 
     const build = await runCargoBuild({
-      manifestPath: defaultWorkerManifestPath(),
+      manifestPath,
       timeoutMs: options.cargoBuildTimeoutMs,
     });
     if (build.status !== 0) {
@@ -199,7 +540,8 @@ async function ensureWorkerBinary(
         detail: `cargo build başarısız (exit=${String(build.status ?? "bilinmiyor")}): ${tail}`,
       };
     }
-    if (!existsSync(binaryPath)) {
+    const builtStat = lstatOrNull(binaryPath);
+    if (builtStat === null || builtStat.isSymbolicLink() || !builtStat.isFile()) {
       // Dürüst ayrım: derleme BAŞARILI ama binary override edilen dizinde
       // değil — "build başarısız" DEMEYİZ; gerçek sebep bildirilir.
       return {
@@ -214,24 +556,77 @@ async function ensureWorkerBinary(
   // hasExplicitWorkerDir === false:
   // 1) Önce asset kökü içindeki <assetRoot>/native/rust-worker/target/debug/<bin> aranır.
   const assetBinaryPath = join(options.workerDir, options.workerBinaryName);
-  if (existsSync(assetBinaryPath)) {
+  const assetStat = lstatOrNull(assetBinaryPath);
+  if (assetStat !== null) {
+    if (assetStat.isSymbolicLink() || !assetStat.isFile()) {
+      return {
+        available: false,
+        workerDir: options.workerDir,
+        detail: `asset Rust worker binary symlink veya düzenli dosya değil (reddedildi): ${assetBinaryPath}`,
+      };
+    }
     return { available: true, workerDir: options.workerDir, detail: "" };
   }
 
-  // 2) Yoksa yazılabilir önbellekteki <cacheTargetDir>/debug/<bin> kontrol edilir.
+  // 2) Yoksa yazılabilir önbellekteki <cacheTargetDir>/debug/<bin> bütünlük doğrulamasıyla kontrol edilir.
   const cacheTargetDir = defaultWritableRustTargetDir();
   const cacheWorkerDir = join(cacheTargetDir, "debug");
   const cacheBinaryPath = join(cacheWorkerDir, options.workerBinaryName);
-  if (existsSync(cacheBinaryPath)) {
-    return { available: true, workerDir: cacheWorkerDir, detail: "" };
+  const sourceFingerprint = computeRustWorkerSourceFingerprint(manifestPath);
+  const cacheStat = lstatOrNull(cacheBinaryPath);
+
+  if (cacheStat !== null) {
+    const verification = verifyRustWorkerBinaryIntegrity(
+      cacheBinaryPath,
+      sourceFingerprint,
+    );
+    if (verification.valid) {
+      return { available: true, workerDir: cacheWorkerDir, detail: "" };
+    }
+    console.error(
+      `[rust-adapter] önbellekteki Rust worker binary bütünlük doğrulamasından geçemedi (${verification.reason}): ${cacheBinaryPath}`,
+    );
+    if (!options.autoBuild || options.hasSpawnInjection) {
+      return {
+        available: false,
+        workerDir: cacheWorkerDir,
+        detail: `önbellekteki Rust worker binary bütünlük doğrulamasından geçemedi (${verification.reason})`,
+      };
+    }
+    // Temiz yeniden derleme öncesi kurcalanmış/symlink/bayat binary ve yan-dosya kaldırılır.
+    try {
+      rmSync(cacheBinaryPath, { force: true });
+      rmSync(rustWorkerIntegrityPath(cacheBinaryPath), { force: true });
+    } catch {
+      return {
+        available: false,
+        workerDir: cacheWorkerDir,
+        detail: `önbellekteki bozuk Rust worker binary temizlenemedi: ${cacheBinaryPath}`,
+      };
+    }
+  } else {
+    if (options.hasSpawnInjection) {
+      return { available: true, workerDir: cacheWorkerDir, detail: "" };
+    }
+    if (!options.autoBuild) {
+      return {
+        available: false,
+        workerDir: cacheWorkerDir,
+        detail: `Rust worker binary bulunamadı ve autoBuild kapalı: ${cacheBinaryPath}`,
+      };
+    }
   }
 
-  if (options.hasSpawnInjection) {
-    return { available: true, workerDir: cacheWorkerDir, detail: "" };
+  // 3) İkisi de yoksa (veya önbellek doğrulaması başarısız olup temizlendiyse)
+  //    cargo build yazılabilir CARGO_TARGET_DIR içine çalıştırılır ve .sha256.json yazılır.
+  if (sourceFingerprint === null) {
+    return {
+      available: false,
+      workerDir: cacheWorkerDir,
+      detail: `Rust worker manifest kaynağı bulunamadı: ${manifestPath}`,
+    };
   }
-
-  // 3) İkisi de yoksa cargo build yazılabilir CARGO_TARGET_DIR içine çalıştırılır.
-  if (!isCargoAvailable()) {
+  if (!isCargoAvailable(manifestPath)) {
     return {
       available: false,
       workerDir: cacheWorkerDir,
@@ -241,7 +636,7 @@ async function ensureWorkerBinary(
   }
 
   const build = await runCargoBuild({
-    manifestPath: defaultWorkerManifestPath(),
+    manifestPath,
     timeoutMs: options.cargoBuildTimeoutMs,
     targetDir: cacheTargetDir,
   });
@@ -257,11 +652,36 @@ async function ensureWorkerBinary(
       detail: `cargo build başarısız (exit=${String(build.status ?? "bilinmiyor")}): ${tail}`,
     };
   }
-  if (!existsSync(cacheBinaryPath)) {
+  const binarySha256 = readRegularFileSha256NoFollow(cacheBinaryPath);
+  if (binarySha256 === null) {
     return {
       available: false,
       workerDir: cacheWorkerDir,
-      detail: `cargo build başarılı ama worker binary'si beklenen konumda yok: ${cacheBinaryPath}`,
+      detail: `cargo build başarılı ama worker binary'si doğrulanamadı (eksik veya düzenli dosya değil): ${cacheBinaryPath}`,
+    };
+  }
+  try {
+    writeRustWorkerIntegrityMetadata(cacheBinaryPath, {
+      sourceFingerprint,
+      binarySha256,
+    });
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    return {
+      available: false,
+      workerDir: cacheWorkerDir,
+      detail: `worker binary bütünlük kaydı (.sha256.json) yazılamadı: ${detail}`,
+    };
+  }
+  const postBuildCheck = verifyRustWorkerBinaryIntegrity(
+    cacheBinaryPath,
+    sourceFingerprint,
+  );
+  if (!postBuildCheck.valid) {
+    return {
+      available: false,
+      workerDir: cacheWorkerDir,
+      detail: `yeni derlenen Rust worker binary doğrulaması başarısız: ${postBuildCheck.reason}`,
     };
   }
   return { available: true, workerDir: cacheWorkerDir, detail: "" };
@@ -589,7 +1009,9 @@ function fallbackResult(
 /* ------------------------------------------------------------------ */
 
 export async function analyzeRustWorkspace(
-  input: AnalyzeRustWorkspaceInput,
+  input: Omit<AnalyzeRustWorkspaceInput, "options"> & {
+    readonly options?: AnalyzeRustWorkspaceOptions;
+  },
 ): Promise<RustAdapterResult> {
   const { workspaceId, files } = input;
   if (workspaceId.trim().length === 0) {

@@ -543,29 +543,40 @@ describe.skipIf(!workerReady)("rust-worker M1 (PROTOCOL.md v1)", () => {
     expect(edge?.evidence[0]?.analyzerId).toBe("rust-worker");
   });
 
-  it("pozitif: CALLS nitelikli yol çağrıları verified (OrdersService::new, OrderRepository::new)", () => {
-    expect(
-      findEdge(
-        analyzeResponse,
-        (edge) =>
-          edge.kind === "CALLS" &&
-          edge.from.qualifiedName === "crate::list_orders" &&
-          edge.to.kind === "Method" &&
-          edge.to.qualifiedName === "crate::services::OrdersService::new" &&
-          edge.resolution === "verified",
-      ),
-    ).toBeDefined();
-    expect(
-      findEdge(
-        analyzeResponse,
-        (edge) =>
-          edge.kind === "CALLS" &&
-          edge.from.qualifiedName === "crate::services::OrdersService::new" &&
-          edge.to.kind === "Method" &&
-          edge.to.qualifiedName === "crate::repositories::OrderRepository::new" &&
-          edge.resolution === "verified",
-      ),
-    ).toBeDefined();
+  it("pozitif: CALLS 2-segment nitelikli yol çağrıları heuristic + explicit ambiguity (modül öneki doğrulanmaz)", () => {
+    const svcNew = findEdge(
+      analyzeResponse,
+      (edge) =>
+        edge.kind === "CALLS" &&
+        edge.from.qualifiedName === "crate::list_orders" &&
+        edge.to.kind === "Method" &&
+        edge.to.qualifiedName === "crate::services::OrdersService::new",
+    );
+    expect(svcNew).toBeDefined();
+    expect(svcNew?.resolution).toBe("heuristic");
+    expect(svcNew?.ambiguity?.candidates).toEqual([
+      "crate::services::OrdersService::new",
+    ]);
+    expect(svcNew?.ambiguity?.reason).toContain(
+      "unverified-module-prefix-suffix-match",
+    );
+
+    const repoNew = findEdge(
+      analyzeResponse,
+      (edge) =>
+        edge.kind === "CALLS" &&
+        edge.from.qualifiedName === "crate::services::OrdersService::new" &&
+        edge.to.kind === "Method" &&
+        edge.to.qualifiedName === "crate::repositories::OrderRepository::new",
+    );
+    expect(repoNew).toBeDefined();
+    expect(repoNew?.resolution).toBe("heuristic");
+    expect(repoNew?.ambiguity?.candidates).toEqual([
+      "crate::repositories::OrderRepository::new",
+    ]);
+    expect(repoNew?.ambiguity?.reason).toContain(
+      "unverified-module-prefix-suffix-match",
+    );
   });
 
   it("pozitif: CALLS metot çağrısı → heuristic (trait dispatch bu dilimde çözülmez)", () => {

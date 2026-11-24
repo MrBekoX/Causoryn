@@ -580,10 +580,12 @@ describe("causoryn_verify_change partial yollar", () => {
           REPO_TS.replace("    return id;", '    return id ?? "";'),
         );
 
-        // checks verilmemiş → tamamı istenir; contracts MCP yüzeyinden
-        // üretilemez (TŞ §10.4 girdisinde spec çifti yoktur) → not_evaluated
-        // → missing-input kuralı inconclusive verir (review_required DEĞİL).
-        const result = await callTool(pair.client, "causoryn_verify_change", { preflightId });
+        // checks açıkça contracts ister → contracts MCP yüzeyinden spec çifti olmadan
+        // üretilemez → not_evaluated → missing-input kuralı inconclusive verir.
+        const result = await callTool(pair.client, "causoryn_verify_change", {
+          preflightId,
+          checks: ["architecture", "contracts", "graph-diff", "test-plan"],
+        });
         const envelope = expectEnvelope(result);
         const data = VerifyChangeDataSchema.parse(envelope.data);
         expect(data.verdict).toBe("inconclusive");
@@ -695,20 +697,21 @@ describe("causoryn_verify_change servis düzeyi", () => {
         });
         const secondData = VerifyChangeDataSchema.parse(expectEnvelope(second).data);
         const tests = secondData.tests;
-        expect(tests.state).toBe("observed");
-        if (tests.state !== "observed") throw new Error("erişilemez: tests observed değil");
+        expect(tests.state).toBe("host_asserted");
+        if (tests.state !== "host_asserted") throw new Error("erişilemez: tests host_asserted değil");
         expect(tests.evidenceRef).toBe("reports/vitest-summary.json");
-        // Rapor gerçekten geçiyor (failedCount 0 && passedCount ≥ 1) ve
-        // aday explicit bağlandı → passed:true literal yalnızca bu koşulda.
-        expect(tests.passed).toBe(true);
+        // Dürüstlük: host beyanı motor doğrulaması değildir (engineVerified=false, hostAssertedPassed=true, passed anahtarı yok).
+        expect(tests.engineVerified).toBe(false);
+        expect(tests.hostAssertedPassed).toBe(true);
+        expect("passed" in tests).toBe(false);
         const firstCandidateStatus = secondData.checks.testPlan.candidateStatuses[0] as unknown as
           | Record<string, unknown>
           | undefined;
-        expect(firstCandidateStatus?.status).toBe("observed");
-        // observed koşum kaydı limitation ile dürüstçe raporlanır (Causoryn
-        // test çalıştırmaz; kayıt host kanıtıdır — TŞ §10.4).
+        expect(firstCandidateStatus?.status).toBe("host_asserted");
+        // host_asserted koşum kaydı limitation ile dürüstçe raporlanır (Causoryn
+        // test çalıştırmaz; kayıt host beyanıdır).
         expect(
-          secondData.limitations.some((limitation) => limitation.includes("observed kaydedildi")),
+          secondData.limitations.some((limitation) => limitation.includes("host_asserted")),
         ).toBe(true);
       } finally {
         await pair.close();

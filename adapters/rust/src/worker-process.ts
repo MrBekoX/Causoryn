@@ -14,14 +14,15 @@
  * CHILD env PATH'ine ÖNEKLENİR. Argümanlar boş sabit dizidir; istek içeriği
  * yalnızca stdin üzerinden taşınır.
  */
-import { delimiter as pathDelimiter } from "node:path";
+import { delimiter as pathDelimiter, dirname, join } from "node:path";
 import {
   buildAllowlistedWorkerEnv,
   runLineJsonWorker,
+  type SidecarSpawnFunction,
   type WorkerRunOutcome,
 } from "@causoryn/sidecar-ipc";
 import { isSafeCommandPath, WORKER_ENV_ALLOWLIST } from "./cargo.js";
-import { DEFAULT_RESPONSE_MAX_CHARS, type SpawnFunction } from "./types.js";
+import { DEFAULT_RESPONSE_MAX_CHARS } from "./types.js";
 
 export type { WorkerRunOutcome } from "@causoryn/sidecar-ipc";
 
@@ -69,7 +70,7 @@ export interface RunWorkerAnalyzeInput {
    */
   readonly stderrMaxChars?: number;
   /** Test enjeksiyonu; default node:child_process.spawn. */
-  readonly spawnProcess?: SpawnFunction;
+  readonly spawnProcess?: SidecarSpawnFunction;
 }
 
 export type RunRustWorkerAnalyzeInput = RunWorkerAnalyzeInput;
@@ -77,11 +78,15 @@ export type RunRustWorkerAnalyzeInput = RunWorkerAnalyzeInput;
 export function runWorkerAnalyze(
   input: RunWorkerAnalyzeInput,
 ): Promise<WorkerRunOutcome> {
-  // Savunma: binary adı ve dizin güvenlik filtresinden geçmeli; aksi
-  // halde süreç hiç başlatılmaz (statik güvenlik kuralı: literal komut + sabit argüman).
+  // Savunma: binary adı (yalnızca dosya adı, yol ayırıcı/kaçış yok) ve
+  // dizin güvenlik filtresinden geçmeli; aksi halde süreç hiç başlatılmaz.
   if (
     !isSafeBinaryPath(input.workerBinaryName) ||
-    !isSafeBinaryPath(input.workerDir)
+    !isSafeBinaryPath(input.workerDir) ||
+    input.workerBinaryName.includes("/") ||
+    input.workerBinaryName.includes("\\") ||
+    input.workerBinaryName === ".." ||
+    input.workerBinaryName === "."
   ) {
     return Promise.resolve({
       status: "unavailable",
@@ -91,10 +96,12 @@ export function runWorkerAnalyze(
     });
   }
 
+  const workerBinaryPath = join(input.workerDir, input.workerBinaryName);
   return runLineJsonWorker({
     command: input.workerBinaryName,
     args: [],
     env: buildWorkerEnv(input.workerDir),
+    cwd: dirname(workerBinaryPath),
     requestPayload: input.requestPayload,
     requestTimeoutMs: input.requestTimeoutMs,
     responseMaxChars: input.responseMaxChars ?? DEFAULT_RESPONSE_MAX_CHARS,

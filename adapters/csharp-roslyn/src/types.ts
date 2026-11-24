@@ -86,6 +86,9 @@ export type SpawnFunction = (
   options: {
     readonly stdio: ["pipe", "pipe", "pipe"];
     readonly env: Readonly<Record<string, string>>;
+    readonly cwd?: string;
+    readonly shell?: false;
+    readonly windowsHide?: true;
   },
 ) => ChildProcess;
 

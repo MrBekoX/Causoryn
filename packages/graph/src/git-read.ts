@@ -44,16 +44,59 @@ import { GraphRepositoryError } from "./errors.js";
 const execFile = promisify(execFileCallback);
 
 /**
+ * Git-compatible null device path: POSIX `/dev/null`, Windows `NUL`.
+ * Note: Node's `os.devNull` is `\\.\nul` on Windows, which Git for Windows
+ * rejects in `GIT_CONFIG_GLOBAL` (`fatal: unable to access '\\.\nul': Invalid argument`).
+ */
+export const GIT_DEV_NULL = process.platform === "win32" ? "NUL" : "/dev/null";
+
+/**
  * İzinli salt-okunur git alt komutları. Bu setin DIŞINDAKİ hiçbir alt komut
- * exec'e ulaşamaz — checkout/reset/clean dahil.
+ * exec'e ulaşamaz — checkout/reset/clean dahil. `rev-parse` ek olarak
+ * yalnızca `--verify --end-of-options <validatedRef>^{commit}` biçiminde
+ * çalışabilir.
  */
 const GIT_ALLOWED_SUBCOMMANDS: ReadonlySet<string> = new Set([
   "cat-file",
   "ls-tree",
+  "rev-parse",
 ]);
 
-/** TŞ §13 örnek deseni: [A-Za-z0-9._/-], uzunluk 1–200. */
-const REF_PATTERN = /^[A-Za-z0-9._/-]{1,200}$/;
+/**
+ * Per-invocation `-c` overrides placed BEFORE the subcommand so malicious
+ * `.git/config` entries (`core.fsmonitor`, `core.sshCommand`, `diff.external`,
+ * `core.hooksPath`, `protocol.ext.allow`, etc.) can never execute external
+ * commands (CVE-2022-24765, CVE-2022-39253, CVE-2024-32465).
+ */
+const GIT_HARDENED_CONFIG_FLAGS: readonly string[] = [
+  "-c",
+  "core.fsmonitor=false",
+  "-c",
+  `core.hooksPath=${GIT_DEV_NULL}`,
+  "-c",
+  "core.pager=cat",
+  "-c",
+  "core.sshCommand=false",
+  "-c",
+  "core.askPass=",
+  "-c",
+  "diff.external=false",
+  "-c",
+  "protocol.allow=never",
+  "-c",
+  "protocol.ext.allow=never",
+  "-c",
+  "safe.bareRepository=explicit",
+];
+
+/**
+ * Safe Git ref grammar (linear-time O(n), zero ReDoS):
+ * base ref `[A-Za-z0-9._/-]+` optionally followed by safe ancestry suffixes
+ * (`~`, `~1`, `~10`, `^`, `^0`, `^2`, `^^`, `~1^2`), total length 1–200.
+ */
+const MAX_REF_LENGTH = 200;
+const REF_PATTERN = /^[A-Za-z0-9._/-]+(?:[~^][0-9]{0,6})*$/;
+const COMMIT_SHA_PATTERN = /^[0-9a-f]{40}$|^[0-9a-f]{64}$/;
 
 /** TŞ §13: commit/tag/branch/commit sha yanında "working-tree" tarafı. */
 export const WORKING_TREE_REF = "working-tree";
@@ -66,14 +109,20 @@ const MAX_BLOB_PATH_LENGTH = 1024;
 /**
  * Ref adı güvenlik doğrulaması. Desen + git-check-ref-format'tan
  * uyarlanmış ek retler: '-' ile başlama ('--' dahil — argv seçenek
- * enjeksiyonu riski), '.' ile başlama, ".." içeriği, "@{", "//", sondaki
- * "/" ve ".lock" soneki. Uzunluk 200 ile sınırlıdır.
+ * enjeksiyonu riski), '.' veya '/' ile başlama, ".." içeriği, "@{", "//",
+ * taban ref'te sondaki "/" veya ".lock" soneki ve `~`/`^` sonrası sayı
+ * olmayan karakterler. Uzunluk 200 ile sınırlıdır.
  */
 export function assertValidGitRef(ref: string): string {
-  if (typeof ref !== "string" || !REF_PATTERN.test(ref)) {
+  if (
+    typeof ref !== "string" ||
+    ref.length === 0 ||
+    ref.length > MAX_REF_LENGTH ||
+    !REF_PATTERN.test(ref)
+  ) {
     throw new GraphRepositoryError(
       "compare/invalid-ref",
-      `Ref biçimi geçersiz (desen: [A-Za-z0-9._/-]{1,200}): ${String(ref)}`,
+      `Ref biçimi geçersiz (desen: [A-Za-z0-9._/-]+(?:[~^][0-9]{0,6})*, uzunluk 1–${String(MAX_REF_LENGTH)}): ${String(ref)}`,
     );
   }
   if (ref.startsWith("-")) {
@@ -86,6 +135,12 @@ export function assertValidGitRef(ref: string): string {
     throw new GraphRepositoryError(
       "compare/invalid-ref",
       `Ref '.' ile başlayamaz: ${ref}`,
+    );
+  }
+  if (ref.startsWith("/")) {
+    throw new GraphRepositoryError(
+      "compare/invalid-ref",
+      `Ref '/' ile başlayamaz: ${ref}`,
     );
   }
   if (ref.includes("..")) {
@@ -106,13 +161,15 @@ export function assertValidGitRef(ref: string): string {
       `Ref '//' içeremez: ${ref}`,
     );
   }
-  if (ref.endsWith("/")) {
+  const suffixStart = ref.search(/[~^]/);
+  const baseRef = suffixStart >= 0 ? ref.slice(0, suffixStart) : ref;
+  if (baseRef.endsWith("/")) {
     throw new GraphRepositoryError(
       "compare/invalid-ref",
       `Ref '/' ile bitemez: ${ref}`,
     );
   }
-  if (ref.endsWith(".lock")) {
+  if (baseRef.endsWith(".lock")) {
     throw new GraphRepositoryError(
       "compare/invalid-ref",
       `Ref '.lock' ile bitemez: ${ref}`,
@@ -223,7 +280,12 @@ export function buildGitEnv(
   }
 
   env["GIT_CONFIG_NOSYSTEM"] = "1";
+  env["GIT_CONFIG_GLOBAL"] = GIT_DEV_NULL;
+  env["GIT_ATTR_NOSYSTEM"] = "1";
   env["GIT_TERMINAL_PROMPT"] = "0";
+  env["GIT_NO_LAZY_FETCH"] = "1";
+  env["GIT_OPTIONAL_LOCKS"] = "0";
+  env["GIT_LFS_SKIP_SMUDGE"] = "1";
   return env;
 }
 
@@ -251,7 +313,8 @@ function mapGitSpawnError(error: unknown, subcommand: string): GraphRepositoryEr
 }
 
 /**
- * Salt-okunur git çalıştırması: argv dizisi + alt komut beyaz listesi.
+ * Salt-okunur git çalıştırması: argv dizisi + alt komut beyaz listesi +
+ * alt komut öncesi sertleştirilmiş `-c` yapılandırma geçersiz kılmaları.
  * `args[0]` beyaz listede değilse komut YÜRÜTÜLMEDEN reddedilir; shell
  * her koşulda kapalıdır (shell interpolation imkânsız).
  */
@@ -275,10 +338,28 @@ export async function runGit(
         `${subcommand === undefined ? "<yok>" : subcommand}`,
     );
   }
+  if (subcommand === "rev-parse") {
+    if (
+      args.length !== 4 ||
+      args[1] !== "--verify" ||
+      args[2] !== "--end-of-options" ||
+      args[3] === undefined
+    ) {
+      throw new GraphRepositoryError(
+        "compare/git-command-not-allowed",
+        "git rev-parse yalnızca read-only ['rev-parse', '--verify', '--end-of-options', '<ref>^{commit}'] biçiminde çalıştırılabilir",
+      );
+    }
+    const rawTarget = args[3];
+    const refToValidate = rawTarget.endsWith("^{commit}")
+      ? rawTarget.slice(0, -"^{commit}".length)
+      : rawTarget;
+    assertValidGitRef(refToValidate);
+  }
   try {
     const result = await execFile(
       "git",
-      ["-C", repoRoot, ...args],
+      ["-C", repoRoot, ...GIT_HARDENED_CONFIG_FLAGS, ...args],
       {
         shell: false,
         windowsHide: true,
@@ -291,6 +372,50 @@ export async function runGit(
   } catch (error) {
     throw mapGitSpawnError(error, subcommand);
   }
+}
+
+/**
+ * Doğrulanmış bir Git revizyonunu (güvenli göreli biçimler dahil: `HEAD~1`,
+ * `HEAD^`, `main~1`, `v0.2.4^0`) salt-okunur `git rev-parse --verify --end-of-options <ref>^{commit}`
+ * ile kanonik commit SHA'sına çözümler.
+ */
+export async function resolveGitCommitRef(
+  repoRoot: string,
+  ref: string,
+  options?: RunGitOptions,
+): Promise<string> {
+  assertValidGitRef(ref);
+  if (ref === WORKING_TREE_REF) {
+    throw new GraphRepositoryError(
+      "compare/invalid-ref",
+      `working-tree bir Git commit ref'i değildir: ${ref}`,
+    );
+  }
+  assertRepoRoot(repoRoot);
+  let output: string;
+  try {
+    output = await runGit(
+      repoRoot,
+      ["rev-parse", "--verify", "--end-of-options", `${ref}^{commit}`],
+      options,
+    );
+  } catch (error) {
+    if (error instanceof GraphRepositoryError && error.code === "compare/git-command-failed") {
+      throw new GraphRepositoryError(
+        "compare/ref-not-found",
+        `Ref çözümlenemedi: ${ref} — ${error.message}`,
+      );
+    }
+    throw error;
+  }
+  const sha = output.trim();
+  if (!COMMIT_SHA_PATTERN.test(sha)) {
+    throw new GraphRepositoryError(
+      "compare/git-unexpected-output",
+      `rev-parse geçerli bir commit SHA döndürmedi (${ref}): ${sha}`,
+    );
+  }
+  return sha;
 }
 
 export type GitTreeEntryType = "blob" | "tree" | "commit";

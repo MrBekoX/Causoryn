@@ -41,3 +41,5 @@ export type {
 } from "./output-policy.js";
 
 export { findMatchingIgnorePattern, matchesIgnorePattern } from "./ignore-matcher.js";
+
+export { assertNotUncOrDevicePath, isUncOrDevicePath } from "./path-safety.js";

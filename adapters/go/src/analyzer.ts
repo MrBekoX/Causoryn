@@ -470,6 +470,29 @@ export async function analyzeGoWorkspace(
     a.relativePath < b.relativePath ? -1 : a.relativePath > b.relativePath ? 1 : 0,
   );
 
+  const seenModuleFiles = new Set<string>();
+  const normalizedModuleFiles: Array<{
+    relativePath: string;
+    content: string;
+  }> = [];
+  for (const modFile of input.moduleFiles ?? []) {
+    const relativePath = normalizeRelativePath(modFile.relativePath);
+    if (seenModuleFiles.has(relativePath)) {
+      throw new DomainError(
+        "adapter/duplicate-source-path",
+        `Aynı modül dosya yolu iki kez verildi: ${relativePath}`,
+      );
+    }
+    seenModuleFiles.add(relativePath);
+    normalizedModuleFiles.push({
+      relativePath,
+      content: modFile.content,
+    });
+  }
+  normalizedModuleFiles.sort((a, b) =>
+    a.relativePath < b.relativePath ? -1 : a.relativePath > b.relativePath ? 1 : 0,
+  );
+
   const options = resolveOptions(input.options);
   const request = {
     id: `analyze:${workspaceId}`,
@@ -479,6 +502,9 @@ export async function analyzeGoWorkspace(
       path: entry.relativePath,
       content: entry.content,
     })),
+    ...(normalizedModuleFiles.length > 0
+      ? { moduleFiles: normalizedModuleFiles }
+      : {}),
   };
 
   const outcome: WorkerRunOutcome = await runGoWorkerAnalyze({

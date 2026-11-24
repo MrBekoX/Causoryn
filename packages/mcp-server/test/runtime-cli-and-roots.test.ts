@@ -9,7 +9,7 @@ import {
   symlinkSync,
   writeFileSync,
 } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
@@ -480,15 +480,86 @@ describe("isSafeProjectRoot — güvenli proje kökü filtresi", { timeout: 20_0
       sandbox.cleanup();
     }
   });
+
+  it("Task 1.3: UNC/device yollarını realpathSync öncesi sözcüksel reddeder; $HOME atalarını ve os.tmpdir() kökünü reddederken tmpdir alt proje dizinlerine izin verir", () => {
+    const sandbox = createTempSandbox();
+    try {
+      const opts = { homeDir: sandbox.fakeHome, env: {} };
+
+      // 1) UNC ve Win32 device yolları sözcüksel olarak anında reddedilir (SMB/NTLM sızıntısı yok).
+      const uncInputs = [
+        "\\\\10.0.0.1\\share",
+        "//evil-host/share",
+        "\\\\?\\C:\\Windows",
+        "\\\\?\\UNC\\attacker\\share",
+        "\\\\.\\pipe\\causoryn-test",
+      ];
+      const uncStartedMs = performance.now();
+      for (const unc of uncInputs) {
+        expect(inspectProjectRootSafety(unc, opts), `UNC reddedilmeli: ${unc}`).toEqual({
+          safe: false,
+          reason: "unc-or-device-path",
+        });
+        expect(isSafeProjectRoot(unc, opts)).toBe(false);
+        expect(() =>
+          buildWorkspaceAutoConfig({
+            roots: [unc],
+            autoDataDir: true,
+            dataDir: sandbox.dataDir,
+            homeDir: sandbox.fakeHome,
+          }),
+        ).toThrow(CausorynConfigError);
+        expect(() =>
+          resolveBaseDataDir({
+            dataDir: unc,
+            homeDir: sandbox.fakeHome,
+          }),
+        ).toThrow(CausorynConfigError);
+      }
+      // Lexical pre-check must reject immediately without invoking OS realpathSync/SMB I/O.
+      expect(performance.now() - uncStartedMs).toBeLessThan(500);
+
+      // 2) $HOME üst atası (ör. fakeHome'un ebeveyni olan sandbox.rootDir ve gerçek C:\Users / /home / /Users) reddedilir.
+      expect(inspectProjectRootSafety(path.dirname(sandbox.fakeHome), opts)).toEqual({
+        safe: false,
+        reason: "home-ancestor-directory",
+      });
+      const realOsHomeParent = path.dirname(path.resolve(homedir()));
+      if (realOsHomeParent !== path.parse(realOsHomeParent).root && existsSync(realOsHomeParent)) {
+        expect(inspectProjectRootSafety(realOsHomeParent)).toEqual({
+          safe: false,
+          reason: "home-ancestor-directory",
+        });
+        expect(isSafeProjectRoot(realOsHomeParent)).toBe(false);
+      }
+
+      // 3) os.tmpdir() kendisi reddedilir ama altındaki proje dizini izinli kalır!
+      expect(isSafeProjectRoot(tmpdir(), opts)).toBe(false);
+      const safeSubdirInTmp = path.join(sandbox.rootDir, "standalone-tmp-project");
+      mkdirSync(safeSubdirInTmp, { recursive: true });
+      expect(isSafeProjectRoot(safeSubdirInTmp, opts)).toBe(true);
+
+      // 4) POSIX üzerinde /tmp, /var, /bin, /sbin, /lib, /dev reddedilir (altındaki /tmp/<subdir> serbesttir).
+      if (process.platform !== "win32") {
+        for (const denied of ["/tmp", "/var", "/bin", "/sbin", "/lib", "/dev"]) {
+          if (existsSync(denied)) {
+            expect(isSafeProjectRoot(denied, opts), `${denied} reddedilmeli`).toBe(false);
+          }
+        }
+      }
+    } finally {
+      sandbox.cleanup();
+    }
+  });
 });
 
-describe("buildWorkspaceAutoConfig — otomatik veri dizini ve çoklu-istemci izolasyonu", { timeout: 30_000 }, () => {
-  it("taban veri dizini önceliğini (--data-dir > ZCODE_PLUGIN_DATA > ~/.causoryn) uygular ve SQLite/wiki/exports yollarını hazırlar", () => {
+describe("buildWorkspaceAutoConfig — otomatik veri dizini ve paylaşımlı workspace DB", { timeout: 30_000 }, () => {
+  it("taban veri dizini önceliğini (--data-dir > ZCODE_PLUGIN_DATA > ~/.causoryn) uygular ve tüm istemciler için paylaşımlı graph.sqlite yolunu hazırlar", () => {
     const sandbox = createTempSandbox();
     try {
       const treeBefore = listTreeRelative(sandbox.projectADir);
 
-      // 1) --data-dir en yüksek öncelik + --client zcode
+      // 1) --data-dir en yüksek öncelik + --client zcode (paylaşımlı graph.sqlite!)
       const cfg1 = buildWorkspaceAutoConfig({
         roots: [sandbox.projectADir],
         autoDataDir: true,
@@ -504,8 +575,39 @@ describe("buildWorkspaceAutoConfig — otomatik veri dizini ve çoklu-istemci iz
       expect(cfg1.storage.dataDbPath?.startsWith(path.join(sandbox.dataDir, "workspaces"))).toBe(
         true,
       );
-      expect(path.basename(cfg1.storage.dataDbPath ?? "")).toBe("graph-zcode.sqlite");
+      expect(path.basename(cfg1.storage.dataDbPath ?? "")).toBe("graph.sqlite");
       expect(cfg1.wiki.dataDbPath).toBe(cfg1.storage.dataDbPath);
+
+      // Farklı --client değerleri aynı workspace için birebir aynı paylaşımlı graph.sqlite yoluna çözülür!
+      const cfgClaude = buildWorkspaceAutoConfig({
+        roots: [sandbox.projectADir],
+        autoDataDir: true,
+        dataDir: sandbox.dataDir,
+        client: "claude-code",
+        homeDir: sandbox.fakeHome,
+      });
+      const cfgCodex = buildWorkspaceAutoConfig({
+        roots: [sandbox.projectADir],
+        autoDataDir: true,
+        dataDir: sandbox.dataDir,
+        client: "codex",
+        homeDir: sandbox.fakeHome,
+      });
+      expect(cfgClaude.storage.dataDbPath).toBe(cfg1.storage.dataDbPath);
+      expect(cfgCodex.storage.dataDbPath).toBe(cfg1.storage.dataDbPath);
+      expect(cfgClaude.wiki.dataDbPath).toBe(cfg1.wiki.dataDbPath);
+      expect(cfgCodex.wiki.dataDbPath).toBe(cfg1.wiki.dataDbPath);
+
+      // Geçersiz --client kimliği hâlâ reddedilir (diagnostic label güvenliği).
+      expect(() =>
+        buildWorkspaceAutoConfig({
+          roots: [sandbox.projectADir],
+          autoDataDir: true,
+          dataDir: sandbox.dataDir,
+          client: `${UP_DIR_TOKEN}/evil`,
+          homeDir: sandbox.fakeHome,
+        }),
+      ).toThrow(CausorynConfigError);
       expect(cfg1.output.allowedOutputDirs.length).toBe(1);
       const exportsDir = cfg1.output.allowedOutputDirs[0] as string;
       expect(path.basename(exportsDir)).toBe("exports");
@@ -1358,13 +1460,13 @@ describe("stdio.ts — gerçek alt-süreç CLI modları ve geriye dönük uyumlu
       expect(callResult.structuredContent?.status).toBe("ok");
       expect(callResult.structuredContent?.workspaceId).toBe("alpha-service");
 
-      // SQLite dosyası workspace DIŞINDA oluştu; kaynak ağaca dokunulmadı!
+      // SQLite dosyası workspace DIŞINDA paylaşımlı graph.sqlite olarak oluştu; kaynak ağaca dokunulmadı!
       const workspacesParent = path.join(sandbox.dataDir, "workspaces");
       const entries = readdirSync(workspacesParent);
       expect(entries.length).toBe(1);
       const wsDirName = entries[0] as string;
       expect(wsDirName.startsWith("alpha-service-")).toBe(true);
-      expect(existsSync(path.join(workspacesParent, wsDirName, "graph-zcode.sqlite"))).toBe(true);
+      expect(existsSync(path.join(workspacesParent, wsDirName, "graph.sqlite"))).toBe(true);
       expect(listTreeRelative(sandbox.projectADir)).toEqual(treeBefore);
     } finally {
       sandbox.cleanup();

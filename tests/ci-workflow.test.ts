@@ -13,8 +13,9 @@
  *   container runtime korunur), ve `run:` bloklarında sıfır `${{ ... }}` interpolasyonu.
  * - CI (`ci.yml`): 3-OS matrisi (`ubuntu-latest`, `windows-latest`, sabit `macos-15`), deterministik Release + RestoreLockedMode Roslyn + locked Rust,
  *   `npm audit --audit-level=high`, cross-platform `export-public-tree.mjs --verify-temp` ve testler.
- * - Release (`release.yml`): korumalı `v*.*.*` etiket tabanlı iki-job izole CD (`build-and-verify`
- *   salt-okunur vs `attest-and-publish` OIDC/environment), hermetik derleme (`cache: npm` YOK),
+ * - Release (`release.yml`): korumalı `v*.*.*` etiket tabanlı üç-job hermetik CD (`verify-and-test`
+ *   salt-okunur → `build-and-pack` temiz checkout, sıfır test, `verify-package-ready.mjs` hemen
+ *   ardından `npm pack` → `publish` OIDC/environment), hermetik derleme (`cache: npm` YOK),
  *   `fetch-depth: 0` + `origin/main` ata doğrulaması, tek-tarball doğrulaması, derin izole smoke
  *   testi (`--version`, `doctor --json`, MCP `initialize`), CycloneDX SBOM, `sha256sum -c`,
  *   `attest-build-provenance`, prerelease-farkında OIDC `npm publish` (`--tag next`) ve idempotent
@@ -494,7 +495,7 @@ describe(".github/workflows/ci.yml — CI sözleşmesi ve SHA-sabitli güvenlik 
   });
 });
 
-describe(".github/workflows/release.yml — iki-job izole OIDC Trusted Publishing & SLSA CD sözleşmesi", () => {
+describe(".github/workflows/release.yml — üç-job hermetik OIDC Trusted Publishing & SLSA CD sözleşmesi (Task 1.4)", () => {
   it("dosya mevcuttur, üst düzey salt-okunur izin + iptal-edilmez concurrency tanımlar ve v*.*.* tag + workflow_dispatch ile tetiklenir", () => {
     const { doc } = loadWorkflow(RELEASE_WORKFLOW_PATH, ".github/workflows/release.yml");
     expect(doc.permissions).toEqual({ contents: "read" });
@@ -512,22 +513,42 @@ describe(".github/workflows/release.yml — iki-job izole OIDC Trusted Publishin
     expect(dispatch?.inputs?.["tag"]).toBeDefined();
   });
 
-  it("build-and-verify (salt-okunur) ile attest-and-publish (environment: release + OIDC) job'larını SLSA ilkeleriyle ayırır", () => {
+  it("verify-and-test (salt-okunur) → build-and-pack (temiz checkout, sıfır test, salt-okunur) → publish (environment: release + OIDC) 3-job zincirini SLSA ilkeleriyle ayırır", () => {
     const { doc } = loadWorkflow(RELEASE_WORKFLOW_PATH, ".github/workflows/release.yml");
-    const buildJob = doc.jobs?.["build-and-verify"];
-    const publishJob = doc.jobs?.["attest-and-publish"];
+    expect(Object.keys(doc.jobs ?? {})).toEqual(["verify-and-test", "build-and-pack", "publish"]);
 
-    expect(buildJob, "salt-okunur build-and-verify job tanımlı olmalı").toBeDefined();
-    expect(publishJob, "ayrıcalıklı attest-and-publish job tanımlı olmalı").toBeDefined();
+    const verifyJob = doc.jobs?.["verify-and-test"];
+    const buildPackJob = doc.jobs?.["build-and-pack"];
+    const publishJob = doc.jobs?.["publish"];
 
-    // Build job'ında YAZMA/OIDC yetkisi ve release environment YOK:
-    expect(buildJob?.["runs-on"]).toBe("ubuntu-latest");
-    expect(buildJob?.environment).toBeUndefined();
-    expect(buildJob?.permissions).toEqual({ contents: "read" });
+    expect(verifyJob, "salt-okunur verify-and-test job tanımlı olmalı").toBeDefined();
+    expect(buildPackJob, "hermetik build-and-pack job tanımlı olmalı").toBeDefined();
+    expect(publishJob, "ayrıcalıklı publish job tanımlı olmalı").toBeDefined();
 
-    // Publish job'ı build-and-verify sonucuna bağımlı, release environment'a kilitli ve derleme/test kodu çalıştırmaz:
+    // 1. verify-and-test: salt-okunur, YAZMA/OIDC yetkisi ve release environment YOK:
+    expect(verifyJob?.["runs-on"]).toBe("ubuntu-latest");
+    expect(verifyJob?.needs).toBeUndefined();
+    expect(verifyJob?.environment).toBeUndefined();
+    expect(verifyJob?.permissions).toEqual({ contents: "read" });
+
+    const verifyRuns = (verifyJob?.steps ?? []).map((s) => s.run ?? "").join("\n");
+    expect(verifyRuns).not.toContain("npm pack");
+    expect(verifyRuns).not.toContain("npm publish");
+
+    // 2. build-and-pack: verify-and-test bağımlı, salt-okunur, SIFIR test yürütmesi:
+    expect(buildPackJob?.["runs-on"]).toBe("ubuntu-latest");
+    expect(buildPackJob?.needs).toBe("verify-and-test");
+    expect(buildPackJob?.environment).toBeUndefined();
+    expect(buildPackJob?.permissions).toEqual({ contents: "read" });
+
+    const buildPackRuns = (buildPackJob?.steps ?? []).map((s) => s.run ?? "").join("\n");
+    expect(buildPackRuns, "build-and-pack sıfır npm test içermeli").not.toMatch(/\bnpm\s+test\b/);
+    expect(buildPackRuns, "build-and-pack sıfır vitest içermeli").not.toMatch(/\bvitest\b/);
+    expect(buildPackRuns).not.toContain("npm publish");
+
+    // 3. publish: build-and-pack bağımlı, release environment + OIDC, derleme/test kodu çalıştırmaz:
     expect(publishJob?.["runs-on"]).toBe("ubuntu-latest");
-    expect(publishJob?.needs).toBe("build-and-verify");
+    expect(publishJob?.needs).toBe("build-and-pack");
     expect(publishJob?.environment).toBe("release");
     expect(publishJob?.permissions).toEqual({
       contents: "write",
@@ -535,39 +556,50 @@ describe(".github/workflows/release.yml — iki-job izole OIDC Trusted Publishin
       attestations: "write",
     });
 
-    const publishRuns = (publishJob?.steps ?? [])
-      .map((s) => s.run ?? "")
-      .join("\n");
+    const publishRuns = (publishJob?.steps ?? []).map((s) => s.run ?? "").join("\n");
     expect(publishRuns).not.toContain("npm ci");
+    expect(publishRuns).not.toMatch(/\bnpm\s+test\b/);
+    expect(publishRuns).not.toMatch(/\bvitest\b/);
     expect(publishRuns).not.toContain("cargo build");
     expect(publishRuns).not.toContain("dotnet build");
+    expect(publishRuns).not.toContain("npm pack");
   });
 
-  it("fetch-depth: 0 + ref:undefined checkout, hermetik setup-node (cache/registry-url yok), artifact paylaşımı ve attest-build-provenance içerir", () => {
+  it("fetch-depth: 0 + temiz checkout'lar, hermetik setup-node (3 job'da cache/registry-url yok), artifact paylaşımı ve attest-build-provenance içerir", () => {
     const { doc } = loadWorkflow(RELEASE_WORKFLOW_PATH, ".github/workflows/release.yml");
-    const buildSteps = doc.jobs?.["build-and-verify"]?.steps ?? [];
-    const publishSteps = doc.jobs?.["attest-and-publish"]?.steps ?? [];
+    const verifySteps = doc.jobs?.["verify-and-test"]?.steps ?? [];
+    const buildPackSteps = doc.jobs?.["build-and-pack"]?.steps ?? [];
+    const publishSteps = doc.jobs?.["publish"]?.steps ?? [];
 
-    const checkout = buildSteps.find((step) => usesPinnedAction(step, "actions/checkout"));
-    expect(checkout).toBeDefined();
-    expect(checkout?.with?.["persist-credentials"]).toBe(false);
-    expect(checkout?.with?.["fetch-depth"]).toBe(0);
-    expect(checkout?.with?.["ref"]).toBeUndefined();
+    const verifyCheckout = verifySteps.find((step) => usesPinnedAction(step, "actions/checkout"));
+    expect(verifyCheckout).toBeDefined();
+    expect(verifyCheckout?.with?.["persist-credentials"]).toBe(false);
+    expect(verifyCheckout?.with?.["fetch-depth"]).toBe(0);
+    expect(verifyCheckout?.with?.["ref"]).toBeUndefined();
+
+    const buildPackCheckout = buildPackSteps.find((step) => usesPinnedAction(step, "actions/checkout"));
+    expect(buildPackCheckout, "build-and-pack temiz checkout yapmalı").toBeDefined();
+    expect(buildPackCheckout?.with?.["persist-credentials"]).toBe(false);
+    expect(buildPackCheckout?.with?.["ref"]).toBeUndefined();
 
     // Hiçbir setup-node adımında cache veya registry-url yok ve setup-node@v7'de
     // package-manager-cache: false açıkça verilir (zizmor cache-poisoning & OIDC ENEEDAUTH kapalı):
     const setupNodes = collectAllSteps(doc).filter((step) =>
       usesPinnedAction(step, "actions/setup-node"),
     );
-    expect(setupNodes.length).toBe(2);
+    expect(setupNodes.length).toBe(3);
     for (const sn of setupNodes) {
       expect(sn.with?.["cache"]).toBeUndefined();
       expect(sn.with?.["package-manager-cache"]).toBe(false);
       expect(sn.with?.["registry-url"]).toBeUndefined();
     }
 
-    const upload = buildSteps.find((step) => usesPinnedAction(step, "actions/upload-artifact"));
+    const upload = buildPackSteps.find((step) => usesPinnedAction(step, "actions/upload-artifact"));
     expect(upload?.with?.["name"]).toBe("release-artifacts");
+    expect(
+      verifySteps.some((step) => usesPinnedAction(step, "actions/upload-artifact")),
+      "verify-and-test artifact yüklememeli",
+    ).toBe(false);
 
     const download = publishSteps.find((step) => usesPinnedAction(step, "actions/download-artifact"));
     expect(download?.with?.["name"]).toBe("release-artifacts");
@@ -581,59 +613,145 @@ describe(".github/workflows/release.yml — iki-job izole OIDC Trusted Publishin
     expect(String(attest?.with?.["subject-path"] ?? "")).toContain("release-artifacts");
   });
 
-  it("fail-closed sıra ile tag+main-ata doğrulaması, derleme/test, tek-tarball + derin MCP smoke testi, SBOM, sha256sum -c, prerelease-farkında OIDC publish ve idempotent GitHub Release yürütür", () => {
+  it("fail-closed sıra ile verify-and-test, hermetik build-and-pack (verify-package-ready.mjs HEMEN ÖNCE npm pack), tek-tarball + derin MCP smoke testi, SBOM, sha256sum -c, prerelease-farkında OIDC publish ve idempotent GitHub Release yürütür", () => {
     const { raw, doc } = loadWorkflow(RELEASE_WORKFLOW_PATH, ".github/workflows/release.yml");
-    const buildSteps = doc.jobs?.["build-and-verify"]?.steps ?? [];
-    const publishSteps = doc.jobs?.["attest-and-publish"]?.steps ?? [];
-    const allSteps = [...buildSteps, ...publishSteps];
+    const verifySteps = doc.jobs?.["verify-and-test"]?.steps ?? [];
+    const buildPackSteps = doc.jobs?.["build-and-pack"]?.steps ?? [];
+    const publishSteps = doc.jobs?.["publish"]?.steps ?? [];
 
-    const stepIndexMatching = (predicate: (s: WorkflowStep) => boolean): number =>
-      allSteps.findIndex(predicate);
+    const findIdx = (steps: readonly WorkflowStep[], predicate: (s: WorkflowStep) => boolean): number =>
+      steps.findIndex(predicate);
 
-    const tagCheckIdx = stepIndexMatching(
+    // Job 1: verify-and-test
+    const vTagCheckIdx = findIdx(
+      verifySteps,
       (s) =>
         (s.run ?? "").includes("merge-base") &&
         (s.run ?? "").includes("--is-ancestor") &&
         (s.run ?? "").includes("refs/remotes/origin/main") &&
         (s.run ?? "").includes("packages/causoryn/package.json"),
     );
-    const installIdx = stepIndexMatching((s) => (s.run ?? "").includes("npm ci --ignore-scripts"));
-    const auditIdx = stepIndexMatching((s) => (s.run ?? "").includes("npm audit --audit-level=high"));
-    const roslynIdx = stepIndexMatching((s) => (s.run ?? "").includes(DETERMINISTIC_ROSLYN_BUILD));
-    const rustIdx = stepIndexMatching((s) => (s.run ?? "").includes(LOCKED_RUST_BUILD));
-    const exportIdx = stepIndexMatching((s) => (s.run ?? "").includes(PUBLIC_EXPORT_GATE_CMD));
-    const testIdx = stepIndexMatching((s) =>
+    const vInstallIdx = findIdx(verifySteps, (s) => (s.run ?? "").includes("npm ci --ignore-scripts"));
+    const vAuditIdx = findIdx(verifySteps, (s) => (s.run ?? "").includes("npm audit --audit-level=high"));
+    const vRoslynIdx = findIdx(verifySteps, (s) => (s.run ?? "").includes(DETERMINISTIC_ROSLYN_BUILD));
+    const vRustIdx = findIdx(verifySteps, (s) => (s.run ?? "").includes(LOCKED_RUST_BUILD));
+    const vTypecheckIdx = findIdx(verifySteps, (s) => (s.run ?? "").trim() === "npm run typecheck");
+    const vLintIdx = findIdx(verifySteps, (s) => (s.run ?? "").trim() === "npm run lint");
+    const vSecretIdx = findIdx(verifySteps, (s) => (s.run ?? "").trim() === "npm run secret-scan");
+    const vExportIdx = findIdx(verifySteps, (s) => (s.run ?? "").includes(PUBLIC_EXPORT_GATE_CMD));
+    const vTestIdx = findIdx(verifySteps, (s) =>
       (s.run ?? "")
         .split(/\r?\n/)
         .some((line) => line.trim() === "npm test"),
     );
-    const packIdx = stepIndexMatching((s) => (s.run ?? "").includes("npm pack"));
-    const smokeIdx = stepIndexMatching(
+
+    const verifyOrdered = [
+      ["verify.tagCheck", vTagCheckIdx],
+      ["verify.install", vInstallIdx],
+      ["verify.audit", vAuditIdx],
+      ["verify.roslyn", vRoslynIdx],
+      ["verify.rust", vRustIdx],
+      ["verify.typecheck", vTypecheckIdx],
+      ["verify.lint", vLintIdx],
+      ["verify.secretScan", vSecretIdx],
+      ["verify.exportGate", vExportIdx],
+      ["verify.test", vTestIdx],
+    ] as const;
+
+    for (const [name, idx] of verifyOrdered) {
+      expect(idx, `release.yml verify-and-test adımı eksik: ${name}`).toBeGreaterThanOrEqual(0);
+    }
+    for (let i = 1; i < verifyOrdered.length; i += 1) {
+      const prev = verifyOrdered[i - 1]!;
+      const curr = verifyOrdered[i]!;
+      expect(
+        curr[1],
+        `verify-and-test adım sırası bozuk: ${prev[0]}(${prev[1]}) < ${curr[0]}(${curr[1]}) olmalı`,
+      ).toBeGreaterThan(prev[1]);
+    }
+
+    // Job 2: build-and-pack (hermetic, zero test execution, verify-package-ready.mjs IMMEDIATELY before npm pack)
+    const bpInstallIdx = findIdx(buildPackSteps, (s) => (s.run ?? "").includes("npm ci --ignore-scripts"));
+    const bpRoslynIdx = findIdx(buildPackSteps, (s) => (s.run ?? "").includes(DETERMINISTIC_ROSLYN_BUILD));
+    const bpBuildIdx = findIdx(buildPackSteps, (s) => (s.run ?? "").trim() === "npm run build");
+    const bpBundleIdx = findIdx(buildPackSteps, (s) =>
+      (s.run ?? "").includes("npm run build:bundle --workspace packages/mcp-server"),
+    );
+    const bpPkgBuildIdx = findIdx(buildPackSteps, (s) =>
+      (s.run ?? "").includes("npm run build:package --workspace packages/causoryn"),
+    );
+    const bpVerifyReadyIdx = findIdx(buildPackSteps, (s) =>
+      (s.run ?? "").includes(PREPACK_VERIFY_CMD),
+    );
+    const bpPackIdx = findIdx(buildPackSteps, (s) => (s.run ?? "").includes("npm pack"));
+    const bpSmokeIdx = findIdx(
+      buildPackSteps,
       (s) =>
         (s.run ?? "").includes("--version") &&
         (s.run ?? "").includes('"$ACTUAL_VERSION" != "$EXPECTED_VERSION"') &&
         (s.run ?? "").includes("doctor --json") &&
         (s.run ?? "").includes('"initialize"'),
     );
-    const sbomIdx = stepIndexMatching((s) => (s.run ?? "").includes("scripts/generate-sbom.mjs"));
-    const uploadIdx = stepIndexMatching((s) => usesPinnedAction(s, "actions/upload-artifact"));
-    const downloadIdx = stepIndexMatching((s) => usesPinnedAction(s, "actions/download-artifact"));
-    const checksumIdx = stepIndexMatching((s) =>
+    const bpSbomIdx = findIdx(buildPackSteps, (s) =>
+      (s.run ?? "").includes("scripts/generate-sbom.mjs"),
+    );
+    const bpUploadIdx = findIdx(buildPackSteps, (s) =>
+      usesPinnedAction(s, "actions/upload-artifact"),
+    );
+
+    const buildPackOrdered = [
+      ["buildPack.install", bpInstallIdx],
+      ["buildPack.roslyn", bpRoslynIdx],
+      ["buildPack.build", bpBuildIdx],
+      ["buildPack.bundle", bpBundleIdx],
+      ["buildPack.package", bpPkgBuildIdx],
+      ["buildPack.verifyReady", bpVerifyReadyIdx],
+      ["buildPack.pack", bpPackIdx],
+      ["buildPack.smoke", bpSmokeIdx],
+      ["buildPack.sbom", bpSbomIdx],
+      ["buildPack.upload", bpUploadIdx],
+    ] as const;
+
+    for (const [name, idx] of buildPackOrdered) {
+      expect(idx, `release.yml build-and-pack adımı eksik: ${name}`).toBeGreaterThanOrEqual(0);
+    }
+    for (let i = 1; i < buildPackOrdered.length; i += 1) {
+      const prev = buildPackOrdered[i - 1]!;
+      const curr = buildPackOrdered[i]!;
+      expect(
+        curr[1],
+        `build-and-pack adım sırası bozuk: ${prev[0]}(${prev[1]}) < ${curr[0]}(${curr[1]}) olmalı`,
+      ).toBeGreaterThan(prev[1]);
+    }
+    // Critical Task 1.4 invariant: verify-package-ready.mjs is the IMMEDIATE gate before npm pack (zero steps between them)
+    expect(
+      bpPackIdx - bpVerifyReadyIdx,
+      "verify-package-ready.mjs, build-and-pack içinde npm pack adımının HEMEN öncesindeki son kapı olmalı",
+    ).toBe(1);
+
+    // Job 3: publish
+    const pDownloadIdx = findIdx(publishSteps, (s) =>
+      usesPinnedAction(s, "actions/download-artifact"),
+    );
+    const pChecksumIdx = findIdx(publishSteps, (s) =>
       (s.run ?? "").includes("sha256sum -c SHA256SUMS.txt"),
     );
-    const attestIdx = stepIndexMatching(
+    const pAttestIdx = findIdx(
+      publishSteps,
       (s) =>
         usesPinnedAction(s, "actions/attest-build-provenance") ||
         usesPinnedAction(s, "actions/attest"),
     );
-    const publishIdx = stepIndexMatching(
+    const pPublishIdx = findIdx(
+      publishSteps,
       (s) =>
         (s.run ?? "").includes('npm publish "./$TGZ_FILE"') &&
         (s.run ?? "").includes("--provenance") &&
         (s.run ?? "").includes("--access public") &&
         (s.run ?? "").includes("--tag next"),
     );
-    const ghReleaseIdx = stepIndexMatching(
+    const pGhReleaseIdx = findIdx(
+      publishSteps,
       (s) =>
         s.env?.["GH_REPO"] === "${{ github.repository }}" &&
         (s.run ?? "").includes("gh release create") &&
@@ -643,34 +761,23 @@ describe(".github/workflows/release.yml — iki-job izole OIDC Trusted Publishin
         (s.run ?? "").includes("gh release upload"),
     );
 
-    const ordered = [
-      ["tagCheck", tagCheckIdx],
-      ["install", installIdx],
-      ["audit", auditIdx],
-      ["roslyn", roslynIdx],
-      ["rust", rustIdx],
-      ["export", exportIdx],
-      ["test", testIdx],
-      ["pack", packIdx],
-      ["smoke", smokeIdx],
-      ["sbom", sbomIdx],
-      ["upload", uploadIdx],
-      ["download", downloadIdx],
-      ["checksum", checksumIdx],
-      ["attest", attestIdx],
-      ["publish", publishIdx],
-      ["ghRelease", ghReleaseIdx],
+    const publishOrdered = [
+      ["publish.download", pDownloadIdx],
+      ["publish.checksum", pChecksumIdx],
+      ["publish.attest", pAttestIdx],
+      ["publish.npmPublish", pPublishIdx],
+      ["publish.ghRelease", pGhReleaseIdx],
     ] as const;
 
-    for (const [name, idx] of ordered) {
-      expect(idx, `release.yml adımı eksik: ${name}`).toBeGreaterThanOrEqual(0);
+    for (const [name, idx] of publishOrdered) {
+      expect(idx, `release.yml publish adımı eksik: ${name}`).toBeGreaterThanOrEqual(0);
     }
-    for (let i = 1; i < ordered.length; i += 1) {
-      const prev = ordered[i - 1]!;
-      const curr = ordered[i]!;
+    for (let i = 1; i < publishOrdered.length; i += 1) {
+      const prev = publishOrdered[i - 1]!;
+      const curr = publishOrdered[i]!;
       expect(
         curr[1],
-        `release.yml adım sırası bozuk: ${prev[0]}(${prev[1]}) < ${curr[0]}(${curr[1]}) olmalı`,
+        `publish adım sırası bozuk: ${prev[0]}(${prev[1]}) < ${curr[0]}(${curr[1]}) olmalı`,
       ).toBeGreaterThan(prev[1]);
     }
 

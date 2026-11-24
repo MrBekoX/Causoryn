@@ -28,6 +28,14 @@ export {
   TEST_RUN_STATUS_SCHEMA,
   formatZodIssues,
 } from "./test-status-schema.js";
+export type {
+  ObservedTestRun,
+  TestPlanCheckResult,
+  VerificationReport,
+  VerifyChangeInput,
+  VerifyTestCandidateStatus,
+  VerifyTestStatus,
+} from "./test-status-schema.js";
 
 export { verifyChange, serializeVerificationReport } from "./verify-change.js";
 
@@ -41,20 +49,14 @@ export type {
   ArchitectureCheckResult,
   ContractsCheckResult,
   GraphDiffCheckResult,
-  ObservedTestRun,
   PreflightAlignment,
   PreflightAlignmentTarget,
-  TestPlanCheckResult,
-  VerificationReport,
   VerifyCheckName,
-  VerifyChangeInput,
   VerifyCheckStatus,
   VerifyContractDriftEntry,
   VerifyFileAuthorizationDecision,
   VerifyFileAuthorizer,
   VerifyTargetRevision,
-  VerifyTestCandidateStatus,
-  VerifyTestStatus,
   VerifyVerdict,
   VerifyVerdictRule,
   VerifyVerdictRuleId,

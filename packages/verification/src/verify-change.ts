@@ -29,6 +29,12 @@ import {
   OBSERVED_TEST_RUN_SCHEMA,
   TEST_RUN_STATUS_SCHEMA,
   formatZodIssues,
+  type ObservedTestRun,
+  type TestPlanCheckResult,
+  type VerificationReport,
+  type VerifyChangeInput,
+  type VerifyTestCandidateStatus,
+  type VerifyTestStatus,
 } from "./test-status-schema.js";
 import {
   NO_FINDINGS_CORE_DISCLAIMER,
@@ -38,17 +44,11 @@ import {
   type ArchitectureCheckResult,
   type ContractsCheckResult,
   type GraphDiffCheckResult,
-  type ObservedTestRun,
   type PreflightAlignment,
-  type TestPlanCheckResult,
-  type VerifyChangeInput,
   type VerifyCheckName,
   type VerifyCheckStatus,
   type VerifyContractDriftEntry,
-  type VerificationReport,
   type VerifyFileAuthorizer,
-  type VerifyTestCandidateStatus,
-  type VerifyTestStatus,
   type VerifyVerdict,
   type VerifyVerdictRule,
 } from "./types.js";
@@ -298,10 +298,11 @@ function normalizeObservedRun(
 }
 
 /**
- * E3: koşum durumu nesnesi. observed yoksa not_run (kanıt/passed alanları
- * FİZİKSEL olarak yazılmaz — tip ve şema düzeyinde yasak); observed varsa
- * evidenceRef zorunlu taşınır ve 'passed' iddiası YALNIZCA rapor gerçekten
- * geçiyorsa (failedCount 0 && passedCount ≥ 1) true literal olarak yazılır.
+ * E3: host-supplied test status. When absent, reports `state: "not_run"`.
+ * When supplied by the host, ALWAYS reports `state: "host_asserted"` with
+ * `engineVerified: false` and `hostAssertedPassed: boolean` (true only when
+ * `failedCount === 0 && passedCount >= 1`), NEVER engine-verified `"observed"`
+ * or `passed: true`.
  */
 function testStatusOf(
   recommendedCount: number,
@@ -310,21 +311,20 @@ function testStatusOf(
   if (observed === undefined) {
     return { state: "not_run", recommendedCount, observedCount: 0 };
   }
-  const passedClaim =
+  const hostAssertedPassed =
     observed.passedCount !== undefined &&
     observed.failedCount !== undefined &&
     observed.failedCount === 0 &&
-    observed.passedCount >= 1
-      ? { passed: true as const }
-      : {};
+    observed.passedCount >= 1;
   return {
-    state: "observed",
+    state: "host_asserted",
+    engineVerified: false,
+    hostAssertedPassed,
     recommendedCount,
     observedCount: observed.observedCount,
     evidenceRef: observed.evidenceRef,
     ...(observed.evidenceSha256 === undefined ? {} : { evidenceSha256: observed.evidenceSha256 }),
     ...(observed.evidenceIds.length > 0 ? { evidenceIds: observed.evidenceIds } : {}),
-    ...passedClaim,
     ...(observed.passedCount === undefined ? {} : { passedCount: observed.passedCount }),
     ...(observed.failedCount === undefined ? {} : { failedCount: observed.failedCount }),
   };
@@ -780,7 +780,7 @@ export function verifyChange(input: VerifyChangeInput): VerificationReport {
         testQualifiedName: candidate.testQualifiedName,
         status:
           boundNames.has(candidate.testNodeId) || boundNames.has(candidate.testQualifiedName)
-            ? ("observed" as const)
+            ? ("host_asserted" as const)
             : ("not_run" as const),
       }));
       const candidateEvidence = plan.candidates.flatMap(
@@ -815,16 +815,16 @@ export function verifyChange(input: VerifyChangeInput): VerificationReport {
       );
       if (!matched) {
         limitations.push(
-          `observed kaydın testNames üyesi hiçbir test adayına bağlanmadı: "${name}" (bağlama explicit ve birebirdir; uydurma kapsama yok)`,
+          `host_asserted test run entry testNames member did not match any test candidate: "${name}" (explicit exact match only; no fabricated coverage)`,
         );
       }
     }
   }
   if (observedRun !== undefined) {
     limitations.push(
-      `test koşumu observed kaydedildi: ${String(observedRun.observedCount)} test; kanıt: ${observedRun.evidenceRef}` +
+      `host_asserted test run recorded (not verified by Causoryn): ${String(observedRun.observedCount)} test(s); evidenceRef: ${observedRun.evidenceRef}` +
         `${observedRun.evidenceSha256 === undefined ? "" : ` (sha256: ${observedRun.evidenceSha256})`}` +
-        " (Causoryn test çalıştırmaz; kayıt host kanıtıdır — TŞ §10.4)",
+        " (Causoryn does not execute or independently verify tests; engineVerified=false)",
     );
   }
 
@@ -960,6 +960,10 @@ export function verifyChange(input: VerifyChangeInput): VerificationReport {
     disclaimers.push(
       `test-plan durumu not_run: hiçbir test çalıştırılmadı; recommendedCount (${String(testPlan.recommendedCount)}) yalnızca aday listesidir (Causoryn test koşucusu içermez — TŞ §10.4)`,
     );
+  } else {
+    disclaimers.push(
+      "test-plan state is host_asserted (engineVerified=false): test results were self-reported by the host and were NOT executed or independently verified by Causoryn",
+    );
   }
 
   // 13) TŞ §10.4 üst düzey izdüşümleri + kanıt birleşimi.
@@ -1059,7 +1063,6 @@ function graphDiffCheckJsonValue(check: GraphDiffCheckResult): JsonValue {
 
 function testStatusJsonValue(status: VerifyTestStatus): JsonValue {
   if (status.state === "not_run") {
-    // E3: not_run dalında kanıt/passed alanları YAZILMAZ (fiziksel yokluk).
     return {
       state: status.state,
       recommendedCount: status.recommendedCount,
@@ -1068,12 +1071,13 @@ function testStatusJsonValue(status: VerifyTestStatus): JsonValue {
   }
   return {
     state: status.state,
+    engineVerified: status.engineVerified,
+    hostAssertedPassed: status.hostAssertedPassed,
     recommendedCount: status.recommendedCount,
     observedCount: status.observedCount,
     evidenceRef: status.evidenceRef,
     ...(status.evidenceSha256 === undefined ? {} : { evidenceSha256: status.evidenceSha256 }),
     ...(status.evidenceIds === undefined ? {} : { evidenceIds: [...status.evidenceIds] }),
-    ...(status.passed === undefined ? {} : { passed: status.passed }),
     ...(status.passedCount === undefined ? {} : { passedCount: status.passedCount }),
     ...(status.failedCount === undefined ? {} : { failedCount: status.failedCount }),
   };

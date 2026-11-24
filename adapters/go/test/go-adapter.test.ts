@@ -1132,6 +1132,168 @@ const adapterSuite = describe.skipIf(!goAvailable)(
       expect(viaBinary.state).toBe("ready");
       expect(JSON.stringify(viaBinary)).toBe(JSON.stringify(positive));
     }, 120_000);
+
+    it("dürüstlük (Task 1.5): çok-dosyalı Go paketi aynı dizinde çapraz dosya çağrısını verified çözer", async () => {
+      const multi = await analyzeGoWorkspace({
+        workspaceId: "adapter-go-multifile-pkg",
+        files: [
+          {
+            path: "pkg/orders/handler.go",
+            content: "package orders\n\nfunc Handle() {\n\thelper()\n}\n",
+          },
+          {
+            path: "pkg/orders/helper.go",
+            content: "package orders\n\nfunc helper() {}\n",
+          },
+          {
+            path: "cmd/app/main.go",
+            content:
+              'package main\n\nimport "example.com/shop/pkg/orders"\n\nfunc main() {\n\torders.Handle()\n}\n',
+          },
+        ],
+        options: { goWorkerBinaryPath: WORKER_TEST_BINARY },
+      });
+      expect(multi.workerAvailable).toBe(true);
+      expect(multi.state).toBe("ready");
+
+      const intraPkg = multi.edges.find(
+        (e) =>
+          e.kind === "CALLS" &&
+          e.from.qualifiedName === "orders.Handle" &&
+          e.to.qualifiedName === "orders.helper",
+      );
+      expect(intraPkg).toBeDefined();
+      expect(intraPkg?.resolution).toBe("verified");
+      expect(intraPkg?.to.relativePath).toBe("pkg/orders/helper.go");
+
+      // Çok-dosyalı pakete dışarıdan go.mod'suz çağrı → heuristic (artık kırık pkgCount yüzünden kaybolmaz).
+      const crossPkg = multi.edges.find(
+        (e) =>
+          e.kind === "CALLS" &&
+          e.from.qualifiedName === "main.main" &&
+          e.to.qualifiedName === "orders.Handle",
+      );
+      expect(crossPkg).toBeDefined();
+      expect(crossPkg?.resolution).toBe("heuristic");
+      expect(crossPkg?.ambiguity).toBeDefined();
+    });
+
+    it("dürüstlük (Task 1.5): iki farklı dizindeki package main asla sahte verified çapraz bağ üretmez", async () => {
+      const dualMain = await analyzeGoWorkspace({
+        workspaceId: "adapter-go-dual-main",
+        files: [
+          {
+            path: "cmd/api/main.go",
+            content:
+              "package main\n\nfunc runAPI() {\n\tshared()\n\tonlyInWorker()\n}\n\nfunc shared() {}\n",
+          },
+          {
+            path: "cmd/worker/main.go",
+            content:
+              "package main\n\nfunc onlyInWorker() {}\n\nfunc shared() {}\n",
+          },
+        ],
+        options: { goWorkerBinaryPath: WORKER_TEST_BINARY },
+      });
+      expect(dualMain.workerAvailable).toBe(true);
+      expect(dualMain.state).toBe("ready");
+
+      // cmd/api → cmd/worker sahte verified kenarı OLAMAZ.
+      const falseEdge = dualMain.edges.find(
+        (e) =>
+          e.kind === "CALLS" &&
+          e.from.relativePath === "cmd/api/main.go" &&
+          e.to.relativePath === "cmd/worker/main.go",
+      );
+      expect(falseEdge).toBeUndefined();
+
+      const unresolvedCall = dualMain.edges.find(
+        (e) =>
+          e.kind === "CALLS" &&
+          e.from.qualifiedName === "main.runAPI" &&
+          e.to.qualifiedName === "onlyInWorker",
+      );
+      expect(unresolvedCall?.resolution).toBe("unresolved");
+      expect(unresolvedCall?.to.kind).toBe("UnknownExternal");
+
+      // Aynı dizindeki shared() yalnızca cmd/api/main.go'ya verified bağlanır.
+      const localShared = dualMain.edges.find(
+        (e) =>
+          e.kind === "CALLS" &&
+          e.from.relativePath === "cmd/api/main.go" &&
+          e.to.qualifiedName === "main.shared",
+      );
+      expect(localShared?.resolution).toBe("verified");
+      expect(localShared?.to.relativePath).toBe("cmd/api/main.go");
+    });
+
+    it("dürüstlük (Task 1.5): moduleFiles ile go.mod verildiğinde <modPath>/pkg import'u exact verified çözülür; go.mod olmadan çoklu dizin belirsizliği asla verified olmaz", async () => {
+      const files = [
+        {
+          path: "a/util/util.go",
+          content: 'package util\n\nfunc Format() string { return "a" }\n',
+        },
+        {
+          path: "b/util/util.go",
+          content: 'package util\n\nfunc Format() string { return "b" }\n',
+        },
+        {
+          path: "cmd/app/main.go",
+          content:
+            'package main\n\nimport "example.com/demo/a/util"\n\nfunc main() {\n\tutil.Format()\n}\n',
+        },
+      ];
+
+      const withMod = await analyzeGoWorkspace({
+        workspaceId: "adapter-go-with-mod",
+        files,
+        moduleFiles: [
+          {
+            relativePath: "go.mod",
+            content: "module example.com/demo\n\ngo 1.22\n",
+          },
+        ],
+        options: { goWorkerBinaryPath: WORKER_TEST_BINARY },
+      });
+      expect(withMod.workerAvailable).toBe(true);
+      const verifiedImportCall = withMod.edges.find(
+        (e) =>
+          e.kind === "CALLS" &&
+          e.from.qualifiedName === "main.main" &&
+          e.to.qualifiedName === "util.Format" &&
+          e.to.relativePath === "a/util/util.go",
+      );
+      expect(verifiedImportCall).toBeDefined();
+      expect(verifiedImportCall?.resolution).toBe("verified");
+
+      // go.mod olmadan basename çakışması: ASLA verified üretilmez, açık ambiguity taşır.
+      const withoutModAmbiguous = await analyzeGoWorkspace({
+        workspaceId: "adapter-go-no-mod-ambiguous",
+        files: [
+          files[0]!,
+          files[1]!,
+          {
+            path: "cmd/app/main.go",
+            content:
+              'package main\n\nimport "other.io/x/util"\n\nfunc main() {\n\tutil.Format()\n}\n',
+          },
+        ],
+        options: { goWorkerBinaryPath: WORKER_TEST_BINARY },
+      });
+      expect(withoutModAmbiguous.workerAvailable).toBe(true);
+      const anyVerifiedCall = withoutModAmbiguous.edges.find(
+        (e) => e.kind === "CALLS" && e.resolution === "verified",
+      );
+      expect(anyVerifiedCall).toBeUndefined();
+      const ambigEdge = withoutModAmbiguous.edges.find(
+        (e) =>
+          e.kind === "CALLS" &&
+          e.from.qualifiedName === "main.main" &&
+          e.to.qualifiedName === "util.Format",
+      );
+      expect(ambigEdge).toBeDefined();
+      expect(ambigEdge?.ambiguity?.candidates.length).toBeGreaterThanOrEqual(2);
+    });
   },
 );
 

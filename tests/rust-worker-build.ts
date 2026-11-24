@@ -15,7 +15,7 @@
  */
 
 import { spawn, spawnSync } from "node:child_process";
-import { closeSync, mkdirSync, openSync, statSync, unlinkSync, writeSync } from "node:fs";
+import { closeSync, existsSync, mkdirSync, openSync, statSync, unlinkSync, writeSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -23,6 +23,12 @@ import {
   CARGO_ENV_ALLOWLIST,
   resolveCargoHomeDir,
 } from "../adapters/rust/src/cargo.js";
+import {
+  computeRustWorkerSourceFingerprint,
+  readRegularFileSha256NoFollow,
+  rustWorkerIntegrityPath,
+} from "../adapters/rust/src/analyzer.js";
+import { readFileSync, writeFileSync } from "node:fs";
 import {
   WORKER_BINARY_NAME,
   WORKER_DIR_RELATIVE_PATH,
@@ -125,17 +131,50 @@ export function buildRustWorkerBinary(): WorkerBuildResult {
   const cargoHome = resolveCargoHomeDir();
   const fd = acquireBuildLock();
   try {
+    const expectedFingerprint = computeRustWorkerSourceFingerprint(RUST_WORKER_MANIFEST_PATH);
+    const metaPath = rustWorkerIntegrityPath(RUST_WORKER_BINARY_PATH);
+    if (expectedFingerprint !== null && existsSync(RUST_WORKER_BINARY_PATH) && existsSync(metaPath)) {
+      try {
+        const meta = JSON.parse(readFileSync(metaPath, "utf8")) as {
+          sourceFingerprint?: unknown;
+          binarySha256?: unknown;
+        };
+        const currentBinSha = readRegularFileSha256NoFollow(RUST_WORKER_BINARY_PATH);
+        if (
+          meta.sourceFingerprint === expectedFingerprint &&
+          currentBinSha !== null &&
+          meta.binarySha256 === currentBinSha
+        ) {
+          return { status: 0, stderr: "", stdout: "" };
+        }
+      } catch {
+        // Bütünlük meta bozuksa aşağıda temiz derlenir.
+      }
+    }
+
     const build = spawnSync(
       "cargo", // LİTERAL komut — kırmızı çizgi 6
       ["build", "--manifest-path", RUST_WORKER_MANIFEST_PATH],
       {
+        cwd: dirname(RUST_WORKER_MANIFEST_PATH),
         encoding: "utf8",
         timeout: BUILD_TIMEOUT_MS,
         maxBuffer: 16 * 1024 * 1024,
         shell: false,
+        windowsHide: true,
         env: buildToolEnv(CARGO_ENV_ALLOWLIST, cargoHome),
       },
     );
+    if (build.status === 0 && expectedFingerprint !== null) {
+      const builtSha = readRegularFileSha256NoFollow(RUST_WORKER_BINARY_PATH);
+      if (builtSha !== null) {
+        writeFileSync(
+          metaPath,
+          JSON.stringify({ sourceFingerprint: expectedFingerprint, binarySha256: builtSha }, null, 2),
+          "utf8",
+        );
+      }
+    }
     return {
       status: build.status,
       stderr: typeof build.stderr === "string" ? build.stderr : "",

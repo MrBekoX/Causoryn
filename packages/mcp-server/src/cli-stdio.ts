@@ -87,7 +87,10 @@ function main(): void {
           rawBaseConfig: parsed,
         });
         activeContext = createDynamicCausorynContext(
-          createCausorynContext(config, { deferAutoIndex: true }),
+          createCausorynContext(config, {
+            deferAutoIndex: true,
+            ...(cliArgs.client === undefined ? {} : { hostLabel: cliArgs.client }),
+          }),
         );
       } else if (cliArgs.allowCwd) {
         const cwdSafety = inspectProjectRootSafety(process.cwd(), {
@@ -102,7 +105,10 @@ function main(): void {
             rawBaseConfig: parsed,
           });
           activeContext = createDynamicCausorynContext(
-            createCausorynContext(config, { deferAutoIndex: true }),
+            createCausorynContext(config, {
+              deferAutoIndex: true,
+              ...(cliArgs.client === undefined ? {} : { hostLabel: cliArgs.client }),
+            }),
           );
           activeContext.logger(
             `[causoryn] --allow-cwd ile güvenli çalışma alanı bağlandı: ${cwdSafety.canonicalRoot} (workspaceId=${activeContext.config.workspaceId})`,

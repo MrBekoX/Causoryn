@@ -18,7 +18,12 @@ import { describe, expect, it } from "vitest";
 import { analyzeCSharpWorkspace } from "@causoryn/adapter-csharp-roslyn";
 import { analyzeGoWorkspace } from "@causoryn/adapter-go";
 import { analyzePythonWorkspace } from "@causoryn/adapter-python";
-import { analyzeRustWorkspace } from "../src/analyzer.js";
+import {
+  analyzeRustWorkspace,
+  computeRustWorkerSourceFingerprint,
+  rustWorkerIntegrityPath,
+  writeRustWorkerIntegrityMetadata,
+} from "../src/analyzer.js";
 import {
   buildToolEnv,
   CARGO_ENV_ALLOWLIST,
@@ -209,7 +214,10 @@ describe("4 sidecar adapter dinamik asset root keşfi (CAUSORYN_ASSET_ROOT)", ()
 
       expect(capturedArgs).toHaveLength(1);
       expect(capturedArgs[0]).toEqual([
+        "-I",
         "-B",
+        "-X",
+        "utf8",
         path.join(tmpDir, "native", "python-worker", "worker.py"),
       ]);
     } finally {
@@ -587,7 +595,23 @@ describe("Rust yazılabilir CARGO_TARGET_DIR önbelleği ve fallback zinciri", (
       const cacheDebugDir = path.join(cacheTargetDir, "debug");
 
       mkdirSync(cacheDebugDir, { recursive: true });
-      writeFileSync(path.join(cacheDebugDir, WORKER_BINARY_NAME), "bin", "utf8");
+      const workerSourceDir = path.join(assetRoot, "native", "rust-worker");
+      mkdirSync(path.join(workerSourceDir, "src"), { recursive: true });
+      const manifestPath = path.join(workerSourceDir, "Cargo.toml");
+      writeFileSync(
+        manifestPath,
+        '[package]\nname = "causoryn-rust-worker"\nversion = "0.1.0"\n',
+        "utf8",
+      );
+      writeFileSync(path.join(workerSourceDir, "src", "main.rs"), "fn main() {}\n", "utf8");
+      const cacheBinPath = path.join(cacheDebugDir, WORKER_BINARY_NAME);
+      writeFileSync(cacheBinPath, "bin", "utf8");
+      const sourceFingerprint = computeRustWorkerSourceFingerprint(manifestPath);
+      expect(sourceFingerprint).not.toBeNull();
+      writeRustWorkerIntegrityMetadata(cacheBinPath, {
+        sourceFingerprint: sourceFingerprint!,
+        binarySha256: createHash("sha256").update("bin", "utf8").digest("hex"),
+      });
 
       // Adım 2: assetRoot altında binary yok ama cacheTargetDir/debug altında var → cacheDebugDir kullanılır.
       const step2Paths: string[] = [];
@@ -778,11 +802,13 @@ describe("Rust yazılabilir CARGO_TARGET_DIR önbelleği ve fallback zinciri", (
 
             expect(result.workerAvailable).toBe(true);
             expect(result.state).toBe("ready");
-            expect(
-              existsSync(
-                path.join(writableTargetDir, "debug", WORKER_BINARY_NAME),
-              ),
-            ).toBe(true);
+            const builtBinPath = path.join(
+              writableTargetDir,
+              "debug",
+              WORKER_BINARY_NAME,
+            );
+            expect(existsSync(builtBinPath)).toBe(true);
+            expect(existsSync(rustWorkerIntegrityPath(builtBinPath))).toBe(true);
             expect(existsSync(path.join(stagedRustWorker, "target"))).toBe(
               false,
             );

@@ -1,5 +1,6 @@
 import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync, statSync } from "node:fs";
+import os from "node:os";
 import path from "node:path";
 
 import { getPersistentRuntimeDir } from "./runtime-stage.js";
@@ -57,7 +58,6 @@ export const DOCTOR_PROBE_ENV_ALLOWLIST = [
   "GOROOT",
   "GOCACHE",
   "GOMODCACHE",
-  "GOENV",
   "CARGO_HOME",
   "RUSTUP_HOME",
 ] as const;
@@ -76,7 +76,7 @@ export function buildDoctorProbeEnv(
   return env;
 }
 
-function defaultToolchainProbe(
+export function defaultToolchainProbe(
   command: string,
   args: readonly string[],
   timeoutMs: number,
@@ -84,6 +84,7 @@ function defaultToolchainProbe(
   const probeEnv = buildDoctorProbeEnv();
   const runOnce = (cmd: string): ToolchainProbeOutcome => {
     const res = spawnSync(cmd, [...args], {
+      cwd: os.tmpdir(),
       shell: false,
       timeout: timeoutMs,
       windowsHide: true,
@@ -327,8 +328,25 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+export function isNodeExecutableCommand(command: unknown): command is string {
+  if (typeof command !== "string") {
+    return false;
+  }
+  const trimmed = command.trim();
+  if (trimmed.length === 0) {
+    return false;
+  }
+  let end = trimmed.length;
+  while (end > 0 && (trimmed[end - 1] === "/" || trimmed[end - 1] === "\\")) {
+    end -= 1;
+  }
+  const normalized = trimmed.slice(0, end);
+  const base = normalized.split(/[\\/]/).pop()?.toLowerCase() ?? "";
+  return base === "node" || base === "node.exe";
+}
+
 function checkEntrypointExists(command: unknown, args: unknown): boolean | null {
-  if (command !== "node" || !Array.isArray(args) || typeof args[0] !== "string") {
+  if (!isNodeExecutableCommand(command) || !Array.isArray(args) || typeof args[0] !== "string") {
     return null;
   }
   const scriptArg = args[0];
@@ -547,13 +565,59 @@ function inspectSingleHost(
   };
 }
 
+export type DoctorOverallStatus = "HEALTHY" | "DEGRADED" | "NOT CONFIGURED" | "UNHEALTHY";
+
+export type DoctorReportWithStatus = DoctorReport & {
+  readonly overallStatus: DoctorOverallStatus;
+  readonly configuredCount: number;
+};
+
+function hasToolchainProbeWarn(
+  toolchains: Readonly<Record<SidecarToolchainId, DoctorToolchainStatus>>,
+): boolean {
+  for (const tcId of SIDECAR_TOOLCHAIN_IDS) {
+    const tc = toolchains[tcId] as DoctorToolchainStatus & { readonly status?: string };
+    if (tc.status === "warn") {
+      return true;
+    }
+  }
+  return false;
+}
+
+export function computeDoctorOverallStatus(
+  report: DoctorReport,
+  selectedClients?: readonly HostClientId[],
+): { readonly overallStatus: DoctorOverallStatus; readonly configuredCount: number } {
+  const clients: readonly HostClientId[] =
+    selectedClients !== undefined && selectedClients.length > 0
+      ? [...new Set(selectedClients)]
+      : HOST_CLIENT_IDS;
+  const hostErrors = clients.some((c) => report.hosts[c].status === "error");
+  const configuredCount = clients.filter(
+    (c) => report.hosts[c].status === "ok" || report.hosts[c].status === "warn",
+  ).length;
+  const hostWarns = clients.some((c) => report.hosts[c].status === "warn");
+  const probeWarns = hasToolchainProbeWarn(report.toolchains);
+
+  if (!report.node.ok || !report.runtime.ok || hostErrors) {
+    return { overallStatus: "UNHEALTHY", configuredCount };
+  }
+  if (configuredCount === 0) {
+    return { overallStatus: "NOT CONFIGURED", configuredCount };
+  }
+  if (hostWarns || probeWarns) {
+    return { overallStatus: "DEGRADED", configuredCount };
+  }
+  return { overallStatus: "HEALTHY", configuredCount };
+}
+
 type ExtendedDoctorOptions = DoctorOptions & {
   readonly isMusl?: boolean | undefined;
   readonly claudeConfigDir?: string | undefined;
   readonly env?: NodeJS.ProcessEnv | undefined;
 };
 
-export function runDoctor(options: ExtendedDoctorOptions = {}): DoctorReport {
+export function runDoctor(options: ExtendedDoctorOptions = {}): DoctorReportWithStatus {
   const effectiveEnv = options.env ?? process.env;
   const explicitHomeProvided = options.homeDir !== undefined;
   const homeDir = resolveEffectiveHomeDir(options.homeDir);
@@ -603,25 +667,47 @@ export function runDoctor(options: ExtendedDoctorOptions = {}): DoctorReport {
     );
   }
 
-  const hostErrors = targetClients.some((c) => hosts[c].status === "error");
-  const healthy = nodeCheck.ok && runtimeCheck.ok && !hostErrors;
-
-  return {
-    healthy,
+  const baseReport: DoctorReport = {
+    healthy: false,
     version: CAUSORYN_PACKAGE_VERSION,
     node: nodeCheck,
     runtime: runtimeCheck,
     toolchains,
     hosts,
   };
+  const { overallStatus, configuredCount } = computeDoctorOverallStatus(baseReport, targetClients);
+  const healthy = overallStatus === "HEALTHY";
+
+  return {
+    ...baseReport,
+    healthy,
+    overallStatus,
+    configuredCount,
+  };
 }
 
 export function formatDoctorReportText(
-  report: DoctorReport,
+  report: DoctorReport | DoctorReportWithStatus,
   selectedClients?: readonly HostClientId[],
 ): string {
+  const overallStatus: DoctorOverallStatus =
+    selectedClients === undefined &&
+    "overallStatus" in report &&
+    typeof report.overallStatus === "string"
+      ? report.overallStatus
+      : computeDoctorOverallStatus(report, selectedClients).overallStatus;
+
   const lines: string[] = [];
-  lines.push(`Causoryn Doctor v${report.version} — ${report.healthy ? "HEALTHY" : "UNHEALTHY"}`);
+  lines.push(`Causoryn Doctor v${report.version} — ${overallStatus}`);
+  if (overallStatus === "NOT CONFIGURED") {
+    lines.push(
+      "Summary: No MCP host is configured yet. Run `causoryn setup --client <antigravity|claude-code|codex|zcode>` or `causoryn setup --all`.",
+    );
+  } else if (overallStatus === "DEGRADED") {
+    lines.push(
+      "Summary: One or more configured hosts or probes reported warnings. Run `causoryn setup --yes` to restore full alignment.",
+    );
+  }
   lines.push("");
   lines.push(`[Node.js] ${report.node.ok ? "OK" : "ERROR"} — ${report.node.detail}`);
   lines.push(

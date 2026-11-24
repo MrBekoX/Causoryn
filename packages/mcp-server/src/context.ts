@@ -126,6 +126,8 @@ export interface ContextOverrides {
    * büyük repolar tarafından bloklanmaz.
    */
   readonly deferAutoIndex?: boolean;
+  /** Optional MCP host client identifier recorded in SQLite build_leases.host_label. */
+  readonly hostLabel?: string;
 }
 
 /**
@@ -166,6 +168,7 @@ export function createCausorynContext(
       clock,
       limits: { maxFiles: config.index.maxFiles },
       tolerateConcurrentPublishRace: config.storage.dataDbPath !== undefined,
+      ...(overrides.hostLabel === undefined ? {} : { hostLabel: overrides.hostLabel }),
     });
     // Sprint-2 B6: refresh_index işleri için yönetici; jobId per-manager
     // monoton sayaçtır (işletim kaydı — snapshot determinizmine girmez).

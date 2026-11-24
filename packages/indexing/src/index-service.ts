@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import path, { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -228,6 +229,69 @@ export interface IndexServiceOptions {
    * Varsayılan false.
    */
   readonly tolerateConcurrentPublishRace?: boolean;
+  /**
+   * Optional diagnostic host/client label stored in `build_leases.host_label`
+   * (e.g., "claude-code", "codex", "antigravity"). Does not affect snapshot IDs.
+   */
+  readonly hostLabel?: string;
+  /** Build lease TTL in milliseconds (default: 30_000). */
+  readonly leaseTtlMs?: number;
+  /** Heartbeat renewal interval in milliseconds (default: 10_000). */
+  readonly leaseHeartbeatIntervalMs?: number;
+  /** Optional PID liveness predicate for lease recovery (test seam). */
+  readonly isPidAlive?: (pid: number) => boolean;
+}
+
+/** Explicit peer status when another live process currently holds the build lease. */
+export type IndexPeerStatus = "waiting_for_peer";
+
+/** Single-writer workspace build lease metadata (structural match for SqliteGraphRepository). */
+export interface BuildLeaseInfo {
+  readonly workspaceId: string;
+  readonly buildId: string;
+  readonly leaseId: string;
+  readonly ownerPid: number;
+  readonly hostLabel: string | null;
+  readonly acquiredAt: string;
+  readonly heartbeatAt: string;
+  readonly expiresAt: string;
+}
+
+/** Optional build-lease & orphan-recovery capability implemented by persistent repositories. */
+export interface BuildLeaseStore {
+  acquireBuildLease(input: {
+    readonly workspaceId: string;
+    readonly buildId: string;
+    readonly leaseId: string;
+    readonly ownerPid: number;
+    readonly hostLabel?: string;
+    readonly nowIso: string;
+    readonly ttlMs: number;
+    readonly isPidAlive?: (pid: number) => boolean;
+  }):
+    | { readonly acquired: true; readonly lease?: BuildLeaseInfo }
+    | { readonly acquired: false; readonly holder: BuildLeaseInfo };
+  renewBuildLease(
+    workspaceId: string,
+    leaseId: string,
+    nowIso: string,
+    ttlMs: number,
+  ): boolean;
+  releaseBuildLease(workspaceId: string, leaseId: string): void;
+  getActiveBuildLease(workspaceId: string): BuildLeaseInfo | undefined;
+  recoverOrphanBuilds(
+    workspaceId: string,
+    options?: {
+      readonly nowIso?: string;
+      readonly isPidAlive?: (pid: number) => boolean;
+    },
+  ): { readonly recoveredBuildIds: readonly string[]; readonly clearedLease: boolean };
+  bindBuildLeaseBuildId?(
+    workspaceId: string,
+    leaseId: string,
+    buildId: string,
+  ): boolean;
+  withImmediateTransaction?<T>(fn: () => T): T;
 }
 
 /** Adapter tanı kaydının uygulama düzeyi karşılığı (parser detayı sızmaz). */
@@ -258,6 +322,14 @@ export interface IndexRunResult {
    * yeniden kullanıldı (yalnızca files tablosu tazelendi).
    */
   readonly published: boolean;
+  /** Set when a live peer holds the workspace build lease and this run deferred honestly. */
+  readonly peerStatus?: IndexPeerStatus;
+  /** True when this run deferred because a live peer is actively building. */
+  readonly waitingForPeer?: boolean;
+  /** True when an existing published snapshot was reused without publishing a new build. */
+  readonly reused?: boolean;
+  /** Holder lease metadata when `peerStatus === "waiting_for_peer"`. */
+  readonly peerLease?: BuildLeaseInfo;
 }
 
 /** Adapter çıktısının pipeline graph inşasına verilen ortak biçimi. */
@@ -335,6 +407,28 @@ function isSymbolSearchStore(
   );
 }
 
+function isBuildLeaseStore(
+  repository: GraphRepository,
+): repository is GraphRepository & BuildLeaseStore {
+  const candidate = repository as Partial<BuildLeaseStore>;
+  return (
+    typeof candidate.acquireBuildLease === "function" &&
+    typeof candidate.renewBuildLease === "function" &&
+    typeof candidate.releaseBuildLease === "function" &&
+    typeof candidate.getActiveBuildLease === "function" &&
+    typeof candidate.recoverOrphanBuilds === "function"
+  );
+}
+
+const DEFAULT_BUILD_LEASE_TTL_MS = 30_000;
+const DEFAULT_BUILD_LEASE_HEARTBEAT_MS = 10_000;
+
+interface ActiveBuildLeaseHandle {
+  readonly leaseId: string;
+  readonly stop: () => void;
+  readonly release: () => void;
+}
+
 function toEvidence(workspaceId: string, input: {
   readonly kind: string;
   readonly span?: SourceSpan;
@@ -410,6 +504,7 @@ interface PreparedRun {
   readonly csEntries: InventoryEntry[];
   readonly pyEntries: InventoryEntry[];
   readonly goEntries: InventoryEntry[];
+  readonly goModEntries: InventoryEntry[];
   readonly rsEntries: InventoryEntry[];
 }
 
@@ -433,6 +528,10 @@ const TS_JS_CONFIG_FILE_PATTERN = /^(?:ts|js)config(?:\..+|-.*)?\.json$/i;
 
 function isTsConfigFile(relativePath: string): boolean {
   return TS_JS_CONFIG_FILE_PATTERN.test(path.posix.basename(relativePath));
+}
+
+function isGoModFile(relativePath: string): boolean {
+  return path.posix.basename(relativePath) === "go.mod";
 }
 
 /**
@@ -483,6 +582,14 @@ export class IndexService {
   private readonly analyzeCSharpFn: AnalyzeCSharpFunction;
   /** K-021: çoklu-süreç SQLite yarış kurtarma modu. */
   private readonly tolerateConcurrentPublishRace: boolean;
+  /** Optional diagnostic host/client label stored in build_leases.host_label. */
+  private readonly hostLabel: string | undefined;
+  /** Single-writer build lease TTL in ms (default 30_000). */
+  private readonly leaseTtlMs: number;
+  /** Heartbeat renewal interval in ms (default 10_000). */
+  private readonly leaseHeartbeatIntervalMs: number;
+  /** Optional PID liveness predicate for lease recovery (test seam). */
+  private readonly isPidAlive: ((pid: number) => boolean) | undefined;
   private workspaceRegistered = false;
   private runCount = 0;
 
@@ -493,6 +600,18 @@ export class IndexService {
     this.clock = options.clock;
     this.limits = options.limits;
     this.tolerateConcurrentPublishRace = options.tolerateConcurrentPublishRace ?? false;
+    this.hostLabel = options.hostLabel;
+    this.leaseTtlMs =
+      options.leaseTtlMs !== undefined && Number.isFinite(options.leaseTtlMs) && options.leaseTtlMs > 0
+        ? options.leaseTtlMs
+        : DEFAULT_BUILD_LEASE_TTL_MS;
+    this.leaseHeartbeatIntervalMs =
+      options.leaseHeartbeatIntervalMs !== undefined &&
+      Number.isFinite(options.leaseHeartbeatIntervalMs) &&
+      options.leaseHeartbeatIntervalMs > 0
+        ? options.leaseHeartbeatIntervalMs
+        : DEFAULT_BUILD_LEASE_HEARTBEAT_MS;
+    this.isPidAlive = options.isPidAlive;
     const policyConfig = options.policy.config;
     const hashInput: JsonValue = {
       workspaceId: this.workspaceId,
@@ -580,7 +699,64 @@ export class IndexService {
       responseMaxChars: DEFAULT_RS_RESPONSE_MAX_CHARS,
       cargoBuildTimeoutMs: rustOptions.cargoBuildTimeoutMs ?? DEFAULT_CARGO_BUILD_TIMEOUT_MS,
     };
+    this.recoverOrphanBuildsIfSupported(this.clock());
     this.runCount = this.readInitialRunCount();
+  }
+
+  /**
+   * Recovers any orphaned `building` rows (no lease, expired lease, or dead PID)
+   * when backed by a build-lease-capable repository (e.g. SqliteGraphRepository).
+   * Safe no-op on repositories without lease support or unregistered workspaces.
+   */
+  private recoverOrphanBuildsIfSupported(nowIso: string): void {
+    if (this.workspaceId.trim().length === 0) return;
+    if (!isBuildLeaseStore(this.repository)) return;
+    try {
+      this.repository.recoverOrphanBuilds(this.workspaceId, {
+        nowIso,
+        ...(this.isPidAlive === undefined ? {} : { isPidAlive: this.isPidAlive }),
+      });
+    } catch {
+      // Best-effort recovery; startup/build continues cleanly if workspace is not registered yet.
+    }
+  }
+
+  private startLeaseHeartbeat(
+    leaseStore: BuildLeaseStore,
+    leaseId: string,
+  ): ActiveBuildLeaseHandle {
+    let released = false;
+    const timer = setInterval(() => {
+      if (released) return;
+      try {
+        leaseStore.renewBuildLease(
+          this.workspaceId,
+          leaseId,
+          this.clock(),
+          this.leaseTtlMs,
+        );
+      } catch {
+        // Best-effort heartbeat; DB may have been closed concurrently.
+      }
+    }, this.leaseHeartbeatIntervalMs);
+    timer.unref();
+
+    const stop = (): void => {
+      clearInterval(timer);
+    };
+
+    const release = (): void => {
+      if (released) return;
+      released = true;
+      stop();
+      try {
+        leaseStore.releaseBuildLease(this.workspaceId, leaseId);
+      } catch {
+        // Best-effort release; publish/failBuild may have already cleared the lease.
+      }
+    };
+
+    return { leaseId, stop, release };
   }
 
   /**
@@ -661,6 +837,7 @@ export class IndexService {
    */
   runIncrementalIndex(rootPath: string, changeSet: readonly string[] = []): IndexRunResult {
     const prepared = this.prepareRun(rootPath);
+    this.recoverOrphanBuildsIfSupported(this.clock());
     const change = this.analyzeChanges(prepared.entries);
     const latest = this.repository.getLatestPublished(this.workspaceId);
     if (
@@ -690,6 +867,7 @@ export class IndexService {
     changeSet: readonly string[] = [],
   ): Promise<IndexRunResult> {
     const prepared = await this.prepareRunAsync(rootPath);
+    this.recoverOrphanBuildsIfSupported(this.clock());
     const change = this.analyzeChanges(prepared.entries);
     const latest = this.repository.getLatestPublished(this.workspaceId);
     const degradedSyncSnapshot =
@@ -742,11 +920,12 @@ export class IndexService {
     return changedSources.length > 0 || deletedSources.length > 0;
   }
 
-  /** Değişim analizinde yeniden indeksleme tetikleyen dosya mı (dil kaynağı veya TS/JS config). */
+  /** Değişim analizinde yeniden indeksleme tetikleyen dosya mı (dil kaynağı, TS/JS config veya go.mod). */
   private isIndexRelevantFile(relativePath: string): boolean {
     return (
       this.isLanguageSource(path.extname(relativePath).toLowerCase()) ||
-      isTsConfigFile(relativePath)
+      isTsConfigFile(relativePath) ||
+      isGoModFile(relativePath)
     );
   }
 
@@ -865,6 +1044,7 @@ export class IndexService {
     const goEntries = entries.filter((entry) =>
       GO_EXTENSIONS.has(path.extname(entry.relativePath).toLowerCase()),
     );
+    const goModEntries = entries.filter((entry) => isGoModFile(entry.relativePath));
     const rsEntries = entries.filter((entry) =>
       RS_EXTENSIONS.has(path.extname(entry.relativePath).toLowerCase()),
     );
@@ -876,6 +1056,7 @@ export class IndexService {
       csEntries,
       pyEntries,
       goEntries,
+      goModEntries,
       rsEntries,
     };
   }
@@ -974,6 +1155,46 @@ export class IndexService {
       warnings: [...warnings, raceWarning],
       diagnostics,
       published: false,
+      reused: true,
+    };
+  }
+
+  /**
+   * Honest deferred result when a live peer currently holds the build lease
+   * (or an active peer build is running): never fakes fresh completion, returns
+   * explicit `peerStatus: "waiting_for_peer"`, `waitingForPeer: true`, `reused: true`,
+   * and an actionable warning referencing the live peer.
+   */
+  private waitingForPeerResult(
+    latest: NonNullable<ReturnType<GraphRepository["getLatestPublished"]>>,
+    holder: BuildLeaseInfo | undefined,
+    fileCount: number,
+    tsFileCount: number,
+    csFileCount: number,
+    warnings: readonly string[],
+    diagnostics: readonly IndexDiagnostic[],
+  ): IndexRunResult {
+    this.runCount = Math.max(this.runCount, latest.snapshot.meta.revision.sequence);
+    const holderDetails =
+      holder === undefined
+        ? "live peer build active"
+        : `pid=${String(holder.ownerPid)}${holder.hostLabel !== null ? `, host=${holder.hostLabel}` : ""}, expiresAt=${holder.expiresAt}`;
+    const peerWarning = `waiting_for_peer: concurrent index build active in live peer (${holderDetails}); reused existing published snapshot without overwriting`;
+    return {
+      snapshotId: latest.snapshot.meta.id,
+      snapshot: latest.snapshot,
+      stale: latest.stale,
+      fileCount,
+      tsFileCount,
+      csFileCount,
+      state: latest.snapshot.meta.state === "ready" ? "ready" : "partial",
+      warnings: [...warnings, peerWarning],
+      diagnostics,
+      published: false,
+      reused: true,
+      waitingForPeer: true,
+      peerStatus: "waiting_for_peer",
+      ...(holder === undefined ? {} : { peerLease: holder }),
     };
   }
 
@@ -1041,8 +1262,11 @@ export class IndexService {
   }
 
   /**
-   * Build açar; tolerateConcurrentPublishRace aktifken graph/build-already-active
-   * yarışında mevcut yayımlanmış snapshot varsa ona zarifçe düşer.
+   * Recovers any orphaned builds first, acquires the single-writer heartbeat lease
+   * (when backed by a lease-capable repository), and opens a new build.
+   * When a live peer holds a valid non-expired lease (or `graph/build-already-active`
+   * occurs with a live peer), honestly returns `peerStatus: "waiting_for_peer"` with
+   * the existing published snapshot (or throws fail-closed if none exists yet).
    */
   private openBuildOrRecover(
     entries: readonly InventoryEntry[],
@@ -1055,15 +1279,83 @@ export class IndexService {
     warnings: readonly string[],
     diagnostics: readonly IndexDiagnostic[],
   ):
-    | { readonly kind: "opened"; readonly opened: ReturnType<IndexService["openBuild"]> }
+    | {
+        readonly kind: "opened";
+        readonly opened: ReturnType<IndexService["openBuild"]>;
+        readonly activeLease: ActiveBuildLeaseHandle | undefined;
+      }
     | { readonly kind: "reused"; readonly result: IndexRunResult } {
+    this.recoverOrphanBuildsIfSupported(createdAt);
     this.syncRunCountBeforeBuild(entries, analyzerFingerprint);
+
+    let activeLease: ActiveBuildLeaseHandle | undefined;
+    const leaseStore = isBuildLeaseStore(this.repository) ? this.repository : undefined;
+    if (leaseStore !== undefined) {
+      const leaseId = randomUUID();
+      const provisionalBuildId = `pending:${leaseId}`;
+      const acquired = leaseStore.acquireBuildLease({
+        workspaceId: this.workspaceId,
+        buildId: provisionalBuildId,
+        leaseId,
+        ownerPid: process.pid,
+        ...(this.hostLabel === undefined ? {} : { hostLabel: this.hostLabel }),
+        nowIso: createdAt,
+        ttlMs: this.leaseTtlMs,
+        ...(this.isPidAlive === undefined ? {} : { isPidAlive: this.isPidAlive }),
+      });
+      if (!acquired.acquired) {
+        const latest = this.repository.getLatestPublished(this.workspaceId);
+        if (latest !== undefined) {
+          return {
+            kind: "reused",
+            result: this.waitingForPeerResult(
+              latest,
+              acquired.holder,
+              fileCount,
+              tsFileCount,
+              csFileCount,
+              warnings,
+              diagnostics,
+            ),
+          };
+        }
+        throw new GraphRepositoryError(
+          "graph/build-already-active",
+          `waiting_for_peer: live peer (pid=${String(acquired.holder.ownerPid)}) holds active build lease for workspace ${this.workspaceId}`,
+        );
+      }
+      activeLease = this.startLeaseHeartbeat(leaseStore, leaseId);
+    }
+
     try {
+      const openAndBind = (): ReturnType<IndexService["openBuild"]> => {
+        const opened = this.openBuild(analyzerFingerprint, createdAt, canonicalRoot);
+        if (leaseStore !== undefined && activeLease !== undefined) {
+          const bound = leaseStore.bindBuildLeaseBuildId?.(
+            this.workspaceId,
+            activeLease.leaseId,
+            opened.buildId,
+          );
+          if (bound === false) {
+            throw new GraphRepositoryError(
+              "graph/build-already-active",
+              `build lease ${activeLease.leaseId} was lost before binding build ${opened.buildId}`,
+            );
+          }
+        }
+        return opened;
+      };
+      const opened =
+        leaseStore?.withImmediateTransaction !== undefined
+          ? leaseStore.withImmediateTransaction(openAndBind)
+          : openAndBind();
       return {
         kind: "opened",
-        opened: this.openBuild(analyzerFingerprint, createdAt, canonicalRoot),
+        opened,
+        activeLease,
       };
     } catch (error) {
+      activeLease?.release();
       if (
         this.tolerateConcurrentPublishRace &&
         error instanceof GraphRepositoryError &&
@@ -1073,16 +1365,17 @@ export class IndexService {
       ) {
         const latest = this.repository.getLatestPublished(this.workspaceId);
         if (latest !== undefined) {
+          const holder = leaseStore?.getActiveBuildLease(this.workspaceId);
           return {
             kind: "reused",
-            result: this.concurrentReuseResult(
+            result: this.waitingForPeerResult(
               latest,
+              holder,
               fileCount,
               tsFileCount,
               csFileCount,
               warnings,
               diagnostics,
-              "concurrent index build race (graph/build-already-active): reused existing published snapshot",
             ),
           };
         }
@@ -1251,198 +1544,202 @@ export class IndexService {
     if (buildAttempt.kind === "reused") {
       return buildAttempt.result;
     }
-    const opened = buildAttempt.opened;
+    const { opened, activeLease } = buildAttempt;
 
-    let finalState: PublishableState = "partial";
-    let emptyLanguageRun = false;
     try {
-      // Erken çıkış: analiz edilebilir dil kaynağı yok (orijinal davranış,
-      // genelleştirilmiş uyarı; tek Workspace node'uyla partial publish).
-      // M2 denetim bulgusu düzeltmesi: kapsam beş dile genişlediğinden
-      // uyarı metni de beş dili sayar (yalnızca hiçbir dil dosyası yokken
-      // bu dala girilir).
-      if (
-        tsEntries.length === 0 &&
-        csEntries.length === 0 &&
-        pyEntries.length === 0 &&
-        goEntries.length === 0 &&
-        rsEntries.length === 0
-      ) {
-        // Envanter mutabakatı: bu dalda adapter koşumu YOK, sıralama
-        // tehlikesi yok — build'e girmeden mutabakat yapılır (async yol
-        // sözleşmesiyle aynı mutabakat garantisi).
-        this.syncInventoryRecords(entries);
-        warnings.push(
-          "workspace analiz edilebilir TypeScript/TSX/C#/Python/Go/Rust kaynağı içermiyor; coverage sıfır (partial yayınlendi)",
-        );
-        for (const entry of entries) {
-          warnings.push(`dosya envanterde ama dil adapter kapsamı dışında: ${entry.relativePath}`);
-        }
-        emptyLanguageRun = true;
-      } else {
-
-      const nodeByKey = new Map<string, GraphNode>();
-      let tsState: "ready" | "partial" = "ready";
-      if (tsEntries.length > 0) {
-        // TS adapter (salt-okunur kaynak çantası; rootDir çözümleme
-        // çapasıdır, adapter diske YAZMAZ — ADR-008).
-        const adapterResult = analyzeTypeScriptProgram({
-          workspaceId: this.workspaceId,
-          rootDir: canonicalRoot,
-          sources: tsEntries.map((entry) => ({
-            relativePath: entry.relativePath,
-            content: entry.content,
-          })),
-          configFiles: tsConfigEntries.map((entry) => ({
-            relativePath: entry.relativePath,
-            content: entry.content,
-          })),
-        });
-        tsState = adapterResult.state;
-        for (const diagnostic of adapterResult.diagnostics) {
-          const converted: IndexDiagnostic = {
-            relativePath: diagnostic.relativePath,
-            code: diagnostic.code,
-            message: diagnostic.message,
-            line: diagnostic.line,
-          };
-          diagnostics.push(converted);
+      let finalState: PublishableState = "partial";
+      let emptyLanguageRun = false;
+      try {
+        // Erken çıkış: analiz edilebilir dil kaynağı yok (orijinal davranış,
+        // genelleştirilmiş uyarı; tek Workspace node'uyla partial publish).
+        // M2 denetim bulgusu düzeltmesi: kapsam beş dile genişlediğinden
+        // uyarı metni de beş dili sayar (yalnızca hiçbir dil dosyası yokken
+        // bu dala girilir).
+        if (
+          tsEntries.length === 0 &&
+          csEntries.length === 0 &&
+          pyEntries.length === 0 &&
+          goEntries.length === 0 &&
+          rsEntries.length === 0
+        ) {
+          // Envanter mutabakatı: bu dalda adapter koşumu YOK, sıralama
+          // tehlikesi yok — build'e girmeden mutabakat yapılır (async yol
+          // sözleşmesiyle aynı mutabakat garantisi).
+          this.syncInventoryRecords(entries);
           warnings.push(
-            `tanı: ${converted.relativePath}:${String(converted.line)} ${converted.code} ${converted.message}`,
+            "workspace analiz edilebilir TypeScript/TSX/C#/Python/Go/Rust kaynağı içermiyor; coverage sıfır (partial yayınlendi)",
           );
+          for (const entry of entries) {
+            warnings.push(`dosya envanterde ama dil adapter kapsamı dışında: ${entry.relativePath}`);
+          }
+          emptyLanguageRun = true;
+        } else {
+
+        const nodeByKey = new Map<string, GraphNode>();
+        let tsState: "ready" | "partial" = "ready";
+        if (tsEntries.length > 0) {
+          // TS adapter (salt-okunur kaynak çantası; rootDir çözümleme
+          // çapasıdır, adapter diske YAZMAZ — ADR-008).
+          const adapterResult = analyzeTypeScriptProgram({
+            workspaceId: this.workspaceId,
+            rootDir: canonicalRoot,
+            sources: tsEntries.map((entry) => ({
+              relativePath: entry.relativePath,
+              content: entry.content,
+            })),
+            configFiles: tsConfigEntries.map((entry) => ({
+              relativePath: entry.relativePath,
+              content: entry.content,
+            })),
+          });
+          tsState = adapterResult.state;
+          for (const diagnostic of adapterResult.diagnostics) {
+            const converted: IndexDiagnostic = {
+              relativePath: diagnostic.relativePath,
+              code: diagnostic.code,
+              message: diagnostic.message,
+              line: diagnostic.line,
+            };
+            diagnostics.push(converted);
+            warnings.push(
+              `tanı: ${converted.relativePath}:${String(converted.line)} ${converted.code} ${converted.message}`,
+            );
+          }
+          warnings.push(...adapterResult.warnings);
+          this.withTransaction(() => {
+            this.addAdapterGraph(
+              opened.buildId,
+              opened.workspaceNode,
+              {
+                analyzerId: TS_ADAPTER_ANALYZER_ID,
+                analyzerVersion: TS_ADAPTER_VERSION,
+                state: tsState,
+                nodes: adapterResult.nodes,
+                edges: adapterResult.edges,
+                evidence: [],
+              },
+              contentHashByPath,
+              nodeByKey,
+            );
+          });
         }
-        warnings.push(...adapterResult.warnings);
-        this.withTransaction(() => {
+
+        let csState: "ready" | "partial" = "ready";
+        if (csEntries.length > 0) {
+          // Senkron köprü: derin analiz yok — L0 envanter düzeyi + explicit
+          // warning. worker başlatılmaz; uydurma sembol/kenar üretilmez.
+          warnings.push(
+            `senkron koşum C# derin sembol analizini yürütemez (Roslyn worker async koşar): ${String(csEntries.length)} dosya L0 envanter düzeyinde listelendi; tam birleşik analiz için runIndexAsync/refresh işi kullanın`,
+          );
+          const l0Nodes: SnapshotNodeInput[] = csEntries.map((entry) => ({
+            kind: "File",
+            qualifiedName: entry.relativePath,
+            language: "csharp",
+            relativePath: entry.relativePath,
+            attributes: { sourceHash: entry.contentHash },
+          }));
+          csState = "partial";
           this.addAdapterGraph(
             opened.buildId,
             opened.workspaceNode,
             {
-              analyzerId: TS_ADAPTER_ANALYZER_ID,
-              analyzerVersion: TS_ADAPTER_VERSION,
-              state: tsState,
-              nodes: adapterResult.nodes,
-              edges: adapterResult.edges,
+              analyzerId: CSHARP_ROSLYN_ADAPTER_ID,
+              analyzerVersion: CSHARP_ROSLYN_ADAPTER_VERSION,
+              state: csState,
+              nodes: l0Nodes,
+              edges: [],
               evidence: [],
             },
             contentHashByPath,
             nodeByKey,
           );
-        });
+        }
+
+        // M2: python/go/rust senkron köprü — worker SPAWN EDİLMEZ; L0
+        // envanter düzeyi File node'ları (sourceHash attribute'lu) + explicit
+        // warning. csharp köprü sözleşmesinin birebir karşılığı.
+        const syncL0Languages: ReadonlyArray<{
+          readonly label: string;
+          readonly language: string;
+          readonly workerName: string;
+          readonly entries: InventoryEntry[];
+        }> = [
+          { label: "Python", language: "python", workerName: "python worker", entries: pyEntries },
+          { label: "Go", language: "go", workerName: "go worker", entries: goEntries },
+          { label: "Rust", language: "rust", workerName: "Rust worker", entries: rsEntries },
+        ];
+        let syncHasL0Language = csEntries.length > 0;
+        for (const l0 of syncL0Languages) {
+          if (l0.entries.length === 0) continue;
+          warnings.push(
+            `senkron koşum ${l0.label} derin sembol analizini yürütemez (${l0.workerName} async koşar): ${String(l0.entries.length)} dosya L0 envanter düzeyinde listelendi; tam birleşik analiz için runIndexAsync/refresh işi kullanın`,
+          );
+          const l0Nodes: SnapshotNodeInput[] = l0.entries.map((entry) => ({
+            kind: "File",
+            qualifiedName: entry.relativePath,
+            language: l0.language,
+            relativePath: entry.relativePath,
+            attributes: { sourceHash: entry.contentHash },
+          }));
+          syncHasL0Language = true;
+          this.addAdapterGraph(
+            opened.buildId,
+            opened.workspaceNode,
+            {
+              analyzerId: l0LanguageAnalyzerId(l0.language),
+              analyzerVersion: l0LanguageAnalyzerVersion(l0.language),
+              state: "partial",
+              nodes: l0Nodes,
+              edges: [],
+              evidence: [],
+            },
+            contentHashByPath,
+            nodeByKey,
+          );
+        }
+
+        // Envanter mutabakatı ADAPTER KOŞUMLARINDAN SONRA (async yolun B10
+        // sözleşmesiyle aynı sıralama — denetim bulgusu): adapter sözleşme
+        // dışı fırlatırsa files tablosu güncellenmez; aksi hâlde güncellenen
+        // envanter sonraki incremental koşumu "değişiklik yok" no-op'una
+        // itip bayat graph'ı korur.
+        this.syncInventoryRecords(entries);
+
+        finalState =
+          tsState === "ready" &&
+          csState === "ready" &&
+          !syncHasL0Language &&
+          diagnostics.length === 0
+            ? "ready"
+            : "partial";
+        }
+      } catch (error) {
+        this.failBuild(opened.buildId, error);
       }
 
-      let csState: "ready" | "partial" = "ready";
-      if (csEntries.length > 0) {
-        // Senkron köprü: derin analiz yok — L0 envanter düzeyi + explicit
-        // warning. worker başlatılmaz; uydurma sembol/kenar üretilmez.
-        warnings.push(
-          `senkron koşum C# derin sembol analizini yürütemez (Roslyn worker async koşar): ${String(csEntries.length)} dosya L0 envanter düzeyinde listelendi; tam birleşik analiz için runIndexAsync/refresh işi kullanın`,
-        );
-        const l0Nodes: SnapshotNodeInput[] = csEntries.map((entry) => ({
-          kind: "File",
-          qualifiedName: entry.relativePath,
-          language: "csharp",
-          relativePath: entry.relativePath,
-          attributes: { sourceHash: entry.contentHash },
-        }));
-        csState = "partial";
-        this.addAdapterGraph(
+      if (emptyLanguageRun) {
+        return this.finalizePublish(
           opened.buildId,
-          opened.workspaceNode,
-          {
-            analyzerId: CSHARP_ROSLYN_ADAPTER_ID,
-            analyzerVersion: CSHARP_ROSLYN_ADAPTER_VERSION,
-            state: csState,
-            nodes: l0Nodes,
-            edges: [],
-            evidence: [],
-          },
-          contentHashByPath,
-          nodeByKey,
+          "partial",
+          entries.length,
+          0,
+          0,
+          warnings,
+          [],
         );
       }
-
-      // M2: python/go/rust senkron köprü — worker SPAWN EDİLMEZ; L0
-      // envanter düzeyi File node'ları (sourceHash attribute'lu) + explicit
-      // warning. csharp köprü sözleşmesinin birebir karşılığı.
-      const syncL0Languages: ReadonlyArray<{
-        readonly label: string;
-        readonly language: string;
-        readonly workerName: string;
-        readonly entries: InventoryEntry[];
-      }> = [
-        { label: "Python", language: "python", workerName: "python worker", entries: pyEntries },
-        { label: "Go", language: "go", workerName: "go worker", entries: goEntries },
-        { label: "Rust", language: "rust", workerName: "Rust worker", entries: rsEntries },
-      ];
-      let syncHasL0Language = csEntries.length > 0;
-      for (const l0 of syncL0Languages) {
-        if (l0.entries.length === 0) continue;
-        warnings.push(
-          `senkron koşum ${l0.label} derin sembol analizini yürütemez (${l0.workerName} async koşar): ${String(l0.entries.length)} dosya L0 envanter düzeyinde listelendi; tam birleşik analiz için runIndexAsync/refresh işi kullanın`,
-        );
-        const l0Nodes: SnapshotNodeInput[] = l0.entries.map((entry) => ({
-          kind: "File",
-          qualifiedName: entry.relativePath,
-          language: l0.language,
-          relativePath: entry.relativePath,
-          attributes: { sourceHash: entry.contentHash },
-        }));
-        syncHasL0Language = true;
-        this.addAdapterGraph(
-          opened.buildId,
-          opened.workspaceNode,
-          {
-            analyzerId: l0LanguageAnalyzerId(l0.language),
-            analyzerVersion: l0LanguageAnalyzerVersion(l0.language),
-            state: "partial",
-            nodes: l0Nodes,
-            edges: [],
-            evidence: [],
-          },
-          contentHashByPath,
-          nodeByKey,
-        );
-      }
-
-      // Envanter mutabakatı ADAPTER KOŞUMLARINDAN SONRA (async yolun B10
-      // sözleşmesiyle aynı sıralama — denetim bulgusu): adapter sözleşme
-      // dışı fırlatırsa files tablosu güncellenmez; aksi hâlde güncellenen
-      // envanter sonraki incremental koşumu "değişiklik yok" no-op'una
-      // itip bayat graph'ı korur.
-      this.syncInventoryRecords(entries);
-
-      finalState =
-        tsState === "ready" &&
-        csState === "ready" &&
-        !syncHasL0Language &&
-        diagnostics.length === 0
-          ? "ready"
-          : "partial";
-      }
-    } catch (error) {
-      this.failBuild(opened.buildId, error);
-    }
-
-    if (emptyLanguageRun) {
       return this.finalizePublish(
         opened.buildId,
-        "partial",
+        finalState,
         entries.length,
-        0,
-        0,
+        tsEntries.length,
+        csEntries.length,
         warnings,
-        [],
+        diagnostics,
       );
+    } finally {
+      activeLease?.release();
     }
-    return this.finalizePublish(
-      opened.buildId,
-      finalState,
-      entries.length,
-      tsEntries.length,
-      csEntries.length,
-      warnings,
-      diagnostics,
-    );
   }
 
   /**
@@ -1468,6 +1765,7 @@ export class IndexService {
       csEntries,
       pyEntries,
       goEntries,
+      goModEntries,
       rsEntries,
     } = prepared;
     const warnings: string[] = [];
@@ -1577,6 +1875,14 @@ export class IndexService {
           path: entry.relativePath,
           content: entry.content,
         })),
+        ...(goModEntries.length > 0
+          ? {
+              moduleFiles: goModEntries.map((entry) => ({
+                relativePath: entry.relativePath,
+                content: entry.content,
+              })),
+            }
+          : {}),
         options: {
           goBinaryPath: this.goSettings.goBinaryPath,
           ...(this.goSettings.goWorkerBinaryPath.length > 0
@@ -1708,122 +2014,126 @@ export class IndexService {
     if (buildAttempt.kind === "reused") {
       return buildAttempt.result;
     }
-    const opened = buildAttempt.opened;
+    const { opened, activeLease } = buildAttempt;
 
-    let finalState: PublishableState = "ready";
-    let emptyLanguageRun = false;
     try {
-      // Envanter mutabakatı ADAPTER KOŞUMULARINDAN ve build açılışından sonra:
-      // başka sürecin aktif build'i nedeniyle önceki snapshot'a düşülürse
-      // files tablosu yayımlanmamış karmalarla kirlenmez.
-      this.syncInventoryRecords(entries);
+      let finalState: PublishableState = "ready";
+      let emptyLanguageRun = false;
+      try {
+        // Envanter mutabakatı ADAPTER KOŞUMULARINDAN ve build açılışından sonra:
+        // başka sürecin aktif build'i nedeniyle önceki snapshot'a düşülürse
+        // files tablosu yayımlanmamış karmalarla kirlenmez.
+        this.syncInventoryRecords(entries);
 
-      // Erken çıkış: analiz edilebilir dil kaynağı yok — senkron yolun
-      // aynı dürüstlük sözleşmesi (denetim bulgusu): coverage sıfırken
-      // 'ready' uydurulmaz; partial + explicit kapsam uyarıları yayımlanır.
-      if (
-        tsEntries.length === 0 &&
-        csEntries.length === 0 &&
-        pyEntries.length === 0 &&
-        goEntries.length === 0 &&
-        rsEntries.length === 0
-      ) {
-        warnings.push(
-          "workspace analiz edilebilir TypeScript/TSX/C#/Python/Go/Rust kaynağı içermiyor; coverage sıfır (partial yayınlendi)",
-        );
-        for (const entry of entries) {
-          warnings.push(`dosya envanterde ama dil adapter kapsamı dışında: ${entry.relativePath}`);
-        }
-        emptyLanguageRun = true;
-      } else {
+        // Erken çıkış: analiz edilebilir dil kaynağı yok — senkron yolun
+        // aynı dürüstlük sözleşmesi (denetim bulgusu): coverage sıfırken
+        // 'ready' uydurulmaz; partial + explicit kapsam uyarıları yayımlanır.
+        if (
+          tsEntries.length === 0 &&
+          csEntries.length === 0 &&
+          pyEntries.length === 0 &&
+          goEntries.length === 0 &&
+          rsEntries.length === 0
+        ) {
+          warnings.push(
+            "workspace analiz edilebilir TypeScript/TSX/C#/Python/Go/Rust kaynağı içermiyor; coverage sıfır (partial yayınlendi)",
+          );
+          for (const entry of entries) {
+            warnings.push(`dosya envanterde ama dil adapter kapsamı dışında: ${entry.relativePath}`);
+          }
+          emptyLanguageRun = true;
+        } else {
 
-      const nodeByKey = new Map<string, GraphNode>();
-      let state: PublishableState = "ready";
+        const nodeByKey = new Map<string, GraphNode>();
+        let state: PublishableState = "ready";
 
-      this.withTransaction(() => {
-        if (tsEntries.length > 0) {
-          this.addAdapterGraph(
-            opened.buildId,
-            opened.workspaceNode,
-            {
-              analyzerId: TS_ADAPTER_ANALYZER_ID,
-              analyzerVersion: TS_ADAPTER_VERSION,
-              state: tsState,
-              nodes: tsNodes,
-              edges: tsEdges,
-              evidence: [],
-            },
-            contentHashByPath,
-            nodeByKey,
-          );
+        this.withTransaction(() => {
+          if (tsEntries.length > 0) {
+            this.addAdapterGraph(
+              opened.buildId,
+              opened.workspaceNode,
+              {
+                analyzerId: TS_ADAPTER_ANALYZER_ID,
+                analyzerVersion: TS_ADAPTER_VERSION,
+                state: tsState,
+                nodes: tsNodes,
+                edges: tsEdges,
+                evidence: [],
+              },
+              contentHashByPath,
+              nodeByKey,
+            );
+          }
+          if (csharpResult !== undefined) {
+            this.addAdapterGraph(
+              opened.buildId,
+              opened.workspaceNode,
+              {
+                analyzerId: csharpResult.analyzerId,
+                analyzerVersion: csharpResult.analyzerVersion,
+                state: csharpResult.state,
+                nodes: csharpResult.nodes,
+                edges: csharpResult.edges,
+                evidence: csharpResult.evidence,
+              },
+              contentHashByPath,
+              nodeByKey,
+            );
+            if (csharpResult.state !== "ready") state = "partial";
+          }
+          // M2: python/go/rust çıktıları aynı addAdapterGraph sözleşmesiyle
+          // TEK build'e katılır (relativePath'li node çakışması açık hatadır;
+          // kenar uçları node haritasından çözülür — dangling yok).
+          for (const result of [pythonResult, goResult, rustResult]) {
+            if (result === undefined) continue;
+            this.addAdapterGraph(
+              opened.buildId,
+              opened.workspaceNode,
+              {
+                analyzerId: result.analyzerId,
+                analyzerVersion: result.analyzerVersion,
+                state: result.state,
+                nodes: result.nodes,
+                edges: result.edges,
+                evidence: result.evidence,
+              },
+              contentHashByPath,
+              nodeByKey,
+            );
+            if (result.state !== "ready") state = "partial";
+          }
+        });
+        if (tsState !== "ready") state = "partial";
+        if (diagnostics.length > 0) state = "partial";
+        finalState = state;
         }
-        if (csharpResult !== undefined) {
-          this.addAdapterGraph(
-            opened.buildId,
-            opened.workspaceNode,
-            {
-              analyzerId: csharpResult.analyzerId,
-              analyzerVersion: csharpResult.analyzerVersion,
-              state: csharpResult.state,
-              nodes: csharpResult.nodes,
-              edges: csharpResult.edges,
-              evidence: csharpResult.evidence,
-            },
-            contentHashByPath,
-            nodeByKey,
-          );
-          if (csharpResult.state !== "ready") state = "partial";
-        }
-        // M2: python/go/rust çıktıları aynı addAdapterGraph sözleşmesiyle
-        // TEK build'e katılır (relativePath'li node çakışması açık hatadır;
-        // kenar uçları node haritasından çözülür — dangling yok).
-        for (const result of [pythonResult, goResult, rustResult]) {
-          if (result === undefined) continue;
-          this.addAdapterGraph(
-            opened.buildId,
-            opened.workspaceNode,
-            {
-              analyzerId: result.analyzerId,
-              analyzerVersion: result.analyzerVersion,
-              state: result.state,
-              nodes: result.nodes,
-              edges: result.edges,
-              evidence: result.evidence,
-            },
-            contentHashByPath,
-            nodeByKey,
-          );
-          if (result.state !== "ready") state = "partial";
-        }
-      });
-      if (tsState !== "ready") state = "partial";
-      if (diagnostics.length > 0) state = "partial";
-      finalState = state;
+      } catch (error) {
+        this.failBuild(opened.buildId, error);
       }
-    } catch (error) {
-      this.failBuild(opened.buildId, error);
-    }
 
-    if (emptyLanguageRun) {
+      if (emptyLanguageRun) {
+        return this.finalizePublish(
+          opened.buildId,
+          "partial",
+          entries.length,
+          0,
+          0,
+          warnings,
+          [],
+        );
+      }
       return this.finalizePublish(
         opened.buildId,
-        "partial",
+        finalState,
         entries.length,
-        0,
-        0,
+        tsEntries.length,
+        csEntries.length,
         warnings,
-        [],
+        diagnostics,
       );
+    } finally {
+      activeLease?.release();
     }
-    return this.finalizePublish(
-      opened.buildId,
-      finalState,
-      entries.length,
-      tsEntries.length,
-      csEntries.length,
-      warnings,
-      diagnostics,
-    );
   }
 
   /**

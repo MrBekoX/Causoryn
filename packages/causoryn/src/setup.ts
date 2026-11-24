@@ -1,3 +1,4 @@
+import { randomBytes } from "node:crypto";
 import {
   chmodSync,
   closeSync,
@@ -90,6 +91,7 @@ interface FileRemoveInstruction {
 
 interface PlannedExecution {
   readonly selectedClients: readonly HostClientId[];
+  readonly noClientsDetected: boolean;
   readonly needsRuntimeStage: boolean;
   readonly targetRuntimeDir: string;
   readonly actions: readonly SetupAction[];
@@ -97,6 +99,9 @@ interface PlannedExecution {
   readonly removals: readonly FileRemoveInstruction[];
   readonly projectedConfigs: ReadonlyMap<string, string>;
 }
+
+export const NO_CLIENTS_DETECTED_MESSAGE =
+  "No supported MCP host clients were detected. No files were written. Specify a client explicitly with `--client claude-code|codex|antigravity|zcode` or pass `--all` to configure all supported hosts.";
 
 export function resolveDefaultPackageRoot(): string {
   return path.dirname(path.dirname(fileURLToPath(import.meta.url)));
@@ -182,10 +187,11 @@ export function detectInstalledClients(
   claudeConfigDir?: string | null,
 ): HostClientId[] {
   const detected: HostClientId[] = [];
+  // Detect Antigravity ONLY via real Antigravity markers — never bare ~/.gemini
+  // (which causes false positives for Gemini CLI users).
   if (
-    existsSync(path.join(homeDir, ".gemini", "config")) ||
     existsSync(path.join(homeDir, ".gemini", "antigravity")) ||
-    existsSync(path.join(homeDir, ".gemini"))
+    existsSync(path.join(homeDir, ".gemini", "config", "mcp_config.json"))
   ) {
     detected.push("antigravity");
   }
@@ -260,6 +266,7 @@ function buildMcpArgs(cliScriptPath: string, client: HostClientId): string[] {
 function planMcpServersJsonFile(params: {
   readonly client: "antigravity" | "claude-code";
   readonly targetPath: string;
+  readonly nodeExecutable: string;
   readonly cliScriptPath: string;
   readonly uninstall: boolean;
   readonly includeStdioType: boolean;
@@ -270,6 +277,7 @@ function planMcpServersJsonFile(params: {
   const {
     client,
     targetPath,
+    nodeExecutable,
     cliScriptPath,
     uninstall,
     includeStdioType,
@@ -279,9 +287,11 @@ function planMcpServersJsonFile(params: {
   } = params;
 
   const existed = assertConfigAndBackupTargetsSafe(targetPath);
+  let existingRaw: string | null = null;
   let doc: Record<string, unknown> = {};
   if (existed) {
-    doc = parseJsonObjectStrict(readFileSync(targetPath, "utf8"), targetPath);
+    existingRaw = readFileSync(targetPath, "utf8");
+    doc = parseJsonObjectStrict(existingRaw, targetPath);
   }
 
   const existingServersRaw = doc["mcpServers"];
@@ -313,6 +323,18 @@ function planMcpServersJsonFile(params: {
       mcpServers: servers,
     };
     const nextRaw = `${JSON.stringify(nextDoc, null, 2)}\n`;
+    if (existingRaw === nextRaw) {
+      projectedConfigs.set(path.resolve(targetPath), existingRaw);
+      actions.push({
+        client,
+        kind: "mcp-config",
+        operation: "noop",
+        targetPath,
+        backupPath: null,
+        detail: "unchanged: mcpServers.causoryn already removed",
+      });
+      return;
+    }
     writes.push({ targetPath, content: nextRaw, createBackup: true, defaultMode: 0o600 });
     projectedConfigs.set(path.resolve(targetPath), nextRaw);
     actions.push({
@@ -328,7 +350,7 @@ function planMcpServersJsonFile(params: {
 
   const entry: Record<string, unknown> = {
     ...(includeStdioType ? { type: "stdio" } : {}),
-    command: "node",
+    command: nodeExecutable,
     args: buildMcpArgs(cliScriptPath, client),
   };
   servers["causoryn"] = entry;
@@ -337,6 +359,18 @@ function planMcpServersJsonFile(params: {
     mcpServers: servers,
   };
   const nextRaw = `${JSON.stringify(nextDoc, null, 2)}\n`;
+  if (existed && existingRaw === nextRaw) {
+    projectedConfigs.set(path.resolve(targetPath), existingRaw);
+    actions.push({
+      client,
+      kind: "mcp-config",
+      operation: "noop",
+      targetPath,
+      backupPath: null,
+      detail: "unchanged: mcpServers.causoryn is already up to date",
+    });
+    return;
+  }
   writes.push({ targetPath, content: nextRaw, createBackup: existed, defaultMode: 0o600 });
   projectedConfigs.set(path.resolve(targetPath), nextRaw);
   actions.push({
@@ -351,20 +385,24 @@ function planMcpServersJsonFile(params: {
 
 function planZcodeMcpConfig(params: {
   readonly homeDir: string;
+  readonly nodeExecutable: string;
   readonly cliScriptPath: string;
   readonly uninstall: boolean;
   readonly actions: SetupAction[];
   readonly writes: FileWriteInstruction[];
   readonly projectedConfigs: Map<string, string>;
 }): void {
-  const { homeDir, cliScriptPath, uninstall, actions, writes, projectedConfigs } = params;
+  const { homeDir, nodeExecutable, cliScriptPath, uninstall, actions, writes, projectedConfigs } =
+    params;
   const targetPath = path.join(homeDir, ".zcode", "cli", "config.json");
   const fallbackPath = path.join(homeDir, ".agents", "mcp.json");
 
   const existed = assertConfigAndBackupTargetsSafe(targetPath);
+  let existingRaw: string | null = null;
   let doc: Record<string, unknown> = {};
   if (existed) {
-    doc = parseJsonObjectStrict(readFileSync(targetPath, "utf8"), targetPath);
+    existingRaw = readFileSync(targetPath, "utf8");
+    doc = parseJsonObjectStrict(existingRaw, targetPath);
   }
 
   const mcpRaw = doc["mcp"];
@@ -413,6 +451,18 @@ function planZcodeMcpConfig(params: {
       nextDoc["mcp"] = nextMcp;
     }
     const nextRaw = `${JSON.stringify(nextDoc, null, 2)}\n`;
+    if (existingRaw === nextRaw) {
+      projectedConfigs.set(path.resolve(targetPath), existingRaw);
+      actions.push({
+        client: "zcode",
+        kind: "mcp-config",
+        operation: "noop",
+        targetPath,
+        backupPath: null,
+        detail: "unchanged: ZCode mcp.servers.causoryn already removed",
+      });
+      return;
+    }
     writes.push({ targetPath, content: nextRaw, createBackup: true, defaultMode: 0o600 });
     projectedConfigs.set(path.resolve(targetPath), nextRaw);
     actions.push({
@@ -455,7 +505,7 @@ function planZcodeMcpConfig(params: {
 
   servers["causoryn"] = {
     type: "stdio",
-    command: "node",
+    command: nodeExecutable,
     args: buildMcpArgs(cliScriptPath, "zcode"),
   };
 
@@ -467,6 +517,18 @@ function planZcodeMcpConfig(params: {
     },
   };
   const nextRaw = `${JSON.stringify(nextDoc, null, 2)}\n`;
+  if (existed && existingRaw === nextRaw) {
+    projectedConfigs.set(path.resolve(targetPath), existingRaw);
+    actions.push({
+      client: "zcode",
+      kind: "mcp-config",
+      operation: "noop",
+      targetPath,
+      backupPath: null,
+      detail: "unchanged: mcp.servers.causoryn is already up to date",
+    });
+    return;
+  }
   writes.push({ targetPath, content: nextRaw, createBackup: existed, defaultMode: 0o600 });
   projectedConfigs.set(path.resolve(targetPath), nextRaw);
   actions.push({
@@ -483,13 +545,15 @@ function planZcodeMcpConfig(params: {
 
 function planCodexMcpConfig(params: {
   readonly codexHomeDir: string;
+  readonly nodeExecutable: string;
   readonly cliScriptPath: string;
   readonly uninstall: boolean;
   readonly actions: SetupAction[];
   readonly writes: FileWriteInstruction[];
   readonly projectedConfigs: Map<string, string>;
 }): void {
-  const { codexHomeDir, cliScriptPath, uninstall, actions, writes, projectedConfigs } = params;
+  const { codexHomeDir, nodeExecutable, cliScriptPath, uninstall, actions, writes, projectedConfigs } =
+    params;
   const targetPath = path.join(codexHomeDir, "config.toml");
   const existed = assertConfigAndBackupTargetsSafe(targetPath);
   const existingRaw = existed ? readFileSync(targetPath, "utf8") : "";
@@ -532,10 +596,22 @@ function planCodexMcpConfig(params: {
   }
 
   const updated = upsertCodexMcpServer(existingRaw, {
-    command: "node",
+    command: nodeExecutable,
     args: buildMcpArgs(cliScriptPath, "codex"),
     startupTimeoutSec: 30,
   });
+  if (existed && existingRaw === updated) {
+    projectedConfigs.set(path.resolve(targetPath), existingRaw);
+    actions.push({
+      client: "codex",
+      kind: "mcp-config",
+      operation: "noop",
+      targetPath,
+      backupPath: null,
+      detail: "unchanged: [mcp_servers.causoryn] is already up to date",
+    });
+    return;
+  }
   writes.push({ targetPath, content: updated, createBackup: existed, defaultMode: 0o600 });
   projectedConfigs.set(path.resolve(targetPath), updated);
   actions.push({
@@ -619,6 +695,17 @@ function planSkillsForClient(params: {
     const srcSkillFile = path.join(skillsSourceDir, skillName, "SKILL.md");
     const content = readSourceSkillFileSync(srcSkillFile);
     const existed = assertRegularOrAbsentTarget(destSkillFile);
+    if (existed && readFileSync(destSkillFile, "utf8") === content) {
+      actions.push({
+        client,
+        kind: "skill",
+        operation: "noop",
+        targetPath: destSkillFile,
+        backupPath: null,
+        detail: `unchanged: skill ${skillName} is already up to date`,
+      });
+      continue;
+    }
     writes.push({ targetPath: destSkillFile, content, createBackup: false, defaultMode: 0o644 });
     actions.push({
       client,
@@ -710,38 +797,84 @@ function anyRemainingHostReferencesRuntime(params: {
   return false;
 }
 
-function writeFileAtomicWithBackup(instruction: FileWriteInstruction): void {
+function atomicWriteFile(
+  destPath: string,
+  data: string | Buffer,
+  mode: number,
+  suffix: string,
+  renameFn: typeof renameSync = renameSync,
+): void {
+  const tmpPath = `${destPath}.causoryn.${suffix}.tmp`;
+  let renamed = false;
+  try {
+    if (typeof data === "string") {
+      writeFileSync(tmpPath, data, { encoding: "utf8", mode });
+    } else {
+      writeFileSync(tmpPath, data, { mode });
+    }
+    if (process.platform !== "win32") {
+      chmodSync(tmpPath, mode);
+    }
+    renameFn(tmpPath, destPath);
+    renamed = true;
+  } finally {
+    if (!renamed) {
+      try {
+        rmSync(tmpPath, { force: true });
+      } catch {
+        // Best-effort cleanup of temp file on write/rename failure.
+      }
+    }
+  }
+}
+
+function writeFileAtomicWithBackup(
+  instruction: FileWriteInstruction,
+  renameFn: typeof renameSync = renameSync,
+): void {
   const { targetPath, content, createBackup, defaultMode = 0o600 } = instruction;
   const parentDir = path.dirname(targetPath);
   mkdirSync(parentDir, { recursive: true });
 
   const existed = assertRegularOrAbsentTarget(targetPath);
+  const originalBytes = existed ? readFileSync(targetPath) : null;
+  if (originalBytes !== null && originalBytes.equals(Buffer.from(content, "utf8"))) {
+    // Defense-in-depth idempotency: never write or touch backups when bytes match.
+    return;
+  }
+
   const effectiveMode = existed ? (statSync(targetPath).mode & 0o777) || defaultMode : defaultMode;
-  const suffix = `${String(process.pid)}-${String(Date.now())}`;
+  const nonce = randomBytes(4).toString("hex");
+  const suffix = `${String(process.pid)}-${String(Date.now())}-${nonce}`;
 
-  if (createBackup && existed) {
-    const backupPath = `${targetPath}.causoryn.backup`;
-    assertRegularOrAbsentTarget(backupPath);
-    const originalBytes = readFileSync(targetPath);
-    const backupTmp = `${backupPath}.${suffix}.tmp`;
-    writeFileSync(backupTmp, originalBytes, { mode: effectiveMode });
-    if (process.platform !== "win32") {
-      chmodSync(backupTmp, effectiveMode);
+  if (createBackup && existed && originalBytes !== null) {
+    const primaryBackupPath = `${targetPath}.causoryn.backup`;
+    const primaryBackupExisted = assertRegularOrAbsentTarget(primaryBackupPath);
+    if (!primaryBackupExisted) {
+      // First-time backup preserves the user's original pre-Causoryn config forever.
+      atomicWriteFile(primaryBackupPath, originalBytes, effectiveMode, `bk-${suffix}`, renameFn);
+    } else {
+      // NEVER overwrite the original .causoryn.backup; write a secondary timestamped backup instead.
+      const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+      const secondaryBackupPath = `${targetPath}.causoryn.${stamp}-${nonce}.backup`;
+      assertRegularOrAbsentTarget(secondaryBackupPath);
+      atomicWriteFile(secondaryBackupPath, originalBytes, effectiveMode, `bk2-${suffix}`, renameFn);
     }
-    renameSync(backupTmp, backupPath);
   }
 
-  const tmpPath = `${targetPath}.causoryn.${suffix}.tmp`;
-  writeFileSync(tmpPath, content, { encoding: "utf8", mode: effectiveMode });
-  if (process.platform !== "win32") {
-    chmodSync(tmpPath, effectiveMode);
-  }
-  renameSync(tmpPath, targetPath);
+  atomicWriteFile(targetPath, content, effectiveMode, suffix, renameFn);
 }
 
-type ExtendedSetupOptions = SetupOptions & {
+export type ExtendedSetupOptions = SetupOptions & {
   readonly claudeConfigDir?: string | undefined;
   readonly env?: NodeJS.ProcessEnv | undefined;
+  readonly all?: boolean | undefined;
+  readonly nodeExecutable?: string | undefined;
+  readonly renameFile?: typeof renameSync | undefined;
+};
+
+export type ExtendedSetupResult = SetupResult & {
+  readonly message?: string | undefined;
 };
 
 function buildExecutionPlan(options: ExtendedSetupOptions): {
@@ -768,15 +901,20 @@ function buildExecutionPlan(options: ExtendedSetupOptions): {
   const packageRoot = path.resolve(options.packageRoot ?? resolveDefaultPackageRoot());
   const uninstall = options.uninstall === true;
   const installSkills = options.installSkills ?? true;
+  const nodeExecutable =
+    options.nodeExecutable !== undefined && options.nodeExecutable.trim().length > 0
+      ? options.nodeExecutable.trim()
+      : process.execPath;
 
   let selectedClients: HostClientId[];
+  let noClientsDetected = false;
   if (options.clients !== undefined && options.clients.length > 0) {
     selectedClients = [...new Set(options.clients)];
-  } else if (options.allDetected === true) {
-    selectedClients = detectInstalledClients(homeDir, codexHomeDir, claudeConfigDir);
+  } else if (options.all === true) {
+    selectedClients = [...HOST_CLIENT_IDS];
   } else {
-    const detected = detectInstalledClients(homeDir, codexHomeDir, claudeConfigDir);
-    selectedClients = detected.length > 0 ? detected : [...HOST_CLIENT_IDS];
+    selectedClients = detectInstalledClients(homeDir, codexHomeDir, claudeConfigDir);
+    noClientsDetected = selectedClients.length === 0;
   }
 
   const targetRuntimeDir = getPersistentRuntimeDir(homeDir);
@@ -802,6 +940,7 @@ function buildExecutionPlan(options: ExtendedSetupOptions): {
         planMcpServersJsonFile({
           client: "antigravity",
           targetPath: primaryPath,
+          nodeExecutable,
           cliScriptPath,
           uninstall,
           includeStdioType: false,
@@ -826,6 +965,7 @@ function buildExecutionPlan(options: ExtendedSetupOptions): {
           planMcpServersJsonFile({
             client: "antigravity",
             targetPath: secondaryPath,
+            nodeExecutable,
             cliScriptPath,
             uninstall,
             includeStdioType: false,
@@ -840,6 +980,7 @@ function buildExecutionPlan(options: ExtendedSetupOptions): {
         planMcpServersJsonFile({
           client: "claude-code",
           targetPath: getClaudeConfigFilePath(homeDir, claudeConfigDir),
+          nodeExecutable,
           cliScriptPath,
           uninstall,
           includeStdioType: true,
@@ -852,6 +993,7 @@ function buildExecutionPlan(options: ExtendedSetupOptions): {
       case "codex": {
         planCodexMcpConfig({
           codexHomeDir,
+          nodeExecutable,
           cliScriptPath,
           uninstall,
           actions,
@@ -863,6 +1005,7 @@ function buildExecutionPlan(options: ExtendedSetupOptions): {
       case "zcode": {
         planZcodeMcpConfig({
           homeDir,
+          nodeExecutable,
           cliScriptPath,
           uninstall,
           actions,
@@ -894,6 +1037,7 @@ function buildExecutionPlan(options: ExtendedSetupOptions): {
     packageRoot,
     plan: {
       selectedClients,
+      noClientsDetected,
       needsRuntimeStage,
       targetRuntimeDir,
       actions,
@@ -904,10 +1048,11 @@ function buildExecutionPlan(options: ExtendedSetupOptions): {
   };
 }
 
-export async function runSetup(options: ExtendedSetupOptions = {}): Promise<SetupResult> {
+export async function runSetup(options: ExtendedSetupOptions = {}): Promise<ExtendedSetupResult> {
   const dryRun = options.dryRun === true;
   const uninstall = options.uninstall === true;
   const { homeDir, codexHomeDir, claudeConfigDir, packageRoot, plan } = buildExecutionPlan(options);
+  const noClientsMsg = plan.noClientsDetected ? { message: NO_CLIENTS_DETECTED_MESSAGE } : {};
 
   if (dryRun) {
     return {
@@ -918,6 +1063,7 @@ export async function runSetup(options: ExtendedSetupOptions = {}): Promise<Setu
       stagedRuntimeDir: plan.needsRuntimeStage ? plan.targetRuntimeDir : null,
       runtimeCleanedUp: false,
       actions: plan.actions,
+      ...noClientsMsg,
     };
   }
 
@@ -933,6 +1079,7 @@ export async function runSetup(options: ExtendedSetupOptions = {}): Promise<Setu
       stagedRuntimeDir: null,
       runtimeCleanedUp: false,
       actions: plan.actions,
+      ...noClientsMsg,
     };
   }
 
@@ -967,8 +1114,9 @@ export async function runSetup(options: ExtendedSetupOptions = {}): Promise<Setu
     stagedRuntimeDir = staged.runtimeDir;
   }
 
+  const renameFn = options.renameFile ?? renameSync;
   for (const writeOp of plan.writes) {
-    writeFileAtomicWithBackup(writeOp);
+    writeFileAtomicWithBackup(writeOp, renameFn);
   }
 
   for (const removeOp of plan.removals) {

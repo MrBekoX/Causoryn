@@ -544,10 +544,17 @@ describe("runLineJsonWorker", () => {
     }
 
     expect("cwd" in firstOpts).toBe(false);
-    expect(Object.keys(firstOpts).sort()).toEqual(["env", "stdio"]);
+    expect(Object.keys(firstOpts).sort()).toEqual([
+      "env",
+      "shell",
+      "stdio",
+      "windowsHide",
+    ]);
     expect(firstOpts).toEqual({
       stdio: ["pipe", "pipe", "pipe"],
       env: { PATH: "/bin" },
+      shell: false,
+      windowsHide: true,
     });
 
     expect("cwd" in secondOpts).toBe(true);
@@ -555,7 +562,30 @@ describe("runLineJsonWorker", () => {
       stdio: ["pipe", "pipe", "pipe"],
       env: { PATH: "/bin" },
       cwd: "/repo/native/go-worker",
+      shell: false,
+      windowsHide: true,
     });
+  });
+
+  it("boş veya yalnızca boşluk içeren cwd değerini süreç başlatmadan reddeder", async () => {
+    let spawnCalled = false;
+    for (const invalidCwd of ["", "   ", "\t\n", "/tmp/\0bad"]) {
+      const outcome = await runLineJsonWorker({
+        command: "worker-bin",
+        args: [],
+        env: { PATH: "/bin" },
+        cwd: invalidCwd,
+        requestPayload: { id: "invalid-cwd" },
+        requestTimeoutMs: 5_000,
+        spawnProcess: () => {
+          spawnCalled = true;
+          return createFakeChild().child;
+        },
+      });
+      expect(outcome.status).toBe("unavailable");
+      expect(outcome.detail).toContain("cwd");
+    }
+    expect(spawnCalled).toBe(false);
   });
 
   it("çok-baytlı UTF-8 karakterleri (ş, ğ, İ, —) iki Buffer parçası arasında bölündüğünde bozulmadan (U+FFFD üretmeden) çözümler", async () => {

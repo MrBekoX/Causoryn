@@ -16,7 +16,18 @@
  */
 export { GraphRepositoryError } from "@causoryn/graph";
 export { applySchema, SCHEMA_VERSION } from "./schema.js";
-export { SqliteGraphRepository } from "./sqlite-repository.js";
+export {
+  defaultIsPidAlive,
+  ORPHAN_BUILD_FAILURE_REASON,
+  SqliteGraphRepository,
+} from "./sqlite-repository.js";
+export type {
+  AcquireBuildLeaseInput,
+  AcquireBuildLeaseResult,
+  BuildLeaseRecord,
+  RecoverOrphanBuildsOptions,
+  RecoverOrphanBuildsResult,
+} from "./sqlite-repository.js";
 export { applyWikiSchema } from "./wiki-schema.js";
 export {
   SqliteWikiStore,

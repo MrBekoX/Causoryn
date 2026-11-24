@@ -33,9 +33,16 @@ import { applyWikiSchema } from "./wiki-schema.js";
  *   (wiki-schema.ts, TŞ §16A.7) aynı migration transaction'ında uygulanır.
  *   Graph tabloları olduğu gibi kalır; v1 damgalı veritabanları idempotent
  *   DDL ile v2'ye yükselir.
+ * - Wave 1 Track C (Task 1.7 + SQLite CVE savunma derinliği): SCHEMA_VERSION 3 —
+ *   tek paylaşımlı workspace DB için heartbeat'li tek-yazıcı `build_leases`
+ *   tablosu eklenir; yeni DB'lerde (`user_version === 0`) tablo oluşturmadan
+ *   önce `PRAGMA page_size = 4096` (CVE-2026-119375 küçük WAL sayfası savunması)
+ *   uygulanır; `symbol_fts` varsayılan `detail=full` ile korunur (asla
+ *   `detail=none` kullanılmaz — CVE-2026-119373 savunması). v1/v2 → v3 geçişi
+ *   tek transaction içinde geriye uyumludur.
  */
 
-export const SCHEMA_VERSION = 2;
+export const SCHEMA_VERSION = 3;
 
 /** Şemayı uygular (sürüm < SCHEMA_VERSION ise); DDL tamamen statiktir. */
 export function applySchema(db: Database.Database): void {
@@ -44,6 +51,11 @@ export function applySchema(db: Database.Database): void {
     throw new Error(`SQLite user_version okunamadı: ${String(version)}`);
   }
   if (version >= SCHEMA_VERSION) return;
+  if (version === 0) {
+    // Defense-in-depth (CVE-2026-119375): enforce standard 4096-byte pages
+    // before any table or WAL page is initialized on a brand-new database.
+    db.pragma("page_size = 4096");
+  }
   db.transaction(() => {
     db.exec(`
       CREATE TABLE IF NOT EXISTS workspaces (
@@ -78,6 +90,16 @@ export function applySchema(db: Database.Database): void {
         WHERE state = 'building';
       CREATE INDEX IF NOT EXISTS idx_snapshots_workspace_state
         ON snapshots(workspace_id, state);
+      CREATE TABLE IF NOT EXISTS build_leases (
+        workspace_id TEXT PRIMARY KEY REFERENCES workspaces(id) ON DELETE CASCADE,
+        build_id TEXT NOT NULL,
+        lease_id TEXT NOT NULL,
+        owner_pid INTEGER NOT NULL,
+        host_label TEXT,
+        acquired_at TEXT NOT NULL,
+        heartbeat_at TEXT NOT NULL,
+        expires_at TEXT NOT NULL
+      );
       CREATE TABLE IF NOT EXISTS nodes (
         snapshot_sid INTEGER NOT NULL REFERENCES snapshots(sid) ON DELETE CASCADE,
         node_id TEXT NOT NULL,
@@ -140,8 +162,8 @@ export function applySchema(db: Database.Database): void {
         node_id UNINDEXED,
         snapshot_sid UNINDEXED
       );
-      PRAGMA user_version = 2;
     `);
     applyWikiSchema(db);
+    db.exec("PRAGMA user_version = 3;");
   })();
 }

@@ -1,6 +1,8 @@
 import { realpathSync, statSync } from "node:fs";
 import path from "node:path";
 
+import { isUncOrDevicePath } from "./path-safety.js";
+
 /**
  * OutputAccessPolicy — export_documentation çıktı yetkilendirmesi
  * (TŞ v2.1 §16 "Export güvenliği: yalnızca explicit izinli output dizini,
@@ -152,6 +154,12 @@ export class OutputAccessPolicy {
           "output dizini beyanı null byte içeriyor",
         );
       }
+      if (isUncOrDevicePath(declared)) {
+        throw new OutputPolicyError(
+          "workspace/output-policy-invalid",
+          `output dizini beyanı UNC veya Win32 aygıt yolu olamaz (dosya sistemi erişiminden önce reddedildi): ${declared}`,
+        );
+      }
       let canonical: string;
       try {
         canonical = realpathSync(declared);
@@ -205,6 +213,13 @@ export class OutputAccessPolicy {
     if (dirPath.includes("\0")) {
       return deny("workspace/output-path-denied", "output dizini yolu null byte içeriyor");
     }
+    if (isUncOrDevicePath(dirPath)) {
+      return deny(
+        "workspace/output-path-denied",
+        "output dizini yolu UNC veya Win32 aygıt yolu olamaz (dosya sistemi erişiminden önce reddedildi)",
+        "unc-or-device-path",
+      );
+    }
     let canonical: string;
     try {
       canonical = realpathSync(dirPath);
@@ -239,6 +254,13 @@ export class OutputAccessPolicy {
     }
     if (fileName.includes("\0")) {
       return deny("workspace/output-path-denied", "dosya adı null byte içeriyor");
+    }
+    if (isUncOrDevicePath(fileName)) {
+      return deny(
+        "workspace/output-path-denied",
+        "dosya adı UNC veya Win32 aygıt yolu olamaz (dosya sistemi erişiminden önce reddedildi)",
+        "unc-or-device-path",
+      );
     }
     if (fileName.includes("/") || fileName.includes("\\")) {
       return deny(

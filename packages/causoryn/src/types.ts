@@ -112,7 +112,9 @@ export interface SetupOptions {
   readonly packageRoot?: string | undefined;
   readonly ephemeralTmpDir?: string | undefined;
   readonly clients?: readonly HostClientId[] | undefined;
+  readonly all?: boolean | undefined;
   readonly allDetected?: boolean | undefined;
+  readonly nodeExecutable?: string | undefined;
   readonly yes?: boolean | undefined;
   readonly dryRun?: boolean | undefined;
   readonly uninstall?: boolean | undefined;
@@ -128,6 +130,7 @@ export interface SetupResult {
   readonly stagedRuntimeDir: string | null;
   readonly runtimeCleanedUp: boolean;
   readonly actions: readonly SetupAction[];
+  readonly message?: string | undefined;
 }
 
 export interface ToolchainProbeOutcome {

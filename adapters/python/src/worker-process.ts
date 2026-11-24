@@ -13,6 +13,7 @@
  * argümanlar SABİT ["-B", workerScriptPath]; istek içeriği yalnızca stdin
  * üzerinden taşınır.
  */
+import { dirname } from "node:path";
 import {
   buildAllowlistedWorkerEnv,
   runLineJsonWorker,
@@ -50,12 +51,14 @@ export function runWorkerAnalyze(
 ): Promise<WorkerRunOutcome> {
   return runLineJsonWorker({
     command: input.pythonCommand,
-    // "-B": __pycache__ bytecode yazımı kapalı — worker salt-okunur
-    // disiplinine savunma derinliği. Argümanlar SABİT dizidir.
-    args: ["-B", input.workerScriptPath],
+    // "-I": isolated mode (ignores PYTHONPATH/PYTHON* env vars and omits cwd & user-site from sys.path)
+    // "-B": disable __pycache__ bytecode writes (read-only discipline)
+    // "-X utf8": enforce UTF-8 stdio/stderr on Windows even under -I
+    args: ["-I", "-B", "-X", "utf8", input.workerScriptPath],
     env: buildAllowlistedWorkerEnv(WORKER_ENV_ALLOWLIST, {
       PYTHONIOENCODING: WORKER_IO_ENCODING,
     }),
+    cwd: dirname(input.workerScriptPath),
     requestPayload: input.requestPayload,
     requestTimeoutMs: input.requestTimeoutMs,
     responseMaxChars: input.responseMaxChars ?? DEFAULT_RESPONSE_MAX_CHARS,

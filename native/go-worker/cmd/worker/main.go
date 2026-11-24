@@ -119,11 +119,18 @@ type fileInput struct {
 	Content string `json:"content"`
 }
 
+// moduleFileInput — opsiyonel moduleFiles[] öğesi (go.mod dosyaları).
+type moduleFileInput struct {
+	RelativePath string `json:"relativePath"`
+	Content      string `json:"content"`
+}
+
 var allowedTopLevelFields = map[string]bool{
 	"id":              true,
 	"type":            true,
 	"protocolVersion": true,
 	"files":           true,
+	"moduleFiles":     true,
 	"maxNodes":        true,
 }
 
@@ -189,39 +196,39 @@ func echoableID(fields map[string]json.RawMessage) (json.RawMessage, *apiError) 
 }
 
 // parseRequest — kesin şema + kaynak sınırları (TŞ §9; K-010) doğrulaması.
-func parseRequest(line string) ([]analyze.SourceFile, int, json.RawMessage, *apiError) {
+func parseRequest(line string) ([]analyze.SourceFile, []analyze.ModuleFile, int, json.RawMessage, *apiError) {
 	fields, perr := decodeStrictFields(line)
 	if perr != nil {
-		return nil, 0, json.RawMessage("null"), perr
+		return nil, nil, 0, json.RawMessage("null"), perr
 	}
 	echo, perr := echoableID(fields)
 	if perr != nil {
-		return nil, 0, echo, perr
+		return nil, nil, 0, echo, perr
 	}
 
 	typeRaw, present := fields["type"]
 	if !present {
-		return nil, 0, echo, invalidArgument("type alanı zorunludur")
+		return nil, nil, 0, echo, invalidArgument("type alanı zorunludur")
 	}
 	var typeName string
 	if err := json.Unmarshal(typeRaw, &typeName); err != nil || typeName != "analyze" {
-		return nil, 0, echo, invalidArgument("type yalnızca \"analyze\" desteklenir")
+		return nil, nil, 0, echo, invalidArgument("type yalnızca \"analyze\" desteklenir")
 	}
 
 	if raw, present := fields["protocolVersion"]; present {
 		var version string
 		if err := json.Unmarshal(raw, &version); err != nil || version != analyze.ProtocolVersion {
-			return nil, 0, echo, invalidArgument(fmt.Sprintf("desteklenmeyen protocolVersion; %q olmalıdır", analyze.ProtocolVersion))
+			return nil, nil, 0, echo, invalidArgument(fmt.Sprintf("desteklenmeyen protocolVersion; %q olmalıdır", analyze.ProtocolVersion))
 		}
 	}
 
 	filesRaw, present := fields["files"]
 	if !present {
-		return nil, 0, echo, invalidArgument("files alanı zorunludur")
+		return nil, nil, 0, echo, invalidArgument("files alanı zorunludur")
 	}
 	var rawFiles []json.RawMessage
 	if err := json.Unmarshal(filesRaw, &rawFiles); err != nil {
-		return nil, 0, echo, invalidArgument("files dizisi geçersiz: " + err.Error())
+		return nil, nil, 0, echo, invalidArgument("files dizisi geçersiz: " + err.Error())
 	}
 	inputs := make([]fileInput, 0, len(rawFiles))
 	for _, rawFile := range rawFiles {
@@ -230,25 +237,61 @@ func parseRequest(line string) ([]analyze.SourceFile, int, json.RawMessage, *api
 		fileDecoder.DisallowUnknownFields()
 		var input fileInput
 		if err := fileDecoder.Decode(&input); err != nil {
-			return nil, 0, echo, invalidArgument("files öğesi geçersiz (bilinmeyen alan dahil): " + err.Error())
+			return nil, nil, 0, echo, invalidArgument("files öğesi geçersiz (bilinmeyen alan dahil): " + err.Error())
 		}
 		inputs = append(inputs, input)
 	}
 	if len(inputs) == 0 {
-		return nil, 0, echo, invalidArgument("files en az 1 dosya içermelidir")
+		return nil, nil, 0, echo, invalidArgument("files en az 1 dosya içermelidir")
 	}
 	if len(inputs) > analyze.MaxFileCount {
-		return nil, 0, echo, limitExceeded(fmt.Sprintf("files sayısı sınırı aşıldı: %d > %d", len(inputs), analyze.MaxFileCount))
+		return nil, nil, 0, echo, limitExceeded(fmt.Sprintf("files sayısı sınırı aşıldı: %d > %d", len(inputs), analyze.MaxFileCount))
+	}
+
+	var moduleFiles []analyze.ModuleFile
+	if modRaw, present := fields["moduleFiles"]; present {
+		var rawMods []json.RawMessage
+		if err := json.Unmarshal(modRaw, &rawMods); err != nil {
+			return nil, nil, 0, echo, invalidArgument("moduleFiles dizisi geçersiz: " + err.Error())
+		}
+		if len(rawMods) > analyze.MaxFileCount {
+			return nil, nil, 0, echo, limitExceeded(fmt.Sprintf("moduleFiles sayısı sınırı aşıldı: %d > %d", len(rawMods), analyze.MaxFileCount))
+		}
+		seenMods := map[string]bool{}
+		moduleFiles = make([]analyze.ModuleFile, 0, len(rawMods))
+		for _, rawMod := range rawMods {
+			modDecoder := json.NewDecoder(bytes.NewReader(rawMod))
+			modDecoder.DisallowUnknownFields()
+			var mf moduleFileInput
+			if err := modDecoder.Decode(&mf); err != nil {
+				return nil, nil, 0, echo, invalidArgument("moduleFiles öğesi geçersiz (bilinmeyen alan dahil): " + err.Error())
+			}
+			if len(mf.Content) > analyze.MaxFileContentBytes {
+				return nil, nil, 0, echo, limitExceeded(fmt.Sprintf("modül dosya içerik boyutu sınırı aşıldı: %d > %d bayt", len(mf.Content), analyze.MaxFileContentBytes))
+			}
+			relPath, verr := normalizeRelativePath(mf.RelativePath)
+			if verr != nil {
+				return nil, nil, 0, echo, verr
+			}
+			if seenMods[relPath] {
+				return nil, nil, 0, echo, invalidArgument("Aynı modül dosya yolu iki kez verildi: " + relPath)
+			}
+			seenMods[relPath] = true
+			moduleFiles = append(moduleFiles, analyze.ModuleFile{
+				RelativePath: relPath,
+				Content:      mf.Content,
+			})
+		}
 	}
 
 	budget := 0
 	if raw, present := fields["maxNodes"]; present {
 		var value float64
 		if err := json.Unmarshal(raw, &value); err != nil || value != math.Trunc(value) {
-			return nil, 0, echo, invalidArgument("maxNodes tam sayı olmalıdır")
+			return nil, nil, 0, echo, invalidArgument("maxNodes tam sayı olmalıdır")
 		}
 		if value < 1 || value > analyze.MaxResponseNodes {
-			return nil, 0, echo, invalidArgument(fmt.Sprintf("maxNodes 1..%d aralığında olmalıdır", analyze.MaxResponseNodes))
+			return nil, nil, 0, echo, invalidArgument(fmt.Sprintf("maxNodes 1..%d aralığında olmalıdır", analyze.MaxResponseNodes))
 		}
 		budget = int(value)
 	}
@@ -257,14 +300,14 @@ func parseRequest(line string) ([]analyze.SourceFile, int, json.RawMessage, *api
 	sources := make([]analyze.SourceFile, 0, len(inputs))
 	for _, input := range inputs {
 		if len(input.Content) > analyze.MaxFileContentBytes {
-			return nil, 0, echo, limitExceeded(fmt.Sprintf("dosya içerik boyutu sınırı aşıldı: %d > %d bayt", len(input.Content), analyze.MaxFileContentBytes))
+			return nil, nil, 0, echo, limitExceeded(fmt.Sprintf("dosya içerik boyutu sınırı aşıldı: %d > %d bayt", len(input.Content), analyze.MaxFileContentBytes))
 		}
 		relativePath, verr := normalizeRelativePath(input.Path)
 		if verr != nil {
-			return nil, 0, echo, verr
+			return nil, nil, 0, echo, verr
 		}
 		if seen[relativePath] {
-			return nil, 0, echo, invalidArgument("Aynı kaynak yolu iki kez verildi: " + relativePath)
+			return nil, nil, 0, echo, invalidArgument("Aynı kaynak yolu iki kez verildi: " + relativePath)
 		}
 		seen[relativePath] = true
 		sum := sha256.Sum256([]byte(input.Content))
@@ -275,7 +318,7 @@ func parseRequest(line string) ([]analyze.SourceFile, int, json.RawMessage, *api
 		})
 	}
 
-	return sources, budget, echo, nil
+	return sources, moduleFiles, budget, echo, nil
 }
 
 func buildResponse(echo json.RawMessage, result analyze.Result) []byte {
@@ -334,11 +377,11 @@ func errorPayload(echo json.RawMessage, apiErr *apiError) []byte {
 // sorunlar HATA DEĞİLDİR (status:"partial" + diagnostics); yalnızca istek
 // düzeyi sorunlar status:"error" üretir ve döngü DEVAM EDER.
 func processLine(line string) []byte {
-	sources, budget, echo, perr := parseRequest(line)
+	sources, moduleFiles, budget, echo, perr := parseRequest(line)
 	if perr != nil {
 		return errorPayload(echo, perr)
 	}
-	result := analyze.Analyze(sources, budget)
+	result := analyze.AnalyzeWithModules(sources, moduleFiles, budget)
 	return buildResponse(echo, result)
 }
 

@@ -2,6 +2,7 @@ import { realpathSync, statSync } from "node:fs";
 import path from "node:path";
 
 import { findMatchingIgnorePattern } from "./ignore-matcher.js";
+import { isUncOrDevicePath } from "./path-safety.js";
 import {
   effectiveIgnorePatterns,
   parseWorkspacePolicyConfig,
@@ -103,6 +104,12 @@ export class WorkspaceAccessPolicy {
 
   private constructor(readonly config: WorkspacePolicyConfig) {
     this.canonicalRoots = config.allowRoots.map((root) => {
+      if (isUncOrDevicePath(root)) {
+        throw new WorkspacePolicyError(
+          "workspace/policy-invalid",
+          `allowRoot UNC veya Win32 aygıt yolu olamaz (dosya sistemi erişiminden önce reddedildi): ${root}`,
+        );
+      }
       try {
         return realpathSync(root);
       } catch {
@@ -138,6 +145,13 @@ export class WorkspaceAccessPolicy {
     }
     if (rootPath.includes("\0")) {
       return deny("workspace/root-not-authorized", "kök yolu null byte içeriyor");
+    }
+    if (isUncOrDevicePath(rootPath)) {
+      return deny(
+        "workspace/root-not-authorized",
+        "kök yolu UNC veya Win32 aygıt yolu olamaz (dosya sistemi erişiminden önce reddedildi)",
+        "unc-or-device-path",
+      );
     }
     let canonical: string;
     try {
@@ -175,6 +189,13 @@ export class WorkspaceAccessPolicy {
     }
     if (candidatePath.includes("\0")) {
       return deny("workspace/path-denied", "aday yol null byte içeriyor (OWASP %00 bypass)");
+    }
+    if (isUncOrDevicePath(candidatePath)) {
+      return deny(
+        "workspace/path-denied",
+        "aday yol UNC veya Win32 aygıt yolu olamaz (dosya sistemi erişiminden önce reddedildi)",
+        "unc-or-device-path",
+      );
     }
 
     // 3) Leksik çözümleme: `..` ve mutlak yollar normalize edilir (OWASP: normalize before IO).

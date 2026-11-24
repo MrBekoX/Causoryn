@@ -69,10 +69,13 @@ export type {
 } from "./fingerprint.js";
 export { INDEXING_VERSION, IndexService } from "./index-service.js";
 export type {
+  BuildLeaseInfo,
+  BuildLeaseStore,
   CsharpIndexOptions,
   GoIndexOptions,
   IndexDiagnostic,
   IndexLimits,
+  IndexPeerStatus,
   IndexRunResult,
   IndexServiceOptions,
   PythonIndexOptions,

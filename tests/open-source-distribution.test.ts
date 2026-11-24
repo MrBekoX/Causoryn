@@ -1194,7 +1194,7 @@ describe("4. build-package.mjs + isolated npm pack end-to-end verification", () 
         ),
       ).toBe(true);
 
-      // (e) Assert 100% read-only workspace + external graph-claude-code.sqlite & exports/
+      // (e) Assert 100% read-only workspace + external shared graph.sqlite & exports/
       expect(snapshotDirectoryState(sampleProjectDir)).toEqual(beforeProjectSnapshot);
 
       const workspacesRoot = path.join(dataDir, "workspaces");
@@ -1204,7 +1204,7 @@ describe("4. build-package.mjs + isolated npm pack end-to-end verification", () 
       );
       expect(workspaceDirs).toHaveLength(1);
       const createdWsDir = path.join(workspacesRoot, workspaceDirs[0]!.name);
-      expect(existsSync(path.join(createdWsDir, "graph-claude-code.sqlite"))).toBe(true);
+      expect(existsSync(path.join(createdWsDir, "graph.sqlite"))).toBe(true);
       expect(existsSync(path.join(createdWsDir, "exports"))).toBe(true);
       expect(statSync(path.join(createdWsDir, "exports")).isDirectory()).toBe(true);
     },

@@ -22,7 +22,7 @@ import {
 
 const HELP_TEXT = `Usage:
   causoryn mcp [--allow-cwd] [--root <path>] [--auto-data-dir] [--data-dir <path>] [--client <id>]
-  causoryn setup [--client <antigravity|claude-code|codex|zcode>...] [--all-detected] [--yes] [--dry-run] [--uninstall] [--skill | --no-skill] [--json]
+  causoryn setup [--client <antigravity|claude-code|codex|zcode>...] [--all] [--all-detected] [--yes] [--dry-run] [--uninstall] [--skill | --no-skill] [--json]
   causoryn doctor [--client <antigravity|claude-code|codex|zcode>...] [--json]
   causoryn --version
   causoryn --help
@@ -81,6 +81,7 @@ function parseClientValues(raw: string): HostClientId[] {
 
 interface ParsedSetupCliFlags {
   readonly clients: HostClientId[];
+  readonly all: boolean;
   readonly allDetected: boolean;
   readonly yes: boolean;
   readonly dryRun: boolean;
@@ -92,6 +93,7 @@ interface ParsedSetupCliFlags {
 
 function parseSetupFlags(args: readonly string[]): ParsedSetupCliFlags {
   const clients: HostClientId[] = [];
+  let all = false;
   let allDetected = false;
   let yes = false;
   let dryRun = false;
@@ -104,6 +106,8 @@ function parseSetupFlags(args: readonly string[]): ParsedSetupCliFlags {
     const arg = args[i] ?? "";
     if (arg === "--help" || arg === "-h") {
       help = true;
+    } else if (arg === "--all") {
+      all = true;
     } else if (arg === "--all-detected") {
       allDetected = true;
     } else if (arg === "--yes" || arg === "-y") {
@@ -137,6 +141,7 @@ function parseSetupFlags(args: readonly string[]): ParsedSetupCliFlags {
 
   return {
     clients,
+    all,
     allDetected,
     yes,
     dryRun,
@@ -212,6 +217,9 @@ function formatSetupResultText(result: SetupResult): string {
   if (result.runtimeCleanedUp) {
     lines.push("Staged Runtime Cleanup: ~/.causoryn/runtime silindi (kalan host referansı yok)");
   }
+  if (result.message !== undefined && result.message.length > 0) {
+    lines.push(result.message);
+  }
   lines.push("Planlanan / Uygulanan İşlemler:");
   lines.push(formatSetupActionsText(result.actions).trimEnd());
   return `${lines.join("\n")}\n`;
@@ -256,6 +264,7 @@ export async function runCli(
         packageRoot: options.packageRoot,
         ephemeralTmpDir: options.ephemeralTmpDir,
         ...(flags.clients.length > 0 ? { clients: flags.clients } : {}),
+        all: flags.all,
         allDetected: flags.allDetected,
         yes: flags.yes,
         dryRun: flags.dryRun,

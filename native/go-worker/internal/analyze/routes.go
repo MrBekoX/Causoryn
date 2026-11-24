@@ -34,15 +34,18 @@ type routeMatch struct {
 // analysisContext — tek Analyze koşumunun paylaşılan indeksleri ve
 // çıktı toplayıcıları (parametre listesi patlamasın).
 type analysisContext struct {
-	fset          *token.FileSet
-	pkgFuncs      map[string]map[string]*funcInfo
-	uniquePkg     func(string) bool
-	methodsByName map[string][]*funcInfo
-	ifaceMethods  map[string][]string
-	addNode       func(Node) NodeRef
-	addEdge       func(Edge)
-	warnings      *[]string
-	declSpan      func(*fileCtx, token.Pos, token.Pos) *Span
+	fset                 *token.FileSet
+	modRoots             []goModRoot
+	pkgFuncs             map[pkgKey]map[string]*funcInfo
+	pkgsByDir            map[string][]pkgKey
+	importablePkgs       []pkgKey
+	importablePkgsByName map[string][]pkgKey
+	methodsByName        map[string][]*funcInfo
+	ifaceMethods         map[string][]string
+	addNode              func(Node) NodeRef
+	addEdge              func(Edge)
+	warnings             *[]string
+	declSpan             func(*fileCtx, token.Pos, token.Pos) *Span
 }
 
 // matchRoute — kayıt çağrısı kalıbını tanır; eşleşmezse nil.
@@ -147,13 +150,13 @@ func handleRoute(ctx *analysisContext, fi *funcInfo, match *routeMatch, call *as
 func classifyHandler(ctx *analysisContext, fi *funcInfo, expr ast.Expr) *callTarget {
 	switch h := expr.(type) {
 	case *ast.Ident:
-		if samePkg, ok := ctx.pkgFuncs[fi.pkg][h.Name]; ok && samePkg.recv == "" {
+		if samePkg, ok := ctx.pkgFuncs[fi.pkgKey][h.Name]; ok && samePkg.recv == "" {
 			return &callTarget{
 				ref:        NodeRef{Kind: "Function", QualifiedName: samePkg.qname, RelativePath: samePkg.file.relativePath},
 				resolution: ResolutionVerified,
 				rationale: fmt.Sprintf(
-					"ROUTES_TO: %s aynı package içindeki tanımlı handler fonksiyonudur (go/ast, verified).",
-					samePkg.qname,
+					"ROUTES_TO: %s aynı dizindeki '%s' paketi içindeki tanımlı handler fonksiyonudur (go/ast, verified).",
+					samePkg.qname, fi.pkg,
 				),
 			}
 		}
@@ -167,7 +170,7 @@ func classifyHandler(ctx *analysisContext, fi *funcInfo, expr ast.Expr) *callTar
 		}
 	default:
 		text := exprText(ctx.fset, fi.file.content, expr)
-		target := classifyExpr(fi, expr, ctx.fset, ctx.pkgFuncs, ctx.uniquePkg, ctx.methodsByName, ctx.ifaceMethods)
+		target := classifyExpr(ctx, fi, expr)
 		if target == nil {
 			return nil
 		}

@@ -442,6 +442,12 @@ describe("worker-process env sınırlaması (güvenlik bulgusu 1)", () => {
       // runtime) ve ReferenceResolver'ın okuduğu DOTNET_ROOT.
       expect(spawnOptions.env["PATH"]).toBeDefined();
       expect(spawnOptions.env["DOTNET_ROOT"]).toBe(WORKER_DIR);
+      // Task 1.1 izolasyonu: güvenilen cwd + DOTNET_STARTUP_HOOKS temiz + telemetry/nologo kapalı.
+      expect((spawnOptions as { cwd?: string }).cwd).toBe(dirname(WORKER_DLL));
+      expect(spawnOptions.env["DOTNET_STARTUP_HOOKS"]).toBe("");
+      expect(spawnOptions.env["DOTNET_CLI_TELEMETRY_OPTOUT"]).toBe("1");
+      expect(spawnOptions.env["DOTNET_NOLOGO"]).toBe("1");
+      expect(spawnOptions.env["DOTNET_SKIP_FIRST_TIME_EXPERIENCE"]).toBe("1");
     } finally {
       if (previousSecret === undefined) delete process.env["CAUSORYN_TEST_SECRET"];
       else process.env["CAUSORYN_TEST_SECRET"] = previousSecret;

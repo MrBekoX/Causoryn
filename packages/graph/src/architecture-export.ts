@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+
 import { z } from "zod";
 
 import { canonicalJson, type SnapshotGraph } from "@causoryn/domain";
@@ -50,9 +52,6 @@ export const exportDocumentationViewSchema = z.enum(EXPORT_DOCUMENTATION_VIEWS);
 
 export const ARCHITECTURE_ZERO_JS_CSP =
   "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'";
-
-export const ARCHITECTURE_INTERACTIVE_CSP =
-  "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'";
 
 interface PreparedArchitecture {
   readonly projection: ArchitectureProjection;
@@ -1599,6 +1598,20 @@ const INTERACTIVE_PORTAL_JS = `(function(){
 
   fitCanvas();
 })();`;
+
+function buildInteractiveArchitectureCsp(scriptBody: string): string {
+  const scriptSha256 = createHash("sha256").update(scriptBody, "utf8").digest("base64");
+  return `default-src 'none'; script-src 'sha256-${scriptSha256}'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'`;
+}
+
+/**
+ * Deterministic SHA-256 CSP for the single-file offline interactive HTML portal:
+ * allows ONLY the exact `INTERACTIVE_PORTAL_JS` inline script body (zero
+ * `script-src 'unsafe-inline'`); the `<script type="application/json">` data
+ * island is non-executable and requires no script execution permission.
+ */
+export const ARCHITECTURE_INTERACTIVE_CSP =
+  buildInteractiveArchitectureCsp(INTERACTIVE_PORTAL_JS);
 
 export function serializeInteractiveArchitectureHtmlFromPrepared(
   prepared: PreparedArchitecture,

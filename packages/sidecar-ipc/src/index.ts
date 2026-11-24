@@ -21,11 +21,13 @@ import { fileURLToPath } from "node:url";
 /** Tek yanıt satırı ve stderr birikimi için varsayılan karakter bütçesi (64 MiB). */
 export const DEFAULT_RESPONSE_MAX_CHARS = 64 * 1024 * 1024;
 
-/** Worker spawn seçenekleri; cwd yalnızca tanımlıyken nesneye eklenir. */
+/** Worker spawn seçenekleri; shell her zaman kapalıdır, cwd yalnızca tanımlıyken eklenir. */
 export interface SidecarSpawnOptions {
   readonly stdio: ["pipe", "pipe", "pipe"];
   readonly env: Readonly<Record<string, string>>;
   readonly cwd?: string;
+  readonly shell: false;
+  readonly windowsHide: true;
 }
 
 /** Sidecar worker süreç başlatıcı imzası (test enjeksiyonu uyumlu). */
@@ -134,6 +136,18 @@ export function buildAllowlistedWorkerEnv(
 export function runLineJsonWorker(
   input: RunLineJsonWorkerInput,
 ): Promise<WorkerRunOutcome> {
+  if (
+    input.cwd !== undefined &&
+    (input.cwd.trim().length === 0 || input.cwd.includes("\0"))
+  ) {
+    return Promise.resolve({
+      status: "unavailable",
+      response: null,
+      stderr: "",
+      detail: "worker süreci başlatılamadı: geçersiz veya boş cwd",
+    });
+  }
+
   const spawnProcess: SidecarSpawnFunction = input.spawnProcess ?? defaultSpawn;
   const responseMaxChars = input.responseMaxChars ?? DEFAULT_RESPONSE_MAX_CHARS;
   const stderrMaxChars = input.stderrMaxChars ?? DEFAULT_RESPONSE_MAX_CHARS;
@@ -172,8 +186,19 @@ export function runLineJsonWorker(
 
     const spawnOptions: SidecarSpawnOptions =
       input.cwd !== undefined
-        ? { stdio: ["pipe", "pipe", "pipe"], env: input.env, cwd: input.cwd }
-        : { stdio: ["pipe", "pipe", "pipe"], env: input.env };
+        ? {
+            stdio: ["pipe", "pipe", "pipe"],
+            env: input.env,
+            cwd: input.cwd,
+            shell: false,
+            windowsHide: true,
+          }
+        : {
+            stdio: ["pipe", "pipe", "pipe"],
+            env: input.env,
+            shell: false,
+            windowsHide: true,
+          };
 
     let child: ChildProcess;
     try {

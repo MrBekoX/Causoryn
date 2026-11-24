@@ -88,9 +88,8 @@ export const CAUSORYN_TOOL_ERROR_CODES = [
 export type CausorynToolErrorCode = (typeof CAUSORYN_TOOL_ERROR_CODES)[number];
 
 /**
- * TŞ §10.1: "Tekrar denenebilirlik ve kullanici aksiyonu belirtilir."
- * Kod → (retryable, userAction) eşlemesi sabittir ve deterministiktir;
- * her hata envelope'unda yapısal alan olarak taşınır.
+ * Deterministic error-code -> (retryable, userAction) guidance table carried
+ * on every error envelope.
  */
 export const TOOL_ERROR_GUIDANCE: Readonly<
   Record<CausorynToolErrorCode, { readonly retryable: boolean; readonly userAction: string }>
@@ -98,70 +97,73 @@ export const TOOL_ERROR_GUIDANCE: Readonly<
   WORKSPACE_NOT_AUTHORIZED: {
     retryable: false,
     userAction:
-      "workspace kökünü kullanici onayli allowRoot listesine ekletin (causoryn workspace authorize akışı)",
+      "Authorize the workspace root using --root <path>, --allow-cwd, MCP roots/list, or allowRoots in CAUSORYN_CONFIG",
   },
   PATH_DENIED: {
     retryable: false,
-    userAction: "yolun ignore kurallarıyla reddedilip reddedilmediğini kontrol edin",
+    userAction:
+      "Verify the path stays within the authorized workspace root and is not excluded by ignore or binary rules",
   },
   INDEX_NOT_READY: {
     retryable: true,
-    userAction: "indeksleme (refresh_index) tamamlandıktan sonra yeniden deneyin",
+    userAction: "Wait for indexing to finish (or run refresh_index) and retry",
   },
   AMBIGUOUS_SYMBOL: {
     retryable: false,
-    userAction: "sorguyu kind/limit/pathPrefix ile daraltın veya adaylardan birini seçin",
+    userAction:
+      "Narrow the query with kind, limit, or pathPrefix, or pick one of the returned candidate symbol IDs",
   },
   LIMIT_EXCEEDED: {
     retryable: false,
-    userAction: "istek limitini config tavanının altına düşürün (maxNodes/maxSymbols)",
+    userAction:
+      "Lower the requested limit below the configured ceiling (e.g. maxNodes, maxSymbols, or maxFileBytes)",
   },
   INVALID_ARGUMENT: {
     retryable: false,
-    userAction: "geçersiz girdiyi düzeltip yeniden deneyin",
+    userAction: "Fix the invalid input argument(s) and retry",
   },
   EVIDENCE_NOT_FOUND: {
     retryable: false,
     userAction:
-      "map_system/find_symbols çıktısındaki node/edge kimliklerini kullanın; eski bir snapshot kimliği sorgulandıysa refresh_index sonrası güncel kimlikle yeniden deneyin",
+      "Use node, edge, finding, or evidence IDs from the current snapshot; if stale, run refresh_index and retry",
   },
   SYMBOL_NOT_FOUND: {
     retryable: false,
     userAction:
-      "map_system/find_symbols çıktısındaki symbolId değerlerini kullanın; eski bir snapshot kimliği sorgulandıysa refresh_index sonrası güncel kimlikle yeniden deneyin",
+      "Use symbolId values from map_system or find_symbols; if the codebase changed, run refresh_index and retry",
   },
   POLICY_INVALID: {
     retryable: false,
     userAction:
-      ".causoryn/architecture.rules.yaml politikasını (ve verilmişse architecture.baseline.yaml'i) düzeltin; dosya mevcut değilse oluşturun",
+      "Fix .causoryn/architecture.rules.yaml (and .causoryn/architecture.baseline.yaml if present), or create the policy file if missing",
   },
   INVALID_REVISION: {
     retryable: false,
     userAction:
-      "geçerli bir commit/tag/branch ref'i (veya working-tree) kullanın; ref'te analiz edilebilir .causoryn/architecture-snapshot.json blob'u yoksa o revizyonda snapshot yayınlayın",
+      "Provide a valid git commit, branch, tag, or working-tree ref with an analyzable architecture snapshot",
   },
   EXPORT_NOT_ALLOWED: {
     retryable: false,
     userAction:
-      "hedef dizini sunucu config'inin output.allowedOutputDirs beyanına ekletin (explicit izinli output listesi, TŞ §16 export güvenliği)",
+      "Add the destination directory to output.allowedOutputDirs in the server configuration",
   },
   WIKI_PAGE_NOT_FOUND: {
     retryable: false,
     userAction:
-      "wiki_get_tree çıktısındaki pageId değerlerini kullanın; eski bir WikiSnapshot kimliği sorgulandıysa güncel snapshot ile yeniden deneyin",
+      "Use pageId values returned by wiki_get_tree; if querying an older WikiSnapshot, retry against the latest snapshot",
   },
   CONTRACT_PARSE_FAILED: {
     retryable: false,
     userAction:
-      "spec dosyasını (OpenAPI/AsyncAPI/JSON Schema/SQL/proto) düzeltin; kota aşımıysa dosyayı küçültün — desteklenen şema ve sınırlar get_capabilities belgelerindedir",
+      "Fix the contract specification file (OpenAPI, AsyncAPI, JSON Schema, SQL, or Protobuf) or reduce its size below the configured limit",
   },
   UNSUPPORTED_LANGUAGE: {
     retryable: false,
-    userAction: "get_capabilities ile desteklenen dil adapter'larını kontrol edin",
+    userAction: "Run get_capabilities to inspect supported language adapters and coverage levels",
   },
   INTERNAL_ERROR: {
     retryable: true,
-    userAction: "yeniden deneyin; sorun sürerse stderr loglarını inceleyin",
+    userAction: "Retry the request; if the error persists, inspect the server stderr logs",
   },
 };
 

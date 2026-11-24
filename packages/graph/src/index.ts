@@ -97,8 +97,10 @@ export type {
 export {
   assertValidBlobPath,
   assertValidGitRef,
+  GIT_DEV_NULL,
   readGitBlob,
   readGitTree,
+  resolveGitCommitRef,
   runGit,
   WORKING_TREE_REF,
 } from "./git-read.js";

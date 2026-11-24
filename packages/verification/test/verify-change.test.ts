@@ -782,7 +782,7 @@ describe("verifyChange — partial", () => {
       checks: ["test-plan", "graph-diff"],
       observedTestRun: observed,
     });
-    expect(report.tests.state).toBe("observed");
+    expect(report.tests.state).toBe("host_asserted");
     expect(report.tests.observedCount).toBe(2);
 
     // Kanıtsız koşum iddiası: şema reddeder (E3 — evidenceRef zorunlu).
@@ -1033,29 +1033,32 @@ describe("verifyChange — E3 test durumu dürüstlüğü", () => {
         testNames: [TEST],
       },
     });
-    expect(report.tests.state).toBe("observed");
-    // Union daraltması: observed dalının alanları yalnızca daraltmayla erişilir.
+    expect(report.tests.state).toBe("host_asserted");
+    // Union daraltması: host_asserted dalının alanları yalnızca daraltmayla erişilir.
     const tests = report.tests;
-    if (tests.state !== "observed") {
-      throw new Error(`observed beklenmişti, gelen: ${String(tests.state)}`);
+    if (tests.state !== "host_asserted") {
+      throw new Error(`host_asserted beklenmişti, gelen: ${String(tests.state)}`);
     }
     expect(tests.evidenceRef).toBe(file.ref);
     expect(tests.evidenceSha256).toBe(file.sha256);
     expect(tests.observedCount).toBe(2);
-    // 'passed' iddiası: rapor gerçekten geçiyor (failedCount 0, passedCount ≥1).
-    expect(tests.passed).toBe(true);
-    expect(report.checks.testPlan.run.state).toBe("observed");
+    // Dürüstlük: host beyanı motor doğrulaması değildir (engineVerified=false, hostAssertedPassed=true, passed anahtarı yok).
+    expect(tests.engineVerified).toBe(false);
+    expect(tests.hostAssertedPassed).toBe(true);
+    expect("passed" in tests).toBe(false);
+    expect(report.checks.testPlan.run.state).toBe("host_asserted");
     const run = report.checks.testPlan.run;
-    if (run.state !== "observed") {
-      throw new Error(`run observed beklenmişti, gelen: ${String(run.state)}`);
+    if (run.state !== "host_asserted") {
+      throw new Error(`run host_asserted beklenmişti, gelen: ${String(run.state)}`);
     }
-    expect(run.passed).toBe(true);
+    expect(run.engineVerified).toBe(false);
+    expect(run.hostAssertedPassed).toBe(true);
     expect(run.evidenceRef).toBe(file.ref);
-    // Explicit bağlama: yalnızca TEST adayı observed.
+    // Explicit bağlama: yalnızca TEST adayı host_asserted.
     expect(report.checks.testPlan.candidateStatuses).toHaveLength(1);
     const entry = report.checks.testPlan.candidateStatuses[0];
     expect(entry?.testQualifiedName).toBe(TEST);
-    expect(entry?.status).toBe("observed");
+    expect(entry?.status).toBe("host_asserted");
     // determinizm: kanıtlı kayıtlı rapor iki koşumda byte-eşit
     const again = verifyChange({
       baseSnapshot: base,
@@ -1090,14 +1093,15 @@ describe("verifyChange — E3 test durumu dürüstlüğü", () => {
         failedCount: 2,
       },
     });
-    expect(report.tests.state).toBe("observed");
+    expect(report.tests.state).toBe("host_asserted");
     const tests = report.tests;
-    if (tests.state !== "observed") {
-      throw new Error(`observed beklenmişti, gelen: ${String(tests.state)}`);
+    if (tests.state !== "host_asserted") {
+      throw new Error(`host_asserted beklenmişti, gelen: ${String(tests.state)}`);
     }
     expect(tests.failedCount).toBe(2);
-    // Rapor başarısız: 'passed' iddiası üretilmez (anahtar fiziksel olarak yok;
-    // passed:false ile temsil edilmez — sayılar konuşur).
+    expect(tests.engineVerified).toBe(false);
+    expect(tests.hostAssertedPassed).toBe(false);
+    // Rapor başarısız: 'passed' iddiası üretilmez (anahtar fiziksel olarak yok).
     expect("passed" in tests).toBe(false);
   });
 
@@ -1231,10 +1235,10 @@ describe("verifyChange — E3 test durumu dürüstlüğü", () => {
     expect(statuses).toHaveLength(2);
     const observedEntry = statuses.find((entry) => entry.testQualifiedName === TEST);
     const notRunEntry = statuses.find((entry) => entry.testQualifiedName !== TEST);
-    expect(observedEntry?.status).toBe("observed");
+    expect(observedEntry?.status).toBe("host_asserted");
     expect(notRunEntry?.status).toBe("not_run");
     expect(notRunEntry?.testQualifiedName).toBe(TEST2);
-    expect(report.tests.state).toBe("observed");
+    expect(report.tests.state).toBe("host_asserted");
   });
 
   it("partial: hiçbir adaya bağlanmayan testNames üyesi sessizce düşürülmez", () => {
