@@ -297,9 +297,7 @@ fn parse_route_attr(attr: &Attribute) -> Option<(String, String)> {
     }
 
     let exprs = attr
-        .parse_args_with(
-            syn::punctuated::Punctuated::<Expr, syn::token::Comma>::parse_terminated,
-        )
+        .parse_args_with(syn::punctuated::Punctuated::<Expr, syn::token::Comma>::parse_terminated)
         .ok()?;
 
     let mut path: Option<String> = None;
@@ -426,14 +424,7 @@ impl<'a> CallVisitor<'a> {
         let rationale = format!(
             "CALLS: call '{call_text}' matched no symbol in the analysis set (unresolved); the target is UnknownExternal and no symbol is invented."
         );
-        self.emit_call_edge(
-            target,
-            "unresolved",
-            start_line,
-            end_line,
-            rationale,
-            None,
-        );
+        self.emit_call_edge(target, "unresolved", start_line, end_line, rationale, None);
     }
 
     /// Çok adaylı çağrı: hiçbir adaya kenar çizilmez (keyfi hedef yok);
@@ -496,8 +487,13 @@ impl<'a> CallVisitor<'a> {
                 }
             }
             // 2) Başka dosyada tek aday → heuristic (import kanıtı yok).
-            let candidates =
-                self.resolve_candidates(self.tables.free_fn_bare.get(name).cloned().unwrap_or_default());
+            let candidates = self.resolve_candidates(
+                self.tables
+                    .free_fn_bare
+                    .get(name)
+                    .cloned()
+                    .unwrap_or_default(),
+            );
             match candidates.len() {
                 0 => self.emit_unresolved(name.clone(), &call_text, start_line, end_line),
                 1 => {
@@ -581,8 +577,13 @@ impl<'a> CallVisitor<'a> {
     }
 
     fn resolve_method_call(&mut self, name: &str, start_line: usize, end_line: usize) {
-        let candidates =
-            self.resolve_candidates(self.tables.methods_bare.get(name).cloned().unwrap_or_default());
+        let candidates = self.resolve_candidates(
+            self.tables
+                .methods_bare
+                .get(name)
+                .cloned()
+                .unwrap_or_default(),
+        );
         match candidates.len() {
             0 => self.emit_unresolved(name.to_string(), name, start_line, end_line),
             1 => {
@@ -728,14 +729,22 @@ fn process_items(
                     start_line,
                     end_line,
                     source_hash,
-                    format!("CONTAINS: '{rel_path}' contains the fn declaration '{name}' (syn AST)."),
+                    format!(
+                        "CONTAINS: '{rel_path}' contains the fn declaration '{name}' (syn AST)."
+                    ),
                 );
-                push_edge(tables, "CONTAINS", file_key.clone(), key.clone(), "verified", evidence, None);
+                push_edge(
+                    tables,
+                    "CONTAINS",
+                    file_key.clone(),
+                    key.clone(),
+                    "verified",
+                    evidence,
+                    None,
+                );
 
-                if let Some((_, file_fns)) = tables
-                    .free_fn_by_file
-                    .iter_mut()
-                    .find(|(m, _)| m == module)
+                if let Some((_, file_fns)) =
+                    tables.free_fn_by_file.iter_mut().find(|(m, _)| m == module)
                 {
                     file_fns.insert(name.clone(), key.clone());
                 }
@@ -777,7 +786,15 @@ fn process_items(
                     source_hash,
                     format!("CONTAINS: '{rel_path}' contains the declaration '{name}' (syn AST)."),
                 );
-                push_edge(tables, "CONTAINS", file_key.clone(), key.clone(), "verified", evidence, None);
+                push_edge(
+                    tables,
+                    "CONTAINS",
+                    file_key.clone(),
+                    key.clone(),
+                    "verified",
+                    evidence,
+                    None,
+                );
                 tables.declared_types.insert(name, key);
             }
             Item::Trait(item_trait) => {
@@ -795,9 +812,19 @@ fn process_items(
                     start_line,
                     end_line,
                     source_hash,
-                    format!("CONTAINS: '{rel_path}' contains the trait declaration '{name}' (syn AST)."),
+                    format!(
+                        "CONTAINS: '{rel_path}' contains the trait declaration '{name}' (syn AST)."
+                    ),
                 );
-                push_edge(tables, "CONTAINS", file_key.clone(), key.clone(), "verified", evidence, None);
+                push_edge(
+                    tables,
+                    "CONTAINS",
+                    file_key.clone(),
+                    key.clone(),
+                    "verified",
+                    evidence,
+                    None,
+                );
                 tables.declared_types.insert(name.clone(), key.clone());
 
                 for trait_item in &item_trait.items {
@@ -959,8 +986,7 @@ fn process_bodies(
         match item {
             Item::Fn(item_fn) => {
                 let name = item_fn.sig.ident.to_string();
-                let caller =
-                    NodeKey::with_path("Function", join_q(module, &name), rel_path);
+                let caller = NodeKey::with_path("Function", join_q(module, &name), rel_path);
                 let mut visitor = CallVisitor {
                     rel_path,
                     source_hash,
@@ -1053,12 +1079,10 @@ pub fn analyze(id: &Value, files: &[FileEntry], max_nodes: usize) -> Value {
         let source_hash = sha256_hex(entry.content.as_bytes());
 
         let file_key = NodeKey::with_path("File", entry.path.clone(), &entry.path);
-        insert_node(
-            &mut tables,
-            file_key,
-            json!({ "sourceHash": source_hash }),
-        );
-        tables.free_fn_by_file.push((module.clone(), BTreeMap::new()));
+        insert_node(&mut tables, file_key, json!({ "sourceHash": source_hash }));
+        tables
+            .free_fn_by_file
+            .push((module.clone(), BTreeMap::new()));
 
         match syn::parse_file(&entry.content) {
             Ok(tree) => {
@@ -1102,13 +1126,7 @@ pub fn analyze(id: &Value, files: &[FileEntry], max_nodes: usize) -> Value {
         };
         let module = module_path_of(&entry.path);
         let source_hash = sha256_hex(entry.content.as_bytes());
-        process_bodies(
-            &mut tables,
-            &module,
-            &entry.path,
-            &source_hash,
-            &tree.items,
-        );
+        process_bodies(&mut tables, &module, &entry.path, &source_hash, &tree.items);
     }
 
     // Kanonik çıktı düzeni (TŞ §8 invariant iv).
@@ -1140,18 +1158,8 @@ pub fn analyze(id: &Value, files: &[FileEntry], max_nodes: usize) -> Value {
         });
     }
     tables.edges.sort_by(|a, b| {
-        let key_a = (
-            a.kind,
-            a.from.clone(),
-            a.to.clone(),
-            a.resolution,
-        );
-        let key_b = (
-            b.kind,
-            b.from.clone(),
-            b.to.clone(),
-            b.resolution,
-        );
+        let key_a = (a.kind, a.from.clone(), a.to.clone(), a.resolution);
+        let key_b = (b.kind, b.from.clone(), b.to.clone(), b.resolution);
         key_a.cmp(&key_b)
     });
     let edges: Vec<Value> = tables
@@ -1317,8 +1325,8 @@ mod tests {
         );
 
         // 3) 2-segment suffix match for mod::fn MUST be heuristic + explicit ambiguity (NEVER verified).
-        let util_fn = find_call(edges, "crate::entry", "crate::util::compute")
-            .expect("util::compute edge");
+        let util_fn =
+            find_call(edges, "crate::entry", "crate::util::compute").expect("util::compute edge");
         assert_eq!(util_fn["resolution"], "heuristic");
         assert_eq!(
             util_fn["ambiguity"]["candidates"],
