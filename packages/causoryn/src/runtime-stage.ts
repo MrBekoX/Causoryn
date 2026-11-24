@@ -119,7 +119,7 @@ export function stagePersistentRuntime(
     if (!existsSync(reqFile)) {
       throw new CausorynCliError(
         "cli/runtime-stage-failed",
-        `Sahnelenecek çalışma zamanı dosyası eksik: ${reqFile}`,
+        `A runtime file required for staging is missing: ${reqFile}`,
       );
     }
   }
@@ -178,7 +178,7 @@ export function stagePersistentRuntime(
     if (error instanceof CausorynCliError) throw error;
     throw new CausorynCliError(
       "cli/runtime-stage-failed",
-      `Kalıcı çalışma zamanı sahnelenemedi: ${error instanceof Error ? error.message : String(error)}`,
+      `Could not stage the persistent runtime: ${error instanceof Error ? error.message : String(error)}`,
     );
   }
 

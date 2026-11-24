@@ -1,3 +1,4 @@
+import { spawnSync } from "node:child_process";
 import {
   existsSync,
   mkdirSync,
@@ -10,6 +11,7 @@ import {
 } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 import { afterEach, describe, expect, it } from "vitest";
 
@@ -17,8 +19,14 @@ import {
   CANONICAL_SKILL_NAMES,
   detectInstalledClients,
   readCodexMcpServer,
+  runCli,
   runSetup,
 } from "../packages/causoryn/src/index.js";
+
+const REPO_ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
+const CLI_SCRIPT = path.join(REPO_ROOT, "packages", "causoryn", "scripts", "causoryn.mjs");
+/** The bin script loads the compiled CLI from dist (built by `npm run build`). */
+const CLI_DIST_ENTRY = path.join(REPO_ROOT, "packages", "causoryn", "dist", "index.js");
 
 const tempDirs: string[] = [];
 
@@ -114,6 +122,102 @@ describe("Task 1.8a — setup.ts DX hardening", () => {
     expect(allResult.applied).toBe(true);
     expect(allResult.selectedClients).toEqual(["antigravity", "claude-code", "codex", "zcode"]);
   });
+
+  it("CLI `setup` exits non-zero with an English --client / --all hint when no host is detected (text, --json, --dry-run, --uninstall)", async () => {
+    const sandbox = createTempDir("no-host-exit");
+    const fakeHome = path.join(sandbox, "home");
+    mkdirSync(fakeHome, { recursive: true });
+    const pkgRoot = createFakePkg(sandbox);
+
+    const run = async (argv: readonly string[]) => {
+      const out: string[] = [];
+      const err: string[] = [];
+      const exitCode = await runCli(argv, {
+        homeDir: fakeHome,
+        codexHomeDir: path.join(fakeHome, ".codex"),
+        packageRoot: pkgRoot,
+        ephemeralTmpDir: path.join(sandbox, "unused-tmp"),
+        io: { stdout: (t) => out.push(t), stderr: (t) => err.push(t) },
+      });
+      return { exitCode, stdout: out.join(""), stderr: err.join("") };
+    };
+
+    const text = await run(["setup"]);
+    expect(text.exitCode).toBe(1);
+    expect(text.stdout).toBe("");
+    expect(text.stderr).toContain("No supported MCP host was detected");
+    expect(text.stderr).toContain("causoryn setup --client claude-code");
+    expect(text.stderr).toContain("causoryn setup --all");
+    expect(text.stderr).not.toMatch(/[çğıöşüÇĞİÖŞÜ]/);
+
+    const json = await run(["setup", "--json"]);
+    expect(json.exitCode).toBe(1);
+    const parsed = JSON.parse(json.stdout) as {
+      applied: boolean;
+      noClientsDetected?: boolean;
+      message?: string;
+    };
+    expect(parsed.applied).toBe(false);
+    expect(parsed.noClientsDetected).toBe(true);
+    expect(parsed.message).toContain("--client");
+    expect(parsed.message).toContain("--all");
+    expect(json.stderr).toContain("No supported MCP host was detected");
+
+    const dryRun = await run(["setup", "--dry-run"]);
+    expect(dryRun.exitCode).toBe(1);
+    expect(dryRun.stderr).toContain("--client");
+
+    const uninstall = await run(["setup", "--uninstall", "--yes"]);
+    expect(uninstall.exitCode).toBe(1);
+    expect(uninstall.stderr).toContain("causoryn setup --uninstall --client claude-code");
+    expect(uninstall.stderr).toContain("causoryn setup --uninstall --all");
+
+    // Nothing was written anywhere in the empty HOME.
+    expect(readdirSync(fakeHome)).toEqual([]);
+
+    // An explicit host or --all still succeeds with exit code 0.
+    expect((await run(["setup", "--client", "claude-code", "--dry-run"])).exitCode).toBe(0);
+    expect((await run(["setup", "--all", "--dry-run"])).exitCode).toBe(0);
+    expect(readdirSync(fakeHome)).toEqual([]);
+  });
+
+  it.skipIf(!existsSync(CLI_DIST_ENTRY))(
+    "spawned `causoryn setup` with an empty HOME exits 1, writes nothing, and prints the guidance on stderr",
+    () => {
+      const sandbox = createTempDir("no-host-spawn");
+      const fakeHome = path.join(sandbox, "home");
+      mkdirSync(fakeHome, { recursive: true });
+      const env: NodeJS.ProcessEnv = { ...process.env };
+      for (const key of [
+        "HOME",
+        "USERPROFILE",
+        "HOMEDRIVE",
+        "HOMEPATH",
+        "CODEX_HOME",
+        "CLAUDE_CONFIG_DIR",
+        "ZCODE_PLUGIN_DATA",
+      ]) {
+        delete env[key];
+      }
+      env["HOME"] = fakeHome;
+      env["USERPROFILE"] = fakeHome;
+
+      const res = spawnSync(process.execPath, [CLI_SCRIPT, "setup"], {
+        cwd: sandbox,
+        env,
+        encoding: "utf8",
+        shell: false,
+        timeout: 60_000,
+      });
+      expect(res.error).toBeUndefined();
+      expect(res.status).toBe(1);
+      expect(res.stdout).toBe("");
+      expect(res.stderr).toContain("No supported MCP host was detected");
+      expect(res.stderr).toContain("--client");
+      expect(res.stderr).toContain("--all");
+      expect(readdirSync(fakeHome)).toEqual([]);
+    },
+  );
 
   it("is truly idempotent (second identical run writes 0 files, touches 0 backups, reports noop/unchanged)", async () => {
     const sandbox = createTempDir("idempotent");

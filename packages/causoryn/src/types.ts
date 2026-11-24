@@ -130,6 +130,8 @@ export interface SetupResult {
   readonly stagedRuntimeDir: string | null;
   readonly runtimeCleanedUp: boolean;
   readonly actions: readonly SetupAction[];
+  /** True when no `--client` / `--all` was given and no supported host was detected (nothing was changed). */
+  readonly noClientsDetected?: boolean | undefined;
   readonly message?: string | undefined;
 }
 
@@ -187,6 +189,27 @@ export interface DoctorHostStatus {
   readonly detail: string;
 }
 
+/** A legacy per-host index file (`graph-<client>.sqlite`) found in a workspace data directory. */
+export interface DoctorLegacyIndexFile {
+  readonly path: string;
+  readonly workspaceDataDir: string;
+  /** Whether the shared `graph.sqlite` exists in the same directory (the legacy file is then redundant). */
+  readonly sharedIndexPresent: boolean;
+  /** Existing `-wal` / `-shm` / `-journal` sidecar files of the legacy database. */
+  readonly sidecars: readonly string[];
+}
+
+/**
+ * Advisory check for legacy per-host index files. A `warn` here is housekeeping
+ * only: it does not change `overallStatus` or the exit code.
+ */
+export interface DoctorLegacyIndexCheck {
+  readonly status: "ok" | "warn";
+  readonly scannedDirs: readonly string[];
+  readonly files: readonly DoctorLegacyIndexFile[];
+  readonly detail: string;
+}
+
 export interface DoctorReport {
   readonly healthy: boolean;
   readonly version: string;
@@ -194,6 +217,7 @@ export interface DoctorReport {
   readonly runtime: DoctorRuntimeCheck;
   readonly toolchains: Readonly<Record<SidecarToolchainId, DoctorToolchainStatus>>;
   readonly hosts: Readonly<Record<HostClientId, DoctorHostStatus>>;
+  readonly legacyIndexFiles: DoctorLegacyIndexCheck;
 }
 
 export interface DoctorOptions {
