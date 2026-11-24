@@ -88,7 +88,7 @@ export function discoverAsyncApiContracts(
   text: string,
 ): DiscoveryOutput {
   if (typeof workspaceId !== "string" || workspaceId.trim().length === 0) {
-    throw new ContractDiscoveryError("contracts/invalid-input", "workspaceId boş olamaz");
+    throw new ContractDiscoveryError("contracts/invalid-input", "workspaceId must not be empty");
   }
   const spec = parseStructuredSpec(relativePath, text);
   const root = spec.root;
@@ -97,20 +97,20 @@ export function discoverAsyncApiContracts(
   if (typeof version !== "string" || version.trim().length === 0) {
     throw new ContractDiscoveryError(
       "contracts/spec-invalid",
-      "AsyncAPI belgesinde 'asyncapi' string alanı zorunludur",
+      "AsyncAPI document must have a string 'asyncapi' field",
     );
   }
   if (!version.startsWith("2.") && !version.startsWith("3.")) {
     throw new ContractDiscoveryError(
       "contracts/unsupported-spec",
-      `Desteklenmeyen AsyncAPI ana sürümü: ${version} (2.x ve 3.x keşfedilir)`,
+      `Unsupported AsyncAPI major version: ${version} (only 2.x and 3.x are discovered)`,
     );
   }
   const channels = root["channels"];
   if (!isPlainObject(channels)) {
     throw new ContractDiscoveryError(
       "contracts/spec-invalid",
-      "AsyncAPI belgesinde 'channels' eşlemesi zorunludur",
+      "AsyncAPI document must have a 'channels' mapping",
     );
   }
   const components = isPlainObject(root["components"])
@@ -126,7 +126,7 @@ export function discoverAsyncApiContracts(
       diagnostics.push({
         relativePath,
         code: "contracts/asyncapi-channel-invalid",
-        message: `channels["${topic}"] bir eşleme değil; channel yok sayıldı`,
+        message: `channels["${topic}"] is not a mapping; channel ignored`,
         line: topicLine,
       });
       continue;
@@ -154,7 +154,7 @@ export function discoverAsyncApiContracts(
           diagnostics.push({
             relativePath,
             code: "contracts/asyncapi-message-ref-unresolved",
-            message: `message $ref dosya içinde çözümlenemedi: ${messageRef}`,
+            message: `message $ref could not be resolved within the file: ${messageRef}`,
             line: topicLine,
           });
         }
@@ -176,7 +176,7 @@ export function discoverAsyncApiContracts(
             diagnostics.push({
               relativePath,
               code: "contracts/asyncapi-payload-ref-unresolved",
-              message: `payload $ref dosya içinde çözümlenemedi: ${payloadRef}`,
+              message: `payload $ref could not be resolved within the file: ${payloadRef}`,
               line: topicLine,
             });
           }
@@ -215,7 +215,7 @@ export function discoverAsyncApiContracts(
       diagnostics.push({
         relativePath,
         code: "contracts/asyncapi-no-operations",
-        message: `channels["${topic}"] altında publish/subscribe operasyonu yok (v3 operations düzeni bu dilimde keşfedilmez)`,
+        message: `channels["${topic}"] has no publish/subscribe operation (the AsyncAPI v3 operations layout is not discovered by this parser)`,
         line: topicLine,
       });
       contracts.push({
@@ -236,7 +236,7 @@ export function discoverAsyncApiContracts(
         resolvedRefs: [],
         certainty: "partial",
         evidence: { relativePath, startLine: topicLine, endLine: topicLine },
-        diagnostics: ["asyncapi: yön (publish/subscribe) bu dilimde belirlenemedi"],
+        diagnostics: ["asyncapi: direction (publish/subscribe) could not be determined by this parser"],
       });
     }
   }

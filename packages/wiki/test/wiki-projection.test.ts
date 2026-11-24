@@ -610,7 +610,7 @@ describe("WikiProjectionEngine — partial (adapter yetmezliği + belirsizlik)",
     for (const title of unsupportedTitles) {
       const page = projection.pages.find((entry) => entry.title === title);
       expect(page?.coverage.status, title).toBe("unsupported");
-      expect(page?.coverage.detail, title).toContain("desteklenmiyor");
+      expect(page?.coverage.detail, title).toContain("is not supported by this adapter set");
     }
     // Desteklenmeyen kategoride ALT sayfa üretilmez (kök sayfa unsupported
     // olarak ağaçta kalır — §16A.1 açık görünüm).

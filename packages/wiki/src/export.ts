@@ -202,7 +202,7 @@ function validateProjection(projection: WikiProjection): WikiProjection {
       .join("; ");
     throw new WikiProjectionError(
       "wiki/export-invalid-projection",
-      `Export girdisi WikiProjection şemasını geçmedi: ${detail}`,
+      `Export input failed WikiProjection schema validation: ${detail}`,
     );
   }
   return parsed.data;
@@ -294,7 +294,7 @@ function exportFileNamesByPageId(pages: readonly WikiPage[]): ReadonlyMap<string
     if (seen.has(fileName)) {
       throw new WikiProjectionError(
         "wiki/export-filename-collision",
-        `Export dosya adı çakışıyor (sessiz üzerine yazma yok): ${fileName} (pageId ${pageId})`,
+        `Export file name collision (no silent overwrite): ${fileName} (pageId ${pageId})`,
       );
     }
     seen.add(fileName);
@@ -348,7 +348,7 @@ function markdownSectionBlock(section: WikiPageSection): string[] {
   lines.push(`- status: ${escapeMarkdownCell(section.status)}`);
   const refs = [...section.evidenceRefs].sort(byEvidenceRef);
   for (const ref of refs) {
-    lines.push(`- kanıt: ${escapeMarkdownCell(formatEvidenceRef(ref))}`);
+    lines.push(`- evidence: ${escapeMarkdownCell(formatEvidenceRef(ref))}`);
   }
   if (section.generatedMarkdown.length > 0) {
     lines.push("");
@@ -371,7 +371,7 @@ function renderPageMarkdown(view: PageView): string {
   lines.push(`- pageId: ${escapeMarkdownCell(view.page.id)}`);
   lines.push(`- wikiSnapshotId: ${escapeMarkdownCell(view.page.wikiSnapshotId)}`);
   lines.push(`- kind: ${escapeMarkdownCell(view.page.kind)}`);
-  lines.push(`- parentId: ${view.page.parentId === null ? "(kök)" : escapeMarkdownCell(view.page.parentId)}`);
+  lines.push(`- parentId: ${view.page.parentId === null ? "(root)" : escapeMarkdownCell(view.page.parentId)}`);
   lines.push(`- slug: ${escapeMarkdownCell(view.page.slug)}`);
   lines.push(`- route: ${escapeMarkdownCell(view.page.route)}`);
   lines.push(`- freshness: ${escapeMarkdownCell(view.page.freshness)}`);
@@ -395,7 +395,7 @@ export function serializeWikiPageMarkdown(projection: WikiProjection, page: Wiki
   if (view === undefined) {
     throw new WikiProjectionError(
       "wiki/export-unknown-page",
-      `Sayfa bu projeksiyonda bulunamadı: ${page.id}`,
+      `Page not found in this projection: ${page.id}`,
     );
   }
   return renderPageMarkdown(view);
@@ -422,15 +422,15 @@ function renderIndexMarkdown(valid: WikiProjection): string {
   lines.push(`- pages: ${String(valid.pages.length)}`);
   lines.push(`- sections: ${String(valid.sections.length)}`);
   lines.push("");
-  lines.push(`## Uyarılar (${String(valid.warnings.length)})`);
+  lines.push(`## Warnings (${String(valid.warnings.length)})`);
   lines.push("");
   for (const warning of valid.warnings) {
     lines.push(`- ${escapeMarkdownCell(warning)}`);
   }
   lines.push("");
-  lines.push("## Sayfa dizini");
+  lines.push("## Page index");
   lines.push("");
-  lines.push("| başlık | tür | freshness | coverage | dosya |");
+  lines.push("| title | kind | freshness | coverage | file |");
   lines.push("| --- | --- | --- | --- | --- |");
   for (const view of views) {
     const fileName = fileNames.get(view.page.id) ?? "";
@@ -490,7 +490,7 @@ function renderWikiHtml(valid: WikiProjection): string {
   ];
   const lines: string[] = [];
   lines.push("<!DOCTYPE html>");
-  lines.push('<html lang="tr">');
+  lines.push('<html lang="en">');
   lines.push("<head>");
   lines.push('<meta charset="utf-8">');
   lines.push(`<meta http-equiv="Content-Security-Policy" content="${WIKI_EXPORT_HTML_CSP}">`);
@@ -514,9 +514,9 @@ function renderWikiHtml(valid: WikiProjection): string {
   lines.push("</section>");
 
   lines.push("<section>");
-  lines.push(`<h2>Uyarılar (${escapeHtmlText(String(valid.warnings.length))})</h2>`);
+  lines.push(`<h2>Warnings (${escapeHtmlText(String(valid.warnings.length))})</h2>`);
   if (valid.warnings.length === 0) {
-    lines.push("<p>(uyarı yok)</p>");
+    lines.push("<p>(no warnings)</p>");
   } else {
     lines.push("<ul>");
     for (const warning of valid.warnings) {
@@ -527,9 +527,9 @@ function renderWikiHtml(valid: WikiProjection): string {
   lines.push("</section>");
 
   lines.push("<section>");
-  lines.push(`<h2>Sayfa dizini (${escapeHtmlText(String(views.length))})</h2>`);
+  lines.push(`<h2>Page index (${escapeHtmlText(String(views.length))})</h2>`);
   if (views.length === 0) {
-    lines.push("<p>(sayfa yok)</p>");
+    lines.push("<p>(no pages)</p>");
   } else {
     lines.push("<ul>");
     for (const [index, view] of views.entries()) {
@@ -547,7 +547,7 @@ function renderWikiHtml(valid: WikiProjection): string {
     lines.push(`<section id="${anchor}">`);
     lines.push(`<h2>${escapeHtmlText(view.page.title)}</h2>`);
     lines.push(
-      `<p class="meta">kind: ${escapeHtmlText(view.page.kind)} · slug: ${escapeHtmlText(view.page.slug)} · route: ${escapeHtmlText(view.page.route)} · parentId: ${view.page.parentId === null ? "(kök)" : escapeHtmlText(view.page.parentId)} · freshness: ${escapeHtmlText(view.page.freshness)} · coverage: ${escapeHtmlText(coverageLabel(view.page.coverage))} · contentHash: ${escapeHtmlText(view.page.contentHash)}</p>`,
+      `<p class="meta">kind: ${escapeHtmlText(view.page.kind)} · slug: ${escapeHtmlText(view.page.slug)} · route: ${escapeHtmlText(view.page.route)} · parentId: ${view.page.parentId === null ? "(root)" : escapeHtmlText(view.page.parentId)} · freshness: ${escapeHtmlText(view.page.freshness)} · coverage: ${escapeHtmlText(coverageLabel(view.page.coverage))} · contentHash: ${escapeHtmlText(view.page.contentHash)}</p>`,
     );
     for (const section of view.sections) {
       lines.push("<section>");
@@ -557,7 +557,7 @@ function renderWikiHtml(valid: WikiProjection): string {
       if (refs.length > 0) {
         lines.push("<ul>");
         for (const ref of refs) {
-          lines.push(`<li>kanıt: ${escapeHtmlText(formatEvidenceRef(ref))}</li>`);
+          lines.push(`<li>evidence: ${escapeHtmlText(formatEvidenceRef(ref))}</li>`);
         }
         lines.push("</ul>");
       }
@@ -618,7 +618,7 @@ export function buildWikiExportFileSet(projection: WikiProjection): readonly Wik
     if (fileName === undefined) {
       throw new WikiProjectionError(
         "wiki/export-filename-collision",
-        `Sayfa için export dosya adı türetilemedi: ${view.page.id}`,
+        `Could not derive an export file name for page: ${view.page.id}`,
       );
     }
     files.push({
@@ -705,7 +705,7 @@ export function exportWikiOffline(
   if (!dirDecision.allowed) {
     throw new WikiProjectionError(
       contractCodeFor(dirDecision.code),
-      `Output yetkilendirmesi reddedildi (${dirDecision.code}): ${dirDecision.reason}`,
+      `Output authorization denied (${dirDecision.code}): ${dirDecision.reason}`,
     );
   }
   const canonicalDir = dirDecision.canonicalDir;
@@ -716,7 +716,7 @@ export function exportWikiOffline(
   } catch (error) {
     throw new WikiProjectionError(
       "wiki/export-write-failed",
-      `Markdown alt dizini açılamadı: ${markdownDir}: ${error instanceof Error ? error.message : String(error)}`,
+      `Could not create the markdown subdirectory: ${markdownDir}: ${error instanceof Error ? error.message : String(error)}`,
     );
   }
   // Alt dizin realpath'i beyanlı kök içinde kalmalı (önceden konmuş
@@ -726,7 +726,7 @@ export function exportWikiOffline(
   if (!markdownDecision.allowed) {
     throw new WikiProjectionError(
       contractCodeFor(markdownDecision.code),
-      `Markdown alt dizini yetkilendirmesi reddedildi (${markdownDecision.code}): ${markdownDecision.reason}`,
+      `Markdown subdirectory authorization denied (${markdownDecision.code}): ${markdownDecision.reason}`,
     );
   }
 
@@ -750,14 +750,14 @@ export function exportWikiOffline(
     ) {
       throw new WikiProjectionError(
         "wiki/output-path-denied",
-        `Export dosya adı güvenli değil (ayraç/null byte/".."): ${file.relativePath}`,
+        `Unsafe export file name (path separator/null byte/".."): ${file.relativePath}`,
       );
     }
     const decision = policy.authorizeFile(targetDir, fileName);
     if (!decision.allowed) {
       throw new WikiProjectionError(
         contractCodeFor(decision.code),
-        `Output yetkilendirmesi reddedildi (${decision.code}): ${decision.reason}`,
+        `Output authorization denied (${decision.code}): ${decision.reason}`,
       );
     }
     const targetPath = decision.canonicalPath;
@@ -780,7 +780,7 @@ export function exportWikiOffline(
       }
       throw new WikiProjectionError(
         "wiki/export-write-failed",
-        `Çıktı dosyası yazılamadı: ${targetPath}: ${error instanceof Error ? error.message : String(error)}`,
+        `Could not write output file: ${targetPath}: ${error instanceof Error ? error.message : String(error)}`,
       );
     }
     written.push({

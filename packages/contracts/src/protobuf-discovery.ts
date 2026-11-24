@@ -105,10 +105,10 @@ export function discoverProtobufContracts(
   text: string,
 ): DiscoveryOutput {
   if (typeof workspaceId !== "string" || workspaceId.trim().length === 0) {
-    throw new ContractDiscoveryError("contracts/invalid-input", "workspaceId boş olamaz");
+    throw new ContractDiscoveryError("contracts/invalid-input", "workspaceId must not be empty");
   }
   if (typeof text !== "string") {
-    throw new ContractDiscoveryError("contracts/invalid-input", "text string olmalı");
+    throw new ContractDiscoveryError("contracts/invalid-input", "text must be a string");
   }
   // Boyut kotası yaml/json yollarıyla simetriktir (kırmızı çizgi 6; TŞ §19):
   // saf çekirdek sınırsız metin kabul etmez (takım denetimi bulgusu 1).
@@ -127,7 +127,7 @@ export function discoverProtobufContracts(
     diagnostics.push({
       relativePath,
       code: "contracts/protobuf-no-syntax",
-      message: 'syntax = "proto3"; satırı bulunamadı; tüm adaylar partial işaretlenir',
+      message: 'syntax = "proto3"; line not found; all candidates are marked partial',
       line: 1,
     });
   }
@@ -222,8 +222,8 @@ export function discoverProtobufContracts(
             relativePath,
             code: "contracts/protobuf-unknown-field",
             message:
-              "map<" + key + "," + value + "> alan türü (" + fieldName +
-              ") sınırlı parser diliminin ötesinde — serializer unknown",
+              "map<" + key + "," + value + "> field type (" + fieldName +
+              ") is beyond the scope of this limited parser — serializer unknown",
             line: lineNumber,
           });
           continue;
@@ -274,7 +274,7 @@ export function discoverProtobufContracts(
     diagnostics.push({
       relativePath,
       code: "contracts/protobuf-unbalanced-block",
-      message: "message/service bloğu kapanmadı; açık bloklar partial aday olarak finalize edildi",
+      message: "message/service block was not closed; open blocks were finalized as partial candidates",
       line: lines.length,
     });
     for (const frame of stack) {
@@ -304,8 +304,8 @@ export function discoverProtobufContracts(
       const unknownField = fields.find((field) => field.unknownKind);
       candidateDiagnostics.push(
         "protobuf: " +
-          (unknownField?.type ?? "bilinmeyen alan türü") +
-          " alan türü sınırlı parser diliminin ötesinde — serializer unknown",
+          (unknownField?.type ?? "unknown field type") +
+          " field type is beyond the scope of this limited parser — serializer unknown",
       );
     }
     contracts.push({
@@ -338,7 +338,7 @@ export function discoverProtobufContracts(
     const candidateDiagnostics: string[] = [];
     if (rpc.streamUsed) {
       candidateDiagnostics.push(
-        "protobuf: stream rpc akış semantiği sınırlı dilim ötesinde — serializer unknown",
+        "protobuf: stream rpc streaming semantics are beyond the scope of this limited parser — serializer unknown",
       );
     }
     contracts.push({

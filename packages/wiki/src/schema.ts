@@ -159,7 +159,7 @@ export const WikiProjectionSchema = z
       if (pageIds.has(page.id)) {
         ctx.addIssue({
           code: "custom",
-          message: `Aynı kimlikte birden fazla sayfa: ${page.id}`,
+          message: `Duplicate page id: ${page.id}`,
           path: ["pages"],
         });
       }
@@ -171,7 +171,7 @@ export const WikiProjectionSchema = z
       if (sectionIds.has(section.id)) {
         ctx.addIssue({
           code: "custom",
-          message: `Aynı kimlikte birden fazla bölüm: ${section.id}`,
+          message: `Duplicate section id: ${section.id}`,
           path: ["sections"],
         });
       }
@@ -179,7 +179,7 @@ export const WikiProjectionSchema = z
       if (!pageIds.has(section.pageId)) {
         ctx.addIssue({
           code: "custom",
-          message: `Bölüm bilinmeyen sayfaya işaret ediyor (dangling): ${section.pageId}`,
+          message: `Section points to an unknown page (dangling): ${section.pageId}`,
           path: ["sections"],
         });
       }
@@ -189,7 +189,7 @@ export const WikiProjectionSchema = z
       if (page.parentId !== null && !pageIds.has(page.parentId)) {
         ctx.addIssue({
           code: "custom",
-          message: `Alt sayfa bilinmeyen ebeveyne işaret ediyor (dangling): ${page.parentId}`,
+          message: `Child page points to an unknown parent page (dangling): ${page.parentId}`,
           path: ["pages"],
         });
       }

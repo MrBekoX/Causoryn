@@ -270,7 +270,7 @@ export function diffWikiGraphs(
         .join("; ");
       throw new WikiProjectionError(
         "wiki/invalid-graph",
-        `${label} şema doğrulaması başarısız: ${detail}`,
+        `${label} schema validation failed: ${detail}`,
       );
     }
   }
@@ -411,10 +411,10 @@ function previousContentIntegrityFailure(previous: WikiProjection): string | nul
   for (const page of previous.pages) {
     const sections = sectionsByPage.get(page.id);
     if (sections === undefined) {
-      return `önceki projeksiyonda sayfanın bölümleri eksik: ${page.id}`;
+      return `page sections are missing from the previous projection: ${page.id}`;
     }
     if (wikiPageContentHash(sections) !== page.contentHash) {
-      return `önceki sayfa contentHash'i bölümleriyle uyuşmuyor (contentHash bozuk/tağyiç edilmiş): ${page.id}`;
+      return `previous page contentHash does not match its sections (contentHash corrupted or tampered with): ${page.id}`;
     }
   }
   return null;
@@ -434,16 +434,16 @@ function previousIntegrityFailure(
 ): string | null {
   const previousParse = WikiProjectionSchema.safeParse(previous);
   if (!previousParse.success) {
-    return "önceki projeksiyon şema doğrulaması geçemedi; içeriğe güvenilmez";
+    return "previous projection failed schema validation; its content cannot be trusted";
   }
   if (previous.snapshot.graphSnapshotId !== previousGraph.meta.id) {
-    return `previous projeksiyon previousGraph'tan türetilmemiş (graphSnapshotId uyuşmuyor: ${previous.snapshot.graphSnapshotId} != ${previousGraph.meta.id})`;
+    return `previous projection was not derived from previousGraph (graphSnapshotId mismatch: ${previous.snapshot.graphSnapshotId} != ${previousGraph.meta.id})`;
   }
   if (previous.snapshot.workspaceId !== nextGraph.meta.workspaceId) {
-    return `workspace değişti (${previous.snapshot.workspaceId} → ${nextGraph.meta.workspaceId}); cross-workspace taşima uydurma kimlik üretir`;
+    return `workspace changed (${previous.snapshot.workspaceId} → ${nextGraph.meta.workspaceId}); carrying pages across workspaces would produce fabricated ids`;
   }
   if (previous.snapshot.templateVersion !== WIKI_TEMPLATE_VERSION) {
-    return `üretim şablonu sürümü değişti (templateVersion ${previous.snapshot.templateVersion} != ${WIKI_TEMPLATE_VERSION}); tüm sayfa hash'leri tanım gereği değişir`;
+    return `generation template version changed (templateVersion ${previous.snapshot.templateVersion} != ${WIKI_TEMPLATE_VERSION}); every page hash changes by definition`;
   }
 
   const contentFailure = previousContentIntegrityFailure(previous);
@@ -473,7 +473,7 @@ function previousIntegrityFailure(
     canonicalJson(sortedStrings(previouslyUnsupported)) !==
     canonicalJson(sortedStrings(currentlyUnsupported))
   ) {
-    return `desteklenen sayfa türü kümesi değişti (supportedPageKinds); önceki unsupported=${canonicalJson(sortedStrings(previouslyUnsupported))} yeni=${canonicalJson(sortedStrings(currentlyUnsupported))}`;
+    return `supported page kind set changed (supportedPageKinds); previous unsupported=${canonicalJson(sortedStrings(previouslyUnsupported))} new=${canonicalJson(sortedStrings(currentlyUnsupported))}`;
   }
   return null;
 }
@@ -496,7 +496,7 @@ function requireValidReport(
       .join("; ");
     throw new WikiProjectionError(
       "wiki/report-invariant-violation",
-      `WikiIncrementalBuildReport invariant ihlali: ${detail}`,
+      `WikiIncrementalBuildReport invariant violation: ${detail}`,
     );
   }
   return report;
@@ -510,7 +510,7 @@ export function projectWikiIncremental(
   if (!builtAtParse.success) {
     throw new WikiProjectionError(
       "wiki/invalid-input",
-      "builtAt ISO 8601 UTC datetime olmalıdır",
+      "builtAt must be an ISO 8601 UTC datetime",
     );
   }
   const supportedKinds: ReadonlySet<WikiPageKind> = new Set(
@@ -521,7 +521,7 @@ export function projectWikiIncremental(
           if (!kindsParse.success) {
             throw new WikiProjectionError(
               "wiki/invalid-input",
-              "supportedPageKinds geçerli WikiPageKind değerleri içermelidir",
+              "supportedPageKinds must contain only valid WikiPageKind values",
             );
           }
           return kindsParse.data;
@@ -534,7 +534,7 @@ export function projectWikiIncremental(
   if (nextState !== "ready" && nextState !== "partial") {
     throw new WikiProjectionError(
       "wiki/snapshot-not-projectable",
-      `Yalnızca ready/partial GraphSnapshot WikiSnapshot'a projeksiyonlanabilir (TŞ §9); gelen durum: ${nextState}`,
+      `Only a ready/partial GraphSnapshot can be projected into a WikiSnapshot; received state: ${nextState}`,
     );
   }
 
@@ -552,7 +552,7 @@ export function projectWikiIncremental(
   const fallbackReason =
     integrityFailure ??
     (diff.configChanged || diff.analyzerChanged
-      ? `parser yapılandırması veya analyzer parmak izi değişti (configHash/analyzerFingerprint); TŞ §16A.5 gereği reconciliation scan ile tam yeniden build gereklidir (configChanged=${String(diff.configChanged)}, analyzerChanged=${String(diff.analyzerChanged)})`
+      ? `parser configuration or analyzer fingerprint changed (configHash/analyzerFingerprint); a full rebuild with a reconciliation scan is required (configChanged=${String(diff.configChanged)}, analyzerChanged=${String(diff.analyzerChanged)})`
       : null);
   if (fallbackReason !== null) {
     return fullRebuildFallback(input, diff, fallbackReason);
@@ -565,7 +565,7 @@ export function projectWikiIncremental(
   if (revisionRef.trim().length === 0) {
     throw new WikiProjectionError(
       "wiki/invalid-input",
-      "revisionRef boş olamaz",
+      "revisionRef must not be empty",
     );
   }
 
@@ -670,7 +670,7 @@ export function projectWikiIncremental(
         return fullRebuildFallback(
           input,
           diff,
-          `önceki projeksiyonda korunacak kök sayfa eksik: ${pageId}`,
+          `root page to preserve is missing from the previous projection: ${pageId}`,
         );
       }
       continue;
@@ -698,7 +698,7 @@ export function projectWikiIncremental(
           ? {}
           : {
               coverageOverride: "unsupported" as CoverageStatus,
-              coverageDetail: `sayfa türü '${category.kind}' bu adapter kümesi tarafından desteklenmiyor`,
+              coverageDetail: `page kind '${category.kind}' is not supported by this adapter set`,
             }),
         ...(structuralDetail === undefined ? {} : { coverageDetail: structuralDetail }),
       }),
@@ -722,7 +722,7 @@ export function projectWikiIncremental(
         return fullRebuildFallback(
           input,
           diff,
-          `önceki projeksiyonda korunacak alt sayfa eksik: ${entry.pageId}`,
+          `child page to preserve is missing from the previous projection: ${entry.pageId}`,
         );
       }
       continue;
@@ -767,7 +767,7 @@ export function projectWikiIncremental(
       .join("; ");
     throw new WikiProjectionError(
       "wiki/projection-invariant-violation",
-      `WikiProjection invariant ihlali: ${detail}`,
+      `WikiProjection invariant violation: ${detail}`,
     );
   }
 
@@ -777,8 +777,8 @@ export function projectWikiIncremental(
       mode: "incremental" as const,
       reason:
         affected.size === 0
-          ? "graph farkı yok; hiçbir sayfa seçilmedi (no-op incremental)"
-          : `bölüm → sayfa eşlemesinden ${String(affected.size)} sayfa seçildi; contentHash korumasıyla ${String(regenerated.length)} yenilendi`,
+          ? "no graph changes; no pages selected (no-op incremental)"
+          : `selected ${String(affected.size)} page(s) via the section → page mapping; regenerated ${String(regenerated.length)} under contentHash protection`,
       diff,
       affectedPageIds: sortedStrings(affected),
       regeneratedPageIds: sortedStrings(regenerated),
@@ -818,7 +818,7 @@ function fullRebuildFallback(
     }
   }
   const warnings = [
-    `incremental build desteklenmedi → tam yeniden build (full-rebuild) yapıldı: ${reason}`,
+    `incremental build not possible → fell back to a full rebuild (full-rebuild): ${reason}`,
     ...projection.warnings,
   ];
   return deepFreeze({

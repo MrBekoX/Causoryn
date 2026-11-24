@@ -83,7 +83,7 @@ function sniffYamlRoot(text: string): SniffResult {
       return {
         ok: false,
         code: "contracts/spec-yaml-invalid",
-        error: "YAML sözdizimi hatası: " + (first?.message ?? "bilinmeyen"),
+        error: "YAML syntax error: " + (first?.message ?? "unknown"),
       };
     }
     return { ok: true, root: document.toJS() };
@@ -94,7 +94,7 @@ function sniffYamlRoot(text: string): SniffResult {
       // yaml kütüphanesinin alias limiti ReferenceError'ı sniff toJS'inde
       // aşar — parse-safety ile aynı eşleme: alias → limit-exceeded.
       code: message.includes("alias") ? "contracts/limit-exceeded" : "contracts/spec-yaml-invalid",
-      error: "YAML çözümlenemedi: " + message,
+      error: "YAML could not be parsed: " + message,
     };
   }
 }
@@ -104,7 +104,7 @@ export function discoverContractsFromTexts(
   files: readonly ContractFileInput[],
 ): ContractDiscoveryResult {
   if (typeof workspaceId !== "string" || workspaceId.trim().length === 0) {
-    throw new ContractDiscoveryError("contracts/invalid-input", "workspaceId boş olamaz");
+    throw new ContractDiscoveryError("contracts/invalid-input", "workspaceId must not be empty");
   }
 
   const contracts: ContractCandidate[] = [];
@@ -117,7 +117,7 @@ export function discoverContractsFromTexts(
     if (typeof file.relativePath !== "string" || file.relativePath.trim().length === 0) {
       throw new ContractDiscoveryError(
         "contracts/invalid-input",
-        "relativePath boş olamaz (dosya listesinde geçersiz girdi)",
+        "relativePath must not be empty (invalid entry in the file list)",
       );
     }
     const extension = extensionOf(file.relativePath);
@@ -133,7 +133,7 @@ export function discoverContractsFromTexts(
       if (!isPlainObject(sniff.root)) {
         throw new ContractDiscoveryError(
           "contracts/spec-invalid",
-          file.relativePath + ": YAML kökü bir eşleme (object) değil",
+          file.relativePath + ": YAML root is not a mapping (object)",
         );
       }
       if (typeof sniff.root["openapi"] === "string") {
@@ -146,7 +146,7 @@ export function discoverContractsFromTexts(
         diagnostics.push({
           relativePath: file.relativePath,
           code: "contracts/unsupported-spec-content",
-          message: "YAML kökü openapi/asyncapi/JSON Schema işareti taşımıyor; sözleşme üretilmedi",
+          message: "YAML root has no openapi/asyncapi/JSON Schema marker; no contract produced",
           line: 1,
         });
         continue;
@@ -161,7 +161,7 @@ export function discoverContractsFromTexts(
       diagnostics.push({
         relativePath: file.relativePath,
         code: "contracts/unsupported-spec-content",
-        message: "Desteklenmeyen spec uzantısı: " + (extension === "" ? "(uzantısız)" : extension),
+        message: "Unsupported spec extension: " + (extension === "" ? "(no extension)" : extension),
         line: 1,
       });
       continue;
@@ -206,8 +206,8 @@ export async function readContractFiles(
         decision.code === "workspace/limit-exceeded"
           ? "contracts/limit-exceeded"
           : "contracts/file-not-authorized",
-        "Salt-okunur spec erişimi reddedildi (" + candidate + "): " + decision.reason +
-          (decision.rule === undefined ? "" : " [kural: " + decision.rule + "]"),
+        "Read-only spec access denied (" + candidate + "): " + decision.reason +
+          (decision.rule === undefined ? "" : " [rule: " + decision.rule + "]"),
       );
     }
 
@@ -216,7 +216,7 @@ export async function readContractFiles(
     if (target !== decision.canonicalRoot && !target.startsWith(decision.canonicalRoot + path.sep)) {
       throw new ContractDiscoveryError(
         "contracts/file-not-authorized",
-        "Spec dosyası kök dışına çözümlendi: " + candidate,
+        "Spec file resolved outside the root: " + candidate,
       );
     }
 
@@ -227,13 +227,13 @@ export async function readContractFiles(
     } catch {
       throw new ContractDiscoveryError(
         "contracts/file-not-authorized",
-        "Açılacak spec dosyasının gerçek yolu çözümlenemedi: " + candidate,
+        "Could not resolve the real path of the spec file to open: " + candidate,
       );
     }
     if (!isInsideRoot(decision.canonicalRoot, real)) {
       throw new ContractDiscoveryError(
         "contracts/file-not-authorized",
-        "Açılan spec dosyasının gerçek yolu kök dışına çıktı (TOCTOU re-check): " + candidate,
+        "Real path of the opened spec file is outside the root (TOCTOU re-check): " + candidate,
       );
     }
     const text = await readFile(real, "utf8");

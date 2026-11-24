@@ -89,7 +89,7 @@ export const WikiAnnotationSchema = z
       if (annotation[field].trim().length === 0) {
         ctx.addIssue({
           code: "custom",
-          message: `${field} boş olamaz`,
+          message: `${field} must not be empty`,
           path: [field],
         });
       }
@@ -97,7 +97,7 @@ export const WikiAnnotationSchema = z
     if (annotation.body.trim().length === 0) {
       ctx.addIssue({
         code: "custom",
-        message: "body boş olamaz",
+        message: "body must not be empty",
         path: ["body"],
       });
     }
@@ -109,7 +109,7 @@ export const WikiAnnotationSchema = z
       ctx.addIssue({
         code: "custom",
         message:
-          "origin=host_model_proposal iken verified=true olamaz (TŞ §16A.6: verified=false kalır)",
+          "verified=true is not allowed when origin=host_model_proposal (it must stay verified=false)",
         path: ["verified"],
       });
     }
@@ -120,7 +120,7 @@ export const WikiAnnotationSchema = z
       ctx.addIssue({
         code: "custom",
         message:
-          "origin=host_model_proposal yalnızca authorKind=host_model_proposal ile bileşebilir (ve tersi)",
+          "origin=host_model_proposal can only be combined with authorKind=host_model_proposal (and vice versa)",
         path: ["authorKind"],
       });
     }
@@ -237,7 +237,7 @@ function parseWikiAnnotation(value: unknown, invalidCode: string): WikiAnnotatio
   if (!parsed.success) {
     throw new AnnotationOverlayError(
       invalidCode,
-      `WikiAnnotation şema doğrulaması başarısız: ${schemaDetail(parsed.error)}`,
+      `WikiAnnotation schema validation failed: ${schemaDetail(parsed.error)}`,
     );
   }
   return deepFreeze(parsed.data as WikiAnnotation);
@@ -332,10 +332,10 @@ export function markAnnotationOrphans(
 export function renderAnnotationBlock(annotation: WikiAnnotation): string {
   const isHost = annotation.authorKind === "host_model_proposal";
   const label = isHost
-    ? `AI ÖNERİSİ — host_model_proposal, verified=${
+    ? `AI PROPOSAL — host_model_proposal, verified=${
         annotation.verified === true ? "true" : "false"
       }`
-    : "Overlay notu — human";
+    : "Overlay note — human";
   const parts = [
     `sectionKey:\`${annotation.sectionKey}\``,
     `annotationId:\`${annotation.id}\``,
@@ -516,7 +516,7 @@ export class AnnotationOverlayEngine {
     if (currentRaw === undefined) {
       throw new AnnotationOverlayError(
         "wiki/annotation-not-found",
-        `Anotasyon bulunamadı: ${input.id}`,
+        `Annotation not found: ${input.id}`,
       );
     }
     const current = parseWikiAnnotation(currentRaw, "wiki/annotation-invalid-row");
