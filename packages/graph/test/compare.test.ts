@@ -797,8 +797,10 @@ describe("git okuma katmanı — geçici depo (salt-okunur cat-file/ls-tree)", (
     expect(filtered["GIT_NO_LAZY_FETCH"]).toBe("1");
     expect(filtered["GIT_OPTIONAL_LOCKS"]).toBe("0");
     expect(filtered["GIT_TERMINAL_PROMPT"]).toBe("0");
+    expect(filtered["GIT_ALLOW_PROTOCOL"]).toBe("");
     expect(Object.keys(filtered).sort()).toEqual([
       "COMSPEC",
+      "GIT_ALLOW_PROTOCOL",
       "GIT_ATTR_NOSYSTEM",
       "GIT_CONFIG_GLOBAL",
       "GIT_CONFIG_NOSYSTEM",

@@ -105,6 +105,12 @@ const GIT_HARDENED_CONFIG_FLAGS: readonly string[] = [
   "-c",
   "protocol.ext.allow=never",
   "-c",
+  "protocol.ftp.allow=never",
+  "-c",
+  "protocol.ftps.allow=never",
+  // Defense in depth only: GIT_ALLOW_PROTOCOL="" in the child env (see
+  // buildGitEnv) is what also covers every other protocol name.
+  "-c",
   "safe.bareRepository=explicit",
 ];
 
@@ -319,8 +325,21 @@ export function buildGitEnv(
   env["GIT_NO_LAZY_FETCH"] = "1";
   env["GIT_OPTIONAL_LOCKS"] = "0";
   env["GIT_LFS_SKIP_SMUDGE"] = "1";
+  env["GIT_ALLOW_PROTOCOL"] = GIT_ALLOW_NO_PROTOCOL;
   return env;
 }
+
+/**
+ * Empty protocol allowlist. git(1), ENVIRONMENT: "GIT_ALLOW_PROTOCOL: If set
+ * to a colon-separated list of protocols, behave as if protocol.allow is set
+ * to never, and each of the listed protocols has protocol.<name>.allow set to
+ * always (overriding any existing configuration)." An empty list therefore
+ * disables every transport, including protocol names a repository could
+ * re-enable with its own protocol.<name>.allow (e.g. ftp, or helper-based
+ * `<name>::` URLs). Source: Git for Windows 2.53 installed docs,
+ * mingw64/share/doc/git-doc/git.html; https://git-scm.com/docs/git#Documentation/git.txt-GITALLOWPROTOCOL
+ */
+const GIT_ALLOW_NO_PROTOCOL = "";
 
 export interface RunGitOptions {
   readonly timeoutMs?: number;
@@ -489,6 +508,7 @@ function buildUserConfigReadEnv(untrustedRoots: readonly string[]): Record<strin
   }
   env["GIT_TERMINAL_PROMPT"] = "0";
   env["GIT_OPTIONAL_LOCKS"] = "0";
+  env["GIT_ALLOW_PROTOCOL"] = GIT_ALLOW_NO_PROTOCOL;
   return env;
 }
 
@@ -591,7 +611,7 @@ async function probeGitVersion(
   }
 }
 
-/** Keys whose presence in the repository's local config marks a partial clone. */
+/** Keys whose presence in the repository's effective config marks a partial clone. */
 const PARTIAL_CLONE_KEY_PATTERN =
   "^(extensions\\.partialclone|remote\\..+\\.promisor|remote\\..+\\.partialclonefilter)$";
 
@@ -605,7 +625,11 @@ async function assertPartialCloneSupported(
   if (version !== null && isAtLeast(version, GIT_MIN_VERSION_FOR_PARTIAL_CLONE)) return;
   let partialClone: boolean;
   try {
-    // `git config` only reads config files; it never fetches objects.
+    // `git config` only reads config files; it never fetches objects. No
+    // scope flag: the EFFECTIVE config is read (repository config, worktree
+    // config when extensions.worktreeConfig is set, includes and the
+    // command line; global/system are already nulled by the env), so a
+    // promisor remote declared in config.worktree is detected too.
     await gitProcessRunner(
       runtime.gitPath,
       [
@@ -614,7 +638,6 @@ async function assertPartialCloneSupported(
         ...GIT_HARDENED_CONFIG_FLAGS,
         ...safeFlags,
         "config",
-        "--local",
         "--includes",
         "-z",
         "--get-regexp",

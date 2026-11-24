@@ -7,8 +7,10 @@
 import { execFile as execFileCallback } from "node:child_process";
 import { existsSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
+import net from "node:net";
 import os from "node:os";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { GraphRepositoryError } from "../packages/graph/src/errors.js";
@@ -222,6 +224,106 @@ describe("git-read: git >= 2.45 is required for partial-clone repositories", () 
     const error = await rejection(() => readGitTree(partialRepo, "HEAD"));
     expect(error.code).toBe("compare/git-unavailable");
   }, 60_000);
+
+  it("detects a promisor remote configured only in the worktree config scope", async () => {
+    const worktreeScoped = await makeRepo("causoryn-git-worktree-promisor-");
+    cleanup.push(worktreeScoped);
+    await gitSetup(worktreeScoped, ["config", "core.repositoryformatversion", "1"]);
+    await gitSetup(worktreeScoped, ["config", "extensions.worktreeConfig", "true"]);
+    await gitSetup(worktreeScoped, ["config", "--worktree", "remote.origin.url", "https://example.invalid/repo.git"]);
+    await gitSetup(worktreeScoped, ["config", "--worktree", "remote.origin.promisor", "true"]);
+    // Nothing promisor-related in the repository's own config file.
+    expect(await gitSetup(worktreeScoped, ["config", "--local", "--list"])).not.toContain("promisor");
+    withReportedVersion("git version 2.44.0");
+    const error = await rejection(() => readGitBlob(worktreeScoped, "HEAD", "src/app.ts"));
+    expect(error.code).toBe("compare/git-unavailable");
+    expect(error.message).toContain("git 2.45 or newer is required");
+  }, 60_000);
+});
+
+describe("git-read: no transport can be enabled by repository config", () => {
+  it("sets GIT_ALLOW_PROTOCOL to an empty allowlist and pins ftp/ftps as well", async () => {
+    const repo = await makeRepo("causoryn-git-allow-protocol-");
+    cleanup.push(repo);
+    const seen: Array<{ args: readonly string[]; env: Readonly<Record<string, string>> }> = [];
+    setGitProcessRunnerForTesting((file, args, options) => {
+      seen.push({ args, env: options.env });
+      return defaultGitProcessRunner(file, args, options);
+    });
+    await readGitTree(repo, "HEAD");
+    expect(seen.length).toBeGreaterThan(0);
+    for (const call of seen) {
+      expect(call.env["GIT_ALLOW_PROTOCOL"]).toBe("");
+    }
+    const readArgs = seen.find((call) => call.args.includes("ls-tree"))!.args;
+    for (const protocol of ["ftp", "ftps"]) {
+      expect(readArgs).toContain(`protocol.${protocol}.allow=never`);
+    }
+  }, 60_000);
+
+  it("a partial clone whose repo config allows ftp cannot reach its promisor remote, even if lazy fetch is not disabled", async () => {
+    const connections: string[] = [];
+    const server = net.createServer((socket) => {
+      connections.push(`${socket.remoteAddress ?? "?"}:${String(socket.remotePort ?? 0)}`);
+      socket.destroy();
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const port = (server.address() as net.AddressInfo).port;
+    try {
+      const origin = await makeRepo("causoryn-git-origin-");
+      cleanup.push(origin);
+      await gitSetup(origin, ["config", "uploadpack.allowFilter", "true"]);
+      const cloneParent = realpathSync.native(mkdtempSync(path.join(os.tmpdir(), "causoryn-git-pclone-")));
+      cleanup.push(cloneParent);
+      const clone = path.join(cloneParent, "clone");
+      await execFile(
+        "git",
+        ["clone", "-q", "--no-checkout", "--filter=blob:none", pathToFileURL(origin).href, clone],
+        { shell: false, windowsHide: true },
+      );
+      await gitSetup(clone, ["remote", "set-url", "origin", `ftp://127.0.0.1:${String(port)}/repo.git`]);
+      await gitSetup(clone, ["config", "protocol.ftp.allow", "always"]);
+      await gitSetup(clone, ["config", "protocol.ftps.allow", "always"]);
+      await gitSetup(clone, ["config", "protocol.allow", "always"]);
+      expect(await gitSetup(clone, ["config", "--get", "remote.origin.promisor"])).toContain("true");
+
+      // Simulate a git that ignores GIT_NO_LAZY_FETCH (as git < 2.45 does):
+      // only the protocol restrictions may stop the fetch.
+      setGitProcessRunnerForTesting((file, args, options) => {
+        const env = { ...options.env };
+        delete env["GIT_NO_LAZY_FETCH"];
+        return defaultGitProcessRunner(file, args, { ...options, env });
+      });
+      const error = await rejection(() => readGitBlob(clone, "HEAD", "src/app.ts"));
+      expect(error.code).toBe("compare/blob-not-found");
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      expect(connections).toEqual([]);
+
+      // Same read with the ftp/ftps -c pins removed: the empty
+      // GIT_ALLOW_PROTOCOL allowlist alone must still block the transport.
+      setGitProcessRunnerForTesting((file, args, options) => {
+        const env = { ...options.env };
+        delete env["GIT_NO_LAZY_FETCH"];
+        const stripped: string[] = [];
+        for (let i = 0; i < args.length; i += 1) {
+          const next = args[i + 1];
+          if (args[i] === "-c" && (next === "protocol.ftp.allow=never" || next === "protocol.ftps.allow=never")) {
+            i += 1;
+            continue;
+          }
+          stripped.push(args[i]!);
+        }
+        expect(env["GIT_ALLOW_PROTOCOL"]).toBe("");
+        return defaultGitProcessRunner(file, stripped, { ...options, env });
+      });
+      const second = await rejection(() => readGitBlob(clone, "HEAD", "src/app.ts"));
+      expect(second.code).toBe("compare/blob-not-found");
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      expect(connections).toEqual([]);
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  }, 120_000);
 });
 
 describe("git-read: protected safe.directory entries are forwarded", () => {
