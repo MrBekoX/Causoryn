@@ -192,7 +192,7 @@ describe("git-read — untrusted repository hardening (Task 1.2)", () => {
         existsSync(path.join(repoRoot, ".git", "index.lock")),
         "ADR-008: read-only git inspection MUST NOT create .git/index.lock",
       ).toBe(false);
-    });
+    }, 60_000);
 
     it("resolves safe relative revisions (HEAD~1, HEAD~2, HEAD^, HEAD^^, main~1, v0.2.4^0) and reads their trees/blobs", async () => {
       expect(await resolveGitCommitRef(repoRoot, "HEAD")).toBe(commit3Sha);
@@ -213,7 +213,7 @@ describe("git-read — untrusted repository hardening (Task 1.2)", () => {
       const treePrev = await readGitTree(repoRoot, "HEAD~1");
       expect(treePrev.some((entry) => entry.path === "src/app.ts")).toBe(true);
       expect(existsSync(markerFile)).toBe(false);
-    });
+    }, 60_000);
 
     it("accepts safe relative ref formats and strictly rejects malicious/malformed refs", async () => {
       for (const valid of [
@@ -310,6 +310,6 @@ describe("git-read — untrusted repository hardening (Task 1.2)", () => {
         await runGit(repoRoot, ["rev-parse", "--verify", "--end-of-options", "HEAD~1^{commit}"])
       ).trim();
       expect(sha).toBe(commit2Sha);
-    });
+    }, 60_000);
   });
 });

@@ -27,6 +27,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { beforeAll, describe, expect, it } from "vitest";
 import { createSnapshot } from "@causoryn/domain";
+import { resolveWindowsSystemExecutable } from "@causoryn/sidecar-ipc";
 import { isCargoAvailable } from "../src/cargo.js";
 import {
   analyzeRustWorkspace,
@@ -40,6 +41,8 @@ import {
 } from "../../../tests/rust-worker-build.js";
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
+/** Absolute fake manifest for spawn-injected cargo tests (cargo is never started). */
+const FAKE_MANIFEST_PATH = join(REPO_ROOT, "native", "rust-worker", "sahte", "Cargo.toml");
 const FIXTURE_DIR = join(REPO_ROOT, "examples", "fixture-rust-app");
 
 const FIXTURE_FILES = [
@@ -265,7 +268,7 @@ describe.skipIf(!cargoAvailable)("adapters/rust (M1)", () => {
     expect(capture.child).not.toBeNull();
     expect(capture.child?.killed).toBe(true);
     expect(
-      result.warnings.some((warning) => warning.includes("zaman aşımı")),
+      result.warnings.some((warning) => warning.includes("timeout")),
     ).toBe(true);
   });
 
@@ -349,7 +352,7 @@ describe.skipIf(!cargoAvailable)("adapters/rust (M1)", () => {
         workspaceId: "adapter-rust-invalid",
         files: [{ path: "D:/outside/x.rs", content: "fn x() { }" }],
       }),
-    ).rejects.toThrowError(/Mutlak kaynak yolu/);
+    ).rejects.toThrowError(/Absolute source paths are not accepted/);
   });
 
   it("negatif girdi: '..' kaçışı ve duplicate path adapter API yüzeyinde reddedilir", async () => {
@@ -358,7 +361,7 @@ describe.skipIf(!cargoAvailable)("adapters/rust (M1)", () => {
         workspaceId: "adapter-rust-escape",
         files: [{ path: "../escape.rs", content: "fn x() { }" }],
       }),
-    ).rejects.toThrowError(/kök dışına çıkıyor/);
+    ).rejects.toThrowError(/escapes the workspace root/);
     await expect(
       analyzeRustWorkspace({
         workspaceId: "adapter-rust-duplicate",
@@ -367,7 +370,7 @@ describe.skipIf(!cargoAvailable)("adapters/rust (M1)", () => {
           { path: "a.rs", content: "fn a() { }" },
         ],
       }),
-    ).rejects.toThrowError(/iki kez verildi/);
+    ).rejects.toThrowError(/was given twice/);
   });
 });
 
@@ -432,7 +435,7 @@ describe("adapters/rust runWorkerAnalyze birim davranışları (cargo gerektirme
       },
     });
     expect(outcome.status).toBe("unavailable");
-    expect(outcome.detail).toContain("sınırını aştı");
+    expect(outcome.detail).toContain("character limit");
     // Saklanan kuyruk bütçeye kırpılır: birikim sınırsız büyüyemez.
     expect(outcome.stderr.length).toBeLessThanOrEqual(64);
     expect(killed.length).toBe(1);
@@ -468,7 +471,8 @@ describe("runCargoBuild çıktı bütçesi (spawn enjeksiyonlu)", () => {
   it("negatif: stdout bütçesi aşımı → süreç kill + status:null + açık spawnError", async () => {
     const killed: boolean[] = [];
     const outcome = await runCargoBuild({
-      manifestPath: "sahte/Cargo.toml",
+      manifestPath: FAKE_MANIFEST_PATH,
+      cargoExecutable: process.execPath,
       timeoutMs: 5_000,
       outputMaxChars: 64,
       spawnFn: () => {
@@ -487,14 +491,15 @@ describe("runCargoBuild çıktı bütçesi (spawn enjeksiyonlu)", () => {
       },
     });
     expect(outcome.status).toBeNull();
-    expect(outcome.spawnError).toContain("sınırını aştı");
+    expect(outcome.spawnError).toContain("character limit");
     expect(outcome.stdout.length).toBeLessThanOrEqual(64);
     expect(killed.length).toBe(1);
   });
 
   it("negatif: stderr bütçesi aşımı → süreç kill + spawnError akış adını taşır", async () => {
     const outcome = await runCargoBuild({
-      manifestPath: "sahte/Cargo.toml",
+      manifestPath: FAKE_MANIFEST_PATH,
+      cargoExecutable: process.execPath,
       timeoutMs: 5_000,
       outputMaxChars: 64,
       spawnFn: () => {
@@ -509,13 +514,14 @@ describe("runCargoBuild çıktı bütçesi (spawn enjeksiyonlu)", () => {
     });
     expect(outcome.status).toBeNull();
     expect(outcome.spawnError).toContain("stderr");
-    expect(outcome.spawnError).toContain("sınırını aştı");
+    expect(outcome.spawnError).toContain("character limit");
     expect(outcome.stderr.length).toBeLessThanOrEqual(64);
   });
 
   it("pozitif kontrol: bütçe altındaki koşum exit kodunu aynen taşır", async () => {
     const outcome = await runCargoBuild({
-      manifestPath: "sahte/Cargo.toml",
+      manifestPath: FAKE_MANIFEST_PATH,
+      cargoExecutable: process.execPath,
       timeoutMs: 5_000,
       outputMaxChars: 4_096,
       spawnFn: () => {
@@ -544,13 +550,14 @@ describe("runCargoBuild çıktı bütçesi (spawn enjeksiyonlu)", () => {
     const spawned: Array<{ command: string; args: readonly string[] }> = [];
     const killed: boolean[] = [];
     const outcome = await runCargoBuild({
-      manifestPath: "sahte/Cargo.toml",
+      manifestPath: FAKE_MANIFEST_PATH,
+      cargoExecutable: process.execPath,
       timeoutMs: 120,
       spawnFn: (command, args) => {
         spawned.push({ command, args: [...args] });
         const child = makeFakeWorkerChild({});
         const record = child as unknown as Record<string, unknown>;
-        record.pid = command === "cargo" ? 7777 : undefined;
+        record.pid = command === process.execPath ? 7777 : undefined;
         record.kill = () => {
           killed.push(true);
           return true;
@@ -559,22 +566,23 @@ describe("runCargoBuild çıktı bütçesi (spawn enjeksiyonlu)", () => {
       },
     });
     expect(outcome.status).toBeNull();
-    expect(outcome.spawnError).toContain("zaman aşımı");
+    expect(outcome.spawnError).toContain("timeout");
     // Doğrudan kill her koşulda uygulanır (ağaç-kill ek savunmadır).
     expect(killed.length).toBe(1);
     // İkinci spawn: LİTERAL "taskkill" + SADECE kendi çocuğumuzun sayısal
     // pid'i (/T ağaç, /F zorla). rustc/codegen torun süreçleri finite'dir
     // ama savunma derinliği go worker deseniyle sağlanır.
     expect(spawned.length).toBe(2);
-    expect(spawned[0]?.command).toBe("cargo");
-    expect(spawned[1]?.command).toBe("taskkill");
+    expect(spawned[0]?.command).toBe(process.execPath);
+    expect(spawned[1]?.command).toBe(resolveWindowsSystemExecutable("taskkill.exe"));
     expect(spawned[1]?.args).toEqual(["/pid", "7777", "/T", "/F"]);
   }, 10_000);
 
   it("pozitif kontrol: zaman aşımına uğramayan koşumda ağaç-kill çağrılmaz", async () => {
     const spawned: Array<{ command: string }> = [];
     const outcome = await runCargoBuild({
-      manifestPath: "sahte/Cargo.toml",
+      manifestPath: FAKE_MANIFEST_PATH,
+      cargoExecutable: process.execPath,
       timeoutMs: 5_000,
       spawnFn: (command) => {
         spawned.push({ command });
@@ -587,6 +595,6 @@ describe("runCargoBuild çıktı bütçesi (spawn enjeksiyonlu)", () => {
     });
     expect(outcome.status).toBe(0);
     expect(spawned.length).toBe(1);
-    expect(spawned[0]?.command).toBe("cargo");
+    expect(spawned[0]?.command).toBe(process.execPath);
   });
 });
