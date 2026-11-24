@@ -3,7 +3,7 @@
   "version": "0.3.0",
   "private": true,
   "license": "MIT",
-  "description": "Go Language Adapter: go/parser + go/ast sidecar worker süreç yönetimi (TŞ v2.1 §7, §23 dil planı; M1-Go).",
+  "description": "Go language adapter: runs the go/parser + go/ast sidecar worker (go run or a prebuilt binary) with request timeouts and an L0/L1 fallback.",
   "type": "module",
   "exports": {
     ".": "./src/index.ts"

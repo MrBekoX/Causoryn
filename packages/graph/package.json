@@ -3,7 +3,7 @@
   "version": "0.3.0",
   "private": true,
   "license": "MIT",
-  "description": "GraphRepository sözleşmesi ve bellek içi gerçekleme: building → ready/partial atomik snapshot yayımlama, stale bayrağı (TŞ v2.1 §8, §9, ADR-005).",
+  "description": "Graph repository contract with an in-memory implementation, plus the analyses that run on published snapshots: impact, call and business-flow tracing, architecture guard and comparison, agent context, onboarding, timeline and documentation export.",
   "type": "module",
   "exports": {
     ".": "./src/index.ts"

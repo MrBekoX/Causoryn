@@ -3,7 +3,7 @@
   "version": "0.3.0",
   "private": true,
   "license": "MIT",
-  "description": "Workspace Gateway: trusted root doğrulaması, file inventory, ignore, symlink escape ve binary/size filtreleri (TŞ v2.1 §5, §9, §25/2).",
+  "description": "Workspace gateway: trusted-root validation, file inventory, ignore rules, symlink-escape protection, binary and size filters, and output path policies.",
   "type": "module",
   "exports": {
     ".": "./src/index.ts"

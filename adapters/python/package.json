@@ -3,7 +3,7 @@
   "version": "0.3.0",
   "private": true,
   "license": "MIT",
-  "description": "Python Language Adapter: stdlib ast sidecar worker süreç yönetimi (TŞ v2.1 §7; M1-Python).",
+  "description": "Python language adapter: runs the stdlib ast sidecar worker with request timeouts and an L0/L1 fallback.",
   "type": "module",
   "exports": {
     ".": "./src/index.ts"

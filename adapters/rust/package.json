@@ -3,7 +3,7 @@
   "version": "0.3.0",
   "private": true,
   "license": "MIT",
-  "description": "Rust Language Adapter: syn sidecar worker süreç yönetimi (TŞ v2.1 §7; native/rust-worker).",
+  "description": "Rust language adapter: builds and runs the syn-based sidecar worker with request timeouts and an L0/L1 fallback.",
   "type": "module",
   "exports": {
     ".": "./src/index.ts"

@@ -3,7 +3,7 @@
   "version": "0.3.0",
   "private": true,
   "license": "MIT",
-  "description": "Graph/Evidence domain sözleşmeleri, canonical JSON ve deterministik ID üretimi (TŞ v2.1 §8).",
+  "description": "Causoryn graph and evidence domain contracts: node, edge and evidence schemas, canonical JSON, deterministic IDs and snapshot construction.",
   "type": "module",
   "exports": {
     ".": "./src/index.ts"

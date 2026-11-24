@@ -3,6 +3,6 @@
   "version": "0.3.0",
   "private": true,
   "license": "MIT",
-  "description": "Causoryn ZCode plugin paketi — .zcode-plugin/plugin.json (inline mcpServers + skills), map-system skill'i ve tanıtım README (TŞ v2.1 §17/§25-8, wiki/decisions.md K-002).",
+  "description": "Causoryn ZCode plugin (monorepo development fixture): .zcode-plugin/plugin.json with an inline stdio MCP server, the map-system skill and a README.",
   "type": "module"
 }
