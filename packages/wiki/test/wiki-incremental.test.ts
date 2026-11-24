@@ -527,7 +527,7 @@ describe("kök sayfa coverage.detail — desteklenmeyen tür yapısal detayı EZ
     const flows = proj.pages.find((page) => page.title === "Business Flows");
     expect(flows?.coverage.status).toBe("unsupported");
     expect(flows?.coverage.detail).toBe(
-      "sayfa türü 'business_flow' bu adapter kümesi tarafından desteklenmiyor",
+      "page kind 'business_flow' is not supported by this adapter set",
     );
 
     const timeline = proj.pages.find(
@@ -535,7 +535,7 @@ describe("kök sayfa coverage.detail — desteklenmeyen tür yapısal detayı EZ
     );
     expect(timeline?.coverage.status).toBe("unsupported");
     expect(timeline?.coverage.detail).toBe(
-      "sayfa türü 'timeline' bu adapter kümesi tarafından desteklenmiyor",
+      "page kind 'timeline' is not supported by this adapter set",
     );
 
     // Desteklendiğinde yapısal no_data detayı döner (her iki koşul ayrı).
@@ -545,7 +545,7 @@ describe("kök sayfa coverage.detail — desteklenmeyen tür yapısal detayı EZ
     );
     expect(flowsSupported?.coverage.status).toBe("no_data");
     expect(flowsSupported?.coverage.detail).toBe(
-      "uçtan uca iş akışı (execution flow) verisi GraphSnapshot'ta taşınmıyor",
+      "end-to-end execution flow data is not carried in the GraphSnapshot",
     );
   });
 
@@ -567,7 +567,7 @@ describe("kök sayfa coverage.detail — desteklenmeyen tür yapısal detayı EZ
     );
     expect(flows?.coverage.status).toBe("unsupported");
     expect(flows?.coverage.detail).toBe(
-      "sayfa türü 'business_flow' bu adapter kümesi tarafından desteklenmiyor",
+      "page kind 'business_flow' is not supported by this adapter set",
     );
     // Desteklenmeyen kök sayfa içeriği sabittir → hash korunur (no-op).
     expect(step.report.regeneratedPageIds).not.toContain(flows?.id);
@@ -702,7 +702,7 @@ describe("incremental desteklenmeyen durumlar — graceful full-rebuild", () => 
       builtAt: T2,
     });
     expect(fallback.report.mode).toBe("full-rebuild");
-    expect(fallback.report.warnings.some((w) => /şablon|template/i.test(w))).toBe(true);
+    expect(fallback.report.warnings.some((w) => /template version changed/.test(w))).toBe(true);
   });
 
   it("desteklenen sayfa türü kümesi değişmişse → full-rebuild + uyarı", () => {
@@ -718,7 +718,7 @@ describe("incremental desteklenmeyen durumlar — graceful full-rebuild", () => 
     });
     expect(fallback.report.mode).toBe("full-rebuild");
     expect(
-      fallback.report.warnings.some((w) => /sayfa türü|supportedPageKinds/i.test(w)),
+      fallback.report.warnings.some((w) => /supported page kind set changed \(supportedPageKinds\)/.test(w)),
     ).toBe(true);
     expect(wikiProjectionCanonicalJson(fallback.projection)).toBe(
       wikiProjectionCanonicalJson(

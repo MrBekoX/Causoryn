@@ -1807,12 +1807,12 @@ describe("wikiDiff eksiksizliği + K-013 #2 mod disiplini", { timeout: 60_000 },
       expect(byKind("added")).toEqual({
         contractId: contractNodeId(schemaTarget),
         changeKind: "added",
-        summary: "table:customers added: hedef WikiSnapshot'ın graph sözleşme yüzeyinde yeni kayıt",
+        summary: "table:customers added: new entry in the target WikiSnapshot's graph contract surface",
       });
       expect(byKind("removed")).toEqual({
         contractId: contractNodeId(eventBase),
         changeKind: "removed",
-        summary: "app.OrderCreated removed: hedef WikiSnapshot'ın graph sözleşme yüzeyinde kayıt yok",
+        summary: "app.OrderCreated removed: no entry in the target WikiSnapshot's graph contract surface",
       });
       // Modified summary içerik karması farkını taşır (base/target karma
       // parçaları; uydurma özet değil, yüzey karmalarından türetim).
