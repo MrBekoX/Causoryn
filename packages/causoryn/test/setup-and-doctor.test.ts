@@ -1146,6 +1146,7 @@ describe(
       path.join("scripts", "causoryn.mjs"),
       path.join("scripts", "plugin-mcp-launcher.mjs"),
       path.join("scripts", "lib", "node-version-guard.mjs"),
+      path.join("scripts", "lib", "asset-root.mjs"),
     ]) {
       const rawBytes = readFileSync(path.join(CAUSORYN_PKG_DIR, relScript));
       expect(rawBytes.includes(0x0d), `${relScript} contains CR (\\r) bytes`).toBe(false);
@@ -1167,10 +1168,12 @@ describe(
       path.join(CAUSORYN_PKG_DIR, "scripts", "plugin-mcp-launcher.mjs"),
       path.join(fakePkg, "scripts", "plugin-mcp-launcher.mjs"),
     );
-    copyFileSync(
-      path.join(CAUSORYN_PKG_DIR, "scripts", "lib", "node-version-guard.mjs"),
-      path.join(fakePkg, "scripts", "lib", "node-version-guard.mjs"),
-    );
+    for (const lib of ["node-version-guard.mjs", "asset-root.mjs"]) {
+      copyFileSync(
+        path.join(CAUSORYN_PKG_DIR, "scripts", "lib", lib),
+        path.join(fakePkg, "scripts", "lib", lib),
+      );
+    }
     // Stub MCP server prints forwarded argv to stdout
     writeFileSync(
       path.join(fakePkg, "dist", "mcp-server.mjs"),
@@ -1535,6 +1538,11 @@ describe(
       writeFileSync(
         path.join(pkgDir, "scripts", "lib", "node-version-guard.mjs"),
         "export function assertSupportedNodeVersion() {}\n",
+        "utf8",
+      );
+      writeFileSync(
+        path.join(pkgDir, "scripts", "lib", "asset-root.mjs"),
+        "export function resolveAssetRootOverride() {}\n",
         "utf8",
       );
       return pkgDir;
