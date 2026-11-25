@@ -6,7 +6,7 @@
 >
 > **Tek paragrafta tehdit modeli:** Causoryn güvenmediği depoları analiz eder. Analiz edilen bir workspace içindeki kaynak dosyalar, yorumlar, yapılandırma dosyaları, Git metadata'sı ve araç zinciri yapılandırması asla talimat veya yürütülebilir yapılandırma olarak değil, her zaman veri olarak ele alınır. Causoryn hiçbir model veya telemetri çağrısı yapmaz, workspace'e hiçbir şey yazmaz, kendi veritabanını ayrı bir veri dizininde tutar ve sonuçları yalnızca MCP `stdio` üzerinden döndürür.
 
-**Bundle kimliği:** `packages/mcp-server/dist/mcp-server.mjs` SHA-256 `f056d5dcbd5bb68e90948fdde034057f29e373107e89fa9debde060673750150`. `dist/bundle-manifest.json` bu özeti `index-worker.mjs`, `mcp-server.mjs.LEGAL.txt` ve vendored native SQLite çalışma zamanıyla birlikte kaydeder (36 kayıt). Özet tek bir yerel build'i tanımlar; aşağıdaki tarihli sonuçlar matriste listelenen test oturumlarını açıklar.
+**Bundle kimliği:** `packages/mcp-server/dist/mcp-server.mjs` SHA-256 `9be4a1a95f75d814a94012ec6f62930fc4d85aeabcb2de09726743bb938c4d1d`. `dist/bundle-manifest.json` bu özeti `index-worker.mjs`, `mcp-server.mjs.LEGAL.txt` ve vendored native SQLite çalışma zamanıyla birlikte kaydeder (36 kayıt). Özet tek bir yerel build'i tanımlar; aşağıdaki tarihli sonuçlar matriste listelenen test oturumlarını açıklar.
 
 ## 1. Çalışma zamanı güvenlik sınırları
 
