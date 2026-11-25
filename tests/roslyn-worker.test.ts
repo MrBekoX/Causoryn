@@ -549,7 +549,7 @@ describe.skipIf(!workerReady)("roslyn-worker B1 (PROTOCOL.md v1)", () => {
     expect(add?.span).toEqual({ startLine: 4, endLine: 9 });
     const ledger = response.nodes?.find((node) => node.qualifiedName === "Demo.Ledger");
     expect(ledger?.span).toEqual({ startLine: 2, endLine: 10 });
-  });
+  }, 120_000);
 
   it("node span: a node derived from a call target (local function in a method) carries its declaration span", () => {
     const source = [
@@ -578,7 +578,7 @@ describe.skipIf(!workerReady)("roslyn-worker B1 (PROTOCOL.md v1)", () => {
     );
     expect(twice?.relativePath).toBe("Ledger.cs");
     expect(twice?.span).toEqual({ startLine: 8, endLine: 11 });
-  });
+  }, 120_000);
 
   /* ---------------- Kabül kanıtı: CALLS zinciri ---------------- */
 

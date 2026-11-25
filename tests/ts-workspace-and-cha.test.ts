@@ -1048,7 +1048,7 @@ describe("Wave 2A — C# Read-Only NuGet obj/project.assets.json Discovery", { t
         },
       });
       expect(adapterRes.workerAvailable).toBe(true);
-      expect(capturedRequest?.["referenceDirs"]).toEqual([pkgLibDir]);
+      expect(capturedRequest?.["referenceDirs"]).toEqual([realpathSync(pkgLibDir)]);
 
       // End-to-end with real Roslyn worker: resolve Causoryn.RoslynWorker.ProtocolConstants via discovered NuGet DLL!
       if (dotnetAvailable && existsSync(ROSLYN_WORKER_DLL)) {
