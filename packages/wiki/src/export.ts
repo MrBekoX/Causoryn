@@ -1,3 +1,4 @@
+import { randomBytes } from "node:crypto";
 import { mkdirSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import path from "node:path";
 
@@ -33,9 +34,11 @@ import { WikiProjectionSchema, type EvidenceRef, type WikiPage, type WikiPageSec
  *   OutputAccessPolicy (K-012, sprint-3 C6) ile denetlenir; wiki_build'in
  *   data-root'u ile KARIŞTIRILMAZ: export kullanıcı beyanlı output dizinine
  *   yazılır (wiki/mcp-tools.md yazma izin matrisi). Reddedilen hedefe hiçbir
- *   dosya HİÇBİR alt dizin oluşturulmadan yazılmaz. Her dosya `.tmp` + rename
- *   ile atomiktir; tmp önceden silinir (output dizinine konmuş symlink
- *   üzerinden kaçış kapatılır — C6 güvenlik bulgusu deseni).
+ *   dosya HİÇBİR alt dizin oluşturulmadan yazılmaz. Each file is written
+ *   atomically: content goes to a unique, unpredictable temp name in the
+ *   target directory opened with O_CREAT|O_EXCL (`wx`), then renamed over
+ *   the target. A pre-existing entry (file, directory or symlink) at any
+ *   temp-like path is never followed, removed or reused.
  *
  * HTML güvenliği (TŞ §16 + §16A.9): TÜM dinamik değerler escapeHtmlText'ten
  * geçer; belgede <script>, <link>, <iframe>, harici kaynak, CDN URL'si,
@@ -623,7 +626,7 @@ export interface WikiExportWrittenFile {
   readonly path: string;
   /** UTF-8 bayt uzunluğu. */
   readonly bytes: number;
-  /** Yazma daima atomiktir: `.tmp` + rename. */
+  /** Always atomic: unique `wx` temp file in the target directory + rename. */
   readonly atomic: true;
 }
 
@@ -647,7 +650,7 @@ function contractCodeFor(decisionCode: string): "wiki/output-not-authorized" | "
  * kümesi üretilir → hedef OutputAccessPolicy ile denetlenir (reddedilen
  * hedefe HİÇBİR dosya yazılmaz, HİÇBİR alt dizin açılmaz) → markdown alt
  * dizini açılıp yeniden yetkilendirilir (realpath sarmalama, CWE-59) → her
- * dosya `.tmp` + rename ile atomik yazılır.
+ * dosya unique `wx` temp file + rename ile atomik yazılır.
  *
  * İşlem kapsamı (takım denetimi davranış notu, test ile kanıtlı): TÜM KÜME
  * atomik DEĞİLDİR — TŞ §16 "atomik write" dosya düzeyi taahhüttür
@@ -730,22 +733,26 @@ export function exportWikiOffline(
       );
     }
     const targetPath = decision.canonicalPath;
-    const tmpPath = `${targetPath}.tmp`;
+    // Unique temp name next to the target (same directory, so rename stays
+    // atomic). `wx` = O_CREAT|O_EXCL: the open fails instead of following or
+    // reusing any entry that already exists at that path.
+    const tmpPath = path.join(
+      path.dirname(targetPath),
+      `.${path.basename(targetPath)}.${randomBytes(12).toString("hex")}.tmp`,
+    );
+    let tmpCreated = false;
     try {
-      // C6 savunma derinliği: kalan .tmp girdisi (özellikle önceden konmuş
-      // symlink) yazmadan ÖNCE kaldırılır; bağın hedefi dokunulmaz kalır.
-      try {
-        unlinkSync(tmpPath);
-      } catch {
-        // tmp yok: temizlik gereksiz; asıl yazma aşağıda.
-      }
-      writeFileSync(tmpPath, file.content, "utf8");
+      writeFileSync(tmpPath, file.content, { encoding: "utf8", flag: "wx" });
+      tmpCreated = true;
       renameSync(tmpPath, targetPath);
+      tmpCreated = false;
     } catch (error) {
-      try {
-        unlinkSync(tmpPath);
-      } catch {
-        // tmp oluşmadıysa temizlik gereksiz; asıl hata aşağıda raporlanır.
+      if (tmpCreated) {
+        try {
+          unlinkSync(tmpPath);
+        } catch {
+          // Best-effort cleanup of our own temp file; the write error is reported below.
+        }
       }
       throw new WikiProjectionError(
         "wiki/export-write-failed",
