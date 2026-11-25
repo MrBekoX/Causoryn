@@ -1,5 +1,7 @@
 import { z } from "zod";
 
+import { escapeMarkdownBlock, escapeMarkdownInline, markdownCodeSpan } from "@causoryn/domain";
+
 import { AnnotationOverlayError } from "./errors.js";
 
 /**
@@ -336,19 +338,26 @@ export function renderAnnotationBlock(annotation: WikiAnnotation): string {
         annotation.verified === true ? "true" : "false"
       }`
     : "Overlay note — human";
+  // Identifiers render as code spans and the body as escaped Markdown text:
+  // annotation text is user/host input and must stay inside this blockquote
+  // (no fence, heading, HTML, link, image or autolink). escapeMarkdownBlock
+  // normalises CR/CRLF to LF first, so every rendered line gets the `> `
+  // prefix and no CommonMark line ending escapes the quote.
   const parts = [
-    `sectionKey:\`${annotation.sectionKey}\``,
-    `annotationId:\`${annotation.id}\``,
+    `sectionKey:${markdownCodeSpan(annotation.sectionKey)}`,
+    `annotationId:${markdownCodeSpan(annotation.id)}`,
     `annotationVersion=${String(annotation.annotationVersion)}`,
   ];
   if (annotation.origin !== undefined) {
-    parts.push(`origin=${annotation.origin}`);
+    parts.push(`origin=${escapeMarkdownInline(annotation.origin)}`);
   }
   if (!isHost && annotation.verified !== undefined) {
     parts.push(`verified=${annotation.verified ? "true" : "false"}`);
   }
   const header = `> **[${label}]** ${parts.join(" · ")}`;
-  const bodyLines = annotation.body.split("\n").map((line) => `> ${line}`);
+  const bodyLines = escapeMarkdownBlock(annotation.body)
+    .split("\n")
+    .map((line) => `> ${line}`);
   return [header, ">", ...bodyLines].join("\n");
 }
 

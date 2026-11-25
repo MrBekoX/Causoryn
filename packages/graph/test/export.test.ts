@@ -378,6 +378,32 @@ describe("Mermaid serializer (deterministik flowchart)", () => {
     expect(serializeDocumentationMermaid(positiveGraph())).toBe(a);
     expect(serializeDocumentationMermaid(shuffledGraph())).toBe(a);
   });
+
+  it("neutralises Mermaid directives, comments and quote breakout in node labels", () => {
+    const hostile = createSnapshot({
+      workspaceId: "ws-mermaid-hostile",
+      revision: { id: "rev-mermaid-hostile", sequence: 1 },
+      configHash: "cfg-mermaid-hostile",
+      analyzerFingerprint: "typescript-adapter@0.1.0",
+      state: "ready",
+      createdAt: CREATED_AT,
+      nodes: [
+        nodeInput("Function", "app::%%{init: {'theme':'dark'}}%%", "src/a.ts", 1, 2),
+        nodeInput("Function", 'app::x"]\nclick n0 call alert(1)\n%% c `md`', "src/b.ts", 3, 4),
+      ],
+      edges: [],
+    });
+    const output = serializeDocumentationMermaid(hostile);
+    const lines = output.trimEnd().split("\n");
+    expect(lines[0]).toBe("flowchart TD");
+    expect(lines).toHaveLength(3);
+    for (const line of lines.slice(1)) {
+      expect(line).toMatch(/^ {2}n\d+\["[^"]*"\]$/);
+    }
+    expect(output).not.toContain("%%");
+    expect(output).not.toMatch(/[{}`]/);
+    expect(output).not.toMatch(/^\s*click\b/m);
+  });
 });
 
 describe("HTML serializer (offline self-contained)", () => {

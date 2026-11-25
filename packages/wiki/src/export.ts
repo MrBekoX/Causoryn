@@ -1,6 +1,11 @@
 import { mkdirSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import path from "node:path";
 
+import {
+  escapeMarkdownBlock,
+  escapeMarkdownInline,
+  escapeMarkdownTableCell,
+} from "@causoryn/domain";
 import { OutputAccessPolicy } from "@causoryn/workspace";
 
 import { WikiProjectionError } from "./errors.js";
@@ -44,12 +49,13 @@ import { WikiProjectionSchema, type EvidenceRef, type WikiPage, type WikiPageSec
  * ham URL öbeği bile kalmaz (linkifier'ların tıklanabilir bağ üretmesi de
  * engellenir).
  *
- * Markdown güvenliği: hücre değerleri (başlık, yol, slug) GFM hücre
- * kaçışıyla kaçırılır (C6 escapeMarkdownCell deseni — kaçırılmayan
- * `![x](https://...)` ağa erişimli GFM görüntüleyicide beacon'dır).
- * Bölüm gövdelerinde satır yapısı korunurken ham inline HTML (`<` → `\<`) ve
- * görsel gömmeleri (`![` → `\![`) nötralize edilir; düz metin linkler
- * korunur (tıklama gerektirir, otomatik ağ isteği yapmaz).
+ * Markdown safety: escaping is shared through @causoryn/domain
+ * (markup-escape.ts), one helper per output context. Titles, ids, paths and
+ * warnings use `escapeMarkdownInline` (single line), the page index table
+ * uses `escapeMarkdownTableCell`, and section bodies use
+ * `escapeMarkdownBlock`, which keeps the generated line/list structure while
+ * escaping code spans, fences, headings, blockquotes, HTML, links and images
+ * on every line, normalising CR/CRLF to LF and defanging bare autolinks.
  *
  * Deterministik dosya adları: pageId kanonik sırasında sanitize edilmiş
  * slug + çakışmada `slug-<pageId[5..13]>` sondası (projection.ts:840
@@ -118,47 +124,10 @@ function escapeHtml(value: string): string {
  * http(s) kapsar. Gövdeye sızan file:// dizgisi HTML'e kaçışlı DÜZ METİN
  * olarak geçer — href üretilmediğinden link AÇILAMAZ (TŞ §16A.9 "keyfi
  * file:// link açma yetkisi verilmez" sağlanır) ve .md'de tıklama
- * gerektiren metindir (escapeMarkdownBody'deki tasarımsal koruma).
+ * gerektiren metindir (Markdown body text is escaped by escapeMarkdownBlock).
  */
 function escapeHtmlText(value: string): string {
   return escapeHtml(value).replace(/https?:\/\//g, (match) => match.replace(":", "&#58;"));
-}
-
-/**
- * Markdown hücre kaçışı (C6 escapeMarkdownCell deseni): GFM hücre ayracı,
- * satır sonları ve link/HTML metakarakterleri. Başlıklar ve meta değerleri
- * için kullanılır — kaçırılmayan `![x](https://...)` dizgisi ağa erişimli
- * GFM görüntüleyicide beacon/link'tir.
- */
-function escapeMarkdownCell(value: string): string {
-  return value
-    .replace(/\\/g, "\\\\")
-    .replace(/\|/g, "\\|")
-    .replace(/!/g, "\\!")
-    .replace(/\[/g, "\\[")
-    .replace(/\]/g, "\\]")
-    .replace(/\(/g, "\\(")
-    .replace(/\)/g, "\\)")
-    .replace(/</g, "\\<")
-    .replace(/>/g, "\\>")
-    .replace(/[\r\n\t]+/g, " ");
-}
-
-/**
- * Markdown blok gövde kaçışı: satır yapısı KORUNUR (hücre kaçışının aksine
- * satır sonları sıkıştırılmaz); ham inline HTML (`<` → `\<`, `>` → `\>`) ve
- * görsel gömmeleri (`![` → `\![`) nötralize edilir. `>` kaçışı yalnızca
- * kapanış etiketi kalıntısını temizlemez; satır başı `>` blockquote
- * sahteciliğini de kapatır. GFM'de `\<`/`\>`/`\!` sabit noktalama kaçışları
- * okunabilirliği korur. Düz `[link](url)` metni korunur: GFM'de tıklama
- * gerektiren bağdır, otomatik ağ isteği yapmaz.
- */
-function escapeMarkdownBody(value: string): string {
-  return value
-    .replace(/\\/g, "\\\\")
-    .replace(/</g, "\\<")
-    .replace(/>/g, "\\>")
-    .replace(/!\[/g, "\\![");
 }
 
 /* ------------------------------------------------------------------ */
@@ -343,16 +312,16 @@ function buildPageViews(projection: WikiProjection): readonly PageView[] {
 /** Bölüm bloğu (paylaşılan md kuralı): başlık + durum + kanıt + gövde. */
 function markdownSectionBlock(section: WikiPageSection): string[] {
   const lines: string[] = [];
-  lines.push(`## ${escapeMarkdownCell(section.sectionKey)}`);
+  lines.push(`## ${escapeMarkdownInline(section.sectionKey)}`);
   lines.push("");
-  lines.push(`- status: ${escapeMarkdownCell(section.status)}`);
+  lines.push(`- status: ${escapeMarkdownInline(section.status)}`);
   const refs = [...section.evidenceRefs].sort(byEvidenceRef);
   for (const ref of refs) {
-    lines.push(`- evidence: ${escapeMarkdownCell(formatEvidenceRef(ref))}`);
+    lines.push(`- evidence: ${escapeMarkdownInline(formatEvidenceRef(ref))}`);
   }
   if (section.generatedMarkdown.length > 0) {
     lines.push("");
-    lines.push(escapeMarkdownBody(section.generatedMarkdown));
+    lines.push(escapeMarkdownBlock(section.generatedMarkdown));
   }
   lines.push("");
   return lines;
@@ -366,17 +335,17 @@ function markdownSectionBlock(section: WikiPageSection): string[] {
  */
 function renderPageMarkdown(view: PageView): string {
   const lines: string[] = [];
-  lines.push(`# ${escapeMarkdownCell(view.page.title)}`);
+  lines.push(`# ${escapeMarkdownInline(view.page.title)}`);
   lines.push("");
-  lines.push(`- pageId: ${escapeMarkdownCell(view.page.id)}`);
-  lines.push(`- wikiSnapshotId: ${escapeMarkdownCell(view.page.wikiSnapshotId)}`);
-  lines.push(`- kind: ${escapeMarkdownCell(view.page.kind)}`);
-  lines.push(`- parentId: ${view.page.parentId === null ? "(root)" : escapeMarkdownCell(view.page.parentId)}`);
-  lines.push(`- slug: ${escapeMarkdownCell(view.page.slug)}`);
-  lines.push(`- route: ${escapeMarkdownCell(view.page.route)}`);
-  lines.push(`- freshness: ${escapeMarkdownCell(view.page.freshness)}`);
-  lines.push(`- coverage: ${escapeMarkdownCell(coverageLabel(view.page.coverage))}`);
-  lines.push(`- contentHash: ${escapeMarkdownCell(view.page.contentHash)}`);
+  lines.push(`- pageId: ${escapeMarkdownInline(view.page.id)}`);
+  lines.push(`- wikiSnapshotId: ${escapeMarkdownInline(view.page.wikiSnapshotId)}`);
+  lines.push(`- kind: ${escapeMarkdownInline(view.page.kind)}`);
+  lines.push(`- parentId: ${view.page.parentId === null ? "(root)" : escapeMarkdownInline(view.page.parentId)}`);
+  lines.push(`- slug: ${escapeMarkdownInline(view.page.slug)}`);
+  lines.push(`- route: ${escapeMarkdownInline(view.page.route)}`);
+  lines.push(`- freshness: ${escapeMarkdownInline(view.page.freshness)}`);
+  lines.push(`- coverage: ${escapeMarkdownInline(coverageLabel(view.page.coverage))}`);
+  lines.push(`- contentHash: ${escapeMarkdownInline(view.page.contentHash)}`);
   lines.push("");
   for (const section of view.sections) {
     lines.push(...markdownSectionBlock(section));
@@ -412,20 +381,20 @@ function renderIndexMarkdown(valid: WikiProjection): string {
   lines.push("");
   lines.push("## Snapshot");
   lines.push("");
-  lines.push(`- wikiSnapshotId: ${escapeMarkdownCell(valid.snapshot.id)}`);
-  lines.push(`- workspaceId: ${escapeMarkdownCell(valid.snapshot.workspaceId)}`);
-  lines.push(`- graphSnapshotId: ${escapeMarkdownCell(valid.snapshot.graphSnapshotId)}`);
-  lines.push(`- revisionRef: ${escapeMarkdownCell(valid.snapshot.revisionRef)}`);
-  lines.push(`- status: ${escapeMarkdownCell(valid.snapshot.status)}`);
-  lines.push(`- builtAt: ${escapeMarkdownCell(valid.snapshot.builtAt)}`);
-  lines.push(`- templateVersion: ${escapeMarkdownCell(valid.snapshot.templateVersion)}`);
+  lines.push(`- wikiSnapshotId: ${escapeMarkdownInline(valid.snapshot.id)}`);
+  lines.push(`- workspaceId: ${escapeMarkdownInline(valid.snapshot.workspaceId)}`);
+  lines.push(`- graphSnapshotId: ${escapeMarkdownInline(valid.snapshot.graphSnapshotId)}`);
+  lines.push(`- revisionRef: ${escapeMarkdownInline(valid.snapshot.revisionRef)}`);
+  lines.push(`- status: ${escapeMarkdownInline(valid.snapshot.status)}`);
+  lines.push(`- builtAt: ${escapeMarkdownInline(valid.snapshot.builtAt)}`);
+  lines.push(`- templateVersion: ${escapeMarkdownInline(valid.snapshot.templateVersion)}`);
   lines.push(`- pages: ${String(valid.pages.length)}`);
   lines.push(`- sections: ${String(valid.sections.length)}`);
   lines.push("");
   lines.push(`## Warnings (${String(valid.warnings.length)})`);
   lines.push("");
   for (const warning of valid.warnings) {
-    lines.push(`- ${escapeMarkdownCell(warning)}`);
+    lines.push(`- ${escapeMarkdownInline(warning)}`);
   }
   lines.push("");
   lines.push("## Page index");
@@ -435,7 +404,7 @@ function renderIndexMarkdown(valid: WikiProjection): string {
   for (const view of views) {
     const fileName = fileNames.get(view.page.id) ?? "";
     lines.push(
-      `| ${escapeMarkdownCell(view.page.title)} | ${escapeMarkdownCell(view.page.kind)} | ${escapeMarkdownCell(view.page.freshness)} | ${escapeMarkdownCell(coverageLabel(view.page.coverage))} | ${escapeMarkdownCell(`${WIKI_EXPORT_MARKDOWN_DIR_NAME}/${fileName}`)} |`,
+      `| ${escapeMarkdownTableCell(view.page.title)} | ${escapeMarkdownTableCell(view.page.kind)} | ${escapeMarkdownTableCell(view.page.freshness)} | ${escapeMarkdownTableCell(coverageLabel(view.page.coverage))} | ${escapeMarkdownTableCell(`${WIKI_EXPORT_MARKDOWN_DIR_NAME}/${fileName}`)} |`,
     );
   }
   lines.push("");
