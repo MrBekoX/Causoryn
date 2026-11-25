@@ -41,11 +41,9 @@ import { createHash, randomBytes } from "node:crypto";
 import {
   closeSync,
   constants as fsConstants,
-  fstatSync,
   lstatSync,
   openSync,
   readdirSync,
-  readSync,
   renameSync,
   rmSync,
   type Stats,
@@ -58,6 +56,13 @@ import {
   isSafeCommandPath,
   resolveCargoHomeDir,
 } from "./cargo.js";
+import {
+  hashRegularFileNoFollow,
+  preparePrivateDirectory,
+  readRegularFileBytesNoFollow,
+  untrustedFileReason,
+  type FileIdentity,
+} from "./file-integrity.js";
 import {
   collectUntrustedRoots,
   isFullyQualifiedPath,
@@ -89,6 +94,7 @@ import {
 } from "./types.js";
 
 export { defaultWritableRustTargetDir } from "./types.js";
+export { readRegularFileSha256NoFollow } from "./file-integrity.js";
 
 /** cargo-home override çözümlemesi (options.cargoHomeDir önceliklidir). */
 function resolveCargoHome(options: Partial<RustAdapterOptions> | undefined): string | null {
@@ -178,8 +184,6 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 /* ------------------------------------------------------------------ */
 
 const HEX_SHA256_RE = /^[0-9a-f]{64}$/;
-const NOFOLLOW_READ_FLAGS =
-  fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0);
 const INTEGRITY_META_MAX_BYTES = 64 * 1024;
 
 export interface RustWorkerIntegrityRecord {
@@ -197,93 +201,6 @@ function lstatOrNull(filePath: string): Stats | null {
     return lstatSync(filePath);
   } catch {
     return null;
-  }
-}
-
-/**
- * Dosyayı lstatSync + O_NOFOLLOW + fstatSync kimlik eşleşmesiyle okur.
- * Symlink / dizin / özel dosya veya açma-arası değişim (TOCTOU) reddedilir.
- */
-function readRegularFileBytesNoFollow(
-  filePath: string,
-  maxBytes?: number,
-): Buffer | null {
-  const st = lstatOrNull(filePath);
-  if (st === null || st.isSymbolicLink() || !st.isFile()) {
-    return null;
-  }
-  if (maxBytes !== undefined && st.size > maxBytes) {
-    return null;
-  }
-  let fd: number | null = null;
-  try {
-    fd = openSync(filePath, NOFOLLOW_READ_FLAGS);
-    const fdStat = fstatSync(fd);
-    if (!fdStat.isFile()) return null;
-    if (st.ino !== 0 && (fdStat.dev !== st.dev || fdStat.ino !== st.ino)) {
-      return null;
-    }
-    const chunks: Buffer[] = [];
-    const buf = Buffer.allocUnsafe(64 * 1024);
-    let total = 0;
-    for (;;) {
-      const read = readSync(fd, buf, 0, buf.length, null);
-      if (read <= 0) break;
-      total += read;
-      if (maxBytes !== undefined && total > maxBytes) {
-        return null;
-      }
-      chunks.push(Buffer.from(buf.subarray(0, read)));
-    }
-    return Buffer.concat(chunks, total);
-  } catch {
-    return null;
-  } finally {
-    if (fd !== null) {
-      try {
-        closeSync(fd);
-      } catch {
-        // ignore close failure
-      }
-    }
-  }
-}
-
-/**
- * Düzenli dosyayı O_NOFOLLOW ile akışlı okuyup SHA-256 hex özetini üretir.
- * Symlink, özel dosya veya TOCTOU sapmasında null döner.
- */
-export function readRegularFileSha256NoFollow(filePath: string): string | null {
-  const st = lstatOrNull(filePath);
-  if (st === null || st.isSymbolicLink() || !st.isFile()) {
-    return null;
-  }
-  let fd: number | null = null;
-  try {
-    fd = openSync(filePath, NOFOLLOW_READ_FLAGS);
-    const fdStat = fstatSync(fd);
-    if (!fdStat.isFile()) return null;
-    if (st.ino !== 0 && (fdStat.dev !== st.dev || fdStat.ino !== st.ino)) {
-      return null;
-    }
-    const hash = createHash("sha256");
-    const buf = Buffer.allocUnsafe(64 * 1024);
-    for (;;) {
-      const read = readSync(fd, buf, 0, buf.length, null);
-      if (read <= 0) break;
-      hash.update(buf.subarray(0, read));
-    }
-    return hash.digest("hex");
-  } catch {
-    return null;
-  } finally {
-    if (fd !== null) {
-      try {
-        closeSync(fd);
-      } catch {
-        // ignore close failure
-      }
-    }
   }
 }
 
@@ -397,15 +314,18 @@ export function writeRustWorkerIntegrityMetadata(
 
 /**
  * Önbellekteki binary'yi çalıştırmadan önce doğrular:
- * 1) lstatSync düzenli dosya kontrolü (symlink reddi),
- * 2) O_NOFOLLOW binary SHA-256 hesabı,
+ * 1) lstatSync düzenli dosya kontrolü (symlink reddi), exactly one hard link
+ *    and, on POSIX, owned by the current user and not group/other-writable
+ *    (the same rules apply to the pin file),
+ * 2) O_NOFOLLOW binary SHA-256 hesabı (the identity of the hashed file is
+ *    returned so the caller can re-check it right before the spawn),
  * 3) <binaryPath>.sha256.json regular-file + O_NOFOLLOW okuması,
  * 4) sourceFingerprint VE binarySha256 birebir eşleşmesi.
  */
 export function verifyRustWorkerBinaryIntegrity(
   binaryPath: string,
   expectedSourceFingerprint: string | null,
-): { readonly valid: boolean; readonly reason: string } {
+): { readonly valid: boolean; readonly reason: string; readonly identity?: FileIdentity } {
   if (expectedSourceFingerprint === null) {
     return {
       valid: false,
@@ -416,20 +336,25 @@ export function verifyRustWorkerBinaryIntegrity(
   if (st === null) {
     return { valid: false, reason: "worker binary does not exist" };
   }
-  if (st.isSymbolicLink() || !st.isFile()) {
-    return {
-      valid: false,
-      reason: "worker binary is a symlink or not a regular file (rejected)",
-    };
+  const binaryProblem = untrustedFileReason(st, "worker binary");
+  if (binaryProblem !== null) {
+    return { valid: false, reason: binaryProblem };
   }
-  const actualBinarySha256 = readRegularFileSha256NoFollow(binaryPath);
-  if (actualBinarySha256 === null) {
+  const hashed = hashRegularFileNoFollow(binaryPath);
+  if (hashed === null) {
     return {
       valid: false,
       reason: "worker binary could not be verified with O_NOFOLLOW",
     };
   }
+  const actualBinarySha256 = hashed.sha256;
   const metaPath = rustWorkerIntegrityPath(binaryPath);
+  const metaStat = lstatOrNull(metaPath);
+  const metaProblem =
+    metaStat === null ? null : untrustedFileReason(metaStat, "integrity sidecar file (.sha256.json)");
+  if (metaProblem !== null) {
+    return { valid: false, reason: metaProblem };
+  }
   const metaRaw = readRegularFileBytesNoFollow(
     metaPath,
     INTEGRITY_META_MAX_BYTES,
@@ -480,13 +405,15 @@ export function verifyRustWorkerBinaryIntegrity(
       reason: "binarySha256 mismatch (tampered or corrupted binary)",
     };
   }
-  return { valid: true, reason: "" };
+  return { valid: true, reason: "", identity: hashed.identity };
 }
 
 interface WorkerBinaryProbe {
   readonly available: boolean;
   readonly workerDir: string;
   readonly detail: string;
+  /** Identity of the verified cached binary; re-checked right before the spawn. */
+  readonly verifiedIdentity?: FileIdentity;
 }
 
 /**
@@ -570,6 +497,22 @@ async function ensureWorkerBinary(
         "set CAUSORYN_RUST_TARGET_DIR to a directory outside the workspace",
     };
   }
+  // An existing cache (and its debug/ directory) must be private to the
+  // current user before anything in it is trusted; it is created privately
+  // by the build below.
+  for (const dir of [cacheTargetDir, cacheWorkerDir]) {
+    if (lstatOrNull(dir) === null) continue;
+    const problem = preparePrivateDirectory(dir, false);
+    if (problem !== null) {
+      return {
+        available: false,
+        workerDir: cacheWorkerDir,
+        detail:
+          `Rust analyzer unavailable: the Rust build cache directory cannot be trusted: ${problem}; ` +
+          "set CAUSORYN_RUST_TARGET_DIR to a directory owned by the current user",
+      };
+    }
+  }
   const sourceFingerprint = computeRustWorkerSourceFingerprint(manifestPath);
   const cacheStat = lstatOrNull(cacheBinaryPath);
 
@@ -579,7 +522,12 @@ async function ensureWorkerBinary(
       sourceFingerprint,
     );
     if (verification.valid) {
-      return { available: true, workerDir: cacheWorkerDir, detail: "" };
+      return {
+        available: true,
+        workerDir: cacheWorkerDir,
+        detail: "",
+        ...(verification.identity !== undefined ? { verifiedIdentity: verification.identity } : {}),
+      };
     }
     console.error(
       `[rust-adapter] cached Rust worker binary failed the integrity check (${verification.reason}): ${cacheBinaryPath}`,
@@ -641,19 +589,13 @@ async function ensureWorkerBinary(
     timeoutMs: options.cargoBuildTimeoutMs,
     cargoHomeDir: options.cargoHomeDir,
   });
-  if (!build.ok) {
+  if (!build.ok || build.binarySha256 === null) {
     return { available: false, workerDir: cacheWorkerDir, detail: build.detail };
   }
-  // The pin is computed from the freshly copied bytes, never from a file the
-  // build did not just produce.
-  const binarySha256 = readRegularFileSha256NoFollow(cacheBinaryPath);
-  if (binarySha256 === null) {
-    return {
-      available: false,
-      workerDir: cacheWorkerDir,
-      detail: `cargo build succeeded but the worker binary could not be verified (missing or not a regular file): ${cacheBinaryPath}`,
-    };
-  }
+  // The pin is the hash of the bytes the build produced (computed before
+  // they were moved into the cache), never a hash of whatever file is at
+  // the destination now; the verification below compares the two.
+  const binarySha256 = build.binarySha256;
   try {
     writeRustWorkerIntegrityMetadata(cacheBinaryPath, {
       sourceFingerprint,
@@ -678,7 +620,12 @@ async function ensureWorkerBinary(
       detail: `verification of the freshly built Rust worker binary failed: ${postBuildCheck.reason}`,
     };
   }
-  return { available: true, workerDir: cacheWorkerDir, detail: "" };
+  return {
+    available: true,
+    workerDir: cacheWorkerDir,
+    detail: "",
+    ...(postBuildCheck.identity !== undefined ? { verifiedIdentity: postBuildCheck.identity } : {}),
+  };
 }
 
 /* ------------------------------------------------------------------ */
@@ -1080,6 +1027,9 @@ export async function analyzeRustWorkspace(
   const outcome: WorkerRunOutcome = await runWorkerAnalyze({
     workerDir: binaryProbe.workerDir,
     workerBinaryName: options.workerBinaryName,
+    ...(binaryProbe.verifiedIdentity !== undefined
+      ? { expectedBinaryIdentity: binaryProbe.verifiedIdentity }
+      : {}),
     requestPayload: request,
     requestTimeoutMs: options.requestTimeoutMs,
     responseMaxChars: options.responseMaxChars,

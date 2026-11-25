@@ -17,9 +17,9 @@
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import {
+  chmodSync,
   constants as fsConstants,
   copyFileSync,
-  existsSync,
   lstatSync,
   mkdirSync,
   mkdtempSync,
@@ -35,8 +35,11 @@ import {
   resolveExecutable,
   resolveWindowsSystemExecutable,
   sanitizePathValue,
+  terminateChildProcess,
   trustedWorkingDirectory,
+  withoutCwdExecutableSearch,
 } from "@causoryn/sidecar-ipc";
+import { hashRegularFileNoFollow, preparePrivateDirectory } from "./file-integrity.js";
 import { WORKER_BINARY_NAME } from "./types.js";
 
 /**
@@ -151,9 +154,11 @@ export function resolveCargoHomeDir(): string | null {
  * Tool süreçleri için allowlist'li ortam kurar; cargo-home dizini
  * biliniyorsa PATH'in başına ÖNEKLENİR — böylece LİTERAL "cargo" komutu
  * PATH çözümlemesiyle o dizinden bulunur (komut değişkeni YOKTUR).
- * Cargo toolchain ortamında CARGO_HOME/RUSTUP_HOME mutlak yerel yol
- * doğrulamasından geçer ve CARGO_BUILD_RUSTC_WRAPPER /
- * CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER zorla boşaltılır.
+ * Cargo toolchain ortamında CARGO_HOME/RUSTUP_HOME/CARGO_TARGET_DIR mutlak
+ * yerel yol doğrulamasından geçer (relative, drive-relative, UNC and ".."
+ * values are dropped) ve CARGO_BUILD_RUSTC_WRAPPER /
+ * CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER zorla boşaltılır. On win32 the
+ * cwd-first executable search is disabled for cargo's own children.
  */
 export function buildToolEnv(
   allowlist: readonly string[],
@@ -164,11 +169,8 @@ export function buildToolEnv(
   for (const key of allowlist) {
     const value = process.env[key];
     if (value !== undefined && value.length > 0) {
-      if (key === "CARGO_TARGET_DIR" && !isSafeCommandPath(value)) {
-        continue;
-      }
       if (
-        (key === "CARGO_HOME" || key === "RUSTUP_HOME") &&
+        (key === "CARGO_HOME" || key === "RUSTUP_HOME" || key === "CARGO_TARGET_DIR") &&
         !isSafeAbsoluteDirPath(value)
       ) {
         continue;
@@ -191,7 +193,7 @@ export function buildToolEnv(
     if (sanitized.length > 0) env["PATH"] = sanitized;
     else delete env["PATH"];
   }
-  return env;
+  return withoutCwdExecutableSearch(env);
 }
 
 export interface CargoResolutionOptions {
@@ -256,37 +258,48 @@ export interface CargoBuildOutcome {
  * codegen TORUN süreçlerini de sonlandırır (win32):
  * %SystemRoot%\System32\taskkill.exe (absolute, its own directory as cwd) +
  * /pid <KENDİ çocuğumuzun sayısal pid'i> /T (ağaç) /F (zorla). pid kullanıcı
- * girdisi DEĞİLDİR; shell yoktur. taskkill başlatılamazsa doğrudan kill
- * zaten uygulanmıştır.
+ * girdisi DEĞİLDİR; shell yoktur. The returned promise settles when
+ * taskkill has finished; the direct kill of cargo follows only then (see
+ * terminateChildProcess), so taskkill /T still finds rustc beneath the live
+ * cargo parent. Without a pid or off win32 nothing is started (undefined).
  */
 function killBuildTree(
   spawnFn: CargoSpawnFunction,
-  child: ChildProcess | null,
+  child: ChildProcess,
   env: Readonly<Record<string, string>>,
-): void {
-  if (process.platform !== "win32") return;
-  const pid = child?.pid;
-  if (pid === undefined) return;
+): Promise<void> | undefined {
+  if (process.platform !== "win32") return undefined;
+  const pid = child.pid;
+  if (pid === undefined) return undefined;
   const taskkill = resolveWindowsSystemExecutable("taskkill.exe");
-  try {
-    const killer = spawnFn(
-      taskkill,
-      ["/pid", String(pid), "/T", "/F"],
-      {
-        stdio: ["ignore", "pipe", "pipe"],
-        env,
-        cwd: dirname(taskkill),
-        shell: false,
-        windowsHide: true,
-      },
-    );
-    killer.on("error", () => {}); // taskkill yoksa/hata verirse doğrudan kill yeterli
+  return new Promise<void>((resolveKill) => {
+    let killer: ChildProcess;
+    try {
+      killer = spawnFn(
+        taskkill,
+        ["/pid", String(pid), "/T", "/F"],
+        {
+          stdio: ["ignore", "pipe", "pipe"],
+          env,
+          cwd: dirname(taskkill),
+          shell: false,
+          windowsHide: true,
+        },
+      );
+    } catch {
+      // spawnFn enjeksiyonları senkron patlayabilir; the direct kill follows.
+      resolveKill();
+      return;
+    }
+    killer.on("error", () => {
+      resolveKill(); // taskkill yoksa/hata verirse doğrudan kill yeterli
+    });
     killer.once("exit", () => {
       killer.removeAllListeners();
+      killer.on("error", () => {});
+      resolveKill();
     });
-  } catch {
-    // spawnFn enjeksiyonları senkron patlayabilir; doğrudan kill uygulanmıştır.
-  }
+  });
 }
 
 function buildFailure(spawnError: string): Promise<CargoBuildOutcome> {
@@ -297,13 +310,19 @@ function buildFailure(spawnError: string): Promise<CargoBuildOutcome> {
  * cargo build'i absolute cargo path + sabit argümanlarla çalıştırır
  * (shell yok; child env allowlist'li, PATH sanitized). cwd is the
  * manifest's directory, which must not be inside an untrusted root.
- * Zaman aşımında süreç kill edilir (win32'de ağaç-kill ile) ve
- * status=null döner; çağıran bunu "derlenemedi" olarak raporlar.
+ * `--locked` is always passed: dependencies come from the shipped
+ * Cargo.lock only (without one, cargo refuses to create it).
+ * Zaman aşımında ve çıktı bütçesi aşımında süreç kill edilir (win32'de
+ * ağaç-kill ile) ve status=null döner; çağıran bunu "derlenemedi" olarak
+ * raporlar.
  */
 export function runCargoBuild(input: {
   manifestPath: string;
   timeoutMs: number;
-  /** Yazılabilir derleme hedef dizini (--target-dir + CARGO_TARGET_DIR); isSafeCommandPath ile doğrulanır. */
+  /**
+   * Yazılabilir derleme hedef dizini (--target-dir + CARGO_TARGET_DIR); it
+   * must be an absolute local path (isSafeAbsoluteDirPath).
+   */
   targetDir?: string;
   /**
    * Her çıktı akışı (stdout/stderr) için char üst sınırı; tanımsızsa 64M
@@ -324,17 +343,21 @@ export function runCargoBuild(input: {
   if (!isSafeCommandPath(input.manifestPath) || !isAbsolute(input.manifestPath)) {
     return buildFailure("cargo build refused: invalid manifestPath (it must be a safe absolute path)");
   }
-  if (input.targetDir !== undefined && !isSafeCommandPath(input.targetDir)) {
-    return buildFailure("cargo build refused: invalid CARGO_TARGET_DIR path");
+  if (input.targetDir !== undefined && !isSafeAbsoluteDirPath(input.targetDir)) {
+    return buildFailure(
+      "cargo build refused: invalid CARGO_TARGET_DIR path (it must be an absolute local directory)",
+    );
   }
   const inheritedTargetDir = process.env["CARGO_TARGET_DIR"];
   if (
     input.targetDir === undefined &&
     inheritedTargetDir !== undefined &&
     inheritedTargetDir.length > 0 &&
-    !isSafeCommandPath(inheritedTargetDir)
+    !isSafeAbsoluteDirPath(inheritedTargetDir)
   ) {
-    return buildFailure("cargo build refused: invalid CARGO_TARGET_DIR path in the environment");
+    return buildFailure(
+      "cargo build refused: invalid CARGO_TARGET_DIR path in the environment (it must be an absolute local directory)",
+    );
   }
   const untrustedRoots = input.untrustedRoots ?? [];
   const cargoCwd = dirname(input.manifestPath);
@@ -367,12 +390,9 @@ export function runCargoBuild(input: {
   if (input.targetDir !== undefined) {
     childEnv["CARGO_TARGET_DIR"] = input.targetDir;
   }
-  const useLocked =
-    input.targetDir !== undefined &&
-    existsSync(join(cargoCwd, "Cargo.lock"));
   const cargoArgs = [
     "build",
-    ...(useLocked ? ["--locked"] : []),
+    "--locked",
     "--manifest-path",
     input.manifestPath,
     ...(input.targetDir !== undefined ? ["--target-dir", input.targetDir] : []),
@@ -383,6 +403,12 @@ export function runCargoBuild(input: {
     let stdoutText = "";
     let stderrText = "";
     let child: ChildProcess | null = null;
+
+    /** win32: taskkill /T first (rustc/codegen torun süreçleri), then the direct kill. */
+    const terminate = (): void => {
+      if (child === null) return;
+      terminateChildProcess(child, (running) => killBuildTree(spawnFn, running, childEnv));
+    };
 
     const finish = (outcome: CargoBuildOutcome): void => {
       if (settled) return;
@@ -396,10 +422,9 @@ export function runCargoBuild(input: {
     };
 
     const timer = setTimeout(() => {
-      child?.kill();
       // win32: rustc/codegen torun süreçleri de sonlandırılır (savunma
       // derinliği; go worker taskkill deseni).
-      killBuildTree(spawnFn, child, childEnv);
+      terminate();
       finish({
         status: null,
         stdout: stdoutText,
@@ -445,7 +470,7 @@ export function runCargoBuild(input: {
         const capped = (current + incoming).slice(0, outputMaxChars);
         if (stream === "stdout") stdoutText = capped;
         else stderrText = capped;
-        child?.kill();
+        terminate();
         finish({
           status: null,
           stdout: stdoutText,
@@ -551,6 +576,11 @@ export interface StagedRustWorkerBuildOutcome {
   readonly ok: boolean;
   /** destinationBinaryPath when ok; otherwise null. */
   readonly binaryPath: string | null;
+  /**
+   * SHA-256 of the bytes the build produced, computed in the private
+   * staging directory before they were moved into place; null when not ok.
+   */
+  readonly binarySha256: string | null;
   /** English diagnostic when not ok. */
   readonly detail: string;
 }
@@ -564,13 +594,22 @@ export interface StagedRustWorkerBuildOutcome {
  * package directory (e.g. <repo>/node_modules/...) would read the analyzed
  * repository's `.cargo/config.toml` / `rust-toolchain.toml`. Every build uses
  * a new target directory, and the output is copied (not linked) to the
- * destination, so the result is always freshly produced bytes. Refuses to
- * build when the cache directory is inside the analyzed workspace.
+ * destination, so the result is always freshly produced bytes. The cache,
+ * staging and destination directories are private to the current user
+ * (POSIX 0700, see preparePrivateDirectory); the produced binary is hashed
+ * in the staging directory, the copy is checked against that hash and only
+ * then renamed into place. Refuses to build when the cache directory is
+ * inside the analyzed workspace.
  */
 export async function buildRustWorkerFromStagedSource(
   input: StagedRustWorkerBuildInput,
 ): Promise<StagedRustWorkerBuildOutcome> {
-  const fail = (detail: string): StagedRustWorkerBuildOutcome => ({ ok: false, binaryPath: null, detail });
+  const fail = (detail: string): StagedRustWorkerBuildOutcome => ({
+    ok: false,
+    binaryPath: null,
+    binarySha256: null,
+    detail,
+  });
   for (const [label, value] of [
     ["worker manifest path", input.sourceManifestPath],
     ["Rust build cache directory", input.cacheRoot],
@@ -594,10 +633,19 @@ export async function buildRustWorkerFromStagedSource(
     return fail(`Rust worker manifest not found: ${input.sourceManifestPath}`);
   }
 
+  const stagingParent = join(input.cacheRoot, "staging");
+  for (const dir of [input.cacheRoot, stagingParent, dirname(input.destinationBinaryPath)]) {
+    const problem = preparePrivateDirectory(dir, true);
+    if (problem !== null) {
+      return fail(
+        `Rust worker build refused: the build cache directory cannot be trusted: ${problem}; ` +
+          "set CAUSORYN_RUST_TARGET_DIR to a directory owned by the current user",
+      );
+    }
+  }
+
   let stagingDir: string;
   try {
-    const stagingParent = join(input.cacheRoot, "staging");
-    mkdirSync(stagingParent, { recursive: true });
     stagingDir = mkdtempSync(join(stagingParent, "build-"));
   } catch (error) {
     const detail = error instanceof Error ? error.message : String(error);
@@ -653,12 +701,25 @@ export async function buildRustWorkerFromStagedSource(
     cleanup();
     return fail(`cargo build succeeded but the worker binary was not produced: ${builtBinary}`);
   }
+  // Hashed inside the private staging directory, before anything is moved.
+  const builtHash = hashRegularFileNoFollow(builtBinary);
+  if (builtHash === null) {
+    cleanup();
+    return fail(`cargo build succeeded but the worker binary could not be read: ${builtBinary}`);
+  }
 
-  // Copy (never hardlink) into place: write a temporary sibling, then rename.
+  // Copy (never hardlink) into place: write a temporary sibling, check it
+  // against the produced bytes, then rename.
   const tmpBinary = `${input.destinationBinaryPath}.tmp-${String(process.pid)}-${randomBytes(6).toString("hex")}`;
   try {
-    mkdirSync(dirname(input.destinationBinaryPath), { recursive: true });
     copyFileSync(builtBinary, tmpBinary, fsConstants.COPYFILE_EXCL);
+    // Owner-only permissions regardless of the umask (a group-writable cached
+    // binary is not trusted, see untrustedFileReason).
+    if (process.platform !== "win32") chmodSync(tmpBinary, 0o700);
+    const copiedHash = hashRegularFileNoFollow(tmpBinary);
+    if (copiedHash === null || copiedHash.sha256 !== builtHash.sha256) {
+      throw new Error("the copied binary does not match the produced bytes");
+    }
     renameSync(tmpBinary, input.destinationBinaryPath);
   } catch (error) {
     rmSync(tmpBinary, { force: true });
@@ -667,5 +728,10 @@ export async function buildRustWorkerFromStagedSource(
     return fail(`freshly built Rust worker binary could not be copied into the cache: ${detail}`);
   }
   cleanup();
-  return { ok: true, binaryPath: input.destinationBinaryPath, detail: "" };
+  return {
+    ok: true,
+    binaryPath: input.destinationBinaryPath,
+    binarySha256: builtHash.sha256,
+    detail: "",
+  };
 }
