@@ -26,7 +26,7 @@ import {
   type BigIntStats,
   type Stats,
 } from "node:fs";
-import { dirname } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 
 const NOFOLLOW_READ_FLAGS = fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0);
 const PRIVATE_DIR_MODE = 0o700;
@@ -180,6 +180,71 @@ export function hashRegularFileNoFollow(
 /** SHA-256 hex digest of a regular file read with O_NOFOLLOW; null when rejected. */
 export function readRegularFileSha256NoFollow(filePath: string): string | null {
   return hashRegularFileNoFollow(filePath)?.sha256 ?? null;
+}
+
+const TOOLCHAIN_CONFIG_FILES = [
+  [".cargo", "config.toml"],
+  [".cargo", "config"],
+  ["rust-toolchain.toml"],
+  ["rust-toolchain"],
+] as const;
+
+function isSameOrBelow(candidate: string, root: string): boolean {
+  const normalize = (value: string): string => {
+    const resolved = resolve(value);
+    return process.platform === "win32" ? resolved.toLowerCase() : resolved;
+  };
+  const rel = relative(normalize(root), normalize(candidate));
+  return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
+}
+
+/**
+ * cargo reads `.cargo/config.toml` (and the legacy `.cargo/config`) from
+ * its working directory and every ancestor, and rustup reads
+ * `rust-toolchain.toml` / `rust-toolchain` the same way. Returns the first
+ * such file in or above `dir` that cannot be vouched for, or null:
+ * - files in or below `trustedRoot` (the user's home directory) are the
+ *   user's own configuration,
+ * - elsewhere a file is accepted on POSIX only when it and its directory are
+ *   owned by root or by the current user; on Windows, where Node exposes no
+ *   owner, it is not accepted (e.g. `C:\.cargo\config.toml`, which any
+ *   local user can create).
+ */
+export function untrustedToolchainConfigAbove(
+  dir: string,
+  trustedRoot: string | null,
+): string | null {
+  let current: string;
+  try {
+    current = realpathSync.native(dir);
+  } catch {
+    current = resolve(dir);
+  }
+  const uid = currentUid();
+  for (;;) {
+    for (const segments of TOOLCHAIN_CONFIG_FILES) {
+      const candidate = join(current, ...segments);
+      let st: Stats;
+      try {
+        st = lstatSync(candidate);
+      } catch {
+        continue;
+      }
+      if (trustedRoot !== null && isSameOrBelow(candidate, trustedRoot)) continue;
+      if (uid === undefined) return candidate;
+      let parentOwner: number;
+      try {
+        parentOwner = lstatSync(dirname(candidate)).uid;
+      } catch {
+        return candidate;
+      }
+      const owners = [st.uid, parentOwner];
+      if (owners.some((owner) => owner !== 0 && owner !== uid)) return candidate;
+    }
+    const parent = dirname(current);
+    if (parent === current) return null;
+    current = parent;
+  }
 }
 
 /**

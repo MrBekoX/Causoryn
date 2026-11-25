@@ -263,6 +263,71 @@ describe("Rust worker binary identity is re-checked right before the spawn", () 
   });
 });
 
+describe("cargo / rustup configuration above the staged build directory", () => {
+  function stageCrate(base: string): string {
+    const crate = path.join(base, "crate");
+    mkdirSync(path.join(crate, "src"), { recursive: true });
+    writeFileSync(path.join(crate, "Cargo.toml"), '[package]\nname = "causoryn-rust-worker"\nversion = "0.1.0"\n', "utf8");
+    writeFileSync(path.join(crate, "Cargo.lock"), "version = 4\n", "utf8");
+    writeFileSync(path.join(crate, "src", "main.rs"), "fn main() {}\n", "utf8");
+    return path.join(crate, "Cargo.toml");
+  }
+
+  async function buildBelow(base: string, trustedConfigRoot: string | null): Promise<{
+    readonly spawned: boolean;
+    readonly ok: boolean;
+    readonly detail: string;
+  }> {
+    let spawned = false;
+    const cacheRoot = path.join(base, "cache");
+    const outcome = await buildRustWorkerFromStagedSource({
+      sourceManifestPath: stageCrate(base),
+      cacheRoot,
+      destinationBinaryPath: path.join(cacheRoot, "debug", WORKER_BINARY_NAME),
+      untrustedRoots: [],
+      timeoutMs: 5_000,
+      cargoExecutable: process.execPath,
+      trustedConfigRoot,
+      spawnFn: () => {
+        spawned = true;
+        const child = new EventEmitter() as unknown as ChildProcess;
+        const record = child as unknown as Record<string, unknown>;
+        record["stdout"] = new EventEmitter();
+        record["stderr"] = new EventEmitter();
+        record["exitCode"] = null;
+        record["signalCode"] = null;
+        record["kill"] = () => true;
+        queueMicrotask(() => child.emit("exit", 0, null));
+        return child;
+      },
+    });
+    return { spawned, ok: outcome.ok, detail: outcome.detail };
+  }
+
+  it("a .cargo/config.toml that cannot be vouched for blocks the build (Windows: any such file outside the home tree)", async () => {
+    const base = tempDir("causoryn-rs-ancestor-cfg-");
+    mkdirSync(path.join(base, ".cargo"), { recursive: true });
+    writeFileSync(path.join(base, ".cargo", "config.toml"), '[build]\nrustc = "elsewhere"\n', "utf8");
+    const outcome = await buildBelow(base, null);
+    if (IS_WIN) {
+      // No owner information on Windows: refused before cargo starts.
+      expect(outcome.spawned).toBe(false);
+      expect(outcome.ok).toBe(false);
+      expect(outcome.detail).toContain(path.join(base, ".cargo", "config.toml"));
+    } else {
+      // POSIX: owned by the current user, so it is the user's own configuration.
+      expect(outcome.spawned).toBe(true);
+    }
+  });
+
+  it("a rust-toolchain.toml inside the trusted (home) tree does not block the build", async () => {
+    const base = tempDir("causoryn-rs-ancestor-home-");
+    writeFileSync(path.join(base, "rust-toolchain.toml"), '[toolchain]\nchannel = "stable"\n', "utf8");
+    const outcome = await buildBelow(base, base);
+    expect(outcome.spawned).toBe(true);
+  });
+});
+
 describe("a fresh build is pinned from the bytes it produced", () => {
   it("buildRustWorkerFromStagedSource reports the SHA-256 of the produced binary", async () => {
     const base = tempDir("causoryn-rs-build-pin-");
