@@ -46,7 +46,8 @@
  *   innerHTML YOK, fetch/XHR YOK).
  *
  * Katman sözleşmesi: SAF FONKSİYON — bu modül fs/ağ/saat/rastgelelik
- * okumaz (node:crypto only hashes the static blocks for the CSP), girdiyi mutate etmez, hiçbir @causoryn/* paketini import etmez
+ * okumaz (node:crypto only hashes the static blocks for the CSP), girdiyi
+ * mutate etmez, hiçbir @causoryn/* paketini import etmez
  * (apps/ workspaces dışıdır; yapısal tipler yerel tanımlıdır, domain tipleri
  * yapısal olarak uyumludur). Herhangi bir orkestrasyon katmanı bu fonksiyonu
  * çağırıp çıktıyı izinli output dizinine yazabilir (TŞ §16 "Viewer server

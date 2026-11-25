@@ -68,35 +68,29 @@ function probe(file: string): { userVersion: unknown; journalMode: unknown; tabl
 }
 
 describe("database file permissions (POSIX)", () => {
+  // The process umask can only clear bits, so a file created with 0o600 is
+  // 0o600 under any usual umask, while SQLite's default creation mode would
+  // give 0o644 under the common 0o022 umask. (process.umask is not changed
+  // here: it is unavailable in worker-thread test pools.)
   it.skipIf(IS_WINDOWS)("graph repository creates graph.sqlite, -wal and -shm as 0o600", () => {
     const file = path.join(tempDir, "graph.sqlite");
-    const previousUmask = process.umask(0o022);
+    const repo = new SqliteGraphRepository(file);
     try {
-      const repo = new SqliteGraphRepository(file);
-      try {
-        repo.registerWorkspace({ id: WS, rootPath: "/tmp/ws", createdAt: T0 });
-        for (const candidate of [file, `${file}-wal`, `${file}-shm`]) {
-          expect(existsSync(candidate), candidate).toBe(true);
-          expect(modeOf(candidate).toString(8), candidate).toBe("600");
-        }
-      } finally {
-        repo.close();
+      repo.registerWorkspace({ id: WS, rootPath: "/tmp/ws", createdAt: T0 });
+      for (const candidate of [file, `${file}-wal`, `${file}-shm`]) {
+        expect(existsSync(candidate), candidate).toBe(true);
+        expect(modeOf(candidate).toString(8), candidate).toBe("600");
       }
     } finally {
-      process.umask(previousUmask);
+      repo.close();
     }
   });
 
   it.skipIf(IS_WINDOWS)("wiki store opened by path creates its database as 0o600", () => {
     const file = path.join(tempDir, "wiki.sqlite");
-    const previousUmask = process.umask(0o022);
-    try {
-      const store = new SqliteWikiStore(file);
-      store.close();
-      expect(modeOf(file).toString(8)).toBe("600");
-    } finally {
-      process.umask(previousUmask);
-    }
+    const store = new SqliteWikiStore(file);
+    store.close();
+    expect(modeOf(file).toString(8)).toBe("600");
   });
 
   it.skipIf(IS_WINDOWS)("an existing database keeps its permissions", () => {
