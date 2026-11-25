@@ -25,7 +25,7 @@ import { EventEmitter } from "node:events";
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { beforeAll, describe, expect, it } from "vitest";
+import { beforeAll, describe, expect, it, vi } from "vitest";
 import { createSnapshot } from "@causoryn/domain";
 import { resolveWindowsSystemExecutable } from "@causoryn/sidecar-ipc";
 import { isCargoAvailable } from "../src/cargo.js";
@@ -549,26 +549,40 @@ describe("runCargoBuild çıktı bütçesi (spawn enjeksiyonlu)", () => {
     }
     const spawned: Array<{ command: string; args: readonly string[] }> = [];
     const killed: boolean[] = [];
+    const events: string[] = [];
     const outcome = await runCargoBuild({
       manifestPath: FAKE_MANIFEST_PATH,
       cargoExecutable: process.execPath,
       timeoutMs: 120,
       spawnFn: (command, args) => {
         spawned.push({ command, args: [...args] });
+        const isCargo = command === process.execPath;
+        events.push(isCargo ? "spawn:cargo" : "spawn:taskkill");
         const child = makeFakeWorkerChild({});
         const record = child as unknown as Record<string, unknown>;
-        record.pid = command === process.execPath ? 7777 : undefined;
+        record.pid = isCargo ? 7777 : undefined;
         record.kill = () => {
+          events.push(isCargo ? "kill:cargo" : "kill:taskkill");
           killed.push(true);
           return true;
         };
+        if (!isCargo) {
+          setTimeout(() => {
+            events.push("exit:taskkill");
+            child.emit("exit", 0, null);
+          }, 20);
+        }
         return child;
       },
     });
     expect(outcome.status).toBeNull();
     expect(outcome.spawnError).toContain("timeout");
-    // Doğrudan kill her koşulda uygulanır (ağaç-kill ek savunmadır).
-    expect(killed.length).toBe(1);
+    // Doğrudan kill her koşulda uygulanır (ağaç-kill ek savunmadır); it only
+    // follows once taskkill /T has finished with the cargo parent still alive.
+    await vi.waitFor(() => {
+      expect(killed.length).toBe(1);
+    });
+    expect(events).toEqual(["spawn:cargo", "spawn:taskkill", "exit:taskkill", "kill:cargo"]);
     // İkinci spawn: LİTERAL "taskkill" + SADECE kendi çocuğumuzun sayısal
     // pid'i (/T ağaç, /F zorla). rustc/codegen torun süreçleri finite'dir
     // ama savunma derinliği go worker deseniyle sağlanır.
@@ -577,6 +591,52 @@ describe("runCargoBuild çıktı bütçesi (spawn enjeksiyonlu)", () => {
     expect(spawned[1]?.command).toBe(resolveWindowsSystemExecutable("taskkill.exe"));
     expect(spawned[1]?.args).toEqual(["/pid", "7777", "/T", "/F"]);
   }, 10_000);
+
+  it.skipIf(process.platform !== "win32")(
+    "output budget overflow also tree-kills the build (taskkill /T before the direct kill)",
+    async () => {
+      const events: string[] = [];
+      const outcome = await runCargoBuild({
+        manifestPath: FAKE_MANIFEST_PATH,
+        cargoExecutable: process.execPath,
+        timeoutMs: 5_000,
+        outputMaxChars: 64,
+        spawnFn: (command, args) => {
+          const isCargo = command === process.execPath;
+          events.push(isCargo ? "spawn:cargo" : `spawn:taskkill ${args.join(" ")}`);
+          const child = makeFakeWorkerChild({});
+          const record = child as unknown as Record<string, unknown>;
+          record.pid = isCargo ? 7778 : undefined;
+          record.kill = () => {
+            events.push(isCargo ? "kill:cargo" : "kill:taskkill");
+            return true;
+          };
+          if (isCargo) {
+            queueMicrotask(() => {
+              (record.stdout as EventEmitter).emit("data", Buffer.from("x".repeat(100), "utf8"));
+            });
+          } else {
+            setTimeout(() => {
+              events.push("exit:taskkill");
+              child.emit("exit", 0, null);
+            }, 20);
+          }
+          return child;
+        },
+      });
+      expect(outcome.status).toBeNull();
+      expect(outcome.spawnError).toContain("character limit");
+      await vi.waitFor(() => {
+        expect(events).toContain("kill:cargo");
+      });
+      expect(events).toEqual([
+        "spawn:cargo",
+        "spawn:taskkill /pid 7778 /T /F",
+        "exit:taskkill",
+        "kill:cargo",
+      ]);
+    },
+  );
 
   it("pozitif kontrol: zaman aşımına uğramayan koşumda ağaç-kill çağrılmaz", async () => {
     const spawned: Array<{ command: string }> = [];

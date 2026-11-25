@@ -409,7 +409,7 @@ describe("Rust yazılabilir CARGO_TARGET_DIR önbelleği ve fallback zinciri", (
     expect(outcome.spawnError.length).toBeGreaterThan(0);
   });
 
-  it("runCargoBuild: targetDir verildiğinde ve Cargo.lock mevcutsa --locked ekler; Cargo.lock yoksa veya targetDir tanımsızsa eklemez", async () => {
+  it("runCargoBuild: always passes --locked (with or without targetDir; without Cargo.lock cargo itself refuses to create one)", async () => {
     const tmpDir = mkdtempSync(path.join(os.tmpdir(), "causoryn-rs-locked-"));
     try {
       const safeTarget = path.join(tmpDir, "safe-target");
@@ -440,7 +440,7 @@ describe("Rust yazılabilir CARGO_TARGET_DIR önbelleği ve fallback zinciri", (
         ["build", "--locked", "--manifest-path", repoManifest, "--target-dir", safeTarget],
       ]);
 
-      // 2) targetDir tanımsız (Cargo.lock mevcut olsa bile) → ["build", "--manifest-path", manifestPath]
+      // 2) targetDir tanımsız → ["build", "--locked", "--manifest-path", manifestPath]
       const noTargetArgs: Array<readonly string[]> = [];
       await withTemporaryEnv({ CARGO_TARGET_DIR: undefined }, async () => {
         const noTargetOutcome = await runCargoBuild({
@@ -457,9 +457,10 @@ describe("Rust yazılabilir CARGO_TARGET_DIR önbelleği ve fallback zinciri", (
         });
         expect(noTargetOutcome.status).toBe(0);
       });
-      expect(noTargetArgs).toEqual([["build", "--manifest-path", repoManifest]]);
+      expect(noTargetArgs).toEqual([["build", "--locked", "--manifest-path", repoManifest]]);
 
-      // 3) targetDir tanımlı ama Cargo.lock yok → ["build", "--manifest-path", manifestPath]
+      // 3) targetDir tanımlı ama Cargo.lock yok → still --locked (cargo then
+      //    fails instead of resolving dependencies afresh).
       const unlockedDir = path.join(tmpDir, "unlocked-crate");
       mkdirSync(unlockedDir, { recursive: true });
       const unlockedManifest = path.join(unlockedDir, "Cargo.toml");
@@ -481,7 +482,7 @@ describe("Rust yazılabilir CARGO_TARGET_DIR önbelleği ve fallback zinciri", (
       });
       expect(unlockedOutcome.status).toBe(0);
       expect(unlockedArgs).toEqual([
-        ["build", "--manifest-path", unlockedManifest, "--target-dir", safeTarget],
+        ["build", "--locked", "--manifest-path", unlockedManifest, "--target-dir", safeTarget],
       ]);
     } finally {
       rmSync(tmpDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
@@ -537,6 +538,66 @@ describe("Rust yazılabilir CARGO_TARGET_DIR önbelleği ve fallback zinciri", (
         expect(unsafeEnvOutcome.spawnError.length).toBeGreaterThan(0);
       },
     );
+  });
+
+  it("negatif (c): relative, drive-relative, UNC and '..' target directories are refused (explicit and inherited CARGO_TARGET_DIR)", async () => {
+    const repoManifest = path.join(REPO_ROOT, "native", "rust-worker", "Cargo.toml");
+    const unsafeTargets = [
+      "relative-target",
+      path.join("nested", "target"),
+      "C:target",
+      "\\\\build-host\\share\\target",
+      "//build-host/share/target",
+      `${os.tmpdir()}${path.sep}..${path.sep}escape-target`,
+    ];
+    for (const target of unsafeTargets) {
+      let explicitSpawned = false;
+      const explicitOutcome = await runCargoBuild({
+        manifestPath: repoManifest,
+        timeoutMs: 5_000,
+        targetDir: target,
+        cargoExecutable: process.execPath,
+        spawnFn: () => {
+          explicitSpawned = true;
+          return createFakeSuccessChild("unused");
+        },
+      });
+      expect(explicitSpawned, `explicit targetDir ${target}`).toBe(false);
+      expect(explicitOutcome.status).toBeNull();
+      expect(explicitOutcome.spawnError).toContain("CARGO_TARGET_DIR");
+
+      await withTemporaryEnv({ CARGO_TARGET_DIR: target }, async () => {
+        expect("CARGO_TARGET_DIR" in buildToolEnv(CARGO_ENV_ALLOWLIST, null)).toBe(false);
+        let inheritedSpawned = false;
+        const inheritedOutcome = await runCargoBuild({
+          manifestPath: repoManifest,
+          timeoutMs: 5_000,
+          cargoExecutable: process.execPath,
+          spawnFn: () => {
+            inheritedSpawned = true;
+            return createFakeSuccessChild("unused");
+          },
+        });
+        expect(inheritedSpawned, `inherited CARGO_TARGET_DIR ${target}`).toBe(false);
+        expect(inheritedOutcome.status).toBeNull();
+        expect(inheritedOutcome.spawnError).toContain("CARGO_TARGET_DIR");
+      });
+    }
+
+    // A safe absolute inherited value is still passed through.
+    const safeTarget = path.join(os.tmpdir(), "causoryn-safe-inherited-target");
+    await withTemporaryEnv({ CARGO_TARGET_DIR: safeTarget }, () => {
+      expect(buildToolEnv(CARGO_ENV_ALLOWLIST, null)["CARGO_TARGET_DIR"]).toBe(safeTarget);
+    });
+  });
+
+  it("buildToolEnv disables the Windows cwd-first executable search for cargo, rustc and the linker", () => {
+    const env = buildToolEnv(CARGO_ENV_ALLOWLIST, null);
+    if (process.platform === "win32") {
+      expect(env["NoDefaultCurrentDirectoryInExePath"]).toBe("1");
+    } else {
+      expect(env["NoDefaultCurrentDirectoryInExePath"]).toBeUndefined();
+    }
   });
 
   it("partial: güvensiz CAUSORYN_RUST_TARGET_DIR ve hazır binary yokluğunda analyzeRustWorkspace L0/L1 dosya düzeyine zarifçe düşer", async () => {
