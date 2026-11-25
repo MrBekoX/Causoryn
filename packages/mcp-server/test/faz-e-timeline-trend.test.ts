@@ -62,14 +62,24 @@ async function connectClient(context: CausorynContext): Promise<ClientPair> {
   };
 }
 
+/**
+ * The trend fixtures carry hand-written content sets in the committed
+ * `.causoryn/architecture-snapshot.json` files. Fresh analysis of a commit
+ * from its git objects would take precedence over those files, so it is
+ * disabled here: these tests exercise the trend core over the
+ * committed-snapshot tier (commit analysis: tests/mcp-history-commit-analysis.test.ts).
+ */
 function makeContext(configOverrides: Record<string, unknown> = {}): CausorynContext {
-  return createCausorynContext({
-    workspaceId: "trend",
-    allowRoots: [],
-    results: { maxNodes: 250, maxSymbols: 100 },
-    autoIndex: false,
-    ...configOverrides,
-  });
+  return createCausorynContext(
+    {
+      workspaceId: "trend",
+      allowRoots: [],
+      results: { maxNodes: 250, maxSymbols: 100 },
+      autoIndex: false,
+      ...configOverrides,
+    },
+    { historyMaxFreshAnalyses: 0 },
+  );
 }
 
 async function callTool(

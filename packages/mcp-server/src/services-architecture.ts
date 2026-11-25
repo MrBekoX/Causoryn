@@ -41,6 +41,11 @@ import {
   staleWarningOf,
   type ServiceDeps,
 } from "./services.js";
+import {
+  DEFAULT_COMPARE_FRESH_ANALYSES,
+  DEFAULT_TIMELINE_FRESH_ANALYSES,
+  resolveHistoryAnalysisBudget,
+} from "./history-commit-analysis.js";
 import { createTrustedHistorySources } from "./trusted-history.js";
 
 /**
@@ -675,7 +680,10 @@ function untrustedSnapshotWarning(
  *
  * Trust order per side (see trusted-history.ts): the local index snapshot
  * when it is verified to be that commit's content, or for `working-tree`;
- * otherwise the snapshot file, reported in `warnings` with
+ * then, for a commit, the engine's own analysis of its git objects (history
+ * cache or a fresh analysis, at most DEFAULT_COMPARE_FRESH_ANALYSES per call
+ * unless CAUSORYN_HISTORY_MAX_ANALYSES says otherwise); otherwise the
+ * snapshot file, reported in `warnings` with
  * `snapshot-loaded-from-committed-git-blob`.
  */
 export async function compareArchitecture(
@@ -685,7 +693,9 @@ export async function compareArchitecture(
 ): Promise<Envelope> {
   const workspaceId = input.workspaceId ?? deps.config.workspaceId;
   const canonicalRoot = requireAuthorizedWorkspace(deps, workspaceId);
-  const trusted = createTrustedHistorySources(deps, workspaceId, canonicalRoot);
+  const trusted = createTrustedHistorySources(deps, workspaceId, canonicalRoot, {
+    maxFreshAnalyses: resolveHistoryAnalysisBudget(deps, DEFAULT_COMPARE_FRESH_ANALYSES),
+  });
   const pointOptions = {
     snapshotLookup: trusted.snapshotLookup,
     reconstructFromGitTree: trusted.reconstructFromGitTree,
@@ -1364,8 +1374,11 @@ export const ArchitectureTimelineDataSchema = z.strictObject({
  * etkilenmez.
  *
  * Points whose commit content is verified against the local index are read
- * from the index snapshot instead of the committed snapshot file (see
- * trusted-history.ts); the others keep their committed-file trust warning.
+ * from the index snapshot; the other commits are analyzed from their git
+ * objects (history cache, or at most DEFAULT_TIMELINE_FRESH_ANALYSES fresh
+ * analyses per call unless CAUSORYN_HISTORY_MAX_ANALYSES says otherwise).
+ * Only points the engine did not analyze fall back to the committed snapshot
+ * file with its trust warning (see trusted-history.ts).
  */
 export async function architectureTimeline(
   deps: ServiceDeps,
@@ -1382,7 +1395,9 @@ export async function architectureTimeline(
     );
   }
 
-  const trusted = createTrustedHistorySources(deps, workspaceId, canonicalRoot);
+  const trusted = createTrustedHistorySources(deps, workspaceId, canonicalRoot, {
+    maxFreshAnalyses: resolveHistoryAnalysisBudget(deps, DEFAULT_TIMELINE_FRESH_ANALYSES),
+  });
   const timeline: ArchitectureTimeline = await runGraphAsync(deps.logger, () =>
     buildArchitectureTimelineFromGit(canonicalRoot, {
       ...(input.refs === undefined ? {} : { refs: input.refs }),

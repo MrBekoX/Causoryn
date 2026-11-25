@@ -82,6 +82,25 @@ function makeContext(configOverrides: Record<string, unknown> = {}): CausorynCon
   });
 }
 
+/**
+ * The compare/timeline fixtures below carry hand-written content sets in the
+ * committed `.causoryn/architecture-snapshot.json` file. Fresh analysis of a
+ * commit from its git objects would take precedence over that file, so it is
+ * disabled here: these tests exercise the diff/timeline core over the
+ * committed-snapshot tier. (Commit analysis is covered by
+ * tests/mcp-history-commit-analysis.test.ts.)
+ */
+function makeCommittedSnapshotContext(configOverrides: Record<string, unknown>): CausorynContext {
+  return createCausorynContext(
+    {
+      workspaceId: "default",
+      results: { maxNodes: 250, maxSymbols: 100 },
+      ...configOverrides,
+    },
+    { historyMaxFreshAnalyses: 0 },
+  );
+}
+
 async function callTool(
   client: Client,
   name: string,
@@ -785,7 +804,7 @@ describe("causoryn_compare_architecture", { timeout: 30_000 }, () => {
     const fixture = makeGitFixture();
     try {
       const pair = await connectClient(
-        makeContext({
+        makeCommittedSnapshotContext({
           workspaceId: "cmp",
           allowRoots: [fixture.root],
           autoIndex: false,
@@ -889,7 +908,7 @@ describe("causoryn_compare_architecture", { timeout: 30_000 }, () => {
     const fixture = makeGitFixture();
     try {
       const pair = await connectClient(
-        makeContext({
+        makeCommittedSnapshotContext({
           workspaceId: "cmp-same",
           allowRoots: [fixture.root],
           autoIndex: false,
@@ -1299,7 +1318,7 @@ describe("causoryn_architecture_timeline", { timeout: 30_000 }, () => {
     const fixture = makeGitFixture();
     try {
       const pair = await connectClient(
-        makeContext({
+        makeCommittedSnapshotContext({
           workspaceId: "tl",
           allowRoots: [fixture.root],
           autoIndex: false,
@@ -1403,7 +1422,7 @@ describe("causoryn_architecture_timeline", { timeout: 30_000 }, () => {
     const fixture = makeGitFixture();
     try {
       const pair = await connectClient(
-        makeContext({
+        makeCommittedSnapshotContext({
           workspaceId: "tl-sample",
           allowRoots: [fixture.root],
           autoIndex: false,
@@ -1434,11 +1453,65 @@ describe("causoryn_architecture_timeline", { timeout: 30_000 }, () => {
       fixture.cleanup();
     }
 
-    // Blob'suz depo: hiçbir nokta analiz edilemez; sayı UYDURULMAZ.
+    // Blob'suz depo (README.md only): the commits are analyzed from their git
+    // objects. They hold no analyzable source, so each point is the Workspace
+    // node alone and the analysis is reported as partial — no counts invented.
     const bare = makeGitFixtureWithoutBlobs();
     try {
       const pair = await connectClient(
         makeContext({
+          workspaceId: "tl-bare",
+          allowRoots: [bare.root],
+          autoIndex: false,
+        }),
+      );
+      try {
+        const result = await callTool(pair.client, "causoryn_architecture_timeline", {
+          refs: ["t1", "t2"],
+        });
+        const envelope = expectEnvelope(result);
+        expect(envelope.status).toBe("ok");
+        const timeline = (envelope.data as Record<string, unknown>)
+          .timeline as Record<string, unknown>;
+        expect(timeline.analyzedPoints).toBe(2);
+        expect(timeline.unanalyzedPoints).toBe(0);
+        const points = timeline.points as Array<Record<string, unknown>>;
+        for (const point of points) {
+          expect(point.status).toBe("analyzed");
+          expect(point.nodeCount).toBe(1);
+          expect(point.trustWarning).toBeUndefined();
+        }
+        const intervals = timeline.intervals as Array<Record<string, unknown>>;
+        expect(intervals[0]?.kind).toBe("diff");
+        const changes = intervals[0]?.changes as Record<string, unknown>;
+        expect(changes.added).toBe(0);
+        expect(changes.removed).toBe(0);
+        expect(changes.changed).toBe(0);
+        const warnings = envelope.warnings as string[];
+        for (const ref of ["t1", "t2"]) {
+          expect(
+            warnings.some(
+              (warning) =>
+                warning.startsWith(`'${ref}' (commit `) &&
+                warning.includes("was analyzed from its git objects") &&
+                warning.includes("the analysis is partial"),
+            ),
+          ).toBe(true);
+        }
+      } finally {
+        await pair.close();
+      }
+    } finally {
+      bare.cleanup();
+    }
+  });
+
+  it("partial: fresh commit analysis disabled and no committed snapshot → points stay unanalyzed (manifest-not-found)", async () => {
+    // Blob'suz depo, commit analysis off: hiçbir nokta analiz edilemez; sayı UYDURULMAZ.
+    const bare = makeGitFixtureWithoutBlobs();
+    try {
+      const pair = await connectClient(
+        makeCommittedSnapshotContext({
           workspaceId: "tl-bare",
           allowRoots: [bare.root],
           autoIndex: false,

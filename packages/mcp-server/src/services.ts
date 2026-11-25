@@ -91,6 +91,12 @@ export interface ServiceDeps {
    * loglanır — istemciye genel mesaj gider, detay kaybolmaz (TŞ §10.1).
    */
   readonly logger: (message: string) => void;
+  /**
+   * Fresh commit analyses one history tool call may run (see
+   * history-commit-analysis.ts). Undefined: `CAUSORYN_HISTORY_MAX_ANALYSES`,
+   * then the tool default. 0 disables fresh analysis (embedding/test seam).
+   */
+  readonly historyMaxFreshAnalyses?: number;
 }
 
 /* ------------------------------------------------------------------ */
