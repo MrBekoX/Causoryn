@@ -41,6 +41,7 @@ import { validateRepositoryLayout, type RepositoryLayout } from "./git-repositor
  * - compare/invalid-blob-path: blob yolu traversal/mutlak/backslash vb.
  * - compare/git-command-not-allowed: beyaz liste dışı alt komut (yürütülmez).
  * - compare/git-unavailable: git çalıştırılabilir bulunamadı.
+ * - compare/repository-refused: the repository layout would read outside the analyzed root (see git-repository-layout.ts).
  * - compare/git-command-failed: git sıfır olmayan çıkış kodu döndü.
  * - compare/ref-not-found: doğrulanmış ref depoda çözümlenemedi.
  * - compare/blob-not-found: ref:path nesnesi okunamadı.

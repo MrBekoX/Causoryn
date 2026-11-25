@@ -283,6 +283,8 @@ describe("graphErrorToToolError — sabit eşleme birim testleri", () => {
       ["compare/ref-not-found", "INVALID_REVISION"],
       ["export/output-not-authorized", "EXPORT_NOT_ALLOWED"],
       ["export/output-path-denied", "PATH_DENIED"],
+      // A git layout that would read outside the analyzed root is refused:
+      ["compare/repository-refused", "PATH_DENIED"],
       ["timeline/invalid-range", "INVALID_REVISION"],
       ["timeline/invalid-input", "INVALID_ARGUMENT"],
     ];
@@ -691,6 +693,13 @@ describe("causoryn_check_architecture", { timeout: 30_000 }, () => {
         const error = expectErrorOf(result);
         expect(error.code).toBe("LIMIT_EXCEEDED");
         expect(JSON.stringify(error.message)).toContain("maxFileBytes");
+        // The message names the limit, never the file's exact size.
+        const policyBytes = readFileSync(
+          path.join(fixture.root, ".causoryn", "architecture.rules.yaml"),
+        ).length;
+        expect(policyBytes).toBeGreaterThan(128);
+        expect(JSON.stringify(error.message)).toContain("128");
+        expect(JSON.stringify(error.message)).not.toContain(String(policyBytes));
       } finally {
         await pair.close();
       }

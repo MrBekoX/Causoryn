@@ -446,7 +446,7 @@ async function tryReadTrustedGitBlob(
     if (bytes > maxBytes) {
       throw new CausorynToolError(
         "LIMIT_EXCEEDED",
-        `${blobPath} at git ref ${ref} (${String(bytes)} bytes) exceeds config.maxFileBytes (${String(maxBytes)})`,
+        `${blobPath} at git ref ${ref} exceeds config.maxFileBytes (${String(maxBytes)} bytes)`,
       );
     }
     return { status: "ok", text };
@@ -456,7 +456,7 @@ async function tryReadTrustedGitBlob(
       if (/maxBuffer/i.test(error.message)) {
         throw new CausorynToolError(
           "LIMIT_EXCEEDED",
-          `${blobPath} at git ref ${ref} exceeds config.maxFileBytes (${String(maxBytes)})`,
+          `${blobPath} at git ref ${ref} exceeds config.maxFileBytes (${String(maxBytes)} bytes)`,
         );
       }
       if (error.code === "compare/blob-not-found") {
@@ -595,7 +595,7 @@ async function loadGuardInputs(
   if (policyRead.status === "too-large") {
     throw new CausorynToolError(
       "LIMIT_EXCEEDED",
-      `.causoryn/architecture.rules.yaml (${String(policyRead.bytes)} bytes) exceeds config.maxFileBytes (${String(maxBytes)}); reduce the policy file size`,
+      `.causoryn/architecture.rules.yaml exceeds config.maxFileBytes (${String(maxBytes)} bytes); reduce the policy file size`,
     );
   }
   if (policyRead.status !== "ok") {
@@ -614,7 +614,7 @@ async function loadGuardInputs(
   if (baselineRead.status === "too-large") {
     throw new CausorynToolError(
       "LIMIT_EXCEEDED",
-      `.causoryn/architecture.baseline.yaml (${String(baselineRead.bytes)} bytes) exceeds config.maxFileBytes (${String(maxBytes)}); reduce the baseline file size`,
+      `.causoryn/architecture.baseline.yaml exceeds config.maxFileBytes (${String(maxBytes)} bytes); reduce the baseline file size`,
     );
   }
   const policy = parseArchitecturePolicy(policyRead.text);
