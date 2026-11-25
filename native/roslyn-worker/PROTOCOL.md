@@ -57,7 +57,7 @@ stderr ← [roslyn-worker] ...                   (loglar; protokolün parçası 
 | `files` | dizi | **Zorunlu, en az 1.** Bellek-içi kaynak çantası. |
 | `files[].path` | string | **Zorunlu.** Workspace-relative POSIX yolu. Mutlak yol, `""`/`.`/`..` segmentleri reddedilir. Aynı yol iki kez verilemez. |
 | `files[].content` | string | **Zorunlu.** Tam kaynak kod. |
-| `referenceDirs` | string[] | Opsiyonel. Ek MetadataReference dizinleri (ör. NuGet DLL'leri). Mevcut olmayan dizin uyarı üretir, hata değil. |
+| `referenceDirs` | string[] | Opsiyonel. Ek MetadataReference dizinleri (ör. NuGet DLL'leri). Mevcut olmayan dizin uyarı üretir, hata değil. Only fully qualified local paths are used; an entry that is, or has an ancestor directory that is, a symbolic link or junction is rejected with a warning (the C# adapter sends real paths). `.dll` entries smaller than 128 bytes (empty files, FIFOs) or larger than 64 MiB are skipped without being opened. |
 | `maxNodes` | tam sayı | Opsiyonel (güvenlik bulgusu 4). Yanıt node bütçesi; `1..MaxResponseNodes` aralığında olmalı, dışı `INVALID_ARGUMENT`. Verilmezse `MaxResponseNodes` uygulanır. |
 | `projects` | dizi | Optional MSBuild project model (see "Projects" below). Absent → every file shares one compilation. |
 
@@ -93,6 +93,14 @@ Unix: `/usr/share/dotnet`, `/usr/lib/dotnet`).
 - BCL pack'i yoksa: yalnızca `System.Private.CoreLib` eklenir (çalışma
   zamanı düşüşü) — kaynak-içi CALLS/CONTAINS etkilenmez, BCL türevleri
   çözümsüz kalır ve uyarı yazılır.
+- A `DOTNET_ROOT` that is not a fully qualified local path (relative, UNC
+  or device path) is ignored before any file system access and reported
+  with the warning `DOTNET_ROOT is not a fully qualified local path and was
+  ignored`.
+- Every reference is loaded on its own: a DLL that cannot be opened or read
+  (removed, locked, no permission) is skipped with the warning
+  `reference '<file>' could not be loaded and was skipped (<exception>)`;
+  the rest of the analysis continues.
 - ASP.NET pack'i yoksa: controller/minimal API öznitelikleri semantik
   çözümlenemez → bilinen-ad kuralı heuristic ROUTES_TO üretir (aşağıda).
   Bu bir uyarı olarak da bildirilir.

@@ -34,7 +34,13 @@
 import { lstatSync, readdirSync, realpathSync } from "node:fs";
 import { join, posix as pathPosix } from "node:path";
 import { MsbuildXmlError, parseMsbuildXml, type XmlElement } from "./msbuild-xml.js";
-import { isInsideRealDir, isSamePath, readBoundedFileNoFollow, resolveSafeRealRoot } from "./safe-fs.js";
+import {
+  isInsideRealDir,
+  isLinkFreeBelow,
+  isSamePath,
+  readBoundedFileNoFollow,
+  resolveSafeRealRoot,
+} from "./safe-fs.js";
 import {
   MAX_CSHARP_PROJECTS,
   MAX_PROJECT_FILE_BYTES,
@@ -492,6 +498,8 @@ function absoluteOf(realRoot: string, relativePosix: string): string {
  */
 function isSafeDirectory(realRoot: string, relativeDir: string): boolean {
   const absolute = absoluteOf(realRoot, relativeDir);
+  // Every component is inspected without following links before realpath runs.
+  if (!isLinkFreeBelow(realRoot, absolute, "directory")) return false;
   try {
     const stat = lstatSync(absolute);
     if (stat.isSymbolicLink() || !stat.isDirectory()) return false;
