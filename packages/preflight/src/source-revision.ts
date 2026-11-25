@@ -1,6 +1,6 @@
 import { Buffer } from "node:buffer";
-import { constants as fsConstants } from "node:fs";
-import { lstat, open, stat } from "node:fs/promises";
+import { constants as fsConstants, type Stats } from "node:fs";
+import { lstat, open, realpath, stat } from "node:fs/promises";
 import path from "node:path";
 
 import type { PreflightSourceRevision } from "./manifest.js";
@@ -32,6 +32,12 @@ import type { PreflightSourceRevision } from "./manifest.js";
  *   assertResolvedWithinRepoRoot örüntüsü).
  * - "gitdir:" dosya gösterimi yalnızca repoRoot İÇİNE çözülen gitdir için
  *   kabul edilir; kök dışına çıkan gitdir desteklenmez (limitation ile).
+ * - Path hardening: the gitdir pointer text is checked for network/device
+ *   forms and lexical containment BEFORE any filesystem call on its target.
+ *   Every git metadata path (gitdir, HEAD, ref files, packed-refs) is
+ *   lstat'ed component by component below the canonical root: a symbolic
+ *   link (or junction) anywhere on the way is not followed, and the opened
+ *   handle must be the file that was checked (dev/ino).
  *
  * Dürüstlük sınırları:
  * - git'siz workspace: hata DEĞİLDİR — sourceRevision yok + limitations ile
@@ -52,6 +58,61 @@ const HEAD_SHA_PATTERN = /^[0-9a-fA-F]{40,64}$/;
  * uydurma telafi yok).
  */
 const MAX_GIT_METADATA_BYTES = 1024 * 1024;
+const MAX_GIT_METADATA_LABEL = "1 MiB";
+
+/**
+ * Network (UNC) and device path forms (`\\host\share`, `//host/share`,
+ * `\\?\`, `\\.\`, `\??\`): never accessed. Same forms as
+ * packages/graph/src/git-repository-layout.ts isNetworkOrDevicePath.
+ */
+const NETWORK_OR_DEVICE_PREFIX = /^(?:[\\/]{2}|[\\/]\?\?[\\/])/;
+
+function isUnsupportedPointerText(value: string): boolean {
+  return (
+    value.includes("\0") ||
+    NETWORK_OR_DEVICE_PREFIX.test(value) ||
+    (process.platform === "win32" && /^[A-Za-z]:(?![\\/])/.test(value))
+  );
+}
+
+/** Strict lexical containment (case-insensitive on win32 via path.relative). */
+function isStrictlyInside(candidate: string, base: string): boolean {
+  const relative = path.relative(base, candidate);
+  return (
+    relative.length > 0 &&
+    !path.isAbsolute(relative) &&
+    relative !== ".." &&
+    !relative.startsWith(`..${path.sep}`)
+  );
+}
+
+type ComponentCheck =
+  | { readonly status: "ok"; readonly final: Stats }
+  | { readonly status: "missing" }
+  | { readonly status: "link" }
+  | { readonly status: "outside" };
+
+/**
+ * lstat's every component of `target` below the canonical `realRoot`
+ * without following links: a symbolic link (or junction) on the way is
+ * reported, never traversed.
+ */
+async function checkComponentsBelowRoot(realRoot: string, target: string): Promise<ComponentCheck> {
+  if (!isStrictlyInside(target, realRoot)) return { status: "outside" };
+  const parts = path
+    .relative(realRoot, target)
+    .split(/[\\/]+/)
+    .filter((part) => part.length > 0);
+  let current = realRoot;
+  let final: Stats | undefined;
+  for (const part of parts) {
+    current = path.join(current, part);
+    final = await lstat(current).catch(() => undefined);
+    if (final === undefined) return { status: "missing" };
+    if (final.isSymbolicLink()) return { status: "link" };
+  }
+  return final === undefined ? { status: "missing" } : { status: "ok", final };
+}
 
 /**
  * Ref adı beyaz listesi: yalnızca "refs/" ile başlayan, güvenli karakter
@@ -104,9 +165,15 @@ function assertRefPathWithinGitDir(gitDir: string, refName: string): string {
 type GitDirResolution =
   | { readonly kind: "missing" }
   | { readonly kind: "unsupported-outside-root" }
+  | { readonly kind: "unsupported-link" }
+  | { readonly kind: "unsupported-path-form" }
   | { readonly kind: "ok"; readonly gitDir: string };
 
 const READ_CHUNK_BYTES = 64 * 1024;
+
+function quotaNote(label: string): string {
+  return `${label} exceeds the size quota (the ${MAX_GIT_METADATA_LABEL} limit); not read because of the resource consumption limit`;
+}
 
 /**
  * Kota denetimli fd tabanlı metin okuma: dosya yoksa metin değil; boyutu kota
@@ -114,22 +181,39 @@ const READ_CHUNK_BYTES = 64 * 1024;
  * kalır) ve aşım notlar'a yazılır (TŞ §19; sessiz okuma yok, TOCTOU yarış
  * penceresi yok). Return undefined hem "yok" hem "kota aşıldı" için
  * mümkündür — ayrım notes'tadır.
+ * The path must lie below the canonical root with no symbolic link on the
+ * way (checked with lstat before opening), and the opened handle must be the
+ * checked file (dev/ino), so a link is never followed on any platform.
  */
 async function readTextWithinQuota(
+  realRoot: string,
   filePath: string,
   label: string,
   notes: string[],
 ): Promise<string | undefined> {
+  const check = await checkComponentsBelowRoot(realRoot, filePath);
+  if (check.status === "link") {
+    notes.push(
+      `${label} was not read: its path inside the repository passes through a symbolic link, and links are not followed`,
+    );
+    return undefined;
+  }
+  if (check.status !== "ok" || !check.final.isFile()) return undefined;
   const openFlags = fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0);
   const handle = await open(filePath, openFlags).catch(() => undefined);
   if (handle === undefined) return undefined;
   try {
     const fileStat = await handle.stat().catch(() => undefined);
     if (fileStat === undefined || !fileStat.isFile()) return undefined;
+    if (
+      fileStat.ino !== 0 &&
+      check.final.ino !== 0 &&
+      (fileStat.dev !== check.final.dev || fileStat.ino !== check.final.ino)
+    ) {
+      return undefined; // replaced between the check and the open
+    }
     if (fileStat.size > MAX_GIT_METADATA_BYTES) {
-      notes.push(
-        `${label} exceeds the size quota (${String(fileStat.size)} bytes > ${String(MAX_GIT_METADATA_BYTES)}); not read because of the resource consumption limit`,
-      );
+      notes.push(quotaNote(label));
       return undefined;
     }
     const chunks: Buffer[] = [];
@@ -144,9 +228,7 @@ async function readTextWithinQuota(
       totalBytes += bytesRead;
     }
     if (totalBytes > MAX_GIT_METADATA_BYTES) {
-      notes.push(
-        `${label} exceeds the size quota (${String(totalBytes)} bytes > ${String(MAX_GIT_METADATA_BYTES)}); not read because of the resource consumption limit`,
-      );
+      notes.push(quotaNote(label));
       return undefined;
     }
     return Buffer.concat(chunks, totalBytes).toString("utf8");
@@ -157,28 +239,38 @@ async function readTextWithinQuota(
   }
 }
 
-/** gitdir çözümlemesi: .git dizin olabilir veya "gitdir:" satırlı dosya. */
+/**
+ * gitdir çözümlemesi: .git dizin olabilir veya "gitdir:" satırlı dosya.
+ * `realRoot` is the canonical root. The pointer text is checked (network /
+ * device / drive-relative forms, lexical containment) before any filesystem
+ * call on its target; the target is then lstat'ed component by component.
+ */
 async function resolveGitDir(
-  repoRoot: string,
+  realRoot: string,
   notes: string[],
 ): Promise<GitDirResolution> {
-  const dotGit = path.join(repoRoot, ".git");
+  const dotGit = path.join(realRoot, ".git");
   const dotGitStat = await lstat(dotGit).catch(() => undefined);
   if (dotGitStat === undefined) return { kind: "missing" };
+  if (dotGitStat.isSymbolicLink()) return { kind: "unsupported-link" };
   if (dotGitStat.isDirectory()) return { kind: "ok", gitDir: dotGit };
   if (!dotGitStat.isFile()) return { kind: "missing" };
-  const content = await readTextWithinQuota(dotGit, ".git pointer file", notes);
+  const content = await readTextWithinQuota(realRoot, dotGit, ".git pointer file", notes);
   if (content === undefined) return { kind: "missing" };
   const match = content.match(/^gitdir:\s*(.+)\s*$/m);
   const gitdir = match?.[1]?.trim();
   if (gitdir === undefined || gitdir.length === 0) return { kind: "missing" };
-  const resolved = path.isAbsolute(gitdir) ? path.normalize(gitdir) : path.resolve(repoRoot, gitdir);
-  const resolvedStat = await stat(resolved).catch(() => undefined);
-  if (resolvedStat === undefined || !resolvedStat.isDirectory()) return { kind: "missing" };
+  if (isUnsupportedPointerText(gitdir)) return { kind: "unsupported-path-form" };
+  // Lexical resolution only: no filesystem call on the target yet.
+  const resolved = path.resolve(realRoot, gitdir);
   // gitdir kök İÇİNE çözülmeli (submodule/worktree için güvenli biçim);
   // kök dışına çıkan gitdir gösterimi bu çekirdekte desteklenmez.
-  const relativeToRoot = path.relative(repoRoot, resolved);
-  if (relativeToRoot.startsWith("..") || path.isAbsolute(relativeToRoot)) {
+  if (!isStrictlyInside(resolved, realRoot)) return { kind: "unsupported-outside-root" };
+  const check = await checkComponentsBelowRoot(realRoot, resolved);
+  if (check.status === "link") return { kind: "unsupported-link" };
+  if (check.status !== "ok" || !check.final.isDirectory()) return { kind: "missing" };
+  const realGitDir = await realpath(resolved).catch(() => undefined);
+  if (realGitDir === undefined || !isStrictlyInside(realGitDir, realRoot)) {
     return { kind: "unsupported-outside-root" };
   }
   return { kind: "ok", gitDir: resolved };
@@ -186,6 +278,7 @@ async function resolveGitDir(
 
 /** Ref dosyasından SHA okur; yoksa/geçersizse/kota üstündeyse undefined. */
 async function readRefFile(
+  realRoot: string,
   gitDir: string,
   refName: string,
   notes: string[],
@@ -196,7 +289,7 @@ async function readRefFile(
   } catch {
     return undefined; // güvenlik reddi: ref okunmaz, hata olarak yayılmaz
   }
-  const content = await readTextWithinQuota(refPath, "ref file", notes);
+  const content = await readTextWithinQuota(realRoot, refPath, "ref file", notes);
   if (content === undefined) return undefined;
   const sha = content.trim();
   return HEAD_SHA_PATTERN.test(sha) ? sha.toLowerCase() : undefined;
@@ -204,13 +297,14 @@ async function readRefFile(
 
 /** packed-refs içinde ref'i arar (ref dosyası yoksa: paketlenmiş dallar). */
 async function readPackedRef(
+  realRoot: string,
   gitDir: string,
   refName: string,
   notes: string[],
 ): Promise<string | undefined> {
   if (!SAFE_REF_NAME_PATTERN.test(refName)) return undefined;
   const packedRefsPath = path.join(gitDir, "packed-refs");
-  const content = await readTextWithinQuota(packedRefsPath, "packed-refs", notes);
+  const content = await readTextWithinQuota(realRoot, packedRefsPath, "packed-refs", notes);
   if (content === undefined) return undefined;
   for (const line of content.split(/\r?\n/)) {
     if (line.length === 0 || line.startsWith("#") || line.startsWith("^")) continue;
@@ -229,11 +323,12 @@ async function readPackedRef(
  * dosyası yoksa packed-refs'e düşer. Çözülemezse undefined.
  */
 async function resolveHeadSha(
+  realRoot: string,
   gitDir: string,
   notes: string[],
 ): Promise<string | undefined> {
   const headPath = path.join(gitDir, "HEAD");
-  const head = await readTextWithinQuota(headPath, ".git/HEAD", notes);
+  const head = await readTextWithinQuota(realRoot, headPath, ".git/HEAD", notes);
   if (head === undefined) return undefined;
   const trimmed = head.trim();
   const refMatch = trimmed.match(/^ref:\s+(.+)$/);
@@ -247,9 +342,9 @@ async function resolveHeadSha(
   } catch {
     return undefined; // güvenlik reddi: çözümleme yapılmaz, uydurma yok
   }
-  const direct = await readRefFile(gitDir, refName, notes);
+  const direct = await readRefFile(realRoot, gitDir, refName, notes);
   if (direct !== undefined) return direct;
-  return readPackedRef(gitDir, refName, notes);
+  return readPackedRef(realRoot, gitDir, refName, notes);
 }
 
 const NOT_A_GIT_REPO_NOTE =
@@ -257,6 +352,12 @@ const NOT_A_GIT_REPO_NOTE =
 
 const GITDIR_OUTSIDE_ROOT_NOTE =
   "sourceRevision not resolved: the gitdir pointer in the .git file resolves outside the repository root; this layout is not supported";
+
+const GITDIR_LINK_NOTE =
+  "sourceRevision not resolved: the .git entry or its gitdir pointer passes through a symbolic link inside the repository; links are not followed";
+
+const GITDIR_PATH_FORM_NOTE =
+  "sourceRevision not resolved: the gitdir pointer in the .git file names a network or device path or a drive-relative path; it is not accessed";
 
 const HEAD_UNRESOLVED_NOTE =
   "sourceRevision not resolved: .git/HEAD could not be read or the ref it points to could not be resolved (detached/ref/packed-refs); the manifest was built without a source revision";
@@ -282,25 +383,27 @@ export async function resolveSourceRevision(
       `resolveSourceRevision: repoRoot is not a directory: ${repoRoot}`,
     );
   }
+  // Canonical root: every metadata path below is checked against it.
+  const realRoot = await realpath(repoRoot);
 
   // Kota/okuma notları: deterministik sırada toplanır ve limitation olarak
   // raporlanır (sessiz okuma yok — TŞ §19 dürüstlük ilkesi).
   const notes: string[] = [];
-  const gitDirResolution = await resolveGitDir(repoRoot, notes);
-  if (gitDirResolution.kind === "missing") {
+  const gitDirResolution = await resolveGitDir(realRoot, notes);
+  const unresolvedNote: Record<Exclude<GitDirResolution["kind"], "ok">, string> = {
+    missing: NOT_A_GIT_REPO_NOTE,
+    "unsupported-outside-root": GITDIR_OUTSIDE_ROOT_NOTE,
+    "unsupported-link": GITDIR_LINK_NOTE,
+    "unsupported-path-form": GITDIR_PATH_FORM_NOTE,
+  };
+  if (gitDirResolution.kind !== "ok") {
     return {
       sourceRevision: undefined,
-      limitations: [NOT_A_GIT_REPO_NOTE, ...notes].sort(cmpTr),
-    };
-  }
-  if (gitDirResolution.kind === "unsupported-outside-root") {
-    return {
-      sourceRevision: undefined,
-      limitations: [GITDIR_OUTSIDE_ROOT_NOTE, ...notes].sort(cmpTr),
+      limitations: [unresolvedNote[gitDirResolution.kind], ...notes].sort(cmpTr),
     };
   }
 
-  const head = await resolveHeadSha(gitDirResolution.gitDir, notes);
+  const head = await resolveHeadSha(realRoot, gitDirResolution.gitDir, notes);
   if (head === undefined) {
     return {
       sourceRevision: undefined,
