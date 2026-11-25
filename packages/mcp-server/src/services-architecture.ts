@@ -180,9 +180,16 @@ export function graphErrorToToolError(
   }
   // A git layout that would read outside the analyzed root (foreign gitdir
   // pointer, linked .git, network path in git metadata) is refused before git
-  // starts; the message names the reason and is safe to return.
+  // starts. The detailed reason can name resolved paths outside the root, so it
+  // goes only to the injected logger (stderr); the client gets a fixed message.
   if (code === "compare/repository-refused") {
-    return new CausorynToolError("PATH_DENIED", error.message);
+    log?.(`graph contract error ${code} mapped to PATH_DENIED: ${error.message}`);
+    return new CausorynToolError(
+      "PATH_DENIED",
+      "the git repository layout at the analyzed root is refused: only a .git directory, a .git file " +
+        "pointing inside the root, or a linked worktree or submodule git directory that points back to " +
+        "the root is read (the reason is in the server log)",
+    );
   }
   // Ortam/hata sınıfı (git yok, komut başarısız, yazma hatası) →
   // retryable=true INTERNAL_ERROR. Orijinal mesaj + modül kodu YALNIZCA

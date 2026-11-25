@@ -283,8 +283,6 @@ describe("graphErrorToToolError — sabit eşleme birim testleri", () => {
       ["compare/ref-not-found", "INVALID_REVISION"],
       ["export/output-not-authorized", "EXPORT_NOT_ALLOWED"],
       ["export/output-path-denied", "PATH_DENIED"],
-      // A git layout that would read outside the analyzed root is refused:
-      ["compare/repository-refused", "PATH_DENIED"],
       ["timeline/invalid-range", "INVALID_REVISION"],
       ["timeline/invalid-input", "INVALID_ARGUMENT"],
     ];
@@ -294,6 +292,23 @@ describe("graphErrorToToolError — sabit eşleme birim testleri", () => {
       expect(mapped.code, sourceCode).toBe(expected);
       expect(mapped.message, `${sourceCode} mesajı taşınmalı`).toBe(message);
     }
+  });
+});
+
+describe("graphErrorToToolError — refused git repository layout", () => {
+  it("maps compare/repository-refused to PATH_DENIED with a fixed, path-free message and logs the detail", () => {
+    const logs: string[] = [];
+    const detail =
+      "Refusing to read the git repository at /srv/work/repo: the .git file points outside the analyzed root (/srv/other/.git)";
+    const mapped = graphErrorToToolError(
+      new GraphRepositoryError("compare/repository-refused", detail),
+      (message: string) => logs.push(message),
+    );
+    expect(mapped.code).toBe("PATH_DENIED");
+    expect(mapped.message).toContain(".git");
+    expect(mapped.message).not.toContain("other");
+    expect(mapped.message).not.toContain("work");
+    expect(logs.join("\n")).toContain(detail);
   });
 });
 
