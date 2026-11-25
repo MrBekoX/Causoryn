@@ -24,6 +24,11 @@ const config = {
     ],
     exclude: ["**/node_modules/**", "**/dist/**", "tests/bench-release/**"],
     environment: "node",
+    // The default 5 s is too tight for slow CI runners (the macOS Intel merge
+    // gate saturates its 4 vCPUs while suites spawn toolchains, and short
+    // in-memory tests then see multi-second scheduling stalls). Tests that need
+    // a precise limit set their own; a real hang still fails.
+    testTimeout: 20_000,
   },
 };
 
