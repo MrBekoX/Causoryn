@@ -13,6 +13,34 @@ import {
 import { ContractDiscoveryError } from "./errors.js";
 
 /**
+ * Syntax error of a spec text as its error code and position only. The yaml
+ * library's own message quotes the offending source lines, and that text would
+ * reach the agent (CONTRACT_PARSE_FAILED) and the server log; config files such
+ * as appsettings.json can hold credentials on exactly those lines.
+ */
+export function describeSpecSyntaxError(error: unknown): string {
+  const record = (error ?? {}) as { code?: unknown; linePos?: ReadonlyArray<{ line?: unknown; col?: unknown }> };
+  const code = typeof record.code === "string" && /^[A-Z_]{1,64}$/.test(record.code) ? record.code : "SYNTAX_ERROR";
+  const position = record.linePos?.[0];
+  const where =
+    position !== undefined && Number.isSafeInteger(position.line) && Number.isSafeInteger(position.col)
+      ? ` at line ${String(position.line)}, column ${String(position.col)}`
+      : "";
+  return `${code}${where}`;
+}
+
+/**
+ * Failure of the parser itself (not a reported syntax error). Its message is
+ * not carried over: it may embed parser internals or input text.
+ */
+export function describeSpecParserFailure(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error);
+  return message.includes("alias")
+    ? "alias use exceeds the limit (aliases are expanded with a bound)"
+    : "the parser failed on this input";
+}
+
+/**
  * Spec parse güvenliği — sprint kırmızı çizgi 6: "Spec dosyası parse
  * güvenliği: sınırsız derinlik/boyut sınırı (yaml safe-load, boyut kotası),
  * ReDoS sınırlı desenler" ve TŞ §19 (kaynak tüketimi).
@@ -256,7 +284,7 @@ export function parseStructuredSpec(relativePath: string, text: string): ParsedS
       const first = document.errors[0];
       throw new ContractDiscoveryError(
         syntaxErrorCode(relativePath),
-        `Spec YAML/JSON syntax error: ${first?.message ?? "unknown error"}`,
+        `Spec YAML/JSON syntax error: ${describeSpecSyntaxError(first)}`,
       );
     }
     // toJS() alias'ları genişletir; kütüphane alias bombası sınırını
@@ -269,7 +297,7 @@ export function parseStructuredSpec(relativePath: string, text: string): ParsedS
       message.includes("alias")
         ? "contracts/limit-exceeded"
         : syntaxErrorCode(relativePath),
-      `Spec could not be parsed: ${message}`,
+      `Spec could not be parsed: ${describeSpecParserFailure(error)}`,
     );
   }
   checkStructureQuotas(root);

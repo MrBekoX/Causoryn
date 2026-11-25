@@ -1,6 +1,6 @@
 {
   "name": "@causoryn/wiki",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "private": true,
   "license": "MIT",
   "description": "Living Wiki engine: deterministic GraphSnapshot-to-WikiSnapshot projection, page taxonomy, links, full-text search, incremental builds, coverage deltas and offline export.",
@@ -9,9 +9,9 @@
     ".": "./src/index.ts"
   },
   "dependencies": {
-    "@causoryn/contracts": "0.3.1",
-    "@causoryn/domain": "0.3.1",
-    "@causoryn/workspace": "0.3.1",
+    "@causoryn/contracts": "0.3.2",
+    "@causoryn/domain": "0.3.2",
+    "@causoryn/workspace": "0.3.2",
     "zod": "^4.6.7"
   }
 }

@@ -2,7 +2,7 @@
 
 > **Dil / Language:** **Türkçe** | [English](en/tool-contracts.md) · [Dokümantasyon Merkezi](README.md)
 >
-> **Durum:** Causoryn 0.3.1'i yansıtır (11 araçlı varsayılan `core` araç profili; `wiki`, `history` ve `full` profilleri `--tool-profile` ile isteğe bağlı açılır). Sunucunun nasıl başlatıldığı için bkz. [CLI ve Konfigürasyon](cli-and-configuration.md).
+> **Durum:** Causoryn 0.3.2'i yansıtır (11 araçlı varsayılan `core` araç profili; `wiki`, `history` ve `full` profilleri `--tool-profile` ile isteğe bağlı açılır). Sunucunun nasıl başlatıldığı için bkz. [CLI ve Konfigürasyon](cli-and-configuration.md).
 >
 > **Doğruluk kaynağı:** `packages/mcp-server/src/version.ts` (`CORE_TOOL_NAMES`, `WIKI_TOOL_NAMES`, `HISTORY_TOOL_NAMES`, `TOOL_NAMES`, `DEPRECATED_TOOL_REPLACEMENTS`), `packages/mcp-server/src/server.ts` (kayıtlar, profil çözümleme, annotations, deprecation ve indeksleme envelope'ları), `packages/mcp-server/src/schemas.ts` (wire girdi şemaları), `packages/mcp-server/src/services*.ts` (handler'lar ve veri şemaları), `packages/mcp-server/src/errors.ts` (sabit hata tablosu), `packages/mcp-server/src/envelope.ts`, `packages/mcp-server/src/runtime-cli.ts`. Doğrulama: `tests/release-docs.test.ts`, bu sayfadaki legacy/full ve wiki tablolarının tam olarak 29 legacy/full aracı listelediğini (İngilizce sürümde ayrıca tam olarak 11 core aracını) denetler; `tests/mcp-tool-surface-budget.test.ts` core `tools/list` bütçesini denetler.
 

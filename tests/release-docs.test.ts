@@ -259,9 +259,10 @@ function changelogSubsection(section: string, title: string): string {
 }
 
 describe("F9 / K-022: sürüm kararı — 0.3.0 Pre-1.0 (1.0.0 DEĞİL)", () => {
-  it("CHANGELOG.md Keep a Changelog formatında, [0.3.1]..[0.2.0] - tarih ve tarihsel [0.1.0] - tarih girişli", () => {
+  it("CHANGELOG.md Keep a Changelog formatında, [0.3.2]..[0.2.0] - tarih ve tarihsel [0.1.0] - tarih girişli", () => {
     const text = readDoc("changelog");
     expect(text).toContain("Keep a Changelog");
+    expect(text).toMatch(/^## \[0\.3\.2\] - \d{4}-\d{2}-\d{2}$/m);
     expect(text).toMatch(/^## \[0\.3\.1\] - \d{4}-\d{2}-\d{2}$/m);
     expect(text).toMatch(/^## \[0\.3\.0\] - \d{4}-\d{2}-\d{2}$/m);
     expect(text).toMatch(/^## \[0\.2\.4\] - \d{4}-\d{2}-\d{2}$/m);
@@ -272,11 +273,11 @@ describe("F9 / K-022: sürüm kararı — 0.3.0 Pre-1.0 (1.0.0 DEĞİL)", () => 
     expect(text).toMatch(/^## \[0\.1\.0\] - \d{4}-\d{2}-\d{2}$/m);
   });
 
-  it("kök package.json version === SERVER_VERSION === 0.3.1 (karar üç yüzeyde tutarlı)", () => {
+  it("kök package.json version === SERVER_VERSION === 0.3.2 (karar üç yüzeyde tutarlı)", () => {
     const pkg = JSON.parse(readFileSync(DOC_PATHS.rootPkg, "utf8")) as {
       version?: string;
     };
-    expect(pkg.version).toBe("0.3.1");
+    expect(pkg.version).toBe("0.3.2");
     expect(pkg.version).toBe(SERVER_VERSION);
   });
 
@@ -433,9 +434,9 @@ describe("DENETİM DÖNGÜSÜ: CHANGELOG [Unreleased] 1.0.0 kapıları F9 sayım
     const text = readDoc("changelog");
     const start = text.indexOf("## [Unreleased]");
     // The [Unreleased] section ends at the newest released version heading.
-    const end = text.indexOf("## [0.3.1]");
+    const end = text.indexOf("## [0.3.2]");
     expect(start, "## [Unreleased] başlığı olmalı").toBeGreaterThanOrEqual(0);
-    expect(end, "## [0.3.1] başlığı olmalı").toBeGreaterThan(start);
+    expect(end, "## [0.3.2] başlığı olmalı").toBeGreaterThan(start);
     return text.slice(start, end);
   }
 
@@ -817,8 +818,8 @@ describe("BAĞIMSIZ DENETİM DÖNGÜSÜ (2026-11-18): doküman↔kod tam parite 
   it("CHANGELOG.md ve docs/implementation-status.md: secret-scan + npm audit (0 açık) kapanış notu ve antigravity-plugin.test.ts satır sayısı diskle senkron", () => {
     const changelog = readDoc("changelog");
     const start = changelog.indexOf("## [Unreleased]");
-    const end = changelog.indexOf("## [0.3.1]");
-    expect(end, "## [0.3.1] başlığı olmalı").toBeGreaterThan(start);
+    const end = changelog.indexOf("## [0.3.2]");
+    expect(end, "## [0.3.2] başlığı olmalı").toBeGreaterThan(start);
     const unreleased = changelog.slice(start, end);
     expect(unreleased).toMatch(/Rate-limit\/concurrency resource budget/i);
     expect(unreleased).toContain("scripts/secret-scan.mjs");
@@ -865,12 +866,12 @@ describe("BAĞIMSIZ DENETİM DÖNGÜSÜ (2026-11-18): doküman↔kod tam parite 
       plugins?: Array<{ version?: string }>;
     };
     expect(zcodeMarketplace.owner?.name).toBe("Causoryn Contributors");
-    expect(zcodeMarketplace.plugins?.[0]?.version).toBe("0.3.1");
+    expect(zcodeMarketplace.plugins?.[0]?.version).toBe("0.3.2");
 
     const rootReadme = readFileSync(path.join(REPO_ROOT, "README.md"), "utf8");
     const pkgReadme = readFileSync(path.join(REPO_ROOT, "packages", "causoryn", "README.md"), "utf8");
     for (const readme of [rootReadme, pkgReadme]) {
-      expect(readme).toContain("0.3.1");
+      expect(readme).toContain("0.3.2");
       expect(readme).toMatch(/Pre-1\.0/i);
       expect(readme).not.toMatch(/Public Preview/i);
       expect(readme).not.toContain("single zero-compile npm package");

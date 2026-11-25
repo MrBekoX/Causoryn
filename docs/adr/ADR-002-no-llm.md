@@ -2,7 +2,7 @@
 
 > **Dil / Language:** **Türkçe** | [English](../en/adr/ADR-002-no-llm.md) · [Dokümantasyon Merkezi](../README.md)
 >
-> **Durum:** Kabul edildi — temel motor sınırı; Causoryn 0.3.1 (pre-1.0) için güncel.
+> **Durum:** Kabul edildi — temel motor sınırı; Causoryn 0.3.2 (pre-1.0) için güncel.
 > **Tarihler:** 2026-11-02'de kaydedildi; 2026-11-20 ve 2026-11-23'te yeniden doğrulandı (host tarafından yazılan anotasyonlar ve MCP `.describe()` rehberliği); 0.3.0 için yeniden gözden geçirildi (araç profilleri, `worker_threads` indeksleme).
 
 ## Bağlam

@@ -1,6 +1,6 @@
 {
   "name": "@causoryn/sidecar-ipc",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "private": true,
   "license": "MIT",
   "description": "Shared sidecar worker IPC core: line-delimited JSON framing, per-request timeouts, stdout/stderr character budgets, EPIPE handling and an allowlisted worker environment.",

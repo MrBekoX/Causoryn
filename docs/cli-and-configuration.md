@@ -2,7 +2,7 @@
 
 > **Dil / Language:** **Türkçe** | [English](en/cli-and-configuration.md) · [Dokümantasyon Merkezi](README.md)
 >
-> **Durum:** Causoryn 0.3.1'i yansıtır (varsayılan `core` araç profili, çalışma alanı başına tek ortak `graph.sqlite`; araçların kendisi için bkz. [MCP Araç Sözleşmeleri](tool-contracts.md)).
+> **Durum:** Causoryn 0.3.2'i yansıtır (varsayılan `core` araç profili, çalışma alanı başına tek ortak `graph.sqlite`; araçların kendisi için bkz. [MCP Araç Sözleşmeleri](tool-contracts.md)).
 >
 > **Kaynak modüller:** `packages/causoryn/src/{cli.ts,setup.ts,doctor.ts,runtime-stage.ts,types.ts}`, `packages/causoryn/scripts/{causoryn.mjs,plugin-mcp-launcher.mjs,lib/node-version-guard.mjs,verify-package-ready.mjs}`, `packages/mcp-server/src/{cli-stdio.ts,stdio.ts,runtime-cli.ts,config.ts,context.ts,workspace-ignore-discovery.ts}`, `packages/workspace/src/{policy-config.ts,path-safety.ts,ignore-matcher.ts,output-policy.ts}`.
 
@@ -12,12 +12,12 @@ Bu başvuru belgesi; her `causoryn` CLI alt komutunu ve bayrağını, MCP araç 
 
 ## 1. CLI alt komutları ve bayraklar (`causoryn`)
 
-Hızlı kurulum ve salt-okunur sağlık denetimi için `@latest` kullanın (`@0.3.1` gibi tam sürüm pini de çalışır ve CI için önerilir):
+Hızlı kurulum ve salt-okunur sağlık denetimi için `@latest` kullanın (`@0.3.2` gibi tam sürüm pini de çalışır ve CI için önerilir):
 
 ```bash
 npx causoryn@latest setup --yes        # bu makinede algılanan host'lar için MCP sunucusunu + 5 skill'i kaydeder
 npx causoryn@latest doctor             # Node.js, runtime dosyaları, sidecar araç zincirleri ve host konfigürasyonlarını salt-okunur denetler
-# Tam pin: npx causoryn@0.3.1 setup --yes && npx causoryn@0.3.1 doctor
+# Tam pin: npx causoryn@0.3.2 setup --yes && npx causoryn@0.3.2 doctor
 ```
 
 `causoryn` ikilisi (`packages/causoryn/scripts/causoryn.mjs`) şunları sunar:
@@ -112,7 +112,7 @@ Denetlenen alt sistemler:
 
 ### 1.4 `causoryn --version` ve `causoryn --help`
 
-- `causoryn --version` (ayrıca `-v`, `version`): paket sürümünü (bu sürüm için `0.3.1`) basar ve `0` ile çıkar.
+- `causoryn --version` (ayrıca `-v`, `version`): paket sürümünü (bu sürüm için `0.3.2`) basar ve `0` ile çıkar.
 - `causoryn --help` (ayrıca `-h`, `help` veya argümansız): yukarıdaki kullanım metnini basar ve `0` ile çıkar.
 
 ---
@@ -355,25 +355,25 @@ MCP sunucusunun başlattığı her alt süreç (sidecar'lar, `git`, `cargo`; Win
 **Wiki ve history araçlarıyla açık kök:**
 
 ```bash
-npx causoryn@0.3.1 mcp --root /work/orders-service --auto-data-dir --client ci --tool-profile wiki,history
+npx causoryn@0.3.2 mcp --root /work/orders-service --auto-data-dir --client ci --tool-profile wiki,history
 ```
 
 **Ortam değişkenleri aracılığıyla, yayımlanmış çıktı şemalarıyla tam legacy katalog:**
 
 ```bash
-CAUSORYN_TOOL_PROFILE=full CAUSORYN_MCP_OUTPUT_SCHEMA_PROFILE=full npx causoryn@0.3.1 mcp --allow-cwd --auto-data-dir
+CAUSORYN_TOOL_PROFILE=full CAUSORYN_MCP_OUTPUT_SCHEMA_PROFILE=full npx causoryn@0.3.2 mcp --allow-cwd --auto-data-dir
 ```
 
 **Bellek-içi graph ile `CAUSORYN_CONFIG`'ten kök (veri dizini yok, dışa aktarım yok, wiki yok):**
 
 ```bash
-CAUSORYN_CONFIG='{"allowRoots":["/work/orders-service"]}' npx causoryn@0.3.1 mcp
+CAUSORYN_CONFIG='{"allowRoots":["/work/orders-service"]}' npx causoryn@0.3.2 mcp
 ```
 
 **Kalıcılık, dışa aktarımlar ve wiki ile `CAUSORYN_CONFIG`'ten kök:**
 
 ```bash
-CAUSORYN_CONFIG='{"allowRoots":["/work/orders-service"],"results":{"maxDepth":6}}' npx causoryn@0.3.1 mcp --auto-data-dir --tool-profile wiki
+CAUSORYN_CONFIG='{"allowRoots":["/work/orders-service"],"results":{"maxDepth":6}}' npx causoryn@0.3.2 mcp --auto-data-dir --tool-profile wiki
 ```
 
 **Önizleme ve kaldırma:**

@@ -4,7 +4,7 @@
 
 **Causoryn** is a **local, deterministic, zero-LLM compiler-grade code graph and `preflight -> verify` change guard** over MCP (`stdio`). It builds an evidence-backed dependency, symbol, hierarchy, route, contract, and test graph for **TypeScript / JavaScript**, **C# / Roslyn**, **Python**, **Go**, and **Rust** strictly read-only, exposing a lean **11-tool default `core` profile** (plus optional `wiki`, `history`, and backward-compatible `full` profiles) and **5 canonical agent skills**.
 
-> **Status:** reflects Causoryn 0.3.1, a pre-1.0 release (not `1.0.0`; historical `v0.1.0` remains frozen at `4c9c188f`). The default MCP surface is the 11-tool `core` profile. Remaining `1.0.0` release gates are tracked in [Implementation Status](implementation-status.md), the [Engineering Backlog](BACKLOG.md) and [CHANGELOG.md](../../CHANGELOG.md).
+> **Status:** reflects Causoryn 0.3.2, a pre-1.0 release (not `1.0.0`; historical `v0.1.0` remains frozen at `4c9c188f`). The default MCP surface is the 11-tool `core` profile. Remaining `1.0.0` release gates are tracked in [Implementation Status](implementation-status.md), the [Engineering Backlog](BACKLOG.md) and [CHANGELOG.md](../../CHANGELOG.md).
 
 ---
 

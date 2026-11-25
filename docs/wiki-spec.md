@@ -2,7 +2,7 @@
 
 > **Dil / Language:** **Türkçe** | [English](en/wiki-spec.md) · [Dokümantasyon Merkezi](README.md)
 >
-> **Durum:** Causoryn 0.3.1'i yansıtır (varsayılan `core` araç profili; Living Wiki araçları isteğe bağlı olarak açılır, bkz. [§2](#2-wiki-araçlarını-ve-depolamayı-etkinleştirme) ve [CLI ve Konfigürasyon](cli-and-configuration.md)).
+> **Durum:** Causoryn 0.3.2'i yansıtır (varsayılan `core` araç profili; Living Wiki araçları isteğe bağlı olarak açılır, bkz. [§2](#2-wiki-araçlarını-ve-depolamayı-etkinleştirme) ve [CLI ve Konfigürasyon](cli-and-configuration.md)).
 >
 > **Kaynak modüller:** `packages/wiki/src/*` (saf projeksiyon, bağlantı, arama, overlay ve export çekirdekleri) · `packages/storage-sqlite/src/{wiki-schema.ts,wiki-store.ts}` (SQLite kalıcılığı) · `packages/mcp-server/src/services-wiki.ts` (MCP servisleri) · `packages/mcp-server/src/server.ts` + `schemas.ts` (araç kaydı ve girdi şemaları) · `packages/mcp-server/src/version.ts` (`WIKI_TOOL_NAMES`, araç profilleri).
 

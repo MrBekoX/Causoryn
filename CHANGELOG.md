@@ -25,6 +25,21 @@ Before `1.0.0`, a breaking change bumps the minor version.
 - Bundle fidelity decision for the bare monorepo bundle's default lib (`.d.ts`) files (`packages/causoryn` already ships `dist/typescript-lib/lib*.d.ts` and reaches `state: "ready"`; the bare `packages/mcp-server/dist/` bundle does not include them).
 - Rate-limit/concurrency resource budget enforcement across concurrent MCP requests (currently out of scope). Already closed: the dedicated secret-scan gate (`scripts/secret-scan.mjs` over 13 directory roots + 13 root files) and `npm audit` with **0 vulnerabilities**.
 
+## [0.3.2] - 2026-11-25
+
+### Release Decision
+
+**`0.3.2` is a Pre-1.0 patch release — explicitly NOT `1.0.0`.** It closes two data exposures found in a security review before the project's public announcement; the MCP tool surface, envelope schema and configuration stay compatible with `0.3.1`, so no migration is needed. Root `package.json`, every workspace package, `packages/causoryn/package.json`, `SERVER_VERSION`, `INDEXING_VERSION`, `server.json`, and the four host marketplace/plugin manifests are kept in sync at `0.3.2`. The open gates under `[Unreleased]` keep `1.0.0` closed.
+
+### Security
+
+- **No absolute workspace path in exports:** the Workspace node no longer carries `attributes.rootPath`. Before this, `causoryn_export_documentation` with `format: "snapshot"` (the file meant to be committed as `.causoryn/architecture-snapshot.json`) and `format: "json"` with `view: "full"` contained the machine's absolute workspace path, which includes the OS user name and the local folder layout. Snapshots exported by earlier versions still contain it: export them again before committing them. Comparing such an older snapshot with a newer point reports the Workspace node as changed once. A new test exports every format and checks that no artifact contains the workspace path.
+- **No source text in contract parse errors:** a spec that fails to parse (`CONTRACT_PARSE_FAILED`) is now reported with the parser's error code and the line/column only. Before this, the message quoted the offending source lines, so a malformed config file such as `appsettings.json` could show a credential to the agent and in the server log.
+
+### Fixed
+
+- **README release status:** it no longer says the current release changed the default tool surface; that change shipped in `0.3.0`.
+
 ## [0.3.1] - 2026-11-25
 
 ### Release Decision

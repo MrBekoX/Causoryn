@@ -1,8 +1,8 @@
 {
   "name": "causoryn-monorepo",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "private": true,
-  "_versionDecision": "2026-11-24: 0.3.1 pre-1.0 release (1.0.0 is not declared). Minor bump because the default MCP tool surface changed in a breaking way (29 legacy tools -> 11-tool core profile; legacy names remain available with --tool-profile full). See CHANGELOG.md. Must stay equal to SERVER_VERSION.",
+  "_versionDecision": "2026-11-24: 0.3.2 pre-1.0 release (1.0.0 is not declared). Minor bump because the default MCP tool surface changed in a breaking way (29 legacy tools -> 11-tool core profile; legacy names remain available with --tool-profile full). See CHANGELOG.md. Must stay equal to SERVER_VERSION.",
   "description": "Causoryn: a local, deterministic code-analysis MCP engine that runs no LLM.",
   "type": "module",
   "license": "MIT",

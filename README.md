@@ -17,7 +17,7 @@
 
 **Causoryn** is a **local, deterministic, zero-LLM compiler-grade code graph and `preflight -> verify` change guard** for AI coding agents over MCP (`stdio`). It analyzes **TypeScript / JavaScript**, **C# / Roslyn**, **Python**, **Go**, and **Rust** strictly read-only, exposes a lean **11-tool default `core` profile** (with optional `wiki`, `history`, and backward-compatible `full` profiles), and ships **5 canonical agent skills**.
 
-> **Pre-1.0 Release Status:** `0.3.1` is a **Pre-1.0** release (not `1.0.0`; historical `v0.1.0` remains frozen at `4c9c188f`). It changes the default MCP tool surface from 29 tools to the 11-tool `core` profile; start the server with `--tool-profile full` to keep the legacy tool names (see the migration notes in [`CHANGELOG.md`](CHANGELOG.md)). Remaining `1.0.0` release gates are tracked transparently in [`CHANGELOG.md`](CHANGELOG.md) and [`docs/en/implementation-status.md`](docs/en/implementation-status.md).
+> **Pre-1.0 Release Status:** `0.3.2` is a **Pre-1.0** release (not `1.0.0`; historical `v0.1.0` remains frozen at `4c9c188f`). Since `0.3.0` the default MCP tool surface is the 11-tool `core` profile (previously 29 tools); start the server with `--tool-profile full` to keep the legacy tool names (see the migration notes in [`CHANGELOG.md`](CHANGELOG.md)). Remaining `1.0.0` release gates are tracked transparently in [`CHANGELOG.md`](CHANGELOG.md) and [`docs/en/implementation-status.md`](docs/en/implementation-status.md).
 >
 > **New here?** Follow the **[5-Minute Quickstart Tutorial](docs/en/tutorial-5-minutes.md)** on [`examples/fixture-ts-orders`](examples/fixture-ts-orders/README.md) to run `setup -> preflight -> edit -> verify` end to end.
 
@@ -227,7 +227,7 @@ Running `causoryn_preflight_change` before editing `src/services/orders-service.
 
 ## Supported Hosts
 
-Causoryn ships as a multi-file npm distribution package (`causoryn` `0.3.1`) and multi-host plugin repository supporting:
+Causoryn ships as a multi-file npm distribution package (`causoryn` `0.3.2`) and multi-host plugin repository supporting:
 
 1. **Antigravity** (`agy` / Antigravity IDE)
 2. **Claude Code**

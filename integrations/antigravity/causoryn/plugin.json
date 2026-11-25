@@ -1,7 +1,7 @@
 {
   "name": "causoryn",
   "displayName": "Causoryn",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "description": "Local, evidence-backed codebase and change intelligence via MCP.",
   "suggestedPrompts": [
     "Map this workspace and show evidence for critical dependencies",

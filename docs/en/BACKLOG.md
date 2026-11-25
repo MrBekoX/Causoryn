@@ -2,7 +2,7 @@
 
 > **Language:** [Türkçe](../BACKLOG.md) | **English** · [Documentation Hub](README.md)
 
-> **Status:** reflects Causoryn 0.3.1 (default `core` tool profile with 11 tools). `1.0.0` is not declared.
+> **Status:** reflects Causoryn 0.3.2 (default `core` tool profile with 11 tools). `1.0.0` is not declared.
 
 This page records the dependency order of the original delivery phases, what was delivered after that plan, the open `1.0.0` release gates with their closure requirements, and post-1.0 candidates. Evidence for every status is in [Implementation Status](implementation-status.md); the release notes are in [CHANGELOG.md](../../CHANGELOG.md). Nothing that does not work is marked `Done`.
 

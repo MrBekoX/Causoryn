@@ -2,7 +2,7 @@
 
 > **Language:** [Türkçe](../language-analyzers.md) | **English** · [Documentation Hub](README.md)
 >
-> **Status:** reflects Causoryn 0.3.1 (pre-1.0). Internal analyzer versions remain `0.1.0` (see §6).
+> **Status:** reflects Causoryn 0.3.2 (pre-1.0). Internal analyzer versions remain `0.1.0` (see §6).
 >
 > **Source modules:** `packages/indexing/src/{index.ts,index-service.ts,job-manager.ts,inventory.ts,fingerprint.ts}`, `packages/workspace/src/ignore-matcher.ts`, `packages/mcp-server/src/{services.ts,workspace-ignore-discovery.ts}`, `packages/sidecar-ipc/src/index.ts`, `adapters/typescript/src/{analyzer.ts,tsconfig-loader.ts}`, `adapters/{csharp-roslyn,python,go,rust}/src/*`, `native/{roslyn-worker,python-worker,go-worker,rust-worker}`.
 

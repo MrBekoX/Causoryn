@@ -1,6 +1,6 @@
 {
   "name": "@causoryn/zcode-plugin",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "private": true,
   "license": "MIT",
   "description": "Causoryn ZCode plugin (monorepo development fixture): .zcode-plugin/plugin.json with an inline stdio MCP server, the map-system skill and a README.",
