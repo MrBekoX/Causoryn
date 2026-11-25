@@ -174,20 +174,25 @@ function runVerification<T>(work: () => T, requestId: string): T {
 /* Girdi şeması (TŞ §10.2/§10.4 alanları)                               */
 /* ------------------------------------------------------------------ */
 
+/** Same bounds as the MCP wire schema (schemas.ts MAX_ID_LENGTH / MAX_GIT_REF_LENGTH). */
+const MAX_ID_LENGTH = 512;
+const MAX_GIT_REF_LENGTH = 200;
+
 export const VerifyChangeInputSchema = z.strictObject({
-  workspaceId: z.string().min(1).optional(),
+  workspaceId: z.string().min(1).max(MAX_ID_LENGTH).optional(),
   /** TŞ §10.2 "preflightId/baseSnapshot" — EN AZ BİRİ zorunlu. */
-  preflightId: z.string().min(1).optional(),
+  preflightId: z.string().min(1).max(MAX_ID_LENGTH).optional(),
   /** Taban yayın kimliği; preflightId ile birlikte UYUMLU olmalıdır. */
-  baseSnapshot: z.string().min(1).optional(),
+  baseSnapshot: z.string().min(1).max(MAX_ID_LENGTH).optional(),
   /** Optional trusted git ref (commit/branch/tag) from which architecture rules/baseline are loaded (defaults to manifest HEAD or "HEAD"). */
-  baseRef: z.string().min(1).optional(),
+  baseRef: z.string().min(1).max(MAX_GIT_REF_LENGTH).optional(),
   /** TŞ §10.4 "targetRevision": çekirdek yalnızca working-tree destekler. */
   targetRevision: z.literal("working-tree").optional(),
   /** Subset of checks; defaults to ["architecture", "graph-diff", "test-plan"] ("contracts" runs only when explicitly requested). */
   checks: z.enum(["architecture", "contracts", "graph-diff", "test-plan"])
     .array()
     .min(1)
+    .max(4)
     .optional(),
   /** E3: host-supplied test run record (always reported as state: "host_asserted", engineVerified: false). */
   observedTestRun: OBSERVED_TEST_RUN_SCHEMA.optional(),

@@ -20,6 +20,121 @@ const FIXTURE_ROOT = path.join(REPO_ROOT, "examples", "fixture-ts-orders");
  * input in memory.
  */
 
+/** JSON-schema paths of strings without maxLength and arrays without maxItems. */
+function unboundedPaths(schema: unknown, at: string): string[] {
+  if (schema === null || typeof schema !== "object") return [];
+  const node = schema as Record<string, unknown>;
+  const found: string[] = [];
+  if (
+    node["type"] === "string" &&
+    node["enum"] === undefined &&
+    node["const"] === undefined &&
+    typeof node["maxLength"] !== "number"
+  ) {
+    found.push(at);
+  }
+  if (node["type"] === "array") {
+    if (typeof node["maxItems"] !== "number") found.push(`${at}[]`);
+    found.push(...unboundedPaths(node["items"], `${at}[]`));
+  }
+  const properties = node["properties"];
+  if (properties !== null && typeof properties === "object") {
+    for (const [key, child] of Object.entries(properties as Record<string, unknown>)) {
+      found.push(...unboundedPaths(child, `${at}.${key}`));
+    }
+  }
+  for (const combinator of ["anyOf", "oneOf", "allOf"]) {
+    const variants = node[combinator];
+    if (Array.isArray(variants)) {
+      variants.forEach((variant, index) => {
+        found.push(...unboundedPaths(variant, `${at}<${combinator}${String(index)}>`));
+      });
+    }
+  }
+  return found;
+}
+
+describe("every tool input string and array is bounded", { timeout: 60_000 }, () => {
+  it("core and full profiles: no string without maxLength and no array without maxItems", async () => {
+    const context = createCausorynContext(
+      { workspaceId: "default", allowRoots: [FIXTURE_ROOT], autoIndex: false },
+      { logger: () => {} },
+    );
+    try {
+      const offenders: string[] = [];
+      for (const toolProfile of ["core", "full"] as const) {
+        const server = createCausorynMcpServer(context, { toolProfile });
+        const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+        const client = new Client({ name: "bounds-walker", version: "0.0.0" });
+        await server.connect(serverTransport);
+        await client.connect(clientTransport);
+        try {
+          const { tools } = await client.listTools();
+          for (const tool of tools) {
+            // The full-profile export_documentation input schema (annotations
+            // payload) is defined and validated in services-architecture.ts.
+            if (toolProfile === "full" && tool.name === "causoryn_export_documentation") continue;
+            offenders.push(
+              ...unboundedPaths(tool.inputSchema, `${toolProfile}:${tool.name}`),
+            );
+          }
+        } finally {
+          await client.close();
+          await server.close();
+        }
+      }
+      expect(offenders).toEqual([]);
+    } finally {
+      context.close();
+    }
+  });
+
+  it("free-form text, identifiers and lists reject oversized values at the schema boundary", async () => {
+    const schemas = await import("../src/schemas.js");
+    const long = (length: number): string => "x".repeat(length);
+    expect(
+      schemas.FindSymbolsToolInputSchema.safeParse({ query: long(schemas.MAX_QUERY_LENGTH) }).success,
+    ).toBe(true);
+    expect(
+      schemas.FindSymbolsToolInputSchema.safeParse({ query: long(schemas.MAX_QUERY_LENGTH + 1) })
+        .success,
+    ).toBe(false);
+    expect(
+      schemas.GetAgentContextToolInputSchema.safeParse({
+        task: long(schemas.MAX_TEXT_LENGTH + 1),
+        tokenBudget: 100,
+      }).success,
+    ).toBe(false);
+    expect(
+      schemas.MapSystemToolInputSchema.safeParse({ cursor: long(schemas.MAX_ID_LENGTH + 1) }).success,
+    ).toBe(false);
+    expect(
+      schemas.PreflightChangeCoreInputSchema.safeParse({
+        targetFiles: Array.from({ length: schemas.MAX_LIST_ITEMS + 1 }, (_, i) => `src/f${String(i)}.ts`),
+      }).success,
+    ).toBe(false);
+    expect(
+      schemas.VerifyChangeCoreInputSchema.safeParse({ baseRef: long(schemas.MAX_GIT_REF_LENGTH + 1) })
+        .success,
+    ).toBe(false);
+    // Record-typed inputs bound their key count (values are validated downstream).
+    expect(
+      schemas.MapSystemToolInputSchema.safeParse({
+        limits: Object.fromEntries(
+          Array.from({ length: 5 }, (_, i) => [`k${String(i)}`, 1]),
+        ),
+      }).success,
+    ).toBe(false);
+    expect(
+      schemas.VerifyChangeCoreInputSchema.safeParse({
+        observedTestRun: Object.fromEntries(
+          Array.from({ length: 50 }, (_, i) => [`k${String(i)}`, 1]),
+        ),
+      }).success,
+    ).toBe(false);
+  });
+});
+
 describe("causoryn_architecture_timeline input bounds", () => {
   const refsOf = (count: number): string[] =>
     Array.from({ length: count }, (_, index) => `v${String(index)}`);
