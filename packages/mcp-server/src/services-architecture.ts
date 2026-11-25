@@ -178,6 +178,12 @@ export function graphErrorToToolError(
   if (code === "export/output-path-denied") {
     return new CausorynToolError("PATH_DENIED", error.message);
   }
+  // A git layout that would read outside the analyzed root (foreign gitdir
+  // pointer, linked .git, network path in git metadata) is refused before git
+  // starts; the message names the reason and is safe to return.
+  if (code === "compare/repository-refused") {
+    return new CausorynToolError("PATH_DENIED", error.message);
+  }
   // Ortam/hata sınıfı (git yok, komut başarısız, yazma hatası) →
   // retryable=true INTERNAL_ERROR. Orijinal mesaj + modül kodu YALNIZCA
   // enjekte edilen logger'a (stderr) yazılır; istemci mesajı geneldir.
@@ -474,7 +480,7 @@ export async function checkArchitecture(
   if (policyRead.status === "too-large") {
     throw new CausorynToolError(
       "LIMIT_EXCEEDED",
-      `${POLICY_RELATIVE_PATH} is ${String(policyRead.bytes)} bytes, which exceeds the config.maxFileBytes ceiling (${String(maxPolicyBytes)}) for a single file; shrink the policy file or split its rules`,
+      `${POLICY_RELATIVE_PATH} exceeds the config.maxFileBytes ceiling (${String(maxPolicyBytes)} bytes) for a single file; shrink the policy file or split its rules`,
     );
   }
   if (policyRead.status !== "ok") {
@@ -491,7 +497,7 @@ export async function checkArchitecture(
   if (baselineRead.status === "too-large") {
     throw new CausorynToolError(
       "LIMIT_EXCEEDED",
-      `${BASELINE_RELATIVE_PATH} is ${String(baselineRead.bytes)} bytes, which exceeds the config.maxFileBytes ceiling (${String(maxPolicyBytes)}) for a single file; shrink the baseline file`,
+      `${BASELINE_RELATIVE_PATH} exceeds the config.maxFileBytes ceiling (${String(maxPolicyBytes)} bytes) for a single file; shrink the baseline file`,
     );
   }
   const baselineText = baselineRead.status === "ok" ? baselineRead.text : null;

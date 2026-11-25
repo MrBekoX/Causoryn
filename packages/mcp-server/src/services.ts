@@ -2211,7 +2211,7 @@ function resolveFindingFromWorkspace(
   if (policyRead.status === "too-large") {
     throw new CausorynToolError(
       "LIMIT_EXCEEDED",
-      `${EVIDENCE_POLICY_DIR}/${EVIDENCE_POLICY_FILE} is ${String(policyRead.bytes)} bytes, which exceeds the config.maxFileBytes ceiling (${String(maxPolicyBytes)}) for a single file; shrink the policy file or split its rules`,
+      `${EVIDENCE_POLICY_DIR}/${EVIDENCE_POLICY_FILE} exceeds the config.maxFileBytes ceiling (${String(maxPolicyBytes)} bytes) for a single file; shrink the policy file or split its rules`,
     );
   }
   if (policyRead.status !== "ok") {
@@ -2227,7 +2227,7 @@ function resolveFindingFromWorkspace(
   if (baselineRead.status === "too-large") {
     throw new CausorynToolError(
       "LIMIT_EXCEEDED",
-      `${EVIDENCE_POLICY_DIR}/${EVIDENCE_BASELINE_FILE} is ${String(baselineRead.bytes)} bytes, which exceeds the config.maxFileBytes ceiling (${String(maxPolicyBytes)}) for a single file; shrink the baseline file`,
+      `${EVIDENCE_POLICY_DIR}/${EVIDENCE_BASELINE_FILE} exceeds the config.maxFileBytes ceiling (${String(maxPolicyBytes)} bytes) for a single file; shrink the baseline file`,
     );
   }
   let finding: GuardFinding;

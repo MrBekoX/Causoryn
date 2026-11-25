@@ -144,9 +144,9 @@ describe("git-read: .git file redirection", () => {
     const root = tempDir("causoryn-git-redirect-");
     writeFileSync(path.join(root, ".git"), `gitdir: ${path.join(other, ".git")}\n`, "utf8");
     const error = await rejection(() => readGitTree(root, "HEAD"));
-    expect(error.code).toBe("compare/git-unavailable");
+    expect(error.code).toBe("compare/repository-refused");
     expect(error.message).toContain("outside the analyzed root");
-    expect((await rejection(() => readGitBlob(root, "HEAD", "other-secret.txt"))).code).toBe("compare/git-unavailable");
+    expect((await rejection(() => readGitBlob(root, "HEAD", "other-secret.txt"))).code).toBe("compare/repository-refused");
   }, 60_000);
 
   it("rejects a .git file that names a linked worktree git dir registered for a different directory", async () => {
@@ -159,7 +159,7 @@ describe("git-read: .git file redirection", () => {
     const root = tempDir("causoryn-git-wt-unrelated-");
     writeFileSync(path.join(root, ".git"), `gitdir: ${worktreeGitDir}\n`, "utf8");
     const error = await rejection(() => readGitTree(root, "HEAD"));
-    expect(error.code).toBe("compare/git-unavailable");
+    expect(error.code).toBe("compare/repository-refused");
     expect(error.message).toContain("outside the analyzed root");
   }, 60_000);
 
@@ -169,7 +169,7 @@ describe("git-read: .git file redirection", () => {
       writeFileSync(path.join(root, ".git"), `gitdir: ${form}\n`, "utf8");
       const calls = blockRepositoryBoundGit();
       const error = await rejection(() => readGitTree(root, "HEAD"));
-      expect(error.code).toBe("compare/git-unavailable");
+      expect(error.code).toBe("compare/repository-refused");
       expect(error.message).toContain("network or device path");
       expect(calls).toEqual([]);
     }, 60_000);
@@ -182,7 +182,7 @@ describe("git-read: .git file redirection", () => {
     linkDirectory(path.join(other, ".git"), path.join(root, ".git"));
     const calls = blockRepositoryBoundGit();
     const error = await rejection(() => readGitTree(root, "HEAD"));
-    expect(error.code).toBe("compare/git-unavailable");
+    expect(error.code).toBe("compare/repository-refused");
     expect(error.message).toContain("symbolic link");
     expect(calls).toEqual([]);
   }, 60_000);
@@ -194,7 +194,7 @@ describe("git-read: .git file redirection", () => {
     linkDirectory(other, path.join(root, "vendor"));
     writeFileSync(path.join(root, ".git"), "gitdir: vendor/.git\n", "utf8");
     const error = await rejection(() => readGitTree(root, "HEAD"));
-    expect(error.code).toBe("compare/git-unavailable");
+    expect(error.code).toBe("compare/repository-refused");
     expect(error.message).toContain("outside the analyzed root");
   }, 60_000);
 });
@@ -314,7 +314,7 @@ describe("git-read: network and device paths inside the git directory are refuse
       const root = await repoWith(mutate);
       const calls = blockRepositoryBoundGit();
       const error = await rejection(() => resolveGitCommitRef(root, "HEAD"));
-      expect(error.code).toBe("compare/git-unavailable");
+      expect(error.code).toBe("compare/repository-refused");
       expect(error.message).toContain("network or device path");
       expect(calls).toEqual([]);
     }, 60_000);
@@ -327,7 +327,7 @@ describe("git-read: network and device paths inside the git directory are refuse
     });
     const calls = blockRepositoryBoundGit();
     const error = await rejection(() => readGitTree(root, "HEAD"));
-    expect(error.code).toBe("compare/git-unavailable");
+    expect(error.code).toBe("compare/repository-refused");
     expect(error.message).toContain("network or device path");
     expect(calls).toEqual([]);
   }, 60_000);
@@ -343,7 +343,7 @@ describe("git-read: network and device paths inside the git directory are refuse
     }
     const calls = blockRepositoryBoundGit();
     const error = await rejection(() => readGitTree(root, "HEAD"));
-    expect(error.code).toBe("compare/git-unavailable");
+    expect(error.code).toBe("compare/repository-refused");
     expect(error.message).toContain("network or device path");
     expect(calls).toEqual([]);
   }, 60_000);

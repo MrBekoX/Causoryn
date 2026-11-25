@@ -103,7 +103,7 @@ function isDriveRelative(value: string): boolean {
 
 function refusal(root: string, reason: string): GraphRepositoryError {
   return new GraphRepositoryError(
-    "compare/git-unavailable",
+    "compare/repository-refused",
     `Refusing to read the git repository at ${root}: ${reason}. ` +
       "Only the repository at the analyzed root is read: a .git directory, a .git file pointing inside the root, " +
       "or a linked worktree or submodule git directory that points back to the root.",

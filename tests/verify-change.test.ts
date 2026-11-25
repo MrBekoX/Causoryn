@@ -416,6 +416,38 @@ suppressions:
     }
   }, 60_000);
 
+  it("a refused repository layout (.git file pointing to another repository) falls back to working-tree rules, never no_findings", async () => {
+    const root = makeTempDir("refused-layout");
+    writeTsFixture(root);
+    // A separate repository outside the analyzed root, with the same rules committed.
+    const other = makeTempDir("refused-layout-other");
+    writeTsFixture(other);
+    runGit(other, ["init", "-q"]);
+    runGit(other, ["add", "."]);
+    runGit(other, ["commit", "-q", "-m", "other repository"]);
+    writeFileSync(path.join(root, ".git"), `gitdir: ${path.join(other, ".git")}\n`, "utf8");
+    const context = createCausorynContext(
+      { workspaceId: "default", allowRoots: [root], autoIndex: true },
+      { clock: fixedClock },
+    );
+    try {
+      const latest = context.repository.getLatestPublished("default");
+      expect(latest).toBeDefined();
+      const envelope = await verifyChangeTool(
+        context,
+        "req-verify-refused-layout",
+        VerifyChangeInputSchema.parse({ baseSnapshot: latest!.snapshot.meta.id }),
+      );
+      const data = VerifyChangeDataSchema.parse(envelope.data);
+      expect(data.verdict).toBe("review_required");
+      expect(data.verdictRationale[0]?.rule).toBe("untrusted-rules");
+      expect(data.rulesProvenance?.source).toBe("working-tree");
+      expect(data.rulesProvenance?.fallbackReason).toBe("ref-unreadable");
+    } finally {
+      context.close();
+    }
+  }, 60_000);
+
   it("keeps host-asserted observedTestRun.evidenceIds out of the report's engine evidence over verifyChangeTool", async () => {
     const root = makeTempDir("host-evidence-isolation");
     writeTsFixture(root);
