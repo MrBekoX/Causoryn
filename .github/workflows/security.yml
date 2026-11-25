@@ -173,3 +173,66 @@ jobs:
             }
             console.log(`NuGet vulnerability audit passed: ${projects.length} project(s), ${sources.length} source(s), 0 vulnerabilities.`);
           '
+
+  cargo-audit:
+    name: Rust Advisory Audit (cargo-audit)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    permissions:
+      contents: read
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@aebdcf6156ab6691adf63218240e476564a1ed4c # v2.23.0
+        with:
+          egress-policy: audit
+          disable-sudo-and-containers: true
+
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Rust
+        # Pinned dtolnay/rust-toolchain (stable branch commit; no upstream semver tag)
+        uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca
+
+      - name: Install cargo-audit (exact version, locked dependencies)
+        run: cargo install --locked --version 0.23.0 cargo-audit
+
+      - name: Audit native/rust-worker/Cargo.lock (fail-closed, warnings included)
+        # --deny warnings also fails on unmaintained, unsound and yanked crates.
+        run: cargo audit --file native/rust-worker/Cargo.lock --deny warnings
+
+  govulncheck:
+    name: Go Vulnerability Check (govulncheck)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    env:
+      # Use only the toolchain installed from go.mod; never download another one.
+      GOTOOLCHAIN: local
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@aebdcf6156ab6691adf63218240e476564a1ed4c # v2.23.0
+        with:
+          egress-policy: audit
+          disable-sudo-and-containers: true
+
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Go
+        uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
+        with:
+          go-version-file: "native/go-worker/go.mod"
+          cache: false
+
+      - name: Install govulncheck (exact version)
+        run: go install golang.org/x/vuln/cmd/govulncheck@v1.10.0
+
+      - name: Check the Go worker and its standard library (fail-closed)
+        working-directory: native/go-worker
+        run: govulncheck ./...

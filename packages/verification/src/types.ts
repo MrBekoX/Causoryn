@@ -64,6 +64,8 @@ export type VerifyVerdict =
  *   2. missing-input     : İSTENEN bir denetim not_evaluated (girdi eksik /
  *     policy reddi — denetim koşulamadı) → inconclusive; tamamlanmamış
  *     değerlendirme review_required izlenimi VEREMEZ.
+ *   2b. untrusted-rules  : architecture evaluated with working-tree rules
+ *     (not from a trusted git ref) → review_required.
  *   3. suppressed-finding: suppression uygulanmış bulgu (baseline istisnası;
  *     yönetişim incelemesi gerekir) → review_required.
  *   4. unresolved-target : kapsam hedefi hedef snapshot'ta çözülemedi →
@@ -81,6 +83,14 @@ export type VerifyVerdict =
 export const VERIFY_VERDICT_RULES = {
   blockingFinding: "blocking-finding",
   missingInput: "missing-input",
+  /**
+   * The architecture check was evaluated with rules (and baseline) read from
+   * the working tree instead of a trusted git ref, so the change under
+   * verification could have weakened them → review_required. Placed after
+   * missing-input and before every other review rule: a clean architecture
+   * result is never reported as no_findings when its rules are untrusted.
+   */
+  untrustedRules: "untrusted-rules",
   suppressedFinding: "suppressed-finding",
   unresolvedTarget: "unresolved-target",
   warningFinding: "warning-finding",
@@ -112,7 +122,7 @@ export interface VerifyVerdictRule {
  * mümkündür; kapı testi ham substring aramasıdır).
  */
 export const NO_FINDINGS_CORE_DISCLAIMER =
-  "no_findings yalnızca kurallı kontrollerin sorunsuz sonuçlandığını gösterir; kod doğruluğu veya güvenlik garantisi değildir; testler koşulmadıysa davranış değişimi doğrulanmamıştır";
+  "no_findings only means the rule-based checks completed without issues; it is not a guarantee of code correctness or security; if tests were not run, behavior changes are unverified";
 
 /**
  * Tekil denetim durumu:
@@ -134,10 +144,38 @@ export type VerifyCheckStatus =
  * no_findings güvenli/doğru kod garantisi değildir.
  */
 export const NO_FINDINGS_DISCLAIMER =
-  "no_findings güvenli/doğru kod garantisi DEĞİLDİR: yalnızca istenen denetimlerde bulgu üretilmediğini ifade eder (TŞ §10.4)";
+  "no_findings is NOT a guarantee of safe or correct code: it only means the requested checks produced no findings";
 
 /** TŞ §10.4 girdisindeki targetRevision; bu çekirdek yalnızca working-tree destekler. */
 export type VerifyTargetRevision = "working-tree";
+
+/** Trust warning carried by reports whose architecture rules came from the working tree. */
+export const UNTRUSTED_RULES_TRUST_WARNING =
+  "architecture-rules-loaded-from-untrusted-working-tree" as const;
+
+/**
+ * Where the host loaded the architecture rules (`.causoryn/architecture.rules.yaml`)
+ * and baseline from. The pure core cannot read git; the host states the
+ * provenance and the core reflects it in the report and the verdict.
+ *
+ * - `source: "git-ref"`: rules came from the trusted git ref `ref`, resolved
+ *   to `commit`. This is trusted even when `ref` is an old commit: choosing
+ *   the base ref is the caller's decision, and the report names it.
+ * - `source: "working-tree"`: rules came from the working tree (no rules file
+ *   at the ref, or the ref could not be read). Untrusted: the change under
+ *   verification may have edited them.
+ */
+export interface VerifyRulesProvenance {
+  readonly source: "git-ref" | "working-tree";
+  /** Git ref consulted as the trusted base (also reported when falling back). */
+  readonly ref?: string;
+  /** Commit the ref resolved to (only when the rules were read from git). */
+  readonly commit?: string;
+  /** How the ref was chosen: caller baseRef, preflight manifest HEAD, or the HEAD default. */
+  readonly refOrigin?: "explicit" | "preflight-manifest" | "default-head";
+  /** Why the working tree was used (only for `source: "working-tree"`). */
+  readonly fallbackReason?: "rules-not-in-ref" | "ref-unreadable";
+}
 
 /** architecture denetimi sonucu: C2 guard bulguları (suppression işaretli). */
 export interface ArchitectureCheckResult {
@@ -289,6 +327,13 @@ export interface VerificationReport {
   };
   readonly preflightAlignment?: PreflightAlignment;
   readonly limitations: readonly string[];
+  /**
+   * Provenance of the architecture rules; present only when the architecture
+   * check was requested and the host supplied it.
+   */
+  readonly rulesProvenance?: VerifyRulesProvenance;
+  /** Set when the architecture rules were read from the untrusted working tree. */
+  readonly trustWarning?: typeof UNTRUSTED_RULES_TRUST_WARNING;
 }
 
 /**
@@ -429,6 +474,8 @@ export interface VerifyChangeInput {
   readonly guardPolicy?: ArchitecturePolicy;
   /** Suppression baseline (verilmezse boş küme uygulanır). */
   readonly guardBaseline?: ArchitectureBaseline;
+  /** Where guardPolicy/guardBaseline were loaded from (see VerifyRulesProvenance). */
+  readonly rulesProvenance?: VerifyRulesProvenance;
   /** D2/D3 drift sonucu (detectContractDrift çıktısı). */
   readonly contractDrift?: ContractDriftResult;
   /** Host test koşumu kaydı (kanıtsız → invalid-input). */

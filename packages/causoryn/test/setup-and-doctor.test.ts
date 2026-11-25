@@ -34,10 +34,33 @@ import {
   stagePersistentRuntime,
   upsertCodexMcpServer,
   validateTomlStructure,
+  type ToolchainProbeFn,
 } from "../src/index.js";
 import { isLinuxMusl } from "../src/doctor.js";
 
 const CAUSORYN_PKG_DIR = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
+
+/**
+ * Probe that answers like supported sidecar toolchains. Doctor checks the
+ * version floors (Python >= 3.10, Go >= 1.26, .NET 10 runtime), so the output
+ * must look like the real `--version` / `--list-runtimes` output.
+ */
+const SUPPORTED_TOOLCHAIN_OUTPUT: Readonly<Record<string, string>> = {
+  dotnet: "Microsoft.NETCore.App 10.0.11 [/usr/share/dotnet/shared/Microsoft.NETCore.App]",
+  python: "Python 3.12.4",
+  go: "go version go1.26.11 linux/amd64",
+  cargo: "cargo 1.100.0 (3acc79c0c 2026-11-05)",
+};
+
+/** `python3` is not installed here: on POSIX doctor tries python3 first, then python. */
+const supportedToolchainProbe: ToolchainProbeFn = (command) => {
+  if (command === "python3") {
+    return { available: false, version: null, detail: "ENOENT", failure: "not-found" };
+  }
+  const output = SUPPORTED_TOOLCHAIN_OUTPUT[command];
+  if (output === undefined) throw new Error(`unexpected toolchain probe: ${command}`);
+  return { available: true, version: output, detail: "ok", output };
+};
 
 /**
  * Track 3 TDD Suite — `packages/causoryn` (`toml-patch`, `runtime-stage`,
@@ -443,7 +466,8 @@ describe("runtime-stage (_npx / tmpdir detection + atomic persistent staging)", 
       clients: ["claude-code", "codex"],
       yes: true,
     });
-    expect(liveRerun.applied).toBe(true);
+    expect(liveRerun.applied).toBe(false);
+    expect(liveRerun.actions.every((a) => a.operation === "noop")).toBe(true);
     expect(liveRerun.stagedRuntimeDir).toBeNull();
     expect(existsSync(sentinelPath)).toBe(true);
 
@@ -618,7 +642,7 @@ describe("setup wizard (4 hosts, backups, fail-closed, ZCode fallback, Antigravi
       ) as { mcpServers: Record<string, { command: string; args: string[] }> };
       expect(agyJson.mcpServers["existingAgy"]).toBeDefined();
       expect(agyJson.mcpServers["causoryn"]).toEqual({
-        command: "node",
+        command: process.execPath,
         args: [
           expectedCliScript,
           "mcp",
@@ -641,7 +665,7 @@ describe("setup wizard (4 hosts, backups, fail-closed, ZCode fallback, Antigravi
     expect(claudeJson.mcpServers["existingClaude"]).toBeDefined();
     expect(claudeJson.mcpServers["causoryn"]).toEqual({
       type: "stdio",
-      command: "node",
+      command: process.execPath,
       args: [
         expectedCliScript,
         "mcp",
@@ -683,11 +707,11 @@ describe("setup wizard (4 hosts, backups, fail-closed, ZCode fallback, Antigravi
     });
     expect(zcodeJson.mcp.servers["causoryn"]).toEqual({
       type: "stdio",
-      command: "node",
+      command: process.execPath,
       args: [expectedCliScript, "mcp", "--allow-cwd", "--auto-data-dir", "--client", "zcode"],
     });
 
-    // All 4 skills installed in each of the 4 hosts' skill roots
+    // All 5 skills installed in each of the 4 hosts' skill roots
     const skillRoots = [
       path.join(fakeHome, ".gemini", "config", "skills"),
       path.join(fakeHome, ".claude", "skills"),
@@ -807,7 +831,7 @@ describe("doctor (strictly read-only health check + injectable toolchain seam + 
         if (command === "cargo") {
           return { available: false, version: null, detail: "ENOENT" };
         }
-        return { available: true, version: `${command} 1.0.0`, detail: "ok" };
+        return supportedToolchainProbe(command, args, timeoutMs);
       },
     });
 
@@ -892,7 +916,7 @@ describe("doctor (strictly read-only health check + injectable toolchain seam + 
       codexHomeDir: fakeCodexHome,
       packageRoot: pkgRoot,
       nodeVersion: "24.19.2",
-      probeToolchain: () => ({ available: true, version: "1.0", detail: "ok" }),
+      probeToolchain: supportedToolchainProbe,
     });
 
     expect(missingCmdReport.healthy).toBe(false);
@@ -935,7 +959,7 @@ describe("doctor (strictly read-only health check + injectable toolchain seam + 
         packageRoot: pkgRoot,
         clients: ["antigravity"],
         nodeVersion: "24.19.2",
-        probeToolchain: () => ({ available: true, version: "1.0", detail: "ok" }),
+        probeToolchain: supportedToolchainProbe,
       });
       expect(secReport.healthy).toBe(false);
       expect(secReport.hosts["antigravity"].configValid).toBe(false);
@@ -968,7 +992,7 @@ describe("doctor (strictly read-only health check + injectable toolchain seam + 
 
     outChunks.length = 0;
     const setupExit = await runCli(
-      ["setup", "--client", "claude-code", "--no-skill", "--yes", "--json"],
+      ["setup", "--client", "claude-code", "--yes", "--json"],
       {
         io,
         homeDir: fakeHome,
@@ -987,11 +1011,12 @@ describe("doctor (strictly read-only health check + injectable toolchain seam + 
       homeDir: fakeHome,
       codexHomeDir: fakeCodexHome,
       packageRoot: pkgRoot,
-      probeToolchain: () => ({ available: true, version: "1.0", detail: "ok" }),
+      probeToolchain: supportedToolchainProbe,
     });
     expect(doctorExit).toBe(0);
-    const doctorJson = JSON.parse(outChunks.join("")) as { healthy: boolean };
+    const doctorJson = JSON.parse(outChunks.join("")) as { healthy: boolean; overallStatus: string };
     expect(doctorJson.healthy).toBe(true);
+    expect(doctorJson.overallStatus).toBe("HEALTHY");
     expect(errChunks).toEqual([]);
   });
 
@@ -1060,7 +1085,7 @@ describe("doctor (strictly read-only health check + injectable toolchain seam + 
           clients: ["claude-code"],
           yes: true,
         }),
-      ).rejects.toThrow(/sembolik bağlantı|CWE-59/);
+      ).rejects.toThrow(/symbolic link|CWE-59/);
       rmSync(claudeConfigPath, { force: true });
     }
 
@@ -1121,6 +1146,7 @@ describe(
       path.join("scripts", "causoryn.mjs"),
       path.join("scripts", "plugin-mcp-launcher.mjs"),
       path.join("scripts", "lib", "node-version-guard.mjs"),
+      path.join("scripts", "lib", "asset-root.mjs"),
     ]) {
       const rawBytes = readFileSync(path.join(CAUSORYN_PKG_DIR, relScript));
       expect(rawBytes.includes(0x0d), `${relScript} contains CR (\\r) bytes`).toBe(false);
@@ -1142,10 +1168,12 @@ describe(
       path.join(CAUSORYN_PKG_DIR, "scripts", "plugin-mcp-launcher.mjs"),
       path.join(fakePkg, "scripts", "plugin-mcp-launcher.mjs"),
     );
-    copyFileSync(
-      path.join(CAUSORYN_PKG_DIR, "scripts", "lib", "node-version-guard.mjs"),
-      path.join(fakePkg, "scripts", "lib", "node-version-guard.mjs"),
-    );
+    for (const lib of ["node-version-guard.mjs", "asset-root.mjs"]) {
+      copyFileSync(
+        path.join(CAUSORYN_PKG_DIR, "scripts", "lib", lib),
+        path.join(fakePkg, "scripts", "lib", lib),
+      );
+    }
     // Stub MCP server prints forwarded argv to stdout
     writeFileSync(
       path.join(fakePkg, "dist", "mcp-server.mjs"),
@@ -1231,7 +1259,7 @@ describe(
       codexHomeDir: fakeCodexHome,
       packageRoot: noDllPkg,
       nodeVersion: "24.16.0",
-      probeToolchain: () => ({ available: true, version: "1.0", detail: "ok" }),
+      probeToolchain: supportedToolchainProbe,
     });
     expect(noDllReport.runtime.nativeWorkersPresent).toBe(false);
     expect(noDllReport.runtime.ok).toBe(false);
@@ -1257,11 +1285,12 @@ describe(
       codexHomeDir: fakeCodexHome,
       packageRoot: noDllPkg,
       nodeVersion: "24.16.0",
-      probeToolchain: () => ({ available: true, version: "1.0", detail: "ok" }),
+      probeToolchain: supportedToolchainProbe,
     });
     expect(releaseDllReport.runtime.nativeWorkersPresent).toBe(true);
     expect(releaseDllReport.runtime.ok).toBe(true);
-    expect(releaseDllReport.healthy).toBe(true);
+    expect(releaseDllReport.overallStatus).toBe("NOT CONFIGURED");
+    expect(releaseDllReport.healthy).toBe(false);
 
     // 4) Linux musl checks linuxmusl-x64.node instead of linux-x64.node
     const glibcOnlyPkg = createFakePackageRoot(sandbox, "glibc-only-pkg", {
@@ -1275,9 +1304,10 @@ describe(
       arch: "x64",
       isMusl: true,
       nodeVersion: "24.16.0",
-      probeToolchain: () => ({ available: true, version: "1.0", detail: "ok" }),
+      probeToolchain: supportedToolchainProbe,
     });
     expect(muslMissingReport.runtime.sqlitePrebuildPresent).toBe(false);
+    expect(muslMissingReport.overallStatus).toBe("UNHEALTHY");
     expect(muslMissingReport.healthy).toBe(false);
     expect(
       muslMissingReport.runtime.missingPaths.some((p) => p.endsWith("linuxmusl-x64.node")),
@@ -1294,10 +1324,12 @@ describe(
       arch: "x64",
       isMusl: true,
       nodeVersion: "24.16.0",
-      probeToolchain: () => ({ available: true, version: "1.0", detail: "ok" }),
+      probeToolchain: supportedToolchainProbe,
     });
     expect(muslOkReport.runtime.sqlitePrebuildPresent).toBe(true);
-    expect(muslOkReport.healthy).toBe(true);
+    expect(muslOkReport.runtime.ok).toBe(true);
+    expect(muslOkReport.overallStatus).toBe("NOT CONFIGURED");
+    expect(muslOkReport.healthy).toBe(false);
   });
 
   it("setup, doctor, and runtime-stage respect CLAUDE_CONFIG_DIR and preserve THIRD-PARTY-NOTICES.md + licenses/", async () => {
@@ -1350,7 +1382,7 @@ describe(
       packageRoot: npxPkg,
       env: envWithClaudeDir,
       nodeVersion: "24.16.0",
-      probeToolchain: () => ({ available: true, version: "1.0", detail: "ok" }),
+      probeToolchain: supportedToolchainProbe,
     });
     expect(doctorReport.healthy).toBe(true);
     expect(doctorReport.hosts["claude-code"].detected).toBe(true);
@@ -1433,6 +1465,11 @@ describe(
       writeFileSync(path.join(pkgDir, "LICENSE"), "MIT License\n", "utf8");
       writeFileSync(path.join(pkgDir, "dist", "index.js"), "export {};\n", "utf8");
       writeFileSync(
+        path.join(pkgDir, "dist", "index-worker.mjs"),
+        "export {};\n",
+        "utf8",
+      );
+      writeFileSync(
         path.join(pkgDir, "dist", "mcp-server.mjs.LEGAL.txt"),
         "/*! legal notices */\n",
         "utf8",
@@ -1503,6 +1540,11 @@ describe(
         "export function assertSupportedNodeVersion() {}\n",
         "utf8",
       );
+      writeFileSync(
+        path.join(pkgDir, "scripts", "lib", "asset-root.mjs"),
+        "export function resolveAssetRootOverride() {}\n",
+        "utf8",
+      );
       return pkgDir;
     };
 
@@ -1536,7 +1578,7 @@ describe(
     const badPdbDir = buildReadyPkg("bad-pdb");
     writeFileSync(
       path.join(badPdbDir, "native", "roslyn-worker", "Causoryn.RoslynWorker.dll"),
-      "MZ...C:\\Users\\alice\\repo\\Causoryn.RoslynWorker.pdb",
+      "MZ...C:\\" + "Users\\alice\\repo\\Causoryn.RoslynWorker.pdb",
       "utf8",
     );
     expect(() => verifyMod.verifyPackageReady(badPdbDir)).toThrow(/Users|pdb/i);
@@ -1581,7 +1623,7 @@ describe(
     const fakeHome = path.join(base, "home");
     mkdirSync(fakeHome, { recursive: true });
 
-    // 1) Eksik SKILL.md -> CausorynCliError("cli/io-error", "Kaynak skill dosyası bulunamadı: ...")
+    // 1) Eksik SKILL.md -> CausorynCliError("cli/io-error", "Source skill file not found: ...")
     const missingPkg = createFakePackageRoot(base, "pkg-missing-skill");
     const missingSkillFile = path.join(missingPkg, "skills", CANONICAL_SKILL_NAMES[0], "SKILL.md");
     rmSync(missingSkillFile);
@@ -1600,7 +1642,7 @@ describe(
     expect(missingErr).toBeInstanceOf(CausorynCliError);
     expect((missingErr as CausorynCliError).code).toBe("cli/io-error");
     expect((missingErr as CausorynCliError).message).toContain(
-      `Kaynak skill dosyası bulunamadı: ${missingSkillFile}`,
+      `Source skill file not found: ${missingSkillFile}`,
     );
 
     // 2) Dizin olan SKILL.md -> aynı CausorynCliError
@@ -1623,7 +1665,7 @@ describe(
     expect(dirErr).toBeInstanceOf(CausorynCliError);
     expect((dirErr as CausorynCliError).code).toBe("cli/io-error");
     expect((dirErr as CausorynCliError).message).toContain(
-      `Kaynak skill dosyası bulunamadı: ${dirSkillFile}`,
+      `Source skill file not found: ${dirSkillFile}`,
     );
 
     // 3) Symlink'li kaynak SKILL.md (OS izin veriyorsa) O_NOFOLLOW olmadan başarıyla okunur
@@ -1650,5 +1692,91 @@ describe(
       });
       expect(setupRes.actions.some((a) => a.kind === "skill")).toBe(true);
     }
+  });
+
+  it("CLI emits clear English help, setup status text, confirmation prompt, and argument error messages", async () => {
+    const sandbox = createTempDir("cli-english");
+    const fakeHome = path.join(sandbox, "home");
+    const fakeCodexHome = path.join(fakeHome, ".codex");
+    const pkgRoot = createFakePackageRoot(sandbox, "pkg");
+    mkdirSync(fakeHome, { recursive: true });
+
+    const runCaptured = async (
+      argv: readonly string[],
+      extraIo?: { readonly isInteractive?: boolean; readonly confirm?: (prompt: string) => Promise<boolean> },
+    ): Promise<{ readonly exitCode: number; readonly stdout: string; readonly stderr: string }> => {
+      const out: string[] = [];
+      const err: string[] = [];
+      const exitCode = await runCli(argv, {
+        homeDir: fakeHome,
+        codexHomeDir: fakeCodexHome,
+        packageRoot: pkgRoot,
+        ephemeralTmpDir: path.join(sandbox, "unused-tmp"),
+        io: {
+          stdout: (t) => out.push(t),
+          stderr: (t) => err.push(t),
+          ...extraIo,
+        },
+      });
+      return { exitCode, stdout: out.join(""), stderr: err.join("") };
+    };
+
+    const helpRes = await runCaptured(["--help"]);
+    expect(helpRes.exitCode).toBe(0);
+    expect(helpRes.stdout).toContain("--tool-profile");
+
+    const dryRunRes = await runCaptured(["setup", "--client", "claude-code", "--dry-run"]);
+    expect(dryRunRes.exitCode).toBe(0);
+    expect(dryRunRes.stdout).toContain("DRY-RUN PREVIEW");
+    expect(dryRunRes.stdout).toContain("Planned / Applied Actions:");
+    expect(dryRunRes.stdout).not.toMatch(/ÖNİZLEME|İşlemler|hiçbir değişiklik/);
+
+    const prompts: string[] = [];
+    const interactiveRes = await runCaptured(["setup", "--client", "claude-code"], {
+      isInteractive: true,
+      confirm: async (promptText) => {
+        prompts.push(promptText);
+        return true;
+      },
+    });
+    expect(interactiveRes.exitCode).toBe(0);
+    expect(interactiveRes.stderr).toContain("The following changes will be applied:");
+    expect(prompts[0]).toBe("Continue? [y/N] ");
+    expect(interactiveRes.stdout).toContain("APPLIED");
+    expect(interactiveRes.stdout).not.toMatch(/UYGULANDI|Devam edilsin/);
+
+    const noopRes = await runCaptured(["setup", "--client", "claude-code", "--yes"]);
+    expect(noopRes.exitCode).toBe(0);
+    expect(noopRes.stdout).toContain("NO CHANGES");
+    expect(noopRes.stdout).not.toContain("DEĞİŞİKLİK YOK");
+
+    const uninstallRes = await runCaptured([
+      "setup",
+      "--client",
+      "claude-code",
+      "--uninstall",
+      "--yes",
+    ]);
+    expect(uninstallRes.exitCode).toBe(0);
+    expect(uninstallRes.stdout).toContain("UNINSTALLED");
+    expect(uninstallRes.stdout).not.toContain("KALDIRILDI");
+
+    const badSubcmd = await runCaptured(["bogus"]);
+    expect(badSubcmd.exitCode).toBe(2);
+    expect(badSubcmd.stderr).toContain("[causoryn] error:");
+    expect(badSubcmd.stderr).toContain('Unknown subcommand: "bogus"');
+    expect(badSubcmd.stderr).not.toMatch(/Bilinmeyen|hata:/);
+
+    const badClient = await runCaptured(["setup", "--client", "invalid-host"]);
+    expect(badClient.exitCode).toBe(2);
+    expect(badClient.stderr).toContain('Invalid --client value "invalid-host"');
+
+    const badSetupArg = await runCaptured(["setup", "--unknown-flag"]);
+    expect(badSetupArg.exitCode).toBe(2);
+    expect(badSetupArg.stderr).toContain("Unknown setup argument: --unknown-flag");
+
+    const badDoctorArg = await runCaptured(["doctor", "--unknown-flag"]);
+    expect(badDoctorArg.exitCode).toBe(2);
+    expect(badDoctorArg.stderr).toContain("Unknown doctor argument: --unknown-flag");
   });
 });

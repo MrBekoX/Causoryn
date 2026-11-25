@@ -46,7 +46,7 @@ yanıt verirse:
 ```ts
 import { analyzeCSharpWorkspace } from "@causoryn/adapter-csharp-roslyn";
 import { createSnapshot } from "@causoryn/domain";
-// analyzerFingerprint fp2 kurgusu packages/indexing'ten gelir:
+// analyzerFingerprint fp3 kurgusu packages/indexing'ten gelir:
 import {
   buildAnalyzerFingerprint,
   extractRoslynRefPackContext,
@@ -58,7 +58,7 @@ const result = await analyzeCSharpWorkspace({
   options: { requestTimeoutMs: 30_000 }, // workerDllPath/dotnetCommand da override edilebilir
 });
 
-// fp2 (aşağıdaki "KAPATILDI" bölümü): worker healthy yanıttan ref-pack
+// fp3 (aşağıdaki "KAPATILDI" bölümü): worker healthy yanıttan ref-pack
 // keşfi türetilir; keşif bilgisi yoksa nötr etiket kullanılır.
 const refPacks = result.workerAvailable
   ? extractRoslynRefPackContext(result.warnings)
@@ -105,6 +105,32 @@ const snapshot = createSnapshot({
 | `requestTimeoutMs` | `30000` | aşım → kill + L0/L1 fallback |
 | `spawnProcess` | `node:child_process.spawn` | yalnızca test enjeksiyonu |
 
+## MSBuild project model (implicit global usings, one compilation per project)
+
+When `rootDir` is given, `resolveCSharpProjects` (`src/project-model.ts`) reads
+`.csproj` and the nearest `Directory.Build.props` (never above `rootDir`)
+strictly read-only and sends the worker a `projects` field
+(`native/roslyn-worker/PROTOCOL.md`, "Projects"):
+
+- **Ownership:** a source belongs to the nearest ancestor directory holding a
+  `.csproj`; each project is compiled separately (no CS7022/duplicate-type
+  artifacts across projects). Sources outside every project share one
+  compilation, as before.
+- **Global usings:** `<ImplicitUsings>` `enable`/`true` (case-insensitive) adds
+  the SDK defaults for `Microsoft.NET.Sdk`, `.Web`, `.Worker` and
+  `.WindowsDesktop` (`UseWPF` / `UseWindowsForms`) as listed on Microsoft Learn
+  (https://learn.microsoft.com/dotnet/core/project-sdk/overview#implicit-using-directives);
+  `System.Net.Http` is omitted for .NET Framework targets. `<Using Include/Remove>`
+  with `Alias` / `Static` metadata is honored in MSBuild import order
+  (`Directory.Build.props` → SDK defaults → project file).
+- **ProjectReference:** resolved to owning projects of the analysis set; the
+  worker references the transitive closure.
+- **Not evaluated (explicit warning when they touch a modeled setting):** MSBuild
+  conditions other than `'$(P)' == 'v'` / `!=` on a modeled property, property
+  functions/`$(...)` values, `<Choose>`, `<Import>`ed files, `Using Update`,
+  `Directory.Build.targets`, SDKs outside the documented table (for example
+  `Microsoft.NET.Sdk.Razor`, `MSTest.Sdk`).
+
 ## Testler
 
 ```bash
@@ -121,18 +147,19 @@ PROTOCOL.md §6'nın belirttiği gibi, worker'ın otomatik ref-pack keşfi
 (DOTNET_ROOT / host / standart kurulum yolu) **referans DLL kümesine ve
 dolayısıyla semantiğe** dokunur: farklı makinelerde farklı .NET/ASP.NET
 Core pack sürümleri farklı çözümleme sonuçları üretebilir. Bu borç,
-packages/indexing B9 diliminde **fp2 şemasıyla kapatıldı**
+packages/indexing B9 diliminde **fp3 şemasıyla kapatıldı**
 (`packages/indexing/src/fingerprint.ts`).
 
-fp2 analyzerFingerprint sözleşmesi — "|" ile ayrılmış konumsal segmentler:
+fp3 analyzerFingerprint sözleşmesi — "|" ile ayrılmış konumsal segmentler:
 
-    fp2|<ts-adapter>@<ver>|roslyn-worker@<ver>|refpack=<pack>@<sürüm>@<tfmDir>;...|refsrc=<kaynak>|opts=<sha256-16>
+    fp3|<ts-adapter>@<ver>|roslyn-worker@<ver>|refpack=<pack>@<sürüm>@<tfmDir>;...|refsrc=<kaynak>|opts=<sha256-16>
 
 - **adapter versiyonu**: koşuma katılan her adapter'ın id@versiyonu.
 - **refpack**: worker'ın GERÇEKTEN yüklediği ref pack sürümleri — worker
-  healthy yanıt warnings'inden türetilir (ReferenceResolver.cs:144 canonical
-  satırı `referans paketi yüklendi: <pack> <sürüm> (<tfmDir>)`). Pack hiç
-  bulunamadıysa `fallback-corelib` (System.Private.CoreLib runtime ref);
+  healthy yanıt warnings'inden türetilir (ReferenceResolver.cs:248 canonical
+  satırı `reference pack loaded: <pack> <version> (<tfmDir>)`). Pack hiç
+  bulunamadıysa (`Microsoft.NETCore.App.Ref pack not found; ...` uyarısı)
+  `fallback-corelib` (System.Private.CoreLib runtime ref);
   keşif bilgisi yoksa `unavailable` — hiçbir koşulda uydurma sürüm yazılmaz.
 - **refsrc**: discovery kaynağı — discovery="performed" iken tfmDir
   `DOTNET_ROOT` altındaysa (dizin sınır ayıracı + Windows büyük/küçük harf

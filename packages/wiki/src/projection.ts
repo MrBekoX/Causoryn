@@ -76,9 +76,9 @@ const SupportedKindsSchema = z.array(WikiPageKindSchema);
 /** §16A.10 "açık no_data" kategorileri: W1 projeksiyonunda veri kaynağı yok. */
 const STRUCTURAL_NO_DATA_DETAIL: Partial<Record<WikiPageKind, string>> = {
   business_flow:
-    "uçtan uca iş akışı (execution flow) verisi GraphSnapshot'ta taşınmıyor",
-  timeline: "git geçmiş verisi GraphSnapshot'ta taşınmıyor (wiki_diff/C3 sağlar)",
-  onboarding: "onboarding öğrenme patikası ayrı motor çıktısıdır",
+    "end-to-end execution flow data is not carried in the GraphSnapshot",
+  timeline: "git history data is not carried in the GraphSnapshot (provided by wiki_diff)",
+  onboarding: "the onboarding learning path is produced by a separate engine",
 };
 
 export interface WikiSectionDraft {
@@ -122,7 +122,7 @@ function requireNonEmpty(field: string, value: string): void {
   if (value.trim().length === 0) {
     throw new WikiProjectionError(
       "wiki/invalid-input",
-      `Zorunlu alan boş olamaz: ${field}`,
+      `Required field must not be empty: ${field}`,
     );
   }
 }
@@ -444,7 +444,7 @@ function buildTestsList(ctx: WikiBuildContext): WikiSectionDraft {
     return emptyDraft("tests");
   }
   const lines = [
-    `- Test: ${testNodes.length} test node, ${testEdges.length} TESTS kenarı`,
+    `- Test: ${testNodes.length} test node, ${testEdges.length} TESTS edge`,
   ];
   return draft("tests", "ok", lines.join("\n"));
 }
@@ -461,7 +461,7 @@ function buildUnresolvedReport(ctx: WikiBuildContext): WikiSectionDraft {
     (edge) =>
       `- ${edge.kind} ${nodeDisplayName(ctx, edge.from)} → ${nodeDisplayName(ctx, edge.to)} ${resolutionLabel(edge.resolution)}`,
   );
-  lines.push(`- Çözülemeyen kenar: ${unresolvedEdges.length}`);
+  lines.push(`- Unresolved edges: ${unresolvedEdges.length}`);
   if (unknownExternals.length > 0) {
     lines.push(`- UnknownExternal: ${unknownExternals.length} node`);
   }
@@ -535,10 +535,10 @@ export function buildWikiNodePageSections(
         `- ${node.qualifiedName}`,
         ...(node.language === undefined
           ? []
-          : [`- dil: ${node.language}`]),
+          : [`- language: ${node.language}`]),
         ...(node.location === undefined
           ? []
-          : [`- kaynak: ${node.location.relativePath}`]),
+          : [`- source: ${node.location.relativePath}`]),
       ];
       const route = draft("route", "ok", routeLines.join("\n"));
       const routes = edgesFrom(ctx, node.id, ["ROUTES_TO", "HANDLES"]);
@@ -702,7 +702,7 @@ export function materializeWikiPage(draftInput: {
   const coverageStatus = draftInput.coverageOverride ?? summaryStatus;
   const detail =
     draftInput.coverageDetail ??
-    (coverageStatus === "no_data" ? "kategoride graph verisi yok (no_data doldurulmaz)" : undefined);
+    (coverageStatus === "no_data" ? "no graph data for this category (no_data is not filled in)" : undefined);
   const page: WikiPage = {
     id: draftInput.pageId,
     wikiSnapshotId: draftInput.wikiSnapshotId,
@@ -738,14 +738,14 @@ export function projectWiki(
       .join("; ");
     throw new WikiProjectionError(
       "wiki/invalid-graph",
-      `GraphSnapshot şema doğrulaması başarısız: ${detail}`,
+      `GraphSnapshot schema validation failed: ${detail}`,
     );
   }
   const builtAtParse = BuiltAtSchema.safeParse(input.builtAt);
   if (!builtAtParse.success) {
     throw new WikiProjectionError(
       "wiki/invalid-input",
-      "builtAt ISO 8601 UTC datetime olmalıdır",
+      "builtAt must be an ISO 8601 UTC datetime",
     );
   }
   const revisionRef = input.revisionRef ?? graph.meta.revision.id;
@@ -759,7 +759,7 @@ export function projectWiki(
           if (!kindsParse.success) {
             throw new WikiProjectionError(
               "wiki/invalid-input",
-              "supportedPageKinds geçerli WikiPageKind değerleri içermelidir",
+              "supportedPageKinds must contain only valid WikiPageKind values",
             );
           }
           return kindsParse.data;
@@ -771,7 +771,7 @@ export function projectWiki(
   if (sourceState !== "ready" && sourceState !== "partial") {
     throw new WikiProjectionError(
       "wiki/snapshot-not-projectable",
-      `Yalnızca ready/partial GraphSnapshot WikiSnapshot'a projeksiyonlanabilir (TŞ §9); gelen durum: ${sourceState}`,
+      `Only a ready/partial GraphSnapshot can be projected into a WikiSnapshot; received state: ${sourceState}`,
     );
   }
 
@@ -818,7 +818,7 @@ export function projectWiki(
         ? {}
         : {
             coverageOverride: "unsupported" as CoverageStatus,
-            coverageDetail: `sayfa türü '${category.kind}' bu adapter kümesi tarafından desteklenmiyor`,
+            coverageDetail: `page kind '${category.kind}' is not supported by this adapter set`,
           }),
       ...(structuralDetail === undefined ? {} : { coverageDetail: structuralDetail }),
     });
@@ -883,7 +883,7 @@ export function projectWiki(
       .join("; ");
     throw new WikiProjectionError(
       "wiki/projection-invariant-violation",
-      `WikiProjection invariant ihlali: ${detail}`,
+      `WikiProjection invariant violation: ${detail}`,
     );
   }
 
@@ -924,7 +924,7 @@ export function planWikiChildPages(
     if (category === undefined) {
       throw new WikiProjectionError(
         "wiki/internal",
-        `Taksonomi kategorisi bulunamadı: ${source.categoryKey}`,
+        `Taxonomy category not found: ${source.categoryKey}`,
       );
     }
     if (!supportedKinds.has(category.kind)) {
@@ -983,7 +983,7 @@ export function planWikiChildPages(
       if (parentCategory === undefined) {
         throw new WikiProjectionError(
           "wiki/internal",
-          `Kök kategori bulunamadı: ${child.categoryKey}`,
+          `Root category not found: ${child.categoryKey}`,
         );
       }
       const slug = slugByChild.get(child) ?? wikiSlugify(child.node.qualifiedName);
@@ -1015,7 +1015,7 @@ export function wikiUnsupportedRootSections(
   if (template === undefined) {
     throw new WikiProjectionError(
       "wiki/internal",
-      `Desteklenmeyen kök kategori şablonu yok: ${categoryKind}`,
+      `No unsupported-root-category template for kind: ${categoryKind}`,
     );
   }
   return template.map(emptyDraft);
@@ -1053,13 +1053,13 @@ export function wikiProjectionWarnings(
     const pageId = wikiRootPageIdFor(workspaceId, category.key, category.kind);
     if (!supportedKinds.has(category.kind)) {
       warnings.push(
-        `Kategori '${category.title}' (${category.kind}): sayfa türü bu adapter kümesi tarafından desteklenmiyor — unsupported`,
+        `Category '${category.title}' (${category.kind}): page kind is not supported by this adapter set — unsupported`,
       );
     }
     for (const section of sectionsByPage.get(pageId) ?? []) {
       if (section.status === "partial") {
         warnings.push(
-          `Sayfa '${category.title}' bölümü '${section.sectionKey}': çözülemeyen kenar içeriyor — partial`,
+          `Page '${category.title}' section '${section.sectionKey}': contains unresolved edges — partial`,
         );
       }
     }
@@ -1082,7 +1082,7 @@ export function wikiProjectionWarnings(
     for (const section of sectionsByPage.get(page.id) ?? []) {
       if (section.status === "partial") {
         warnings.push(
-          `Sayfa '${page.title}' bölümü '${section.sectionKey}': çözülemeyen kenar içeriyor — partial`,
+          `Page '${page.title}' section '${section.sectionKey}': contains unresolved edges — partial`,
         );
       }
     }

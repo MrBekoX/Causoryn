@@ -1,3 +1,4 @@
+import { insertMissingOwnedKeys } from "./owned-keys.js";
 import {
   CausorynCliError,
   type CodexMcpServerSpec,
@@ -69,7 +70,7 @@ function unescapeTomlString(raw: string): string {
     return trimmed.slice(1, -1);
   }
   if (!trimmed.startsWith('"') || !trimmed.endsWith('"') || trimmed.length < 2) {
-    throw new CausorynCliError("cli/malformed-toml", `Geçersiz TOML string değeri: ${raw}`);
+    throw new CausorynCliError("cli/malformed-toml", `Invalid TOML string value: ${raw}`);
   }
   const body = trimmed.slice(1, -1);
   let result = "";
@@ -81,7 +82,7 @@ function unescapeTomlString(raw: string): string {
     }
     i += 1;
     if (i >= body.length) {
-      throw new CausorynCliError("cli/malformed-toml", "Kapanmamış TOML kaçış dizisi");
+      throw new CausorynCliError("cli/malformed-toml", "Unterminated TOML escape sequence");
     }
     const esc = body[i] ?? "";
     switch (esc) {
@@ -109,7 +110,7 @@ function unescapeTomlString(raw: string): string {
       case "u": {
         const hex = body.slice(i + 1, i + 5);
         if (!/^[0-9a-fA-F]{4}$/.test(hex)) {
-          throw new CausorynCliError("cli/malformed-toml", `Geçersiz \\u kaçışı: ${hex}`);
+          throw new CausorynCliError("cli/malformed-toml", `Invalid \\u escape: ${hex}`);
         }
         result += String.fromCharCode(Number.parseInt(hex, 16));
         i += 4;
@@ -221,7 +222,7 @@ function scanTomlLine(
       if (state.bracketDepth < 0) {
         throw new CausorynCliError(
           "cli/malformed-toml",
-          `Bozuk TOML (satır ${String(lineNumber)}): eşleşmeyen ']' karakteri`,
+          `Malformed TOML (line ${String(lineNumber)}): unmatched ']' character`,
         );
       }
     } else if (ch === "{") {
@@ -231,7 +232,7 @@ function scanTomlLine(
       if (state.braceDepth < 0) {
         throw new CausorynCliError(
           "cli/malformed-toml",
-          `Bozuk TOML (satır ${String(lineNumber)}): eşleşmeyen '}' karakteri`,
+          `Malformed TOML (line ${String(lineNumber)}): unmatched '}' character`,
         );
       }
     }
@@ -241,7 +242,7 @@ function scanTomlLine(
   if (inBasic || inLiteral) {
     throw new CausorynCliError(
       "cli/malformed-toml",
-      `Bozuk TOML (satır ${String(lineNumber)}): kapanmamış string tırnağı`,
+      `Malformed TOML (line ${String(lineNumber)}): unterminated string quote`,
     );
   }
 
@@ -256,14 +257,14 @@ function parseTableHeaderCode(effectiveCode: string, lineNumber: number): string
     if (!effectiveCode.endsWith("]]")) {
       throw new CausorynCliError(
         "cli/malformed-toml",
-        `Bozuk TOML (satır ${String(lineNumber)}): kapanmamış dizi-tablo başlığı`,
+        `Malformed TOML (line ${String(lineNumber)}): unterminated array-of-tables header`,
       );
     }
     const inner = effectiveCode.slice(2, -2).trim();
     if (inner.length === 0 || inner.includes("[") || inner.includes("]")) {
       throw new CausorynCliError(
         "cli/malformed-toml",
-        `Bozuk TOML (satır ${String(lineNumber)}): geçersiz dizi-tablo başlığı`,
+        `Malformed TOML (line ${String(lineNumber)}): invalid array-of-tables header`,
       );
     }
     return `[${inner}]`;
@@ -272,14 +273,14 @@ function parseTableHeaderCode(effectiveCode: string, lineNumber: number): string
   if (!effectiveCode.endsWith("]")) {
     throw new CausorynCliError(
       "cli/malformed-toml",
-      `Bozuk TOML (satır ${String(lineNumber)}): kapanmamış tablo başlığı`,
+      `Malformed TOML (line ${String(lineNumber)}): unterminated table header`,
     );
   }
   const inner = effectiveCode.slice(1, -1).trim();
   if (inner.length === 0 || inner.includes("[") || inner.includes("]")) {
     throw new CausorynCliError(
       "cli/malformed-toml",
-      `Bozuk TOML (satır ${String(lineNumber)}): geçersiz tablo başlığı`,
+      `Malformed TOML (line ${String(lineNumber)}): invalid table header`,
     );
   }
   return inner;
@@ -347,7 +348,7 @@ function parseTomlDocument(rawToml: string): ParsedTomlDocument {
     const { effectiveCode } = scanTomlLine(line, lineNumber, state);
     const currentBuilder = builders[builders.length - 1];
     if (currentBuilder === undefined) {
-      throw new CausorynCliError("cli/malformed-toml", "İç TOML ayrıştırıcı hatası");
+      throw new CausorynCliError("cli/malformed-toml", "Internal TOML parser error");
     }
 
     if (wasContinuation || effectiveCode.length === 0) {
@@ -360,7 +361,7 @@ function parseTomlDocument(rawToml: string): ParsedTomlDocument {
       if (state.bracketDepth !== 0 || state.braceDepth !== 0) {
         throw new CausorynCliError(
           "cli/malformed-toml",
-          `Bozuk TOML (satır ${String(lineNumber)}): dengesiz tablo başlığı`,
+          `Malformed TOML (line ${String(lineNumber)}): unbalanced table header`,
         );
       }
       const header = parseTableHeaderCode(effectiveCode, lineNumber);
@@ -368,7 +369,7 @@ function parseTomlDocument(rawToml: string): ParsedTomlDocument {
         if (seenStandardTables.has(header)) {
           throw new CausorynCliError(
             "cli/malformed-toml",
-            `Bozuk TOML (satır ${String(lineNumber)}): mükerrer tablo başlığı [${header}]`,
+            `Malformed TOML (line ${String(lineNumber)}): duplicate table header [${header}]`,
           );
         }
         seenStandardTables.add(header);
@@ -381,7 +382,7 @@ function parseTomlDocument(rawToml: string): ParsedTomlDocument {
     if (eqIdx <= 0) {
       throw new CausorynCliError(
         "cli/malformed-toml",
-        `Bozuk TOML (satır ${String(lineNumber)}): anahtar = değer ataması bekleniyordu`,
+        `Malformed TOML (line ${String(lineNumber)}): expected a key = value assignment`,
       );
     }
     const keyPart = effectiveCode.slice(0, eqIdx).trim();
@@ -392,7 +393,7 @@ function parseTomlDocument(rawToml: string): ParsedTomlDocument {
     ) {
       throw new CausorynCliError(
         "cli/malformed-toml",
-        `Bozuk TOML (satır ${String(lineNumber)}): eksik anahtar veya değer`,
+        `Malformed TOML (line ${String(lineNumber)}): missing key or value`,
       );
     }
 
@@ -407,7 +408,7 @@ function parseTomlDocument(rawToml: string): ParsedTomlDocument {
   ) {
     throw new CausorynCliError(
       "cli/malformed-toml",
-      "Bozuk TOML: dosya sonunda kapanmamış çok-satırlı değer veya dizi/tablo",
+      "Malformed TOML: unterminated multi-line value, array, or inline table at end of file",
     );
   }
 
@@ -461,14 +462,108 @@ export function validateTomlStructure(rawToml: string): void {
   parseTomlDocument(rawToml);
 }
 
+/**
+ * Keys of `[mcp_servers.causoryn]` that Causoryn writes, in the order of a
+ * fresh table. Every other key of an existing table is kept verbatim.
+ */
+const CAUSORYN_OWNED_TABLE_KEYS = ["command", "args", "startup_timeout_sec"] as const;
+
+type CausorynOwnedTableKey = (typeof CAUSORYN_OWNED_TABLE_KEYS)[number];
+
+function specStartupTimeoutSec(spec: CodexMcpServerSpec): number {
+  return spec.startupTimeoutSec ?? DEFAULT_STARTUP_TIMEOUT_SEC;
+}
+
+function renderOwnedTableLine(key: CausorynOwnedTableKey, spec: CodexMcpServerSpec): string {
+  switch (key) {
+    case "command":
+      return `command = ${formatTomlBasicString(spec.command)}`;
+    case "args":
+      return `args = [${spec.args.map((arg) => formatTomlBasicString(arg)).join(", ")}]`;
+    case "startup_timeout_sec":
+      return `startup_timeout_sec = ${String(specStartupTimeoutSec(spec))}`;
+  }
+}
+
+/** Owned key (or "env") an assignment of the main table sets; null for a key Causoryn does not own. */
+function ownedTableKeyOf(rawKey: string | null): CausorynOwnedTableKey | "env" | null {
+  if (rawKey === null) return null;
+  const first = splitTomlKeyPath(rawKey)?.[0];
+  if (first === "env") return "env";
+  return (CAUSORYN_OWNED_TABLE_KEYS as readonly string[]).includes(first ?? "")
+    ? (first as CausorynOwnedTableKey)
+    : null;
+}
+
+/** Whether an existing owned value already equals the spec value (then its line is kept verbatim). */
+function ownedTableValueUnchanged(
+  key: CausorynOwnedTableKey,
+  rawValue: string,
+  spec: CodexMcpServerSpec,
+): boolean {
+  try {
+    switch (key) {
+      case "command":
+        return unescapeTomlString(rawValue) === spec.command;
+      case "args": {
+        const existing = parseTomlStringArray(rawValue);
+        return existing.length === spec.args.length && existing.every((arg, i) => arg === spec.args[i]);
+      }
+      case "startup_timeout_sec":
+        return parseTomlNumber(rawValue) === specStartupTimeoutSec(spec);
+    }
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Rewrites an existing `[mcp_servers.causoryn]` table in place: the owned keys
+ * get the spec values (a line whose value is already right stays verbatim; a
+ * dotted key under an owned name is replaced too), env keys move to the env
+ * sub-table, and every other key, comment and blank line keeps its text and
+ * position. Missing owned keys are inserted where a fresh table has them.
+ */
+function rewriteCausorynMainTableLines(section: TomlSection, spec: CodexMcpServerSpec): string[] {
+  interface BodyItem {
+    readonly owned: CausorynOwnedTableKey | null;
+    readonly lines: readonly string[];
+  }
+  const items: BodyItem[] = [];
+  const seen = new Set<CausorynOwnedTableKey>();
+  for (const unit of splitSectionUnits(section)) {
+    const owner = ownedTableKeyOf(unit.key);
+    if (owner === "env") continue;
+    if (owner === null) {
+      items.push({ owned: null, lines: unit.lines });
+      continue;
+    }
+    // A repeated owned key is invalid TOML; only the first one is rewritten.
+    if (seen.has(owner)) continue;
+    seen.add(owner);
+    const keepVerbatim =
+      unit.key !== null &&
+      unit.value !== null &&
+      splitTomlKeyPath(unit.key)?.length === 1 &&
+      ownedTableValueUnchanged(owner, unit.value, spec);
+    items.push({ owned: owner, lines: keepVerbatim ? unit.lines : [renderOwnedTableLine(owner, spec)] });
+  }
+  const complete = insertMissingOwnedKeys(
+    items,
+    (item) => item.owned,
+    CAUSORYN_OWNED_TABLE_KEYS,
+    (key): BodyItem => ({
+      owned: key as CausorynOwnedTableKey,
+      lines: [renderOwnedTableLine(key as CausorynOwnedTableKey, spec)],
+    }),
+  );
+  return [section.lines[0] ?? `[${CAUSORYN_TABLE}]`, ...complete.flatMap((item) => item.lines)];
+}
+
 function renderCausorynSections(spec: CodexMcpServerSpec): TomlSection[] {
-  const timeoutSec = spec.startupTimeoutSec ?? DEFAULT_STARTUP_TIMEOUT_SEC;
-  const formattedArgs = spec.args.map((arg) => formatTomlBasicString(arg)).join(", ");
   const mainLines = [
     `[${CAUSORYN_TABLE}]`,
-    `command = ${formatTomlBasicString(spec.command)}`,
-    `args = [${formattedArgs}]`,
-    `startup_timeout_sec = ${String(timeoutSec)}`,
+    ...CAUSORYN_OWNED_TABLE_KEYS.map((key) => renderOwnedTableLine(key, spec)),
   ];
 
   const out: TomlSection[] = [
@@ -479,21 +574,33 @@ function renderCausorynSections(spec: CodexMcpServerSpec): TomlSection[] {
     },
   ];
 
-  const envEntries = spec.env !== undefined ? Object.entries(spec.env) : [];
-  if (envEntries.length > 0) {
-    envEntries.sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
-    const envLines = [
-      `[${CAUSORYN_ENV_TABLE}]`,
-      ...envEntries.map(([k, v]) => `${formatTomlKey(k)} = ${formatTomlBasicString(v)}`),
-    ];
-    out.push({
-      header: CAUSORYN_ENV_TABLE,
-      leadingComments: [],
-      lines: envLines,
-    });
+  const envSection = renderCausorynEnvSection(spec.env);
+  if (envSection !== null) {
+    out.push(envSection);
   }
 
   return out;
+}
+
+/**
+ * Renders `[mcp_servers.causoryn.env]` in the given key order (the caller keeps
+ * the user's existing order so an unchanged env does not cause a rewrite).
+ */
+function renderCausorynEnvSection(
+  env: Readonly<Record<string, string>> | undefined,
+): TomlSection | null {
+  const envEntries = env !== undefined ? Object.entries(env) : [];
+  if (envEntries.length === 0) {
+    return null;
+  }
+  return {
+    header: CAUSORYN_ENV_TABLE,
+    leadingComments: [],
+    lines: [
+      `[${CAUSORYN_ENV_TABLE}]`,
+      ...envEntries.map(([k, v]) => `${formatTomlKey(k)} = ${formatTomlBasicString(v)}`),
+    ],
+  };
 }
 
 function formatTomlKey(key: string): string {
@@ -527,11 +634,15 @@ function serializeSections(sections: readonly TomlSection[], eol: "\n" | "\r\n")
 export function upsertCodexMcpServer(existingToml: string, spec: CodexMcpServerSpec): string {
   const parsed = parseTomlDocument(existingToml);
   const replacement = renderCausorynSections(spec);
+  const envReplacement = renderCausorynEnvSection(spec.env);
 
   const outputSections: TomlSection[] = [];
   let inserted = false;
 
   const hasExistingMain = parsed.sections.some((s) => s.header === CAUSORYN_TABLE);
+  // An existing env sub-table is rewritten in place (keeping its position and
+  // leading comments); otherwise the new env sub-table follows the main table.
+  const hasExistingEnv = parsed.sections.some((s) => s.header === CAUSORYN_ENV_TABLE);
 
   for (const section of parsed.sections) {
     if (section.header === CAUSORYN_TABLE) {
@@ -541,11 +652,13 @@ export function upsertCodexMcpServer(existingToml: string, spec: CodexMcpServerS
           outputSections.push({
             header: firstReplacement.header,
             leadingComments: section.leadingComments,
-            lines: firstReplacement.lines,
+            lines: rewriteCausorynMainTableLines(section, spec),
           });
           for (let i = 1; i < replacement.length; i += 1) {
             const extra = replacement[i];
-            if (extra !== undefined) outputSections.push(extra);
+            if (extra !== undefined && !(hasExistingEnv && extra.header === CAUSORYN_ENV_TABLE)) {
+              outputSections.push(extra);
+            }
           }
         }
         inserted = true;
@@ -554,7 +667,14 @@ export function upsertCodexMcpServer(existingToml: string, spec: CodexMcpServerS
     }
 
     if (section.header === CAUSORYN_ENV_TABLE) {
-      // Yeni env varsa yukarıda replacement ile eklendi; eski env düşürülür.
+      if (envReplacement !== null && hasExistingMain) {
+        outputSections.push({
+          header: envReplacement.header,
+          leadingComments: section.leadingComments,
+          lines: envReplacement.lines,
+        });
+      }
+      // Without a main table the env sub-table is (re)emitted with the replacement.
       continue;
     }
 
@@ -606,7 +726,7 @@ export function removeCodexMcpServer(existingToml: string): {
 function parseTomlStringArray(rawValue: string): string[] {
   const trimmed = rawValue.trim();
   if (!trimmed.startsWith("[") || !trimmed.endsWith("]")) {
-    throw new CausorynCliError("cli/malformed-toml", `TOML dizi bekleniyordu: ${rawValue}`);
+    throw new CausorynCliError("cli/malformed-toml", `Expected a TOML array: ${rawValue}`);
   }
   const inner = trimmed.slice(1, -1).trim();
   if (inner.length === 0) return [];
@@ -661,6 +781,209 @@ function parseTomlStringArray(rawValue: string): string[] {
   return items;
 }
 
+/**
+ * One piece of a section body: a `key = value` assignment with all of its raw
+ * lines (a value can span lines), or a single blank / comment line
+ * (`key` and `value` null).
+ */
+interface SectionUnit {
+  readonly lines: readonly string[];
+  readonly key: string | null;
+  readonly value: string | null;
+}
+
+/** Splits a section body (header line skipped) into assignments and blank / comment lines. */
+function splitSectionUnits(section: TomlSection): SectionUnit[] {
+  const state: ScanState = {
+    inMultilineBasic: false,
+    inMultilineLiteral: false,
+    bracketDepth: 0,
+    braceDepth: 0,
+  };
+  const units: SectionUnit[] = [];
+  let pending: { lines: string[]; code: string } | null = null;
+
+  for (let i = 1; i < section.lines.length; i += 1) {
+    const line = section.lines[i] ?? "";
+    const { effectiveCode } = scanTomlLine(line, i + 1, state);
+    const open =
+      state.inMultilineBasic ||
+      state.inMultilineLiteral ||
+      state.bracketDepth > 0 ||
+      state.braceDepth > 0;
+    if (pending === null) {
+      if (effectiveCode.length === 0 && !open) {
+        units.push({ lines: [line], key: null, value: null });
+        continue;
+      }
+      pending = { lines: [line], code: effectiveCode };
+    } else {
+      pending.lines.push(line);
+      if (effectiveCode.length > 0) {
+        pending.code = `${pending.code} ${effectiveCode}`;
+      }
+    }
+    if (open) continue;
+
+    const eqIdx = findTopLevelEquals(pending.code);
+    units.push({
+      lines: pending.lines,
+      key: eqIdx > 0 ? pending.code.slice(0, eqIdx).trim() : null,
+      value: eqIdx > 0 ? pending.code.slice(eqIdx + 1).trim() : null,
+    });
+    pending = null;
+  }
+  if (pending !== null) {
+    units.push({ lines: pending.lines, key: null, value: null });
+  }
+  return units;
+}
+
+/** Calls `onAssignment` for every top-level `key = value` of a section body (header line skipped). */
+function forEachSectionAssignment(
+  section: TomlSection,
+  onAssignment: (key: string, value: string) => void,
+): void {
+  for (const unit of splitSectionUnits(section)) {
+    if (unit.key !== null && unit.value !== null) {
+      onAssignment(unit.key, unit.value);
+    }
+  }
+}
+
+/**
+ * Splits a (possibly dotted) TOML key into its unquoted parts:
+ * `env . "A.B"` gives `["env", "A.B"]`. Returns null for a key it cannot read.
+ */
+function splitTomlKeyPath(rawKey: string): string[] | null {
+  const parts: string[] = [];
+  for (const piece of splitTopLevel(rawKey, ".")) {
+    const trimmed = piece.trim();
+    if (trimmed.startsWith('"') || trimmed.startsWith("'")) {
+      try {
+        parts.push(unescapeTomlString(trimmed));
+      } catch {
+        return null;
+      }
+    } else if (/^[A-Za-z0-9_-]+$/.test(trimmed)) {
+      parts.push(trimmed);
+    } else {
+      return null;
+    }
+  }
+  return parts.length > 0 ? parts : null;
+}
+
+const TOML_DECIMAL_NUMBER = /^[+-]?(?:0|[1-9](?:_?\d)*)(?:\.\d(?:_?\d)*)?(?:[eE][+-]?\d(?:_?\d)*)?$/;
+const TOML_PREFIXED_INTEGER = /^0(?:x[0-9A-Fa-f](?:_?[0-9A-Fa-f])*|o[0-7](?:_?[0-7])*|b[01](?:_?[01])*)$/;
+
+/** Reads a finite TOML integer or float (`30`, `1_000`, `45.5`, `0x1E`); null otherwise. */
+function parseTomlNumber(rawValue: string): number | null {
+  const trimmed = rawValue.trim();
+  if (!TOML_DECIMAL_NUMBER.test(trimmed) && !TOML_PREFIXED_INTEGER.test(trimmed)) {
+    return null;
+  }
+  const parsed = Number(trimmed.replace(/_/g, ""));
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+/** Parses a single (bare or quoted) TOML key; dotted keys are rejected. */
+function parseTomlSimpleKey(rawKey: string, context: string): string {
+  const trimmed = rawKey.trim();
+  if (trimmed.startsWith('"') || trimmed.startsWith("'")) {
+    return unescapeTomlString(trimmed);
+  }
+  if (!/^[A-Za-z0-9_-]+$/.test(trimmed)) {
+    throw new CausorynCliError(
+      "cli/malformed-toml",
+      `Unsupported TOML key in ${context}: ${rawKey.trim()}`,
+    );
+  }
+  return trimmed;
+}
+
+function parseTomlEnvValue(rawValue: string, key: string): string {
+  const trimmed = rawValue.trim();
+  if (!trimmed.startsWith('"') && !trimmed.startsWith("'")) {
+    throw new CausorynCliError(
+      "cli/malformed-toml",
+      `Unsupported value for ${CAUSORYN_ENV_TABLE}.${key}: env values must be TOML strings (${trimmed})`,
+    );
+  }
+  return unescapeTomlString(trimmed);
+}
+
+/** Splits `text` on top-level `separator` characters (outside strings, arrays and inline tables). */
+function splitTopLevel(text: string, separator: string): string[] {
+  const parts: string[] = [];
+  let current = "";
+  let inBasic = false;
+  let inLiteral = false;
+  let depth = 0;
+  for (let i = 0; i < text.length; i += 1) {
+    const ch = text[i] ?? "";
+    if (inBasic) {
+      current += ch;
+      if (ch === "\\" && i + 1 < text.length) {
+        i += 1;
+        current += text[i] ?? "";
+      } else if (ch === '"') {
+        inBasic = false;
+      }
+      continue;
+    }
+    if (inLiteral) {
+      current += ch;
+      if (ch === "'") inLiteral = false;
+      continue;
+    }
+    if (ch === '"') {
+      inBasic = true;
+    } else if (ch === "'") {
+      inLiteral = true;
+    } else if (ch === "[" || ch === "{") {
+      depth += 1;
+    } else if (ch === "]" || ch === "}") {
+      depth -= 1;
+    } else if (ch === separator && depth === 0) {
+      parts.push(current);
+      current = "";
+      continue;
+    }
+    current += ch;
+  }
+  parts.push(current);
+  return parts;
+}
+
+/** Defines an own env entry (a plain assignment of `__proto__` would be swallowed). */
+function setEnvEntry(env: Record<string, string>, key: string, value: string): void {
+  Object.defineProperty(env, key, { value, enumerable: true, writable: true, configurable: true });
+}
+
+/** Parses an inline `{ KEY = "value", ... }` env table. */
+function parseTomlInlineEnvTable(rawValue: string, into: Record<string, string>): void {
+  const trimmed = rawValue.trim();
+  if (!trimmed.startsWith("{") || !trimmed.endsWith("}")) {
+    throw new CausorynCliError(
+      "cli/malformed-toml",
+      `Expected an inline table for ${CAUSORYN_TABLE}.env: ${trimmed}`,
+    );
+  }
+  for (const piece of splitTopLevel(trimmed.slice(1, -1), ",")) {
+    if (piece.trim().length === 0) continue;
+    const eqIdx = findTopLevelEquals(piece);
+    if (eqIdx <= 0) {
+      throw new CausorynCliError(
+        "cli/malformed-toml",
+        `Malformed entry in ${CAUSORYN_TABLE}.env: ${piece.trim()}`,
+      );
+    }
+    const key = parseTomlSimpleKey(piece.slice(0, eqIdx), `${CAUSORYN_TABLE}.env`);
+    setEnvEntry(into, key, parseTomlEnvValue(piece.slice(eqIdx + 1), key));
+  }
+}
+
 export function readCodexMcpServer(rawToml: string): ParsedCodexMcpServer | null {
   const parsed = parseTomlDocument(rawToml);
   const target = parsed.sections.find((s) => s.header === CAUSORYN_TABLE);
@@ -668,49 +991,67 @@ export function readCodexMcpServer(rawToml: string): ParsedCodexMcpServer | null
     return null;
   }
 
-  let command: string | null = null;
-  let args: string[] = [];
-  let startupTimeoutSec: number | null = null;
-
-  const state: ScanState = {
-    inMultilineBasic: false,
-    inMultilineLiteral: false,
-    bracketDepth: 0,
-    braceDepth: 0,
+  const found: {
+    command: string | null;
+    args: string[];
+    startupTimeoutSec: number | null;
+    startupTimeoutSecRaw: string | undefined;
+  } = {
+    command: null,
+    args: [],
+    startupTimeoutSec: null,
+    startupTimeoutSecRaw: undefined,
   };
+  const env: Record<string, string> = {};
 
-  let pendingAssignment = "";
-  for (let i = 1; i < target.lines.length; i += 1) {
-    const line = target.lines[i] ?? "";
-    const { effectiveCode } = scanTomlLine(line, i + 1, state);
-    if (effectiveCode.length === 0) continue;
-    pendingAssignment =
-      pendingAssignment.length === 0 ? effectiveCode : `${pendingAssignment} ${effectiveCode}`;
-    if (state.bracketDepth > 0 || state.braceDepth > 0) {
-      continue;
-    }
-
-    const eqIdx = findTopLevelEquals(pendingAssignment);
-    const assignment = pendingAssignment;
-    pendingAssignment = "";
-    if (eqIdx <= 0) continue;
-
-    const key = assignment.slice(0, eqIdx).trim();
-    const val = assignment.slice(eqIdx + 1).trim();
-    if (key === "command") {
-      command = unescapeTomlString(val);
-    } else if (key === "args") {
-      args = parseTomlStringArray(val);
-    } else if (key === "startup_timeout_sec") {
-      const parsedNum = Number.parseInt(val, 10);
-      if (Number.isFinite(parsedNum)) {
-        startupTimeoutSec = parsedNum;
+  forEachSectionAssignment(target, (key, val) => {
+    const keyPath = splitTomlKeyPath(key);
+    if (keyPath === null) return;
+    const [first] = keyPath;
+    if (first === "env") {
+      if (keyPath.length === 1) {
+        parseTomlInlineEnvTable(val, env);
+        return;
       }
+      if (keyPath.length > 2) {
+        throw new CausorynCliError(
+          "cli/malformed-toml",
+          `Unsupported TOML key in ${CAUSORYN_ENV_TABLE}: ${key.trim()}`,
+        );
+      }
+      const envKey = keyPath[1] as string;
+      setEnvEntry(env, envKey, parseTomlEnvValue(val, envKey));
+      return;
     }
+    if (keyPath.length !== 1) return;
+    if (first === "command") {
+      found.command = unescapeTomlString(val);
+    } else if (first === "args") {
+      found.args = parseTomlStringArray(val);
+    } else if (first === "startup_timeout_sec") {
+      found.startupTimeoutSec = parseTomlNumber(val);
+      found.startupTimeoutSecRaw = val;
+    }
+  });
+
+  const envSection = parsed.sections.find((s) => s.header === CAUSORYN_ENV_TABLE);
+  if (envSection !== undefined) {
+    forEachSectionAssignment(envSection, (key, val) => {
+      const envKey = parseTomlSimpleKey(key, CAUSORYN_ENV_TABLE);
+      setEnvEntry(env, envKey, parseTomlEnvValue(val, envKey));
+    });
   }
 
-  if (command === null) {
+  if (found.command === null) {
     return null;
   }
-  return { command, args, startupTimeoutSec };
+  return {
+    command: found.command,
+    args: found.args,
+    startupTimeoutSec: found.startupTimeoutSec,
+    ...(found.startupTimeoutSecRaw !== undefined
+      ? { startupTimeoutSecRaw: found.startupTimeoutSecRaw }
+      : {}),
+    env,
+  };
 }

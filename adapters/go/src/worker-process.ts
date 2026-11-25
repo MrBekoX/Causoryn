@@ -10,9 +10,17 @@
  * interpole edilmez (kırmızı çizgi 6).
  */
 import { spawn as defaultSpawn, type ChildProcess } from "node:child_process";
+import { dirname } from "node:path";
 import {
   buildAllowlistedWorkerEnv,
+  isFullyQualifiedPath,
+  collectUntrustedRoots,
+  resolveWindowsSystemExecutable,
+  resolveWorkerCommand,
   runLineJsonWorker,
+  withoutCwdExecutableSearch,
+  withSanitizedPath,
+  workerUnavailable,
   type WorkerRunOutcome,
 } from "@causoryn/sidecar-ipc";
 import {
@@ -24,34 +32,70 @@ import {
 export type { WorkerRunOutcome } from "@causoryn/sidecar-ipc";
 
 /**
+ * Go toolchain isolation for both `go run` and the prebuilt binary:
+ * - GOTOOLCHAIN=local: never switch to (or download) another toolchain,
+ * - GOWORK=off: no go.work discovery,
+ * - GOPROXY=off: no network (the worker module has no dependencies),
+ * - GOENV=off: the user-level go env file (`go env -w`) is not read, so
+ *   GOFLAGS / CC / GOTOOLCHAIN values stored there do not apply,
+ * - GOFLAGS=-mod=readonly: go.mod is never rewritten,
+ * - CGO_ENABLED=0: the pure-Go worker never starts a C compiler.
+ */
+const GO_ISOLATION_ENV_OVERRIDES = {
+  GOTOOLCHAIN: "local",
+  GOWORK: "off",
+  GOPROXY: "off",
+  GOENV: "off",
+  GOFLAGS: "-mod=readonly",
+  CGO_ENABLED: "0",
+} as const;
+
+/**
  * go run modunda (goWorkerBinaryPath boşken) worker, go tool'unun TORUN
  * sürecidir: doğrudan kill yalnızca `go` sürecini öldürür; derlenen analiz
- * worker'ı arka planda kalmasın diye win32'de LİTERAL "taskkill" + kendi
- * çocuğumuzun sayısal pid'i (/T ağaç, /F zorla) uygulanır (kırmızı çizgi 6).
+ * worker'ı arka planda kalmasın diye win32'de %SystemRoot%\System32\taskkill.exe
+ * (absolute path, its own directory as cwd) + kendi çocuğumuzun sayısal
+ * pid'i (/T ağaç, /F zorla) uygulanır (kırmızı çizgi 6). The returned promise
+ * settles when taskkill has finished; the shared IPC core applies the direct
+ * kill only after that, while `go` is still alive to anchor the tree.
  */
 function killProcessTree(
   spawnProcess: SpawnFunction,
   closing: ChildProcess,
-): void {
-  if (process.platform !== "win32") return;
+  env: Readonly<Record<string, string>>,
+): Promise<void> | undefined {
+  if (process.platform !== "win32") return undefined;
   const pid = closing.pid;
-  if (pid === undefined) return;
-  try {
-    const killer = spawnProcess(
-      "taskkill", // LİTERAL komut — kırmızı çizgi 6
-      ["/pid", String(pid), "/T", "/F"],
-      {
-        stdio: ["pipe", "pipe", "pipe"],
-        env: buildAllowlistedWorkerEnv(WORKER_ENV_ALLOWLIST),
-      },
-    );
-    killer.on("error", () => {});
+  if (pid === undefined) return undefined;
+  const taskkill = resolveWindowsSystemExecutable("taskkill.exe");
+  return new Promise<void>((resolveKill) => {
+    let killer: ChildProcess;
+    try {
+      killer = spawnProcess(
+        taskkill,
+        ["/pid", String(pid), "/T", "/F"],
+        {
+          stdio: ["pipe", "pipe", "pipe"],
+          env: withoutCwdExecutableSearch(env),
+          cwd: dirname(taskkill),
+          shell: false,
+          windowsHide: true,
+        },
+      );
+    } catch {
+      // spawnProcess enjeksiyonları senkron patlayabilir; the direct kill follows.
+      resolveKill();
+      return;
+    }
+    killer.on("error", () => {
+      resolveKill();
+    });
     killer.once("exit", () => {
       killer.removeAllListeners();
+      killer.on("error", () => {});
+      resolveKill();
     });
-  } catch {
-    // spawnProcess enjeksiyonları senkron patlayabilir; doğrudan kill uygulanmıştır.
-  }
+  });
 }
 
 export interface RunGoWorkerAnalyzeInput {
@@ -73,6 +117,11 @@ export interface RunGoWorkerAnalyzeInput {
   readonly stderrMaxChars?: number;
   /** Test enjeksiyonu; default node:child_process.spawn. */
   readonly spawnProcess?: SpawnFunction;
+  /**
+   * Analyzed workspace root(s): PATH entries inside them are never used to
+   * resolve the go executable (the process cwd is always included).
+   */
+  readonly untrustedRoots?: readonly string[];
 }
 
 export function runGoWorkerAnalyze(
@@ -80,15 +129,44 @@ export function runGoWorkerAnalyze(
 ): Promise<WorkerRunOutcome> {
   const spawnProcess: SpawnFunction = input.spawnProcess ?? defaultSpawn;
   const isBinaryMode = input.goWorkerBinaryPath.length > 0;
-  const command = isBinaryMode ? input.goWorkerBinaryPath : input.goBinaryPath;
   const args = isBinaryMode
     ? ([] as string[])
     : (["run", "./cmd/worker"] as string[]);
+  if (!isFullyQualifiedPath(input.workerDir)) {
+    return Promise.resolve(
+      workerUnavailable(
+        `worker process was not started: the Go worker directory must be absolute (got: ${input.workerDir})`,
+      ),
+    );
+  }
+  const untrustedRoots = collectUntrustedRoots(input.untrustedRoots ?? []);
+  const env = withSanitizedPath(
+    buildAllowlistedWorkerEnv(WORKER_ENV_ALLOWLIST, GO_ISOLATION_ENV_OVERRIDES),
+    untrustedRoots,
+  );
+  let command: string;
+  if (isBinaryMode) {
+    if (!isFullyQualifiedPath(input.goWorkerBinaryPath)) {
+      return Promise.resolve(
+        workerUnavailable(
+          `worker process was not started: the prebuilt Go worker binary path must be absolute (got: ${input.goWorkerBinaryPath})`,
+        ),
+      );
+    }
+    command = input.goWorkerBinaryPath;
+  } else {
+    // Absolute executable: a bare name would be searched in the cwd first on Windows.
+    const resolved = resolveWorkerCommand(input.goBinaryPath, env, untrustedRoots);
+    if ("detail" in resolved) {
+      return Promise.resolve(workerUnavailable(resolved.detail));
+    }
+    command = resolved.command;
+  }
 
   return runLineJsonWorker({
     command,
     args,
-    env: buildAllowlistedWorkerEnv(WORKER_ENV_ALLOWLIST),
+    env,
     cwd: input.workerDir,
     requestPayload: input.requestPayload,
     requestTimeoutMs: input.requestTimeoutMs,
@@ -97,9 +175,8 @@ export function runGoWorkerAnalyze(
     spawnProcess,
     ...(!isBinaryMode
       ? {
-          onKillChild: (closing: ChildProcess) => {
-            killProcessTree(spawnProcess, closing);
-          },
+          onKillChild: (closing: ChildProcess) =>
+            killProcessTree(spawnProcess, closing, env),
         }
       : {}),
   });

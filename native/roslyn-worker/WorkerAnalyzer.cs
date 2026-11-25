@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -117,7 +118,7 @@ public static class WorkerAnalyzer
             {
                 throw new ProtocolException(
                     ProtocolErrorCodes.InternalError,
-                    $"TŞ §8 node kataloğu dışı tür üretilemez: {kind}");
+                    $"node kind outside the catalog cannot be emitted: {kind}");
             }
 
             var key = NodeKey(kind, qualifiedName, relativePath);
@@ -160,7 +161,7 @@ public static class WorkerAnalyzer
             {
                 throw new ProtocolException(
                     ProtocolErrorCodes.InternalError,
-                    $"TŞ §8 edge kataloğu dışı tür üretilemez: {kind}");
+                    $"edge kind outside the catalog cannot be emitted: {kind}");
             }
 
             // Güvenlik bulgusu 4: ucu admit edilmemiş (limit aşımı) kenar
@@ -315,6 +316,10 @@ public static class WorkerAnalyzer
         var assembler = new GraphAssembler(nodeLimit);
         var warnings = assembler.Warnings;
 
+        // 0) Optional MSBuild project model: request-level validation (strict
+        //    schema) before any parse, so a malformed model rejects the request.
+        var projects = ProjectModel.Validate(request.Projects, warnings);
+
         // 1) Kaynaklar: yol normalizasyonu, çakışma reddi, deterministik sıra.
         //    Parse, dosya başına izole edilir: derin AST Roslyn parser'ında
         //    InsufficientExecutionStackException üretebilir (guard'lı, yakalanabilir);
@@ -329,7 +334,7 @@ public static class WorkerAnalyzer
             {
                 throw new ProtocolException(
                     ProtocolErrorCodes.InvalidArgument,
-                    $"Aynı kaynak yolu iki kez verildi: {relativePath}");
+                    $"Same source path was given twice: {relativePath}");
             }
 
             SyntaxTree tree;
@@ -337,7 +342,7 @@ public static class WorkerAnalyzer
             {
                 tree = CSharpSyntaxTree.ParseText(
                     file.Content,
-                    new CSharpParseOptions(languageVersion: LanguageVersion.Latest),
+                    ParseOptions,
                     path: relativePath);
             }
             catch (Exception ex)
@@ -346,7 +351,7 @@ public static class WorkerAnalyzer
                 {
                     RelativePath = relativePath,
                     Code = "ADAPTER_INTERNAL",
-                    Message = $"dosya ayrıştırılamadı, analiz setinden çıkarıldı: {ex.Message}",
+                    Message = $"file could not be parsed and was removed from the analysis set: {ex.Message}",
                     Line = 0,
                 });
                 continue;
@@ -359,21 +364,18 @@ public static class WorkerAnalyzer
 
         // 2) Referanslar + derleme (bellek-içi; workspace'e dokunulmaz — ADR-008).
         var referencePaths = ReferenceResolver.Resolve(request.ReferenceDirs, "net10.0", warnings);
-        var references = referencePaths.Select(p => (MetadataReference)MetadataReference.CreateFromFile(p)).ToList();
-        // Top-level statement içeren girdi yürütülebilir derlenmelidir
-        // (CS8805); aksi halde kütüphane çıktısı CS5001 uyarısı üretmez.
-        // Her iki durum da girdiden türetilir → deterministik.
-        var hasTopLevelStatements = entries.Any(e =>
-            e.Tree.GetRoot() is CompilationUnitSyntax unit &&
-            unit.Members.OfType<GlobalStatementSyntax>().Any());
-        var outputKind = hasTopLevelStatements ? OutputKind.ConsoleApplication : OutputKind.DynamicallyLinkedLibrary;
-        var compilation = CSharpCompilation.Create(
-            "CausorynWorker.Analysis",
-            entries.Select(e => e.Tree),
-            references,
-            new CSharpCompilationOptions(
-                outputKind,
-                nullableContextOptions: NullableContextOptions.Enable));
+        var references = ReferenceResolver.LoadMetadataReferences(referencePaths, warnings);
+        var compilationSets = BuildCompilations(entries, projects, references, warnings);
+        var compilationByTree = new Dictionary<SyntaxTree, CSharpCompilation>();
+        foreach (var set in compilationSets)
+        {
+            foreach (var entry in set.Entries)
+            {
+                compilationByTree[entry.Tree] = set.Compilation;
+            }
+        }
+
+        SemanticModel ModelFor(SourceEntry entry) => compilationByTree[entry.Tree].GetSemanticModel(entry.Tree);
 
         // 3) Tanılar: Roslyn 5.0 GetDiagnostics (parse+declaration+semantic+body)
         //    tek çağrı; Warning+Error korunur, dosyaya eşlenir (1 tabanlı satır)
@@ -381,48 +383,62 @@ public static class WorkerAnalyzer
         //    derin AST'de Roslyn bind/tanı aşaması InsufficientExecutionStackException
         //    fırlatabilir (guard'lı) — yakalanır, bütün girdiye ADAPTER_INTERNAL
         //    tanısı + uyarı yazılır ve analiz partial olarak sürer.
+        //    Each compilation (one per project) is isolated the same way.
         var entryByTree = entries.ToDictionary(e => e.Tree, e => e);
         var diagnostics = parseDiagnostics;
-        try
+        foreach (var set in compilationSets)
         {
-            foreach (var diagnostic in compilation.GetDiagnostics())
+            try
             {
-                if (diagnostic.Severity is not (DiagnosticSeverity.Error or DiagnosticSeverity.Warning))
+                foreach (var diagnostic in set.Compilation.GetDiagnostics())
                 {
-                    continue;
+                    if (diagnostic.Severity is not (DiagnosticSeverity.Error or DiagnosticSeverity.Warning))
+                    {
+                        continue;
+                    }
+
+                    if (set.GlobalUsingsTree is not null && diagnostic.Location.SourceTree == set.GlobalUsingsTree)
+                    {
+                        // The synthetic global usings are not a workspace file: a
+                        // problem there (e.g. a namespace whose reference pack is
+                        // missing) is reported as an explicit warning, never dropped.
+                        assembler.AddWarning(
+                            $"generated global using of project '{set.ProjectPath}' reported {diagnostic.Id}: {diagnostic.GetMessage(CultureInfo.InvariantCulture)}");
+                        continue;
+                    }
+
+                    if (diagnostic.Location.SourceTree is not SyntaxTree sourceTree ||
+                        !entryByTree.TryGetValue(sourceTree, out var entry))
+                    {
+                        continue; // dosya-dışı derleme tanısı bu protokolde taşınmaz
+                    }
+
+                    var lineSpan = diagnostic.Location.GetLineSpan();
+                    var line = lineSpan.IsValid ? lineSpan.StartLinePosition.Line + 1 : 0;
+                    diagnostics.Add(new DiagnosticOut
+                    {
+                        RelativePath = entry.RelativePath,
+                        Code = diagnostic.Id,
+                        Message = diagnostic.GetMessage(),
+                        Line = line,
+                    });
+                }
+            }
+            catch (Exception ex)
+            {
+                foreach (var entry in set.Entries)
+                {
+                    diagnostics.Add(new DiagnosticOut
+                    {
+                        RelativePath = entry.RelativePath,
+                        Code = "ADAPTER_INTERNAL",
+                        Message = $"compilation diagnostics phase could not complete ({ex.GetType().Name}); input nesting depth exceeds the code budget",
+                        Line = 0,
+                    });
                 }
 
-                if (diagnostic.Location.SourceTree is not SyntaxTree sourceTree ||
-                    !entryByTree.TryGetValue(sourceTree, out var entry))
-                {
-                    continue; // dosya-dışı derleme tanısı bu protokolde taşınmaz
-                }
-
-                var lineSpan = diagnostic.Location.GetLineSpan();
-                var line = lineSpan.IsValid ? lineSpan.StartLinePosition.Line + 1 : 0;
-                diagnostics.Add(new DiagnosticOut
-                {
-                    RelativePath = entry.RelativePath,
-                    Code = diagnostic.Id,
-                    Message = diagnostic.GetMessage(),
-                    Line = line,
-                });
+                warnings.Add("diagnostics phase could not complete: " + ex.Message);
             }
-        }
-        catch (Exception ex)
-        {
-            foreach (var entry in entries)
-            {
-                diagnostics.Add(new DiagnosticOut
-                {
-                    RelativePath = entry.RelativePath,
-                    Code = "ADAPTER_INTERNAL",
-                    Message = $"derleme tanı aşaması tamamlanamadı ({ex.GetType().Name}); girdi derinliği kod bütçesini aşıyor",
-                    Line = 0,
-                });
-            }
-
-            warnings.Add("tanı aşaması tamamlanamadı: " + ex.Message);
         }
 
         diagnostics.Sort((a, b) =>
@@ -464,10 +480,10 @@ public static class WorkerAnalyzer
                 {
                     RelativePath = phaseEntry.RelativePath,
                     Code = "ADAPTER_INTERNAL",
-                    Message = "çözümleme aşaması derinlik sınırına takıldı (InsufficientExecutionStackException); aşama bu dosya için atlandı",
+                    Message = "resolution phase hit the depth limit (InsufficientExecutionStackException); phase skipped for this file",
                     Line = 0,
                 });
-                warnings.Add($"çözümleme derinlik sınırı: {phaseEntry.RelativePath} (aşama atlandı)");
+                warnings.Add($"resolution depth limit: {phaseEntry.RelativePath} (phase skipped)");
             }
             catch (Exception ex)
             {
@@ -478,7 +494,7 @@ public static class WorkerAnalyzer
                     Message = ex.Message,
                     Line = 0,
                 });
-                warnings.Add($"çözümleme aşaması hata verdi: {phaseEntry.RelativePath} ({ex.GetType().Name})");
+                warnings.Add($"resolution phase failed: {phaseEntry.RelativePath} ({ex.GetType().Name})");
             }
         }
 
@@ -488,11 +504,22 @@ public static class WorkerAnalyzer
         {
             RunPhaseIsolated(entry, () =>
             {
-                var model = compilation.GetSemanticModel(entry.Tree);
+                var model = ModelFor(entry);
                 var fileRecord = assembler.EnsureNode(
                     "File", entry.RelativePath, entry.RelativePath,
                     new Dictionary<string, object> { ["sourceHash"] = entry.SourceHash });
                 WalkCompilationUnit(entry, fileRecord.Node, model, assembler, registry, controllers);
+            });
+        }
+
+        // 4.5) Faz 1.5: Class Hierarchy Analysis (CHA — Dean et al. ECOOP 1995):
+        //      INHERITS / IMPLEMENTS kenarları (tüm tipler registry'ye girdikten sonra).
+        foreach (var entry in entries)
+        {
+            RunPhaseIsolated(entry, () =>
+            {
+                var model = ModelFor(entry);
+                ExtractTypeHierarchies(entry, entries, model, assembler, registry);
             });
         }
 
@@ -501,7 +528,7 @@ public static class WorkerAnalyzer
         {
             RunPhaseIsolated(entry, () =>
             {
-                var model = compilation.GetSemanticModel(entry.Tree);
+                var model = ModelFor(entry);
                 VisitCalls(entry, entries, model, assembler, registry, diagnostics);
             });
         }
@@ -511,7 +538,7 @@ public static class WorkerAnalyzer
         {
             RunPhaseIsolated(entry, () =>
             {
-                var model = compilation.GetSemanticModel(entry.Tree);
+                var model = ModelFor(entry);
                 ExtractControllerRoutes(entry, info, model, assembler, registry);
             });
         }
@@ -525,7 +552,7 @@ public static class WorkerAnalyzer
             {
                 RelativePath = string.Empty,
                 Code = "RESPONSE_TRUNCATED",
-                Message = $"yanıt node bütçesi aşıldı (maxNodes={nodeLimit.ToString(System.Globalization.CultureInfo.InvariantCulture)}); aşan node/kenarlar yayınlanmadı",
+                Message = $"response node budget exceeded (maxNodes={nodeLimit.ToString(System.Globalization.CultureInfo.InvariantCulture)}); excess nodes/edges were not emitted",
                 Line = 0,
             });
         }
@@ -563,31 +590,31 @@ public static class WorkerAnalyzer
     {
         if (request.Id.ValueKind is JsonValueKind.Undefined or JsonValueKind.Null)
         {
-            throw new ProtocolException(ProtocolErrorCodes.InvalidArgument, "'id' alanı zorunludur");
+            throw new ProtocolException(ProtocolErrorCodes.InvalidArgument, "'id' field is required");
         }
 
         if (string.IsNullOrWhiteSpace(request.Type))
         {
-            throw new ProtocolException(ProtocolErrorCodes.InvalidArgument, "'type' alanı zorunludur");
+            throw new ProtocolException(ProtocolErrorCodes.InvalidArgument, "'type' field is required");
         }
 
         if (request.ProtocolVersion is not null && request.ProtocolVersion != ProtocolConstants.ProtocolVersion)
         {
             throw new ProtocolException(
                 ProtocolErrorCodes.InvalidArgument,
-                $"Desteklenmeyen protokol sürümü: '{request.ProtocolVersion}' (desteklenen: '{ProtocolConstants.ProtocolVersion}')");
+                $"Unsupported protocol version: '{request.ProtocolVersion}' (supported: '{ProtocolConstants.ProtocolVersion}')");
         }
 
         if (request.ExtensionData is { Count: > 0 })
         {
             throw new ProtocolException(
                 ProtocolErrorCodes.InvalidArgument,
-                $"İstek bilinmeyen alan içeriyor: {string.Join(", ", request.ExtensionData.Keys)}");
+                $"Request contains unknown field(s): {string.Join(", ", request.ExtensionData.Keys)}");
         }
 
         if (request.Files is null || request.Files.Count == 0)
         {
-            throw new ProtocolException(ProtocolErrorCodes.InvalidArgument, "'files' alanı zorunludur (en az bir kaynak)");
+            throw new ProtocolException(ProtocolErrorCodes.InvalidArgument, "'files' field is required (at least one source)");
         }
 
         // Kaynak sınırları (TŞ §9 resource budget; K-010: yalnızca boyut
@@ -596,7 +623,7 @@ public static class WorkerAnalyzer
         {
             throw new ProtocolException(
                 ProtocolErrorCodes.LimitExceeded,
-                $"files sayısı sınırı aşıldı: {request.Files.Count} > {ProtocolConstants.MaxFileCount}");
+                $"file count limit exceeded: {request.Files.Count} > {ProtocolConstants.MaxFileCount}");
         }
 
         // Güvenlik bulgusu 4: maxNodes aralık denetimi — null → sert tavan;
@@ -606,7 +633,7 @@ public static class WorkerAnalyzer
         {
             throw new ProtocolException(
                 ProtocolErrorCodes.InvalidArgument,
-                $"maxNodes 1..{ProtocolConstants.MaxResponseNodes} aralığında olmalı; gelen: {request.MaxNodes?.ToString(System.Globalization.CultureInfo.InvariantCulture) ?? "null"}");
+                $"maxNodes must be in the range 1..{ProtocolConstants.MaxResponseNodes}; received: {request.MaxNodes?.ToString(System.Globalization.CultureInfo.InvariantCulture) ?? "null"}");
         }
 
         foreach (var file in request.Files)
@@ -615,14 +642,14 @@ public static class WorkerAnalyzer
             {
                 throw new ProtocolException(
                     ProtocolErrorCodes.InvalidArgument,
-                    "files[] girdisi 'path' ve 'content' alanlarını zorunlu kılar");
+                    "files[] entry requires the 'path' and 'content' fields");
             }
 
             if (file.ExtensionData is { Count: > 0 })
             {
                 throw new ProtocolException(
                     ProtocolErrorCodes.InvalidArgument,
-                    $"files[] girdisi bilinmeyen alan içeriyor: {string.Join(", ", file.ExtensionData.Keys)}");
+                    $"files[] entry contains unknown field(s): {string.Join(", ", file.ExtensionData.Keys)}");
             }
 
             var contentBytes = Encoding.UTF8.GetByteCount(file.Content);
@@ -630,7 +657,7 @@ public static class WorkerAnalyzer
             {
                 throw new ProtocolException(
                     ProtocolErrorCodes.LimitExceeded,
-                    $"dosya içerik boyutu sınırı aşıldı: {file.Path} ({contentBytes} bayt > {ProtocolConstants.MaxFileContentBytes})");
+                    $"file content size limit exceeded: {file.Path} ({contentBytes} bytes > {ProtocolConstants.MaxFileContentBytes})");
             }
         }
     }
@@ -642,7 +669,7 @@ public static class WorkerAnalyzer
         {
             throw new ProtocolException(
                 ProtocolErrorCodes.InvalidArgument,
-                $"Mutlak kaynak yolu kabul edilmez: {raw}");
+                $"Absolute source paths are not accepted: {raw}");
         }
 
         foreach (var segment in posix.Split('/'))
@@ -651,14 +678,14 @@ public static class WorkerAnalyzer
             {
                 throw new ProtocolException(
                     ProtocolErrorCodes.InvalidArgument,
-                    $"Kaynak yolu boş/geçersiz segment içeriyor: {raw}");
+                    $"Source path contains an empty/invalid segment: {raw}");
             }
 
             if (segment == "..")
             {
                 throw new ProtocolException(
                     ProtocolErrorCodes.InvalidArgument,
-                    $"Kaynak yolu kök dışına çıkıyor: {raw}");
+                    $"Source path escapes the workspace root: {raw}");
             }
         }
 
@@ -669,6 +696,115 @@ public static class WorkerAnalyzer
     {
         var hash = SHA256.HashData(Encoding.UTF8.GetBytes(content));
         return Convert.ToHexString(hash).ToLowerInvariant();
+    }
+
+    /* ------------------------------------------------------------------ */
+    /* Compilations: one per project (+ one for files outside projects)    */
+    /* ------------------------------------------------------------------ */
+
+    private static readonly CSharpParseOptions ParseOptions = new(languageVersion: LanguageVersion.Latest);
+
+    private sealed record CompilationSet(
+        string? ProjectPath,
+        CSharpCompilation Compilation,
+        IReadOnlyList<SourceEntry> Entries,
+        SyntaxTree? GlobalUsingsTree);
+
+    /**
+     * Builds the compilations of the request. Without a project model every file
+     * shares one compilation (historical behavior). With one, each project gets its
+     * own compilation: its sources, its generated global usings and its transitive
+     * ProjectReference closure as compilation references (dependencies first). All
+     * compilations share the same MetadataReference instances, so symbols of a
+     * referenced project are the referenced compilation's own source symbols.
+     */
+    private static List<CompilationSet> BuildCompilations(
+        IReadOnlyList<SourceEntry> entries,
+        IReadOnlyList<ProjectSpec> projects,
+        IReadOnlyList<MetadataReference> references,
+        List<string> warnings)
+    {
+        var projectByDirectory = projects.ToDictionary(p => p.Directory, StringComparer.Ordinal);
+        var entriesByProject = new Dictionary<string, List<SourceEntry>>(StringComparer.Ordinal);
+        var looseEntries = new List<SourceEntry>();
+        foreach (var entry in entries)
+        {
+            var owner = ProjectModel.OwningProject(entry.RelativePath, projectByDirectory);
+            if (owner is null)
+            {
+                looseEntries.Add(entry);
+                continue;
+            }
+
+            if (!entriesByProject.TryGetValue(owner, out var list))
+            {
+                list = new List<SourceEntry>();
+                entriesByProject.Add(owner, list);
+            }
+
+            list.Add(entry);
+        }
+
+        var projectsWithSources = projects.Where(p => entriesByProject.ContainsKey(p.Path)).ToList();
+        var requestedPaths = projects.Select(p => p.Path).ToHashSet(StringComparer.Ordinal);
+        var order = ProjectModel.CompilationOrder(projectsWithSources, requestedPaths, warnings, out var closure);
+
+        var sets = new List<CompilationSet>();
+        var built = new Dictionary<string, CSharpCompilation>(StringComparer.Ordinal);
+        foreach (var project in order)
+        {
+            var projectEntries = entriesByProject[project.Path];
+            var trees = projectEntries.Select(e => e.Tree).ToList();
+            SyntaxTree? globalUsingsTree = null;
+            if (project.GlobalUsings.Count > 0)
+            {
+                globalUsingsTree = CSharpSyntaxTree.ParseText(
+                    ProjectModel.GlobalUsingsSource(project.GlobalUsings),
+                    ParseOptions,
+                    path: ProjectModel.GlobalUsingsPath(project));
+                trees.Add(globalUsingsTree);
+            }
+
+            var projectReferences = references
+                .Concat(closure[project.Path].Select(path => (MetadataReference)built[path].ToMetadataReference()))
+                .ToList();
+            var compilation = CSharpCompilation.Create(
+                project.AssemblyName,
+                trees,
+                projectReferences,
+                CompilationOptionsFor(projectEntries));
+            built.Add(project.Path, compilation);
+            sets.Add(new CompilationSet(project.Path, compilation, projectEntries, globalUsingsTree));
+        }
+
+        if (looseEntries.Count > 0 || sets.Count == 0)
+        {
+            sets.Insert(0, new CompilationSet(
+                null,
+                CSharpCompilation.Create(
+                    ProjectModel.LooseAssemblyName,
+                    looseEntries.Select(e => e.Tree),
+                    references,
+                    CompilationOptionsFor(looseEntries)),
+                looseEntries,
+                null));
+        }
+
+        return sets;
+    }
+
+    /**
+     * Top-level statement içeren girdi yürütülebilir derlenmelidir (CS8805);
+     * aksi halde kütüphane çıktısı CS5001 uyarısı üretmez. Derived per
+     * compilation from its own sources → deterministic.
+     */
+    private static CSharpCompilationOptions CompilationOptionsFor(IReadOnlyList<SourceEntry> compilationEntries)
+    {
+        var hasTopLevelStatements = compilationEntries.Any(e =>
+            e.Tree.GetRoot() is CompilationUnitSyntax unit &&
+            unit.Members.OfType<GlobalStatementSyntax>().Any());
+        var outputKind = hasTopLevelStatements ? OutputKind.ConsoleApplication : OutputKind.DynamicallyLinkedLibrary;
+        return new CSharpCompilationOptions(outputKind, nullableContextOptions: NullableContextOptions.Enable);
     }
 
     /* ------------------------------------------------------------------ */
@@ -768,7 +904,7 @@ public static class WorkerAnalyzer
         }
 
         AddContains(assembler, entry, typeDecl, fileNode, record,
-            $"CONTAINS: {entry.RelativePath} dosyasındaki {qualifiedName} {kind.ToLowerInvariant()} bildirimi AST span kanıtıyla eşlendi.");
+            $"CONTAINS: the {kind.ToLowerInvariant()} declaration {qualifiedName} in {entry.RelativePath} was matched by AST span evidence.");
 
         if (typeDecl is ClassDeclarationSyntax classDecl)
         {
@@ -837,7 +973,7 @@ public static class WorkerAnalyzer
         }
 
         AddContains(assembler, entry, declaration, ownerRecord.Node, record,
-            $"CONTAINS: {ownerQualifiedName} bildirimi içindeki {memberName} üyesi AST span kanıtıyla eşlendi.");
+            $"CONTAINS: member {memberName} inside the {ownerQualifiedName} declaration was matched by AST span evidence.");
     }
 
     private static void RegisterTopLevelLocalFunction(
@@ -860,7 +996,7 @@ public static class WorkerAnalyzer
         }
 
         AddContains(assembler, entry, localFunction, fileNode, record,
-            $"CONTAINS: {entry.RelativePath} dosyasındaki {qualifiedName} yerel fonksiyon bildirimi AST span kanıtıyla eşlendi.");
+            $"CONTAINS: the local function declaration {qualifiedName} in {entry.RelativePath} was matched by AST span evidence.");
     }
 
     private static string TypeKindOf(TypeDeclarationSyntax typeDecl) => typeDecl switch
@@ -892,7 +1028,7 @@ public static class WorkerAnalyzer
         }
 
         AddContains(assembler, entry, enumDecl, fileNode, record,
-            $"CONTAINS: {entry.RelativePath} dosyasındaki {qualifiedName} enum bildirimi AST span kanıtıyla eşlendi.");
+            $"CONTAINS: the enum declaration {qualifiedName} in {entry.RelativePath} was matched by AST span evidence.");
     }
 
     private static void AddContains(
@@ -904,8 +1040,214 @@ public static class WorkerAnalyzer
         string rationale)
     {
         var from = assembler.EnsureNode(fromNode.Kind, fromNode.QualifiedName, fromNode.RelativePath, null);
-        assembler.AddEdge("CONTAINS", from, toRecord, "verified",
+        assembler.AddEdge("CONTAINS", from, WithDeclarationSpan(toRecord, entry, declaration), "verified",
             SpanEvidence(entry, declaration, "ast-span", rationale), null);
+    }
+
+    /* ------------------------------------------------------------------ */
+    /* Faz 1.5: Class Hierarchy Analysis (CHA — INHERITS / IMPLEMENTS)     */
+    /* ------------------------------------------------------------------ */
+
+    private static void ExtractTypeHierarchies(
+        SourceEntry entry,
+        IReadOnlyList<SourceEntry> entries,
+        SemanticModel model,
+        GraphAssembler assembler,
+        Dictionary<ISymbol, NodeRecord> registry)
+    {
+        if (entry.Tree.GetRoot() is not CompilationUnitSyntax unit)
+        {
+            return;
+        }
+
+        foreach (var member in unit.Members)
+        {
+            WalkMemberHierarchies(entry, entries, member, model, assembler, registry, depth: 0);
+        }
+    }
+
+    private static void WalkMemberHierarchies(
+        SourceEntry entry,
+        IReadOnlyList<SourceEntry> entries,
+        SyntaxNode member,
+        SemanticModel model,
+        GraphAssembler assembler,
+        Dictionary<ISymbol, NodeRecord> registry,
+        int depth)
+    {
+        if (depth > MaxTraversalDepth)
+        {
+            return;
+        }
+
+        switch (member)
+        {
+            case NamespaceDeclarationSyntax ns:
+                foreach (var child in ns.Members)
+                {
+                    WalkMemberHierarchies(entry, entries, child, model, assembler, registry, depth + 1);
+                }
+
+                break;
+
+            case FileScopedNamespaceDeclarationSyntax fsns:
+                foreach (var child in fsns.Members)
+                {
+                    WalkMemberHierarchies(entry, entries, child, model, assembler, registry, depth + 1);
+                }
+
+                break;
+
+            case TypeDeclarationSyntax typeDecl:
+                EmitTypeHierarchyEdges(entry, entries, typeDecl, model, assembler, registry);
+                foreach (var child in typeDecl.Members)
+                {
+                    if (child is TypeDeclarationSyntax)
+                    {
+                        WalkMemberHierarchies(entry, entries, child, model, assembler, registry, depth + 1);
+                    }
+                }
+
+                break;
+        }
+    }
+
+    private static void EmitTypeHierarchyEdges(
+        SourceEntry entry,
+        IReadOnlyList<SourceEntry> entries,
+        TypeDeclarationSyntax typeDecl,
+        SemanticModel model,
+        GraphAssembler assembler,
+        Dictionary<ISymbol, NodeRecord> registry)
+    {
+        if (typeDecl.BaseList is null || typeDecl.BaseList.Types.Count == 0)
+        {
+            return;
+        }
+
+        var declaredSymbol = model.GetDeclaredSymbol(typeDecl) as INamedTypeSymbol;
+        var ownerRecord = declaredSymbol is null ? null : RegistryLookupPlain(registry, declaredSymbol);
+        if (ownerRecord is null)
+        {
+            return;
+        }
+
+        var isInterfaceDecl = typeDecl is InterfaceDeclarationSyntax || declaredSymbol?.TypeKind == TypeKind.Interface;
+        var isStructDecl = typeDecl is StructDeclarationSyntax ||
+            (typeDecl is RecordDeclarationSyntax rec && rec.ClassOrStructKeyword.IsKind(SyntaxKind.StructKeyword));
+
+        for (var i = 0; i < typeDecl.BaseList.Types.Count; i += 1)
+        {
+            var baseTypeSyntax = typeDecl.BaseList.Types[i];
+            var typeInfo = model.GetTypeInfo(baseTypeSyntax.Type);
+            var baseSymbol = (typeInfo.Type ?? typeInfo.ConvertedType) as INamedTypeSymbol;
+            var isResolved = baseSymbol is not null && baseSymbol.TypeKind != TypeKind.Error;
+
+            if (isResolved)
+            {
+                // Skip trivial runtime base types so graphs aren't polluted by every class/struct/enum.
+                if (baseSymbol!.SpecialType is SpecialType.System_Object or SpecialType.System_ValueType or SpecialType.System_Enum)
+                {
+                    continue;
+                }
+
+                var edgeKind = isInterfaceDecl
+                    ? "INHERITS"
+                    : baseSymbol.TypeKind == TypeKind.Interface
+                        ? "IMPLEMENTS"
+                        : "INHERITS";
+
+                var originalTarget = baseSymbol.OriginalDefinition;
+                var targetRecord = RegistryLookupPlain(registry, baseSymbol);
+                if (targetRecord is null && originalTarget.DeclaringSyntaxReferences.Length > 0)
+                {
+                    var declRelPath = RelativePathOfDeclaration(entries, originalTarget);
+                    if (declRelPath is not null)
+                    {
+                        targetRecord = assembler.EnsureNode(
+                            CatalogKindOf(originalTarget),
+                            TypeQualifiedName(originalTarget),
+                            declRelPath,
+                            null);
+                        registry[originalTarget] = targetRecord;
+                    }
+                }
+
+                if (targetRecord is not null)
+                {
+                    if (targetRecord.Key == ownerRecord.Key)
+                    {
+                        continue;
+                    }
+
+                    assembler.AddEdge(edgeKind, ownerRecord, targetRecord, "verified",
+                        SpanEvidence(entry, baseTypeSyntax, "semantic-symbol",
+                            $"{edgeKind}: the {ownerRecord.Node.QualifiedName} declaration was resolved to type {targetRecord.Node.QualifiedName} by the Roslyn semantic model (verified)."),
+                        null);
+                    continue;
+                }
+
+                var externalName = TypeQualifiedName(originalTarget);
+                if (string.IsNullOrEmpty(externalName))
+                {
+                    continue;
+                }
+
+                var externalRecord = assembler.EnsureExternal(externalName);
+                assembler.AddEdge(edgeKind, ownerRecord, externalRecord, "verified",
+                    SpanEvidence(entry, baseTypeSyntax, "semantic-symbol",
+                        $"{edgeKind}: the {ownerRecord.Node.QualifiedName} declaration was resolved to type {externalName} outside the analysis set; the external source is represented as an explicit UnknownExternal node."),
+                    null);
+                continue;
+            }
+
+            var rawName = baseTypeSyntax.Type.ToString().Trim();
+            if (rawName.Length == 0)
+            {
+                continue;
+            }
+
+            var unresolvedKind = isInterfaceDecl
+                ? "INHERITS"
+                : isStructDecl || i > 0
+                    ? "IMPLEMENTS"
+                    : LooksLikeCSharpInterfaceName(rawName) && baseTypeSyntax is not PrimaryConstructorBaseTypeSyntax
+                        ? "IMPLEMENTS"
+                        : "INHERITS";
+
+            var unresolvedTarget = assembler.EnsureExternal(rawName);
+            assembler.AddEdge(unresolvedKind, ownerRecord, unresolvedTarget, "unresolved",
+                SpanEvidence(entry, baseTypeSyntax, "ast-span",
+                    $"{unresolvedKind}: inheritance target '{rawName}' in {ownerRecord.Node.QualifiedName} could not be resolved; marked unresolved on an explicit UnknownExternal node."),
+                null);
+            assembler.AddWarning(
+                $"{unresolvedKind} unresolved: {entry.RelativePath} '{ownerRecord.Node.QualifiedName}' -> '{rawName}' (unresolved, UnknownExternal node emitted)");
+        }
+    }
+
+    private static bool LooksLikeCSharpInterfaceName(string typeText)
+    {
+        var genericIdx = typeText.IndexOf('<');
+        var withoutGeneric = genericIdx >= 0 ? typeText.Substring(0, genericIdx) : typeText;
+        var dotIdx = withoutGeneric.LastIndexOf('.');
+        var simpleName = dotIdx >= 0 ? withoutGeneric.Substring(dotIdx + 1) : withoutGeneric;
+        return simpleName.Length >= 2 && simpleName[0] == 'I' && char.IsUpper(simpleName[1]);
+    }
+
+    private static string? RelativePathOfDeclaration(IReadOnlyList<SourceEntry> entries, ISymbol symbol)
+    {
+        foreach (var reference in symbol.DeclaringSyntaxReferences)
+        {
+            foreach (var entry in entries)
+            {
+                if (entry.Tree.Equals(reference.SyntaxTree))
+                {
+                    return entry.RelativePath;
+                }
+            }
+        }
+
+        return null;
     }
 
     /* ------------------------------------------------------------------ */
@@ -976,11 +1318,11 @@ public static class WorkerAnalyzer
         {
             RelativePath = context.Entry.RelativePath,
             Code = "ADAPTER_INTERNAL",
-            Message = $"AST gezinme derinliği {MaxTraversalDepth} sınırını aştı; derin alt ağaçlar atlandı",
+            Message = $"AST traversal depth exceeded the {MaxTraversalDepth} limit; deep subtrees were skipped",
             Line = lineSpan.IsValid ? lineSpan.StartLinePosition.Line + 1 : 0,
         });
         context.Assembler.AddWarning(
-            $"AST derinlik sınırı aşıldı: {context.Entry.RelativePath} (derin alt ağaçlar atlandı)");
+            $"AST depth limit exceeded: {context.Entry.RelativePath} (deep subtrees skipped)");
     }
 
     private static NodeRecord? CallerFor(CallContext context, SyntaxNode node)
@@ -1033,7 +1375,7 @@ public static class WorkerAnalyzer
             EmitUnresolvedCall(context, caller, invocation, expressionText, new AmbiguityOut
             {
                 Candidates = info.CandidateSymbols.Select(s => s.ToDisplayString()).ToList(),
-                Reason = "Aşırı yükleme belirsizliği; semantik model tek aday seçemedi.",
+                Reason = "Overload ambiguity; the semantic model could not select a single candidate.",
             });
             return;
         }
@@ -1049,7 +1391,7 @@ public static class WorkerAnalyzer
         {
             context.Assembler.AddEdge("CALLS", caller, target, "verified",
                 SpanEvidence(context.Entry, invocation, "semantic-symbol",
-                    $"CALLS: {caller.Node.QualifiedName} içindeki çağrı ifadesi Roslyn semantic model ile {target.Node.QualifiedName} sembolüne çözümlendi (verified)."),
+                    $"CALLS: the call expression in {caller.Node.QualifiedName} was resolved to symbol {target.Node.QualifiedName} by the Roslyn semantic model (verified)."),
                 null);
             return;
         }
@@ -1061,7 +1403,7 @@ public static class WorkerAnalyzer
         var external = context.Assembler.EnsureExternal(externalName);
         context.Assembler.AddEdge("CALLS", caller, external, "verified",
             SpanEvidence(context.Entry, invocation, "semantic-symbol",
-                $"CALLS: {caller.Node.QualifiedName} içindeki çağrı analiz seti dışındaki {externalName} sembolüne çözümlendi; dış kaynak açık UnknownExternal node olarak temsil edildi."),
+                $"CALLS: the call in {caller.Node.QualifiedName} was resolved to symbol {externalName} outside the analysis set; the external source is represented as an explicit UnknownExternal node."),
             null);
     }
 
@@ -1080,7 +1422,7 @@ public static class WorkerAnalyzer
             EmitUnresolvedCall(context, caller, creation, expressionText, new AmbiguityOut
             {
                 Candidates = info.CandidateSymbols.Select(s => s.ToDisplayString()).ToList(),
-                Reason = "Kurucu aşırı yükleme belirsizliği; semantik model tek aday seçemedi.",
+                Reason = "Constructor overload ambiguity; the semantic model could not select a single candidate.",
             });
             return;
         }
@@ -1099,7 +1441,7 @@ public static class WorkerAnalyzer
         {
             context.Assembler.AddEdge("CALLS", caller, target, "verified",
                 SpanEvidence(context.Entry, creation, "semantic-symbol",
-                    $"CALLS: {caller.Node.QualifiedName} içindeki nesne oluşturma {target.Node.QualifiedName} sınıfına çözümlendi (semantic-symbol, verified)."),
+                    $"CALLS: the object creation in {caller.Node.QualifiedName} was resolved to class {target.Node.QualifiedName} (semantic-symbol, verified)."),
                 null);
             return;
         }
@@ -1108,7 +1450,7 @@ public static class WorkerAnalyzer
         var external = context.Assembler.EnsureExternal(externalName);
         context.Assembler.AddEdge("CALLS", caller, external, "verified",
             SpanEvidence(context.Entry, creation, "semantic-symbol",
-                $"CALLS: {caller.Node.QualifiedName} içindeki nesne oluşturma analiz seti dışındaki {externalName} sınıfına çözümlendi; dış kaynak açık UnknownExternal node olarak temsil edildi."),
+                $"CALLS: the object creation in {caller.Node.QualifiedName} was resolved to class {externalName} outside the analysis set; the external source is represented as an explicit UnknownExternal node."),
             null);
     }
 
@@ -1122,10 +1464,10 @@ public static class WorkerAnalyzer
         var target = context.Assembler.EnsureExternal(callText);
         context.Assembler.AddEdge("CALLS", caller, target, "unresolved",
             SpanEvidence(context.Entry, callSite, "ast-span",
-                $"CALLS: {caller.Node.QualifiedName} içindeki '{callText}' çağrısı çözümlenemedi; uydurma hedef yerine açık UnknownExternal node üzerinde unresolved işaretlendi."),
+                $"CALLS: the call '{callText}' in {caller.Node.QualifiedName} could not be resolved; marked unresolved on an explicit UnknownExternal node instead of a fabricated target."),
             ambiguity);
         context.Assembler.AddWarning(
-            $"CALLS çözümlenemedi: {context.Entry.RelativePath} '{callText}' (unresolved, UnknownExternal node üretildi)");
+            $"CALLS unresolved: {context.Entry.RelativePath} '{callText}' (unresolved, UnknownExternal node emitted)");
     }
 
     private static NodeRecord? ResolveTargetRecord(CallContext context, ISymbol symbol)
@@ -1181,7 +1523,7 @@ public static class WorkerAnalyzer
         }
 
         var relativePath = RelativePathOfDeclaration(context, symbol);
-        return context.Assembler.EnsureNode(kind, qualifiedName, relativePath, null);
+        return WithSymbolDeclarationSpan(context.Assembler.EnsureNode(kind, qualifiedName, relativePath, null), context.Entries, symbol, relativePath);
     }
 
     private static string? RelativePathOfDeclaration(CallContext context, ISymbol symbol)
@@ -1223,17 +1565,26 @@ public static class WorkerAnalyzer
         return ns is { IsGlobalNamespace: false } ? $"{ns.ToDisplayString()}.{owner}" : owner;
     }
 
+    /**
+     * `Namespace.Type.Member` of a symbol outside the analysis set. TypeQualifiedName
+     * already carries the namespace, so it is not prefixed a second time (that
+     * produced names such as `System.System.Console.WriteLine`).
+     */
     private static string ExternalQualifiedName(ISymbol symbol)
     {
-        var ns = symbol.ContainingNamespace;
-        var nsPrefix = ns is { IsGlobalNamespace: false } ? $"{ns.ToDisplayString()}." : string.Empty;
-        return symbol switch
+        switch (symbol)
         {
-            IMethodSymbol method => $"{nsPrefix}{TypeQualifiedName(method.ContainingType)}.{method.OriginalDefinition.Name}",
-            IPropertySymbol property => $"{nsPrefix}{TypeQualifiedName(property.ContainingType)}.{property.OriginalDefinition.Name}",
-            INamedTypeSymbol type => $"{nsPrefix}{TypeQualifiedName(type)}",
-            _ => $"{nsPrefix}{symbol.Name}",
-        };
+            case IMethodSymbol method:
+                return $"{TypeQualifiedName(method.ContainingType)}.{method.OriginalDefinition.Name}";
+            case IPropertySymbol property:
+                return $"{TypeQualifiedName(property.ContainingType)}.{property.OriginalDefinition.Name}";
+            case INamedTypeSymbol type:
+                return TypeQualifiedName(type);
+            default:
+                var ns = symbol.ContainingNamespace;
+                var nsPrefix = ns is { IsGlobalNamespace: false } ? $"{ns.ToDisplayString()}." : string.Empty;
+                return $"{nsPrefix}{symbol.Name}";
+        }
     }
 
     /* ------------------------------------------------------------------ */
@@ -1278,7 +1629,7 @@ public static class WorkerAnalyzer
         if (!pathValue.HasValue || pathValue.Value is not string path)
         {
             assembler.AddWarning(
-                $"Minimal API rotası modellenmedi: {context.Entry.RelativePath} '{name}(...)' — rota kalıbı sabit string değil");
+                $"Minimal API route not modeled: {context.Entry.RelativePath} '{name}(...)' — the route pattern is not a constant string");
             return;
         }
 
@@ -1289,7 +1640,7 @@ public static class WorkerAnalyzer
             if (verbs.Count == 0)
             {
                 assembler.AddWarning(
-                    $"Minimal API rotası modellenmedi: {context.Entry.RelativePath} 'MapMethods(...)' — HTTP fiilleri sabit string dizisi değil");
+                    $"Minimal API route not modeled: {context.Entry.RelativePath} 'MapMethods(...)' — the HTTP verbs are not a constant string array");
                 return;
             }
         }
@@ -1313,20 +1664,20 @@ public static class WorkerAnalyzer
             }
 
             var basisText = semanticBasis
-                ? "EndpointRouteBuilderExtensions uzantı metodu semantic model ile doğrulandı"
-                : "bilinen ad kuralı (semantic model uzantı metodunu çözümlemedi)";
+                ? "EndpointRouteBuilderExtensions extension method verified by the semantic model"
+                : "known-name rule (the semantic model did not resolve the extension method)";
             var resolution = semanticBasis ? "verified" : "heuristic";
             AmbiguityOut? ambiguity = semanticBasis
                 ? null
                 : new AmbiguityOut
                 {
                     Candidates = new List<string> { name },
-                    Reason = "Minimal API kayıt metodu ad kuralı ile tanındı; Microsoft.AspNetCore.Builder semantiği çözümlenemedi.",
+                    Reason = "Minimal API registration method recognized by the name rule; Microsoft.AspNetCore.Builder semantics could not be resolved.",
                 };
 
             assembler.AddEdge("ROUTES_TO", endpoint, handlerRecord, resolution,
                 SpanEvidence(context.Entry, invocation, "route-attribute",
-                    $"ROUTES_TO: '{verb} {path}' minimal API kaydı ({basisText}) {handlerRecord.Node.QualifiedName} handler'ına çözümlendi."),
+                    $"ROUTES_TO: minimal API registration '{verb} {path}' ({basisText}) was resolved to handler {handlerRecord.Node.QualifiedName}."),
                 ambiguity);
         }
     }
@@ -1369,7 +1720,7 @@ public static class WorkerAnalyzer
             if (expression is AnonymousFunctionExpressionSyntax)
             {
                 context.Assembler.AddWarning(
-                    $"Route handler modellenmedi: {context.Entry.RelativePath} minimal API kaydı — inline/anonymous handler unsupportedConstructs kapsamında");
+                    $"Route handler not modeled: {context.Entry.RelativePath} minimal API registration — inline/anonymous handlers are listed under unsupportedConstructs");
                 return null;
             }
 
@@ -1395,7 +1746,7 @@ public static class WorkerAnalyzer
                 }
 
                 context.Assembler.AddWarning(
-                    $"ROUTES_TO çözümlenemedi: {context.Entry.RelativePath} minimal API handler sembolü bulunamadı ('{expression}')");
+                    $"ROUTES_TO unresolved: {context.Entry.RelativePath} minimal API handler symbol not found ('{expression}')");
                 return null;
             }
 
@@ -1437,7 +1788,7 @@ public static class WorkerAnalyzer
         if (classRoute is null || classRoute.Template is null)
         {
             assembler.AddWarning(
-                $"Controller rotası modellenmedi: {controller.QualifiedName} — [Route] özniteliği yok; convention routing kalıbı statik olarak belirlenemez (unsupportedConstructs: convention-routing-templates)");
+                $"Controller route not modeled: {controller.QualifiedName} — no [Route] attribute; a convention routing template cannot be determined statically (unsupportedConstructs: convention-routing-templates)");
             return;
         }
 
@@ -1468,7 +1819,7 @@ public static class WorkerAnalyzer
                 if (actionRecord is null)
                 {
                     assembler.AddWarning(
-                        $"ROUTES_TO çözümlenemedi: {controller.QualifiedName}.{method.Identifier.ValueText} action kaydı registry'de yok");
+                        $"ROUTES_TO unresolved: {controller.QualifiedName}.{method.Identifier.ValueText} action is not in the symbol registry");
                     continue;
                 }
 
@@ -1496,17 +1847,17 @@ public static class WorkerAnalyzer
                     ambiguity = new AmbiguityOut
                     {
                         Candidates = unresolvedNames,
-                        Reason = "ASP.NET Core öznitelik tipleri semantic model ile Microsoft.AspNetCore.Mvc köküne çözümlenemedi; bilinen ad kuralı uygulandı (TŞ §8 heuristic).",
+                        Reason = "ASP.NET Core attribute types could not be resolved to the Microsoft.AspNetCore.Mvc namespace by the semantic model; the known-name rule was applied (heuristic).",
                     };
                 }
 
                 var basisText = allSemantic
-                    ? "öznitelik tipleri semantic model ile Microsoft.AspNetCore.Mvc köküne çözümlendi"
-                    : "bilinen ad kuralı (semantic model öznitelik tipini çözümlemedi)";
+                    ? "attribute types resolved to the Microsoft.AspNetCore.Mvc namespace by the semantic model"
+                    : "known-name rule (the semantic model did not resolve the attribute type)";
 
                 assembler.AddEdge("ROUTES_TO", endpoint, actionRecord, resolution,
                     SpanEvidence(entry, verbAttribute.Node, "route-attribute",
-                        $"ROUTES_TO: '{verbAttribute.Verb} {template}' controller route kaydı ({basisText}) {actionRecord.Node.QualifiedName} action'ına çözümlendi."),
+                        $"ROUTES_TO: controller route registration '{verbAttribute.Verb} {template}' ({basisText}) was resolved to action {actionRecord.Node.QualifiedName}."),
                     ambiguity);
             }
         }
@@ -1665,5 +2016,70 @@ public static class WorkerAnalyzer
             AnalyzerVersion = ProtocolConstants.AnalyzerVersion,
             Rationale = rationale,
         };
+    }
+
+    /* ------------------------------------------------------------------ */
+    /* Node spans (kept at the end of the file so cited line numbers above */
+    /* stay fixed)                                                         */
+    /* ------------------------------------------------------------------ */
+
+    /**
+     * Records the declaration line range on a symbol node (PROTOCOL.md "Node
+     * fields": optional `span`) and returns the record. It is the Roslyn
+     * `GetLineSpan` of the declaration syntax — the same range as the node's
+     * CONTAINS `ast-span` evidence (attribute lists included, leading trivia such
+     * as XML doc comments excluded). A node declared more than once in one file
+     * (method overloads, two `partial` declarations of a type) gets the smallest
+     * range that covers every declaration, so the result does not depend on
+     * visit order. Only declaration nodes reach this path (AddContains), so File,
+     * Endpoint and UnknownExternal nodes never carry a span.
+     */
+    private static NodeRecord WithDeclarationSpan(NodeRecord record, SourceEntry entry, SyntaxNode declaration)
+    {
+        var lineSpan = entry.Tree.GetLineSpan(declaration.Span);
+        var startLine = lineSpan.StartLinePosition.Line + 1;
+        var endLine = lineSpan.EndLinePosition.Line + 1;
+        var current = record.Node.Span;
+        record.Node.Span = current is null
+            ? new NodeSpanOut { StartLine = startLine, EndLine = endLine }
+            : new NodeSpanOut
+            {
+                StartLine = Math.Min(current.StartLine, startLine),
+                EndLine = Math.Max(current.EndLine, endLine),
+            };
+        return record;
+    }
+
+    /**
+     * Span of a node derived from a resolved call target (DeriveRecord): a symbol
+     * of the analysis set that the declaration walk does not register, such as a
+     * local function inside a method. The span is taken from the symbol's own
+     * declaring syntax in the node's file (every declaring reference in that
+     * file, widened), never from the call site. Symbols outside the analysis set
+     * (relativePath null → UnknownExternal) get none.
+     */
+    private static NodeRecord WithSymbolDeclarationSpan(
+        NodeRecord record,
+        IReadOnlyList<SourceEntry> entries,
+        ISymbol symbol,
+        string? relativePath)
+    {
+        if (relativePath is null || record.Node.RelativePath != relativePath)
+        {
+            return record;
+        }
+
+        foreach (var reference in symbol.DeclaringSyntaxReferences)
+        {
+            foreach (var entry in entries)
+            {
+                if (entry.RelativePath == relativePath && entry.Tree.Equals(reference.SyntaxTree))
+                {
+                    WithDeclarationSpan(record, entry, reference.GetSyntax());
+                }
+            }
+        }
+
+        return record;
     }
 }

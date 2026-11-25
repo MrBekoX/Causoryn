@@ -1,4 +1,5 @@
 import {
+  accessSync,
   chmodSync,
   closeSync,
   constants as fsConstants,
@@ -12,6 +13,7 @@ import {
   realpathSync,
   statSync,
 } from "node:fs";
+import { AsyncLocalStorage } from "node:async_hooks";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -19,9 +21,20 @@ import { fileURLToPath } from "node:url";
 import { sha256Hex, utf8Encode } from "@causoryn/domain";
 import type { GraphRepository, SymbolSearchStore } from "@causoryn/graph";
 import type { IndexJobManager, IndexService } from "@causoryn/indexing";
-import type { SqliteWikiStore } from "@causoryn/storage-sqlite";
+import {
+  migrateLegacyWorkspaceDatabase,
+  readSqliteUserVersion,
+  SCHEMA_VERSION as STORAGE_SCHEMA_VERSION,
+  type SqliteWikiStore,
+} from "@causoryn/storage-sqlite";
 import type { WikiSearchStore } from "@causoryn/wiki";
-import type { OutputAccessPolicy, WorkspaceAccessPolicy } from "@causoryn/workspace";
+import {
+  inspectLinkTargets,
+  isUncOrDevicePath,
+  LINK_TARGET_INSPECTION_ENABLED,
+  type OutputAccessPolicy,
+  type WorkspaceAccessPolicy,
+} from "@causoryn/workspace";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { RootsListChangedNotificationSchema } from "@modelcontextprotocol/sdk/types.js";
 
@@ -32,11 +45,15 @@ import {
 } from "./config.js";
 import {
   createCausorynContext,
+  type ActiveIndexJobInfo,
   type CausorynContext,
   type ContextOverrides,
+  type WaitForInitialIndexOptions,
 } from "./context.js";
 import type { PreflightManifestStore } from "./preflight-store.js";
-import type { OutputSchemaProfile } from "./server.js";
+import type { BeforeToolCallContext, OutputSchemaProfile } from "./server.js";
+import { tryParseToolProfile } from "./tool-profile.js";
+import type { ToolProfile } from "./version.js";
 import { discoverWorkspaceIgnoreConfig } from "./workspace-ignore-discovery.js";
 
 /**
@@ -50,8 +67,9 @@ import { discoverWorkspaceIgnoreConfig } from "./workspace-ignore-discovery.js";
  * - `$HOME`, dosya sistemi kökü (`/`, `C:\`), `~/.causoryn`, `ZCODE_PLUGIN_DATA`,
  *   `--data-dir`, Causoryn eklenti/bundle kurulum dizinleri, hassas kullanıcı
  *   dizinleri (`~/.ssh`, `~/.aws`, `~/.gnupg`, `~/.kube`, `~/.claude`,
- *   `~/.codex`, `~/.zcode`) ve OS sistem dizinleri ASLA proje kökü olarak
- *   yetkilendirilmez.
+ *   `~/.codex`, `~/.zcode`, `~/.config`, `~/.docker`, `~/.azure`, `~/.gcloud`,
+ *   `~/.npm`, `~/.cargo`, `~/Library`, `%APPDATA%`, `%LOCALAPPDATA%`) ve OS
+ *   sistem dizinleri ASLA proje kökü olarak yetkilendirilmez.
  * - Analiz edilen kaynak ağaca tek bayt bile yazılmaz; `--auto-data-dir`
  *   dizinleri oluşturulmadan ÖNCE yetkili köklerin dışında kaldığı doğrulanır.
  */
@@ -71,6 +89,7 @@ export interface ParsedMcpCliArgs {
   readonly dataDir?: string;
   readonly client?: string;
   readonly outputSchemaProfile?: OutputSchemaProfile;
+  readonly toolProfile?: string;
 }
 
 const KNOWN_FLAGS = new Set([
@@ -79,8 +98,27 @@ const KNOWN_FLAGS = new Set([
   "--auto-data-dir",
   "--data-dir",
   "--client",
+  "--output-schema",
   "--output-schema-profile",
+  "--tool-profile",
 ]);
+
+/**
+ * Parses a single or comma-separated tool profile string (e.g., "core", "full",
+ * "wiki", "history", "wiki,history"). Throws McpCliUsageError on invalid
+ * entries; `source` names the setting in the message (`--tool-profile`,
+ * `CAUSORYN_TOOL_PROFILE` or `CAUSORYN_CONFIG.toolProfile`).
+ */
+export function parseToolProfile(
+  raw: string,
+  source = "--tool-profile",
+): readonly ToolProfile[] {
+  const parsed = tryParseToolProfile(raw);
+  if (!parsed.ok) {
+    throw new McpCliUsageError(`${source}: ${parsed.message}`);
+  }
+  return parsed.profiles;
+}
 
 const SAFE_CLIENT_ID_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$/;
 
@@ -91,7 +129,7 @@ const SAFE_CLIENT_ID_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$/;
 export function parseMcpCliArgs(argv: readonly string[]): ParsedMcpCliArgs {
   for (const token of argv) {
     if (token.includes("\0")) {
-      throw new McpCliUsageError("CLI argümanları null byte içeremez");
+      throw new McpCliUsageError("CLI arguments must not contain a NUL byte");
     }
   }
 
@@ -114,18 +152,19 @@ export function parseMcpCliArgs(argv: readonly string[]): ParsedMcpCliArgs {
   let dataDir: string | undefined;
   let client: string | undefined;
   let outputSchemaProfile: OutputSchemaProfile | undefined;
+  let toolProfile: string | undefined;
   const roots: string[] = [];
 
   const readRequiredValue = (flag: string, inlineValue: string | undefined): string => {
     if (inlineValue !== undefined) {
       if (inlineValue.trim().length === 0) {
-        throw new McpCliUsageError(`${flag} bayrağı boş değer alamaz`);
+        throw new McpCliUsageError(`${flag} must not have an empty value`);
       }
       return inlineValue;
     }
     const next = argv[index + 1];
     if (next === undefined || next.trim().length === 0 || KNOWN_FLAGS.has(next)) {
-      throw new McpCliUsageError(`${flag} bayrağı bir değer gerektirir`);
+      throw new McpCliUsageError(`${flag} requires a value`);
     }
     index += 1;
     return next;
@@ -134,7 +173,7 @@ export function parseMcpCliArgs(argv: readonly string[]): ParsedMcpCliArgs {
   for (; index < argv.length; index += 1) {
     const rawToken = argv[index] as string;
     if (!rawToken.startsWith("--")) {
-      throw new McpCliUsageError(`Beklenmeyen konumsal argüman veya bayrak: ${rawToken}`);
+      throw new McpCliUsageError(`Unexpected positional argument or flag: ${rawToken}`);
     }
 
     const eqPos = rawToken.indexOf("=");
@@ -144,14 +183,14 @@ export function parseMcpCliArgs(argv: readonly string[]): ParsedMcpCliArgs {
     switch (flag) {
       case "--allow-cwd": {
         if (inlineValue !== undefined) {
-          throw new McpCliUsageError("--allow-cwd bayrağı değer almaz");
+          throw new McpCliUsageError("--allow-cwd does not take a value");
         }
         allowCwd = true;
         break;
       }
       case "--auto-data-dir": {
         if (inlineValue !== undefined) {
-          throw new McpCliUsageError("--auto-data-dir bayrağı değer almaz");
+          throw new McpCliUsageError("--auto-data-dir does not take a value");
         }
         autoDataDir = true;
         break;
@@ -171,24 +210,31 @@ export function parseMcpCliArgs(argv: readonly string[]): ParsedMcpCliArgs {
         const clientValue = readRequiredValue("--client", inlineValue);
         if (!SAFE_CLIENT_ID_PATTERN.test(clientValue)) {
           throw new McpCliUsageError(
-            `Geçersiz --client kimliği (yalnızca alfasayısal, '.', '_', '-' karakterleri): ${clientValue}`,
+            `Invalid --client id (only alphanumerics, '.', '_' and '-' are allowed): ${clientValue}`,
           );
         }
         client = clientValue;
         break;
       }
+      case "--output-schema":
       case "--output-schema-profile": {
-        const profileValue = readRequiredValue("--output-schema-profile", inlineValue);
+        const profileValue = readRequiredValue(flag, inlineValue);
         if (profileValue !== "full" && profileValue !== "omit") {
           throw new McpCliUsageError(
-            `--output-schema-profile yalnızca 'full' veya 'omit' olabilir: ${profileValue}`,
+            `${flag} must be 'full' or 'omit': ${profileValue}`,
           );
         }
         outputSchemaProfile = profileValue;
         break;
       }
+      case "--tool-profile": {
+        const rawProfile = readRequiredValue("--tool-profile", inlineValue);
+        const normalized = parseToolProfile(rawProfile);
+        toolProfile = normalized.join(",");
+        break;
+      }
       default:
-        throw new McpCliUsageError(`Bilinmeyen CLI bayrağı: ${flag}`);
+        throw new McpCliUsageError(`Unknown CLI flag: ${flag}`);
     }
   }
 
@@ -200,12 +246,13 @@ export function parseMcpCliArgs(argv: readonly string[]): ParsedMcpCliArgs {
     ...(dataDir !== undefined ? { dataDir } : {}),
     ...(client !== undefined ? { client } : {}),
     ...(outputSchemaProfile !== undefined ? { outputSchemaProfile } : {}),
+    ...(toolProfile !== undefined ? { toolProfile } : {}),
   };
 }
 
 /**
- * Etkin `outputSchemaProfile` kararını çözer:
- * `--output-schema-profile` > `CAUSORYN_MCP_OUTPUT_SCHEMA_PROFILE` > (`hasCliActivation ? "omit" : "full"`).
+ * Resolves the effective outputSchemaProfile:
+ * `--output-schema` / `--output-schema-profile` > `CAUSORYN_MCP_OUTPUT_SCHEMA_PROFILE` > `"omit"`.
  */
 export function resolveEffectiveOutputSchemaProfile(
   cliArgs: ParsedMcpCliArgs,
@@ -220,10 +267,99 @@ export function resolveEffectiveOutputSchemaProfile(
       return envRaw;
     }
     throw new McpCliUsageError(
-      `CAUSORYN_MCP_OUTPUT_SCHEMA_PROFILE yalnızca 'full' veya 'omit' olabilir: ${envRaw}`,
+      `CAUSORYN_MCP_OUTPUT_SCHEMA_PROFILE must be 'full' or 'omit': ${envRaw}`,
     );
   }
-  return cliArgs.hasCliActivation ? "omit" : "full";
+  return "omit";
+}
+
+/**
+ * Resolves the effective tool profile string:
+ * `--tool-profile` > `CAUSORYN_TOOL_PROFILE` > `CAUSORYN_CONFIG.toolProfile`
+ * (`configToolProfile`) > `"core"`. Every supplied value is validated, even
+ * when a higher-precedence source wins, so a typo never hides until the
+ * higher-precedence setting is removed.
+ */
+export function resolveEffectiveToolProfile(
+  cliArgs: ParsedMcpCliArgs,
+  env: NodeJS.ProcessEnv = process.env,
+  configToolProfile?: string,
+): string {
+  const fromConfig =
+    configToolProfile === undefined
+      ? undefined
+      : parseToolProfile(configToolProfile, "CAUSORYN_CONFIG.toolProfile").join(",");
+  const envRaw = env["CAUSORYN_TOOL_PROFILE"]?.trim();
+  const fromEnv =
+    envRaw !== undefined && envRaw.length > 0
+      ? parseToolProfile(envRaw, "CAUSORYN_TOOL_PROFILE").join(",")
+      : undefined;
+  if (cliArgs.toolProfile !== undefined) {
+    return parseToolProfile(cliArgs.toolProfile).join(",");
+  }
+  return fromEnv ?? fromConfig ?? "core";
+}
+
+/** Startup settings shared by the bare `stdio.ts` entry and the `causoryn mcp` entry. */
+export interface McpServerSettings {
+  readonly outputSchemaProfile: OutputSchemaProfile;
+  readonly toolProfile: string;
+  readonly indexWaitTimeoutMs: number;
+}
+
+function configToolProfileOf(rawConfig: unknown): string | undefined {
+  if (!isPlainObject(rawConfig) || !Object.hasOwn(rawConfig, "toolProfile")) {
+    return undefined;
+  }
+  const value = rawConfig["toolProfile"];
+  if (value === undefined) {
+    return undefined;
+  }
+  if (typeof value !== "string") {
+    throw new McpCliUsageError(
+      `CAUSORYN_CONFIG.toolProfile must be a string (for example "core" or "wiki,history"), got ${value === null ? "null" : typeof value}`,
+    );
+  }
+  return value;
+}
+
+/**
+ * The single resolver both MCP entry points use for their startup settings:
+ * output schema profile (`--output-schema` > `CAUSORYN_MCP_OUTPUT_SCHEMA_PROFILE`
+ * > `"omit"`), tool profile (`--tool-profile` > `CAUSORYN_TOOL_PROFILE` >
+ * `CAUSORYN_CONFIG.toolProfile` > `"core"`) and the cold-start index wait
+ * window (`CAUSORYN_INDEX_WAIT_MS`). `rawConfig` is the parsed
+ * `CAUSORYN_CONFIG` JSON (`{}` when unset). The bare entry passes
+ * `parseMcpCliArgs([])`. Invalid values throw `McpCliUsageError`.
+ */
+export function resolveMcpServerSettings(
+  cliArgs: ParsedMcpCliArgs,
+  env: NodeJS.ProcessEnv = process.env,
+  rawConfig: unknown = {},
+): McpServerSettings {
+  return {
+    outputSchemaProfile: resolveEffectiveOutputSchemaProfile(cliArgs, env),
+    toolProfile: resolveEffectiveToolProfile(cliArgs, env, configToolProfileOf(rawConfig)),
+    indexWaitTimeoutMs: resolveIndexWaitTimeoutMs(env),
+  };
+}
+
+export const DEFAULT_INDEX_WAIT_MS = 15_000;
+
+/**
+ * Resolves the bounded cold-start indexing wait window from `CAUSORYN_INDEX_WAIT_MS`
+ * (defaults to 15,000 ms; 0 skips waiting and returns indexing status immediately).
+ */
+export function resolveIndexWaitTimeoutMs(env: NodeJS.ProcessEnv = process.env): number {
+  const raw = env["CAUSORYN_INDEX_WAIT_MS"]?.trim();
+  if (raw === undefined || raw.length === 0) {
+    return DEFAULT_INDEX_WAIT_MS;
+  }
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed < 0) {
+    return DEFAULT_INDEX_WAIT_MS;
+  }
+  return Math.floor(parsed);
 }
 
 function stripWin32DevicePrefix(value: string): string {
@@ -260,7 +396,13 @@ function isSameOrInsideComparable(targetPath: string, containerPath: string): bo
  * ile çözerek symlink/8.3 kısa yol kaçışlarını yakalar.
  */
 function resolveRealOrLexical(inputPath: string): string {
+  if (isUncOrDevicePath(inputPath)) {
+    return inputPath;
+  }
   const abs = path.resolve(inputPath);
+  if (isUncOrDevicePath(abs)) {
+    return abs;
+  }
   const tailSegments: string[] = [];
   let cursor = abs;
   while (true) {
@@ -316,6 +458,24 @@ function isInsideResolvedDirs(
       isSameOrInsideComparable(targetPath, entry.real) ||
       isSameOrInsideComparable(realTargetPath, entry.raw) ||
       isSameOrInsideComparable(realTargetPath, entry.real)
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function isSameAsResolvedDirs(
+  targetPath: string,
+  realTargetPath: string,
+  entries: readonly ResolvedDirEntry[],
+): boolean {
+  for (const entry of entries) {
+    if (
+      isSameComparablePath(targetPath, entry.raw) ||
+      isSameComparablePath(targetPath, entry.real) ||
+      isSameComparablePath(realTargetPath, entry.raw) ||
+      isSameComparablePath(realTargetPath, entry.real)
     ) {
       return true;
     }
@@ -394,7 +554,8 @@ function readBoundedPluginManifestSync(manifestPath: string): string | null {
   let fd: number;
   try {
     // O_NOFOLLOW bilinçli olarak eklenmez: symlink'li paket/eklenti manifestleri desteklenir.
-    fd = openSync(manifestPath, fsConstants.O_RDONLY);
+    // Read-only open (no file is created); the mode argument only documents that.
+    fd = openSync(manifestPath, fsConstants.O_RDONLY, 0o600);
   } catch {
     return null;
   }
@@ -542,6 +703,11 @@ function deriveForbiddenPluginDirs(
   return entries;
 }
 
+/**
+ * Credential and tool configuration directories below the home directory; the
+ * directory itself and everything inside it is rejected as a project root.
+ * Platform independent on purpose (deterministic, and harmless where absent).
+ */
 const SENSITIVE_HOME_SUBDIRS = [
   ".ssh",
   ".aws",
@@ -550,7 +716,19 @@ const SENSITIVE_HOME_SUBDIRS = [
   ".claude",
   ".codex",
   ".zcode",
+  ".config",
+  ".docker",
+  ".azure",
+  ".gcloud",
+  ".npm",
+  ".cargo",
+  "Library",
+  path.join("AppData", "Roaming"),
+  path.join("AppData", "Local"),
 ] as const;
+
+/** Environment-named per-user application data directories (Windows profile layout). */
+const SENSITIVE_ENV_DIR_KEYS = ["APPDATA", "LOCALAPPDATA"] as const;
 
 const POSIX_SYSTEM_DIRS = [
   "/etc",
@@ -560,6 +738,26 @@ const POSIX_SYSTEM_DIRS = [
   "/proc",
   "/sys",
   "/root",
+  "/bin",
+  "/sbin",
+  "/lib",
+  "/dev",
+] as const;
+
+/**
+ * Exact-match denied directories on POSIX: these bare roots are rejected, while
+ * nested project subdirectories (e.g. `/tmp/causoryn-test-xxx` or macOS
+ * `/var/folders/.../T/causoryn-test-xxx`) remain allowed.
+ */
+const POSIX_EXACT_DENIED_DIRS = [
+  "/tmp",
+  "/private/tmp",
+  "/var",
+  "/private/var",
+  "/var/tmp",
+  "/private/var/tmp",
+  "/home",
+  "/Users",
 ] as const;
 
 const WINDOWS_FALLBACK_SYSTEM_DIRS = [
@@ -591,11 +789,91 @@ function readEnvValue(env: NodeJS.ProcessEnv, key: string): string | undefined {
   return undefined;
 }
 
-function deriveSensitiveUserDirs(homeDir: string): ResolvedDirEntry[] {
-  if (homeDir.trim().length === 0) return [];
-  return SENSITIVE_HOME_SUBDIRS.map((subdir) =>
-    toResolvedDirEntry(path.join(homeDir, subdir)),
-  );
+/** Like `resolveRealOrLexical`, but with the native realpath (8.3 short names expanded). */
+function resolveNativeRealOrLexical(inputPath: string): string {
+  const abs = path.resolve(inputPath);
+  if (isUncOrDevicePath(inputPath) || isUncOrDevicePath(abs)) {
+    return abs;
+  }
+  // Mocked `node:fs` modules may not carry `.native`; fall back to the JS realpath.
+  const native = (realpathSync as { native?: (p: string) => string }).native;
+  const realpath = typeof native === "function" ? native : realpathSync;
+  const tailSegments: string[] = [];
+  let cursor = abs;
+  for (;;) {
+    try {
+      const realAncestor = stripWin32DevicePrefix(realpath(cursor));
+      return tailSegments.length === 0 ? realAncestor : path.join(realAncestor, ...tailSegments.reverse());
+    } catch {
+      const parent = path.dirname(cursor);
+      if (parent === cursor) return abs;
+      tailSegments.push(path.basename(cursor));
+      cursor = parent;
+    }
+  }
+}
+
+/**
+ * Every spelling of a directory used by the sensitive-directory comparison:
+ * lexical, realpath and native long-name form. A directory reached through a
+ * link to a UNC/device target is compared lexically only (never followed).
+ */
+function sensitivePathForms(dir: string): string[] {
+  const lexical = path.resolve(dir);
+  if (isUncOrDevicePath(dir) || isUncOrDevicePath(lexical)) {
+    return [lexical];
+  }
+  if (LINK_TARGET_INSPECTION_ENABLED && !inspectLinkTargets(lexical).ok) {
+    return [lexical];
+  }
+  return [lexical, resolveRealOrLexical(lexical), resolveNativeRealOrLexical(lexical)];
+}
+
+function deriveSensitiveUserDirs(homeDir: string, env: NodeJS.ProcessEnv): string[][] {
+  const rawDirs: string[] = [];
+  if (homeDir.trim().length > 0) {
+    for (const subdir of SENSITIVE_HOME_SUBDIRS) {
+      rawDirs.push(path.join(homeDir, subdir));
+    }
+  }
+  for (const key of SENSITIVE_ENV_DIR_KEYS) {
+    const value = readEnvValue(env, key)?.trim();
+    if (value !== undefined && value.length > 0 && path.isAbsolute(value)) {
+      rawDirs.push(value);
+    }
+  }
+  return rawDirs.map(sensitivePathForms);
+}
+
+function anyFormSameOrInside(targets: readonly string[], containers: readonly string[]): boolean {
+  return targets.some((target) => containers.some((container) => isSameOrInsideComparable(target, container)));
+}
+
+/**
+ * Same-or-inside test against the sensitive directories. The OS temp directory
+ * may itself live inside one (Windows: %LOCALAPPDATA%\Temp); projects inside the
+ * temp directory stay usable there, while the bare temp root is rejected
+ * separately as an exact system directory.
+ */
+function isInsideSensitiveUserDir(
+  candidateForms: readonly string[],
+  homeDir: string,
+  env: NodeJS.ProcessEnv,
+): boolean {
+  const rawTemp = os.tmpdir().trim();
+  const tempForms = rawTemp.length === 0 || isUncOrDevicePath(rawTemp) ? [] : sensitivePathForms(rawTemp);
+  for (const entryForms of deriveSensitiveUserDirs(homeDir, env)) {
+    if (!anyFormSameOrInside(candidateForms, entryForms)) continue;
+    if (
+      tempForms.length > 0 &&
+      anyFormSameOrInside(tempForms, entryForms) &&
+      anyFormSameOrInside(candidateForms, tempForms)
+    ) {
+      continue;
+    }
+    return true;
+  }
+  return false;
 }
 
 function deriveSystemDirs(env: NodeJS.ProcessEnv): ResolvedDirEntry[] {
@@ -628,6 +906,29 @@ function deriveSystemDirs(env: NodeJS.ProcessEnv): ResolvedDirEntry[] {
   return entries;
 }
 
+function deriveExactDeniedDirs(): ResolvedDirEntry[] {
+  const rawDirs: string[] = [];
+  const osTmp = os.tmpdir().trim();
+  if (osTmp.length > 0 && !isUncOrDevicePath(osTmp)) {
+    rawDirs.push(osTmp);
+  }
+  if (process.platform !== "win32") {
+    for (const dir of POSIX_EXACT_DENIED_DIRS) {
+      rawDirs.push(dir);
+    }
+  }
+
+  const seen = new Set<string>();
+  const entries: ResolvedDirEntry[] = [];
+  for (const rawDir of rawDirs) {
+    const comparable = normalizeComparablePath(rawDir);
+    if (seen.has(comparable)) continue;
+    seen.add(comparable);
+    entries.push(toResolvedDirEntry(rawDir));
+  }
+  return entries;
+}
+
 /**
  * Aday çalışma dizininin güvenli bir proje kökü olup olmadığını ayrıntılı
  * gerekçesiyle denetler.
@@ -637,31 +938,63 @@ export function inspectProjectRootSafety(
   options: SafeProjectRootOptions = {},
 ): ProjectRootSafetyResult {
   if (candidatePath.trim().length === 0 || candidatePath.includes("\0")) {
-    return { safe: false, reason: "boş veya geçersiz yol" };
+    return { safe: false, reason: "empty or invalid path" };
+  }
+
+  // Lexical UNC / Win32 device path pre-check BEFORE any filesystem syscall
+  // (prevents outbound SMB/NTLM handshake via realpathSync / statSync).
+  if (isUncOrDevicePath(candidatePath) || isUncOrDevicePath(candidatePath.trim())) {
+    return { safe: false, reason: "unc-or-device-path" };
   }
 
   const lexicalCandidate = path.resolve(candidatePath);
+  if (isUncOrDevicePath(lexicalCandidate)) {
+    return { safe: false, reason: "unc-or-device-path" };
+  }
+  // Links whose target is a UNC/device path are rejected before realpathSync follows them.
+  if (LINK_TARGET_INSPECTION_ENABLED) {
+    const inspection = inspectLinkTargets(lexicalCandidate);
+    if (!inspection.ok) {
+      return { safe: false, reason: inspection.reason };
+    }
+  }
+
   let real: string;
   try {
     real = stripWin32DevicePrefix(realpathSync(lexicalCandidate));
     if (!statSync(real).isDirectory()) {
-      return { safe: false, reason: `dizin değil: ${real}` };
+      return { safe: false, reason: `not a directory: ${real}` };
     }
   } catch {
-    return { safe: false, reason: `çözümlenemeyen dizin: ${candidatePath}` };
+    return { safe: false, reason: `unresolvable directory: ${candidatePath}` };
   }
 
   // 1) Dosya sistemi kökleri (/, C:\, D:\ vb.)
   if (path.dirname(real) === real || path.parse(real).root === real) {
-    return { safe: false, reason: `dosya sistemi kökü reddedildi: ${real}` };
+    return { safe: false, reason: `filesystem root rejected: ${real}` };
   }
 
-  // 2) Kullanıcı ev dizini ($HOME)
+  // 2) Kullanıcı ev dizini ($HOME) ve tüm üst ataları (ör. /home, /Users, C:\Users)
   const rawHome = options.homeDir ?? os.homedir();
-  if (rawHome.trim().length > 0) {
+  // Native long-name form of the candidate (8.3 short names expanded) for the
+  // home and sensitive-directory comparisons below.
+  const realNative = resolveNativeRealOrLexical(real);
+  if (rawHome.trim().length > 0 && !isUncOrDevicePath(rawHome)) {
     const realHome = resolveRealOrLexical(rawHome);
-    if (isSameComparablePath(real, rawHome) || isSameComparablePath(real, realHome)) {
-      return { safe: false, reason: `kullanıcı ev dizini ($HOME) reddedildi: ${real}` };
+    const homeForms = sensitivePathForms(rawHome);
+    if (
+      isSameComparablePath(real, rawHome) ||
+      isSameComparablePath(real, realHome) ||
+      homeForms.some((homeForm) => isSameComparablePath(realNative, homeForm))
+    ) {
+      return { safe: false, reason: `user home directory ($HOME) rejected: ${real}` };
+    }
+    if (
+      isSameOrInsideComparable(rawHome, real) ||
+      isSameOrInsideComparable(realHome, real) ||
+      homeForms.some((homeForm) => isSameOrInsideComparable(homeForm, realNative))
+    ) {
+      return { safe: false, reason: "home-ancestor-directory" };
     }
   }
 
@@ -675,12 +1008,13 @@ export function inspectProjectRootSafety(
   ];
   for (const rawDataDir of dataDirs) {
     if (rawDataDir === undefined || rawDataDir.trim().length === 0) continue;
+    if (isUncOrDevicePath(rawDataDir)) continue;
     const realDataDir = resolveRealOrLexical(rawDataDir);
     if (
       isSameOrInsideComparable(real, rawDataDir) ||
       isSameOrInsideComparable(real, realDataDir)
     ) {
-      return { safe: false, reason: `Causoryn veri dizini reddedildi: ${real}` };
+      return { safe: false, reason: `Causoryn data directory rejected: ${real}` };
     }
   }
 
@@ -690,15 +1024,20 @@ export function inspectProjectRootSafety(
     return { safe: false, reason: "plugin-install-directory" };
   }
 
-  // 5) Hassas kullanıcı kimlik/yapılandırma dizinleri (~/.ssh, ~/.aws, ~/.gnupg, ~/.kube, ~/.claude, ~/.codex, ~/.zcode)
-  const sensitiveEntries = deriveSensitiveUserDirs(rawHome);
-  if (isInsideResolvedDirs(lexicalCandidate, real, sensitiveEntries)) {
+  // 5) Sensitive credential/tool configuration directories (SENSITIVE_HOME_SUBDIRS,
+  //    %APPDATA%, %LOCALAPPDATA%), compared in lexical, realpath and native forms.
+  if (isInsideSensitiveUserDir([lexicalCandidate, real, realNative], rawHome, env)) {
     return { safe: false, reason: "sensitive-directory" };
   }
 
-  // 6) OS sistem kök/sistem dizinleri (/etc, /private/etc, /System, /usr, /proc, /sys, /root, C:\Windows, Program Files, ProgramData)
+  // 6) OS sistem kök/sistem dizinleri (/etc, /private/etc, /System, /usr, /proc, /sys, /root, /bin, /sbin, /lib, /dev, C:\Windows, Program Files, ProgramData)
+  //    ve tam eşleşmeli geçici/sistem kökleri (/tmp, /var, os.tmpdir() — alt dizinlere izin verilir)
   const systemEntries = deriveSystemDirs(env);
   if (isInsideResolvedDirs(lexicalCandidate, real, systemEntries)) {
+    return { safe: false, reason: "system-directory" };
+  }
+  const exactDeniedEntries = deriveExactDeniedDirs();
+  if (isSameAsResolvedDirs(lexicalCandidate, real, exactDeniedEntries)) {
     return { safe: false, reason: "system-directory" };
   }
 
@@ -730,38 +1069,114 @@ export function isSafeProjectRoot(
   return inspectProjectRootSafety(candidatePath, options).safe;
 }
 
-export function resolveBaseDataDir(options: {
+/** Where a base data directory candidate came from. */
+export type DataDirSource = "--data-dir" | "home" | "ZCODE_PLUGIN_DATA";
+
+export interface DataDirCandidate {
+  readonly dir: string;
+  readonly source: DataDirSource;
+}
+
+export interface DataDirCandidates {
+  /** The base data directory every host resolves the same way. */
+  readonly primary: DataDirCandidate;
+  /** Used only when `primary` cannot hold the workspace data directory. */
+  readonly fallback?: DataDirCandidate;
+}
+
+export interface BaseDataDirOptions {
   readonly dataDir?: string;
   readonly homeDir?: string;
   readonly env?: NodeJS.ProcessEnv;
-}): string {
+}
+
+/** Validates `ZCODE_PLUGIN_DATA` when set (fail-closed even when unused). */
+function readZcodePluginDataDir(env: NodeJS.ProcessEnv): string | undefined {
+  const zcodeDataDir = env["ZCODE_PLUGIN_DATA"]?.trim();
+  if (zcodeDataDir === undefined || zcodeDataDir.length === 0) {
+    return undefined;
+  }
+  if (zcodeDataDir.includes("\0")) {
+    throw new CausorynConfigError(["ZCODE_PLUGIN_DATA must not contain a NUL byte"]);
+  }
+  if (isUncOrDevicePath(zcodeDataDir)) {
+    throw new CausorynConfigError([
+      `ZCODE_PLUGIN_DATA must not be a UNC or Win32 device path: ${zcodeDataDir}`,
+    ]);
+  }
+  if (!path.isAbsolute(zcodeDataDir)) {
+    throw new CausorynConfigError([
+      `ZCODE_PLUGIN_DATA must be an absolute path: ${zcodeDataDir}`,
+    ]);
+  }
+  return path.resolve(zcodeDataDir);
+}
+
+/**
+ * Resolves the base data directory candidates. Precedence: `--data-dir`
+ * (explicit; no fallback) > `~/.causoryn`. `~/.causoryn` is the base for
+ * every host, so Claude Code, Codex, Antigravity and ZCode share one
+ * `workspaces/<slug>-<hash12>/graph.sqlite` per workspace. `ZCODE_PLUGIN_DATA`
+ * (the ZCode plugin's persistent data directory) is only a fallback for when
+ * `~/.causoryn` cannot be created or written; nothing documents a ZCode
+ * restriction on writing to `~/.causoryn` (the plugin's MCP server is an
+ * ordinary user process).
+ */
+export function resolveDataDirCandidates(options: BaseDataDirOptions): DataDirCandidates {
   const explicitDataDir = options.dataDir?.trim();
   if (explicitDataDir !== undefined && explicitDataDir.length > 0) {
     if (explicitDataDir.includes("\0")) {
-      throw new CausorynConfigError(["--data-dir null byte içeremez"]);
+      throw new CausorynConfigError(["--data-dir must not contain a NUL byte"]);
+    }
+    if (isUncOrDevicePath(explicitDataDir)) {
+      throw new CausorynConfigError([
+        `--data-dir must not be a UNC or Win32 device path: ${explicitDataDir}`,
+      ]);
     }
     if (!path.isAbsolute(explicitDataDir)) {
-      throw new CausorynConfigError([`--data-dir mutlak yol olmalı: ${explicitDataDir}`]);
+      throw new CausorynConfigError([`--data-dir must be an absolute path: ${explicitDataDir}`]);
     }
-    return path.resolve(explicitDataDir);
+    return { primary: { dir: path.resolve(explicitDataDir), source: "--data-dir" } };
   }
 
   const env = options.env ?? process.env;
-  const zcodeDataDir = env["ZCODE_PLUGIN_DATA"]?.trim();
-  if (zcodeDataDir !== undefined && zcodeDataDir.length > 0) {
-    if (zcodeDataDir.includes("\0")) {
-      throw new CausorynConfigError(["ZCODE_PLUGIN_DATA null byte içeremez"]);
-    }
-    if (!path.isAbsolute(zcodeDataDir)) {
-      throw new CausorynConfigError([
-        `ZCODE_PLUGIN_DATA mutlak yol olmalı: ${zcodeDataDir}`,
-      ]);
-    }
-    return path.resolve(zcodeDataDir);
-  }
-
+  const zcodeDataDir = readZcodePluginDataDir(env);
   const homeDir = options.homeDir ?? os.homedir();
-  return path.resolve(homeDir, ".causoryn");
+  if (isUncOrDevicePath(homeDir)) {
+    if (zcodeDataDir !== undefined) {
+      return { primary: { dir: zcodeDataDir, source: "ZCODE_PLUGIN_DATA" } };
+    }
+    throw new CausorynConfigError([
+      `homeDir must not be a UNC or Win32 device path: ${homeDir}`,
+    ]);
+  }
+  const homeDataDir = path.resolve(homeDir, ".causoryn");
+  return {
+    primary: { dir: homeDataDir, source: "home" },
+    ...(zcodeDataDir !== undefined && !isSameComparablePath(zcodeDataDir, homeDataDir)
+      ? { fallback: { dir: zcodeDataDir, source: "ZCODE_PLUGIN_DATA" as const } }
+      : {}),
+  };
+}
+
+/** The primary base data directory (`--data-dir` > `~/.causoryn`). */
+export function resolveBaseDataDir(options: BaseDataDirOptions): string {
+  return resolveDataDirCandidates(options).primary.dir;
+}
+
+/**
+ * A data directory that exists as a non-directory or cannot be created or
+ * written. Unlike symlink / inside-workspace violations (security errors that
+ * always stop startup), this one lets startup move on to a fallback base.
+ */
+class DataDirUnusableError extends CausorynConfigError {
+  readonly reason: string;
+
+  constructor(issue: string, reason: string) {
+    super([issue]);
+    this.name = "DataDirUnusableError";
+    this.reason = reason;
+  }
 }
 
 function isSlugTrimChar(code: number): boolean {
@@ -808,7 +1223,7 @@ function assertStrictlyOutsideWorkspaceRoots(
         isSameOrInsideComparable(realTarget, canonicalRoot)
       ) {
         throw new CausorynConfigError([
-          `otomatik veri dizini yetkili workspace kökünün içinde olamaz (ADR-008): ${target}`,
+          `the automatic data directory must not be inside an authorized workspace root: ${target}`,
         ]);
       }
     }
@@ -820,19 +1235,20 @@ function assertNotSymlinkDirectory(targetDir: string): void {
     const st = lstatSync(targetDir);
     if (st.isSymbolicLink()) {
       throw new CausorynConfigError([
-        `veri dizini sembolik bağ olamaz (CWE-59): ${targetDir}`,
+        `the data directory must not be a symbolic link (CWE-59): ${targetDir}`,
       ]);
     }
     if (!st.isDirectory()) {
-      throw new CausorynConfigError([
-        `veri dizini bir dizin değil: ${targetDir}`,
-      ]);
+      throw new DataDirUnusableError(
+        `the data directory path is not a directory: ${targetDir}`,
+        `${targetDir} is not a directory`,
+      );
     }
   } catch (error) {
     if (error instanceof CausorynConfigError) throw error;
     if ((error as NodeJS.ErrnoException | undefined)?.code !== "ENOENT") {
       throw new CausorynConfigError([
-        `veri dizini durumu doğrulanamadı: ${targetDir}`,
+        `the data directory status could not be verified: ${targetDir}`,
       ]);
     }
   }
@@ -879,18 +1295,18 @@ function assertDataDirAncestorsSafe(
         continue;
       }
       throw new CausorynConfigError([
-        `veri dizini üst yolu doğrulanamadı: ${prefix}`,
+        `a data directory ancestor could not be verified: ${prefix}`,
       ]);
     }
 
     if (st.isSymbolicLink() && !isMacOsSystemFirmlinkPrefix(prefix)) {
       throw new CausorynConfigError([
-        `veri dizini veya üst dizini sembolik bağ olamaz (CWE-59): ${prefix}`,
+        `the data directory or an ancestor must not be a symbolic link (CWE-59): ${prefix}`,
       ]);
     }
     if (!st.isSymbolicLink() && !st.isDirectory()) {
       throw new CausorynConfigError([
-        `veri dizini veya üst yolu bir dizin değil: ${prefix}`,
+        `the data directory or an ancestor path is not a directory: ${prefix}`,
       ]);
     }
 
@@ -899,7 +1315,7 @@ function assertDataDirAncestorsSafe(
       realPrefix = stripWin32DevicePrefix(realpathSync(prefix));
     } catch {
       throw new CausorynConfigError([
-        `veri dizini üst yolunun gerçek konumu çözümlenemedi (dangling symlink / CWE-59): ${prefix}`,
+        `the real location of a data directory ancestor could not be resolved (dangling symlink / CWE-59): ${prefix}`,
       ]);
     }
 
@@ -911,7 +1327,7 @@ function assertDataDirAncestorsSafe(
         isSameOrInsideComparable(realPrefix, canonicalRoot)
       ) {
         throw new CausorynConfigError([
-          `otomatik veri dizini yetkili workspace kökünün içinde olamaz (ADR-008): ${targetDir}`,
+          `the automatic data directory must not be inside an authorized workspace root: ${targetDir}`,
         ]);
       }
     }
@@ -945,6 +1361,180 @@ export interface WorkspaceAutoConfigOptions {
   readonly rawBaseConfig?: unknown;
   readonly homeDir?: string;
   readonly env?: NodeJS.ProcessEnv;
+  /** stderr logger for data-dir notices (default `console.error`). */
+  readonly logger?: (message: string) => void;
+}
+
+/** Shared per-workspace database file used by every MCP host client. */
+export const SHARED_WORKSPACE_DB_FILE = "graph.sqlite";
+
+/**
+ * Version-specific fallback database file name. Used when the shared
+ * `graph.sqlite` was stamped by a NEWER schema than this build supports, so
+ * two different schema versions never write the same file.
+ */
+export function versionedWorkspaceDbFileName(
+  schemaVersion: number = STORAGE_SCHEMA_VERSION,
+): string {
+  return `graph.schema-${String(schemaVersion)}.sqlite`;
+}
+
+/**
+ * Picks the database file inside an (already validated) workspace data dir:
+ * the shared `graph.sqlite`, unless its `user_version` is newer than this
+ * build's schema, in which case `graph.schema-<N>.sqlite` (N = this build's
+ * schema version) is used and one stderr warning is logged. The probe opens
+ * the file read-only and never creates, migrates or writes it.
+ */
+export function selectWorkspaceDbPath(
+  workspaceDataDir: string,
+  logger: (message: string) => void = (message) => {
+    console.error(message);
+  },
+): string {
+  const shared = path.join(workspaceDataDir, SHARED_WORKSPACE_DB_FILE);
+  try {
+    const st = lstatSync(shared);
+    if (!st.isFile()) {
+      // Symlinks / non-files are rejected later by validateDataDbPath.
+      return shared;
+    }
+  } catch {
+    return shared;
+  }
+  let version: number | undefined;
+  try {
+    version = readSqliteUserVersion(shared);
+  } catch {
+    // Unreadable/corrupt: keep the shared path; opening it fails loudly later.
+    return shared;
+  }
+  if (version !== undefined && version > STORAGE_SCHEMA_VERSION) {
+    const fallback = path.join(workspaceDataDir, versionedWorkspaceDbFileName());
+    logger(
+      `[causoryn] ${shared} uses schema v${String(version)}, newer than this Causoryn build supports (v${String(STORAGE_SCHEMA_VERSION)}); using ${fallback} instead so different schema versions never write the same file`,
+    );
+    return fallback;
+  }
+  return shared;
+}
+
+/**
+ * One-time migration of legacy per-client databases (`graph-<client>.sqlite`,
+ * used up to v0.2.4) into the shared `graph.sqlite` before any connection is
+ * opened. Only applies when the configured storage DB is the shared file and
+ * it does not exist yet. Never throws: failures are logged and startup
+ * continues with a fresh shared database. Legacy files are left in place.
+ */
+export async function prepareWorkspaceDatabase(
+  config: CausorynServerConfig,
+  options: { readonly logger?: (message: string) => void } = {},
+): Promise<void> {
+  const log =
+    options.logger ??
+    ((message: string): void => {
+      console.error(message);
+    });
+  const dbPath = config.storage.dataDbPath;
+  if (dbPath === undefined || path.basename(dbPath) !== SHARED_WORKSPACE_DB_FILE) {
+    return;
+  }
+  try {
+    const result = await migrateLegacyWorkspaceDatabase(dbPath);
+    if (result.migrated) {
+      log(
+        `[causoryn] migrated legacy database ${path.basename(result.source)} (schema v${String(result.sourceSchemaVersion)}) into ${result.target}; legacy files were left in place`,
+      );
+    } else if (result.reason === "no-valid-legacy-file") {
+      const rejected = result.candidates
+        .map((candidate) => `${path.basename(candidate.path)}: ${candidate.reason ?? "invalid"}`)
+        .join("; ");
+      log(
+        `[causoryn] legacy per-client databases found but none could be migrated (${rejected}); starting with a fresh ${SHARED_WORKSPACE_DB_FILE}`,
+      );
+    }
+  } catch (error) {
+    log(
+      `[causoryn] legacy database migration failed: ${error instanceof Error ? error.message : String(error)}; starting with a fresh ${SHARED_WORKSPACE_DB_FILE}`,
+    );
+  }
+}
+
+interface PreparedWorkspaceDataDir {
+  readonly exportsDir: string;
+  readonly dbPath: string;
+}
+
+/**
+ * Validates and creates `<baseDataDir>/workspaces/<workspaceDirName>` and its
+ * `exports/` directory, then picks the database file. Every path is checked
+ * to lie outside the authorized roots and to contain no symlinked component
+ * BEFORE anything is created (ADR-008 + CWE-59), and re-checked by real path
+ * afterwards (TOCTOU). A base that cannot be created or written throws
+ * `DataDirUnusableError`; security violations throw `CausorynConfigError`.
+ */
+function prepareWorkspaceDataDir(
+  baseDataDir: string,
+  workspaceDirName: string,
+  effectiveRoots: readonly string[],
+  canonicalRoots: readonly string[],
+  logger: ((message: string) => void) | undefined,
+): PreparedWorkspaceDataDir {
+  const workspacesDir = path.join(baseDataDir, "workspaces");
+  const workspaceDataDir = path.join(workspacesDir, workspaceDirName);
+  const exportsDir = path.join(workspaceDataDir, "exports");
+  // Single shared workspace SQLite database across all MCP host clients;
+  // the host client id is preserved strictly as a diagnostic/host label.
+  const sharedDbPath = path.join(workspaceDataDir, SHARED_WORKSPACE_DB_FILE);
+
+  // Yazmadan ÖNCE hem sözcüksel hem gerçek-ata yollarının workspace dışında
+  // kaldığını ve hiçbir önek/ata dizinin sembolik/dangling bağ olmadığını
+  // doğrula (ADR-008 + CWE-59: kaynak ağaca tek klasör bile açılamaz).
+  assertStrictlyOutsideWorkspaceRoots(
+    [baseDataDir, workspacesDir, workspaceDataDir, exportsDir, sharedDbPath],
+    effectiveRoots,
+    canonicalRoots,
+  );
+  assertNotSymlinkDirectory(baseDataDir);
+  assertNotSymlinkDirectory(workspacesDir);
+  assertNotSymlinkDirectory(workspaceDataDir);
+  assertNotSymlinkDirectory(exportsDir);
+  assertDataDirAncestorsSafe(exportsDir, effectiveRoots, canonicalRoots);
+
+  try {
+    mkdirSync(workspaceDataDir, { recursive: true, mode: 0o700 });
+    mkdirSync(exportsDir, { recursive: true, mode: 0o700 });
+    accessSync(workspaceDataDir, fsConstants.W_OK);
+    accessSync(exportsDir, fsConstants.W_OK);
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException | undefined)?.code ?? "unknown error";
+    throw new DataDirUnusableError(
+      `the data directory could not be created or is not writable: ${workspaceDataDir} (${code})`,
+      `${code} while creating ${workspaceDataDir}`,
+    );
+  }
+  if (process.platform !== "win32") {
+    try {
+      chmodSync(workspaceDataDir, 0o700);
+      chmodSync(exportsDir, 0o700);
+    } catch {
+      // Dosya sistemi izin daraltmayı desteklemiyorsa sessiz geçilir.
+    }
+  }
+
+  // Oluşturma sonrası realpath doğrulaması (TOCTOU savunması).
+  const realWorkspaceDataDir = stripWin32DevicePrefix(realpathSync(workspaceDataDir));
+  const realExportsDir = stripWin32DevicePrefix(realpathSync(exportsDir));
+  assertStrictlyOutsideWorkspaceRoots(
+    [realWorkspaceDataDir, realExportsDir],
+    effectiveRoots,
+    canonicalRoots,
+  );
+
+  // Schema forward guard (Task 1.7 criterion 4): never share a file with a
+  // newer schema version; fall back to graph.schema-<N>.sqlite instead.
+  const dbPath = selectWorkspaceDbPath(workspaceDataDir, logger);
+  return { exportsDir, dbPath };
 }
 
 /**
@@ -971,16 +1561,35 @@ export function buildWorkspaceAutoConfig(
     Object.hasOwn(rawBase, "allowRoots") && Array.isArray(rawBase["allowRoots"])
       ? (rawBase["allowRoots"] as unknown[])
       : [];
+  const rawRoots: string[] =
+    options.roots.length > 0
+      ? [...options.roots]
+      : baseAllowRoots.map((entry) => String(entry));
+  for (const rawRoot of rawRoots) {
+    if (isUncOrDevicePath(rawRoot) || isUncOrDevicePath(rawRoot.trim())) {
+      throw new CausorynConfigError([
+        `allowRoot must not be a UNC or Win32 device path: ${rawRoot}`,
+      ]);
+    }
+  }
   const effectiveRoots: string[] =
     options.roots.length > 0
       ? options.roots.map((r) => path.resolve(r))
-      : baseAllowRoots.map((entry) => String(entry));
+      : rawRoots;
+  for (const resolvedRoot of effectiveRoots) {
+    if (isUncOrDevicePath(resolvedRoot)) {
+      throw new CausorynConfigError([
+        `allowRoot must not be a UNC or Win32 device path: ${resolvedRoot}`,
+      ]);
+    }
+  }
 
   if (!options.autoDataDir || effectiveRoots.length === 0) {
     const firstRoot = effectiveRoots[0];
     const canDiscoverPrimary =
       firstRoot !== undefined &&
       typeof firstRoot === "string" &&
+      !isUncOrDevicePath(firstRoot) &&
       path.isAbsolute(firstRoot) &&
       !firstRoot.includes("\0");
     const discovery = canDiscoverPrimary
@@ -999,29 +1608,29 @@ export function buildWorkspaceAutoConfig(
 
   if (options.client !== undefined && !SAFE_CLIENT_ID_PATTERN.test(options.client)) {
     throw new CausorynConfigError([
-      `geçersiz client kimliği: ${options.client}`,
+      `invalid client id: ${options.client}`,
     ]);
   }
 
   const canonicalRoots: string[] = effectiveRoots.map((root) => {
-    if (!path.isAbsolute(root) || root.includes("\0")) {
-      throw new CausorynConfigError([`allowRoot geçersiz veya mutlak yol değil: ${root}`]);
+    if (isUncOrDevicePath(root) || !path.isAbsolute(root) || root.includes("\0")) {
+      throw new CausorynConfigError([`allowRoot is invalid or not an absolute path: ${root}`]);
     }
     try {
       const resolved = stripWin32DevicePrefix(realpathSync(path.resolve(root)));
       if (!statSync(resolved).isDirectory()) {
-        throw new CausorynConfigError([`allowRoot bir dizin değil: ${root}`]);
+        throw new CausorynConfigError([`allowRoot is not a directory: ${root}`]);
       }
       return resolved;
     } catch (error) {
       if (error instanceof CausorynConfigError) throw error;
       throw new CausorynConfigError([
-        `allowRoot gerçek yolu çözümlenemedi: ${root}`,
+        `allowRoot real path could not be resolved: ${root}`,
       ]);
     }
   });
 
-  const baseDataDir = resolveBaseDataDir({
+  const candidates = resolveDataDirCandidates({
     ...(options.dataDir !== undefined ? { dataDir: options.dataDir } : {}),
     ...(options.homeDir !== undefined ? { homeDir: options.homeDir } : {}),
     ...(options.env !== undefined ? { env: options.env } : {}),
@@ -1030,48 +1639,39 @@ export function buildWorkspaceAutoConfig(
   const primaryRoot = canonicalRoots[0] as string;
   const slug = deriveWorkspaceSlug(primaryRoot);
   const hash12 = sha256Hex(utf8Encode(normalizeComparablePath(primaryRoot))).slice(0, 12);
-  const workspacesDir = path.join(baseDataDir, "workspaces");
-  const workspaceDataDir = path.join(workspacesDir, `${slug}-${hash12}`);
-  const exportsDir = path.join(workspaceDataDir, "exports");
-  const dbFileName =
-    options.client !== undefined
-      ? `graph-${options.client.toLowerCase()}.sqlite`
-      : "graph.sqlite";
-  const dbPath = path.join(workspaceDataDir, dbFileName);
+  const workspaceDirName = `${slug}-${hash12}`;
 
-  // Yazmadan ÖNCE hem sözcüksel hem gerçek-ata yollarının workspace dışında
-  // kaldığını ve hiçbir önek/ata dizinin sembolik/dangling bağ olmadığını
-  // doğrula (ADR-008 + CWE-59: kaynak ağaca tek klasör bile açılamaz).
-  assertStrictlyOutsideWorkspaceRoots(
-    [baseDataDir, workspacesDir, workspaceDataDir, exportsDir, dbPath],
-    effectiveRoots,
-    canonicalRoots,
-  );
-  assertNotSymlinkDirectory(baseDataDir);
-  assertNotSymlinkDirectory(workspacesDir);
-  assertNotSymlinkDirectory(workspaceDataDir);
-  assertNotSymlinkDirectory(exportsDir);
-  assertDataDirAncestorsSafe(exportsDir, effectiveRoots, canonicalRoots);
-
-  mkdirSync(workspaceDataDir, { recursive: true, mode: 0o700 });
-  mkdirSync(exportsDir, { recursive: true, mode: 0o700 });
-  if (process.platform !== "win32") {
-    try {
-      chmodSync(workspaceDataDir, 0o700);
-      chmodSync(exportsDir, 0o700);
-    } catch {
-      // Dosya sistemi izin daraltmayı desteklemiyorsa sessiz geçilir.
+  let prepared: PreparedWorkspaceDataDir;
+  try {
+    prepared = prepareWorkspaceDataDir(
+      candidates.primary.dir,
+      workspaceDirName,
+      effectiveRoots,
+      canonicalRoots,
+      options.logger,
+    );
+  } catch (error) {
+    const fallback = candidates.fallback;
+    if (fallback === undefined || !(error instanceof DataDirUnusableError)) {
+      throw error;
     }
+    const log =
+      options.logger ??
+      ((message: string): void => {
+        console.error(message);
+      });
+    log(
+      `[causoryn] ${candidates.primary.dir} cannot hold the index (${error.reason}); using ${fallback.source} (${fallback.dir}) instead. This index is not shared with hosts that use ${candidates.primary.dir}; fix that directory, or pass --data-dir to choose the location explicitly.`,
+    );
+    prepared = prepareWorkspaceDataDir(
+      fallback.dir,
+      workspaceDirName,
+      effectiveRoots,
+      canonicalRoots,
+      options.logger,
+    );
   }
-
-  // Oluşturma sonrası realpath doğrulaması (TOCTOU savunması).
-  const realWorkspaceDataDir = stripWin32DevicePrefix(realpathSync(workspaceDataDir));
-  const realExportsDir = stripWin32DevicePrefix(realpathSync(exportsDir));
-  assertStrictlyOutsideWorkspaceRoots(
-    [realWorkspaceDataDir, realExportsDir],
-    effectiveRoots,
-    canonicalRoots,
-  );
+  const { exportsDir, dbPath } = prepared;
 
   const baseStorage = isPlainObject(rawBase["storage"]) ? rawBase["storage"] : {};
   const baseWiki = isPlainObject(rawBase["wiki"]) ? rawBase["wiki"] : {};
@@ -1113,75 +1713,136 @@ export function buildWorkspaceAutoConfig(
 export interface DynamicCausorynContext extends CausorynContext {
   readonly current: CausorynContext;
   rebind(nextContext: CausorynContext): void;
+  /**
+   * Runs one unit of work (a tool call) pinned to the context generation that
+   * is active when it starts. Every getter read inside `work` — including
+   * after awaits — resolves to that generation, and a `rebind` during `work`
+   * defers closing it until `work` settles.
+   */
+  runPinned<T>(work: () => Promise<T> | T): Promise<T>;
+}
+
+/** One bound context plus the number of pinned calls still using it. */
+interface ContextGeneration {
+  readonly context: CausorynContext;
+  inFlight: number;
+  /** No longer the active binding (rebound away or the wrapper was closed). */
+  retired: boolean;
+  closed: boolean;
 }
 
 /**
- * Getter tabanlı dinamik `CausorynContext` sarmalayıcısı; `rebind` çağrısında
- * tüm araçların okuduğu aktif bağlamı atomik değiştirir ve eski bağlamı kapatır.
+ * Getter-based dynamic `CausorynContext` wrapper used by the MCP roots binder.
+ *
+ * `rebind` atomically switches the binding that NEW work sees. Work started
+ * through `runPinned` keeps its generation for its whole lifetime (resolved
+ * through AsyncLocalStorage, so awaits inside a tool call cannot observe a
+ * rebind), and a retired generation is closed only after its last pinned
+ * call settles — an in-flight call never finishes against another workspace
+ * or a closed SQLite connection. Reads outside `runPinned` use the current
+ * binding.
  */
 export function createDynamicCausorynContext(
   initialContext: CausorynContext,
 ): DynamicCausorynContext {
-  let active = initialContext;
+  const pinnedGeneration = new AsyncLocalStorage<ContextGeneration>();
+  let activeGeneration: ContextGeneration = {
+    context: initialContext,
+    inFlight: 0,
+    retired: false,
+    closed: false,
+  };
+  const target = (): CausorynContext =>
+    (pinnedGeneration.getStore() ?? activeGeneration).context;
+  const closeGeneration = (generation: ContextGeneration): void => {
+    if (generation.closed) return;
+    generation.closed = true;
+    try {
+      generation.context.close();
+    } catch (error) {
+      activeGeneration.context.logger(
+        `[causoryn] could not close the previous context: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  };
+  const retire = (generation: ContextGeneration): void => {
+    generation.retired = true;
+    if (generation.inFlight === 0) closeGeneration(generation);
+  };
   return {
     get current(): CausorynContext {
-      return active;
+      return activeGeneration.context;
     },
     get config(): CausorynServerConfig {
-      return active.config;
+      return target().config;
     },
     get policy(): WorkspaceAccessPolicy {
-      return active.policy;
+      return target().policy;
     },
     get repository(): GraphRepository {
-      return active.repository;
+      return target().repository;
     },
     get symbolSearch(): SymbolSearchStore | null {
-      return active.symbolSearch;
+      return target().symbolSearch;
     },
     get indexService(): IndexService {
-      return active.indexService;
+      return target().indexService;
     },
     get jobManager(): IndexJobManager {
-      return active.jobManager;
+      return target().jobManager;
     },
     get outputPolicy(): OutputAccessPolicy | null {
-      return active.outputPolicy;
+      return target().outputPolicy;
     },
     get wikiStore(): SqliteWikiStore | null {
-      return active.wikiStore;
+      return target().wikiStore;
     },
     get wikiSearch(): WikiSearchStore | null {
-      return active.wikiSearch;
+      return target().wikiSearch;
     },
     get preflightStore(): PreflightManifestStore {
-      return active.preflightStore;
+      return target().preflightStore;
     },
     get clock(): () => string {
-      return active.clock;
+      return target().clock;
     },
     get logger(): (message: string) => void {
-      return active.logger;
+      return target().logger;
     },
     startDeferredIndex(): void {
-      active.startDeferredIndex?.();
+      target().startDeferredIndex?.();
     },
-    waitForInitialIndex(timeoutMs?: number): Promise<void> {
-      return active.waitForInitialIndex ? active.waitForInitialIndex(timeoutMs) : Promise.resolve();
+    waitForInitialIndex(timeoutOrOptions?: number | WaitForInitialIndexOptions): Promise<void> {
+      const context = target();
+      return context.waitForInitialIndex
+        ? context.waitForInitialIndex(timeoutOrOptions)
+        : Promise.resolve();
+    },
+    getActiveIndexJob(): ActiveIndexJobInfo | null {
+      const context = target();
+      return context.getActiveIndexJob ? context.getActiveIndexJob() : null;
     },
     close(): void {
-      active.close();
+      // Shutdown: the active generation closes now, or after its in-flight
+      // calls settle. Idempotent (a generation is closed at most once).
+      retire(activeGeneration);
     },
     rebind(nextContext: CausorynContext): void {
-      if (nextContext === active) return;
-      const previous = active;
-      active = nextContext;
+      if (nextContext === activeGeneration.context) return;
+      const previous = activeGeneration;
+      activeGeneration = { context: nextContext, inFlight: 0, retired: false, closed: false };
+      retire(previous);
+    },
+    async runPinned<T>(work: () => Promise<T> | T): Promise<T> {
+      // Nested calls stay on the generation that is already pinned.
+      if (pinnedGeneration.getStore() !== undefined) return await work();
+      const generation = activeGeneration;
+      generation.inFlight += 1;
       try {
-        previous.close();
-      } catch (error) {
-        active.logger(
-          `[causoryn] önceki bağlam kapatılamadı: ${error instanceof Error ? error.message : String(error)}`,
-        );
+        return await pinnedGeneration.run(generation, work);
+      } finally {
+        generation.inFlight -= 1;
+        if (generation.retired && generation.inFlight === 0) closeGeneration(generation);
       }
     },
   };
@@ -1205,7 +1866,10 @@ export interface AttachMcpRootsBinderOptions {
 }
 
 export interface McpRootsWorkspaceBinder {
-  readonly beforeToolCall: (toolName: string) => Promise<void>;
+  readonly beforeToolCall: (
+    toolName: string,
+    hookContext?: BeforeToolCallContext,
+  ) => Promise<void>;
   readonly syncFromClientRoots: (force?: boolean) => Promise<void>;
 }
 
@@ -1275,8 +1939,8 @@ export function attachMcpRootsWorkspaceBinder(
     ...(options.env !== undefined ? { env: options.env } : {}),
   };
 
-  const rebindRoot = (canonicalRoot: string | null): void => {
-    const nextConfig = buildWorkspaceAutoConfig({
+  const buildRootConfig = (canonicalRoot: string | null): CausorynServerConfig =>
+    buildWorkspaceAutoConfig({
       roots: canonicalRoot === null ? [] : [canonicalRoot],
       autoDataDir: options.autoDataDir ?? false,
       ...(options.dataDir !== undefined ? { dataDir: options.dataDir } : {}),
@@ -1284,12 +1948,24 @@ export function attachMcpRootsWorkspaceBinder(
       ...(options.rawBaseConfig !== undefined ? { rawBaseConfig: options.rawBaseConfig } : {}),
       ...(options.homeDir !== undefined ? { homeDir: options.homeDir } : {}),
       ...(options.env !== undefined ? { env: options.env } : {}),
+      logger: log,
     });
+  const bindConfig = (nextConfig: CausorynServerConfig): void => {
     const nextContext = createCausorynContext(nextConfig, {
       deferAutoIndex: true,
+      ...(options.client === undefined ? {} : { hostLabel: options.client }),
       ...effectiveContextOverrides,
     });
     dynamicContext.rebind(nextContext);
+  };
+  const rebindRoot = (canonicalRoot: string | null): void => {
+    bindConfig(buildRootConfig(canonicalRoot));
+  };
+  /** Async rebind: migrates legacy per-client DBs before opening the shared DB. */
+  const rebindRootAsync = async (canonicalRoot: string | null): Promise<void> => {
+    const nextConfig = buildRootConfig(canonicalRoot);
+    await prepareWorkspaceDatabase(nextConfig, { logger: log });
+    bindConfig(nextConfig);
   };
 
   let currentBoundRoot: string | null =
@@ -1304,12 +1980,13 @@ export function attachMcpRootsWorkspaceBinder(
       rebindRoot(cwdCheck.canonicalRoot);
       currentBoundRoot = cwdCheck.canonicalRoot;
       initialSyncDone = true;
+      const clientTag = options.client !== undefined ? `, client=${options.client}` : "";
       log(
-        `[causoryn] --allow-cwd ile güvenli çalışma alanı bağlandı: ${cwdCheck.canonicalRoot} (workspaceId=${dynamicContext.config.workspaceId})`,
+        `[causoryn] bound safe workspace via --allow-cwd: ${cwdCheck.canonicalRoot} (workspaceId=${dynamicContext.config.workspaceId}${clientTag})`,
       );
     } else {
       log(
-        `[causoryn] --allow-cwd reddedildi (${cwdCheck.reason}); allowRoots: [] ile başlanıyor, MCP roots/list bekleniyor`,
+        `[causoryn] --allow-cwd rejected (${cwdCheck.reason}); starting with allowRoots: [] and waiting for MCP roots/list`,
       );
     }
   }
@@ -1344,7 +2021,7 @@ export function attachMcpRootsWorkspaceBinder(
       listedRoots = response.roots;
     } catch (error) {
       log(
-        `[causoryn] MCP roots/list alınamadı: ${error instanceof Error ? error.message : String(error)}`,
+        `[causoryn] could not fetch MCP roots/list: ${error instanceof Error ? error.message : String(error)}`,
       );
       return true;
     }
@@ -1355,7 +2032,7 @@ export function attachMcpRootsWorkspaceBinder(
       if (localPath === null) continue;
       const safety = inspectProjectRootSafety(localPath, safetyOptions);
       if (!safety.safe) {
-        log(`[causoryn] MCP root adayı atlandı (${safety.reason}): ${entry.uri}`);
+        log(`[causoryn] skipped MCP root candidate (${safety.reason}): ${entry.uri}`);
         continue;
       }
       selectedRoot = safety.canonicalRoot;
@@ -1367,10 +2044,10 @@ export function attachMcpRootsWorkspaceBinder(
         try {
           rebindRoot(null);
           currentBoundRoot = null;
-          log("[causoryn] MCP roots/list güvenli kök içermiyor; allowRoots: [] durumuna dönüldü");
+          log("[causoryn] MCP roots/list contains no safe root; reverted to allowRoots: []");
         } catch (error) {
           log(
-            `[causoryn] boş bağlama dönüş başarısız: ${error instanceof Error ? error.message : String(error)}`,
+            `[causoryn] reverting to an empty binding failed: ${error instanceof Error ? error.message : String(error)}`,
           );
         }
       }
@@ -1382,14 +2059,15 @@ export function attachMcpRootsWorkspaceBinder(
     }
 
     try {
-      rebindRoot(selectedRoot);
+      await rebindRootAsync(selectedRoot);
       currentBoundRoot = selectedRoot;
+      const clientTag = options.client !== undefined ? `, client=${options.client}` : "";
       log(
-        `[causoryn] MCP roots/list ile çalışma alanı bağlandı: ${selectedRoot} (workspaceId=${dynamicContext.config.workspaceId})`,
+        `[causoryn] bound workspace via MCP roots/list: ${selectedRoot} (workspaceId=${dynamicContext.config.workspaceId}${clientTag})`,
       );
     } catch (error) {
       log(
-        `[causoryn] MCP roots/list çalışma alanı bağlanamadı (${selectedRoot}): ${error instanceof Error ? error.message : String(error)}`,
+        `[causoryn] could not bind the MCP roots/list workspace (${selectedRoot}): ${error instanceof Error ? error.message : String(error)}`,
       );
     }
     return true;
@@ -1442,16 +2120,38 @@ export function attachMcpRootsWorkspaceBinder(
   });
 
   const NON_BLOCKING_BOOT_TOOLS: ReadonlySet<string> = new Set([
+    "causoryn_status",
     "causoryn_get_capabilities",
     "causoryn_index_status",
     "causoryn_refresh_index",
   ]);
 
   return {
-    beforeToolCall: async (toolName: string): Promise<void> => {
+    beforeToolCall: async (
+      toolName: string,
+      hookContext?: BeforeToolCallContext,
+    ): Promise<void> => {
       await syncFromClientRoots(false);
+      if (toolName === "causoryn_status" || toolName === "causoryn_index_status") {
+        dynamicContext.startDeferredIndex?.();
+        return;
+      }
       if (!NON_BLOCKING_BOOT_TOOLS.has(toolName)) {
-        await dynamicContext.waitForInitialIndex?.(15_000);
+        const timeoutMs = resolveIndexWaitTimeoutMs(options.env ?? process.env);
+        await dynamicContext.waitForInitialIndex?.({
+          timeoutMs,
+          ...(hookContext?.signal === undefined ? {} : { signal: hookContext.signal }),
+          ...(hookContext?.progressToken === undefined
+            ? {}
+            : {
+                onProgress: (update) =>
+                  hookContext.sendProgress({
+                    progress: update.progress,
+                    total: update.total,
+                    message: update.message,
+                  }),
+              }),
+        });
       }
     },
     syncFromClientRoots,

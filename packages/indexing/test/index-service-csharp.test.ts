@@ -246,7 +246,7 @@ describe.skipIf(!workerReady)(
       expect(segments).toContain("roslyn-worker@0.1.0");
       // Ref-pack: worker healthy koştu → NETCore.App.Ref sürümü yüklü
       // (bu makinede packs dizini SDK ile gelir; ReferenceResolver.cs:144
-      // formatı: "referans paketi yüklendi: <pack> <sürüm> (<tfmDir>)").
+      // formatı: "reference pack loaded: <pack> <version> (<tfmDir>)").
       const netCore = segments.find((s) => s.startsWith("refpack="));
       expect(netCore).toBeDefined();
       expect(netCore).toContain("Microsoft.NETCore.App.Ref@");
@@ -308,7 +308,7 @@ describe.skipIf(!workerReady)(
         // Explicit degradasyon warning'i (adapter fallback sözleşmesi).
         expect(
           run.warnings.some(
-            (w) => w.includes("Roslyn worker kullanılamıyor") && w.includes("L0/L1"),
+            (w) => w.includes("Roslyn worker unavailable") && w.includes("L0/L1"),
           ),
         ).toBe(true);
         // Fingerprint dürüstçülüğü: ref-pack keşfi YAPILMADI.
@@ -371,7 +371,7 @@ describe.skipIf(!workerReady)(
       // (fingerprint'in kaynağı — ReferenceResolver.cs:144 formatı).
       expect(
         runLocal.warnings.some(
-          (w) => w.startsWith("referans paketi yüklendi: Microsoft.NETCore.App.Ref"),
+          (w) => w.startsWith("reference pack loaded: Microsoft.NETCore.App.Ref"),
         ),
       ).toBe(true);
     });
@@ -421,6 +421,79 @@ describe.skipIf(!workerReady)(
 );
 
 /* ------------------------------------------------------------------ */
+/* SDK-style project with implicit global usings (real worker)          */
+/* ------------------------------------------------------------------ */
+
+describe.skipIf(!workerReady)(
+  "IndexService.runIndexAsync — SDK-style project with ImplicitUsings (real Roslyn worker)",
+  () => {
+    const runnerSource = [
+      "namespace App;",
+      "",
+      "public static class Runner",
+      "{",
+      "    public static int Run()",
+      "    {",
+      "        Console.WriteLine(\"start\");",
+      "        Thread.Sleep(1);",
+      "        var items = new List<int>();",
+      "        items.Add(1);",
+      "        return items.Count;",
+      "    }",
+      "}",
+      "",
+    ].join("\n");
+    const csproj = (implicitUsings: string): string =>
+      '<Project Sdk="Microsoft.NET.Sdk">\n  <PropertyGroup>\n    <TargetFramework>net10.0</TargetFramework>\n' +
+      `    <ImplicitUsings>${implicitUsings}</ImplicitUsings>\n  </PropertyGroup>\n</Project>\n`;
+
+    async function indexProject(implicitUsings: string, workspaceId: string) {
+      const root = mkdtempSync(path.join(tmpdir(), "causoryn-implicit-usings-"));
+      try {
+        mkdirSync(path.join(root, "App"));
+        writeFileSync(path.join(root, "App", "App.csproj"), csproj(implicitUsings), "utf8");
+        writeFileSync(path.join(root, "App", "Runner.cs"), runnerSource, "utf8");
+        const service = makeService(new InMemoryGraphRepository(), root, undefined, workspaceId);
+        return await service.runIndexAsync(root);
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    }
+
+    beforeAll(() => {
+      if (!existsSync(WORKER_DLL)) {
+        const build = buildRoslynWorkerBinary();
+        if (build.status !== 0 || !existsSync(WORKER_DLL)) {
+          throw new Error(`worker build failed (exit=${String(build.status)})`);
+        }
+      }
+    }, 300_000);
+
+    it("ImplicitUsings enable: no false CS0246/CS0103, ready snapshot, verified BCL CALLS", async () => {
+      const run = await indexProject("enable", "implicit-usings-on");
+      expect(run.diagnostics.map((d) => d.code)).toEqual([]);
+      expect(run.snapshot.meta.state).toBe("ready");
+      const byId = new Map(run.snapshot.nodes.map((n) => [n.id, n]));
+      const consoleCall = run.snapshot.edges.find(
+        (e) =>
+          e.kind === "CALLS" &&
+          byId.get(e.from)?.qualifiedName === "App.Runner.Run" &&
+          byId.get(e.to)?.qualifiedName === "System.Console.WriteLine",
+      );
+      expect(consoleCall?.resolution).toBe("verified");
+    }, 300_000);
+
+    it("ImplicitUsings disable: the same sources keep their CS0246/CS0103 diagnostics", async () => {
+      const run = await indexProject("disable", "implicit-usings-off");
+      const codes = run.diagnostics.map((d) => d.code);
+      expect(codes).toContain("CS0103");
+      expect(codes).toContain("CS0246");
+      expect(run.snapshot.meta.state).toBe("partial");
+    }, 300_000);
+  },
+);
+
+/* ------------------------------------------------------------------ */
 /* Senkron köprü dürüstlüğü: runIndex .cs'i L0'da tutar                */
 /* ------------------------------------------------------------------ */
 
@@ -430,7 +503,7 @@ describe("IndexService.runIndex — senkron koşum C# derin analiz yürütmez (B
     try {
       const repository = new InMemoryGraphRepository();
       // Olmayan DLL ile koş: senkron yol adapter'a SPAWN ATMAMALI — spawn
-      // atılsaydı fallback warning'i ("Roslyn worker kullanılamıyor")
+      // atılsaydı fallback warning ("Roslyn worker unavailable")
       // warnings'e girerdi; köprü sözleşmesinde o uyarı YOKTUR.
       const service = makeService(
         repository,
@@ -466,14 +539,14 @@ describe("IndexService.runIndex — senkron koşum C# derin analiz yürütmez (B
       expect(
         run.warnings.some(
           (w) =>
-            w.includes("senkron koşum") &&
+            w.includes("synchronous run cannot perform deep") &&
             w.includes("C#") &&
             w.includes("runIndexAsync"),
         ),
       ).toBe(true);
       // Spawn atılmadı: adapter fallback uyarısı yok.
       expect(
-        run.warnings.some((w) => w.includes("Roslyn worker kullanılamıyor")),
+        run.warnings.some((w) => w.includes("Roslyn worker unavailable")),
       ).toBe(false);
       // Fingerprint: sync koşum worker keşfi yapmadı — dürüst etiket.
       const segments = run.snapshot.meta.analyzerFingerprint.split("|");
@@ -495,7 +568,7 @@ describe("IndexService.runIndex — senkron koşum C# derin analiz yürütmez (B
       (n) => n.kind === "File" && n.language === "csharp",
     );
     expect(csFiles.length).toBe(4);
-    expect(run.warnings.some((w) => w.includes("senkron koşum"))).toBe(true);
+    expect(run.warnings.some((w) => w.includes("synchronous run cannot perform deep"))).toBe(true);
   }, 60_000);
 
   it("negatif: yetkisiz kök runIndexAsync'te de IndexingError ile reddedilir", async () => {
@@ -571,8 +644,8 @@ describe("analyzerFingerprint fp2 şeması (birim)", () => {
     delete process.env["DOTNET_ROOT"];
     try {
       const context = extractRoslynRefPackContext([
-        "referans paketi yüklendi: Microsoft.AspNetCore.App.Ref 10.0.11 (C:\\Program Files\\dotnet\\packs\\Microsoft.AspNetCore.App.Ref\\10.0.11\\ref\\net10.0)",
-        "referans paketi yüklendi: Microsoft.NETCore.App.Ref 10.0.11 (C:\\Program Files\\dotnet\\packs\\Microsoft.NETCore.App.Ref\\10.0.11\\ref\\net10.0)",
+        "reference pack loaded: Microsoft.AspNetCore.App.Ref 10.0.11 (C:\\Program Files\\dotnet\\packs\\Microsoft.AspNetCore.App.Ref\\10.0.11\\ref\\net10.0)",
+        "reference pack loaded: Microsoft.NETCore.App.Ref 10.0.11 (C:\\Program Files\\dotnet\\packs\\Microsoft.NETCore.App.Ref\\10.0.11\\ref\\net10.0)",
       ]);
       expect(context).not.toBeNull();
       expect(context?.packs).toHaveLength(2);
@@ -593,7 +666,7 @@ describe("analyzerFingerprint fp2 şeması (birim)", () => {
     delete process.env["DOTNET_ROOT"];
     try {
       const fallback = extractRoslynRefPackContext([
-        "Microsoft.NETCore.App.Ref pack bulunamadı; çalışma zamanı düşüşü: yalnızca System.Private.CoreLib.dll referansı eklendi.",
+        "Microsoft.NETCore.App.Ref pack not found; runtime fallback: only the System.Private.CoreLib.dll reference was added.",
       ]);
       expect(fallback).not.toBeNull();
       expect(fallback?.packs).toHaveLength(0);
@@ -637,7 +710,7 @@ describe("analyzerFingerprint fp2 şeması (birim)", () => {
       csharp,
     });
     expect(a).toBe(b);
-    expect(a.startsWith("fp2|")).toBe(true);
+    expect(a.startsWith("fp3|")).toBe(true);
     expect(a.split("|")).toContain("ts-adapter@0.1.0");
     expect(a.split("|")).toContain("roslyn-worker@0.1.0");
     expect(a).toContain("Microsoft.NETCore.App.Ref@10.0.11");
@@ -699,7 +772,7 @@ describe("analyzerFingerprint fp2 şeması (birim)", () => {
       // env keşfi SANMAMALI (prefix ayıraçsız eşleşme false-positive).
       process.env["DOTNET_ROOT"] = "C:\\dotnet";
       const evil = extractRoslynRefPackContext([
-        "referans paketi yüklendi: Microsoft.NETCore.App.Ref 10.0.11 (C:\\dotnet-evil\\packs\\Microsoft.NETCore.App.Ref\\10.0.11\\ref\\net10.0)",
+        "reference pack loaded: Microsoft.NETCore.App.Ref 10.0.11 (C:\\dotnet-evil\\packs\\Microsoft.NETCore.App.Ref\\10.0.11\\ref\\net10.0)",
       ]);
       expect(evil?.source).toBe("worker-discovered");
 
@@ -708,7 +781,7 @@ describe("analyzerFingerprint fp2 şeması (birim)", () => {
       // false-negative güvenli ama bilgi kaybı gereksizdir).
       process.env["DOTNET_ROOT"] = "c:\\dotnet";
       const real = extractRoslynRefPackContext([
-        "referans paketi yüklendi: Microsoft.NETCore.App.Ref 10.0.11 (C:\\dotnet\\packs\\Microsoft.NETCore.App.Ref\\10.0.11\\ref\\net10.0)",
+        "reference pack loaded: Microsoft.NETCore.App.Ref 10.0.11 (C:\\dotnet\\packs\\Microsoft.NETCore.App.Ref\\10.0.11\\ref\\net10.0)",
       ]);
       expect(real?.source).toBe("env-dotnet-root");
     } finally {
@@ -744,7 +817,7 @@ describe("runIndexAsync — boş workspace dürüstlüğü (denetim bulgusu B1)"
       // yalnızca TypeScript/TSX/C# sayıyordu — geride kalmıştı).
       expect(
         run.warnings.some((w) =>
-          w.includes("analiz edilebilir TypeScript/TSX/C#/Python/Go/Rust kaynağı içermiyor"),
+          w.includes("contains no analyzable TypeScript/TSX/C#/Python/Go/Rust sources"),
         ),
       ).toBe(true);
       expect(run.warnings.some((w) => w.includes("README.md"))).toBe(true);

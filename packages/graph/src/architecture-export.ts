@@ -1,6 +1,16 @@
+import { createHash } from "node:crypto";
+
 import { z } from "zod";
 
-import { canonicalJson, type SnapshotGraph } from "@causoryn/domain";
+import {
+  canonicalJson,
+  escapeMarkdownBlock,
+  escapeMarkdownInline,
+  escapeMarkdownTableCell,
+  escapeMermaidLabel,
+  markdownCodeSpan,
+  type SnapshotGraph,
+} from "@causoryn/domain";
 
 import {
   validateArchitectureAnnotations,
@@ -51,9 +61,6 @@ export const exportDocumentationViewSchema = z.enum(EXPORT_DOCUMENTATION_VIEWS);
 export const ARCHITECTURE_ZERO_JS_CSP =
   "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'";
 
-export const ARCHITECTURE_INTERACTIVE_CSP =
-  "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'";
-
 interface PreparedArchitecture {
   readonly projection: ArchitectureProjection;
   readonly annotations?: ValidatedArchitectureAnnotations;
@@ -84,54 +91,14 @@ function escapeJsonForScriptIsland(json: string): string {
     .replace(/\u2029/g, "\\u2029");
 }
 
-function escapeMarkdownCell(value: string): string {
-  return value
-    .replace(/\\/g, "\\\\")
-    .replace(/\|/g, "\\|")
-    .replace(/!/g, "\\!")
-    .replace(/\[/g, "\\[")
-    .replace(/\]/g, "\\]")
-    .replace(/\(/g, "\\(")
-    .replace(/\)/g, "\\)")
-    .replace(/</g, "\\<")
-    .replace(/>/g, "\\>")
-    .replace(/[\r\n\t]+/g, " ");
-}
-
+/**
+ * Multi-line annotation prose (executive summary, descriptions). Markdown and
+ * Mermaid escaping is shared through @causoryn/domain (markup-escape.ts): one
+ * helper per output context, so repository- and host-supplied text renders as
+ * literal text in every serializer.
+ */
 function escapeMarkdownProse(value: string): string {
-  return value
-    .replace(/\\/g, "\\\\")
-    .replace(/!/g, "\\!")
-    .replace(/\[/g, "\\[")
-    .replace(/\]/g, "\\]")
-    .replace(/\(/g, "\\(")
-    .replace(/\)/g, "\\)")
-    .replace(/</g, "\\<")
-    .replace(/>/g, "\\>")
-    .replace(/\r\n/g, "\n")
-    .trim();
-}
-
-function escapeMarkdownInline(value: string): string {
-  return escapeMarkdownProse(value).replace(/[\r\n\t]+/g, " ");
-}
-
-function escapeMermaidText(value: string, maxLen = 72): string {
-  const flat = value
-    .replace(/[\r\n\t]+/g, " ")
-    .replace(/\s{2,}/g, " ")
-    .trim();
-  const clipped = flat.length > maxLen ? `${flat.slice(0, maxLen - 1)}…` : flat;
-  return clipped
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/`/g, "&#96;")
-    .replace(/#/g, "&#35;")
-    .replace(/\|/g, "&#124;")
-    .replace(/\[/g, "&#91;")
-    .replace(/\]/g, "&#93;");
+  return escapeMarkdownBlock(value).trim();
 }
 
 export function prepareArchitecture(
@@ -261,7 +228,7 @@ export function renderArchitectureMermaidFromPrepared(prepared: PreparedArchitec
     if (bucket === undefined || bucket.mods.length === 0) continue;
     const sgId = `sg${String(sgIndex)}`;
     sgIndex += 1;
-    lines.push(`  subgraph ${sgId}["${escapeMermaidText(bucket.title, 48)}"]`);
+    lines.push(`  subgraph ${sgId}["${escapeMermaidLabel(bucket.title, 48)}"]`);
     for (const mod of bucket.mods) {
       const mmdId = mmdIdByModId.get(mod.id) ?? "m0";
       const stats = [
@@ -272,7 +239,7 @@ export function renderArchitectureMermaidFromPrepared(prepared: PreparedArchitec
       ].join(" · ");
       const cls = mermaidClassForModule(mod, cycleModIds);
       lines.push(
-        `    ${mmdId}["${escapeMermaidText(mod.label, 40)}<br/>${escapeMermaidText(stats, 40)}"]:::${cls}`,
+        `    ${mmdId}["${escapeMermaidLabel(mod.label, 40)}<br/>${escapeMermaidLabel(stats, 40)}"]:::${cls}`,
       );
     }
     lines.push("  end");
@@ -288,7 +255,7 @@ export function renderArchitectureMermaidFromPrepared(prepared: PreparedArchitec
     const arrow = edge.resolution === "verified" && !edge.isCycle ? "-->" : "-.->";
     const suffix = edge.isCycle ? " CYCLE" : edge.resolution === "verified" ? "" : ` ${edge.resolution}`;
     const label = `${topKind} ×${String(edge.weight)}${suffix}`;
-    lines.push(`  ${fromId} ${arrow}|"${escapeMermaidText(label, 36)}"| ${toId}`);
+    lines.push(`  ${fromId} ${arrow}|"${escapeMermaidLabel(label, 36)}"| ${toId}`);
     if (edge.isCycle) cycleEdgeIndices.push(emittedEdgeIdx);
     emittedEdgeIdx += 1;
   }
@@ -381,13 +348,13 @@ export function serializeArchitectureMarkdownFromPrepared(prepared: PreparedArch
   lines.push("");
   lines.push("## Snapshot & Coverage");
   lines.push("");
-  lines.push(`- id: ${escapeMarkdownCell(projection.meta.id)}`);
-  lines.push(`- workspaceId: ${escapeMarkdownCell(projection.meta.workspaceId)}`);
+  lines.push(`- id: ${escapeMarkdownInline(projection.meta.id)}`);
+  lines.push(`- workspaceId: ${escapeMarkdownInline(projection.meta.workspaceId)}`);
   lines.push(
-    `- revision: ${escapeMarkdownCell(projection.meta.revision.id)} (sequence ${String(projection.meta.revision.sequence)})`,
+    `- revision: ${escapeMarkdownInline(projection.meta.revision.id)} (sequence ${String(projection.meta.revision.sequence)})`,
   );
-  lines.push(`- state: ${escapeMarkdownCell(projection.meta.state)}`);
-  lines.push(`- createdAt: ${escapeMarkdownCell(projection.meta.createdAt)}`);
+  lines.push(`- state: ${escapeMarkdownInline(projection.meta.state)}`);
+  lines.push(`- createdAt: ${escapeMarkdownInline(projection.meta.createdAt)}`);
   lines.push(
     `- analyzed: ${String(projection.summary.analyzedFiles)} files · ${String(projection.summary.moduleCount)} modules · ${String(projection.summary.moduleEdgeCount)} module links · ${String(projection.summary.cycleCount)} circular dependencies · ${String(projection.summary.entrypointCount)} entrypoints`,
   );
@@ -397,7 +364,7 @@ export function serializeArchitectureMarkdownFromPrepared(prepared: PreparedArch
 
   if (projection.summary.languages.length > 0) {
     lines.push(
-      `- languages: ${projection.summary.languages.map((l) => `${escapeMarkdownCell(l.language)} (${String(l.fileCount)} files)`).join(", ")}`,
+      `- languages: ${projection.summary.languages.map((l) => `${escapeMarkdownInline(l.language)} (${String(l.fileCount)} files)`).join(", ")}`,
     );
   }
 
@@ -419,7 +386,7 @@ export function serializeArchitectureMarkdownFromPrepared(prepared: PreparedArch
       lines.push("");
       lines.push(escapeMarkdownProse(dom.description));
       lines.push("");
-      lines.push(`- Modules: ${dom.moduleIds.map((id) => `\`${escapeMarkdownCell(id)}\``).join(", ")}`);
+      lines.push(`- Modules: ${dom.moduleIds.map((id) => markdownCodeSpan(id)).join(", ")}`);
       lines.push("");
     }
   }
@@ -438,7 +405,7 @@ export function serializeArchitectureMarkdownFromPrepared(prepared: PreparedArch
           ? keySyms
           : m.path;
     lines.push(
-      `| ${escapeMarkdownCell(m.label)} | ${escapeMarkdownCell(m.group)} | L${String(m.layer)} | ${escapeMarkdownCell(m.primaryLanguage)} | ${String(m.counts.files)} | ${String(m.counts.totalSymbols)} | ${String(m.fanIn)}/${String(m.fanOut)} | ${escapeMarkdownCell(desc)} |`,
+      `| ${escapeMarkdownTableCell(m.label)} | ${escapeMarkdownTableCell(m.group)} | L${String(m.layer)} | ${escapeMarkdownTableCell(m.primaryLanguage)} | ${String(m.counts.files)} | ${String(m.counts.totalSymbols)} | ${String(m.fanIn)}/${String(m.fanOut)} | ${escapeMarkdownTableCell(desc)} |`,
     );
   }
   lines.push("");
@@ -455,7 +422,7 @@ export function serializeArchitectureMarkdownFromPrepared(prepared: PreparedArch
         const s = flow.steps[i];
         if (s === undefined) continue;
         lines.push(
-          `${String(i + 1)}. **${escapeMarkdownInline(s.label)}**${s.moduleId === undefined ? "" : ` (\`${escapeMarkdownCell(s.moduleId)}\`)`} — ${escapeMarkdownInline(s.explanation)}`,
+          `${String(i + 1)}. **${escapeMarkdownInline(s.label)}**${s.moduleId === undefined ? "" : ` (${markdownCodeSpan(s.moduleId)})`} — ${escapeMarkdownInline(s.explanation)}`,
         );
       }
       lines.push("");
@@ -470,7 +437,7 @@ export function serializeArchitectureMarkdownFromPrepared(prepared: PreparedArch
         flow.entryQualifiedName,
         ...flow.steps.map((s) => s.qualifiedName),
       ]
-        .map(escapeMarkdownCell)
+        .map(escapeMarkdownInline)
         .join(" -> ");
       lines.push(`- ${chain}`);
     }
@@ -482,7 +449,7 @@ export function serializeArchitectureMarkdownFromPrepared(prepared: PreparedArch
     lines.push("");
     for (const stop of annotations.guidedTour) {
       lines.push(
-        `${String(stop.step)}. **${escapeMarkdownInline(stop.title)}**${stop.targetModuleId === undefined ? "" : ` (\`${escapeMarkdownCell(stop.targetModuleId)}\`)`} — ${escapeMarkdownInline(stop.explanation)}`,
+        `${String(stop.step)}. **${escapeMarkdownInline(stop.title)}**${stop.targetModuleId === undefined ? "" : ` (${markdownCodeSpan(stop.targetModuleId)})`} — ${escapeMarkdownInline(stop.explanation)}`,
       );
     }
     lines.push("");
@@ -499,7 +466,7 @@ export function serializeArchitectureMarkdownFromPrepared(prepared: PreparedArch
           ? ""
           : `${ep.relativePath}${ep.startLine === undefined ? "" : `:${String(ep.startLine)}`}`;
       lines.push(
-        `| ${escapeMarkdownCell(ep.kind)} | ${escapeMarkdownCell(ep.qualifiedName)} | ${escapeMarkdownCell(ep.moduleId)} | ${escapeMarkdownCell(loc)} |`,
+        `| ${escapeMarkdownTableCell(ep.kind)} | ${escapeMarkdownTableCell(ep.qualifiedName)} | ${escapeMarkdownTableCell(ep.moduleId)} | ${escapeMarkdownTableCell(loc)} |`,
       );
     }
     lines.push("");
@@ -510,12 +477,12 @@ export function serializeArchitectureMarkdownFromPrepared(prepared: PreparedArch
     lines.push("");
     for (const c of projection.cycles) {
       lines.push(
-        `- **Cycle ${escapeMarkdownCell(c.id)}** (${String(c.edgeCount)} edges): ${c.moduleIds.map((id) => `\`${escapeMarkdownCell(id)}\``).join(" ↔ ")}`,
+        `- **Cycle ${escapeMarkdownInline(c.id)}** (${String(c.edgeCount)} edges): ${c.moduleIds.map((id) => markdownCodeSpan(id)).join(" ↔ ")}`,
       );
     }
     for (const h of projection.riskHotspots) {
       lines.push(
-        `- **${escapeMarkdownCell(h.label)}** [${escapeMarkdownCell(h.reason)}]: ${escapeMarkdownCell(h.detail)}`,
+        `- **${escapeMarkdownInline(h.label)}** [${escapeMarkdownInline(h.reason)}]: ${escapeMarkdownInline(h.detail)}`,
       );
     }
     lines.push("");
@@ -1599,6 +1566,20 @@ const INTERACTIVE_PORTAL_JS = `(function(){
 
   fitCanvas();
 })();`;
+
+function buildInteractiveArchitectureCsp(scriptBody: string): string {
+  const scriptSha256 = createHash("sha256").update(scriptBody, "utf8").digest("base64");
+  return `default-src 'none'; script-src 'sha256-${scriptSha256}'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'`;
+}
+
+/**
+ * Deterministic SHA-256 CSP for the single-file offline interactive HTML portal:
+ * allows ONLY the exact `INTERACTIVE_PORTAL_JS` inline script body (zero
+ * `script-src 'unsafe-inline'`); the `<script type="application/json">` data
+ * island is non-executable and requires no script execution permission.
+ */
+export const ARCHITECTURE_INTERACTIVE_CSP =
+  buildInteractiveArchitectureCsp(INTERACTIVE_PORTAL_JS);
 
 export function serializeInteractiveArchitectureHtmlFromPrepared(
   prepared: PreparedArchitecture,

@@ -176,11 +176,41 @@ const SQL_SECTIONS = `SELECT page_id, evidence_refs_json
  WHERE wiki_snapshot_sid = ?
  ORDER BY page_id, position`;
 
+/**
+ * Runs one FTS5 MATCH statement and maps SQLite failures to search contract
+ * codes. The SQL text is static and already prepared, so an `SQLITE_ERROR`
+ * raised while stepping comes from evaluating the MATCH expression: it maps
+ * to `wiki/invalid-field` with a fixed message (no SQL, engine text or stack
+ * reaches the caller). Any other failure is an environment error
+ * (`storage/driver-error`); the service layer logs its detail to stderr and
+ * returns a generic internal error.
+ */
+function runFullTextQuery(run: () => unknown[]): unknown[] {
+  try {
+    return run();
+  } catch (error) {
+    const code =
+      error !== null && typeof error === "object" && "code" in error
+        ? (error as { code?: unknown }).code
+        : undefined;
+    if (code === "SQLITE_ERROR") {
+      throw new WikiSearchError(
+        "wiki/invalid-field",
+        "query cannot be evaluated by the full-text index; remove unsupported characters and retry",
+      );
+    }
+    throw new WikiSearchError(
+      "storage/driver-error",
+      `SQLite full-text search failed: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+}
+
 function asRecord(value: unknown, what: string): Record<string, unknown> {
   if (value === null || typeof value !== "object" || Array.isArray(value)) {
     throw new WikiSearchError(
       "wiki/storage-corrupt",
-      `Depo satırı beklenen şekilde değil: ${what}`,
+      `Storage row has an unexpected shape: ${what}`,
     );
   }
   return value as Record<string, unknown>;
@@ -191,7 +221,7 @@ function asString(record: Record<string, unknown>, key: string): string {
   if (typeof value !== "string") {
     throw new WikiSearchError(
       "wiki/storage-corrupt",
-      `Depo alanı metin olmalı: ${key}`,
+      `Storage field must be a string: ${key}`,
     );
   }
   return value;
@@ -206,7 +236,7 @@ function asStringOrNull(
   if (typeof value !== "string") {
     throw new WikiSearchError(
       "wiki/storage-corrupt",
-      `Depo alanı metin veya null olmalı: ${key}`,
+      `Storage field must be a string or null: ${key}`,
     );
   }
   return value;
@@ -217,7 +247,7 @@ function asFiniteNumber(record: Record<string, unknown>, key: string): number {
   if (typeof value !== "number" || !Number.isFinite(value)) {
     throw new WikiSearchError(
       "wiki/storage-corrupt",
-      `Depo alanı sonlu sayı olmalı: ${key}`,
+      `Storage field must be a finite number: ${key}`,
     );
   }
   return value;
@@ -233,13 +263,13 @@ function collectEvidenceIds(rawJson: string, pageId: string): string[] {
   } catch {
     throw new WikiSearchError(
       "wiki/storage-corrupt",
-      `evidence_refs_json çözümlenemedi: ${pageId}`,
+      `evidence_refs_json could not be parsed: ${pageId}`,
     );
   }
   if (!Array.isArray(parsed)) {
     throw new WikiSearchError(
       "wiki/storage-corrupt",
-      `evidence_refs_json dizi olmalı: ${pageId}`,
+      `evidence_refs_json must be an array: ${pageId}`,
     );
   }
   const ids = new Set<string>();
@@ -247,14 +277,14 @@ function collectEvidenceIds(rawJson: string, pageId: string): string[] {
     if (ref === null || typeof ref !== "object" || Array.isArray(ref)) {
       throw new WikiSearchError(
         "wiki/storage-corrupt",
-        `evidence referansı nesne olmalı: ${pageId}`,
+        `evidence reference must be an object: ${pageId}`,
       );
     }
     const evidenceId = (ref as Record<string, unknown>)["evidenceId"];
     if (typeof evidenceId !== "string" || evidenceId === "") {
       throw new WikiSearchError(
         "wiki/storage-corrupt",
-        `evidence referansında evidenceId metin olmalı: ${pageId}`,
+        `evidenceId in an evidence reference must be a string: ${pageId}`,
       );
     }
     ids.add(evidenceId);
@@ -269,7 +299,7 @@ export class WikiSearchStore {
     if (db === null || typeof db.prepare !== "function") {
       throw new WikiSearchError(
         "wiki/invalid-field",
-        "WikiSearchDatabase portu gerekli (prepare fonksiyonu)",
+        "A WikiSearchDatabase port is required (prepare function)",
       );
     }
     this.db = db;
@@ -287,20 +317,20 @@ export class WikiSearchStore {
     if (workspaceId === "") {
       throw new WikiSearchError(
         "wiki/invalid-field",
-        "workspaceId zorunludur",
+        "workspaceId is required",
       );
     }
     if (typeof input.query !== "string") {
       throw new WikiSearchError(
         "wiki/invalid-field",
-        "query metin olmalıdır",
+        "query must be a string",
       );
     }
     const query = normalizeWikiSearchQuery(input.query);
     if (query === "") {
       throw new WikiSearchError(
         "wiki/empty-query",
-        "Sorgu boş olamaz (normalizasyon sonrası boş kaldı)",
+        "Query must not be empty (it is empty after normalization)",
       );
     }
     const limit = input.limit ?? DEFAULT_WIKI_SEARCH_LIMIT;
@@ -311,7 +341,7 @@ export class WikiSearchStore {
     ) {
       throw new WikiSearchError(
         "wiki/invalid-limit",
-        `limit 1..${String(MAX_WIKI_SEARCH_LIMIT)} aralığında tam sayı olmalı: ${String(limit)}`,
+        `limit must be an integer in the range 1..${String(MAX_WIKI_SEARCH_LIMIT)}: ${String(limit)}`,
       );
     }
     const offset =
@@ -319,7 +349,7 @@ export class WikiSearchStore {
     if (offset === null) {
       throw new WikiSearchError(
         "wiki/invalid-cursor",
-        "Cursor çözülemedi",
+        "Cursor could not be decoded",
       );
     }
     const proximity = input.proximity;
@@ -328,7 +358,7 @@ export class WikiSearchStore {
         if (typeof distance !== "number" || !Number.isFinite(distance)) {
           throw new WikiSearchError(
             "wiki/invalid-field",
-            `proximity değeri sonlu sayı olmalı: ${pageId}`,
+            `proximity value must be a finite number: ${pageId}`,
           );
         }
       }
@@ -337,23 +367,25 @@ export class WikiSearchStore {
     const snapshot = this.resolveSnapshot(workspaceId, input.wikiSnapshotId);
     const matchExpression = buildWikiMatchExpression(query);
 
-    const candidateRows = this.db
-      .prepare(SQL_CANDIDATES)
-      .all(matchExpression, snapshot.sid) as unknown[];
+    const candidateStatement = this.db.prepare(SQL_CANDIDATES);
+    const candidateRows = runFullTextQuery(() =>
+      candidateStatement.all(matchExpression, snapshot.sid),
+    );
     const candidates = candidateRows.map((row) =>
-      this.toCandidate(asRecord(row, "wiki_fts aday satırı")),
+      this.toCandidate(asRecord(row, "wiki_fts candidate row")),
     );
 
     // Alan eşleşme gerçeği: altı statik sütun-filtreli sorgu; sonuç
     // pageId kümeleri adaylarla kesiştirilir ve kanonik sırada yazılır.
     const matchedByField = new Map<WikiSearchMatchedField, Set<string>>();
     for (const fieldQuery of SQL_FIELD_MATCH) {
-      const rows = this.db
-        .prepare(fieldQuery.sql)
-        .all(`${fieldQuery.column}:${matchExpression}`, snapshot.sid) as unknown[];
+      const fieldStatement = this.db.prepare(fieldQuery.sql);
+      const rows = runFullTextQuery(() =>
+        fieldStatement.all(`${fieldQuery.column}:${matchExpression}`, snapshot.sid),
+      );
       const pageIds = new Set<string>();
       for (const row of rows) {
-        pageIds.add(asString(asRecord(row, "fts alan satırı"), "page_id"));
+        pageIds.add(asString(asRecord(row, "fts field row"), "page_id"));
       }
       matchedByField.set(fieldQuery.field, pageIds);
     }
@@ -410,7 +442,7 @@ export class WikiSearchStore {
     } catch {
       throw new WikiSearchError(
         "wiki/storage-corrupt",
-        "Arama sonucu şema sözleşmesini ihlal etti",
+        "Search result violated the schema contract",
       );
     }
   }
@@ -431,23 +463,23 @@ export class WikiSearchStore {
       throw new WikiSearchError(
         "wiki/snapshot-not-found",
         wikiSnapshotId === undefined
-          ? `Workspace için publish edilmiş WikiSnapshot yok: ${workspaceId}`
-          : `Workspace kapsamında WikiSnapshot bulunamadı: ${wikiSnapshotId}`,
+          ? `No published WikiSnapshot for workspace: ${workspaceId}`
+          : `WikiSnapshot not found in workspace scope: ${wikiSnapshotId}`,
       );
     }
-    const record = asRecord(row, "wiki_snapshots satırı");
+    const record = asRecord(row, "wiki_snapshots row");
     const sid = asFiniteNumber(record, "sid");
     if (!Number.isInteger(sid)) {
       throw new WikiSearchError(
         "wiki/storage-corrupt",
-        "wiki_snapshots.sid tam sayı olmalı",
+        "wiki_snapshots.sid must be an integer",
       );
     }
     const id = asStringOrNull(record, "id");
     if (id === null) {
       throw new WikiSearchError(
         "wiki/storage-corrupt",
-        "Publish edilmiş snapshot satırında id null olamaz",
+        "Published snapshot row must not have a null id",
       );
     }
     return { sid, id };
@@ -482,7 +514,7 @@ export class WikiSearchStore {
       .prepare(SQL_SECTIONS)
       .all(sid) as unknown[];
     for (const row of rows) {
-      const record = asRecord(row, "wiki_page_sections satırı");
+      const record = asRecord(row, "wiki_page_sections row");
       const pageId = asString(record, "page_id");
       if (!windowPages.has(pageId)) continue;
       const refs = collectEvidenceIds(

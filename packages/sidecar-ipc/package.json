@@ -1,9 +1,9 @@
 {
   "name": "@causoryn/sidecar-ipc",
-  "version": "0.2.4",
+  "version": "0.3.0",
   "private": true,
   "license": "MIT",
-  "description": "Ortak sidecar worker IPC çekirdeği: satır-bazlı NDJSON framing, per-request timeout, stdout/stderr karakter bütçeleri, EPIPE yutma ve allowlist env kurucu (TŞ v2.1 §7 adapter izolasyonu).",
+  "description": "Shared sidecar worker IPC core: line-delimited JSON framing, per-request timeouts, stdout/stderr character budgets, EPIPE handling and an allowlisted worker environment.",
   "type": "module",
   "exports": {
     ".": "./src/index.ts"

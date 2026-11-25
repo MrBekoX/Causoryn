@@ -77,13 +77,13 @@ describe("computeWikiContractChanges — pozitif", () => {
     expect(modified).toEqual<ContractChangeRecord>({
       contractId: "node:aaa2",
       changeKind: "modified",
-      summary: "app.OrdersApi modified: sözleşme içerik karması değişti (base=hash-v1 → target=hash-v2)",
+      summary: "app.OrdersApi modified: contract content hash changed (base=hash-v1 → target=hash-v2)",
     });
     const added = changes.find((change) => change.changeKind === "added");
     expect(added).toEqual<ContractChangeRecord>({
       contractId: "node:ccc",
       changeKind: "added",
-      summary: "table:customers added: hedef WikiSnapshot'ın graph sözleşme yüzeyinde yeni kayıt",
+      summary: "table:customers added: new entry in the target WikiSnapshot's graph contract surface",
     });
     // K-013(7) gövdesi TAM ÜÇ alandır: fazla/eksik alan yok.
     for (const change of changes) {
@@ -134,7 +134,7 @@ describe("computeWikiContractChanges — negatif", () => {
       {
         contractId: "node:bbb",
         changeKind: "removed",
-        summary: "app.OrderCreated removed: hedef WikiSnapshot'ın graph sözleşme yüzeyinde kayıt yok",
+        summary: "app.OrderCreated removed: no entry in the target WikiSnapshot's graph contract surface",
       },
     ]);
   });

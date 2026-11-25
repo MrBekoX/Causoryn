@@ -36,7 +36,7 @@
  *   JSON sha256 özeti (ilk 16 hex) — csharp opts kuralının aynısı.
  * - refpack: worker'ın GERÇEKTEN yüklediği ref pack'leri (worker yanıt
  *   warnings'inden türetilir — ReferenceResolver.cs:144 canonical satırı
- *   "referans paketi yüklendi: <pack> <sürüm> (<tfmDir>)"); pack hiç
+ *   "reference pack loaded: <pack> <version> (<tfmDir>)"); pack hiç
  *   bulunamadıysa "fallback-corelib" (System.Private.CoreLib runtime ref),
  *   keşif bilgisi yoksa "unavailable" — hiçbir koşulda uydurma sürüm
  *   yazılmaz.
@@ -69,8 +69,12 @@ import {
   type JsonValue,
 } from "@causoryn/domain";
 
-/** fp2: adapter + ref-pack + ayarlar bağlamını taşıyan şema sürümü. */
-export const ANALYZER_FINGERPRINT_SCHEMA_VERSION = "fp2";
+/**
+ * Fingerprint schema version. fp3 (0.3.0) supersedes fp2: node spans, ESM/CJS
+ * module-format detection and the English evidence text changed analyzer output,
+ * so snapshots and file_facts written by earlier builds must not be reused.
+ */
+export const ANALYZER_FINGERPRINT_SCHEMA_VERSION = "fp3";
 
 /** Worker'ın yüklediği tek ref-pack kaydı (ReferenceResolver.cs:144). */
 export interface RoslynRefPackEntry {
@@ -106,17 +110,17 @@ export type RoslynDiscoveryStatus =
   | "sync-run-degraded";
 
 /** Yükleme notunun canonical başlık öneki (ReferenceResolver.cs:144). */
-const REF_PACK_LOADED_PREFIX = "referans paketi yüklendi: ";
+const REF_PACK_LOADED_PREFIX = "reference pack loaded: ";
 
 /** ReferenceResolver.cs:62-65 fallback satırının ayrıştırıcı imzası. */
-const REF_PACK_FALLBACK_PREFIX = "Microsoft.NETCore.App.Ref pack bulunamadı;";
+const REF_PACK_FALLBACK_PREFIX = "Microsoft.NETCore.App.Ref pack not found;";
 
 /** Sürüm biçimi: X.Y.Z (ReferenceResolver VersionDirRegex karşılığı). */
 const VERSION_SHAPE = /^\d+\.\d+\.\d+$/;
 
 /**
- * Tek yükleme satırını ayrıştırır: "referans paketi yüklendi: <pack>
- * <sürüm> (<tfmDir>)". Regex capture yerine adım adım dilimleme kullanılır
+ * Tek yükleme satırını ayrıştırır: "reference pack loaded: <pack>
+ * <version> (<tfmDir>)". Regex capture yerine adım adım dilimleme kullanılır
  * (saf string işlemi — yürütme ile ilişkisi yoktur).
  */
 function parseRefPackWarning(warning: string): RoslynRefPackEntry | null {

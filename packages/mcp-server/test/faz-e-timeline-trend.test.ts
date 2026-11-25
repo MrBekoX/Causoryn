@@ -45,7 +45,10 @@ interface ClientPair {
 
 /** Context'i SDK InMemory transport üzerinden bir Client'a bağlar. */
 async function connectClient(context: CausorynContext): Promise<ClientPair> {
-  const server = createCausorynMcpServer(context);
+  const server = createCausorynMcpServer(context, {
+    toolProfile: "full",
+    outputSchemaProfile: "full",
+  });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   const client = new Client({ name: "vitest-client", version: "0.0.0" });
   await server.connect(serverTransport);

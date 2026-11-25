@@ -39,7 +39,10 @@ afterEach(() => {
 });
 
 async function connectClient(context: CausorynContext) {
-  const server = createCausorynMcpServer(context);
+  const server = createCausorynMcpServer(context, {
+    toolProfile: "full",
+    outputSchemaProfile: "full",
+  });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   const client = new Client({ name: "vitest-arch-client", version: "0.0.0" });
   await server.connect(serverTransport);
@@ -82,8 +85,11 @@ describe("causoryn_export_documentation — v0.2.2 visual architecture & Host-LL
     );
     try {
       const list = await pair.client.listTools();
-      expect(list.tools).toHaveLength(29);
+      expect(list.tools).toHaveLength(32);
       expect(TOOL_NAMES).toHaveLength(29);
+      for (const name of TOOL_NAMES) {
+        expect(list.tools.some((t) => t.name === name)).toBe(true);
+      }
 
       // 1. Default JSON blueprint: exposes meta.id AND architectureSummary.moduleIds
       const jsonRes = await pair.client.callTool({

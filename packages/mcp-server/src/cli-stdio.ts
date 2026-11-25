@@ -7,25 +7,23 @@ import {
   createDynamicCausorynContext,
   inspectProjectRootSafety,
   parseMcpCliArgs,
-  resolveEffectiveOutputSchemaProfile,
+  prepareWorkspaceDatabase,
+  resolveMcpServerSettings,
+  type McpServerSettings,
   type ParsedMcpCliArgs,
 } from "./runtime-cli.js";
-import { createCausorynMcpServer, type OutputSchemaProfile } from "./server.js";
+import { createCausorynMcpServer, type BeforeToolCallContext } from "./server.js";
 import { SERVER_NAME, SERVER_VERSION } from "./version.js";
 
 /**
- * K-021 Sıfır-Ayar CLI / Plugin MCP stdio giriş noktası (`causoryn mcp ...`).
+ * Zero-config CLI / Plugin MCP stdio entrypoint (`causoryn mcp ...`).
  *
- * Not: `src/stdio.ts` TŞ §20 / F1 saf `CAUSORYN_CONFIG` giriş noktası olarak
- * (`process.argv` okumadan) korunur; açık kaynak `packages/causoryn` paketi ise
- * bu modülü (`src/cli-stdio.ts`) `packages/causoryn/dist/mcp-server.mjs` olarak
- * derler.
- *
- * stdout disiplini: bu süreç stdout'a YALNIZCA MCP protokol trafiği yazar;
- * tüm loglar `console.error` ile STDERR'e gider (TŞ §10.1).
+ * stdout discipline: this process writes ONLY MCP JSON-RPC frames to stdout;
+ * all logs are written to stderr via `console.error`.
  */
 
 const NON_BLOCKING_BOOT_TOOLS: ReadonlySet<string> = new Set([
+  "causoryn_status",
   "causoryn_get_capabilities",
   "causoryn_index_status",
   "causoryn_refresh_index",
@@ -39,15 +37,13 @@ function hasNonEmptyAllowRoots(value: unknown): boolean {
   return Array.isArray(allowRoots) && allowRoots.length > 0;
 }
 
-function main(): void {
+async function main(): Promise<void> {
   let cliArgs: ParsedMcpCliArgs;
-  let outputSchemaProfile: OutputSchemaProfile;
   try {
     cliArgs = parseMcpCliArgs(process.argv.slice(2));
-    outputSchemaProfile = resolveEffectiveOutputSchemaProfile(cliArgs, process.env);
   } catch (error) {
     console.error(
-      `[causoryn] CLI argüman hatası: ${error instanceof Error ? error.message : String(error)}`,
+      `[causoryn] CLI argument error: ${error instanceof Error ? error.message : String(error)}`,
     );
     process.exit(2);
   }
@@ -59,18 +55,32 @@ function main(): void {
       parsed = JSON.parse(rawConfig) as unknown;
     } catch (error) {
       console.error(
-        `[causoryn] CAUSORYN_CONFIG geçerli JSON değil: ${error instanceof Error ? error.message : String(error)}`,
+        `[causoryn] CAUSORYN_CONFIG is not valid JSON: ${error instanceof Error ? error.message : String(error)}`,
       );
       process.exit(2);
     }
   } else if (!cliArgs.hasCliActivation) {
     console.error(
-      "[causoryn] CAUSORYN_CONFIG tanımsız; allowRoots: [] güvenli default kullanılıyor (workspace araçları WORKSPACE_NOT_AUTHORIZED döner)",
+      "[causoryn] CAUSORYN_CONFIG unset; using safe default allowRoots: [] (workspace tools return WORKSPACE_NOT_AUTHORIZED)",
     );
   }
 
+  // Same resolver as the bare stdio.ts entry (flags > environment > CAUSORYN_CONFIG).
+  let settings: McpServerSettings;
+  try {
+    settings = resolveMcpServerSettings(cliArgs, process.env, parsed);
+  } catch (error) {
+    console.error(
+      `[causoryn] configuration error: ${error instanceof Error ? error.message : String(error)}`,
+    );
+    process.exit(2);
+  }
+  const { outputSchemaProfile, toolProfile, indexWaitTimeoutMs } = settings;
+
   let activeContext: CausorynContext;
-  let beforeToolCallHook: ((toolName: string) => Promise<void>) | undefined;
+  let beforeToolCallHook:
+    | ((toolName: string, hookContext?: BeforeToolCallContext) => Promise<void>)
+    | undefined;
   let needsDynamicBinder = false;
 
   try {
@@ -86,8 +96,13 @@ function main(): void {
           ...(cliArgs.client !== undefined ? { client: cliArgs.client } : {}),
           rawBaseConfig: parsed,
         });
+        // Legacy graph-<client>.sqlite -> graph.sqlite before any connection opens.
+        await prepareWorkspaceDatabase(config);
         activeContext = createDynamicCausorynContext(
-          createCausorynContext(config, { deferAutoIndex: true }),
+          createCausorynContext(config, {
+            deferAutoIndex: true,
+            ...(cliArgs.client === undefined ? {} : { hostLabel: cliArgs.client }),
+          }),
         );
       } else if (cliArgs.allowCwd) {
         const cwdSafety = inspectProjectRootSafety(process.cwd(), {
@@ -101,11 +116,15 @@ function main(): void {
             ...(cliArgs.client !== undefined ? { client: cliArgs.client } : {}),
             rawBaseConfig: parsed,
           });
+          await prepareWorkspaceDatabase(config);
           activeContext = createDynamicCausorynContext(
-            createCausorynContext(config, { deferAutoIndex: true }),
+            createCausorynContext(config, {
+              deferAutoIndex: true,
+              ...(cliArgs.client === undefined ? {} : { hostLabel: cliArgs.client }),
+            }),
           );
           activeContext.logger(
-            `[causoryn] --allow-cwd ile güvenli çalışma alanı bağlandı: ${cwdSafety.canonicalRoot} (workspaceId=${activeContext.config.workspaceId})`,
+            `[causoryn] authorized workspace via --allow-cwd: ${cwdSafety.canonicalRoot} (workspaceId=${activeContext.config.workspaceId})`,
           );
         } else {
           const fallbackConfig = buildWorkspaceAutoConfig({
@@ -120,7 +139,7 @@ function main(): void {
         needsDynamicBinder = true;
       } else {
         console.error(
-          "[causoryn] yetkili kök belirtilmedi (--root veya --allow-cwd yok); allowRoots: [] güvenli default kullanılıyor",
+          "[causoryn] no workspace root specified (no --root or --allow-cwd); using safe default allowRoots: []",
         );
         const config = buildWorkspaceAutoConfig({
           roots: [],
@@ -132,21 +151,42 @@ function main(): void {
     }
   } catch (error) {
     console.error(
-      `[causoryn] başlatma başarısız: ${error instanceof Error ? error.message : String(error)}`,
+      `[causoryn] startup failed: ${error instanceof Error ? error.message : String(error)}`,
     );
     process.exit(2);
   }
 
   const server = createCausorynMcpServer(activeContext, {
     outputSchemaProfile,
+    toolProfile,
+    indexWaitTimeoutMs,
     ...(cliArgs.hasCliActivation
       ? {
-          beforeToolCall: async (toolName: string): Promise<void> => {
-            await beforeToolCallHook?.(toolName);
-            if (toolName === "causoryn_index_status") {
+          beforeToolCall: async (
+            toolName: string,
+            hookContext?: BeforeToolCallContext,
+          ): Promise<void> => {
+            if (beforeToolCallHook !== undefined) {
+              await beforeToolCallHook(toolName, hookContext);
+              return;
+            }
+            if (toolName === "causoryn_status" || toolName === "causoryn_index_status") {
               activeContext.startDeferredIndex?.();
             } else if (!NON_BLOCKING_BOOT_TOOLS.has(toolName)) {
-              await activeContext.waitForInitialIndex?.(15_000);
+              await activeContext.waitForInitialIndex?.({
+                timeoutMs: indexWaitTimeoutMs,
+                ...(hookContext?.signal === undefined ? {} : { signal: hookContext.signal }),
+                ...(hookContext?.progressToken === undefined
+                  ? {}
+                  : {
+                      onProgress: (update) =>
+                        hookContext.sendProgress({
+                          progress: update.progress,
+                          total: update.total,
+                          message: update.message,
+                        }),
+                    }),
+              });
             }
           },
         }
@@ -173,8 +213,7 @@ function main(): void {
   server.server.oninitialized = (): void => {
     previousOnInitialized?.();
     if (cliArgs.hasCliActivation) {
-      // MCP initialize + olası anlık tools/list yanıtının event-loop blokajına
-      // yakalanmaması için arka plan ilk indeks kısa bir gecikmeyle başlar.
+      // Defer initial background indexing briefly so MCP initialize + tools/list stay instant.
       const bootTimer = setTimeout(() => {
         activeContext.startDeferredIndex?.();
       }, 100);
@@ -191,15 +230,20 @@ function main(): void {
   server
     .connect(new StdioServerTransport())
     .then(() => {
-      activeContext.logger(`causoryn mcp server hazir (${SERVER_NAME}@${SERVER_VERSION})`);
+      activeContext.logger(`causoryn mcp server ready (${SERVER_NAME}@${SERVER_VERSION})`);
     })
     .catch((error: unknown) => {
       activeContext.close();
       console.error(
-        `[causoryn] stdio transport başlatılamadı: ${error instanceof Error ? error.message : String(error)}`,
+        `[causoryn] failed to start stdio transport: ${error instanceof Error ? error.message : String(error)}`,
       );
       process.exit(1);
     });
 }
 
-main();
+main().catch((error: unknown) => {
+  console.error(
+    `[causoryn] startup failed: ${error instanceof Error ? error.message : String(error)}`,
+  );
+  process.exit(2);
+});

@@ -127,7 +127,7 @@ function requireWikiStore(deps: ServiceDeps): SqliteWikiStore {
   if (deps.wikiStore === null) {
     throw new CausorynToolError(
       "INDEX_NOT_READY",
-      "wiki veri kökü yapılandırılmamış (config wiki.dataDbPath beyanı yok); WikiSnapshot üretilip yayımlanmadan wiki okuma araçları kullanılamaz",
+      "no wiki data root is configured (config wiki.dataDbPath is not set); wiki read tools are unavailable until a WikiSnapshot is built and published",
     );
   }
   return deps.wikiStore;
@@ -138,7 +138,7 @@ function requireWikiStoreForWrite(deps: ServiceDeps): SqliteWikiStore {
   if (deps.wikiStore === null) {
     throw new CausorynToolError(
       "PATH_DENIED",
-      "izinli wiki veri kökü beyanı yok (config wiki.dataDbPath); wiki_build yalnızca beyanlı Causoryn data-root'una yazabilir (default deny, TŞ §16A.8) ve kaynak workspace dosyalarına ASLA yazmaz",
+      "no authorized wiki data root is declared (config wiki.dataDbPath); wiki_build can only write to a declared Causoryn data root (default deny) and NEVER writes to workspace source files",
     );
   }
   return deps.wikiStore;
@@ -161,7 +161,7 @@ function requirePublishedWiki(
     if (read === undefined || read.snapshot.workspaceId !== workspaceId) {
       throw new CausorynToolError(
         "EVIDENCE_NOT_FOUND",
-        `WikiSnapshot bulunamadı (workspace kapsamında): ${snapshotId}; wiki_get_tree/wiki_search çıktısındaki wikiSnapshotId değerlerini kullanın`,
+        `WikiSnapshot not found in this workspace: ${snapshotId}; use wikiSnapshotId values from wiki_get_tree or wiki_search output`,
       );
     }
     return read;
@@ -170,7 +170,7 @@ function requirePublishedWiki(
   if (latest === undefined) {
     throw new CausorynToolError(
       "INDEX_NOT_READY",
-      `workspace için yayımlanmış WikiSnapshot yok: ${workspaceId}; causoryn_wiki_build ile üretin`,
+      `no published WikiSnapshot for workspace: ${workspaceId}; build one with causoryn_wiki_build`,
     );
   }
   return latest;
@@ -192,12 +192,12 @@ function wikiWarnings(deps: ServiceDeps, wiki: WikiSnapshotRead): string[] {
   const warnings: string[] = [];
   if (wikiStaleOf(deps, wiki)) {
     warnings.push(
-      `WikiSnapshot bayat (stale=true): kaynak graph snapshot ${wiki.snapshot.graphSnapshotId} workspace'in en güncel yayınlanmış snapshot'ı değil; yeniden wiki_build önerilir`,
+      `WikiSnapshot is stale (stale=true): its source graph snapshot ${wiki.snapshot.graphSnapshotId} is not the workspace's latest published snapshot; re-running wiki_build is recommended`,
     );
   }
   if (wiki.snapshot.status === "partial") {
     warnings.push(
-      "WikiSnapshot partial durumda; coverage eksik olabilir (TŞ §16A.5: ready/partial statüsü belirtilir)",
+      "WikiSnapshot is partial; coverage may be incomplete",
     );
   }
   return warnings;
@@ -213,7 +213,7 @@ function requireCursorOffset(cursor: string): number {
   if (offset === null) {
     throw new CausorynToolError(
       "INVALID_ARGUMENT",
-      "cursor çözülemedi; önceki yanıtın nextCursor değerini aynen kullanın",
+      "cursor could not be decoded; pass the nextCursor value from the previous response unchanged",
     );
   }
   return offset;
@@ -225,7 +225,7 @@ function requireLimit(limit: number | undefined): number {
   if (effective > WIKI_TOOL_MAX_LIMIT) {
     throw new CausorynToolError(
       "LIMIT_EXCEEDED",
-      `limit ${String(effective)} max ${String(WIKI_TOOL_MAX_LIMIT)} tavanını aşıyor (K-013 #5); limiti düşürün`,
+      `limit ${String(effective)} exceeds the maximum of ${String(WIKI_TOOL_MAX_LIMIT)}; lower the limit`,
     );
   }
   return effective;
@@ -335,10 +335,10 @@ export function wikiErrorToToolError(
     // publish-failed, storage-corrupt, driver-error, build-not-active,
     // duplicate-*, projection-invariant-violation …): istemciye genel
     // mesaj, detay stderr loguna.
-    deps.logger(`wiki sözleşme hatası ${code} INTERNAL_ERROR'a eşlendi: ${errorText(error)}`);
+    deps.logger(`wiki contract error ${code} mapped to INTERNAL_ERROR: ${errorText(error)}`);
     return new CausorynToolError(
       "INTERNAL_ERROR",
-      "Beklenmeyen iç hata; ayrıntılar sunucu loglarında",
+      "Unexpected internal error; see the server logs for details",
     );
   }
   throw error;
@@ -497,7 +497,7 @@ function buildLinkDrafts(
     if (resolution === "verified" && refs.length === 0) {
       resolution = "heuristic";
       downgradeWarnings.push(
-        `Wiki link ${linkKind} (${fromNode.qualifiedName} → ${toNode.qualifiedName}): verified kenarın span'lı kanıtı yok — link heuristic'e düşürüldü (doğrulanmış taklit yapılmaz, TŞ §16A.10)`,
+        `Wiki link ${linkKind} (${fromNode.qualifiedName} → ${toNode.qualifiedName}): the verified edge has no span-backed evidence, so the link was downgraded to heuristic (it is not presented as verified)`,
       );
     }
     drafts.push({
@@ -637,7 +637,7 @@ export async function wikiBuild(
   if (input.scope !== undefined) {
     throw new CausorynToolError(
       "INVALID_ARGUMENT",
-      `scope dar kapsamlı wiki build bu araç yüzeyinde desteklenmiyor (${input.scope}); wiki şimdilik tüm yayınlanmış snapshot için üretilir`,
+      `a scoped wiki build is not supported by this tool (${input.scope}); the wiki is currently built for the whole published snapshot`,
     );
   }
 
@@ -665,9 +665,9 @@ export async function wikiBuild(
   );
 }
 
-/** Degrade uyarısının tek metni (testler /full-rebuild|tam yeniden build/ eşler). */
+/** Degrade uyarısının tek metni (testler /full-rebuild|full rebuild/ eşler). */
 function incrementalFallbackWarning(reason: string): string {
-  return `incremental build desteklenmedi → tam yeniden build (full-rebuild) yapıldı: ${reason}`;
+  return `incremental build not possible; performed a full rebuild (full-rebuild) instead: ${reason}`;
 }
 
 /**
@@ -694,7 +694,7 @@ async function wikiBuildIncremental(
       workspaceId,
       graphRead,
       wikiStore,
-      "mode=incremental istendi ancak workspace için yayımlanmış WikiSnapshot yok; ilk build full olarak yürütüldü",
+      "mode=incremental was requested but the workspace has no published WikiSnapshot; the first build ran as a full build",
     );
   }
 
@@ -709,7 +709,7 @@ async function wikiBuildIncremental(
       workspaceId,
       graphRead,
       wikiStore,
-      `önceki WikiSnapshot'ın kaynak graph snapshot'ı okunamıyor (${existing.snapshot.graphSnapshotId}); TŞ §16A.5 gereği tam yeniden build gereklidir`,
+      `the previous WikiSnapshot's source graph snapshot cannot be read (${existing.snapshot.graphSnapshotId}); a full rebuild is required`,
     );
   }
 
@@ -719,7 +719,7 @@ async function wikiBuildIncremental(
   if (existing.snapshot.id === deterministicWikiId) {
     const brokenExisting = existing.links.filter((link) => link.toPageId === null).length;
     const idempotentWarnings = [
-      `aynı graph snapshot için WikiSnapshot zaten yayımlanmış (${existing.snapshot.id}); idempotent no-op — sayfalar yeniden üretilmedi (TŞ §16A.4 deterministik türetim)`,
+      `a WikiSnapshot is already published for this graph snapshot (${existing.snapshot.id}); idempotent no-op, pages were not regenerated (derivation is deterministic)`,
       ...wikiWarnings(deps, existing),
     ];
     return buildEnvelope({
@@ -805,7 +805,7 @@ async function wikiBuildIncremental(
   ];
   if (brokenLinks > 0) {
     warnings.push(
-      `${String(brokenLinks)} Wiki linki hedefi çözümlenemedi; kayıtlar toPageId=null ile korundu ve brokenLinkDiagnostics üretildi (K-013 #4)`,
+      `${String(brokenLinks)} wiki link target(s) could not be resolved; the records were kept with toPageId=null and brokenLinkDiagnostics were produced`,
     );
   }
 
@@ -921,7 +921,7 @@ function writeAndPublishWikiProjection(options: {
     if (publishStatus !== "ready" && publishStatus !== "partial") {
       throw new CausorynToolError(
         "INDEX_NOT_READY",
-        `Wiki projeksiyonu publish edilemez durumda: ${publishStatus} (TŞ §9 publish kuralı)`,
+        `wiki projection cannot be published in state ${publishStatus} (only ready or partial projections are published)`,
       );
     }
     const published = runWiki(deps, () =>
@@ -940,7 +940,7 @@ function writeAndPublishWikiProjection(options: {
     try {
       wikiStore.failWikiBuild(sid, errorText(error));
     } catch (failError) {
-      deps.logger(`wiki_build failWikiBuild başarısız: ${errorText(failError)}`);
+      deps.logger(`wiki_build: failWikiBuild failed: ${errorText(failError)}`);
     }
     if (error instanceof CausorynToolError) throw error;
     throw wikiErrorToToolError(error, deps);
@@ -978,7 +978,7 @@ async function wikiBuildFull(
       ...(fallbackReason === undefined
         ? []
         : [incrementalFallbackWarning(fallbackReason)]),
-      `aynı graph snapshot için WikiSnapshot zaten yayımlanmış (${existing.snapshot.id}); idempotent no-op — sayfalar yeniden üretilmedi (TŞ §16A.4 deterministik türetim)`,
+      `a WikiSnapshot is already published for this graph snapshot (${existing.snapshot.id}); idempotent no-op, pages were not regenerated (derivation is deterministic)`,
       ...wikiWarnings(deps, existing),
     ];
     return buildEnvelope({
@@ -1038,7 +1038,7 @@ async function wikiBuildFull(
   ];
   if (brokenLinks > 0) {
     warnings.push(
-      `${String(brokenLinks)} Wiki linki hedefi çözümlenemedi; kayıtlar toPageId=null ile korundu ve brokenLinkDiagnostics üretildi (K-013 #4)`,
+      `${String(brokenLinks)} wiki link target(s) could not be resolved; the records were kept with toPageId=null and brokenLinkDiagnostics were produced`,
     );
   }
 
@@ -1149,7 +1149,7 @@ export function wikiGetTree(
       if (root === undefined || root.wikiSnapshotId !== wiki.snapshot.id) {
         throw new CausorynToolError(
           "WIKI_PAGE_NOT_FOUND",
-          `parentId bu WikiSnapshot'ta bulunamadı: ${input.parentId}`,
+          `parentId not found in this WikiSnapshot: ${input.parentId}`,
         );
       }
       subtreeRoots = [root.id];
@@ -1157,17 +1157,26 @@ export function wikiGetTree(
 
     const maxDepth = input.depth ?? Number.MAX_SAFE_INTEGER;
     const ordered: { pageId: string; depth: number }[] = [];
-    const queue: { pageId: string; depth: number }[] = subtreeRoots.map((pageId) => ({
-      pageId,
-      depth: 1,
-    }));
-    while (queue.length > 0) {
-      const entry = queue.shift();
+    // Breadth-first walk with a visited set: a stored parent chain that loops
+    // (self-parent, A → B → C → A) can neither revisit pages nor make the
+    // walk unbounded; each page is listed at most once, at its first depth.
+    const visited = new Set<string>();
+    const queue: { pageId: string; depth: number }[] = [];
+    for (const pageId of subtreeRoots) {
+      if (visited.has(pageId)) continue;
+      visited.add(pageId);
+      queue.push({ pageId, depth: 1 });
+    }
+    for (let head = 0; head < queue.length; head += 1) {
+      const entry = queue[head];
       if (entry === undefined) break;
       if (entry.depth > maxDepth) continue;
       ordered.push(entry);
+      if (entry.depth >= maxDepth) continue;
       const children = childrenByParent.get(entry.pageId) ?? [];
       for (const child of [...children].sort()) {
+        if (visited.has(child)) continue;
+        visited.add(child);
         queue.push({ pageId: child, depth: entry.depth + 1 });
       }
     }
@@ -1177,7 +1186,7 @@ export function wikiGetTree(
       if (page === undefined) {
         throw new CausorynToolError(
           "INTERNAL_ERROR",
-          "Wiki ağaç sıralaması tutarsız (sayfa bulunamadı)",
+          "wiki tree ordering is inconsistent (page not found)",
         );
       }
       return {
@@ -1287,7 +1296,7 @@ export function wikiGetPage(
   if (page === undefined) {
     throw new CausorynToolError(
       "WIKI_PAGE_NOT_FOUND",
-      `Wiki sayfası bu WikiSnapshot'ta bulunamadı: ${input.pageId}; wiki_get_tree çıktısındaki pageId değerlerini kullanın`,
+      `wiki page not found in this WikiSnapshot: ${input.pageId}; use pageId values from wiki_get_tree output`,
     );
   }
 
@@ -1416,7 +1425,7 @@ export function wikiSearch(
     // arama yüzeyi vardır: INDEX_NOT_READY dürüst koddur.
     throw new CausorynToolError(
       "INDEX_NOT_READY",
-      "wiki veri kökü yapılandırılmamış (config wiki.dataDbPath beyanı yok); WikiSnapshot üretilip yayımlanmadan wiki arama kullanılamaz",
+      "no wiki data root is configured (config wiki.dataDbPath is not set); wiki search is unavailable until a WikiSnapshot is built and published",
     );
   }
   const wikiSearchStore: WikiSearchStore = deps.wikiSearch;
@@ -1424,31 +1433,31 @@ export function wikiSearch(
   if (input.kinds !== undefined) {
     throw new CausorynToolError(
       "INVALID_ARGUMENT",
-      "kinds (pageKind) filtresi bu araç yüzeyinde henüz açılmadı (TŞ §16A.3 filtre seti W4/W5 dilimine aittir); sonucu istemci tarafında kind'a göre daraltın",
+      "the kinds (pageKind) filter is not supported by this tool yet; filter the results by kind on the client side",
     );
   }
   if (input.scope !== undefined) {
     throw new CausorynToolError(
       "INVALID_ARGUMENT",
-      `scope dar kapsamlı arama bu araç yüzeyinde desteklenmiyor (${input.scope})`,
+      `a scoped search is not supported by this tool (${input.scope})`,
     );
   }
   if (input.language !== undefined) {
     throw new CausorynToolError(
       "INVALID_ARGUMENT",
-      `language filtresi bu araç yüzeyinde henüz açılmadı (${input.language})`,
+      `the language filter is not supported by this tool yet (${input.language})`,
     );
   }
   if (input.revision !== undefined) {
     throw new CausorynToolError(
       "INVALID_ARGUMENT",
-      `revision filtresi bu araç yüzeyinde henüz açılmadı (${input.revision}); snapshotId ile wiki snapshot daraltması kullanılabilir`,
+      `the revision filter is not supported by this tool yet (${input.revision}); use snapshotId to select a wiki snapshot`,
     );
   }
   if (input.resolution !== undefined) {
     throw new CausorynToolError(
       "INVALID_ARGUMENT",
-      `resolution filtresi bu araç yüzeyinde henüz açılmadı (${input.resolution})`,
+      `the resolution filter is not supported by this tool yet (${input.resolution})`,
     );
   }
 
@@ -1542,7 +1551,7 @@ export function wikiGetLinks(
   if (page === undefined) {
     throw new CausorynToolError(
       "WIKI_PAGE_NOT_FOUND",
-      `Wiki sayfası bu WikiSnapshot'ta bulunamadı: ${input.pageId}; wiki_get_tree çıktısındaki pageId değerlerini kullanın`,
+      `wiki page not found in this WikiSnapshot: ${input.pageId}; use pageId values from wiki_get_tree output`,
     );
   }
 
@@ -1682,7 +1691,7 @@ async function resolveRevisionAlias(
     const output = await runGit(repoRoot, ["cat-file", "-t", ref]);
     const kind = output.trim();
     if (kind.length === 0) {
-      return { resolved: false, reason: `git cat-file -t boş çıktı döndürdü: ${ref}` };
+      return { resolved: false, reason: `git cat-file -t returned empty output: ${ref}` };
     }
     return { resolved: true, kind };
   } catch (error) {
@@ -1721,7 +1730,7 @@ export async function wikiGetVersions(
       if (!resolution.resolved) {
         throw new CausorynToolError(
           "INVALID_REVISION",
-          `ref çözümlenemedi: ${ref} — ${resolution.reason}`,
+          `ref could not be resolved: ${ref} — ${resolution.reason}`,
         );
       }
       resolved.push({ ref, kind: resolution.kind });
@@ -1735,7 +1744,7 @@ export async function wikiGetVersions(
     if (version === undefined) {
       throw new CausorynToolError(
         "WIKI_PAGE_NOT_FOUND",
-        `sayfa sürümü bu WikiSnapshot'ta bulunamadı: ${input.pageId}`,
+        `page version not found in this WikiSnapshot: ${input.pageId}`,
       );
     }
     versions.push({
@@ -1774,7 +1783,7 @@ export async function wikiGetVersions(
       builtAt: null,
       availability: "not_available",
       notAvailableReason:
-        `çözümlenen revizyonda yayımlanmış WikiSnapshot kaydı yok (git ${entry.kind}); wiki_build koşusu bu revisionRef ile veri kökünde bulunamadı`,
+        `no published WikiSnapshot record for the resolved revision (git ${entry.kind}); no wiki_build run with this revisionRef was found in the data root`,
     });
   }
 
@@ -1913,7 +1922,7 @@ function resolveDiffSide(
   }
   throw new CausorynToolError(
     "INVALID_REVISION",
-    `wiki diff tarafı çözümlenemedi: ${token} — wikiSnapshotId veya bu workspace'in yayımlanmış revisionRef'i olmalı (revisionRef yalnızca en güncel yayınlanmış WikiSnapshot için çözümlenir)`,
+    `wiki diff side could not be resolved: ${token} — it must be a wikiSnapshotId or a published revisionRef of this workspace (a revisionRef resolves only for the latest published WikiSnapshot)`,
   );
 }
 
@@ -1972,7 +1981,7 @@ export function wikiDiff(
     if (!inBase && !inTarget) {
       throw new CausorynToolError(
         "WIKI_PAGE_NOT_FOUND",
-        `pageId iki WikiSnapshot'ta da bulunamadı: ${pageScope}`,
+        `pageId not found in either WikiSnapshot: ${pageScope}`,
       );
     }
   }
@@ -2103,7 +2112,7 @@ export function wikiDiff(
     if (before !== after) {
       unresolvedDifferences.push({
         pageId,
-        reason: `partial bölüm sayısı ${String(before)} → ${String(after)}`,
+        reason: `partial section count ${String(before)} → ${String(after)}`,
       });
     }
   }
@@ -2133,7 +2142,7 @@ export function wikiDiff(
         ? `base (${base.snapshot.graphSnapshotId})`
         : `target (${target.snapshot.graphSnapshotId})`;
     contractWarnings.push(
-      `contractChanges boş: ${missingSide} WikiSnapshot'ın arka graph snapshot'ı çözümlenemedi (yayımlanmış ready/partial graph yok); sözleşme yüzeyi karşılaştırılamadı (K-013 #7)`,
+      `contractChanges is empty: the backing graph snapshot of the ${missingSide} WikiSnapshot could not be resolved (no published ready or partial graph); the contract surface could not be compared`,
     );
   } else {
     const surfaceChanges = runWiki(deps, () =>

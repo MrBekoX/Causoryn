@@ -1,25 +1,30 @@
-//! syn 2 tabanlı deterministik analiz — M1-Rust.
+//! Deterministic analysis based on syn 3 (Cargo.lock pins 3.0.10).
 //!
-//! Çıkarım sözleşmesi (native/rust-worker/PROTOCOL.md v1):
-//! - Bildirimler: fn → Function, struct/enum → Class, trait → Interface,
-//!   impl fn → Method (CONTAINS File→tip, tip→Method).
-//! - CALLS resolution üçlüsü:
-//!     * aynı modülde tanımlı fn'e doğrudan (bare) çağrı → verified,
-//!     * nitelikli yol çağrısı (a::B::c / B::c) → analiz seti isim
-//!       tablosunda TEK eşleşme → verified (modül önekleri tam
-//!       doğrulanmaz — belgeli sınırlama), çok eşleşme → heuristic +
-//!       ambiguity, hiç eşleşme yok → unresolved + UnknownExternal,
-//!     * metot çağrısı (x.foo()) → alıcı türü çözülmez (trait dispatch
-//!       bu dilimde yok) → heuristic; tek isim tablosu adayı hedef,
-//!       çok aday → ambiguity, aday yok → unresolved.
-//!   verified/heuristic kenarlar "semantic-symbol", unresolved kenarlar ve
-//!   CONTAINS "ast-span", ROUTES_TO "route-attribute" kanıt türünü taşır
-//!   (kanıt türleri TŞ §8 kümesinden; rationale metni isim tablosu
-//!   dayanağını DÜRÜST belirtir — semantik çözümleyici yoktur).
-//! - Route tespiti: #[get/post/put/delete/patch/head/options/connect/trace("…")]
-//!   ve #[route("…", method = …)] (axum/actix/rocket örüntüleri) → Endpoint
-//!   node + ROUTES_TO (verified, sözdizimsel bağ).
-//! - Determinizm: BTreeMap/BTreeSet, kanonik sıralama, saat okunmaz.
+//! Extraction contract (native/rust-worker/PROTOCOL.md v1):
+//! - Declarations: fn → Function, struct/enum → Class, trait → Interface,
+//!   impl fn → Method (CONTAINS File→type, type→Method).
+//! - CALLS resolution:
+//!     * bare call to a fn defined in the same module → verified; a single
+//!       match in another file → heuristic; several matches → no edge to any
+//!       candidate: unresolved + UnknownExternal + multi-candidate ambiguity,
+//!     * qualified path call (a::B::c / B::c) → matched on the last 2 segments,
+//!       which checks neither module prefixes nor `use` imports, so a single
+//!       match is heuristic + explicit ambiguity
+//!       ("unverified-module-prefix-suffix-match"), several matches draw no
+//!       edge to any candidate (unresolved + UnknownExternal + multi-candidate
+//!       ambiguity), and no match is unresolved + UnknownExternal,
+//!     * method call (x.foo()) → the receiver type is not resolved (no trait
+//!       dispatch) → heuristic; a single name-table candidate is the target,
+//!       several candidates → unresolved + ambiguity (no arbitrary target),
+//!       none → unresolved.
+//!   verified/heuristic edges carry "semantic-symbol" evidence, unresolved
+//!   edges and CONTAINS carry "ast-span", ROUTES_TO carries "route-attribute"
+//!   (the rationale text states honestly that the basis is a name table —
+//!   there is no semantic resolver).
+//! - Route detection: #[get/post/put/delete/patch/head/options/connect/trace("…")]
+//!   and #[route("…", method = …)] (axum/actix/rocket patterns) → Endpoint
+//!   node + ROUTES_TO (verified, syntactic binding).
+//! - Determinism: BTreeMap/BTreeSet, canonical ordering, no clock reads.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -93,8 +98,8 @@ struct EdgeKey {
 /// Bu dilimde modellenmeyen yapılar — TŞ §7 unsupportedConstructs beyanı.
 const UNSUPPORTED_CONSTRUCTS: [&str; 6] = [
     // Metot çağrısının alıcı türü çözülmez: trait metodu hangi implementasyon
-    // üzerinde koşar, sorusu bu dilimde cevaplanmaz (isim tablosu adayları
-    // heuristic + ambiguity ile raporlanır).
+    // üzerinde koşar, sorusu bu dilimde cevaplanmaz (tek aday heuristic;
+    // çok aday unresolved + ambiguity ile raporlanır).
     "trait-method-dispatch",
     // Makro gövdeleri gezilmez (println!, vec! vb. ürettikleri kod analiz
     // edilmez); makro ile tanımlı üst-düzey öğeler atlanır.
@@ -162,6 +167,28 @@ fn insert_node(tables: &mut Tables, key: NodeKey, attributes: Value) -> NodeKey 
     key
 }
 
+/// Records a 1-based declaration line range on a symbol node (PROTOCOL.md
+/// "Node fields": `span`). A node declared more than once (one method name in
+/// two impl blocks of the same type) gets the smallest range that covers every
+/// declaration, so the result does not depend on visit order.
+fn widen_node_span(tables: &mut Tables, key: &NodeKey, start_line: usize, end_line: usize) {
+    let Some(node) = tables.nodes.get_mut(key) else {
+        return;
+    };
+    let (start, end) = match node.get("span") {
+        Some(current) => (
+            current["startLine"]
+                .as_u64()
+                .map_or(start_line, |line| (line as usize).min(start_line)),
+            current["endLine"]
+                .as_u64()
+                .map_or(end_line, |line| (line as usize).max(end_line)),
+        ),
+        None => (start_line, end_line),
+    };
+    node["span"] = json!({ "startLine": start, "endLine": end });
+}
+
 fn push_evidence(
     tables: &mut Tables,
     kind: &str,
@@ -209,6 +236,9 @@ fn push_edge(
     };
     if let Some(&index) = tables.edge_index.get(&key) {
         let existing = &mut tables.edges[index];
+        if existing.ambiguity.is_none() {
+            existing.ambiguity = ambiguity;
+        }
         if !existing.evidence.contains(&evidence) {
             existing.evidence.push(evidence);
             existing.evidence.sort_by(|a, b| {
@@ -289,9 +319,7 @@ fn parse_route_attr(attr: &Attribute) -> Option<(String, String)> {
     }
 
     let exprs = attr
-        .parse_args_with(
-            syn::punctuated::Punctuated::<Expr, syn::token::Comma>::parse_terminated,
-        )
+        .parse_args_with(syn::punctuated::Punctuated::<Expr, syn::token::Comma>::parse_terminated)
         .ok()?;
 
     let mut path: Option<String> = None;
@@ -416,15 +444,46 @@ impl<'a> CallVisitor<'a> {
             json!({}),
         );
         let rationale = format!(
-            "CALLS: '{call_text}' çağrısı analiz setinde hiçbir sembolle eşleşmedi (unresolved); hedef UnknownExternal — uydurma sembol üretilmez."
+            "CALLS: call '{call_text}' matched no symbol in the analysis set (unresolved); the target is UnknownExternal and no symbol is invented."
         );
+        self.emit_call_edge(target, "unresolved", start_line, end_line, rationale, None);
+    }
+
+    /// Çok adaylı çağrı: hiçbir adaya kenar çizilmez (keyfi hedef yok);
+    /// unresolved kenar UnknownExternal node'una gider ve aday listesi hem
+    /// rationale'de hem ambiguity alanında taşınır.
+    fn emit_ambiguous_unresolved(
+        &mut self,
+        qualified_name: String,
+        call_description: &str,
+        candidates: &[NodeKey],
+        reason: String,
+        start_line: usize,
+        end_line: usize,
+    ) {
+        let candidates_names: Vec<String> =
+            candidates.iter().map(|c| c.qualified.clone()).collect();
+        let target = insert_node(
+            self.tables,
+            NodeKey::virtual_("UnknownExternal", qualified_name),
+            json!({}),
+        );
+        let rationale = format!(
+            "CALLS: {call_description} matched {count} candidates ({list}); no edge is drawn to any single candidate (unresolved; ambiguity).",
+            count = candidates_names.len(),
+            list = candidates_names.join(", ")
+        );
+        let ambiguity = json!({
+            "candidates": candidates_names,
+            "reason": reason,
+        });
         self.emit_call_edge(
             target,
             "unresolved",
             start_line,
             end_line,
             rationale,
-            None,
+            Some(ambiguity),
         );
     }
 
@@ -442,7 +501,7 @@ impl<'a> CallVisitor<'a> {
                 if let Some(target) = file_fns.get(name) {
                     let target = target.clone();
                     let rationale = format!(
-                        "CALLS: '{name}' doğrudan çağrısı aynı modülde tanımlı '{t}' sembolüne çözümlendi (verified; syn AST, semantik çözümleyici yoktur).",
+                        "CALLS: direct call '{name}' resolved to '{t}', defined in the same module (verified; syn AST, no semantic resolver).",
                         t = target.qualified
                     );
                     self.emit_call_edge(target, "verified", start_line, end_line, rationale, None);
@@ -450,36 +509,34 @@ impl<'a> CallVisitor<'a> {
                 }
             }
             // 2) Başka dosyada tek aday → heuristic (import kanıtı yok).
-            let candidates =
-                self.resolve_candidates(self.tables.free_fn_bare.get(name).cloned().unwrap_or_default());
+            let candidates = self.resolve_candidates(
+                self.tables
+                    .free_fn_bare
+                    .get(name)
+                    .cloned()
+                    .unwrap_or_default(),
+            );
             match candidates.len() {
                 0 => self.emit_unresolved(name.clone(), &call_text, start_line, end_line),
                 1 => {
                     let target = candidates[0].clone();
                     let rationale = format!(
-                        "CALLS: '{name}' çağrısı import kanıtı olmadan isim tablosunda tek eşleşme '{t}' buldu (heuristic; modül/import doğrulaması bu dilimde yoktur).",
+                        "CALLS: call '{name}' found a single name-table match '{t}' without import evidence (heuristic; module and import verification is not implemented).",
                         t = target.qualified
                     );
                     self.emit_call_edge(target, "heuristic", start_line, end_line, rationale, None);
                 }
                 _ => {
-                    let candidates_names: Vec<String> =
-                        candidates.iter().map(|c| c.qualified.clone()).collect();
-                    let target = candidates[0].clone();
-                    let rationale = format!(
-                        "CALLS: '{name}' çağrısı isim tablosunda birden çok eşleşme buldu (heuristic + ambiguity)."
-                    );
-                    let ambiguity = json!({
-                        "candidates": candidates_names,
-                        "reason": format!("'{name}' adı analiz setinde birden çok serbest fn ile eşleşiyor; alıcı/modül kanıtı yok"),
-                    });
-                    self.emit_call_edge(
-                        target,
-                        "heuristic",
+                    // Çok aday: keyfi bir adaya kenar çizilmez → unresolved.
+                    self.emit_ambiguous_unresolved(
+                        name.clone(),
+                        &format!("call '{name}'"),
+                        &candidates,
+                        format!(
+                            "'{name}' matches several free functions in the analysis set; there is no receiver or module evidence to pick one"
+                        ),
                         start_line,
                         end_line,
-                        rationale,
-                        Some(ambiguity),
                     );
                 }
             }
@@ -506,21 +563,15 @@ impl<'a> CallVisitor<'a> {
             1 => {
                 let target = candidates[0].clone();
                 let rationale = format!(
-                    "CALLS: nitelikli yol çağrısı '{call_text}' → '{t}' isim tablosunda tek eşleşme (verified; modül önekleri bu dilimde tam doğrulanmaz — belgeli sınırlama).",
+                    "CALLS: qualified path call '{call_text}' → '{t}' matched on the last 2 segments ('{type_name}::{name}'); marked heuristic because module prefixes and use imports are not verified (unverified-module-prefix-suffix-match).",
                     t = target.qualified
                 );
-                self.emit_call_edge(target, "verified", start_line, end_line, rationale, None);
-            }
-            _ => {
-                let candidates_names: Vec<String> =
-                    candidates.iter().map(|c| c.qualified.clone()).collect();
-                let target = candidates[0].clone();
-                let rationale = format!(
-                    "CALLS: nitelikli yol çağrısı '{call_text}' isim tablosunda birden çok eşleşme buldu (heuristic + ambiguity)."
-                );
                 let ambiguity = json!({
-                    "candidates": candidates_names,
-                    "reason": format!("'{type_name}::{name}' analiz setinde birden çok sembolle eşleşiyor"),
+                    "candidates": [target.qualified.clone()],
+                    "reason": format!(
+                        "unverified-module-prefix-suffix-match: '{call_text}' → '{t}' relies only on a match of the last 2 segments ('{type_name}::{name}'); module prefixes and use imports were not verified",
+                        t = target.qualified
+                    ),
                 });
                 self.emit_call_edge(
                     target,
@@ -529,42 +580,54 @@ impl<'a> CallVisitor<'a> {
                     end_line,
                     rationale,
                     Some(ambiguity),
+                );
+            }
+            _ => {
+                // Çok aday: keyfi bir adaya kenar çizilmez → unresolved.
+                self.emit_ambiguous_unresolved(
+                    call_text.clone(),
+                    &format!("qualified path call '{call_text}'"),
+                    &candidates,
+                    format!(
+                        "'{type_name}::{name}' matches several symbols in the analysis set; module prefixes and use imports are not verified, so none can be chosen"
+                    ),
+                    start_line,
+                    end_line,
                 );
             }
         }
     }
 
     fn resolve_method_call(&mut self, name: &str, start_line: usize, end_line: usize) {
-        let candidates =
-            self.resolve_candidates(self.tables.methods_bare.get(name).cloned().unwrap_or_default());
+        let candidates = self.resolve_candidates(
+            self.tables
+                .methods_bare
+                .get(name)
+                .cloned()
+                .unwrap_or_default(),
+        );
         match candidates.len() {
             0 => self.emit_unresolved(name.to_string(), name, start_line, end_line),
             1 => {
                 let target = candidates[0].clone();
                 let rationale = format!(
-                    "CALLS: metot çağrısı '{name}' — alıcı türü çözülemedi (trait dispatch bu dilimde çözülmez); isim tablosu eşleşmesi '{t}' (heuristic).",
+                    "CALLS: method call '{name}' — the receiver type is not resolved (no trait dispatch resolution); name-table match '{t}' (heuristic).",
                     t = target.qualified
                 );
                 self.emit_call_edge(target, "heuristic", start_line, end_line, rationale, None);
             }
             _ => {
-                let candidates_names: Vec<String> =
-                    candidates.iter().map(|c| c.qualified.clone()).collect();
-                let target = candidates[0].clone();
-                let rationale = format!(
-                    "CALLS: metot çağrısı '{name}' birden çok aday buldu — trait/implementasyon ayrımı çözülemedi (heuristic + ambiguity)."
-                );
-                let ambiguity = json!({
-                    "candidates": candidates_names,
-                    "reason": format!("'{name}' adında birden çok trait/implementasyon metodu var; alıcı türü bilinmiyor"),
-                });
-                self.emit_call_edge(
-                    target,
-                    "heuristic",
+                // Çok aday: alıcı türü olmadan trait/impl ayrımı yapılamaz →
+                // keyfi bir adaya kenar çizilmez, unresolved.
+                self.emit_ambiguous_unresolved(
+                    name.to_string(),
+                    &format!("method call '{name}'"),
+                    &candidates,
+                    format!(
+                        "several trait or impl methods are named '{name}'; the receiver type is unknown, so none can be chosen"
+                    ),
                     start_line,
                     end_line,
-                    rationale,
-                    Some(ambiguity),
                 );
             }
         }
@@ -595,8 +658,8 @@ impl<'a> Visit<'a> for CallVisitor<'a> {
             }
             _ => {
                 self.emit_unresolved(
-                    "(anonim-cağrı)".to_string(),
-                    "(anonim-cağrı)",
+                    "(anonymous-call)".to_string(),
+                    "(anonymous-call)",
                     start_line,
                     end_line,
                 );
@@ -637,7 +700,7 @@ fn emit_route(
             end_line,
             source_hash,
             format!(
-                "ROUTES_TO: #[{attr_path}] özniteliği '{target}' öğesine sözdizimsel olarak bağlı (route-attribute; verified; syn AST).",
+                "ROUTES_TO: the #[{attr_path}] attribute is syntactically attached to item '{target}' (route-attribute; verified; syn AST).",
                 attr_path = format!("{method} \"{path}\"").to_lowercase(),
                 target = target.qualified
             ),
@@ -681,6 +744,7 @@ fn process_items(
                     json!({}),
                 );
                 let (start_line, end_line) = span_lines(item_fn);
+                widen_node_span(tables, &key, start_line, end_line);
                 let evidence = push_evidence(
                     tables,
                     "ast-span",
@@ -688,14 +752,22 @@ fn process_items(
                     start_line,
                     end_line,
                     source_hash,
-                    format!("CONTAINS: '{rel_path}' '{name}' fn bildirimini içerir (syn AST)."),
+                    format!(
+                        "CONTAINS: '{rel_path}' contains the fn declaration '{name}' (syn AST)."
+                    ),
                 );
-                push_edge(tables, "CONTAINS", file_key.clone(), key.clone(), "verified", evidence, None);
+                push_edge(
+                    tables,
+                    "CONTAINS",
+                    file_key.clone(),
+                    key.clone(),
+                    "verified",
+                    evidence,
+                    None,
+                );
 
-                if let Some((_, file_fns)) = tables
-                    .free_fn_by_file
-                    .iter_mut()
-                    .find(|(m, _)| m == module)
+                if let Some((_, file_fns)) =
+                    tables.free_fn_by_file.iter_mut().find(|(m, _)| m == module)
                 {
                     file_fns.insert(name.clone(), key.clone());
                 }
@@ -728,6 +800,7 @@ fn process_items(
                     json!({}),
                 );
                 let (start_line, end_line) = span_lines(item);
+                widen_node_span(tables, &key, start_line, end_line);
                 let evidence = push_evidence(
                     tables,
                     "ast-span",
@@ -735,9 +808,17 @@ fn process_items(
                     start_line,
                     end_line,
                     source_hash,
-                    format!("CONTAINS: '{rel_path}' '{name}' bildirimini içerir (syn AST)."),
+                    format!("CONTAINS: '{rel_path}' contains the declaration '{name}' (syn AST)."),
                 );
-                push_edge(tables, "CONTAINS", file_key.clone(), key.clone(), "verified", evidence, None);
+                push_edge(
+                    tables,
+                    "CONTAINS",
+                    file_key.clone(),
+                    key.clone(),
+                    "verified",
+                    evidence,
+                    None,
+                );
                 tables.declared_types.insert(name, key);
             }
             Item::Trait(item_trait) => {
@@ -748,6 +829,7 @@ fn process_items(
                     json!({}),
                 );
                 let (start_line, end_line) = span_lines(item_trait);
+                widen_node_span(tables, &key, start_line, end_line);
                 let evidence = push_evidence(
                     tables,
                     "ast-span",
@@ -755,9 +837,19 @@ fn process_items(
                     start_line,
                     end_line,
                     source_hash,
-                    format!("CONTAINS: '{rel_path}' '{name}' trait bildirimini içerir (syn AST)."),
+                    format!(
+                        "CONTAINS: '{rel_path}' contains the trait declaration '{name}' (syn AST)."
+                    ),
                 );
-                push_edge(tables, "CONTAINS", file_key.clone(), key.clone(), "verified", evidence, None);
+                push_edge(
+                    tables,
+                    "CONTAINS",
+                    file_key.clone(),
+                    key.clone(),
+                    "verified",
+                    evidence,
+                    None,
+                );
                 tables.declared_types.insert(name.clone(), key.clone());
 
                 for trait_item in &item_trait.items {
@@ -773,6 +865,7 @@ fn process_items(
                             json!({}),
                         );
                         let (ms, me) = span_lines(method);
+                        widen_node_span(tables, &method_key, ms, me);
                         let evidence = push_evidence(
                             tables,
                             "ast-span",
@@ -780,7 +873,7 @@ fn process_items(
                             ms,
                             me,
                             source_hash,
-                            format!("CONTAINS: '{name}' trait'i '{method_name}' metot bildirimini içerir (syn AST)."),
+                            format!("CONTAINS: trait '{name}' contains the method declaration '{method_name}' (syn AST)."),
                         );
                         push_edge(
                             tables,
@@ -827,7 +920,7 @@ fn process_items(
                         relative_path: rel_path.to_string(),
                         code: "IMPL_UNKNOWN_TYPE".to_string(),
                         message: format!(
-                            "'{type_name}' analiz setinde bildirilmedi; impl metotları modellenmedi"
+                            "'{type_name}' is not declared in the analysis set; its impl methods were not modelled"
                         ),
                         line,
                     });
@@ -847,6 +940,7 @@ fn process_items(
                             json!({}),
                         );
                         let (ms, me) = span_lines(method);
+                        widen_node_span(tables, &method_key, ms, me);
                         let evidence = push_evidence(
                             tables,
                             "ast-span",
@@ -854,7 +948,7 @@ fn process_items(
                             ms,
                             me,
                             source_hash,
-                            format!("CONTAINS: '{type_name}' '{method_name}' metot tanımını içerir (syn AST)."),
+                            format!("CONTAINS: '{type_name}' contains the method definition '{method_name}' (syn AST)."),
                         );
                         push_edge(
                             tables,
@@ -888,7 +982,7 @@ fn process_items(
                     relative_path: rel_path.to_string(),
                     code: "MACRO_ITEM_SKIPPED".to_string(),
                     message: format!(
-                        "'{}' makro öğesi modellenmedi (macro-defined-items)",
+                        "macro item '{}' was not modelled (macro-defined-items)",
                         item_macro
                             .mac
                             .path
@@ -919,8 +1013,7 @@ fn process_bodies(
         match item {
             Item::Fn(item_fn) => {
                 let name = item_fn.sig.ident.to_string();
-                let caller =
-                    NodeKey::with_path("Function", join_q(module, &name), rel_path);
+                let caller = NodeKey::with_path("Function", join_q(module, &name), rel_path);
                 let mut visitor = CallVisitor {
                     rel_path,
                     source_hash,
@@ -1013,12 +1106,10 @@ pub fn analyze(id: &Value, files: &[FileEntry], max_nodes: usize) -> Value {
         let source_hash = sha256_hex(entry.content.as_bytes());
 
         let file_key = NodeKey::with_path("File", entry.path.clone(), &entry.path);
-        insert_node(
-            &mut tables,
-            file_key,
-            json!({ "sourceHash": source_hash }),
-        );
-        tables.free_fn_by_file.push((module.clone(), BTreeMap::new()));
+        insert_node(&mut tables, file_key, json!({ "sourceHash": source_hash }));
+        tables
+            .free_fn_by_file
+            .push((module.clone(), BTreeMap::new()));
 
         match syn::parse_file(&entry.content) {
             Ok(tree) => {
@@ -1029,7 +1120,7 @@ pub fn analyze(id: &Value, files: &[FileEntry], max_nodes: usize) -> Value {
                 tables.diagnostics.push(Diagnostic {
                     relative_path: entry.path.clone(),
                     code: "PARSE_ERROR".to_string(),
-                    message: format!("dosya ayrıştırılamadı: {err}"),
+                    message: format!("file could not be parsed: {err}"),
                     line,
                 });
                 parsed_trees.push(None);
@@ -1062,13 +1153,7 @@ pub fn analyze(id: &Value, files: &[FileEntry], max_nodes: usize) -> Value {
         };
         let module = module_path_of(&entry.path);
         let source_hash = sha256_hex(entry.content.as_bytes());
-        process_bodies(
-            &mut tables,
-            &module,
-            &entry.path,
-            &source_hash,
-            &tree.items,
-        );
+        process_bodies(&mut tables, &module, &entry.path, &source_hash, &tree.items);
     }
 
     // Kanonik çıktı düzeni (TŞ §8 invariant iv).
@@ -1093,25 +1178,15 @@ pub fn analyze(id: &Value, files: &[FileEntry], max_nodes: usize) -> Value {
             relative_path: String::new(),
             code: "RESPONSE_TRUNCATED".to_string(),
             message: format!(
-                "yanıt node bütçesi ({budget}) aşıldı; {budget} node yayınlandı, uçları yayınlanmayan {} kenar düştü (dangling yok)",
+                "response node budget ({budget}) exceeded; {budget} nodes were published and {} edges with unpublished endpoints were dropped (no dangling edges)",
                 tables.edge_index.len() - tables.edges.len()
             ),
             line: 0,
         });
     }
     tables.edges.sort_by(|a, b| {
-        let key_a = (
-            a.kind,
-            a.from.clone(),
-            a.to.clone(),
-            a.resolution,
-        );
-        let key_b = (
-            b.kind,
-            b.from.clone(),
-            b.to.clone(),
-            b.resolution,
-        );
+        let key_a = (a.kind, a.from.clone(), a.to.clone(), a.resolution);
+        let key_b = (b.kind, b.from.clone(), b.to.clone(), b.resolution);
         key_a.cmp(&key_b)
     });
     let edges: Vec<Value> = tables
@@ -1206,4 +1281,336 @@ fn node_ref_value(key: &NodeKey) -> Value {
         value["relativePath"] = Value::String(key.rel_path.clone());
     }
     value
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn find_call<'a>(edges: &'a [Value], from: &str, to: &str) -> Option<&'a Value> {
+        edges.iter().find(|e| {
+            e["kind"] == "CALLS"
+                && e["from"]["qualifiedName"] == from
+                && e["to"]["qualifiedName"] == to
+        })
+    }
+
+    #[test]
+    fn two_segment_suffix_match_emits_heuristic_with_explicit_ambiguity_never_verified() {
+        let files = vec![
+            FileEntry {
+                path: "src/main.rs".to_string(),
+                content: [
+                    "fn local_helper() {}",
+                    "fn entry() {",
+                    "    local_helper();",
+                    "    let _s = other::services::OrdersService::new();",
+                    "    other_mod::util::compute();",
+                    "}",
+                ]
+                .join("\n"),
+            },
+            FileEntry {
+                path: "src/services.rs".to_string(),
+                content: [
+                    "pub struct OrdersService;",
+                    "impl OrdersService {",
+                    "    pub fn new() -> Self { OrdersService }",
+                    "}",
+                ]
+                .join("\n"),
+            },
+            FileEntry {
+                path: "src/util.rs".to_string(),
+                content: "pub fn compute() -> u32 { 42 }\n".to_string(),
+            },
+        ];
+
+        let result = analyze(&json!("rust-honesty-1"), &files, 0);
+        let edges = result["edges"].as_array().expect("edges array");
+
+        // 1) Same-module bare call remains verified.
+        let local = find_call(edges, "crate::entry", "crate::local_helper")
+            .expect("same-module bare call edge");
+        assert_eq!(local["resolution"], "verified");
+
+        // 2) 2-segment suffix match for Type::method MUST be heuristic + explicit ambiguity (NEVER verified).
+        let svc_new = find_call(edges, "crate::entry", "crate::services::OrdersService::new")
+            .expect("OrdersService::new edge");
+        assert_eq!(svc_new["resolution"], "heuristic");
+        assert_eq!(
+            svc_new["ambiguity"]["candidates"],
+            json!(["crate::services::OrdersService::new"])
+        );
+        assert!(
+            svc_new["ambiguity"]["reason"]
+                .as_str()
+                .unwrap_or("")
+                .contains("unverified-module-prefix-suffix-match"),
+            "expected unverified-module-prefix-suffix-match reason, got: {:?}",
+            svc_new["ambiguity"]
+        );
+
+        // 3) 2-segment suffix match for mod::fn MUST be heuristic + explicit ambiguity (NEVER verified).
+        let util_fn =
+            find_call(edges, "crate::entry", "crate::util::compute").expect("util::compute edge");
+        assert_eq!(util_fn["resolution"], "heuristic");
+        assert_eq!(
+            util_fn["ambiguity"]["candidates"],
+            json!(["crate::util::compute"])
+        );
+        assert!(
+            util_fn["ambiguity"]["reason"]
+                .as_str()
+                .unwrap_or("")
+                .contains("unverified-module-prefix-suffix-match"),
+            "expected unverified-module-prefix-suffix-match reason, got: {:?}",
+            util_fn["ambiguity"]
+        );
+    }
+
+    fn calls_from<'a>(edges: &'a [Value], from: &str) -> Vec<&'a Value> {
+        edges
+            .iter()
+            .filter(|e| e["kind"] == "CALLS" && e["from"]["qualifiedName"] == from)
+            .collect()
+    }
+
+    fn assert_ambiguous_unresolved(
+        edges: &[Value],
+        from: &str,
+        unknown_name: &str,
+        candidates: &[&str],
+    ) {
+        // No CALLS edge may point at any one of the candidates.
+        for candidate in candidates {
+            assert!(
+                find_call(edges, from, candidate).is_none(),
+                "multi-candidate call must not draw an edge to {candidate}; edges: {:?}",
+                calls_from(edges, from)
+            );
+        }
+        let edge = edges
+            .iter()
+            .find(|e| {
+                e["kind"] == "CALLS"
+                    && e["from"]["qualifiedName"] == from
+                    && e["to"]["kind"] == "UnknownExternal"
+                    && e["to"]["qualifiedName"] == unknown_name
+            })
+            .unwrap_or_else(|| {
+                panic!(
+                    "expected an unresolved CALLS edge {from} -> UnknownExternal {unknown_name}; edges: {:?}",
+                    calls_from(edges, from)
+                )
+            });
+        assert_eq!(edge["resolution"], "unresolved");
+        assert!(edge["to"].get("relativePath").is_none());
+        let expected: Vec<Value> = candidates.iter().map(|c| json!(c)).collect();
+        assert_eq!(edge["ambiguity"]["candidates"], Value::Array(expected));
+        let reason = edge["ambiguity"]["reason"].as_str().unwrap_or("");
+        assert!(!reason.is_empty(), "ambiguity reason must not be empty");
+        let rationale = edge["evidence"][0]["rationale"].as_str().unwrap_or("");
+        assert!(rationale.starts_with("CALLS: "), "rationale: {rationale}");
+        assert!(rationale.contains("(unresolved"), "rationale: {rationale}");
+        for candidate in candidates {
+            assert!(
+                rationale.contains(candidate),
+                "rationale must list candidate {candidate}: {rationale}"
+            );
+        }
+        assert_eq!(edge["evidence"][0]["kind"], "ast-span");
+    }
+
+    #[test]
+    fn multi_candidate_calls_are_unresolved_and_never_bound_to_an_arbitrary_candidate() {
+        let files = vec![
+            FileEntry {
+                path: "src/caller.rs".to_string(),
+                content: [
+                    "fn run(store: &dyn Thing) {",
+                    "    helper();",
+                    "    util::compute();",
+                    "    store.save();",
+                    "}",
+                ]
+                .join("\n"),
+            },
+            FileEntry {
+                path: "src/lib_a.rs".to_string(),
+                content: "pub fn helper() -> u32 { 1 }\n".to_string(),
+            },
+            FileEntry {
+                path: "src/lib_b.rs".to_string(),
+                content: "pub fn helper() -> u32 { 2 }\n".to_string(),
+            },
+            FileEntry {
+                path: "src/a/util.rs".to_string(),
+                content: "pub fn compute() -> u32 { 3 }\n".to_string(),
+            },
+            FileEntry {
+                path: "src/b/util.rs".to_string(),
+                content: "pub fn compute() -> u32 { 4 }\n".to_string(),
+            },
+            FileEntry {
+                path: "src/store.rs".to_string(),
+                content: [
+                    "pub struct Disk;",
+                    "impl Disk { pub fn save(&self) {} }",
+                    "pub struct Memory;",
+                    "impl Memory { pub fn save(&self) {} }",
+                ]
+                .join("\n"),
+            },
+        ];
+
+        let result = analyze(&json!("rust-ambiguity-1"), &files, 0);
+        let edges = result["edges"].as_array().expect("edges array");
+        let caller = "crate::caller::run";
+
+        // Bare free-fn call with two candidates in other modules.
+        assert_ambiguous_unresolved(
+            edges,
+            caller,
+            "helper",
+            &["crate::lib_a::helper", "crate::lib_b::helper"],
+        );
+        // Qualified path call whose last two segments match two functions.
+        assert_ambiguous_unresolved(
+            edges,
+            caller,
+            "util::compute",
+            &["crate::a::util::compute", "crate::b::util::compute"],
+        );
+        // Method call whose name matches two impl methods.
+        assert_ambiguous_unresolved(
+            edges,
+            caller,
+            "save",
+            &["crate::store::Disk::save", "crate::store::Memory::save"],
+        );
+        // No heuristic CALLS edge survives for these three calls.
+        assert!(
+            calls_from(edges, caller)
+                .iter()
+                .all(|e| e["resolution"] == "unresolved"),
+            "edges: {:?}",
+            calls_from(edges, caller)
+        );
+    }
+
+    #[test]
+    fn single_candidate_calls_stay_heuristic() {
+        let files = vec![
+            FileEntry {
+                path: "src/caller.rs".to_string(),
+                content: [
+                    "fn run(store: &Disk) {",
+                    "    helper();",
+                    "    store.save();",
+                    "}",
+                ]
+                .join("\n"),
+            },
+            FileEntry {
+                path: "src/lib_a.rs".to_string(),
+                content: "pub fn helper() -> u32 { 1 }\n".to_string(),
+            },
+            FileEntry {
+                path: "src/store.rs".to_string(),
+                content: "pub struct Disk;\nimpl Disk { pub fn save(&self) {} }\n".to_string(),
+            },
+        ];
+
+        let result = analyze(&json!("rust-ambiguity-2"), &files, 0);
+        let edges = result["edges"].as_array().expect("edges array");
+        let helper = find_call(edges, "crate::caller::run", "crate::lib_a::helper")
+            .expect("single-candidate bare call edge");
+        assert_eq!(helper["resolution"], "heuristic");
+        let save = find_call(edges, "crate::caller::run", "crate::store::Disk::save")
+            .expect("single-candidate method call edge");
+        assert_eq!(save["resolution"], "heuristic");
+    }
+
+    fn find_node<'a>(nodes: &'a [Value], kind: &str, qualified: &str) -> Option<&'a Value> {
+        nodes
+            .iter()
+            .find(|n| n["kind"] == kind && n["qualifiedName"] == qualified)
+    }
+
+    /// Symbol nodes carry their 1-based declaration span (the same range as the
+    /// CONTAINS evidence: syn item spans include outer attributes and doc
+    /// comments); one method name in two impl blocks is widened over both; File,
+    /// Endpoint and UnknownExternal nodes carry none.
+    #[test]
+    fn symbol_nodes_carry_declaration_spans() {
+        let files = vec![FileEntry {
+            path: "src/ledger.rs".to_string(),
+            content: [
+                "/// Sums the items.",                                  // 1
+                "pub fn total(items: &[u32]) -> u32 {",                 // 2
+                "    missing(items)",                                   // 3
+                "}",                                                    // 4
+                "",                                                     // 5
+                "#[derive(Debug)]",                                     // 6
+                "pub struct Ledger {",                                  // 7
+                "    amount: u32,",                                     // 8
+                "}",                                                    // 9
+                "",                                                     // 10
+                "pub trait Store {",                                    // 11
+                "    fn save(&self);",                                  // 12
+                "}",                                                    // 13
+                "",                                                     // 14
+                "impl Ledger {",                                        // 15
+                "    #[get(\"/ledger\")]",                              // 16
+                "    pub fn show(&self) -> u32 {",                      // 17
+                "        self.amount",                                  // 18
+                "    }",                                                // 19
+                "}",                                                    // 20
+                "",                                                     // 21
+                "impl Clone for Ledger {",                              // 22
+                "    fn clone(&self) -> Self {",                        // 23
+                "        Ledger { amount: self.amount }",               // 24
+                "    }",                                                // 25
+                "}",                                                    // 26
+                "",                                                     // 27
+                "impl Ledger {",                                        // 28
+                "    fn clone(&self) -> Self { Ledger { amount: 0 } }", // 29
+                "}",                                                    // 30
+            ]
+            .join("\n"),
+        }];
+
+        let result = analyze(&json!("rust-spans-1"), &files, 0);
+        let nodes = result["nodes"].as_array().expect("nodes array");
+        let expected = [
+            ("Function", "crate::ledger::total", 1, 4),
+            ("Class", "crate::ledger::Ledger", 6, 9),
+            ("Interface", "crate::ledger::Store", 11, 13),
+            ("Method", "crate::ledger::Store::save", 12, 12),
+            ("Method", "crate::ledger::Ledger::show", 16, 19),
+            ("Method", "crate::ledger::Ledger::clone", 23, 29),
+        ];
+        for (kind, qualified, start, end) in expected {
+            let node = find_node(nodes, kind, qualified)
+                .unwrap_or_else(|| panic!("node {kind} {qualified} not found"));
+            assert_eq!(
+                node["span"],
+                json!({ "startLine": start, "endLine": end }),
+                "span of {qualified}"
+            );
+        }
+        for (kind, qualified) in [
+            ("File", "src/ledger.rs"),
+            ("Endpoint", "GET /ledger"),
+            ("UnknownExternal", "missing"),
+        ] {
+            let node = find_node(nodes, kind, qualified)
+                .unwrap_or_else(|| panic!("node {kind} {qualified} not found"));
+            assert!(
+                node.get("span").is_none(),
+                "{kind} {qualified} must carry no span"
+            );
+        }
+    }
 }

@@ -25,14 +25,13 @@ import {
   type TypeScriptAdapterDiagnostic,
   type TypeScriptAdapterInput,
   type TypeScriptAdapterResult,
-  type TypeScriptAnalysisRun,
+  type TypeScriptAnalysisRun, type TypeScriptIncrementalAnalysisRun, type TypeScriptIncrementalState,
   type TsAdapterSourceFile,
 } from "./types.js";
 import {
-  buildProgramCompilerOptions,
-  expandCandidatePaths,
-  loadWorkspaceTsConfigs,
-  resolveScopedModuleName,
+  buildProgramCompilerOptions, expandCandidatePaths, loadPackageModuleScopes,
+  loadWorkspacePackages, loadWorkspaceTsConfigs, type PackageModuleScope,
+  resolveScopedModuleName, type ScopedTsConfig, type WorkspacePackageManifest,
 } from "./tsconfig-loader.js";
 
 /**
@@ -212,20 +211,20 @@ function normalizeRelativePath(raw: string): string {
   if (posix.startsWith("/") || /^[a-zA-Z]:/.test(posix)) {
     throw new DomainError(
       "adapter/absolute-source-path",
-      `Mutlak kaynak yolu kabul edilmez: ${raw}`,
+      `Absolute source paths are not accepted: ${raw}`,
     );
   }
   for (const segment of posix.split("/")) {
     if (segment === "" || segment === ".") {
       throw new DomainError(
         "adapter/invalid-source-path",
-        `Kaynak yolu boş/geçersiz segment içeriyor: ${raw}`,
+        `Source path contains an empty or invalid segment: ${raw}`,
       );
     }
     if (segment === "..") {
       throw new DomainError(
         "adapter/source-path-escape",
-        `Kaynak yolu kök dışına çıkıyor: ${raw}`,
+        `Source path escapes the root: ${raw}`,
       );
     }
   }
@@ -250,7 +249,7 @@ interface SourceEntry {
 
 interface NodeRecord {
   readonly key: string;
-  readonly node: SnapshotNodeInput;
+  node: SnapshotNodeInput;
   readonly ref: NodeRef;
 }
 
@@ -295,10 +294,11 @@ class GraphAssembler {
     relativePath?: string;
     language?: string;
     attributes?: Record<string, unknown>;
+    location?: SnapshotNodeInput["location"];
   }): NodeRecord {
     const key = this.nodeKey(input.kind, input.qualifiedName, input.relativePath);
     const existing = this.nodes.get(key);
-    if (existing !== undefined) return existing;
+    if (existing !== undefined) return withLocation(existing, input.location);
     const ref: NodeRef = {
       kind: input.kind,
       qualifiedName: input.qualifiedName,
@@ -316,7 +316,7 @@ class GraphAssembler {
       },
     };
     this.nodes.set(key, record);
-    return record;
+    return withLocation(record, input.location);
   }
 
   /** Kenarı ekler; aynı (kind, from, to) kenarı kanıtlarıyla birleştirir. */
@@ -391,8 +391,8 @@ interface AnalysisContext {
   readonly entries: Map<string, SourceEntry>;
   readonly entryByRelativePath: Map<string, SourceEntry>;
   readonly assembler: GraphAssembler;
-  /** Bildirim sembolü → node kaydı (registry). */
   readonly registry: Map<ts.Symbol, NodeRecord>;
+  readonly declarationNodes: Map<ts.ClassLikeDeclaration | ts.InterfaceDeclaration, NodeRecord>;
   /** Test callback fonksiyonu → Test node kaydı (yalnızca test-affinity dosyalar). */
   readonly testCallbacks: Map<ts.Node, NodeRecord>;
   /** BDD sarmalayıcı çağrıları (`describe`/`it`/`test`); sahte CALLS kenarı üretmez. */
@@ -405,11 +405,11 @@ interface AnalysisContext {
 /* ------------------------------------------------------------------ */
 
 /** Tek analiz koşusunun çıktısı: ana sonuç + framework linker katkısı. */
-type AnalysisRun = TypeScriptAnalysisRun;
+type AnalysisRun = TypeScriptIncrementalAnalysisRun;
 
 function runAnalysis(input: TypeScriptAdapterInput): AnalysisRun {
   if (input.workspaceId.trim().length === 0) {
-    throw new DomainError("adapter/empty-workspace-id", "workspaceId boş olamaz");
+    throw new DomainError("adapter/empty-workspace-id", "workspaceId must not be empty");
   }
   const rootPosix = normalizeRootPosix(input.rootDir);
   // Mutlaklık: POSIX ("/...") veya Windows sürücü harfi ("D:/...").
@@ -417,7 +417,7 @@ function runAnalysis(input: TypeScriptAdapterInput): AnalysisRun {
   if (!isAbsolute) {
     throw new DomainError(
       "adapter/invalid-root-dir",
-      `rootDir mutlak dizin olmalı: ${input.rootDir}`,
+      `rootDir must be an absolute directory: ${input.rootDir}`,
     );
   }
 
@@ -431,7 +431,7 @@ function runAnalysis(input: TypeScriptAdapterInput): AnalysisRun {
     if (entries.has(absoluteKey) || entryByRelativePath.has(relativePath)) {
       throw new DomainError(
         "adapter/duplicate-source-path",
-        `Aynı kaynak yolu iki kez verildi: ${source.relativePath}`,
+        `The same source path was given twice: ${source.relativePath}`,
       );
     }
     const entry: SourceEntry = {
@@ -449,32 +449,36 @@ function runAnalysis(input: TypeScriptAdapterInput): AnalysisRun {
     a.relativePath < b.relativePath ? -1 : 1,
   );
 
-  // 1.5) Güvenli, salt-okunur tsconfig.json / jsconfig.json yüklemesi.
+  // 1.5) Güvenli, salt-okunur tsconfig.json / jsconfig.json + monorepo package.json yüklemesi.
   const loadedConfigs = loadWorkspaceTsConfigs(
     rootPosix,
     input.configFiles,
     input.configFiles === undefined ? input.rootDir : undefined,
     sortedEntries.map((entry) => entry.relativePath),
   );
+  const loadedPackages = loadWorkspacePackages(
+    rootPosix,
+    input.packageFiles,
+    input.packageFiles === undefined ? input.rootDir : undefined,
+    sortedEntries.map((entry) => entry.relativePath),
+  );
+  const moduleFormat = loadModuleFormatScopes(input, rootPosix, sortedEntries);
   const compilerOptions = buildProgramCompilerOptions(loadedConfigs.configs);
   const resolvedLibDir = resolveTypeScriptLibDir();
   const host = createCompilerHostWithDefaultLib(compilerOptions, resolvedLibDir);
-  /**
-   * SEC-04: CompilerHost + ModuleResolutionHost disk fallback'i kesinlikle
-   * sınırlandırılır — `entries` (WorkspaceAccessPolicy izinli kaynaklar)
-   * dışındaki workspace dosyaları (.env.js, ../outside-secret.js, symlink,
-   * bundle vb.) diskten ASLA okunmaz. Disk erişimi yalnızca:
-   * (a) TypeScript yerleşik lib*.d.ts dizini (`resolvedLibDir`), ve
-   * (b) `rootPosix` içindeki `node_modules` altındaki `.d.ts`/`.d.mts`/
-   *     `.d.cts`/`package.json` dosyaları için izin verilir.
-   */
+  /* SEC-04: workspace files outside `entries` (the sources allowed by the
+   * WorkspaceAccessPolicy) are never read from disk (.env.js, ../secret.js,
+   * links, bundles, ...); node_modules declarations skipped by the confined
+   * host are reported as warnings. */
+  const hostWarnings: string[] = [];
   const resolutionHost = configureConfinedCompilerHost(
     host,
     entries,
     rootPosix,
     resolvedLibDir,
+    moduleFormat.projections,
+    { addWarning: (message) => hostWarnings.push(message) },
   );
-  // Her containingFile için en yakın ata tsconfig/jsconfig ile modül çözümleme.
   const resolveOne = (
     moduleName: string,
     containingFile: string,
@@ -485,6 +489,7 @@ function runAnalysis(input: TypeScriptAdapterInput): AnalysisRun {
     ...(resolvedLibDir === undefined ? {} : { allowedLibDir: resolvedLibDir }),
     programOptions: compilerOptions,
     configs: loadedConfigs.configs,
+    workspacePackages: loadedPackages.packages,
     resolutionHost,
     entries,
   });
@@ -502,9 +507,11 @@ function runAnalysis(input: TypeScriptAdapterInput): AnalysisRun {
   host.resolveModuleNames = resolveModuleNamesHook;
   host.resolveModuleNameLiterals = resolveModuleNameLiteralsHook;
 
-  // 3) Program + TypeChecker (TŞ §7: TypeScript Compiler API).
-  const rootNames = sortedEntries.map((entry) => entry.absolutePath);
-  const program = ts.createProgram({ rootNames, options: compilerOptions, host });
+  // 3) Program + TypeChecker (TŞ §7: TypeScript Compiler API) + incremental oldProgram.
+  const { program, optionsSignature } = createProgramWithIncrementalReuse({
+    input, rootPosix, compilerOptions, loadedConfigs: loadedConfigs.configs, moduleScopes: moduleFormat.scopes,
+    workspacePackages: loadedPackages.packages, host, entries, sortedEntries, resolvedLibDir,
+  });
   const checker = program.getTypeChecker();
   for (const sourceFile of program.getSourceFiles()) {
     const hit = entries.get(canonicalPath(sourceFile.fileName));
@@ -512,7 +519,7 @@ function runAnalysis(input: TypeScriptAdapterInput): AnalysisRun {
   }
 
   const assembler = new GraphAssembler(input.workspaceId);
-  for (const warning of loadedConfigs.warnings) assembler.addWarning(warning);
+  for (const warning of [...loadedConfigs.warnings, ...loadedPackages.warnings, ...moduleFormat.warnings, ...hostWarnings]) assembler.addWarning(warning);
   const context: AnalysisContext = {
     workspaceId: input.workspaceId,
     compilerOptions,
@@ -523,6 +530,7 @@ function runAnalysis(input: TypeScriptAdapterInput): AnalysisRun {
     entryByRelativePath,
     assembler,
     registry: new Map<ts.Symbol, NodeRecord>(),
+    declarationNodes: new Map<ts.ClassLikeDeclaration | ts.InterfaceDeclaration, NodeRecord>(),
     testCallbacks: new Map<ts.Node, NodeRecord>(),
     testBlockCalls: new Set<ts.CallExpression>(),
     framework: {
@@ -554,7 +562,7 @@ function runAnalysis(input: TypeScriptAdapterInput): AnalysisRun {
       diagnostics.push({
         relativePath: entry.relativePath,
         code: "ADAPTER_INTERNAL",
-        message: "Program bu kaynak için SourceFile üretmedi",
+        message: "The TypeScript program produced no SourceFile for this source",
         line: 0,
       });
       return;
@@ -617,6 +625,9 @@ function runAnalysis(input: TypeScriptAdapterInput): AnalysisRun {
     runPhase(entry, (sourceFile) =>
       extractDeclarations(context, entry, sourceFile),
     );
+  }
+  for (const entry of sortedEntries) {
+    runPhase(entry, (sourceFile) => extractHeritageClauses(context, entry, sourceFile));
   }
   for (const entry of sortedEntries) {
     runPhase(entry, (sourceFile) => extractImports(context, entry, sourceFile));
@@ -696,39 +707,25 @@ function runAnalysis(input: TypeScriptAdapterInput): AnalysisRun {
     frameworkLinkers: TS_ADAPTER_FRAMEWORK_LINKERS,
   };
 
-  return {
-    result: {
-      analyzerId: TS_ADAPTER_ANALYZER_ID,
-      analyzerVersion: TS_ADAPTER_VERSION,
-      state: diagnostics.length > 0 ? "partial" : "ready",
-      capabilities,
-      coverageRatio,
-      unsupportedConstructs: UNSUPPORTED_CONSTRUCTS,
-      warnings: assembler.warnings,
-      diagnostics,
-      nodes: nodeInputs,
-      edges: edgeInputs,
-    },
-    framework: {
-      detections: [...context.framework.detections].sort((a, b) =>
-        a.framework < b.framework ? -1 : 1,
-      ),
-      nodes: frameworkNodes,
-      edges: [...context.framework.edges].sort(byEdgeKey).map(edgeRecordToInput),
-      diagnostics: [...context.framework.diagnostics].sort((a, b) => {
-        if (a.relativePath !== b.relativePath) {
-          return a.relativePath < b.relativePath ? -1 : 1;
-        }
-        if (a.code !== b.code) return a.code < b.code ? -1 : 1;
-        return a.message < b.message ? -1 : a.message > b.message ? 1 : 0;
-      }),
-    },
-  };
+  return buildAnalysisRunWithIncrementalState({
+    diagnostics,
+    capabilities,
+    coverageRatio,
+    assembler,
+    nodeInputs,
+    edgeInputs,
+    context,
+    frameworkNodes,
+    byEdgeKey,
+    program,
+    sortedEntries,
+    optionsSignature,
+  });
 }
 
 /**
  * TypeScript Language Adapter ana girişi: tam graph (framework kenarları
- * dahil) döner.
+ * dahil) döner. `nextIncrementalState` non-enumerable olarak eklenir.
  */
 export function analyzeTypeScriptProgram(
   input: TypeScriptAdapterInput,
@@ -766,7 +763,11 @@ export function extractFrameworkEdges(
 export function analyzeTypeScriptProgramWithFrameworks(
   input: TypeScriptAdapterInput,
 ): TypeScriptAnalysisRun {
-  return runAnalysis(input);
+  const run = runAnalysis(input);
+  return attachNonEnumerableIncrementalState(
+    { result: run.result, framework: run.framework },
+    run.nextIncrementalState,
+  );
 }
 
 /* ------------------------------------------------------------------ */
@@ -790,12 +791,7 @@ function evidenceFor(
 ): SnapshotEvidenceInput {
   return {
     kind,
-    span: {
-      relativePath: entry.relativePath,
-      startLine: spanStart(sourceFile, node),
-      endLine: spanEnd(sourceFile, node),
-      sourceHash: entry.sourceHash,
-    },
+    span: declarationSpan(entry, sourceFile, node),
     analyzerId: TS_ADAPTER_ANALYZER_ID,
     analyzerVersion: TS_ADAPTER_VERSION,
     rationale,
@@ -858,17 +854,19 @@ function extractDeclarations(
     node: ts.Node,
     rationale: string,
   ): void => {
+    const evidence = evidenceFor(entry, sourceFile, node, "ast-span", rationale);
     assembler.addEdge({
       kind: "CONTAINS",
       from,
       to,
       resolution: "verified",
-      evidence: evidenceFor(entry, sourceFile, node, "ast-span", rationale),
+      evidence,
     });
+    withLocation(to, evidence.span);
   };
 
   const registerMembers = (
-    statement: ts.ClassDeclaration | ts.InterfaceDeclaration,
+    statement: ts.ClassLikeDeclaration | ts.InterfaceDeclaration,
     ownerRecord: NodeRecord,
     ownerKind: NodeKind,
   ): void => {
@@ -888,7 +886,7 @@ function extractDeclarations(
         ownerRecord,
         memberRecord,
         member,
-        `CONTAINS: ${ownerRecord.node.qualifiedName} ${ownerKind.toLowerCase()} bildirimi içindeki ${memberName} üyesi AST span kanıtıyla eşlendi.`,
+        `CONTAINS: member ${memberName} of the ${ownerRecord.node.qualifiedName} ${ownerKind.toLowerCase()} declaration, matched by AST span evidence.`,
       );
     }
   };
@@ -905,11 +903,12 @@ function extractDeclarations(
         language: entry.language,
       });
       registerWithSymbol(symbolOfDeclaration(statement), record);
+      context.declarationNodes.set(statement, record);
       addContains(
         fileNode,
         record,
         statement,
-        `CONTAINS: ${entry.relativePath} dosyasındaki ${name} ${kind.toLowerCase()} bildirimi AST span kanıtıyla eşlendi.`,
+        `CONTAINS: ${kind.toLowerCase()} declaration ${name} in ${entry.relativePath}, matched by AST span evidence.`,
       );
       registerMembers(statement, record, kind);
       continue;
@@ -929,7 +928,7 @@ function extractDeclarations(
         fileNode,
         record,
         statement,
-        `CONTAINS: ${entry.relativePath} dosyasındaki ${name} fonksiyon bildirimi AST span kanıtıyla eşlendi.`,
+        `CONTAINS: function declaration ${name} in ${entry.relativePath}, matched by AST span evidence.`,
       );
       continue;
     }
@@ -940,6 +939,7 @@ function extractDeclarations(
         // CommonJS import bağlaması (`const express = require("express")`)
         // yerel Handler bildirimi değildir.
         if (isStaticRequireCall(declaration.initializer) !== undefined) continue;
+        if (tryRegisterClassExpression(context, entry, statement, declaration, fileNode, addContains, registerWithSymbol, registerMembers)) continue;
         // Call signature'lı tip = handler değeri → Handler node'u
         // (ör. const ordersRoute = createOrdersRoute(ordersService)).
         const type = checker.getTypeAtLocation(declaration.name);
@@ -958,7 +958,7 @@ function extractDeclarations(
           fileNode,
           record,
           statement,
-          `CONTAINS: ${entry.relativePath} dosyasındaki ${declaration.name.text} handler bağlaması AST span kanıtıyla eşlendi.`,
+          `CONTAINS: handler binding ${declaration.name.text} in ${entry.relativePath}, matched by AST span evidence.`,
         );
       }
       continue;
@@ -1144,7 +1144,7 @@ function extractTestDefinitions(
           fileNode,
           testRecord,
           node,
-          `CONTAINS: ${entry.relativePath} dosyasındaki '${qualifiedName}' test tanımı AST span kanıtıyla eşlendi.`,
+          `CONTAINS: test definition '${qualifiedName}' in ${entry.relativePath}, matched by AST span evidence.`,
         );
         testCallbacks.set(testMatch.callback, testRecord);
         walk(node.expression, suiteChain);
@@ -1239,7 +1239,7 @@ function extractImports(
           sourceFile,
           specifier.node,
           "ast-span",
-          `IMPORTS: ${entry.relativePath} dosyasındaki '${specifier.text}' beyanı TypeChecker tarafından ${record.targetRelativePath} dosyasına çözümlendi.`,
+          `IMPORTS: '${specifier.text}' in ${entry.relativePath} was resolved by the TypeChecker to ${record.targetRelativePath}.`,
         ),
       });
       continue;
@@ -1262,11 +1262,11 @@ function extractImports(
             sourceFile,
             specifier.node,
             "ast-span",
-            `IMPORTS: '${specifier.text}' Node.js çekirdek modülü olarak bilinen kural ile sınıflandırıldı (heuristic); dış kaynak açık UnknownExternal node olarak temsil edildi.`,
+            `IMPORTS: '${specifier.text}' was classified as a Node.js core module by a known rule (heuristic); the external source is represented as an explicit UnknownExternal node.`,
           ),
           ambiguity: {
             candidates: [specifier.text],
-            reason: "Node.js builtin sınıflandırması; semantik çözümleme yok.",
+            reason: "Node.js builtin classification; no semantic resolution.",
           },
         });
         continue;
@@ -1281,7 +1281,7 @@ function extractImports(
           sourceFile,
           specifier.node,
           "ast-span",
-          `IMPORTS: ${entry.relativePath} dosyasındaki '${specifier.text}' analizi dışındaki modüle çözümlendi; dış kaynak açık UnknownExternal node olarak temsil edildi.`,
+          `IMPORTS: '${specifier.text}' in ${entry.relativePath} resolved to a module outside the analysis set; the external source is represented as an explicit UnknownExternal node.`,
         ),
       });
       continue;
@@ -1309,11 +1309,11 @@ function extractImports(
           sourceFile,
           specifier.node,
           "ast-span",
-          `IMPORTS: '${specifier.text}' TypeChecker tarafından çözümlenemedi; relative aday yolu ${candidate} analizi içinde eşleşti (heuristic).`,
+          `IMPORTS: '${specifier.text}' was not resolved by the TypeChecker; the relative candidate path ${candidate} matched inside the analysis set (heuristic).`,
         ),
         ambiguity: {
           candidates: [candidate],
-          reason: "TypeChecker modülü çözümlemedi; dosya yolu aday eşleşmesi.",
+          reason: "The TypeChecker did not resolve the module; file-path candidate match.",
         },
       });
       continue;
@@ -1333,11 +1333,11 @@ function extractImports(
         sourceFile,
         specifier.node,
         "ast-span",
-        `IMPORTS: '${specifier.text}' çözümlenemedi; uydurma hedef yerine açık UnknownExternal node üzerinde unresolved işaretlendi.`,
+        `IMPORTS: '${specifier.text}' could not be resolved; marked unresolved on an explicit UnknownExternal node instead of inventing a target.`,
       ),
     });
     assembler.addWarning(
-      `IMPORTS çözümlenemedi: ${entry.relativePath} -> '${specifier.text}' (unresolved, UnknownExternal node üretildi)`,
+      `IMPORTS unresolved: ${entry.relativePath} -> '${specifier.text}' (unresolved, UnknownExternal node created)`,
     );
   }
 }
@@ -1413,15 +1413,15 @@ function callerRecordForFunctionLike(
     const ownerName =
       (ts.isClassDeclaration(owner) || ts.isInterfaceDeclaration(owner))
         ? owner.name?.text
-        : undefined;
+        : resolveClassExpressionOwnerName(context, owner);
     const qualifiedName =
       ownerName === undefined ? name.text : `${ownerName}.${name.text}`;
     const kind: NodeKind = ts.isMethodDeclaration(node) ? "Method" : "Function";
     const record = assembler.ensureNode({
-      kind,
-      qualifiedName,
+      kind, qualifiedName,
       relativePath: entry.relativePath,
       language: entry.language,
+      location: declarationSpan(entry, node.getSourceFile(), node),
     });
     const symbol = checker.getSymbolAtLocation(name);
     if (symbol !== undefined) registry.set(symbol, record);
@@ -1433,10 +1433,10 @@ function callerRecordForFunctionLike(
   const parent = node.parent;
   if (parent !== undefined && ts.isVariableDeclaration(parent) && ts.isIdentifier(parent.name)) {
     return assembler.ensureNode({
-      kind: "Handler",
-      qualifiedName: parent.name.text,
+      kind: "Handler", qualifiedName: parent.name.text,
       relativePath: entry.relativePath,
       language: entry.language,
+      location: declarationSpan(entry, parent.getSourceFile(), parent),
     });
   }
   return cjsExportCallerRecord(context, entry, node);
@@ -1540,16 +1540,16 @@ function deriveNodeRecord(
     return undefined;
   }
   return assembler.ensureNode({
-    kind,
-    qualifiedName,
+    kind, qualifiedName,
     relativePath: declarationEntry.relativePath,
     language: declarationEntry.language,
+    location: declarationSpan(declarationEntry, declaration.getSourceFile(), declaration),
   });
 }
 
 function inferNodeKind(declaration: ts.Declaration): NodeKind | undefined {
-  if (ts.isClassDeclaration(declaration)) return "Class";
-  if (ts.isInterfaceDeclaration(declaration)) return "Interface";
+  if (ts.isClassDeclaration(declaration) || ts.isClassExpression(declaration)) return "Class";
+  if (ts.isInterfaceDeclaration(declaration) || ts.isTypeAliasDeclaration(declaration)) return ts.isInterfaceDeclaration(declaration) ? "Interface" : "Type";
   if (ts.isFunctionDeclaration(declaration)) return "Function";
   if (ts.isFunctionExpression(declaration) || ts.isArrowFunction(declaration)) return inferCjsExportNodeKind(declaration);
   if (
@@ -1590,14 +1590,14 @@ function tryRoutePattern(
   const verb = callee.name.text.toUpperCase();
   const pathText = pathArg.text;
   const endpoint = assembler.ensureNode({
-    kind: "Endpoint",
-    qualifiedName: `${verb} ${pathText}`,
+    kind: "Endpoint", qualifiedName: `${verb} ${pathText}`,
     relativePath: entry.relativePath,
     language: entry.language,
     attributes:
       framework === undefined
         ? { method: verb, path: pathText }
         : { method: verb, path: pathText, framework },
+    location: declarationSpan(entry, sourceFile, call),
   });
   if (framework !== undefined) {
     context.framework.nodeKeys.add(endpoint.key);
@@ -1607,7 +1607,7 @@ function tryRoutePattern(
   if (handlerArg === undefined) return true;
   if (!ts.isIdentifier(handlerArg) && !ts.isPropertyAccessExpression(handlerArg)) {
     assembler.addWarning(
-      `Route handler modellenmedi: ${entry.relativePath} '${verb} ${pathText}' (inline/anonymous handler unsupportedConstructs kapsamında)`,
+      `Route handler not modeled: ${entry.relativePath} '${verb} ${pathText}' (inline/anonymous handlers are listed in unsupportedConstructs)`,
     );
     return true;
   }
@@ -1643,7 +1643,7 @@ function tryRoutePattern(
         sourceFile,
         call,
         "route-attribute",
-        `ROUTES_TO: '${verb} ${pathText}' route kaydı ${handlerRecord.node.qualifiedName} handler'ına TypeChecker ile çözümlendi.`,
+        `ROUTES_TO: route registration '${verb} ${pathText}' was resolved by the TypeChecker to handler ${handlerRecord.node.qualifiedName}.`,
       ),
     );
     return true;
@@ -1662,14 +1662,14 @@ function tryRoutePattern(
         sourceFile,
         call,
         "route-attribute",
-        `ROUTES_TO: '${verb} ${pathText}' route kaydındaki handler analiz seti dışındaki ${handlerSymbol.getName()} sembolüne çözümlendi; açık UnknownExternal node kullanıldı.`,
+        `ROUTES_TO: the handler of route registration '${verb} ${pathText}' resolved to symbol ${handlerSymbol.getName()} outside the analysis set; an explicit UnknownExternal node was used.`,
       ),
     );
     return true;
   }
 
   assembler.addWarning(
-    `ROUTES_TO çözümlenemedi: ${entry.relativePath} '${verb} ${pathText}' -> handler sembolü bulunamadı (Endpoint node'u korundu, kenar üretilmedi)`,
+    `ROUTES_TO unresolved: ${entry.relativePath} '${verb} ${pathText}' -> handler symbol not found (Endpoint node kept, no edge created)`,
   );
   return true;
 }
@@ -1693,18 +1693,25 @@ function emitCallEdge(
   const isNew = ts.isNewExpression(call);
   const signature = isNew ? undefined : checker.getResolvedSignature(call);
   const declaration = signature?.declaration;
+  const signatureSymbol =
+    declaration !== undefined
+      ? checker.getSymbolAtLocation(ts.getNameOfDeclaration(declaration) ?? declaration)
+      : undefined;
   const targetSymbol = isNew
     ? checker.getSymbolAtLocation(call.expression)
-    : declaration !== undefined
-      ? checker.getSymbolAtLocation(ts.getNameOfDeclaration(declaration) ?? declaration)
-      : checker.getSymbolAtLocation(call.expression);
+    : (signatureSymbol ?? checker.getSymbolAtLocation(call.expression));
+  const resolvedTargetSymbol = unwrapAliasSymbol(checker, targetSymbol);
 
-  const registryHit = resolveSymbolRecord(
-    context,
-    entry,
-    targetSymbol ?? undefined,
-    declaration ?? undefined,
-  );
+  const registryHit =
+    resolveSymbolRecord(
+      context,
+      entry,
+      targetSymbol ?? undefined,
+      declaration ?? undefined,
+    ) ??
+    (!isNew && declaration !== undefined
+      ? resolveInternalCallableRecord(context, resolvedTargetSymbol, caller)
+      : undefined);
   if (registryHit !== undefined) {
     assembler.addEdge({
       kind: "CALLS",
@@ -1716,7 +1723,7 @@ function emitCallEdge(
         sourceFile,
         call,
         "semantic-symbol",
-        `CALLS: ${caller.node.qualifiedName} içindeki çağrı ifadesi TypeChecker ile ${registryHit.node.qualifiedName} sembolüne çözümlendi (verified).`,
+        `CALLS: call expression in ${caller.node.qualifiedName} was resolved by the TypeChecker to symbol ${registryHit.node.qualifiedName} (verified).`,
       ),
     });
     if (caller.node.kind === "Test" && registryHit.node.kind !== "Test") {
@@ -1730,7 +1737,7 @@ function emitCallEdge(
           sourceFile,
           call,
           "semantic-symbol",
-          `TESTS: ${caller.node.qualifiedName} testi içindeki çağrı ifadesi TypeChecker ile ${registryHit.node.qualifiedName} sembolüne çözümlendi (verified).`,
+          `TESTS: call expression in test ${caller.node.qualifiedName} was resolved by the TypeChecker to symbol ${registryHit.node.qualifiedName} (verified).`,
         ),
       });
     }
@@ -1738,13 +1745,18 @@ function emitCallEdge(
   }
 
   if (
-    targetSymbol !== undefined &&
-    (targetSymbol.getDeclarations()?.length ?? 0) > 0 &&
-    !isInternalDeclarationOrSymbol(context, targetSymbol, declaration)
+    resolvedTargetSymbol !== undefined &&
+    (resolvedTargetSymbol.flags & ts.SymbolFlags.Alias) === 0 &&
+    (resolvedTargetSymbol.getDeclarations()?.length ?? 0) > 0 &&
+    !isInternalDeclarationOrSymbol(context, resolvedTargetSymbol, declaration)
   ) {
     // Analiz setinin dışında bildirilen sembol (lib/node_modules): açık
     // UnknownExternal node + checker dayanaklı verified kenar.
-    const externalName = externalQualifiedName(targetSymbol, declaration);
+    const externalDecl =
+      signatureSymbol !== undefined
+        ? declaration
+        : resolvedTargetSymbol.getDeclarations()?.[0];
+    const externalName = externalQualifiedName(resolvedTargetSymbol, externalDecl);
     const externalNode = assembler.ensureNode({
       kind: "UnknownExternal",
       qualifiedName: externalName,
@@ -1759,14 +1771,26 @@ function emitCallEdge(
         sourceFile,
         call,
         "semantic-symbol",
-        `CALLS: ${caller.node.qualifiedName} içindeki çağrı analiz seti dışındaki ${externalName} sembolüne çözümlendi; dış kaynak açık UnknownExternal node olarak temsil edildi.`,
+        `CALLS: call in ${caller.node.qualifiedName} resolved to symbol ${externalName} outside the analysis set; the external source is represented as an explicit UnknownExternal node.`,
       ),
     });
     return;
   }
 
+  // TypeChecker tarafından kesin olarak çözümlenmiş ancak üst düzey düğüm
+  // olarak modellenmeyen yerel çağrılar (callback parametreleri, test-içi
+  // kapanışlar, anonim nesne değişmezleri, IIFE): sahte UnknownExternal
+  // (unresolved) üretmez.
+  if (
+    !isNew &&
+    declaration !== undefined &&
+    isResolvedInternalNonModeledCall(context, resolvedTargetSymbol, declaration)
+  ) {
+    return;
+  }
+
   // Hiç çözümlenemedi: uydurma sembol YOK; açık UnknownExternal + unresolved.
-  const callText = call.expression.getText(sourceFile).trim();
+  const callText = formatUnresolvedCalleeText(call.expression, sourceFile);
   const unresolvedNode = assembler.ensureNode({
     kind: "UnknownExternal",
     qualifiedName: callText,
@@ -1781,12 +1805,137 @@ function emitCallEdge(
       sourceFile,
       call,
       "ast-span",
-      `CALLS: ${caller.node.qualifiedName} içindeki '${callText}' çağrısı çözümlenemedi; uydurma hedef yerine açık UnknownExternal node üzerinde unresolved işaretlendi.`,
+      `CALLS: call '${callText}' in ${caller.node.qualifiedName} could not be resolved; marked unresolved on an explicit UnknownExternal node instead of inventing a target.`,
     ),
   });
   assembler.addWarning(
-    `CALLS çözümlenemedi: ${entry.relativePath} '${callText}' (unresolved, UnknownExternal node üretildi)`,
+    `CALLS unresolved: ${entry.relativePath} '${callText}' (unresolved, UnknownExternal node created)`,
   );
+}
+
+const MAX_UNRESOLVED_CALLEE_CHARS = 120;
+const MAX_UNRESOLVED_CALLEE_DEPTH = 16;
+
+function resolveInternalCallableRecord(
+  context: AnalysisContext,
+  symbol: ts.Symbol | undefined,
+  caller: NodeRecord,
+): NodeRecord | undefined {
+  if (symbol === undefined || (symbol.flags & ts.SymbolFlags.Alias) !== 0) {
+    return undefined;
+  }
+  const decl = symbol.getDeclarations()?.[0];
+  if (decl === undefined) return undefined;
+  const declEntry = context.entries.get(
+    canonicalPath(decl.getSourceFile().fileName),
+  );
+  if (declEntry === undefined) return undefined;
+
+  if (
+    (ts.isPropertySignature(decl) || ts.isPropertyDeclaration(decl)) &&
+    ts.isIdentifier(decl.name)
+  ) {
+    const owner = decl.parent;
+    const ownerName =
+      ts.isClassDeclaration(owner) || ts.isInterfaceDeclaration(owner)
+        ? owner.name?.text
+        : resolveClassExpressionOwnerName(context, owner);
+    if (ownerName !== undefined) {
+      const record = context.assembler.ensureNode({
+        kind: "Method",
+        qualifiedName: `${ownerName}.${decl.name.text}`,
+        relativePath: declEntry.relativePath,
+        language: declEntry.language,
+        location: declarationSpan(declEntry, decl.getSourceFile(), decl),
+      });
+      context.registry.set(symbol, record);
+      return record;
+    }
+  }
+
+  if (
+    caller.node.kind !== "Test" &&
+    ts.isVariableDeclaration(decl) &&
+    ts.isIdentifier(decl.name)
+  ) {
+    const init = unwrapParenthesizedExpression(decl.initializer);
+    if (
+      init !== undefined &&
+      (ts.isArrowFunction(init) || ts.isFunctionExpression(init))
+    ) {
+      const record = context.assembler.ensureNode({
+        kind: "Handler",
+        qualifiedName: decl.name.text,
+        relativePath: declEntry.relativePath,
+        language: declEntry.language,
+        location: declarationSpan(declEntry, decl.getSourceFile(), decl),
+      });
+      context.registry.set(symbol, record);
+      return record;
+    }
+  }
+
+  return undefined;
+}
+
+function isResolvedInternalNonModeledCall(
+  context: AnalysisContext,
+  resolvedTargetSymbol: ts.Symbol | undefined,
+  declaration: ts.Declaration,
+): boolean {
+  if (
+    resolvedTargetSymbol !== undefined &&
+    (resolvedTargetSymbol.flags & ts.SymbolFlags.Alias) === 0 &&
+    isInternalDeclarationOrSymbol(context, resolvedTargetSymbol, declaration)
+  ) {
+    return true;
+  }
+  return (
+    (ts.isArrowFunction(declaration) || ts.isFunctionExpression(declaration)) &&
+    ownRelativePathOf(context, declaration) !== undefined
+  );
+}
+
+function formatUnresolvedCalleeExpr(
+  expr: ts.Expression,
+  sourceFile: ts.SourceFile,
+  depth: number,
+): string {
+  if (depth >= MAX_UNRESOLVED_CALLEE_DEPTH) {
+    return expr.getText(sourceFile).trim();
+  }
+  if (
+    ts.isParenthesizedExpression(expr) ||
+    ts.isAsExpression(expr) ||
+    ts.isNonNullExpression(expr) ||
+    ts.isSatisfiesExpression(expr)
+  ) {
+    return formatUnresolvedCalleeExpr(expr.expression, sourceFile, depth + 1);
+  }
+  if (ts.isCallExpression(expr)) {
+    return `${formatUnresolvedCalleeExpr(expr.expression, sourceFile, depth + 1)}()`;
+  }
+  if (ts.isPropertyAccessExpression(expr)) {
+    const receiver = formatUnresolvedCalleeExpr(expr.expression, sourceFile, depth + 1);
+    return `${receiver}.${expr.name.text}`;
+  }
+  if (ts.isElementAccessExpression(expr)) {
+    const receiver = formatUnresolvedCalleeExpr(expr.expression, sourceFile, depth + 1);
+    return `${receiver}[]`;
+  }
+  return expr.getText(sourceFile).trim();
+}
+
+function formatUnresolvedCalleeText(
+  expr: ts.Expression,
+  sourceFile: ts.SourceFile,
+): string {
+  const raw = formatUnresolvedCalleeExpr(expr, sourceFile, 0);
+  const collapsed = raw.replace(/\s+/g, " ").trim();
+  if (collapsed.length === 0) return "<unresolved-call>";
+  return collapsed.length > MAX_UNRESOLVED_CALLEE_CHARS
+    ? collapsed.slice(0, MAX_UNRESOLVED_CALLEE_CHARS)
+    : collapsed;
 }
 
 function externalQualifiedName(
@@ -2085,6 +2234,7 @@ function emitNextRouteEdge(
     relativePath: entry.relativePath,
     language: entry.language,
     attributes: { method, path: routePath, framework: "nextjs" },
+    location: declarationSpan(entry, sourceFile, anchor),
   });
   context.framework.nodeKeys.add(endpoint.key);
   const edge = context.assembler.addEdge({
@@ -2097,7 +2247,7 @@ function emitNextRouteEdge(
       sourceFile,
       anchor,
       "route-attribute",
-      `ROUTES_TO: '${method} ${routePath}' Next.js App Router kural exportu (${entry.relativePath}) ${handlerRecord.node.qualifiedName} sembolüne TypeChecker ile çözümlendi.`,
+      `ROUTES_TO: Next.js App Router convention export '${method} ${routePath}' (${entry.relativePath}) was resolved by the TypeChecker to symbol ${handlerRecord.node.qualifiedName}.`,
     ),
   });
   context.framework.edges.push(edge);
@@ -2133,7 +2283,7 @@ function collectNextRouteHandlers(
       const record = handlerRecordOf(name);
       if (record === undefined) {
         assembler.addWarning(
-          `Next.js route handler çözümlenemedi: ${entry.relativePath} '${name.text}' (kenar üretilmedi)`,
+          `Next.js route handler unresolved: ${entry.relativePath} '${name.text}' (no edge created)`,
         );
         continue;
       }
@@ -2160,7 +2310,7 @@ function collectNextRouteHandlers(
         const record = handlerRecordOf(declaration.name);
         if (record === undefined) {
           assembler.addWarning(
-            `Next.js route handler çözümlenemedi: ${entry.relativePath} '${declaration.name.text}' (kenar üretilmedi)`,
+            `Next.js route handler unresolved: ${entry.relativePath} '${declaration.name.text}' (no edge created)`,
           );
           continue;
         }
@@ -2183,7 +2333,7 @@ function collectNextRouteHandlers(
     context.framework.diagnostics.push({
       relativePath: entry.relativePath,
       code: "FRAMEWORK_PATTERN_UNKNOWN",
-      message: `Next.js App Router kural dosyası ('${entry.relativePath}') tanınan HTTP fiil exportu içermiyor (beklenen: export function GET|POST|... veya export const GET = ...); kenar üretilmedi, node icat edilmedi.`,
+      message: `Next.js App Router route file ('${entry.relativePath}') has no recognized HTTP verb export (expected: export function GET|POST|... or export const GET = ...); no edge created, no node invented.`,
       line: firstStatementLine(sourceFile),
     });
   }
@@ -2249,8 +2399,8 @@ function collectNextPageHandler(
     relativePath: entry.relativePath,
     code: "FRAMEWORK_PATTERN_UNKNOWN",
     message: defaultExportSeen
-      ? `Next.js App Router sayfa dosyası ('${entry.relativePath}') isimsiz/anonim default export içeriyor; sembol icat edilmez, kenar üretilmedi.`
-      : `Next.js App Router sayfa dosyası ('${entry.relativePath}') tanınan default export içermiyor; kenar üretilmedi, node icat edilmedi.`,
+      ? `Next.js App Router page file ('${entry.relativePath}') has an unnamed/anonymous default export; no symbol invented, no edge created.`
+      : `Next.js App Router page file ('${entry.relativePath}') has no recognized default export; no edge created, no node invented.`,
     line: firstStatementLine(sourceFile),
   });
 }
@@ -2444,54 +2594,142 @@ function joinRootAndRelative(rootPosix: string, relativePath: string): string {
 }
 
 /**
- * SEC-04: CompilerHost + ModuleResolutionHost disk fallback'ini kesinlikle
- * sınırlar — `entries` dışındaki workspace dosyaları (.env.js, ../secret.js,
- * symlink, bundle vb.) diskten ASLA okunmaz. Disk erişimi yalnızca:
- * (a) TypeScript yerleşik lib*.d.ts dizini (`resolvedLibDir`), ve
- * (b) `rootPosix` içindeki `node_modules` altındaki `.d.ts`/`.d.mts`/`.d.cts`/
- *     `package.json` dosyaları için izin verilir.
+ * Maps each workspace `package.json` (canonical absolute path) to a minimal
+ * JSON projection carrying only its `"type"` field. TypeScript reads the
+ * nearest package.json through the compiler host to decide whether a
+ * `.ts`/`.js` file is ESM or CommonJS (`impliedNodeFormat`); without this the
+ * confined host hides every workspace manifest and all such files are treated
+ * as CommonJS (false TS1470 for `import.meta` in `"type": "module"` packages).
+ * Other manifest fields are deliberately not exposed, so module resolution
+ * behaves exactly as before.
+ */
+function buildPackageJsonProjections(
+  rootPosix: string,
+  scopes: readonly PackageModuleScope[],
+): ReadonlyMap<string, string> {
+  const projections = new Map<string, string>();
+  for (const scope of scopes) {
+    const absolutePath = normalizePosixPath(
+      joinRootAndRelative(rootPosix, scope.manifestRelativePath),
+    );
+    projections.set(
+      canonicalPath(absolutePath),
+      JSON.stringify(scope.moduleType === undefined ? {} : { type: scope.moduleType }),
+    );
+  }
+  return projections;
+}
+
+// Imported here (imports are hoisted) so line numbers pinned by tests above stay stable.
+import {
+  classifyLinkTarget,
+  createNodeConfinedFsProbe,
+  isSafePathSegment,
+  isUncDeviceOrNtPath,
+  MAX_CONFINED_DISK_FILE_BYTES,
+  MAX_CONFINED_DISK_TOTAL_BYTES,
+  MAX_CONFINED_LINK_HOPS,
+  type ConfinedFsProbe,
+  type ConfinedFsStat,
+} from "./confined-fs.js";
+
+/** Options of `configureConfinedCompilerHost`; the defaults are used in production. */
+export interface ConfinedCompilerHostOptions {
+  /** File system probe (default: `node:fs`; tests inject an in-memory probe). */
+  readonly fs?: ConfinedFsProbe;
+  /** Per-file disk read limit in bytes (default MAX_CONFINED_DISK_FILE_BYTES). */
+  readonly maxDiskFileBytes?: number;
+  /** Total disk read budget in bytes for this host (default MAX_CONFINED_DISK_TOTAL_BYTES). */
+  readonly maxDiskTotalBytes?: number;
+  /** Receives one English warning per skipped declaration file / exhausted budget. */
+  readonly addWarning?: (message: string) => void;
+}
+
+/** Outcome of walking one path component by component without following links. */
+type ConfinedWalk =
+  | { readonly kind: "resolved"; readonly real: string; readonly stat: ConfinedFsStat }
+  | { readonly kind: "escaped"; readonly target: string }
+  | { readonly kind: "missing" }
+  | { readonly kind: "refused" };
+
+interface ConfinedRegion {
+  /** Canonical key segments (lexical and real spelling) whose subtree belongs to the region. */
+  readonly keySegments: readonly (readonly string[])[];
+  /** Real path the walk starts from (trusted: workspace root or TypeScript lib dir). */
+  readonly base: string;
+}
+
+const MAX_CONFINED_CACHE_ENTRIES = 200_000;
+
+function splitPosixAbsolute(normalized: string): string[] | undefined {
+  if (normalized === "/") return [""];
+  if (/^[a-zA-Z]:\/?$/.test(normalized)) return [normalized.slice(0, 2)];
+  if (!normalized.startsWith("/") && !/^[a-zA-Z]:\//.test(normalized)) return undefined;
+  return normalized.split("/");
+}
+
+/**
+ * SEC-04: confines the CompilerHost + ModuleResolutionHost disk fallback.
+ * Workspace files outside `entries` (.env.js, ../secret.js, links, bundles,
+ * ...) are never read from disk. Disk access is limited to:
+ * (a) the bundled TypeScript `lib*.d.ts` directory (`resolvedLibDir`), and
+ * (b) `.d.ts` / `.d.mts` / `.d.cts` / `package.json` files under a
+ *     `node_modules` directory inside `rootPosix`.
+ *
+ * No path is handed to a following file system call: every candidate is
+ * first checked lexically (NUL, UNC/device/NT prefixes, reserved Windows
+ * device names, region and policy), then walked component by component with
+ * `lstat`. Links are resolved by reading their target; a UNC/device target or
+ * a target outside the regions is never touched. Reads are bounded per file
+ * and per run and refuse non-regular files. The host never writes, never
+ * exposes the process environment and never enumerates the disk.
  */
 export function configureConfinedCompilerHost(
   host: ts.CompilerHost,
   entries: ReadonlyMap<string, { readonly absolutePath: string; readonly content: string }>,
   rootPosix: string,
   resolvedLibDir: string | undefined,
+  packageJsonProjections: ReadonlyMap<string, string> = new Map(),
+  options: ConfinedCompilerHostOptions = {},
 ): ts.ModuleResolutionHost {
-  const baseFileExists = host.fileExists.bind(host);
-  const baseReadFile = host.readFile.bind(host);
-  const baseDirectoryExists = host.directoryExists?.bind(host);
-  const baseRealpath = host.realpath?.bind(host);
-  const baseGetDirectories = host.getDirectories?.bind(host);
+  const probe = options.fs ?? createNodeConfinedFsProbe();
+  const maxFileBytes = options.maxDiskFileBytes ?? MAX_CONFINED_DISK_FILE_BYTES;
+  const maxTotalBytes = options.maxDiskTotalBytes ?? MAX_CONFINED_DISK_TOTAL_BYTES;
+  const emittedWarnings = new Set<string>();
+  const warn = (message: string): void => {
+    if (options.addWarning === undefined || emittedWarnings.has(message)) return;
+    emittedWarnings.add(message);
+    options.addWarning(message);
+  };
 
   const withTrailingSlash = (key: string): string =>
     key.endsWith("/") ? key : `${key}/`;
 
-  const tryBaseRealpath = (p: string): string | undefined => {
-    if (baseRealpath === undefined || p.includes("\0")) return undefined;
-    try {
-      const real = baseRealpath(p);
-      return typeof real === "string" && real.length > 0 ? real : undefined;
-    } catch {
-      return undefined;
-    }
+  /** Real path of a trusted region base, never for UNC/device input. */
+  const realBaseOf = (base: string): string | undefined => {
+    if (probe === undefined || base.includes("\0") || isUncDeviceOrNtPath(base)) return undefined;
+    const real = probe.realpath(base);
+    if (real === undefined || real.includes("\0") || isUncDeviceOrNtPath(real)) return undefined;
+    return normalizePosixPath(real);
   };
 
+  const rootIsRemote = isUncDeviceOrNtPath(rootPosix);
   const rootKey = canonicalPath(rootPosix);
   const rootKeyWithSlash = withTrailingSlash(rootKey);
-  const realRootRaw = tryBaseRealpath(rootPosix);
-  const realRootKey =
-    realRootRaw === undefined ? undefined : canonicalPath(realRootRaw);
+  const realRootPosix = rootIsRemote ? undefined : realBaseOf(rootPosix);
+  const realRootKey = realRootPosix === undefined ? undefined : canonicalPath(realRootPosix);
   const realRootKeyWithSlash =
     realRootKey === undefined ? undefined : withTrailingSlash(realRootKey);
 
+  const libIsRemote = resolvedLibDir !== undefined && isUncDeviceOrNtPath(resolvedLibDir);
   const libDirKey =
-    resolvedLibDir === undefined ? undefined : canonicalPath(resolvedLibDir);
+    resolvedLibDir === undefined || libIsRemote ? undefined : canonicalPath(resolvedLibDir);
   const libDirKeyWithSlash =
     libDirKey === undefined ? undefined : withTrailingSlash(libDirKey);
-  const realLibDirRaw =
-    resolvedLibDir === undefined ? undefined : tryBaseRealpath(resolvedLibDir);
+  const realLibDirPosix =
+    resolvedLibDir === undefined || libIsRemote ? undefined : realBaseOf(resolvedLibDir);
   const realLibDirKey =
-    realLibDirRaw === undefined ? undefined : canonicalPath(realLibDirRaw);
+    realLibDirPosix === undefined ? undefined : canonicalPath(realLibDirPosix);
   const realLibDirKeyWithSlash =
     realLibDirKey === undefined ? undefined : withTrailingSlash(realLibDirKey);
 
@@ -2505,6 +2743,7 @@ export function configureConfinedCompilerHost(
     (realLibDirKey !== undefined && candidateKey === realLibDirKey);
 
   const relativeUnderAllowedRoot = (candidateKey: string): string | undefined => {
+    if (rootIsRemote) return undefined;
     if (candidateKey.startsWith(rootKeyWithSlash)) {
       return candidateKey.slice(rootKeyWithSlash.length);
     }
@@ -2523,9 +2762,7 @@ export function configureConfinedCompilerHost(
     return rel.startsWith("node_modules/") || rel.includes("/node_modules/");
   };
 
-  const isAllowedDiskFile = (candidatePath: string): boolean => {
-    if (candidatePath.includes("\0")) return false;
-    const key = canonicalPath(candidatePath);
+  const isAllowedDiskFileKey = (key: string): boolean => {
     if (isInAllowedLibDir(key)) return true;
     if (!isInRootNodeModules(key)) return false;
     const lower = key.toLowerCase();
@@ -2537,9 +2774,7 @@ export function configureConfinedCompilerHost(
     );
   };
 
-  const isAllowedDiskDir = (candidatePath: string): boolean => {
-    if (candidatePath.includes("\0")) return false;
-    const key = canonicalPath(candidatePath);
+  const isAllowedDiskDirKey = (key: string): boolean => {
     if (isInAllowedLibDirOrSelf(key)) return true;
     const rel = relativeUnderAllowedRoot(key);
     if (rel === undefined) return false;
@@ -2551,34 +2786,223 @@ export function configureConfinedCompilerHost(
     );
   };
 
-  // SEC-04-R1: CWE-59 symlink escape guard on BOTH fileExists and readFile.
-  const isRealpathConfinedDiskFile = (p: string): boolean => {
-    if (p.includes("\0")) return false;
-    const key = canonicalPath(p);
-    if (isInAllowedLibDir(key)) {
-      if (baseRealpath === undefined) return true;
-      const real = tryBaseRealpath(p);
-      return real !== undefined && isInAllowedLibDir(canonicalPath(real));
+  const lexicallyUsable = (p: string): boolean =>
+    !p.includes("\0") && !isUncDeviceOrNtPath(p);
+  const isAllowedDiskFile = (p: string): boolean =>
+    lexicallyUsable(p) && isAllowedDiskFileKey(canonicalPath(p));
+  const isAllowedDiskDir = (p: string): boolean =>
+    lexicallyUsable(p) && isAllowedDiskDirKey(canonicalPath(p));
+
+  /* -------------------------- link-aware walk -------------------------- */
+
+  const regionOf = (keys: readonly string[], base: string): ConfinedRegion => ({
+    keySegments: keys
+      .map((key) => splitPosixAbsolute(key))
+      .filter((segments): segments is string[] => segments !== undefined),
+    base,
+  });
+  const regions: ConfinedRegion[] = [];
+  if (libDirKey !== undefined && resolvedLibDir !== undefined) {
+    regions.push(regionOf(
+      realLibDirKey === undefined ? [libDirKey] : [libDirKey, realLibDirKey],
+      realLibDirPosix ?? normalizePosixPath(resolvedLibDir),
+    ));
+  }
+  if (!rootIsRemote) {
+    regions.push(regionOf(
+      realRootKey === undefined ? [rootKey] : [rootKey, realRootKey],
+      realRootPosix ?? normalizePosixPath(rootPosix),
+    ));
+  }
+
+  /** Region of a normalized absolute path and the segments below its base. */
+  const locate = (
+    normalized: string,
+  ): { readonly base: string; readonly rest: string[] } | undefined => {
+    const segments = splitPosixAbsolute(normalized);
+    if (segments === undefined) return undefined;
+    const canonicalSegments = splitPosixAbsolute(canonicalPath(normalized));
+    if (canonicalSegments === undefined || canonicalSegments.length !== segments.length) {
+      return undefined;
     }
-    if (!isAllowedDiskFile(p)) return false;
-    if (baseRealpath === undefined) return false;
-    const real = tryBaseRealpath(p);
-    return real !== undefined && isAllowedDiskFile(real);
+    for (const region of regions) {
+      for (const keySegments of region.keySegments) {
+        if (keySegments.length > canonicalSegments.length) continue;
+        if (keySegments.every((segment, index) => canonicalSegments[index] === segment)) {
+          return { base: region.base, rest: segments.slice(keySegments.length) };
+        }
+      }
+    }
+    return undefined;
   };
 
-  const isRealpathConfinedDiskDir = (p: string): boolean => {
-    if (p.includes("\0")) return false;
-    const key = canonicalPath(p);
-    if (isInAllowedLibDirOrSelf(key)) {
-      if (baseRealpath === undefined) return true;
-      const real = tryBaseRealpath(p);
-      return real !== undefined && isInAllowedLibDirOrSelf(canonicalPath(real));
-    }
-    if (!isAllowedDiskDir(p)) return false;
-    if (baseRealpath === undefined) return false;
-    const real = tryBaseRealpath(p);
-    return real !== undefined && isAllowedDiskDir(real);
+  const lstatCache = new Map<string, ConfinedFsStat | null>();
+  const readlinkCache = new Map<string, string | null>();
+  const cachedLstat = (p: string): ConfinedFsStat | undefined => {
+    if (probe === undefined) return undefined;
+    const hit = lstatCache.get(p);
+    if (hit !== undefined) return hit ?? undefined;
+    if (lstatCache.size >= MAX_CONFINED_CACHE_ENTRIES) lstatCache.clear();
+    const stat = probe.lstat(p);
+    lstatCache.set(p, stat ?? null);
+    return stat;
   };
+  const cachedReadlink = (p: string): string | undefined => {
+    if (probe === undefined) return undefined;
+    const hit = readlinkCache.get(p);
+    if (hit !== undefined) return hit ?? undefined;
+    if (readlinkCache.size >= MAX_CONFINED_CACHE_ENTRIES) readlinkCache.clear();
+    const target = probe.readlink(p);
+    readlinkCache.set(p, target ?? null);
+    return target;
+  };
+
+  const appendSegments = (base: string, rest: readonly string[]): string => {
+    if (rest.length === 0) return base;
+    return base.endsWith("/") ? `${base}${rest.join("/")}` : `${base}/${rest.join("/")}`;
+  };
+
+  /**
+   * Resolves `inputPath` without ever following a link implicitly. Only
+   * `lstat`/`readlink` of components whose parent chain was already verified
+   * to be real, link-free directories inside a region are performed.
+   */
+  const walk = (inputPath: string): ConfinedWalk => {
+    if (probe === undefined || !lexicallyUsable(inputPath)) return { kind: "refused" };
+    const start = locate(normalizePosixPath(inputPath));
+    if (start === undefined) return { kind: "refused" };
+    let current = start.base;
+    const remaining = [...start.rest];
+    let currentStat: ConfinedFsStat | undefined;
+    let hops = 0;
+    if (remaining.length === 0) {
+      currentStat = cachedLstat(current);
+      if (currentStat === undefined) return { kind: "missing" };
+      if (currentStat.kind === "symlink") return { kind: "refused" };
+      return { kind: "resolved", real: current, stat: currentStat };
+    }
+    while (remaining.length > 0) {
+      const segment = remaining.shift() as string;
+      const windowsStyle = /^[a-zA-Z]:/.test(current);
+      if (!isSafePathSegment(segment, windowsStyle)) return { kind: "refused" };
+      const next = appendSegments(current, [segment]);
+      const stat = cachedLstat(next);
+      if (stat === undefined) return { kind: "missing" };
+      if (stat.kind === "symlink") {
+        hops += 1;
+        if (hops > MAX_CONFINED_LINK_HOPS) return { kind: "refused" };
+        const rawTarget = cachedReadlink(next);
+        if (rawTarget === undefined) return { kind: "missing" };
+        const target = classifyLinkTarget(rawTarget);
+        if (target === undefined) {
+          // UNC/device/NT or drive-relative target: reported, never touched.
+          const lexical = rawTarget.replace(/\\/g, "/").replace(/\/+$/, "");
+          return { kind: "escaped", target: appendSegments(lexical, remaining) };
+        }
+        let absoluteTarget: string;
+        if (/^[a-zA-Z]:\//.test(target)) {
+          absoluteTarget = normalizePosixPath(target);
+        } else if (target.startsWith("/")) {
+          absoluteTarget = normalizePosixPath(windowsStyle ? `${current.slice(0, 2)}${target}` : target);
+        } else {
+          absoluteTarget = normalizePosixPath(appendSegments(current, [target]));
+        }
+        const located = locate(absoluteTarget);
+        if (located === undefined) {
+          return { kind: "escaped", target: appendSegments(absoluteTarget, remaining) };
+        }
+        current = located.base;
+        remaining.unshift(...located.rest);
+        currentStat = undefined;
+        continue;
+      }
+      if (remaining.length > 0 && stat.kind !== "directory") return { kind: "missing" };
+      current = next;
+      currentStat = stat;
+    }
+    if (currentStat === undefined) {
+      // The path ended on a link to a region base; inspect the base itself.
+      currentStat = cachedLstat(current);
+      if (currentStat === undefined) return { kind: "missing" };
+      if (currentStat.kind === "symlink") return { kind: "refused" };
+    }
+    return { kind: "resolved", real: current, stat: currentStat };
+  };
+
+  /** Display path of a disk file for warnings: workspace-relative or the base name. */
+  const displayPath = (p: string): string => {
+    const normalized = normalizePosixPath(p);
+    const rel = relativeUnderAllowedRoot(canonicalPath(normalized));
+    if (rel !== undefined) {
+      const segments = normalized.split("/");
+      return segments.slice(segments.length - rel.split("/").length).join("/");
+    }
+    return normalized.slice(normalized.lastIndexOf("/") + 1);
+  };
+
+  /** A regular disk file inside the policy (requested and real path). */
+  const resolveDiskFile = (p: string): { readonly real: string; readonly stat: ConfinedFsStat } | undefined => {
+    if (!isAllowedDiskFile(p)) return undefined;
+    const key = canonicalPath(p);
+    const result = walk(p);
+    if (result.kind !== "resolved") return undefined;
+    const realKey = canonicalPath(result.real);
+    const confined = isInAllowedLibDir(key)
+      ? isInAllowedLibDir(realKey)
+      : isAllowedDiskFileKey(realKey);
+    if (!confined) return undefined;
+    if (result.stat.kind !== "file") {
+      if (result.stat.kind === "other") {
+        warn(`declaration file skipped: ${displayPath(p)} is not a regular file`);
+      }
+      return undefined;
+    }
+    if (result.stat.size > maxFileBytes) {
+      warn(
+        `declaration file skipped: ${displayPath(p)} exceeds the ${String(maxFileBytes)}-byte disk read limit`,
+      );
+      return undefined;
+    }
+    return { real: result.real, stat: result.stat };
+  };
+
+  /** Real path of a disk directory inside the policy (requested and real path). */
+  const resolveDiskDir = (p: string): string | undefined => {
+    if (!isAllowedDiskDir(p)) return undefined;
+    const key = canonicalPath(p);
+    const result = walk(p);
+    if (result.kind !== "resolved" || result.stat.kind !== "directory") return undefined;
+    const realKey = canonicalPath(result.real);
+    const confined = isInAllowedLibDirOrSelf(key)
+      ? isInAllowedLibDirOrSelf(realKey)
+      : isAllowedDiskDirKey(realKey);
+    return confined ? result.real : undefined;
+  };
+
+  let diskBytesRead = 0;
+  const readDiskFile = (p: string): string | undefined => {
+    if (probe === undefined) return undefined;
+    const file = resolveDiskFile(p);
+    if (file === undefined) return undefined;
+    if (diskBytesRead + file.stat.size > maxTotalBytes) {
+      warn(
+        `declaration reads stopped: the ${String(maxTotalBytes)}-byte total disk read budget of this analysis was used; remaining node_modules declarations were not read`,
+      );
+      return undefined;
+    }
+    const read = probe.readText(file.real, file.stat, maxFileBytes);
+    if (read.status === "too-large") {
+      warn(
+        `declaration file skipped: ${displayPath(p)} exceeds the ${String(maxFileBytes)}-byte disk read limit`,
+      );
+      return undefined;
+    }
+    if (read.status !== "ok") return undefined;
+    diskBytesRead += read.bytes;
+    return read.text;
+  };
+
+  /* --------------------------- memory model --------------------------- */
 
   const memoryDirectories = new Set<string>();
   const memoryChildDirs = new Map<string, Set<string>>();
@@ -2603,71 +3027,116 @@ export function configureConfinedCompilerHost(
     }
   }
 
-  host.fileExists = (p: string): boolean =>
-    !p.includes("\0") &&
-    (entries.has(canonicalPath(p)) ||
-      (isAllowedDiskFile(p) && baseFileExists(p) && isRealpathConfinedDiskFile(p)));
+  /* ------------------------- host overrides ------------------------- */
+
+  // Workspace package.json manifests are never read from disk here; the host
+  // serves only their module-format projection (see buildPackageJsonProjections).
+  host.fileExists = (p: string): boolean => {
+    if (p.includes("\0")) return false;
+    const key = canonicalPath(p);
+    if (entries.has(key) || packageJsonProjections.has(key)) return true;
+    return resolveDiskFile(p) !== undefined;
+  };
 
   host.readFile = (p: string): string | undefined => {
     if (p.includes("\0")) return undefined;
-    const hit = entries.get(canonicalPath(p));
+    const key = canonicalPath(p);
+    const hit = entries.get(key);
     if (hit !== undefined) return hit.content;
-    return isAllowedDiskFile(p) && isRealpathConfinedDiskFile(p)
-      ? baseReadFile(p)
-      : undefined;
+    const projected = packageJsonProjections.get(key);
+    if (projected !== undefined) return projected;
+    return readDiskFile(p);
   };
 
-  const resolutionHost: ts.ModuleResolutionHost = {
+  const confinedDirectoryExists = (p: string): boolean =>
+    !p.includes("\0") &&
+    (memoryDirectories.has(canonicalPath(p)) || resolveDiskDir(p) !== undefined);
+  host.directoryExists = confinedDirectoryExists;
+
+  const confinedRealpath = (p: string): string => {
+    if (p.includes("\0")) return p;
+    if (entries.has(canonicalPath(p))) return p;
+    if (!isAllowedDiskFile(p) && !isAllowedDiskDir(p)) return p;
+    // An escaping link is not hidden behind its lexical path: the (never
+    // touched) target is returned so `isAllowedResolved` rejects it.
+    const result = walk(p);
+    if (result.kind === "resolved") return result.real;
+    if (result.kind === "escaped") return result.target;
+    return p;
+  };
+  host.realpath = confinedRealpath;
+
+  host.getDirectories = (p: string): string[] => {
+    if (p.includes("\0")) return [];
+    const key = canonicalPath(p);
+    const memChildren = memoryChildDirs.get(key);
+    const memList = memChildren === undefined ? [] : [...memChildren].sort();
+    const realDir = probe === undefined ? undefined : resolveDiskDir(p);
+    if (probe === undefined || realDir === undefined) return memList;
+    const childPrefix = p.endsWith("/") || p.endsWith("\\") ? p : `${p}/`;
+    const names = probe.readdir(realDir) ?? [];
+    const diskDirs = names.filter(
+      (name) =>
+        name.length > 0 &&
+        !name.includes("\0") &&
+        !name.includes("/") &&
+        !name.includes("\\") &&
+        resolveDiskDir(`${childPrefix}${name}`) !== undefined,
+    );
+    if (memList.length === 0) return diskDirs;
+    return [...new Set([...memList, ...diskDirs])].sort();
+  };
+
+  // The disk is never enumerated: only in-memory sources under `rootDir` are
+  // listed (extension and depth filters apply; include/exclude globs do not).
+  host.readDirectory = (
+    rootDir: string,
+    extensions: readonly string[] | undefined,
+    _excludes: readonly string[] | undefined,
+    _includes: readonly string[] | undefined,
+    depth?: number,
+  ): string[] => {
+    if (rootDir.includes("\0")) return [];
+    const dirKeyWithSlash = withTrailingSlash(canonicalPath(rootDir));
+    const lowerExtensions = extensions?.map((extension) => extension.toLowerCase());
+    const listed: string[] = [];
+    for (const entry of entries.values()) {
+      const key = canonicalPath(entry.absolutePath);
+      if (!key.startsWith(dirKeyWithSlash)) continue;
+      const nestedDirs = key.slice(dirKeyWithSlash.length).split("/").length - 1;
+      if (depth !== undefined && depth > 0 && nestedDirs >= depth) continue;
+      if (
+        lowerExtensions !== undefined &&
+        lowerExtensions.length > 0 &&
+        !lowerExtensions.some((extension) => key.toLowerCase().endsWith(extension))
+      ) {
+        continue;
+      }
+      listed.push(entry.absolutePath);
+    }
+    return listed.sort();
+  };
+
+  const refuseWrite = (): never => {
+    throw new DomainError(
+      "adapter/confined-host-write",
+      "The confined compiler host never writes files or creates directories",
+    );
+  };
+  host.writeFile = refuseWrite;
+  // `createDirectory` is part of the runtime host (used by emit) but not of the public type.
+  (host as { createDirectory?: (directory: string) => void }).createDirectory = refuseWrite;
+  // The analyzed workspace never sees the process environment.
+  host.getEnvironmentVariable = () => "";
+  // stdout carries only the MCP protocol: resolution traces are discarded.
+  host.trace = () => undefined;
+
+  return {
     fileExists: (p: string) => host.fileExists(p),
     readFile: (p: string) => host.readFile(p),
+    directoryExists: confinedDirectoryExists,
+    realpath: confinedRealpath,
   };
-
-  if (baseDirectoryExists !== undefined) {
-    const confinedDirectoryExists = (p: string): boolean =>
-      !p.includes("\0") &&
-      (memoryDirectories.has(canonicalPath(p)) ||
-        (isAllowedDiskDir(p) && baseDirectoryExists(p) && isRealpathConfinedDiskDir(p)));
-    resolutionHost.directoryExists = confinedDirectoryExists;
-    host.directoryExists = confinedDirectoryExists;
-  }
-
-  if (baseRealpath !== undefined) {
-    const confinedRealpath = (p: string): string => {
-      if (p.includes("\0")) return p;
-      if (entries.has(canonicalPath(p))) return p;
-      if (!isAllowedDiskFile(p) && !isAllowedDiskDir(p)) return p;
-      // Escaping symlink'leri leksik yol arkasına SAKLAMAZ: gerçek hedefi döner,
-      // böylece `isAllowedResolved` kök dışı hedefi kesin biçimde reddeder.
-      return tryBaseRealpath(p) ?? p;
-    };
-    resolutionHost.realpath = confinedRealpath;
-    host.realpath = confinedRealpath;
-  }
-
-  if (baseGetDirectories !== undefined) {
-    host.getDirectories = (p: string): string[] => {
-      if (p.includes("\0")) return [];
-      const key = canonicalPath(p);
-      const memChildren = memoryChildDirs.get(key);
-      const memList = memChildren === undefined ? [] : [...memChildren].sort();
-      if (!isAllowedDiskDir(p) || !isRealpathConfinedDiskDir(p)) {
-        return memList;
-      }
-      const childPrefix = p.endsWith("/") || p.endsWith("\\") ? p : `${p}/`;
-      let diskDirs: string[];
-      try {
-        diskDirs = baseGetDirectories(p).filter(
-          (name) => !name.includes("\0") && isRealpathConfinedDiskDir(`${childPrefix}${name}`),
-        );
-      } catch {
-        diskDirs = [];
-      }
-      if (memList.length === 0) return diskDirs;
-      return [...new Set([...memList, ...diskDirs])].sort();
-    };
-  }
-
-  return resolutionHost;
 }
 
 /** Statik CommonJS `require("...")` çağrısını tanır; dinamik ifadeleri yoksayar. */
@@ -2792,7 +3261,7 @@ function extractCjsExportStatement(
     fileNode,
     record,
     statement,
-    `CONTAINS: ${entry.relativePath} dosyasındaki CommonJS export ${match.exportName} bildirimi AST span kanıtıyla eşlendi.`,
+    `CONTAINS: CommonJS export ${match.exportName} in ${entry.relativePath}, matched by AST span evidence.`,
   );
 }
 
@@ -2813,6 +3282,7 @@ function cjsExportCallerRecord(
     qualifiedName: match.exportName,
     relativePath: entry.relativePath,
     language: entry.language,
+    location: declarationSpan(entry, parent.getSourceFile(), parent),
   });
 }
 
@@ -2859,4 +3329,632 @@ function inferCjsExportNodeKind(
     return undefined;
   }
   return matchCjsExportAssignment(parent)?.kind;
+}
+
+/* ------------------------------------------------------------------ */
+/* Monorepo Workspace, CHA (INHERITS/IMPLEMENTS) & Incremental Reuse   */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Incremental entry point returning `{ result, framework, nextIncrementalState }`
+ * with enumerable `nextIncrementalState` for reusing unchanged `ts.SourceFile`
+ * ASTs via `ts.createProgram(..., oldProgram)` on subsequent runs.
+ */
+export function analyzeTypeScriptProgramIncremental(
+  input: TypeScriptAdapterInput,
+): TypeScriptIncrementalAnalysisRun {
+  return runAnalysis(input);
+}
+
+function computeIncrementalOptionsSignature(
+  rootPosix: string,
+  compilerOptions: ts.CompilerOptions,
+  configs: readonly ScopedTsConfig[],
+  workspacePackages: ReadonlyMap<string, WorkspacePackageManifest>,
+  moduleScopes: readonly PackageModuleScope[],
+): string {
+  const normalizedConfigs = configs.map((cfg) => ({
+    dirPrefix: cfg.dirPrefix,
+    configRelativePath: cfg.configRelativePath,
+    baseUrl: cfg.baseUrl ?? null,
+    pathsBasePath: cfg.pathsBasePath ?? null,
+    paths: cfg.paths === undefined ? null : [...cfg.paths.entries()],
+    jsx: cfg.jsx ?? null,
+    moduleResolution: cfg.moduleResolution ?? null,
+    module: cfg.module ?? null,
+    target: cfg.target ?? null,
+    experimentalDecorators: cfg.experimentalDecorators ?? null,
+    verbatimModuleSyntax: cfg.verbatimModuleSyntax ?? null,
+  }));
+  const normalizedPackages = [...workspacePackages.entries()]
+    .sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0))
+    .map(([name, pkg]) => ({
+      name,
+      dirPrefix: pkg.dirPrefix,
+      manifestRelativePath: pkg.manifestRelativePath,
+      exports: pkg.exports ?? null,
+      main: pkg.main ?? null,
+      module: pkg.module ?? null,
+      types: pkg.types ?? null,
+      typings: pkg.typings ?? null,
+    }));
+  const signaturePayload = {
+    rootPosix,
+    options: {
+      strict: compilerOptions.strict ?? null,
+      allowJs: compilerOptions.allowJs ?? null,
+      checkJs: compilerOptions.checkJs ?? null,
+      jsx: compilerOptions.jsx ?? null,
+      target: compilerOptions.target ?? null,
+      module: compilerOptions.module ?? null,
+      moduleResolution: compilerOptions.moduleResolution ?? null,
+      experimentalDecorators: compilerOptions.experimentalDecorators ?? null,
+      verbatimModuleSyntax: compilerOptions.verbatimModuleSyntax ?? null,
+      baseUrl: compilerOptions.baseUrl ?? null,
+    },
+    configs: normalizedConfigs,
+    workspacePackages: normalizedPackages,
+    moduleScopes: moduleScopes.map((scope) => [
+      scope.manifestRelativePath,
+      scope.moduleType ?? null,
+    ]),
+  };
+  return sha256Hex(utf8Encode(JSON.stringify(signaturePayload)));
+}
+
+function isCompilerOptionsCompatibleForReuse(
+  prev: ts.CompilerOptions,
+  next: ts.CompilerOptions,
+): boolean {
+  return (
+    prev.target === next.target &&
+    prev.jsx === next.jsx &&
+    prev.module === next.module &&
+    prev.moduleResolution === next.moduleResolution &&
+    prev.strict === next.strict &&
+    prev.allowJs === next.allowJs &&
+    prev.checkJs === next.checkJs &&
+    prev.experimentalDecorators === next.experimentalDecorators &&
+    prev.verbatimModuleSyntax === next.verbatimModuleSyntax
+  );
+}
+
+function configureIncrementalSourceFileReuse(
+  host: ts.CompilerHost,
+  oldProgram: ts.Program,
+  entries: ReadonlyMap<string, SourceEntry>,
+  previousSourceHashes: ReadonlyMap<string, string> | undefined,
+  resolvedLibDir: string | undefined,
+): void {
+  const baseGetSourceFile = host.getSourceFile.bind(host);
+  const oldSourceFilesByKey = new Map<string, ts.SourceFile>();
+  for (const sf of oldProgram.getSourceFiles()) {
+    oldSourceFilesByKey.set(canonicalPath(sf.fileName), sf);
+  }
+  const libDirKeyWithSlash =
+    resolvedLibDir === undefined
+      ? undefined
+      : (() => {
+          const k = canonicalPath(resolvedLibDir);
+          return k.endsWith("/") ? k : `${k}/`;
+        })();
+
+  const tryReuseOldSourceFile = (
+    fileName: string,
+    shouldCreateNewSourceFile?: boolean,
+    languageVersionOrOptions?: ts.ScriptTarget | ts.CreateSourceFileOptions,
+  ): ts.SourceFile | undefined => {
+    if (shouldCreateNewSourceFile) return undefined;
+    const key = canonicalPath(fileName);
+    const oldSf = oldSourceFilesByKey.get(key);
+    if (oldSf === undefined) return undefined;
+    // A package.json "type" change flips ESM/CommonJS without touching the
+    // file text; never reuse a SourceFile parsed under the other format.
+    if (
+      typeof languageVersionOrOptions === "object" &&
+      languageVersionOrOptions.impliedNodeFormat !== oldSf.impliedNodeFormat
+    ) {
+      return undefined;
+    }
+
+    const entry = entries.get(key);
+    if (entry !== undefined) {
+      if (previousSourceHashes !== undefined) {
+        return previousSourceHashes.get(key) === entry.sourceHash ? oldSf : undefined;
+      }
+      return oldSf.text === entry.content ? oldSf : undefined;
+    }
+
+    if (libDirKeyWithSlash !== undefined && key.startsWith(libDirKeyWithSlash)) {
+      return oldSf;
+    }
+    return undefined;
+  };
+
+  host.getSourceFile = (
+    fileName,
+    languageVersionOrOptions,
+    onError,
+    shouldCreateNewSourceFile,
+  ) =>
+    tryReuseOldSourceFile(fileName, shouldCreateNewSourceFile, languageVersionOrOptions) ??
+    baseGetSourceFile(
+      fileName,
+      languageVersionOrOptions,
+      onError,
+      shouldCreateNewSourceFile,
+    );
+
+  if (host.getSourceFileByPath !== undefined) {
+    const baseGetSourceFileByPath = host.getSourceFileByPath.bind(host);
+    host.getSourceFileByPath = (
+      fileName,
+      pathArg,
+      languageVersionOrOptions,
+      onError,
+      shouldCreateNewSourceFile,
+    ) =>
+      tryReuseOldSourceFile(fileName, shouldCreateNewSourceFile, languageVersionOrOptions) ??
+      baseGetSourceFileByPath(
+        fileName,
+        pathArg,
+        languageVersionOrOptions,
+        onError,
+        shouldCreateNewSourceFile,
+      );
+  }
+}
+
+function createProgramWithIncrementalReuse(params: {
+  readonly input: TypeScriptAdapterInput;
+  readonly rootPosix: string;
+  readonly compilerOptions: ts.CompilerOptions;
+  readonly loadedConfigs: readonly ScopedTsConfig[];
+  readonly workspacePackages: ReadonlyMap<string, WorkspacePackageManifest>;
+  readonly moduleScopes: readonly PackageModuleScope[];
+  readonly host: ts.CompilerHost;
+  readonly entries: ReadonlyMap<string, SourceEntry>;
+  readonly sortedEntries: readonly SourceEntry[];
+  readonly resolvedLibDir: string | undefined;
+}): { readonly program: ts.Program; readonly optionsSignature: string } {
+  const {
+    input,
+    rootPosix,
+    compilerOptions,
+    loadedConfigs,
+    workspacePackages,
+    moduleScopes,
+    host,
+    entries,
+    sortedEntries,
+    resolvedLibDir,
+  } = params;
+  const optionsSignature = computeIncrementalOptionsSignature(
+    rootPosix,
+    compilerOptions,
+    loadedConfigs,
+    workspacePackages,
+    moduleScopes,
+  );
+  let oldProgram: ts.Program | undefined;
+  let previousSourceHashes: ReadonlyMap<string, string> | undefined;
+  if (
+    input.incrementalState !== undefined &&
+    input.incrementalState.optionsSignature === optionsSignature
+  ) {
+    oldProgram = input.incrementalState.program;
+    previousSourceHashes = input.incrementalState.sourceHashes;
+  } else if (
+    input.previousProgram !== undefined &&
+    isCompilerOptionsCompatibleForReuse(
+      input.previousProgram.getCompilerOptions(),
+      compilerOptions,
+    )
+  ) {
+    oldProgram = input.previousProgram;
+  }
+  if (oldProgram !== undefined) {
+    configureIncrementalSourceFileReuse(
+      host,
+      oldProgram,
+      entries,
+      previousSourceHashes,
+      resolvedLibDir,
+    );
+  }
+  const rootNames = sortedEntries.map((entry) => entry.absolutePath);
+  const program = ts.createProgram({
+    rootNames,
+    options: compilerOptions,
+    host,
+    ...(oldProgram === undefined ? {} : { oldProgram }),
+  });
+  return { program, optionsSignature };
+}
+
+function attachNonEnumerableIncrementalState<T extends object>(
+  target: T,
+  state: TypeScriptIncrementalState,
+): T {
+  Object.defineProperty(target, "nextIncrementalState", {
+    value: state,
+    enumerable: false,
+    writable: false,
+    configurable: true,
+  });
+  return target;
+}
+
+function buildAnalysisRunWithIncrementalState(params: {
+  readonly diagnostics: TypeScriptAdapterDiagnostic[];
+  readonly capabilities: TypeScriptAdapterCapabilities;
+  readonly coverageRatio: number;
+  readonly assembler: GraphAssembler;
+  readonly nodeInputs: SnapshotNodeInput[];
+  readonly edgeInputs: SnapshotEdgeInput[];
+  readonly context: AnalysisContext;
+  readonly frameworkNodes: SnapshotNodeInput[];
+  readonly byEdgeKey: (a: EdgeRecord, b: EdgeRecord) => number;
+  readonly program: ts.Program;
+  readonly sortedEntries: readonly SourceEntry[];
+  readonly optionsSignature: string;
+}): AnalysisRun {
+  const {
+    diagnostics,
+    capabilities,
+    coverageRatio,
+    assembler,
+    nodeInputs,
+    edgeInputs,
+    context,
+    frameworkNodes,
+    byEdgeKey,
+    program,
+    sortedEntries,
+    optionsSignature,
+  } = params;
+
+  const sourceHashes = new Map<string, string>();
+  for (const entry of sortedEntries) {
+    sourceHashes.set(entry.absoluteKey, entry.sourceHash);
+  }
+  const nextIncrementalState: TypeScriptIncrementalState = {
+    program,
+    sourceHashes,
+    optionsSignature,
+  };
+
+  const result: TypeScriptAdapterResult = attachNonEnumerableIncrementalState(
+    {
+      analyzerId: TS_ADAPTER_ANALYZER_ID,
+      analyzerVersion: TS_ADAPTER_VERSION,
+      state: diagnostics.length > 0 ? "partial" : "ready",
+      capabilities,
+      coverageRatio,
+      unsupportedConstructs: UNSUPPORTED_CONSTRUCTS,
+      warnings: assembler.warnings,
+      diagnostics,
+      nodes: nodeInputs,
+      edges: edgeInputs,
+    },
+    nextIncrementalState,
+  );
+
+  const framework: FrameworkEdgesResult = {
+    detections: [...context.framework.detections].sort((a, b) =>
+      a.framework < b.framework ? -1 : 1,
+    ),
+    nodes: frameworkNodes,
+    edges: [...context.framework.edges].sort(byEdgeKey).map(edgeRecordToInput),
+    diagnostics: [...context.framework.diagnostics].sort((a, b) => {
+      if (a.relativePath !== b.relativePath) {
+        return a.relativePath < b.relativePath ? -1 : 1;
+      }
+      if (a.code !== b.code) return a.code < b.code ? -1 : 1;
+      return a.message < b.message ? -1 : a.message > b.message ? 1 : 0;
+    }),
+  };
+
+  return {
+    result,
+    framework,
+    nextIncrementalState,
+  };
+}
+
+function unwrapParenthesizedExpression(
+  expr: ts.Expression | undefined,
+): ts.Expression | undefined {
+  let current = expr;
+  while (current !== undefined && ts.isParenthesizedExpression(current)) {
+    current = current.expression;
+  }
+  return current;
+}
+
+function tryRegisterClassExpression(
+  context: AnalysisContext,
+  entry: SourceEntry,
+  statement: ts.VariableStatement,
+  declaration: ts.VariableDeclaration,
+  fileNode: NodeRecord,
+  addContains: (from: NodeRecord, to: NodeRecord, node: ts.Node, rationale: string) => void,
+  registerWithSymbol: (symbol: ts.Symbol | undefined, record: NodeRecord) => void,
+  registerMembers: (
+    stmt: ts.ClassLikeDeclaration | ts.InterfaceDeclaration,
+    ownerRecord: NodeRecord,
+    ownerKind: NodeKind,
+  ) => void,
+): boolean {
+  if (!ts.isIdentifier(declaration.name)) return false;
+  const unwrappedInit = unwrapParenthesizedExpression(declaration.initializer);
+  if (unwrappedInit === undefined || !ts.isClassExpression(unwrappedInit)) return false;
+
+  const { assembler, checker } = context;
+  const classRecord = assembler.ensureNode({
+    kind: "Class",
+    qualifiedName: declaration.name.text,
+    relativePath: entry.relativePath,
+    language: entry.language,
+  });
+  registerWithSymbol(checker.getSymbolAtLocation(declaration.name), classRecord);
+  if (unwrappedInit.name !== undefined) {
+    registerWithSymbol(checker.getSymbolAtLocation(unwrappedInit.name), classRecord);
+  }
+  context.declarationNodes.set(unwrappedInit, classRecord);
+  addContains(
+    fileNode,
+    classRecord,
+    statement,
+    `CONTAINS: class expression ${declaration.name.text} in ${entry.relativePath}, matched by AST span evidence.`,
+  );
+  registerMembers(unwrappedInit, classRecord, "Class");
+  return true;
+}
+
+function resolveClassExpressionOwnerName(
+  context: AnalysisContext,
+  owner: ts.Node,
+): string | undefined {
+  if (!ts.isClassExpression(owner)) return undefined;
+  return context.declarationNodes.get(owner)?.node.qualifiedName ?? owner.name?.text;
+}
+
+function unwrapAliasSymbol(
+  checker: ts.TypeChecker,
+  symbol: ts.Symbol | undefined,
+): ts.Symbol | undefined {
+  if (symbol === undefined) return undefined;
+  let current = symbol;
+  let depth = 0;
+  while ((current.flags & ts.SymbolFlags.Alias) !== 0 && depth < 16) {
+    const aliased = checker.getAliasedSymbol(current);
+    if (aliased === undefined || aliased === current || aliased.flags === 0) {
+      break;
+    }
+    current = aliased;
+    depth += 1;
+  }
+  return current;
+}
+
+function extractHeritageClauses(
+  context: AnalysisContext,
+  entry: SourceEntry,
+  sourceFile: ts.SourceFile,
+): void {
+  const { assembler, checker } = context;
+
+  const emitHeritageEdge = (
+    ownerRecord: NodeRecord,
+    edgeKind: "INHERITS" | "IMPLEMENTS",
+    heritageType: ts.ExpressionWithTypeArguments,
+  ): void => {
+    const rawSym = checker.getSymbolAtLocation(heritageType.expression);
+    const exprSym = unwrapAliasSymbol(checker, rawSym);
+    const exprDecl = exprSym?.getDeclarations()?.[0];
+
+    let targetRecord = resolveSymbolRecord(context, entry, exprSym, exprDecl);
+    let resolvedSym = exprSym;
+    let resolvedDecl = exprDecl;
+
+    if (targetRecord === undefined) {
+      const resolvedType = checker.getTypeAtLocation(heritageType);
+      const isTrivialErrorType =
+        (resolvedType.flags &
+          (ts.TypeFlags.Any | ts.TypeFlags.Unknown | ts.TypeFlags.Never)) !==
+        0;
+      if (!isTrivialErrorType) {
+        const typeSym = unwrapAliasSymbol(
+          checker,
+          resolvedType.getSymbol() ?? resolvedType.aliasSymbol,
+        );
+        const typeDecl = typeSym?.getDeclarations()?.[0];
+        if (typeSym !== undefined) {
+          targetRecord = resolveSymbolRecord(context, entry, typeSym, typeDecl);
+          if (targetRecord !== undefined || (typeSym.getDeclarations()?.length ?? 0) > 0) {
+            resolvedSym = typeSym;
+            resolvedDecl = typeDecl;
+          }
+        }
+      }
+    }
+
+    if (targetRecord !== undefined) {
+      if (targetRecord.key === ownerRecord.key) return;
+      assembler.addEdge({
+        kind: edgeKind,
+        from: ownerRecord,
+        to: targetRecord,
+        resolution: "verified",
+        evidence: evidenceFor(
+          entry,
+          sourceFile,
+          heritageType,
+          "semantic-symbol",
+          `${edgeKind}: declaration ${ownerRecord.node.qualifiedName} was resolved by the TypeChecker to symbol ${targetRecord.node.qualifiedName} (verified).`,
+        ),
+      });
+      return;
+    }
+
+    if (
+      resolvedSym !== undefined &&
+      (resolvedSym.flags & ts.SymbolFlags.Alias) === 0 &&
+      (resolvedSym.getDeclarations()?.length ?? 0) > 0 &&
+      !isInternalDeclarationOrSymbol(context, resolvedSym, resolvedDecl)
+    ) {
+      const externalName = externalQualifiedName(resolvedSym, resolvedDecl);
+      const externalNode = assembler.ensureNode({
+        kind: "UnknownExternal",
+        qualifiedName: externalName,
+      });
+      assembler.addEdge({
+        kind: edgeKind,
+        from: ownerRecord,
+        to: externalNode,
+        resolution: "verified",
+        evidence: evidenceFor(
+          entry,
+          sourceFile,
+          heritageType,
+          "semantic-symbol",
+          `${edgeKind}: declaration ${ownerRecord.node.qualifiedName} resolved to symbol ${externalName} outside the analysis set; the external source is represented as an explicit UnknownExternal node.`,
+        ),
+      });
+      return;
+    }
+
+    const rawText = heritageType.expression.getText(sourceFile).trim();
+    if (rawText.length === 0) return;
+    const unresolvedNode = assembler.ensureNode({
+      kind: "UnknownExternal",
+      qualifiedName: rawText,
+    });
+    assembler.addEdge({
+      kind: edgeKind,
+      from: ownerRecord,
+      to: unresolvedNode,
+      resolution: "unresolved",
+      evidence: evidenceFor(
+        entry,
+        sourceFile,
+        heritageType,
+        "ast-span",
+        `${edgeKind}: heritage target '${rawText}' of ${ownerRecord.node.qualifiedName} could not be resolved; marked unresolved on an explicit UnknownExternal node.`,
+      ),
+    });
+    assembler.addWarning(
+      `${edgeKind} unresolved: ${entry.relativePath} '${ownerRecord.node.qualifiedName}' -> '${rawText}' (unresolved, UnknownExternal node created)`,
+    );
+  };
+
+  const walk = (node: ts.Node): void => {
+    if (
+      ts.isClassDeclaration(node) ||
+      ts.isClassExpression(node) ||
+      ts.isInterfaceDeclaration(node)
+    ) {
+      const clauses = node.heritageClauses;
+      const ownerRecord = context.declarationNodes.get(node);
+      if (clauses !== undefined && clauses.length > 0 && ownerRecord !== undefined) {
+        for (const clause of clauses) {
+          const edgeKind: "INHERITS" | "IMPLEMENTS" =
+            clause.token === ts.SyntaxKind.ImplementsKeyword
+              ? "IMPLEMENTS"
+              : "INHERITS";
+          for (const heritageType of clause.types) {
+            emitHeritageEdge(ownerRecord, edgeKind, heritageType);
+          }
+        }
+      }
+    }
+    ts.forEachChild(node, walk);
+  };
+
+  walk(sourceFile);
+}
+
+/* ------------------------------------------------------------------ */
+/* Symbol node locations & module-format scopes                         */
+/* (kept at the end of the file so cited line numbers above stay fixed) */
+/* ------------------------------------------------------------------ */
+
+type NodeLocation = NonNullable<SnapshotNodeInput["location"]>;
+
+/** 1-based line span of `node` in its file (leading trivia such as JSDoc excluded). */
+function declarationSpan(
+  entry: SourceEntry,
+  sourceFile: ts.SourceFile,
+  node: ts.Node,
+): NodeLocation {
+  return {
+    relativePath: entry.relativePath,
+    startLine: spanStart(sourceFile, node),
+    endLine: spanEnd(sourceFile, node),
+    sourceHash: entry.sourceHash,
+  };
+}
+
+/**
+ * Merges a declaration span into a file-bound symbol node's `location` and
+ * returns the record. Only spans of the node's own file are accepted; File
+ * nodes carry no adapter span (the indexer anchors them). Repeated
+ * declarations of the same node (overloads, merged declarations, a symbol
+ * seen both as a declaration and as a call target) widen the span to cover
+ * all of them, so the result does not depend on visit order.
+ */
+function withLocation(record: NodeRecord, span: NodeLocation | undefined): NodeRecord {
+  if (span === undefined || record.ref.kind === "File") return record;
+  if (record.ref.relativePath === undefined || record.ref.relativePath !== span.relativePath) {
+    return record;
+  }
+  const current = record.node.location;
+  if (
+    current !== undefined &&
+    current.startLine <= span.startLine &&
+    current.endLine >= span.endLine
+  ) {
+    return record;
+  }
+  const location: NodeLocation = {
+    relativePath: span.relativePath,
+    startLine: current === undefined ? span.startLine : Math.min(current.startLine, span.startLine),
+    endLine: current === undefined ? span.endLine : Math.max(current.endLine, span.endLine),
+    sourceHash: span.sourceHash,
+  };
+  const { language, attributes } = record.node;
+  record.node = {
+    ...record.ref,
+    ...(language === undefined ? {} : { language }),
+    location,
+    ...(attributes === undefined ? {} : { attributes }),
+  };
+  return record;
+}
+
+/**
+ * Loads the nearest-`package.json` `"type"` scopes for every analyzed file
+ * (in-memory `packageFiles`, otherwise the guarded read-only disk reader) and
+ * the compiler-host projections TypeScript uses for ESM/CommonJS detection.
+ */
+function loadModuleFormatScopes(
+  input: TypeScriptAdapterInput,
+  rootPosix: string,
+  sortedEntries: readonly SourceEntry[],
+): {
+  readonly scopes: readonly PackageModuleScope[];
+  readonly warnings: readonly string[];
+  readonly projections: ReadonlyMap<string, string>;
+} {
+  const loaded = loadPackageModuleScopes(
+    input.packageFiles,
+    input.packageFiles === undefined ? input.rootDir : undefined,
+    sortedEntries.map((entry) => entry.relativePath),
+  );
+  return {
+    scopes: loaded.scopes,
+    warnings: loaded.warnings,
+    projections: buildPackageJsonProjections(rootPosix, loaded.scopes),
+  };
 }

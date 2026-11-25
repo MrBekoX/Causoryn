@@ -1,6 +1,15 @@
 import { realpathSync, statSync } from "node:fs";
 import path from "node:path";
 
+import {
+  describeLinkInspectionFailure,
+  describeWindowsPathSegmentIssue,
+  findWindowsUnsafePathSegment,
+  inspectLinkTargets,
+  isUncOrDevicePath,
+  LINK_TARGET_INSPECTION_ENABLED,
+} from "./path-safety.js";
+
 /**
  * OutputAccessPolicy — export_documentation çıktı yetkilendirmesi
  * (TŞ v2.1 §16 "Export güvenliği: yalnızca explicit izinli output dizini,
@@ -115,6 +124,42 @@ function deny(code: OutputPolicyErrorCode, reason: string, rule?: string): Outpu
   return rule === undefined ? { allowed: false, code, reason } : { allowed: false, code, reason, rule };
 }
 
+/**
+ * Windows-only hardening shared by directory paths and file names: alternate data
+ * streams, trailing dots/spaces and reserved device names (NUL, CON, COM1, ...),
+ * then UNC/device link targets (lstat/readlink only, before any realpath/stat).
+ */
+function windowsOutputPathDeny(
+  rawPath: string,
+  label: string,
+  inspectFrom?: { readonly absolute: string; readonly startDir?: string },
+): OutputDeny | undefined {
+  if (IS_WIN) {
+    const finding = findWindowsUnsafePathSegment(rawPath);
+    if (finding !== undefined) {
+      return deny(
+        "workspace/output-path-denied",
+        `${label}: ${describeWindowsPathSegmentIssue(finding)}`,
+        `windows-${finding.issue}`,
+      );
+    }
+  }
+  if (LINK_TARGET_INSPECTION_ENABLED && inspectFrom !== undefined) {
+    const inspection = inspectLinkTargets(
+      inspectFrom.absolute,
+      inspectFrom.startDir === undefined ? {} : { startDir: inspectFrom.startDir },
+    );
+    if (!inspection.ok) {
+      return deny(
+        "workspace/output-path-denied",
+        `${label}: ${describeLinkInspectionFailure(inspection)}`,
+        inspection.reason,
+      );
+    }
+  }
+  return undefined;
+}
+
 export class OutputAccessPolicy {
   /** Beyanlı output kökleri; kanonik + leksik sıralı (deterministik dizi). */
   private readonly canonicalDirs: readonly string[];
@@ -133,7 +178,7 @@ export class OutputAccessPolicy {
     if (allowedOutputDirs.length === 0) {
       throw new OutputPolicyError(
         "workspace/output-policy-invalid",
-        "output dizin listesi boş olamaz: en az bir explicit beyan zorunludur (default deny)",
+        "the output directory list must not be empty: at least one explicit declaration is required (default deny)",
       );
     }
     // Kanonik gerçek yol → gösterim eşlemesi (aynı hedefe işaret eden
@@ -143,14 +188,26 @@ export class OutputAccessPolicy {
       if (typeof declared !== "string" || declared.length === 0) {
         throw new OutputPolicyError(
           "workspace/output-policy-invalid",
-          "output dizini beyanı boş olamaz",
+          "an output directory declaration must not be empty",
         );
       }
       if (declared.includes("\0")) {
         throw new OutputPolicyError(
           "workspace/output-policy-invalid",
-          "output dizini beyanı null byte içeriyor",
+          "an output directory declaration contains a null byte",
         );
+      }
+      if (isUncOrDevicePath(declared)) {
+        throw new OutputPolicyError(
+          "workspace/output-policy-invalid",
+          `an output directory declaration must not be a UNC or Win32 device path (rejected before filesystem access): ${declared}`,
+        );
+      }
+      const hardeningDeny = windowsOutputPathDeny(declared, "output directory declaration is not usable", {
+        absolute: path.resolve(declared),
+      });
+      if (hardeningDeny !== undefined) {
+        throw new OutputPolicyError("workspace/output-policy-invalid", `${hardeningDeny.reason} (${declared})`);
       }
       let canonical: string;
       try {
@@ -158,7 +215,7 @@ export class OutputAccessPolicy {
       } catch {
         throw new OutputPolicyError(
           "workspace/output-policy-invalid",
-          `output dizini gerçek yola çözümlenemedi (yok veya erişilemez): ${declared}`,
+          `output directory could not be resolved to a real path (missing or inaccessible): ${declared}`,
         );
       }
       let isDirectory = true;
@@ -167,13 +224,13 @@ export class OutputAccessPolicy {
       } catch {
         throw new OutputPolicyError(
           "workspace/output-policy-invalid",
-          `output dizini durumu okunamadı: ${declared}`,
+          `output directory status could not be read: ${declared}`,
         );
       }
       if (!isDirectory) {
         throw new OutputPolicyError(
           "workspace/output-policy-invalid",
-          `output dizini beyanı bir dizin değil: ${declared}`,
+          `output directory declaration is not a directory: ${declared}`,
         );
       }
       const key = comparablePath(canonical);
@@ -200,10 +257,23 @@ export class OutputAccessPolicy {
    */
   authorizeDirectory(dirPath: string): OutputDecision {
     if (dirPath.length === 0) {
-      return deny("workspace/output-path-denied", "output dizini yolu boş");
+      return deny("workspace/output-path-denied", "output directory path is empty");
     }
     if (dirPath.includes("\0")) {
-      return deny("workspace/output-path-denied", "output dizini yolu null byte içeriyor");
+      return deny("workspace/output-path-denied", "output directory path contains a null byte");
+    }
+    if (isUncOrDevicePath(dirPath)) {
+      return deny(
+        "workspace/output-path-denied",
+        "output directory path must not be a UNC or Win32 device path (rejected before filesystem access)",
+        "unc-or-device-path",
+      );
+    }
+    const hardeningDeny = windowsOutputPathDeny(dirPath, "output directory path is not usable", {
+      absolute: path.resolve(dirPath),
+    });
+    if (hardeningDeny !== undefined) {
+      return hardeningDeny;
     }
     let canonical: string;
     try {
@@ -211,14 +281,14 @@ export class OutputAccessPolicy {
     } catch {
       return deny(
         "workspace/output-not-authorized",
-        "output dizini gerçek yola çözümlenemedi (yok veya erişilemez); doğrulanamayan dizin yazma kaynağı olamaz",
+        "output directory could not be resolved to a real path (missing or inaccessible); an unverifiable directory cannot be a write target",
       );
     }
     const declared = this.canonicalDirs.find((canonicalDir) => isInside(canonicalDir, canonical));
     if (declared === undefined) {
       return deny(
         "workspace/output-not-authorized",
-        "output dizini kullanıcının beyan ettiği output listesinde değil (explicit authorization, TŞ §16)",
+        "output directory is not in the user-declared output list (explicit authorization required)",
       );
     }
     return { allowed: true, canonicalDir: canonical, canonicalPath: canonical };
@@ -235,22 +305,29 @@ export class OutputAccessPolicy {
       return dirDecision;
     }
     if (fileName.length === 0) {
-      return deny("workspace/output-path-denied", "dosya adı boş");
+      return deny("workspace/output-path-denied", "file name is empty");
     }
     if (fileName.includes("\0")) {
-      return deny("workspace/output-path-denied", "dosya adı null byte içeriyor");
+      return deny("workspace/output-path-denied", "file name contains a null byte");
+    }
+    if (isUncOrDevicePath(fileName)) {
+      return deny(
+        "workspace/output-path-denied",
+        "file name must not be a UNC or Win32 device path (rejected before filesystem access)",
+        "unc-or-device-path",
+      );
     }
     if (fileName.includes("/") || fileName.includes("\\")) {
       return deny(
         "workspace/output-path-denied",
-        "dosya adı yol ayracı içeremez (alt dizin yazma izni yok)",
+        "file name must not contain a path separator (writing to subdirectories is not allowed)",
         "separator",
       );
     }
     if (fileName === "." || fileName === "..") {
       return deny(
         "workspace/output-path-denied",
-        "dosya adı '.' veya '..' tam segmenti olamaz (traversal reddi)",
+        "file name must not be '.' or '..' (path traversal rejected)",
         "..",
       );
     }
@@ -259,9 +336,18 @@ export class OutputAccessPolicy {
     if (isLexicalEscape(relative)) {
       return deny(
         "workspace/output-path-denied",
-        "yazma hedefi leksik çözümlemede beyanlı dizin dışına çıkıyor",
+        "write target escapes the declared directory after lexical resolution",
         "..",
       );
+    }
+    // Windows name aliases in the file name, and a write target that is itself a
+    // link to a UNC/device path (a write would follow it to the network).
+    const hardeningDeny = windowsOutputPathDeny(fileName, "file name is not usable", {
+      absolute,
+      startDir: dirDecision.canonicalDir,
+    });
+    if (hardeningDeny !== undefined) {
+      return hardeningDeny;
     }
     // realpath sarmalama (CWE-59): mevcut dosya/symlink kendisiyle çözülür;
     // henüz var olmayan hedef için en derin mevcut ata + kalan segment —
@@ -269,12 +355,12 @@ export class OutputAccessPolicy {
     // sabit uygulanır.
     const resolved = this.resolveRealpath(absolute);
     if (resolved === undefined) {
-      return deny("workspace/output-path-denied", "yazma hedefinin gerçek yolu çözümlenemedi");
+      return deny("workspace/output-path-denied", "the real path of the write target could not be resolved");
     }
     if (!isInside(dirDecision.canonicalDir, resolved)) {
       return deny(
         "workspace/output-path-denied",
-        "yazma hedefinin gerçek yolu (symlink/junction) beyanlı dizin dışına çıkıyor",
+        "the real path of the write target (symlink/junction) escapes the declared directory",
         "realpath-containment",
       );
     }

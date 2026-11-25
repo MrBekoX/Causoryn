@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -71,7 +72,10 @@ interface ClientPair {
 }
 
 async function connectClient(context: CausorynContext): Promise<ClientPair> {
-  const server = createCausorynMcpServer(context);
+  const server = createCausorynMcpServer(context, {
+    toolProfile: "full",
+    outputSchemaProfile: "full",
+  });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   const client = new Client({ name: "vitest-faz-e-client", version: "0.0.0" });
   await server.connect(serverTransport);
@@ -184,6 +188,30 @@ function writeFixture(root: string): FixturePaths {
   return { root, repoTs, serviceTs, legacyDir: path.join(root, "src", "legacy") };
 }
 
+/**
+ * Commits the fixture so `.causoryn/architecture.rules.yaml` is read from the
+ * trusted HEAD commit. Only a trusted rules source can produce no_findings;
+ * working-tree rules always downgrade a clean result to review_required.
+ */
+function commitFixture(root: string): void {
+  const git = (args: readonly string[]): void => {
+    execFileSync("git", ["-C", root, ...args], {
+      shell: false,
+      stdio: "ignore",
+      env: {
+        ...process.env,
+        GIT_AUTHOR_NAME: "Test Bot",
+        GIT_AUTHOR_EMAIL: "test@example.com",
+        GIT_COMMITTER_NAME: "Test Bot",
+        GIT_COMMITTER_EMAIL: "test@example.com",
+      },
+    });
+  };
+  git(["init", "-q"]);
+  git(["add", "."]);
+  git(["commit", "-q", "-m", "fixture with architecture rules"]);
+}
+
 function makeContext(allowRoot: string, autoIndex = true): CausorynContext {
   return createCausorynContext(
     {
@@ -243,9 +271,9 @@ describe("causoryn_verify_change araç kaydı (29. araç)", () => {
       const verifyTool = tools.find((t) => t.name === "causoryn_verify_change");
       expect(verifyTool?.inputSchema).toBeDefined();
       expect(verifyTool?.outputSchema).toBeDefined();
-      // README sözleşmesiyle aynı satır: "kod yazmaz ... DOĞRULAR".
-      expect(verifyTool?.description).toMatch(/kod yazmaz/);
-      expect(verifyTool?.description).toMatch(/doğrular/i);
+      // English-first description contract: read-only verification without running tests.
+      expect(verifyTool?.description).toMatch(/read-only/i);
+      expect(verifyTool?.description).toMatch(/verify/i);
     } finally {
       await pair.close();
     }
@@ -261,6 +289,7 @@ describe("causoryn_verify_change sprint kapısı", () => {
     const root = mkdtempSync(path.join(os.tmpdir(), "causoryn-verify-e-"));
     try {
       const fixture = writeFixture(root);
+      commitFixture(fixture.root);
       const pair = await connectClient(makeContext(fixture.root));
       try {
         // 1) Preflight manifest üret (depo: context.preflightStore).
@@ -308,6 +337,8 @@ describe("causoryn_verify_change sprint kapısı", () => {
         expect(firstData.verdictRationale[0]?.rule).toBe("clean-and-resolved");
         expect(firstData.incompleteChecks).toEqual([]);
         expect(firstData.disclaimers.length).toBeGreaterThan(0);
+        expect(firstData.trustWarning).toBeUndefined();
+        expect(firstData.rulesProvenance?.source).toBe("git-ref");
 
         // E3 dürüstlük: tests.state=not_run (TŞ §10.4 alan sadakati);
         // rapor/'passed' iddiası YOK.
@@ -328,6 +359,7 @@ describe("causoryn_verify_change sprint kapısı", () => {
         // SPRINT KAPISI 1: not_run adaylı raporda "geçti" kelimesi YOK.
         const serialized = JSON.stringify(firstEnvelope.data);
         expect(serialized).not.toContain("geçti");
+        expect(serialized).not.toMatch(/\bpassed\b/i);
 
         // TŞ §10.4 alan sadakati (PDF s.11, sprint-6 takım denetimi
         // bulgusu): yayınlanan envelope gövdesi üst düzey bulgu alanını
@@ -355,6 +387,40 @@ describe("causoryn_verify_change sprint kapısı", () => {
       }
     } finally {
       rmSync(root, { recursive: true, force: true });
+    }
+  }, 60_000);
+
+  it("untrusted rules: a clean tree with working-tree rules (no git) reports review_required with trustWarning and rulesProvenance inside data", async () => {
+    const root = mkdtempSync(path.join(os.tmpdir(), "causoryn-verify-untrusted-"));
+    try {
+      const fixture = writeFixture(root);
+      const pair = await connectClient(makeContext(fixture.root));
+      try {
+        const preflightResult = await callTool(pair.client, "causoryn_preflight_change", {
+          intent: "untrusted rules source",
+          targetFiles: ["src/order-service.ts"],
+        });
+        const preflightId = preflightDataOf(preflightResult).preflightId as string;
+        const result = await callTool(pair.client, "causoryn_verify_change", {
+          preflightId,
+          checks: ["architecture", "graph-diff", "test-plan"],
+        });
+        const envelope = expectEnvelope(result);
+        const data = VerifyChangeDataSchema.parse(envelope.data);
+        expect(data.checks.architecture.status).toBe("evaluated");
+        expect(data.architectureFindings).toHaveLength(0);
+        expect(data.verdict).toBe("review_required");
+        expect(data.verdictRationale[0]?.rule).toBe("untrusted-rules");
+        expect(data.trustWarning).toBe("architecture-rules-loaded-from-untrusted-working-tree");
+        expect(data.rulesProvenance?.source).toBe("working-tree");
+        expect((envelope.warnings as string[]).some((w) => w.includes("cannot be no_findings"))).toBe(
+          true,
+        );
+      } finally {
+        await pair.close();
+      }
+    } finally {
+      rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
     }
   }, 60_000);
 
@@ -580,10 +646,12 @@ describe("causoryn_verify_change partial yollar", () => {
           REPO_TS.replace("    return id;", '    return id ?? "";'),
         );
 
-        // checks verilmemiş → tamamı istenir; contracts MCP yüzeyinden
-        // üretilemez (TŞ §10.4 girdisinde spec çifti yoktur) → not_evaluated
-        // → missing-input kuralı inconclusive verir (review_required DEĞİL).
-        const result = await callTool(pair.client, "causoryn_verify_change", { preflightId });
+        // checks açıkça contracts ister → contracts MCP yüzeyinden spec çifti olmadan
+        // üretilemez → not_evaluated → missing-input kuralı inconclusive verir.
+        const result = await callTool(pair.client, "causoryn_verify_change", {
+          preflightId,
+          checks: ["architecture", "contracts", "graph-diff", "test-plan"],
+        });
         const envelope = expectEnvelope(result);
         const data = VerifyChangeDataSchema.parse(envelope.data);
         expect(data.verdict).toBe("inconclusive");
@@ -612,6 +680,7 @@ describe("causoryn_verify_change servis düzeyi", () => {
     const root = mkdtempSync(path.join(os.tmpdir(), "causoryn-verify-svc-"));
     try {
       const fixture = writeFixture(root);
+      commitFixture(fixture.root);
       const context = makeContext(fixture.root);
       const pair = await connectClient(context);
       try {
@@ -640,6 +709,11 @@ describe("causoryn_verify_change servis düzeyi", () => {
         expect(data.preflightId).toBeUndefined();
         expect(data.preflightAlignment).toBeUndefined();
         expect(data.verdict).toBe("no_findings");
+        expect(data.rulesProvenance).toMatchObject({
+          source: "git-ref",
+          ref: "HEAD",
+          refOrigin: "default-head",
+        });
         // Kapsam diff'ten türetilir (derivedFrom: graph-diff).
         expect(data.checks.testPlan.derivedFrom).toBe("graph-diff");
       } finally {
@@ -695,20 +769,21 @@ describe("causoryn_verify_change servis düzeyi", () => {
         });
         const secondData = VerifyChangeDataSchema.parse(expectEnvelope(second).data);
         const tests = secondData.tests;
-        expect(tests.state).toBe("observed");
-        if (tests.state !== "observed") throw new Error("erişilemez: tests observed değil");
+        expect(tests.state).toBe("host_asserted");
+        if (tests.state !== "host_asserted") throw new Error("erişilemez: tests host_asserted değil");
         expect(tests.evidenceRef).toBe("reports/vitest-summary.json");
-        // Rapor gerçekten geçiyor (failedCount 0 && passedCount ≥ 1) ve
-        // aday explicit bağlandı → passed:true literal yalnızca bu koşulda.
-        expect(tests.passed).toBe(true);
+        // Dürüstlük: host beyanı motor doğrulaması değildir (engineVerified=false, hostAssertedPassed=true, passed anahtarı yok).
+        expect(tests.engineVerified).toBe(false);
+        expect(tests.hostAssertedPassed).toBe(true);
+        expect("passed" in tests).toBe(false);
         const firstCandidateStatus = secondData.checks.testPlan.candidateStatuses[0] as unknown as
           | Record<string, unknown>
           | undefined;
-        expect(firstCandidateStatus?.status).toBe("observed");
-        // observed koşum kaydı limitation ile dürüstçe raporlanır (Causoryn
-        // test çalıştırmaz; kayıt host kanıtıdır — TŞ §10.4).
+        expect(firstCandidateStatus?.status).toBe("host_asserted");
+        // host_asserted koşum kaydı limitation ile dürüstçe raporlanır (Causoryn
+        // test çalıştırmaz; kayıt host beyanıdır).
         expect(
-          secondData.limitations.some((limitation) => limitation.includes("observed kaydedildi")),
+          secondData.limitations.some((limitation) => limitation.includes("host_asserted")),
         ).toBe(true);
       } finally {
         await pair.close();

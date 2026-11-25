@@ -321,12 +321,12 @@ function requireLimit(
   if (typeof requested !== "number" || !Number.isInteger(requested) || requested < 1) {
     throw new GraphRepositoryError(
       "graph/business-flow-invalid-input",
-      `${name} pozitif tam sayı olmalı: ${String(requested)}`,
+      `${name} must be a positive integer: ${String(requested)}`,
     );
   }
   if (requested > ceiling) {
     rationales.push(
-      `${name}=${String(requested)} istenen değeri tavana (${String(ceiling)}) indirildi (TŞ §20 resource budget)`,
+      `${name}=${String(requested)} exceeds the ceiling and was clamped to ${String(ceiling)} (resource budget)`,
     );
     return ceiling;
   }
@@ -375,8 +375,8 @@ function makeGapSegment(from: FlowNodeRef, allowedKinds: readonly string[]): Flo
     from,
     to: null,
     reason:
-      `kopuk zincir: "${from.qualifiedName}" (${from.nodeId}) düğümünden iş akışı devam kenarı bulunamadı ` +
-      `(aranan kenar türleri: ${allowedKinds.join(", ")}) — zincir dürüstçe kesildi; uydurma köprü üretilmedi (TŞ §14)`,
+      `broken chain: no business-flow edge continues from "${from.qualifiedName}" (${from.nodeId}) ` +
+      `(edge kinds searched: ${allowedKinds.join(", ")}); the chain stops here and no bridge was invented`,
   };
 }
 
@@ -411,7 +411,7 @@ export function traceBusinessFlow(
   if (state !== "ready" && state !== "partial") {
     throw new GraphRepositoryError(
       "graph/business-flow-snapshot-state",
-      `iş akışı izleme yalnızca ready/partial snapshot üzerinde çalışır; snapshot durumu: ${String(state)}`,
+      `business flow tracing only runs on a ready or partial snapshot; snapshot state: ${String(state)}`,
     );
   }
 
@@ -420,7 +420,7 @@ export function traceBusinessFlow(
   if (typeof flowSeed !== "string" || flowSeed.trim().length === 0) {
     throw new GraphRepositoryError(
       "graph/business-flow-invalid-input",
-      `flowSeed boş olamaz: node kimliği veya tam qualifiedName gerekli: ${String(flowSeed)}`,
+      `flowSeed must not be empty: a node id or an exact qualifiedName is required: ${String(flowSeed)}`,
     );
   }
 
@@ -440,14 +440,14 @@ export function traceBusinessFlow(
     if (!Array.isArray(input.boundaries) || input.boundaries.length === 0) {
       throw new GraphRepositoryError(
         "graph/business-flow-invalid-input",
-        "boundaries boş olamaz: BUSINESS_FLOW_EDGE_KINDS alt kümesi gerekli ya da alanı hiç vermeyin",
+        "boundaries must not be empty: pass a subset of BUSINESS_FLOW_EDGE_KINDS or omit the field",
       );
     }
     const invalid = input.boundaries.filter((kind) => !BUSINESS_FLOW_EDGE_KIND_SET.has(kind));
     if (invalid.length > 0) {
       throw new GraphRepositoryError(
         "graph/business-flow-invalid-input",
-        `geçersiz boundaries üyesi(leri): ${invalid.join(", ")}; boundaries şu kümenin alt kümesi olmalı: ${BUSINESS_FLOW_EDGE_KINDS.join(", ")}`,
+        `invalid boundaries member(s): ${invalid.join(", ")}; boundaries must be a subset of: ${BUSINESS_FLOW_EDGE_KINDS.join(", ")}`,
       );
     }
     allowedKinds = [...new Set(input.boundaries)].sort(cmp);
@@ -496,13 +496,13 @@ export function traceBusinessFlow(
     } else if (byName.length === 0) {
       unresolvedSeed = {
         seed: flowSeed,
-        reason: `seed çözülemedi: "${flowSeed}" — node kimliği veya tam qualifiedName olarak yayınlanmış snapshot'ta bulunamadı`,
+        reason: `seed not resolved: "${flowSeed}" was not found in the published snapshot as a node id or an exact qualifiedName`,
       };
     } else {
       const candidateIds = byName.map((node) => node.id).sort(cmp);
       unresolvedSeed = {
         seed: flowSeed,
-        reason: `seed belirsiz: "${flowSeed}" tam qualifiedName ${String(byName.length)} node ile eşleşti (${candidateIds.join(", ")}); node kimliği ile hedefleyin`,
+        reason: `ambiguous seed: the exact qualifiedName "${flowSeed}" matches ${String(byName.length)} nodes (${candidateIds.join(", ")}); target it by node id`,
       };
     }
   }
@@ -541,7 +541,7 @@ export function traceBusinessFlow(
     if (maxNodesHit) return;
     maxNodesHit = true;
     rationales.push(
-      `maxNodes=${String(limits.maxNodes)} bütçesi doldu (türetilmiş kuyruğa-alma bütçesi maxNodes×maxHops=${String(limits.maxNodes * limits.maxHops)}): genişleme durduruldu, kalan kısmi akışlar truncated kapatıldı (TŞ §20 resource budget)`,
+      `maxNodes=${String(limits.maxNodes)} budget exhausted (derived enqueue budget maxNodes×maxHops=${String(limits.maxNodes * limits.maxHops)}): expansion stopped and the remaining partial flows were closed as truncated (resource budget)`,
     );
   };
   const closeFlow = (
@@ -553,7 +553,7 @@ export function traceBusinessFlow(
       if (!maxFlowsHit) {
         maxFlowsHit = true;
         rationales.push(
-          `maxFlows=${String(limits.maxFlows)} tavanına ulaşıldı: kalan akış adayları tutulmadı (TŞ §20 resource budget)`,
+          `maxFlows=${String(limits.maxFlows)} ceiling reached: the remaining flow candidates were not kept (resource budget)`,
         );
       }
       return;
@@ -598,7 +598,7 @@ export function traceBusinessFlow(
     if (TERMINAL_NODE_KINDS.has(current.kind)) {
       if (partial.segments.length === 0) {
         rationales.push(
-          `seed terminal: "${current.qualifiedName}" (${current.id}) belgeli zincir ucudur (Table/Database/SchemaContract); izlenecek sınır geçişi yok — akış üretilmedi`,
+          `terminal seed: "${current.qualifiedName}" (${current.id}) is a documented chain end (Table/Database/SchemaContract); there is no boundary crossing to trace, so no flow was produced`,
         );
         continue;
       }
@@ -626,7 +626,7 @@ export function traceBusinessFlow(
       if (partial.segments.length === 0) {
         // Seed'den hiç akış çıkamadı: dürüst gap akışı + rationale.
         rationales.push(
-          `seed izole: "${current.qualifiedName}" (${current.id}) düğümünden iş akışı kenarı bulunamadı; kopukluk gap segmentiyle raporlandı`,
+          `isolated seed: no business-flow edge leaves "${current.qualifiedName}" (${current.id}); the break is reported as a gap segment`,
         );
         closeFlow(
           {
@@ -646,11 +646,11 @@ export function traceBusinessFlow(
         // döngü korumasıdır.
         if (CONTRACT_NODE_KINDS.has(current.kind)) {
           rationales.push(
-            `kontrat devamsız: "${current.qualifiedName}" (${current.id}) kontratından başka producer/consumer kenarı bulunamadı (mevcut kenar yalnızca gelinen yönde); akış temiz kapatıldı`,
+            `contract has no continuation: "${current.qualifiedName}" (${current.id}) has no other producer/consumer edge (the only edge is the one the flow arrived on); the flow was closed cleanly`,
           );
         } else {
           rationales.push(
-            `döngü koruması: "${current.qualifiedName}" (${current.id}) düğümünden tüm devam kenarları yol içinde ziyaret edilmiş node'lara dönüyor; akış temiz kapatıldı`,
+            `cycle guard: every continuation edge from "${current.qualifiedName}" (${current.id}) leads back to a node already on the path; the flow was closed cleanly`,
           );
         }
         closeFlow(partial, false);

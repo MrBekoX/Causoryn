@@ -92,6 +92,8 @@ const PKG_DIR = path.resolve(SCRIPT_DIR, "..");
 const REPO_ROOT = path.resolve(PKG_DIR, "..", "..");
 const DIST_DIR = path.join(PKG_DIR, "dist");
 const BUNDLE_PATH = path.join(DIST_DIR, "mcp-server.mjs");
+const WORKER_BUNDLE_PATH = path.join(DIST_DIR, "index-worker.mjs");
+const WORKER_ENTRY_PATH = path.join(PKG_DIR, "src", "index-worker-entry.ts");
 const LEGAL_PATH = path.join(DIST_DIR, "mcp-server.mjs.LEGAL.txt");
 const MANIFEST_PATH = path.join(DIST_DIR, "bundle-manifest.json");
 const VENDOR_PARENT = path.join(DIST_DIR, "node_modules");
@@ -115,7 +117,7 @@ const VENDOR_ENTRIES = ["package.json", "LICENSE", "lib", "prebuilds"];
 
 function assertExists(filePath, label) {
   if (!existsSync(filePath)) {
-    console.error(`[build:bundle] ${label} bulunamadı: ${filePath}`);
+    console.error(`[build:bundle] ${label} not found: ${filePath}`);
     process.exit(1);
   }
 }
@@ -131,7 +133,7 @@ function writeFileAtomic(destPath, content) {
   renameSync(tmpPath, destPath);
 }
 
-assertExists(path.join(PKG_DIR, "src", "stdio.ts"), "giriş noktası src/stdio.ts");
+assertExists(path.join(PKG_DIR, "src", "stdio.ts"), "entry point src/stdio.ts");
 assertExists(SQLITE_SRC, "repo node_modules/better-sqlite3 (npm install gerekli)");
 
 // --- 1) Bundle (in-memory + atomik yazım: koşut testlerde ENOENT penceresi yok) ---
@@ -175,7 +177,7 @@ const outputFiles = buildResult.outputFiles ?? [];
 const bundleOut = outputFiles.find((f) => path.resolve(f.path) === path.resolve(BUNDLE_PATH));
 const legalOut = outputFiles.find((f) => path.resolve(f.path) === path.resolve(LEGAL_PATH));
 if (!bundleOut || !legalOut) {
-  console.error("[build:bundle] esbuild beklenen mcp-server.mjs veya mcp-server.mjs.LEGAL.txt çıktısını üretmedi");
+  console.error("[build:bundle] esbuild did not produce the expected mcp-server.mjs or mcp-server.mjs.LEGAL.txt output");
   process.exit(1);
 }
 
@@ -201,11 +203,57 @@ const finalLegalBytes = Buffer.from(legalOut.contents);
 writeFileAtomic(BUNDLE_PATH, finalBundleBytes);
 writeFileAtomic(LEGAL_PATH, finalLegalBytes);
 
+// --- 1b) Non-blocking worker_threads indexing bundle (Wave 2 Task 2.5) ---
+assertExists(WORKER_ENTRY_PATH, "indexing worker entry point src/index-worker-entry.ts");
+const workerBuildResult = await build({
+  absWorkingDir: PKG_DIR,
+  entryPoints: [WORKER_ENTRY_PATH],
+  outfile: "dist/index-worker.mjs",
+  bundle: true,
+  platform: "node",
+  format: "esm",
+  target: "node24",
+  write: false,
+  external: ["better-sqlite3"],
+  banner: {
+    js: [
+      "/* eslint-disable */",
+      'import { createRequire } from "node:module";',
+      'import { fileURLToPath as __causorynFileURLToPath } from "node:url";',
+      "const require = createRequire(import.meta.url);",
+      "const __filename = __causorynFileURLToPath(import.meta.url);",
+      'const __dirname = __causorynFileURLToPath(new URL(".", import.meta.url));',
+    ].join("\n"),
+  },
+  sourcemap: false,
+  minify: false,
+  legalComments: "none",
+  logLevel: "warning",
+});
+const workerOut = (workerBuildResult.outputFiles ?? []).find(
+  (f) => path.resolve(f.path) === path.resolve(WORKER_BUNDLE_PATH),
+);
+if (!workerOut) {
+  console.error("[build:bundle] esbuild did not produce the expected index-worker.mjs output");
+  process.exit(1);
+}
+const rawWorker = workerOut.text;
+const workerFirstNl = rawWorker.indexOf("\n");
+const finalWorkerText =
+  workerFirstNl >= 0
+    ? rawWorker.slice(0, workerFirstNl + 1) +
+      rawWorker
+        .slice(workerFirstNl + 1)
+        .replace(/(\/\/|\/\*)\s*eslint-(disable|enable)\b/g, "$1 [bundled-lint-directive] $2")
+    : rawWorker;
+const finalWorkerBytes = Buffer.from(finalWorkerText, "utf8");
+writeFileAtomic(WORKER_BUNDLE_PATH, finalWorkerBytes);
+
 // --- 2) Vendored better-sqlite3 çalışma zamanı ----------------------------
 mkdirSync(VENDOR_DEST, { recursive: true });
 for (const entry of VENDOR_ENTRIES) {
   const source = path.join(SQLITE_SRC, entry);
-  assertExists(source, `better-sqlite3 çalışma zamanı parçası ${entry}`);
+  assertExists(source, `better-sqlite3 runtime file ${entry}`);
   cpSync(source, path.join(VENDOR_DEST, entry), { recursive: true, force: true });
 }
 
@@ -217,6 +265,7 @@ for (const entry of VENDOR_ENTRIES) {
 const files = {};
 files["mcp-server.mjs"] = createHash("sha256").update(finalBundleBytes).digest("hex");
 files["mcp-server.mjs.LEGAL.txt"] = createHash("sha256").update(finalLegalBytes).digest("hex");
+files["index-worker.mjs"] = createHash("sha256").update(finalWorkerBytes).digest("hex");
 for (const rel of listFiles(VENDOR_DEST)) {
   files[`node_modules/better-sqlite3/${rel}`] = sha256(
     path.join(VENDOR_DEST, ...rel.split("/")),
@@ -232,6 +281,7 @@ writeFileAtomic(MANIFEST_PATH, Buffer.from(manifest, "utf8"));
 mkdirSync(ANTIGRAVITY_VENDOR_DEST, { recursive: true });
 writeFileAtomic(path.join(ANTIGRAVITY_SCRIPTS_DIR, "mcp-server.mjs"), finalBundleBytes);
 writeFileAtomic(path.join(ANTIGRAVITY_SCRIPTS_DIR, "mcp-server.mjs.LEGAL.txt"), finalLegalBytes);
+writeFileAtomic(path.join(ANTIGRAVITY_SCRIPTS_DIR, "index-worker.mjs"), finalWorkerBytes);
 for (const entry of VENDOR_ENTRIES) {
   cpSync(
     path.join(VENDOR_DEST, entry),

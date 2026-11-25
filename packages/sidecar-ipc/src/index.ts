@@ -17,15 +17,112 @@ import { existsSync } from "node:fs";
 import path from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import { fileURLToPath } from "node:url";
+import {
+  isFullyQualifiedPath,
+  resolveExecutable,
+  sanitizePathValue,
+  withoutCwdExecutableSearch,
+} from "./executable.js";
+
+export {
+  collectUntrustedRoots,
+  isFullyQualifiedPath,
+  isWithinUntrustedRoots,
+  processCwdUntrustedRoot,
+  readPathVariable,
+  resolveExecutable,
+  resolveWindowsSystemExecutable,
+  sanitizePathValue,
+  trustedSearchDirectories,
+  trustedWorkingDirectory,
+  withoutCwdExecutableSearch,
+  type ExecutableSearchEnv,
+  type ResolveExecutableOptions,
+} from "./executable.js";
 
 /** Tek yanıt satırı ve stderr birikimi için varsayılan karakter bütçesi (64 MiB). */
 export const DEFAULT_RESPONSE_MAX_CHARS = 64 * 1024 * 1024;
 
-/** Worker spawn seçenekleri; cwd yalnızca tanımlıyken nesneye eklenir. */
+/**
+ * How long a tree-kill hook may run before the direct kill is applied anyway
+ * (a hung `taskkill` must not leave the worker running).
+ */
+export const DEFAULT_KILL_FALLBACK_MS = 5_000;
+
+/** Time stdout gets to drain after 'exit' when 'close' does not follow. */
+export const EXIT_DRAIN_GRACE_MS = 1_000;
+
+/**
+ * Tree-kill hook: terminates the child's whole process tree (e.g. Windows
+ * `taskkill /T /F`). It may return a promise that settles once the tree
+ * kill has finished.
+ */
+export type ProcessTreeKill = (child: ChildProcess) => void | PromiseLike<void>;
+
+function isPromiseLike(value: unknown): value is PromiseLike<void> {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    typeof (value as { then?: unknown }).then === "function"
+  );
+}
+
+/**
+ * Terminates a running child process. Without a tree-kill hook the child is
+ * killed directly. With a hook, the hook runs FIRST and the direct kill only
+ * follows once the hook has settled (or after `fallbackMs`, or right away
+ * when the hook throws or returns nothing): killing the parent first would
+ * leave its own children without a live parent, and `taskkill /T` can then
+ * no longer find them. Never throws.
+ */
+export function terminateChildProcess(
+  child: ChildProcess,
+  treeKill?: ProcessTreeKill,
+  fallbackMs: number = DEFAULT_KILL_FALLBACK_MS,
+): void {
+  const directKill = (): void => {
+    if (child.exitCode !== null || child.signalCode !== null) return;
+    try {
+      child.kill();
+    } catch {
+      // The process is already gone or cannot be signalled.
+    }
+  };
+  if (treeKill === undefined) {
+    directKill();
+    return;
+  }
+  let pending: void | PromiseLike<void>;
+  try {
+    pending = treeKill(child);
+  } catch {
+    directKill();
+    return;
+  }
+  if (!isPromiseLike(pending)) {
+    directKill();
+    return;
+  }
+  let settled = false;
+  const afterTreeKill = (): void => {
+    if (settled) return;
+    settled = true;
+    clearTimeout(fallbackTimer);
+    directKill();
+  };
+  // Both callbacks run asynchronously, after fallbackTimer is initialized.
+  const fallbackTimer = setTimeout(afterTreeKill, fallbackMs);
+  fallbackTimer.unref();
+  Promise.resolve(pending).then(afterTreeKill, afterTreeKill);
+}
+
+/** Worker spawn seçenekleri; shell her zaman kapalıdır, cwd yalnızca tanımlıyken eklenir. */
 export interface SidecarSpawnOptions {
   readonly stdio: ["pipe", "pipe", "pipe"];
   readonly env: Readonly<Record<string, string>>;
   readonly cwd?: string;
+  readonly shell: false;
+  readonly windowsHide: true;
 }
 
 /** Sidecar worker süreç başlatıcı imzası (test enjeksiyonu uyumlu). */
@@ -61,8 +158,13 @@ export interface RunLineJsonWorkerInput {
   readonly stderrMaxChars?: number;
   /** Test enjeksiyonu; default node:child_process.spawn. */
   readonly spawnProcess?: SidecarSpawnFunction;
-  /** Çalışmakta olan çocuk süreç sonlandırılırken çağrılan ek temizlik kancası. */
-  readonly onKillChild?: (child: ChildProcess) => void;
+  /**
+   * Tree-kill hook used when a still-running child is terminated; it runs
+   * before the direct kill (see terminateChildProcess).
+   */
+  readonly onKillChild?: ProcessTreeKill;
+  /** Delay before the direct kill when onKillChild has not settled; default DEFAULT_KILL_FALLBACK_MS. */
+  readonly killFallbackMs?: number;
 }
 
 export interface ResolveCausorynAssetRootOptions {
@@ -126,6 +228,48 @@ export function buildAllowlistedWorkerEnv(
   return env;
 }
 
+/** `unavailable` outcome without starting a process. */
+export function workerUnavailable(detail: string): WorkerRunOutcome {
+  return { status: "unavailable", response: null, stderr: "", detail };
+}
+
+/**
+ * Returns `env` with its PATH sanitized (empty, relative and untrusted-root
+ * entries removed) so tools started by the worker cannot be picked up from
+ * the analyzed workspace either.
+ */
+export function withSanitizedPath(
+  env: Readonly<Record<string, string>>,
+  untrustedRoots: readonly string[],
+): Record<string, string> {
+  const next: Record<string, string> = { ...env };
+  for (const key of Object.keys(next)) {
+    if (key.toUpperCase() !== "PATH") continue;
+    const sanitized = sanitizePathValue(next[key] ?? "", untrustedRoots);
+    if (sanitized.length > 0) next[key] = sanitized;
+    else delete next[key];
+  }
+  return next;
+}
+
+/**
+ * Resolves a configured worker command to an absolute executable using the
+ * child's PATH (never the cwd, never an untrusted-root PATH entry).
+ */
+export function resolveWorkerCommand(
+  command: string,
+  env: Readonly<Record<string, string>>,
+  untrustedRoots: readonly string[],
+): { readonly command: string } | { readonly detail: string } {
+  const resolved = resolveExecutable(command, { env, untrustedRoots });
+  if (resolved === null) {
+    return {
+      detail: `worker process was not started: executable "${command}" was not found on PATH outside the analyzed workspace (relative paths are not accepted)`,
+    };
+  }
+  return { command: resolved };
+}
+
 /**
  * Tek satır JSON istek/yanıt protokolüyle çalışan sidecar worker sürecini
  * başlatır, bütçe ve zaman aşımı sınırlarıyla izler ve ilk geçerli JSON
@@ -134,12 +278,36 @@ export function buildAllowlistedWorkerEnv(
 export function runLineJsonWorker(
   input: RunLineJsonWorkerInput,
 ): Promise<WorkerRunOutcome> {
+  // Bare or relative command names are refused: on Windows they are looked
+  // up in the child cwd before PATH. Callers resolve tools with
+  // resolveExecutable() first.
+  if (!isFullyQualifiedPath(input.command)) {
+    return Promise.resolve({
+      status: "unavailable",
+      response: null,
+      stderr: "",
+      detail: `worker process was not started: the command must be an absolute path (got: ${input.command})`,
+    });
+  }
+  if (
+    input.cwd !== undefined &&
+    (input.cwd.trim().length === 0 || input.cwd.includes("\0"))
+  ) {
+    return Promise.resolve({
+      status: "unavailable",
+      response: null,
+      stderr: "",
+      detail: "worker process could not be started: invalid or empty cwd",
+    });
+  }
+
   const spawnProcess: SidecarSpawnFunction = input.spawnProcess ?? defaultSpawn;
   const responseMaxChars = input.responseMaxChars ?? DEFAULT_RESPONSE_MAX_CHARS;
   const stderrMaxChars = input.stderrMaxChars ?? DEFAULT_RESPONSE_MAX_CHARS;
 
   return new Promise<WorkerRunOutcome>((resolveOutcome) => {
     let settled = false;
+    let exitDrainTimer: ReturnType<typeof setTimeout> | undefined;
     let stderrText = "";
     let buffer = "";
     const stdoutDecoder = new StringDecoder("utf8");
@@ -153,6 +321,7 @@ export function runLineJsonWorker(
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      if (exitDrainTimer !== undefined) clearTimeout(exitDrainTimer);
       if (
         closing !== null &&
         !alreadyExited &&
@@ -160,8 +329,7 @@ export function runLineJsonWorker(
         closing.exitCode === null &&
         closing.signalCode === null
       ) {
-        closing.kill();
-        input.onKillChild?.(closing);
+        terminateChildProcess(closing, input.onKillChild, input.killFallbackMs);
       }
       closing?.removeAllListeners();
       closing?.stdout?.removeAllListeners();
@@ -170,10 +338,22 @@ export function runLineJsonWorker(
       resolveOutcome(outcome);
     };
 
+    const childEnv = withoutCwdExecutableSearch(input.env);
     const spawnOptions: SidecarSpawnOptions =
       input.cwd !== undefined
-        ? { stdio: ["pipe", "pipe", "pipe"], env: input.env, cwd: input.cwd }
-        : { stdio: ["pipe", "pipe", "pipe"], env: input.env };
+        ? {
+            stdio: ["pipe", "pipe", "pipe"],
+            env: childEnv,
+            cwd: input.cwd,
+            shell: false,
+            windowsHide: true,
+          }
+        : {
+            stdio: ["pipe", "pipe", "pipe"],
+            env: childEnv,
+            shell: false,
+            windowsHide: true,
+          };
 
     let child: ChildProcess;
     try {
@@ -184,7 +364,7 @@ export function runLineJsonWorker(
         status: "unavailable",
         response: null,
         stderr: "",
-        detail: `worker süreci başlatılamadı: ${detail}`,
+        detail: `worker process could not be started: ${detail}`,
       });
       return;
     }
@@ -195,7 +375,7 @@ export function runLineJsonWorker(
           status: "timeout",
           response: null,
           stderr: stderrText,
-          detail: `worker ${String(input.requestTimeoutMs)} ms içinde yanıt vermedi (zaman aşımı); süreç sonlandırıldı — sonraki istek taze süreçle yürütülür`,
+          detail: `worker did not respond within ${String(input.requestTimeoutMs)} ms (timeout); the process was terminated and the next request uses a fresh process`,
         },
         child,
       );
@@ -208,7 +388,7 @@ export function runLineJsonWorker(
           status: "unavailable",
           response: null,
           stderr: stderrText,
-          detail: `worker süreci başlatılamadı: ${detail}`,
+          detail: `worker process could not be started: ${detail}`,
         },
         child,
       );
@@ -223,7 +403,7 @@ export function runLineJsonWorker(
             status: "unavailable",
             response: null,
             stderr: stderrText,
-            detail: `worker stderr çıktısı ${String(stderrMaxChars)} karakter sınırını aştı; süreç sonlandırıldı — sonraki istek taze süreçle ve L0/L1 fallback ile yürütülür`,
+            detail: `worker stderr output exceeded the ${String(stderrMaxChars)} character limit; the process was terminated and the next request uses a fresh process with L0/L1 fallback`,
           },
           child,
         );
@@ -240,7 +420,7 @@ export function runLineJsonWorker(
             status: "unavailable",
             response: null,
             stderr: stderrText,
-            detail: `worker yanıt satırı ${String(responseMaxChars)} karakter sınırını aştı; süreç sonlandırıldı — sonraki istek taze süreçle ve L0/L1 fallback ile yürütülür`,
+            detail: `worker response line exceeded the ${String(responseMaxChars)} character limit; the process was terminated and the next request uses a fresh process with L0/L1 fallback`,
           },
           child,
         );
@@ -266,7 +446,7 @@ export function runLineJsonWorker(
               status: "unavailable",
               response: null,
               stderr: stderrText,
-              detail: `worker yanıtı geçerli JSON değil: ${detail}`,
+              detail: `worker response is not valid JSON: ${detail}`,
             },
             child,
           );
@@ -286,7 +466,12 @@ export function runLineJsonWorker(
       }
     });
 
-    child.on("exit", (code: number | null, signal: NodeJS.Signals | null) => {
+    // 'exit' can fire before the last stdout chunk has been read: a worker that
+    // answers, then sees EOF on stdin and exits 0 would otherwise lose its
+    // response. The early-exit outcome is therefore reported on 'close' (all
+    // stdio delivered), or EXIT_DRAIN_GRACE_MS after 'exit' when 'close' does
+    // not follow (for example a grandchild still holds the pipe).
+    const reportExit = (code: number | null, signal: NodeJS.Signals | null): void => {
       finish(
         {
           status: "unavailable",
@@ -294,12 +479,19 @@ export function runLineJsonWorker(
           stderr: stderrText,
           detail:
             signal !== null
-              ? `worker sinyal ile sonlandı (${signal})`
-              : `worker çıktı (exit=${String(code ?? "bilinmiyor")}); stderr: ${stderrText.slice(0, 200).trim() || "(boş)"}`,
+              ? `worker terminated by signal (${signal})`
+              : `worker exited (exit=${String(code ?? "unknown")}); stderr: ${stderrText.slice(0, 200).trim() || "(empty)"}`,
         },
         child,
         true,
       );
+    };
+    child.on("exit", (code: number | null, signal: NodeJS.Signals | null) => {
+      if (settled) return;
+      exitDrainTimer = setTimeout(() => reportExit(code, signal), EXIT_DRAIN_GRACE_MS);
+    });
+    child.on("close", (code: number | null, signal: NodeJS.Signals | null) => {
+      reportExit(code, signal);
     });
 
     child.stdin?.on("error", () => {});
@@ -314,7 +506,7 @@ export function runLineJsonWorker(
           status: "unavailable",
           response: null,
           stderr: stderrText,
-          detail: `istek worker'a yazılamadı: ${detail}`,
+          detail: `request could not be written to the worker: ${detail}`,
         },
         child,
       );

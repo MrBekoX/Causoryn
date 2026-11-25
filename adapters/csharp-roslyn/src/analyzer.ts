@@ -37,8 +37,34 @@ import {
   type SourceSpan,
 } from "@causoryn/domain";
 import { resolveCausorynAssetRoot } from "@causoryn/sidecar-ipc";
-import { existsSync } from "node:fs";
-import { join } from "node:path";
+import {
+  existsSync,
+  lstatSync,
+  readdirSync,
+  realpathSync,
+} from "node:fs";
+import { join, posix as pathPosix, relative, resolve, sep } from "node:path";
+import {
+  trustedNugetPackageRoots,
+  type NugetTrustOptions,
+  type TrustedNugetRoot,
+} from "./nuget-roots.js";
+import {
+  mapNodeLocation,
+  nodeSpanSources,
+  nodeSpanWarnings,
+  type NodeSpanSource,
+} from "./node-span.js";
+import { resolveCSharpProjects } from "./project-model.js";
+import {
+  canonicalLocalPath,
+  isFullyQualifiedLocalPath,
+  isInsideRealDir,
+  readBoundedFileNoFollow,
+  resolveLocalRealDirectory,
+  resolveSafeRealRoot,
+  stripTrailingSeparators,
+} from "./safe-fs.js";
 import { runWorkerAnalyze, type WorkerRunOutcome } from "./worker-process.js";
 import {
   CSHARP_ROSLYN_ADAPTER_ID,
@@ -46,9 +72,12 @@ import {
   DEFAULT_DOTNET_COMMAND,
   DEFAULT_REQUEST_TIMEOUT_MS,
   DEFAULT_RESPONSE_MAX_CHARS,
+  MAX_NUGET_REFERENCE_DIRS,
+  MAX_PROJECT_ASSETS_BYTES,
   WORKER_DLL_RELATIVE_PATH,
   WORKER_UNAVAILABLE_CAPABILITIES,
   type AnalyzeCSharpWorkspaceInput,
+  type NugetReferenceDiscoveryResult,
   type RoslynAdapterCapabilities,
   type RoslynAdapterDiagnostic,
   type RoslynAdapterOptions,
@@ -117,7 +146,7 @@ function normalizeRelativePath(raw: string): string
   {
     throw new DomainError(
       "adapter/absolute-source-path",
-      `Mutlak kaynak yolu kabul edilmez: ${raw}`,
+      `Absolute source paths are not accepted: ${raw}`,
     );
   }
 
@@ -127,7 +156,7 @@ function normalizeRelativePath(raw: string): string
     {
       throw new DomainError(
         "adapter/invalid-source-path",
-        `Kaynak yolu boş/geçersiz segment içeriyor: ${raw}`,
+        `Source path contains an empty or invalid segment: ${raw}`,
       );
     }
 
@@ -135,7 +164,7 @@ function normalizeRelativePath(raw: string): string
     {
       throw new DomainError(
         "adapter/source-path-escape",
-        `Kaynak yolu kök dışına çıkıyor: ${raw}`,
+        `Source path escapes the workspace root: ${raw}`,
       );
     }
   }
@@ -248,7 +277,12 @@ function mapAmbiguity(raw: unknown): { candidates: string[]; reason: string } | 
   return { candidates: [...candidates], reason };
 }
 
-function mapNode(raw: unknown, skipped: string[]): SnapshotNodeInput | null
+function mapNode(
+  raw: unknown,
+  skipped: string[],
+  spanSources: ReadonlyMap<string, NodeSpanSource>,
+  rejectedSpans: string[],
+): SnapshotNodeInput | null
 {
   if (!isRecord(raw)) return null;
   const kind = raw["kind"];
@@ -260,18 +294,25 @@ function mapNode(raw: unknown, skipped: string[]): SnapshotNodeInput | null
 
   if (typeof kind !== "string" || !NODE_KIND_SET.has(kind))
   {
-    skipped.push(`katalog dışı node türü atlandı: ${String(kind)}`);
+    skipped.push(`skipped a node with a kind outside the catalog: ${String(kind)}`);
     return null;
   }
 
   const language = raw["language"];
   const relativePath = raw["relativePath"];
   const attributes = raw["attributes"];
-  return {
+  const ref = {
     kind: kind as NodeKind,
+    qualifiedName,
+    ...(typeof relativePath === "string" ? { relativePath } : {}),
+  };
+  const location = mapNodeLocation(raw["span"], ref, spanSources, rejectedSpans);
+  return {
+    kind: ref.kind,
     qualifiedName,
     ...(typeof language === "string" ? { language } : {}),
     ...(typeof relativePath === "string" ? { relativePath } : {}),
+    ...(location !== undefined ? { location } : {}),
     attributes: isRecord(attributes) ? { ...attributes } : {},
   };
 }
@@ -283,13 +324,13 @@ function mapEdge(raw: unknown, skipped: string[]): SnapshotEdgeInput | null
   const resolution = raw["resolution"];
   if (typeof kind !== "string" || !EDGE_KIND_SET.has(kind))
   {
-    skipped.push(`katalog dışı edge türü atlandı: ${String(kind)}`);
+    skipped.push(`skipped an edge with a kind outside the catalog: ${String(kind)}`);
     return null;
   }
 
   if (typeof resolution !== "string" || !RESOLUTION_SET.has(resolution))
   {
-    skipped.push(`geçersiz resolution değeri olan kenar atlandı: ${String(resolution)}`);
+    skipped.push(`skipped an edge with an invalid resolution value: ${String(resolution)}`);
     return null;
   }
 
@@ -297,7 +338,7 @@ function mapEdge(raw: unknown, skipped: string[]): SnapshotEdgeInput | null
   const to = mapNodeRef(raw["to"]);
   if (from === null || to === null)
   {
-    skipped.push("geçersiz kenar ucu atlandı");
+    skipped.push("skipped an edge with an invalid endpoint");
     return null;
   }
 
@@ -375,12 +416,13 @@ function mapWorkerResponse(
   payload: unknown,
   expectedId: string,
   skipped: string[],
+  spanSources: ReadonlyMap<string, NodeSpanSource>,
 ): MappedWorkerResponse | null
 {
   if (!isRecord(payload)) return null;
   if (payload["id"] !== expectedId)
   {
-    skipped.push("worker yanıtı id echo eşleşmedi");
+    skipped.push("worker response id did not match the request id");
     return null;
   }
 
@@ -396,13 +438,13 @@ function mapWorkerResponse(
     const code =
       error !== null && typeof error["code"] === "string"
         ? error["code"]
-        : "bilinmeyen";
+        : "unknown";
     const message =
       error !== null && typeof error["message"] === "string"
         ? error["message"]
         : "";
     skipped.push(
-      `worker hatası ${code}${message.length > 0 ? `: ${message}` : ""} — istek kaynak sınırlarını (dosya boyutu/sayısı) kontrol edin`,
+      `worker error ${code}${message.length > 0 ? `: ${message}` : ""} — check the request resource limits (file size/count)`,
     );
     return null;
   }
@@ -411,9 +453,11 @@ function mapWorkerResponse(
   if (!Array.isArray(payload["nodes"])) return null;
   if (!Array.isArray(payload["edges"])) return null;
 
+  const rejectedSpans: string[] = [];
   const nodes = payload["nodes"]
-    .map((node) => mapNode(node, skipped))
+    .map((node) => mapNode(node, skipped, spanSources, rejectedSpans))
     .filter((node): node is SnapshotNodeInput => node !== null);
+  skipped.push(...nodeSpanWarnings(rejectedSpans));
   const edges = payload["edges"]
     .map((edge) => mapEdge(edge, skipped))
     .filter((edge): edge is SnapshotEdgeInput => edge !== null);
@@ -454,7 +498,7 @@ function fallbackResult(
 ): RoslynAdapterResult
 {
   const warningLines = [
-    `${reason} — L0/L1 dosya düzeyine düşüldü`,
+    `${reason} — fell back to L0/L1 file-level facts`,
     ...(stderr.trim().length > 0
       ? [`worker stderr: ${stderr.trim().slice(0, 200)}`]
       : []),
@@ -486,6 +530,431 @@ function fallbackResult(
 }
 
 /* ------------------------------------------------------------------ */
+/* Read-Only NuGet `obj/project.assets.json` Reference Discovery       */
+/* ------------------------------------------------------------------ */
+
+const MAX_ASSETS_SCAN_DEPTH = 4;
+const MAX_ASSETS_FILES = 32;
+const MAX_ASSETS_DIR_VISITS = 512;
+
+const FORBIDDEN_JSON_KEYS: ReadonlySet<string> = new Set([
+  "__proto__",
+  "constructor",
+  "prototype",
+]);
+
+const ASSETS_SKIP_DIRS: ReadonlySet<string> = new Set([
+  "node_modules",
+  ".git",
+  ".hg",
+  ".svn",
+  ".vs",
+  ".vscode",
+  ".idea",
+  "bin",
+  "obj",
+  "dist",
+  "build",
+  "out",
+  "target",
+]);
+
+function validateSafeRelativeSegments(rawPath: string): string[] | null
+{
+  if (rawPath.length === 0 || rawPath.includes("\0")) return null;
+  const posixPath = rawPath.replace(/\\/g, "/");
+  if (posixPath.startsWith("/") || /^[a-zA-Z]:/.test(posixPath)) return null;
+  const segments = posixPath.split("/");
+  for (const segment of segments)
+  {
+    if (segment.length === 0 || segment === "." || segment === "..")
+    {
+      return null;
+    }
+  }
+  return segments;
+}
+
+function scoreTargetFrameworkKey(tfmKey: string): readonly [number, number, number]
+{
+  const slashIdx = tfmKey.indexOf("/");
+  const baseTfm = (slashIdx >= 0 ? tfmKey.slice(0, slashIdx) : tfmKey).toLowerCase();
+  const ridPenalty = slashIdx >= 0 ? 0 : 1;
+
+  const netMatch = /^net(\d+)\.(\d+)$/.exec(baseTfm);
+  if (netMatch !== null)
+  {
+    return [3, Number(netMatch[1]) * 100 + Number(netMatch[2]), ridPenalty];
+  }
+  const netCoreMatch = /^netcoreapp(\d+)\.(\d+)$/.exec(baseTfm);
+  if (netCoreMatch !== null)
+  {
+    return [2, Number(netCoreMatch[1]) * 100 + Number(netCoreMatch[2]), ridPenalty];
+  }
+  const netStdMatch = /^netstandard(\d+)\.(\d+)$/.exec(baseTfm);
+  if (netStdMatch !== null)
+  {
+    return [1, Number(netStdMatch[1]) * 100 + Number(netStdMatch[2]), ridPenalty];
+  }
+  return [0, 0, ridPenalty];
+}
+
+function selectPreferredTargetKey(targetKeys: readonly string[]): string | undefined
+{
+  if (targetKeys.length === 0) return undefined;
+  const sorted = [...targetKeys].sort((a, b) => {
+    const scoreA = scoreTargetFrameworkKey(a);
+    const scoreB = scoreTargetFrameworkKey(b);
+    if (scoreB[0] !== scoreA[0]) return scoreB[0] - scoreA[0];
+    if (scoreB[1] !== scoreA[1]) return scoreB[1] - scoreA[1];
+    if (scoreB[2] !== scoreA[2]) return scoreB[2] - scoreA[2];
+    return a < b ? -1 : a > b ? 1 : 0;
+  });
+  return sorted[0];
+}
+
+function resolveNonSymlinkDirWithinBase(
+  baseRealDir: string,
+  segments: readonly string[],
+): string | null
+{
+  let current = baseRealDir;
+  for (const seg of segments)
+  {
+    current = join(current, seg);
+    let stat;
+    try
+    {
+      stat = lstatSync(current);
+    }
+    catch
+    {
+      return null;
+    }
+    if (stat.isSymbolicLink() || !stat.isDirectory()) return null;
+  }
+
+  let realTarget: string;
+  try
+  {
+    realTarget = realpathSync(current);
+  }
+  catch
+  {
+    return null;
+  }
+  if (!isInsideRealDir(baseRealDir, realTarget)) return null;
+  return realTarget;
+}
+
+function validateSafeLocalDirectory(rawDir: string): string | null
+{
+  if (rawDir.length === 0 || rawDir.includes("\0")) return null;
+  const trimmed = rawDir.trim();
+  if (trimmed.length === 0 || !isFullyQualifiedLocalPath(trimmed))
+  {
+    return null;
+  }
+  const normalized = stripTrailingSeparators(trimmed);
+  // The ancestors are walked first (links resolved manually, remote targets
+  // refused), so the leaf lstat below never traverses a link to a remote host.
+  const real = resolveLocalRealDirectory(normalized);
+  if (real === null) return null;
+  let stat;
+  try
+  {
+    stat = lstatSync(normalized);
+  }
+  catch
+  {
+    return null;
+  }
+  if (stat.isSymbolicLink() || !stat.isDirectory()) return null;
+  return real;
+}
+
+/**
+ * Real path of a `packageFolders` entry when it lies inside a trusted NuGet
+ * root or the workspace (checked lexically before any file system access and
+ * again on the real path); null otherwise.
+ */
+function confinePackageFolder(rawKey: string, trustedRoots: readonly TrustedNugetRoot[]): string | null
+{
+  if (rawKey.length === 0 || rawKey.includes("\0")) return null;
+  const trimmed = rawKey.trim();
+  if (!isFullyQualifiedLocalPath(trimmed)) return null;
+  const candidate = resolve(stripTrailingSeparators(trimmed));
+  const owners = trustedRoots.filter(
+    (root) =>
+      isInsideRealDir(root.lexical, candidate) ||
+      isInsideRealDir(root.real, candidate) ||
+      isInsideRealDir(root.canonical, candidate),
+  );
+  if (owners.length === 0) return null;
+  const real = validateSafeLocalDirectory(candidate);
+  if (real === null) return null;
+  const canonical = canonicalLocalPath(real);
+  if (canonical === null) return null;
+  return owners.some((root) => isInsideRealDir(root.canonical, canonical)) ? real : null;
+}
+
+function extractNugetDirsFromAssetsContent(
+  content: string,
+  discovered: Set<string>,
+  trustedRoots: readonly TrustedNugetRoot[],
+  onIgnoredPackageFolders: (count: number) => void,
+): void
+{
+  let parsed: unknown;
+  try
+  {
+    parsed = JSON.parse(content);
+  }
+  catch
+  {
+    return;
+  }
+  if (!isRecord(parsed)) return;
+
+  // 1) packageFolders confined to the trusted NuGet roots and the workspace
+  //    (UNC/device, relative, linked and outside entries are ignored).
+  const rawPackageFolders = parsed["packageFolders"];
+  if (!isRecord(rawPackageFolders)) return;
+  const packageFolders: string[] = [];
+  let ignoredFolders = 0;
+  for (const key of Object.getOwnPropertyNames(rawPackageFolders).sort())
+  {
+    if (FORBIDDEN_JSON_KEYS.has(key)) continue;
+    if (!Object.prototype.hasOwnProperty.call(rawPackageFolders, key)) continue;
+    const realFolder = confinePackageFolder(key, trustedRoots);
+    if (realFolder === null)
+    {
+      ignoredFolders += 1;
+      continue;
+    }
+    if (!packageFolders.includes(realFolder))
+    {
+      packageFolders.push(realFolder);
+    }
+  }
+  if (ignoredFolders > 0) onIgnoredPackageFolders(ignoredFolders);
+  if (packageFolders.length === 0) return;
+
+  // 2) Map library keys -> safe relative package paths.
+  const libraryPathByKey = new Map<string, readonly string[]>();
+  const rawLibraries = parsed["libraries"];
+  if (isRecord(rawLibraries))
+  {
+    for (const key of Object.getOwnPropertyNames(rawLibraries))
+    {
+      if (FORBIDDEN_JSON_KEYS.has(key)) continue;
+      if (!Object.prototype.hasOwnProperty.call(rawLibraries, key)) continue;
+      const lib = rawLibraries[key];
+      if (!isRecord(lib)) continue;
+      if (lib["type"] !== undefined && lib["type"] !== "package") continue;
+      const rawPath = lib["path"];
+      if (typeof rawPath === "string")
+      {
+        const segments = validateSafeRelativeSegments(rawPath);
+        if (segments !== null)
+        {
+          libraryPathByKey.set(key, segments);
+        }
+      }
+    }
+  }
+
+  // 3) Extract compile-time DLL directories from the preferred TFM target.
+  const rawTargets = parsed["targets"];
+  if (!isRecord(rawTargets)) return;
+  const targetKeys = Object.getOwnPropertyNames(rawTargets).filter(
+    (key) => !FORBIDDEN_JSON_KEYS.has(key) && Object.prototype.hasOwnProperty.call(rawTargets, key),
+  );
+  const preferredTargetKey = selectPreferredTargetKey(targetKeys);
+  if (preferredTargetKey === undefined) return;
+
+  const targetPackages = rawTargets[preferredTargetKey];
+  if (!isRecord(targetPackages)) return;
+
+  const sortedPkgKeys = Object.getOwnPropertyNames(targetPackages)
+    .filter((key) => !FORBIDDEN_JSON_KEYS.has(key) && Object.prototype.hasOwnProperty.call(targetPackages, key))
+    .sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+
+  for (const pkgKey of sortedPkgKeys)
+  {
+    if (discovered.size >= MAX_NUGET_REFERENCE_DIRS) break;
+    const pkgInfo = targetPackages[pkgKey];
+    if (!isRecord(pkgInfo)) continue;
+    if (pkgInfo["type"] !== undefined && pkgInfo["type"] !== "package") continue;
+
+    const compileObj = pkgInfo["compile"];
+    if (!isRecord(compileObj)) continue;
+
+    const libSegments =
+      libraryPathByKey.get(pkgKey) ??
+      validateSafeRelativeSegments(pkgKey.toLowerCase());
+    if (libSegments === null) continue;
+
+    const compileEntries = Object.getOwnPropertyNames(compileObj)
+      .filter((k) => !FORBIDDEN_JSON_KEYS.has(k) && Object.prototype.hasOwnProperty.call(compileObj, k))
+      .sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+
+    for (const compileKey of compileEntries)
+    {
+      if (discovered.size >= MAX_NUGET_REFERENCE_DIRS) break;
+      if (!compileKey.toLowerCase().endsWith(".dll")) continue;
+      const compileSegments = validateSafeRelativeSegments(compileKey);
+      if (compileSegments === null || compileSegments.length === 0) continue;
+
+      const dllFileName = compileSegments[compileSegments.length - 1]!;
+      const compileDirPosix = pathPosix.dirname(compileSegments.join("/"));
+      const compileDirSegments =
+        compileDirPosix === "." ? [] : compileDirPosix.split("/");
+      const fullDirSegments = [...libSegments, ...compileDirSegments];
+
+      for (const pkgFolder of packageFolders)
+      {
+        const resolvedDir = resolveNonSymlinkDirWithinBase(pkgFolder, fullDirSegments);
+        if (resolvedDir === null) continue;
+        const dllPath = join(resolvedDir, dllFileName);
+        let dllStat;
+        try
+        {
+          dllStat = lstatSync(dllPath);
+        }
+        catch
+        {
+          continue;
+        }
+        if (dllStat.isSymbolicLink() || !dllStat.isFile()) continue;
+
+        discovered.add(resolvedDir);
+        break;
+      }
+    }
+  }
+}
+
+/**
+ * Strictly read-only, bounded, symlink- and UNC-safe discovery of local NuGet
+ * compile-time DLL directories from `obj/project.assets.json` inside `rootDir`.
+ * Degrades silently with zero crashes if absent, malformed, or oversized (> 8 MB).
+ */
+export function discoverNugetReferenceDirs(
+  rootDir: string,
+  trustOptions: NugetTrustOptions = {},
+): NugetReferenceDiscoveryResult
+{
+  const warnings: string[] = [];
+  const realRoot = resolveSafeRealRoot(rootDir);
+  if (realRoot === null)
+  {
+    return { referenceDirs: [], warnings };
+  }
+  const canonicalRoot = canonicalLocalPath(realRoot);
+  const trustedRoots: TrustedNugetRoot[] = [
+    ...trustedNugetPackageRoots(trustOptions),
+    ...(canonicalRoot === null
+      ? []
+      : [{ lexical: resolve(stripTrailingSeparators(rootDir)), real: realRoot, canonical: canonicalRoot }]),
+  ];
+
+  const assetsFiles: string[] = [];
+  const queue: Array<{ readonly dir: string; readonly depth: number }> = [
+    { dir: realRoot, depth: 0 },
+  ];
+  let visitedDirs = 0;
+
+  while (
+    queue.length > 0 &&
+    visitedDirs < MAX_ASSETS_DIR_VISITS &&
+    assetsFiles.length < MAX_ASSETS_FILES
+  )
+  {
+    const current = queue.shift()!;
+    visitedDirs += 1;
+
+    // Check `<current>/obj/project.assets.json` strictly without following symlinks.
+    const objDir = join(current.dir, "obj");
+    try
+    {
+      const objStat = lstatSync(objDir);
+      if (!objStat.isSymbolicLink() && objStat.isDirectory())
+      {
+        const realObj = realpathSync(objDir);
+        if (isInsideRealDir(realRoot, realObj))
+        {
+          // lstat, not exists(): a linked assets file is never followed.
+          const assetsPath = join(realObj, "project.assets.json");
+          const assetsStat = lstatSync(assetsPath, { throwIfNoEntry: false });
+          if (assetsStat !== undefined && !assetsStat.isSymbolicLink() && assetsStat.isFile())
+          {
+            assetsFiles.push(assetsPath);
+          }
+        }
+      }
+    }
+    catch
+    {
+      // Absent obj/ directory — normal case, degrade silently.
+    }
+
+    if (current.depth >= MAX_ASSETS_SCAN_DEPTH) continue;
+
+    let names: string[];
+    try
+    {
+      names = readdirSync(current.dir).sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+    }
+    catch
+    {
+      continue;
+    }
+
+    for (const name of names)
+    {
+      if (name.length === 0 || name.startsWith(".") || ASSETS_SKIP_DIRS.has(name.toLowerCase()))
+      {
+        continue;
+      }
+      const childDir = join(current.dir, name);
+      try
+      {
+        const childStat = lstatSync(childDir);
+        if (childStat.isSymbolicLink() || !childStat.isDirectory()) continue;
+        const realChild = realpathSync(childDir);
+        if (!isInsideRealDir(realRoot, realChild)) continue;
+        queue.push({ dir: realChild, depth: current.depth + 1 });
+      }
+      catch
+      {
+        continue;
+      }
+    }
+  }
+
+  const discovered = new Set<string>();
+  for (const assetsPath of assetsFiles.sort((a, b) => (a < b ? -1 : a > b ? 1 : 0)))
+  {
+    if (discovered.size >= MAX_NUGET_REFERENCE_DIRS) break;
+    const content = readBoundedFileNoFollow(assetsPath, realRoot, MAX_PROJECT_ASSETS_BYTES);
+    if (content === null) continue;
+    const displayPath = relative(realRoot, assetsPath).split(sep).join("/");
+    extractNugetDirsFromAssetsContent(content, discovered, trustedRoots, (count) => {
+      warnings.push(
+        `${displayPath}: ignored ${String(count)} NuGet packageFolders ${count === 1 ? "entry" : "entries"} outside the trusted NuGet package roots and the workspace`,
+      );
+    });
+  }
+
+  const referenceDirs = [...discovered]
+    .sort((a, b) => (a < b ? -1 : a > b ? 1 : 0))
+    .slice(0, MAX_NUGET_REFERENCE_DIRS);
+
+  return { referenceDirs, warnings };
+}
+
+/* ------------------------------------------------------------------ */
 /* Ana giriş                                                           */
 /* ------------------------------------------------------------------ */
 
@@ -496,7 +965,7 @@ export async function analyzeCSharpWorkspace(
   const { workspaceId, files } = input;
   if (workspaceId.trim().length === 0)
   {
-    throw new DomainError("adapter/empty-workspace-id", "workspaceId boş olamaz");
+    throw new DomainError("adapter/empty-workspace-id", "workspaceId must not be empty");
   }
 
   // 1) Girdi normalizasyonu (sıralı, çakışmasız — deterministik istek).
@@ -513,7 +982,7 @@ export async function analyzeCSharpWorkspace(
     {
       throw new DomainError(
         "adapter/duplicate-source-path",
-        `Aynı kaynak yolu iki kez verildi: ${relativePath}`,
+        `The same source path was given twice: ${relativePath}`,
       );
     }
 
@@ -529,6 +998,42 @@ export async function analyzeCSharpWorkspace(
     a.relativePath < b.relativePath ? -1 : a.relativePath > b.relativePath ? 1 : 0,
   );
 
+  // 1.5) Read-only NuGet `obj/project.assets.json` referenceDirs discovery (bounded, symlink/UNC-safe).
+  const mergedRefDirs = new Set<string>();
+  const nugetWarnings: string[] = [];
+  if (input.rootDir !== undefined)
+  {
+    const discovered = discoverNugetReferenceDirs(input.rootDir);
+    for (const dir of discovered.referenceDirs)
+    {
+      mergedRefDirs.add(dir);
+    }
+    nugetWarnings.push(...discovered.warnings);
+  }
+  if (input.referenceDirs !== undefined)
+  {
+    for (const rawDir of input.referenceDirs)
+    {
+      if (mergedRefDirs.size >= MAX_NUGET_REFERENCE_DIRS) break;
+      const safeDir = validateSafeLocalDirectory(rawDir);
+      if (safeDir !== null)
+      {
+        mergedRefDirs.add(safeDir);
+      }
+    }
+  }
+  const referenceDirs = [...mergedRefDirs]
+    .sort((a, b) => (a < b ? -1 : a > b ? 1 : 0))
+    .slice(0, MAX_NUGET_REFERENCE_DIRS);
+
+  // 1.6) Read-only MSBuild project model (.csproj + Directory.Build.props inside
+  //      rootDir): one compilation per project with the SDK's implicit global
+  //      usings, Using items and ProjectReference closure (project-model.ts).
+  const projectModel =
+    input.rootDir !== undefined
+      ? resolveCSharpProjects(input.rootDir, entries.map((entry) => entry.relativePath))
+      : { projects: [], warnings: [] };
+
   const options = resolveOptions(input.options);
   const request = {
     id: `analyze:${workspaceId}`,
@@ -538,11 +1043,14 @@ export async function analyzeCSharpWorkspace(
       path: entry.relativePath,
       content: entry.content,
     })),
+    ...(referenceDirs.length > 0 ? { referenceDirs } : {}),
+    ...(projectModel.projects.length > 0 ? { projects: projectModel.projects } : {}),
   };
 
   const outcome: WorkerRunOutcome = await runWorkerAnalyze({
     dotnetCommand: options.dotnetCommand,
     workerDllPath: options.workerDllPath,
+    ...(input.rootDir !== undefined ? { untrustedRoots: [input.rootDir] } : {}),
     requestPayload: request,
     requestTimeoutMs: options.requestTimeoutMs,
     responseMaxChars: options.responseMaxChars,
@@ -551,10 +1059,15 @@ export async function analyzeCSharpWorkspace(
       : {}),
   });
 
-  const skipped: string[] = [];
+  const skipped: string[] = [...nugetWarnings, ...projectModel.warnings];
   if (outcome.status === "ok")
   {
-    const mapped = mapWorkerResponse(outcome.response, request.id, skipped);
+    const mapped = mapWorkerResponse(
+      outcome.response,
+      request.id,
+      skipped,
+      nodeSpanSources(entries),
+    );
     if (mapped !== null)
     {
       return {
@@ -580,12 +1093,12 @@ export async function analyzeCSharpWorkspace(
   // reddidir; gerekçe metni bunu dürüstçe ayırt eder (ayrıntı warnings'te).
   const isWorkerRejection =
     outcome.status === "ok" &&
-    skipped.some((line) => line.startsWith("worker hatası"));
+    skipped.some((line) => line.startsWith("worker error"));
   const reason =
     outcome.status === "ok"
       ? isWorkerRejection
-        ? 'Roslyn worker isteği reddetti (worker status:"error"); ayrıntı warnings\'te'
-        : "Roslyn worker kullanılamıyor (yanıt sözleşmeye aykırı)"
-      : `Roslyn worker kullanılamıyor (${outcome.detail})`;
+        ? 'Roslyn worker rejected the request (worker status:"error"); details are in the warnings'
+        : "Roslyn worker unavailable (the response violates the protocol)"
+      : `Roslyn worker unavailable (${outcome.detail})`;
   return fallbackResult(entries, reason, outcome.stderr, skipped);
 }

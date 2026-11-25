@@ -20,7 +20,10 @@ import {
   parseArchitectureBaseline,
   parseArchitecturePolicy,
   readTimelinePointFromGit,
+  TIMELINE_SNAPSHOT_BLOB_PATH,
+  WORKING_TREE_REF,
   writeDocumentation,
+  type TimelineTrustWarning,
 } from "@causoryn/graph";
 import { z } from "zod";
 
@@ -38,6 +41,7 @@ import {
   staleWarningOf,
   type ServiceDeps,
 } from "./services.js";
+import { createTrustedHistorySources } from "./trusted-history.js";
 
 /**
  * Faz C uygulama servisleri (sprint-3 C8 — C1–C7 çekirdek modüllerinin MCP
@@ -174,13 +178,26 @@ export function graphErrorToToolError(
   if (code === "export/output-path-denied") {
     return new CausorynToolError("PATH_DENIED", error.message);
   }
+  // A git layout that would read outside the analyzed root (foreign gitdir
+  // pointer, linked .git, network path in git metadata) is refused before git
+  // starts. The detailed reason can name resolved paths outside the root, so it
+  // goes only to the injected logger (stderr); the client gets a fixed message.
+  if (code === "compare/repository-refused") {
+    log?.(`graph contract error ${code} mapped to PATH_DENIED: ${error.message}`);
+    return new CausorynToolError(
+      "PATH_DENIED",
+      "the git repository layout at the analyzed root is refused: only a .git directory, a .git file " +
+        "pointing inside the root, or a linked worktree or submodule git directory that points back to " +
+        "the root is read (the reason is in the server log)",
+    );
+  }
   // Ortam/hata sınıfı (git yok, komut başarısız, yazma hatası) →
   // retryable=true INTERNAL_ERROR. Orijinal mesaj + modül kodu YALNIZCA
   // enjekte edilen logger'a (stderr) yazılır; istemci mesajı geneldir.
-  log?.(`graf sözleşme hatası ${code} INTERNAL_ERROR'a eşlendi: ${error.message}`);
+  log?.(`graph contract error ${code} mapped to INTERNAL_ERROR: ${error.message}`);
   return new CausorynToolError(
     "INTERNAL_ERROR",
-    "Beklenmeyen iç hata; ayrıntılar sunucu loglarında",
+    "Unexpected internal error; see the server logs for details",
   );
 }
 
@@ -449,13 +466,13 @@ export async function checkArchitecture(
   if (input.policyId !== undefined) {
     throw new CausorynToolError(
       "INVALID_ARGUMENT",
-      "policyId bu araç yüzeyinde henüz açılmadı; bu dilimde yalnızca workspace kökündeki .causoryn/architecture.rules.yaml değerlendirilir",
+      "policyId is not supported by this tool yet; only .causoryn/architecture.rules.yaml at the workspace root is evaluated",
     );
   }
   if (input.scope !== undefined) {
     throw new CausorynToolError(
       "INVALID_ARGUMENT",
-      `scope dar kapsamlı guard değerlendirmesi bu araç yüzeyinde desteklenmiyor (${input.scope}); kapsam kural başına policy dosyasında tanımlanır (scope: modules|files|all)`,
+      `a narrowed guard evaluation scope is not supported by this tool (${input.scope}); define scope per rule in the policy file (scope: modules|files|all)`,
     );
   }
 
@@ -470,13 +487,13 @@ export async function checkArchitecture(
   if (policyRead.status === "too-large") {
     throw new CausorynToolError(
       "LIMIT_EXCEEDED",
-      `${POLICY_RELATIVE_PATH} ${String(policyRead.bytes)} byte ile config.maxFileBytes tavanını (${String(maxPolicyBytes)}) aşıyor (TŞ §20 dosya başına byte bütçesi); policy dosyasını küçültün veya kuralları bölün`,
+      `${POLICY_RELATIVE_PATH} exceeds the config.maxFileBytes ceiling (${String(maxPolicyBytes)} bytes) for a single file; shrink the policy file or split its rules`,
     );
   }
   if (policyRead.status !== "ok") {
     throw new CausorynToolError(
       "POLICY_INVALID",
-      `policy dosyası bulunamadı: ${POLICY_RELATIVE_PATH} (workspace köküne göre); guard değerlendirmesi için kural dosyası oluşturun`,
+      `policy file not found: ${POLICY_RELATIVE_PATH} (relative to the workspace root); create the rules file to run the guard evaluation`,
     );
   }
   const policyText = policyRead.text;
@@ -487,7 +504,7 @@ export async function checkArchitecture(
   if (baselineRead.status === "too-large") {
     throw new CausorynToolError(
       "LIMIT_EXCEEDED",
-      `${BASELINE_RELATIVE_PATH} ${String(baselineRead.bytes)} byte ile config.maxFileBytes tavanını (${String(maxPolicyBytes)}) aşıyor (TŞ §20 dosya başına byte bütçesi); baseline dosyasını küçültün`,
+      `${BASELINE_RELATIVE_PATH} exceeds the config.maxFileBytes ceiling (${String(maxPolicyBytes)} bytes) for a single file; shrink the baseline file`,
     );
   }
   const baselineText = baselineRead.status === "ok" ? baselineRead.text : null;
@@ -513,7 +530,7 @@ export async function checkArchitecture(
   const warnings = [...staleWarningOf(read)];
   if (findings.violations.length === 0) {
     warnings.push(
-      "guard değerlendirmesi tamamlandı; kural ihlali bulunamadı (boş bulgu seti hat değil, raporlanan sonuçtur)",
+      "guard evaluation completed; no rule violations found (an empty finding set is a reported result, not an error)",
     );
   }
 
@@ -634,6 +651,19 @@ export const CompareArchitectureDataSchema = z.strictObject({
   diff: ArchitectureDiffSchema,
 });
 
+/** Envelope warning for a compare side read from an unverified snapshot file. */
+function untrustedSnapshotWarning(
+  trustWarning: TimelineTrustWarning,
+  side: "baseRef" | "targetRef",
+  ref: string,
+): string {
+  const source =
+    ref === WORKING_TREE_REF
+      ? `the working-tree file ${TIMELINE_SNAPSHOT_BLOB_PATH}`
+      : `the committed git blob ${TIMELINE_SNAPSHOT_BLOB_PATH}`;
+  return `${trustWarning}: ${side} '${ref}' was loaded from ${source}, which this engine did not produce or verify; index the workspace (or check out that commit and index it) for a verified point`;
+}
+
 /**
  * causoryn_compare_architecture (TŞ §13 Architecture Diff; C3): iki git
  * ref'inin `.causoryn/architecture-snapshot.json` blob'ları salt-okunur
@@ -642,6 +672,11 @@ export const CompareArchitectureDataSchema = z.strictObject({
  * qualifiedName + imza parmak izi + yol benzerliğiyle heuristiktir ve
  * confidence BELGELIDIR (bantlar + skorlar çıktıda taşınır). Blob'u
  * olmayan/bozuk içerikli revizyon → INVALID_REVISION (uydurma içerik yok).
+ *
+ * Trust order per side (see trusted-history.ts): the local index snapshot
+ * when it is verified to be that commit's content, or for `working-tree`;
+ * otherwise the snapshot file, reported in `warnings` with
+ * `snapshot-loaded-from-committed-git-blob`.
  */
 export async function compareArchitecture(
   deps: ServiceDeps,
@@ -650,20 +685,38 @@ export async function compareArchitecture(
 ): Promise<Envelope> {
   const workspaceId = input.workspaceId ?? deps.config.workspaceId;
   const canonicalRoot = requireAuthorizedWorkspace(deps, workspaceId);
+  const trusted = createTrustedHistorySources(deps, workspaceId, canonicalRoot);
+  const pointOptions = {
+    snapshotLookup: trusted.snapshotLookup,
+    reconstructFromGitTree: trusted.reconstructFromGitTree,
+  };
+  const trustWarnings: string[] = [];
 
   const diff = await runGraphAsync(deps.logger, async () => {
-    const basePoint = await readTimelinePointFromGit(canonicalRoot, input.baseRef);
+    const basePoint = await readTimelinePointFromGit(canonicalRoot, input.baseRef, pointOptions);
     if (basePoint.status !== "analyzed") {
       throw new GraphRepositoryError(
         "compare/blob-not-found",
-        `baseRef '${input.baseRef}' analiz edilemedi: ${basePoint.reason}`,
+        `baseRef '${input.baseRef}' could not be analyzed: ${basePoint.reason}`,
       );
     }
-    const targetPoint = await readTimelinePointFromGit(canonicalRoot, input.targetRef);
+    if (basePoint.trustWarning !== undefined) {
+      trustWarnings.push(untrustedSnapshotWarning(basePoint.trustWarning, "baseRef", input.baseRef));
+    }
+    const targetPoint = await readTimelinePointFromGit(
+      canonicalRoot,
+      input.targetRef,
+      pointOptions,
+    );
     if (targetPoint.status !== "analyzed") {
       throw new GraphRepositoryError(
         "compare/blob-not-found",
-        `targetRef '${input.targetRef}' analiz edilemedi: ${targetPoint.reason}`,
+        `targetRef '${input.targetRef}' could not be analyzed: ${targetPoint.reason}`,
+      );
+    }
+    if (targetPoint.trustWarning !== undefined) {
+      trustWarnings.push(
+        untrustedSnapshotWarning(targetPoint.trustWarning, "targetRef", input.targetRef),
       );
     }
     return diffContentSets(basePoint.contentSet, targetPoint.contentSet);
@@ -675,7 +728,7 @@ export async function compareArchitecture(
     snapshotId: null,
     status: "ok",
     coverage: null,
-    warnings: [],
+    warnings: [...trustWarnings, ...trusted.notes()],
     data: {
       baseRef: input.baseRef,
       targetRef: input.targetRef,
@@ -771,7 +824,7 @@ export function getAgentContext(
   if (input.candidateScope !== undefined) {
     throw new CausorynToolError(
       "INVALID_ARGUMENT",
-      "candidateScope bu araç yüzeyinde henüz açılmadı (aday evresi şimdilik tüm yayınlanmış snapshot); görevi task metniyle daraltın",
+      "candidateScope is not supported by this tool yet (candidates currently come from the whole published snapshot); narrow the task through the task text instead",
     );
   }
 
@@ -899,6 +952,7 @@ export const GenerateOnboardingDataSchema = z.strictObject({
       code: z.enum([
         "onboarding/no-entry-endpoint",
         "onboarding/learning-order-truncated",
+        "onboarding/limit-clamped",
       ]),
       message: z.string(),
     }),
@@ -925,7 +979,7 @@ export function generateOnboardingTool(
   if (input.focus !== undefined) {
     throw new CausorynToolError(
       "INVALID_ARGUMENT",
-      "focus bu araç yüzeyinde henüz açılmadı (rapor şimdilik tüm yayınlanmış snapshot için üretilir)",
+      "focus is not supported by this tool yet (the report currently covers the whole published snapshot)",
     );
   }
 
@@ -1069,14 +1123,14 @@ export function exportDocumentationTool(
     if (input.view === "wiki") {
       throw new CausorynToolError(
         "INVALID_ARGUMENT",
-        'view="wiki" bu araç yüzeyinde desteklenmez; wiki görünümü Living Wiki araçlarına aittir (izinli view değerleri: architecture, interactive, full)',
+        'view="wiki" is not supported by this tool; the wiki view belongs to the Living Wiki tools (allowed view values: architecture, interactive, full)',
       );
     }
     const parsedView = exportDocumentationViewSchema.safeParse(input.view);
     if (!parsedView.success) {
       throw new CausorynToolError(
         "INVALID_ARGUMENT",
-        `Bilinmeyen view: ${input.view}; izinli değerler: ${EXPORT_DOCUMENTATION_VIEWS.join(", ")}`,
+        `unknown view: ${input.view}; allowed values: ${EXPORT_DOCUMENTATION_VIEWS.join(", ")}`,
       );
     }
     effectiveView = parsedView.data;
@@ -1089,7 +1143,7 @@ export function exportDocumentationTool(
     // output listesi de export yazma reddinin tam karşılığıdır (default deny).
     throw new CausorynToolError(
       "EXPORT_NOT_ALLOWED",
-      "sunucu konfigürasyonunda output.allowedOutputDirs beyanı yok (default deny); yazma hedefi beyan edilmeden export yapılamaz",
+      "the server configuration declares no output.allowedOutputDirs (default deny); export is not possible without a declared output directory",
     );
   }
   const outputPolicy = deps.outputPolicy;
@@ -1150,6 +1204,7 @@ const TimelinePointSchema = z.strictObject({
   edgeCount: z.number().int().nonnegative().optional(),
   apiSurfaceNodeCount: z.number().int().nonnegative().optional(),
   unanalyzedReason: z.string().optional(),
+  trustWarning: z.string().optional(),
 });
 
 const TimelineChangesSchema = z.strictObject({
@@ -1278,6 +1333,7 @@ const ArchitectureTimelineSchema = z.strictObject({
   }),
   /** Sprint-6 E5: ihlal trendi (nokta başına C2 guard değerlendirmesi). */
   trend: TimelineViolationTrendSchema,
+  warnings: z.array(z.string()).optional(),
 });
 
 export const ArchitectureTimelineDataSchema = z.strictObject({
@@ -1306,6 +1362,10 @@ export const ArchitectureTimelineDataSchema = z.strictObject({
  * Policy blob'u olmayan/bozuk ref'lerde trend noktası coded 'unavailable'
  * olur (sıfır ihlal UYDURULMAZ); diff aralıkları (Sprint-3 davranışı)
  * etkilenmez.
+ *
+ * Points whose commit content is verified against the local index are read
+ * from the index snapshot instead of the committed snapshot file (see
+ * trusted-history.ts); the others keep their committed-file trust warning.
  */
 export async function architectureTimeline(
   deps: ServiceDeps,
@@ -1318,16 +1378,19 @@ export async function architectureTimeline(
   if (input.granularity !== undefined) {
     throw new CausorynToolError(
       "INVALID_ARGUMENT",
-      `granularity bu araç yüzeyinde henüz açılmadı (${input.granularity}); nokta seçimi şimdilik refs sırasıyla yapılır`,
+      `granularity is not supported by this tool yet (${input.granularity}); timeline points currently follow the order of refs`,
     );
   }
 
+  const trusted = createTrustedHistorySources(deps, workspaceId, canonicalRoot);
   const timeline: ArchitectureTimeline = await runGraphAsync(deps.logger, () =>
     buildArchitectureTimelineFromGit(canonicalRoot, {
       ...(input.refs === undefined ? {} : { refs: input.refs }),
       ...(input.range === undefined ? {} : { range: input.range }),
       ...(input.maxRevisions === undefined ? {} : { maxRevisions: input.maxRevisions }),
       ...(input.maxRangeWalk === undefined ? {} : { maxRangeWalk: input.maxRangeWalk }),
+      snapshotLookup: trusted.snapshotLookup,
+      reconstructFromGitTree: trusted.reconstructFromGitTree,
     }),
   );
 
@@ -1337,7 +1400,7 @@ export async function architectureTimeline(
     snapshotId: null,
     status: "ok",
     coverage: null,
-    warnings: [],
+    warnings: [...timeline.warnings, ...trusted.notes()],
     data: {
       refs: input.refs === undefined ? null : [...input.refs],
       range: input.range === undefined ? null : { ...input.range },

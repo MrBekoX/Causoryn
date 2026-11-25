@@ -12,7 +12,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
-import { TOOL_NAMES } from "../src/version.js";
+import { CORE_TOOL_NAMES, TOOL_NAMES } from "../src/version.js";
 
 /**
  * Sprint-7 F1 — esbuild bundle testleri (TŞ v2.1 §17.1/§17.2).
@@ -47,6 +47,7 @@ const PKG_DIR = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const REPO_ROOT = path.dirname(path.dirname(PKG_DIR));
 const DIST_DIR = path.join(PKG_DIR, "dist");
 const BUNDLE_PATH = path.join(DIST_DIR, "mcp-server.mjs");
+const WORKER_BUNDLE_PATH = path.join(DIST_DIR, "index-worker.mjs");
 const LEGAL_PATH = path.join(DIST_DIR, "mcp-server.mjs.LEGAL.txt");
 const VENDOR_ROOT = path.join(DIST_DIR, "node_modules", "better-sqlite3");
 const MANIFEST_PATH = path.join(DIST_DIR, "bundle-manifest.json");
@@ -58,6 +59,7 @@ const ANTIGRAVITY_SCRIPTS_DIR = path.join(
   "scripts",
 );
 const ANTIGRAVITY_BUNDLE_PATH = path.join(ANTIGRAVITY_SCRIPTS_DIR, "mcp-server.mjs");
+const ANTIGRAVITY_WORKER_BUNDLE_PATH = path.join(ANTIGRAVITY_SCRIPTS_DIR, "index-worker.mjs");
 const ANTIGRAVITY_LEGAL_PATH = path.join(ANTIGRAVITY_SCRIPTS_DIR, "mcp-server.mjs.LEGAL.txt");
 const ANTIGRAVITY_VENDOR_ROOT = path.join(
   ANTIGRAVITY_SCRIPTS_DIR,
@@ -78,7 +80,7 @@ const CONFIG = {
   autoIndex: true,
 };
 
-const READY_MARKER = "causoryn mcp server hazir";
+const READY_MARKER = "causoryn mcp server ready";
 
 interface JsonRpcMessage {
   readonly jsonrpc?: unknown;
@@ -204,7 +206,7 @@ function runBundleSession(
         jsonrpc: "2.0",
         id: 3,
         method: "tools/call",
-        params: { name: "causoryn_get_capabilities", arguments: {} },
+        params: { name: "causoryn_status", arguments: {} },
       },
     ];
     // pending kaydı YALNIZCA aşağıdaki allResponses kurulumunda yapılır:
@@ -347,9 +349,10 @@ describe("F1 bundle — gerçek spawn smoke testi (stdio, InMemoryTransport değ
     const listMsg = result.responseOf(2);
     const listResult = listMsg.result as { tools?: Array<{ name?: string }> };
     const listedNames = listResult.tools?.map((tool) => tool.name).sort();
-    // Katalogla birebir: TOOL_NAMES tam olarak 29 araçtır (version.ts).
+    // Default core profile exposes exact 11 CORE_TOOL_NAMES (legacy TOOL_NAMES stays 29).
     expect(TOOL_NAMES.length).toBe(29);
-    expect(listedNames).toEqual([...TOOL_NAMES].sort());
+    expect(CORE_TOOL_NAMES.length).toBe(11);
+    expect(listedNames).toEqual([...CORE_TOOL_NAMES].sort());
 
     const callMsg = result.responseOf(3);
     const callResult = callMsg.result as {
@@ -432,7 +435,7 @@ describe("F1 bundle — klon-benzeri ortam (partial)", () => {
     const listMsg = result.responseOf(2);
     const listResult = listMsg.result as { tools?: Array<{ name?: string }> };
     expect(listResult.tools?.map((tool) => tool.name).sort()).toEqual(
-      [...TOOL_NAMES].sort(),
+      [...CORE_TOOL_NAMES].sort(),
     );
     const callMsg = result.responseOf(3);
     const callResult = callMsg.result as { isError?: boolean };
@@ -471,6 +474,14 @@ describe("F1 bundle — Antigravity eklenti sahnelemesi (integrations/antigravit
       "integrations/antigravity/causoryn/scripts/mcp-server.mjs.LEGAL.txt sahnelenmedi",
     ).toBe(true);
     expect(
+      existsSync(WORKER_BUNDLE_PATH),
+      "dist/index-worker.mjs üretilmedi",
+    ).toBe(true);
+    expect(
+      existsSync(ANTIGRAVITY_WORKER_BUNDLE_PATH),
+      "integrations/antigravity/causoryn/scripts/index-worker.mjs sahnelenmedi",
+    ).toBe(true);
+    expect(
       existsSync(ANTIGRAVITY_MANIFEST_PATH),
       "integrations/antigravity/causoryn/scripts/bundle-manifest.json sahnelenmedi",
     ).toBe(true);
@@ -494,6 +505,7 @@ describe("F1 bundle — Antigravity eklenti sahnelemesi (integrations/antigravit
     ).toBe(true);
 
     expect(sha256(ANTIGRAVITY_BUNDLE_PATH)).toBe(sha256(BUNDLE_PATH));
+    expect(sha256(ANTIGRAVITY_WORKER_BUNDLE_PATH)).toBe(sha256(WORKER_BUNDLE_PATH));
     expect(sha256(ANTIGRAVITY_LEGAL_PATH)).toBe(sha256(LEGAL_PATH));
     expect(sha256(ANTIGRAVITY_MANIFEST_PATH)).toBe(sha256(MANIFEST_PATH));
     expect(sha256(path.join(ANTIGRAVITY_VENDOR_ROOT, "package.json"))).toBe(
@@ -514,8 +526,15 @@ describe("F1 bundle — Antigravity eklenti sahnelemesi (integrations/antigravit
     const distManifest = JSON.parse(readFileSync(MANIFEST_PATH, "utf8")) as {
       files?: Record<string, string>;
     };
-    // mcp-server.mjs + mcp-server.mjs.LEGAL.txt + 33 better-sqlite3 dosyası (LICENSE dahil)
-    expect(Object.keys(distManifest.files ?? {}).length).toBe(35);
+    // mcp-server.mjs + mcp-server.mjs.LEGAL.txt + index-worker.mjs + 33 better-sqlite3 dosyası (LICENSE dahil)
+    expect(Object.keys(distManifest.files ?? {}).length).toBe(36);
+    expect(distManifest.files?.["index-worker.mjs"]).toMatch(/^[0-9a-f]{64}$/);
+    const workerBundleText = readFileSync(WORKER_BUNDLE_PATH, "utf8");
+    expect(workerBundleText).toContain("SqliteGraphRepository");
+    expect(/\bimport\s*\(\s*specifier\s*\)/.test(workerBundleText)).toBe(false);
+    expect(/\bimport\s*\(\s*["']@causoryn\/storage-sqlite["']\s*\)/.test(workerBundleText)).toBe(
+      false,
+    );
     const stagedBundleText = readFileSync(ANTIGRAVITY_BUNDLE_PATH, "utf8");
     expect(stagedBundleText.startsWith("/* eslint-disable */")).toBe(true);
     const bundleBodyAfterBanner = stagedBundleText.slice(stagedBundleText.indexOf("\n") + 1);

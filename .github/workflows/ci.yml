@@ -7,12 +7,16 @@ on:
   pull_request:
     branches:
       - main
+  # Nightly run at an off-peak hour; it also covers the Apple Silicon leg.
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
@@ -25,12 +29,17 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os:
-          - ubuntu-latest
-          - windows-latest
-          # Pin stable macos-15 instead of floating macos-latest (macos-26-arm64),
-          # which suffers recurring 15-minute hosted runner acquisition timeouts.
-          - macos-15
+        # Merge gate (push / pull_request): Linux, Windows and macOS on GitHub's
+        # Intel x64 macOS pool (macos-26-intel, a standard runner).
+        # The standard macOS arm64 pool (macos-15, macos-26, macos-latest) has
+        # been capacity constrained since late October 2026: during peak hours
+        # (roughly 12:00-23:00 UTC) jobs wait 15 minutes and are cancelled with
+        # "The job was not acquired by Runner of type hosted even after multiple
+        # attempts", which blocked merges for reasons unrelated to the code.
+        # The nightly schedule (off-peak) and manual dispatch add the Apple
+        # Silicon leg (macos-26). GitHub ends Intel macOS images in 2027:
+        # move the gate back to arm64 before then.
+        os: ${{ fromJSON((github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && '["ubuntu-latest","windows-latest","macos-26-intel","macos-26"]' || '["ubuntu-latest","windows-latest","macos-26-intel"]') }}
     steps:
       - name: Harden Runner (Linux)
         if: runner.os == 'Linux'

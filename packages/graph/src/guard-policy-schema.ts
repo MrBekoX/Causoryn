@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { parse as parseYaml, YAMLParseError } from "yaml";
+import { parse as parseYaml, YAMLParseError, type ErrorCode as YamlErrorCode } from "yaml";
 import { EDGE_KINDS, type EdgeKind } from "@causoryn/domain";
 
 /**
@@ -30,6 +30,12 @@ import { EDGE_KINDS, type EdgeKind } from "@causoryn/domain";
  * - Suppression girişlerinde `reason`, `owner`, `date` ZORUNLUDUR
  *   (TŞ §12: "neden/sahip/tarih bilgisi zorunlu kılınabilir" — bu tasarımda
  *   zorunlu kılınmıştır); Zod refine eksik/boş alanı şema reddiyle düşürür.
+ * - Resource and disclosure bounds (TŞ §19 untrusted repository input,
+ *   TŞ §20 budgets): YAML aliases are not supported (`maxAliasCount: 0`;
+ *   an alias is a policy error, never an unmapped exception); YAML parse
+ *   errors carry the error code, line and column but no source text; rule,
+ *   suppression and edgeKinds list sizes, identifier/free-text lengths and
+ *   the number of reported schema issues are capped (constants below).
  *
  * Bu modül fs/thread/saat okumaz; dosya okuma MCP/servis katmanının işidir.
  */
@@ -230,7 +236,7 @@ export function compileGuardGlob(pattern: string): GuardGlob {
   if (pattern.length > MAX_GLOB_LENGTH) {
     throw new GuardError(
       "guard/pattern-too-long",
-      `Glob deseni çok uzun (${pattern.length} > ${MAX_GLOB_LENGTH})`,
+      `Glob pattern is too long (${pattern.length} > ${MAX_GLOB_LENGTH})`,
     );
   }
   let wildcards = 0;
@@ -239,20 +245,20 @@ export function compileGuardGlob(pattern: string): GuardGlob {
     if (UNSUPPORTED_GLOB_CHARS.has(ch)) {
       throw new GuardError(
         "guard/pattern-unsupported-syntax",
-        `Glob deseninde desteklenmeyen karakter: '${ch}' (yalnızca **, *, ? desteklenir)`,
+        `Unsupported character in glob pattern: '${ch}' (only **, * and ? are supported)`,
       );
     }
   }
   if (pattern.includes("***")) {
     throw new GuardError(
       "guard/pattern-unsupported-syntax",
-      "Glob deseninde üç veya daha fazla ardışık '*' desteklenmez",
+      "Three or more consecutive '*' characters are not supported in a glob pattern",
     );
   }
   if (wildcards > MAX_GLOB_WILDCARDS) {
     throw new GuardError(
       "guard/pattern-too-complex",
-      `Glob deseni çok karmaşık (${wildcards} wildcard > ${MAX_GLOB_WILDCARDS})`,
+      `Glob pattern is too complex (${wildcards} wildcards > ${MAX_GLOB_WILDCARDS})`,
     );
   }
 
@@ -274,19 +280,66 @@ export type GuardRuleType = "no-cycles" | "forbidden-dependency";
 /** no-cycles kapsamı: hangi node türleri döngü analizine girer. */
 export type GuardScope = "modules" | "files" | "all";
 
+/**
+ * Maximum number of rules in one policy file. Evaluation cost grows with
+ * rules × graph size (every rule scans all edges or runs an SCC pass).
+ */
+export const MAX_POLICY_RULES = 500;
+
+/**
+ * Maximum number of suppression entries in one baseline file. Each finding
+ * is matched against the suppression list, so the cost grows with
+ * findings × suppressions; one entry can cover many findings via globs.
+ */
+export const MAX_BASELINE_SUPPRESSIONS = 1000;
+
+/** Maximum length of identifier-like fields: rule id, suppression ruleId, owner. */
+export const MAX_GUARD_IDENTIFIER_LENGTH = 256;
+
+/** Maximum length of free-text fields: rule description, suppression reason. */
+export const MAX_GUARD_TEXT_LENGTH = 2048;
+
+/** Maximum number of schema issues carried by a GuardError (message and `issues`). */
+export const MAX_REPORTED_SCHEMA_ISSUES = 20;
+
+/** Maximum length of one reported schema issue; longer issue texts are truncated. */
+const MAX_ISSUE_TEXT_LENGTH = 200;
+
 const SeveritySchema = z.enum(["error", "warning", "info"]);
 const ScopeSchema = z.enum(["modules", "files", "all"]);
 const EdgeKindSchema = z.enum(EDGE_KINDS);
 
 /**
+ * edgeKinds list: at least one entry and never more entries than there are
+ * edge kinds (each kind can be listed once; the list is not deduplicated).
+ */
+const EdgeKindListSchema = z
+  .array(EdgeKindSchema)
+  .min(1)
+  .max(EDGE_KINDS.length, `edgeKinds may list at most ${String(EDGE_KINDS.length)} entries`);
+
+/**
  * Boş/yalnızca boşluk string reddi — domain paketindeki requireNonEmpty
  * kuralıyla aynı semantik (değer kırpılmaz, olduğu gibi taşınır).
  */
-const NonEmptyString = z.string().refine((value) => value.trim().length > 0, {
-  message: "Alan boş veya yalnızca boşluk olamaz",
-});
+const isNotBlank = (value: string): boolean => value.trim().length > 0;
+const NOT_BLANK = { message: "Field must not be empty or whitespace-only" };
 
-const RuleIdSchema = NonEmptyString;
+const NonEmptyString = z.string().refine(isNotBlank, NOT_BLANK);
+
+/** NonEmptyString with an upper length bound. */
+function boundedNonEmptyString(maxLength: number): z.ZodType<string> {
+  return z
+    .string()
+    .max(maxLength, `Field must be at most ${String(maxLength)} characters`)
+    .refine(isNotBlank, NOT_BLANK);
+}
+
+const RuleIdSchema = boundedNonEmptyString(MAX_GUARD_IDENTIFIER_LENGTH);
+
+const DescriptionSchema = z
+  .string()
+  .max(MAX_GUARD_TEXT_LENGTH, `description must be at most ${String(MAX_GUARD_TEXT_LENGTH)} characters`);
 
 const NoCyclesRuleSchema = z.strictObject({
   id: RuleIdSchema,
@@ -299,9 +352,9 @@ const NoCyclesRuleSchema = z.strictObject({
    * değildir). Başka EDGE_KINDS değerleri de seçilebilir (örn. INHERITS);
    * liste boş olamaz.
    */
-  edgeKinds: z.array(EdgeKindSchema).min(1).optional(),
+  edgeKinds: EdgeKindListSchema.optional(),
   severity: SeveritySchema,
-  description: z.string().optional(),
+  description: DescriptionSchema.optional(),
 });
 
 const ForbiddenDependencyRuleSchema = z.strictObject({
@@ -309,20 +362,21 @@ const ForbiddenDependencyRuleSchema = z.strictObject({
   type: z.literal("forbidden-dependency"),
   // NonEmptyString: boş from/to '^$' glob'una derlenip kuralı sessiz ölü
   // girdi yapmaz; şema reddiyle yüzeye çıkar.
+  // Glob length is bounded by compileGuardGlob (MAX_GLOB_LENGTH).
   from: NonEmptyString,
   to: NonEmptyString,
-  edgeKinds: z.array(EdgeKindSchema).min(1),
+  edgeKinds: EdgeKindListSchema,
   severity: SeveritySchema,
-  description: z.string().optional(),
+  description: DescriptionSchema.optional(),
 });
 
 const PolicySchema = z
   .strictObject({
     version: z.literal(1),
-    rules: z.discriminatedUnion("type", [
-      NoCyclesRuleSchema,
-      ForbiddenDependencyRuleSchema,
-    ]).array(),
+    rules: z
+      .discriminatedUnion("type", [NoCyclesRuleSchema, ForbiddenDependencyRuleSchema])
+      .array()
+      .max(MAX_POLICY_RULES, `a policy may define at most ${String(MAX_POLICY_RULES)} rules`),
   })
   .superRefine((policy, ctx) => {
     const seen = new Set<string>();
@@ -330,7 +384,7 @@ const PolicySchema = z
       if (seen.has(rule.id)) {
         ctx.addIssue({
           code: "custom",
-          message: `Kural kimliği tekrarlandı: ${rule.id}`,
+          message: `Duplicate rule id: ${rule.id}`,
           path: ["rules"],
         });
       }
@@ -359,14 +413,14 @@ function isValidCalendarDate(value: string): boolean {
 const SuppressionSchema = z.strictObject({
   ruleId: RuleIdSchema,
   /** ZORUNLU: neden baskılanıyor (TŞ §12 yönetişim koşulu). */
-  reason: NonEmptyString,
+  reason: boundedNonEmptyString(MAX_GUARD_TEXT_LENGTH),
   /** ZORUNLU: kim üstleniyor. */
-  owner: NonEmptyString,
+  owner: boundedNonEmptyString(MAX_GUARD_IDENTIFIER_LENGTH),
   /** ZORUNLU: hangi tarihte kaydedildi (YYYY-MM-DD, geçerli takvim günü). */
   date: z
     .string()
     .refine(isValidCalendarDate, {
-      message: "date YYYY-MM-DD biçiminde geçerli bir takvim günü olmalı",
+      message: "date must be a valid calendar day in YYYY-MM-DD format",
     }),
   // NonEmptyString: boş from/to '^$' glob'una derlenip baskılamayı sessizce
   // no-op yapmaz; şema reddiyle yüzeye çıkar.
@@ -376,7 +430,10 @@ const SuppressionSchema = z.strictObject({
 
 const BaselineSchema = z.strictObject({
   version: z.literal(1),
-  suppressions: SuppressionSchema.array(),
+  suppressions: SuppressionSchema.array().max(
+    MAX_BASELINE_SUPPRESSIONS,
+    `a baseline may define at most ${String(MAX_BASELINE_SUPPRESSIONS)} suppressions`,
+  ),
 });
 
 // ---------------------------------------------------------------------------
@@ -430,20 +487,71 @@ const DEFAULT_NO_CYCLES_EDGE_KINDS: readonly EdgeKind[] = ["CALLS", "IMPORTS"];
 // Parse + doğrulama
 // ---------------------------------------------------------------------------
 
+/**
+ * YAML parse options: aliases are disabled (`maxAliasCount: 0`, so alias
+ * expansion cannot multiply the document) and parser warnings are not
+ * written to stderr (`logLevel: "error"`; warnings embed source excerpts).
+ */
+const YAML_PARSE_OPTIONS = { maxAliasCount: 0, logLevel: "error" } as const;
+
+/** Generic reasons per yaml error code; the parser's own message embeds source text. */
+const YAML_ERROR_REASONS: Partial<Record<YamlErrorCode, string>> = {
+  BAD_INDENT: "bad indentation",
+  BAD_DQ_ESCAPE: "invalid escape sequence in a double-quoted string",
+  BAD_SCALAR_START: "a plain scalar cannot start with this character",
+  BLOCK_AS_IMPLICIT_KEY: "nested mapping is not allowed in a compact mapping",
+  BLOCK_IN_FLOW: "block collection is not allowed inside a flow collection",
+  DUPLICATE_KEY: "mapping keys must be unique",
+  KEY_OVER_1024_CHARS: "implicit key is longer than 1024 characters",
+  MISSING_CHAR: "missing closing character",
+  MULTILINE_IMPLICIT_KEY: "implicit keys must be on a single line",
+  MULTIPLE_DOCS: "the file must contain a single YAML document",
+  RESOURCE_EXHAUSTION: "document exceeds the parser resource limits",
+  TAB_AS_INDENT: "tabs are not allowed as indentation",
+  UNEXPECTED_TOKEN: "unexpected token",
+};
+
+/** Describes a YAML parse error by code and position only (no source excerpt). */
+function describeYamlParseError(error: YAMLParseError): string {
+  const reason = YAML_ERROR_REASONS[error.code] ?? "invalid YAML syntax";
+  const position = error.linePos?.[0];
+  const where =
+    position === undefined
+      ? ""
+      : ` at line ${String(position.line)}, column ${String(position.col)}`;
+  return `YAML could not be parsed: ${error.code} (${reason})${where}`;
+}
+
 function parseYamlOrThrow(text: string, yamlErrorCode: string): unknown {
   let document: unknown;
   try {
-    document = parseYaml(text);
+    document = parseYaml(text, YAML_PARSE_OPTIONS);
   } catch (error) {
     if (error instanceof YAMLParseError) {
+      throw new GuardError(yamlErrorCode, describeYamlParseError(error));
+    }
+    // The yaml library raises ReferenceError only while resolving aliases
+    // (disabled, unresolved or excessive alias use).
+    if (error instanceof ReferenceError) {
       throw new GuardError(
         yamlErrorCode,
-        `YAML çözümlenemedi: ${error.message}`,
+        "YAML could not be parsed: aliases (*name) are not supported in policy and baseline files; write the referenced value out in full",
       );
     }
-    throw error;
+    // Any other parser failure is still a malformed-input outcome; its
+    // message is not carried over (it may embed parser internals or input).
+    throw new GuardError(
+      yamlErrorCode,
+      "YAML could not be parsed: the parser failed on this input; simplify the file structure",
+    );
   }
   return document;
+}
+
+function truncateIssue(text: string): string {
+  return text.length <= MAX_ISSUE_TEXT_LENGTH
+    ? text
+    : `${text.slice(0, MAX_ISSUE_TEXT_LENGTH)}... (truncated)`;
 }
 
 function requireSchema<T>(
@@ -453,12 +561,15 @@ function requireSchema<T>(
 ): T {
   const result = schema.safeParse(document);
   if (!result.success) {
-    const issues = result.error.issues.map(
-      (issue) => `${issue.path.join(".") || "(kök)"}: ${issue.message}`,
-    );
+    const allIssues = result.error.issues;
+    const issues = allIssues
+      .slice(0, MAX_REPORTED_SCHEMA_ISSUES)
+      .map((issue) => truncateIssue(`${issue.path.join(".") || "(root)"}: ${issue.message}`));
+    const omitted = allIssues.length - issues.length;
+    const suffix = omitted > 0 ? `; ... and ${String(omitted)} more issue(s)` : "";
     throw new GuardError(
       code,
-      `Şema doğrulaması başarısız: ${issues.join("; ")}`,
+      `Schema validation failed: ${issues.join("; ")}${suffix}`,
       issues,
     );
   }

@@ -7,32 +7,31 @@ description: Run deterministic pre-change blast-radius, contract compatibility, 
 
 Use this skill **before** modifying existing functions, classes, endpoints, database schemas,
 or public contracts so your edit plan is grounded in verified static graph evidence rather
-than guesswork.
+than guesswork. Every tool named here is part of the default `core` tool profile.
 
 ## Step-by-Step Procedure
 
 1. **Ensure Snapshot Freshness**
-   - Check `causoryn_index_status`. If no snapshot is published (`INDEX_NOT_READY`) or the snapshot is stale after recent file edits, run `causoryn_refresh_index` first.
+   - Call `causoryn_status` `{"action": "inspect"}`. If no snapshot is published (`INDEX_NOT_READY`) or `data.index.latestSnapshot.stale` is `true` after recent file edits, call `causoryn_status` `{"action": "refresh", "mode": "incremental"}` first and poll `causoryn_status` `{"action": "inspect", "jobId": "<jobId>"}` until the job reaches a terminal status: `done` (a new snapshot was published), `reused` (nothing changed, or a concurrent build already published an identical snapshot — keep using it) or `failed` (read its error).
 2. **Resolve Target Identifiers**
-   - If you only have partial symbol names, resolve exact qualified names or node IDs via `causoryn_find_symbols` and `causoryn_get_symbol_context`.
+   - If you only have partial symbol names, resolve exact qualified names or node IDs with `causoryn_find_symbols` `{"query": "<partial name>"}` and confirm them with `causoryn_get_symbol_context` `{"symbolId": "<node id or exact qualifiedName>"}`.
 3. **Generate the Candidate-Only Preflight Manifest**
-   - Call `causoryn_preflight_change` with:
-     - `intent`: concise description of the planned change
-     - `targetSymbols` and/or `targetFiles`: workspace-relative paths or resolved symbol identifiers
+   - Call `causoryn_preflight_change` `{"intent": "<concise description of the planned change>", "targetSymbols": ["<resolved symbol>"], "targetFiles": ["<workspace-relative path>"]}` (`targetSymbols` and `targetFiles` are each optional, but give at least one).
    - Inspect the returned manifest:
-     - `preflightId`: **keep this ID** in your working notes to pass into `causoryn_verify_change` after editing!
+     - `preflightId`: **keep this ID** in your working notes to pass into `causoryn_verify_change` after editing.
      - `candidateOnly`: always `true` — preflight never edits code and never claims exhaustive runtime completeness.
      - `requiresDisambiguation` / `candidateTargets`: if `true`, narrow ambiguous targets and re-run `causoryn_preflight_change` instead of guessing.
-     - Impact items keep `certainty` (`direct | indirect | possible`) and edge `resolution` (`verified | heuristic | unresolved`) in separate fields.
-     - `testPlanId`: content-addressed reference (`testplan:<sha256>`) matching `causoryn_derive_test_plan`.
+     - `impactCandidates` keep `certainty` (`direct | indirect | possible`) and edge `resolution` (`verified | heuristic | unresolved`) in separate fields.
+     - `testPlanId` (`testplan:<sha256>`) and the embedded `testPlan`: candidate tests derived without running anything.
      - `limitations` and `warnings`: surface these explicitly when summarizing risk.
 4. **Deepen Analysis When Needed**
-   - Call `causoryn_analyze_impact` when you need full reverse-BFS `impactPaths` across callers and consumers.
-   - Call `causoryn_check_contracts` (`contracts: [{ name, base, target }]`) or `causoryn_detect_contract_drift` when modifying OpenAPI, AsyncAPI, JSON Schema, SQL, or `.proto` files (`CONTRACT_PARSE_FAILED` indicates malformed spec syntax).
-   - Call `causoryn_derive_test_plan` to inspect `direct`, `call-site`, and `naming` test candidates plus `missingCoverageCandidates`.
-   - Call `causoryn_get_evidence` to inspect exact source lines backing critical dependency edges.
+   - Impact paths only: `causoryn_preflight_change` `{"include": ["impact"], "targetSymbols": ["<resolved symbol>"], "maxDepth": 4}` returns reverse-dependency `paths` and `affectedNodes` across callers and consumers (do not pass `intent` or `targetFiles` with this form).
+   - Test plan only, for a preflight you already ran in this server session: `causoryn_preflight_change` `{"include": ["test-plan"], "preflightId": "<preflightId>"}` lists `direct`, `call-site`, and `naming` test `candidates` plus `missingCoverageCandidates`.
+   - Contract pairs (OpenAPI, AsyncAPI, JSON Schema, SQL, or `.proto`): `causoryn_contracts` `{"action": "check", "contracts": [{"name": "<label>", "base": "<old spec path>", "target": "<new spec path>"}]}` (`CONTRACT_PARSE_FAILED` indicates malformed spec syntax).
+   - Contract drift with producer/consumer impact: `causoryn_contracts` `{"action": "drift", "base": ["<old spec path>"], "target": ["<new spec path>"], "anchorFiles": ["<source file that produces or consumes the contract>"]}`.
+   - Exact source lines behind a critical dependency edge: `causoryn_get_evidence` `{"id": "<edge or evidence id>"}`.
 
 ## Strict Honesty Boundaries
 
-- **Read-only guarantee:** `causoryn_preflight_change` and `causoryn_derive_test_plan` never modify files and never execute tests.
+- **Read-only guarantee:** `causoryn_preflight_change` never modifies files and never executes tests, including its `include: ["test-plan"]` form.
 - **No 100% impact claims:** Static analysis cannot observe dynamic reflection or unindexed external consumers; always preserve `heuristic` / `possible` / `unknown` qualifiers verbatim.

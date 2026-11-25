@@ -320,6 +320,25 @@ describe("wiki store — pozitif", () => {
     }
   });
 
+  it("searchWiki treats NUL bytes as whitespace instead of failing inside FTS5", () => {
+    const p = dbPath("fts-nul.db");
+    registerWorkspace(p);
+    const store = new SqliteWikiStore(p);
+    try {
+      const wikiSid = store.beginWikiBuild(wikiMeta(GRAPH_SNAPSHOT_ID));
+      fillFixture(store, wikiSid);
+      store.publishWiki(wikiSid, WIKI_ID, "ready", BUILT_AT);
+
+      const hits = store.searchWiki("CreateOrder\u0000");
+      expect(hits.map((hit) => hit.pageId)).toEqual(["p_api"]);
+      expect(() => store.searchWiki("\u0000\u0000")).toThrowError(
+        expect.objectContaining({ code: "wiki/invalid-field" }),
+      );
+    } finally {
+      store.close();
+    }
+  });
+
   it("searchWiki workspace filtresiyle cross-workspace hit döndürmez", () => {
     const p = dbPath("fts-scope.db");
     registerWorkspace(p);
@@ -586,7 +605,7 @@ describe("wiki store — negatif", () => {
     try {
       store.beginWikiBuild(wikiMeta(GRAPH_SNAPSHOT_ID));
       expect(() => store.beginWikiBuild(wikiMeta(GRAPH_SNAPSHOT_ID))).toThrow(
-        /aktif wiki build/i,
+        /active wiki build/i,
       );
     } finally {
       store.close();
@@ -731,7 +750,7 @@ describe("wiki store — partial", () => {
       const probe = new Database(p, { readonly: true });
       try {
         const version = probe.pragma("user_version", { simple: true });
-        expect(version).toBe(2);
+        expect(version).toBe(5);
         const tables = probe
           .prepare(
             "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'wiki_%' ORDER BY name",

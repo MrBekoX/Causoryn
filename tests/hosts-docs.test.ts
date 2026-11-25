@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
+import { findDocumentPrivacyLeaks } from "./helpers/leak-scan.js";
 
 /**
  * Sprint-7 F3+F4 host dokümantasyon doğrulama testi (docs/hosts/ yüzeyi).
@@ -151,8 +152,11 @@ describe("F1 bundle artifact (üretilebilirlik + koşullu determinizm)", () => {
     expect(pkg.scripts?.["build:bundle"]).toBeTruthy();
     const root = JSON.parse(readFileSync(rootPkg, "utf8")) as {
       dependencies?: Record<string, string>;
+      devDependencies?: Record<string, string>;
     };
-    expect(root.dependencies?.esbuild).toMatch(/^\^?0\.28\./);
+    // esbuild is a build tool (packages/mcp-server/scripts/build-bundle.mjs), not a runtime dependency:
+    expect(root.devDependencies?.esbuild).toMatch(/^\^?0\.28\./);
+    expect(root.dependencies?.esbuild).toBeUndefined();
   });
 
   it.runIf(artifactBuilt)("dist/mcp-server.mjs mevcut", () => {
@@ -332,61 +336,57 @@ describe("NEGATİF: host dokümanları yanlış/tehlikeli iddia taşımaz", () =
   const SINGLE_FILE_CLAIM =
     /(tek[- ]dosya dağıt|single[- ]file (distribution|bundle))/i;
 
-  it("claude-code.md: kök allowRoots yetkisi, sır, 'tek dosya' dağıtım iddiası ve kişisel/yerel makine yolu YOK", () => {
+  // Personal/local-machine data is checked with the shared leak scanner:
+  // user-profile paths, absolute drive-letter paths outside documented
+  // example roots, and the maintainer's untracked private term list
+  // (`.git/info/causoryn-private-terms` / CAUSORYN_PRIVATE_TERMS).
+  it("claude-code.md: kök allowRoots yetkisi, sır, 'tek dosya' dağıtım iddiası ve kişisel/yerel makine yolu YOK", async () => {
     const text = readClaudeDoc();
     expect(text).not.toMatch(ROOT_GRANT);
     expect(text).not.toMatch(SECRET);
     expect(text).not.toMatch(SINGLE_FILE_CLAIM);
-    expect(text).not.toMatch(/D:[\\/]Causoryn/i);
-    expect(text).not.toMatch(/D:[\\/]tools/i);
-    expect(text).not.toContain("ber" + "ka");
+    expect(await findDocumentPrivacyLeaks("docs/hosts/claude-code.md", text)).toEqual([]);
   });
 
-  it("codex.md: kök allowRoots yetkisi, sır, 'tek dosya' dağıtım iddiası ve kişisel/yerel makine yolu YOK", () => {
+  it("codex.md: kök allowRoots yetkisi, sır, 'tek dosya' dağıtım iddiası ve kişisel/yerel makine yolu YOK", async () => {
     const text = readCodexDoc();
     expect(text).not.toMatch(ROOT_GRANT);
     expect(text).not.toMatch(SECRET);
     expect(text).not.toMatch(SINGLE_FILE_CLAIM);
-    expect(text).not.toMatch(/D:[\\/]Causoryn/i);
-    expect(text).not.toMatch(/D:[\\/]tools/i);
-    expect(text).not.toContain("ber" + "ka");
+    expect(await findDocumentPrivacyLeaks("docs/hosts/codex.md", text)).toEqual([]);
   });
 
-  it("antigravity.md: kişisel/yerel makine yolu YOK ve bare stdio.ts vs packaged cli-stdio.ts ayrımı açık", () => {
+  it("antigravity.md: kişisel/yerel makine yolu YOK ve bare stdio.ts vs packaged cli-stdio.ts ayrımı açık", async () => {
     const text = readAntigravityDoc();
-    expect(text).not.toMatch(/D:[\\/]Causoryn/i);
-    expect(text).not.toMatch(/D:[\\/]tools/i);
-    expect(text).not.toContain("ber" + "ka");
+    expect(await findDocumentPrivacyLeaks("docs/hosts/antigravity.md", text)).toEqual([]);
     expect(text).toContain("cli-stdio.ts");
     expect(text).toContain("--allow-cwd");
     expect(text).toContain("--auto-data-dir");
-    expect(text).toContain("npx causoryn@0.2.4 setup");
+    expect(text).toContain("npx causoryn@0.3.0 setup");
   });
 
-  it("K-021/K-022: claude-code.md ve codex.md 0.2.4 setup + 2026-11-19 güncel CLI kanıtlarını (claude 2.1.328, codex 0.169.0) taşır", () => {
+  it("K-021/K-022: claude-code.md ve codex.md 0.3.0 setup + 2026-11-19 güncel CLI kanıtlarını (claude 2.1.328, codex 0.169.0) taşır", () => {
     const claudeText = readClaudeDoc();
-    expect(claudeText).toContain("npx causoryn@0.2.4 setup");
+    expect(claudeText).toContain("npx causoryn@0.3.0 setup");
     expect(claudeText).toContain("2.1.328");
     expect(claudeText).toContain("2026-11-19");
     expect(claudeText).toContain("plugin validate --strict");
 
     const codexText = readCodexDoc();
-    expect(codexText).toContain("npx causoryn@0.2.4 setup");
+    expect(codexText).toContain("npx causoryn@0.3.0 setup");
     expect(codexText).toContain("0.169.0");
     expect(codexText).toContain("2026-11-19");
     expect(codexText).toContain("plugin marketplace add");
   });
 
-  it("zcode.md: ZCode CLI setup (npx causoryn@0.2.4 setup --client zcode --yes), deneysel marketplace ve GUI NOT RUN dürüstlüğünü belgeler; kişisel yol/sır YOK", () => {
+  it("zcode.md: ZCode CLI setup (npx causoryn@0.3.0 setup --client zcode --yes), deneysel marketplace ve GUI NOT RUN dürüstlüğünü belgeler; kişisel yol/sır YOK", async () => {
     expect(existsSync(DOCS.zcodeDoc), "docs/hosts/zcode.md mevcut olmalı").toBe(true);
     const zcodeText = readFileSync(DOCS.zcodeDoc, "utf8");
     expect(zcodeText).not.toMatch(ROOT_GRANT);
     expect(zcodeText).not.toMatch(SECRET);
     expect(zcodeText).not.toMatch(SINGLE_FILE_CLAIM);
-    expect(zcodeText).not.toMatch(/D:[\\/]Causoryn/i);
-    expect(zcodeText).not.toMatch(/D:[\\/]tools/i);
-    expect(zcodeText).not.toContain("ber" + "ka");
-    expect(zcodeText).toContain("npx causoryn@0.2.4 setup --client zcode --yes");
+    expect(await findDocumentPrivacyLeaks("docs/hosts/zcode.md", zcodeText)).toEqual([]);
+    expect(zcodeText).toContain("npx causoryn@0.3.0 setup --client zcode --yes");
     expect(zcodeText).toContain(".zcode/cli/config.json");
     expect(zcodeText).toContain("ZCODE_PLUGIN_ROOT");
     expect(zcodeText).toContain("ZCODE_PROJECT_DIR");

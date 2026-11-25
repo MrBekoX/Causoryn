@@ -339,7 +339,7 @@ describe("deriveTestPlan — negatif (sinyalsiz değişiklik kümesi)", () => {
     // Boş plan gerekçesi açıkça raporlanır.
     expect(result.rationales.some((r) => r.includes("Ghost.MissingSymbol"))).toBe(true);
     expect(result.rationales.some((r) => r.includes(NOTES_PATH))).toBe(true);
-    expect(result.rationales.some((r) => r.includes("boş"))).toBe(true);
+    expect(result.rationales.some((r) => r.includes("test plan is empty"))).toBe(true);
   });
 });
 
@@ -353,7 +353,7 @@ describe("deriveTestPlan — belirsiz sembol ve doğrulama reddi", () => {
     expect(result.unresolvedSymbols).toHaveLength(1);
     const entry = result.unresolvedSymbols[0];
     expect(entry?.target).toBe(SVC);
-    expect(entry?.reason).toContain("belirsiz");
+    expect(entry?.reason).toContain("ambiguous");
     // İki aday node kimliği gerekçede sayılır.
     expect(entry?.reason).toContain(nid("Class", SVC, SVC_PATH));
     expect(entry?.reason).toContain(nid("Function", SVC, "src/legacy/orders.ts"));

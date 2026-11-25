@@ -162,7 +162,7 @@ function asJsonValue(value: unknown): JsonValue {
       if (!Number.isFinite(value)) {
         throw new DomainError(
           "domain/non-finite-number",
-          `Snapshot JSON'e sonlu olmayan sayı yazılamaz: ${String(value)}`,
+          `Cannot write a non-finite number to snapshot JSON: ${String(value)}`,
         );
       }
       return value;
@@ -190,7 +190,7 @@ function asJsonValue(value: unknown): JsonValue {
     default:
       throw new DomainError(
         "domain/non-json-value",
-        `Snapshot JSON'e serileştirilemez değer: ${typeof value}`,
+        `Value cannot be serialized to snapshot JSON: ${typeof value}`,
       );
   }
 }
@@ -204,8 +204,157 @@ function spanJsonValue(span: SourceSpan): JsonValue {
   };
 }
 
-function nodesJsonValue(nodes: readonly GraphNode[]): JsonValue {
-  return nodes.map((node) => ({
+const SHA256_K: readonly number[] = [
+  0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1,
+  0x923f82a4, 0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3,
+  0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174, 0xe49b69c1, 0xefbe4786,
+  0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+  0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147,
+  0x06ca6351, 0x14292967, 0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13,
+  0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85, 0xa2bfe8a1, 0xa81a664b,
+  0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+  0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a,
+  0x5b9cca4f, 0x682e6ff3, 0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208,
+  0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
+];
+
+const SHA256_IV: readonly number[] = [
+  0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c,
+  0x1f83d9ab, 0x5be0cd19,
+];
+
+function rotr32(x: number, n: number): number {
+  return ((x >>> n) | (x << (32 - n))) >>> 0;
+}
+
+/**
+ * Zero-giant-allocation streaming FIPS 180-4 SHA-256 hasher.
+ * Keeps peak hashing memory at 64 bytes (+ reusable 256-byte schedule) so large
+ * snapshots never construct monolithic canonical JSON strings or byte buffers.
+ */
+class StreamingSha256 {
+  private readonly state = new Uint32Array(SHA256_IV);
+  private readonly block = new Uint8Array(64);
+  private readonly blockView = new DataView(this.block.buffer);
+  private readonly schedule = new Uint32Array(64);
+  private blockOffset = 0;
+  private totalBytes = 0;
+
+  private pushByte(byte: number): void {
+    this.block[this.blockOffset] = byte;
+    this.blockOffset += 1;
+    this.totalBytes += 1;
+    if (this.blockOffset === 64) {
+      this.compress();
+      this.blockOffset = 0;
+    }
+  }
+
+  updateUtf8(text: string): void {
+    const len = text.length;
+    for (let i = 0; i < len; i += 1) {
+      let codePoint = text.charCodeAt(i);
+      if (codePoint < 0x80) {
+        this.pushByte(codePoint);
+        continue;
+      }
+      if (codePoint >= 0xd800 && codePoint <= 0xdbff && i + 1 < len) {
+        const low = text.charCodeAt(i + 1);
+        if (low >= 0xdc00 && low <= 0xdfff) {
+          codePoint = 0x10000 + ((codePoint - 0xd800) << 10) + (low - 0xdc00);
+          i += 1;
+        }
+      }
+      if (codePoint < 0x800) {
+        this.pushByte(0xc0 | (codePoint >> 6));
+        this.pushByte(0x80 | (codePoint & 0x3f));
+      } else if (codePoint < 0x10000) {
+        this.pushByte(0xe0 | (codePoint >> 12));
+        this.pushByte(0x80 | ((codePoint >> 6) & 0x3f));
+        this.pushByte(0x80 | (codePoint & 0x3f));
+      } else {
+        this.pushByte(0xf0 | (codePoint >> 18));
+        this.pushByte(0x80 | ((codePoint >> 12) & 0x3f));
+        this.pushByte(0x80 | ((codePoint >> 6) & 0x3f));
+        this.pushByte(0x80 | (codePoint & 0x3f));
+      }
+    }
+  }
+
+  private compress(): void {
+    const w = this.schedule;
+    const view = this.blockView;
+    for (let t = 0; t < 16; t += 1) {
+      w[t] = view.getUint32(t * 4, false);
+    }
+    for (let t = 16; t < 64; t += 1) {
+      const w15 = w[t - 15] as number;
+      const w2 = w[t - 2] as number;
+      const s0 = rotr32(w15, 7) ^ rotr32(w15, 18) ^ (w15 >>> 3);
+      const s1 = rotr32(w2, 17) ^ rotr32(w2, 19) ^ (w2 >>> 10);
+      w[t] = ((w[t - 16] as number) + s0 + (w[t - 7] as number) + s1) >>> 0;
+    }
+
+    const st = this.state;
+    let a = st[0] as number;
+    let b = st[1] as number;
+    let c = st[2] as number;
+    let d = st[3] as number;
+    let e = st[4] as number;
+    let f = st[5] as number;
+    let g = st[6] as number;
+    let h = st[7] as number;
+
+    for (let t = 0; t < 64; t += 1) {
+      const bigSigma1 = rotr32(e, 6) ^ rotr32(e, 11) ^ rotr32(e, 25);
+      const choose = (e & f) ^ (~e & g);
+      const temp1 = (h + bigSigma1 + choose + (SHA256_K[t] as number) + (w[t] as number)) >>> 0;
+      const bigSigma0 = rotr32(a, 2) ^ rotr32(a, 13) ^ rotr32(a, 22);
+      const majority = (a & b) ^ (a & c) ^ (b & c);
+      const temp2 = (bigSigma0 + majority) >>> 0;
+      h = g;
+      g = f;
+      f = e;
+      e = (d + temp1) >>> 0;
+      d = c;
+      c = b;
+      b = a;
+      a = (temp1 + temp2) >>> 0;
+    }
+
+    st[0] = ((st[0] as number) + a) >>> 0;
+    st[1] = ((st[1] as number) + b) >>> 0;
+    st[2] = ((st[2] as number) + c) >>> 0;
+    st[3] = ((st[3] as number) + d) >>> 0;
+    st[4] = ((st[4] as number) + e) >>> 0;
+    st[5] = ((st[5] as number) + f) >>> 0;
+    st[6] = ((st[6] as number) + g) >>> 0;
+    st[7] = ((st[7] as number) + h) >>> 0;
+  }
+
+  digestHex(): string {
+    const finalBytes = this.totalBytes;
+    this.pushByte(0x80);
+    while (this.blockOffset !== 56) {
+      this.pushByte(0);
+    }
+    const highBits = Math.floor(finalBytes / 0x2000_0000) >>> 0;
+    const lowBits = ((finalBytes & 0x1fff_ffff) * 8) >>> 0;
+    this.blockView.setUint32(56, highBits, false);
+    this.blockView.setUint32(60, lowBits, false);
+    this.compress();
+    this.blockOffset = 0;
+
+    let hex = "";
+    for (let i = 0; i < 8; i += 1) {
+      hex += (this.state[i] as number).toString(16).padStart(8, "0");
+    }
+    return hex;
+  }
+}
+
+function nodeJsonValue(node: GraphNode): JsonValue {
+  return {
     id: node.id,
     kind: node.kind,
     qualifiedName: node.qualifiedName,
@@ -214,11 +363,11 @@ function nodesJsonValue(nodes: readonly GraphNode[]): JsonValue {
       ? {}
       : { location: spanJsonValue(node.location) }),
     attributes: asJsonValue(node.attributes),
-  }));
+  };
 }
 
-function edgesJsonValue(edges: readonly GraphEdge[]): JsonValue {
-  return edges.map((edge) => ({
+function edgeJsonValue(edge: GraphEdge): JsonValue {
+  return {
     id: edge.id,
     from: edge.from,
     to: edge.to,
@@ -233,18 +382,89 @@ function edgesJsonValue(edges: readonly GraphEdge[]): JsonValue {
             reason: edge.ambiguity.reason,
           },
         }),
-  }));
+  };
 }
 
-function evidenceJsonValue(evidence: readonly Evidence[]): JsonValue {
-  return evidence.map((item) => ({
+function evidenceItemJsonValue(item: Evidence): JsonValue {
+  return {
     id: item.id,
     kind: item.kind,
     ...(item.span === undefined ? {} : { span: spanJsonValue(item.span) }),
     analyzerId: item.analyzerId,
     analyzerVersion: item.analyzerVersion,
     rationale: item.rationale,
-  }));
+  };
+}
+
+function nodesJsonValue(nodes: readonly GraphNode[]): JsonValue {
+  return nodes.map(nodeJsonValue);
+}
+
+function edgesJsonValue(edges: readonly GraphEdge[]): JsonValue {
+  return edges.map(edgeJsonValue);
+}
+
+function evidenceJsonValue(evidence: readonly Evidence[]): JsonValue {
+  return evidence.map(evidenceItemJsonValue);
+}
+
+/**
+ * Streams canonical JSON bytes of sorted edges, evidence, and nodes directly into
+ * an incremental SHA-256 hasher (one record at a time). Produces the exact bit-for-bit
+ * digest of `canonicalJson({ edges, evidence, nodes })` without allocating a giant string.
+ */
+export function computeStreamingContentHash(
+  sortedNodes: readonly GraphNode[],
+  sortedEdges: readonly GraphEdge[],
+  sortedEvidence: readonly Evidence[],
+): string {
+  const hasher = new StreamingSha256();
+  hasher.updateUtf8('{"edges":[');
+  for (let i = 0; i < sortedEdges.length; i += 1) {
+    if (i > 0) hasher.updateUtf8(",");
+    hasher.updateUtf8(canonicalJson(edgeJsonValue(sortedEdges[i]!)));
+  }
+  hasher.updateUtf8('],"evidence":[');
+  for (let i = 0; i < sortedEvidence.length; i += 1) {
+    if (i > 0) hasher.updateUtf8(",");
+    hasher.updateUtf8(canonicalJson(evidenceItemJsonValue(sortedEvidence[i]!)));
+  }
+  hasher.updateUtf8('],"nodes":[');
+  for (let i = 0; i < sortedNodes.length; i += 1) {
+    if (i > 0) hasher.updateUtf8(",");
+    hasher.updateUtf8(canonicalJson(nodeJsonValue(sortedNodes[i]!)));
+  }
+  hasher.updateUtf8("]}");
+  return hasher.digestHex();
+}
+
+/** Computes the deterministic `snapshot:<64-hex>` ID via streaming SHA-256. */
+export function computeStreamingSnapshotId(input: {
+  readonly workspaceId: string;
+  readonly revision: RevisionRef;
+  readonly configHash: string;
+  readonly analyzerFingerprint: string;
+  readonly sortedNodes: readonly GraphNode[];
+  readonly sortedEdges: readonly GraphEdge[];
+  readonly sortedEvidence: readonly Evidence[];
+}): string {
+  const contentHash = computeStreamingContentHash(
+    input.sortedNodes,
+    input.sortedEdges,
+    input.sortedEvidence,
+  );
+  return `snapshot:${sha256Hex(
+    utf8Encode(
+      canonicalJson([
+        input.workspaceId,
+        input.revision.id,
+        input.revision.sequence,
+        input.configHash,
+        input.analyzerFingerprint,
+        contentHash,
+      ]),
+    ),
+  )}`;
 }
 
 function metaJsonValue(meta: GraphSnapshot): JsonValue {
@@ -272,18 +492,6 @@ export function snapshotCanonicalJson(snapshot: SnapshotGraph): string {
   });
 }
 
-function graphContentJsonValue(
-  nodes: readonly GraphNode[],
-  edges: readonly GraphEdge[],
-  evidence: readonly Evidence[],
-): JsonValue {
-  return {
-    nodes: nodesJsonValue(nodes),
-    edges: edgesJsonValue(edges),
-    evidence: evidenceJsonValue(evidence),
-  };
-}
-
 function deepFreeze<T>(value: T): T {
   if (value !== null && typeof value === "object") {
     for (const child of Object.values(value as Record<string, unknown>)) {
@@ -308,7 +516,7 @@ export function createSnapshot(input: SnapshotInput): SnapshotGraph {
     if (nodesByKey.has(key)) {
       throw new DomainError(
         "domain/duplicate-node",
-        `Aynı kimlikte birden fazla node: ${key}`,
+        `Duplicate node id: ${key}`,
       );
     }
     nodesByKey.set(key, makeNode(input.workspaceId, nodeInput));
@@ -334,7 +542,7 @@ export function createSnapshot(input: SnapshotInput): SnapshotGraph {
       const ref = from === undefined ? edgeInput.from : edgeInput.to;
       throw new DomainError(
         "domain/dangling-edge",
-        `Kenar ucu bilinmeyen node'a işaret ediyor (${missing}): ${nodeKey(ref)}`,
+        `Edge endpoint points to an unknown node (${missing}): ${nodeKey(ref)}`,
       );
     }
     const evidenceIds: string[] = [];
@@ -362,7 +570,7 @@ export function createSnapshot(input: SnapshotInput): SnapshotGraph {
     if (seenEdgeIds.has(edge.id)) {
       throw new DomainError(
         "domain/duplicate-edge",
-        `Aynı kimlikte birden fazla edge: ${edge.id}`,
+        `Duplicate edge id: ${edge.id}`,
       );
     }
     seenEdgeIds.add(edge.id);
@@ -374,27 +582,18 @@ export function createSnapshot(input: SnapshotInput): SnapshotGraph {
   const sortedEdges = [...edges].sort(byId);
   const sortedEvidence = [...evidenceById.values()].sort(byId);
 
-  // 5) Deterministik ID: içerik karması + deterministik girdiler.
-  //    `createdAt` ve `state` bilinçli olarak DIŞARIDA bırakılır.
-  const contentHash = sha256Hex(
-    utf8Encode(
-      canonicalJson(
-        graphContentJsonValue(sortedNodes, sortedEdges, sortedEvidence),
-      ),
-    ),
-  );
-  const snapshotId = `snapshot:${sha256Hex(
-    utf8Encode(
-      canonicalJson([
-        input.workspaceId,
-        input.revision.id,
-        input.revision.sequence,
-        input.configHash,
-        input.analyzerFingerprint,
-        contentHash,
-      ]),
-    ),
-  )}`;
+  // 5) Deterministik ID: akışlı SHA-256 içerik karması + deterministik girdiler.
+  //    `createdAt` ve `state` bilinçli olarak DIŞARIDA bırakılır; monolitik
+  //    string tahsisi yapılmaz.
+  const snapshotId = computeStreamingSnapshotId({
+    workspaceId: input.workspaceId,
+    revision: input.revision,
+    configHash: input.configHash,
+    analyzerFingerprint: input.analyzerFingerprint,
+    sortedNodes,
+    sortedEdges,
+    sortedEvidence,
+  });
 
   const meta: GraphSnapshot = {
     id: snapshotId,
@@ -421,7 +620,7 @@ export function createSnapshot(input: SnapshotInput): SnapshotGraph {
       .join("; ");
     throw new DomainError(
       "domain/snapshot-invariant-violation",
-      `Snapshot invariant ihlali: ${detail}`,
+      `Snapshot invariant violation: ${detail}`,
     );
   }
 

@@ -71,6 +71,7 @@ interface WorkerNode {
   qualifiedName: string;
   language?: string;
   relativePath?: string | null;
+  span?: { startLine: number; endLine: number };
   attributes: Record<string, unknown>;
 }
 
@@ -326,6 +327,71 @@ describe.skipIf(!pythonAvailable)("tests/python-worker (M1-Python)", () => {
     expect(stampContains?.evidence[0]?.span?.sourceHash).toBe(
       sha256Hex(fixture("repositories/order_repository.py")),
     );
+    expect(stampContains?.evidence[0]?.rationale).toBe(
+      "CONTAINS: the method declaration repositories.order_repository.OrderRepository._stamp " +
+        "in repositories/order_repository.py was matched with AST span evidence.",
+    );
+  });
+
+  it("node span: Function/Method/Class nodes carry their declaration lines (= CONTAINS evidence span)", () => {
+    const nodes = positive?.nodes ?? [];
+    const declarations = nodes.filter((node) =>
+      ["Function", "Method", "Class"].includes(node.kind),
+    );
+    expect(declarations.length).toBe(11);
+    for (const node of declarations) {
+      const contains = findEdge(
+        positive,
+        (edge) =>
+          edge.kind === "CONTAINS" &&
+          edge.to.kind === node.kind &&
+          edge.to.qualifiedName === node.qualifiedName,
+      );
+      const evidenceSpan = contains?.evidence[0]?.span;
+      expect(node.span, node.qualifiedName).toEqual({
+        startLine: evidenceSpan?.startLine,
+        endLine: evidenceSpan?.endLine,
+      });
+    }
+    const stamp = nodes.find(
+      (node) => node.qualifiedName === "repositories.order_repository.OrderRepository._stamp",
+    );
+    expect(stamp?.span?.startLine).toBe(
+      fixtureLine("repositories/order_repository.py", "def _stamp"),
+    );
+    for (const node of nodes.filter((candidate) =>
+      ["File", "Endpoint", "UnknownExternal"].includes(candidate.kind),
+    )) {
+      expect(node.span, `${node.kind} ${node.qualifiedName}`).toBeUndefined();
+    }
+  });
+
+  it("node span: a node declared twice (property getter + setter) covers both declarations", () => {
+    const source = [
+      "class Ledger:", // 1
+      "    @property", // 2
+      "    def amount(self):", // 3
+      "        return 1", // 4
+      "", // 5
+      "    @amount.setter", // 6
+      "    def amount(self, value):", // 7
+      "        pass", // 8
+      "",
+    ].join("\n");
+    const run = runWorker([
+      {
+        id: "span-widen",
+        type: "analyze",
+        files: [{ path: "ledger.py", content: source }],
+      },
+    ]);
+    const response = parseLine(run.lines[0] ?? "");
+    const amount = response.nodes?.find(
+      (node) => node.kind === "Method" && node.qualifiedName === "ledger.Ledger.amount",
+    );
+    expect(amount?.span).toEqual({ startLine: 3, endLine: 8 });
+    const ledger = response.nodes?.find((node) => node.qualifiedName === "ledger.Ledger");
+    expect(ledger?.span).toEqual({ startLine: 1, endLine: 8 });
   });
 
   it("pozitif: aynı modülde tanımlı hedef → verified CALLS", () => {
@@ -372,6 +438,11 @@ describe.skipIf(!pythonAvailable)("tests/python-worker (M1-Python)", () => {
     expect(validateCall?.evidence[0]?.span?.startLine).toBe(
       fixtureLine("services/orders_service.py", "    _validate_order(order)"),
     );
+    // Evidence rationale is plain English runtime text.
+    expect(validateCall?.evidence[0]?.rationale).toBe(
+      "CALLS: services.orders_service.create_order → services.orders_service._validate_order " +
+        "resolved via the AST name binding of '_validate_order' defined in the same module (verified).",
+    );
   });
 
   it("pozitif: import edilen modül sembolü → heuristic CALLS + ambiguity", () => {
@@ -392,7 +463,14 @@ describe.skipIf(!pythonAvailable)("tests/python-worker (M1-Python)", () => {
       expect(edge, `heuristic CALLS eksik: ${fromQn} → ${toQn}`).toBeDefined();
       expect(edge?.resolution).toBe("heuristic");
       expect(edge?.ambiguity?.reason.length ?? 0).toBeGreaterThan(0);
+      expect(edge?.ambiguity?.reason).toBe(
+        "imported module symbol; Python name binding is dynamic, so no definitive resolution was made",
+      );
       expect(edge?.evidence.length).toBeGreaterThan(0);
+      expect(edge?.evidence[0]?.rationale).toBe(
+        `CALLS: ${fromQn} → ${toQn} resolved through an imported module symbol ` +
+          "(heuristic; no full type inference).",
+      );
     }
   });
 
@@ -420,6 +498,10 @@ describe.skipIf(!pythonAvailable)("tests/python-worker (M1-Python)", () => {
         edge.kind === "CALLS" && edge.to.qualifiedName === "logger.info",
     );
     expect(loggerCall?.from.qualifiedName).toBe("app.get_orders");
+    expect(loggerCall?.evidence[0]?.rationale).toBe(
+      "CALLS: app.get_orders → logger.info could not be resolved (unresolved); " +
+        "no fabricated target was produced.",
+    );
     expect(loggerCall?.evidence[0]?.span?.relativePath).toBe("app.py");
     expect(loggerCall?.evidence[0]?.span?.startLine).toBe(
       // Çağrı satırı özgün iğne: başlıktaki yorum da "logger.info" içerir.
@@ -585,8 +667,18 @@ describe.skipIf(!pythonAvailable)("tests/python-worker (M1-Python)", () => {
     // Non-literal dekoratör yolu: endpoint ÜRETİLMEZ, açık uyarı yazılır.
     expect(endpointNames).not.toContain("GET /not-literal");
     expect(
-      (response.warnings ?? []).some((w) => w.includes("dekoratör yolu literal string değil")),
+      (response.warnings ?? []).some(
+        (w) =>
+          w ===
+          "routes.py: the route path of decorator 'flask_app.get' is not a literal string; " +
+            "no endpoint was produced for routes.not_literal_route",
+      ),
     ).toBe(true);
+    const legacyRoute = routesTo.find((edge) => edge.from.qualifiedName === "GET /legacy");
+    expect(legacyRoute?.evidence[0]?.rationale).toBe(
+      "ROUTES_TO: flask_app.route('/legacy', methods=['GET', 'POST']) is bound to handler " +
+        "routes.legacy_handler (verified).",
+    );
   });
 
   it("negatif: eksik id → INVALID_ARGUMENT + id null", () => {
@@ -604,11 +696,15 @@ describe.skipIf(!pythonAvailable)("tests/python-worker (M1-Python)", () => {
     expect(typeResponse.status).toBe("error");
     expect(typeResponse.id).toBe(7);
     expect(typeResponse.error?.code).toBe("INVALID_ARGUMENT");
+    expect(typeResponse.error?.message).toBe("type must be 'analyze': 'rewrite'");
 
     const unknownVersion = runWorker([
       { id: "v2", type: "analyze", protocolVersion: "2", files: [{ path: "a.py", content: "x = 1" }] },
     ]);
     expect(parseLine(unknownVersion.lines[0] ?? "").error?.code).toBe("INVALID_ARGUMENT");
+    expect(parseLine(unknownVersion.lines[0] ?? "").error?.message).toBe(
+      "unsupported protocolVersion: '2'",
+    );
 
     const unknownField = runWorker([
       {
@@ -619,6 +715,9 @@ describe.skipIf(!pythonAvailable)("tests/python-worker (M1-Python)", () => {
       },
     ]);
     expect(parseLine(unknownField.lines[0] ?? "").error?.code).toBe("INVALID_ARGUMENT");
+    expect(parseLine(unknownField.lines[0] ?? "").error?.message).toBe(
+      "unknown request field(s): referenceDirs",
+    );
   });
 
   it("negatif: files eksik/boş + yol ihlalleri → INVALID_ARGUMENT", () => {
@@ -642,15 +741,30 @@ describe.skipIf(!pythonAvailable)("tests/python-worker (M1-Python)", () => {
       }, // duplicate yol
       { ...base, files: [{ path: "a.py", content: "x = 1" }], maxNodes: 0 }, // maxNodes aralık dışı
     ];
+    const expectedMessages = [
+      "files must be a non-empty array",
+      "files must be a non-empty array",
+      "files[0].content must be a string",
+      "files[0] contains unknown field(s): extra",
+      "files[].path escapes the workspace root ('..'): ../escape.py",
+      "files[].path must not be an absolute path: /abs.py",
+      "files[].path must not be an absolute path with a drive letter: C:/abs.py",
+      "files[].path must be a POSIX path (backslashes are not accepted): a\\b.py",
+      "files[].path contains an empty segment: a//b.py",
+      "the same source path was given twice: a.py",
+      "maxNodes must be in the range 1..250000: 0",
+    ];
+    expect(expectedMessages.length).toBe(cases.length);
     const run = runWorker(cases);
     expect(run.exitCode).toBe(0);
     expect(run.lines.length).toBe(cases.length);
-    for (const line of run.lines) {
+    run.lines.forEach((line, index) => {
       const response = parseLine(line);
       expect(response.status).toBe("error");
       expect(response.error?.code).toBe("INVALID_ARGUMENT");
       expect(response.id).toBe("paths");
-    }
+      expect(response.error?.message).toBe(expectedMessages[index]);
+    });
   });
 
   it("negatif: bozuk JSON satırı → id null hata yanıtı; worker yaşamaya devam eder", () => {
@@ -662,6 +776,7 @@ describe.skipIf(!pythonAvailable)("tests/python-worker (M1-Python)", () => {
     expect(broken.status).toBe("error");
     expect(broken.id).toBeNull();
     expect(broken.error?.code).toBe("INVALID_ARGUMENT");
+    expect(broken.error?.message.startsWith("line is not valid JSON: ")).toBe(true);
     const after = parseLine(lines[1] ?? "");
     expect(after.status).toBe("ready");
     expect(after.id).toBe("sonra");
@@ -710,6 +825,9 @@ describe.skipIf(!pythonAvailable)("tests/python-worker (M1-Python)", () => {
     expect(response.status).toBe("error");
     expect(response.id).toBe("limit-content");
     expect(response.error?.code).toBe("LIMIT_EXCEEDED");
+    expect(response.error?.message).toBe(
+      "file content size limit exceeded: big.py (2000001 > 2000000 bytes)",
+    );
   });
 
   it("negatif: 5001 dosya → LIMIT_EXCEEDED", () => {
@@ -723,6 +841,7 @@ describe.skipIf(!pythonAvailable)("tests/python-worker (M1-Python)", () => {
     const response = parseLine(run.lines[0] ?? "");
     expect(response.status).toBe("error");
     expect(response.error?.code).toBe("LIMIT_EXCEEDED");
+    expect(response.error?.message).toBe("file count limit exceeded: 5001 > 5000");
   });
 
   it("partial: sözdizimi hatası → status partial + dosya/satır taşıyan tanı; sağlam dosyanın grafiği üretilir", () => {
@@ -776,6 +895,12 @@ describe.skipIf(!pythonAvailable)("tests/python-worker (M1-Python)", () => {
     expect(
       (response.diagnostics ?? []).some((d) => d.code === "RESPONSE_TRUNCATED"),
     ).toBe(true);
+    expect(
+      (response.diagnostics ?? []).find((d) => d.code === "RESPONSE_TRUNCATED")?.message,
+    ).toBe(
+      "node budget exceeded: 5 nodes published; the excess nodes and the edges " +
+        "whose endpoints were not published were dropped",
+    );
     // Kesilen node'lara işaret eden dangling kenar bırakılmaz.
     const kept = new Set((response.nodes ?? []).map((node) => node.qualifiedName));
     for (const edge of response.edges ?? []) {
@@ -844,7 +969,7 @@ describe.skipIf(!pythonAvailable)("tests/python-worker (M1-Python)", () => {
     expect(
       (response.warnings ?? []).some(
         (warning) =>
-          warning.includes("basit ad değil") && warning.includes("endpoint üretilmedi"),
+          warning.includes("is not a simple name") && warning.includes("no endpoint was produced for"),
       ),
     ).toBe(true);
   });
@@ -870,7 +995,9 @@ describe.skipIf(!pythonAvailable)("tests/python-worker (M1-Python)", () => {
     });
     expect(result.status).toBe(0);
     const stderr = typeof result.stderr === "string" ? result.stderr : "";
-    expect(stderr).toContain("worker başladı");
+    // The start line carries a non-ASCII em dash: a locale-codec fallback
+    // (e.g. cp1254) would garble it into U+FFFD when read back as UTF-8.
+    expect(stderr).toContain("worker started — protocol v1, analyzer python-worker v0.1.0");
     expect(stderr).not.toContain("\ufffd");
   });
 
@@ -880,5 +1007,52 @@ describe.skipIf(!pythonAvailable)("tests/python-worker (M1-Python)", () => {
     expect(run.stdout).toBe("");
     expect(run.stderr.length).toBeGreaterThan(0);
     expect(run.stderr).toContain("[python-worker]");
+    expect(run.stderr).toContain("[python-worker] EOF — worker exiting normally");
+  });
+
+  it("language: worker runtime text (rationales, warnings, diagnostics, errors, stderr) is English", () => {
+    const turkishLetters = /[çğıöşüÇĞİÖŞÜ]/;
+    const run = runWorker([
+      {
+        id: "english-1",
+        type: "analyze",
+        protocolVersion: "1",
+        files: [
+          ...FIXTURE_FILES.map((relativePath) => ({
+            path: relativePath,
+            content: fixture(relativePath),
+          })),
+          { path: "broken.py", content: "def broken(:\n    pass\n" },
+          {
+            path: "carriers.py",
+            content: 'routers = {}\n@routers["main"].get("/x")\ndef h():\n    return 1\n',
+          },
+        ],
+      },
+      { id: "english-2", type: "rewrite", files: [{ path: "a.py", content: "x = 1" }] },
+      { id: "english-3", type: "analyze", files: [{ path: "../a.py", content: "x = 1" }] },
+      {
+        id: "english-4",
+        type: "analyze",
+        maxNodes: 1,
+        files: [{ path: "a.py", content: "def f():\n    g()\n" }],
+      },
+    ]);
+    expect(run.exitCode).toBe(0);
+    expect(run.lines.length).toBe(4);
+    const texts: string[] = [];
+    for (const line of run.lines) {
+      const response = parseLine(line);
+      texts.push(...(response.warnings ?? []), ...(response.unsupportedConstructs ?? []));
+      for (const diagnostic of response.diagnostics ?? []) texts.push(diagnostic.message);
+      for (const edge of response.edges ?? []) {
+        for (const item of edge.evidence) texts.push(item.rationale);
+        if (edge.ambiguity !== undefined) texts.push(edge.ambiguity.reason);
+      }
+      if (response.error !== undefined) texts.push(response.error.message);
+    }
+    texts.push(...run.stderr.split("\n"));
+    expect(texts.length).toBeGreaterThan(10);
+    expect(texts.filter((text) => turkishLetters.test(text))).toEqual([]);
   });
 });

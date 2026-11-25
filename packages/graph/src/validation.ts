@@ -35,7 +35,7 @@ export function requireNonEmptyField(field: string, value: unknown): string {
   if (typeof value !== "string" || value.trim().length === 0) {
     throw new GraphRepositoryError(
       "graph/empty-required-field",
-      `Zorunlu alan boş veya boşluk olamaz: ${field}`,
+      `Required field must not be empty or whitespace-only: ${field}`,
     );
   }
   return value;
@@ -47,7 +47,7 @@ export function requireTimestamp(field: string, value: unknown): string {
   if (Number.isNaN(Date.parse(text))) {
     throw new GraphRepositoryError(
       "graph/invalid-timestamp",
-      `Zaman damgası çözümlenemedi: ${field}=${text}`,
+      `Timestamp could not be parsed: ${field}=${text}`,
     );
   }
   return text;
@@ -57,7 +57,7 @@ function requirePositiveInt(field: string, value: unknown): void {
   if (typeof value !== "number" || !Number.isInteger(value) || value < 1) {
     throw new GraphRepositoryError(
       "graph/invalid-span",
-      `Alan pozitif tam sayı olmalı: ${field}=${String(value)}`,
+      `Field must be a positive integer: ${field}=${String(value)}`,
     );
   }
 }
@@ -70,7 +70,7 @@ export function validateSpan(field: string, spanValue: SourceSpan): void {
   if (spanValue.endLine < spanValue.startLine) {
     throw new GraphRepositoryError(
       "graph/invalid-span",
-      `endLine, startLine'dan küçük olamaz: ${field}`,
+      `endLine must not be less than startLine: ${field}`,
     );
   }
 }
@@ -82,7 +82,7 @@ function assertJsonSerializable(field: string, value: unknown): void {
     if (error instanceof DomainError) {
       throw new GraphRepositoryError(
         "graph/attributes-not-json",
-        `${field} JSON'e serileştirilemiyor: ${error.message}`,
+        `${field} cannot be serialized to JSON: ${error.message}`,
       );
     }
     throw error;
@@ -101,7 +101,7 @@ export function validateNode(workspaceId: string, node: GraphNode): void {
   if (!NODE_KIND_SET.has(node.kind)) {
     throw new GraphRepositoryError(
       "graph/unknown-node-kind",
-      `Bilinmeyen node türü: ${String(node.kind)}`,
+      `Unknown node kind: ${String(node.kind)}`,
     );
   }
   if (node.language !== undefined) {
@@ -122,7 +122,7 @@ export function validateNode(workspaceId: string, node: GraphNode): void {
   if (derived !== node.id) {
     throw new GraphRepositoryError(
       "graph/node-id-mismatch",
-      `Node kimliği deterministik türetimle uyuşmuyor: ${node.id}`,
+      `Node id does not match its deterministic derivation: ${node.id}`,
     );
   }
 }
@@ -151,7 +151,7 @@ export function validateEvidence(
   if (derived !== evidence.id) {
     throw new GraphRepositoryError(
       "graph/evidence-id-mismatch",
-      `Evidence kimliği deterministik türetimle uyuşmuyor: ${evidence.id}`,
+      `Evidence id does not match its deterministic derivation: ${evidence.id}`,
     );
   }
 }
@@ -170,19 +170,19 @@ export function validateEdgeShape(edge: GraphEdge): void {
   if (!EDGE_KIND_SET.has(edge.kind)) {
     throw new GraphRepositoryError(
       "graph/unknown-edge-kind",
-      `Bilinmeyen edge türü: ${String(edge.kind)}`,
+      `Unknown edge kind: ${String(edge.kind)}`,
     );
   }
   if (!RESOLUTION_SET.has(edge.resolution)) {
     throw new GraphRepositoryError(
       "graph/unknown-resolution",
-      `Bilinmeyen resolution değeri: ${String(edge.resolution)}`,
+      `Unknown resolution value: ${String(edge.resolution)}`,
     );
   }
   if (!Array.isArray(edge.evidenceIds)) {
     throw new GraphRepositoryError(
       "graph/invalid-edge",
-      `edge.evidenceIds dizi olmalı: ${edge.id}`,
+      `edge.evidenceIds must be an array: ${edge.id}`,
     );
   }
   for (const evidenceRef of edge.evidenceIds) {
@@ -191,14 +191,14 @@ export function validateEdgeShape(edge: GraphEdge): void {
   if (edge.resolution === "verified" && edge.evidenceIds.length === 0) {
     throw new GraphRepositoryError(
       "graph/verified-edge-requires-evidence",
-      "verified kenar en az bir kanıt gerektirir (TŞ §8 invariant i, ADR-004)",
+      "a verified edge requires at least one piece of evidence",
     );
   }
   if (edge.ambiguity !== undefined) {
     if (edge.ambiguity.candidates.length === 0) {
       throw new GraphRepositoryError(
         "graph/invalid-ambiguity",
-        `ambiguity.candidates boş olamaz: ${edge.id}`,
+        `ambiguity.candidates must not be empty: ${edge.id}`,
       );
     }
     for (const candidate of edge.ambiguity.candidates) {
@@ -222,7 +222,7 @@ export function validateEdgeIdentity(
   if (derived !== edge.id) {
     throw new GraphRepositoryError(
       "graph/edge-id-mismatch",
-      `Edge kimliği deterministik türetimle uyuşmuyor: ${edge.id}`,
+      `Edge id does not match its deterministic derivation: ${edge.id}`,
     );
   }
 }

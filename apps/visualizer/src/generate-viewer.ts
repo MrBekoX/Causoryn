@@ -21,13 +21,13 @@
  *
  * C6 desenleri (packages/graph/src/export.ts) KOPYALA-UYARLA, bağımlılıksız:
  * - escapeHtml: aynı karakter kümesi (&, <, >, ", ').
- * - Kısıtlayıcı CSP meta: C6'daki `default-src 'none'; style-src
- *   'unsafe-inline'; base-uri 'none'; form-action 'none'` tabanına BİR
- *   istisna eklenir: `script-src 'unsafe-inline'`. Gerekçe: TŞ §16 viewer'ı
- *   ETKİLEŞİMLİDİR (selection → get_evidence akışı); bu akış çevrimdışı
- *   gömülü betikle sağlanır. CSP yine TÜM yükleme yollarını kapatır:
- *   img/font/connect/frame/media 'none'dan türer (default-src), yalnızca
- *   belge İÇİNDEKİ statik betik ve stil çalışır. Harici kaynak sıfırdır.
+ * - Restrictive CSP meta: `default-src 'none'; base-uri 'none';
+ *   form-action 'none'` plus SHA-256 hash sources for the embedded blocks:
+ *   `script-src 'sha256-…'` (the viewer is interactive: selection →
+ *   evidence panel, served by one static inline script) and
+ *   `style-src 'sha256-…'` (one static inline stylesheet). No
+ *   'unsafe-inline'; every load path stays closed and no external source
+ *   is used.
  * - Kanonik sıra: node/edge/evidence/wiki sayfaları id'ye göre bayt-artan
  *   sıralanır; aynı girdi iki koşumda bit-bit aynı HTML üretir (TŞ §8
  *   invariant vi'nin viewer karşılığı; girdi dizi sırasından bağımsız).
@@ -46,13 +46,16 @@
  *   innerHTML YOK, fetch/XHR YOK).
  *
  * Katman sözleşmesi: SAF FONKSİYON — bu modül fs/ağ/saat/rastgelelik
- * okumaz, girdiyi mutate etmez, hiçbir @causoryn/* paketini import etmez
+ * okumaz (node:crypto only hashes the static blocks for the CSP), girdiyi
+ * mutate etmez, hiçbir @causoryn/* paketini import etmez
  * (apps/ workspaces dışıdır; yapısal tipler yerel tanımlıdır, domain tipleri
  * yapısal olarak uyumludur). Herhangi bir orkestrasyon katmanı bu fonksiyonu
  * çağırıp çıktıyı izinli output dizinine yazabilir (TŞ §16 "Viewer server
  * dışında ayrıca paketlenebilir"; yazma yetkilendirmesi OutputAccessPolicy
  * katmanının işidir — burada tekrarlanmaz).
  */
+
+import { createHash } from "node:crypto";
 
 /* ------------------------------------------------------------------ */
 /* Hata türü                                                           */
@@ -167,15 +170,6 @@ export interface ViewerInput {
 /* Sabitler                                                            */
 /* ------------------------------------------------------------------ */
 
-/**
- * Kısıtlayıcı offline CSP (C6 tabanı + çevrimdışı etkileşim istisnası).
- * default-src 'none': img/font/connect/frame/media/worker dahil TÜM
- * yükleme yolları kapalıdır; script-src/style-src 'unsafe-inline' yalnızca
- * belge içi gömülü betik ve stil için gereklidir. Harici köken sıfırdır.
- */
-export const VIEWER_CSP_POLICY =
-  "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'";
-
 /** Çözüm seviyesi renkleri: verified=yeşil, heuristic=sarı, unresolved=gri. */
 const RESOLUTION_COLORS: Readonly<Record<ViewerResolution, string>> = {
   verified: "#16a34a",
@@ -263,7 +257,7 @@ function orderedViewerView(input: ViewerInput): OrderedViewerView {
     if (!nodeIds.has(edge.from) || !nodeIds.has(edge.to)) {
       throw new ViewerError(
         "viewer/dangling-edge",
-        `Kenar ucu bilinmeyen node'a işaret ediyor; finalize edilmiş snapshot kullanın: ${edge.id}`,
+        `Edge endpoint points to an unknown node; use a finalized snapshot: ${edge.id}`,
       );
     }
   }
@@ -638,7 +632,7 @@ const VIEWER_APP_JS = `
     if (!ids.length) {
       var note = document.createElement("p");
       note.className = "panel-note";
-      note.textContent = "Bu öğe için gömülü kanıt yok.";
+      note.textContent = "No embedded evidence for this item.";
       panelBody.appendChild(note);
     }
     for (var j = 0; j < ids.length; j++) {
@@ -647,7 +641,7 @@ const VIEWER_APP_JS = `
       var head = document.createElement("h3");
       var record = evidenceById[ids[j]];
       if (!record) {
-        head.textContent = ids[j] + " — gömülü kaydı yok";
+        head.textContent = ids[j] + " — no embedded record";
         item.appendChild(head);
       } else {
         head.textContent = record.id + " (" + record.kind + ")";
@@ -655,7 +649,7 @@ const VIEWER_APP_JS = `
         var dl = document.createElement("dl");
         addTerm(dl, "Konum", spanText(record.span));
         addTerm(dl, "Analyzer", record.analyzerId + " @ " + record.analyzerVersion);
-        addTerm(dl, "Gerekçe", record.rationale);
+        addTerm(dl, "Rationale", record.rationale);
         item.appendChild(dl);
       }
       panelBody.appendChild(item);
@@ -740,6 +734,26 @@ const VIEWER_CSS = [
 ].join("\n");
 
 /* ------------------------------------------------------------------ */
+/* Content Security Policy                                             */
+/* ------------------------------------------------------------------ */
+
+/** CSP hash source for one inline block: base64 SHA-256 of its exact text. */
+function cspHashSource(blockText: string): string {
+  return `'sha256-${createHash("sha256").update(blockText, "utf8").digest("base64")}'`;
+}
+
+/**
+ * Restrictive offline CSP. default-src 'none' closes every load path
+ * (img/font/connect/frame/media/worker); script-src and style-src allow
+ * exactly the two embedded blocks by SHA-256 hash, so no other inline
+ * script, event handler or style can run ('unsafe-inline' is not used).
+ * Both blocks are static constants, which keeps the policy deterministic.
+ * The `<script type="application/json">` data island is not executable and
+ * needs no script permission.
+ */
+export const VIEWER_CSP_POLICY = `default-src 'none'; script-src ${cspHashSource(VIEWER_APP_JS)}; style-src ${cspHashSource(VIEWER_CSS)}; base-uri 'none'; form-action 'none'`;
+
+/* ------------------------------------------------------------------ */
 /* Statik bölümler                                                     */
 /* ------------------------------------------------------------------ */
 
@@ -771,16 +785,16 @@ function metaSection(meta: ViewerGraphMeta): string {
 function legendSection(): string {
   const lines: string[] = [];
   lines.push("<section>");
-  lines.push("<h2>Çözüm seviyeleri</h2>");
+  lines.push("<h2>Resolution levels</h2>");
   lines.push('<ul class="legend">');
   lines.push(
-    '<li><span class="legend-swatch swatch-verified"></span>verified (resolved) — düz yeşil ok</li>',
+    '<li><span class="legend-swatch swatch-verified"></span>verified (resolved) — solid green arrow</li>',
   );
   lines.push(
-    '<li><span class="legend-swatch swatch-heuristic"></span>heuristic — kesikli sarı ok</li>',
+    '<li><span class="legend-swatch swatch-heuristic"></span>heuristic — dashed amber arrow</li>',
   );
   lines.push(
-    '<li><span class="legend-swatch swatch-unresolved"></span>unresolved — noktalı gri ok</li>',
+    '<li><span class="legend-swatch swatch-unresolved"></span>unresolved — dotted grey arrow</li>',
   );
   lines.push("</ul>");
   lines.push("</section>");
@@ -842,21 +856,20 @@ export function generateViewerHtml(input: ViewerInput): string {
   const isEmpty = view.nodes.length === 0;
   const lines: string[] = [];
   lines.push("<!DOCTYPE html>");
-  lines.push('<html lang="tr">');
+  lines.push('<html lang="en">');
   lines.push("<head>");
   lines.push('<meta charset="utf-8">');
   lines.push(`<meta http-equiv="Content-Security-Policy" content="${VIEWER_CSP_POLICY}">`);
   lines.push('<meta name="viewport" content="width=device-width, initial-scale=1">');
   lines.push('<meta name="referrer" content="no-referrer">');
   lines.push("<title>Causoryn Architecture Viewer</title>");
-  lines.push("<style>");
-  lines.push(VIEWER_CSS);
-  lines.push("</style>");
+  // Each block's text must equal its hashed constant byte for byte (CSP hash).
+  lines.push(`<style>${VIEWER_CSS}</style>`);
   lines.push("</head>");
   lines.push("<body>");
   lines.push("<h1>Causoryn Architecture Viewer</h1>");
   lines.push(
-    '<p class="viewer-note">Çevrimdışı görüntüleyici — hiçbir ağ isteği yapmaz; tüm içerik bu tek dosyada gömülüdür.</p>',
+    '<p class="viewer-note">Offline viewer — makes no network requests; all content is embedded in this single file.</p>',
   );
   lines.push(metaSection(view.meta));
   lines.push(legendSection());
@@ -865,7 +878,7 @@ export function generateViewerHtml(input: ViewerInput): string {
     `<h2>Graph (${String(view.nodes.length)} node / ${String(view.edges.length)} edge)${isEmpty ? ' data-empty="true"' : ""}</h2>`,
   );
   if (isEmpty) {
-    lines.push('<div class="graph-warning" data-empty="true">Graf boş — snapshot node/edge içermiyor.</div>');
+    lines.push('<div class="graph-warning" data-empty="true">Empty graph — the snapshot contains no nodes or edges.</div>');
   }
   lines.push(svgBody(view));
   lines.push("</section>");
@@ -875,17 +888,15 @@ export function generateViewerHtml(input: ViewerInput): string {
   lines.push(
     '<button id="evidence-panel-close" type="button">Kapat</button>',
   );
-  lines.push('<h2 id="evidence-panel-title">Kanıt</h2>');
+  lines.push('<h2 id="evidence-panel-title">Evidence</h2>');
   lines.push('<div id="evidence-panel-body"></div>');
   lines.push("</aside>");
   lines.push('<script id="causoryn-data" type="application/json">');
   lines.push(islandJson);
   lines.push("</script>");
-  lines.push("<script>");
-  lines.push(VIEWER_APP_JS);
-  lines.push("</script>");
+  lines.push(`<script>${VIEWER_APP_JS}</script>`);
   lines.push(
-    "<noscript><p>Betikler kapalıyken kanıt paneli çalışmaz; hiçbir ağ isteği yapılmaz.</p></noscript>",
+    "<noscript><p>The evidence panel needs scripts enabled; no network requests are made.</p></noscript>",
   );
   lines.push("</body>");
   lines.push("</html>");

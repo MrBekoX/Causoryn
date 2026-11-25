@@ -1,10 +1,11 @@
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
-import { SERVER_VERSION, TOOL_NAMES } from "../packages/mcp-server/src/version.js";
+import { CORE_TOOL_NAMES, SERVER_VERSION, TOOL_NAMES } from "../packages/mcp-server/src/version.js";
 import { CLONE_MAX_ATTEMPTS } from "./security-release/helpers/bundle-client.js";
 import { buildFixtureModel } from "./bench-release/fixture.js";
+import { findDocumentPrivacyLeaks } from "./helpers/leak-scan.js";
 
 /**
  * Sprint-7 F8+F9 release dokümantasyon doğrulama testi.
@@ -235,10 +236,33 @@ describe("NEGATİF: compatibility-matrix.md koşulmayan hostu geçmiş sayamaz",
   });
 });
 
-describe("F9 / K-022: sürüm kararı — 0.2.4 Pre-1.0 Public Preview (1.0.0 DEĞİL)", () => {
-  it("CHANGELOG.md Keep a Changelog formatında, [0.2.4]..[0.2.0] - tarih ve tarihsel [0.1.0] - tarih girişli", () => {
+/**
+ * Returns the body of one CHANGELOG version section (`## [<version>] ...` up to
+ * the next `## [` heading), failing loudly if the heading is missing.
+ */
+function changelogSection(text: string, version: string): string {
+  const normalized = text.replace(/\r\n/g, "\n");
+  const heading = `## [${version}]`;
+  const start = normalized.indexOf(heading);
+  expect(start, `CHANGELOG must contain a "${heading}" heading`).toBeGreaterThanOrEqual(0);
+  const next = normalized.indexOf("\n## [", start + heading.length);
+  return normalized.slice(start, next === -1 ? undefined : next);
+}
+
+/** Returns one `### <title>` subsection of a CHANGELOG version section. */
+function changelogSubsection(section: string, title: string): string {
+  const heading = `\n### ${title}\n`;
+  const start = section.indexOf(heading);
+  expect(start, `CHANGELOG section must contain "### ${title}"`).toBeGreaterThanOrEqual(0);
+  const next = section.indexOf("\n### ", start + heading.length);
+  return section.slice(start, next === -1 ? undefined : next);
+}
+
+describe("F9 / K-022: sürüm kararı — 0.3.0 Pre-1.0 (1.0.0 DEĞİL)", () => {
+  it("CHANGELOG.md Keep a Changelog formatında, [0.3.0]..[0.2.0] - tarih ve tarihsel [0.1.0] - tarih girişli", () => {
     const text = readDoc("changelog");
     expect(text).toContain("Keep a Changelog");
+    expect(text).toMatch(/^## \[0\.3\.0\] - \d{4}-\d{2}-\d{2}$/m);
     expect(text).toMatch(/^## \[0\.2\.4\] - \d{4}-\d{2}-\d{2}$/m);
     expect(text).toMatch(/^## \[0\.2\.3\] - \d{4}-\d{2}-\d{2}$/m);
     expect(text).toMatch(/^## \[0\.2\.2\] - \d{4}-\d{2}-\d{2}$/m);
@@ -247,19 +271,44 @@ describe("F9 / K-022: sürüm kararı — 0.2.4 Pre-1.0 Public Preview (1.0.0 DE
     expect(text).toMatch(/^## \[0\.1\.0\] - \d{4}-\d{2}-\d{2}$/m);
   });
 
-  it("kök package.json version === SERVER_VERSION === 0.2.4 (karar üç yüzeyde tutarlı)", () => {
+  it("kök package.json version === SERVER_VERSION === 0.3.0 (karar üç yüzeyde tutarlı)", () => {
     const pkg = JSON.parse(readFileSync(DOC_PATHS.rootPkg, "utf8")) as {
       version?: string;
     };
-    expect(pkg.version).toBe("0.2.4");
+    expect(pkg.version).toBe("0.3.0");
     expect(pkg.version).toBe(SERVER_VERSION);
   });
 
-  it("karar gerekçesi CHANGELOG'da ADR-010 ve K-022 atfıyla yazılı", () => {
+  it("the release rationale is written in the CHANGELOG [0.3.0] Release Decision (pre-1.0 honesty policy, explicitly NOT 1.0.0, gates in [Unreleased]) with the breaking change and its migration path", () => {
     const text = readDoc("changelog");
-    expect(text).toContain("ADR-010");
-    expect(text).toContain("0.2.4");
-    expect(text).toContain("K-022");
+    const section = changelogSection(text, "0.3.0");
+
+    // Release Decision: states the pre-1.0 honesty policy, refuses 1.0.0 explicitly,
+    // names the version surfaces kept in sync, and points to the open gates.
+    const decision = changelogSubsection(section, "Release Decision");
+    expect(decision).toMatch(/\*\*`0\.3\.0` is a Pre-1\.0 release — explicitly NOT `1\.0\.0`\.\*\*/);
+    expect(decision).toMatch(/breaking/i);
+    expect(decision).toContain("SERVER_VERSION");
+    expect(decision).toContain("package.json");
+    expect(decision).toContain("`[Unreleased]`");
+
+    // The breaking default-surface change is named with both numbers, and the
+    // migration path to the legacy names is spelled out (flag + env var).
+    const breaking = changelogSubsection(section, "Breaking Changes");
+    expect(breaking).toMatch(/29 to 11 tools/);
+    for (const tool of CORE_TOOL_NAMES) {
+      expect(breaking, `Breaking Changes must list core tool ${tool}`).toContain(`\`${tool}\``);
+    }
+    const migration = changelogSubsection(section, "Migration");
+    expect(migration).toContain("--tool-profile full");
+    expect(migration).toContain("CAUSORYN_TOOL_PROFILE=full");
+    expect(migration).toContain("--output-schema full");
+    expect(migration).toContain(`all ${String(TOOL_NAMES.length)} legacy names`);
+
+    // The open 1.0.0 gates stay under [Unreleased], not under a released version.
+    const unreleased = changelogSection(text, "Unreleased");
+    expect(unreleased).toMatch(/^### Remaining 1\.0\.0 Release Gates/m);
+    expect(section).not.toMatch(/^### Remaining 1\.0\.0 Release Gates/m);
   });
 });
 
@@ -347,8 +396,8 @@ describe("F8 FİNAL turu (2026-11-10 yeniden doğrulama) — bayat iddia geri ge
     expect(text).not.toMatch(medianRegex("5.3"));
     expect(text).not.toMatch(medianRegex("8.2"));
     expect(text).not.toMatch(medianRegex("5.7"));
-    expect(text).toContain("5 bağımsız spawn");
-    expect(text).not.toContain("4 bağımsız spawn");
+    expect(text).toContain("5 independent spawn");
+    expect(text).not.toContain("4 independent spawn");
   });
 
   it("implementation-status Sprint 7 final dal koşumlarını taşır: F6 32/32, F7 yeni medyan + cold index, claude 2.1.322, final commit'ler 60735ff/e3d0bc2", () => {
@@ -382,9 +431,10 @@ describe("DENETİM DÖNGÜSÜ: CHANGELOG [Unreleased] 1.0.0 kapıları F9 sayım
   function unreleasedSection(): string {
     const text = readDoc("changelog");
     const start = text.indexOf("## [Unreleased]");
-    const end = text.indexOf("## [0.2.4]");
+    // The [Unreleased] section ends at the newest released version heading.
+    const end = text.indexOf("## [0.3.0]");
     expect(start, "## [Unreleased] başlığı olmalı").toBeGreaterThanOrEqual(0);
-    expect(end, "## [0.2.4] başlığı olmalı").toBeGreaterThan(start);
+    expect(end, "## [0.3.0] başlığı olmalı").toBeGreaterThan(start);
     return text.slice(start, end);
   }
 
@@ -398,7 +448,7 @@ describe("DENETİM DÖNGÜSÜ: CHANGELOG [Unreleased] 1.0.0 kapıları F9 sayım
   it("F9 kalemi 11 — visualizer: gerçek tarayıcı koşusu + viewer HTML MCP yüzeyi", () => {
     const u = unreleasedSection();
     expect(u).toMatch(/visualizer/i);
-    expect(u).toMatch(/tarayıcı|MCP yüzeyi/i);
+    expect(u).toMatch(/browser|MCP surface/i);
   });
 
   it("F9 kalemi 12 — bundle fidelity: default lib .d.ts → partial düşüşü", () => {
@@ -406,9 +456,9 @@ describe("DENETİM DÖNGÜSÜ: CHANGELOG [Unreleased] 1.0.0 kapıları F9 sayım
     expect(u).toMatch(/default lib|\.d\.ts/i);
   });
 
-  it("F9 kalem 5 alt kalemi — per-file parse reuse (B7) ve kalem 7 alt kalemi — K-015(3) SQL rename → unknown", () => {
+  it("F9 kalem 5 alt kalemi — per-file incremental indexing ve kalem 7 alt kalemi — SQL rename → unknown", () => {
     const u = unreleasedSection();
-    expect(u).toMatch(/per-file parse reuse/i);
+    expect(u).toMatch(/file_facts|per-file/i);
     expect(u).toMatch(/SQL RENAME|rename/i);
   });
 });
@@ -766,10 +816,10 @@ describe("BAĞIMSIZ DENETİM DÖNGÜSÜ (2026-11-18): doküman↔kod tam parite 
   it("CHANGELOG.md ve docs/implementation-status.md: secret-scan + npm audit (0 açık) kapanış notu ve antigravity-plugin.test.ts satır sayısı diskle senkron", () => {
     const changelog = readDoc("changelog");
     const start = changelog.indexOf("## [Unreleased]");
-    const end = changelog.indexOf("## [0.2.4]");
-    expect(end, "## [0.2.4] başlığı olmalı").toBeGreaterThan(start);
+    const end = changelog.indexOf("## [0.3.0]");
+    expect(end, "## [0.3.0] başlığı olmalı").toBeGreaterThan(start);
     const unreleased = changelog.slice(start, end);
-    expect(unreleased).toContain("Rate-limit/concurrency resource budget (K-010 kapsam dışı beyanı)");
+    expect(unreleased).toMatch(/Rate-limit\/concurrency resource budget/i);
     expect(unreleased).toContain("scripts/secret-scan.mjs");
     expect(unreleased).toMatch(/0\s+(?:güvenlik açığı|vulnerabilit)/i);
 
@@ -783,7 +833,7 @@ describe("BAĞIMSIZ DENETİM DÖNGÜSÜ (2026-11-18): doküman↔kod tam parite 
     expect(status).toContain("scripts/secret-scan.mjs");
   });
 
-  it("K-022 açık kaynak yönetişim dosyaları, temiz doküman yüzeyi (0 kişisel yol) ve wiki paritesi sağlanmış", () => {
+  it("K-022 açık kaynak yönetişim dosyaları, temiz doküman yüzeyi (0 kişisel yol) ve wiki paritesi sağlanmış", async () => {
     const governanceFiles = [
       "SECURITY.md",
       "CONTRIBUTING.md",
@@ -814,13 +864,14 @@ describe("BAĞIMSIZ DENETİM DÖNGÜSÜ (2026-11-18): doküman↔kod tam parite 
       plugins?: Array<{ version?: string }>;
     };
     expect(zcodeMarketplace.owner?.name).toBe("Causoryn Contributors");
-    expect(zcodeMarketplace.plugins?.[0]?.version).toBe("0.2.4");
+    expect(zcodeMarketplace.plugins?.[0]?.version).toBe("0.3.0");
 
     const rootReadme = readFileSync(path.join(REPO_ROOT, "README.md"), "utf8");
     const pkgReadme = readFileSync(path.join(REPO_ROOT, "packages", "causoryn", "README.md"), "utf8");
     for (const readme of [rootReadme, pkgReadme]) {
-      expect(readme).toContain("0.2.4");
-      expect(readme).toMatch(/Pre-1\.0 Public Preview/i);
+      expect(readme).toContain("0.3.0");
+      expect(readme).toMatch(/Pre-1\.0/i);
+      expect(readme).not.toMatch(/Public Preview/i);
       expect(readme).not.toContain("single zero-compile npm package");
       expect(readme).toContain("crates.io");
       expect(readme).toContain("SECURITY.md");
@@ -848,14 +899,15 @@ describe("BAĞIMSIZ DENETİM DÖNGÜSÜ (2026-11-18): doküman↔kod tam parite 
       path.join("integrations", "zcode", "causoryn", "README.md"),
       path.join("integrations", "antigravity", "causoryn", "README.md"),
     ];
-    const personalUser = "ber" + "ka";
-    const localRepoPathRe = new RegExp("D:[\\\\/]Cau" + "soryn", "i");
-    const localToolsPathRe = new RegExp("D:[\\\\/]to" + "ols", "i");
+    // Personal names, user-profile paths and local drive paths: shared leak
+    // scanner (generic detectors + the untracked private term list).
     for (const rel of userFacingDocs) {
       const text = readFileSync(path.join(REPO_ROOT, rel), "utf8");
-      expect(text, `${rel} kişisel kullanıcı adı içeremez`).not.toContain(personalUser);
-      expect(text, `${rel} yerel repo sürücü yolu içeremez`).not.toMatch(localRepoPathRe);
-      expect(text, `${rel} yerel tools sürücü yolu içeremez`).not.toMatch(localToolsPathRe);
+      const relPosix = rel.split(path.sep).join("/");
+      expect(
+        await findDocumentPrivacyLeaks(relPosix, text),
+        `${rel} kişisel kullanıcı adı / yerel sürücü veya profil yolu içeremez`,
+      ).toEqual([]);
     }
   });
 
@@ -886,7 +938,7 @@ describe("BAĞIMSIZ DENETİM DÖNGÜSÜ (2026-11-18): doküman↔kod tam parite 
     expect(text.slice(relatedIdx)).toContain("`integrations/antigravity/causoryn/README.md`");
   });
 
-  it("TR / EN tam dokümantasyon paritesi: 17 TR dokümanın her birinin docs/en/ karşılığı mevcut, kırık yerel markdown linki yok, EN tool-contracts 29 aracı ve EN security-pass/benchmarks pinli hashleri taşır", () => {
+  it("TR / EN tam dokümantasyon paritesi: 17 TR dokümanın her birinin docs/en/ karşılığı mevcut, kırık yerel markdown linki yok, EN tool-contracts 29 aracı ve EN security-pass/benchmarks pinli hashleri taşır", async () => {
     const bilingualPairs: ReadonlyArray<readonly [string, string]> = [
       ["docs/README.md", "docs/en/README.md"],
       ["docs/prompting-and-architecture-portals.md", "docs/en/prompting-and-architecture-portals.md"],
@@ -907,10 +959,6 @@ describe("BAĞIMSIZ DENETİM DÖNGÜSÜ (2026-11-18): doküman↔kod tam parite 
       ["docs/hosts/zcode.md", "docs/en/hosts/zcode.md"],
     ];
 
-    const personalUser = "ber" + "ka";
-    const localRepoPathRe = new RegExp("D:[\\\\/]Cau" + "soryn", "i");
-    const localToolsPathRe = new RegExp("D:[\\\\/]to" + "ols", "i");
-
     for (const [trRel, enRel] of bilingualPairs) {
       const trAbs = path.join(REPO_ROOT, ...trRel.split("/"));
       const enAbs = path.join(REPO_ROOT, ...enRel.split("/"));
@@ -920,9 +968,10 @@ describe("BAĞIMSIZ DENETİM DÖNGÜSÜ (2026-11-18): doküman↔kod tam parite 
       for (const [docRel, docAbs] of [[trRel, trAbs], [enRel, enAbs]] as const) {
         const content = readFileSync(docAbs, "utf8");
         expect(content.trim().length, `${docRel} boş olamaz`).toBeGreaterThan(200);
-        expect(content, `${docRel} kişisel kullanıcı adı içeremez`).not.toContain(personalUser);
-        expect(content, `${docRel} yerel sürücü yolu içeremez`).not.toMatch(localRepoPathRe);
-        expect(content, `${docRel} yerel tools yolu içeremez`).not.toMatch(localToolsPathRe);
+        expect(
+          await findDocumentPrivacyLeaks(docRel, content),
+          `${docRel} kişisel kullanıcı adı / yerel sürücü veya profil yolu içeremez`,
+        ).toEqual([]);
         expect(content, `${docRel} 1.0.0 yayınlandı iddiası taşıyamaz`).not.toMatch(/^## \[1\.0\.0\]/m);
 
         // Göreli markdown link kontrolü (kod blokları dışındaki [etiket](hedef) linkleri):
@@ -949,21 +998,33 @@ describe("BAĞIMSIZ DENETİM DÖNGÜSÜ (2026-11-18): doküman↔kod tam parite 
       }
     }
 
-    // EN tool-contracts.md: 29 aracın tamamını içerir
+    // EN tool-contracts.md: documents both the 11-tool default core profile and all 29 legacy/full tools
     const enToolsText = readFileSync(path.join(REPO_ROOT, "docs", "en", "tool-contracts.md"), "utf8");
-    const enListedTools: string[] = [];
-    let inEnContractSection = false;
+    const enCoreProfileTools: string[] = [];
+    const enLegacyTools: string[] = [];
+    let enSectionMode: "none" | "core-profile" | "legacy" = "none";
     for (const line of enToolsText.split(/\r?\n/)) {
       if (line.startsWith("## ")) {
-        inEnContractSection = line.startsWith("## Core") || line.startsWith("## Wiki");
+        if (line.startsWith("## Default Core Profile")) {
+          enSectionMode = "core-profile";
+        } else if (line.startsWith("## Full Profile") || line.startsWith("## Wiki")) {
+          enSectionMode = "legacy";
+        } else {
+          enSectionMode = "none";
+        }
         continue;
       }
-      if (!inEnContractSection) continue;
+      if (enSectionMode === "none") continue;
       const match = line.match(/^\|\s*`?(causoryn_[a-z_0-9]+)`?\s*\|/);
-      if (match?.[1]) enListedTools.push(match[1]);
+      if (match?.[1]) {
+        if (enSectionMode === "core-profile") enCoreProfileTools.push(match[1]);
+        else enLegacyTools.push(match[1]);
+      }
     }
-    expect(enListedTools).toHaveLength(TOOL_NAMES.length);
-    expect([...enListedTools].sort()).toEqual([...TOOL_NAMES].sort());
+    expect(enCoreProfileTools).toHaveLength(CORE_TOOL_NAMES.length);
+    expect([...enCoreProfileTools].sort()).toEqual([...CORE_TOOL_NAMES].sort());
+    expect(enLegacyTools).toHaveLength(TOOL_NAMES.length);
+    expect([...enLegacyTools].sort()).toEqual([...TOOL_NAMES].sort());
 
     // TR ve EN tool-contracts.md: INDEXED_ADAPTERS gerçek runtime analyzerId kimliklerini taşır
     const trToolsText = readDoc("toolContracts");
@@ -1004,9 +1065,9 @@ describe("BAĞIMSIZ DENETİM DÖNGÜSÜ (2026-11-18): doküman↔kod tam parite 
     expect(enBench).toContain("10.7");
     expect(enBench).toContain("16370.3");
 
-    // EN implementation-status.md: B7 Partial kalır (ADR-010)
+    // EN implementation-status.md: Live Architecture / watcher MCP surface remains Partial honestly
     const enStatus = readFileSync(path.join(REPO_ROOT, "docs", "en", "implementation-status.md"), "utf8");
-    expect(enStatus).toMatch(/\|\s*B7\s*\|[^\n]*\*\*Partial\*\*/);
+    expect(enStatus).toMatch(/Live Architecture[^\n]*\*\*Partial\*\*/i);
   });
 
   it("K-026: temiz sürüm-kirliliğinden arınmış README, deterministik vs. anotasyonlu örnek prompt'lar, Diátaxis hub ve güncel v0.2.3 + K-025 TR/EN dokümanlar", () => {
@@ -1118,11 +1179,13 @@ describe("BAĞIMSIZ DENETİM DÖNGÜSÜ (2026-11-18): doküman↔kod tam parite 
     expect(changelogText).not.toContain("33-dosya");
     expect(changelogText).not.toContain("12 kök + kök dosyalarına");
     expect(readDoc("toolContracts")).not.toContain("küreyi");
-    for (const rel of ["docs/implementation-status.md", "docs/en/implementation-status.md"]) {
-      const statusDoc = readFileSync(path.join(REPO_ROOT, ...rel.split("/")), "utf8");
-      expect(statusDoc).toContain("K-024");
-      expect(statusDoc).toContain("K-025");
-    }
+    const trStatusDoc = readFileSync(path.join(REPO_ROOT, "docs", "implementation-status.md"), "utf8");
+    expect(trStatusDoc).toContain("K-024");
+    expect(trStatusDoc).toContain("K-025");
+    const enStatusDoc = readFileSync(path.join(REPO_ROOT, "docs", "en", "implementation-status.md"), "utf8");
+    expect(enStatusDoc).toContain("JavaScript");
+    expect(enStatusDoc).toContain("CodeQL");
+    expect(enStatusDoc).toContain("zizmor");
 
     // 8. project-overview.tr-en.md doğrulamaları (syn 3, K-024, K-025, 96 test dosyası)
     const overview = readFileSync(OVERVIEW_PATH, "utf8");
@@ -1141,5 +1204,189 @@ describe("BAĞIMSIZ DENETİM DÖNGÜSÜ (2026-11-18): doküman↔kod tam parite 
     expect(contribMd).toContain("-p:RestoreLockedMode=true");
     expect(contribMd).toContain("npm audit --audit-level=high");
     expect(contribMd).toContain("export-public-tree.mjs --verify-temp");
+  });
+});
+
+describe("Wave 3 Track 3B: Jargon-free public English docs, 5-minute tutorial & English CHANGELOG", () => {
+  const DOT_DOT = "." + ".";
+  const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), DOT_DOT);
+  const EN_DOCS_ROOT = path.join(REPO_ROOT, "docs", "en");
+  const TUTORIAL_PATH = path.join(EN_DOCS_ROOT, "tutorial-5-minutes.md");
+
+  function collectMarkdownFiles(dir: string): string[] {
+    const out: string[] = [];
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        out.push(...collectMarkdownFiles(full));
+      } else if (entry.isFile() && entry.name.endsWith(".md")) {
+        out.push(full);
+      }
+    }
+    return out.sort();
+  }
+
+  it("ships docs/en/tutorial-5-minutes.md linked from README.md and docs/en/README.md with zero broken links", () => {
+    expect(existsSync(TUTORIAL_PATH), "docs/en/tutorial-5-minutes.md must exist").toBe(true);
+    const tutorial = readFileSync(TUTORIAL_PATH, "utf8");
+    expect(tutorial.trim().length).toBeGreaterThan(1_000);
+    expect(tutorial).not.toMatch(/^## \[1\.0\.0\]/m);
+
+    for (const token of [
+      "examples/fixture-ts-orders",
+      "npx causoryn setup --client claude-code --yes",
+      "npx causoryn doctor",
+      "causoryn_status",
+      "causoryn_map_system",
+      "causoryn_preflight_change",
+      "causoryn_verify_change",
+      "causoryn_get_agent_context",
+      "causoryn_trace",
+      "--tool-profile full",
+      "--tool-profile wiki,history",
+    ]) {
+      expect(tutorial, `tutorial-5-minutes.md missing: ${token}`).toContain(token);
+    }
+
+    // Zero broken relative markdown links in tutorial-5-minutes.md
+    const strippedCode = tutorial.replace(/```[\s\S]*?```/g, "");
+    const linkRe = /\[[^\]]+\]\(([^)#\s]+)(?:#[^)]*)?\)/g;
+    let m: RegExpExecArray | null;
+    while ((m = linkRe.exec(strippedCode)) !== null) {
+      const href = m[1] ?? "";
+      if (
+        href.length === 0 ||
+        href.startsWith("http://") ||
+        href.startsWith("https://") ||
+        href.startsWith("mailto:") ||
+        href.startsWith("file://")
+      ) {
+        continue;
+      }
+      const resolvedLink = path.resolve(path.dirname(TUTORIAL_PATH), href);
+      expect(
+        existsSync(resolvedLink),
+        `Broken relative link in docs/en/tutorial-5-minutes.md: (${href}) -> ${resolvedLink}`,
+      ).toBe(true);
+    }
+
+    // Linked prominently from README.md and docs/en/README.md
+    const rootReadme = readFileSync(path.join(REPO_ROOT, "README.md"), "utf8");
+    const enHub = readFileSync(path.join(EN_DOCS_ROOT, "README.md"), "utf8");
+    expect(rootReadme).toContain("docs/en/tutorial-5-minutes.md");
+    expect(enHub).toContain("tutorial-5-minutes.md");
+  });
+
+  it("removes internal spec, decision, sprint, and task jargon from README.md, packages/causoryn/README.md, and all docs/en/**", () => {
+    const publicEnglishFiles = [
+      path.join(REPO_ROOT, "README.md"),
+      path.join(REPO_ROOT, "packages", "causoryn", "README.md"),
+      ...collectMarkdownFiles(EN_DOCS_ROOT),
+    ];
+
+    const forbiddenPatterns: ReadonlyArray<{ readonly label: string; readonly re: RegExp }> = [
+      { label: "Turkish spec ref (TŞ §)", re: /TŞ\s*§/ },
+      { label: "Spec section ref (TS § / TS v2 / Spec §)", re: /\b(?:TS|Spec)\s*(?:§|v2\.1)/ },
+      { label: "Technical Specification internal ref", re: /Technical Specification\b/ },
+      { label: "Internal decision ID (K-0xx)", re: /\bK-0\d\d\b/ },
+      { label: "Internal ADR prose ID (ADR-0xx)", re: /\bADR-0\d\d\b/ },
+      { label: "Internal sprint ID (sprint-1..9)", re: /\bsprint-[1-9]\b/i },
+      { label: "Internal sprint label (Sprint 1..9)", re: /\bSprint\s+[1-9]\b/ },
+      { label: "Internal task code (F1..F9 / B1..B9 / C1..C8 / D1..D7 / E1..E6 / W1..W8)", re: /\b(?:F[1-9]|B[1-9]|C[1-8]|D[1-7]|E[1-6]|W[1-8])\b/ },
+      { label: "Internal raw PDF path", re: /raw\/Causoryn_Teknik_Dokuman_v2\.1\.pdf/ },
+      { label: "Internal wiki notebook path", re: /wiki\/(?:sprint-[1-9]|decisions\.md|architecture\.md|mcp-tools\.md|roadmap\.md|scope\.md)/ },
+      { label: "Overstated Public Preview phrasing", re: /Public Preview/i },
+    ];
+
+    for (const filePath of publicEnglishFiles) {
+      const rel = path.relative(REPO_ROOT, filePath).replace(/\\/g, "/");
+      const raw = readFileSync(filePath, "utf8");
+      // Preserve valid relative/URL links pointing to the file `adr/ADR-002-no-llm.md`
+      // without flagging the literal filename inside URLs or markdown link targets.
+      const proseForScan = raw.replace(/(?:docs\/en\/)?(?:adr\/)?ADR-002-no-llm\.md/g, "no-llm-policy.md");
+      for (const { label, re } of forbiddenPatterns) {
+        expect(proseForScan, `${rel} contains forbidden internal jargon: ${label}`).not.toMatch(re);
+      }
+    }
+  });
+
+  it("documents Wave 1 & Wave 2 capabilities accurately across docs/en/**", () => {
+    const toolContracts = readFileSync(path.join(EN_DOCS_ROOT, "tool-contracts.md"), "utf8");
+    const cliConfig = readFileSync(path.join(EN_DOCS_ROOT, "cli-and-configuration.md"), "utf8");
+    const arch = readFileSync(path.join(EN_DOCS_ROOT, "architecture.md"), "utf8");
+    const sec = readFileSync(path.join(EN_DOCS_ROOT, "security-pass.md"), "utf8");
+    const status = readFileSync(path.join(EN_DOCS_ROOT, "implementation-status.md"), "utf8");
+    const compat = readFileSync(path.join(EN_DOCS_ROOT, "compatibility-matrix.md"), "utf8");
+
+    expect(toolContracts).toContain("--tool-profile");
+    expect(toolContracts).toContain("CAUSORYN_TOOL_PROFILE");
+    expect(toolContracts).toContain("coverage.byLanguage");
+    expect(toolContracts).toContain("host_asserted");
+
+    expect(cliConfig).toContain("--tool-profile");
+    expect(cliConfig).toContain("CAUSORYN_TOOL_PROFILE");
+    expect(cliConfig).toContain("graph.sqlite");
+    expect(cliConfig).toContain("NOT CONFIGURED");
+
+    expect(arch).toContain("worker_threads");
+    expect(arch).toContain("build_leases");
+    expect(arch).toContain("file_facts");
+    expect(arch).toContain("INHERITS");
+    expect(arch).toContain("IMPLEMENTS");
+    expect(arch).toContain("obj/project.assets.json");
+
+    expect(sec).toContain("GIT_NO_LAZY_FETCH=1");
+    expect(sec).toContain("GOTOOLCHAIN=local");
+    expect(sec).toContain("GOWORK=off");
+    expect(sec).toContain("GOPROXY=off");
+    expect(sec).toContain("-I");
+    expect(sec).toContain("DOTNET_STARTUP_HOOKS");
+    expect(sec).toContain(".sha256.json");
+    expect(sec).toContain("script-src 'sha256-");
+    expect(sec).toContain("UNC");
+
+    expect(status).toContain("worker_threads");
+    expect(status).toContain("file_facts");
+    expect(status).toContain("host_asserted");
+
+    expect(compat).toContain("--tool-profile");
+    expect(compat).toContain("11");
+  });
+
+  it("keeps root CHANGELOG.md English-first with the Wave 1/2/3 changes released under [0.3.0] and zero 1.0.0 release claims", () => {
+    const changelog = readFileSync(path.join(REPO_ROOT, "CHANGELOG.md"), "utf8");
+    expect(changelog).toContain("All notable changes to this project will be documented in this file");
+    expect(changelog).not.toContain("Bu projedeki");
+    expect(changelog).not.toContain("Sürüm kararı");
+    expect(changelog).not.toContain("TŞ §");
+    expect(changelog).not.toMatch(/\bK-0\d\d\b/);
+    expect(changelog).not.toMatch(/^## \[1\.0\.0\]/m);
+
+    const released = changelogSection(changelog, "0.3.0");
+    expect(released).toMatch(/^## \[0\.3\.0\] - \d{4}-\d{2}-\d{2}$/m);
+    expect(released).toContain("--tool-profile");
+    expect(released).toContain("worker_threads");
+    expect(released).toContain("file_facts");
+    expect(released).toContain("build_leases");
+    expect(released).toContain("tutorial-5-minutes.md");
+  });
+
+  it("keeps every historical CHANGELOG entry from the pre-translation (0.2.4) CHANGELOG, translated to English", () => {
+    const changelog = readFileSync(path.join(REPO_ROOT, "CHANGELOG.md"), "utf8");
+    // Facts that the 0.2.4 CHANGELOG recorded per release; an English rewrite must not drop them.
+    const historicalFacts: ReadonlyArray<readonly [string, readonly string[]]> = [
+      ["0.2.4", ["PR #20, #23", "PR #24", "includeTests", "js/insecure-temporary-file", "2-job SLSA", "publish_results: true"]],
+      ["0.2.3", ['language: "javascript"', "module.exports = function", "NodeNext", "frontend/tsconfig.json", ".safetensors", "**/bin/{Debug,Release,x64,x86,AnyCPU}/**", "setImmediate", "EXPORT_INTERACTIVE_HTML_FILE_NAME", "ts.sys"]],
+      ["0.2.2", ["externalSummary", "default-src 'none'", "architectureSummary.moduleIds", "VIEWER_CSP_POLICY", "max 4 entries", "100–300x"]],
+      ["0.2.1", ["oninitialized", ".pytest_cache", "runInTransaction", "50 entries"]],
+      ["0.2.0", ["coverageOf.tier", "symbol_fts", "4 canonical `skills/`", "Causoryn Contributors", "causoryn-sbom.cdx.json", "docs/superpowers/", "claude plugin validate --strict", "PDB"]],
+      ["0.1.0", ["only Windows was verified", "EVIDENCE_NOT_FOUND", "SYMBOL_NOT_FOUND", "8-rule verdict chain", "inconclusive", "evidenceRef", "parse safety quotas", "fp2", "bit-identical", "5 independent spawn"]],
+    ];
+    for (const [version, facts] of historicalFacts) {
+      const section = changelogSection(changelog, version);
+      for (const fact of facts) {
+        expect(section, `CHANGELOG [${version}] lost historical detail: ${fact}`).toContain(fact);
+      }
+    }
   });
 });

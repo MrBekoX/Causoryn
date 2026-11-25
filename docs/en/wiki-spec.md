@@ -1,97 +1,163 @@
 # Living Wiki Engine — Design & Implementation Specification
 
-> **Language:** [Türkçe](../wiki-spec.md) | **English**
+> **Language:** [Türkçe](../wiki-spec.md) | **English** · [Documentation Hub](README.md)
 >
-> **Evidence:** `raw/Causoryn_Teknik_Dokuman_v2.1.pdf` (Technical Specification v2.1) — §16A pp. 14–18, §10 pp. 9–10, §8–§9 pp. 8–9, §19–§20 pp. 21–22, §23 p. 23, §24–§25 pp. 23–24 · `wiki/mcp-tools.md` · `wiki/scope.md` · `wiki/sprint-4.md` · `packages/wiki/src/*` · `packages/storage-sqlite/src/*` · `packages/mcp-server/src/services-wiki.ts`
+> **Status:** reflects Causoryn 0.3.0 (default `core` tool profile; the Living Wiki tools are opt-in, see [§2](#2-enabling-the-wiki-tools-and-storage) and [CLI & Configuration](cli-and-configuration.md)).
+>
+> **Source modules:** `packages/wiki/src/*` (pure projection, links, search, overlay, export cores) · `packages/storage-sqlite/src/{wiki-schema.ts,wiki-store.ts}` (SQLite persistence) · `packages/mcp-server/src/services-wiki.ts` (MCP services) · `packages/mcp-server/src/server.ts` + `schemas.ts` (tool registration and input schemas) · `packages/mcp-server/src/version.ts` (`WIKI_TOOL_NAMES`, tool profiles).
 
-> **STATUS (`v0.2.4` Pre-1.0 Public Preview — ADR-010 Honesty Summary):**
-> - **Shipped core & MCP surface:** The pure `@causoryn/wiki` projection engine (`projectWiki`, `projectWikiIncremental`, `resolveWikiLinks`, `buildWikiLinkIndex`, `WikiSearchStore`, `AnnotationOverlayEngine`, `exportWikiOffline`, `computeWikiCoverageDeltas`, `computeWikiContractChanges`), `@causoryn/storage-sqlite` (`SqliteWikiStore`: `wiki_snapshots`, `wiki_pages`, `wiki_page_sections`, `wiki_links`, `wiki_page_versions`, `wiki_annotations`, `wiki_aliases`, `wiki_fts`), and **all 7 MCP Wiki tools** in `packages/mcp-server/src/services-wiki.ts` are registered in the server.
-> - **Data-root provisioning & `.git`-less `working-tree` compatibility (K-021):** Alongside explicit `wiki.dataDbPath` configuration, `causoryn mcp --allow-cwd --auto-data-dir [--client <id>]` (and dynamic MCP `roots/list` workspace binding in desktop IDEs) automatically provisions an out-of-tree SQLite database at `~/.causoryn/workspaces/<slug>-<hash12>/graph[-<client>].sqlite`. Furthermore, in workspaces without a `.git` directory (such as exported source archives), the `working-tree` revision resolves directly without spawning `git`.
-> - **Open 1.0.0 release gates:** (1) Extra filter fields on `causoryn_wiki_search` (`kinds`, `scope`, `language`, `revision`, `resolution`) are declared in the schema but explicitly rejected with `INVALID_ARGUMENT` on the `v0.2.4` MCP surface (and the unpopulated `proximity` rank leg is honestly reported via `skippedRankLegs`); (2) `WIKI_NOTE_CONFLICT` is fully implemented as `wiki/annotation-conflict` in `AnnotationOverlayEngine`, while its registration in MCP `CAUSORYN_TOOL_ERROR_CODES` is deferred until local note CLI/UI write flows ship in 1.0.0 (K-014); (3) automatic Wiki rebuilds on `causoryn_refresh_index` (`wiki.autoBuildOnSnapshot`) and `causoryn_export_documentation(view="wiki")` MCP wiring remain open 1.0.0 items (Wiki rebuilds are triggered explicitly via `causoryn_wiki_build`, and `view="wiki"` returns `INVALID_ARGUMENT`); incremental `wiki_build` preserves unchanged page `contentHash` values while writing a complete `WikiSnapshot` row set per publication in SQLite.
+> [!IMPORTANT]
+> **The wiki tools are not in the default tool surface.** The default `core` profile lists 11 tools and none of the 7 `causoryn_wiki_*` tools. Start the server with **`--tool-profile wiki`** (or `--tool-profile wiki,history`, or `--tool-profile full`), or set the environment variable **`CAUSORYN_TOOL_PROFILE=wiki`**. The CLI flag wins over the environment variable; unknown profile names are rejected at startup. The wiki also needs a SQLite data root (`--auto-data-dir`, `--data-dir <path>`, or `wiki.dataDbPath`); without one, `causoryn_wiki_build` returns `PATH_DENIED` and the read tools return `INDEX_NOT_READY`.
+
+> **Implementation summary (honest status):**
+> - **Implemented:** the pure `@causoryn/wiki` engine (`projectWiki`, `projectWikiIncremental`, `diffWikiGraphs`, `resolveWikiLinks`, `buildWikiLinkIndex`, `WikiSearchStore`, `computeWikiCoverageDeltas`, `computeWikiContractChanges`, `AnnotationOverlayEngine`, `exportWikiOffline`); the `SqliteWikiStore` with the `wiki_*` table family and the `wiki_fts` FTS5 table; and all 7 MCP wiki tools under the `wiki` / `full` profiles.
+> - **Partial:** `causoryn_wiki_build` emits only three of the eleven link kinds (`PARENT_OF`, `DEPENDS_ON`, `CALLS`); the page kinds `component`, `symbol` and `policy` are declared but never generated; `mode: "incremental"` preserves unchanged page content but still writes a complete row set for every new `WikiSnapshot`; `causoryn_wiki_get_versions` and the revision form of `causoryn_wiki_diff` only see the latest published `WikiSnapshot`.
+> - **Not implemented:** the extra `causoryn_wiki_search` filters (`kinds`, `scope`, `language`, `revision`, `resolution`; declared and explicitly rejected with `INVALID_ARGUMENT`) and the graph-proximity rank leg; any MCP or CLI surface for annotations (the overlay engine is library-only, so `WIKI_NOTE_CONFLICT` is not an MCP error code); offline wiki export from MCP or the CLI (`causoryn_export_documentation(view="wiki")` returns `INVALID_ARGUMENT`); automatic wiki rebuild after re-indexing; wiki snapshot retention. Details in [§11](#11-limits-and-honest-gaps).
+
+## Contents
+
+1. [Purpose and scope](#1-purpose-and-scope)
+2. [Enabling the wiki tools and storage](#2-enabling-the-wiki-tools-and-storage)
+3. [Page taxonomy and page kinds](#3-page-taxonomy-and-page-kinds)
+4. [Identifiers, hashes and determinism](#4-identifiers-hashes-and-determinism)
+5. [Data model (Zod schemas)](#5-data-model-zod-schemas)
+6. [Projection, links and incremental invalidation](#6-projection-links-and-incremental-invalidation)
+7. [Storage schema (`wiki_*`, `wiki_fts`)](#7-storage-schema-wiki_-wiki_fts)
+8. [MCP tool contracts — 7 wiki tools](#8-mcp-tool-contracts--7-wiki-tools)
+9. [Write permissions and security boundaries](#9-write-permissions-and-security-boundaries)
+10. [Tests and acceptance criteria](#10-tests-and-acceptance-criteria)
+11. [Limits and honest gaps](#11-limits-and-honest-gaps)
+12. [Related documentation](#12-related-documentation)
 
 ## 1. Purpose and Scope
 
-The Living Wiki Engine is Causoryn's **cross-cutting** 19th deliverable, unifying the 18 core architectural intelligence capabilities into a navigable, versioned project Wiki. The Wiki is **not** a separate code analysis engine; it is a deterministic, versioned, queryable **projection** of the Unified Evidence & Knowledge Graph (ADR-011: *Living Wiki as Graph Projection*, Technical Specification §24).
+The Living Wiki Engine turns Causoryn's evidence graph into a navigable, versioned, searchable project wiki stored in SQLite with an FTS5 index. It is **not** a second code analyzer: every generated section is derived from a published, immutable `GraphSnapshot` (nodes, edges, evidence spans, contract nodes). The wiki reads no source files itself, so anything excluded from indexing never reaches it.
 
-> **Living Wiki (`causoryn_wiki_*`) vs. Visual Architecture Portals (`causoryn_export_documentation`):**
-> - **Living Wiki (`causoryn_wiki_*`):** A persistent, revisioned, 12-category SQLite + FTS5 project knowledge base (`SqliteWikiStore` + `wiki_fts`) built via `causoryn_wiki_build` and queried incrementally over MCP (`wiki_get_tree`, `wiki_get_page`, `wiki_search`, `wiki_get_links`, `wiki_get_versions`, `wiki_diff`) for page-level navigation, reverse backlinks, FTS5 search, and cross-revision diffs.
-> - **Visual Architecture Portals (`causoryn_export_documentation`):** Standalone offline artifacts exported on demand to an authorized `output.allowedOutputDirs` directory (`causoryn-architecture-interactive.html`, zero-JS `causoryn-architecture.html`, Mermaid `.mmd`, Architecture Brief `.md`, JSON blueprint), optionally enriched with fail-closed Host-LLM `annotations` guided by the `architecture-blueprint` skill. See [Prompting & Architecture Portals Guide](prompting-and-architecture-portals.md).
+- **Living Wiki (`causoryn_wiki_*`):** a persistent, revisioned knowledge base with 12 root categories. `causoryn_wiki_build` projects and publishes a `WikiSnapshot`; the six read tools (`causoryn_wiki_get_tree`, `causoryn_wiki_get_page`, `causoryn_wiki_search`, `causoryn_wiki_get_links`, `causoryn_wiki_get_versions`, `causoryn_wiki_diff`) navigate it page by page, follow links and backlinks, run FTS5 search, and diff snapshots.
+- **Visual Architecture Portals (`causoryn_export_documentation`, core profile):** standalone offline artifacts (`causoryn-architecture-interactive.html`, zero-JS `causoryn-architecture.html`, Mermaid `.mmd`, Architecture Brief `.md`, JSON blueprint) written on demand into `output.allowedOutputDirs`. This tool does not export the Living Wiki (`view: "wiki"` is rejected). See [Prompting & Architecture Portals Guide](prompting-and-architecture-portals.md).
+- **Generated layer vs. overlay layer:** generated sections are rebuilt freely and never edited by hand. Human notes and user-accepted host-model proposals belong to a separate `wiki_annotations` overlay table that rebuilds never touch (see [§5.6](#56-wikiannotation--overlay-layer)).
+- **Source of truth:** authorized source code → `GraphSnapshot` → `WikiSnapshot`. Annotations and host-model text never replace or upgrade graph evidence.
+- **No model calls:** the wiki engine calls no LLM or embedding service; search ranking is FTS5 BM25 plus deterministic rules ([no-LLM policy](adr/ADR-002-no-llm.md)).
+- **Determinism:** the same graph snapshot and template version produce the same `WikiSnapshot` ID, page IDs, section IDs, link IDs and content hashes. `builtAt` is an input to the pure projection; the MCP server takes it from its runtime clock, so timestamps differ between builds while identities do not.
 
-The same graph snapshot and template version produce the same WikiSnapshot ID. The pure projection takes `builtAt` as an input. The MCP server gets the build and publication timestamps from its runtime clock, so timestamp fields can vary across builds. Evidence and page content derive from the source graph.
+## 2. Enabling the Wiki Tools and Storage
 
-- **Source of truth**: authorized source code + `GraphSnapshot` + Git revisions + contract files. Human annotations and host-model narrative proposals never replace the source of truth (§16A).
-- **Relationship to the 18 core features**: The Wiki replaces none of the 18 features; it aggregates them into a unified navigation surface (§2.3, §25 item 10). Core engines for Architecture Map, Impact Analysis, Contracts, Verification, and Onboarding operate independently; the Wiki renders their evidence-backed projection.
-- **Governing ADRs**: ADR-011 (Graph Projection), ADR-012 (Generated/Overlay Separation), and ADR-013 (Wiki Revision & Link Integrity), together with ADR-004 (Evidence First), ADR-005 (Immutable Snapshots), ADR-008 (Read-only Workspace Default), and ADR-010 (Incomplete Feature Never Advertised as Done).
-- **Locked tool catalog**: 22 core tools + 7 Wiki tools = **29 MCP tools** (§2.3, `wiki/mcp-tools.md`).
+### 2.1 Tool profiles
 
-## 2. Wiki Page Kinds and Purpose
+Tool profiles are defined in `packages/mcp-server/src/version.ts` (`TOOL_PROFILES`, `WIKI_TOOL_NAMES`) and resolved in `server.ts` (`resolveProfileToolNames`) and `runtime-cli.ts` (`parseToolProfile`, `resolveEffectiveToolProfile`).
 
-### 2.1 Default Page Tree (Technical Specification §16A.1)
-
-Every workspace Wiki exposes 12 root categories in taxonomy order (`packages/wiki/src/taxonomy.ts` `WIKI_ROOT_CATEGORIES`):
-
-```
-Workspace Wiki
-├── Overview                  # repository, languages, scope, unknowns
-├── Architecture              # L0–L4 layer/module/component summaries
-├── Projects & Modules        # per-module components + dependencies
-├── APIs & Entry Points       # endpoints, handlers, route links
-├── Business Flows            # end-to-end flows (e.g., checkout/order)
-├── Events & Integrations     # producers/consumers, async contracts
-├── Data & Schemas            # entities, tables, read/write access
-├── Contracts & Policies      # API/event/schema contracts, policies
-├── Tests & Quality           # test nodes, TESTS edges, coverage gaps
-├── Architecture Timeline     # commit-based evolution / ADR references
-├── Onboarding                # learning paths, critical modules
-└── Unresolved & Coverage     # unresolved edges, UnknownExternal nodes
-```
-
-### 2.2 Page Kinds (`kind`) and Graph Sources
-
-Supported page kinds (§16A.1, p. 16): `overview | architecture | project | module | component | symbol | api | business_flow | event | data | contract | policy | test | timeline | onboarding | coverage`.
-
-| `kind` | Purpose | Primary Graph Source |
+| Profile | Tools listed | Wiki tools |
 |---|---|---|
-| `overview` | Summary of repository, languages, node/edge/evidence counts | `Workspace` / `Repository` / `Project` nodes |
-| `architecture` | L0–L4 layer/module/component breakdown | `CONTAINS` / `DEPENDS_ON` edges + layer node counts |
-| `project` | Project-level module inventory and ownership | `Project` / `Module` nodes |
-| `module` | Per-module components and inbound/outbound dependencies | `Module` nodes + `CONTAINS` + `DEPENDS_ON` |
-| `component` | Component (class/service cluster) detail | `Class` / `Interface` / `Function` nodes |
-| `symbol` | Individual symbol declaration, relations, and evidence | Symbol nodes + `CALLS` / `IMPORTS` |
-| `api` | Endpoint routes, handlers, and contract links | `Endpoint` / `Handler` + `ROUTES_TO` / `HANDLES` |
-| `business_flow` | End-to-end flow (e.g., checkout/order) | Execution / Business Flow projection |
-| `event` | Event/topic/queue publishers and subscribers | `Event` / `Topic` / `Queue` + `PUBLISHES` / `SUBSCRIBES` |
-| `data` | Database tables, schemas, and reader/writer edges | `Database` / `Table` / `Column` + `READS` / `WRITES` |
-| `contract` | API, event, and schema contract definitions | `ApiContract` / `EventContract` / `SchemaContract` / `ContractVersion` |
-| `policy` | Architectural guard rules, drift, and suppressions | Guard policy + baseline suppression data |
-| `test` | Test inventory, `TESTS` edges, and coverage gaps | `Test` nodes + `TESTS` edges |
-| `timeline` | Commit-level architectural evolution | Git revisions + `CHANGED_IN` |
-| `onboarding` | Topological learning path and high-centrality modules | Onboarding Mode output |
-| `coverage` | Unresolved edges, `UnknownExternal` nodes, parser gaps | `unresolved` edges + `UnknownExternal` nodes |
+| `core` (default) | 11 | none |
+| `wiki` | 18 (11 core + 7 wiki) | all 7 |
+| `wiki,history` | 20 (11 core + 7 wiki + 2 history) | all 7 |
+| `full` | 32 (29 legacy names + `causoryn_status`, `causoryn_trace`, `causoryn_contracts`) | all 7 |
 
-When a page kind is not supported by a workspace's active adapters, the page returns `unsupported` or `partial` coverage rather than fabricated prose (`packages/wiki/src/projection.ts`: root categories whose inputs live outside `GraphSnapshot` — `business_flow`, `timeline`, and `onboarding` — honestly report `no_data`, while child pages materialize via `WIKI_CHILD_PAGE_SOURCES` for `module`, `api`, `event`, `data`, and `contract` nodes).
+Selection order: `--tool-profile <list>` > `CAUSORYN_TOOL_PROFILE` > `CAUSORYN_CONFIG.toolProfile` > `core`. Profiles combine with commas. In `full`, superseded legacy tools carry a deprecation note; the wiki tools are not deprecated and behave identically in `wiki` and `full`.
 
-### 2.3 Page Generation Principles (§16A.1)
+### 2.2 Data root
 
-1. **No module or endpoint page is ever generated without backing graph nodes.** Empty category pages carry `coverage.status: "no_data"` and `generatedMarkdown: ""`; filler prose is never synthesized.
-2. Every page exposes: `kind, pageId, parentId, title, route, graphSnapshotId, wikiSnapshotId, coverage, freshness, sourceRefs`.
-3. `pageId` is derived deterministically via SHA-256 from **canonical graph identity + page kind** (`wikiRootPageIdFor`, `wikiChildPageId`), preserving stable identity across display title or slug formatting changes.
-4. When a rename or relocation cannot be resolved with certainty, `wiki_aliases` records a `candidate_redirect` entry rather than silently guessing (see `WikiPageAlias`, §3.6, and `resolveWikiLinks`, §3.3).
+`causoryn_wiki_build` writes, and the read tools read, a SQLite database outside every authorized workspace root:
 
-## 3. Data Model — Zod Schemas
+1. **Zero-config (`--auto-data-dir` or `--data-dir <path>`):** `buildWorkspaceAutoConfig` (`runtime-cli.ts`) resolves the base directory (`--data-dir` > `~/.causoryn` for every host; `ZCODE_PLUGIN_DATA` only as a fallback when `~/.causoryn` is unusable) and sets both `storage.dataDbPath` and `wiki.dataDbPath` to the same file, `<base>/workspaces/<slug>-<hash12>/graph.sqlite`. All hosts share this one database, so a wiki built from one host is visible to every host that uses the same data directory. Directories are created with mode `0700` and checked to be strictly outside the authorized roots before and after creation.
+2. **Explicit configuration:** set `wiki.dataDbPath` in `CAUSORYN_CONFIG` to an absolute path outside the workspace. It is validated at startup by `validateDataDbPath` (`context.ts`); see [§9](#9-write-permissions-and-security-boundaries).
 
-Field names follow the Technical Specification §16A.7 (p. 17) entity catalog: `WikiSnapshot, WikiPage, WikiPageSection, WikiLink, WikiPageVersion, WikiAnnotation, WikiPageAlias, WikiSearchIndex`. Runtime Zod schemas (`z.strictObject`) live in `packages/wiki/src/{schema.ts,links.ts,overlay.ts,search-schema.ts}` and map 1-to-1 to the `wiki_*` SQLite table family in `packages/storage-sqlite/src/{wiki-schema.ts,wiki-store.ts}`, incorporating all finalized K-013 decisions.
+The `wiki` configuration object accepts only `dataDbPath` (`config.ts`, strict schema); other keys are rejected at startup.
 
-### 3.0 Common Types (§8, p. 8)
+Example (zero-config, wiki tools enabled):
+
+```bash
+causoryn mcp --allow-cwd --auto-data-dir --tool-profile wiki
+# or
+CAUSORYN_TOOL_PROFILE=wiki causoryn mcp --allow-cwd --auto-data-dir
+```
+
+Typical call order: wait for the graph index (`causoryn_status`), call `causoryn_wiki_build` with `mode: "full"`, then use the read tools. The wiki is never rebuilt automatically; call `causoryn_wiki_build` again after a re-index (read tools report `stale: true` until you do).
+
+## 3. Page Taxonomy and Page Kinds
+
+### 3.1 Default page tree
+
+Every workspace wiki has 12 root category pages in fixed taxonomy order (`packages/wiki/src/taxonomy.ts`, `WIKI_ROOT_CATEGORIES`). The category `key` feeds page-ID derivation; the route is `/wiki/<slug>` (slug = key).
+
+```text
+Workspace Wiki                 key / root kind
+├── Overview                   overview / overview              # repository, languages, scope, unknowns
+├── Architecture               architecture / architecture      # L0–L4 layer, module, component counts
+├── Projects & Modules         projects-modules / project       # modules with components and dependencies
+├── APIs & Entry Points        apis-entry-points / api          # endpoints, handlers, route links
+├── Business Flows             business-flows / business_flow   # end-to-end flows (always no_data today)
+├── Events & Integrations      events-integrations / event      # producers/consumers, async contracts
+├── Data & Schemas             data-schemas / data              # databases, tables, columns, readers/writers
+├── Contracts & Policies       contracts-policies / contract    # API/event/schema contracts
+├── Tests & Quality            tests-quality / test             # test nodes, TESTS edges, coverage gaps
+├── Architecture Timeline      architecture-timeline / timeline # commit history (always no_data today)
+├── Onboarding                 onboarding / onboarding          # learning paths (always no_data today)
+└── Unresolved & Coverage      unresolved-coverage / coverage   # unresolved edges, UnknownExternal nodes
+```
+
+### 3.2 Page kinds and graph sources
+
+The page-kind enum (`WikiPageKindSchema`) has 16 values: `overview | architecture | project | module | component | symbol | api | business_flow | event | data | contract | policy | test | timeline | onboarding | coverage`. The table shows what the current projection (`packages/wiki/src/projection.ts`) actually generates.
+
+| `kind` | Generated as | Graph source | Section keys |
+|---|---|---|---|
+| `overview` | root page | `Workspace` / `Repository` / `Project` nodes; node/edge/evidence counts; per-language node counts | `summary`, `languages` |
+| `architecture` | root page | Node counts per layer: L0 `Repository`/`Workspace`, L1 `Project`/`Module`/`Package`, L2 `Class`/`Interface`/`Type`, L3 `Method`/`Function`/`Endpoint`/`Handler`, L4 contract nodes | `layers` |
+| `project` | root page (Projects & Modules) | `Module` nodes with locations | `modules` |
+| `module` | child page per `Module` node | `CONTAINS` (outgoing) and `DEPENDS_ON` (both directions) edges | `components`, `dependencies` |
+| `api` | root page + child page per `Endpoint` node | root: endpoint list; child: route, language, location, `ROUTES_TO` / `HANDLES` edges | root `endpoints`; child `route`, `handler` |
+| `event` | root page + child page per `Event` / `Topic` / `Queue` node | `PUBLISHES` (outgoing), `SUBSCRIBES` (incoming) | root `events`; child `publishers`, `subscribers` |
+| `data` | root page + child page per `Table` node | root: `Database` / `Table` / `Column` counts; child: incoming `READS` / `WRITES` | root `schemas`; child `readers-writers` |
+| `contract` | root page (Contracts & Policies) + child page per contract node | `ApiContract` / `EventContract` / `SchemaContract` / `ContractVersion` nodes and their attributes | root `contracts`; child `definition` |
+| `test` | root page | `Test` nodes and `TESTS` edges | `tests`, `coverage-gaps` (always `no_data`) |
+| `coverage` | root page | edges with `resolution: "unresolved"` and `UnknownExternal` nodes | `unresolved` |
+| `business_flow`, `timeline`, `onboarding` | root page, structurally `no_data` | not carried in `GraphSnapshot` (flow, Git history and onboarding outputs come from other engines) | `flows`, `commits`, `path` |
+| `component`, `symbol`, `policy` | **not generated** | declared in the enum and SQL `CHECK` constraint only | — |
+
+There is no `policy` page: the "Contracts & Policies" root has kind `contract`, and guard-policy or baseline-suppression data is not projected into the wiki today.
+
+### 3.3 Generation principles
+
+1. **No page without backing graph nodes.** Child pages exist only for nodes listed in `WIKI_CHILD_PAGE_SOURCES`; empty categories are never padded.
+2. **`no_data` stays empty.** A `no_data` section always has `generatedMarkdown: ""` and no evidence. Structural `no_data` roots (Business Flows, Architecture Timeline, Onboarding) carry an explanatory `coverage.detail`.
+3. **Coverage roll-up** (`materializeWikiPage`): all sections `no_data` → page `no_data`; all `ok` → `complete`; otherwise `partial`. A section is `partial` when at least one contributing edge is `unresolved`.
+4. **Unsupported kinds.** The pure engine accepts `supportedPageKinds`; categories outside that set become `unsupported` with a warning and no child pages. The MCP build does not pass this option, so every kind is treated as supported.
+5. **Stable identity.** `pageId` derives from canonical graph identity + page kind, never from the display title or slug (see [§4](#4-identifiers-hashes-and-determinism)).
+6. **Routes and slugs.** Child routes are `/wiki/<categorySlug>/<slug>`, where the slug is the node's qualified name reduced to `[a-z0-9-]`. Slug collisions inside a category get a deterministic suffix taken from the node ID.
+7. **Every page exposes** `kind`, `pageId`, `parentId`, `title`, `route`, `coverage`, `freshness`, `contentHash`, and its `wikiSnapshotId` / `graphSnapshotId` through the read tools.
+
+## 4. Identifiers, Hashes and Determinism
+
+All hashes are SHA-256 over canonical JSON (sorted keys, no whitespace) from `@causoryn/domain`.
+
+| Identifier | Derivation (code) |
+|---|---|
+| `wikiSnapshotId` | `wiki:` + sha256(`[graphSnapshotId, WIKI_TEMPLATE_VERSION]`) — `deriveWikiSnapshotId`; `WIKI_TEMPLATE_VERSION = "1.1.0"` |
+| Root `pageId` | `page:` + sha256(`[workspaceId, "root", categoryKey, categoryKind]`) — `wikiRootPageIdFor` |
+| Child `pageId` | `page:` + sha256(`[workspaceId, "node", pageKind, nodeId]`) — `wikiChildPageId` |
+| Section `id` | `section:` + sha256(`[pageId, sectionKey]`) |
+| Link `id` | `wikilink:` + sha256(`[kind, fromPageId, toRef]`) — `services-wiki.ts` |
+| `contentHash` | sha256 over each section's `{sectionKey, generatedMarkdown, evidenceRefs, status}` in template order (`content-hash.ts`); page ID, title, slug and route are excluded, so renaming a display title does not change it |
+| `linkSetHash` | sha256 over the page's outgoing links `{id, kind, toPageId, resolution}` sorted by ID |
+
+- **Two-level versioning:** `GraphSnapshot` → deterministic `WikiSnapshot`. Re-running `causoryn_wiki_build` for a graph snapshot whose wiki is already the latest published one is an idempotent no-op (`pagesRegenerated: 0` plus a warning).
+- **Template version:** changing a generated Markdown template requires bumping `WIKI_TEMPLATE_VERSION`, which changes every `wikiSnapshotId` and forces incremental builds to fall back to a full build. The version moved to `1.1.0` when the generated templates were translated to English, so a wiki published with an older template version is rebuilt on the next build.
+- **`revisionRef`:** defaults to the graph snapshot's `revision.id`. The indexer records `working-tree` there, so unless `causoryn_wiki_build` is called with an explicit `revision` label, every `WikiSnapshot` has `revisionRef: "working-tree"`. The `revision` input is a free-form label; it is not resolved against Git.
+- **Output order:** roots in taxonomy order, child pages by category then `pageId`; all core outputs are deep-frozen.
+
+## 5. Data Model (Zod Schemas)
+
+Runtime schemas live in `packages/wiki/src/{schema.ts,links.ts,overlay.ts,search-schema.ts}` and map to the `wiki_*` tables in `packages/storage-sqlite/src/wiki-schema.ts`. The excerpts below match the code.
+
+### 5.1 Common types
 
 ```ts
-import { z } from "zod";
-
-// Technical Specification §8: Resolution — `verified` is static/checker proof, NOT a runtime guarantee.
+// Resolution: "verified" means static/checker evidence, not a runtime guarantee.
 export const WikiResolutionSchema = z.enum(["verified", "heuristic", "unresolved"]);
 
-// Reference to a Graph Evidence/SourceSpan (§8). Evidence without a source span is never fabricated
-// into a fake location; affected sections degrade to `partial` with a warning.
+// Reference to a graph Evidence record with a source span. Evidence without a
+// span is never turned into a fake location.
 export const EvidenceRefSchema = z.strictObject({
   evidenceId: z.string(),
   relativePath: z.string(),
@@ -99,75 +165,60 @@ export const EvidenceRefSchema = z.strictObject({
   endLine: z.number().int().nonnegative(),
   sourceHash: z.string(),
 });
-export type EvidenceRef = z.infer<typeof EvidenceRefSchema>;
 ```
 
-### 3.1 WikiSnapshot (§16A.7)
+### 5.2 WikiSnapshot
 
 ```ts
-// K-013 #1: aligned 1-to-1 with GraphSnapshot.state; there is no separate "error" enum value.
+// Same value set as GraphSnapshot.state; there is no separate "error" status.
 export const WikiSnapshotStatusSchema = z.enum(["building", "ready", "partial", "failed"]);
 
 export const WikiSnapshotSchema = z.strictObject({
-  id: z.string(),               // wikiSnapshotId — deterministically derived from graphSnapshotId + WIKI_TEMPLATE_VERSION
+  id: z.string(),               // deriveWikiSnapshotId(graphSnapshotId)
   workspaceId: z.string(),
-  graphSnapshotId: z.string(),  // immutable source snapshot (ADR-005); only ready/partial snapshots are projectable (§9)
-  revisionRef: z.string(),      // Git commit SHA or working-tree revision descriptor (§16A.4)
+  graphSnapshotId: z.string(),  // only ready/partial graph snapshots are projectable
+  revisionRef: z.string(),      // graph revision.id ("working-tree") or the build's revision label
   status: WikiSnapshotStatusSchema,
-  builtAt: z.iso.datetime(),    // ISO 8601 UTC from injected clock; excluded from deterministic snapshot ID hash
-  templateVersion: z.string(),  // versioned generated Markdown templates (§16A.7)
+  builtAt: z.iso.datetime(),    // injected clock; not part of any ID
+  templateVersion: z.string(),  // WIKI_TEMPLATE_VERSION
 });
-export type WikiSnapshot = z.infer<typeof WikiSnapshotSchema>;
 ```
 
-Two-level versioning (§16A.4): **GraphSnapshot** → deterministically derived **WikiSnapshot** (`deriveWikiSnapshotId`). Git commit SHAs provide immutable revision identity while branches/tags act as moving aliases. For dirty workspaces or workspaces without a `.git` directory, `working-tree` / revision descriptors (`treeFingerprint + configHash + analyzerVersion`) are used so projection and `working-tree` version lookups work cleanly even outside Git repositories.
+The published status mirrors the source graph: a `ready` graph gives a `ready` wiki, a `partial` graph a `partial` wiki. `building` rows are invisible to readers; a build that throws is closed as `failed`.
 
-### 3.2 WikiPage and WikiPageSection (§16A.7, §16A.1)
+### 5.3 WikiPage and WikiPageSection
 
 ```ts
-export const WikiPageKindSchema = z.enum([
-  "overview", "architecture", "project", "module", "component", "symbol", "api",
-  "business_flow", "event", "data", "contract", "policy", "test", "timeline",
-  "onboarding", "coverage",
-]);
-
-// K-013 #3: finalized coverage and freshness enums.
 export const CoverageStatusSchema = z.enum(["complete", "partial", "unsupported", "no_data"]);
 export const FreshnessSchema = z.enum(["fresh", "stale"]);
+export const WikiPageSectionStatusSchema = z.enum(["ok", "partial", "no_data"]);
 
 export const WikiPageSchema = z.strictObject({
-  id: z.string(),                    // pageId — SHA-256 over canonical graph identity + kind (§16A.1)
+  id: z.string(),                    // pageId (see §4)
   wikiSnapshotId: z.string(),
   kind: WikiPageKindSchema,
-  parentId: z.string().nullable(),   // null on the 12 root category pages
-  title: z.string(),
+  parentId: z.string().nullable(),   // null on the 12 root pages
+  title: z.string(),                 // child pages: the node's qualifiedName
   slug: z.string(),
   route: z.string(),
-  contentHash: z.string(),           // deterministic hash over section payloads — incremental invalidation key (§16A.10)
+  contentHash: z.string(),           // incremental invalidation key
   freshness: FreshnessSchema,
-  coverage: z.strictObject({
-    status: CoverageStatusSchema,
-    detail: z.string().optional(),
-  }),
+  coverage: z.strictObject({ status: CoverageStatusSchema, detail: z.string().optional() }),
 });
-export type WikiPage = z.infer<typeof WikiPageSchema>;
-
-export const WikiPageSectionStatusSchema = z.enum(["ok", "partial", "no_data"]); // K-013 #3
 
 export const WikiPageSectionSchema = z.strictObject({
   id: z.string(),
   pageId: z.string(),
-  sectionKey: z.string(),             // fixed template section key versioned by WIKI_TEMPLATE_VERSION
-  generatedMarkdown: z.string(),      // strictly source-derived; never edited manually (ADR-012)
+  sectionKey: z.string(),            // fixed template key, versioned by WIKI_TEMPLATE_VERSION
+  generatedMarkdown: z.string(),     // source-derived only; never edited by hand
   evidenceRefs: z.array(EvidenceRefSchema),
   status: WikiPageSectionStatusSchema,
 });
-export type WikiPageSection = z.infer<typeof WikiPageSectionSchema>;
 ```
 
-Rule (§16A.7): `WikiPage` carries **only source-derived section data**, and generated Markdown templates are version-locked via `WIKI_TEMPLATE_VERSION`. `WikiProjectionSchema` enforces unique page/section IDs and referential integrity (`section.pageId` and `page.parentId`) via `superRefine`.
+`WikiProjectionSchema` (`{ snapshot, pages, sections, warnings }`) rejects duplicate page or section IDs, sections pointing at unknown pages, and child pages pointing at unknown parents. Page `freshness` is written as `fresh`; staleness is reported per response through the `stale` flag (see [§8.1](#81-shared-behavior)).
 
-### 3.3 WikiLink (§16A.2, §16A.7)
+### 5.4 WikiLink and broken-link diagnostics
 
 ```ts
 export const WikiLinkKindSchema = z.enum([
@@ -175,132 +226,206 @@ export const WikiLinkKindSchema = z.enum([
   "CONSUMES", "TESTED_BY", "FLOWS_TO", "RELATED_CONTRACT", "CHANGED_IN",
 ]);
 
-export const WikiLinkSchema = z
-  .strictObject({
-    id: z.string(),
-    wikiSnapshotId: z.string(),
-    fromPageId: z.string(),
-    toPageId: z.string().nullable(), // K-013 #4: unresolved targets are preserved with toPageId=null
-    kind: WikiLinkKindSchema,
-    resolution: WikiResolutionSchema,
-    evidenceRefs: z.array(EvidenceRefSchema), // every verified link requires ≥1 EvidenceRef (§16A.7, ADR-004)
-  });
-export type WikiLink = z.infer<typeof WikiLinkSchema>;
+export const WikiLinkSchema = z.strictObject({
+  id: z.string(),
+  wikiSnapshotId: z.string(),
+  fromPageId: z.string(),
+  toPageId: z.string().nullable(),   // unresolved targets are kept with toPageId = null
+  kind: WikiLinkKindSchema,
+  resolution: WikiResolutionSchema,
+  evidenceRefs: z.array(EvidenceRefSchema),
+}).superRefine(/* a "verified" link without evidenceRefs is rejected */);
+
+export const BrokenLinkDiagnosticSchema = z.strictObject({
+  linkId: z.string(),
+  fromPageId: z.string(),
+  toRef: z.string().nullable(),      // raw target name; null when derived from stored rows
+  kind: WikiLinkKindSchema,
+  reason: z.string(),
+});
 ```
 
-Behavioral rules (`packages/wiki/src/links.ts`, §16A.2 + K-013 #4):
+Rules (`packages/wiki/src/links.ts`):
 
-- Every link traces back to a `GraphEdge`, contract relationship, or taxonomy parent; if a `verified` graph edge has no spanned `EvidenceRef`, its Wiki link downgrades to `heuristic` with an explicit warning (verified links are never faked).
-- **Backlinks are derived automatically in O(1) via a reverse index** (`buildWikiLinkIndex`); duplicate reciprocal link rows are never stored (ADR-013).
-- If a link target is removed or cannot be resolved, the link row is **not** silently dropped: it is persisted with `toPageId: null`, excluded from target backlink buckets, and paired with a **`brokenLinkDiagnostics`** record (`{ linkId, fromPageId, toRef, kind, reason }`, K-013 #4).
-- Links resolved through an alias with `matchConfidence < 1` automatically cap `verified` resolution down to `heuristic`.
-- Rendering URLs/anchors always enforces normalized `pageId` slugs, permitted routes, and HTML escaping.
+- A `verified` link must carry at least one `EvidenceRef`; the schema rejects violations. The build path downgrades a `verified` graph edge without span evidence to `heuristic` and adds a warning instead of producing an invalid link.
+- **Backlinks are derived, not stored.** `buildWikiLinkIndex` builds forward and reverse maps from the single stored link row, so backlink lookup is O(1) and no reciprocal rows exist.
+- **Broken links are data, not errors.** `resolveWikiLinks` resolves a draft's `toRef` in this order: page ID, slug, alias text, old-page-ID redirect. An unresolved target is kept with `toPageId: null`, excluded from backlink buckets, and reported in `brokenLinkDiagnostics`. A link resolved through an alias with `matchConfidence < 1` is capped from `verified` to `heuristic`.
+- Drafts from an unknown source page and duplicate link IDs are rejected.
 
-### 3.4 WikiPageVersion (§16A.4, §16A.7)
+### 5.5 WikiPageVersion
+
+Stored once per page per snapshot (`wiki_page_versions`, primary key `(wiki_snapshot_sid, page_id)`):
 
 ```ts
-export const WikiPageVersionSchema = z.strictObject({
-  pageId: z.string(),
-  wikiSnapshotId: z.string(),
-  revisionRef: z.string(),     // immutable commit SHA or working-tree descriptor
-  contentHash: z.string(),
-  linkSetHash: z.string(),     // outbound link-set integrity hash (ADR-013)
-  templateVersion: z.string(), // §16A.4 minimum version metadata
-  coverage: z.strictObject({ status: CoverageStatusSchema }),
-});
-export type WikiPageVersion = z.infer<typeof WikiPageVersionSchema>;
+interface WikiPageVersion {
+  pageId: string;
+  wikiSnapshotId: string;
+  revisionRef: string;
+  contentHash: string;
+  linkSetHash: string;       // outgoing link-set integrity hash
+  templateVersion: string;
+  coverage: { status: CoverageStatus };
+}
 ```
 
-Version boundaries: under shallow clones, pruned Git objects, data migrations, or revisions for which no `WikiSnapshot` exists in the data-root, queries return `availability: "not_available"` with `notAvailableReason`; historical versions do not imply infinite retention. Git ref verification uses strictly read-only `git cat-file -t` **without `git checkout`, `reset`, or `clean`** (Red Line 3), while `working-tree` resolves directly without requiring `.git`.
+History across revisions lives in separate `WikiSnapshot` rows. A queried revision with no stored `WikiSnapshot` is reported as `availability: "not_available"` with `notAvailableReason`; keeping old versions is not a retention guarantee.
 
-### 3.5 WikiAnnotation — Overlay Layer (§16A.6, §16A.7)
+### 5.6 WikiAnnotation — overlay layer
 
-Every Wiki page separates two layers (ADR-012: Generated/Overlay Separation, `packages/wiki/src/overlay.ts`):
-
-- **Generated layer**: deterministically projected from `GraphSnapshot`; regenerated freely on every rebuild and **never edited by hand**.
-- **Overlay layer**: human notes, team rationale, external links, and user-accepted host-model proposals.
+`packages/wiki/src/overlay.ts` separates two layers: the generated layer (rebuilt freely) and the overlay layer (human notes, external links, user-accepted host-model proposals).
 
 ```ts
 export const AnnotationAuthorKindSchema = z.enum(["human", "host_model_proposal"]);
-export const AnnotationOriginSchema = z.enum([
-  "human_note",            // human/team note
-  "external_link",         // external reference link
-  "host_model_proposal",   // host-model text explicitly accepted by a user — verified MUST remain false
-]);
+export const AnnotationOriginSchema = z.enum(["human_note", "external_link", "host_model_proposal"]);
 
 export const WikiAnnotationSchema = z.strictObject({
   id: z.string().min(1),
-  stablePageId: z.string().min(1),       // survives deterministic page regeneration (§16A.6)
-  sectionKey: z.string().min(1),         // target section; rendered OUTSIDE generatedMarkdown
+  stablePageId: z.string().min(1),   // deterministic pageId the note is attached to
+  sectionKey: z.string().min(1),     // rendered outside generatedMarkdown
   authorKind: AnnotationAuthorKindSchema,
   origin: AnnotationOriginSchema.optional(),
-  verified: z.boolean().optional(),      // superRefine forbids verified=true when origin=host_model_proposal (§16A.6)
-  body: z.string(),
-  annotationVersion: z.number().int().nonnegative(), // optimistic concurrency CAS (§16A.6)
+  verified: z.boolean().optional(),
+  body: z.string(),                  // must not be blank
+  annotationVersion: z.number().int().nonnegative(),
   updatedAt: z.iso.datetime(),
-});
-export type WikiAnnotation = z.infer<typeof WikiAnnotationSchema>;
+}).superRefine(/* see rules below */);
 ```
 
-Rules (§16A.6 + `AnnotationOverlayEngine`):
+Rules (`AnnotationOverlayEngine`, `SqliteWikiStore`):
 
-- `WikiAnnotation` rows live in an isolated `wiki_annotations` table (with no foreign-key cascade from generated `wiki_*` snapshot tables); rebuilding generated pages **never overwrites or deletes** annotations.
-- Creating or editing annotations requires a **separate local UI/CLI workflow** with explicit user consent. **No MCP tool writes annotations** — none of the 7 published Wiki MCP tools mutate notes (see §5.2).
-- If a user optionally accepts prose drafted by a host LLM, it is stored with `authorKind: "host_model_proposal"`, `origin: "host_model_proposal"`, and `verified: false`, rendered with a distinct visual header separate from human notes. Causoryn itself never invokes any LLM (Red Line 1).
-- Human notes without source-code backing never acquire `Evidence` provenance status.
-- When a page is removed or renamed to a new identity, annotations are never deleted: `markAnnotationOrphans` derives `orphan: true` against the current `pageId` set, and if the page returns with the same deterministic `pageId`, orphan recovery happens automatically with zero writes (§19).
-- Optimistic concurrency: `AnnotationOverlayEngine.updateAnnotation` enforces atomic compare-and-swap via `expectedAnnotationVersion`, throwing `wiki/annotation-conflict` on version mismatch.
-- Including manual notes in exports defaults to **opt-in** (`includeManualNotesInExport: false`, §20).
+- Annotations live in `wiki_annotations`, which has no foreign key to the generated `wiki_*` tables; rebuilding pages never overwrites or deletes them.
+- `origin: "host_model_proposal"` cannot have `verified: true`, and `origin: "host_model_proposal"` is allowed only with `authorKind: "host_model_proposal"` (and vice versa). Host proposals render with a distinct label, separate from human notes. Causoryn never calls a model to produce them.
+- **Optimistic concurrency:** `addAnnotation` starts at version `0`; `updateAnnotation` performs an atomic compare-and-swap against `expectedAnnotationVersion` and raises `wiki/annotation-conflict` on mismatch (the intended MCP code `WIKI_NOTE_CONFLICT` is not registered, see [§8.2](#82-error-codes)). Each successful write increments the version.
+- **Orphans:** `markAnnotationOrphans` derives `orphan: true` when `stablePageId` is absent from the current projection; the row is never deleted or changed. Because page IDs are deterministic, the flag clears automatically when the page returns, with no write.
+- **Surface:** there is no MCP tool and no CLI command that reads or writes annotations. `causoryn_wiki_get_page` returns only the generated layer. The overlay is a tested library capability waiting for a consented local UI/CLI flow.
 
-### 3.6 WikiPageAlias (§16A.1, §16A.7)
+### 5.7 Aliases
 
-```ts
-export const WikiPageAliasSchema = z.object({
-  oldPageId: z.string(),
-  candidateNewPageId: z.string().nullable(),
-  reason: z.string(),                          // e.g., rename, relocation
-  matchConfidence: z.number().min(0).max(1),   // < 1 downgrades resolved verified links to heuristic
-});
-export type WikiPageAlias = z.infer<typeof WikiPageAliasSchema>;
-```
+`wiki_aliases` (`WikiAliasInput`: `pageId`, `alias`, `source`, `candidateNewPageId?`, `matchConfidence?` in `0..1`) records uncertain renames or relocations. `candidateNewPageId = null` marks an unresolved candidate redirect; ambiguous matches are never promoted to `verified`. `resolveWikiLinks` consumes aliases when given them, but the MCP build path does not write or pass aliases today.
 
-Uncertain renames/relocations are stored as `candidate_redirect` entries in `wiki_aliases` (`packages/wiki/src/links.ts` `WikiAliasEntry`); **ambiguous matches are never silently promoted to verified links**.
+### 5.8 WikiSearchIndex (FTS5)
 
-### 3.7 WikiSearchIndex — FTS5 (§16A.3, §16A.7)
+`wiki_fts` indexes `title`, `qualified_symbol`, `api_route`, `module`, `tags`, `body`, with `page_id` and `wiki_snapshot_sid` as unindexed join keys. What the build writes (`buildFtsDocs`):
 
-FTS5 indexed columns (`wiki_fts`, `packages/wiki/src/search-store.ts`): `title, qualified_symbol, api_route, module, tags, body` (`manualNotes` search inclusion is opt-in per §20: `wiki.includeManualNotesInSearch: false`).
+| Column | Value |
+|---|---|
+| `title` | page title |
+| `qualified_symbol` | child pages: the node's qualified name (= title); root pages: null |
+| `api_route` | `api` child pages: the endpoint's qualified name; otherwise null |
+| `module` | `module` child pages: the module's qualified name; otherwise null |
+| `tags` | always null |
+| `body` | non-empty section Markdown joined; null if empty |
 
-Search ranking (`packages/wiki/src/search-ranking.ts`, §16A.3): **exact symbol/route match > title > module > BM25/FTS5 body rank > graph proximity** (with deterministic `pageId` lexical tie-breaking). Relevance transparency is provided via `matchedFields` (computed across six static column-scoped FTS queries) and `evidenceIds`; opaque vector/embedding scores never appear because Causoryn uses **zero embedding services** (Red Line 1). When graph proximity distances are not supplied, `skippedRankLegs` honestly reports the skipped leg. Query normalization, FTS phrase escaping (`escapeFtsPhrase` bound via prepared parameters), and cursor/limit bounds (default 50, cap 200 — K-013 #5) are enforced on every search.
+Annotations are never indexed.
 
-## 4. MCP Tool Contracts — 7 Wiki Tools
+## 6. Projection, Links and Incremental Invalidation
 
-### 4.1 Standard Envelope and Error Codes (§10.1)
+### 6.1 Full projection (`projectWiki`)
 
-All 7 Wiki tools return the standard 10-field `EnvelopeSchema` (§16A.8): `schemaVersion` (`"2.0"`), `requestId`, `workspaceId`, `snapshotId` (the served `WikiSnapshot` ID), `status` (`ok | partial | error`), `coverage` (populated from the source `GraphSnapshot` on `wiki_build`; `null` on the 6 read tools), `warnings`, `data`, `nextCursor` (identical to `data.nextCursor` across all 5 paginated Wiki tools), and `error` (`{code, message, retryable, userAction} | null`). `stdout` carries only MCP protocol traffic; logs go to `stderr` (Red Line 4). Stack traces never enter MCP responses. All 7 tools declare MCP `annotations`: `causoryn_wiki_build` sets `readOnlyHint: false`, and the 6 query tools set `readOnlyHint: true`.
+1. Validate the graph against the domain `SnapshotSchema`; reject non-ISO `builtAt` (`wiki/invalid-input`).
+2. Accept only `ready` / `partial` graph snapshots (`wiki/snapshot-not-projectable` otherwise).
+3. Build the 12 root pages from fixed section templates, then plan child pages from `WIKI_CHILD_PAGE_SOURCES` (`projects-modules` ← `Module`; `apis-entry-points` ← `Endpoint`; `events-integrations` ← `Event`/`Topic`/`Queue`; `data-schemas` ← `Table`; `contracts-policies` ← contract nodes).
+4. Attach span evidence from contributing edges to each section (sorted by `evidenceId`).
+5. Produce warnings from one shared generator (unsupported categories, `partial` sections), validate the whole projection against `WikiProjectionSchema`, and deep-freeze it.
 
-Error code governance (`packages/mcp-server/src/errors.ts`, `services-wiki.ts`, K-014):
+### 6.2 Link generation in `causoryn_wiki_build`
 
-- **Active fixed error codes (`WIKI_TOOL_ERROR_CODES_USED`):** `WORKSPACE_NOT_AUTHORIZED`, `PATH_DENIED`, `INDEX_NOT_READY`, `EVIDENCE_NOT_FOUND` (when an explicit `snapshotId` is not found), `LIMIT_EXCEEDED`, `INVALID_ARGUMENT`, `INVALID_REVISION`, `WIKI_PAGE_NOT_FOUND` (Spec §10.1 fixed code for unknown `pageId`/`parentId`), `EXPORT_NOT_ALLOWED` (mapped for offline export authorization denials), and `INTERNAL_ERROR`.
-- **Intentionally unused / deferred Spec §10.1 Wiki codes (K-014 honesty note):**
-  - `WIKI_REVISION_NOT_AVAILABLE`: Unresolvable Git aliases return `INVALID_REVISION` (K-013 #6), while valid Git revisions without a stored `WikiSnapshot` report `availability: "not_available"` + `notAvailableReason` in `data.versions` rather than throwing an error.
-  - `WIKI_BROKEN_LINK`: Per K-013 #4, broken links are modeled as **diagnostic data** (`toPageId: null` + `brokenLinkDiagnostics`), not tool errors.
-  - `WIKI_NOTE_CONFLICT`: Optimistic concurrency CAS conflicts are implemented in core `AnnotationOverlayEngine.updateAnnotation` (`wiki/annotation-conflict`); registering `WIKI_NOTE_CONFLICT` in MCP `CAUSORYN_TOOL_ERROR_CODES` / `TOOL_ERROR_GUIDANCE` is tracked as an open 1.0.0 item alongside local note CLI/UI write flows because none of the 7 MCP tools write annotations.
+`buildLinkDrafts` (`services-wiki.ts`) emits:
 
-### 4.2 Tools
+- **`PARENT_OF`** from each root page to each of its child pages, with `resolution: "heuristic"` and no evidence (structural taxonomy link).
+- **`DEPENDS_ON` and `CALLS`** for graph edges of those kinds whose both endpoints have child pages. The link keeps the edge's resolution and span evidence; a `verified` edge without span evidence is downgraded to `heuristic` with a warning.
 
-Input and output schemas below reflect Technical Specification §10.2 (p. 10), §16A.8 (p. 17), and the exact `v0.2.4` schemas in `packages/mcp-server/src/services-wiki.ts`. Each output schema describes the `envelope.data` payload.
+Multiple edges of the same kind between the same page pair collapse into one link. The other eight link kinds are declared in the schema and the SQL constraint but not produced. Because `CALLS` edges usually connect functions or methods, which do not have pages, `CALLS` links appear only when a `CALLS` edge connects two page-backed nodes. All drafts target pages from the same projection, so `brokenLinks` is normally `0`; the broken-link model is exercised by the core tests.
 
-#### 4.2.1 `causoryn_wiki_build`
+### 6.3 Incremental invalidation (`projectWikiIncremental`)
 
-- **Purpose**: Projects the published `GraphSnapshot` for the authorized workspace into a `WikiSnapshot` and publishes it atomically (§16A.8).
-- **Permission**: ✍️ **WRITES (`readOnlyHint: false`) — strictly to Causoryn's authorized data-root SQLite** (`config.wiki.dataDbPath` or `--auto-data-dir`; returns `PATH_DENIED` if unconfigured). **Never writes to workspace source files** (§5.2).
+`mode: "incremental"` uses the previous published `WikiSnapshot` and its source graph snapshot:
+
+1. `diffWikiGraphs` computes changed / added / removed node, edge and evidence IDs plus `configChanged`, `analyzerChanged`, `revisionChanged`, `stateChanged`.
+2. **Fallback to full build** (reported as `mode: "full"` + `fallbackReason`, never silently) when: no published `WikiSnapshot` exists; the previous wiki's graph snapshot can no longer be read; the parser configuration or analyzer fingerprint changed; the template version changed; the supported-kind set changed; the previous projection fails integrity checks (missing sections, content hash mismatch, workspace or graph ID mismatch, a page to preserve is missing).
+3. **Page selection:** any content change selects every graph-global root page (all roots except the three structural `no_data` roots). Changed, added or removed nodes, plus both endpoints of changed, added or removed edges, select their child pages.
+4. **Content-hash guard:** selected pages are regenerated; if the new `contentHash` equals the old one the page counts as preserved. Unselected pages are carried over unchanged.
+5. The result is canonically identical to a full build of the same graph (same templates, planner and warning generator).
+
+`pagesRegenerated` counts pages whose content hash changed; `sectionsRegenerated` counts their sections. The write still stores a full row set (pages, sections, links, versions, FTS documents) for the new `WikiSnapshot`; narrowing these row rewrites is open work.
+
+### 6.4 Diff computations
+
+- `changedSections`: sections of pages present on both sides whose Markdown, status or evidence differ, plus section keys present on only one side.
+- `addedLinks` / `removedLinks`: link-ID set difference.
+- `coverageDelta` (`computeWikiCoverageDeltas`): pages whose `coverage.status` changed (with section-count reason), new pages (`previous: "no_data"`), and removed pages (`current: "no_data"`).
+- `unresolvedDifferences`: common pages whose number of `partial` sections changed.
+- `contractChanges` (`computeWikiContractChanges`): compares contract nodes of the two backing graph snapshots by `"<nodeKind> <qualifiedName>"`. `added` and `modified` records carry the target node ID, `removed` the base node ID; `modified` means the hash of kind, qualified name, language, location and attributes changed, and the summary includes both 12-character hash prefixes. If either backing graph snapshot is no longer stored, `contractChanges` is `[]` with a warning.
+
+## 7. Storage Schema (`wiki_*`, `wiki_fts`)
+
+Defined in `packages/storage-sqlite/src/wiki-schema.ts` and applied with the main schema (`user_version = 5`). All DDL and DML are static SQL with bound parameters.
+
+| Table | Key | Notes |
+|---|---|---|
+| `wiki_snapshots` | `sid` (integer PK); `id` UNIQUE, NULL while building | `workspace_id`, `graph_snapshot_id`, `revision_ref`, `status` (`building\|ready\|partial\|failed`), `created_at`, `built_at`, `template_version`, `failure_reason`. A partial unique index allows only one `building` row per `(workspace_id, graph_snapshot_id)`. |
+| `wiki_pages` | `(wiki_snapshot_sid, page_id)` | `kind` and `coverage_status` `CHECK` constraints; `parent_id` is a composite FK to the same table; `position` keeps canonical order. |
+| `wiki_page_sections` | `(wiki_snapshot_sid, section_id)` | `generated_markdown`, `evidence_refs_json`, `status`; FK to the page. |
+| `wiki_links` | `(wiki_snapshot_sid, link_id)` | `to_page_id` nullable (broken links); non-null targets are FK-checked; indexes on `from_page_id` and `to_page_id`. |
+| `wiki_page_versions` | `(wiki_snapshot_sid, page_id)` | `revision_ref`, `content_hash`, `link_set_hash`, `template_version`, `coverage_status`. |
+| `wiki_annotations` | `id` | Overlay: linked only to `workspaces`, not to any wiki snapshot. |
+| `wiki_aliases` | `(workspace_id, page_id, alias)` | `source`, `candidate_new_page_id`, `match_confidence` (`0..1` `CHECK`). |
+| `wiki_fts` | FTS5 virtual table | Columns from [§5.8](#58-wikisearchindex-fts5); no FK. |
+
+Child tables cascade on snapshot deletion, but nothing deletes wiki snapshots today (see [§11](#11-limits-and-honest-gaps)).
+
+**Build and publish sequence** (`writeAndPublishWikiProjection`): `beginWikiBuild` inserts a `building` row → pages, sections, links, page versions and FTS documents are written to that row → `publishWiki` sets `id`, `status` and `built_at` in one transaction. On any error the row is closed with `failWikiBuild` (`failed`), so a half-written snapshot is never readable and no stale `building` lock remains. Search uses a second, read-only connection to the same file.
+
+## 8. MCP Tool Contracts — 7 Wiki Tools
+
+Available only under `--tool-profile wiki`, `wiki,history` or `full` ([§2.1](#21-tool-profiles)). Input schemas are registered from `packages/mcp-server/src/schemas.ts` (`Wiki*ToolInputSchema`, identical in shape to the service schemas below); output data schemas come from `services-wiki.ts`. Every response is the standard 10-field envelope (`schemaVersion: "2.0"`). `outputSchema` is omitted from `tools/list` by default (`--output-schema full` publishes it); the server validates every envelope either way.
+
+### 8.1 Shared behavior
+
+- **Annotations:** `causoryn_wiki_build` has `readOnlyHint: false` (it writes only to the wiki SQLite data root); the six read tools have `readOnlyHint: true`. All seven have `destructiveHint: false`, `openWorldHint: false`.
+- **Input validation:** arguments that do not match the registered strict input schema (unknown fields, wrong enum values, `limit < 1`, `depth > 8`, more than 200 `refs`) are rejected before the handler runs; the call returns `isError: true` rather than a Causoryn envelope.
+- **Authorization first:** every tool checks the workspace (`workspaceId` defaults to the configured one) before anything else → `WORKSPACE_NOT_AUTHORIZED`.
+- **Envelope fields:** `envelope.snapshotId` is the served **`WikiSnapshot`** ID (core tools put a graph snapshot ID there). `envelope.coverage` is populated only by `causoryn_wiki_build` (from the source graph); read tools return `null`. `envelope.status` is `partial` when the served wiki is `partial` (for `causoryn_wiki_diff`, when either side is).
+- **Staleness:** a wiki is stale when its `graphSnapshotId` is not the workspace's latest published graph snapshot. Read tools then return `data.stale: true` (except `causoryn_wiki_diff`, which has no such field) and a warning recommending a rebuild.
+- **Pagination:** opaque base64url cursor `{ "v": 1, "o": <offset> }`; `limit` default 50, maximum 200 (`LIMIT_EXCEEDED` above that); a malformed cursor gives `INVALID_ARGUMENT`; `nextCursor` is `null` on the last page and `envelope.nextCursor` equals `data.nextCursor` on the five paginated tools.
+- **Snapshot selection:** an explicit `snapshotId` must be a published `WikiSnapshot` of the same workspace (`EVIDENCE_NOT_FOUND` otherwise); without it the latest published `WikiSnapshot` is used (`INDEX_NOT_READY` if none exists or no wiki data root is configured).
+- **Indexing:** like other non-status tools, wiki tools wait up to `CAUSORYN_INDEX_WAIT_MS` for the first graph index. Unlike core tools, a wiki tool's `INDEX_NOT_READY` stays an error envelope (it is not converted into a `partial` "indexing" envelope), and wiki responses do not receive the background re-index `stale=true` warning that core tools get.
+- **Strings:** field names, enum values and error codes are stable identifiers. Warning texts, `reason` / `summary` strings, error messages and generated Markdown labels are free text in plain English; do not parse free text.
+
+### 8.2 Error codes
+
+Codes used by the wiki services (`WIKI_TOOL_ERROR_CODES_USED` in `services-wiki.ts`, subset of the 15 codes in `packages/mcp-server/src/errors.ts`):
+
+| Code | When |
+|---|---|
+| `WORKSPACE_NOT_AUTHORIZED` | Workspace not authorized (checked first) |
+| `PATH_DENIED` | `causoryn_wiki_build` without a configured wiki data root (default deny) |
+| `INDEX_NOT_READY` | No published graph snapshot (build); no published `WikiSnapshot` or no wiki data root (reads); a second build for the same graph snapshot is already running |
+| `EVIDENCE_NOT_FOUND` | An explicit `snapshotId` is not a published `WikiSnapshot` of this workspace |
+| `WIKI_PAGE_NOT_FOUND` | Unknown `pageId` / `parentId` in the served snapshot (for `causoryn_wiki_diff`: absent from both sides) |
+| `INVALID_REVISION` | A Git ref in `causoryn_wiki_get_versions` cannot be resolved; a `causoryn_wiki_diff` side cannot be resolved |
+| `INVALID_ARGUMENT` | `scope` on build; rejected search filters; empty query; malformed cursor; invalid core input |
+| `LIMIT_EXCEEDED` | `limit` > 200 |
+| `INTERNAL_ERROR` | Storage or consistency failures; the detail goes to stderr, not to the client |
+
+Core error codes are mapped in one place (`wikiErrorToToolError`). It also maps the export codes `wiki/output-not-authorized` → `EXPORT_NOT_ALLOWED` and `wiki/output-path-denied` → `PATH_DENIED`, but no wiki tool calls the export core, so these are not reachable today.
+
+Reserved wiki codes that are **not** registered as MCP error codes:
+
+- `WIKI_REVISION_NOT_AVAILABLE`: unresolvable refs return `INVALID_REVISION`; valid refs without a stored `WikiSnapshot` are reported as `availability: "not_available"` data.
+- `WIKI_BROKEN_LINK`: broken links are data (`toPageId: null` + `brokenLinkDiagnostics`), not errors.
+- `WIKI_NOTE_CONFLICT`: the conflict exists in the core as `wiki/annotation-conflict`, but no MCP tool writes annotations, so the code is not registered.
+
+### 8.3 `causoryn_wiki_build`
+
+Projects the latest published `GraphSnapshot` of the workspace into a `WikiSnapshot` and publishes it atomically into the wiki data root. Never writes to workspace files.
 
 ```ts
 export const WikiBuildInputSchema = z.strictObject({
   workspaceId: z.string().min(1).optional(),
-  mode: z.enum(["full", "incremental"]),      // K-013 #2
-  scope: z.string().min(1).optional(),        // explicitly rejected with INVALID_ARGUMENT in v0.2.4 (ADR-010)
-  revision: z.string().min(1).optional(),     // defaults to graph.meta.revision.id
+  mode: z.enum(["full", "incremental"]),     // required
+  scope: z.string().min(1).optional(),       // reserved: any value → INVALID_ARGUMENT
+  revision: z.string().min(1).optional(),    // free-form revisionRef label; default graph revision.id
 });
 
 export const WikiBuildDataSchema = z.strictObject({
@@ -308,114 +433,96 @@ export const WikiBuildDataSchema = z.strictObject({
   graphSnapshotId: z.string(),
   revisionRef: z.string(),
   status: z.enum(["ready", "partial"]),
-  mode: z.enum(["full", "incremental"]),      // actual executed mode
-  fallbackReason: z.string().optional(),      // populated when incremental gracefully falls back to full
+  mode: z.enum(["full", "incremental"]),     // executed mode
+  fallbackReason: z.string().optional(),     // set when incremental fell back to full
   pagesRegenerated: z.number().int().nonnegative(),
   sectionsRegenerated: z.number().int().nonnegative(),
-  linksRegenerated: z.number().int().nonnegative(),
+  linksRegenerated: z.number().int().nonnegative(),  // links written for the new snapshot
   brokenLinks: z.number().int().nonnegative(),
-  warnings: z.array(z.string()),
+  warnings: z.array(z.string()),             // same content as envelope.warnings
 });
 ```
 
-- **Error codes**: `WORKSPACE_NOT_AUTHORIZED`, `INDEX_NOT_READY` (no published `ready`/`partial` `GraphSnapshot`), `PATH_DENIED` (`wiki.dataDbPath` unconfigured — default deny), `INVALID_ARGUMENT` (when `scope` is passed), `INTERNAL_ERROR`.
-- **Behavior**: Only `ready`/`partial` `GraphSnapshot`s enter projection; pages, sections, links, page versions, and `wiki_fts` are written into a `building` row and flipped atomically in one SQLite transaction via `publishWiki` (or marked `failed` via `failWikiBuild` on error). Re-running against the same `graphSnapshotId` is an idempotent no-op. `mode="incremental"` regenerates only affected `pageId`s (preserving unchanged `contentHash` values) and falls back gracefully to `mode="full"` + `fallbackReason` when prior snapshot/graph state is unavailable.
+- Full mode: `pagesRegenerated` / `sectionsRegenerated` / `linksRegenerated` are the totals written.
+- Idempotent no-op: if the latest published `WikiSnapshot` already has the deterministic ID for the current graph snapshot, nothing is written and the counters are `0`.
+- Errors: `WORKSPACE_NOT_AUTHORIZED`, `INVALID_ARGUMENT` (`scope`), `INDEX_NOT_READY`, `PATH_DENIED`, `INTERNAL_ERROR`.
 
-#### 4.2.2 `causoryn_wiki_get_tree`
+### 8.4 `causoryn_wiki_get_tree`
 
-- **Purpose**: Hierarchy and deterministic page ordering (§16A.8); 12-category navigation tree (§10.2).
-- **Permission**: 🔒 **READ-ONLY (`readOnlyHint: true`).**
+Hierarchical page tree with coverage, freshness and child counts.
 
 ```ts
 export const WikiGetTreeInputSchema = z.strictObject({
   workspaceId: z.string().min(1).optional(),
-  snapshotId: z.string().min(1).optional(),         // defaults to latest published WikiSnapshot
-  parentId: z.string().min(1).optional(),           // subtree root
-  depth: z.number().int().min(1).max(8).optional(), // subtree depth cap
-  limit: z.number().int().min(1).optional(),        // K-013 #5: default 50, max 200
+  snapshotId: z.string().min(1).optional(),
+  parentId: z.string().min(1).optional(),            // subtree root; default: all 12 roots
+  depth: z.number().int().min(1).max(8).optional(),  // depth cap; roots are depth 1
+  limit: z.number().int().min(1).optional(),
   cursor: z.string().min(1).optional(),
 });
 
 export const WikiTreeNodeSchema = z.strictObject({
-  pageId: z.string(),
-  kind: WikiPageKindSchema,
-  parentId: z.string().nullable(),
-  title: z.string(),
-  route: z.string(),
-  coverage: z.strictObject({ status: CoverageStatusSchema }), // no_data categories listed without filler (§16A.1)
+  pageId: z.string(), kind: WikiPageKindSchema, parentId: z.string().nullable(),
+  title: z.string(), route: z.string(),
+  coverage: z.strictObject({ status: CoverageStatusSchema }),
   freshness: FreshnessSchema,
   childCount: z.number().int().nonnegative(),
   depth: z.number().int().positive(),
 });
 
 export const WikiGetTreeDataSchema = z.strictObject({
-  wikiSnapshotId: z.string(),
-  graphSnapshotId: z.string(),
-  stale: z.boolean(),
+  wikiSnapshotId: z.string(), graphSnapshotId: z.string(), stale: z.boolean(),
   nodes: z.array(WikiTreeNodeSchema),
   totalNodes: z.number().int().nonnegative(),
   nextCursor: z.string().nullable(),
 });
 ```
 
-- **Error codes**: `WORKSPACE_NOT_AUTHORIZED`, `INDEX_NOT_READY`, `WIKI_PAGE_NOT_FOUND` (unknown `parentId`), `EVIDENCE_NOT_FOUND` (unknown explicit `snapshotId`), `INVALID_ARGUMENT` (malformed cursor), `LIMIT_EXCEEDED`, `INTERNAL_ERROR`.
+Order is breadth-first: roots in taxonomy order, children sorted by `pageId`; pagination applies to that order. `no_data` categories are listed without filler. Errors: `WORKSPACE_NOT_AUTHORIZED`, `INDEX_NOT_READY`, `EVIDENCE_NOT_FOUND`, `WIKI_PAGE_NOT_FOUND` (unknown `parentId`), `INVALID_ARGUMENT`, `LIMIT_EXCEEDED`, `INTERNAL_ERROR`.
 
-#### 4.2.3 `causoryn_wiki_get_page`
+### 8.5 `causoryn_wiki_get_page`
 
-- **Purpose**: Page sections, provenance, coverage, and source refs (§16A.8); generated blocks, evidence, and freshness (§10.2).
-- **Permission**: 🔒 **READ-ONLY (`readOnlyHint: true`).**
+One page with its generated sections, evidence and source references.
 
 ```ts
 export const WikiGetPageInputSchema = z.strictObject({
   workspaceId: z.string().min(1).optional(),
   pageId: z.string().min(1),
   snapshotId: z.string().min(1).optional(),
-  sections: z.array(z.string().min(1)).optional(), // sectionKey filter
-  limit: z.number().int().min(1).optional(),       // section pagination (default 50, max 200)
+  sections: z.array(z.string().min(1)).optional(),   // sectionKey filter
+  limit: z.number().int().min(1).optional(),         // sections per response
   cursor: z.string().min(1).optional(),
 });
 
 export const WikiGetPageDataSchema = z.strictObject({
-  wikiSnapshotId: z.string(),
-  graphSnapshotId: z.string(),
-  stale: z.boolean(),
+  wikiSnapshotId: z.string(), graphSnapshotId: z.string(), stale: z.boolean(),
   page: z.strictObject({
-    pageId: z.string(),
-    kind: WikiPageKindSchema,
-    parentId: z.string().nullable(),
-    title: z.string(),
-    slug: z.string(),
-    route: z.string(),
-    contentHash: z.string(),
+    pageId: z.string(), kind: WikiPageKindSchema, parentId: z.string().nullable(),
+    title: z.string(), slug: z.string(), route: z.string(), contentHash: z.string(),
     freshness: FreshnessSchema,
-    coverage: z.strictObject({
-      status: CoverageStatusSchema,
-      detail: z.string().optional(),
-    }),
+    coverage: z.strictObject({ status: CoverageStatusSchema, detail: z.string().optional() }),
   }),
-  sourceRefs: z.array(EvidenceRefSchema),       // deduplicated provenance across all sections of the page
-  sections: z.array(WikiPageSectionSchema),     // generated layer (ADR-012)
-  sectionsTotal: z.number().int().nonnegative(),
+  sourceRefs: z.array(EvidenceRefSchema),        // deduplicated over ALL sections, sorted by evidenceId
+  sections: z.array(WikiPageSectionSchema),      // generated layer only, after filter + pagination
+  sectionsTotal: z.number().int().nonnegative(), // sections matching the filter
   nextCursor: z.string().nullable(),
 });
 ```
 
-- **Overlay note**: `WikiAnnotation` records are not returned on this MCP surface (§16A.6: separate local UI/CLI flow).
-- **Error codes**: `WORKSPACE_NOT_AUTHORIZED`, `INDEX_NOT_READY`, `WIKI_PAGE_NOT_FOUND`, `EVIDENCE_NOT_FOUND`, `INVALID_ARGUMENT`, `LIMIT_EXCEEDED`, `INTERNAL_ERROR`.
+Annotations are not returned. Errors: `WORKSPACE_NOT_AUTHORIZED`, `INDEX_NOT_READY`, `EVIDENCE_NOT_FOUND`, `WIKI_PAGE_NOT_FOUND`, `INVALID_ARGUMENT`, `LIMIT_EXCEEDED`, `INTERNAL_ERROR`.
 
-#### 4.2.4 `causoryn_wiki_search`
+### 8.6 `causoryn_wiki_search`
 
-- **Purpose**: FTS5 and symbol/route matching with pagination (§16A.8, §10.2).
-- **Permission**: 🔒 **READ-ONLY (`readOnlyHint: true`).** Secret/ignored files never enter the Wiki index or snippets (§19).
+Escaped FTS5 search over one published `WikiSnapshot`.
 
 ```ts
 export const WikiSearchInputSchema = z.strictObject({
   workspaceId: z.string().min(1).optional(),
-  query: z.string(),                              // normalized and FTS phrase-escaped (§16A.3)
+  query: z.string(),                          // trimmed, inner whitespace collapsed; empty → INVALID_ARGUMENT
   snapshotId: z.string().min(1).optional(),
-  limit: z.number().int().min(1).optional(),      // K-013 #5: default 50, max 200
+  limit: z.number().int().min(1).optional(),
   cursor: z.string().min(1).optional(),
-  // Declared per §16A.3 but explicitly rejected with INVALID_ARGUMENT in v0.2.4 (ADR-010):
+  // Declared but not implemented: any value → INVALID_ARGUMENT
   kinds: z.array(WikiPageKindSchema).optional(),
   scope: z.string().min(1).optional(),
   language: z.string().min(1).optional(),
@@ -423,29 +530,38 @@ export const WikiSearchInputSchema = z.strictObject({
   resolution: z.enum(["verified", "heuristic", "unresolved"]).optional(),
 });
 
+// data = WikiSearchResultSchema + stale
+export const WikiSearchResultSchema = z.strictObject({
+  wikiSnapshotId: z.string(),
+  workspaceId: z.string(),
+  query: z.string(),                // normalized query
+  matchExpression: z.string(),      // the escaped FTS5 phrase actually bound
+  totalMatches: z.number().int().nonnegative(),
+  hits: z.array(WikiSearchHitSchema),
+  nextCursor: z.string().nullable(),
+  skippedRankLegs: z.array(z.enum(["graphProximity"])),
+});
+
 export const WikiSearchHitSchema = z.strictObject({
-  pageId: z.string(),
-  kind: WikiPageKindSchema,
-  title: z.string(),
-  route: z.string(),
+  pageId: z.string(), kind: WikiPageKindSchema, title: z.string(), route: z.string(),
   freshness: FreshnessSchema,
-  qualifiedSymbol: z.string().nullable(),
-  apiRoute: z.string().nullable(),
-  module: z.string().nullable(),
-  snippet: z.string(),
+  qualifiedSymbol: z.string().nullable(), apiRoute: z.string().nullable(), module: z.string().nullable(),
+  snippet: z.string(),              // FTS5 snippet(): "[" … "]" markers, "…" ellipsis, 12 tokens
   matchedFields: z.array(z.enum(["title", "qualifiedSymbol", "apiRoute", "module", "tags", "body"])),
-  evidenceIds: z.array(z.string()),
+  evidenceIds: z.array(z.string()), // deduplicated evidence IDs from the page's sections
 });
 ```
 
-- **Ranking guarantee**: Exact symbol/route matches (such as `CreateOrder`) always rank **above** generic FTS body matches (§16A.10 acceptance gate). Because graph `proximity` is not populated on the `v0.2.4` MCP surface, it is honestly listed in `skippedRankLegs`.
-- **Token budget**: Returns compact snippets and metadata; full section bodies are fetched on demand via `causoryn_wiki_get_page` (§16A.3).
-- **Error codes**: `WORKSPACE_NOT_AUTHORIZED`, `INDEX_NOT_READY`, `EVIDENCE_NOT_FOUND` (unknown `snapshotId`), `INVALID_ARGUMENT` (empty query, malformed cursor, or unimplemented extra filter fields), `LIMIT_EXCEEDED`, `INTERNAL_ERROR`.
+- **Query escaping:** the whole normalized query becomes one FTS5 phrase (`"..."`, inner quotes doubled) bound as a parameter, so operators such as `AND`, `OR`, `NEAR`, `*`, `:` are matched as text. Multi-word queries therefore match the words as an adjacent phrase.
+- **Ranking** (`search-ranking.ts`), highest first: exact case-insensitive match of the query against `qualifiedSymbol` or `apiRoute` > query contained in the title > query contained in the module > FTS5 `bm25()` (unweighted) > graph proximity > tie-break by title, then `pageId` (code-unit comparison, no locale). The MCP service never supplies proximity data, so `skippedRankLegs` is always `["graphProximity"]`.
+- **Relevance transparency:** `matchedFields` comes from six static column-filtered FTS5 queries; no hidden vector or embedding score exists.
+- **Token budget:** hits carry snippets and metadata only; fetch full sections with `causoryn_wiki_get_page`.
+- The full candidate set of the snapshot is ranked before pagination (suitable for wikis with hundreds of pages).
+- Errors: `WORKSPACE_NOT_AUTHORIZED`, `INDEX_NOT_READY`, `EVIDENCE_NOT_FOUND`, `INVALID_ARGUMENT`, `LIMIT_EXCEEDED`, `INTERNAL_ERROR`.
 
-#### 4.2.5 `causoryn_wiki_get_links`
+### 8.7 `causoryn_wiki_get_links`
 
-- **Purpose**: Outgoing links, reverse-index backlinks, and evidence (§16A.8, §10.2).
-- **Permission**: 🔒 **READ-ONLY (`readOnlyHint: true`).**
+Outgoing links, derived backlinks and broken-link diagnostics for one page.
 
 ```ts
 export const WikiGetLinksInputSchema = z.strictObject({
@@ -459,31 +575,28 @@ export const WikiGetLinksInputSchema = z.strictObject({
 });
 
 export const WikiGetLinksDataSchema = z.strictObject({
-  wikiSnapshotId: z.string(),
-  graphSnapshotId: z.string(),
-  stale: z.boolean(),
+  wikiSnapshotId: z.string(), graphSnapshotId: z.string(), stale: z.boolean(),
   pageId: z.string(),
   direction: z.enum(["incoming", "outgoing", "both"]),
   outgoing: z.array(WikiLinkSchema),
-  incoming: z.array(WikiLinkSchema),  // derived in O(1) from the reverse index (§16A.2, ADR-013)
-  brokenLinkDiagnostics: z.array(BrokenLinkDiagnosticSchema), // K-013 #4: toPageId=null rows
+  incoming: z.array(WikiLinkSchema),        // from the reverse index, not stored rows
+  brokenLinkDiagnostics: z.array(BrokenLinkDiagnosticSchema),
   totalMatching: z.number().int().nonnegative(),
   nextCursor: z.string().nullable(),
 });
 ```
 
-- **Error codes**: `WORKSPACE_NOT_AUTHORIZED`, `INDEX_NOT_READY`, `WIKI_PAGE_NOT_FOUND`, `EVIDENCE_NOT_FOUND`, `INVALID_ARGUMENT`, `LIMIT_EXCEEDED`, `INTERNAL_ERROR` (broken links are returned in `brokenLinkDiagnostics`, not thrown — K-013 #4).
+`direction` is applied: only the selected side(s) are returned and counted in `totalMatching`. Pagination runs over outgoing-then-incoming links; `brokenLinkDiagnostics` lists the page's own broken outgoing links (filtered by `linkKinds`, not paginated) with `toRef: null`, because stored rows do not keep the raw target name. Errors: `WORKSPACE_NOT_AUTHORIZED`, `INDEX_NOT_READY`, `EVIDENCE_NOT_FOUND`, `WIKI_PAGE_NOT_FOUND`, `INVALID_ARGUMENT`, `LIMIT_EXCEEDED`, `INTERNAL_ERROR`.
 
-#### 4.2.6 `causoryn_wiki_get_versions`
+### 8.8 `causoryn_wiki_get_versions`
 
-- **Purpose**: Accessible Git and snapshot revisions (§16A.8); commit and `working-tree` Wiki versions (§10.2).
-- **Permission**: 🔒 **READ-ONLY (`readOnlyHint: true`).** Git inspection is strictly read-only (`git cat-file -t` with `shell: false`; zero `checkout`/`reset`/`clean`), and `working-tree` resolves directly even when no `.git` directory is present.
+Revision availability for the latest published `WikiSnapshot`, with optional read-only Git ref resolution.
 
 ```ts
 export const WikiGetVersionsInputSchema = z.strictObject({
   workspaceId: z.string().min(1).optional(),
-  pageId: z.string().min(1).optional(),                 // page version history if set; snapshot revisions otherwise
-  refs: z.array(z.string().min(1)).min(1).max(200).optional(), // commit SHA / branch / tag / working-tree
+  pageId: z.string().min(1).optional(),      // page version instead of snapshot revision
+  refs: z.array(z.string().min(1)).min(1).max(200).optional(),
   limit: z.number().int().min(1).optional(),
   cursor: z.string().min(1).optional(),
 });
@@ -500,42 +613,46 @@ export const WikiVersionEntrySchema = z.strictObject({
   templateVersion: z.string().optional(),
   coverage: z.strictObject({ status: CoverageStatusSchema }).optional(),
 });
+
+export const WikiGetVersionsDataSchema = z.strictObject({
+  wikiSnapshotId: z.string(),
+  stale: z.boolean(),
+  versions: z.array(WikiVersionEntrySchema),
+  nextCursor: z.string().nullable(),
+});
 ```
 
-- **Error codes**: `WORKSPACE_NOT_AUTHORIZED`, `INDEX_NOT_READY`, `WIKI_PAGE_NOT_FOUND` (`pageId` absent in the snapshot), `INVALID_REVISION` (malformed or unresolvable Git ref — K-013 #6), `INVALID_ARGUMENT`, `LIMIT_EXCEEDED`, `INTERNAL_ERROR`.
+- The first entry is always the latest published `WikiSnapshot` (`available`); with `pageId` it carries that page's `contentHash`, `linkSetHash`, `templateVersion` and `coverage`.
+- Each `refs` entry is validated (`assertValidGitRef`) and resolved with `git cat-file -t` through the hardened read-only Git runner (`execFile`, `shell: false`, subcommand allowlist, `-c` overrides; see [Security Pass](security-pass.md)). `working-tree` resolves without spawning Git, so it works in directories without `.git`. One unresolvable ref fails the whole call with `INVALID_REVISION`.
+- A resolved ref is `available` only if it equals the latest snapshot's `revisionRef` (by default `working-tree`); every other resolved ref is `not_available` with a reason. Older stored snapshots are not listed and there is no `snapshotId` input.
+- Errors: `WORKSPACE_NOT_AUTHORIZED`, `INDEX_NOT_READY`, `WIKI_PAGE_NOT_FOUND`, `INVALID_REVISION`, `INVALID_ARGUMENT`, `LIMIT_EXCEEDED`, `INTERNAL_ERROR`.
 
-#### 4.2.7 `causoryn_wiki_diff`
+### 8.9 `causoryn_wiki_diff`
 
-- **Purpose**: Page, section, link, coverage, and contract differences across Wiki snapshots/revisions (§16A.8, §10.2).
-- **Permission**: 🔒 **READ-ONLY (`readOnlyHint: true`).** Diffs read isolated `WikiSnapshot` records without touching the working tree (§16A.10).
+Structural differences between two published `WikiSnapshot`s. Reads stored rows only; never touches the working tree or Git.
 
 ```ts
 export const WikiDiffInputSchema = z.strictObject({
   workspaceId: z.string().min(1).optional(),
-  base: z.string().min(1),               // wikiSnapshotId or latest published revisionRef — required
-  target: z.string().min(1),             // wikiSnapshotId or latest published revisionRef — required
-  pageId: z.string().min(1).optional(),  // optional single-page scope filter
+  base: z.string().min(1),               // wikiSnapshotId, or revisionRef of the latest published wiki
+  target: z.string().min(1),
+  pageId: z.string().min(1).optional(),  // single-page scope
 });
 
 export const WikiDiffDataSchema = z.strictObject({
-  base: z.string(),
-  target: z.string(),
-  baseWikiSnapshotId: z.string(),
-  targetWikiSnapshotId: z.string(),
+  base: z.string(), target: z.string(),
+  baseWikiSnapshotId: z.string(), targetWikiSnapshotId: z.string(),
   addedPages: z.array(z.string()),
   removedPages: z.array(z.string()),
-  changedSections: z.array(z.strictObject({
-    pageId: z.string(),
-    sectionKey: z.string(),
-  })),
+  changedSections: z.array(z.strictObject({ pageId: z.string(), sectionKey: z.string() })),
   addedLinks: z.array(WikiLinkSchema),
   removedLinks: z.array(WikiLinkSchema),
-  contractChanges: z.array(z.strictObject({ // K-013 #7 (finalized in Sprint 5 D7)
+  contractChanges: z.array(z.strictObject({
     contractId: z.string(),
     changeKind: z.enum(["added", "removed", "modified"]),
     summary: z.string(),
   })),
-  coverageDelta: z.array(z.strictObject({   // K-013 #3
+  coverageDelta: z.array(z.strictObject({
     pageId: z.string(),
     previous: CoverageStatusSchema,
     current: CoverageStatusSchema,
@@ -545,108 +662,108 @@ export const WikiDiffDataSchema = z.strictObject({
 });
 ```
 
-- **Partial uncertainty**: When either base or target `WikiSnapshot` is `partial`, `envelope.status` is `"partial"`; if either backing `GraphSnapshot` is no longer present in the graph repository, `contractChanges` returns `[]` with an explicit warning (§16A.5, K-013 #7).
-- **Error codes**: `WORKSPACE_NOT_AUTHORIZED`, `INDEX_NOT_READY`, `WIKI_PAGE_NOT_FOUND` (`pageId` absent from both snapshots), `INVALID_REVISION` (`base` or `target` could not be resolved), `INVALID_ARGUMENT`, `INTERNAL_ERROR`.
+- Side resolution: a published `WikiSnapshot` ID of the workspace, or a string equal to the latest published snapshot's `revisionRef`. Since most snapshots share `revisionRef: "working-tree"`, use `wikiSnapshotId` values (from `causoryn_wiki_build` or `causoryn_wiki_get_tree`).
+- `pageId` scope: page and section results are limited to that page, link results to links touching it, and `contractChanges` to records whose contract page ID equals it. A `removed` record carries the base ID and a `modified` record the target ID, so a base-only page scope may not show a `modified` record.
+- Not paginated. `envelope.snapshotId` is the target ID; `envelope.status` is `partial` if either side is `partial`.
+- Computation details: [§6.4](#64-diff-computations).
+- Errors: `WORKSPACE_NOT_AUTHORIZED`, `INDEX_NOT_READY` (no wiki data root), `INVALID_REVISION`, `WIKI_PAGE_NOT_FOUND`, `INVALID_ARGUMENT`, `INTERNAL_ERROR`.
 
-### 4.3 Optional MCP Resources
+### 8.10 MCP resources
 
-Optional resource URI template: `causoryn://wiki/{workspaceId}/{pageId}?snapshot={wikiSnapshotId}` (§16A.8). In `v0.2.4`, MCP `resources` are not published; the portable baseline contract is the 7 MCP tools above. Interactive UI extensions (such as MCP Apps) are deferred until cross-host support is verified and are never advertised prematurely (ADR-010).
+The design reserves a resource URI template `causoryn://wiki/{workspaceId}/{pageId}?snapshot={wikiSnapshotId}`. It is not implemented: the server advertises only the `tools` capability. MCP Apps or other interactive UI surfaces are not provided.
 
-## 5. Write Permissions: Data-Root Rule and Permission Matrix
+## 9. Write Permissions and Security Boundaries
 
-### 5.1 `wiki_build` Writes Strictly to the Authorized Data-Root
+### 9.1 Data-root rule
 
-- `wiki_build` requires explicit workspace authorization and **can never write to source files** (§16A.8, ADR-008).
-- The SQLite data-root is provisioned in one of two ways:
-  1. **Explicit configuration (`wiki.dataDbPath`):** Validated fail-closed at startup by `validateDataDbPath` (`packages/mcp-server/src/context.ts:230-357`) — must be an absolute path with no null bytes, an existing parent directory, non-symlink/verified SQLite `-wal`/`-shm`/`-journal` sidecars (CWE-59), and a `realpathSync` location strictly outside every `allowRoots` entry.
-  2. **Zero-config CLI / Plugin mode (`--auto-data-dir`, K-021):** `buildWorkspaceAutoConfig` (`packages/mcp-server/src/runtime-cli.ts:871-996`) resolves the base data directory (`--data-dir` > `ZCODE_PLUGIN_DATA` > `~/.causoryn`) and provisions `~/.causoryn/workspaces/<slug>-<hash12>/graph[-<client>].sqlite` for both `storage.dataDbPath` and `wiki.dataDbPath` (with `0o700` permissions, pre-create ancestor symlink checks, and post-create `realpathSync` TOCTOU verification).
-- `LLM_* / API_KEY / MODEL_PROVIDER` configuration keys are forbidden (Red Line 1).
-- Offline Wiki export (`exportWikiOffline`, `packages/wiki/src/export.ts`) is completely separate from `wiki.dataDbPath` and writes atomically (`.tmp` + `rename`) **only** to directories authorized by `OutputAccessPolicy` (`output.allowedOutputDirs`), emitting self-contained HTML with a strict CSP (`default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'`), URL defanging, no `file://` links, and zero remote CDN/telemetry assets (§16A.9).
+- `causoryn_wiki_build` writes only through `SqliteWikiStore` to the configured data root; it has no code path that writes workspace files.
+- `validateDataDbPath` (`context.ts`) checks an explicit `wiki.dataDbPath` fail-closed at startup: absolute path; no null byte; at least one authorized root; lexically outside every root; parent directory exists; the database file and its `-wal`, `-shm`, `-journal` sidecars must not be directories, dangling symlinks are rejected, and the real paths of the parent and of every existing artifact must lie outside the real path of every root (symlink and junction escapes are rejected). Violations stop the server with a configuration error.
+- Under `--auto-data-dir`, the directory checks of `buildWorkspaceAutoConfig` apply instead ([§2.2](#22-data-root)).
+- The configuration has no model-provider or API-key settings (no-LLM policy).
 
-### 5.2 Write-Permission Matrix
+### 9.2 Read-only Git
 
-| Tool / Flow | Write Permission | Permitted Write Target | Reference |
-|---|---|---|---|
-| `causoryn_wiki_build` | ✅ YES (`readOnlyHint: false`) | Authorized Causoryn SQLite data-root only (`wiki.dataDbPath` or `--auto-data-dir`) | §16A.8, §19, K-021 |
-| `causoryn_wiki_get_tree` | ❌ NO (`readOnlyHint: true`) | — (read-only) | §16A.8 |
-| `causoryn_wiki_get_page` | ❌ NO (`readOnlyHint: true`) | — (read-only) | §16A.8 |
-| `causoryn_wiki_search` | ❌ NO (`readOnlyHint: true`) | — (read-only) | §16A.8 |
-| `causoryn_wiki_get_links` | ❌ NO (`readOnlyHint: true`) | — (read-only) | §16A.8 |
-| `causoryn_wiki_get_versions` | ❌ NO (`readOnlyHint: true`) | — (read-only; Git read-only + `.git`-less `working-tree`) | §16A.8, Red Line 3 |
-| `causoryn_wiki_diff` | ❌ NO (`readOnlyHint: true`) | — (read-only; working tree untouched) | §16A.8, §16A.10 |
-| `causoryn_refresh_index` | ✅ (index, `readOnlyHint: false`) | Causoryn graph index only (`InMemoryGraphRepository` / `storage.dataDbPath`); Wiki rebuilds are invoked explicitly via `causoryn_wiki_build` in `v0.2.4` | §10.2, ADR-010 |
-| `causoryn_export_documentation` | ✅ (export, `readOnlyHint: false`) | Explicitly authorized `output.allowedOutputDirs` only (visual architecture views are available, `view="wiki"` explicitly returns `INVALID_ARGUMENT`) | §10.2, §16A.9, ADR-010 |
-| Wiki note create/update | ✅ (consented local flow) | **No MCP tool**; core `AnnotationOverlayEngine` implemented, local UI/CLI surface tracked for 1.0.0 | §16A.6, §10.2, K-014 |
+`causoryn_wiki_get_versions` runs only `git cat-file -t <ref>` via the shared read-only runner in `packages/graph/src/git-read.ts`; `causoryn_wiki_diff` runs no Git at all. Neither runs `checkout`, `reset` or `clean`. The runner's environment hardening (including `GIT_NO_LAZY_FETCH=1`, which needs Git 2.45 or newer to take effect) is described in the [Security Pass](security-pass.md).
 
-Summary: **Out of the 7 Wiki MCP tools, only `causoryn_wiki_build` writes**, and strictly to the external SQLite data-root; the remaining 6 tools are purely read-only.
+### 9.3 Offline wiki export (library only)
 
-## 6. Reuse Principle: `refresh_index` and `export_documentation`
+`exportWikiOffline` (`packages/wiki/src/export.ts`) writes a self-contained wiki (`index.html`, `markdown/index.md`, one `.md` per page) and is separate from the data root:
 
-Technical Specification §10.2 + §16A.8 catalog design principle (and honest `v0.2.4` implementation status):
+- Target directories are authorized by `OutputAccessPolicy` (`output.allowedOutputDirs`); a rejected target gets no files and no subdirectories.
+- Each file is written atomically (`.tmp` + rename, stale `.tmp` removed first). The file set as a whole is not transactional: if a later file fails, earlier files remain.
+- HTML: every dynamic value is escaped; CSP `default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'`; no scripts, external resources, CDN or telemetry; navigation only through same-document anchors; source paths shown as text, no `file://` links; raw `http(s)://` strings in body text are defanged.
+- Markdown: table cells and headings are escaped; inline HTML and image embeds in section bodies are neutralized.
+- File names: sanitized slugs with deterministic ID suffixes on collisions and for Windows reserved device names (`con`, `nul`, `com1`–`com9`, `lpt1`–`lpt9`, …); remaining collisions are rejected, never overwritten.
+- Annotations are not exported.
 
-1. **Separate `wiki_refresh` and `wiki_export` MCP tools are NEVER created** — keeping the published catalog locked at 22 + 7 = 29 tools.
-2. **Specification target vs. `v0.2.4` surface (ADR-010):**
-   - Technical Specification §20 envisions automatic Wiki refresh after `causoryn_refresh_index` (`wiki.autoBuildOnSnapshot: true`) and offline Wiki export through `causoryn_export_documentation(view="wiki")`.
-   - The core includes `projectWikiIncremental` and `exportWikiOffline`. On the MCP surface, invoke `causoryn_wiki_build` to project the Living Wiki. For Visual Architecture Portals, `causoryn_export_documentation` supports the `architecture`, HTML-only `interactive` (defaulting to `causoryn-architecture-interactive.html`), and `full` views (`view="wiki"` explicitly returns `INVALID_ARGUMENT`). See [MCP Tool Contracts](tool-contracts.md) · [Prompting & Architecture Portals Guide](prompting-and-architecture-portals.md).
-3. **Incremental pipeline (`packages/wiki/src/incremental.ts`, §16A.5):** `diffWikiGraphs` computes affected root and child `pageId`s between consecutive `GraphSnapshot`s → unaffected pages preserve their exact `contentHash` and section payloads → the new `WikiSnapshot` and `wiki_fts` publish atomically in a single SQLite transaction → until publication completes, concurrent readers continue serving the previous `WikiSnapshot` with `stale: true`.
-4. Manual annotation editing remains isolated from MCP read tools in user-consented local CLI/UI flows (§10.2, §16A.6).
+No MCP tool or CLI command calls this function today.
 
-Target configuration model (§20; in `v0.2.4`, the active runtime server config key is `wiki.dataDbPath` — see [CLI & Configuration](cli-and-configuration.md)):
+### 9.4 Write-permission matrix
 
-```yaml
-wiki:
-  dataDbPath: "/abs/path/outside-workspace/graph.sqlite" # or auto-provisioned via --auto-data-dir
-  # Technical Specification §20 target 1.0.0 extensions:
-  enabled: true
-  autoBuildOnSnapshot: true
-  includeManualNotesInSearch: false
-  includeManualNotesInExport: false
-  historicalSnapshotRetention: "metadata_and_derivatives" # raw source is never stored
-  offlineExportDefault: true
-```
+| Tool / flow | Writes | Target |
+|---|---|---|
+| `causoryn_wiki_build` | yes (`readOnlyHint: false`) | Wiki SQLite data root only |
+| `causoryn_wiki_get_tree`, `causoryn_wiki_get_page`, `causoryn_wiki_search`, `causoryn_wiki_get_links` | no (`readOnlyHint: true`) | — |
+| `causoryn_wiki_get_versions` | no (`readOnlyHint: true`) | — (read-only Git; `working-tree` without Git) |
+| `causoryn_wiki_diff` | no (`readOnlyHint: true`) | — (stored snapshots only) |
+| `causoryn_status` with `action: "refresh"` (legacy `causoryn_refresh_index` in `full`) | yes | Graph index only; does not rebuild the wiki |
+| `causoryn_export_documentation` | yes | `output.allowedOutputDirs` only; `view: "wiki"` → `INVALID_ARGUMENT` |
+| Annotation create / update / delete | — | No MCP tool or CLI command; core `AnnotationOverlayEngine` only |
 
-Observability metrics (§21 target): `wiki_projection_duration, wiki_pages_regenerated, wiki_fts_update_duration, wiki_broken_links, wiki_stale_queries, wiki_orphaned_notes` (`pagesRegenerated` and `brokenLinks` are already returned directly in `causoryn_wiki_build` responses).
+Of the seven wiki tools, only `causoryn_wiki_build` writes, and only to the external SQLite data root.
 
-## 7. Test and Acceptance Criteria (Technical Specification §16A.10)
+## 10. Tests and Acceptance Criteria
 
-| Test Area | Acceptance Criterion |
+| Area | Acceptance criterion | Covered by |
+|---|---|---|
+| Hierarchy | The TypeScript orders fixture (`examples/fixture-ts-orders`) yields 12 roots in taxonomy order, child pages for modules / endpoints, and explicit `no_data` / `partial` states | `packages/wiki/test/wiki-projection.test.ts`, `packages/mcp-server/test/wiki-tools.test.ts` |
+| Bidirectional links | Every outgoing link is found through the target's backlink query in the same snapshot; `verified` links carry evidence | `packages/wiki/test/wiki-links.test.ts`, `wiki-tools.test.ts` |
+| Search ranking | An exact symbol or route match (for example `CreateOrder`, `post /orders`) ranks above generic body matches; `matchedFields` and `evidenceIds` are returned | `packages/wiki/test/wiki-search.test.ts`, `wiki-tools.test.ts` |
+| Versioning | A diff between wikis built from two Git commits reports added pages, links, changed sections and coverage deltas and leaves the working tree untouched | `wiki-tools.test.ts` |
+| Incremental build | Changing one service regenerates only affected pages; independent pages keep their `contentHash`; fallbacks report `fallbackReason` | `packages/wiki/test/wiki-incremental.test.ts`, `packages/mcp-server/test/wiki-build-incremental.test.ts` |
+| Annotations | Two consecutive rebuilds leave annotation rows byte-for-byte intact; removed pages mark notes `orphan` without data loss; stale versions raise `wiki/annotation-conflict` | `packages/wiki/test/wiki-overlay.test.ts`, `packages/storage-sqlite/test/wiki-annotation-overlay.test.ts` |
+| Uncertainty | Unresolved edges produce `partial` sections and are never shown as `verified` links | `wiki-projection.test.ts`, `wiki-links.test.ts` |
+| Contract changes | `added` / `removed` / `modified` records and the missing-graph fallback | `packages/wiki/test/contract-changes.test.ts`, `wiki-tools.test.ts` |
+| Storage | Atomic publish, `failed` on error, no lingering `building` lock, FK and `CHECK` constraints | `packages/storage-sqlite/test/wiki-store.test.ts`, `wiki-tools.test.ts` |
+| Security | Data root inside the workspace or behind a symlink/junction stops the server; export HTML is escaped, CSP-restricted and makes no network requests | `wiki-tools.test.ts`, `packages/wiki/test/wiki-export.test.ts` |
+
+Each wiki tool has positive, negative and partial-result cases in `wiki-tools.test.ts`. For current pass/fail evidence see [Implementation Status](implementation-status.md).
+
+## 11. Limits and Honest Gaps
+
+**Limits**
+
+| Limit | Value |
 |---|---|
-| Hierarchy | Navigation from TS Orders fixture across Overview → APIs → POST /orders → Service, with explicit `no_data`/`partial` states |
-| Bidirectional links | Every `from -> to` link is discoverable via target backlink queries in the same snapshot, with `EvidenceRef`s on `verified` links |
-| Search ranking | Exact symbol match (e.g., `CreateOrder`) ranks strictly above generic FTS body matches |
-| Versioning | Diffs across two fixture Git commits report accurate added/removed/changed pages and links while **leaving the user working tree untouched** |
-| Incremental build | Modifying a single service regenerates only affected pages while independent page `contentHash` values remain identical |
-| Manual annotations | Two consecutive rebuilds leave manual notes byte-for-byte intact; renames mark notes `orphan` with **zero data loss** |
-| Uncertainty honesty | Unresolved dynamic imports report `partial`/`unresolved` and never impersonate `verified` links |
-| Security | Offline HTML enforces XSS escaping + strict CSP + URL defanging; broken-link diagnostics preserved; secret exclusion applied to all snippets (§22, §19) |
+| `limit` (tree, page sections, search, links, versions) | default 50, maximum 200 |
+| `depth` (`causoryn_wiki_get_tree`) | 1–8 |
+| `refs` (`causoryn_wiki_get_versions`) | 1–200 |
+| Search snippet | 12 tokens |
+| Template version | `1.1.0` |
+| Concurrent builds | one `building` row per workspace and graph snapshot |
 
-Every Wiki tool adheres to the positive + negative + partial test triad (§23 Definition of Done; see [Implementation Status](implementation-status.md)).
+**Gaps (not implemented or partial)**
 
-## 8. Resolved Design Decisions (K-013) & Open 1.0.0 Items
+1. Search filters `kinds`, `scope`, `language`, `revision`, `resolution` are declared and rejected with `INVALID_ARGUMENT`; filter results on the client side. The graph-proximity rank leg is never fed.
+2. Only `PARENT_OF`, `DEPENDS_ON` and `CALLS` links are generated; `DOCUMENTS`, `IMPLEMENTS`, `PRODUCES`, `CONSUMES`, `TESTED_BY`, `FLOWS_TO`, `RELATED_CONTRACT`, `CHANGED_IN` are schema-only. The `tags` search column is always empty.
+3. Page kinds `component`, `symbol`, `policy` are never generated; Business Flows, Architecture Timeline and Onboarding are always `no_data`; the Tests & Quality `coverage-gaps` section is always `no_data`.
+4. No automatic wiki rebuild after re-indexing (`wiki.autoBuildOnSnapshot` does not exist); call `causoryn_wiki_build` explicitly.
+5. Incremental builds rewrite the full row set per `WikiSnapshot`.
+6. No retention for wiki snapshots: every non-idempotent build adds a full row set to the database. Graph snapshot retention keeps only the two newest published graph snapshots, so after further re-indexes an incremental build falls back to full (previous graph gone) and `contractChanges` for older wiki pairs is `[]` with a warning.
+7. `causoryn_wiki_get_versions` reports only the latest published `WikiSnapshot`; `causoryn_wiki_diff` resolves a `revisionRef` only for the latest one; `revisionRef` defaults to `working-tree` and is not tied to a Git commit.
+8. No MCP or CLI surface for annotations; `WIKI_NOTE_CONFLICT` is not an MCP error code; annotations are not searchable or exportable (no `includeManualNotesInSearch` / `includeManualNotesInExport` options exist).
+9. Offline wiki export is library-only; `causoryn_export_documentation(view="wiki")` returns `INVALID_ARGUMENT`.
+10. Aliases (`wiki_aliases`) are not written or used by the build; rename detection is not active.
+11. MCP resources for wiki pages are not published.
+12. Warning, reason and summary texts, error messages and generated Markdown labels are English free text; clients should key on codes and enum values, not on message wording.
+13. Planned configuration keys (`enabled`, `autoBuildOnSnapshot`, `includeManualNotesInSearch`, `includeManualNotesInExport`, `historicalSnapshotRetention`, `offlineExportDefault`) and planned metrics (`wiki_projection_duration`, `wiki_fts_update_duration`, `wiki_stale_queries`, `wiki_orphaned_notes`, …) do not exist; the strict config schema rejects these keys. `pagesRegenerated` and `brokenLinks` are reported in `causoryn_wiki_build` responses.
 
-> **RESOLVED (2026-11-05, K-013 + Sprint 5 D7):** All 7 pre-implementation design questions originally tracked in §8 were resolved under **K-013** and codified across `packages/wiki`, `packages/storage-sqlite`, and `packages/mcp-server`:
+## 12. Related Documentation
 
-1. **`WikiSnapshot.status` value set (K-013 #1):** `building | ready | partial | failed` — identical to §8 `GraphSnapshot.state`; there is no separate `"error"` status string, and failures surface via `warnings` + fixed tool error codes.
-2. **`wiki_build mode` enum values (K-013 #2):** `full | incremental`; internal engine `full-rebuild` fallbacks map cleanly to `mode: "full"` + `fallbackReason` on the MCP surface.
-3. **`freshness`, `CoverageStatus`, `section status`, and `coverageDelta` shape (K-013 #3):** `freshness = fresh | stale`, `CoverageStatus = complete | partial | unsupported | no_data` (`no_data` is never padded with synthetic prose), section status `ok | partial | no_data`, and `coverageDelta` item shape `{ pageId, previous, current, reason? }`.
-4. **Broken-link target storage representation (K-013 #4):** `WikiLink` rows are retained with `toPageId: null` (never silently deleted and never placed into backlink buckets) **and** paired with `brokenLinkDiagnostics` entries.
-5. **Cursor format and pagination limits (K-013 #5):** Reuses the shared opaque `base64url` `{ "v": 1, "o": <int> }` cursor codec; default `limit = 50`, hard cap `200`, `nextCursor = null` on the final page.
-6. **`wiki_get_versions` branch/tag alias resolution (K-013 #6):** Resolved via read-only `git cat-file -t` (with `working-tree` resolved directly without requiring `.git`); unresolvable refs return `INVALID_REVISION`, whereas valid refs without a stored `WikiSnapshot` return `availability: "not_available"`.
-7. **`contractChanges` diff payload (K-013 #7, finalized in Sprint 5 D7):** `{ contractId, changeKind: "added" | "removed" | "modified", summary }`, computed across contract node surfaces (`ApiContract`/`EventContract`/`SchemaContract`/`ContractVersion`) of the backing `GraphSnapshot`s.
-
-**Remaining open Wiki items gated for `1.0.0` (synced with `CHANGELOG.md` `[Unreleased]`):**
-
-- Enabling the extra `causoryn_wiki_search` filters (`kinds`, `scope`, `language`, `revision`, `resolution`) and feeding the graph `proximity` rank leg on the MCP surface.
-- Registering `WIKI_NOTE_CONFLICT` in MCP `CAUSORYN_TOOL_ERROR_CODES` / `TOOL_ERROR_GUIDANCE` when local note CLI/UI write surfaces ship (K-014).
-- Wiring `causoryn_export_documentation(view="wiki")` and `wiki.autoBuildOnSnapshot` on the MCP surface, plus incremental SQLite row-sharing optimization across `WikiSnapshot` publications.
-
-## 9. Related Documentation
-
-- [Documentation Index](README.md) — entry point for all English and Turkish documentation
-- [Prompting & Architecture Portals Guide](prompting-and-architecture-portals.md) — standalone offline architecture portals and Host-LLM annotation workflow (`causoryn_export_documentation`)
-- [MCP Tool Contracts](tool-contracts.md) — all 29 published tools, 10-field envelope, 15 error codes, and write-permission matrix
-- [Architecture Overview](architecture.md) — package map, SQLite `wiki_*` schema family, and dependency boundaries
-- [CLI & Configuration](cli-and-configuration.md) — `wiki.dataDbPath`, `--auto-data-dir`, and workspace authorization
-- [Implementation Status](implementation-status.md) — Phase C2 (Sprint 4 W1–W8) and Phase D (D7) verification evidence
-- [Türkçe Spesifikasyon](../wiki-spec.md) — Turkish counterpart of this specification
-- Historical/primary source references: `raw/Causoryn_Teknik_Dokuman_v2.1.pdf` §16A (pp. 14–18) · `wiki/mcp-tools.md` · `wiki/scope.md` · `wiki/sprint-4.md` · `wiki/decisions.md` (ADR-004/005/008/010/011/012/013, K-013, K-014, K-021..K-026)
+- [Documentation Hub](README.md) · [5-Minute Quickstart Tutorial](tutorial-5-minutes.md)
+- [MCP Tool Contracts](tool-contracts.md) — tool profiles, envelope, error codes, write-permission summary
+- [CLI & Configuration](cli-and-configuration.md) — `--tool-profile`, `CAUSORYN_TOOL_PROFILE`, `--auto-data-dir`, `wiki.dataDbPath`, data directory layout
+- [Architecture Overview](architecture.md) — package map and storage layout
+- [Security Pass](security-pass.md) — read-only Git hardening and export safety
+- [Prompting & Architecture Portals Guide](prompting-and-architecture-portals.md) — `causoryn_export_documentation`
+- [Implementation Status](implementation-status.md) · [Türkçe Spesifikasyon](../wiki-spec.md)

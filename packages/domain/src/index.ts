@@ -47,6 +47,8 @@ export {
   SourceSpanSchema,
 } from "./graph-schema.js";
 export {
+  computeStreamingContentHash,
+  computeStreamingSnapshotId,
   createSnapshot,
   snapshotCanonicalJson,
 } from "./snapshot.js";
@@ -58,3 +60,10 @@ export type {
   SnapshotInput,
   SnapshotNodeInput,
 } from "./snapshot.js";
+export {
+  escapeMarkdownBlock,
+  escapeMarkdownInline,
+  escapeMarkdownTableCell,
+  escapeMermaidLabel,
+  markdownCodeSpan,
+} from "./markup-escape.js";

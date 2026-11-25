@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+
 import { describe, expect, it } from "vitest";
 
 import {
@@ -168,10 +170,15 @@ function extractDataIsland(html: string): {
   wiki?: { id: string; pages: Array<{ id: string; title: string }> };
 } {
   const match = html.match(
-    /<script id="causoryn-data" type="application\/json">([\s\S]*?)<\/script>/,
+    /<script id="causoryn-data" type="application\/json">([\s\S]*?)<\/script\b[^>]*>/i,
   );
   expect(match).not.toBeNull();
   return JSON.parse(match![1]!) as ReturnType<typeof extractDataIsland>;
+}
+
+/** CSP hash source value: base64 SHA-256 of the exact inline block text. */
+function sha256Base64(text: string): string {
+  return createHash("sha256").update(text, "utf8").digest("base64");
 }
 
 describe("visualizer — pozitif: offline HTML + SVG graph + gömülü evidence", () => {
@@ -182,13 +189,67 @@ describe("visualizer — pozitif: offline HTML + SVG graph + gömülü evidence"
     expect(html).toContain(
       `<meta http-equiv="Content-Security-Policy" content="${VIEWER_CSP_POLICY}">`,
     );
-    // CSP: hiçbir dış kaynak yüklenemez; yalnızca gömülü inline style/script
-    // istisnası vardır (çevrimdışı selection → evidence paneli için).
+    // CSP: no external source can load; only the embedded script and style
+    // blocks are allowed, by SHA-256 hash (no 'unsafe-inline').
     expect(VIEWER_CSP_POLICY).toContain("default-src 'none'");
-    expect(VIEWER_CSP_POLICY).toContain("style-src 'unsafe-inline'");
-    expect(VIEWER_CSP_POLICY).toContain("script-src 'unsafe-inline'");
+    expect(VIEWER_CSP_POLICY).toMatch(/style-src 'sha256-[A-Za-z0-9+/]{43}='/);
+    expect(VIEWER_CSP_POLICY).toMatch(/script-src 'sha256-[A-Za-z0-9+/]{43}='/);
+    expect(VIEWER_CSP_POLICY).not.toContain("'unsafe-inline'");
     expect(VIEWER_CSP_POLICY).toContain("base-uri 'none'");
     expect(VIEWER_CSP_POLICY).toContain("form-action 'none'");
+  });
+
+  it("CSP hashes match the emitted inline script and style blocks exactly", () => {
+    for (const input of [FIXTURE, { graph: { ...FIXTURE.graph, nodes: [], edges: [], evidence: [] } }]) {
+      const page = generateViewerHtml(input);
+      const csp = /<meta http-equiv="Content-Security-Policy" content="([^"]*)">/.exec(page)?.[1] ?? "";
+      expect(csp).toBe(VIEWER_CSP_POLICY);
+      expect(csp).not.toContain("'unsafe-inline'");
+      expect(csp).not.toContain("'unsafe-eval'");
+      const directives = new Map(
+        csp
+          .split(";")
+          .map((directive) => directive.trim())
+          .filter((directive) => directive.length > 0)
+          .map((directive) => {
+            const [name = "", ...values] = directive.split(/\s+/);
+            return [name, values] as const;
+          }),
+      );
+      expect(directives.get("default-src")).toEqual(["'none'"]);
+      expect(directives.get("base-uri")).toEqual(["'none'"]);
+      expect(directives.get("form-action")).toEqual(["'none'"]);
+
+      const scripts = [...page.matchAll(/<script\b([^>]*)>([\s\S]*?)<\/script\b[^>]*>/gi)];
+      expect(scripts).toHaveLength(2);
+      const executable = scripts.filter((match) => !/type="application\/json"/i.test(match[1] ?? ""));
+      expect(executable).toHaveLength(1);
+      expect(directives.get("script-src")).toEqual(
+        executable.map((match) => `'sha256-${sha256Base64(match[2] ?? "")}'`),
+      );
+
+      const styles = [...page.matchAll(/<style\b([^>]*)>([\s\S]*?)<\/style\b[^>]*>/gi)];
+      expect(styles).toHaveLength(1);
+      expect(directives.get("style-src")).toEqual(
+        styles.map((match) => `'sha256-${sha256Base64(match[2] ?? "")}'`),
+      );
+
+      // Hash-only CSP: inline event handlers or style attributes would be blocked.
+      // Text outside the <script>/<style> blocks, taken from the gaps between
+      // matches (no replace-based stripping): no other tag may open one.
+      const gaps: string[] = [];
+      let last = 0;
+      for (const block of page.matchAll(/<(script|style)\b[^>]*>[\s\S]*?<\/\1\b[^>]*>/gi)) {
+        gaps.push(page.slice(last, block.index));
+        last = block.index + block[0].length;
+      }
+      gaps.push(page.slice(last));
+      const withoutBlocks = gaps.join("\n");
+      expect(/<script\b/i.test(withoutBlocks)).toBe(false);
+      expect(/<style\b/i.test(withoutBlocks)).toBe(false);
+      expect(/\son[a-z]+\s*=/i.test(withoutBlocks)).toBe(false);
+      expect(/\sstyle\s*=/i.test(withoutBlocks)).toBe(false);
+    }
   });
 
   it("kendi inline SVG graph render'ını üretir (Mermaid kütüphanesi yok)", () => {
@@ -414,7 +475,7 @@ describe("visualizer — partial: boş graph → boş iskelet + uyarı", () => {
   it("boş graph uyarısı + boş SVG iskeleti üretir", () => {
     const html = generateViewerHtml(EMPTY);
     expect(html).toContain('data-empty="true"');
-    expect(html).toContain("Graf boş");
+    expect(html).toContain("Empty graph");
     // Boş SVG iskeleti yine de mevcut (viewBox'lı).
     expect(html).toContain("<svg");
     expect(html).toContain('viewBox="0 0');

@@ -25,9 +25,10 @@ import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { beforeAll, describe, expect, it } from "vitest";
+import { beforeAll, describe, expect, it, vi } from "vitest";
 import { EventEmitter } from "node:events";
 import { createSnapshot } from "@causoryn/domain";
+import { resolveWindowsSystemExecutable } from "@causoryn/sidecar-ipc";
 import {
   analyzeGoWorkspace,
   runGoWorkerAnalyze,
@@ -37,6 +38,8 @@ import {
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
 const WORKER_DIR = join(REPO_ROOT, "native", "go-worker");
 const WORKER_BIN_DIR = join(WORKER_DIR, "bin");
+/** Absolute fake prebuilt-binary path for spawn-injected tests (never started). */
+const FAKE_ABSOLUTE_WORKER_BINARY = join(WORKER_BIN_DIR, "sahte-worker");
 const FIXTURE_DIR = join(REPO_ROOT, "examples", "fixture-go-app");
 
 const FIXTURE_FILES = [
@@ -88,7 +91,7 @@ function writeFakeScripts(): void {
   // Geçerli PROTOCOL.md v1 hata yanıtı yazıp çıkan süreç.
   writeFileSync(
     FAKE_ERROR_PATH,
-    "process.stdout.write(JSON.stringify({ id: 'analyze:adapter-go-worker-error', protocolVersion: '1', status: 'error', error: { code: 'LIMIT_EXCEEDED', message: 'dosya sayısı sınırı aşıldı: 5001 > 5000' } }) + '\\n'); process.exit(0);\n",
+    "process.stdout.write(JSON.stringify({ id: 'analyze:adapter-go-worker-error', protocolVersion: '1', status: 'error', error: { code: 'LIMIT_EXCEEDED', message: 'file count limit exceeded: 5001 > 5000' } }) + '\\n'); process.exit(0);\n",
     "utf8",
   );
 }
@@ -1132,6 +1135,168 @@ const adapterSuite = describe.skipIf(!goAvailable)(
       expect(viaBinary.state).toBe("ready");
       expect(JSON.stringify(viaBinary)).toBe(JSON.stringify(positive));
     }, 120_000);
+
+    it("dürüstlük (Task 1.5): çok-dosyalı Go paketi aynı dizinde çapraz dosya çağrısını verified çözer", async () => {
+      const multi = await analyzeGoWorkspace({
+        workspaceId: "adapter-go-multifile-pkg",
+        files: [
+          {
+            path: "pkg/orders/handler.go",
+            content: "package orders\n\nfunc Handle() {\n\thelper()\n}\n",
+          },
+          {
+            path: "pkg/orders/helper.go",
+            content: "package orders\n\nfunc helper() {}\n",
+          },
+          {
+            path: "cmd/app/main.go",
+            content:
+              'package main\n\nimport "example.com/shop/pkg/orders"\n\nfunc main() {\n\torders.Handle()\n}\n',
+          },
+        ],
+        options: { goWorkerBinaryPath: WORKER_TEST_BINARY },
+      });
+      expect(multi.workerAvailable).toBe(true);
+      expect(multi.state).toBe("ready");
+
+      const intraPkg = multi.edges.find(
+        (e) =>
+          e.kind === "CALLS" &&
+          e.from.qualifiedName === "orders.Handle" &&
+          e.to.qualifiedName === "orders.helper",
+      );
+      expect(intraPkg).toBeDefined();
+      expect(intraPkg?.resolution).toBe("verified");
+      expect(intraPkg?.to.relativePath).toBe("pkg/orders/helper.go");
+
+      // Çok-dosyalı pakete dışarıdan go.mod'suz çağrı → heuristic (artık kırık pkgCount yüzünden kaybolmaz).
+      const crossPkg = multi.edges.find(
+        (e) =>
+          e.kind === "CALLS" &&
+          e.from.qualifiedName === "main.main" &&
+          e.to.qualifiedName === "orders.Handle",
+      );
+      expect(crossPkg).toBeDefined();
+      expect(crossPkg?.resolution).toBe("heuristic");
+      expect(crossPkg?.ambiguity).toBeDefined();
+    });
+
+    it("dürüstlük (Task 1.5): iki farklı dizindeki package main asla sahte verified çapraz bağ üretmez", async () => {
+      const dualMain = await analyzeGoWorkspace({
+        workspaceId: "adapter-go-dual-main",
+        files: [
+          {
+            path: "cmd/api/main.go",
+            content:
+              "package main\n\nfunc runAPI() {\n\tshared()\n\tonlyInWorker()\n}\n\nfunc shared() {}\n",
+          },
+          {
+            path: "cmd/worker/main.go",
+            content:
+              "package main\n\nfunc onlyInWorker() {}\n\nfunc shared() {}\n",
+          },
+        ],
+        options: { goWorkerBinaryPath: WORKER_TEST_BINARY },
+      });
+      expect(dualMain.workerAvailable).toBe(true);
+      expect(dualMain.state).toBe("ready");
+
+      // cmd/api → cmd/worker sahte verified kenarı OLAMAZ.
+      const falseEdge = dualMain.edges.find(
+        (e) =>
+          e.kind === "CALLS" &&
+          e.from.relativePath === "cmd/api/main.go" &&
+          e.to.relativePath === "cmd/worker/main.go",
+      );
+      expect(falseEdge).toBeUndefined();
+
+      const unresolvedCall = dualMain.edges.find(
+        (e) =>
+          e.kind === "CALLS" &&
+          e.from.qualifiedName === "main.runAPI" &&
+          e.to.qualifiedName === "onlyInWorker",
+      );
+      expect(unresolvedCall?.resolution).toBe("unresolved");
+      expect(unresolvedCall?.to.kind).toBe("UnknownExternal");
+
+      // Aynı dizindeki shared() yalnızca cmd/api/main.go'ya verified bağlanır.
+      const localShared = dualMain.edges.find(
+        (e) =>
+          e.kind === "CALLS" &&
+          e.from.relativePath === "cmd/api/main.go" &&
+          e.to.qualifiedName === "main.shared",
+      );
+      expect(localShared?.resolution).toBe("verified");
+      expect(localShared?.to.relativePath).toBe("cmd/api/main.go");
+    });
+
+    it("dürüstlük (Task 1.5): moduleFiles ile go.mod verildiğinde <modPath>/pkg import'u exact verified çözülür; go.mod olmadan çoklu dizin belirsizliği asla verified olmaz", async () => {
+      const files = [
+        {
+          path: "a/util/util.go",
+          content: 'package util\n\nfunc Format() string { return "a" }\n',
+        },
+        {
+          path: "b/util/util.go",
+          content: 'package util\n\nfunc Format() string { return "b" }\n',
+        },
+        {
+          path: "cmd/app/main.go",
+          content:
+            'package main\n\nimport "example.com/demo/a/util"\n\nfunc main() {\n\tutil.Format()\n}\n',
+        },
+      ];
+
+      const withMod = await analyzeGoWorkspace({
+        workspaceId: "adapter-go-with-mod",
+        files,
+        moduleFiles: [
+          {
+            relativePath: "go.mod",
+            content: "module example.com/demo\n\ngo 1.22\n",
+          },
+        ],
+        options: { goWorkerBinaryPath: WORKER_TEST_BINARY },
+      });
+      expect(withMod.workerAvailable).toBe(true);
+      const verifiedImportCall = withMod.edges.find(
+        (e) =>
+          e.kind === "CALLS" &&
+          e.from.qualifiedName === "main.main" &&
+          e.to.qualifiedName === "util.Format" &&
+          e.to.relativePath === "a/util/util.go",
+      );
+      expect(verifiedImportCall).toBeDefined();
+      expect(verifiedImportCall?.resolution).toBe("verified");
+
+      // go.mod olmadan basename çakışması: ASLA verified üretilmez, açık ambiguity taşır.
+      const withoutModAmbiguous = await analyzeGoWorkspace({
+        workspaceId: "adapter-go-no-mod-ambiguous",
+        files: [
+          files[0]!,
+          files[1]!,
+          {
+            path: "cmd/app/main.go",
+            content:
+              'package main\n\nimport "other.io/x/util"\n\nfunc main() {\n\tutil.Format()\n}\n',
+          },
+        ],
+        options: { goWorkerBinaryPath: WORKER_TEST_BINARY },
+      });
+      expect(withoutModAmbiguous.workerAvailable).toBe(true);
+      const anyVerifiedCall = withoutModAmbiguous.edges.find(
+        (e) => e.kind === "CALLS" && e.resolution === "verified",
+      );
+      expect(anyVerifiedCall).toBeUndefined();
+      const ambigEdge = withoutModAmbiguous.edges.find(
+        (e) =>
+          e.kind === "CALLS" &&
+          e.from.qualifiedName === "main.main" &&
+          e.to.qualifiedName === "util.Format",
+      );
+      expect(ambigEdge).toBeDefined();
+      expect(ambigEdge?.ambiguity?.candidates.length).toBeGreaterThanOrEqual(2);
+    });
   },
 );
 
@@ -1163,7 +1328,7 @@ describe("adapters/go graceful fallback (M1-Go)", { timeout: 20_000 }, () => {
     expect(
       result.warnings.some(
         (warning) =>
-          warning.includes("Go worker kullanılamıyor") &&
+          warning.includes("Go worker unavailable") &&
           warning.includes("L0/L1"),
       ),
     ).toBe(true);
@@ -1176,7 +1341,7 @@ describe("adapters/go graceful fallback (M1-Go)", { timeout: 20_000 }, () => {
       files: fixtureFiles(),
       options: {
         requestTimeoutMs: 400,
-        goWorkerBinaryPath: "sahte-worker",
+        goWorkerBinaryPath: FAKE_ABSOLUTE_WORKER_BINARY,
         spawnProcess: (command, args, options) => {
           void command;
           void args;
@@ -1191,7 +1356,7 @@ describe("adapters/go graceful fallback (M1-Go)", { timeout: 20_000 }, () => {
     expect(capture.child).not.toBeNull();
     expect(capture.child?.killed).toBe(true);
     expect(
-      result.warnings.some((warning) => warning.includes("zaman aşımı")),
+      result.warnings.some((warning) => warning.includes("timeout")),
     ).toBe(true);
   });
 
@@ -1201,7 +1366,7 @@ describe("adapters/go graceful fallback (M1-Go)", { timeout: 20_000 }, () => {
       files: fixtureFiles(),
       options: {
         requestTimeoutMs: 30_000,
-        goWorkerBinaryPath: "sahte-worker",
+        goWorkerBinaryPath: FAKE_ABSOLUTE_WORKER_BINARY,
         spawnProcess: (command, args, options) => {
           void command;
           void args;
@@ -1225,7 +1390,7 @@ describe("adapters/go graceful fallback (M1-Go)", { timeout: 20_000 }, () => {
       files: [{ path: "Big/Big.go", content: bigContent }, ...fixtureFiles()],
       options: {
         requestTimeoutMs: 30_000,
-        goWorkerBinaryPath: "sahte-worker",
+        goWorkerBinaryPath: FAKE_ABSOLUTE_WORKER_BINARY,
         spawnProcess: (command, args, options) => {
           void command;
           void args;
@@ -1244,7 +1409,7 @@ describe("adapters/go graceful fallback (M1-Go)", { timeout: 20_000 }, () => {
       files: fixtureFiles(),
       options: {
         requestTimeoutMs: 30_000,
-        goWorkerBinaryPath: "sahte-worker",
+        goWorkerBinaryPath: FAKE_ABSOLUTE_WORKER_BINARY,
         spawnProcess: (command, args, options) => {
           void command;
           void args;
@@ -1259,7 +1424,7 @@ describe("adapters/go graceful fallback (M1-Go)", { timeout: 20_000 }, () => {
       result.warnings.some(
         (warning) =>
           warning.includes("LIMIT_EXCEEDED") &&
-          warning.includes("dosya sayısı sınırı"),
+          warning.includes("file count limit exceeded"),
       ),
     ).toBe(true);
     expect(result.nodes.length).toBe(FIXTURE_FILES.length);
@@ -1274,7 +1439,7 @@ describe("adapters/go graceful fallback (M1-Go)", { timeout: 20_000 }, () => {
         workspaceId: "adapter-go-invalid",
         files: [{ path: "D:/outside/x.go", content: "package x" }],
       }),
-    ).rejects.toThrowError(/Mutlak kaynak yolu/);
+    ).rejects.toThrowError(/Absolute source paths are not accepted/);
   });
 
   it("negatif girdi: '..' kaçışı ve duplicate path adapter API yüzeyinde reddedilir", async () => {
@@ -1283,7 +1448,7 @@ describe("adapters/go graceful fallback (M1-Go)", { timeout: 20_000 }, () => {
         workspaceId: "adapter-go-escape",
         files: [{ path: "../escape.go", content: "package x" }],
       }),
-    ).rejects.toThrowError(/kök dışına çıkıyor/);
+    ).rejects.toThrowError(/escapes the workspace root/);
     await expect(
       analyzeGoWorkspace({
         workspaceId: "adapter-go-duplicate",
@@ -1292,7 +1457,7 @@ describe("adapters/go graceful fallback (M1-Go)", { timeout: 20_000 }, () => {
           { path: "a.go", content: "package a" },
         ],
       }),
-    ).rejects.toThrowError(/iki kez verildi/);
+    ).rejects.toThrowError(/was given twice/);
   });
 });
 
@@ -1434,7 +1599,7 @@ describe("worker-process env sınırlaması (M1-Go)", { timeout: 20_000 }, () =>
       },
     });
     expect(outcome.status).toBe("unavailable");
-    expect(outcome.detail).toContain("sınır");
+    expect(outcome.detail).toContain("limit");
     expect(killed.length).toBe(1);
   });
 
@@ -1513,7 +1678,7 @@ describe("worker-process env sınırlaması (M1-Go)", { timeout: 20_000 }, () =>
       },
     });
     expect(outcome.status).toBe("unavailable");
-    expect(outcome.detail).toContain("sınırını aştı");
+    expect(outcome.detail).toContain("character limit");
     // Saklanan kuyruk bütçeye kırpılır: birikim sınırsız büyüyemez.
     expect(outcome.stderr.length).toBeLessThanOrEqual(64);
     expect(killed.length).toBe(1);
@@ -1550,6 +1715,8 @@ describe("worker-process env sınırlaması (M1-Go)", { timeout: 20_000 }, () =>
     }
     const spawned: Array<{ command: string; args: readonly string[] }> = [];
     const killed: boolean[] = [];
+    const events: string[] = [];
+    const taskkill = resolveWindowsSystemExecutable("taskkill.exe");
     const outcome = await runGoWorkerAnalyze({
       goBinaryPath: GO_BINARY,
       goWorkerBinaryPath: "",
@@ -1558,22 +1725,37 @@ describe("worker-process env sınırlaması (M1-Go)", { timeout: 20_000 }, () =>
       requestTimeoutMs: 300,
       spawnProcess: (command, args) => {
         spawned.push({ command, args: [...args] });
-        const child = makeStderrChild({ pid: 4242 });
+        const isTaskkill = command === taskkill;
+        events.push(isTaskkill ? "spawn:taskkill" : "spawn:go");
+        const child = makeStderrChild({ pid: isTaskkill ? 5151 : 4242 });
         const record = child as unknown as Record<string, unknown>;
         record.kill = () => {
+          events.push(isTaskkill ? "kill:taskkill" : "kill:go");
           killed.push(true);
           return true;
         };
+        if (isTaskkill) {
+          // taskkill finishes shortly after it was started.
+          setTimeout(() => {
+            events.push("exit:taskkill");
+            child.emit("exit", 0, null);
+          }, 20);
+        }
         return child;
       },
     });
     expect(outcome.status).toBe("timeout");
-    // Doğrudan kill her koşulda uygulanır (ağaç-kill ek savunmadır).
-    expect(killed.length).toBe(1);
+    // Doğrudan kill her koşulda uygulanır (ağaç-kill ek savunmadır); it only
+    // follows once taskkill has finished, so taskkill /T still finds the
+    // worker process under the live `go` parent.
+    await vi.waitFor(() => {
+      expect(killed.length).toBe(1);
+    });
+    expect(events).toEqual(["spawn:go", "spawn:taskkill", "exit:taskkill", "kill:go"]);
     // İkinci spawn: LİTERAL "taskkill" + SADECE kendi çocuğumuzun sayısal
     // pid'i (/T ağaç, /F zorla). Kullanıcı girdisi interpole edilmez.
     expect(spawned.length).toBe(2);
-    expect(spawned[1]?.command).toBe("taskkill");
+    expect(spawned[1]?.command).toBe(resolveWindowsSystemExecutable("taskkill.exe"));
     expect(spawned[1]?.args).toEqual(["/pid", "4242", "/T", "/F"]);
   });
 

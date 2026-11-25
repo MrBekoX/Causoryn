@@ -61,17 +61,21 @@ const EXCLUDED_NATIVE_DIR_NAMES = new Set([
   "target",
   "obj",
   "__pycache__",
-  ".mimosa",
-  ".video_agent",
-  ".git",
   "node_modules",
 ]);
 
 const EXCLUDED_NATIVE_FILE_NAMES = new Set([
   "test-build.lock",
-  ".DS_Store",
   "Thumbs.db",
 ]);
+
+/**
+ * Hidden entries (names starting with ".") under the native worker sources
+ * are never staged: they are local tool caches, editor state or VCS
+ * metadata, not worker runtime files. A hidden entry the package really
+ * needs must be added here explicitly (currently none).
+ */
+export const NATIVE_HIDDEN_ENTRY_ALLOWLIST = new Set([]);
 
 const MIT_LICENSE_TEMPLATE = [
   "Permission is hereby granted, free of charge, to any person obtaining a copy",
@@ -97,7 +101,7 @@ function extractServerVersion(versionTsSource) {
   const match = versionTsSource.match(/export const SERVER_VERSION\s*=\s*"([^"]+)"/);
   if (!match || !match[1]) {
     throw new Error(
-      "[build:package] packages/mcp-server/src/version.ts içinde SERVER_VERSION bulunamadı",
+      "[build:package] SERVER_VERSION not found in packages/mcp-server/src/version.ts",
     );
   }
   return match[1];
@@ -105,7 +109,7 @@ function extractServerVersion(versionTsSource) {
 
 function readJson(filePath) {
   if (!existsSync(filePath)) {
-    throw new Error(`[build:package] zorunlu manifest bulunamadı: ${filePath}`);
+    throw new Error(`[build:package] required manifest not found: ${filePath}`);
   }
   return JSON.parse(readFileSync(filePath, "utf8"));
 }
@@ -113,19 +117,19 @@ function readJson(filePath) {
 function assertEqual(actual, expected, label) {
   if (actual !== expected) {
     throw new Error(
-      `[build:package] sürüm/alan eşliği hatası (${label}): beklenen "${String(expected)}", bulunan "${String(actual)}"`,
+      `[build:package] version/field parity error (${label}): expected "${String(expected)}", found "${String(actual)}"`,
     );
   }
 }
 
 function assertLauncherExpectedVersion(args, expectedVersion, label) {
   if (!Array.isArray(args)) {
-    throw new Error(`[build:package] ${label} args dizisi eksik`);
+    throw new Error(`[build:package] ${label} args array is missing`);
   }
   const idx = args.indexOf("--expected-version");
   if (idx < 0 || args[idx + 1] !== expectedVersion) {
     throw new Error(
-      `[build:package] ${label} "--expected-version ${expectedVersion}" pini eksik veya uyuşmuyor`,
+      `[build:package] ${label} "--expected-version ${expectedVersion}" pin is missing or does not match`,
     );
   }
 }
@@ -135,7 +139,7 @@ export function verifyManifestVersionParity(repoRoot, pkgDir) {
   const expectedVersion = extractServerVersion(readFileSync(versionTsPath, "utf8"));
   if (!SEMVER_PATTERN.test(expectedVersion)) {
     throw new Error(
-      `[build:package] SERVER_VERSION geçerli SemVer değil: "${expectedVersion}"`,
+      `[build:package] SERVER_VERSION is not a valid SemVer version: "${expectedVersion}"`,
     );
   }
 
@@ -162,7 +166,7 @@ export function verifyManifestVersionParity(repoRoot, pkgDir) {
 
   const serverPkgArgs = serverJson.packages?.[0]?.packageArguments;
   if (!Array.isArray(serverPkgArgs) || serverPkgArgs.length === 0) {
-    throw new Error("[build:package] server.json#packages[0].packageArguments eksik veya boş");
+    throw new Error("[build:package] server.json#packages[0].packageArguments is missing or empty");
   }
   for (const argSpec of serverPkgArgs) {
     if (
@@ -170,12 +174,12 @@ export function verifyManifestVersionParity(repoRoot, pkgDir) {
       (argSpec?.name === "--allow-cwd" || argSpec?.name === "--auto-data-dir")
     ) {
       throw new Error(
-        `[build:package] server.json packageArguments yasak 'named' bayrak içeriyor (${argSpec.name}); sabit 'positional' olmalı`,
+        `[build:package] server.json packageArguments contains a forbidden 'named' flag (${argSpec.name}); it must be a fixed 'positional' argument`,
       );
     }
     if (argSpec?.type !== "positional" || typeof argSpec?.value !== "string" || argSpec.value.length === 0) {
       throw new Error(
-        `[build:package] server.json packageArguments yalnızca sabit 'positional' bayraklar içermeli: ${JSON.stringify(argSpec)}`,
+        `[build:package] server.json packageArguments must contain only fixed 'positional' arguments: ${JSON.stringify(argSpec)}`,
       );
     }
   }
@@ -183,7 +187,7 @@ export function verifyManifestVersionParity(repoRoot, pkgDir) {
   for (const requiredArg of ["mcp", "--allow-cwd", "--auto-data-dir"]) {
     if (!positionalValues.includes(requiredArg)) {
       throw new Error(
-        `[build:package] server.json packageArguments zorunlu konumsal bayrak eksik: ${requiredArg}`,
+        `[build:package] server.json packageArguments is missing a required positional argument: ${requiredArg}`,
       );
     }
   }
@@ -199,7 +203,7 @@ export function verifyManifestVersionParity(repoRoot, pkgDir) {
     }
     const firstPlugin = Array.isArray(mkt.plugins) ? mkt.plugins[0] : undefined;
     if (!firstPlugin) {
-      throw new Error(`[build:package] ${relMkt} plugins[0] eksik`);
+      throw new Error(`[build:package] ${relMkt} plugins[0] is missing`);
     }
     assertEqual(firstPlugin.version, expectedVersion, `${relMkt}#plugins[0].version`);
     assertEqual(
@@ -218,7 +222,7 @@ export function verifyManifestVersionParity(repoRoot, pkgDir) {
     const args = mcpDoc.mcpServers?.causoryn?.args ?? [];
     if (!Array.isArray(args) || !args.includes(expectedPinnedSpec)) {
       throw new Error(
-        `[build:package] ${relMcp} mcpServers.causoryn.args "${expectedPinnedSpec}" içermiyor`,
+        `[build:package] ${relMcp} mcpServers.causoryn.args does not contain "${expectedPinnedSpec}"`,
       );
     }
   }
@@ -254,19 +258,20 @@ export function verifyManifestVersionParity(repoRoot, pkgDir) {
   const codexArgs = codexPkgMcp.mcpServers?.causoryn?.args ?? [];
   if (!Array.isArray(codexArgs) || !codexArgs.includes(expectedPinnedSpec)) {
     throw new Error(
-      `[build:package] packages/causoryn/.codex-plugin/mcp.json "${expectedPinnedSpec}" içermiyor`,
+      `[build:package] packages/causoryn/.codex-plugin/mcp.json does not contain "${expectedPinnedSpec}"`,
     );
   }
 
   return expectedVersion;
 }
 
-function copyNativeFiltered(srcDir, destDir, workerName) {
+export function copyNativeFiltered(srcDir, destDir, workerName) {
   mkdirSync(destDir, { recursive: true });
   const entries = readdirSync(srcDir, { withFileTypes: true }).sort((a, b) =>
     a.name < b.name ? -1 : a.name > b.name ? 1 : 0,
   );
   for (const entry of entries) {
+    if (entry.name.startsWith(".") && !NATIVE_HIDDEN_ENTRY_ALLOWLIST.has(entry.name)) continue;
     if (entry.isDirectory()) {
       if (EXCLUDED_NATIVE_DIR_NAMES.has(entry.name)) continue;
       // go-worker/bin yalnızca test sahte ikililerini barındırır;
@@ -314,8 +319,8 @@ function stageRoslynPortableRuntimeFlat(srcRoslynDir, destRoslynDir) {
 
   if (buildOutputDir === null) {
     throw new Error(
-      "[build:package] derlenmiş Causoryn.RoslynWorker.dll bulunamadı (bin/Release/net10.0 veya bin/Debug/net10.0). " +
-        "Önce `dotnet build native/roslyn-worker/Causoryn.RoslynWorker.csproj -c Release -p:DebugType=none -p:ContinuousIntegrationBuild=true -p:SatelliteResourceLanguages=en` çalıştırın.",
+      "[build:package] compiled Causoryn.RoslynWorker.dll not found (bin/Release/net10.0 or bin/Debug/net10.0). " +
+        "Run `dotnet build native/roslyn-worker/Causoryn.RoslynWorker.csproj -c Release -p:DebugType=none -p:ContinuousIntegrationBuild=true -p:SatelliteResourceLanguages=en` first.",
     );
   }
 
@@ -323,7 +328,7 @@ function stageRoslynPortableRuntimeFlat(srcRoslynDir, destRoslynDir) {
     const srcFile = path.join(buildOutputDir, fileName);
     if (!existsSync(srcFile)) {
       throw new Error(
-        `[build:package] zorunlu Roslyn çalışma zamanı dosyası eksik (${fileName}): ${srcFile}`,
+        `[build:package] required Roslyn runtime file is missing (${fileName}): ${srcFile}`,
       );
     }
   }
@@ -360,7 +365,7 @@ function resolveBundledNpmPackages(repoRoot, mcpServerPkgDir, metafile) {
   for (const dir of [...packageDirs].sort()) {
     const pkgJsonPath = path.join(dir, "package.json");
     if (!existsSync(pkgJsonPath)) {
-      throw new Error(`[build:package] paket metadata dosyası bulunamadı: ${pkgJsonPath}`);
+      throw new Error(`[build:package] package metadata file not found: ${pkgJsonPath}`);
     }
     const pkgJson = JSON.parse(readFileSync(pkgJsonPath, "utf8"));
     const name = String(pkgJson.name ?? "");
@@ -378,7 +383,7 @@ function resolveBundledNpmPackages(repoRoot, mcpServerPkgDir, metafile) {
       existsSync(path.join(dir, f)),
     );
     if (!licenseCandidate) {
-      throw new Error(`[build:package] lisans dosyası bulunamadı (${key}): ${dir}`);
+      throw new Error(`[build:package] license file not found (${key}): ${dir}`);
     }
     const licenseText = normalizeLf(readFileSync(path.join(dir, licenseCandidate), "utf8"));
     const homepage =
@@ -465,7 +470,7 @@ function stageThirdPartyLicensesAndNotices({
   ];
   for (const [src, dest] of standaloneLicenseCopies) {
     if (!existsSync(src)) {
-      throw new Error(`[build:package] zorunlu üçüncü-parti lisans dosyası eksik: ${src}`);
+      throw new Error(`[build:package] required third-party license file is missing: ${src}`);
     }
     copyFileSync(src, dest);
   }
@@ -576,11 +581,13 @@ export function stageVerifiedBundleArtifacts(options) {
 
   const bundleSrc = path.join(resolvedMcpDist, "mcp-server.mjs");
   const bundleLegalSrc = path.join(resolvedMcpDist, "mcp-server.mjs.LEGAL.txt");
+  const workerBundleSrc = path.join(resolvedMcpDist, "index-worker.mjs");
   const bundleManifestSrc = path.join(resolvedMcpDist, "bundle-manifest.json");
   const vendorNodeModulesSrc = path.join(resolvedMcpDist, "node_modules");
 
   const destBundle = path.join(resolvedPkgDist, "mcp-server.mjs");
   const destLegal = path.join(resolvedPkgDist, "mcp-server.mjs.LEGAL.txt");
+  const destWorkerBundle = path.join(resolvedPkgDist, "index-worker.mjs");
   const destManifest = path.join(resolvedPkgDist, "bundle-manifest.json");
   const destVendorNodeModules = path.join(resolvedPkgDist, "node_modules");
   const pkgDistBoundary = resolvedPkgDist.endsWith(path.sep)
@@ -591,12 +598,12 @@ export function stageVerifiedBundleArtifacts(options) {
   for (let retry = 0; retry <= maxRetries; retry += 1) {
     try {
       for (const [reqPath, label] of [
-        [bundleSrc, "packages/mcp-server/dist/mcp-server.mjs (önce build:bundle)"],
+        [bundleSrc, "packages/mcp-server/dist/mcp-server.mjs (run build:bundle first)"],
         [bundleManifestSrc, "packages/mcp-server/dist/bundle-manifest.json"],
         [path.join(vendorNodeModulesSrc, "better-sqlite3", "package.json"), "vendored better-sqlite3"],
       ]) {
         if (!existsSync(reqPath)) {
-          throw new Error(`[build:package] eksik önkoşul (${label}) [ENOENT]: ${reqPath}`);
+          throw new Error(`[build:package] missing prerequisite (${label}) [ENOENT]: ${reqPath}`);
         }
       }
 
@@ -606,44 +613,49 @@ export function stageVerifiedBundleArtifacts(options) {
       } else {
         rmSync(destLegal, { force: true });
       }
+      if (existsSync(workerBundleSrc)) {
+        copyFileSync(workerBundleSrc, destWorkerBundle);
+      } else {
+        rmSync(destWorkerBundle, { force: true });
+      }
       copyFileSync(bundleManifestSrc, destManifest);
       rmSync(destVendorNodeModules, { recursive: true, force: true });
       cpSync(vendorNodeModulesSrc, destVendorNodeModules, { recursive: true });
 
       const parsed = JSON.parse(readFileSync(destManifest, "utf8"));
       if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
-        throw new Error("[build:package] bundle-manifest.json kök değeri nesne değil");
+        throw new Error("[build:package] the bundle-manifest.json root value is not an object");
       }
       const filesMap = parsed.files;
       if (typeof filesMap !== "object" || filesMap === null || Array.isArray(filesMap)) {
-        throw new Error("[build:package] bundle-manifest.json files alanı nesne değil");
+        throw new Error("[build:package] the bundle-manifest.json files field is not an object");
       }
       const entries = Object.entries(filesMap);
       if (entries.length === 0 || typeof filesMap["mcp-server.mjs"] !== "string") {
-        throw new Error("[build:package] bundle-manifest.json mcp-server.mjs kaydı eksik");
+        throw new Error("[build:package] bundle-manifest.json has no mcp-server.mjs entry");
       }
 
       const postCopySrcManifest = JSON.parse(readFileSync(bundleManifestSrc, "utf8"));
       if (postCopySrcManifest?.files?.["mcp-server.mjs"] !== filesMap["mcp-server.mjs"]) {
         throw new Error(
-          "[build:package] SHA-256 manifest torn-read: kaynak bundle-manifest.json kopyalama sırasında değişti",
+          "[build:package] SHA-256 manifest torn read: the source bundle-manifest.json changed while it was being copied",
         );
       }
 
       for (const [relPath, expectedSha] of entries) {
         if (typeof expectedSha !== "string" || !/^[0-9a-f]{64}$/i.test(expectedSha)) {
           throw new Error(
-            `[build:package] geçersiz SHA-256 özeti (${relPath}): ${String(expectedSha)}`,
+            `[build:package] invalid SHA-256 digest (${relPath}): ${String(expectedSha)}`,
           );
         }
         const stagedFile = path.resolve(resolvedPkgDist, ...relPath.split("/"));
         if (!stagedFile.startsWith(pkgDistBoundary)) {
-          throw new Error(`[build:package] geçersiz bundle-manifest yolu: ${relPath}`);
+          throw new Error(`[build:package] invalid bundle-manifest path: ${relPath}`);
         }
         const actualSha = createHash("sha256").update(readFileSync(stagedFile)).digest("hex");
         if (actualSha !== expectedSha.toLowerCase()) {
           throw new Error(
-            `[build:package] bundle-manifest SHA-256 uyuşmazlığı (${relPath}): beklenen ${expectedSha}, bulunan ${actualSha}`,
+            `[build:package] bundle-manifest SHA-256 mismatch (${relPath}): expected ${expectedSha}, found ${actualSha}`,
           );
         }
       }
@@ -662,10 +674,11 @@ export function stageVerifiedBundleArtifacts(options) {
 
   rmSync(destBundle, { force: true });
   rmSync(destLegal, { force: true });
+  rmSync(destWorkerBundle, { force: true });
   rmSync(destManifest, { force: true });
   rmSync(destVendorNodeModules, { recursive: true, force: true });
   throw new Error(
-    `[build:package] bundle doğrulama ${String(maxRetries)} yeniden deneme sonunda başarısız: ${lastError instanceof Error ? lastError.message : String(lastError)}`,
+    `[build:package] bundle verification failed after ${String(maxRetries)} retries: ${lastError instanceof Error ? lastError.message : String(lastError)}`,
   );
 }
 
@@ -678,7 +691,7 @@ export function stageCausorynPackage(options = {}) {
   const compiledCliEntry = path.join(pkgDir, "dist", "index.js");
   if (!existsSync(compiledCliEntry)) {
     throw new Error(
-      `[build:package] eksik önkoşul (packages/causoryn derlenmiş CLI (önce npm run build)): ${compiledCliEntry}`,
+      `[build:package] missing prerequisite (compiled packages/causoryn CLI; run npm run build first): ${compiledCliEntry}`,
     );
   }
 
@@ -699,7 +712,7 @@ export function stageCausorynPackage(options = {}) {
   const mcpServerPkgDir = path.join(repoRoot, "packages", "mcp-server");
   const cliStdioEntry = path.join(mcpServerPkgDir, "src", "cli-stdio.ts");
   if (!existsSync(cliStdioEntry)) {
-    throw new Error(`[build:package] cli-stdio giriş noktası bulunamadı: ${cliStdioEntry}`);
+    throw new Error(`[build:package] cli-stdio entry point not found: ${cliStdioEntry}`);
   }
   const pkgBundlePath = path.join(pkgDistDir, "mcp-server.mjs");
   const pkgLegalPath = path.join(pkgDistDir, "mcp-server.mjs.LEGAL.txt");
@@ -755,7 +768,7 @@ export function stageCausorynPackage(options = {}) {
   // 2) TypeScript lib*.d.ts -> packages/causoryn/dist/typescript-lib/
   const tsLibSrcDir = path.join(repoRoot, "node_modules", "typescript", "lib");
   if (!existsSync(tsLibSrcDir)) {
-    throw new Error(`[build:package] TypeScript lib dizini bulunamadı: ${tsLibSrcDir}`);
+    throw new Error(`[build:package] TypeScript lib directory not found: ${tsLibSrcDir}`);
   }
   const tsLibDestDir = path.join(pkgDistDir, "typescript-lib");
   rmSync(tsLibDestDir, { recursive: true, force: true });
@@ -764,7 +777,7 @@ export function stageCausorynPackage(options = {}) {
     .filter((name) => /^lib(\..+)?\.d\.ts$/.test(name))
     .sort();
   if (!dtsFiles.includes("lib.es2022.full.d.ts")) {
-    throw new Error("[build:package] lib.es2022.full.d.ts bulunamadı");
+    throw new Error("[build:package] lib.es2022.full.d.ts not found");
   }
   for (const dtsName of dtsFiles) {
     copyFileSync(path.join(tsLibSrcDir, dtsName), path.join(tsLibDestDir, dtsName));
@@ -777,7 +790,7 @@ export function stageCausorynPackage(options = {}) {
   for (const workerName of NATIVE_WORKER_DIRS) {
     const srcWorker = path.join(repoRoot, "native", workerName);
     if (!existsSync(srcWorker)) {
-      throw new Error(`[build:package] native worker bulunamadı: ${srcWorker}`);
+      throw new Error(`[build:package] native worker not found: ${srcWorker}`);
     }
     const destWorker = path.join(pkgNativeDir, workerName);
     copyNativeFiltered(srcWorker, destWorker, workerName);
@@ -789,7 +802,7 @@ export function stageCausorynPackage(options = {}) {
   // 4) Kök skills/ -> packages/causoryn/skills/
   const rootSkillsDir = path.join(repoRoot, "skills");
   if (!existsSync(rootSkillsDir)) {
-    throw new Error(`[build:package] kök skills/ dizini bulunamadı: ${rootSkillsDir}`);
+    throw new Error(`[build:package] root skills/ directory not found: ${rootSkillsDir}`);
   }
   const pkgSkillsDir = path.join(pkgDir, "skills");
   rmSync(pkgSkillsDir, { recursive: true, force: true });
@@ -801,7 +814,7 @@ export function stageCausorynPackage(options = {}) {
   // 5) Kök LICENSE -> packages/causoryn/LICENSE
   const rootLicense = path.join(repoRoot, "LICENSE");
   if (!existsSync(rootLicense)) {
-    throw new Error(`[build:package] kök LICENSE bulunamadı: ${rootLicense}`);
+    throw new Error(`[build:package] root LICENSE not found: ${rootLicense}`);
   }
   copyFileSync(rootLicense, path.join(pkgDir, "LICENSE"));
 
@@ -833,7 +846,7 @@ if (isDirectExecution) {
   try {
     const summary = stageCausorynPackage();
     console.error(
-      `[build:package] ok — causoryn@${summary.version} sahnelendi (ts-lib: ${String(summary.typescriptLibFileCount)} d.ts, native: 4 worker + flat Roslyn DLL, skills: ${String(summary.skillCount)}, LICENSE + THIRD-PARTY-NOTICES.md)`,
+      `[build:package] ok — staged causoryn@${summary.version} (ts-lib: ${String(summary.typescriptLibFileCount)} d.ts, native: 4 worker + flat Roslyn DLL, skills: ${String(summary.skillCount)}, LICENSE + THIRD-PARTY-NOTICES.md)`,
     );
   } catch (error) {
     console.error(error instanceof Error ? error.message : String(error));

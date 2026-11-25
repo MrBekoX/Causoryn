@@ -17,13 +17,16 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   buildAllowlistedWorkerEnv,
   resolveCausorynAssetRoot,
   runLineJsonWorker,
   type SidecarSpawnOptions,
 } from "@causoryn/sidecar-ipc";
+
+/** Absolute fake command (the injected spawn never runs it; bare names are refused). */
+const WORKER_COMMAND = path.join(os.tmpdir(), "worker-bin");
 
 interface FakeChildController {
   readonly child: ChildProcess;
@@ -154,7 +157,7 @@ describe("runLineJsonWorker", () => {
     const fake = createFakeChild();
 
     const outcome = await runLineJsonWorker({
-      command: "worker-bin",
+      command: WORKER_COMMAND,
       args: ["--mode", "analyze"],
       env: { PATH: "/usr/bin" },
       requestPayload: { id: "req-1", type: "analyze" },
@@ -186,12 +189,61 @@ describe("runLineJsonWorker", () => {
     expect(fake.stdinEnded).toBe(true);
   });
 
+  it("keeps a response that is delivered after the process 'exit' event (stdout drains before 'close')", async () => {
+    // Real child processes may emit 'exit' before the last stdout chunk is read:
+    // a worker that answers, sees EOF on stdin and exits 0 must not lose its answer.
+    const fake = createFakeChild();
+    const outcome = await runLineJsonWorker({
+      command: WORKER_COMMAND,
+      args: [],
+      env: {},
+      requestPayload: { id: "req-exit-first" },
+      requestTimeoutMs: 5_000,
+      spawnProcess: () => {
+        setTimeout(() => {
+          const record = fake.child as unknown as Record<string, unknown>;
+          record["exitCode"] = 0;
+          fake.child.emit("exit", 0, null);
+          setTimeout(() => {
+            fake.stdout.emit("data", Buffer.from('{"id":"req-exit-first","status":"ready"}\n', "utf8"));
+            fake.child.emit("close", 0, null);
+          }, 20);
+        }, 0);
+        return fake.child;
+      },
+    });
+    expect(outcome.status).toBe("ok");
+    expect(outcome.response).toEqual({ id: "req-exit-first", status: "ready" });
+  });
+
+  it("reports an early exit once stdout has closed without a response line", async () => {
+    const fake = createFakeChild();
+    const outcome = await runLineJsonWorker({
+      command: WORKER_COMMAND,
+      args: [],
+      env: {},
+      requestPayload: { id: "req-exit-empty" },
+      requestTimeoutMs: 5_000,
+      spawnProcess: () => {
+        setTimeout(() => {
+          const record = fake.child as unknown as Record<string, unknown>;
+          record["exitCode"] = 0;
+          fake.child.emit("exit", 0, null);
+          fake.child.emit("close", 0, null);
+        }, 0);
+        return fake.child;
+      },
+    });
+    expect(outcome.status).toBe("unavailable");
+    expect(outcome.detail).toContain("worker exited (exit=0)");
+  });
+
   it("newline gelmeyen yarım satırda requestTimeoutMs sonunda süreci sonlandırır ve tam timeout detayı döner", async () => {
     const fake = createFakeChild();
     const requestTimeoutMs = 80;
 
     const outcome = await runLineJsonWorker({
-      command: "worker-bin",
+      command: WORKER_COMMAND,
       args: [],
       env: {},
       requestPayload: { id: "half" },
@@ -209,7 +261,7 @@ describe("runLineJsonWorker", () => {
     expect(outcome.response).toBeNull();
     expect(outcome.stderr).toBe("bekliyor");
     expect(outcome.detail).toBe(
-      `worker ${String(requestTimeoutMs)} ms içinde yanıt vermedi (zaman aşımı); süreç sonlandırıldı — sonraki istek taze süreçle yürütülür`,
+      `worker did not respond within ${String(requestTimeoutMs)} ms (timeout); the process was terminated and the next request uses a fresh process`,
     );
     expect(fake.killCount).toBe(1);
   });
@@ -219,7 +271,7 @@ describe("runLineJsonWorker", () => {
     const responseMaxChars = 32;
 
     const outcome = await runLineJsonWorker({
-      command: "worker-bin",
+      command: WORKER_COMMAND,
       args: [],
       env: {},
       requestPayload: { id: "oversize-stdout" },
@@ -237,7 +289,7 @@ describe("runLineJsonWorker", () => {
     expect(outcome.status).toBe("unavailable");
     expect(outcome.response).toBeNull();
     expect(outcome.detail).toBe(
-      `worker yanıt satırı ${String(responseMaxChars)} karakter sınırını aştı; süreç sonlandırıldı — sonraki istek taze süreçle ve L0/L1 fallback ile yürütülür`,
+      `worker response line exceeded the ${String(responseMaxChars)} character limit; the process was terminated and the next request uses a fresh process with L0/L1 fallback`,
     );
     expect(fake.killCount).toBe(1);
   });
@@ -247,7 +299,7 @@ describe("runLineJsonWorker", () => {
     const stderrMaxChars = 25;
 
     const outcome = await runLineJsonWorker({
-      command: "worker-bin",
+      command: WORKER_COMMAND,
       args: [],
       env: {},
       requestPayload: { id: "oversize-stderr" },
@@ -267,7 +319,7 @@ describe("runLineJsonWorker", () => {
     expect(outcome.stderr).toBe("a".repeat(15) + "b".repeat(10));
     expect(outcome.stderr.length).toBe(stderrMaxChars);
     expect(outcome.detail).toBe(
-      `worker stderr çıktısı ${String(stderrMaxChars)} karakter sınırını aştı; süreç sonlandırıldı — sonraki istek taze süreçle ve L0/L1 fallback ile yürütülür`,
+      `worker stderr output exceeded the ${String(stderrMaxChars)} character limit; the process was terminated and the next request uses a fresh process with L0/L1 fallback`,
     );
     expect(fake.killCount).toBe(1);
   });
@@ -276,7 +328,7 @@ describe("runLineJsonWorker", () => {
     const fake = createFakeChild();
 
     const outcome = await runLineJsonWorker({
-      command: "worker-bin",
+      command: WORKER_COMMAND,
       args: [],
       env: {},
       requestPayload: { id: "bad-json" },
@@ -291,7 +343,7 @@ describe("runLineJsonWorker", () => {
 
     expect(outcome.status).toBe("unavailable");
     expect(outcome.response).toBeNull();
-    expect(outcome.detail.startsWith("worker yanıtı geçerli JSON değil: ")).toBe(
+    expect(outcome.detail.startsWith("worker response is not valid JSON: ")).toBe(
       true,
     );
     expect(fake.killCount).toBe(1);
@@ -300,7 +352,7 @@ describe("runLineJsonWorker", () => {
   it("yanıttan önce exit kodu ile kapanan süreçte unavailable ve stderr özetli detay döner", async () => {
     const fakeWithStderr = createFakeChild();
     const outcomeWithStderr = await runLineJsonWorker({
-      command: "worker-bin",
+      command: WORKER_COMMAND,
       args: [],
       env: {},
       requestPayload: { id: "exit-code" },
@@ -321,13 +373,13 @@ describe("runLineJsonWorker", () => {
       status: "unavailable",
       response: null,
       stderr: "  çökme sebebi  \n",
-      detail: "worker çıktı (exit=2); stderr: çökme sebebi",
+      detail: "worker exited (exit=2); stderr: çökme sebebi",
     });
     expect(fakeWithStderr.killCount).toBe(0);
 
     const fakeEmpty = createFakeChild();
     const outcomeEmpty = await runLineJsonWorker({
-      command: "worker-bin",
+      command: WORKER_COMMAND,
       args: [],
       env: {},
       requestPayload: { id: "exit-null" },
@@ -341,7 +393,7 @@ describe("runLineJsonWorker", () => {
     });
 
     expect(outcomeEmpty.detail).toBe(
-      "worker çıktı (exit=bilinmiyor); stderr: (boş)",
+      "worker exited (exit=unknown); stderr: (empty)",
     );
   });
 
@@ -349,7 +401,7 @@ describe("runLineJsonWorker", () => {
     const fake = createFakeChild();
 
     const outcome = await runLineJsonWorker({
-      command: "worker-bin",
+      command: WORKER_COMMAND,
       args: [],
       env: {},
       requestPayload: { id: "exit-signal" },
@@ -366,14 +418,14 @@ describe("runLineJsonWorker", () => {
       status: "unavailable",
       response: null,
       stderr: "",
-      detail: "worker sinyal ile sonlandı (SIGTERM)",
+      detail: "worker terminated by signal (SIGTERM)",
     });
     expect(fake.killCount).toBe(0);
   });
 
   it("spawnProcess senkron hata fırlattığında veya child error olayı ürettiğinde başlatılamadı detayı döner", async () => {
     const syncOutcome = await runLineJsonWorker({
-      command: "worker-bin",
+      command: WORKER_COMMAND,
       args: [],
       env: {},
       requestPayload: { id: "spawn-sync-err" },
@@ -387,12 +439,12 @@ describe("runLineJsonWorker", () => {
       status: "unavailable",
       response: null,
       stderr: "",
-      detail: "worker süreci başlatılamadı: senkron ENOENT",
+      detail: "worker process could not be started: senkron ENOENT",
     });
 
     const fake = createFakeChild();
     const asyncOutcome = await runLineJsonWorker({
-      command: "worker-bin",
+      command: WORKER_COMMAND,
       args: [],
       env: {},
       requestPayload: { id: "spawn-async-err" },
@@ -409,14 +461,14 @@ describe("runLineJsonWorker", () => {
       status: "unavailable",
       response: null,
       stderr: "",
-      detail: "worker süreci başlatılamadı: asenkron ENOENT",
+      detail: "worker process could not be started: asenkron ENOENT",
     });
   });
 
   it("stdin EPIPE error olayını uncaught exception olmadan yutar; stdin.write senkron hatasında açık detay döner", async () => {
     const fakeEpipe = createFakeChild();
     const epipeOutcome = await runLineJsonWorker({
-      command: "worker-bin",
+      command: WORKER_COMMAND,
       args: [],
       env: {},
       requestPayload: { id: "epipe" },
@@ -434,13 +486,13 @@ describe("runLineJsonWorker", () => {
     });
 
     expect(epipeOutcome.status).toBe("unavailable");
-    expect(epipeOutcome.detail).toBe("worker çıktı (exit=1); stderr: (boş)");
+    expect(epipeOutcome.detail).toBe("worker exited (exit=1); stderr: (empty)");
 
     const fakeWriteThrow = createFakeChild({
       throwOnWrite: new Error("boru kapali"),
     });
     const writeThrowOutcome = await runLineJsonWorker({
-      command: "worker-bin",
+      command: WORKER_COMMAND,
       args: [],
       env: {},
       requestPayload: { id: "write-throw" },
@@ -452,7 +504,7 @@ describe("runLineJsonWorker", () => {
       status: "unavailable",
       response: null,
       stderr: "",
-      detail: "istek worker'a yazılamadı: boru kapali",
+      detail: "request could not be written to the worker: boru kapali",
     });
     expect(fakeWriteThrow.killCount).toBe(1);
   });
@@ -462,7 +514,7 @@ describe("runLineJsonWorker", () => {
     const runningFake = createFakeChild({ pid: 9001 });
 
     const timeoutOutcome = await runLineJsonWorker({
-      command: "worker-bin",
+      command: WORKER_COMMAND,
       args: [],
       env: {},
       requestPayload: { id: "hook-timeout" },
@@ -479,7 +531,7 @@ describe("runLineJsonWorker", () => {
 
     const exitedFake = createFakeChild({ pid: 9002 });
     const exitedOutcome = await runLineJsonWorker({
-      command: "worker-bin",
+      command: WORKER_COMMAND,
       args: [],
       env: {},
       requestPayload: { id: "hook-exited" },
@@ -505,7 +557,7 @@ describe("runLineJsonWorker", () => {
 
     const withoutCwdFake = createFakeChild();
     await runLineJsonWorker({
-      command: "worker-bin",
+      command: WORKER_COMMAND,
       args: ["exec"],
       env: { PATH: "/bin" },
       requestPayload: { id: "no-cwd" },
@@ -521,7 +573,7 @@ describe("runLineJsonWorker", () => {
 
     const withCwdFake = createFakeChild();
     await runLineJsonWorker({
-      command: "worker-bin",
+      command: WORKER_COMMAND,
       args: ["run"],
       env: { PATH: "/bin" },
       cwd: "/repo/native/go-worker",
@@ -544,18 +596,74 @@ describe("runLineJsonWorker", () => {
     }
 
     expect("cwd" in firstOpts).toBe(false);
-    expect(Object.keys(firstOpts).sort()).toEqual(["env", "stdio"]);
+    expect(Object.keys(firstOpts).sort()).toEqual([
+      "env",
+      "shell",
+      "stdio",
+      "windowsHide",
+    ]);
+    // win32 children additionally get NoDefaultCurrentDirectoryInExePath=1.
+    const expectedEnv =
+      process.platform === "win32"
+        ? { PATH: "/bin", NoDefaultCurrentDirectoryInExePath: "1" }
+        : { PATH: "/bin" };
     expect(firstOpts).toEqual({
       stdio: ["pipe", "pipe", "pipe"],
-      env: { PATH: "/bin" },
+      env: expectedEnv,
+      shell: false,
+      windowsHide: true,
     });
 
     expect("cwd" in secondOpts).toBe(true);
     expect(secondOpts).toEqual({
       stdio: ["pipe", "pipe", "pipe"],
-      env: { PATH: "/bin" },
+      env: expectedEnv,
       cwd: "/repo/native/go-worker",
+      shell: false,
+      windowsHide: true,
     });
+  });
+
+  it("boş veya yalnızca boşluk içeren cwd değerini süreç başlatmadan reddeder", async () => {
+    let spawnCalled = false;
+    for (const invalidCwd of ["", "   ", "\t\n", "/tmp/\0bad"]) {
+      const outcome = await runLineJsonWorker({
+        command: WORKER_COMMAND,
+        args: [],
+        env: { PATH: "/bin" },
+        cwd: invalidCwd,
+        requestPayload: { id: "invalid-cwd" },
+        requestTimeoutMs: 5_000,
+        spawnProcess: () => {
+          spawnCalled = true;
+          return createFakeChild().child;
+        },
+      });
+      expect(outcome.status).toBe("unavailable");
+      expect(outcome.detail).toContain("cwd");
+    }
+    expect(spawnCalled).toBe(false);
+  });
+
+  it("refuses bare or relative command names without spawning (Windows searches the cwd first)", async () => {
+    let spawnCalled = false;
+    for (const command of ["worker-bin", "./worker-bin", "bin/worker-bin", "", "C:worker.exe"]) {
+      const outcome = await runLineJsonWorker({
+        command,
+        args: [],
+        env: { PATH: "/bin" },
+        cwd: os.tmpdir(),
+        requestPayload: { id: "bare-command" },
+        requestTimeoutMs: 5_000,
+        spawnProcess: () => {
+          spawnCalled = true;
+          return createFakeChild().child;
+        },
+      });
+      expect(outcome.status).toBe("unavailable");
+      expect(outcome.detail).toContain("must be an absolute path");
+    }
+    expect(spawnCalled).toBe(false);
   });
 
   it("çok-baytlı UTF-8 karakterleri (ş, ğ, İ, —) iki Buffer parçası arasında bölündüğünde bozulmadan (U+FFFD üretmeden) çözümler", async () => {
@@ -575,7 +683,7 @@ describe("runLineJsonWorker", () => {
     const stderrPart2 = fullStderr.subarray(stderrDashOffset + 1);
 
     const outcome = await runLineJsonWorker({
-      command: "worker-bin",
+      command: WORKER_COMMAND,
       args: [],
       env: {},
       requestPayload: { id: "utf8-split" },
@@ -739,5 +847,120 @@ describe("resolveCausorynAssetRoot", () => {
     } finally {
       rmSync(tmpDir, { recursive: true, force: true });
     }
+  });
+});
+
+describe("runLineJsonWorker process termination and child environment", () => {
+  const IS_WIN = process.platform === "win32";
+
+  it("runs the tree-kill hook BEFORE the direct kill and kills directly only once the hook has settled", async () => {
+    const events: string[] = [];
+    const fake = createFakeChild({ pid: 9101 });
+    const record = fake.child as unknown as Record<string, unknown>;
+    record["kill"] = (): boolean => {
+      events.push("direct-kill");
+      fake.killCount += 1;
+      record["killed"] = true;
+      return true;
+    };
+    let releaseHook: () => void = () => {};
+    const hookDone = new Promise<void>((resolve) => {
+      releaseHook = resolve;
+    });
+
+    const outcome = await runLineJsonWorker({
+      command: WORKER_COMMAND,
+      args: [],
+      env: {},
+      requestPayload: { id: "tree-kill-order" },
+      requestTimeoutMs: 50,
+      spawnProcess: () => fake.child,
+      onKillChild: () => {
+        events.push("tree-kill");
+        return hookDone;
+      },
+    });
+
+    expect(outcome.status).toBe("timeout");
+    // The parent must still be alive while the tree kill enumerates its children.
+    expect(events).toEqual(["tree-kill"]);
+    expect(fake.killCount).toBe(0);
+
+    releaseHook();
+    await vi.waitFor(() => {
+      expect(events).toEqual(["tree-kill", "direct-kill"]);
+    });
+    expect(fake.killCount).toBe(1);
+  });
+
+  it("applies the direct kill after the fallback delay when the tree-kill hook never settles", async () => {
+    const fake = createFakeChild({ pid: 9102 });
+    const outcome = await runLineJsonWorker({
+      command: WORKER_COMMAND,
+      args: [],
+      env: {},
+      requestPayload: { id: "tree-kill-hang" },
+      requestTimeoutMs: 50,
+      killFallbackMs: 80,
+      spawnProcess: () => fake.child,
+      onKillChild: () => new Promise<void>(() => {}),
+    });
+    expect(outcome.status).toBe("timeout");
+    expect(fake.killCount).toBe(0);
+    await vi.waitFor(() => {
+      expect(fake.killCount).toBe(1);
+    });
+  });
+
+  it("still kills the child directly when the tree-kill hook throws or is absent", async () => {
+    const throwing = createFakeChild({ pid: 9103 });
+    await runLineJsonWorker({
+      command: WORKER_COMMAND,
+      args: [],
+      env: {},
+      requestPayload: { id: "tree-kill-throws" },
+      requestTimeoutMs: 50,
+      spawnProcess: () => throwing.child,
+      onKillChild: () => {
+        throw new Error("taskkill unavailable");
+      },
+    });
+    expect(throwing.killCount).toBe(1);
+
+    const plain = createFakeChild({ pid: 9104 });
+    await runLineJsonWorker({
+      command: WORKER_COMMAND,
+      args: [],
+      env: {},
+      requestPayload: { id: "no-tree-kill" },
+      requestTimeoutMs: 50,
+      spawnProcess: () => plain.child,
+    });
+    expect(plain.killCount).toBe(1);
+  });
+
+  it("disables the Windows cwd-first executable search in every child environment (POSIX env unchanged)", async () => {
+    const captured: SidecarSpawnOptions[] = [];
+    const fake = createFakeChild();
+    await runLineJsonWorker({
+      command: WORKER_COMMAND,
+      args: [],
+      env: { PATH: "/bin", NODEFAULTCURRENTDIRECTORYINEXEPATH: "0" },
+      requestPayload: { id: "child-env" },
+      requestTimeoutMs: 5_000,
+      spawnProcess: (_cmd, _args, options) => {
+        captured.push(options);
+        queueMicrotask(() => {
+          fake.stdout.emit("data", Buffer.from('{"ok":true}\n', "utf8"));
+        });
+        return fake.child;
+      },
+    });
+    expect(captured).toHaveLength(1);
+    expect(captured[0]?.env).toEqual(
+      IS_WIN
+        ? { PATH: "/bin", NoDefaultCurrentDirectoryInExePath: "1" }
+        : { PATH: "/bin", NODEFAULTCURRENTDIRECTORYINEXEPATH: "0" },
+    );
   });
 });

@@ -35,8 +35,50 @@ export const MAX_TOTAL_RESOLVE_VISITS = 128;
 export const MAX_TSCONFIG_WARNINGS = 100;
 export const MAX_SCOPED_CONFIGS = 64;
 export const MAX_PATHS_ENTRIES = 200;
+export const MAX_WORKSPACE_SCAN_DEPTH = 4;
+export const MAX_WORKSPACE_MANIFESTS = 256;
+export const MAX_PACKAGE_JSON_BYTES = 256 * 1024;
 const MAX_PATH_TARGETS_PER_PATTERN = 16;
 const MAX_DISK_SCAN_DIRS = 64;
+const MAX_WORKSPACE_DIR_VISITS = 512;
+const MAX_EXPORTS_RECURSION_DEPTH = 6;
+const MAX_EXPORTS_CANDIDATES = 16;
+
+const WORKSPACE_SKIP_DIRS: ReadonlySet<string> = new Set([
+  "node_modules",
+  ".git",
+  ".hg",
+  ".svn",
+  "dist",
+  "build",
+  "out",
+  "coverage",
+  "target",
+  "obj",
+  "bin",
+]);
+
+const WORKSPACE_OUTPUT_PREFIXES: readonly string[] = [
+  "dist/",
+  "build/",
+  "lib/",
+  "out/",
+  "esm/",
+  "cjs/",
+];
+
+const PACKAGE_NAME_PATTERN = /^(?:@[a-zA-Z0-9._-]+\/)?[a-zA-Z0-9._-]+$/;
+
+const EXPORT_CONDITION_PRIORITY: readonly string[] = [
+  "source",
+  "typescript",
+  "import",
+  "default",
+  "types",
+  "require",
+  "node",
+  "browser",
+];
 
 const FORBIDDEN_KEYS: ReadonlySet<string> = new Set([
   "__proto__",
@@ -103,6 +145,7 @@ interface NodeFsMinimal {
   };
   lstatSync(path: string): NodeFsStatMinimal;
   realpathSync(path: string): string;
+  readdirSync?(path: string): string[];
   openSync(path: string, flags: number): number;
   fstatSync(fd: number): NodeFsStatMinimal;
   readSync(
@@ -427,7 +470,7 @@ function checkPrototypeInjection(
   const proto: unknown = Object.getPrototypeOf(obj);
   if (proto !== Object.prototype && proto !== null) {
     addWarning(
-      `tsconfig içinde güvensiz __proto__ anahtarı algılandı ve yoksayıldı: ${contextLabel}`,
+      `unsafe __proto__ key detected in tsconfig and ignored: ${contextLabel}`,
     );
   }
 }
@@ -451,7 +494,7 @@ function extractSafeCompilerOptions(
       out.baseUrl = joinPosixAbs(rootPosix, resolvedBase.relativePath);
     } else {
       addWarning(
-        `kök dışına çıkan tsconfig baseUrl reddedildi: ${configRelativePath} -> ${rawBaseUrl}`,
+        `rejected tsconfig baseUrl that escapes the root: ${configRelativePath} -> ${rawBaseUrl}`,
       );
     }
   }
@@ -464,7 +507,7 @@ function extractSafeCompilerOptions(
     for (const key of Object.getOwnPropertyNames(rawPaths)) {
       if (FORBIDDEN_KEYS.has(key)) {
         addWarning(
-          `tsconfig paths içinde güvensiz '${key}' anahtarı reddedildi: ${configRelativePath}`,
+          `rejected unsafe '${key}' key in tsconfig paths: ${configRelativePath}`,
         );
         continue;
       }
@@ -475,7 +518,7 @@ function extractSafeCompilerOptions(
         if (!cappedWarned) {
           cappedWarned = true;
           addWarning(
-            `tsconfig paths giriş sınırı (${String(MAX_PATHS_ENTRIES)}) aşıldı; kalan girdiler kesildi: ${configRelativePath}`,
+            `tsconfig paths entry limit (${String(MAX_PATHS_ENTRIES)}) exceeded; remaining entries were dropped: ${configRelativePath}`,
           );
         }
         break;
@@ -578,7 +621,7 @@ function sanitizePathsWithinRoot(
         : undefined;
   if (effectiveBaseRel === undefined) {
     addWarning(
-      `kök dışına çıkan tsconfig paths tabanı reddedildi: ${configRelativePath}`,
+      `rejected tsconfig paths base that escapes the root: ${configRelativePath}`,
     );
     const { paths: _omit, pathsBasePath: _omitBase, ...rest } = options;
     return rest;
@@ -590,7 +633,7 @@ function sanitizePathsWithinRoot(
     for (const target of targets) {
       if (!isSafePathTargetWithinRoot(effectiveBaseRel, target)) {
         addWarning(
-          `kök dışına çıkan tsconfig paths hedefi reddedildi: ${configRelativePath} ('${pattern}' -> '${target}')`,
+          `rejected tsconfig paths target that escapes the root: ${configRelativePath} ('${pattern}' -> '${target}')`,
         );
         continue;
       }
@@ -673,7 +716,7 @@ function readBoundedTextFromFd(
     const fdStat = nodeFs.fstatSync(fd);
     if (!fdStat.isFile()) return undefined;
     if (fdStat.size > MAX_TSCONFIG_BYTES) {
-      addWarning(`tsconfig boyutu 256 KB sınırını aşıyor: ${relPath}`);
+      addWarning(`config file exceeds the 256 KB limit: ${relPath}`);
       return undefined;
     }
     if (
@@ -681,7 +724,7 @@ function readBoundedTextFromFd(
       leafStat.ino !== 0 &&
       (fdStat.ino !== leafStat.ino || fdStat.dev !== leafStat.dev)
     ) {
-      addWarning(`tsconfig okuma sırasında değişti (TOCTOU): ${relPath}`);
+      addWarning(`config file changed while being read (TOCTOU): ${relPath}`);
       return undefined;
     }
     const buf = new Uint8Array(MAX_TSCONFIG_BYTES + 1);
@@ -698,7 +741,7 @@ function readBoundedTextFromFd(
       totalRead += bytesRead;
     }
     if (totalRead > MAX_TSCONFIG_BYTES) {
-      addWarning(`tsconfig boyutu okuma sonrası 256 KB sınırını aşıyor: ${relPath}`);
+      addWarning(`config file exceeds the 256 KB limit after reading: ${relPath}`);
       return undefined;
     }
     return decodeUtf8(buf.subarray(0, totalRead));
@@ -713,10 +756,23 @@ function readBoundedTextFromFd(
   }
 }
 
+const UNC_OR_DEVICE_PREFIX = /^(?:\\\\|\/\/|\/\\|\\\/)/;
+
+function isUncOrDevicePath(raw: string): boolean {
+  if (raw.length < 2) {
+    return false;
+  }
+  return UNC_OR_DEVICE_PREFIX.test(raw);
+}
+
 function createDiskConfigReader(
   rootDirOnDisk: string,
   addWarning: (msg: string) => void,
 ): ((relativePath: string) => string | undefined) | undefined {
+  if (isUncOrDevicePath(rootDirOnDisk) || rootDirOnDisk.includes("\0")) {
+    addWarning(`disk read refused for a UNC/device rootDir`);
+    return undefined;
+  }
   const nodeFs = getNodeFs();
   if (nodeFs === undefined) return undefined;
 
@@ -727,18 +783,23 @@ function createDiskConfigReader(
     return undefined;
   }
   if (rootStat.isSymbolicLink() || !rootStat.isDirectory()) {
-    addWarning(`symlink veya dizin olmayan rootDir için disk tsconfig okuması atlandı`);
+    addWarning(`skipped disk config read: rootDir is a symlink or not a directory`);
     return undefined;
   }
 
-  let realRootPosix: string;
+  let rawRealRoot: string;
   try {
-    realRootPosix = stripNonRootTrailingSlash(
-      normalizePosixAbsolute(nodeFs.realpathSync(rootDirOnDisk)),
-    );
+    rawRealRoot = nodeFs.realpathSync(rootDirOnDisk);
   } catch {
     return undefined;
   }
+  if (isUncOrDevicePath(rawRealRoot)) {
+    addWarning(`disk read refused for a UNC/device rootDir`);
+    return undefined;
+  }
+  const realRootPosix = stripNonRootTrailingSlash(
+    normalizePosixAbsolute(rawRealRoot),
+  );
   const realRootKey = canonicalKey(realRootPosix);
   const rootPrefixWithSlash = realRootKey.endsWith("/") ? realRootKey : `${realRootKey}/`;
   const cleanRootNative = stripNonRootTrailingSlash(
@@ -750,7 +811,7 @@ function createDiskConfigReader(
     if (relPath === undefined) return undefined;
     if (!relPath.toLowerCase().endsWith(".json")) return undefined;
     if (hasForbiddenDiskSegment(relPath)) {
-      addWarning(`yasaklı segment içeren tsconfig reddedildi: ${relPath}`);
+      addWarning(`rejected config path with a forbidden segment: ${relPath}`);
       return undefined;
     }
 
@@ -770,7 +831,7 @@ function createDiskConfigReader(
         return undefined;
       }
       if (stat.isSymbolicLink()) {
-        addWarning(`symlink tsconfig reddedildi (CWE-59): ${relPath}`);
+        addWarning(`rejected symlinked config file (CWE-59): ${relPath}`);
         return undefined;
       }
       const isLast = i === segments.length - 1;
@@ -779,7 +840,7 @@ function createDiskConfigReader(
       } else {
         if (!stat.isFile()) return undefined;
         if (stat.size > MAX_TSCONFIG_BYTES) {
-          addWarning(`tsconfig boyutu 256 KB sınırını aşıyor: ${relPath}`);
+          addWarning(`config file exceeds the 256 KB limit: ${relPath}`);
           return undefined;
         }
         leafStat = stat;
@@ -795,7 +856,7 @@ function createDiskConfigReader(
     }
     const realTargetKey = canonicalKey(realTargetRaw);
     if (!realTargetKey.startsWith(rootPrefixWithSlash)) {
-      addWarning(`kök dışına çıkan tsconfig reddedildi (CWE-59): ${relPath}`);
+      addWarning(`rejected config file that resolves outside the root (CWE-59): ${relPath}`);
       return undefined;
     }
 
@@ -882,11 +943,11 @@ export function loadWorkspaceTsConfigs(
     for (const file of sortedInputs) {
       const validRel = validateRelativeConfigPath(file.relativePath);
       if (validRel === undefined) {
-        addWarning(`geçersiz tsconfig yolu yoksayıldı: ${file.relativePath}`);
+        addWarning(`ignored invalid tsconfig path: ${file.relativePath}`);
         continue;
       }
       if (utf8Encode(file.content).byteLength > MAX_TSCONFIG_BYTES) {
-        addWarning(`tsconfig boyutu 256 KB sınırını aşıyor: ${validRel}`);
+        addWarning(`tsconfig exceeds the 256 KB limit: ${validRel}`);
         continue;
       }
       const key = canonicalRelKey(validRel);
@@ -940,7 +1001,7 @@ export function loadWorkspaceTsConfigs(
     }
     const parsed = ts.parseConfigFileTextToJson(entry.relativePath, entry.content);
     if (parsed.error !== undefined || !isPlainRecord(parsed.config)) {
-      addWarning(`geçersiz tsconfig JSONC yoksayıldı: ${entry.relativePath}`);
+      addWarning(`ignored invalid tsconfig JSONC: ${entry.relativePath}`);
       parsedCache.set(canonRel, null);
       return undefined;
     }
@@ -956,14 +1017,14 @@ export function loadWorkspaceTsConfigs(
   ): ResolveOutcome => {
     if (depth > MAX_EXTENDS_DEPTH) {
       addWarning(
-        `tsconfig extends derinlik sınırı (${String(MAX_EXTENDS_DEPTH)}) aşıldı: ${entry.relativePath}`,
+        `tsconfig extends depth limit (${String(MAX_EXTENDS_DEPTH)}) exceeded: ${entry.relativePath}`,
       );
       return { options: undefined, globallyCacheable: false };
     }
     const canonRel = canonicalRelKey(entry.relativePath);
     if (visited.has(canonRel)) {
       addWarning(
-        `döngüsel tsconfig extends zinciri algılandı: ${entry.relativePath}`,
+        `circular tsconfig extends chain detected: ${entry.relativePath}`,
       );
       return { options: undefined, globallyCacheable: false };
     }
@@ -984,7 +1045,7 @@ export function loadWorkspaceTsConfigs(
 
     if (totalVisits >= MAX_TOTAL_RESOLVE_VISITS) {
       addWarning(
-        `tsconfig extends ziyaret bütçesi (${String(MAX_TOTAL_RESOLVE_VISITS)}) aşıldı; kalan zincir kesildi`,
+        `tsconfig extends visit budget (${String(MAX_TOTAL_RESOLVE_VISITS)}) exceeded; the remaining chain was cut`,
       );
       return { options: undefined, globallyCacheable: false };
     }
@@ -1009,7 +1070,7 @@ export function loadWorkspaceTsConfigs(
         if (typeof item !== "string") continue;
         if (extendsList.length >= MAX_EXTENDS_ENTRIES) {
           addWarning(
-            `tsconfig extends giriş sınırı (${String(MAX_EXTENDS_ENTRIES)}) aşıldı: ${entry.relativePath}`,
+            `tsconfig extends entry limit (${String(MAX_EXTENDS_ENTRIES)}) exceeded: ${entry.relativePath}`,
           );
           break;
         }
@@ -1025,7 +1086,7 @@ export function loadWorkspaceTsConfigs(
         if (spec.length === 0) continue;
         if (isAbsoluteOrUnsafeExtendsSpec(spec)) {
           addWarning(
-            `mutlak/güvensiz tsconfig extends reddedildi: ${entry.relativePath} -> ${spec}`,
+            `rejected absolute/unsafe tsconfig extends: ${entry.relativePath} -> ${spec}`,
           );
           continue;
         }
@@ -1036,7 +1097,7 @@ export function loadWorkspaceTsConfigs(
         const resolved = resolveRelativeWithinRoot(dirPrefix, spec);
         if (!resolved.ok) {
           addWarning(
-            `kök dışına çıkan tsconfig extends reddedildi: ${entry.relativePath} -> ${spec}`,
+            `rejected tsconfig extends that escapes the root: ${entry.relativePath} -> ${spec}`,
           );
           continue;
         }
@@ -1058,7 +1119,7 @@ export function loadWorkspaceTsConfigs(
         }
         if (parentEntry === undefined) {
           addWarning(
-            `tsconfig extends hedefi bulunamadı: ${entry.relativePath} -> ${spec}`,
+            `tsconfig extends target not found: ${entry.relativePath} -> ${spec}`,
           );
           continue;
         }
@@ -1100,7 +1161,7 @@ export function loadWorkspaceTsConfigs(
   const activeEntries = sortedActiveEntries.slice(0, MAX_SCOPED_CONFIGS);
   if (sortedActiveEntries.length > MAX_SCOPED_CONFIGS) {
     addWarning(
-      `aktif tsconfig/jsconfig sınırı (${String(MAX_SCOPED_CONFIGS)}) aşıldı; kalan yapılandırmalar kesildi`,
+      `active tsconfig/jsconfig limit (${String(MAX_SCOPED_CONFIGS)}) exceeded; remaining configs were dropped`,
     );
   }
 
@@ -1531,10 +1592,969 @@ function resolveViaVirtualAlias(
   return undefined;
 }
 
+/* ------------------------------------------------------------------ */
+/* Monorepo Workspace Package Discovery & Confined Resolution (v0.3)   */
+/* ------------------------------------------------------------------ */
+
+/** Discovered in-repo workspace package manifest (strictly root-confined). */
+export interface WorkspacePackageManifest {
+  readonly name: string;
+  /** Workspace-relative POSIX directory prefix ("" for root, "packages/domain" for subpkg). */
+  readonly dirPrefix: string;
+  readonly manifestRelativePath: string;
+  readonly exports?: unknown;
+  readonly main?: string;
+  readonly module?: string;
+  readonly types?: string;
+  readonly typings?: string;
+}
+
+/** Deterministic result of workspace `package.json` manifest discovery. */
+export interface LoadedWorkspacePackages {
+  readonly packages: ReadonlyMap<string, WorkspacePackageManifest>;
+  readonly warnings: readonly string[];
+}
+
+function isWorkspacePackageJsonPath(relativePath: string): boolean {
+  const base = relativeBasename(relativePath).toLowerCase();
+  if (base !== "package.json") return false;
+  for (const segment of relativePath.split("/")) {
+    if (segment.toLowerCase() === "node_modules") return false;
+  }
+  return true;
+}
+
+function isSkippedWorkspaceScanDir(name: string): boolean {
+  if (name.length === 0 || name.startsWith(".")) return true;
+  return WORKSPACE_SKIP_DIRS.has(name.toLowerCase());
+}
+
+function trimSlashes(str: string): string {
+  let start = 0;
+  let end = str.length;
+  while (start < end && str.charCodeAt(start) === 47) start += 1;
+  while (end > start && str.charCodeAt(end - 1) === 47) end -= 1;
+  return str.slice(start, end);
+}
+
+function extractRootWorkspacePatterns(rootPkg: Record<string, unknown>): {
+  readonly includes: readonly string[];
+  readonly excludes: readonly string[];
+} {
+  const rawWorkspaces = ownProperty(rootPkg, "workspaces");
+  let rawList: unknown[] = [];
+  if (Array.isArray(rawWorkspaces)) {
+    rawList = rawWorkspaces;
+  } else if (isPlainRecord(rawWorkspaces)) {
+    const packagesField = ownProperty(rawWorkspaces, "packages");
+    if (Array.isArray(packagesField)) {
+      rawList = packagesField;
+    }
+  }
+
+  const includes: string[] = [];
+  const excludes: string[] = [];
+  for (const item of rawList) {
+    if (typeof item !== "string") continue;
+    const trimmed = toPosix(item.trim());
+    if (trimmed.length === 0 || trimmed.includes("\0")) continue;
+    if (trimmed.startsWith("!")) {
+      const cleaned = trimSlashes(trimmed.slice(1));
+      if (cleaned.length > 0 && !cleaned.split("/").includes("..")) {
+        excludes.push(cleaned);
+      }
+    } else {
+      const cleaned = trimSlashes(trimmed.replace(/^\.\/+/, ""));
+      if (cleaned.length > 0 && !cleaned.split("/").includes("..")) {
+        includes.push(cleaned);
+      }
+    }
+  }
+  return { includes, excludes };
+}
+
+function matchGlobSegment(patternSegment: string, name: string): boolean {
+  if (patternSegment === "*") return true;
+  const starIdx = patternSegment.indexOf("*");
+  if (starIdx < 0) {
+    return ts.sys.useCaseSensitiveFileNames
+      ? patternSegment === name
+      : patternSegment.toLowerCase() === name.toLowerCase();
+  }
+  if (starIdx !== patternSegment.lastIndexOf("*")) return false;
+  const prefix = patternSegment.slice(0, starIdx);
+  const suffix = patternSegment.slice(starIdx + 1);
+  if (name.length < prefix.length + suffix.length) return false;
+  if (ts.sys.useCaseSensitiveFileNames) {
+    return name.startsWith(prefix) && name.endsWith(suffix);
+  }
+  const lowerName = name.toLowerCase();
+  return lowerName.startsWith(prefix.toLowerCase()) && lowerName.endsWith(suffix.toLowerCase());
+}
+
+function isExcludedByWorkspacePatterns(
+  dirRel: string,
+  excludes: readonly string[],
+): boolean {
+  if (excludes.length === 0) return false;
+  const dirSegments = dirRel.split("/");
+  for (const pattern of excludes) {
+    const patSegments = pattern.split("/").filter((s) => s.length > 0);
+    if (patSegments.length !== dirSegments.length) continue;
+    let allMatch = true;
+    for (let i = 0; i < patSegments.length; i += 1) {
+      if (!matchGlobSegment(patSegments[i]!, dirSegments[i]!)) {
+        allMatch = false;
+        break;
+      }
+    }
+    if (allMatch) return true;
+  }
+  return false;
+}
+
+function createConfinedDirScanner(
+  rootDirOnDisk: string,
+): {
+  readonly listSafeChildDirs: (dirRel: string) => string[];
+} | undefined {
+  if (isUncOrDevicePath(rootDirOnDisk) || rootDirOnDisk.includes("\0")) {
+    return undefined;
+  }
+  const nodeFs = getNodeFs();
+  if (nodeFs === undefined || typeof nodeFs.readdirSync !== "function") {
+    return undefined;
+  }
+
+  let rootStat: NodeFsStatMinimal;
+  try {
+    rootStat = nodeFs.lstatSync(rootDirOnDisk);
+  } catch {
+    return undefined;
+  }
+  if (rootStat.isSymbolicLink() || !rootStat.isDirectory()) {
+    return undefined;
+  }
+
+  let rawRealRoot: string;
+  try {
+    rawRealRoot = nodeFs.realpathSync(rootDirOnDisk);
+  } catch {
+    return undefined;
+  }
+  if (isUncOrDevicePath(rawRealRoot)) {
+    return undefined;
+  }
+  const realRootPosix = stripNonRootTrailingSlash(
+    normalizePosixAbsolute(rawRealRoot),
+  );
+  const realRootKey = canonicalKey(realRootPosix);
+  const realRootPrefixWithSlash = realRootKey.endsWith("/")
+    ? realRootKey
+    : `${realRootKey}/`;
+  const cleanRootNative = stripNonRootTrailingSlash(
+    toPosix(stripWindowsExtendedPrefix(rootDirOnDisk)),
+  );
+  const readdirSync = nodeFs.readdirSync.bind(nodeFs);
+
+  return {
+    listSafeChildDirs(dirRel: string): string[] {
+      const absDir =
+        dirRel === ""
+          ? cleanRootNative
+          : cleanRootNative.endsWith("/")
+            ? `${cleanRootNative}${dirRel}`
+            : `${cleanRootNative}/${dirRel}`;
+      let names: string[];
+      try {
+        names = readdirSync(absDir);
+      } catch {
+        return [];
+      }
+      names.sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+      const safeChildren: string[] = [];
+      for (const name of names) {
+        if (name.includes("\0") || name === "." || name === "..") continue;
+        if (isSkippedWorkspaceScanDir(name)) continue;
+        const childAbs = absDir.endsWith("/") ? `${absDir}${name}` : `${absDir}/${name}`;
+        let stat: NodeFsStatMinimal;
+        try {
+          stat = nodeFs.lstatSync(childAbs);
+        } catch {
+          continue;
+        }
+        if (stat.isSymbolicLink() || !stat.isDirectory()) continue;
+        let realChild: string;
+        try {
+          realChild = nodeFs.realpathSync(childAbs);
+        } catch {
+          continue;
+        }
+        if (!canonicalKey(realChild).startsWith(realRootPrefixWithSlash)) {
+          continue;
+        }
+        safeChildren.push(name);
+      }
+      return safeChildren;
+    },
+  };
+}
+
+function expandWorkspacePatternDirs(
+  pattern: string,
+  scanner: { readonly listSafeChildDirs: (dirRel: string) => string[] },
+  excludes: readonly string[],
+): string[] {
+  const segments = pattern.split("/").filter((s) => s.length > 0 && s !== ".");
+  if (segments.length === 0 || segments.length > MAX_WORKSPACE_SCAN_DEPTH) {
+    return [];
+  }
+  if (segments.some((s) => s === ".." || s === "**" || s.toLowerCase() === "node_modules")) {
+    return [];
+  }
+  let currentDirs: string[] = [""];
+  for (const seg of segments) {
+    const nextDirs: string[] = [];
+    for (const dirRel of currentDirs) {
+      const children = scanner.listSafeChildDirs(dirRel);
+      for (const child of children) {
+        if (!matchGlobSegment(seg, child)) continue;
+        const nextRel = dirRel === "" ? child : `${dirRel}/${child}`;
+        nextDirs.push(nextRel);
+        if (nextDirs.length >= MAX_WORKSPACE_MANIFESTS) break;
+      }
+      if (nextDirs.length >= MAX_WORKSPACE_MANIFESTS) break;
+    }
+    currentDirs = nextDirs;
+    if (currentDirs.length === 0) break;
+  }
+  return currentDirs.filter((dir) => !isExcludedByWorkspacePatterns(dir, excludes));
+}
+
+function parseSafePackageManifest(
+  relativePath: string,
+  content: string,
+  addWarning: (msg: string) => void,
+): { readonly manifest?: WorkspacePackageManifest; readonly rawRecord?: Record<string, unknown> } {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(content);
+  } catch {
+    addWarning(invalidPackageJsonWarning(relativePath));
+    return {};
+  }
+  if (!isPlainRecord(parsed)) return {};
+  checkPrototypeInjection(parsed, relativePath, addWarning);
+
+  const rawName = ownProperty(parsed, "name");
+  if (typeof rawName !== "string") {
+    return { rawRecord: parsed };
+  }
+  const name = rawName.trim();
+  if (
+    name.length === 0 ||
+    name.includes("\0") ||
+    FORBIDDEN_KEYS.has(name) ||
+    !PACKAGE_NAME_PATTERN.test(name)
+  ) {
+    return { rawRecord: parsed };
+  }
+
+  const readOptString = (field: string): string | undefined => {
+    const value = ownProperty(parsed, field);
+    if (typeof value !== "string") return undefined;
+    const trimmed = value.trim();
+    return trimmed.length > 0 && !trimmed.includes("\0") ? trimmed : undefined;
+  };
+
+  const exportsField = ownProperty(parsed, "exports");
+  const main = readOptString("main");
+  const moduleField = readOptString("module");
+  const types = readOptString("types");
+  const typings = readOptString("typings");
+
+  return {
+    rawRecord: parsed,
+    manifest: {
+      name,
+      dirPrefix: relativeDirPrefix(relativePath),
+      manifestRelativePath: relativePath,
+      ...(exportsField === undefined ? {} : { exports: exportsField }),
+      ...(main === undefined ? {} : { main }),
+      ...(moduleField === undefined ? {} : { module: moduleField }),
+      ...(types === undefined ? {} : { types }),
+      ...(typings === undefined ? {} : { typings }),
+    },
+  };
+}
+
+function directoryHasAnalyzedSources(
+  dirPrefix: string,
+  sourceDirs: ReadonlySet<string>,
+): boolean {
+  if (dirPrefix === "") return sourceDirs.size > 0;
+  return sourceDirs.has(canonicalRelKey(dirPrefix));
+}
+
+function shouldPreferManifest(
+  candidate: WorkspacePackageManifest,
+  existing: WorkspacePackageManifest,
+  sourceDirs: ReadonlySet<string>,
+): boolean {
+  const candHas = directoryHasAnalyzedSources(candidate.dirPrefix, sourceDirs);
+  const existHas = directoryHasAnalyzedSources(existing.dirPrefix, sourceDirs);
+  if (candHas !== existHas) return candHas;
+  const depthDiff = segmentDepth(candidate.dirPrefix) - segmentDepth(existing.dirPrefix);
+  if (depthDiff !== 0) return depthDiff < 0;
+  return candidate.dirPrefix < existing.dirPrefix;
+}
+
+/**
+ * Discovers workspace `package.json` manifests inside `rootPosix` strictly
+ * read-only, bounded to max depth 4 and max 256 manifests, rejecting all
+ * symlinks and `node_modules` paths.
+ */
+export function loadWorkspacePackages(
+  rootPosix: string,
+  packageFiles?: readonly TsAdapterSourceFile[],
+  rootDirOnDisk?: string,
+  sourceRelativePaths?: readonly string[],
+): LoadedWorkspacePackages {
+  void rootPosix;
+  const warnings: string[] = [];
+  const warningSeen = new Set<string>();
+  const addWarning = (message: string): void => {
+    if (warnings.length >= MAX_TSCONFIG_WARNINGS) return;
+    if (warningSeen.has(message)) return;
+    warningSeen.add(message);
+    warnings.push(message);
+  };
+
+  const sourceDirs = new Set<string>();
+  const ancestorDirs = new Set<string>([""]);
+  if (sourceRelativePaths !== undefined) {
+    const sortedSources = [...sourceRelativePaths].sort((a, b) =>
+      a < b ? -1 : a > b ? 1 : 0,
+    );
+    for (const rel of sortedSources) {
+      const valid = validateRelativeConfigPath(rel);
+      if (valid === undefined) continue;
+      if (valid.split("/").some((seg) => seg.toLowerCase() === "node_modules")) {
+        continue;
+      }
+      let dir = relativeDirPrefix(valid);
+      while (dir.length > 0) {
+        sourceDirs.add(canonicalRelKey(dir));
+        ancestorDirs.add(dir);
+        dir = relativeDirPrefix(dir);
+      }
+    }
+  }
+
+  const rawByCanonRel = new Map<string, RawConfigEntry>();
+
+  if (packageFiles !== undefined) {
+    const sortedInputs = [...packageFiles].sort((a, b) =>
+      a.relativePath < b.relativePath ? -1 : a.relativePath > b.relativePath ? 1 : 0,
+    );
+    for (const file of sortedInputs) {
+      const validRel = validateRelativeConfigPath(file.relativePath);
+      if (validRel === undefined || !isWorkspacePackageJsonPath(validRel)) {
+        continue;
+      }
+      if (utf8Encode(file.content).byteLength > MAX_PACKAGE_JSON_BYTES) {
+        addWarning(`package.json exceeds the 256 KB limit: ${validRel}`);
+        continue;
+      }
+      if (rawByCanonRel.size >= MAX_WORKSPACE_MANIFESTS) break;
+      const key = canonicalRelKey(validRel);
+      if (!rawByCanonRel.has(key)) {
+        rawByCanonRel.set(key, { relativePath: validRel, content: file.content });
+      }
+    }
+  } else if (rootDirOnDisk !== undefined) {
+    const readDiskJson = createDiskConfigReader(rootDirOnDisk, addWarning);
+    if (readDiskJson !== undefined) {
+      const candidateDirs = new Set<string>();
+      const addCandidateDir = (dirRel: string): void => {
+        if (candidateDirs.size >= MAX_WORKSPACE_MANIFESTS) return;
+        if (segmentDepth(dirRel) > MAX_WORKSPACE_SCAN_DEPTH) return;
+        candidateDirs.add(dirRel);
+      };
+
+      const scanner = createConfinedDirScanner(rootDirOnDisk);
+      const rootContent = readDiskJson("package.json");
+      let excludes: readonly string[] = [];
+      if (rootContent !== undefined) {
+        rawByCanonRel.set(canonicalRelKey("package.json"), {
+          relativePath: "package.json",
+          content: rootContent,
+        });
+        const rootParsed = parseSafePackageManifest("package.json", rootContent, addWarning);
+        if (rootParsed.rawRecord !== undefined && scanner !== undefined) {
+          const patterns = extractRootWorkspacePatterns(rootParsed.rawRecord);
+          excludes = patterns.excludes;
+          for (const pat of patterns.includes) {
+            for (const matchedDir of expandWorkspacePatternDirs(pat, scanner, excludes)) {
+              addCandidateDir(matchedDir);
+            }
+          }
+        }
+      }
+
+      // Ancestor directories of all policy-approved analyzed TS/JS sources.
+      const sortedAncestors = [...ancestorDirs].sort((a, b) => {
+        const depthDiff = segmentDepth(a) - segmentDepth(b);
+        if (depthDiff !== 0) return depthDiff;
+        return a < b ? -1 : a > b ? 1 : 0;
+      });
+      for (const dir of sortedAncestors) {
+        if (dir === "") continue;
+        if (!isExcludedByWorkspacePatterns(dir, excludes)) {
+          addCandidateDir(dir);
+        }
+      }
+
+      // Bounded BFS fallback scan (max depth 4, max 512 dirs, max 256 manifests).
+      if (scanner !== undefined && candidateDirs.size < MAX_WORKSPACE_MANIFESTS) {
+        const queue: Array<{ readonly dirRel: string; readonly depth: number }> = [
+          { dirRel: "", depth: 0 },
+        ];
+        const visitedDirs = new Set<string>([""]);
+        let dirVisits = 0;
+        while (
+          queue.length > 0 &&
+          dirVisits < MAX_WORKSPACE_DIR_VISITS &&
+          candidateDirs.size < MAX_WORKSPACE_MANIFESTS
+        ) {
+          const current = queue.shift()!;
+          dirVisits += 1;
+          if (current.depth >= MAX_WORKSPACE_SCAN_DEPTH) continue;
+          const children = scanner.listSafeChildDirs(current.dirRel);
+          for (const child of children) {
+            const nextRel = current.dirRel === "" ? child : `${current.dirRel}/${child}`;
+            const nextKey = canonicalRelKey(nextRel);
+            if (visitedDirs.has(nextKey)) continue;
+            visitedDirs.add(nextKey);
+            if (isExcludedByWorkspacePatterns(nextRel, excludes)) continue;
+            addCandidateDir(nextRel);
+            queue.push({ dirRel: nextRel, depth: current.depth + 1 });
+            if (candidateDirs.size >= MAX_WORKSPACE_MANIFESTS) break;
+          }
+        }
+      }
+
+      const sortedCandidateDirs = [...candidateDirs].sort((a, b) => {
+        const depthDiff = segmentDepth(a) - segmentDepth(b);
+        if (depthDiff !== 0) return depthDiff;
+        return a < b ? -1 : a > b ? 1 : 0;
+      });
+      for (const dir of sortedCandidateDirs) {
+        if (rawByCanonRel.size >= MAX_WORKSPACE_MANIFESTS) break;
+        const relPath = dir === "" ? "package.json" : `${dir}/package.json`;
+        const key = canonicalRelKey(relPath);
+        if (rawByCanonRel.has(key)) continue;
+        const content = readDiskJson(relPath);
+        if (content !== undefined) {
+          rawByCanonRel.set(key, { relativePath: relPath, content });
+        }
+      }
+    }
+  }
+
+  const packages = new Map<string, WorkspacePackageManifest>();
+  const sortedRaw = [...rawByCanonRel.values()].sort((a, b) =>
+    a.relativePath < b.relativePath ? -1 : a.relativePath > b.relativePath ? 1 : 0,
+  );
+  for (const raw of sortedRaw) {
+    const { manifest } = parseSafePackageManifest(raw.relativePath, raw.content, addWarning);
+    if (manifest === undefined) continue;
+    const existing = packages.get(manifest.name);
+    if (existing === undefined || shouldPreferManifest(manifest, existing, sourceDirs)) {
+      packages.set(manifest.name, manifest);
+    }
+  }
+
+  return { packages, warnings };
+}
+
+/**
+ * Module-format scope of one workspace `package.json`: TypeScript decides
+ * whether a `.ts`/`.tsx`/`.js`/`.jsx` file is ESM or CommonJS under
+ * `module: node16/nodenext` from the `"type"` field of the nearest
+ * `package.json` (`.mts`/`.cts` force the format by extension).
+ */
+export interface PackageModuleScope {
+  /** Workspace-relative POSIX directory prefix ("" for the workspace root). */
+  readonly dirPrefix: string;
+  readonly manifestRelativePath: string;
+  /** `"module"` or `"commonjs"`; absent when the field is missing or has another value. */
+  readonly moduleType?: "module" | "commonjs";
+}
+
+/** Deterministic result of `loadPackageModuleScopes`. */
+export interface LoadedPackageModuleScopes {
+  /** Sorted by `manifestRelativePath`. */
+  readonly scopes: readonly PackageModuleScope[];
+  readonly warnings: readonly string[];
+}
+
+/** Upper bound on ancestor directories probed for a `package.json`. */
+const MAX_PACKAGE_SCOPE_DIRS = 4096;
+
+function invalidPackageJsonWarning(relativePath: string): string {
+  return `ignored invalid package.json: ${relativePath}`;
+}
+
+/**
+ * Collects the module-format scopes (`package.json` `"type"`) for every
+ * workspace directory that is an ancestor of an analyzed source file — exactly
+ * the directories TypeScript walks when it computes a file's
+ * `impliedNodeFormat`. Unlike `loadWorkspacePackages`, nameless manifests count
+ * (the `"type"` field applies regardless of `"name"`).
+ *
+ * Read-only and root-confined: in-memory `packageFiles` are used when given;
+ * otherwise each ancestor `package.json` is read through the same symlink- and
+ * size-guarded disk reader as tsconfig files. `node_modules` paths are skipped
+ * (the compiler host already serves those declaration package manifests).
+ */
+export function loadPackageModuleScopes(
+  packageFiles: readonly TsAdapterSourceFile[] | undefined,
+  rootDirOnDisk: string | undefined,
+  sourceRelativePaths: readonly string[],
+): LoadedPackageModuleScopes {
+  const warnings: string[] = [];
+  const warningSeen = new Set<string>();
+  const addWarning = (message: string): void => {
+    if (warnings.length >= MAX_TSCONFIG_WARNINGS) return;
+    if (warningSeen.has(message)) return;
+    warningSeen.add(message);
+    warnings.push(message);
+  };
+
+  const dirByKey = new Map<string, string>([[canonicalRelKey(""), ""]]);
+  for (const rel of sourceRelativePaths) {
+    const valid = validateRelativeConfigPath(rel);
+    if (valid === undefined) continue;
+    if (valid.split("/").some((seg) => seg.toLowerCase() === "node_modules")) continue;
+    let dir = relativeDirPrefix(valid);
+    while (dir.length > 0) {
+      const key = canonicalRelKey(dir);
+      if (dirByKey.has(key)) break;
+      dirByKey.set(key, dir);
+      dir = relativeDirPrefix(dir);
+    }
+  }
+  const sortedDirs = [...dirByKey.values()].sort((a, b) => {
+    const depthDiff = segmentDepth(a) - segmentDepth(b);
+    if (depthDiff !== 0) return depthDiff;
+    return a < b ? -1 : a > b ? 1 : 0;
+  });
+  if (sortedDirs.length > MAX_PACKAGE_SCOPE_DIRS) {
+    addWarning(
+      `package.json module-format lookup limited to ${String(MAX_PACKAGE_SCOPE_DIRS)} of ${String(sortedDirs.length)} source directories; deeper directories inherit the nearest probed scope`,
+    );
+    sortedDirs.length = MAX_PACKAGE_SCOPE_DIRS;
+  }
+
+  let readManifest: ((relativePath: string) => string | undefined) | undefined;
+  if (packageFiles !== undefined) {
+    const contentByKey = new Map<string, { relativePath: string; content: string }>();
+    const sortedInputs = [...packageFiles].sort((a, b) =>
+      a.relativePath < b.relativePath ? -1 : a.relativePath > b.relativePath ? 1 : 0,
+    );
+    for (const file of sortedInputs) {
+      const validRel = validateRelativeConfigPath(file.relativePath);
+      if (validRel === undefined || !isWorkspacePackageJsonPath(validRel)) continue;
+      if (utf8Encode(file.content).byteLength > MAX_PACKAGE_JSON_BYTES) {
+        addWarning(`package.json exceeds the 256 KB limit: ${validRel}`);
+        continue;
+      }
+      const key = canonicalRelKey(validRel);
+      if (!contentByKey.has(key)) {
+        contentByKey.set(key, { relativePath: validRel, content: file.content });
+      }
+    }
+    readManifest = (relativePath) => contentByKey.get(canonicalRelKey(relativePath))?.content;
+  } else if (rootDirOnDisk !== undefined) {
+    readManifest = createDiskConfigReader(rootDirOnDisk, addWarning);
+  }
+
+  const scopes: PackageModuleScope[] = [];
+  if (readManifest !== undefined) {
+    for (const dir of sortedDirs) {
+      const manifestRelativePath = dir === "" ? "package.json" : `${dir}/package.json`;
+      const content = readManifest(manifestRelativePath);
+      if (content === undefined) continue;
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(content);
+      } catch {
+        addWarning(invalidPackageJsonWarning(manifestRelativePath));
+        continue;
+      }
+      if (!isPlainRecord(parsed)) continue;
+      const rawType = ownProperty(parsed, "type");
+      const moduleType =
+        rawType === "module" || rawType === "commonjs" ? rawType : undefined;
+      scopes.push({
+        dirPrefix: dir,
+        manifestRelativePath,
+        ...(moduleType === undefined ? {} : { moduleType }),
+      });
+    }
+  }
+  scopes.sort((a, b) =>
+    a.manifestRelativePath < b.manifestRelativePath
+      ? -1
+      : a.manifestRelativePath > b.manifestRelativePath
+        ? 1
+        : 0,
+  );
+  return { scopes, warnings };
+}
+
+function parseBarePackageSpecifier(
+  moduleName: string,
+): { readonly packageName: string; readonly subpath: string } | undefined {
+  if (
+    moduleName.length === 0 ||
+    moduleName.includes("\0") ||
+    moduleName.includes("\\") ||
+    moduleName.startsWith(".") ||
+    moduleName.startsWith("/") ||
+    /^[a-zA-Z]:/.test(moduleName)
+  ) {
+    return undefined;
+  }
+  const segments = moduleName.split("/");
+  for (const seg of segments) {
+    if (seg === "" || seg === "." || seg === "..") return undefined;
+  }
+  if (moduleName.startsWith("@")) {
+    if (segments.length < 2) return undefined;
+    const packageName = `${segments[0]}/${segments[1]}`;
+    if (FORBIDDEN_KEYS.has(packageName)) return undefined;
+    const subpath = segments.length === 2 ? "." : `./${segments.slice(2).join("/")}`;
+    return { packageName, subpath };
+  }
+  const packageName = segments[0]!;
+  if (FORBIDDEN_KEYS.has(packageName)) return undefined;
+  const subpath = segments.length === 1 ? "." : `./${segments.slice(1).join("/")}`;
+  return { packageName, subpath };
+}
+
+function collectExportTargetStrings(
+  node: unknown,
+  depth: number,
+  out: string[],
+): void {
+  if (depth > MAX_EXPORTS_RECURSION_DEPTH || out.length >= MAX_EXPORTS_CANDIDATES) {
+    return;
+  }
+  if (typeof node === "string") {
+    const trimmed = node.trim();
+    if (trimmed.length > 0 && !trimmed.includes("\0") && !out.includes(trimmed)) {
+      out.push(trimmed);
+    }
+    return;
+  }
+  if (Array.isArray(node)) {
+    for (const item of node) {
+      collectExportTargetStrings(item, depth + 1, out);
+      if (out.length >= MAX_EXPORTS_CANDIDATES) break;
+    }
+    return;
+  }
+  if (!isPlainRecord(node)) return;
+
+  const seen = new Set<string>();
+  for (const condition of EXPORT_CONDITION_PRIORITY) {
+    if (Object.prototype.hasOwnProperty.call(node, condition)) {
+      seen.add(condition);
+      collectExportTargetStrings(node[condition], depth + 1, out);
+    }
+  }
+  const remaining = Object.getOwnPropertyNames(node)
+    .filter((k) => !FORBIDDEN_KEYS.has(k) && !seen.has(k) && !k.startsWith("."))
+    .sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+  for (const key of remaining) {
+    collectExportTargetStrings(node[key], depth + 1, out);
+    if (out.length >= MAX_EXPORTS_CANDIDATES) break;
+  }
+}
+
+function substituteSingleStar(target: string, matched: string): string | undefined {
+  const starIdx = target.indexOf("*");
+  if (starIdx < 0) return target;
+  if (starIdx !== target.lastIndexOf("*")) return undefined;
+  if (matched.includes("\0") || matched.split("/").includes("..")) return undefined;
+  return `${target.slice(0, starIdx)}${matched}${target.slice(starIdx + 1)}`;
+}
+
+function resolvePackageExportsTargets(
+  exportsField: unknown,
+  subpath: string,
+): readonly string[] {
+  const targets: string[] = [];
+  if (typeof exportsField === "string" || Array.isArray(exportsField)) {
+    if (subpath === ".") {
+      collectExportTargetStrings(exportsField, 0, targets);
+    }
+    return targets;
+  }
+  if (!isPlainRecord(exportsField)) return targets;
+
+  const keys = Object.getOwnPropertyNames(exportsField).filter(
+    (k) => !FORBIDDEN_KEYS.has(k) && Object.prototype.hasOwnProperty.call(exportsField, k),
+  );
+  const isSubpathMap = keys.some((k) => k.startsWith("."));
+
+  if (!isSubpathMap) {
+    if (subpath === ".") {
+      collectExportTargetStrings(exportsField, 0, targets);
+    }
+    return targets;
+  }
+
+  // 1) Exact subpath match
+  if (Object.prototype.hasOwnProperty.call(exportsField, subpath)) {
+    const exactVal = exportsField[subpath];
+    if (exactVal === null) return [];
+    collectExportTargetStrings(exactVal, 0, targets);
+    return targets;
+  }
+
+  // 2) Single-star pattern match ("./*" or "./sub/*.js"), longest prefix first
+  const patternMatches: Array<{
+    readonly prefixLen: number;
+    readonly suffixLen: number;
+    readonly key: string;
+    readonly matched: string;
+    readonly value: unknown;
+  }> = [];
+  for (const key of keys) {
+    if (!key.startsWith(".")) continue;
+    const starIdx = key.indexOf("*");
+    if (starIdx >= 0) {
+      if (starIdx !== key.lastIndexOf("*")) continue;
+      const prefix = key.slice(0, starIdx);
+      const suffix = key.slice(starIdx + 1);
+      if (
+        subpath.length >= prefix.length + suffix.length &&
+        subpath.startsWith(prefix) &&
+        subpath.endsWith(suffix)
+      ) {
+        const matched = subpath.slice(
+          prefix.length,
+          suffix.length === 0 ? subpath.length : subpath.length - suffix.length,
+        );
+        patternMatches.push({
+          prefixLen: prefix.length,
+          suffixLen: suffix.length,
+          key,
+          matched,
+          value: exportsField[key],
+        });
+      }
+    } else if (key.endsWith("/") && subpath.startsWith(key)) {
+      const matched = subpath.slice(key.length);
+      patternMatches.push({
+        prefixLen: key.length,
+        suffixLen: 0,
+        key,
+        matched,
+        value: exportsField[key],
+      });
+    }
+  }
+  patternMatches.sort((a, b) => {
+    if (b.prefixLen !== a.prefixLen) return b.prefixLen - a.prefixLen;
+    if (b.suffixLen !== a.suffixLen) return b.suffixLen - a.suffixLen;
+    return a.key < b.key ? -1 : a.key > b.key ? 1 : 0;
+  });
+
+  for (const match of patternMatches) {
+    if (match.value === null) return [];
+    const rawTargets: string[] = [];
+    collectExportTargetStrings(match.value, 0, rawTargets);
+    for (const rawTarget of rawTargets) {
+      let substituted: string | undefined;
+      if (match.key.includes("*")) {
+        substituted = substituteSingleStar(rawTarget, match.matched);
+      } else if (match.key.endsWith("/") && rawTarget.endsWith("/")) {
+        substituted = `${rawTarget}${match.matched}`;
+      } else {
+        substituted = rawTarget;
+      }
+      if (substituted !== undefined && !targets.includes(substituted)) {
+        targets.push(substituted);
+      }
+    }
+    if (targets.length > 0) break;
+  }
+
+  return targets;
+}
+
+function expandWorkspaceSourceProbePaths(basePath: string): string[] {
+  const candidates: string[] = [];
+  const pushUnique = (value: string): void => {
+    if (!candidates.includes(value)) candidates.push(value);
+  };
+  const lower = basePath.toLowerCase();
+  if (lower.endsWith(".d.ts")) {
+    const stem = basePath.slice(0, -5);
+    pushUnique(`${stem}.ts`);
+    pushUnique(`${stem}.tsx`);
+    pushUnique(basePath);
+  } else if (lower.endsWith(".d.mts")) {
+    const stem = basePath.slice(0, -6);
+    pushUnique(`${stem}.mts`);
+    pushUnique(`${stem}.ts`);
+    pushUnique(basePath);
+  } else if (lower.endsWith(".d.cts")) {
+    const stem = basePath.slice(0, -6);
+    pushUnique(`${stem}.cts`);
+    pushUnique(`${stem}.ts`);
+    pushUnique(basePath);
+  }
+  for (const expanded of expandCandidatePaths(basePath)) {
+    pushUnique(expanded);
+  }
+  return candidates;
+}
+
+function expandWorkspaceTargetVariants(
+  rawTarget: string,
+  isRootSubpath: boolean,
+): string[] {
+  const cleaned = toPosix(rawTarget).replace(/^\.\/+/, "");
+  if (cleaned.length === 0 || cleaned.startsWith("/") || /^[a-zA-Z]:/.test(cleaned)) {
+    return [];
+  }
+  const variants: string[] = [cleaned];
+  const lower = cleaned.toLowerCase();
+  let matchedOutputPrefix = false;
+  for (const prefix of WORKSPACE_OUTPUT_PREFIXES) {
+    if (lower.startsWith(prefix)) {
+      matchedOutputPrefix = true;
+      const rest = cleaned.slice(prefix.length);
+      if (rest.length > 0) {
+        variants.push(`src/${rest}`);
+        variants.push(rest);
+      }
+      break;
+    }
+  }
+  if (isRootSubpath && matchedOutputPrefix) {
+    variants.push("src/index", "index");
+  }
+  return variants;
+}
+
+function isWithinPackagePrefix(relativePath: string, dirPrefix: string): boolean {
+  if (dirPrefix === "") return true;
+  const relKey = canonicalRelKey(relativePath);
+  const dirKey = canonicalRelKey(dirPrefix);
+  return relKey === dirKey || relKey.startsWith(`${dirKey}/`);
+}
+
+function resolveWorkspacePackageModule(params: {
+  readonly moduleName: string;
+  readonly rootPosix: string;
+  readonly rootKeyWithSlash: string;
+  readonly workspacePackages: ReadonlyMap<string, WorkspacePackageManifest>;
+  readonly entries: ReadonlyMap<
+    string,
+    { readonly relativePath: string; readonly absolutePath: string }
+  >;
+}): ts.ResolvedModuleFull | undefined {
+  const { moduleName, rootPosix, rootKeyWithSlash, workspacePackages, entries } = params;
+  const parsed = parseBarePackageSpecifier(moduleName);
+  if (parsed === undefined) return undefined;
+
+  const pkg = workspacePackages.get(parsed.packageName);
+  if (pkg === undefined) return undefined;
+
+  const isRootSubpath = parsed.subpath === ".";
+  const rawTargets: string[] = [];
+  if (pkg.exports !== undefined) {
+    rawTargets.push(...resolvePackageExportsTargets(pkg.exports, parsed.subpath));
+  } else if (isRootSubpath) {
+    for (const field of [pkg.module, pkg.main, pkg.types, pkg.typings]) {
+      if (field !== undefined && !rawTargets.includes(field)) {
+        rawTargets.push(field);
+      }
+    }
+    rawTargets.push("./src/index", "./index");
+  } else {
+    const subRest = parsed.subpath.slice(2);
+    rawTargets.push(parsed.subpath, `./src/${subRest}`);
+  }
+
+  for (const rawTarget of rawTargets) {
+    for (const variant of expandWorkspaceTargetVariants(rawTarget, isRootSubpath)) {
+      const resolvedRel = resolveRelativeWithinRoot(pkg.dirPrefix, variant);
+      if (!resolvedRel.ok) continue;
+      if (!isWithinPackagePrefix(resolvedRel.relativePath, pkg.dirPrefix)) continue;
+      if (resolvedRel.relativePath.split("/").some((s) => s.toLowerCase() === "node_modules")) {
+        continue;
+      }
+      const candidateBaseAbs = joinPosixAbs(rootPosix, resolvedRel.relativePath);
+      const normalizedBase = normalizePosixAbsolute(candidateBaseAbs);
+      if (!canonicalKey(normalizedBase).startsWith(rootKeyWithSlash)) continue;
+
+      for (const candidate of expandWorkspaceSourceProbePaths(normalizedBase)) {
+        const hit = entries.get(canonicalKey(candidate));
+        if (hit !== undefined) {
+          if (hit.relativePath.split("/").some((s) => s.toLowerCase() === "node_modules")) {
+            continue;
+          }
+          return {
+            resolvedFileName: hit.absolutePath,
+            extension: tsExtensionForPath(hit.relativePath),
+            isExternalLibraryImport: false,
+          };
+        }
+      }
+    }
+  }
+
+  return undefined;
+}
+
+/** Cached real-path root keys (workspace roots are few; realpath runs once per root). */
+const REAL_ROOT_KEY_CACHE = new Map<string, string | undefined>();
+const MAX_REAL_ROOT_KEY_CACHE = 64;
+
+/**
+ * Returns `<canonical real root>/` when the root's real path differs from the
+ * given root key, or `undefined` when it is the same or cannot be determined.
+ */
+function realRootKeyWithSlashOf(normalizedRoot: string, rootKeyWithSlash: string): string | undefined {
+  if (REAL_ROOT_KEY_CACHE.has(normalizedRoot)) return REAL_ROOT_KEY_CACHE.get(normalizedRoot);
+  let result: string | undefined;
+  try {
+    const real = ts.sys?.realpath?.(normalizedRoot);
+    if (typeof real === "string" && real.length > 0 && !real.includes("\0")) {
+      const realKey = canonicalKey(stripNonRootTrailingSlash(normalizePosixAbsolute(real)));
+      const withSlash = realKey.endsWith("/") ? realKey : `${realKey}/`;
+      result = withSlash === rootKeyWithSlash ? undefined : withSlash;
+    }
+  } catch {
+    result = undefined;
+  }
+  if (REAL_ROOT_KEY_CACHE.size >= MAX_REAL_ROOT_KEY_CACHE) REAL_ROOT_KEY_CACHE.clear();
+  REAL_ROOT_KEY_CACHE.set(normalizedRoot, result);
+  return result;
+}
+
 /**
  * Her `containingFile` için en yakın ata `ScopedTsConfig` ile modül çözer;
- * Bundler fallback ve bellek-içi alias eşleşmesiyle uzantısız/alias importları
- * deterministik biçimde `verified` olarak çözümler ve kök dışına kaçışı engeller.
+ * monorepo workspace paket çözümlemesi, Bundler fallback ve bellek-içi alias
+ * eşleşmesiyle uzantısız/alias/workspace importlarını deterministik biçimde
+ * `verified` olarak çözümler ve kök dışına kaçışı engeller.
  */
 export function resolveScopedModuleName(params: {
   readonly moduleName: string;
@@ -1543,6 +2563,7 @@ export function resolveScopedModuleName(params: {
   readonly allowedLibDir?: string;
   readonly programOptions: ts.CompilerOptions;
   readonly configs: readonly ScopedTsConfig[];
+  readonly workspacePackages?: ReadonlyMap<string, WorkspacePackageManifest>;
   readonly resolutionHost: ts.ModuleResolutionHost;
   readonly entries: ReadonlyMap<
     string,
@@ -1556,6 +2577,7 @@ export function resolveScopedModuleName(params: {
     allowedLibDir,
     programOptions,
     configs,
+    workspacePackages,
     resolutionHost,
     entries,
   } = params;
@@ -1576,6 +2598,12 @@ export function resolveScopedModuleName(params: {
           return libKey.endsWith("/") ? libKey : `${libKey}/`;
         })();
 
+  // TypeScript realpaths resolved files, so a root given by an alias of its real
+  // path (for example a Windows 8.3 short name such as C:\Users\RUNNER~1\...)
+  // must also accept files under the real root; otherwise every node_modules
+  // import of such a workspace becomes a false TS2307.
+  const realRootKeyWithSlash = realRootKeyWithSlashOf(normalizedRoot, rootKeyWithSlash);
+
   // SEC-03: Çözümlenen dosya mutlaka workspace kökü veya TS lib dizini içinde kalmalıdır.
   const isAllowedResolved = (
     resolved: ts.ResolvedModuleFull | undefined,
@@ -1583,6 +2611,9 @@ export function resolveScopedModuleName(params: {
     if (resolved === undefined) return undefined;
     const resolvedKey = canonicalKey(resolved.resolvedFileName);
     if (resolvedKey.startsWith(rootKeyWithSlash)) return resolved;
+    if (realRootKeyWithSlash !== undefined && resolvedKey.startsWith(realRootKeyWithSlash)) {
+      return resolved;
+    }
     if (
       allowedLibKeyWithSlash !== undefined &&
       resolvedKey.startsWith(allowedLibKeyWithSlash)
@@ -1610,6 +2641,28 @@ export function resolveScopedModuleName(params: {
     programOptions,
     scopedConfig,
   );
+
+  // Respect explicit tsconfig.json `paths` aliases before workspace package map.
+  const hasExplicitTsconfigPathMatch =
+    scopedConfig?.paths !== undefined &&
+    matchScopedPathPatterns(moduleName, scopedConfig.paths).length > 0;
+
+  if (
+    !hasExplicitTsconfigPathMatch &&
+    workspacePackages !== undefined &&
+    workspacePackages.size > 0
+  ) {
+    const workspaceResolved = isAllowedResolved(
+      resolveWorkspacePackageModule({
+        moduleName,
+        rootPosix: normalizedRoot,
+        rootKeyWithSlash,
+        workspacePackages,
+        entries,
+      }),
+    );
+    if (workspaceResolved !== undefined) return workspaceResolved;
+  }
 
   const primary = isAllowedResolved(
     ts.resolveModuleName(
@@ -1639,11 +2692,28 @@ export function resolveScopedModuleName(params: {
   }
 
   if (scopedConfig !== undefined) {
-    return resolveViaVirtualAlias(
+    const virtualAlias = resolveViaVirtualAlias(
       moduleName,
       scopedConfig,
       entries,
       rootKeyWithSlash,
+    );
+    if (virtualAlias !== undefined) return virtualAlias;
+  }
+
+  if (
+    hasExplicitTsconfigPathMatch &&
+    workspacePackages !== undefined &&
+    workspacePackages.size > 0
+  ) {
+    return isAllowedResolved(
+      resolveWorkspacePackageModule({
+        moduleName,
+        rootPosix: normalizedRoot,
+        rootKeyWithSlash,
+        workspacePackages,
+        entries,
+      }),
     );
   }
 

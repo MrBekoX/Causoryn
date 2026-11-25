@@ -2,7 +2,7 @@ import { renameSync, unlinkSync, writeFileSync } from "node:fs";
 
 import { z } from "zod";
 
-import { snapshotCanonicalJson, type SnapshotGraph } from "@causoryn/domain";
+import { escapeMermaidLabel, snapshotCanonicalJson, type SnapshotGraph } from "@causoryn/domain";
 import { OutputAccessPolicy } from "@causoryn/workspace";
 
 import { GraphRepositoryError } from "./errors.js";
@@ -138,18 +138,6 @@ function escapeMarkdownCell(value: string): string {
     .replace(/[\r\n\t]+/g, " ");
 }
 
-/** Mermaid etiket kaçışı: tırnaklı etiket içinde güvenli HTML entity'leri. */
-function escapeMermaidLabel(value: string): string {
-  return value
-    .replace(/[\r\n\t]+/g, " ")
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/#/g, "&#35;")
-    .replace(/\|/g, "&#124;");
-}
-
 function byId<T extends { readonly id: string }>(a: T, b: T): number {
   if (a.id < b.id) return -1;
   if (a.id > b.id) return 1;
@@ -177,7 +165,7 @@ function assertNoDanglingEdges(snapshot: SnapshotGraph): void {
     if (!nodeIds.has(edge.from) || !nodeIds.has(edge.to)) {
       throw new GraphRepositoryError(
         "export/dangling-edge",
-        `Kenar ucu bilinmeyen node'a işaret ediyor; snapshot'ı finalize edilmiş yayınlayın: ${edge.id}`,
+        `Edge endpoint points to an unknown node; publish a finalized snapshot: ${edge.id}`,
       );
     }
   }
@@ -291,7 +279,7 @@ export function serializeDocumentationMermaid(snapshot: SnapshotGraph): string {
     const fromId = nodeIndexById.get(edge.from);
     const toId = nodeIndexById.get(edge.to);
     if (fromId === undefined || toId === undefined) {
-      throw new GraphRepositoryError("export/dangling-edge", `Kenar ucu bilinmeyen node: ${edge.id}`);
+      throw new GraphRepositoryError("export/dangling-edge", `Edge endpoint points to an unknown node: ${edge.id}`);
     }
     lines.push(
       `  ${fromId} ${mermaidArrow(edge.resolution)}|${edge.kind}/${edge.resolution}| ${toId}`,
@@ -367,7 +355,7 @@ export function serializeDocumentationHtml(snapshot: SnapshotGraph): string {
   ];
   const lines: string[] = [];
   lines.push("<!DOCTYPE html>");
-  lines.push('<html lang="tr">');
+  lines.push('<html lang="en">');
   lines.push("<head>");
   lines.push('<meta charset="utf-8">');
   lines.push(`<meta http-equiv="Content-Security-Policy" content="${HTML_CSP_POLICY}">`);
@@ -462,7 +450,7 @@ export function serializeDocumentation(
   if (!parsed.success) {
     throw new GraphRepositoryError(
       "export/invalid-format",
-      `Bilinmeyen export formatı: ${String(format)}; izinli değerler: ${EXPORT_DOCUMENTATION_FORMATS.join(", ")}`,
+      `Unknown export format: ${String(format)}; allowed values: ${EXPORT_DOCUMENTATION_FORMATS.join(", ")}`,
     );
   }
   switch (parsed.data) {
@@ -546,7 +534,7 @@ export function writeDocumentation(
   if (!parsedFormat.success) {
     throw new GraphRepositoryError(
       "export/invalid-format",
-      `Bilinmeyen export formatı: ${String(input.format)}; izinli değerler: ${EXPORT_DOCUMENTATION_FORMATS.join(", ")}`,
+      `Unknown export format: ${String(input.format)}; allowed values: ${EXPORT_DOCUMENTATION_FORMATS.join(", ")}`,
     );
   }
 
@@ -556,7 +544,7 @@ export function writeDocumentation(
     if (!parsedView.success) {
       throw new GraphRepositoryError(
         "export/invalid-view",
-        `Bilinmeyen export görünümü: ${String(input.view)}; izinli değerler: ${EXPORT_DOCUMENTATION_VIEWS.join(", ")}`,
+        `Unknown export view: ${String(input.view)}; allowed values: ${EXPORT_DOCUMENTATION_VIEWS.join(", ")}`,
       );
     }
     resolvedView = parsedView.data;
@@ -571,13 +559,13 @@ export function writeDocumentation(
     if (input.options !== undefined || input.annotations !== undefined) {
       throw new GraphRepositoryError(
         "export/invalid-options",
-        "snapshot formatında options veya annotations kullanılamaz",
+        "options and annotations cannot be used with the snapshot format",
       );
     }
     if (resolvedView !== undefined && resolvedView !== "full") {
       throw new GraphRepositoryError(
         "export/invalid-view",
-        `snapshot formatı yalnızca ham CompareContentSet üretir; view="${resolvedView}" desteklenmez`,
+        `the snapshot format only produces a raw CompareContentSet; view="${resolvedView}" is not supported`,
       );
     }
     content = serializeDocumentationSnapshot(input.snapshot);
@@ -585,7 +573,7 @@ export function writeDocumentation(
     if (input.options !== undefined || input.annotations !== undefined) {
       throw new GraphRepositoryError(
         "export/invalid-options",
-        'options veya annotations yalnızca view="architecture" veya view="interactive" ile kullanılabilir',
+        'options and annotations can only be used with view="architecture" or view="interactive"',
       );
     }
     content = serializeDocumentation(input.snapshot, parsedFormat.data);
@@ -593,7 +581,7 @@ export function writeDocumentation(
     if (parsedFormat.data !== "html") {
       throw new GraphRepositoryError(
         "export/invalid-view",
-        `view="interactive" yalnızca format="html" ile kullanılabilir (verilen: ${parsedFormat.data})`,
+        `view="interactive" can only be used with format="html" (given: ${parsedFormat.data})`,
       );
     }
     const prepared = prepareArchitecture(input.snapshot, input.options, input.annotations);
@@ -650,7 +638,7 @@ export function writeDocumentation(
         : "export/output-path-denied";
     throw new GraphRepositoryError(
       contractCode,
-      `Output yetkilendirmesi reddedildi (${decision.code}): ${decision.reason}`,
+      `Output authorization denied (${decision.code}): ${decision.reason}`,
     );
   }
   const targetPath = decision.canonicalPath;
@@ -675,7 +663,7 @@ export function writeDocumentation(
     }
     throw new GraphRepositoryError(
       "export/write-failed",
-      `Çıktı dosyası yazılamadı: ${targetPath}: ${error instanceof Error ? error.message : String(error)}`,
+      `Could not write the output file: ${targetPath}: ${error instanceof Error ? error.message : String(error)}`,
     );
   }
   return {

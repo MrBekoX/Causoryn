@@ -1,27 +1,43 @@
 /**
- * secret-scan — üretim kaynak, doküman, workflow ve kök yapılandırma yüzeyinde
- * kimlik bilgisi ve yerel kullanıcı profili yolu tarayıcısı (F-P2-01, K-022).
+ * secret-scan — working-tree credential and privacy-leak gate (F-P2-01, K-022).
  *
- * Kapsam (13 dizin kökü + kök metin dosyaları):
- *   packages, adapters, apps, native, scripts, integrations/zcode/causoryn,
- *   integrations/zcode/.claude-plugin, integrations/antigravity/causoryn,
- *   .github, .claude-plugin, .agents, docs, skills + ROOT_TEXT_FILES.
+ * Coverage: every file Git would publish or is about to publish:
+ *   - tracked files (`git ls-files --cached`), including files that match an
+ *     ignore rule but were force-added, and
+ *   - untracked files that are not ignored (`--others --exclude-standard`),
+ *     so a leak is caught before `git add`.
+ *   `--tracked-only` limits the scan to the index (exactly what a commit of
+ *   the current index would contain).
+ * Ignored files (`.gitignore`, `.git/info/exclude`, `core.excludesFile`) are
+ * not scanned: build outputs (`dist/`, `target/`, `bin/`, `obj/`,
+ * `node_modules/`, staged plugin scripts) and local-only directories never
+ * reach the repository.
  *
- * Bilinçli dışlamalar:
- * - `raw/` ve `wiki/`: kamuya açık dışa aktarımdan (`scripts/export-public-tree.mjs`)
- *   dışlanan özel arşiv/çalışma kayıtlarıdır; SCAN_ROOTS'ta yer almaz.
- * - `docs/superpowers/`: dışa aktarımdan dışlanan iç geliştirme planlarıdır.
- * - `test/`, `tests/`, `__tests__/`, `fixture/`, `fixtures/`, `example/`, `examples/`:
- *   güvenlik testlerinde sentetik yem token'ları bilinçli olarak yaşar.
- * - `node_modules/`, `dist/`, `target/`, `bin/`, `obj/`, `__pycache__/` ve
- *   `integrations/antigravity/causoryn/scripts/`: derleme/sahneleme çıktıları.
+ * Rules live in `scripts/lib/leak-scan.mjs`, shared with the published-tree
+ * gate `scripts/export-public-tree.mjs`. Binary files are detected by NUL
+ * bytes and scanned through their printable strings; there is no extension
+ * allowlist. Optional private terms are read from
+ * `.git/info/causoryn-private-terms` (untracked, one term per line) and the
+ * `CAUSORYN_PRIVATE_TERMS` environment variable; findings never echo them.
  *
- * Kural: herhangi bir eşleşmede veya eksik beyanlı kökte/dosyada exit 1 (kapı kırmızı);
- * temizde taranan kök ve kök-dosya sayısıyla exit 0.
+ * SCAN_ROOTS / ROOT_TEXT_FILES are the declared minimum coverage: each must
+ * exist, otherwise the gate fails (protects against running from a partial
+ * checkout).
+ *
+ * Exit codes: 0 clean; 1 on any finding, missing declared root, unreadable
+ * entry, Git failure or invalid argument (fail-closed).
  */
-import { readdirSync, readFileSync, statSync } from "node:fs";
+import { statSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+
+import {
+  formatFindings,
+  listRepoFiles,
+  loadPrivateTerms,
+  readWorkingTreeFile,
+  scanContent,
+} from "./lib/leak-scan.mjs";
 
 const REPO_ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 
@@ -57,175 +73,89 @@ const ROOT_TEXT_FILES = [
   ".gitignore",
 ];
 
-/**
- * Repo-göreli dışlanan alt dizinler:
- * - integrations/antigravity/causoryn/scripts: sahnelenmiş derleme çıktısı (.gitignore satır 4).
- * - docs/superpowers: iç geliştirme planları (export-public-tree.mjs tarafından dışlanır).
- */
-const EXCLUDE_REL_PATHS = new Set([
-  path.join("integrations", "antigravity", "causoryn", "scripts"),
-  path.join("docs", "superpowers"),
-]);
-
-const EXCLUDE_SEGMENTS = new Set([
-  "node_modules", "dist", "target", "test", "tests", "__tests__",
-  "__pycache__", "fixture", "fixtures", "example", "examples",
-  "bin", "obj",
-]);
-
-const TEXT_EXTENSIONS = new Set([
-  ".ts", ".mts", ".cts", ".js", ".mjs", ".cjs", ".json", ".md", ".yaml",
-  ".yml", ".toml", ".py", ".go", ".rs", ".cs", ".csproj", ".mod", ".lock", ".txt",
-]);
-
-const GENERIC_PROFILE_USERS = new Set([
-  "you",
-  "your-user",
-  "runner",
-  "runneradmin",
-  "username",
-  "user",
-  "demo",
-  "dev",
-  "<user>",
-]);
-
-const PATTERNS = [
-  { name: "private-key-block", re: /-----BEGIN [A-Z ]*PRIVATE KEY-----/ },
-  { name: "github-token", re: /\bgh[pousr]_[A-Za-z0-9]{30,}\b/ },
-  { name: "github-fine-grained-pat", re: /\bgithub_pat_[A-Za-z0-9_]{20,}\b/ },
-  { name: "npm-token", re: /\bnpm_[A-Za-z0-9]{20,}\b/ },
-  { name: "openai-key", re: /\bsk-[A-Za-z0-9_-]{20,}\b/ },
-  { name: "google-api-key", re: /\bAIza[0-9A-Za-z_-]{35}\b/ },
-  {
-    name: "jwt-token",
-    re: /\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b/,
-  },
-  { name: "aws-access-key", re: /\bAKIA[0-9A-Z]{16}\b/ },
-  { name: "slack-token", re: /\bxox[abprs]-[A-Za-z0-9-]{10,}\b/ },
-  {
-    name: "assigned-secret-literal",
-    re: /(?:password|passwd|secret|api[_-]?key)\s*[:=]\s*["'][^"']{12,}["']/i,
-  },
-  { name: "personal-email", re: /[A-Za-z0-9._%+-]+@(?:gmail|hotmail|outlook)\.com/i },
-];
-
-const USER_PROFILE_PATH_RE =
-  /(?:[A-Za-z]:(?:\\{1,2}|\/)Users(?:\\{1,2}|\/)|\/(?:Users|home)\/)(<[A-Za-z0-9._-]+>|[A-Za-z0-9._-]+)/g;
-
-function hasLocalUserProfilePath(line) {
-  USER_PROFILE_PATH_RE.lastIndex = 0;
-  let match;
-  while ((match = USER_PROFILE_PATH_RE.exec(line)) !== null) {
-    const userSegment = (match[1] ?? "").toLowerCase();
-    if (!GENERIC_PROFILE_USERS.has(userSegment)) {
-      return true;
+function parseArgs(argv) {
+  let trackedOnly = false;
+  for (const arg of argv) {
+    if (arg === "--tracked-only") {
+      trackedOnly = true;
+    } else {
+      throw new Error(`Unknown argument: ${String(arg)}`);
     }
   }
-  return false;
+  return { trackedOnly };
 }
 
-function* walk(dir) {
-  for (const entry of readdirSync(dir, { withFileTypes: true })) {
-    const full = path.join(dir, entry.name);
-    if (entry.isDirectory()) {
-      if (EXCLUDE_SEGMENTS.has(entry.name)) continue;
-      if (EXCLUDE_REL_PATHS.has(path.relative(REPO_ROOT, full))) continue;
-      yield* walk(full);
-    } else if (TEXT_EXTENSIONS.has(path.extname(entry.name))) {
-      // Tarayıcı kendi kaynaklarını taramaz: desen literalleri bu dosyada
-      // bilinçli olarak yaşar (self-match önleme).
-      if (path.basename(full) === "secret-scan.mjs") continue;
-      yield full;
-    }
-  }
-}
-
-function isExistingDir(targetPath) {
+function isExisting(targetPath, kind) {
   try {
-    return statSync(targetPath).isDirectory();
+    const stat = statSync(targetPath);
+    return kind === "dir" ? stat.isDirectory() : stat.isFile();
   } catch {
     return false;
   }
 }
 
-function isExistingFile(targetPath) {
-  try {
-    return statSync(targetPath).isFile();
-  } catch {
-    return false;
-  }
+function toNative(relPosix) {
+  return relPosix.split("/").join(path.sep);
 }
 
-function isThirdPartyLicenseNoticeFile(relPosix) {
-  const base = path.posix.basename(relPosix);
-  if (base === "THIRD-PARTY-NOTICES.md") return true;
-  return relPosix.startsWith("licenses/") || relPosix.includes("/licenses/");
-}
+function main() {
+  const { trackedOnly } = parseArgs(process.argv.slice(2));
 
-function scanFile(filePath, findings) {
-  let content;
-  try {
-    content = readFileSync(filePath, "utf8");
-  } catch {
-    return;
+  const missingRoots = [
+    ...SCAN_ROOTS.filter((root) => !isExisting(path.join(REPO_ROOT, root), "dir")),
+    ...ROOT_TEXT_FILES.filter((file) => !isExisting(path.join(REPO_ROOT, file), "file")),
+  ];
+  if (missingRoots.length > 0) {
+    console.error("SECRET_SCAN FAIL — declared root directory/file not found:");
+    for (const missing of missingRoots) console.error("  " + missing);
+    return 1;
   }
-  const relPath = path.relative(REPO_ROOT, filePath);
-  const relPosix = relPath.split(path.sep).join("/");
-  const allowUpstreamCopyrightEmail = isThirdPartyLicenseNoticeFile(relPosix);
-  const lines = content.split(/\r?\n/);
-  for (let index = 0; index < lines.length; index += 1) {
-    const line = lines[index] ?? "";
-    for (const { name, re } of PATTERNS) {
-      if (allowUpstreamCopyrightEmail && name === "personal-email") continue;
-      if (re.test(line)) {
-        findings.push(`${relPath}:${index + 1} — ${name}`);
-      }
+
+  const privateTerms = loadPrivateTerms({ repoRoot: REPO_ROOT });
+  const { files, deleted } = listRepoFiles(REPO_ROOT, { trackedOnly });
+
+  const findings = [];
+  const unreadable = [];
+  let scannedFiles = 0;
+  for (const relPosix of files) {
+    let content;
+    try {
+      content = readWorkingTreeFile(REPO_ROOT, relPosix, deleted);
+    } catch (error) {
+      unreadable.push(`${toNative(relPosix)} — ${error instanceof Error ? error.message : String(error)}`);
+      continue;
     }
-    if (hasLocalUserProfilePath(line)) {
-      findings.push(`${relPath}:${index + 1} — local-user-profile-path`);
+    if (content === null) continue;
+    scannedFiles += 1;
+    for (const finding of scanContent(relPosix, content, { privateTerms })) {
+      findings.push({
+        location: toNative(relPosix) + finding.location.slice(relPosix.length),
+        rule: finding.rule,
+      });
     }
   }
-}
 
-const missingRoots = [];
-const findings = [];
-let scannedRoots = 0;
-let scannedRootFiles = 0;
-
-for (const root of SCAN_ROOTS) {
-  const fullRoot = path.join(REPO_ROOT, root);
-  if (!isExistingDir(fullRoot)) {
-    missingRoots.push(root);
-    continue;
+  if (unreadable.length > 0) {
+    console.error("SECRET_SCAN FAIL — entries could not be read (fail-closed):");
+    for (const entry of unreadable) console.error("  " + entry);
+    return 1;
   }
-  scannedRoots += 1;
-  for (const file of walk(fullRoot)) {
-    scanFile(file, findings);
+  if (findings.length > 0) {
+    console.error("SECRET_SCAN FAIL — matching lines:");
+    for (const line of formatFindings(findings)) console.error("  " + line);
+    return 1;
   }
+  console.log(
+    `SECRET_SCAN PASS — ${String(SCAN_ROOTS.length)} roots scanned (+ ${String(ROOT_TEXT_FILES.length)} root files), ` +
+      `${String(scannedFiles)} ${trackedOnly ? "tracked" : "tracked/untracked"} files, ` +
+      `${String(privateTerms.length)} private term(s), 0 matches.`,
+  );
+  return 0;
 }
 
-for (const rootFile of ROOT_TEXT_FILES) {
-  const fullFile = path.join(REPO_ROOT, rootFile);
-  if (!isExistingFile(fullFile)) {
-    missingRoots.push(rootFile);
-    continue;
-  }
-  scannedRootFiles += 1;
-  scanFile(fullFile, findings);
+try {
+  process.exitCode = main();
+} catch (error) {
+  console.error(`SECRET_SCAN FAIL — ${error instanceof Error ? error.message : String(error)}`);
+  process.exitCode = 1;
 }
-
-if (missingRoots.length > 0) {
-  console.error("SECRET_SCAN KIRMIZI — beyan edilen kök dizin/dosya bulunamadı:");
-  for (const missing of missingRoots) console.error("  " + missing);
-  process.exit(1);
-}
-
-if (findings.length > 0) {
-  console.error("SECRET_SCAN KIRMIZI — eşleşen satırlar:");
-  for (const finding of findings) console.error("  " + finding);
-  process.exit(1);
-}
-console.log(
-  `SECRET_SCAN YEŞİL — ${scannedRoots} kök tarandı (+ ${scannedRootFiles} kök dosyası), 0 eşleşme.`,
-);

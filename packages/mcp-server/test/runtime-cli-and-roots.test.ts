@@ -9,7 +9,7 @@ import {
   symlinkSync,
   writeFileSync,
 } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
@@ -55,7 +55,7 @@ const REPO_ROOT = path.dirname(path.dirname(PKG_DIR));
 const STDIO_ENTRY = path.join(PKG_DIR, "src", "cli-stdio.ts");
 const LOADER_ENTRY = path.join(TEST_DIR, "loader", "register-strip.mjs");
 const FIXTURE_ROOT = path.join(REPO_ROOT, "examples", "fixture-ts-orders");
-const READY_MARKER = "causoryn mcp server hazir";
+const READY_MARKER = "causoryn mcp server ready";
 const UP_DIR_TOKEN = "." + ".";
 
 interface TempSandbox {
@@ -195,12 +195,12 @@ describe("parseMcpCliArgs — sıfır-ayar CLI ayrıştırıcısı", () => {
     expect(() => parseMcpCliArgs(["--root", "/tmp/bad\0null"])).toThrow(McpCliUsageError);
   });
 
-  it("resolveEffectiveOutputSchemaProfile: bayrak > CAUSORYN_MCP_OUTPUT_SCHEMA_PROFILE > mod varsayılanı sırasını uygular", () => {
+  it("resolveEffectiveOutputSchemaProfile: bayrak > CAUSORYN_MCP_OUTPUT_SCHEMA_PROFILE > varsayılan omit sırasını uygular", () => {
     const bare = parseMcpCliArgs([]);
-    expect(resolveEffectiveOutputSchemaProfile(bare, {})).toBe("full");
+    expect(resolveEffectiveOutputSchemaProfile(bare, {})).toBe("omit");
     expect(
-      resolveEffectiveOutputSchemaProfile(bare, { CAUSORYN_MCP_OUTPUT_SCHEMA_PROFILE: "omit" }),
-    ).toBe("omit");
+      resolveEffectiveOutputSchemaProfile(bare, { CAUSORYN_MCP_OUTPUT_SCHEMA_PROFILE: "full" }),
+    ).toBe("full");
 
     const cli = parseMcpCliArgs(["mcp", "--allow-cwd"]);
     expect(resolveEffectiveOutputSchemaProfile(cli, {})).toBe("omit");
@@ -214,6 +214,9 @@ describe("parseMcpCliArgs — sıfır-ayar CLI ayrıştırıcısı", () => {
         CAUSORYN_MCP_OUTPUT_SCHEMA_PROFILE: "omit",
       }),
     ).toBe("full");
+
+    const shortFlag = parseMcpCliArgs(["mcp", "--output-schema", "full"]);
+    expect(resolveEffectiveOutputSchemaProfile(shortFlag, {})).toBe("full");
 
     expect(() =>
       resolveEffectiveOutputSchemaProfile(bare, { CAUSORYN_MCP_OUTPUT_SCHEMA_PROFILE: "bogus" }),
@@ -480,15 +483,86 @@ describe("isSafeProjectRoot — güvenli proje kökü filtresi", { timeout: 20_0
       sandbox.cleanup();
     }
   });
+
+  it("Task 1.3: UNC/device yollarını realpathSync öncesi sözcüksel reddeder; $HOME atalarını ve os.tmpdir() kökünü reddederken tmpdir alt proje dizinlerine izin verir", () => {
+    const sandbox = createTempSandbox();
+    try {
+      const opts = { homeDir: sandbox.fakeHome, env: {} };
+
+      // 1) UNC ve Win32 device yolları sözcüksel olarak anında reddedilir (SMB/NTLM sızıntısı yok).
+      const uncInputs = [
+        "\\\\10.0.0.1\\share",
+        "//evil-host/share",
+        "\\\\?\\C:\\Windows",
+        "\\\\?\\UNC\\attacker\\share",
+        "\\\\.\\pipe\\causoryn-test",
+      ];
+      const uncStartedMs = performance.now();
+      for (const unc of uncInputs) {
+        expect(inspectProjectRootSafety(unc, opts), `UNC reddedilmeli: ${unc}`).toEqual({
+          safe: false,
+          reason: "unc-or-device-path",
+        });
+        expect(isSafeProjectRoot(unc, opts)).toBe(false);
+        expect(() =>
+          buildWorkspaceAutoConfig({
+            roots: [unc],
+            autoDataDir: true,
+            dataDir: sandbox.dataDir,
+            homeDir: sandbox.fakeHome,
+          }),
+        ).toThrow(CausorynConfigError);
+        expect(() =>
+          resolveBaseDataDir({
+            dataDir: unc,
+            homeDir: sandbox.fakeHome,
+          }),
+        ).toThrow(CausorynConfigError);
+      }
+      // Lexical pre-check must reject immediately without invoking OS realpathSync/SMB I/O.
+      expect(performance.now() - uncStartedMs).toBeLessThan(500);
+
+      // 2) $HOME üst atası (ör. fakeHome'un ebeveyni olan sandbox.rootDir ve gerçek C:\Users / /home / /Users) reddedilir.
+      expect(inspectProjectRootSafety(path.dirname(sandbox.fakeHome), opts)).toEqual({
+        safe: false,
+        reason: "home-ancestor-directory",
+      });
+      const realOsHomeParent = path.dirname(path.resolve(homedir()));
+      if (realOsHomeParent !== path.parse(realOsHomeParent).root && existsSync(realOsHomeParent)) {
+        expect(inspectProjectRootSafety(realOsHomeParent)).toEqual({
+          safe: false,
+          reason: "home-ancestor-directory",
+        });
+        expect(isSafeProjectRoot(realOsHomeParent)).toBe(false);
+      }
+
+      // 3) os.tmpdir() kendisi reddedilir ama altındaki proje dizini izinli kalır!
+      expect(isSafeProjectRoot(tmpdir(), opts)).toBe(false);
+      const safeSubdirInTmp = path.join(sandbox.rootDir, "standalone-tmp-project");
+      mkdirSync(safeSubdirInTmp, { recursive: true });
+      expect(isSafeProjectRoot(safeSubdirInTmp, opts)).toBe(true);
+
+      // 4) POSIX üzerinde /tmp, /var, /bin, /sbin, /lib, /dev reddedilir (altındaki /tmp/<subdir> serbesttir).
+      if (process.platform !== "win32") {
+        for (const denied of ["/tmp", "/var", "/bin", "/sbin", "/lib", "/dev"]) {
+          if (existsSync(denied)) {
+            expect(isSafeProjectRoot(denied, opts), `${denied} reddedilmeli`).toBe(false);
+          }
+        }
+      }
+    } finally {
+      sandbox.cleanup();
+    }
+  });
 });
 
-describe("buildWorkspaceAutoConfig — otomatik veri dizini ve çoklu-istemci izolasyonu", { timeout: 30_000 }, () => {
-  it("taban veri dizini önceliğini (--data-dir > ZCODE_PLUGIN_DATA > ~/.causoryn) uygular ve SQLite/wiki/exports yollarını hazırlar", () => {
+describe("buildWorkspaceAutoConfig — otomatik veri dizini ve paylaşımlı workspace DB", { timeout: 30_000 }, () => {
+  it("applies the base data dir precedence (--data-dir > ~/.causoryn; ZCODE_PLUGIN_DATA only as a fallback) and prepares one shared graph.sqlite for every client", () => {
     const sandbox = createTempSandbox();
     try {
       const treeBefore = listTreeRelative(sandbox.projectADir);
 
-      // 1) --data-dir en yüksek öncelik + --client zcode
+      // 1) --data-dir en yüksek öncelik + --client zcode (paylaşımlı graph.sqlite!)
       const cfg1 = buildWorkspaceAutoConfig({
         roots: [sandbox.projectADir],
         autoDataDir: true,
@@ -504,8 +578,39 @@ describe("buildWorkspaceAutoConfig — otomatik veri dizini ve çoklu-istemci iz
       expect(cfg1.storage.dataDbPath?.startsWith(path.join(sandbox.dataDir, "workspaces"))).toBe(
         true,
       );
-      expect(path.basename(cfg1.storage.dataDbPath ?? "")).toBe("graph-zcode.sqlite");
+      expect(path.basename(cfg1.storage.dataDbPath ?? "")).toBe("graph.sqlite");
       expect(cfg1.wiki.dataDbPath).toBe(cfg1.storage.dataDbPath);
+
+      // Farklı --client değerleri aynı workspace için birebir aynı paylaşımlı graph.sqlite yoluna çözülür!
+      const cfgClaude = buildWorkspaceAutoConfig({
+        roots: [sandbox.projectADir],
+        autoDataDir: true,
+        dataDir: sandbox.dataDir,
+        client: "claude-code",
+        homeDir: sandbox.fakeHome,
+      });
+      const cfgCodex = buildWorkspaceAutoConfig({
+        roots: [sandbox.projectADir],
+        autoDataDir: true,
+        dataDir: sandbox.dataDir,
+        client: "codex",
+        homeDir: sandbox.fakeHome,
+      });
+      expect(cfgClaude.storage.dataDbPath).toBe(cfg1.storage.dataDbPath);
+      expect(cfgCodex.storage.dataDbPath).toBe(cfg1.storage.dataDbPath);
+      expect(cfgClaude.wiki.dataDbPath).toBe(cfg1.wiki.dataDbPath);
+      expect(cfgCodex.wiki.dataDbPath).toBe(cfg1.wiki.dataDbPath);
+
+      // Geçersiz --client kimliği hâlâ reddedilir (diagnostic label güvenliği).
+      expect(() =>
+        buildWorkspaceAutoConfig({
+          roots: [sandbox.projectADir],
+          autoDataDir: true,
+          dataDir: sandbox.dataDir,
+          client: `${UP_DIR_TOKEN}/evil`,
+          homeDir: sandbox.fakeHome,
+        }),
+      ).toThrow(CausorynConfigError);
       expect(cfg1.output.allowedOutputDirs.length).toBe(1);
       const exportsDir = cfg1.output.allowedOutputDirs[0] as string;
       expect(path.basename(exportsDir)).toBe("exports");
@@ -517,7 +622,10 @@ describe("buildWorkspaceAutoConfig — otomatik veri dizini ve çoklu-istemci iz
         expect(statSync(exportsDir).mode & 0o777).toBe(0o700);
       }
 
-      // 2) --data-dir yokken ZCODE_PLUGIN_DATA ikinci öncelik + client verilmezse graph.sqlite
+      // 2) Without --data-dir, a set ZCODE_PLUGIN_DATA no longer moves the index away
+      //    from ~/.causoryn: ZCode shares graph.sqlite with the other hosts
+      //    (ZCODE_PLUGIN_DATA is only used when ~/.causoryn cannot be written —
+      //    see tests/zcode-shared-data-dir.test.ts).
       const zcodeDataDir = path.join(sandbox.rootDir, "zcode-data");
       const cfg2 = buildWorkspaceAutoConfig({
         roots: [sandbox.projectADir],
@@ -525,10 +633,11 @@ describe("buildWorkspaceAutoConfig — otomatik veri dizini ve çoklu-istemci iz
         homeDir: sandbox.fakeHome,
         env: { ZCODE_PLUGIN_DATA: zcodeDataDir },
       });
-      expect(cfg2.storage.dataDbPath?.startsWith(path.join(zcodeDataDir, "workspaces"))).toBe(
-        true,
-      );
+      expect(
+        cfg2.storage.dataDbPath?.startsWith(path.join(sandbox.fakeHome, ".causoryn", "workspaces")),
+      ).toBe(true);
       expect(path.basename(cfg2.storage.dataDbPath ?? "")).toBe("graph.sqlite");
+      expect(existsSync(zcodeDataDir)).toBe(false);
 
       // 3) İkisi de yokken ~/.causoryn üçüncü öncelik + CAUSORYN_CONFIG içindeki açık alanlar korunur
       const cfg3 = buildWorkspaceAutoConfig({
@@ -703,8 +812,12 @@ describe("createCausorynMcpServer — outputSchemaProfile ve beforeToolCall", { 
     );
     const seenToolCalls: string[] = [];
 
-    const fullServer = createCausorynMcpServer(fullCtx);
+    const fullServer = createCausorynMcpServer(fullCtx, {
+      toolProfile: "full",
+      outputSchemaProfile: "full",
+    });
     const omitServer = createCausorynMcpServer(omitCtx, {
+      toolProfile: "full",
       outputSchemaProfile: "omit",
       beforeToolCall: async (toolName) => {
         seenToolCalls.push(toolName);
@@ -725,8 +838,8 @@ describe("createCausorynMcpServer — outputSchemaProfile ve beforeToolCall", { 
       const fullList = await fullClient.listTools();
       const omitList = await omitClient.listTools();
 
-      expect(fullList.tools.length).toBe(29);
-      expect(omitList.tools.length).toBe(29);
+      expect(fullList.tools.length).toBe(32);
+      expect(omitList.tools.length).toBe(32);
       for (const tool of fullList.tools) {
         expect(tool.outputSchema).toBeDefined();
       }
@@ -795,6 +908,7 @@ describe("DynamicCausorynContext + attachMcpRootsWorkspaceBinder — dinamik MCP
       const dynamicContext = createDynamicCausorynContext(trackedInitial);
       const hookRef: { current?: (toolName: string) => Promise<void> } = {};
       const server = createCausorynMcpServer(dynamicContext, {
+        toolProfile: "full",
         outputSchemaProfile: "omit",
         beforeToolCall: async (toolName) => {
           await hookRef.current?.(toolName);
@@ -920,6 +1034,7 @@ describe("DynamicCausorynContext + attachMcpRootsWorkspaceBinder — dinamik MCP
       try {
         const hookRef: { current?: (toolName: string) => Promise<void> } = {};
         const server = createCausorynMcpServer(dynamicContext, {
+          toolProfile: "full",
           outputSchemaProfile: "omit",
           beforeToolCall: async (toolName) => {
             await hookRef.current?.(toolName);
@@ -988,6 +1103,7 @@ describe("DynamicCausorynContext + attachMcpRootsWorkspaceBinder — dinamik MCP
       );
       const hookRef: { current?: (toolName: string) => Promise<void> } = {};
       const server = createCausorynMcpServer(dynamicContext, {
+        toolProfile: "full",
         outputSchemaProfile: "omit",
         beforeToolCall: async (toolName) => {
           await hookRef.current?.(toolName);
@@ -1065,6 +1181,7 @@ describe("DynamicCausorynContext + attachMcpRootsWorkspaceBinder — dinamik MCP
       try {
         const hookRef: { current?: (toolName: string) => Promise<void> } = {};
         const server = createCausorynMcpServer(dynamicContext, {
+          toolProfile: "full",
           outputSchemaProfile: "omit",
           beforeToolCall: async (toolName) => {
             await hookRef.current?.(toolName);
@@ -1271,7 +1388,7 @@ describe("stdio.ts — gerçek alt-süreç CLI modları ve geriye dönük uyumlu
             id: 3,
             method: "tools/call",
             params: {
-              name: "causoryn_workspace_summary",
+              name: "causoryn_map_system",
               arguments: { workspaceId: "alpha-service" },
             },
           },
@@ -1342,11 +1459,11 @@ describe("stdio.ts — gerçek alt-süreç CLI modları ve geriye dönük uyumlu
       }
       expect(initMsg["id"]).toBe(1);
 
-      // CLI aktivasyonunda varsayılan outputSchemaProfile === "omit" olmalı.
+      // CLI aktivasyonunda varsayılan toolProfile === "core" (11 araç) ve outputSchemaProfile === "omit" olmalı.
       const tools = (
         listMsg["result"] as { tools?: Array<{ name?: string; outputSchema?: unknown }> }
       ).tools ?? [];
-      expect(tools.length).toBe(29);
+      expect(tools.length).toBe(11);
       expect(tools.every((t) => t.outputSchema === undefined)).toBe(true);
 
       // Workspace otomatik bağlandı ve indeks hazır!
@@ -1358,13 +1475,13 @@ describe("stdio.ts — gerçek alt-süreç CLI modları ve geriye dönük uyumlu
       expect(callResult.structuredContent?.status).toBe("ok");
       expect(callResult.structuredContent?.workspaceId).toBe("alpha-service");
 
-      // SQLite dosyası workspace DIŞINDA oluştu; kaynak ağaca dokunulmadı!
+      // SQLite dosyası workspace DIŞINDA paylaşımlı graph.sqlite olarak oluştu; kaynak ağaca dokunulmadı!
       const workspacesParent = path.join(sandbox.dataDir, "workspaces");
       const entries = readdirSync(workspacesParent);
       expect(entries.length).toBe(1);
       const wsDirName = entries[0] as string;
       expect(wsDirName.startsWith("alpha-service-")).toBe(true);
-      expect(existsSync(path.join(workspacesParent, wsDirName, "graph-zcode.sqlite"))).toBe(true);
+      expect(existsSync(path.join(workspacesParent, wsDirName, "graph.sqlite"))).toBe(true);
       expect(listTreeRelative(sandbox.projectADir)).toEqual(treeBefore);
     } finally {
       sandbox.cleanup();
@@ -1427,7 +1544,7 @@ describe("stdio.ts — gerçek alt-süreç CLI modları ve geriye dönük uyumlu
             jsonrpc: "2.0",
             id: 3,
             method: "tools/call",
-            params: { name: "causoryn_workspace_summary", arguments: {} },
+            params: { name: "causoryn_map_system", arguments: {} },
           },
         ];
         for (const frame of frames) {
@@ -1486,8 +1603,8 @@ describe("stdio.ts — gerçek alt-süreç CLI modları ve geriye dönük uyumlu
       const tools = (
         listMsg["result"] as { tools?: Array<{ name?: string; outputSchema?: unknown }> }
       ).tools ?? [];
-      expect(tools.length).toBe(29);
-      expect(tools.every((t) => t.outputSchema !== undefined)).toBe(true);
+      expect(tools.length).toBe(11);
+      expect(tools.every((t) => t.outputSchema === undefined)).toBe(true);
 
       const summaryEnv = (
         summaryMsg["result"] as {
@@ -1573,7 +1690,7 @@ describe("stdio.ts — gerçek alt-süreç CLI modları ve geriye dönük uyumlu
             id: 11,
             method: "tools/call",
             params: {
-              name: "causoryn_workspace_summary",
+              name: "causoryn_map_system",
               arguments: { workspaceId: "alpha-service" },
             },
           },
@@ -1665,7 +1782,7 @@ describe("stdio.ts — gerçek alt-süreç CLI modları ve geriye dönük uyumlu
           homeDir: sandbox.fakeHome,
           env: { ZCODE_PLUGIN_DATA: "relative-zcode-data" },
         }),
-      ).toThrow(/ZCODE_PLUGIN_DATA mutlak yol olmalı/);
+      ).toThrow(/ZCODE_PLUGIN_DATA must be an absolute path/);
     } finally {
       sandbox.cleanup();
     }

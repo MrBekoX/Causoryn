@@ -70,6 +70,7 @@ interface WorkerNode {
   qualifiedName: string;
   language?: string;
   relativePath?: string | null;
+  span?: { startLine: number; endLine: number };
   attributes: Record<string, unknown>;
 }
 
@@ -489,6 +490,96 @@ describe.skipIf(!workerReady)("roslyn-worker B1 (PROTOCOL.md v1)", () => {
     ).toBeDefined();
   });
 
+  it("node span: declaration nodes carry the union of their CONTAINS evidence spans", () => {
+    const nodes = analyzeResponse?.nodes ?? [];
+    const declarations = nodes.filter((node) =>
+      ["Class", "Interface", "Type", "Method", "Function"].includes(node.kind),
+    );
+    expect(declarations.length).toBeGreaterThan(0);
+    for (const node of declarations) {
+      const spans = (analyzeResponse?.edges ?? [])
+        .filter(
+          (edge) =>
+            edge.kind === "CONTAINS" &&
+            edge.to.kind === node.kind &&
+            edge.to.qualifiedName === node.qualifiedName &&
+            edge.to.relativePath === node.relativePath,
+        )
+        .flatMap((edge) => edge.evidence.map((evidence) => evidence.span));
+      expect(spans.length, node.qualifiedName).toBeGreaterThan(0);
+      expect(node.span, node.qualifiedName).toEqual({
+        startLine: Math.min(...spans.map((span) => span?.startLine ?? 0)),
+        endLine: Math.max(...spans.map((span) => span?.endLine ?? 0)),
+      });
+    }
+    const getById = nodes.find(
+      (node) =>
+        node.qualifiedName === "Causoryn.Fixture.Orders.Services.OrdersService.GetById",
+    );
+    expect(getById?.span?.startLine).toBe(
+      fixtureLine("Services/OrdersService.cs", "public Order? GetById"),
+    );
+    for (const node of nodes.filter((candidate) =>
+      ["File", "Endpoint", "UnknownExternal"].includes(candidate.kind),
+    )) {
+      expect(node.span, `${node.kind} ${node.qualifiedName}`).toBeUndefined();
+    }
+  });
+
+  it("node span: method overloads share one node whose span covers every overload", () => {
+    const source = [
+      "namespace Demo;", // 1
+      "public class Ledger", // 2
+      "{", // 3
+      "    public int Add(int a) => a;", // 4
+      "", // 5
+      "    public int Add(int a, int b)", // 6
+      "    {", // 7
+      "        return a + b;", // 8
+      "    }", // 9
+      "}", // 10
+      "",
+    ].join("\n");
+    const response = parseLine(
+      runWorker([
+        { id: "span-overloads", type: "analyze", files: [{ path: "Ledger.cs", content: source }] },
+      ]).lines[0] ?? "",
+    );
+    const add = response.nodes?.find((node) => node.qualifiedName === "Demo.Ledger.Add");
+    expect(add?.span).toEqual({ startLine: 4, endLine: 9 });
+    const ledger = response.nodes?.find((node) => node.qualifiedName === "Demo.Ledger");
+    expect(ledger?.span).toEqual({ startLine: 2, endLine: 10 });
+  }, 120_000);
+
+  it("node span: a node derived from a call target (local function in a method) carries its declaration span", () => {
+    const source = [
+      "namespace Demo;", // 1
+      "public class Ledger", // 2
+      "{", // 3
+      "    public int Total(int a)", // 4
+      "    {", // 5
+      "        return Twice(a);", // 6
+      "", // 7
+      "        static int Twice(int value)", // 8
+      "        {", // 9
+      "            return value * 2;", // 10
+      "        }", // 11
+      "    }", // 12
+      "}", // 13
+      "",
+    ].join("\n");
+    const response = parseLine(
+      runWorker([
+        { id: "span-local-function", type: "analyze", files: [{ path: "Ledger.cs", content: source }] },
+      ]).lines[0] ?? "",
+    );
+    const twice = response.nodes?.find(
+      (node) => node.kind === "Function" && node.qualifiedName === "Demo.Ledger.Twice",
+    );
+    expect(twice?.relativePath).toBe("Ledger.cs");
+    expect(twice?.span).toEqual({ startLine: 8, endLine: 11 });
+  }, 120_000);
+
   /* ---------------- Kabül kanıtı: CALLS zinciri ---------------- */
 
   it("pozitif: CALLS OrdersController.GetById→OrdersService.GetById (verified)", () => {
@@ -757,7 +848,59 @@ describe.skipIf(!workerReady)("roslyn-worker B1 (PROTOCOL.md v1)", () => {
     );
     expect(depthDiag).toBeDefined();
     expect(depthDiag?.relativePath).toBe("Deep/Deep.cs");
-    expect(depthDiag?.message).toContain("derin");
+    expect(depthDiag?.message).toContain("AST traversal depth exceeded");
+  });
+
+  /* ---------------- Runtime text language ---------------- */
+
+  it("runtime text: stderr log, protocol errors, rationales and warnings are English", () => {
+    const turkishLetters = /[çğıöşüÇĞİÖŞÜ]/;
+    expect(analyzeStderr).toContain("worker started — protocol v1");
+    expect(negativeById["neg-unknown-type"]?.error?.message).toContain(
+      "unknown request type: ",
+    );
+    expect(negativeById["neg-bad-version"]?.error?.message).toContain(
+      "Unsupported protocol version: ",
+    );
+    expect(negativeById["neg-absolute-path"]?.error?.message).toContain(
+      "Absolute source paths are not accepted: ",
+    );
+    expect(negativeById["neg-duplicate"]?.error?.message).toContain(
+      "Same source path was given twice: ",
+    );
+    expect(manyFilesResponse?.error?.message).toBe("file count limit exceeded: 5001 > 5000");
+    expect(bigFileResponse?.error?.message).toContain("file content size limit exceeded: ");
+
+    const verifiedCall = findEdge(
+      analyzeResponse,
+      (edge) =>
+        edge.kind === "CALLS" &&
+        edge.from.qualifiedName ===
+          "Causoryn.Fixture.Orders.Controllers.OrdersController.GetById" &&
+        edge.to.qualifiedName ===
+          "Causoryn.Fixture.Orders.Services.OrdersService.GetById",
+    );
+    expect(verifiedCall?.evidence[0]?.rationale).toBe(
+      "CALLS: the call expression in Causoryn.Fixture.Orders.Controllers.OrdersController.GetById " +
+        "was resolved to symbol Causoryn.Fixture.Orders.Services.OrdersService.GetById " +
+        "by the Roslyn semantic model (verified).",
+    );
+
+    const texts = [
+      ...(analyzeResponse?.evidence ?? []).map((evidence) => evidence.rationale),
+      ...(analyzeResponse?.edges ?? []).flatMap((edge) => [
+        ...edge.evidence.map((evidence) => evidence.rationale),
+        edge.ambiguity?.reason ?? "",
+      ]),
+      ...(analyzeResponse?.warnings ?? []),
+      ...(depthRun.lines.map((line) => parseLine(line)).flatMap((response) => [
+        ...(response.warnings ?? []),
+        ...(response.diagnostics ?? []).map((diag) => diag.message),
+      ])),
+      ...Object.values(negativeById).map((response) => response?.error?.message ?? ""),
+    ];
+    expect(texts.length).toBeGreaterThan(10);
+    expect(texts.filter((text) => turkishLetters.test(text))).toEqual([]);
   });
 
   /* ---------------- Partial ---------------- */

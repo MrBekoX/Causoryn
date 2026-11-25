@@ -1,16 +1,16 @@
 {
   "name": "@causoryn/storage-sqlite",
-  "version": "0.2.4",
+  "version": "0.3.0",
   "private": true,
   "license": "MIT",
-  "description": "SQLite + FTS5 GraphRepository gerçeklemesi: tablolar, WAL, atomik snapshot yayımlama ve sembol arama (TŞ v2.1 §9).",
+  "description": "SQLite + FTS5 graph repository and Living Wiki store: schema, WAL, atomic snapshot publication, symbol search and per-file facts for incremental indexing.",
   "type": "module",
   "exports": {
     ".": "./src/index.ts"
   },
   "dependencies": {
-    "@causoryn/domain": "0.2.4",
-    "@causoryn/graph": "0.2.4",
+    "@causoryn/domain": "0.3.0",
+    "@causoryn/graph": "0.3.0",
     "better-sqlite3": "^13.2.0"
   }
 }

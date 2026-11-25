@@ -325,7 +325,7 @@ describe.skipIf(!(pythonAvailable && goAvailable && cargoAvailable))(
   it("analyzerFingerprint: koşuma katılan beş analyzer segmenti + worker durumları + ayar hash'leri", () => {
     const run = firstRun as NonNullable<typeof firstRun>;
     const segments = run.snapshot.meta.analyzerFingerprint.split("|");
-    expect(segments[0]).toBe("fp2");
+    expect(segments[0]).toBe("fp3");
     expect(segments).toContain("ts-adapter@0.1.0");
     expect(segments).toContain("roslyn-worker@0.1.0");
     expect(segments).toContain("python-worker@0.1.0");
@@ -386,7 +386,7 @@ describe.skipIf(!(goAvailable && cargoAvailable))(
       // Explicit degradasyon warning'i (adapter fallback sözleşmesi).
       expect(
         run.warnings.some(
-          (w) => w.includes("Python worker kullanılamıyor") && w.includes("L0/L1"),
+          (w) => w.includes("Python worker unavailable") && w.includes("L0/L1"),
         ),
       ).toBe(true);
       // Fingerprint dürüstçülüğü: Python worker koşamadı.
@@ -446,10 +446,10 @@ describe(
       }
       // Explicit fallback uyarıları (adapter sözleşmesi).
       expect(
-        run.warnings.some((w) => w.includes("Python worker kullanılamıyor") && w.includes("L0/L1")),
+        run.warnings.some((w) => w.includes("Python worker unavailable") && w.includes("L0/L1")),
       ).toBe(true);
       expect(
-        run.warnings.some((w) => w.includes("Go worker kullanılamıyor") && w.includes("L0/L1")),
+        run.warnings.some((w) => w.includes("Go worker unavailable") && w.includes("L0/L1")),
       ).toBe(true);
       expect(
         run.warnings.some(
@@ -479,7 +479,7 @@ describe("IndexService.runIndex — senkron koşum Python/Go/Rust derin analiz y
       const repository = new InMemoryGraphRepository();
       // Olmayan worker ayarlarıyla koş: senkron yol adapter'lara SPAWN
       // ATMAMALI — spawn atılsaydı adapter fallback uyarıları
-      // ("... kullanılamıyor") warnings'e girerdi; köprü sözleşmesinde
+      // ("... unavailable") warnings'e girerdi; köprü sözleşmesinde
       // o uyarılar YOKTUR (csharp köprü testiyle aynı kural).
       const service = makeService(
         repository,
@@ -517,13 +517,13 @@ describe("IndexService.runIndex — senkron koşum Python/Go/Rust derin analiz y
       for (const lang of ["Python", "Go", "Rust"]) {
         expect(
           run.warnings.some(
-            (w) => w.includes(`senkron koşum ${lang} derin sembol analizini yürütemez`) && w.includes("runIndexAsync"),
+            (w) => w.includes(`synchronous run cannot perform deep ${lang} symbol analysis`) && w.includes("runIndexAsync"),
           ),
           `senkron köprü uyarısı eksik: ${lang}`,
         ).toBe(true);
       }
       // Spawn atılmadı: adapter fallback uyarıları yok.
-      expect(run.warnings.some((w) => w.includes("worker kullanılamıyor"))).toBe(false);
+      expect(run.warnings.some((w) => w.includes("worker unavailable"))).toBe(false);
       // Fingerprint: senkron koşum worker'ları başlatmadı — dürüst etiket.
       const segments = run.snapshot.meta.analyzerFingerprint.split("|");
       expect(segments).toContain("pystate=sync-run-degraded");

@@ -213,7 +213,9 @@ describe("SqliteGraphRepository — şema ve bağlantı", () => {
       for (const table of [
         "workspaces",
         "files",
+        "file_facts",
         "snapshots",
+        "build_leases",
         "nodes",
         "edges",
         "evidence",
@@ -221,6 +223,8 @@ describe("SqliteGraphRepository — şema ve bağlantı", () => {
       ]) {
         expect(tables, `tablo yok: ${table}`).toContain(table);
       }
+      expect(probe.pragma("page_size", { simple: true })).toBe(4096);
+      expect(probe.pragma("user_version", { simple: true })).toBe(5);
       probe.close();
     } finally {
       repo.close();
@@ -746,22 +750,33 @@ describe("SqliteGraphRepository — symbol_fts (temel)", () => {
         { symbol: "listOrders", nodeId: graph.nodes[2]!.id },
       ]);
 
+      // LocAgent camelCase tokenlaştırması + BM25: createOrder tam + alt-token
+      // eşleşmesiyle 1. sırada, listOrders ortak "order" tokenıyla 2. sırada döner.
       const hits = repo.searchSymbols("createOrder");
-      expect(hits.length).toBe(1);
+      expect(hits.length).toBe(2);
       expect(hits[0]?.symbol).toBe("createOrder");
       expect(hits[0]?.nodeId).toBe(graph.nodes[1]!.id);
       expect(hits[0]?.snapshotId).toBe(graph.meta.id);
+      expect(hits[1]?.symbol).toBe("listOrders");
 
-      // FTS5 token semantiği (unicode61 camelCase'i bölmez): ortak token'a
-      // sahip semboller; sonuç sırası deterministik (sembol adına göre artan).
+      // Ortak "order" tokenına sahip tüm semboller (camelCase + snake_case)
+      // deterministik BM25 + node_id sırasıyla döner.
       repo.indexSymbols(graph.meta.id, [
         { symbol: "order_total", nodeId: graph.nodes[2]!.id },
         { symbol: "order_item", nodeId: graph.nodes[3]!.id },
       ]);
       const ordered = repo.searchSymbols("order", 10);
+      // Exact BM25 order (weights symbol=2.0, search_text=1.0): the snake_case
+      // symbols carry "order" in the weighted `symbol` column and rank first;
+      // camelCase symbols match only through their LocAgent `search_text`
+      // tokens. The two snake_case documents score identically, so the tie is
+      // broken by node_id ASC (order_total -> nodes[2], order_item -> nodes[3]).
+      expect(graph.nodes[2]!.id < graph.nodes[3]!.id).toBe(true);
       expect(ordered.map((hit) => hit.symbol)).toEqual([
-        "order_item",
         "order_total",
+        "order_item",
+        "createOrder",
+        "listOrders",
       ]);
       // Farklı token eşleşmez (alt-dize semantiği yok).
       expect(repo.searchSymbols("nomatchsymbol")).toEqual([]);
@@ -1030,6 +1045,226 @@ describe("v0.2.1 SqliteGraphRepository.runInTransaction ve O(1) position sayacı
       });
     } finally {
       repo.close();
+    }
+  });
+});
+
+describe("Task 1.7 — SqliteGraphRepository build_leases ve recoverOrphanBuilds", () => {
+  it("acquire / renew / release / publish-cleanup / failBuild-cleanup yaşam döngüsünü atomik yürütür", () => {
+    const repo = makeRepo("leases.sqlite");
+    try {
+      const built = buildOrderSnapshot(repo, 1);
+      const acq1 = repo.acquireBuildLease({
+        workspaceId: WS,
+        buildId: built.build.buildId,
+        leaseId: "lease-1",
+        ownerPid: process.pid,
+        hostLabel: "claude-code",
+        nowIso: CREATED_AT,
+        ttlMs: 30_000,
+      });
+      expect(acq1.acquired).toBe(true);
+      expect(repo.getActiveBuildLease(WS)?.leaseId).toBe("lease-1");
+      expect(repo.getActiveBuildLease(WS)?.hostLabel).toBe("claude-code");
+
+      // Canlı lease varken ikinci edinen reddedilir ve mevcut holder döner.
+      const acq2 = repo.acquireBuildLease({
+        workspaceId: WS,
+        buildId: "build-other",
+        leaseId: "lease-2",
+        ownerPid: process.pid,
+        hostLabel: "codex",
+        nowIso: CREATED_AT,
+        ttlMs: 30_000,
+        isPidAlive: () => true,
+      });
+      expect(acq2.acquired).toBe(false);
+      if (!acq2.acquired) {
+        expect(acq2.holder.leaseId).toBe("lease-1");
+        expect(acq2.holder.hostLabel).toBe("claude-code");
+      }
+
+      // Yenileme doğru leaseId ile başarılı, yanlış leaseId ile false döner.
+      expect(repo.renewBuildLease(WS, "wrong-lease", PUBLISHED_AT, 30_000)).toBe(false);
+      expect(repo.renewBuildLease(WS, "lease-1", PUBLISHED_AT, 30_000)).toBe(true);
+      expect(repo.getActiveBuildLease(WS)?.heartbeatAt).toBe(PUBLISHED_AT);
+
+      // publish() eşleşen lease satırını atomik olarak temizler.
+      repo.publish(built.build.buildId, "ready", PUBLISHED_AT);
+      expect(repo.getActiveBuildLease(WS)).toBeUndefined();
+
+      // failBuild() de eşleşen lease satırını atomik olarak temizler.
+      const built2 = buildOrderSnapshot(repo, 2);
+      const acq3 = repo.acquireBuildLease({
+        workspaceId: WS,
+        buildId: built2.build.buildId,
+        leaseId: "lease-3",
+        ownerPid: process.pid,
+        nowIso: PUBLISHED_AT,
+        ttlMs: 30_000,
+      });
+      expect(acq3.acquired).toBe(true);
+      repo.failBuild(built2.build.buildId, "aborted");
+      expect(repo.getActiveBuildLease(WS)).toBeUndefined();
+
+      // releaseBuildLease idempotenttir (olmayan lease için fırlatmaz).
+      expect(() => repo.releaseBuildLease(WS, "lease-3")).not.toThrow();
+    } finally {
+      repo.close();
+    }
+  });
+
+  it("recoverOrphanBuilds canlı lease'i korur; lease'siz, süresi dolmuş veya ölü PID'li building satırlarını kurtarır", () => {
+    const repo = makeRepo("orphan-unit.sqlite");
+    try {
+      const liveBuild = buildOrderSnapshot(repo, 1).build;
+      const orphanBuild = buildOrderSnapshot(repo, 2).build;
+      repo.acquireBuildLease({
+        workspaceId: WS,
+        buildId: liveBuild.buildId,
+        leaseId: "lease-live",
+        ownerPid: process.pid,
+        nowIso: CREATED_AT,
+        ttlMs: 30_000,
+      });
+
+      // Canlı lease liveBuild'i korur, ama lease ile eşleşmeyen orphanBuild kurtarılır!
+      const partialRecovery = repo.recoverOrphanBuilds(WS, {
+        nowIso: CREATED_AT,
+        isPidAlive: () => true,
+      });
+      expect(partialRecovery.recoveredBuildIds).toEqual([orphanBuild.buildId]);
+      expect(partialRecovery.clearedLease).toBe(false);
+      expect(repo.getBuild(liveBuild.buildId)?.state).toBe("building");
+      expect(repo.getBuild(orphanBuild.buildId)?.state).toBe("failed");
+      expect(repo.getBuild(orphanBuild.buildId)?.failureReason).toBe("orphan-build-recovered");
+      expect(repo.getActiveBuildLease(WS)?.leaseId).toBe("lease-live");
+
+      // Süre dolduğunda (PUBLISHED_AT = CREATED_AT + 5 dk > 30 sn) liveBuild ve lease temizlenir.
+      const fullRecovery = repo.recoverOrphanBuilds(WS, {
+        nowIso: PUBLISHED_AT,
+        isPidAlive: () => true,
+      });
+      expect(fullRecovery.recoveredBuildIds).toEqual([liveBuild.buildId]);
+      expect(fullRecovery.clearedLease).toBe(true);
+      expect(repo.getBuild(liveBuild.buildId)?.state).toBe("failed");
+      expect(repo.getActiveBuildLease(WS)).toBeUndefined();
+    } finally {
+      repo.close();
+    }
+  });
+});
+
+describe("SqliteGraphRepository.getLatestWorkspaceSummaryMeta — zero-hydration SQLite aggregation", () => {
+  it("returns undefined before publish, aggregates counts/entrypoints/frameworks/resolutions/languageCoverage, and tracks stale & external invalidation", () => {
+    const file = dbPath("summary-meta.sqlite");
+    const repo = new SqliteGraphRepository(file);
+    try {
+      repo.registerWorkspace({
+        id: WS,
+        rootPath: "D:/fixture/orders",
+        createdAt: CREATED_AT,
+      });
+
+      // No snapshot published yet (even while building)
+      expect(repo.getLatestWorkspaceSummaryMeta(WS)).toBeUndefined();
+      const { build } = buildOrderSnapshot(repo, 1);
+      expect(repo.getLatestWorkspaceSummaryMeta(WS)).toBeUndefined();
+
+      const graph = repo.publish(build.buildId, "ready", PUBLISHED_AT);
+      const summary = repo.getLatestWorkspaceSummaryMeta(WS);
+      expect(summary).toBeDefined();
+      expect(summary?.snapshotId).toBe(graph.meta.id);
+      expect(summary?.workspaceId).toBe(WS);
+      expect(summary?.state).toBe("ready");
+      expect(summary?.revisionId).toBe("rev-1");
+      expect(summary?.revisionSequence).toBe(1);
+      expect(summary?.stale).toBe(false);
+      expect(summary?.nodeCount).toBe(4);
+      expect(summary?.edgeCount).toBe(2);
+      expect(summary?.evidenceCount).toBe(2);
+      expect(summary?.fileCount).toBe(0);
+      expect(summary?.languages).toEqual([]);
+      expect(summary?.frameworks).toEqual([]);
+      expect(summary?.entrypoints).toEqual(["POST /orders"]);
+      expect(summary?.edgesByKind).toEqual({ CALLS: 1, ROUTES_TO: 1 });
+      expect(summary?.resolutions).toEqual({ verified: 2, heuristic: 0, unresolved: 0 });
+      expect(summary?.languageCoverage).toEqual([
+        {
+          language: "typescript",
+          files: 0,
+          hasNonFileSymbols: true,
+          hasSemanticEdges: true,
+          verifiedEdges: 2,
+          heuristicEdges: 0,
+          unresolvedEdges: 0,
+        },
+      ]);
+
+      // Active newer build flips stale -> true immediately (never stale-cached)
+      const nextBuild = buildOrderSnapshot(repo, 2).build;
+      expect(repo.getLatestWorkspaceSummaryMeta(WS)?.stale).toBe(true);
+
+      // Failing the newer build flips stale back -> false
+      repo.failBuild(nextBuild.buildId, "cancelled");
+      expect(repo.getLatestWorkspaceSummaryMeta(WS)?.stale).toBe(false);
+
+      // External connection write invalidates any cached summary via PRAGMA data_version
+      const external = new Database(file);
+      try {
+        external
+          .prepare("UPDATE nodes SET attributes_json = ? WHERE kind = 'Endpoint'")
+          .run(JSON.stringify({ framework: "express" }));
+      } finally {
+        external.close();
+      }
+      expect(repo.getLatestWorkspaceSummaryMeta(WS)?.frameworks).toEqual(["express"]);
+    } finally {
+      repo.close();
+    }
+  });
+
+  it("pins an MVCC read transaction so concurrent publish + pruneOldSnapshots cannot tear getLatestWorkspaceSummaryMeta", () => {
+    const file = dbPath("summary-meta-mvcc.sqlite");
+    const writer = new SqliteGraphRepository(file);
+    const reader = new SqliteGraphRepository(file);
+    try {
+      writer.registerWorkspace({
+        id: WS,
+        rootPath: "D:/fixture/orders",
+        createdAt: CREATED_AT,
+      });
+      const b1 = buildOrderSnapshot(writer, 1);
+      const snap1 = writer.publish(b1.build.buildId, "ready", PUBLISHED_AT);
+
+      const readerInternal = reader as unknown as {
+        countRows: (table: "nodes" | "edges" | "evidence", sid: number) => number;
+      };
+      const origCountRows = readerInternal.countRows.bind(reader);
+      let injected = false;
+      readerInternal.countRows = (table, sid) => {
+        if (!injected) {
+          injected = true;
+          const b2 = buildOrderSnapshot(writer, 2);
+          writer.publish(b2.build.buildId, "ready", PUBLISHED_AT_2);
+          const gc = writer.pruneOldSnapshots(WS, 1);
+          expect(gc.prunedSnapshotSids).toBe(1);
+        }
+        return origCountRows(table, sid);
+      };
+
+      const meta = reader.getLatestWorkspaceSummaryMeta(WS);
+      readerInternal.countRows = origCountRows;
+
+      expect(injected).toBe(true);
+      expect(meta?.snapshotId).toBe(snap1.meta.id);
+      expect(meta?.nodeCount).toBe(4);
+      expect(meta?.edgeCount).toBe(2);
+      expect(meta?.evidenceCount).toBe(2);
+      expect(meta?.stale).toBe(false);
+    } finally {
+      reader.close();
+      writer.close();
     }
   });
 });

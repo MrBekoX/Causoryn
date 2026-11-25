@@ -47,7 +47,7 @@ export function computeCoverageDelta(
       .join("; ");
     throw new WikiProjectionError(
       "wiki/invalid-coverage-delta",
-      `Geçersiz coverageDelta: ${detail}`,
+      `Invalid coverageDelta: ${detail}`,
     );
   }
   return parsed.data;
@@ -107,7 +107,7 @@ export function computeWikiCoverageDeltas(
         delta: computeCoverageDelta(
           inPrevious.coverage.status,
           inCurrent.coverage.status,
-          `bölümler ${formatCounts(sectionStatusCounts(previous, pageId))} → ` +
+          `sections ${formatCounts(sectionStatusCounts(previous, pageId))} → ` +
             formatCounts(sectionStatusCounts(current, pageId)),
         ),
       });
@@ -120,7 +120,7 @@ export function computeWikiCoverageDeltas(
         delta: computeCoverageDelta(
           "no_data",
           inCurrent.coverage.status,
-          "önceki projeksiyonda sayfa yok (yeni sayfa)",
+          "page not present in the previous projection (new page)",
         ),
       });
       continue;
@@ -132,7 +132,7 @@ export function computeWikiCoverageDeltas(
         delta: computeCoverageDelta(
           inPrevious.coverage.status,
           "no_data",
-          "mevcut projeksiyonda sayfa yok (kaldırıldı)",
+          "page not present in the current projection (removed)",
         ),
       });
     }

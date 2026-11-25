@@ -1,7 +1,8 @@
 import type { GraphNode, NodeKind, SnapshotGraph } from "@causoryn/domain";
 
 import { GraphRepositoryError } from "./errors.js";
-import type { SymbolSearchStore } from "./repository.js";
+import type { SymbolSearchHit, SymbolSearchStore } from "./repository.js";
+import { tokenizeSymbolText } from "./symbol-tokens.js";
 import { nodeIdentityRelativePath } from "./validation.js";
 
 /**
@@ -102,8 +103,91 @@ const MAX_PROXIMITY_NODES = 250;
 /** FTS arama çağrısı isabet tavanı. */
 const MAX_FTS_HITS = 50;
 
+/** Multi-token FTS fallback query cap (when full-phrase search returns 0 hits). */
+const MAX_FTS_FALLBACK_TOKENS = 8;
+
 /** Tek contextItem'ın taşıyacağı kanıt kimliği tavanı. */
 const MAX_ITEM_EVIDENCE_IDS = 8;
+
+/** Maximum character length scanned per identifier segment (matches symbol-tokens.ts O(n) guard). */
+const MAX_IDENTIFIER_SCAN_CHARS = 4_096;
+
+/** Maximum distinct query concepts evaluated per task (matches symbol-tokens.ts MAX_TOKENS). */
+const MAX_QUERY_CONCEPTS = 64;
+
+/** Root container kinds excluded from code localization & proximity BFS traversal. */
+const PROXIMITY_EXCLUDED_NODE_KINDS: ReadonlySet<string> = new Set([
+  "Workspace",
+  "Repository",
+]);
+
+/** Query tokens indicating explicit interest in tests, specs, fixtures, or mocks. */
+const TEST_INTENT_TOKENS: ReadonlySet<string> = new Set([
+  "test",
+  "tests",
+  "spec",
+  "specs",
+  "fixture",
+  "fixtures",
+  "vitest",
+  "jest",
+  "mock",
+]);
+
+/** Concept-weight decay for 1-hop reverse-caller propagation from matched UnknownExternal nodes. */
+const UNKNOWN_EXTERNAL_CALLER_PROPAGATION = 0.9;
+
+/** Final-score priority multipliers favoring production source over test files & external stubs. */
+const PRIORITY_MULTIPLIER_PRODUCTION = 1.0;
+const PRIORITY_MULTIPLIER_TEST = 0.45;
+const PRIORITY_MULTIPLIER_UNKNOWN_EXTERNAL = 0.35;
+
+function roundScore(value: number): number {
+  return Math.round(value * 1_000_000) / 1_000_000;
+}
+
+/**
+ * Pure O(n) test-path detector (Windows + POSIX safe, zero regexes):
+ * matches `test/` / `tests/` / `__tests__/` path segments or `*.test.*` / `*.spec.*` / `*.tests.*`
+ * filenames without misclassifying production files like `packages/preflight/src/test-plan.ts`.
+ */
+function isTestPath(rawPath: string | undefined): boolean {
+  if (rawPath === undefined || rawPath.length === 0) return false;
+  const normalized = rawPath.replace(/\\/g, "/").toLowerCase();
+  if (
+    normalized.startsWith("test/") ||
+    normalized.startsWith("tests/") ||
+    normalized.startsWith("__tests__/") ||
+    normalized.includes("/test/") ||
+    normalized.includes("/tests/") ||
+    normalized.includes("/__tests__/")
+  ) {
+    return true;
+  }
+  const lastSlash = normalized.lastIndexOf("/");
+  const fileName = lastSlash >= 0 ? normalized.slice(lastSlash + 1) : normalized;
+  const dotIdx = fileName.lastIndexOf(".");
+  const stem = dotIdx > 0 ? fileName.slice(0, dotIdx) : fileName;
+  return stem.endsWith(".test") || stem.endsWith(".spec") || stem.endsWith(".tests");
+}
+
+function isTestSourceNode(node: GraphNode): boolean {
+  if (node.kind === "Test") return true;
+  if (isTestPath(nodeIdentityRelativePath(node))) return true;
+  return node.kind === "File" && isTestPath(node.qualifiedName);
+}
+
+function hasTestIntent(
+  queryTokens: readonly string[],
+  concepts: readonly QueryConcept[],
+): boolean {
+  if (queryTokens.some((token) => TEST_INTENT_TOKENS.has(token))) {
+    return true;
+  }
+  return concepts.some((concept) =>
+    concept.exactForms.some((form) => TEST_INTENT_TOKENS.has(form)),
+  );
+}
 
 /**
  * Sözleşme node türleri (sprint-5 D7): contract ayakının SNAPSHOT
@@ -248,6 +332,24 @@ interface Candidate {
   depth?: number;
   /** BFS'e giren kenarın kimliği (evidence kaynağı). */
   parentEdgeId?: string;
+  /** LocAgent internal tie-breaking signals (never serialized onto public schema). */
+  coverageRatio: number;
+  identifierOrBasenameBoost: number;
+  structuralImportance: number;
+}
+
+interface QueryConcept {
+  readonly id: number;
+  readonly meaningful: boolean;
+  readonly exactForms: readonly string[];
+  readonly stemmedForms: readonly string[];
+}
+
+interface NodeTokenProfile {
+  readonly primaryExact: ReadonlySet<string>;
+  readonly primaryStemmed: ReadonlySet<string>;
+  readonly pathExact: ReadonlySet<string>;
+  readonly pathStemmed: ReadonlySet<string>;
 }
 
 function cmp(a: string, b: string): number {
@@ -278,28 +380,179 @@ function tokenizeTask(task: string): string[] {
   return [...new Set(parts.filter((part) => part.length > 0))];
 }
 
-/**
- * Identifier'ı alt tokenlara böler: camelCase/PascalCase sınırı ve
- * harf/rakam dışı ayraçlar. "OrdersService" → [orders, service];
- * "getUserById" → [get, user, by, id]; "ORDER_STATUS" → [order, status].
- */
-function splitIdentifierTokens(name: string): string[] {
-  const spaced = name
-    .replace(/([A-Z])([A-Z][a-z])/g, "$1 $2")
-    .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
-    .replace(/[^\p{L}\p{N}]+/gu, " ");
-  return spaced
-    .toLowerCase()
-    .split(" ")
-    .filter((part) => part.length > 0);
+function isAsciiUpper(code: number): boolean {
+  return code >= 65 && code <= 90;
 }
 
-/** qualifiedName'in terminal segmenti: harf/rakam/alt-tire dışına böl, sonuncu. */
+function isAsciiLower(code: number): boolean {
+  return code >= 97 && code <= 122;
+}
+
+function isAsciiDigit(code: number): boolean {
+  return code >= 48 && code <= 57;
+}
+
+/**
+ * Pure O(n) exact (unstemmed, non-compound) camelCase/PascalCase/ACRONYM/Unicode
+ * identifier splitter with zero regex backtracking.
+ * - "HTTPServer" -> ["http", "server"]
+ * - "XMLHttpRequest" -> ["xml", "http", "request"]
+ * - "getURLPath" -> ["get", "url", "path"]
+ * - "OrdersService" -> ["orders", "service"]
+ * - "ORDER_STATUS" -> ["order", "status"]
+ */
+function splitExactIdentifierTokens(raw: string): string[] {
+  const clipped =
+    raw.length > MAX_IDENTIFIER_SCAN_CHARS
+      ? raw.slice(0, MAX_IDENTIFIER_SCAN_CHARS)
+      : raw;
+  const runs = clipped.split(/[^\p{L}\p{N}]+/u);
+  const out: string[] = [];
+  for (const run of runs) {
+    if (run.length === 0) continue;
+    let start = 0;
+    for (let i = 1; i < run.length; i += 1) {
+      const prev = run.charCodeAt(i - 1);
+      const curr = run.charCodeAt(i);
+      const next = i + 1 < run.length ? run.charCodeAt(i + 1) : 0;
+      const lowerToUpper =
+        (isAsciiLower(prev) || isAsciiDigit(prev)) && isAsciiUpper(curr);
+      const acronymSplit =
+        isAsciiUpper(prev) && isAsciiUpper(curr) && isAsciiLower(next);
+      if (lowerToUpper || acronymSplit) {
+        out.push(run.slice(start, i).toLowerCase());
+        start = i;
+      }
+    }
+    out.push(run.slice(start).toLowerCase());
+  }
+  return out;
+}
+
+/**
+ * Extracts normalized POSIX directory segments and extension-stripped basename
+ * from any Windows or POSIX relative file path (never reduces `.ts` files to `"ts"`).
+ */
+function extractPathParts(rawPath: string): {
+  readonly directories: string;
+  readonly basename: string;
+} {
+  const normalized = rawPath.replace(/\\/g, "/");
+  const lastSlash = normalized.lastIndexOf("/");
+  const directories = lastSlash >= 0 ? normalized.slice(0, lastSlash) : "";
+  const fileName = lastSlash >= 0 ? normalized.slice(lastSlash + 1) : normalized;
+  const dotIndex = fileName.lastIndexOf(".");
+  const basename = dotIndex > 0 ? fileName.slice(0, dotIndex) : fileName;
+  return { directories, basename };
+}
+
+/** qualifiedName'in terminal segmenti (non-File semboller): harf/rakam/alt-tire dışına böl, sonuncu. */
 function terminalIdentifier(qualifiedName: string): string {
   const parts = qualifiedName
     .split(/[^\p{L}\p{N}_]+/u)
     .filter((part) => part.length > 0);
   return parts[parts.length - 1] ?? qualifiedName;
+}
+
+/**
+ * Builds deduplicated query concepts from the raw task text using both exact
+ * unstemmed tokens and LocAgent stemmed tokens from `tokenizeSymbolText`.
+ */
+function buildQueryConcepts(rawTask: string): {
+  readonly concepts: readonly QueryConcept[];
+  readonly meaningfulCount: number;
+  readonly ftsFallbackTokens: readonly string[];
+} {
+  const rawWords = rawTask
+    .split(/[^\p{L}\p{N}]+/u)
+    .filter((part) => part.length > 0);
+  const concepts: QueryConcept[] = [];
+  const seenKeys = new Set<string>();
+  let nextId = 0;
+
+  for (const word of rawWords) {
+    if (concepts.length >= MAX_QUERY_CONCEPTS) break;
+    const exactParts = splitExactIdentifierTokens(word);
+    for (const part of exactParts) {
+      if (concepts.length >= MAX_QUERY_CONCEPTS) break;
+      if (part.length === 0 || seenKeys.has(part)) continue;
+      seenKeys.add(part);
+      const stemmedMeaningful = tokenizeSymbolText(part, {
+        stripStopWords: true,
+        includeCompound: false,
+      });
+      const stemmedAll = tokenizeSymbolText(part, {
+        stripStopWords: false,
+        includeCompound: false,
+      });
+      const isStopWord = stemmedMeaningful.length === 0 && stemmedAll.length > 0;
+      const meaningful = !isStopWord;
+      const stemmedForms = meaningful ? stemmedMeaningful : stemmedAll;
+      concepts.push({
+        id: nextId,
+        meaningful,
+        exactForms: [part],
+        stemmedForms: stemmedForms.length > 0 ? stemmedForms : [part],
+      });
+      nextId += 1;
+    }
+  }
+
+  const meaningfulCount = concepts.reduce(
+    (sum, c) => sum + (c.meaningful ? 1 : 0),
+    0,
+  );
+  const ftsFallbackTokens = tokenizeSymbolText(rawTask, {
+    stripStopWords: true,
+    includeCompound: false,
+  }).slice(0, MAX_FTS_FALLBACK_TOKENS);
+
+  return { concepts, meaningfulCount, ftsFallbackTokens };
+}
+
+/**
+ * Builds the LocAgent token profile for a graph node:
+ * - `File` nodes tokenize full path directories AND extension-stripped basename
+ *   (NEVER reduced to extension `"ts"`).
+ * - Non-`File` symbols tokenize their own identifier as primary tokens and their
+ *   `relativePath` (directories + basename) as corroborating path context.
+ */
+function buildNodeTokenProfile(node: GraphNode): NodeTokenProfile {
+  const relPath = nodeIdentityRelativePath(node);
+  if (node.kind === "File") {
+    const filePath = relPath ?? node.qualifiedName;
+    const { directories, basename } = extractPathParts(filePath);
+    const primaryExact = new Set(splitExactIdentifierTokens(basename));
+    const primaryStemmed = new Set(
+      tokenizeSymbolText(basename, { stripStopWords: false, includeCompound: false }),
+    );
+    const pathExact = new Set(splitExactIdentifierTokens(directories));
+    const pathStemmed = new Set(
+      tokenizeSymbolText(directories, { stripStopWords: false, includeCompound: false }),
+    );
+    return { primaryExact, primaryStemmed, pathExact, pathStemmed };
+  }
+
+  const terminal = terminalIdentifier(node.qualifiedName);
+  const primaryExact = new Set(splitExactIdentifierTokens(terminal));
+  const primaryStemmed = new Set(
+    tokenizeSymbolText(terminal, { stripStopWords: false, includeCompound: false }),
+  );
+  if (relPath === undefined) {
+    return {
+      primaryExact,
+      primaryStemmed,
+      pathExact: new Set(),
+      pathStemmed: new Set(),
+    };
+  }
+  const { directories, basename } = extractPathParts(relPath);
+  const pathText = directories.length > 0 ? `${directories} ${basename}` : basename;
+  const pathExact = new Set(splitExactIdentifierTokens(pathText));
+  const pathStemmed = new Set(
+    tokenizeSymbolText(pathText, { stripStopWords: false, includeCompound: false }),
+  );
+  return { primaryExact, primaryStemmed, pathExact, pathStemmed };
 }
 
 function invalidInput(message: string): GraphRepositoryError {
@@ -318,7 +571,7 @@ function resolveLimits(
     tokenBudget < 1
   ) {
     throw invalidInput(
-      `tokenBudget pozitif tam sayı olmalı (0 ve kesirli değerler açık reddedilir): ${String(tokenBudget)}`,
+      `tokenBudget must be a positive integer (0 and fractional values are rejected): ${String(tokenBudget)}`,
     );
   }
   const maxProximityDepth = input.maxProximityDepth ?? DEFAULT_PROXIMITY_DEPTH;
@@ -328,20 +581,20 @@ function resolveLimits(
     maxProximityDepth < 1
   ) {
     throw invalidInput(
-      `maxProximityDepth pozitif tam sayı olmalı: ${String(maxProximityDepth)}`,
+      `maxProximityDepth must be a positive integer: ${String(maxProximityDepth)}`,
     );
   }
   let appliedBudget = tokenBudget;
   let appliedDepth = maxProximityDepth;
   if (appliedBudget > AGENT_CONTEXT_LIMIT_CEILINGS.tokenBudget) {
     rationales.push(
-      `tokenBudget=${String(tokenBudget)} istenen değeri tavana (${String(AGENT_CONTEXT_LIMIT_CEILINGS.tokenBudget)}) indirildi (TŞ §20 resource budget)`,
+      `tokenBudget=${String(tokenBudget)} exceeds the ceiling and was clamped to ${String(AGENT_CONTEXT_LIMIT_CEILINGS.tokenBudget)} (resource budget)`,
     );
     appliedBudget = AGENT_CONTEXT_LIMIT_CEILINGS.tokenBudget;
   }
   if (appliedDepth > AGENT_CONTEXT_LIMIT_CEILINGS.maxProximityDepth) {
     rationales.push(
-      `maxProximityDepth=${String(maxProximityDepth)} istenen değeri tavana (${String(AGENT_CONTEXT_LIMIT_CEILINGS.maxProximityDepth)}) indirildi (TŞ §20 resource budget)`,
+      `maxProximityDepth=${String(maxProximityDepth)} exceeds the ceiling and was clamped to ${String(AGENT_CONTEXT_LIMIT_CEILINGS.maxProximityDepth)} (resource budget)`,
     );
     appliedDepth = AGENT_CONTEXT_LIMIT_CEILINGS.maxProximityDepth;
   }
@@ -352,12 +605,12 @@ function resolveLimits(
 function validateOptionalInputs(input: AgentContextInput): void {
   if (input.contractSymbols !== undefined) {
     if (!Array.isArray(input.contractSymbols)) {
-      throw invalidInput("contractSymbols dizi olmalı");
+      throw invalidInput("contractSymbols must be an array");
     }
     for (const symbol of input.contractSymbols) {
       if (typeof symbol !== "string") {
         throw invalidInput(
-          `contractSymbols öğesi string olmalı: ${String(symbol)}`,
+          `contractSymbols entries must be strings: ${String(symbol)}`,
         );
       }
     }
@@ -367,12 +620,12 @@ function validateOptionalInputs(input: AgentContextInput): void {
       input.symbolSearch === null ||
       typeof input.symbolSearch.searchSymbols !== "function"
     ) {
-      throw invalidInput("symbolSearch SymbolSearchStore sözleşmesini uygulamalı");
+      throw invalidInput("symbolSearch must implement the SymbolSearchStore contract");
     }
   }
   if (input.fileFreshness !== undefined) {
     if (!Array.isArray(input.fileFreshness)) {
-      throw invalidInput("fileFreshness dizi olmalı");
+      throw invalidInput("fileFreshness must be an array");
     }
     for (const record of input.fileFreshness) {
       if (
@@ -382,7 +635,7 @@ function validateOptionalInputs(input: AgentContextInput): void {
         typeof record.updatedAt !== "string"
       ) {
         throw invalidInput(
-          "fileFreshness kaydı {relativePath: string, updatedAt: string} olmalı",
+          "fileFreshness entries must be {relativePath: string, updatedAt: string}",
         );
       }
     }
@@ -406,7 +659,7 @@ export function generateAgentContext(
 ): AgentContextResult {
   // 1) Girdi sözleşmesi: görev metni zorunlu ve boş olmayan arama verisidir.
   if (typeof input.task !== "string" || input.task.trim().length === 0) {
-    throw invalidInput("task boş olmayan bir görev metni (arama sorgusu) olmalı");
+    throw invalidInput("task must be a non-empty task description (it is used as the search query)");
   }
   validateOptionalInputs(input);
 
@@ -417,7 +670,7 @@ export function generateAgentContext(
   if (state !== "ready" && state !== "partial") {
     throw new GraphRepositoryError(
       "graph/agent-context-snapshot-state",
-      `agent context yalnızca ready/partial snapshot üzerinde çalışır; snapshot durumu: ${String(state)}`,
+      `agent context only runs on a ready or partial snapshot; snapshot state: ${String(state)}`,
     );
   }
 
@@ -446,21 +699,21 @@ export function generateAgentContext(
     degradedLegs.push({
       leg: "contract",
       reason:
-        "contract ayakı atlandı: snapshot'ta sözleşme kaydı yok (ApiContract/EventContract/SchemaContract/ContractVersion yüzeyi boş) ve contractSymbols verilmedi (hata değildir)",
+        "contract leg skipped: the snapshot has no contract records (the ApiContract/EventContract/SchemaContract/ContractVersion surface is empty) and no contractSymbols were given (this is not an error)",
     });
   }
   if (!freshnessProvided) {
     degradedLegs.push({
       leg: "freshness",
       reason:
-        "freshness ayakı atlandı: fileFreshness verilmedi (dosya updatedAt eşlemesi yok)",
+        "freshness leg skipped: no fileFreshness was given (no per-file updatedAt mapping)",
     });
   }
   if (!ftsProvided) {
     degradedLegs.push({
       leg: "fts",
       reason:
-        "fts ayakı atlandı: symbolSearch deposu verilmedi (symbol_fts yok)",
+        "fts leg skipped: no symbolSearch store was given (symbol_fts unavailable)",
     });
   }
   const legsApplied: AgentContextLeg[] = LEG_ORDER.filter((leg) => {
@@ -472,11 +725,11 @@ export function generateAgentContext(
 
   if (queryTokens.length === 0) {
     rationales.push(
-      "görev metni arama tokenı üretmedi; boş sorgu kümesiyle hiçbir ayak eşleşemez",
+      "the task text produced no search tokens; no leg can match an empty query set",
     );
   }
 
-  // 4) Node/kenar indeksleri: kanonik düzen (girdi dizi sırasından bağımsızlık).
+  // 4) Node/edge indexes + structural importance (non-CONTAINS degree, canonical order).
   const nodesById = new Map<string, GraphNode>();
   for (const node of snapshot.nodes) nodesById.set(node.id, node);
   const sortedNodes = [...snapshot.nodes].sort(compareNodeKey);
@@ -484,6 +737,19 @@ export function generateAgentContext(
 
   const evidenceByEdgeId = new Map<string, readonly string[]>();
   const incidentEvidence = new Map<string, string[]>();
+  const nonContainsInDegree = new Map<string, number>();
+  const nonContainsOutDegree = new Map<string, number>();
+  const directContainedByFile = new Map<string, string[]>();
+  const containingFileIdByNodeId = new Map<string, string>();
+  const fileNodeByPath = new Map<string, GraphNode>();
+  const incomingCallsToExternal = new Map<string, string[]>();
+
+  for (const node of sortedNodes) {
+    if (node.kind !== "File") continue;
+    const rel = nodeIdentityRelativePath(node) ?? node.qualifiedName;
+    fileNodeByPath.set(rel.replace(/\\/g, "/"), node);
+  }
+
   for (const edge of sortedEdges) {
     evidenceByEdgeId.set(edge.id, edge.evidenceIds);
     for (const endpointId of [edge.from, edge.to]) {
@@ -491,6 +757,52 @@ export function generateAgentContext(
       list.push(...edge.evidenceIds);
       incidentEvidence.set(endpointId, list);
     }
+    if (edge.kind === "CONTAINS") {
+      const fromNode = nodesById.get(edge.from);
+      const toNode = nodesById.get(edge.to);
+      if (
+        fromNode?.kind === "File" &&
+        toNode !== undefined &&
+        !PROXIMITY_EXCLUDED_NODE_KINDS.has(toNode.kind) &&
+        toNode.kind !== "File"
+      ) {
+        const list = directContainedByFile.get(fromNode.id);
+        if (list === undefined) {
+          directContainedByFile.set(fromNode.id, [toNode.id]);
+        } else {
+          list.push(toNode.id);
+        }
+        if (!containingFileIdByNodeId.has(toNode.id)) {
+          containingFileIdByNodeId.set(toNode.id, fromNode.id);
+        }
+      }
+      continue;
+    }
+    if (edge.kind === "CALLS") {
+      const toNode = nodesById.get(edge.to);
+      if (toNode?.kind === "UnknownExternal") {
+        const callers = incomingCallsToExternal.get(toNode.id);
+        if (callers === undefined) {
+          incomingCallsToExternal.set(toNode.id, [edge.from]);
+        } else {
+          callers.push(edge.from);
+        }
+      }
+    }
+    nonContainsOutDegree.set(edge.from, (nonContainsOutDegree.get(edge.from) ?? 0) + 1);
+    nonContainsInDegree.set(edge.to, (nonContainsInDegree.get(edge.to) ?? 0) + 1);
+  }
+
+  const structuralImportanceByNodeId = new Map<string, number>();
+  for (const node of sortedNodes) {
+    let inDeg = nonContainsInDegree.get(node.id) ?? 0;
+    const outDeg = nonContainsOutDegree.get(node.id) ?? 0;
+    if (node.kind === "File") {
+      for (const childId of directContainedByFile.get(node.id) ?? []) {
+        inDeg += 0.5 * (nonContainsInDegree.get(childId) ?? 0);
+      }
+    }
+    structuralImportanceByNodeId.set(node.id, Math.log1p(inDeg * 2 + outDeg));
   }
 
   const candidates = new Map<string, Candidate>();
@@ -501,39 +813,334 @@ export function generateAgentContext(
       node,
       scores: { exact: 0, proximity: 0, contract: 0, freshness: 0, fts: 0 },
       legs: new Set<AgentContextLeg>(),
+      coverageRatio: 0,
+      identifierOrBasenameBoost: 0,
+      structuralImportance: structuralImportanceByNodeId.get(node.id) ?? 0,
     };
     candidates.set(node.id, created);
     return created;
   };
 
-  // 5) exact-symbol ayakı: görev tokenı ≡ terminal alt tokenları (birebir).
-  const terminalTokensByNodeId = new Map<string, Set<string>>();
+  // 5) exact-symbol & LocAgent lexical localization leg:
+  //    Full path + basename + camelCase/acronym tokenization (never reduces `.ts` to `"ts"`),
+  //    multi-token concept coverage, exact basename/identifier boost, and 1-hop File rollup.
+  const { concepts, meaningfulCount, ftsFallbackTokens } = buildQueryConcepts(input.task);
+  const conceptDenominator = meaningfulCount > 0 ? meaningfulCount : concepts.length;
+  const profilesByNodeId = new Map<string, NodeTokenProfile>();
   for (const node of sortedNodes) {
-    terminalTokensByNodeId.set(
-      node.id,
-      new Set(splitIdentifierTokens(terminalIdentifier(node.qualifiedName))),
-    );
+    profilesByNodeId.set(node.id, buildNodeTokenProfile(node));
   }
-  if (queryTokens.length > 0) {
+
+  // Per-node concept match weight map (0.5 = path/dir or child rollup, 1.0 = primary symbol/basename)
+  const matchedConceptWeightsByNodeId = new Map<string, Map<number, number>>();
+  const primaryMatchedConceptsByNodeId = new Map<string, Set<number>>();
+
+  const matchesAny = (
+    tokenSet: ReadonlySet<string>,
+    forms: readonly string[],
+  ): boolean => {
+    for (const form of forms) {
+      if (tokenSet.has(form)) return true;
+    }
+    return false;
+  };
+
+  if (concepts.length > 0) {
+    interface NodeLexicalEval {
+      readonly node: GraphNode;
+      readonly exactPrimary: Set<number>;
+      readonly exactPath: Set<number>;
+      readonly stemmedPrimary: Set<number>;
+      readonly stemmedPath: Set<number>;
+      readonly meaningfulExactPrimary: number;
+      readonly meaningfulExactPath: number;
+      readonly meaningfulStemmedPrimary: number;
+      readonly meaningfulStemmedPath: number;
+    }
+
+    const evals: NodeLexicalEval[] = [];
+    let exactSeedCount = 0;
+
     for (const node of sortedNodes) {
-      const tokens = terminalTokensByNodeId.get(node.id);
-      if (tokens === undefined) continue;
-      let matched = 0;
-      for (const token of queryTokens) {
-        if (tokens.has(token)) matched += 1;
+      if (PROXIMITY_EXCLUDED_NODE_KINDS.has(node.kind)) continue;
+      const profile = profilesByNodeId.get(node.id);
+      if (profile === undefined) continue;
+
+      const exactPrimary = new Set<number>();
+      const exactPath = new Set<number>();
+      const stemmedPrimary = new Set<number>();
+      const stemmedPath = new Set<number>();
+      let meaningfulExactPrimary = 0;
+      let meaningfulExactPath = 0;
+      let meaningfulStemmedPrimary = 0;
+      let meaningfulStemmedPath = 0;
+
+      for (const concept of concepts) {
+        if (matchesAny(profile.primaryExact, concept.exactForms)) {
+          exactPrimary.add(concept.id);
+          if (concept.meaningful) meaningfulExactPrimary += 1;
+          continue;
+        }
+        if (matchesAny(profile.pathExact, concept.exactForms)) {
+          exactPath.add(concept.id);
+          if (concept.meaningful) meaningfulExactPath += 1;
+        }
+        if (concept.meaningful && matchesAny(profile.primaryStemmed, concept.stemmedForms)) {
+          stemmedPrimary.add(concept.id);
+          meaningfulStemmedPrimary += 1;
+          continue;
+        }
+        if (
+          concept.meaningful &&
+          !exactPath.has(concept.id) &&
+          matchesAny(profile.pathStemmed, concept.stemmedForms)
+        ) {
+          stemmedPath.add(concept.id);
+          meaningfulStemmedPath += 1;
+        }
       }
-      if (matched > 0) {
-        const candidate = getCandidate(node);
-        candidate.scores.exact = matched;
-        candidate.legs.add("exact-symbol");
+
+      const qualifiesExact =
+        node.kind === "File"
+          ? meaningfulCount > 0
+            ? meaningfulExactPrimary + meaningfulExactPath > 0
+            : exactPrimary.size + exactPath.size > 0
+          : meaningfulCount > 0
+            ? meaningfulExactPrimary > 0
+            : exactPrimary.size > 0;
+
+      if (qualifiesExact) {
+        exactSeedCount += 1;
+      }
+
+      evals.push({
+        node,
+        exactPrimary,
+        exactPath,
+        stemmedPrimary,
+        stemmedPath,
+        meaningfulExactPrimary,
+        meaningfulExactPath,
+        meaningfulStemmedPrimary,
+        meaningfulStemmedPath,
+      });
+    }
+
+    for (const ev of evals) {
+      const isFile = ev.node.kind === "File";
+      const qualifiesExact = isFile
+        ? meaningfulCount > 0
+          ? ev.meaningfulExactPrimary + ev.meaningfulExactPath > 0
+          : ev.exactPrimary.size + ev.exactPath.size > 0
+        : meaningfulCount > 0
+          ? ev.meaningfulExactPrimary > 0
+          : ev.exactPrimary.size > 0;
+
+      const stemmedPrimaryHits = ev.meaningfulStemmedPrimary;
+      const pathHits = ev.meaningfulExactPath + ev.meaningfulStemmedPath;
+      const qualifiesStemmed =
+        stemmedPrimaryHits >= 2 ||
+        (stemmedPrimaryHits >= 1 && pathHits >= 1) ||
+        (exactSeedCount === 0 && (stemmedPrimaryHits >= 1 || (isFile && ev.meaningfulStemmedPath >= 1)));
+
+      if (!qualifiesExact && !qualifiesStemmed) continue;
+
+      const weights = new Map<number, number>();
+      const primarySet = new Set<number>();
+
+      // Primary symbol / basename matches always earn 1.0 per matched concept.
+      for (const cid of ev.exactPrimary) {
+        weights.set(cid, 1);
+        primarySet.add(cid);
+      }
+      for (const cid of ev.stemmedPrimary) {
+        if (!weights.has(cid)) {
+          weights.set(cid, 1);
+          primarySet.add(cid);
+        }
+      }
+
+      // Directory / path context earns 0.5 for concepts not already matched in primary identifier.
+      const allowPathBonus = isFile || primarySet.size > 0;
+      if (allowPathBonus) {
+        for (const cid of ev.exactPath) {
+          if (!weights.has(cid)) {
+            weights.set(cid, 0.5);
+          }
+        }
+        for (const cid of ev.stemmedPath) {
+          if (!weights.has(cid)) {
+            weights.set(cid, 0.5);
+          }
+        }
+      }
+
+      if (weights.size === 0) continue;
+
+      let totalScore = 0;
+      let meaningfulMatched = 0;
+      for (const [cid, w] of weights) {
+        totalScore += w;
+        const concept = concepts[cid];
+        if (concept !== undefined && (meaningfulCount === 0 || concept.meaningful)) {
+          meaningfulMatched += 1;
+        }
+      }
+
+      matchedConceptWeightsByNodeId.set(ev.node.id, weights);
+      primaryMatchedConceptsByNodeId.set(ev.node.id, primarySet);
+
+      const candidate = getCandidate(ev.node);
+      candidate.scores.exact = totalScore;
+      candidate.identifierOrBasenameBoost = primarySet.size;
+      candidate.coverageRatio =
+        conceptDenominator > 0 ? meaningfulMatched / conceptDenominator : 0;
+      candidate.legs.add("exact-symbol");
+    }
+
+    // 1-hop File --CONTAINS--> Symbol concept rollup: a File defining matched symbols
+    // inherits concept coverage so file-level localization (e.g., server.ts) ranks cleanly
+    // above directory-only distractors even when the file's own basename doesn't repeat
+    // every symbol token.
+    for (const [fileId, childIds] of directContainedByFile) {
+      const fileNode = nodesById.get(fileId);
+      if (fileNode === undefined) continue;
+      const childPrimaryConcepts = new Set<number>();
+      for (const childId of childIds) {
+        const childPrimary = primaryMatchedConceptsByNodeId.get(childId);
+        if (childPrimary === undefined) continue;
+        for (const cid of childPrimary) childPrimaryConcepts.add(cid);
+      }
+      if (childPrimaryConcepts.size === 0) continue;
+
+      const existingWeights =
+        matchedConceptWeightsByNodeId.get(fileId) ?? new Map<number, number>();
+      let changed = false;
+      for (const cid of childPrimaryConcepts) {
+        const prev = existingWeights.get(cid);
+        if (prev === undefined) {
+          existingWeights.set(cid, 0.5);
+          changed = true;
+        } else if (prev < 0.75) {
+          // Upgrade directory-only 0.5 match to 0.75 when a declared symbol inside this file
+          // literally matches the concept in its identifier!
+          existingWeights.set(cid, 0.75);
+          changed = true;
+        }
+      }
+      if (!changed) continue;
+
+      matchedConceptWeightsByNodeId.set(fileId, existingWeights);
+      let totalScore = 0;
+      let meaningfulMatched = 0;
+      for (const [cid, w] of existingWeights) {
+        totalScore += w;
+        const concept = concepts[cid];
+        if (concept !== undefined && (meaningfulCount === 0 || concept.meaningful)) {
+          meaningfulMatched += 1;
+        }
+      }
+      const candidate = getCandidate(fileNode);
+      candidate.scores.exact = totalScore;
+      candidate.coverageRatio =
+        conceptDenominator > 0 ? meaningfulMatched / conceptDenominator : 0;
+      candidate.legs.add("exact-symbol");
+    }
+
+    // 1-hop reverse-caller propagation from matched UnknownExternal nodes:
+    // when a query matches an external API call (e.g. `McpServer.registerTool`),
+    // propagate its matched concept weights (scaled by 0.9) 1 hop backward along
+    // incoming CALLS edges to production callers and their containing File.
+    const mergePropagatedWeights = (
+      targetNode: GraphNode,
+      sourceWeights: ReadonlyMap<number, number>,
+    ): void => {
+      const existingWeights =
+        matchedConceptWeightsByNodeId.get(targetNode.id) ?? new Map<number, number>();
+      let changed = false;
+      for (const [cid, w] of sourceWeights) {
+        const propagated = roundScore(w * UNKNOWN_EXTERNAL_CALLER_PROPAGATION);
+        const prev = existingWeights.get(cid);
+        if (prev === undefined || prev < propagated) {
+          existingWeights.set(cid, propagated);
+          changed = true;
+        }
+      }
+      if (!changed) return;
+
+      matchedConceptWeightsByNodeId.set(targetNode.id, existingWeights);
+      let totalScore = 0;
+      let meaningfulMatched = 0;
+      for (const [cid, w] of existingWeights) {
+        totalScore += w;
+        const concept = concepts[cid];
+        if (concept !== undefined && (meaningfulCount === 0 || concept.meaningful)) {
+          meaningfulMatched += 1;
+        }
+      }
+      const candidate = getCandidate(targetNode);
+      candidate.scores.exact = roundScore(totalScore);
+      candidate.coverageRatio =
+        conceptDenominator > 0 ? meaningfulMatched / conceptDenominator : 0;
+      candidate.legs.add("exact-symbol");
+    };
+
+    for (const node of sortedNodes) {
+      if (node.kind !== "UnknownExternal") continue;
+      const extWeights = matchedConceptWeightsByNodeId.get(node.id);
+      if (extWeights === undefined || extWeights.size === 0) continue;
+      const callerIds = incomingCallsToExternal.get(node.id);
+      if (callerIds === undefined) continue;
+      for (const callerId of callerIds) {
+        const callerNode = nodesById.get(callerId);
+        if (
+          callerNode === undefined ||
+          PROXIMITY_EXCLUDED_NODE_KINDS.has(callerNode.kind) ||
+          callerNode.kind === "UnknownExternal" ||
+          isTestSourceNode(callerNode)
+        ) {
+          continue;
+        }
+        mergePropagatedWeights(callerNode, extWeights);
+        const containingFileId = containingFileIdByNodeId.get(callerNode.id);
+        const callerRel = nodeIdentityRelativePath(callerNode);
+        const fileNode =
+          (containingFileId !== undefined ? nodesById.get(containingFileId) : undefined) ??
+          (callerRel !== undefined
+            ? fileNodeByPath.get(callerRel.replace(/\\/g, "/"))
+            : undefined);
+        if (
+          fileNode !== undefined &&
+          fileNode.id !== callerNode.id &&
+          !isTestSourceNode(fileNode)
+        ) {
+          mergePropagatedWeights(fileNode, extWeights);
+        }
       }
     }
   }
 
-  // 6) graph-proximity ayakı: exact seed'lerden her iki yönde bounded BFS.
+  // 6) graph-proximity leg: bounded BFS from lexical seeds.
+  //    Excludes Workspace/Repository hubs AND reverse CONTAINS upward hops so unrelated
+  //    sibling files can never flood top-K via 2-hop `File <- Workspace -> OtherFile`.
   const adjacency = new Map<string, ProximityNeighbor[]>();
   for (const node of sortedNodes) adjacency.set(node.id, []);
   for (const edge of sortedEdges) {
+    const fromNode = nodesById.get(edge.from);
+    const toNode = nodesById.get(edge.to);
+    if (fromNode === undefined || toNode === undefined) continue;
+    if (
+      PROXIMITY_EXCLUDED_NODE_KINDS.has(fromNode.kind) ||
+      PROXIMITY_EXCLUDED_NODE_KINDS.has(toNode.kind)
+    ) {
+      continue;
+    }
+    if (edge.kind === "CONTAINS") {
+      // Forward CONTAINS (e.g., File -> Symbol, Class -> Method) stays traversable from
+      // a matched container; upward reverse CONTAINS (Symbol/File -> Container) is excluded.
+      adjacency.get(edge.from)?.push({ edgeId: edge.id, other: edge.to });
+      continue;
+    }
     adjacency.get(edge.from)?.push({ edgeId: edge.id, other: edge.to });
     adjacency.get(edge.to)?.push({ edgeId: edge.id, other: edge.from });
   }
@@ -550,7 +1157,7 @@ export function generateAgentContext(
   );
   if (proximityTruncated) {
     rationales.push(
-      `graph-proximity tavanı vuruldu: ${String(MAX_PROXIMITY_NODES)} keşif node ile sınırlandı (TŞ §20 resource budget)`,
+      `graph-proximity ceiling reached: exploration was limited to ${String(MAX_PROXIMITY_NODES)} nodes (resource budget)`,
     );
   }
 
@@ -563,14 +1170,14 @@ export function generateAgentContext(
     ]);
     if (queryTokens.length === 0) {
       rationales.push(
-        "contract: boş sorgu kümesi kontrat kesişimi üretmez (ayak koştu, katkı yok)",
+        "contract: an empty query set cannot intersect any contract (leg ran, no contribution)",
       );
     }
     for (const node of sortedNodes) {
       if (!contractSet.has(node.qualifiedName)) continue;
-      const tokens = terminalTokensByNodeId.get(node.id);
-      if (tokens === undefined) continue;
-      const intersects = queryTokens.some((token) => tokens.has(token));
+      const profile = profilesByNodeId.get(node.id);
+      if (profile === undefined) continue;
+      const intersects = queryTokens.some((token) => profile.primaryExact.has(token));
       if (!intersects) continue;
       const candidate = getCandidate(node);
       candidate.scores.contract = 1;
@@ -579,37 +1186,85 @@ export function generateAgentContext(
   }
 
   // 8) fts ayakı: SymbolSearchStore sorgusu, depo relevance sırasıyla.
+  //    Falls back to bounded per-token queries when full-prose search returns 0 hits
+  //    (e.g., backing store uses exact-phrase matching) and aggregates multi-token hits.
   if (ftsProvided && input.symbolSearch !== undefined) {
     if (queryTokens.length === 0) {
       rationales.push(
-        "fts: boş sorgu kümesi için depo çağrısı yapılmadı (ayak koştu, katkı yok)",
+        "fts: the store was not queried for an empty query set (leg ran, no contribution)",
       );
     } else {
-      const hits = input.symbolSearch.searchSymbols(
+      const primaryHits = input.symbolSearch.searchSymbols(
         input.task,
         MAX_FTS_HITS,
         snapshot.meta.id,
       );
-      const seen = new Set<string>();
-      let rank = 0;
       let droppedUnknown = 0;
-      for (const hit of hits) {
-        if (seen.has(hit.nodeId)) continue;
-        seen.add(hit.nodeId);
-        const node = nodesById.get(hit.nodeId);
-        if (node === undefined) {
-          droppedUnknown += 1;
-          continue;
+
+      if (primaryHits.length > 0 || ftsFallbackTokens.length <= 1) {
+        const seen = new Set<string>();
+        let rank = 0;
+        for (const hit of primaryHits) {
+          if (seen.has(hit.nodeId)) continue;
+          seen.add(hit.nodeId);
+          const node = nodesById.get(hit.nodeId);
+          if (node === undefined) {
+            droppedUnknown += 1;
+            continue;
+          }
+          if (PROXIMITY_EXCLUDED_NODE_KINDS.has(node.kind)) continue;
+          rank += 1;
+          const candidate = getCandidate(node);
+          // Depo sırası relevance sırasıdır: ilk isabet en güçlü (1/rank).
+          if (candidate.scores.fts < 1 / rank) candidate.scores.fts = 1 / rank;
+          candidate.legs.add("fts");
         }
-        rank += 1;
-        const candidate = getCandidate(node);
-        // Depo sırası relevance sırasıdır: ilk isabet en güçli (1/rank).
-        if (candidate.scores.fts < 1 / rank) candidate.scores.fts = 1 / rank;
-        candidate.legs.add("fts");
+      } else {
+        // Multi-token fallback for natural-language queries on phrase-only stores.
+        const perTokenLimit = Math.min(20, MAX_FTS_HITS);
+        const aggregated = new Map<
+          string,
+          { node: GraphNode; matchedQueries: number; bestRank: number }
+        >();
+        const unknownIds = new Set<string>();
+        for (const token of ftsFallbackTokens) {
+          const tokenHits: readonly SymbolSearchHit[] =
+            input.symbolSearch.searchSymbols(token, perTokenLimit, snapshot.meta.id);
+          const seenInToken = new Set<string>();
+          let rank = 0;
+          for (const hit of tokenHits) {
+            if (seenInToken.has(hit.nodeId)) continue;
+            seenInToken.add(hit.nodeId);
+            const node = nodesById.get(hit.nodeId);
+            if (node === undefined) {
+              unknownIds.add(hit.nodeId);
+              continue;
+            }
+            if (PROXIMITY_EXCLUDED_NODE_KINDS.has(node.kind)) continue;
+            rank += 1;
+            const prev = aggregated.get(node.id);
+            if (prev === undefined) {
+              aggregated.set(node.id, { node, matchedQueries: 1, bestRank: rank });
+            } else {
+              prev.matchedQueries += 1;
+              if (rank < prev.bestRank) prev.bestRank = rank;
+            }
+          }
+        }
+        droppedUnknown = unknownIds.size;
+        for (const entry of aggregated.values()) {
+          const candidate = getCandidate(entry.node);
+          const coverageComponent = entry.matchedQueries / ftsFallbackTokens.length;
+          const rankComponent = 1 / entry.bestRank;
+          const ftsScore = coverageComponent * 0.8 + rankComponent * 0.2;
+          if (candidate.scores.fts < ftsScore) candidate.scores.fts = ftsScore;
+          candidate.legs.add("fts");
+        }
       }
+
       if (droppedUnknown > 0) {
         rationales.push(
-          `fts: ${String(droppedUnknown)} isabet snapshot'ta olmayan nodeId taşıdığı için düşürüldü`,
+          `fts: dropped ${String(droppedUnknown)} hit(s) whose nodeId is not in the snapshot`,
         );
       }
     }
@@ -654,7 +1309,27 @@ export function generateAgentContext(
     }
   }
 
-  // 10) Sıralama: ayak sırasına göre leksik kompozit + kanonik tie-break.
+  // 10) Production-source priority multiplier & sıralama:
+  //     When the query does not explicitly ask about tests, prioritize production
+  //     source nodes (1.0) over test files/nodes (0.45) and UnknownExternal stubs (0.35).
+  const queryMentionsTests = hasTestIntent(queryTokens, concepts);
+  for (const candidate of candidates.values()) {
+    const multiplier =
+      candidate.node.kind === "UnknownExternal"
+        ? PRIORITY_MULTIPLIER_UNKNOWN_EXTERNAL
+        : !queryMentionsTests && isTestSourceNode(candidate.node)
+          ? PRIORITY_MULTIPLIER_TEST
+          : PRIORITY_MULTIPLIER_PRODUCTION;
+    if (multiplier !== 1) {
+      candidate.scores.exact = roundScore(candidate.scores.exact * multiplier);
+      candidate.scores.proximity = roundScore(candidate.scores.proximity * multiplier);
+      candidate.scores.contract = roundScore(candidate.scores.contract * multiplier);
+      candidate.scores.freshness = roundScore(candidate.scores.freshness * multiplier);
+      candidate.scores.fts = roundScore(candidate.scores.fts * multiplier);
+    }
+  }
+
+  // Sıralama: ayak sırasına göre leksik kompozit + LocAgent relevance/structural tie-breakers + kanonik fallback.
   const ranked = [...candidates.values()].sort((a, b) => {
     const byScores =
       b.scores.exact - a.scores.exact ||
@@ -663,12 +1338,17 @@ export function generateAgentContext(
       b.scores.freshness - a.scores.freshness ||
       b.scores.fts - a.scores.fts;
     if (byScores !== 0) return byScores;
+    const byLocAgent =
+      b.coverageRatio - a.coverageRatio ||
+      b.identifierOrBasenameBoost - a.identifierOrBasenameBoost ||
+      b.structuralImportance - a.structuralImportance;
+    if (byLocAgent !== 0) return byLocAgent;
     return compareNodeKey(a.node, b.node);
   });
 
   if (ranked.length === 0) {
     rationales.push(
-      `görev tokenları (${String(queryTokens.length)} adet) hiçbir ayakta aday üretmedi; boş bağlam döndürüldü`,
+      `the ${String(queryTokens.length)} task token(s) produced no candidates in any leg; returning an empty context`,
     );
   }
 
@@ -687,7 +1367,7 @@ export function generateAgentContext(
     } else {
       omittedCount = ranked.length - contextItems.length;
       rationales.push(
-        `tokenBudget doldu: ${String(omittedCount)} aday pakete alınmadı (uygulanan bütçe ${String(tokenBudget)})`,
+        `tokenBudget exhausted: ${String(omittedCount)} candidate(s) left out of the package (applied budget ${String(tokenBudget)})`,
       );
       break;
     }
@@ -836,19 +1516,19 @@ function resolveReason(candidate: Candidate): string {
     if (!candidate.legs.has(leg)) continue;
     switch (leg) {
       case "exact-symbol":
-        return "exact-symbol: görev tokenları sembol adı tokenlarıyla birebir eşleşti";
+        return "exact-symbol: task tokens exactly match the symbol name tokens";
       case "graph-proximity": {
         const depth = candidate.depth ?? 0;
-        return `graph-proximity: birebir eşleşen sembolden ${String(depth)} kenar derinliğinde bağlı`;
+        return `graph-proximity: connected to an exactly matched symbol at edge depth ${String(depth)}`;
       }
       case "contract":
-        return "contract: görevle token kesişen kontrat yüzey sembolü";
+        return "contract: contract surface symbol that shares tokens with the task";
       case "freshness":
-        return "freshness: dosya tazeliğine göre sıralandı";
+        return "freshness: ranked by file freshness";
       case "fts":
-        return "fts: symbol_fts eşleşmesi";
+        return "fts: symbol_fts match";
     }
   }
   // Ulaşılamaz: aday en az bir ayakla oluşur.
-  return "agent-context: yapısal aday";
+  return "agent-context: structural candidate";
 }

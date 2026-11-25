@@ -28,12 +28,21 @@ export {
   TEST_RUN_STATUS_SCHEMA,
   formatZodIssues,
 } from "./test-status-schema.js";
+export type {
+  ObservedTestRun,
+  TestPlanCheckResult,
+  VerificationReport,
+  VerifyChangeInput,
+  VerifyTestCandidateStatus,
+  VerifyTestStatus,
+} from "./test-status-schema.js";
 
 export { verifyChange, serializeVerificationReport } from "./verify-change.js";
 
 export {
   NO_FINDINGS_CORE_DISCLAIMER,
   NO_FINDINGS_DISCLAIMER,
+  UNTRUSTED_RULES_TRUST_WARNING,
   VERIFY_CHECK_NAMES,
   VERIFY_VERDICT_RULES,
 } from "./types.js";
@@ -41,20 +50,15 @@ export type {
   ArchitectureCheckResult,
   ContractsCheckResult,
   GraphDiffCheckResult,
-  ObservedTestRun,
   PreflightAlignment,
   PreflightAlignmentTarget,
-  TestPlanCheckResult,
-  VerificationReport,
   VerifyCheckName,
-  VerifyChangeInput,
   VerifyCheckStatus,
   VerifyContractDriftEntry,
   VerifyFileAuthorizationDecision,
   VerifyFileAuthorizer,
+  VerifyRulesProvenance,
   VerifyTargetRevision,
-  VerifyTestCandidateStatus,
-  VerifyTestStatus,
   VerifyVerdict,
   VerifyVerdictRule,
   VerifyVerdictRuleId,

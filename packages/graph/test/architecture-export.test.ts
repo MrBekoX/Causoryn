@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -8,12 +9,14 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
   canonicalJson,
   createSnapshot,
+  markdownCodeSpan,
   type SnapshotGraph,
   type SnapshotNodeInput,
 } from "@causoryn/domain";
 import { OutputAccessPolicy } from "@causoryn/workspace";
 
 import {
+  ARCHITECTURE_INTERACTIVE_CSP,
   EXPORT_DOCUMENTATION_VIEWS,
   serializeArchitectureHtml,
   serializeArchitectureJson,
@@ -341,12 +344,55 @@ describe("serializeArchitectureHtml — sıfır-JS katı-CSP offline mimari port
 });
 
 describe("serializeInteractiveArchitectureHtml — etkileşimli offline E6+ portal", () => {
-  it("VIEWER_CSP_POLICY, kaçışlı JSON veri adası, sıfır innerHTML/fetch ve etkileşim kontrolleri taşır", () => {
+  it("deterministik SHA-256 script-src CSP (sıfır script-src 'unsafe-inline'), kaçışlı JSON veri adası, sıfır innerHTML/fetch ve etkileşim kontrolleri taşır", () => {
     const snap = richFixture();
     const ann = sampleAnnotations(snap);
     const html = serializeInteractiveArchitectureHtml(snap, undefined, ann);
 
-    expect(html).toContain("default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'");
+    // Task 1.3b: ZERO script-src 'unsafe-inline'; deterministic sha256 hash matches exact <script> body
+    expect(ARCHITECTURE_INTERACTIVE_CSP).not.toContain("script-src 'unsafe-inline'");
+    expect(ARCHITECTURE_INTERACTIVE_CSP).toMatch(
+      /^default-src 'none'; script-src 'sha256-[A-Za-z0-9+/]{43}='; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'$/,
+    );
+
+    const cspMetaMatch = html.match(
+      /<meta http-equiv="Content-Security-Policy" content="([^"]+)">/,
+    );
+    expect(cspMetaMatch).not.toBeNull();
+    const renderedCsp = cspMetaMatch?.[1] ?? "";
+    expect(renderedCsp).toBe(ARCHITECTURE_INTERACTIVE_CSP);
+    expect(renderedCsp).not.toContain("script-src 'unsafe-inline'");
+
+    const cspHashMatch = renderedCsp.match(/script-src '(sha256-[A-Za-z0-9+/]{43}=)'/);
+    expect(cspHashMatch).not.toBeNull();
+    const cspHash = cspHashMatch?.[1] ?? "";
+
+    // Strictly 2 <script> blocks: 1 non-executable JSON island + 1 executable script matching SHA-256 hash
+    const allScripts = [...html.matchAll(/<script\b([^>]*)>([\s\S]*?)<\/script\b[^>]*>/gi)];
+    expect(allScripts).toHaveLength(2);
+    const jsonScripts = allScripts.filter((m) => (m[1] ?? "").includes('type="application/json"'));
+    const execScripts = allScripts.filter((m) => !(m[1] ?? "").includes('type="application/json"'));
+    expect(jsonScripts).toHaveLength(1);
+    expect(execScripts).toHaveLength(1);
+
+    const execBody = execScripts[0]?.[2] ?? "";
+    const computedHash = `sha256-${createHash("sha256").update(execBody, "utf8").digest("base64")}`;
+    expect(computedHash).toBe(cspHash);
+
+    // Single-file offline compatibility: zero inline event handlers or external resources in HTML markup
+    // Strip script blocks until nothing changes, so a nested or case-variant
+    // "<script" left behind by one pass is removed too.
+    let htmlWithoutScripts = html;
+    for (let previous = ""; previous !== htmlWithoutScripts; ) {
+      previous = htmlWithoutScripts;
+      htmlWithoutScripts = htmlWithoutScripts.replace(/<script\b[^>]*>[\s\S]*?<\/script\b[^>]*>/gi, "");
+    }
+    expect(/<script\b/i.test(htmlWithoutScripts)).toBe(false);
+    expect(/\son[a-z]+\s*=/i.test(htmlWithoutScripts)).toBe(false);
+    expect(/<link\b/i.test(htmlWithoutScripts)).toBe(false);
+    expect(/<img\b/i.test(htmlWithoutScripts)).toBe(false);
+    expect(/\ssrc\s*=/i.test(htmlWithoutScripts)).toBe(false);
+
     expect(html).toContain('id="causoryn-portal-data"');
     expect(html).toContain("causoryn-search");
     expect(html).toContain("causoryn-inspector");
@@ -648,5 +694,138 @@ describe("writeDocumentation — view & annotations entegrasyonu", () => {
     expect(exportSource).toMatch(
       /writeFileSync\(\s*tmpPath\s*,\s*content\s*,\s*\{\s*encoding:\s*"utf8"\s*,\s*flag:\s*"wx"\s*\}\s*\)/,
     );
+  });
+});
+
+/* ------------------------------------------------------------------ */
+/* Hostile names: Markdown and Mermaid output contexts                 */
+/* ------------------------------------------------------------------ */
+
+const FENCE_LINE = /^ {0,3}(?:`{3,}|~{3,})/;
+const MERMAID_DIRECTIVE_PAYLOAD = "%%{init: {'theme':'dark','themeCSS':'*{x:y}'}}%%";
+const MERMAID_STATEMENT_PAYLOAD = '"]\nclick m0 call alert(1)\n%% comment';
+const FENCE_PAYLOAD = "\n```\n```mermaid\nflowchart TB\nclick m0 href \"https://evil.test\"\n```\n";
+
+function hostileArchitectureFixture(): SnapshotGraph {
+  const api = node(
+    "Function",
+    `api::handler${FENCE_PAYLOAD}`,
+    "src/we`ird/handler.ts",
+  );
+  const core = node(
+    "Function",
+    `core::${MERMAID_DIRECTIVE_PAYLOAD}`,
+    "src/core~~~/svc.ts",
+  );
+  return createSnapshot({
+    workspaceId: WS,
+    revision: { id: "rev-hostile", sequence: 1 },
+    configHash: "cfg-hostile",
+    analyzerFingerprint: "ts-adapter@0.2.2",
+    state: "ready",
+    createdAt: CREATED_AT,
+    nodes: [api, core],
+    edges: [
+      {
+        kind: "CALLS",
+        from: api,
+        to: core,
+        resolution: "verified",
+        evidence: [ev("src/we`ird/handler.ts", "Calls core")],
+      },
+    ],
+  });
+}
+
+function hostileAnnotations(snap: SnapshotGraph) {
+  const proj = projectArchitecture(snap);
+  const [first, second] = proj.modules;
+  if (first === undefined || second === undefined) throw new Error("missing fixture modules");
+  return {
+    title: `Title${FENCE_PAYLOAD}# Fake title`,
+    architectureStyle: `Style ${MERMAID_DIRECTIVE_PAYLOAD}`,
+    executiveSummary: `Summary line\r# Fake heading\r\n> quote\n~~~\n${FENCE_PAYLOAD}www.evil.test and https://evil.test/x`,
+    domains: [
+      {
+        id: "dom-hostile",
+        name: `Domain ${MERMAID_STATEMENT_PAYLOAD} ${MERMAID_DIRECTIVE_PAYLOAD}`,
+        description: `Description${FENCE_PAYLOAD}`,
+        moduleIds: [first.id, second.id],
+      },
+    ],
+    flows: [
+      {
+        id: "flow-hostile",
+        title: "Flow `x`",
+        description: `Flow description${FENCE_PAYLOAD}`,
+        steps: [{ moduleId: first.id, label: "Step ```", explanation: "Explains\n# not a heading" }],
+      },
+    ],
+    guidedTour: [{ step: 1, title: "Stop ~~~", targetModuleId: second.id, explanation: "Walk\r```" }],
+  };
+}
+
+function mermaidBlockOf(markdown: string): string[] {
+  const lines = markdown.split("\n");
+  const start = lines.indexOf("```mermaid");
+  const end = lines.indexOf("```", start + 1);
+  if (start < 0 || end < 0) throw new Error("no mermaid block");
+  return lines.slice(start + 1, end);
+}
+
+/** Statement shapes the architecture Mermaid serializer is allowed to emit. */
+const MERMAID_STATEMENT_SHAPES: readonly RegExp[] = [
+  /^flowchart TB$/,
+  /^ {2}subgraph sg\d+\["[^"]*"\]$/,
+  /^ {4}m\d+\["[^"]*"\]:::[A-Za-z]+$/,
+  /^ {2}end$/,
+  /^ {2}m\d+ (?:-->|-\.->)\|"[^"]*"\| m\d+$/,
+  /^ {2}classDef [A-Za-z]+ [^"%{}`]+$/,
+  /^ {2}linkStyle \d+ [^"%{}`]+$/,
+];
+
+describe("architecture Markdown/Mermaid — hostile symbol, path and annotation text", () => {
+  it("Mermaid output only contains generated statements: no directive, comment, click or quote breakout", () => {
+    const snap = hostileArchitectureFixture();
+    const mmd = serializeArchitectureMermaid(snap, undefined, hostileAnnotations(snap));
+    const lines = mmd.trimEnd().split("\n");
+    for (const line of lines) {
+      expect(
+        MERMAID_STATEMENT_SHAPES.some((shape) => shape.test(line)),
+        `unexpected Mermaid statement: ${JSON.stringify(line)}`,
+      ).toBe(true);
+    }
+    expect(mmd).not.toContain("%%");
+    expect(mmd).not.toMatch(/[{}`]/);
+    expect(mmd).not.toMatch(/^\s*click\b/m);
+  });
+
+  it("Markdown keeps exactly one fence pair, renders hostile prose as text and defangs bare URLs", () => {
+    const snap = hostileArchitectureFixture();
+    const md = serializeArchitectureMarkdown(snap, undefined, hostileAnnotations(snap));
+    const fenceLines = md.split("\n").filter((line) => FENCE_LINE.test(line));
+    expect(fenceLines).toEqual(["```mermaid", "```"]);
+    for (const line of mermaidBlockOf(md)) {
+      expect(MERMAID_STATEMENT_SHAPES.some((shape) => shape.test(line)), JSON.stringify(line)).toBe(true);
+    }
+    expect(md).not.toMatch(/^#{1,6} Fake/m);
+    expect(md).not.toMatch(/^#{1,6} not a heading/m);
+    expect(md).not.toMatch(/^> quote/m);
+    expect(md).toContain("\# Fake heading");
+    expect(md).toContain("\> quote");
+    expect(md).not.toMatch(/\r/);
+    expect(/(?:https?|ftp):\/\/|www\./i.test(md)).toBe(false);
+  });
+
+  it("module ids that contain backticks stay inside their code span", () => {
+    const snap = hostileArchitectureFixture();
+    const proj = projectArchitecture(snap);
+    const backtickModule = proj.modules.find((m) => m.id.includes("`"));
+    if (backtickModule === undefined) throw new Error("fixture must produce a module id with a backtick");
+    const md = serializeArchitectureMarkdown(snap, undefined, hostileAnnotations(snap));
+    expect(md).toContain(markdownCodeSpan(backtickModule.id));
+    // A single-backtick span around an id that contains a backtick closes early.
+    const escapedId = backtickModule.id.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    expect(md).not.toMatch(new RegExp(`(?<!\`)\`${escapedId}\`(?!\`)`));
   });
 });

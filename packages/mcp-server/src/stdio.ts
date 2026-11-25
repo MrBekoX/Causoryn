@@ -1,6 +1,11 @@
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 
 import { createCausorynContext, type CausorynContext } from "./context.js";
+import {
+  parseMcpCliArgs,
+  resolveMcpServerSettings,
+  type McpServerSettings,
+} from "./runtime-cli.js";
 import { createCausorynMcpServer } from "./server.js";
 import { SERVER_NAME, SERVER_VERSION } from "./version.js";
 
@@ -26,14 +31,26 @@ function main(): void {
       parsed = JSON.parse(rawConfig) as unknown;
     } catch (error) {
       console.error(
-        `[causoryn] CAUSORYN_CONFIG geçerli JSON değil: ${error instanceof Error ? error.message : String(error)}`,
+        `[causoryn] CAUSORYN_CONFIG is not valid JSON: ${error instanceof Error ? error.message : String(error)}`,
       );
       process.exit(2);
     }
   } else {
     console.error(
-      "[causoryn] CAUSORYN_CONFIG tanımsız; allowRoots: [] güvenli default kullanılıyor (workspace araçları WORKSPACE_NOT_AUTHORIZED döner)",
+      "[causoryn] CAUSORYN_CONFIG is not set; using the safe default allowRoots: [] (workspace tools return WORKSPACE_NOT_AUTHORIZED)",
     );
+  }
+
+  // Same resolver as the `causoryn mcp` entry (cli-stdio.ts); this entry takes
+  // no CLI flags, so only the environment and CAUSORYN_CONFIG apply.
+  let settings: McpServerSettings;
+  try {
+    settings = resolveMcpServerSettings(parseMcpCliArgs([]), process.env, parsed);
+  } catch (error) {
+    console.error(
+      `[causoryn] configuration error: ${error instanceof Error ? error.message : String(error)}`,
+    );
+    process.exit(2);
   }
 
   let context: CausorynContext;
@@ -41,21 +58,25 @@ function main(): void {
     context = createCausorynContext(parsed);
   } catch (error) {
     console.error(
-      `[causoryn] başlatma başarısız: ${error instanceof Error ? error.message : String(error)}`,
+      `[causoryn] startup failed: ${error instanceof Error ? error.message : String(error)}`,
     );
     process.exit(2); // never döner; context akış aşağısında tanımlıdır
   }
 
-  const server = createCausorynMcpServer(context);
+  const server = createCausorynMcpServer(context, {
+    outputSchemaProfile: settings.outputSchemaProfile,
+    toolProfile: settings.toolProfile,
+    indexWaitTimeoutMs: settings.indexWaitTimeoutMs,
+  });
   server
     .connect(new StdioServerTransport())
     .then(() => {
       // Hazır logu: yalnızca stderr (stdout-safi testi bu satırı bekler).
-      context.logger(`causoryn mcp server hazir (${SERVER_NAME}@${SERVER_VERSION})`);
+      context.logger(`causoryn mcp server ready (${SERVER_NAME}@${SERVER_VERSION})`);
     })
     .catch((error: unknown) => {
       console.error(
-        `[causoryn] stdio transport başlatılamadı: ${error instanceof Error ? error.message : String(error)}`,
+        `[causoryn] failed to start the stdio transport: ${error instanceof Error ? error.message : String(error)}`,
       );
       process.exit(1);
     });

@@ -581,4 +581,228 @@ describe("analyzeImpact (sprint-3 C1, TŞ §13 Impact)", () => {
       ].sort(),
     );
   });
+
+  it("Wave 2: default reverse BFS excludes CONTAINS (never reports Workspace root) while explicit edgeKinds=['CONTAINS'] still works", () => {
+    const wsSnap = createSnapshot({
+      workspaceId: WS,
+      revision: { id: "rev-contains", sequence: 1 },
+      configHash: "cfg",
+      analyzerFingerprint: "fp",
+      state: "ready",
+      createdAt: CREATED_AT,
+      nodes: [
+        { kind: "Workspace", qualifiedName: WS },
+        { kind: "File", qualifiedName: "src/server.ts", relativePath: "src/server.ts" },
+        { kind: "File", qualifiedName: "src/sibling.ts", relativePath: "src/sibling.ts" },
+        { kind: "File", qualifiedName: "src/cli.ts", relativePath: "src/cli.ts" },
+        { kind: "Function", qualifiedName: "createServer", relativePath: "src/server.ts" },
+        { kind: "Function", qualifiedName: "bootCli", relativePath: "src/cli.ts" },
+      ],
+      edges: [
+        {
+          kind: "CONTAINS",
+          from: { kind: "Workspace", qualifiedName: WS },
+          to: { kind: "File", qualifiedName: "src/server.ts", relativePath: "src/server.ts" },
+          resolution: "verified",
+          evidence: [
+            {
+              kind: "inventory",
+              span: span("src/server.ts", 1, 1),
+              analyzerId: "causoryn-indexing",
+              analyzerVersion: "0.3.0",
+              rationale: "Workspace contains src/server.ts",
+            },
+          ],
+        },
+        {
+          kind: "CONTAINS",
+          from: { kind: "Workspace", qualifiedName: WS },
+          to: { kind: "File", qualifiedName: "src/sibling.ts", relativePath: "src/sibling.ts" },
+          resolution: "verified",
+          evidence: [
+            {
+              kind: "inventory",
+              span: span("src/sibling.ts", 1, 1),
+              analyzerId: "causoryn-indexing",
+              analyzerVersion: "0.3.0",
+              rationale: "Workspace contains src/sibling.ts",
+            },
+          ],
+        },
+        {
+          kind: "CONTAINS",
+          from: { kind: "File", qualifiedName: "src/server.ts", relativePath: "src/server.ts" },
+          to: { kind: "Function", qualifiedName: "createServer", relativePath: "src/server.ts" },
+          resolution: "verified",
+          evidence: [
+            {
+              kind: "ast-span",
+              span: span("src/server.ts", 3, 15),
+              analyzerId: "causoryn/typescript",
+              analyzerVersion: "0.3.0",
+              rationale: "File contains createServer",
+            },
+          ],
+        },
+        {
+          kind: "IMPORTS",
+          from: { kind: "File", qualifiedName: "src/cli.ts", relativePath: "src/cli.ts" },
+          to: { kind: "File", qualifiedName: "src/server.ts", relativePath: "src/server.ts" },
+          resolution: "verified",
+          evidence: [
+            {
+              kind: "import-site",
+              span: span("src/cli.ts", 1, 1),
+              analyzerId: "causoryn/typescript",
+              analyzerVersion: "0.3.0",
+              rationale: "cli imports server",
+            },
+          ],
+        },
+        {
+          kind: "CALLS",
+          from: { kind: "Function", qualifiedName: "bootCli", relativePath: "src/cli.ts" },
+          to: { kind: "Function", qualifiedName: "createServer", relativePath: "src/server.ts" },
+          resolution: "verified",
+          evidence: [
+            {
+              kind: "call-site",
+              span: span("src/cli.ts", 8, 8),
+              analyzerId: "causoryn/typescript",
+              analyzerVersion: "0.3.0",
+              rationale: "bootCli calls createServer",
+            },
+          ],
+        },
+      ],
+    });
+
+    const serverFileId = nid("File", "src/server.ts", "src/server.ts");
+    const defaultResult = analyzeImpact(wsSnap, { targets: [serverFileId] });
+    expect(defaultResult.affectedNodes.some((n) => n.kind === "Workspace")).toBe(false);
+    expect(defaultResult.affectedNodes.some((n) => n.qualifiedName === "src/sibling.ts")).toBe(false);
+    expect(defaultResult.affectedNodes.map((n) => n.qualifiedName)).toContain("src/cli.ts");
+    expect(defaultResult.affectedNodes.map((n) => n.qualifiedName)).toContain("bootCli");
+
+    // Explicit opt-in to CONTAINS still traverses upward containment
+    const explicitContains = analyzeImpact(wsSnap, {
+      targets: [serverFileId],
+      edgeKinds: ["CONTAINS"],
+    });
+    expect(explicitContains.affectedNodes.some((n) => n.kind === "Workspace")).toBe(true);
+  });
+
+  it("Wave 2: CHA INHERITS and IMPLEMENTS edges propagate reverse impact to subclasses, implementors, and callers", () => {
+    const chaSnap = createSnapshot({
+      workspaceId: WS,
+      revision: { id: "rev-cha", sequence: 1 },
+      configHash: "cfg",
+      analyzerFingerprint: "fp",
+      state: "ready",
+      createdAt: CREATED_AT,
+      nodes: [
+        { kind: "Interface", qualifiedName: "IStore", relativePath: "src/store.ts" },
+        { kind: "Class", qualifiedName: "BaseStore", relativePath: "src/base-store.ts" },
+        { kind: "Class", qualifiedName: "SqliteStore", relativePath: "src/sqlite-store.ts" },
+        { kind: "Function", qualifiedName: "runQuery", relativePath: "src/app.ts" },
+      ],
+      edges: [
+        {
+          kind: "IMPLEMENTS",
+          from: { kind: "Class", qualifiedName: "BaseStore", relativePath: "src/base-store.ts" },
+          to: { kind: "Interface", qualifiedName: "IStore", relativePath: "src/store.ts" },
+          resolution: "verified",
+          evidence: [
+            {
+              kind: "implements",
+              span: span("src/base-store.ts", 2, 2),
+              analyzerId: "causoryn/typescript",
+              analyzerVersion: "0.3.0",
+              rationale: "BaseStore implements IStore",
+            },
+          ],
+        },
+        {
+          kind: "INHERITS",
+          from: { kind: "Class", qualifiedName: "SqliteStore", relativePath: "src/sqlite-store.ts" },
+          to: { kind: "Class", qualifiedName: "BaseStore", relativePath: "src/base-store.ts" },
+          resolution: "verified",
+          evidence: [
+            {
+              kind: "inherits",
+              span: span("src/sqlite-store.ts", 3, 3),
+              analyzerId: "causoryn/typescript",
+              analyzerVersion: "0.3.0",
+              rationale: "SqliteStore extends BaseStore",
+            },
+          ],
+        },
+        {
+          kind: "CALLS",
+          from: { kind: "Function", qualifiedName: "runQuery", relativePath: "src/app.ts" },
+          to: { kind: "Class", qualifiedName: "SqliteStore", relativePath: "src/sqlite-store.ts" },
+          resolution: "verified",
+          evidence: [
+            {
+              kind: "call-site",
+              span: span("src/app.ts", 10, 10),
+              analyzerId: "causoryn/typescript",
+              analyzerVersion: "0.3.0",
+              rationale: "runQuery calls SqliteStore",
+            },
+          ],
+        },
+      ],
+    });
+
+    const result = analyzeImpact(chaSnap, { targets: ["IStore"] });
+    expect(result.affectedNodes.map((n) => n.qualifiedName)).toEqual([
+      "BaseStore",
+      "SqliteStore",
+      "runQuery",
+    ]);
+    expect(affectedOf(result, "BaseStore")).toMatchObject({ certainty: "direct", minDepth: 1 });
+    expect(affectedOf(result, "SqliteStore")).toMatchObject({ certainty: "indirect", minDepth: 2 });
+    expect(affectedOf(result, "runQuery")).toMatchObject({ certainty: "indirect", minDepth: 3 });
+  });
+
+  it("Wave 2: evidenceIds on edges and paths are deduplicated and cleanly capped", () => {
+    const manyEvidences = Array.from({ length: 20 }, (_, i) => ({
+      kind: "call-site",
+      span: span("src/caller.ts", i + 1, i + 1),
+      analyzerId: "causoryn/typescript",
+      analyzerVersion: "0.3.0",
+      rationale: `call site #${String(i)}`,
+    }));
+    const evSnap = createSnapshot({
+      workspaceId: WS,
+      revision: { id: "rev-ev-cap", sequence: 1 },
+      configHash: "cfg",
+      analyzerFingerprint: "fp",
+      state: "ready",
+      createdAt: CREATED_AT,
+      nodes: [
+        { kind: "Function", qualifiedName: "targetFn", relativePath: "src/target.ts" },
+        { kind: "Function", qualifiedName: "callerFn", relativePath: "src/caller.ts" },
+      ],
+      edges: [
+        {
+          kind: "CALLS",
+          from: { kind: "Function", qualifiedName: "callerFn", relativePath: "src/caller.ts" },
+          to: { kind: "Function", qualifiedName: "targetFn", relativePath: "src/target.ts" },
+          resolution: "verified",
+          evidence: manyEvidences,
+        },
+      ],
+    });
+
+    const result = analyzeImpact(evSnap, { targets: ["targetFn"] });
+    expect(result.paths).toHaveLength(1);
+    const edgeEv = result.paths[0]!.edges[0]!.evidenceIds;
+    expect(edgeEv.length).toBeLessThanOrEqual(8);
+    expect(new Set(edgeEv).size).toBe(edgeEv.length);
+    const pathEv = result.paths[0]!.evidenceIds;
+    expect(pathEv.length).toBeLessThanOrEqual(16);
+    expect(new Set(pathEv).size).toBe(pathEv.length);
+  });
 });

@@ -1,4 +1,5 @@
 import {
+  EDGE_KINDS,
   EDGE_KIND_SET,
   type EdgeKind,
   type GraphEdge,
@@ -55,6 +56,40 @@ export const IMPACT_LIMIT_CEILINGS: ImpactAppliedLimits = {
   maxPaths: 20,
   maxNodes: 250,
 };
+
+/**
+ * Default reverse-impact traversal edge kinds (Ekstazi ISSTA 2015 + CHA ECOOP 1995):
+ * - Excludes `CONTAINS` so upward containment (`Workspace --CONTAINS--> File`,
+ *   `Package --CONTAINS--> File`, `File --CONTAINS--> Symbol`) never pollutes impact
+ *   results with container roots or unrelated siblings.
+ * - Includes `INHERITS` and `IMPLEMENTS` so interface / base-class changes propagate
+ *   to subclasses, implementors, and their transitive callers.
+ * Callers may still explicitly opt into `CONTAINS` via `input.edgeKinds`.
+ */
+export const DEFAULT_IMPACT_EDGE_KINDS: readonly EdgeKind[] = EDGE_KINDS.filter(
+  (kind): kind is EdgeKind => kind !== "CONTAINS",
+);
+
+const DEFAULT_IMPACT_EDGE_KIND_SET: ReadonlySet<string> = new Set(
+  DEFAULT_IMPACT_EDGE_KINDS,
+);
+
+/** Deduplicated per-edge and per-path evidence ID payload caps. */
+export const MAX_IMPACT_EDGE_EVIDENCE_IDS = 8;
+export const MAX_IMPACT_PATH_EVIDENCE_IDS = 16;
+
+/** Structural container kinds excluded from downward File-target symbol seeding. */
+const CONTAINER_NODE_KINDS: ReadonlySet<string> = new Set([
+  "Workspace",
+  "Repository",
+  "Project",
+  "Module",
+  "Package",
+  "File",
+]);
+
+/** Max downward containment depth when seeding symbols declared inside a changed File. */
+const FILE_FORWARD_SEED_MAX_DEPTH = 2;
 
 /** Etki sınıflaması (TŞ §13): direct | indirect | possible. */
 export type ImpactCertainty = "direct" | "indirect" | "possible";
@@ -213,12 +248,12 @@ function requireLimit(
   if (typeof requested !== "number" || !Number.isInteger(requested) || requested < 1) {
     throw new GraphRepositoryError(
       "graph/impact-invalid-input",
-      `${name} pozitif tam sayı olmalı: ${String(requested)}`,
+      `${name} must be a positive integer: ${String(requested)}`,
     );
   }
   if (requested > ceiling) {
     rationales.push(
-      `${name}=${String(requested)} istenen değeri tavana (${String(ceiling)}) indirildi (TŞ §20 resource budget)`,
+      `${name}=${String(requested)} exceeds the ceiling and was clamped to ${String(ceiling)} (resource budget)`,
     );
     return ceiling;
   }
@@ -249,7 +284,9 @@ function toEdgeRef(edge: GraphEdge): ImpactEdgeRef {
     from: edge.from,
     to: edge.to,
     resolution: edge.resolution,
-    evidenceIds: [...edge.evidenceIds].sort(cmp),
+    evidenceIds: [...new Set(edge.evidenceIds)]
+      .sort(cmp)
+      .slice(0, MAX_IMPACT_EDGE_EVIDENCE_IDS),
   };
 }
 
@@ -270,7 +307,7 @@ export function analyzeImpact(
   if (state !== "ready" && state !== "partial") {
     throw new GraphRepositoryError(
       "graph/impact-snapshot-state",
-      `etki analizi yalnızca ready/partial snapshot üzerinde çalışır; snapshot durumu: ${String(state)}`,
+      `impact analysis only runs on a ready or partial snapshot; snapshot state: ${String(state)}`,
     );
   }
 
@@ -279,14 +316,14 @@ export function analyzeImpact(
   if (requestedTargets === undefined || requestedTargets.length === 0) {
     throw new GraphRepositoryError(
       "graph/impact-invalid-input",
-      "targets boş olamaz: en az bir node kimliği veya tam qualifiedName gerekli",
+      "targets must not be empty: at least one node id or exact qualifiedName is required",
     );
   }
   for (const target of requestedTargets) {
     if (typeof target !== "string" || target.trim().length === 0) {
       throw new GraphRepositoryError(
         "graph/impact-invalid-input",
-        `targets üyesi boş/blanks olamaz: ${String(target)}`,
+        `targets members must not be empty or blank: ${String(target)}`,
       );
     }
   }
@@ -300,44 +337,72 @@ export function analyzeImpact(
     maxNodes: requireLimit("maxNodes", input.maxNodes, IMPACT_LIMIT_CEILINGS.maxNodes, rationales),
   };
 
-  // 4) edgeKinds anlamsal doğrulama: üyeler EDGE_KINDS'te olmalı.
-  let allowedKinds: ReadonlySet<string> | null = null;
+  // 4) edgeKinds semantic validation: default excludes CONTAINS (includes INHERITS/IMPLEMENTS);
+  //    explicit caller edgeKinds must be a subset of EDGE_KINDS and may opt into CONTAINS.
+  let allowedKinds: ReadonlySet<string> = DEFAULT_IMPACT_EDGE_KIND_SET;
+  const explicitContains =
+    input.edgeKinds !== undefined && input.edgeKinds.includes("CONTAINS");
   if (input.edgeKinds !== undefined) {
     const invalid = input.edgeKinds.filter((kind) => !EDGE_KIND_SET.has(kind));
     if (invalid.length > 0) {
       throw new GraphRepositoryError(
         "graph/impact-invalid-input",
-        `geçersiz edgeKinds üyesi(leri): ${invalid.join(", ")}; edgeKinds EDGE_KINDS alt kümesi olmalı`,
+        `invalid edgeKinds member(s): ${invalid.join(", ")}; edgeKinds must be a subset of EDGE_KINDS`,
       );
     }
     allowedKinds = new Set(input.edgeKinds);
   }
 
-  // 5) Node/kanıt haritaları + ters komşuluk (edge.id kanonik sırasında).
+  // 5) Node/evidence maps + reverse dependency adjacency + forward File containment map
+  //    (canonical edge.id ordering for determinism).
   const nodeById = new Map<string, GraphNode>();
   for (const node of snapshot.nodes) nodeById.set(node.id, node);
   const incomingByNode = new Map<string, GraphEdge[]>();
+  const forwardContainsByNode = new Map<string, GraphEdge[]>();
+  const edgeRefById = new Map<string, ImpactEdgeRef>();
   const danglingEdgeIds: string[] = [];
   for (const edge of snapshot.edges) {
-    if (allowedKinds !== null && !allowedKinds.has(edge.kind)) continue;
+    const isForwardContain = edge.kind === "CONTAINS" || edge.kind === "DECLARES";
+    const isAllowedReverse = allowedKinds.has(edge.kind);
+    if (!isAllowedReverse && !isForwardContain) continue;
     if (!nodeById.has(edge.from) || !nodeById.has(edge.to)) {
-      danglingEdgeIds.push(edge.id);
+      if (isAllowedReverse) {
+        danglingEdgeIds.push(edge.id);
+      }
       continue;
     }
-    const list = incomingByNode.get(edge.to);
-    if (list === undefined) {
-      incomingByNode.set(edge.to, [edge]);
-    } else {
-      list.push(edge);
+    if (isForwardContain) {
+      const fwdList = forwardContainsByNode.get(edge.from);
+      if (fwdList === undefined) {
+        forwardContainsByNode.set(edge.from, [edge]);
+      } else {
+        fwdList.push(edge);
+      }
+    }
+    if (isAllowedReverse) {
+      const list = incomingByNode.get(edge.to);
+      if (list === undefined) {
+        incomingByNode.set(edge.to, [edge]);
+      } else {
+        list.push(edge);
+      }
     }
   }
   for (const list of incomingByNode.values()) list.sort((a, b) => cmp(a.id, b.id));
+  for (const list of forwardContainsByNode.values()) list.sort((a, b) => cmp(a.id, b.id));
   const uniqueDangling = [...new Set(danglingEdgeIds)].sort(cmp);
   for (const edgeId of uniqueDangling) {
     rationales.push(
-      `kenar yok sayıldı: ucu snapshot node kümesinde olmayan kenar (edge:${edgeId})`,
+      `edge ignored: an endpoint is not in the snapshot node set (edge:${edgeId})`,
     );
   }
+  const getEdgeRef = (edge: GraphEdge): ImpactEdgeRef => {
+    const cached = edgeRefById.get(edge.id);
+    if (cached !== undefined) return cached;
+    const created = toEdgeRef(edge);
+    edgeRefById.set(edge.id, created);
+    return created;
+  };
 
   // 6) Hedef çözümleme: önce node kimliği, sonra tam qualifiedName.
   //    0 eşleşme → unresolved; >1 eşleşme → belirsiz (adaylarla raporlanır;
@@ -363,13 +428,13 @@ export function analyzeImpact(
     if (byName.length === 0) {
       unresolvedTargets.push({
         target,
-        reason: `hedef çözülemedi: "${target}" — node kimliği veya tam qualifiedName olarak yayınlanmış snapshot'ta bulunamadı`,
+        reason: `target not resolved: "${target}" was not found in the published snapshot as a node id or an exact qualifiedName`,
       });
     } else {
       const candidateIds = byName.map((node) => node.id).sort(cmp);
       unresolvedTargets.push({
         target,
-        reason: `hedef belirsiz: "${target}" tam qualifiedName ${String(byName.length)} node ile eşleşti (${candidateIds.join(", ")}); node kimliği ile hedefleyin`,
+        reason: `ambiguous target: the exact qualifiedName "${target}" matches ${String(byName.length)} nodes (${candidateIds.join(", ")}); target it by node id`,
       });
     }
   }
@@ -378,18 +443,63 @@ export function analyzeImpact(
   }
   const targetIdSet = new Set(targets.map((target) => target.nodeId));
 
-  // 7) Bounded ters BFS: basit yollar, edge.id kanonik genişleme sırası.
+  // 7) Bounded reverse BFS: simple paths, canonical edge.id expansion order.
+  //    For changed File targets (when caller did not explicitly request CONTAINS),
+  //    forward-seed symbols declared inside that File (downward CONTAINS/DECLARES up to
+  //    2 hops into non-container symbols) so callers/implementors of symbols defined in
+  //    the changed file are discovered WITHOUT traversing upward CONTAINS to Workspace.
   const keptPaths: KeptPath[] = [];
   const truncatedBy = new Set<ImpactTruncatedBy>();
+  const seedsByTarget = new Map<string, string[]>();
+  const containedSeedIds = new Set<string>();
   if (targets.length > 0) {
     const affectedSeen = new Set<string>();
-    const queue: PartialPath[] = targets.map((target) => ({
-      targetNodeId: target.nodeId,
-      nodes: [target.nodeId],
-      edgeRefs: [],
-      weakest: "verified",
-      hasUnresolved: false,
-    }));
+    const queue: PartialPath[] = [];
+    for (const target of targets) {
+      const targetSeeds: string[] = [target.nodeId];
+      queue.push({
+        targetNodeId: target.nodeId,
+        nodes: [target.nodeId],
+        edgeRefs: [],
+        weakest: "verified",
+        hasUnresolved: false,
+      });
+
+      if (target.kind === "File" && !explicitContains && allowedKinds.size > 0) {
+        const discoveredSymbols = new Set<string>();
+        const seedFrontier: Array<{ id: string; depth: number }> = [
+          { id: target.nodeId, depth: 0 },
+        ];
+        let seedHead = 0;
+        while (seedHead < seedFrontier.length) {
+          const item = seedFrontier[seedHead]!;
+          seedHead += 1;
+          if (item.depth >= FILE_FORWARD_SEED_MAX_DEPTH) continue;
+          for (const fwdEdge of forwardContainsByNode.get(item.id) ?? []) {
+            const childId = fwdEdge.to;
+            if (discoveredSymbols.has(childId) || targetIdSet.has(childId)) continue;
+            const childNode = nodeById.get(childId);
+            if (childNode === undefined || CONTAINER_NODE_KINDS.has(childNode.kind)) continue;
+            discoveredSymbols.add(childId);
+            seedFrontier.push({ id: childId, depth: item.depth + 1 });
+          }
+        }
+        const sortedContained = [...discoveredSymbols].sort(cmp);
+        for (const childId of sortedContained) {
+          containedSeedIds.add(childId);
+          targetSeeds.push(childId);
+          queue.push({
+            targetNodeId: target.nodeId,
+            nodes: [childId],
+            edgeRefs: [],
+            weakest: "verified",
+            hasUnresolved: false,
+          });
+        }
+      }
+      seedsByTarget.set(target.nodeId, targetSeeds);
+    }
+
     let head = 0;
     while (head < queue.length) {
       const partial = queue[head] as PartialPath;
@@ -407,9 +517,15 @@ export function analyzeImpact(
       let hasUntakenNeighbor = false;
       for (const edge of incomingByNode.get(current) ?? []) {
         const next = edge.from;
-        // Basit yol + hedef dışlaması: hedefler etki kümesine girmez,
+        // Basit yol + hedef/file-seed dışlaması: hedefler etki kümesine girmez,
         // yol üzerine yazılmaz (bilinçli kural, truncated SAYILMAZ).
-        if (partial.nodes.includes(next) || targetIdSet.has(next)) continue;
+        if (
+          partial.nodes.includes(next) ||
+          targetIdSet.has(next) ||
+          containedSeedIds.has(next)
+        ) {
+          continue;
+        }
         if (nextDepth > limits.maxDepth) {
           hasUntakenNeighbor = true;
           truncatedBy.add("maxDepth");
@@ -424,7 +540,7 @@ export function analyzeImpact(
         extensions.push({
           targetNodeId: partial.targetNodeId,
           nodes: [...partial.nodes, next],
-          edgeRefs: [...partial.edgeRefs, toEdgeRef(edge)],
+          edgeRefs: [...partial.edgeRefs, getEdgeRef(edge)],
           weakest: weakestResolution(partial.weakest, edge.resolution),
           hasUnresolved: partial.hasUnresolved || edge.resolution === "unresolved",
         });
@@ -449,7 +565,7 @@ export function analyzeImpact(
   }
 
   // 8) ImpactPath çıktısı: kanonik yol sırası (BFS emission), kanıt
-  //    birleşimi tekrarsız + sıralı.
+  //    birleşimi tekrarsız + sıralı + tavanlı.
   const paths: ImpactPath[] = [];
   for (const kept of keptPaths) {
     const endpointId = kept.partial.nodes[kept.partial.nodes.length - 1] as string;
@@ -470,7 +586,7 @@ export function analyzeImpact(
       resolution: kept.partial.weakest,
       truncated: kept.truncated,
       edges: kept.partial.edgeRefs,
-      evidenceIds: [...evidenceSet].sort(cmp),
+      evidenceIds: [...evidenceSet].sort(cmp).slice(0, MAX_IMPACT_PATH_EVIDENCE_IDS),
     });
   }
 
@@ -521,9 +637,13 @@ export function analyzeImpact(
 
   // 10) İzolasyon rationale'i: ters kenarı hiç olmayan hedef açıkça raporlanır.
   for (const target of targets) {
-    if ((incomingByNode.get(target.nodeId) ?? []).length === 0) {
+    const targetSeeds = seedsByTarget.get(target.nodeId) ?? [target.nodeId];
+    const hasIncoming = targetSeeds.some(
+      (seedId) => (incomingByNode.get(seedId) ?? []).length > 0,
+    );
+    if (!hasIncoming) {
       rationales.push(
-        `hedef izole: "${target.qualifiedName}" (${target.nodeId}) için ters kenar yok — doğrudan bağımlı node bulunamadı, etki adayı üretilmedi`,
+        `isolated target: "${target.qualifiedName}" (${target.nodeId}) has no incoming edges; no direct dependents were found, so no impact candidates were produced`,
       );
     }
   }

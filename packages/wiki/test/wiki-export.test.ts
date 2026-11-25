@@ -1,11 +1,14 @@
 import {
   existsSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
   readdirSync,
   readFileSync,
   realpathSync,
   rmSync,
+  symlinkSync,
+  writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -356,7 +359,8 @@ describe("exportWikiOffline (negatif)", () => {
     // Gövde markdown'ındaki script ve beacon görseli de nötralize edilir:
     // KAÇIŞSIZ görsel gömme örüntüsü yok, kaçışlı sabit metin var.
     expect(pageMd).not.toMatch(/(?<!\\)!\[beacon\]/);
-    expect(pageMd).toContain("\\![beacon]");
+    // Brackets are escaped too, so neither an image nor a link can form.
+    expect(pageMd).toContain("\\!\\[beacon\\]");
     expect(pageMd).not.toMatch(/(?<!\\)<script>/);
     expect(httpUrlMatches(html)).toEqual([]);
   });
@@ -696,6 +700,139 @@ describe("exportFileSlug — CodeQL #20 tire kırpma paritesi ve ReDoS koruması
     expect(names).toContain(`${WIKI_EXPORT_MARKDOWN_DIR_NAME}/alpha.md`);
     expect(names).toContain(`${WIKI_EXPORT_MARKDOWN_DIR_NAME}/a-b.md`);
     expect(elapsedMs).toBeLessThan(250);
+  });
+});
+
+/* ------------------------------------------------------------------ */
+/* Hostile text in Markdown output                                     */
+/* ------------------------------------------------------------------ */
+
+const FENCE_LINE = /^ {0,3}(?:`{3,}|~{3,})/;
+const RAW_AUTOLINK = /(?:https?|ftp):\/\/|www\./i;
+
+function buildHostileProjection(): WikiProjection {
+  const base = buildFixtureProjection();
+  return {
+    ...base,
+    pages: base.pages.map((candidate) =>
+      candidate.id === "page:22222222"
+        ? { ...candidate, title: "OrderService\n```mermaid\nclick A call alert(1)\n```\n# Injected title" }
+        : candidate,
+    ),
+    sections: [
+      ...base.sections,
+      section({
+        id: "section:bbbb0002",
+        pageId: "page:22222222",
+        sectionKey: "deps\n# Injected section ~~~",
+        generatedMarkdown: [
+          "- Workspace: orders-service",
+          "- Module: src/we`ird\r```mermaid\r%%{init: {'theme':'dark'}}%%\r```",
+          "- Path: src/a.ts\r\n# Injected heading\n> injected quote",
+          "- Link: [x](https://evil.test/a) www.evil.test ftp://files.test/x",
+          "~~~",
+        ].join("\n"),
+        evidenceRefs: [
+          {
+            evidenceId: "ev:hostile`1",
+            relativePath: "src/x\n# Injected evidence.ts",
+            startLine: 1,
+            endLine: 2,
+            sourceHash: "sha256:hostile",
+          },
+        ],
+      }),
+    ],
+    warnings: [...base.warnings, "warning\n```\n# Injected warning https://evil.test/w"],
+  };
+}
+
+describe("exportWikiOffline (hostile Markdown text)", () => {
+  it("page and index Markdown contain no injected fence, heading, blockquote, CR or bare autolink", () => {
+    const files = buildWikiExportFileSet(buildHostileProjection());
+    for (const file of files.filter((candidate) => candidate.relativePath.endsWith(".md"))) {
+      const lines = file.content.split("\n");
+      expect(lines.filter((line) => FENCE_LINE.test(line)), file.relativePath).toEqual([]);
+      expect(file.content, file.relativePath).not.toMatch(/^#{1,6} Injected/m);
+      expect(file.content, file.relativePath).not.toMatch(/^ {0,3}> injected/m);
+      expect(file.content, file.relativePath).not.toContain("\r");
+      expect(RAW_AUTOLINK.test(file.content), file.relativePath).toBe(false);
+      // Mermaid directive text is inert here because no fence can be opened.
+    }
+    const pageMd = files.find((candidate) => candidate.relativePath === "markdown/orderservice.md");
+    const content = pageMd?.content ?? "";
+    // Generated list structure is kept; only the hostile characters are escaped.
+    expect(content).toContain("- Workspace: orders-service");
+    expect(content).toContain("- Module: src/we\\`ird");
+    expect(content).toContain("\\# Injected heading");
+    expect(content).toContain("\\> injected quote");
+    expect(content).toContain("\\[x\\]\\(https\\://evil.test/a\\)");
+  });
+});
+
+/* ------------------------------------------------------------------ */
+/* Atomic write: unique temp names, no predictable <target>.tmp        */
+/* ------------------------------------------------------------------ */
+
+describe("exportWikiOffline (atomic write temp files)", () => {
+  it("never touches a pre-existing <target>.tmp entry and leaves no temp residue", () => {
+    const projection = buildFixtureProjection();
+    const outputDir = makeTempDir("tmp-sentinel");
+    const sentinel = path.join(outputDir, "index.html.tmp");
+    writeFileSync(sentinel, "SENTINEL", "utf8");
+    const policy = OutputAccessPolicy.create([outputDir]);
+
+    const result = exportWikiOffline({ projection, outputDir }, policy);
+
+    expect(readFileSync(sentinel, "utf8")).toBe("SENTINEL");
+    expect(readFileSync(path.join(outputDir, "index.html"), "utf8")).toBe(serializeWikiHtml(projection));
+    expect(result.files.every((file) => !file.path.endsWith(".tmp"))).toBe(true);
+    expect(readdirSync(outputDir).sort()).toEqual(["index.html", "index.html.tmp", WIKI_EXPORT_MARKDOWN_DIR_NAME].sort());
+    expect(
+      readdirSync(path.join(outputDir, WIKI_EXPORT_MARKDOWN_DIR_NAME)).filter((entry) => entry.endsWith(".tmp")),
+    ).toEqual([]);
+  });
+
+  it("a directory squatting on <target>.tmp does not block the export", () => {
+    const projection = buildFixtureProjection();
+    const outputDir = makeTempDir("tmp-dir");
+    mkdirSync(path.join(outputDir, WIKI_EXPORT_MARKDOWN_DIR_NAME, "overview.md.tmp"), { recursive: true });
+    const policy = OutputAccessPolicy.create([outputDir]);
+
+    exportWikiOffline({ projection, outputDir }, policy);
+
+    const overview = path.join(outputDir, WIKI_EXPORT_MARKDOWN_DIR_NAME, "overview.md");
+    expect(lstatSync(overview).isFile()).toBe(true);
+    expect(lstatSync(`${overview}.tmp`).isDirectory()).toBe(true);
+  });
+
+  it("a symlink planted at <target>.tmp is neither followed nor removed", (context) => {
+    const projection = buildFixtureProjection();
+    const outputDir = makeTempDir("tmp-link");
+    const outsideDir = makeTempDir("tmp-link-outside");
+    const victim = path.join(outsideDir, "victim.txt");
+    writeFileSync(victim, "VICTIM", "utf8");
+    const planted = path.join(outputDir, "index.html.tmp");
+    try {
+      symlinkSync(victim, planted, "file");
+    } catch (error) {
+      // Windows without symlink privilege: the regular-file case above covers the path.
+      if ((error as NodeJS.ErrnoException).code === "EPERM") {
+        context.skip();
+        return;
+      }
+      throw error;
+    }
+    const policy = OutputAccessPolicy.create([outputDir]);
+
+    exportWikiOffline({ projection, outputDir }, policy);
+
+    expect(readFileSync(victim, "utf8")).toBe("VICTIM");
+    expect(lstatSync(planted).isSymbolicLink()).toBe(true);
+    const target = path.join(outputDir, "index.html");
+    const written = readFileSync(target, "utf8");
+    expect(lstatSync(target).isSymbolicLink()).toBe(false);
+    expect(written).toBe(serializeWikiHtml(projection));
   });
 });
 

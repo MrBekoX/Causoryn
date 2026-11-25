@@ -54,15 +54,16 @@ export const WORKER_DIR_RELATIVE_PATH = join("native", "go-worker");
 
 /**
  * Worker alt sürecine geçilen ortam değişkeni allowlist'i (güvenlik
- * bulgusu 1 savunma derinliği; Roslyn adapter deseni). go toolchain'inin
- * ÇALIŞMASI için gerekenler taşınır:
+ * bulgusu 1 + Wave 1 Task 1.1 toolchain izolasyonu):
  * - PATH: çalıştırılabilir çözümleme,
  * - SystemRoot, COMSPEC: Windows yükleyici/süreç altyapısı,
  * - TEMP, TMP: go build geçici dizinleri,
  * - USERPROFILE, HOME: GOPATH default'u (%USERPROFILE%\go),
  * - APPDATA: go env config dosyası (%APPDATA%\go\env),
  * - LOCALAPPDATA: GOCACHE default'u (%LOCALAPPDATA%\go-build),
- * - GOPATH, GOROOT, GOCACHE, GOMODCACHE, GOENV: açık go konum değişkenleri.
+ * - GOPATH, GOROOT, GOCACHE, GOMODCACHE: açık go konum değişkenleri.
+ * GOENV BİLİNÇLİ OLARAK ÇIKARILDI: güvenilmeyen ortamdan miraslanmaz;
+ * GOTOOLCHAIN="local", GOWORK="off", GOPROXY="off" zorlanır.
  * Allowlist dışı değerler (anahtar/token vb.) worker'a MİRASLANMAZ.
  */
 export const WORKER_ENV_ALLOWLIST = [
@@ -79,7 +80,6 @@ export const WORKER_ENV_ALLOWLIST = [
   "GOROOT",
   "GOCACHE",
   "GOMODCACHE",
-  "GOENV",
 ] as const;
 
 export type SpawnFunction = (
@@ -93,6 +93,8 @@ export type SpawnFunction = (
      * spawn'ında (taskkill) anlamsızdır — opsiyoneldir.
      */
     readonly cwd?: string;
+    readonly shell?: false;
+    readonly windowsHide?: true;
   },
 ) => ChildProcess;
 
@@ -100,6 +102,13 @@ export type SpawnFunction = (
 export interface GoSourceFile {
   /** Workspace-relative POSIX yolu; ".." ve mutlak yol DomainError ile reddedilir. */
   readonly path: string;
+  readonly content: string;
+}
+
+/** Opsiyonel go.mod dosya girdisi — tam modül yolu import çözümlemesi için. */
+export interface GoModuleFile {
+  /** Workspace-relative POSIX yolu (ör. "go.mod" veya "services/api/go.mod"). */
+  readonly relativePath: string;
   readonly content: string;
 }
 
@@ -132,6 +141,14 @@ export interface AnalyzeGoWorkspaceInput {
   /** Opaque workspace kimliği; boş/boşluk DomainError ile reddedilir. */
   readonly workspaceId: string;
   readonly files: readonly GoSourceFile[];
+  /** Opsiyonel go.mod dosyaları; varsa <modulePath>/<subdir> import'ları tam çözülür. */
+  readonly moduleFiles?: readonly GoModuleFile[];
+  /**
+   * Absolute root of the analyzed workspace (optional). PATH entries inside
+   * it are never used to resolve toolchain executables; the process cwd is
+   * always treated the same way.
+   */
+  readonly workspaceRoot?: string;
   readonly options?: Partial<GoAdapterOptions>;
 }
 

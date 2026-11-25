@@ -1,6 +1,8 @@
 import { workspacePolicyConfigSchema, type WorkspacePolicyConfig } from "@causoryn/workspace";
 import { z } from "zod";
 
+import { tryParseToolProfile } from "./tool-profile.js";
+
 /**
  * Causoryn MCP server konfigürasyonu — TŞ v2.1 §20 `causoryn.config`
  * sözdiziminin Faz A dilimi. Workspace dilimi (allowRoots/ignore/uzantı/
@@ -83,6 +85,20 @@ export const causorynServerConfigSchema = workspacePolicyConfigSchema.extend({
       dataDbPath: z.string().min(1).optional(),
     })
     .default({}),
+  /**
+   * Optional default tool profile ("core", "full", "wiki", "history" or a
+   * comma-separated combination). Used when neither `--tool-profile` nor
+   * `CAUSORYN_TOOL_PROFILE` is set; validated with the same parser as both.
+   */
+  toolProfile: z
+    .string()
+    .superRefine((value, ctx) => {
+      const parsed = tryParseToolProfile(value);
+      if (!parsed.ok) {
+        ctx.addIssue({ code: "custom", message: parsed.message });
+      }
+    })
+    .optional(),
 });
 
 export type CausorynServerConfig = z.infer<typeof causorynServerConfigSchema>;
@@ -94,7 +110,7 @@ export class CausorynConfigError extends Error {
   readonly issues: readonly string[];
 
   constructor(issues: readonly string[]) {
-    super(`Causoryn server konfigürasyonu geçersiz: ${issues.join("; ")}`);
+    super(`invalid Causoryn server configuration: ${issues.join("; ")}`);
     this.name = "CausorynConfigError";
     this.issues = issues;
   }
@@ -108,7 +124,7 @@ export function parseCausorynServerConfig(input: unknown): CausorynServerConfig 
   }
   const issues = result.error.issues.map(
     (issue) =>
-      `${issue.path.length > 0 ? issue.path.map(String).join(".") : "(kök)"}: ${issue.message}`,
+      `${issue.path.length > 0 ? issue.path.map(String).join(".") : "(root)"}: ${issue.message}`,
   );
   throw new CausorynConfigError(issues);
 }

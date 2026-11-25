@@ -17,6 +17,7 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import {
   CAUSORYN_TOOL_ERROR_CODES,
+  CORE_TOOL_NAMES,
   SERVER_NAME,
   SERVER_VERSION,
   TOOL_NAMES,
@@ -47,6 +48,8 @@ const DOLLAR_BRACE = "$" + "{";
 const CLAUDE_PLUGIN_ROOT_TOKEN = DOLLAR_BRACE + "CLAUDE_PLUGIN_ROOT}";
 const ZCODE_PLUGIN_ROOT_TOKEN = DOLLAR_BRACE + "ZCODE_PLUGIN_ROOT}";
 const ZCODE_PROJECT_DIR_TOKEN = DOLLAR_BRACE + "ZCODE_PROJECT_DIR}";
+/** Antigravity expands this token to the plugin directory in a plugin's mcp_config.json. */
+const ANTIGRAVITY_PLUGIN_ROOT_TOKEN = DOLLAR_BRACE + "PLUGIN_ROOT}";
 
 const CREDENTIAL_PATTERN =
   /(api[_-]?key|secret|token|password|credential|bearer|private[_-]?key)/i;
@@ -358,7 +361,7 @@ async function runStdioSequence(
 
     for (const req of requests) {
       child.stdin?.write(`${JSON.stringify(req)}\n`);
-      if (req["method"] === "initialize" && typeof req["id"] === "number") {
+      if (typeof req["id"] === "number") {
         await waitForId(req["id"]);
       }
     }
@@ -399,13 +402,13 @@ async function runStdioHandshake(
       jsonrpc: "2.0",
       id: 3,
       method: "tools/call",
-      params: { name: "causoryn_get_capabilities", arguments: {} },
+      params: { name: "causoryn_status", arguments: {} },
     },
   ]);
 }
 
 describe("1. Canonical skills/ (YAML frontmatter + ADR-010 tool honesty)", () => {
-  const knownTools = new Set<string>(TOOL_NAMES);
+  const knownTools = new Set<string>([...TOOL_NAMES, ...CORE_TOOL_NAMES]);
 
   it("ships all 5 canonical skills with valid frontmatter and strictly real published tools", () => {
     for (const skillName of EXPECTED_SKILLS) {
@@ -462,9 +465,9 @@ describe("1. Canonical skills/ (YAML frontmatter + ADR-010 tool honesty)", () =>
       "utf8",
     );
     const requiredTokens = [
-      "causoryn_workspace_summary",
+      "causoryn_status",
       "causoryn_map_system",
-      "causoryn_generate_onboarding",
+      '"profile": "onboarding"',
       "causoryn_export_documentation",
       "architectureSummary.moduleIds",
       "annotations",
@@ -535,18 +538,19 @@ describe("1. Canonical skills/ (YAML frontmatter + ADR-010 tool honesty)", () =>
     );
     expect(zcodeMapSkill).not.toContain("Faz A");
     expect(zcodeMapSkill).toContain("architecture-blueprint");
-    expect(zcodeMapSkill).toContain("causoryn_trace_execution");
+    expect(zcodeMapSkill).toContain("causoryn_trace");
+    expect(zcodeMapSkill).not.toContain("causoryn_trace_execution");
     expect(zcodeMapSkill).toMatch(/L3[^\n]*Test/);
     expect(zcodeMapSkill).toContain("nextCursor, error");
   });
 });
 
-describe("2. Repo-root & packages/causoryn 4-host manifests (0.2.4 parity + zero credentials)", () => {
+describe("2. Repo-root & packages/causoryn 4-host manifests (0.3.0 parity + zero credentials)", () => {
   it("validates ZCode, Claude Code, Codex, Antigravity, and MCP Registry root manifests", () => {
-    expect(SERVER_VERSION).toBe("0.2.4");
+    expect(SERVER_VERSION).toBe("0.3.0");
 
     const pkgJson = readJsonObject(path.join(PKG_DIR, "package.json"));
-    expect(pkgJson["version"]).toBe("0.2.4");
+    expect(pkgJson["version"]).toBe("0.3.0");
 
     const zcodeMkt = readJsonObject(path.join(REPO_ROOT, "marketplace.json"));
     expect(zcodeMkt["name"]).toBe("causoryn");
@@ -559,7 +563,7 @@ describe("2. Repo-root & packages/causoryn 4-host manifests (0.2.4 parity + zero
     expect(zcodePlugins[0]?.["source"]).toEqual({
       source: "npm",
       package: "causoryn",
-      version: "0.2.4",
+      version: "0.3.0",
     });
 
     const claudeMkt = readJsonObject(
@@ -572,7 +576,7 @@ describe("2. Repo-root & packages/causoryn 4-host manifests (0.2.4 parity + zero
     expect(claudePlugins[0]?.["source"]).toEqual({
       source: "npm",
       package: "causoryn",
-      version: "0.2.4",
+      version: "0.3.0",
     });
 
     const codexMkt = readJsonObject(
@@ -583,7 +587,7 @@ describe("2. Repo-root & packages/causoryn 4-host manifests (0.2.4 parity + zero
     expect(codexPlugins[0]?.["source"]).toEqual({
       source: "npm",
       package: "causoryn",
-      version: "0.2.4",
+      version: "0.3.0",
     });
     expect(codexPlugins[0]?.["policy"]).toEqual({
       installation: "AVAILABLE",
@@ -604,7 +608,8 @@ describe("2. Repo-root & packages/causoryn 4-host manifests (0.2.4 parity + zero
     expect(agyServers["causoryn"]?.["command"]).toBe("npx");
     expect(agyServers["causoryn"]?.["args"]).toEqual([
       "-y",
-      "causoryn@0.2.4",
+      "--ignore-scripts",
+      "causoryn@0.3.0",
       "mcp",
       "--allow-cwd",
       "--auto-data-dir",
@@ -615,16 +620,23 @@ describe("2. Repo-root & packages/causoryn 4-host manifests (0.2.4 parity + zero
     const rootMcp = readJsonObject(path.join(REPO_ROOT, "mcp.json"));
     const portableServers = rootMcp["mcpServers"] as Record<string, Record<string, unknown>>;
     expect(portableServers["causoryn"]?.["command"]).toBe("npx");
-    expect(portableServers["causoryn"]?.["args"]).toContain("causoryn@0.2.4");
+    expect(portableServers["causoryn"]?.["args"]).toEqual([
+      "-y",
+      "--ignore-scripts",
+      "causoryn@0.3.0",
+      "mcp",
+      "--allow-cwd",
+      "--auto-data-dir",
+    ]);
 
     const serverJson = readJsonObject(path.join(REPO_ROOT, "server.json"));
     expect(serverJson["name"]).toBe("io.github.mrbekox/causoryn");
     expect(pkgJson["mcpName"]).toBe(serverJson["name"]);
-    expect(serverJson["version"]).toBe("0.2.4");
+    expect(serverJson["version"]).toBe("0.3.0");
     expect(serverJson["websiteUrl"]).toBe("https://github.com/MrBekoX/Causoryn");
     const serverPackages = serverJson["packages"] as Array<Record<string, unknown>>;
     expect(serverPackages).toHaveLength(1);
-    expect(serverPackages[0]?.["version"]).toBe("0.2.4");
+    expect(serverPackages[0]?.["version"]).toBe("0.3.0");
     expect(serverPackages[0]?.["registryBaseUrl"]).toBe("https://registry.npmjs.org");
     const pkgArgs = serverPackages[0]?.["packageArguments"] as Array<Record<string, unknown>>;
     expect(pkgArgs).toEqual([
@@ -636,7 +648,7 @@ describe("2. Repo-root & packages/causoryn 4-host manifests (0.2.4 parity + zero
 
   it("validates all 6 package-internal manifests in packages/causoryn/", () => {
     const zcodePlugin = readJsonObject(path.join(PKG_DIR, ".zcode-plugin", "plugin.json"));
-    expect(zcodePlugin["version"]).toBe("0.2.4");
+    expect(zcodePlugin["version"]).toBe("0.3.0");
     expect(zcodePlugin["skills"]).toBe("skills");
     const zcodeServers = zcodePlugin["mcpServers"] as Record<string, Record<string, unknown>>;
     expect(zcodeServers["causoryn"]?.["command"]).toBe("node");
@@ -644,7 +656,7 @@ describe("2. Repo-root & packages/causoryn 4-host manifests (0.2.4 parity + zero
     expect(zcodeServers["causoryn"]?.["args"]).toEqual([
       `${ZCODE_PLUGIN_ROOT_TOKEN}/scripts/plugin-mcp-launcher.mjs`,
       "--expected-version",
-      "0.2.4",
+      "0.3.0",
       "--allow-cwd",
       "--auto-data-dir",
       "--client",
@@ -652,13 +664,13 @@ describe("2. Repo-root & packages/causoryn 4-host manifests (0.2.4 parity + zero
     ]);
 
     const claudePlugin = readJsonObject(path.join(PKG_DIR, ".claude-plugin", "plugin.json"));
-    expect(claudePlugin["version"]).toBe("0.2.4");
+    expect(claudePlugin["version"]).toBe("0.3.0");
     const claudeServers = claudePlugin["mcpServers"] as Record<string, Record<string, unknown>>;
     expect(claudeServers["causoryn"]?.["command"]).toBe("node");
     expect(claudeServers["causoryn"]?.["args"]).toEqual([
       `${CLAUDE_PLUGIN_ROOT_TOKEN}/scripts/plugin-mcp-launcher.mjs`,
       "--expected-version",
-      "0.2.4",
+      "0.3.0",
       "--allow-cwd",
       "--auto-data-dir",
       "--client",
@@ -666,7 +678,7 @@ describe("2. Repo-root & packages/causoryn 4-host manifests (0.2.4 parity + zero
     ]);
 
     const codexPlugin = readJsonObject(path.join(PKG_DIR, ".codex-plugin", "plugin.json"));
-    expect(codexPlugin["version"]).toBe("0.2.4");
+    expect(codexPlugin["version"]).toBe("0.3.0");
     expect(codexPlugin["mcpServers"]).toBe("./.codex-plugin/mcp.json");
     expect(codexPlugin["skills"]).toBe("./skills");
 
@@ -676,8 +688,9 @@ describe("2. Repo-root & packages/causoryn 4-host manifests (0.2.4 parity + zero
     expect(codexServers["causoryn"]?.["startup_timeout_sec"]).toBe(30);
     expect(codexServers["causoryn"]?.["args"]).toEqual([
       "-y",
+      "--ignore-scripts",
       "--package",
-      "causoryn@0.2.4",
+      "causoryn@0.3.0",
       "causoryn",
       "mcp",
       "--allow-cwd",
@@ -691,15 +704,16 @@ describe("2. Repo-root & packages/causoryn 4-host manifests (0.2.4 parity + zero
     for (const key of Object.keys(pkgAgyPlugin)) {
       expect(ALLOWED_ANTIGRAVITY_PLUGIN_KEYS.has(key)).toBe(true);
     }
-    expect(pkgAgyPlugin["version"]).toBe("0.2.4");
+    expect(pkgAgyPlugin["version"]).toBe("0.3.0");
 
     const pkgAgyMcp = readJsonObject(path.join(PKG_DIR, "mcp_config.json"));
     const pkgAgyServers = pkgAgyMcp["mcpServers"] as Record<string, Record<string, unknown>>;
     expect(pkgAgyServers["causoryn"]?.["command"]).toBe("node");
+    // Anchored at the plugin root, so the host's working directory never selects the launcher:
     expect(pkgAgyServers["causoryn"]?.["args"]).toEqual([
-      "scripts/plugin-mcp-launcher.mjs",
+      `${ANTIGRAVITY_PLUGIN_ROOT_TOKEN}/scripts/plugin-mcp-launcher.mjs`,
       "--expected-version",
-      "0.2.4",
+      "0.3.0",
       "--allow-cwd",
       "--auto-data-dir",
       "--client",
@@ -766,7 +780,7 @@ describe("4. build-package.mjs + isolated npm pack end-to-end verification", () 
     };
 
     writeDrifted("package.json", { name: "causoryn", version: "0.9.9" });
-    expect(() => mod.verifyManifestVersionParity(REPO_ROOT, fakePkgDir)).toThrow(/0\.2\.4/);
+    expect(() => mod.verifyManifestVersionParity(REPO_ROOT, fakePkgDir)).toThrow(/0\.3\.0/);
   });
 
   it("verifies every file in bundle-manifest.json via SHA-256 and recovers from torn reads before failing closed", async () => {
@@ -874,6 +888,7 @@ describe("4. build-package.mjs + isolated npm pack end-to-end verification", () 
       expect(files).toContain("dist/node_modules/better-sqlite3/LICENSE");
       expect(files).toContain("dist/typescript-lib/lib.es2022.full.d.ts");
       expect(files).toContain("scripts/lib/node-version-guard.mjs");
+      expect(files).toContain("scripts/lib/asset-root.mjs");
       expect(files).toContain("native/python-worker/worker.py");
       expect(files).toContain("native/go-worker/cmd/worker/main.go");
       expect(files).toContain("native/rust-worker/Cargo.toml");
@@ -904,7 +919,14 @@ describe("4. build-package.mjs + isolated npm pack end-to-end verification", () 
         expect(rel.includes("__pycache__")).toBe(false);
         expect(rel.endsWith(".pdb")).toBe(false);
         expect(rel.startsWith("dist/") && rel.endsWith(".map")).toBe(false);
-        expect(rel.includes(".mimosa/")).toBe(false);
+        // No dot-directory/dot-file (local tool caches, VCS metadata) is
+        // staged from the native worker sources:
+        if (rel.startsWith("native/")) {
+          expect(
+            rel.split("/").some((segment) => segment.startsWith(".")),
+            `${rel} is a dot-entry under native/`,
+          ).toBe(false);
+        }
       }
 
       // Pure LF line endings on executable scripts in the packed tarball
@@ -912,6 +934,7 @@ describe("4. build-package.mjs + isolated npm pack end-to-end verification", () 
         "scripts/causoryn.mjs",
         "scripts/plugin-mcp-launcher.mjs",
         "scripts/lib/node-version-guard.mjs",
+        "scripts/lib/asset-root.mjs",
       ]) {
         const scriptBytes = readFileSync(path.join(unpackedPkg, relScript));
         expect(scriptBytes.includes(0x0d), `${relScript} contains CR bytes in tarball`).toBe(false);
@@ -1007,7 +1030,8 @@ describe("4. build-package.mjs + isolated npm pack end-to-end verification", () 
       const listMsg = launcherHandshake.responses.get(2)?.result as {
         tools?: Array<{ name?: string }>;
       };
-      expect(listMsg.tools?.map((t) => t.name)).toEqual([...TOOL_NAMES]);
+      expect(listMsg.tools?.map((t) => t.name)).toEqual([...CORE_TOOL_NAMES]);
+      expect(JSON.stringify(listMsg).length).toBeLessThanOrEqual(15_000);
 
       // 4. Unpacked causoryn.mjs mcp over pure JSON-RPC stdio
       const cliHandshake = await runStdioHandshake(
@@ -1123,16 +1147,16 @@ describe("4. build-package.mjs + isolated npm pack end-to-end verification", () 
             jsonrpc: "2.0",
             id: 3,
             method: "tools/call",
-            params: { name: "causoryn_workspace_summary", arguments: {} },
+            params: {
+              name: "causoryn_find_symbols",
+              arguments: { query: "aggregateOrderBuckets" },
+            },
           },
           {
             jsonrpc: "2.0",
             id: 4,
             method: "tools/call",
-            params: {
-              name: "causoryn_find_symbols",
-              arguments: { query: "aggregateOrderBuckets" },
-            },
+            params: { name: "causoryn_status", arguments: {} },
           },
         ],
       );
@@ -1140,36 +1164,19 @@ describe("4. build-package.mjs + isolated npm pack end-to-end verification", () 
       // Pure JSON-RPC stdout discipline (4 responses, zero log noise)
       expect(session.stdoutLines).toHaveLength(4);
 
-      // tools/list: 29 tools AND outputSchema omitted on wire
+      // tools/list: 11 lean core tools, <= 15,000 chars, AND outputSchema omitted on wire
       const listResult = session.responses.get(2)?.result as {
         tools?: Array<Record<string, unknown>>;
       };
       expect(listResult.tools).toBeDefined();
-      expect(listResult.tools?.map((t) => t["name"])).toEqual([...TOOL_NAMES]);
+      expect(listResult.tools?.map((t) => t["name"])).toEqual([...CORE_TOOL_NAMES]);
+      expect(JSON.stringify(listResult).length).toBeLessThanOrEqual(15_000);
       for (const toolDef of listResult.tools ?? []) {
         expect("outputSchema" in toolDef).toBe(false);
       }
 
-      // causoryn_workspace_summary: status === "ok" and snapshotState === "ready" (zero TS2318 errors!)
-      const summaryCallResult = session.responses.get(3)?.result as {
-        structuredContent?: {
-          status?: string;
-          data?: {
-            snapshotState?: string;
-            fileCount?: number;
-            languages?: Array<{ language: string; files: number }>;
-          };
-        };
-      };
-      expect(summaryCallResult.structuredContent?.status).toBe("ok");
-      expect(summaryCallResult.structuredContent?.data?.snapshotState).toBe("ready");
-      expect(summaryCallResult.structuredContent?.data?.languages).toContainEqual({
-        language: "typescript",
-        files: 1,
-      });
-
-      // causoryn_find_symbols: locates aggregateOrderBuckets in src/order-service.ts
-      const findCallResult = session.responses.get(4)?.result as {
+      // causoryn_find_symbols (id 3): triggers wait for initial index and locates aggregateOrderBuckets in src/order-service.ts
+      const findCallResult = session.responses.get(3)?.result as {
         structuredContent?: {
           status?: string;
           data?: {
@@ -1194,7 +1201,27 @@ describe("4. build-package.mjs + isolated npm pack end-to-end verification", () 
         ),
       ).toBe(true);
 
-      // (e) Assert 100% read-only workspace + external graph-claude-code.sqlite & exports/
+      // causoryn_status (id 4): status === "ok" and snapshotState === "ready" (zero TS2318 errors!)
+      const summaryCallResult = session.responses.get(4)?.result as {
+        structuredContent?: {
+          status?: string;
+          data?: {
+            summary?: {
+              snapshotState?: string;
+              fileCount?: number;
+              languages?: Array<{ language: string; files: number }>;
+            };
+          };
+        };
+      };
+      expect(summaryCallResult.structuredContent?.status).toBe("ok");
+      expect(summaryCallResult.structuredContent?.data?.summary?.snapshotState).toBe("ready");
+      expect(summaryCallResult.structuredContent?.data?.summary?.languages).toContainEqual({
+        language: "typescript",
+        files: 1,
+      });
+
+      // (e) Assert 100% read-only workspace + external shared graph.sqlite & exports/
       expect(snapshotDirectoryState(sampleProjectDir)).toEqual(beforeProjectSnapshot);
 
       const workspacesRoot = path.join(dataDir, "workspaces");
@@ -1204,7 +1231,7 @@ describe("4. build-package.mjs + isolated npm pack end-to-end verification", () 
       );
       expect(workspaceDirs).toHaveLength(1);
       const createdWsDir = path.join(workspacesRoot, workspaceDirs[0]!.name);
-      expect(existsSync(path.join(createdWsDir, "graph-claude-code.sqlite"))).toBe(true);
+      expect(existsSync(path.join(createdWsDir, "graph.sqlite"))).toBe(true);
       expect(existsSync(path.join(createdWsDir, "exports"))).toBe(true);
       expect(statSync(path.join(createdWsDir, "exports")).isDirectory()).toBe(true);
     },

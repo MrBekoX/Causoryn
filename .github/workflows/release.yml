@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Release tag to build and publish (e.g. v0.2.4); workflow must be dispatched on that tag ref"
+        description: "Release tag to build and publish (e.g. v0.2.5); workflow must be dispatched on that tag ref"
         required: true
         type: string
 
@@ -19,8 +19,8 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  build-and-verify:
-    name: Build, Verify & Pack (Isolated)
+  verify-and-test:
+    name: Verify & Test (Read-Only)
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
@@ -127,9 +127,6 @@ jobs:
       - name: Build distribution package
         run: npm run build:package --workspace packages/causoryn
 
-      - name: Verify distribution package readiness
-        run: node packages/causoryn/scripts/verify-package-ready.mjs
-
       - name: Lint
         run: npm run lint
 
@@ -142,11 +139,100 @@ jobs:
       - name: Run tests
         run: npm test
 
+  build-and-pack:
+    name: Hermetic Build & Pack (Zero Tests)
+    needs: verify-and-test
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    permissions:
+      contents: read
+    # The publish job compares the downloaded artifacts with these digests, which are
+    # fixed before any packaged code runs (smoke test) and travel outside the artifact.
+    outputs:
+      tarball_name: ${{ steps.digests.outputs.tarball_name }}
+      tarball_sha256: ${{ steps.digests.outputs.tarball_sha256 }}
+      sbom_sha256: ${{ steps.digests.outputs.sbom_sha256 }}
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@aebdcf6156ab6691adf63218240e476564a1ed4c # v2.23.0
+        with:
+          egress-policy: audit
+          disable-sudo-and-containers: true
+
+      - name: Clean checkout of release ref
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "24"
+          # Hermetic SLSA build: explicitly disable package-manager-cache (defaults to true in v7;
+          # prevents Actions cache poisoning) and omit registry-url (no static .npmrc token).
+          package-manager-cache: false
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@0f4a354dd5547a28c70b7853dbd95d5b67886e73 # v6.1.0
+        with:
+          dotnet-version: "10.0.x"
+
+      - name: Install dependencies
+        run: npm ci --ignore-scripts
+
+      - name: Build Roslyn worker (deterministic Release, locked)
+        run: dotnet build native/roslyn-worker/Causoryn.RoslynWorker.csproj -c Release -p:DebugType=none -p:ContinuousIntegrationBuild=true -p:SatelliteResourceLanguages=en -p:RestoreLockedMode=true
+
+      - name: Build packages and adapters
+        run: npm run build
+
+      - name: Build MCP server bundle
+        run: npm run build:bundle --workspace packages/mcp-server
+
+      - name: Build distribution package
+        run: npm run build:package --workspace packages/causoryn
+
+      - name: Verify distribution package readiness
+        run: node packages/causoryn/scripts/verify-package-ready.mjs
+
       - name: Pack distribution tarball
         working-directory: packages/causoryn
         run: |
           mkdir -p ../../release-artifacts
           npm pack --pack-destination ../../release-artifacts
+
+      # Checksums are taken immediately after `npm pack`, before any smoke/test step
+      # runs against the packed tarball, so SHA256SUMS.txt describes the artifact exactly as packed.
+      - name: Generate SHA256SUMS.txt and CycloneDX SBOM
+        run: node scripts/generate-sbom.mjs --artifacts-dir release-artifacts
+
+      - name: Record artifact digests as job outputs (before any packaged code runs)
+        id: digests
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          TGZ_NAME="causoryn-${RELEASE_TAG#v}.tgz"
+          files=(release-artifacts/*.tgz)
+          if (( ${#files[@]} != 1 )) || [[ "${files[0]}" != "release-artifacts/$TGZ_NAME" ]]; then
+            echo "Expected exactly release-artifacts/${TGZ_NAME}, found: ${files[*]}" >&2
+            exit 1
+          fi
+          TGZ_SHA256="$(sha256sum "release-artifacts/$TGZ_NAME" | cut -d ' ' -f 1)"
+          SBOM_SHA256="$(sha256sum release-artifacts/causoryn-sbom.cdx.json | cut -d ' ' -f 1)"
+          # SHA256SUMS.txt must list exactly the tarball and the SBOM with these digests.
+          if [[ "$(wc -l < release-artifacts/SHA256SUMS.txt)" -ne 2 ]] \
+            || ! grep -Fxq "$TGZ_SHA256  $TGZ_NAME" release-artifacts/SHA256SUMS.txt \
+            || ! grep -Fxq "$SBOM_SHA256  causoryn-sbom.cdx.json" release-artifacts/SHA256SUMS.txt; then
+            echo "SHA256SUMS.txt does not list exactly ${TGZ_NAME} and causoryn-sbom.cdx.json with their digests" >&2
+            exit 1
+          fi
+          {
+            echo "tarball_name=$TGZ_NAME"
+            echo "tarball_sha256=$TGZ_SHA256"
+            echo "sbom_sha256=$SBOM_SHA256"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Smoke-test packed tarball in isolated prefix (CLI + doctor + MCP initialize)
         env:
@@ -175,7 +261,17 @@ jobs:
             echo "CLI version mismatch: expected ${EXPECTED_VERSION}, got ${ACTUAL_VERSION}" >&2
             exit 1
           fi
-          HOME="$SMOKE_DIR/home" "$SMOKE_DIR/node_modules/.bin/causoryn" doctor --json
+          DOCTOR_OUT=""
+          DOCTOR_EXIT=0
+          DOCTOR_OUT=$(HOME="$SMOKE_DIR/home" "$SMOKE_DIR/node_modules/.bin/causoryn" doctor --json) || DOCTOR_EXIT=$?
+          DOCTOR_OUT="$DOCTOR_OUT" DOCTOR_EXIT="$DOCTOR_EXIT" node -e '
+            const exitCode = Number(process.env.DOCTOR_EXIT);
+            const report = JSON.parse(process.env.DOCTOR_OUT || "{}");
+            if (exitCode !== 1 || report.node?.ok !== true || report.runtime?.ok !== true || report.overallStatus !== "NOT CONFIGURED") {
+              console.error("Unexpected doctor smoke result:", { exitCode, overallStatus: report.overallStatus, nodeOk: report.node?.ok, runtimeOk: report.runtime?.ok });
+              process.exit(1);
+            }
+          '
           HOME="$SMOKE_DIR/home" SMOKE_BIN="$SMOKE_DIR/node_modules/.bin/causoryn" SMOKE_CWD="$SMOKE_DIR/workspace" node -e '
             const cp = require("node:child_process");
             const bin = process.env.SMOKE_BIN;
@@ -226,8 +322,22 @@ jobs:
             child.stdin.write(initReq);
           '
 
-      - name: Generate SHA256SUMS.txt and CycloneDX SBOM
-        run: node scripts/generate-sbom.mjs --artifacts-dir release-artifacts
+      - name: Re-verify artifact digests after the smoke test
+        env:
+          TGZ_NAME: ${{ steps.digests.outputs.tarball_name }}
+          TGZ_SHA256: ${{ steps.digests.outputs.tarball_sha256 }}
+          SBOM_SHA256: ${{ steps.digests.outputs.sbom_sha256 }}
+        run: |
+          set -euo pipefail
+          EXPECTED_SUMS="$RUNNER_TEMP/expected-sha256sums.txt"
+          printf '%s  %s\n%s  %s\n' "$TGZ_SHA256" "$TGZ_NAME" "$SBOM_SHA256" "causoryn-sbom.cdx.json" > "$EXPECTED_SUMS"
+          (cd release-artifacts && sha256sum --strict -c "$EXPECTED_SUMS")
+          expected_listing="$(printf '%s\n' SHA256SUMS.txt causoryn-sbom.cdx.json "$TGZ_NAME" | LC_ALL=C sort)"
+          actual_listing="$(find release-artifacts -mindepth 1 -printf '%P\n' | LC_ALL=C sort)"
+          if [[ "$actual_listing" != "$expected_listing" ]]; then
+            echo "release-artifacts/ must contain exactly: $(tr '\n' ' ' <<< "$expected_listing")found: $(tr '\n' ' ' <<< "$actual_listing")" >&2
+            exit 1
+          fi
 
       - name: Upload verified release artifacts
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -236,9 +346,9 @@ jobs:
           path: release-artifacts/
           retention-days: 5
 
-  attest-and-publish:
+  publish:
     name: Attest & Publish (OIDC)
-    needs: build-and-verify
+    needs: build-and-pack
     runs-on: ubuntu-latest
     environment: release
     timeout-minutes: 15
@@ -259,23 +369,50 @@ jobs:
           name: release-artifacts
           path: release-artifacts
 
-      - name: Verify artifact checksums and tarball identity
+      # The downloaded bundle is checked against the digests build-and-pack exported as job
+      # outputs, not only against the SHA256SUMS.txt that travels inside the same artifact.
+      - name: Verify artifacts against the build-and-pack digests (fail-closed)
         env:
           RELEASE_TAG: ${{ github.ref_name }}
+          EXPECTED_TGZ_NAME: ${{ needs.build-and-pack.outputs.tarball_name }}
+          EXPECTED_TGZ_SHA256: ${{ needs.build-and-pack.outputs.tarball_sha256 }}
+          EXPECTED_SBOM_SHA256: ${{ needs.build-and-pack.outputs.sbom_sha256 }}
         run: |
           set -euo pipefail
-          shopt -s nullglob
+          SHA256_RE='^[0-9a-f]{64}$'
+          if [[ ! "$EXPECTED_TGZ_SHA256" =~ $SHA256_RE || ! "$EXPECTED_SBOM_SHA256" =~ $SHA256_RE ]]; then
+            echo "build-and-pack did not export valid SHA-256 digests" >&2
+            exit 1
+          fi
+          EXPECTED_TGZ="causoryn-${RELEASE_TAG#v}.tgz"
+          if [[ "$EXPECTED_TGZ_NAME" != "$EXPECTED_TGZ" ]]; then
+            echo "Tarball identity mismatch: expected ${EXPECTED_TGZ}, build-and-pack exported ${EXPECTED_TGZ_NAME}" >&2
+            exit 1
+          fi
+          expected_listing="$(printf '%s\n' SHA256SUMS.txt causoryn-sbom.cdx.json "$EXPECTED_TGZ" | LC_ALL=C sort)"
+          actual_listing="$(find release-artifacts -mindepth 1 -printf '%P\n' | LC_ALL=C sort)"
+          if [[ "$actual_listing" != "$expected_listing" ]]; then
+            echo "release-artifacts/ must contain exactly: $(tr '\n' ' ' <<< "$expected_listing")found: $(tr '\n' ' ' <<< "$actual_listing")" >&2
+            exit 1
+          fi
+          ACTUAL_TGZ_SHA256="$(sha256sum "release-artifacts/$EXPECTED_TGZ" | cut -d ' ' -f 1)"
+          ACTUAL_SBOM_SHA256="$(sha256sum release-artifacts/causoryn-sbom.cdx.json | cut -d ' ' -f 1)"
+          if [[ "$ACTUAL_TGZ_SHA256" != "$EXPECTED_TGZ_SHA256" ]]; then
+            echo "Tarball digest mismatch: build-and-pack ${EXPECTED_TGZ_SHA256}, downloaded ${ACTUAL_TGZ_SHA256}" >&2
+            exit 1
+          fi
+          if [[ "$ACTUAL_SBOM_SHA256" != "$EXPECTED_SBOM_SHA256" ]]; then
+            echo "SBOM digest mismatch: build-and-pack ${EXPECTED_SBOM_SHA256}, downloaded ${ACTUAL_SBOM_SHA256}" >&2
+            exit 1
+          fi
+          # SHA256SUMS.txt must list exactly both expected files with the expected digests.
+          if [[ "$(wc -l < release-artifacts/SHA256SUMS.txt)" -ne 2 ]] \
+            || ! grep -Fxq "$EXPECTED_TGZ_SHA256  $EXPECTED_TGZ" release-artifacts/SHA256SUMS.txt \
+            || ! grep -Fxq "$EXPECTED_SBOM_SHA256  causoryn-sbom.cdx.json" release-artifacts/SHA256SUMS.txt; then
+            echo "SHA256SUMS.txt does not list exactly ${EXPECTED_TGZ} and causoryn-sbom.cdx.json with the build-and-pack digests" >&2
+            exit 1
+          fi
           (cd release-artifacts && sha256sum -c SHA256SUMS.txt)
-          files=(release-artifacts/*.tgz)
-          if (( ${#files[@]} != 1 )); then
-            echo "Expected exactly 1 tarball in release-artifacts/, found ${#files[@]}" >&2
-            exit 1
-          fi
-          EXPECTED_TGZ="release-artifacts/causoryn-${RELEASE_TAG#v}.tgz"
-          if [[ "${files[0]}" != "$EXPECTED_TGZ" ]]; then
-            echo "Tarball identity mismatch: expected ${EXPECTED_TGZ}, got ${files[0]}" >&2
-            exit 1
-          fi
 
       - name: Setup Node.js
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
@@ -308,20 +445,38 @@ jobs:
             npm publish "./$TGZ_FILE" --provenance --access public
           fi
 
-      - name: Create or update GitHub Release
+      - name: Create GitHub Release (existing assets are never overwritten)
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           RELEASE_TAG: ${{ github.ref_name }}
         run: |
           set -euo pipefail
+          ASSETS=(
+            release-artifacts/*.tgz
+            release-artifacts/SHA256SUMS.txt
+            release-artifacts/causoryn-sbom.cdx.json
+          )
           if gh release view "$RELEASE_TAG" --repo "$GH_REPO" >/dev/null 2>&1; then
-            gh release upload "$RELEASE_TAG" \
-              --repo "$GH_REPO" \
-              release-artifacts/*.tgz \
-              release-artifacts/SHA256SUMS.txt \
-              release-artifacts/causoryn-sbom.cdx.json \
-              --clobber
+            # The release already exists (rerun or created by hand). Assets are never
+            # overwritten: a missing asset is uploaded, an existing one must be identical.
+            EXISTING_ASSETS="$(gh release view "$RELEASE_TAG" --repo "$GH_REPO" --json assets --jq '.assets[].name')"
+            DOWNLOAD_DIR="$(mktemp -d)"
+            for asset in "${ASSETS[@]}"; do
+              name="$(basename "$asset")"
+              if grep -Fxq -- "$name" <<< "$EXISTING_ASSETS"; then
+                gh release download "$RELEASE_TAG" --repo "$GH_REPO" --pattern "$name" --dir "$DOWNLOAD_DIR"
+                local_sha="$(sha256sum "$asset" | cut -d ' ' -f 1)"
+                remote_sha="$(sha256sum "$DOWNLOAD_DIR/$name" | cut -d ' ' -f 1)"
+                if [[ "$local_sha" != "$remote_sha" ]]; then
+                  echo "Release asset ${name} already exists with a different SHA-256 (release ${remote_sha}, build ${local_sha}); refusing to overwrite it" >&2
+                  exit 1
+                fi
+                echo "Release asset ${name} already present with the same SHA-256; not uploaded again"
+              else
+                gh release upload "$RELEASE_TAG" --repo "$GH_REPO" "$asset"
+              fi
+            done
           else
             PRERELEASE_FLAG=()
             if [[ "$RELEASE_TAG" == *-* ]]; then
@@ -329,9 +484,7 @@ jobs:
             fi
             gh release create "$RELEASE_TAG" \
               --repo "$GH_REPO" \
-              release-artifacts/*.tgz \
-              release-artifacts/SHA256SUMS.txt \
-              release-artifacts/causoryn-sbom.cdx.json \
+              "${ASSETS[@]}" \
               --title "Causoryn $RELEASE_TAG" \
               --generate-notes \
               --verify-tag \

@@ -148,7 +148,7 @@ export function discoverOpenApiContracts(
   text: string,
 ): DiscoveryOutput {
   if (typeof workspaceId !== "string" || workspaceId.trim().length === 0) {
-    throw new ContractDiscoveryError("contracts/invalid-input", "workspaceId boş olamaz");
+    throw new ContractDiscoveryError("contracts/invalid-input", "workspaceId must not be empty");
   }
   const spec = parseStructuredSpec(relativePath, text);
   const root = spec.root;
@@ -158,25 +158,25 @@ export function discoverOpenApiContracts(
     if (typeof root["swagger"] === "string") {
       throw new ContractDiscoveryError(
         "contracts/unsupported-spec",
-        `OpenAPI 2.x (Swagger) desteklenmez; gelen sürüm: ${String(root["swagger"])}`,
+        `OpenAPI 2.x (Swagger) is not supported; received version: ${String(root["swagger"])}`,
       );
     }
     throw new ContractDiscoveryError(
       "contracts/spec-invalid",
-      "OpenAPI belgesinde 'openapi' string alanı zorunludur",
+      "OpenAPI document must have a string 'openapi' field",
     );
   }
   if (!version.startsWith("3.")) {
     throw new ContractDiscoveryError(
       "contracts/unsupported-spec",
-      `Yalnızca OpenAPI 3.x keşfedilir; gelen sürüm: ${version} (OpenAPI 2.x/Swagger desteklenmez)`,
+      `Only OpenAPI 3.x is discovered; received version: ${version} (OpenAPI 2.x/Swagger is not supported)`,
     );
   }
   const paths = root["paths"];
   if (!isPlainObject(paths)) {
     throw new ContractDiscoveryError(
       "contracts/spec-invalid",
-      "OpenAPI belgesinde 'paths' eşlemesi zorunludur",
+      "OpenAPI document must have a 'paths' mapping",
     );
   }
   const components = isPlainObject(root["components"]) ? (root["components"] as Record<string, unknown>) : undefined;
@@ -194,7 +194,7 @@ export function discoverOpenApiContracts(
       diagnostics.push({
         relativePath,
         code: "contracts/openapi-path-item-invalid",
-        message: `paths["${route}"] bir eşleme değil; pathItem yok sayıldı`,
+        message: `paths["${route}"] is not a mapping; pathItem ignored`,
         line: pathLine,
       });
       continue;
@@ -236,11 +236,11 @@ export function discoverOpenApiContracts(
             diagnostics.push({
               relativePath,
               code: "contracts/openapi-ref-unresolved",
-              message: `requestBody $ref dosya içinde çözümlenemedi: ${refRaw}`,
+              message: `requestBody $ref could not be resolved within the file: ${refRaw}`,
               line: pathLine,
             });
             certainty = "partial";
-            opDiagnostics.push("openapi: yerel request $ref çözümlenemedi — gövde kanıtı yok");
+            opDiagnostics.push("openapi: local request $ref could not be resolved — no request body evidence");
           }
           // Dış $ref (http vb.): şema kimliği son segment olarak taşınır;
           // gövde kanıtı çıkarılmaz (salt-okunur yerel keşif dilimi — belgeli).
@@ -276,7 +276,7 @@ export function discoverOpenApiContracts(
       diagnostics.push({
         relativePath,
         code: "contracts/openapi-path-no-operations",
-        message: `paths["${route}"] altında tanınan HTTP methodu yok (parametreler/$ref pathItem bu dilimde keşfedilmez)`,
+        message: `paths["${route}"] has no recognized HTTP method (parameters-only or $ref pathItems are not discovered by this parser)`,
         line: pathLine,
       });
     }

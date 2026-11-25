@@ -1,11 +1,29 @@
+import { lstatSync, realpathSync, type Stats } from "node:fs";
+import path from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import { Worker } from "node:worker_threads";
+
 import type { WorkspaceAccessPolicy } from "@causoryn/workspace";
 
 import { IndexingError } from "./errors.js";
 import {
   IndexService,
+  clearBuildLeaseActiveLocally,
+  markBuildLeaseActiveLocally,
+  type ExternalLeaseHeartbeat,
   type IndexDiagnostic,
+  type IndexProgressCallback,
+  type IndexProgressEvent,
+  type IndexProgressPhase,
+  type IndexRunOutcome,
   type IndexRunResult,
+  type IndexWorkerServiceConfig,
 } from "./index-service.js";
+import type {
+  IndexWorkerMessage,
+  IndexWorkerResultSummary,
+  IndexWorkerTaskInput,
+} from "./index-worker.js";
 
 /**
  * IndexJobManager — snapshot iş yönetimi (TŞ v2.1 §10.2, sprint-2 B6).
@@ -51,13 +69,36 @@ import {
 /** Refresh iş türleri (TŞ §10.2 "mode"). */
 export type IndexJobMode = "full" | "incremental";
 
-/** İş yaşam döngüsü durumları. */
-export type IndexJobStatus = "queued" | "running" | "done" | "failed";
+/**
+ * Job lifecycle states. Terminal states:
+ * - `done`: this job published a new snapshot (outcome `published`).
+ * - `reused`: the job completed without publishing; an existing snapshot is
+ *   current (outcome `unchanged` or `reused_peer`).
+ * - `failed`: the job errored, was cancelled, or gave up waiting for a live
+ *   peer build (outcome `failed` / `peer_busy`).
+ */
+export type IndexJobStatus = "queued" | "running" | "done" | "reused" | "failed";
+
+/** Honest terminal outcome of a job (`null` while queued/running). */
+export type IndexJobOutcome = IndexRunOutcome | "failed";
+
+/** True for terminal job states (`done`, `reused`, `failed`). */
+export function isTerminalIndexJobStatus(status: IndexJobStatus): boolean {
+  return status === "done" || status === "reused" || status === "failed";
+}
 
 /** Başarısız işin uygulama düzeyi hata kaydı (IndexingError kodu). */
 export interface IndexJobError {
   readonly code: string;
   readonly message: string;
+}
+
+/** Structured job progress snapshot (`job.progress`). */
+export interface IndexJobProgress {
+  readonly phase: IndexProgressPhase;
+  readonly completed: number;
+  readonly total: number;
+  readonly message?: string;
 }
 
 /** Bir refresh işinin işletim kaydı (index_status çıktısının kaynağı). */
@@ -72,7 +113,13 @@ export interface IndexJobRecord {
    */
   readonly changeSet: readonly string[];
   readonly status: IndexJobStatus;
+  /** Terminal outcome; `null` while queued/running. Only `published` means a new snapshot. */
+  readonly outcome: IndexJobOutcome | null;
+  /** True only when this job published a new snapshot (`outcome === "published"`). */
+  readonly published: boolean;
   readonly progressPercent: number;
+  /** Structured progress state updated continuously during worker/in-process indexing. */
+  readonly progress: IndexJobProgress;
   readonly createdAt: string;
   readonly startedAt: string | null;
   readonly finishedAt: string | null;
@@ -88,6 +135,20 @@ export interface IndexJobRecord {
   readonly diagnostics: readonly IndexDiagnostic[];
   readonly warnings: readonly string[];
   readonly error: IndexJobError | null;
+  /** Execution path used for this job (`worker` off-thread vs `in-process` fallback). */
+  readonly executionMode?: "worker" | "in-process";
+  /** Number of source files re-analyzed (Task 2.6). */
+  readonly reanalyzedFiles?: number;
+  /** Number of source files served from `file_facts` cache (Task 2.6). */
+  readonly cachedFiles?: number;
+  /** True when early cutoff avoided invalidating reverse dependents (Task 2.6). */
+  readonly earlyCutoffApplied?: boolean;
+  /**
+   * Number of later identical refresh requests (same root and mode) that were
+   * merged into this job while it was still queued; absent when none. A
+   * coalesced request returns this job's record instead of opening a new job.
+   */
+  readonly coalescedRequests?: number;
 }
 
 export interface IndexJobManagerOptions {
@@ -101,23 +162,282 @@ export interface IndexJobManagerOptions {
   readonly scheduler?: (task: () => void) => void;
   /** İşletim kaydı sınırı; en eski kayıt FIFO düşer. Varsayılan 100. */
   readonly maxJobs?: number;
+  /**
+   * Optional SQLite DB path for off-thread `worker_threads` indexing.
+   * When omitted, automatically derived from `SqliteGraphRepository.dbPath` if available.
+   */
+  readonly workerDbPath?: string;
+  /** Optional explicit override path to compiled/bundled `index-worker` entrypoint. */
+  readonly workerEntryPath?: string;
+  /** Set `false` to disable `worker_threads` execution and force in-process async mode. */
+  readonly useWorkerThread?: boolean;
+  /** Optional fixed ISO timestamp forwarded to worker-thread clock (test seam). */
+  readonly workerFixedClockIso?: string;
+  /** Optional progress listener notified whenever any job emits a progress event. */
+  readonly onProgress?: (jobId: string, event: IndexProgressEvent) => void;
+  /**
+   * Merge a refresh request into an already QUEUED job for the same root and
+   * mode (default true). A running job is never a merge target: changes made
+   * after a run started need a new run.
+   */
+  readonly coalescePendingRefreshes?: boolean;
+  /**
+   * Upper bound for jobs waiting in the queue (default
+   * DEFAULT_MAX_PENDING_INDEX_JOBS). A request that would open a new job
+   * beyond it is rejected with indexing/limit-exceeded; coalesced requests
+   * are never rejected.
+   */
+  readonly maxPendingJobs?: number;
 }
 
-/** İş "running" aşamasına geçtiğinde raporlanan ara yüzde (yukarıdaki not). */
-const RUNNING_PROGRESS_PERCENT = 50;
+/** İş "running" aşamasına geçtiğinde raporlanan başlangıç yüzdesi. */
+const RUNNING_PROGRESS_PERCENT = 10;
 
 /** Varsayılan işletim kaydı sınırı. */
 const DEFAULT_MAX_JOBS = 100;
+
+/**
+ * Default bound for queued (not yet running) jobs. With coalescing, at most
+ * one queued job exists per (root, mode), so the bound only matters for many
+ * roots or when coalescing is disabled.
+ */
+export const DEFAULT_MAX_PENDING_INDEX_JOBS = 16;
+
+/**
+ * Static ESM bootstrap used ONLY when spawning `index-worker.ts` directly from
+ * TypeScript source (Vitest / dev mode on Node 24+). Registers a relative `.js` -> `.ts`
+ * resolver via `node:module` `registerHooks` and imports the trusted `workerData.__workerEntryUrl`.
+ */
+const TS_WORKER_BOOTSTRAP_CODE = `
+import { registerHooks } from "node:module";
+import { existsSync } from "node:fs";
+import path from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import { workerData } from "node:worker_threads";
+
+registerHooks({
+  resolve(specifier, context, nextResolve) {
+    try {
+      return nextResolve(specifier, context);
+    } catch (err) {
+      if (
+        specifier.endsWith(".js") &&
+        context.parentURL &&
+        context.parentURL.startsWith("file:")
+      ) {
+        const parentDir = path.dirname(fileURLToPath(context.parentURL));
+        const tsPath = path.resolve(parentDir, specifier.slice(0, -3) + ".ts");
+        if (existsSync(tsPath)) {
+          return nextResolve(pathToFileURL(tsPath).href, context);
+        }
+      }
+      throw err;
+    }
+  },
+});
+
+await import(workerData.__workerEntryUrl);
+`;
+
+interface ResolvedWorkerEntry {
+  readonly kind: "js" | "ts-source";
+  readonly path: string;
+}
+
+const UNC_OR_DEVICE_PATH_PATTERN = /^(?:\\\\|\/\/|\/\\|\\\/)/;
+
+function stripWin32DevicePrefix(value: string): string {
+  if (process.platform !== "win32") return value;
+  if (value.startsWith("\\\\?\\UNC\\")) return `\\\\${value.slice(8)}`;
+  if (value.startsWith("\\\\?\\")) return value.slice(4);
+  return value;
+}
+
+function normalizePathForContainment(value: string): string {
+  const stripped = stripWin32DevicePrefix(path.resolve(value));
+  return process.platform === "win32" ? stripped.toLowerCase() : stripped;
+}
+
+function isStrictlyInsideDir(targetPath: string, parentDir: string): boolean {
+  const normTarget = normalizePathForContainment(targetPath);
+  const normParent = normalizePathForContainment(parentDir);
+  if (normTarget === normParent) return false;
+  const boundary = normParent.endsWith(path.sep)
+    ? normParent
+    : `${normParent}${path.sep}`;
+  return normTarget.startsWith(boundary);
+}
+
+/**
+ * Validates a `worker_threads` entrypoint file path fail-closed:
+ * - rejects empty/whitespace strings, NUL bytes, and UNC/Windows device paths;
+ * - checks `lstatSync` to reject symlinks and non-regular files (directories/FIFOs);
+ * - canonicalizes via `realpathSync` and, when `allowedParentDir` is specified
+ *   (default sibling discovery), verifies strict containment inside `realpathSync(allowedParentDir)`.
+ */
+export function validateWorkerEntryPath(
+  candidate: string,
+  allowedParentDir?: string,
+): string | undefined {
+  if (typeof candidate !== "string" || candidate.trim().length === 0) {
+    return undefined;
+  }
+  if (candidate.includes("\0")) {
+    return undefined;
+  }
+  if (UNC_OR_DEVICE_PATH_PATTERN.test(candidate)) {
+    return undefined;
+  }
+  const resolved = path.resolve(candidate);
+  if (UNC_OR_DEVICE_PATH_PATTERN.test(resolved)) {
+    return undefined;
+  }
+
+  let stat: Stats;
+  try {
+    stat = lstatSync(resolved);
+  } catch {
+    return undefined;
+  }
+  if (stat.isSymbolicLink() || !stat.isFile()) {
+    return undefined;
+  }
+
+  let realCandidate: string;
+  try {
+    realCandidate = realpathSync(resolved);
+  } catch {
+    return undefined;
+  }
+  if (UNC_OR_DEVICE_PATH_PATTERN.test(stripWin32DevicePrefix(realCandidate))) {
+    return undefined;
+  }
+
+  if (allowedParentDir !== undefined) {
+    if (
+      typeof allowedParentDir !== "string" ||
+      allowedParentDir.trim().length === 0 ||
+      allowedParentDir.includes("\0") ||
+      UNC_OR_DEVICE_PATH_PATTERN.test(allowedParentDir)
+    ) {
+      return undefined;
+    }
+    let realParent: string;
+    try {
+      realParent = realpathSync(path.resolve(allowedParentDir));
+    } catch {
+      return undefined;
+    }
+    if (!isStrictlyInsideDir(realCandidate, realParent)) {
+      return undefined;
+    }
+  }
+
+  return realCandidate;
+}
 
 interface JobWaiter {
   readonly resolve: (record: IndexJobRecord) => void;
   readonly reject: (error: unknown) => void;
 }
 
+function progressPercentFromEvent(
+  event: IndexProgressEvent,
+  fallbackPercent: number,
+): number {
+  switch (event.phase) {
+    case "queued":
+      return 0;
+    case "waiting_for_peer":
+      return Math.max(fallbackPercent, 5);
+    case "inventory":
+      return event.total > 0 && event.completed >= event.total ? 15 : 5;
+    case "analyzing": {
+      const ratio =
+        event.total > 0 ? Math.min(1, Math.max(0, event.completed / event.total)) : 0.5;
+      return Math.round(15 + ratio * 60);
+    }
+    case "building":
+      return 85;
+    case "publishing":
+      return 95;
+    case "done":
+    case "reused":
+      return 100;
+    case "failed":
+      return fallbackPercent;
+  }
+}
+
+/**
+ * Outcome of a finished run. Results always carry `outcome`; the fallback
+ * derivation only guards against a summary without it (never reports a
+ * non-publishing run as published).
+ */
+function runOutcomeOf(result: IndexRunResult | IndexWorkerResultSummary): IndexRunOutcome {
+  if (result.outcome !== undefined) return result.outcome;
+  if (result.published) return "published";
+  if (result.waitingForPeer === true) return "peer_busy";
+  if (result.reused === true) return "reused_peer";
+  return "unchanged";
+}
+
+interface TerminalJobView {
+  readonly status: "done" | "reused" | "failed";
+  readonly phase: IndexProgressPhase;
+  readonly message: string;
+  readonly error: IndexJobError | null;
+}
+
+/** Honest terminal status/message for a completed run (finding: no `done` without publish). */
+function terminalViewOf(
+  outcome: IndexRunOutcome,
+  result: IndexRunResult | IndexWorkerResultSummary,
+): TerminalJobView {
+  switch (outcome) {
+    case "published":
+      return {
+        status: "done",
+        phase: "done",
+        message: `Published snapshot ${result.snapshotId}`,
+        error: null,
+      };
+    case "unchanged":
+      return {
+        status: "reused",
+        phase: "reused",
+        message: `No changes; snapshot ${result.snapshotId} is current`,
+        error: null,
+      };
+    case "reused_peer":
+      return {
+        status: "reused",
+        phase: "reused",
+        message: `A concurrent build published snapshot ${result.snapshotId} first; reused it`,
+        error: null,
+      };
+    case "peer_busy": {
+      const holder = result.peerLease;
+      const holderText =
+        holder === undefined
+          ? "a live peer"
+          : `pid=${String(holder.ownerPid)} on ${holder.hostname ?? "unknown host"}`;
+      const message = `A concurrent index build (${holderText}) still holds the build lease; this job gave up waiting and published nothing. Snapshot ${result.snapshotId} is still served`;
+      return {
+        status: "failed",
+        phase: "failed",
+        message,
+        error: { code: "indexing/peer-busy", message },
+      };
+    }
+  }
+}
+
 /** Kaydı derin dondurur (dizi kopyalarıyla; ADR-005 stili). */
 function freezeRecord(record: IndexJobRecord): IndexJobRecord {
   return Object.freeze({
     ...record,
+    progress: Object.freeze({ ...record.progress }),
     diagnostics: Object.freeze(record.diagnostics.map((item) => ({ ...item }))),
     warnings: Object.freeze([...record.warnings]),
     error: record.error === null ? null : Object.freeze({ ...record.error }),
@@ -131,6 +451,15 @@ export class IndexJobManager {
   private readonly jobIdGenerator: () => string;
   private readonly scheduler: (task: () => void) => void;
   private readonly maxJobs: number;
+  private readonly coalescePendingRefreshes: boolean;
+  private readonly maxPendingJobs: number;
+  private readonly workerDbPath: string | undefined;
+  private readonly workerEntryPath: string | undefined;
+  private readonly useWorkerThread: boolean;
+  private readonly workerFixedClockIso: string | undefined;
+  private readonly onProgressListener:
+    | ((jobId: string, event: IndexProgressEvent) => void)
+    | undefined;
   /** Sayaç tabanlı default jobId üretimi için monoton sayaç. */
   private counter = 0;
 
@@ -138,9 +467,14 @@ export class IndexJobManager {
   private readonly records = new Map<string, IndexJobRecord>();
   private readonly roots = new Map<string, string>();
   private readonly waiters = new Map<string, JobWaiter[]>();
+  private readonly progressListeners = new Map<string, Set<IndexProgressCallback>>();
   private readonly queue: string[] = [];
   private draining = false;
   private lastJobId: string | undefined;
+  private activeWorker: Worker | undefined;
+  /** Stops lease tracking (main-thread heartbeat) of the active worker job. */
+  private activeWorkerLeaseCleanup: ((release: boolean) => void) | undefined;
+  private closed = false;
 
   constructor(options: IndexJobManagerOptions) {
     this.indexService = options.indexService;
@@ -156,6 +490,20 @@ export class IndexJobManager {
       });
     this.scheduler = options.scheduler ?? ((task) => setImmediate(task));
     this.maxJobs = options.maxJobs ?? DEFAULT_MAX_JOBS;
+    this.coalescePendingRefreshes = options.coalescePendingRefreshes ?? true;
+    const maxPendingJobs = options.maxPendingJobs ?? DEFAULT_MAX_PENDING_INDEX_JOBS;
+    if (!Number.isInteger(maxPendingJobs) || maxPendingJobs < 1) {
+      throw new IndexingError(
+        "indexing/internal",
+        `maxPendingJobs must be a positive integer: ${String(maxPendingJobs)}`,
+      );
+    }
+    this.maxPendingJobs = maxPendingJobs;
+    this.workerDbPath = options.workerDbPath;
+    this.workerEntryPath = options.workerEntryPath;
+    this.useWorkerThread = options.useWorkerThread ?? true;
+    this.workerFixedClockIso = options.workerFixedClockIso;
+    this.onProgressListener = options.onProgress;
   }
 
   /**
@@ -176,25 +524,48 @@ export class IndexJobManager {
       readonly mode: IndexJobMode;
       readonly scope?: string;
       readonly changeSet?: readonly string[];
+      readonly onProgress?: IndexProgressCallback;
     },
   ): IndexJobRecord {
+    if (this.closed) {
+      throw new IndexingError(
+        "indexing/internal",
+        "IndexJobManager is closed; no new indexing jobs are accepted",
+      );
+    }
     if (input.mode !== "full" && input.mode !== "incremental") {
       throw new IndexingError(
         "indexing/unsupported-mode",
-        `mode "${input.mode as string}" desteklenmiyor (full | incremental)`,
+        `mode "${input.mode as string}" is not supported (full | incremental)`,
       );
     }
     if (input.scope !== undefined) {
       throw new IndexingError(
         "indexing/unsupported-mode",
-        "scope dar kapsamlı yeniden indeksleme desteklenmiyor; sonraki dilimde değerlendirilecek",
+        "scoped re-indexing (scope) is not supported; use mode=full or mode=incremental",
       );
     }
     const decision = this.policy.authorizeRoot(rootPath);
     if (!decision.allowed) {
       throw new IndexingError(
         "indexing/root-not-authorized",
-        `kök yetkilendirilmedi (${decision.code}): ${decision.reason}`,
+        `root is not authorized (${decision.code}): ${decision.reason}`,
+      );
+    }
+
+    // Coalesce: an identical refresh that has not started yet would produce
+    // the same result, so the request joins the queued job (its change set
+    // is merged) instead of queueing another full run.
+    if (this.coalescePendingRefreshes) {
+      const pendingJobId = this.findQueuedJob(rootPath, input.mode);
+      if (pendingJobId !== undefined) {
+        return this.coalesceInto(pendingJobId, input.changeSet, input.onProgress);
+      }
+    }
+    if (this.queue.length >= this.maxPendingJobs) {
+      throw new IndexingError(
+        "indexing/limit-exceeded",
+        `indexing queue is full (${String(this.queue.length)} pending job(s), limit ${String(this.maxPendingJobs)}); wait for a queued job to finish before requesting another refresh`,
       );
     }
 
@@ -205,7 +576,15 @@ export class IndexJobManager {
       scope: null,
       changeSet: Object.freeze([...(input.changeSet ?? [])].sort()),
       status: "queued",
+      outcome: null,
+      published: false,
       progressPercent: 0,
+      progress: {
+        phase: "queued",
+        completed: 0,
+        total: 0,
+        message: "Queued for indexing",
+      },
       createdAt: this.clock(),
       startedAt: null,
       finishedAt: null,
@@ -221,10 +600,35 @@ export class IndexJobManager {
     });
     this.records.set(jobId, record);
     this.roots.set(jobId, rootPath);
+    if (input.onProgress !== undefined) {
+      this.subscribeProgress(jobId, input.onProgress);
+    }
     this.lastJobId = jobId;
     this.evictOverflow();
     this.enqueue(jobId);
     return this.records.get(jobId) as IndexJobRecord;
+  }
+
+  /** Subscribes to live structured progress updates for `jobId`; returns an unsubscribe function. */
+  subscribeProgress(
+    jobId: string,
+    listener: IndexProgressCallback,
+  ): () => void {
+    if (this.closed) {
+      return () => {};
+    }
+    let set = this.progressListeners.get(jobId);
+    if (set === undefined) {
+      set = new Set<IndexProgressCallback>();
+      this.progressListeners.set(jobId, set);
+    }
+    set.add(listener);
+    return () => {
+      set?.delete(listener);
+      if (set !== undefined && set.size === 0) {
+        this.progressListeners.delete(jobId);
+      }
+    };
   }
 
   /** jobId ile iş kaydı; bilinmeyen/düşen kimlikte undefined. */
@@ -257,9 +661,9 @@ export class IndexJobManager {
   waitForJob(jobId: string): Promise<IndexJobRecord> {
     const existing = this.records.get(jobId);
     if (existing === undefined) {
-      return Promise.reject(new Error(`bilinmeyen jobId: ${jobId}`));
+      return Promise.reject(new Error(`unknown jobId: ${jobId}`));
     }
-    if (existing.status === "done" || existing.status === "failed") {
+    if (isTerminalIndexJobStatus(existing.status)) {
       return Promise.resolve(existing);
     }
     return new Promise<IndexJobRecord>((resolve, reject) => {
@@ -269,11 +673,115 @@ export class IndexJobManager {
     });
   }
 
+  /**
+   * Shuts down the job manager idempotently:
+   * - prevents new jobs and post-close repository mutations,
+   * - cancels all queued and in-flight jobs and settles pending waiters cleanly,
+   * - clears progress listeners,
+   * - terminates any active off-thread indexing `Worker`.
+   */
+  close(): void {
+    if (this.closed) return;
+    this.closed = true;
+
+    const worker = this.activeWorker;
+    this.activeWorker = undefined;
+    // Release the worker's lease from the main thread so the next context
+    // (e.g. after a roots rebind) never waits for a terminated build.
+    const leaseCleanup = this.activeWorkerLeaseCleanup;
+    this.activeWorkerLeaseCleanup = undefined;
+    leaseCleanup?.(true);
+    if (worker !== undefined) {
+      void worker.terminate().catch(() => {});
+    }
+
+    const cancelledMessage = "Indexing job cancelled: job manager closed";
+    const cancelJob = (jobId: string): void => {
+      const current = this.records.get(jobId);
+      if (current !== undefined && !isTerminalIndexJobStatus(current.status)) {
+        this.records.set(
+          jobId,
+          freezeRecord({
+            ...current,
+            status: "failed",
+            outcome: "failed",
+            published: false,
+            progress: {
+              phase: "failed",
+              completed: current.progress.completed,
+              total: current.progress.total,
+              message: cancelledMessage,
+            },
+            finishedAt: this.clock(),
+            error: { code: "indexing/internal", message: cancelledMessage },
+          }),
+        );
+      }
+      this.settle(jobId);
+    };
+
+    const pendingQueued = this.queue.splice(0);
+    for (const queuedJobId of pendingQueued) {
+      cancelJob(queuedJobId);
+    }
+
+    for (const [jobId, record] of this.records) {
+      if (record.status === "queued" || record.status === "running") {
+        cancelJob(jobId);
+      }
+    }
+
+    for (const jobId of [...this.waiters.keys()]) {
+      this.settle(jobId);
+    }
+    this.waiters.clear();
+    this.progressListeners.clear();
+  }
+
   /* ---------------------------------------------------------------- */
   /* İç kuyruk                                                        */
   /* ---------------------------------------------------------------- */
 
+  /** Oldest job still waiting in the queue for the same root and mode. */
+  private findQueuedJob(rootPath: string, mode: IndexJobMode): string | undefined {
+    for (const jobId of this.queue) {
+      const record = this.records.get(jobId);
+      if (
+        record !== undefined &&
+        record.status === "queued" &&
+        record.mode === mode &&
+        this.roots.get(jobId) === rootPath
+      ) {
+        return jobId;
+      }
+    }
+    return undefined;
+  }
+
+  /** Merges one refresh request into a queued job and returns its updated record. */
+  private coalesceInto(
+    jobId: string,
+    changeSet: readonly string[] | undefined,
+    onProgress: IndexProgressCallback | undefined,
+  ): IndexJobRecord {
+    const current = this.records.get(jobId) as IndexJobRecord;
+    const merged = Object.freeze(
+      [...new Set([...current.changeSet, ...(changeSet ?? [])])].sort(),
+    );
+    const updated = freezeRecord({
+      ...current,
+      changeSet: merged,
+      coalescedRequests: (current.coalescedRequests ?? 0) + 1,
+    });
+    this.records.set(jobId, updated);
+    if (onProgress !== undefined) {
+      this.subscribeProgress(jobId, onProgress);
+    }
+    return updated;
+  }
+
   private enqueue(jobId: string): void {
+    if (this.closed) return;
     this.queue.push(jobId);
     if (this.draining) return;
     this.draining = true;
@@ -289,7 +797,7 @@ export class IndexJobManager {
       // İşler SIRAYLA koşar: her iş tamamlanmadan (await) sonrakine
       // geçilmez — "job başına bir iş, eşzamanlılık yok" sözleşmesi
       // async pipeline ile de korunur.
-      while (this.queue.length > 0) {
+      while (!this.closed && this.queue.length > 0) {
         const jobId = this.queue.shift() as string;
         try {
           await this.runJob(jobId);
@@ -297,7 +805,9 @@ export class IndexJobManager {
           // runJob her hatayı yakalar; buraya ulaşmak beklenmedik bir
           // kusurdur (ör. donmuş kayıt inşası) — işi güvenli biçimde
           // düşürür, kuyruk çalışmaya devam eder.
-          this.failSafely(jobId, error);
+          if (!this.closed) {
+            this.failSafely(jobId, error);
+          }
         }
       }
     } finally {
@@ -305,43 +815,373 @@ export class IndexJobManager {
     }
   }
 
+  private emitProgress(jobId: string, event: IndexProgressEvent): void {
+    if (this.closed) return;
+    const existing = this.records.get(jobId);
+    if (existing !== undefined && existing.status === "running") {
+      const updated = freezeRecord({
+        ...existing,
+        progressPercent: progressPercentFromEvent(event, existing.progressPercent),
+        progress: {
+          phase: event.phase,
+          completed: event.completed,
+          total: event.total,
+          message: event.message,
+        },
+      });
+      this.records.set(jobId, updated);
+    }
+    try {
+      this.onProgressListener?.(jobId, event);
+    } catch {
+      // Listener errors must never crash the indexing job queue.
+    }
+    const perJob = this.progressListeners.get(jobId);
+    if (perJob !== undefined) {
+      for (const listener of perJob) {
+        try {
+          listener(event);
+        } catch {
+          // Listener errors must never crash the indexing job queue.
+        }
+      }
+    }
+  }
+
+  private resolveWorkerEntry(): ResolvedWorkerEntry | undefined {
+    if (this.workerEntryPath !== undefined) {
+      const validated = validateWorkerEntryPath(this.workerEntryPath);
+      if (validated === undefined) return undefined;
+      return {
+        kind: validated.endsWith(".ts") ? "ts-source" : "js",
+        path: validated,
+      };
+    }
+    let selfPath: string;
+    try {
+      selfPath = fileURLToPath(import.meta.url);
+    } catch {
+      return undefined;
+    }
+    const selfDir = path.dirname(selfPath);
+    if (selfPath.endsWith(".ts")) {
+      const tsWorker = validateWorkerEntryPath(
+        path.join(selfDir, "index-worker.ts"),
+        selfDir,
+      );
+      return tsWorker !== undefined
+        ? { kind: "ts-source", path: tsWorker }
+        : undefined;
+    }
+    if (selfPath.endsWith(".mjs")) {
+      const mjsWorker = validateWorkerEntryPath(
+        path.join(selfDir, "index-worker.mjs"),
+        selfDir,
+      );
+      if (mjsWorker !== undefined) return { kind: "js", path: mjsWorker };
+      const jsWorker = validateWorkerEntryPath(
+        path.join(selfDir, "index-worker.js"),
+        selfDir,
+      );
+      if (jsWorker !== undefined) return { kind: "js", path: jsWorker };
+      return undefined;
+    }
+    const jsWorker = validateWorkerEntryPath(
+      path.join(selfDir, "index-worker.js"),
+      selfDir,
+    );
+    if (jsWorker !== undefined) return { kind: "js", path: jsWorker };
+    const mjsWorker = validateWorkerEntryPath(
+      path.join(selfDir, "index-worker.mjs"),
+      selfDir,
+    );
+    if (mjsWorker !== undefined) return { kind: "js", path: mjsWorker };
+    return undefined;
+  }
+
+  private runInWorkerThread(
+    jobId: string,
+    rootPath: string,
+    running: IndexJobRecord,
+    workerEntry: ResolvedWorkerEntry,
+    dbPath: string,
+    serviceConfig: IndexWorkerServiceConfig,
+  ): Promise<IndexWorkerResultSummary> {
+    if (this.closed) {
+      return Promise.reject(
+        new IndexingError(
+          "indexing/internal",
+          "Indexing job cancelled: job manager closed",
+        ),
+      );
+    }
+
+    const payload: IndexWorkerTaskInput = {
+      dbPath,
+      rootPath,
+      mode: running.mode,
+      changeSet: [...running.changeSet],
+      workspaceId: serviceConfig.workspaceId,
+      policyConfig: serviceConfig.policyConfig,
+      limits: serviceConfig.limits,
+      ...(serviceConfig.csharp === undefined ? {} : { csharp: serviceConfig.csharp }),
+      ...(serviceConfig.python === undefined ? {} : { python: serviceConfig.python }),
+      ...(serviceConfig.go === undefined ? {} : { go: serviceConfig.go }),
+      ...(serviceConfig.rust === undefined ? {} : { rust: serviceConfig.rust }),
+      tolerateConcurrentPublishRace: serviceConfig.tolerateConcurrentPublishRace,
+      ...(serviceConfig.hostLabel === undefined ? {} : { hostLabel: serviceConfig.hostLabel }),
+      leaseTtlMs: serviceConfig.leaseTtlMs,
+      leaseHeartbeatIntervalMs: serviceConfig.leaseHeartbeatIntervalMs,
+      ...(serviceConfig.processInstanceId === undefined
+        ? {}
+        : { processInstanceId: serviceConfig.processInstanceId }),
+      ...(serviceConfig.peerWaitTimeoutMs === undefined
+        ? {}
+        : { peerWaitTimeoutMs: serviceConfig.peerWaitTimeoutMs }),
+      ...(serviceConfig.leaseStaleCeilingMs === undefined
+        ? {}
+        : { leaseStaleCeilingMs: serviceConfig.leaseStaleCeilingMs }),
+      ...(this.workerFixedClockIso === undefined
+        ? {}
+        : { fixedClockIso: this.workerFixedClockIso }),
+    };
+
+    return new Promise<IndexWorkerResultSummary>((resolve, reject) => {
+      if (this.closed) {
+        reject(
+          new IndexingError(
+            "indexing/internal",
+            "Indexing job cancelled: job manager closed",
+          ),
+        );
+        return;
+      }
+      let settled = false;
+      const worker =
+        workerEntry.kind === "ts-source"
+          ? new Worker(TS_WORKER_BOOTSTRAP_CODE, {
+              eval: true,
+              workerData: {
+                ...payload,
+                __workerEntryUrl: pathToFileURL(workerEntry.path).href,
+                __causorynBootstrap: true,
+              },
+              execArgv: ["--experimental-transform-types", "--no-warnings"],
+            })
+          : new Worker(pathToFileURL(workerEntry.path), {
+              workerData: payload,
+            });
+      this.activeWorker = worker;
+
+      // Main-thread lease tracking (finding 2): the worker reports the lease
+      // it acquired; the main thread renews it on its own connection so a
+      // worker whose event loop is busy analyzing never looks expired, and
+      // releases it when the worker finishes, crashes or is terminated.
+      let trackedLeaseId: string | undefined;
+      let externalHeartbeat: ExternalLeaseHeartbeat | undefined;
+      const stopLeaseTracking = (release: boolean): void => {
+        externalHeartbeat?.stop({ release });
+        externalHeartbeat = undefined;
+        if (trackedLeaseId !== undefined) {
+          clearBuildLeaseActiveLocally(trackedLeaseId);
+          trackedLeaseId = undefined;
+        }
+      };
+      this.activeWorkerLeaseCleanup = stopLeaseTracking;
+
+      const clearActiveWorker = (): void => {
+        if (this.activeWorker === worker) {
+          this.activeWorker = undefined;
+        }
+        if (this.activeWorkerLeaseCleanup === stopLeaseTracking) {
+          this.activeWorkerLeaseCleanup = undefined;
+        }
+      };
+
+      const finishResolve = (summary: IndexWorkerResultSummary): void => {
+        if (settled) return;
+        settled = true;
+        stopLeaseTracking(true);
+        clearActiveWorker();
+        void worker.terminate().catch(() => {});
+        resolve(summary);
+      };
+
+      const finishReject = (error: unknown): void => {
+        if (settled) return;
+        settled = true;
+        const heldLease = trackedLeaseId !== undefined;
+        stopLeaseTracking(true);
+        clearActiveWorker();
+        void worker.terminate().catch(() => {});
+        if (heldLease && !this.closed) {
+          // The worker died holding the lease: its building row (if any) is
+          // now lease-less, so recover it right away (stale flag stays honest).
+          this.indexService.recoverOrphanBuildsNow();
+        }
+        reject(error);
+      };
+
+      worker.on("message", (raw: unknown) => {
+        if (this.closed) return;
+        if (raw === null || typeof raw !== "object") return;
+        const msg = raw as IndexWorkerMessage;
+        if (msg.type === "lease") {
+          if (typeof msg.leaseId !== "string" || msg.leaseId.length === 0) return;
+          if (msg.event === "acquired") {
+            stopLeaseTracking(false);
+            trackedLeaseId = msg.leaseId;
+            markBuildLeaseActiveLocally(msg.leaseId);
+            externalHeartbeat = this.indexService.startExternalLeaseHeartbeat(msg.leaseId);
+          } else if (msg.leaseId === trackedLeaseId) {
+            stopLeaseTracking(false);
+          }
+          return;
+        }
+        if (msg.type === "progress") {
+          this.emitProgress(jobId, {
+            phase: msg.phase,
+            completed: msg.completed,
+            total: msg.total,
+            message: msg.message,
+          });
+          return;
+        }
+        if (msg.type === "done") {
+          finishResolve(msg.result);
+          return;
+        }
+        if (msg.type === "error") {
+          finishReject(
+            new IndexingError(
+              msg.code === "indexing/root-not-authorized" ||
+                msg.code === "indexing/limit-exceeded" ||
+                msg.code === "indexing/unsupported-mode" ||
+                msg.code === "indexing/internal"
+                ? msg.code
+                : "indexing/internal",
+              msg.message,
+            ),
+          );
+        }
+      });
+
+      worker.on("error", (err) => {
+        clearActiveWorker();
+        finishReject(err);
+      });
+
+      worker.on("exit", (exitCode) => {
+        clearActiveWorker();
+        if (!settled) {
+          finishReject(
+            new IndexingError(
+              "indexing/internal",
+              `Indexing worker exited unexpectedly with code ${String(exitCode)}`,
+            ),
+          );
+        }
+      });
+    });
+  }
+
   /**
-   * İş koşumu (B9 denetim düzeltmesi): TAM pipeline — IndexService'in
-   * runIndexAsync/runIncrementalIndexAsync metotları await edilir. Böylece
-   * refresh_index ve watcher invalidasyonları .cs'li workspace'lerde C#
-   * derin analizini YÜRÜTÜR; senkron runIndex köprüsü (L0 + partial) yalnızca
-   * senkron çağıran tarafın (mcp-server autoIndex başlatma koşumu) kuralı
-   * olarak kalır.
+   * İş koşumu (B9 + Task 2.5): SQLite `dbPath` ve worker giriş noktası
+   * mevcutsa indeksleme işini ana event-loop'u bloklamadan kendi `worker_threads`
+   * iş parçacığında yürütür; bellek içi depo veya worker yoksa in-process async
+   * pipeline'a zarifçe düşer. Her iki yolda da canlı progress olayları akar.
    */
   private async runJob(jobId: string): Promise<void> {
+    if (this.closed) return;
     const current = this.records.get(jobId);
     const rootPath = this.roots.get(jobId);
     if (current === undefined || rootPath === undefined) return;
+
+    const serviceConfig = this.useWorkerThread
+      ? this.indexService.getWorkerConfig()
+      : undefined;
+    const effectiveDbPath = this.workerDbPath ?? serviceConfig?.dbPath;
+    const workerEntry =
+      this.useWorkerThread &&
+      effectiveDbPath !== undefined &&
+      serviceConfig !== undefined
+        ? this.resolveWorkerEntry()
+        : undefined;
+    const executionMode: "worker" | "in-process" =
+      workerEntry !== undefined &&
+      effectiveDbPath !== undefined &&
+      serviceConfig !== undefined
+        ? "worker"
+        : "in-process";
 
     const running = freezeRecord({
       ...current,
       status: "running",
       progressPercent: RUNNING_PROGRESS_PERCENT,
+      progress: {
+        phase: "inventory",
+        completed: 0,
+        total: 0,
+        message: "Starting indexing job",
+      },
       startedAt: this.clock(),
+      executionMode,
     });
     this.records.set(jobId, running);
 
-    let result: IndexRunResult;
+    let result: IndexRunResult | IndexWorkerResultSummary;
     try {
-      result =
-        running.mode === "incremental"
-          ? await this.indexService.runIncrementalIndexAsync(rootPath, running.changeSet)
-          : await this.indexService.runIndexAsync(rootPath);
+      if (
+        executionMode === "worker" &&
+        workerEntry !== undefined &&
+        effectiveDbPath !== undefined &&
+        serviceConfig !== undefined
+      ) {
+        result = await this.runInWorkerThread(
+          jobId,
+          rootPath,
+          running,
+          workerEntry,
+          effectiveDbPath,
+          serviceConfig,
+        );
+        if (this.closed) return;
+        this.indexService.syncRunCountFromRepository();
+      } else {
+        const onProgress: IndexProgressCallback = (event) => {
+          this.emitProgress(jobId, event);
+        };
+        result =
+          running.mode === "incremental"
+            ? await this.indexService.runIncrementalIndexAsync(
+                rootPath,
+                running.changeSet,
+                { onProgress },
+              )
+            : await this.indexService.runIndexAsync(rootPath, { onProgress });
+        if (this.closed) return;
+      }
     } catch (error) {
+      if (this.closed) return;
       const code = error instanceof IndexingError ? error.code : "indexing/internal";
       const message = error instanceof Error ? error.message : String(error);
+      const latestBeforeFail = this.records.get(jobId) ?? running;
       const failed = freezeRecord({
-        ...running,
+        ...latestBeforeFail,
         status: "failed",
+        outcome: "failed",
+        published: false,
+        progress: {
+          phase: "failed",
+          completed: latestBeforeFail.progress.completed,
+          total: latestBeforeFail.progress.total,
+          message,
+        },
         finishedAt: this.clock(),
         error: { code, message },
       });
       this.records.set(jobId, failed);
+      this.progressListeners.delete(jobId);
       this.settle(jobId);
       // Güvenlik bulgusu 5: terminal kayıt sonrası saklama sınırı boşaltılır
       // (yalnızca terminal kayıtlar düşürülür — bkz. evictOverflow).
@@ -349,22 +1189,43 @@ export class IndexJobManager {
       return;
     }
 
+    const latestBeforeDone = this.records.get(jobId) ?? running;
+    const totalFiles = result.fileCount;
+    const outcome = runOutcomeOf(result);
+    const terminal = terminalViewOf(outcome, result);
     const done = freezeRecord({
-      ...running,
-      status: "done",
-      progressPercent: 100,
+      ...latestBeforeDone,
+      status: terminal.status,
+      outcome,
+      published: outcome === "published",
+      progressPercent: terminal.status === "failed" ? latestBeforeDone.progressPercent : 100,
+      progress: {
+        phase: terminal.phase,
+        completed: totalFiles,
+        total: totalFiles,
+        message: terminal.message,
+      },
       finishedAt: this.clock(),
-      snapshotId: result.snapshotId,
-      snapshotState: result.state,
+      snapshotId: terminal.status === "failed" ? null : result.snapshotId,
+      snapshotState: terminal.status === "failed" ? null : result.state,
       stale: result.stale,
       fileCount: result.fileCount,
       tsFileCount: result.tsFileCount,
       csFileCount: result.csFileCount,
       diagnostics: result.diagnostics,
       warnings: result.warnings,
-      error: null,
+      error: terminal.error,
+      executionMode,
+      ...(result.reanalyzedFiles === undefined
+        ? {}
+        : { reanalyzedFiles: result.reanalyzedFiles }),
+      ...(result.cachedFiles === undefined ? {} : { cachedFiles: result.cachedFiles }),
+      ...(result.earlyCutoffApplied === undefined
+        ? {}
+        : { earlyCutoffApplied: result.earlyCutoffApplied }),
     });
     this.records.set(jobId, done);
+    this.progressListeners.delete(jobId);
     this.settle(jobId);
     this.evictOverflow();
   }
@@ -378,11 +1239,20 @@ export class IndexJobManager {
         freezeRecord({
           ...current,
           status: "failed",
+          outcome: "failed",
+          published: false,
+          progress: {
+            phase: "failed",
+            completed: current.progress.completed,
+            total: current.progress.total,
+            message,
+          },
           finishedAt: this.clock(),
           error: { code: "indexing/internal", message },
         }),
       );
     }
+    this.progressListeners.delete(jobId);
     this.settle(jobId);
     this.evictOverflow();
   }
@@ -395,7 +1265,7 @@ export class IndexJobManager {
     this.waiters.delete(jobId);
     for (const waiter of list) {
       if (record === undefined) {
-        waiter.reject(new Error(`iş kaydı kayboldu: ${jobId}`));
+        waiter.reject(new Error(`job record was lost: ${jobId}`));
       } else {
         waiter.resolve(record);
       }
@@ -416,7 +1286,7 @@ export class IndexJobManager {
     while (this.records.size > this.maxJobs) {
       let oldestTerminal: string | undefined;
       for (const [jobId, record] of this.records) {
-        if (record.status === "done" || record.status === "failed") {
+        if (isTerminalIndexJobStatus(record.status)) {
           oldestTerminal = jobId;
           break;
         }
@@ -429,7 +1299,7 @@ export class IndexJobManager {
       if (list !== undefined) {
         this.waiters.delete(jobId);
         for (const waiter of list) {
-          waiter.reject(new Error(`iş kaydı sınır aşımıyla düşürüldü: ${jobId}`));
+          waiter.reject(new Error(`job record was evicted (maxJobs limit): ${jobId}`));
         }
       }
     }

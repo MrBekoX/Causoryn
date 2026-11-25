@@ -83,7 +83,10 @@ interface ClientPair {
 
 /** Context'i SDK InMemory transport üzerinden bir Client'a bağlar. */
 async function connectClient(context: CausorynContext): Promise<ClientPair> {
-  const server = createCausorynMcpServer(context);
+  const server = createCausorynMcpServer(context, {
+    toolProfile: "full",
+    outputSchemaProfile: "full",
+  });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   const client = new Client({ name: "vitest-wiki-client", version: "0.0.0" });
   await server.connect(serverTransport);
@@ -208,7 +211,7 @@ describe("Wiki araç katalogu", { timeout: 60_000 }, () => {
         expect(tool?.outputSchema).toBeDefined();
         expect((tool?.description ?? "").length).toBeGreaterThan(0);
       }
-      expect(names.length).toBe(29);
+      expect(names.length).toBe(32);
     } finally {
       await pair.close();
     }
@@ -400,7 +403,10 @@ describe("causoryn_wiki_build", { timeout: 60_000 }, () => {
         realStore.searchWiki(...args),
     } as unknown as SqliteWikiStore;
     const sabotaged = { ...context, wikiStore: sabotage } as unknown as CausorynContext;
-    const server = createCausorynMcpServer(sabotaged);
+    const server = createCausorynMcpServer(sabotaged, {
+      toolProfile: "full",
+      outputSchemaProfile: "full",
+    });
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
     const client = new Client({ name: "publish-sabotage", version: "0.0.0" });
     await server.connect(serverTransport);
@@ -1172,7 +1178,7 @@ describe("causoryn_wiki_get_versions", { timeout: 60_000 }, () => {
       expect(versions[0]?.availability).toBe("available");
       expect(String(versions[0]?.contentHash)).toMatch(/^[0-9a-f]{64}$/);
       expect(String(versions[0]?.linkSetHash)).toMatch(/^[0-9a-f]{64}$/);
-      expect(versions[0]?.templateVersion).toBe("1.0.0");
+      expect(versions[0]?.templateVersion).toBe("1.1.0");
       const coverage = versions[0]?.coverage as Record<string, unknown>;
       expect(typeof coverage.status).toBe("string");
 
@@ -1801,12 +1807,12 @@ describe("wikiDiff eksiksizliği + K-013 #2 mod disiplini", { timeout: 60_000 },
       expect(byKind("added")).toEqual({
         contractId: contractNodeId(schemaTarget),
         changeKind: "added",
-        summary: "table:customers added: hedef WikiSnapshot'ın graph sözleşme yüzeyinde yeni kayıt",
+        summary: "table:customers added: new entry in the target WikiSnapshot's graph contract surface",
       });
       expect(byKind("removed")).toEqual({
         contractId: contractNodeId(eventBase),
         changeKind: "removed",
-        summary: "app.OrderCreated removed: hedef WikiSnapshot'ın graph sözleşme yüzeyinde kayıt yok",
+        summary: "app.OrderCreated removed: no entry in the target WikiSnapshot's graph contract surface",
       });
       // Modified summary içerik karması farkını taşır (base/target karma
       // parçaları; uydurma özet değil, yüzey karmalarından türetim).
@@ -1840,9 +1846,12 @@ describe("wikiDiff eksiksizliği + K-013 #2 mod disiplini", { timeout: 60_000 },
       expect(data.contractChanges).toEqual([]);
       const warnings = envelope.warnings as string[];
       expect(
-        warnings.some((warning) => warning.includes("arka graph snapshot'ı çözümlenemedi")),
+        warnings.some((warning) => warning.includes("backing graph snapshot") && warning.includes("could not be resolved")),
       ).toBe(true);
-      expect(warnings.some((warning) => warning.includes("K-013 #7"))).toBe(true);
+      expect(
+        warnings.some((warning) => warning.includes("the contract surface could not be compared")),
+      ).toBe(true);
+      expect(warnings.some((warning) => warning.includes("K-013"))).toBe(false);
     } finally {
       context.close();
     }

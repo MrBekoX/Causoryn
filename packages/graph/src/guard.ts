@@ -216,7 +216,7 @@ export function findViolations(
   ) {
     throw new GuardError(
       "guard/invalid-input",
-      "findViolations: geçersiz snapshot girdisi (meta.id/nodes/edges zorunlu)",
+      "findViolations: invalid snapshot input (meta.id, nodes and edges are required)",
     );
   }
 

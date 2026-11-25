@@ -71,7 +71,7 @@ const HALF_LINE_SCRIPT = `process.stdout.write('{"id":"x"}'); setTimeout(() => {
 /** Anında stderr yazıp çıkan sahte süreç (worker crash fallback). */
 const CRASH_SCRIPT = `process.stderr.write('sahte worker cakildi'); process.exit(1);`;
 /** Geçerli PROTOCOL.md v1 hata yanıtı yazıp çıkan sahte süreç. */
-const WORKER_ERROR_SCRIPT = `process.stdout.write(JSON.stringify({ id: 'analyze:adapter-python-worker-error', protocolVersion: '1', status: 'error', error: { code: 'LIMIT_EXCEEDED', message: 'dosya sayısı sınırı aşıldı: 5001 > 5000' } }) + '\\n'); process.exit(0);`;
+const WORKER_ERROR_SCRIPT = `process.stdout.write(JSON.stringify({ id: 'analyze:adapter-python-worker-error', protocolVersion: '1', status: 'error', error: { code: 'LIMIT_EXCEEDED', message: 'file count limit exceeded: 5001 > 5000' } }) + '\\n'); process.exit(0);`;
 
 // Python yokluğunda koşulamayan blok: meşru skip.
 describe.skipIf(!pythonAvailable)("adapters/python (M1-Python)", () => {
@@ -188,7 +188,7 @@ describe.skipIf(!pythonAvailable)("adapters/python (M1-Python)", () => {
     expect(
       result.warnings.some(
         (warning) =>
-          warning.includes("Python worker kullanılamıyor") && warning.includes("L0/L1"),
+          warning.includes("Python worker unavailable") && warning.includes("L0/L1"),
       ),
     ).toBe(true);
   });
@@ -214,7 +214,7 @@ describe.skipIf(!pythonAvailable)("adapters/python (M1-Python)", () => {
     expect(capture.child).not.toBeNull();
     expect(capture.child?.killed).toBe(true);
     expect(
-      result.warnings.some((warning) => warning.includes("zaman aşımı")),
+      result.warnings.some((warning) => warning.includes("timeout")),
     ).toBe(true);
   });
 
@@ -259,7 +259,7 @@ describe.skipIf(!pythonAvailable)("adapters/python (M1-Python)", () => {
       result.warnings.some((warning) => warning.includes("LIMIT_EXCEEDED")),
     ).toBe(true);
     expect(
-      result.warnings.some((warning) => warning.includes("worker hatası")),
+      result.warnings.some((warning) => warning.includes("worker error")),
     ).toBe(true);
   });
 
@@ -298,6 +298,39 @@ describe.skipIf(!pythonAvailable)("adapters/python (M1-Python)", () => {
     // Allowlist disiplini: parent'taki anahtar/token benzeri değerler taşınmaz.
     expect(Object.keys(env).every((key) => key !== "PYTHONPATH")).toBe(true);
     expect(env["PATH"]).toBeDefined();
+  });
+
+  it("izolasyon (Task 1.1): python -I -B -X utf8 ve güvenilen cwd=dirname(workerScriptPath) ile başlatılır", async () => {
+    const captured: Array<{
+      args: readonly string[];
+      cwd?: string;
+      shell?: false;
+      windowsHide?: true;
+    }> = [];
+    const result = await analyzePythonWorkspace({
+      workspaceId: "adapter-python-isolation",
+      files: fixtureFiles(),
+      options: {
+        requestTimeoutMs: 30_000,
+        spawnProcess: (_cmd, args, options) => {
+          captured.push({
+            args,
+            ...(options.cwd !== undefined ? { cwd: options.cwd } : {}),
+            ...(options.shell !== undefined ? { shell: options.shell } : {}),
+            ...(options.windowsHide !== undefined
+              ? { windowsHide: options.windowsHide }
+              : {}),
+          });
+          return spawn("node", ["-e", CRASH_SCRIPT], options);
+        },
+      },
+    });
+    expect(result.workerAvailable).toBe(false);
+    expect(captured).toHaveLength(1);
+    expect(captured[0]?.args).toEqual(["-I", "-B", "-X", "utf8", WORKER_SCRIPT]);
+    expect(captured[0]?.cwd).toBe(dirname(WORKER_SCRIPT));
+    expect(captured[0]?.shell).toBe(false);
+    expect(captured[0]?.windowsHide).toBe(true);
   });
 });
 
@@ -374,7 +407,7 @@ describe("adapters/python runWorkerAnalyze", () => {
       },
     });
     expect(outcome.status).toBe("unavailable");
-    expect(outcome.detail).toContain("sınırını aştı");
+    expect(outcome.detail).toContain("character limit");
     // Saklanan kuyruk bütçeye kırpılır: birikim sınırsız büyüyemez.
     expect(outcome.stderr.length).toBeLessThanOrEqual(64);
     expect(killed.length).toBe(1);

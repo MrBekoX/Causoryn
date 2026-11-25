@@ -14,16 +14,25 @@
  * CHILD env PATH'ine ÖNEKLENİR. Argümanlar boş sabit dizidir; istek içeriği
  * yalnızca stdin üzerinden taşınır.
  */
-import { delimiter as pathDelimiter } from "node:path";
+import { delimiter as pathDelimiter, dirname, join } from "node:path";
 import {
   buildAllowlistedWorkerEnv,
+  isFullyQualifiedPath,
   runLineJsonWorker,
+  type SidecarSpawnFunction,
   type WorkerRunOutcome,
 } from "@causoryn/sidecar-ipc";
 import { isSafeCommandPath, WORKER_ENV_ALLOWLIST } from "./cargo.js";
-import { DEFAULT_RESPONSE_MAX_CHARS, type SpawnFunction } from "./types.js";
+import { readFileIdentity, sameFileIdentity, type FileIdentity } from "./file-integrity.js";
+import { DEFAULT_RESPONSE_MAX_CHARS } from "./types.js";
 
 export type { WorkerRunOutcome } from "@causoryn/sidecar-ipc";
+export type { FileIdentity as WorkerBinaryIdentity } from "./file-integrity.js";
+
+/** Identity (device, inode, size, mtime) of a single-link worker binary, or null. */
+export function readWorkerBinaryIdentity(binaryPath: string): FileIdentity | null {
+  return readFileIdentity(binaryPath);
+}
 
 function isSafeBinaryPath(value: string): boolean {
   return isSafeCommandPath(value);
@@ -69,7 +78,13 @@ export interface RunWorkerAnalyzeInput {
    */
   readonly stderrMaxChars?: number;
   /** Test enjeksiyonu; default node:child_process.spawn. */
-  readonly spawnProcess?: SpawnFunction;
+  readonly spawnProcess?: SidecarSpawnFunction;
+  /**
+   * Identity of the binary whose hash was verified. When given, the binary
+   * is re-checked synchronously right before the spawn and not started if
+   * it was replaced or modified in the meantime.
+   */
+  readonly expectedBinaryIdentity?: FileIdentity;
 }
 
 export type RunRustWorkerAnalyzeInput = RunWorkerAnalyzeInput;
@@ -77,24 +92,45 @@ export type RunRustWorkerAnalyzeInput = RunWorkerAnalyzeInput;
 export function runWorkerAnalyze(
   input: RunWorkerAnalyzeInput,
 ): Promise<WorkerRunOutcome> {
-  // Savunma: binary adı ve dizin güvenlik filtresinden geçmeli; aksi
-  // halde süreç hiç başlatılmaz (statik güvenlik kuralı: literal komut + sabit argüman).
+  // Savunma: binary adı (yalnızca dosya adı, yol ayırıcı/kaçış yok) ve
+  // dizin güvenlik filtresinden geçmeli; aksi halde süreç hiç başlatılmaz.
   if (
     !isSafeBinaryPath(input.workerBinaryName) ||
-    !isSafeBinaryPath(input.workerDir)
+    !isSafeBinaryPath(input.workerDir) ||
+    input.workerBinaryName.includes("/") ||
+    input.workerBinaryName.includes("\\") ||
+    input.workerBinaryName === ".." ||
+    input.workerBinaryName === "." ||
+    !isFullyQualifiedPath(input.workerDir)
   ) {
     return Promise.resolve({
       status: "unavailable",
       response: null,
       stderr: "",
-      detail: "geçersiz worker binary yolu (güvenlik filtresi reddetti)",
+      detail: "invalid worker binary path (rejected by the safety filter; the worker directory must be absolute)",
     });
   }
 
+  // Started by its absolute path: a bare binary name would be looked up in
+  // the cwd first on Windows.
+  const workerBinaryPath = join(input.workerDir, input.workerBinaryName);
+  if (input.expectedBinaryIdentity !== undefined) {
+    // No await between this check and the spawn inside runLineJsonWorker.
+    const current = readFileIdentity(workerBinaryPath);
+    if (current === null || !sameFileIdentity(current, input.expectedBinaryIdentity)) {
+      return Promise.resolve({
+        status: "unavailable",
+        response: null,
+        stderr: "",
+        detail: `worker binary changed after its integrity check; it was not started: ${workerBinaryPath}`,
+      });
+    }
+  }
   return runLineJsonWorker({
-    command: input.workerBinaryName,
+    command: workerBinaryPath,
     args: [],
     env: buildWorkerEnv(input.workerDir),
+    cwd: dirname(workerBinaryPath),
     requestPayload: input.requestPayload,
     requestTimeoutMs: input.requestTimeoutMs,
     responseMaxChars: input.responseMaxChars ?? DEFAULT_RESPONSE_MAX_CHARS,

@@ -3,9 +3,9 @@
     "causoryn": {
       "command": "node",
       "args": [
-        "scripts/plugin-mcp-launcher.mjs",
+        "${PLUGIN_ROOT}/scripts/plugin-mcp-launcher.mjs",
         "--expected-version",
-        "0.2.4",
+        "0.3.0",
         "--allow-cwd",
         "--auto-data-dir",
         "--client",

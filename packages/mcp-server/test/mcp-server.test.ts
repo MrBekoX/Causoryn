@@ -64,7 +64,10 @@ interface ClientPair {
 
 /** Context'i SDK InMemory transport üzerinden bir Client'a bağlar. */
 async function connectClient(context: CausorynContext): Promise<ClientPair> {
-  const server = createCausorynMcpServer(context);
+  const server = createCausorynMcpServer(context, {
+    toolProfile: "full",
+    outputSchemaProfile: "full",
+  });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   const client = new Client({ name: "vitest-client", version: "0.0.0" });
   await server.connect(serverTransport);
@@ -135,7 +138,11 @@ describe("MCP server — protokol düzeyi", { timeout: 30_000 }, () => {
     const pair = await connectClient(makeContext());
     try {
       const { tools } = await pair.client.listTools();
-      expect(tools.map((t) => t.name).sort()).toEqual([...TOOL_NAMES].sort());
+      const listedNames = new Set(tools.map((t) => t.name));
+      for (const legacyName of TOOL_NAMES) {
+        expect(listedNames.has(legacyName), `missing legacy tool ${legacyName}`).toBe(true);
+      }
+      expect(tools).toHaveLength(32);
       // Sıra TŞ §10.2 katalog sırası + §16A.8 Wiki ekidir: index_status +
       // refresh_index sprint-2 B6 ile, get_symbol_context sprint-2 B5 ile,
       // trace_execution sprint-2 B4 ile, Faz C'nin 7 aracı sprint-3 C8 ile,
@@ -1178,7 +1185,11 @@ describe("MCP server — protokol düzeyi", { timeout: 30_000 }, () => {
       const status = await callTool(pair.client, "causoryn_index_status", { jobId });
       const statusData = statusDataOf(expectEnvelope(status));
       const job = statusData.job as Record<string, unknown>;
-      expect(job.status).toBe("done");
+      // A no-op job published nothing, so it is never reported `done`
+      // (Task 1.7 criterion 5): status `reused`, outcome `unchanged`.
+      expect(job.status).toBe("reused");
+      expect(job.outcome).toBe("unchanged");
+      expect(job.published).toBe(false);
       expect(job.mode).toBe("incremental");
       expect(job.snapshotId).toBe(initialSnapshotId);
       expect((job.warnings as string[]).some((w) => w.includes("incremental no-op"))).toBe(true);
@@ -1726,7 +1737,7 @@ describe(
       const pair = await connectClient(makeContext({ autoIndex: false }));
       try {
         const { tools } = await pair.client.listTools();
-        expect(tools.length).toBe(29);
+        expect(tools.length).toBe(32);
         for (const tool of tools) {
           expect(tool.annotations, `${tool.name} annotations eksik`).toBeDefined();
           expect(tool.annotations?.destructiveHint, `${tool.name} destructiveHint`).toBe(false);
@@ -1742,12 +1753,13 @@ describe(
         expect(writeTools).toEqual([
           "causoryn_export_documentation",
           "causoryn_refresh_index",
+          "causoryn_status",
           "causoryn_wiki_build",
         ]);
         const readOnlyTools = tools
           .filter((t) => t.annotations?.readOnlyHint === true)
           .map((t) => t.name);
-        expect(readOnlyTools.length).toBe(26);
+        expect(readOnlyTools.length).toBe(28);
       } finally {
         await pair.close();
       }
@@ -1758,14 +1770,14 @@ describe(
       try {
         const { tools } = await pair.client.listTools();
         const refreshTool = tools.find((t) => t.name === "causoryn_refresh_index");
-        expect(refreshTool?.description).toContain("InMemoryGraphRepository");
+        expect(refreshTool?.description).toMatch(/data store/i);
         expect(refreshTool?.description).not.toContain(
           "Yalnızca Causoryn izinli data-root'una yazar.",
         );
 
         const preflightTool = tools.find((t) => t.name === "causoryn_preflight_change");
-        expect(preflightTool?.description).toContain("PreflightManifestStore");
-        expect(preflightTool?.description).toContain("FIFO 200");
+        expect(preflightTool?.description).toMatch(/read-only/i);
+        expect(preflightTool?.description).toMatch(/preflight manifest/i);
       } finally {
         await pair.close();
       }
@@ -1850,6 +1862,16 @@ describe(
         unresolvedEdges: 0,
         totalEdges: 2,
         coverageRatio: 1,
+        byLanguage: {
+          python: {
+            tier: "L2",
+            files: 1,
+            verifiedEdges: 1,
+            heuristicEdges: 1,
+            unresolvedEdges: 0,
+            coverageRatio: 1,
+          },
+        },
       });
 
       const pyPair = await connectClient(pyContext);

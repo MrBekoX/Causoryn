@@ -155,7 +155,7 @@ describe("TypeScript çözüm sözleşmesi", () => {
     const paths = references.map((ref) => String(field(ref, "path")));
     // Faz C2 (Living Wiki) ile packages/wiki çözüme eklendi.
     // M1-Python ile adapters/python (stdlib ast sidecar) çözüme eklendi.
-    // M1-Rust ile adapters/rust (syn 2 sidecar) çözüme eklendi.
+    // M1-Rust ile adapters/rust (syn 3 sidecar) çözüme eklendi.
     // M1-Go ile adapters/go (stdlib go/parser sidecar) çözüme eklendi.
     // K-020 ile packages/sidecar-ipc ortak sidecar IPC çekirdeği çözüme eklendi.
     // K-021 ile packages/causoryn açık kaynak CLI/dağıtım paketi çözüme eklendi.

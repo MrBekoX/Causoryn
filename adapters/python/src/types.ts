@@ -8,10 +8,11 @@
  * SnapshotEdgeInput / SnapshotEvidenceInput) birebir uyumludur — ID
  * üretmez, normalizer merkezi kuraldır (TŞ §7.1).
  *
- * Güvenlik (proje kırmızı çizgisi 6): süreç yalnızca LİTERAL "python"
- * komutu + SABİT argüman dizisi ["-B", workerScriptPath] ile başlatılır;
- * kaynak içerikleri asla komut satırına gitmez — yalnızca stdin JSON'da
- * taşınır.
+ * Security (project red line 6): the process is started with a fixed
+ * argument array (["-I", "-B", "-X", "utf8", workerScriptPath]) and the
+ * configured Python command, or the default candidates (python3/python on
+ * POSIX, python on win32) resolved to an absolute path; source contents never
+ * reach the command line, only the stdin JSON.
  */
 import type { ChildProcess } from "node:child_process";
 import { join } from "node:path";
@@ -37,8 +38,35 @@ export const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
  */
 export const DEFAULT_RESPONSE_MAX_CHARS = 64 * 1024 * 1024;
 
-/** Default "python" komutu — PATH'ten çözülür; opsiyonla override edilebilir. */
-export const DEFAULT_PYTHON_COMMAND = "python";
+/**
+ * Python commands tried, in order, when no command is configured; the first
+ * one found on PATH (outside the analyzed workspace) is started. Many POSIX
+ * systems (Debian/Ubuntu, macOS) ship only `python3`; the Windows installer
+ * provides `python.exe`. `causoryn doctor` probes the same list (pinned copy
+ * in packages/causoryn/src/types.ts, guarded by
+ * tests/python-command-candidates.test.ts).
+ */
+export const PYTHON_COMMAND_CANDIDATES: {
+  readonly posix: readonly string[];
+  readonly win32: readonly string[];
+} = {
+  posix: ["python3", "python"],
+  win32: ["python"],
+};
+
+/** Default Python command candidates for `platform`, in the order they are tried. */
+export function defaultPythonCommandCandidates(
+  platform: NodeJS.Platform = process.platform,
+): readonly string[] {
+  return platform === "win32" ? PYTHON_COMMAND_CANDIDATES.win32 : PYTHON_COMMAND_CANDIDATES.posix;
+}
+
+/**
+ * Default `pythonCommand`: the empty string selects the default resolution
+ * (the first of {@link defaultPythonCommandCandidates} found on PATH). Any
+ * other value is an explicit command and is used as-is.
+ */
+export const DEFAULT_PYTHON_COMMAND = "";
 
 /**
  * Worker script repo-relative sabit bölümü — repo kökü import.meta.url'den
@@ -79,6 +107,9 @@ export type SpawnFunction = (
   options: {
     readonly stdio: ["pipe", "pipe", "pipe"];
     readonly env: Readonly<Record<string, string>>;
+    readonly cwd?: string;
+    readonly shell?: false;
+    readonly windowsHide?: true;
   },
 ) => ChildProcess;
 
@@ -92,7 +123,10 @@ export interface PythonSourceFile {
 export interface PythonAdapterOptions {
   /** Worker script mutlak yolu — SABİT/config'den; kullanıcı girdisi değildir. */
   readonly workerScriptPath: string;
-  /** python çalıştırılabilirinin yolu/adı. */
+  /**
+   * Python executable name or absolute path, used as-is; DEFAULT_PYTHON_COMMAND
+   * selects the first default candidate found on PATH.
+   */
   readonly pythonCommand: string;
   /** Tek istek üst sınırı (ms); aşım → süreç kill + L0/L1 fallback. */
   readonly requestTimeoutMs: number;
@@ -106,6 +140,12 @@ export interface AnalyzePythonWorkspaceInput {
   /** Opaque workspace kimliği; boş/boşluk DomainError ile reddedilir. */
   readonly workspaceId: string;
   readonly files: readonly PythonSourceFile[];
+  /**
+   * Absolute root of the analyzed workspace (optional). PATH entries inside
+   * it are never used to resolve toolchain executables; the process cwd is
+   * always treated the same way.
+   */
+  readonly workspaceRoot?: string;
   readonly options?: Partial<PythonAdapterOptions>;
 }
 

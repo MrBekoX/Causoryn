@@ -46,6 +46,7 @@ const PURE_LF_SCRIPTS = [
   path.join("scripts", "causoryn.mjs"),
   path.join("scripts", "plugin-mcp-launcher.mjs"),
   path.join("scripts", "lib", "node-version-guard.mjs"),
+  path.join("scripts", "lib", "asset-root.mjs"),
 ];
 
 const LEAKED_BINARY_PATTERNS = [
@@ -114,6 +115,7 @@ export function verifyPackageReady(pkgDir = DEFAULT_PKG_DIR) {
     path.join(distDir, "index.js"),
     path.join(distDir, "mcp-server.mjs"),
     path.join(distDir, "mcp-server.mjs.LEGAL.txt"),
+    path.join(distDir, "index-worker.mjs"),
     path.join(distDir, "bundle-manifest.json"),
     path.join(distDir, "node_modules", "better-sqlite3", "LICENSE"),
     path.join(distDir, "typescript-lib", "lib.es2022.full.d.ts"),

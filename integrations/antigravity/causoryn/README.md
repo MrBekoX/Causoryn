@@ -1,6 +1,6 @@
 # Causoryn for Antigravity
 
-> **Monorepo Development Fixture:** This directory (`integrations/antigravity/causoryn`) is a local monorepo development/testing fixture for verifying staged bundle compatibility. End users can install Causoryn via `npx causoryn@0.2.4 setup --client antigravity --yes` or from the repository root (`https://github.com/MrBekoX/Causoryn`).
+> **Monorepo Development Fixture:** This directory (`integrations/antigravity/causoryn`) is a local monorepo development/testing fixture for verifying staged bundle compatibility. End users can install Causoryn via `npx causoryn@0.3.0 setup --client antigravity --yes` or from the repository root (`https://github.com/MrBekoX/Causoryn`).
 
 > Evidence: TŞ v2.1 §17.1, §17.4, §22 · `docs/hosts/antigravity.md` · `packages/mcp-server` (29 published MCP tools)
 
@@ -23,9 +23,9 @@
 This plugin directory carries two synchronized MCP server definitions so both the built-in Antigravity customization loader and the TŞ §17.1 portable plugin specification resolve the same server cleanly:
 
 1. **`mcp_config.json` (Primary — native Antigravity plugin loader):**
-   The built-in Antigravity plugin loader discovers MCP servers from `<plugin_dir>/mcp_config.json` and spawns `node` with the plugin-relative entrypoint `"scripts/mcp-server.mjs"`.
+   The built-in Antigravity plugin loader discovers MCP servers from `<plugin_dir>/mcp_config.json`, expands `${PLUGIN_ROOT}` to the plugin directory, and spawns `node` with `"${PLUGIN_ROOT}/scripts/mcp-server.mjs"`. The entry is anchored at the plugin root because `node` would resolve a bare relative path against the host's working directory.
 2. **`mcp.json` (Portable manifest — TŞ v2.1 §17.1):**
-   Uses `"${PLUGIN_ROOT}/scripts/mcp-server.mjs"` per the TŞ §17.1 portable plugin manifest contract (no fragile parent-directory `../../..` traversal into monorepo build folders, and no `--data-dir` CLI flag because `stdio.ts` reads configuration solely from `CAUSORYN_CONFIG`).
+   Uses the same `"${PLUGIN_ROOT}/scripts/mcp-server.mjs"` per the TŞ §17.1 portable plugin manifest contract (no fragile parent-directory `../../..` traversal into monorepo build folders, and no `--data-dir` CLI flag because `stdio.ts` reads configuration solely from `CAUSORYN_CONFIG`).
 3. **`plugin.json` (Clean top-level manifest):**
    Contains only fields supported by the native Antigravity loader (`name`, `displayName`, `version`, `description`, `suggestedPrompts`). Unknown top-level keys such as `$schema` are intentionally omitted because the native loader silently discards them.
 4. **Global server naming (`"causoryn"`):**
@@ -60,5 +60,5 @@ Both `mcp_config.json` and `mcp.json` ship with a strict **default-deny** config
 
 ## Verification Honesty (`agy` CLI Status: `NOT RUN`)
 
-- **Direct `stdio` spawn coverage:** With the bundle staged, `antigravity-plugin.test.ts` spawns `node scripts/mcp-server.mjs` from this directory using `mcp_config.json` (`command`, `args`, `env`). It asserts `initialize` against `SERVER_VERSION` (`0.2.4`), `tools/list` (29 tools), `causoryn_get_capabilities` (`ok`), `causoryn_workspace_summary` (`WORKSPACE_NOT_AUTHORIZED`), and JSON-RPC-only `stdout`.
+- **Direct `stdio` spawn coverage:** With the bundle staged, `antigravity-plugin.test.ts` spawns `node scripts/mcp-server.mjs` from this directory using `mcp_config.json` (`command`, `args`, `env`). It asserts `initialize` against `SERVER_VERSION` (`0.3.0`), `tools/list` (the 11 default `core` tools), `causoryn_status` (`ok`), `causoryn_map_system` (`WORKSPACE_NOT_AUTHORIZED`), and JSON-RPC-only `stdout`.
 - **`NOT RUN` via `agy` CLI (TŞ §22):** `agy CLI bulunamadı — bu hostta kurulum/smoke koşulmadı`. Because the `agy` command-line binary is not installed on this host machine, CLI lifecycle commands (`agy plugin validate --strict`, `agy plugin install`, `agy plugin list`) were **NOT RUN** and are documented as reference examples in `docs/hosts/antigravity.md`.

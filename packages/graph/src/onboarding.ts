@@ -88,6 +88,27 @@ const DEFAULT_LIMITS: Omit<OnboardingLimits, "maxLearningSteps"> = {
   maxCriticalFlows: DEFAULT_MAX_CRITICAL_FLOWS,
 };
 
+/**
+ * Upper bounds for caller-supplied limits. A larger request is clamped to the
+ * ceiling with an `onboarding/limit-clamped` warning (same contract as the
+ * trace tool's maxDepth/maxPaths clamping), so a single call cannot ask for
+ * an unbounded report.
+ */
+export const ONBOARDING_LIMIT_CEILINGS: Readonly<OnboardingLimits> = Object.freeze({
+  entryPointLimit: 100,
+  topModuleCount: 100,
+  maxLearningSteps: 500,
+  maxCriticalFlows: 50,
+});
+
+/** Fixed key order for validation and clamp warnings (deterministic output). */
+const LIMIT_KEYS: readonly (keyof OnboardingLimits)[] = [
+  "entryPointLimit",
+  "topModuleCount",
+  "maxLearningSteps",
+  "maxCriticalFlows",
+];
+
 export interface GenerateOnboardingInput {
   readonly profile: OnboardingProfile;
   readonly limits?: Partial<OnboardingLimits>;
@@ -168,7 +189,8 @@ export interface OnboardingRiskArea {
 export interface OnboardingWarning {
   readonly code:
     | "onboarding/no-entry-endpoint"
-    | "onboarding/learning-order-truncated";
+    | "onboarding/learning-order-truncated"
+    | "onboarding/limit-clamped";
   readonly message: string;
 }
 
@@ -246,7 +268,7 @@ function assertValidProfile(profile: OnboardingProfile): void {
   ) {
     throw new GraphRepositoryError(
       "graph/onboarding-invalid-input",
-      `Bilinmeyen onboarding profili: ${String(profile)}`,
+      `Unknown onboarding profile: ${String(profile)}`,
     );
   }
 }
@@ -259,23 +281,85 @@ function assertValidProfile(profile: OnboardingProfile): void {
 function resolveLimits(
   profile: OnboardingProfile,
   overrides?: Partial<OnboardingLimits>,
-): OnboardingLimits {
-  const limits = {
+): { readonly limits: OnboardingLimits; readonly clampWarnings: readonly OnboardingWarning[] } {
+  const requested = {
     ...DEFAULT_LIMITS,
     ...overrides,
     maxLearningSteps:
       overrides?.maxLearningSteps ?? PROFILE_LEARNING_STEPS[profile],
   };
-  for (const [key, value] of Object.entries(limits)) {
+  for (const [key, value] of Object.entries(requested)) {
     if (typeof value !== "number" || !Number.isInteger(value) || value <= 0) {
       throw new GraphRepositoryError(
         "graph/onboarding-invalid-input",
-        `Onboarding limiti pozitif tam sayı olmalı (${key}): ${String(value)}`,
+        `Onboarding limit must be a positive integer (${key}): ${String(value)}`,
       );
     }
   }
-  // Doğrulama tüm alanların pozitif tam sayı olduğunu garanti etti.
-  return limits as OnboardingLimits;
+  // Validation guaranteed positive integers; oversized values are clamped.
+  const limits: Record<keyof OnboardingLimits, number> = { ...requested };
+  const clampWarnings: OnboardingWarning[] = [];
+  for (const key of LIMIT_KEYS) {
+    const ceiling = ONBOARDING_LIMIT_CEILINGS[key];
+    if (limits[key] > ceiling) {
+      clampWarnings.push({
+        code: "onboarding/limit-clamped",
+        message: `${key}=${String(limits[key])} exceeds the ceiling ${String(ceiling)}; clamped to ${String(ceiling)}`,
+      });
+      limits[key] = ceiling;
+    }
+  }
+  return { limits, clampWarnings };
+}
+
+/**
+ * Binary min-heap of component indices. Component indices follow the
+ * representative's lexical order (orderedReps is sorted with
+ * compareNodeKey), so "smallest index" is exactly the previous
+ * "lexically smallest ready representative" tie-break.
+ */
+class ComponentMinHeap {
+  private readonly items: number[] = [];
+
+  get size(): number {
+    return this.items.length;
+  }
+
+  push(value: number): void {
+    const items = this.items;
+    items.push(value);
+    let index = items.length - 1;
+    while (index > 0) {
+      const parent = (index - 1) >> 1;
+      const parentValue = items[parent] as number;
+      if (parentValue <= value) break;
+      items[index] = parentValue;
+      index = parent;
+    }
+    items[index] = value;
+  }
+
+  pop(): number | undefined {
+    const items = this.items;
+    const top = items[0];
+    const last = items.pop();
+    if (top === undefined || last === undefined || items.length === 0) return top;
+    let index = 0;
+    for (;;) {
+      const left = index * 2 + 1;
+      if (left >= items.length) break;
+      const right = left + 1;
+      const leftValue = items[left] as number;
+      const rightValue = right < items.length ? (items[right] as number) : Number.POSITIVE_INFINITY;
+      const child = rightValue < leftValue ? right : left;
+      const childValue = items[child] as number;
+      if (last <= childValue) break;
+      items[index] = childValue;
+      index = child;
+    }
+    items[index] = last;
+    return top;
+  }
 }
 
 /** Tarjan SCC — iterative DFS (yığın taşması yok; bounded V+E). */
@@ -365,7 +449,7 @@ export function generateOnboarding(
   input: GenerateOnboardingInput,
 ): OnboardingReport {
   assertValidProfile(input.profile);
-  const limits = resolveLimits(input.profile, input.limits);
+  const { limits, clampWarnings } = resolveLimits(input.profile, input.limits);
   // Snapshot durumu: yalnızca yayımlanabilir snapshot işlenir (TŞ §9:
   // building okuma yollarında görünmez, failed yayın akışına girmez).
   // Bellek deposu bunu publish'te garanti eder; saf çekirdek doğrudan
@@ -375,7 +459,7 @@ export function generateOnboarding(
   if (state !== "ready" && state !== "partial") {
     throw new GraphRepositoryError(
       "graph/onboarding-snapshot-state",
-      `onboarding yalnızca ready/partial snapshot üzerinde çalışır; snapshot durumu: ${String(state)}`,
+      `onboarding only runs on a ready or partial snapshot; snapshot state: ${String(state)}`,
     );
   }
 
@@ -393,7 +477,7 @@ export function generateOnboarding(
     inDegree.set(edge.to, (inDegree.get(edge.to) ?? 0) + 1);
   }
 
-  const warnings: OnboardingWarning[] = [];
+  const warnings: OnboardingWarning[] = [...clampWarnings];
 
   // 2) Giriş noktaları: endpoint node'ları + giriş derecesi 0, giden akışı
   //    olan sınıflar (düşük dereeli yüksek önemli). Endpoint yoksa uyarı.
@@ -438,8 +522,8 @@ export function generateOnboarding(
     warnings.push({
       code: "onboarding/no-entry-endpoint",
       message:
-        "Snapshot'ta Endpoint node'u bulunamadı; giriş noktaları türetilemedi. " +
-        "Unresolved kenar uçları 'riskli alanlar' bölümünde raporlanır.",
+        "No Endpoint node was found in the snapshot, so entry points could not be derived. " +
+        "Unresolved edge endpoints are reported in the riskAreas section.",
     });
   }
   entryPoints.sort((a, b) => {
@@ -554,22 +638,18 @@ export function generateOnboarding(
   }
   for (const neighbors of condensationOut.values()) neighbors.sort((a, b) => a - b);
 
-  // Kahn: hazır bileşenler arasından representative'ı leksik en küçük olan
-  // seçilir (deterministik tie-break).
-  const ready: number[] = [];
+  // Kahn: among the ready components the one whose representative is
+  // lexically smallest is taken next (deterministic tie-break). Component
+  // ids are assigned in that lexical order, so a min-heap on the id gives the
+  // same order in O((V + E) log V) instead of re-sorting the ready list on
+  // every step.
+  const ready = new ComponentMinHeap();
   for (const [comp, incomingCount] of condensationIn) {
     if (incomingCount === 0) ready.push(comp);
   }
-  const compareComponents = (a: number, b: number): number => {
-    const nodeA = nodesById.get(orderedReps[a] ?? "");
-    const nodeB = nodesById.get(orderedReps[b] ?? "");
-    if (nodeA === undefined || nodeB === undefined) return 0;
-    return compareNodeKey(nodeA, nodeB);
-  };
   const orderedComponents: number[] = [];
-  while (ready.length > 0) {
-    ready.sort(compareComponents);
-    const next = ready.shift();
+  while (ready.size > 0) {
+    const next = ready.pop();
     if (next === undefined) break;
     orderedComponents.push(next);
     for (const neighbor of condensationOut.get(next) ?? []) {
@@ -606,7 +686,7 @@ export function generateOnboarding(
   if (totalLearningSteps > limits.maxLearningSteps) {
     warnings.push({
       code: "onboarding/learning-order-truncated",
-      message: `Öğrenme sırası tavana indirildi: ${limits.maxLearningSteps}/${totalLearningSteps} adım gösteriliyor.`,
+      message: `Learning order was clamped to the ceiling: showing ${limits.maxLearningSteps}/${totalLearningSteps} steps.`,
     });
   }
 

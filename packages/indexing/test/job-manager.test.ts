@@ -26,6 +26,7 @@ import { describe, expect, it } from "vitest";
  */
 
 import {
+  DEFAULT_MAX_PENDING_INDEX_JOBS,
   IndexJobManager,
   IndexService,
   IndexingError,
@@ -54,6 +55,8 @@ function makeHarness(
     readonly allowRoots?: readonly string[];
     readonly jobIdGenerator?: () => string;
     readonly maxJobs?: number;
+    readonly coalescePendingRefreshes?: boolean;
+    readonly maxPendingJobs?: number;
   } = {},
 ): ManagerHarness {
   const allowRoots = options.allowRoots ?? [FIXTURE_ROOT];
@@ -75,6 +78,10 @@ function makeHarness(
       ? {}
       : { jobIdGenerator: options.jobIdGenerator }),
     ...(options.maxJobs === undefined ? {} : { maxJobs: options.maxJobs }),
+    ...(options.coalescePendingRefreshes === undefined
+      ? {}
+      : { coalescePendingRefreshes: options.coalescePendingRefreshes }),
+    ...(options.maxPendingJobs === undefined ? {} : { maxPendingJobs: options.maxPendingJobs }),
     // Manuel scheduler: her task kuyruğa girer; test dilediğinde boşaltır.
     scheduler: (task) => {
       tasks.push(task);
@@ -163,7 +170,9 @@ describe("IndexJobManager — refresh_index iş yönetimi (sprint-2 B6)", () => 
   }, 30_000);
 
   it("pozitif: sayaç tabanlı jobId deterministiktir ve işler sırayla koşar", async () => {
-    const harness = makeHarness();
+    // Raw queue mechanics with two distinct queued jobs: identical pending
+    // refreshes are coalesced by default, so this test opts out explicitly.
+    const harness = makeHarness({ coalescePendingRefreshes: false });
     const first = harness.manager.refreshIndex(FIXTURE_ROOT, { mode: "full" });
     const second = harness.manager.refreshIndex(FIXTURE_ROOT, { mode: "full" });
 
@@ -227,10 +236,18 @@ describe("IndexJobManager — refresh_index iş yönetimi (sprint-2 B6)", () => 
 
       for (const task of harness.tasks.splice(0)) task();
       const done = await harness.manager.waitForJob(incremental.jobId);
-      expect(done.status).toBe("done");
+      // Fixture unchanged: the incremental hash comparison is a no-op and the
+      // current snapshot is kept. A job that published nothing is never
+      // reported `done` (Task 1.7 criterion 5): it ends `reused` / `unchanged`.
+      expect(done.status).toBe("reused");
+      expect(done.outcome).toBe("unchanged");
+      expect(done.published).toBe(false);
+      expect(done.progress.message).toBe(
+        `No changes; snapshot ${String(fullDone.snapshotId)} is current`,
+      );
+      expect(fullDone.status).toBe("done");
+      expect(fullDone.outcome).toBe("published");
       expect(done.mode).toBe("incremental");
-      // Fixture değişmedi: incremental karma karşılaştırması no-op verir,
-      // mevcut snapshot korunur (IndexService unit testleri ayrıca kanıtlar).
       expect(done.snapshotId).toBe(fullDone.snapshotId);
       expect(harness.manager.jobs().map((job) => job.jobId)).toEqual([
         full.jobId,
@@ -292,7 +309,8 @@ describe("IndexJobManager — refresh_index iş yönetimi (sprint-2 B6)", () => 
   });
 
   it("maxJobs aşımı: en eski iş kaydı FIFO düşer, bilinen jobId sorgusu undefined döner", async () => {
-    const harness = makeHarness({ maxJobs: 2 });
+    // Record retention needs three distinct jobs (coalescing opted out).
+    const harness = makeHarness({ maxJobs: 2, coalescePendingRefreshes: false });
     const r1 = harness.manager.refreshIndex(FIXTURE_ROOT, { mode: "full" });
     const r2 = harness.manager.refreshIndex(FIXTURE_ROOT, { mode: "full" });
     const r3 = harness.manager.refreshIndex(FIXTURE_ROOT, { mode: "full" });
@@ -312,7 +330,8 @@ describe("IndexJobManager — refresh_index iş yönetimi (sprint-2 B6)", () => 
     // düşürür; waitForJob reddedilir ve iş hiç koşmaz (sessiz iptal).
     // Doğru davranış: maxJobs kayıt SAKLAMA sınırıdır — düşürme yalnızca
     // terminal (done/failed) kayıtlara uygulanır; iş koşumu tamamlanır.
-    const harness = makeHarness({ maxJobs: 2 });
+    // Three distinct queued jobs are required (coalescing opted out).
+    const harness = makeHarness({ maxJobs: 2, coalescePendingRefreshes: false });
     const r1 = harness.manager.refreshIndex(FIXTURE_ROOT, { mode: "full" });
     const r2 = harness.manager.refreshIndex(FIXTURE_ROOT, { mode: "full" });
     const r3 = harness.manager.refreshIndex(FIXTURE_ROOT, { mode: "full" });
@@ -334,4 +353,105 @@ describe("IndexJobManager — refresh_index iş yönetimi (sprint-2 B6)", () => 
     expect(harness.manager.status(r3.jobId)).toBeDefined();
     expect(harness.manager.latest()?.jobId).toBe(r3.jobId);
   }, 30_000);
+});
+
+describe("IndexJobManager — refresh coalescing and pending queue bound", () => {
+  it("coalesces an identical pending refresh into the queued job and reports the merge", async () => {
+    const harness = makeHarness();
+    const first = harness.manager.refreshIndex(FIXTURE_ROOT, { mode: "full" });
+    const second = harness.manager.refreshIndex(FIXTURE_ROOT, { mode: "full" });
+    const third = harness.manager.refreshIndex(FIXTURE_ROOT, { mode: "full" });
+
+    expect(first.status).toBe("queued");
+    expect(first.coalescedRequests).toBeUndefined();
+    expect(second.jobId).toBe(first.jobId);
+    expect(second.status).toBe("queued");
+    expect(second.coalescedRequests).toBe(1);
+    expect(third.jobId).toBe(first.jobId);
+    expect(third.coalescedRequests).toBe(2);
+    expect(harness.manager.jobs()).toHaveLength(1);
+
+    for (const task of harness.tasks.splice(0)) task();
+    const done = await harness.manager.waitForJob(first.jobId);
+    // Existing terminal semantics are unchanged: one run, one outcome.
+    expect(done.status).toBe("done");
+    expect(done.outcome).toBe("published");
+    expect(done.published).toBe(true);
+    expect(done.coalescedRequests).toBe(2);
+  }, 30_000);
+
+  it("merges the change sets of coalesced incremental refreshes", () => {
+    const harness = makeHarness();
+    const first = harness.manager.refreshIndex(FIXTURE_ROOT, {
+      mode: "incremental",
+      changeSet: ["src/b.ts", "src/a.ts"],
+    });
+    const second = harness.manager.refreshIndex(FIXTURE_ROOT, {
+      mode: "incremental",
+      changeSet: ["src/c.ts", "src/a.ts"],
+    });
+    expect(second.jobId).toBe(first.jobId);
+    expect(second.changeSet).toEqual(["src/a.ts", "src/b.ts", "src/c.ts"]);
+    expect(harness.manager.status(first.jobId)?.changeSet).toEqual([
+      "src/a.ts",
+      "src/b.ts",
+      "src/c.ts",
+    ]);
+    harness.manager.close();
+  });
+
+  it("does not coalesce different modes or a refresh requested while the job is already running", () => {
+    const harness = makeHarness();
+    const full = harness.manager.refreshIndex(FIXTURE_ROOT, { mode: "full" });
+    const incremental = harness.manager.refreshIndex(FIXTURE_ROOT, { mode: "incremental" });
+    expect(incremental.jobId).not.toBe(full.jobId);
+
+    // Start draining: the first job leaves the queue and is running.
+    for (const task of harness.tasks.splice(0)) task();
+    expect(harness.manager.status(full.jobId)?.status).toBe("running");
+    const afterStart = harness.manager.refreshIndex(FIXTURE_ROOT, { mode: "full" });
+    // Changes after a run started need a new run: a fresh job is queued.
+    expect(afterStart.jobId).not.toBe(full.jobId);
+    expect(afterStart.coalescedRequests).toBeUndefined();
+    harness.manager.close();
+  });
+
+  it("rejects a new job with indexing/limit-exceeded once maxPendingJobs jobs are queued; coalescing still succeeds", () => {
+    const harness = makeHarness({ maxPendingJobs: 1 });
+    const full = harness.manager.refreshIndex(FIXTURE_ROOT, { mode: "full" });
+    // Identical request: merged, never rejected by the bound.
+    expect(harness.manager.refreshIndex(FIXTURE_ROOT, { mode: "full" }).jobId).toBe(full.jobId);
+    let caught: unknown;
+    try {
+      harness.manager.refreshIndex(FIXTURE_ROOT, { mode: "incremental" });
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBeInstanceOf(IndexingError);
+    expect((caught as IndexingError).code).toBe("indexing/limit-exceeded");
+    expect((caught as IndexingError).message).toContain("1 pending");
+    // No record is opened for the rejected request.
+    expect(harness.manager.jobs()).toHaveLength(1);
+    expect(harness.manager.latest()?.jobId).toBe(full.jobId);
+    harness.manager.close();
+  });
+
+  it("bounds the queue by default even when coalescing is disabled", () => {
+    const harness = makeHarness({ coalescePendingRefreshes: false });
+    let caught: unknown;
+    let accepted = 0;
+    for (let attempt = 0; attempt < 1_000; attempt += 1) {
+      try {
+        harness.manager.refreshIndex(FIXTURE_ROOT, { mode: "full" });
+        accepted += 1;
+      } catch (error) {
+        caught = error;
+        break;
+      }
+    }
+    expect(caught).toBeInstanceOf(IndexingError);
+    expect((caught as IndexingError).code).toBe("indexing/limit-exceeded");
+    expect(accepted).toBe(DEFAULT_MAX_PENDING_INDEX_JOBS);
+    harness.manager.close();
+  });
 });

@@ -37,8 +37,24 @@
  *   K-008 ile, SYMBOL_NOT_FOUND ise K-011 (wiki/decisions.md:37) ile karara
  *   bağlanmıştır).
  */
-export { SERVER_NAME, SERVER_VERSION, SCHEMA_VERSION, TOOL_NAMES } from "./version.js";
-export type { ToolName } from "./version.js";
+export {
+  CORE_TOOL_NAMES,
+  DEPRECATED_TOOL_REPLACEMENTS,
+  HISTORY_TOOL_NAMES,
+  SCHEMA_VERSION,
+  SERVER_NAME,
+  SERVER_VERSION,
+  TOOL_NAMES,
+  TOOL_PROFILES,
+  WIKI_TOOL_NAMES,
+} from "./version.js";
+export type {
+  CoreToolName,
+  HistoryToolName,
+  ToolName,
+  ToolProfile,
+  WikiToolName,
+} from "./version.js";
 export { CAUSORYN_TOOL_ERROR_CODES, CausorynToolError } from "./errors.js";
 export type { CausorynToolErrorCode } from "./errors.js";
 export { parseCausorynServerConfig, causorynServerConfigSchema, CausorynConfigError } from "./config.js";
@@ -46,12 +62,19 @@ export type { CausorynServerConfig } from "./config.js";
 export {
   EnvelopeSchema,
   CoverageSchema,
+  IndexingInProgressDataSchema,
+  LanguageCoverageSchema,
   ToolErrorSchema,
   buildEnvelope,
   envelopeOutputSchema,
   errorEnvelope,
 } from "./envelope.js";
-export type { Coverage, Envelope } from "./envelope.js";
+export type {
+  Coverage,
+  Envelope,
+  IndexingInProgressData,
+  LanguageCoverage,
+} from "./envelope.js";
 export { encodeCursor, decodeCursor } from "./cursor.js";
 export { createCausorynContext } from "./context.js";
 export type { CausorynContext, ContextOverrides } from "./context.js";
@@ -60,7 +83,11 @@ export {
   PreflightManifestStore,
 } from "./preflight-store.js";
 export { createCausorynMcpServer } from "./server.js";
-export type { CreateCausorynServerOptions, OutputSchemaProfile } from "./server.js";
+export type {
+  BeforeToolCallContext,
+  CreateCausorynServerOptions,
+  OutputSchemaProfile,
+} from "./server.js";
 export {
   McpCliUsageError,
   attachMcpRootsWorkspaceBinder,
@@ -69,8 +96,11 @@ export {
   inspectProjectRootSafety,
   isSafeProjectRoot,
   parseMcpCliArgs,
+  parseToolProfile,
   resolveBaseDataDir,
   resolveEffectiveOutputSchemaProfile,
+  resolveEffectiveToolProfile,
+  resolveIndexWaitTimeoutMs,
 } from "./runtime-cli.js";
 export type {
   AttachMcpRootsBinderOptions,

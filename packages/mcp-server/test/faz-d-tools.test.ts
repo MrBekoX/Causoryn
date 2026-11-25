@@ -85,7 +85,10 @@ interface ClientPair {
 }
 
 async function connectClient(context: CausorynContext): Promise<ClientPair> {
-  const server = createCausorynMcpServer(context);
+  const server = createCausorynMcpServer(context, {
+    toolProfile: "full",
+    outputSchemaProfile: "full",
+  });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   const client = new Client({ name: "vitest-faz-d-client", version: "0.0.0" });
   await server.connect(serverTransport);
@@ -327,7 +330,7 @@ describe("Faz D katalog büyümesi", { timeout: 60_000 }, () => {
     const pair = await connectClient(makeContext());
     try {
       const { tools } = await pair.client.listTools();
-      expect(tools).toHaveLength(29);
+      expect(tools).toHaveLength(32);
       for (const name of [
         "causoryn_check_contracts",
         "causoryn_detect_contract_drift",
@@ -899,7 +902,7 @@ describe("causoryn_preflight_change", { timeout: 60_000 }, () => {
         // contractChecks bu dilimde türetilmez → dürüst limitation notu.
         expect(data.contractChecks).toEqual([]);
         expect(
-          limitations.some((note) => note.includes("sözleşme denetimi")),
+          limitations.some((note) => note.includes("contract check")),
         ).toBe(true);
       } finally {
         await pair.close();
@@ -925,7 +928,7 @@ describe("causoryn_preflight_change", { timeout: 60_000 }, () => {
       expect(candidates[0]?.target).toBe("NoSuchSymbolAnywhere");
       const limitations = data.limitations as string[];
       expect(
-        limitations.some((note) => note.includes("aday bulunamadı")),
+        limitations.some((note) => note.includes("no candidates found")),
         "adaysız hedef dürüst limitation taşır",
       ).toBe(true);
     } finally {
@@ -1318,7 +1321,7 @@ describe("causoryn_get_agent_context contract ayağı", { timeout: 60_000 }, () 
       const degraded = data.degradedLegs as Array<Record<string, unknown>>;
       const contractLeg = degraded.find((leg) => leg.leg === "contract");
       expect(contractLeg).toBeDefined();
-      expect(String(contractLeg?.reason)).toContain("sözleşme kaydı yok");
+      expect(String(contractLeg?.reason)).toContain("no contract records");
     } finally {
       context.close();
     }

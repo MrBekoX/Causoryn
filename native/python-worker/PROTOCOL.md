@@ -95,9 +95,21 @@ CPython parser'ının yapısal sınırlarıdır — aşırı derin iç içe yap�
 "too many nested parentheses") ile reddedilir → dosya başına `SyntaxError`
 tanısı + yalnızca File node (L0), analiz `partial` sürer ve süreç yaşamaya
 devam eder (kabul testi: tests/python-worker.test.ts "aşırı derin iç içe
-yapı"). İkincil katman olarak AST gezinme derinliği 1000'i aşan alt
-ağaçlar atlanır ve dosya başına bir kez `ADAPTER_INTERNAL` tanısı yazılır;
-bu sayaç tipik koşumda tetiklenmez (parser sınırı daha önce devreye girer).
+yapı"). İkincil katman olarak AST gezinme derinliği `MAX_AST_DEPTH`'i aşan alt
+ağaçlar atlanır ve dosya başına bir kez `ADAPTER_INTERNAL` tanısı yazılır.
+`MAX_AST_DEPTH` is 500 (at most half the interpreter recursion limit), so
+the walk keeps headroom below the recursion limit; long operator chains
+such as `a + b + ...` parse without parentheses and reach this limit. A
+`RecursionError` that still occurs during the declaration or call pass is
+isolated per file (per callable in the call pass): the file gets an
+`ADAPTER_INTERNAL` diagnostic ("AST traversal exceeded the interpreter
+recursion budget; ...") and the rest of the batch is analyzed.
+
+Rendered expression text (`ast.unparse` of call targets and decorators in
+UnknownExternal names, rationales and warnings) is capped at 200
+characters; a longer rendering is cut and suffixed with `...#<12 hex
+digits of its SHA-256>`. An expression too deep for `ast.unparse` is
+rendered from its source segment instead.
 
 **Süreç yaşamlılığının gerçek mekanizması (takım denetimi tur-2
 netleştirmesi):** bildirim/çağrı gezinmesi REKÜRSİFTİR (`_declare` /
@@ -127,7 +139,7 @@ Analiz tamamlandığında:
   },
   "coverageRatio": 0.64,
   "unsupportedConstructs": [...],
-  "warnings": ["app.py: 'flask_app.get' dekoratör yolu literal string değil; ..."],
+  "warnings": ["app.py: the route path of decorator 'flask_app.get' is not a literal string; ..."],
   "diagnostics": [{ "relativePath": "broken.py", "code": "SyntaxError", "message": "...", "line": 1 }],
   "nodes": [...], "edges": [...], "evidence": [...]
 }
@@ -151,10 +163,25 @@ Analiz tamamlandığında:
   "qualifiedName": "services.orders_service.create_order",
   "language": "python",
   "relativePath": "services/orders_service.py",
+  "span": { "startLine": 14, "endLine": 22 },
   "attributes": { "sourceHash": "...", "method": "POST", "path": "/orders" }
 }
 ```
 
+- `span` — optional (protocol v1 stays compatible: clients ignore an unknown
+  field, and an older worker simply omits it). The 1-based, inclusive line
+  range of the declaration from the `ast` positions `lineno`..`end_lineno` of
+  the `def` / `async def` / `class` statement (Function, Method, Class nodes).
+  Decorators are not part of the range (since Python 3.8 `lineno` is the
+  `def`/`class` line); it is the same range as the node's CONTAINS `ast-span`
+  evidence. A node declared more than once in one file (a property getter and
+  its setter, a redefined function) gets the smallest range that covers every
+  declaration, so the result does not depend on visit order. File, Endpoint and
+  UnknownExternal nodes carry no `span`. The adapter
+  (`adapters/python/src/node-span.ts`) accepts it only as positive integers with
+  `startLine <= endLine` inside the analyzed file and binds it to that file's
+  `relativePath` and source hash as the node `location`; anything else is
+  dropped with one warning and the node keeps its file anchor.
 - `kind` — TŞ §8 27-node kataloğuyla sınırlıdır; worker liste dışı kind
   üretemez (çıkış anında sert doğrulama). Kullanılanlar: `File`,
   `Function`, `Method`, `Class`, `Endpoint`, `UnknownExternal`.
@@ -189,7 +216,7 @@ Analiz tamamlandığında:
   "evidence": [ { "kind": "ast-span", "span": {...}, "analyzerId": "python-worker",
                   "analyzerVersion": "0.1.0", "rationale": "CALLS: ... (heuristic; ...)." } ],
   "ambiguity": { "candidates": ["services.orders_service.create_order"],
-                 "reason": "import edilen modül sembolü; Python ad bağlamı dinamiktir, ..." }
+                 "reason": "imported module symbol; Python name binding is dynamic, ..." }
 }
 ```
 
@@ -261,8 +288,8 @@ verified) → `services.orders_service.create_order` (heuristic; import) →
 `monkey-patching`, `runtime-dependency-injection`,
 `dynamic-import (importlib/__import__)`, `local-variable-type-inference`
 (yerel değişkene atanan nesnenin metot çağrısı çözülmez),
-`module-level-calls (caller'sız)`, `decorator-arg-non-literal-path`,
-`function-level-imports (yalnızca modül düzeyi import tablosu)`.
+`module-level-calls (no caller)`, `decorator-arg-non-literal-path`,
+`function-level-imports (module-level import table only)`.
 
 ## 4. Hata yanıtı — `status: "error"`
 

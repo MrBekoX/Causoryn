@@ -42,6 +42,23 @@ export interface InventoryEntry {
 
 const READ_CHUNK_BYTES = 64 * 1024;
 
+/**
+ * Maximum directory nesting below the workspace root the inventory descends into.
+ * Real source trees stay far below it (ignored trees such as node_modules are
+ * pruned before descending); a deeper tree fails with `indexing/limit-exceeded`
+ * instead of being truncated silently.
+ */
+export const MAX_INVENTORY_DEPTH = 256;
+
+function assertWithinDepth(depth: number, maxDepth: number, childPosix: string): void {
+  if (depth > maxDepth) {
+    throw new IndexingError(
+      "indexing/limit-exceeded",
+      `directory nesting exceeded the inventory depth limit (${String(maxDepth)}) at ${childPosix}`,
+    );
+  }
+}
+
 function toPosixRelative(nativeRelative: string): string {
   return nativeRelative.split(path.sep).join("/");
 }
@@ -51,7 +68,7 @@ function assertCanonicalRootIsDirectory(canonicalRoot: string): void {
   if (!rootStat.isDirectory()) {
     throw new IndexingError(
       "indexing/internal",
-      "envanter kökü bir dizin değil (authorizeRoot kararıyla çelişki)",
+      "inventory root is not a directory (contradicts the authorizeRoot decision)",
     );
   }
 }
@@ -143,16 +160,22 @@ export function yieldToEventLoop(): Promise<void> {
 /**
  * Politika izinli dosyaları kök altında toplar. Dizin, ignore kuralına
  * takılırsa alt ağacı budanır (checkPath ataları da değerlendirir).
+ *
+ * Only regular files and real directories are visited: link entries (symbolic
+ * links, junctions) and special files are skipped without a policy call, so
+ * nothing stats or resolves a link target. Directory nesting deeper than
+ * `maxDepth` fails with `indexing/limit-exceeded`.
  */
 export function collectInventory(
   policy: WorkspaceAccessPolicy,
   canonicalRoot: string,
   maxFiles: number,
+  maxDepth = MAX_INVENTORY_DEPTH,
 ): InventoryEntry[] {
   assertCanonicalRootIsDirectory(canonicalRoot);
   const entries: InventoryEntry[] = [];
 
-  const walk = (nativeRelative: string): void => {
+  const walk = (nativeRelative: string, depth: number): void => {
     const absolute =
       nativeRelative === "" ? canonicalRoot : path.join(canonicalRoot, nativeRelative);
     const dirents = readdirSync(absolute, { withFileTypes: true }).sort((a, b) =>
@@ -167,14 +190,13 @@ export function collectInventory(
         if (!dirDecision.allowed) {
           continue;
         }
-        walk(childRelative);
+        assertWithinDepth(depth + 1, maxDepth, childPosix);
+        walk(childRelative, depth + 1);
         continue;
       }
       if (!dirent.isFile()) {
-        const entryDecision = policy.checkPath(canonicalRoot, childPosix);
-        if (!entryDecision.allowed) {
-          continue;
-        }
+        // Links (symbolic links, junctions) and special files are never followed:
+        // skipped before any policy call stats or resolves them.
         continue;
       }
       const entry = readAllowedFileEntry(policy, canonicalRoot, childRelative, childPosix);
@@ -183,13 +205,13 @@ export function collectInventory(
       if (entries.length > maxFiles) {
         throw new IndexingError(
           "indexing/limit-exceeded",
-          `dosya sayısı index.maxFiles sınırını (${String(maxFiles)}) aştı`,
+          `file count exceeded the index.maxFiles limit (${String(maxFiles)})`,
         );
       }
     }
   };
 
-  walk("");
+  walk("", 0);
   entries.sort((a, b) =>
     a.relativePath < b.relativePath ? -1 : a.relativePath > b.relativePath ? 1 : 0,
   );
@@ -207,6 +229,7 @@ export async function collectInventoryAsync(
   canonicalRoot: string,
   maxFiles: number,
   yieldEvery = 64,
+  maxDepth = MAX_INVENTORY_DEPTH,
 ): Promise<InventoryEntry[]> {
   assertCanonicalRootIsDirectory(canonicalRoot);
 
@@ -221,7 +244,7 @@ export async function collectInventoryAsync(
     }
   };
 
-  const walk = async (nativeRelative: string): Promise<void> => {
+  const walk = async (nativeRelative: string, depth: number): Promise<void> => {
     const absolute =
       nativeRelative === "" ? canonicalRoot : path.join(canonicalRoot, nativeRelative);
     const dirents = readdirSync(absolute, { withFileTypes: true }).sort((a, b) =>
@@ -237,14 +260,13 @@ export async function collectInventoryAsync(
         if (!dirDecision.allowed) {
           continue;
         }
-        await walk(childRelative);
+        assertWithinDepth(depth + 1, maxDepth, childPosix);
+        await walk(childRelative, depth + 1);
         continue;
       }
       if (!dirent.isFile()) {
-        const entryDecision = policy.checkPath(canonicalRoot, childPosix);
-        if (!entryDecision.allowed) {
-          continue;
-        }
+        // Links (symbolic links, junctions) and special files are never followed:
+        // skipped before any policy call stats or resolves them.
         continue;
       }
       const entry = readAllowedFileEntry(policy, canonicalRoot, childRelative, childPosix);
@@ -253,13 +275,13 @@ export async function collectInventoryAsync(
       if (entries.length > maxFiles) {
         throw new IndexingError(
           "indexing/limit-exceeded",
-          `dosya sayısı index.maxFiles sınırını (${String(maxFiles)}) aştı`,
+          `file count exceeded the index.maxFiles limit (${String(maxFiles)})`,
         );
       }
     }
   };
 
-  await walk("");
+  await walk("", 0);
   entries.sort((a, b) =>
     a.relativePath < b.relativePath ? -1 : a.relativePath > b.relativePath ? 1 : 0,
   );

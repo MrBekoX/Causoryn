@@ -67,22 +67,59 @@ export type {
   RustIndexSettings,
   WorkerRunStatus,
 } from "./fingerprint.js";
-export { INDEXING_VERSION, IndexService } from "./index-service.js";
+export {
+  clearBuildLeaseActiveLocally,
+  DEFAULT_PEER_WAIT_TIMEOUT_MS,
+  INDEXING_VERSION,
+  IndexService,
+  isBuildLeaseActiveLocally,
+  markBuildLeaseActiveLocally,
+} from "./index-service.js";
 export type {
+  BuildLeaseEvent,
+  BuildLeaseHeartbeatConnection,
+  BuildLeaseInfo,
+  BuildLeaseLivenessOptions,
+  BuildLeaseStore,
+  ExternalLeaseHeartbeat,
   CsharpIndexOptions,
+  FileFactRecord,
+  FileFactStore,
   GoIndexOptions,
   IndexDiagnostic,
   IndexLimits,
+  IndexPeerStatus,
+  IndexProgressCallback,
+  IndexProgressEvent,
+  IndexProgressPhase,
+  IndexRunOptions,
+  IndexRunOutcome,
   IndexRunResult,
   IndexServiceOptions,
+  IndexWorkerServiceConfig,
   PythonIndexOptions,
   RustIndexOptions,
 } from "./index-service.js";
-export { IndexJobManager } from "./job-manager.js";
+export { runIndexWorkerTask, startIndexWorker } from "./index-worker-core.js";
+export type {
+  CloseableGraphRepository,
+  IndexWorkerMessage,
+  IndexWorkerResultSummary,
+  IndexWorkerTaskInput,
+  SqliteRepositoryConstructor,
+} from "./index-worker-core.js";
+export {
+  DEFAULT_MAX_PENDING_INDEX_JOBS,
+  IndexJobManager,
+  isTerminalIndexJobStatus,
+  validateWorkerEntryPath,
+} from "./job-manager.js";
 export type {
   IndexJobError,
+  IndexJobOutcome,
   IndexJobManagerOptions,
   IndexJobMode,
+  IndexJobProgress,
   IndexJobRecord,
   IndexJobStatus,
 } from "./job-manager.js";
@@ -110,7 +147,7 @@ export type {
  */
 const FRAMEWORK_LINKERS_LABEL =
   TS_ADAPTER_FRAMEWORK_LINKERS.length === 0
-    ? "yok"
+    ? "none"
     : TS_ADAPTER_FRAMEWORK_LINKERS.join("+");
 
 /**
@@ -204,7 +241,7 @@ export const INDEXED_ADAPTERS: readonly IndexedAdapterInfo[] = [
     version: GO_ADAPTER_VERSION,
     levels: {
       astParse: "L1",
-      symbolResolution: "heuristic-only (semantik L2 yok)",
+      symbolResolution: "heuristic-only (no semantic L2)",
       frameworkLinkers: "http-router-registration (L3)",
     },
     source: "adapters/go",

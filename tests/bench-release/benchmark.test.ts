@@ -313,8 +313,8 @@ describe("F7 benchmark — docs yeniden üretim komutu sözleşmesi", { timeout:
 
   it("docs'taki 'Yeniden üretim' satırı bench runner'ı gösterir; varsayılan config'e dayanan kırık komut kaldırılmıştır", () => {
     const doc = renderBenchmarksDoc(syntheticReport());
-    const line = doc.split("\n").find((candidate) => candidate.startsWith("- Yeniden üretim:"));
-    expect(line, "docs'ta '- Yeniden üretim:' satırı bulunamadı").toBeDefined();
+    const line = doc.split("\n").find((candidate) => candidate.startsWith("- **Yeniden üretim:**"));
+    expect(line, "docs'ta '- **Yeniden üretim:**' satırı bulunamadı").toBeDefined();
     // Komut bench config'ini (`npm run bench` / vitest.bench.config.ts)
     // göstermeli: varsayılan config tests/bench-release'i dışlar.
     expect(line).toMatch(/npm run bench|vitest\.bench\.config\.ts/);

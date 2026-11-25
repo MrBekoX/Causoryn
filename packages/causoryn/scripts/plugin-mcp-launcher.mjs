@@ -5,11 +5,18 @@
  * İç içe `npx` alt-süreci açmadan kurulu plugin dizinindeki `package.json`
  * sürüm bütünlüğünü doğrular, `CAUSORYN_ASSET_ROOT` ortamını bağlar ve saf
  * `stdout` disipliniyle doğrudan `dist/mcp-server.mjs` modülünü yükler.
+ *
+ * `CAUSORYN_ASSET_ROOT`, sunucunun sidecar worker kaynaklarını (`native/`)
+ * yüklediği kökü seçer. Tanımsız/boşsa doğrulanmış paket köküne bağlanır;
+ * miras alınan bir değer (geliştirme override'ı) yalnızca mutlak, var olan ve
+ * aynı doğrulanmış sürümdeki `causoryn` paketini (`native/` ile) gösteriyorsa
+ * kabul edilir, aksi halde başlatıcı `2` ile fail-closed çıkar.
  */
 import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
+import { resolveAssetRootOverride } from "./lib/asset-root.mjs";
 import { assertSupportedNodeVersion } from "./lib/node-version-guard.mjs";
 
 assertSupportedNodeVersion();
@@ -27,7 +34,7 @@ function parseLauncherArgs(argv) {
     if (token === "--expected-version") {
       const next = argv[i + 1];
       if (next === undefined || next.trim().length === 0 || next.startsWith("-")) {
-        console.error("[causoryn-launcher] --expected-version bayrağı geçerli bir sürüm değeri gerektirir");
+        console.error("[causoryn-launcher] --expected-version requires a valid version value");
         process.exit(2);
       }
       cliExpectedVersion = next.trim();
@@ -37,7 +44,7 @@ function parseLauncherArgs(argv) {
     if (token.startsWith("--expected-version=")) {
       const inlineVal = token.slice("--expected-version=".length).trim();
       if (inlineVal.length === 0 || inlineVal.startsWith("-")) {
-        console.error("[causoryn-launcher] --expected-version bayrağı boş veya geçersiz değer alamaz");
+        console.error("[causoryn-launcher] --expected-version does not accept an empty or invalid value");
         process.exit(2);
       }
       cliExpectedVersion = inlineVal;
@@ -49,8 +56,23 @@ function parseLauncherArgs(argv) {
   return { cliExpectedVersion, forwardedArgs };
 }
 
+/**
+ * Returns the asset root the server must use (see lib/asset-root.mjs): this
+ * verified package when CAUSORYN_ASSET_ROOT is unset or blank, otherwise the
+ * realpath of a valid same-version override. Exits 2 otherwise.
+ */
+function resolveAssetRoot(rawValue, verifiedVersion) {
+  const result = resolveAssetRootOverride(rawValue, PKG_ROOT, verifiedVersion);
+  if (!result.ok) {
+    console.error(`[causoryn-launcher] CAUSORYN_ASSET_ROOT rejected (${result.reason}): ${rawValue?.trim()}`);
+    process.exit(2);
+  }
+  return result.root;
+}
+
 const { cliExpectedVersion, forwardedArgs } = parseLauncherArgs(process.argv.slice(2));
 
+let verifiedVersion;
 try {
   const pkgRaw = JSON.parse(readFileSync(PKG_JSON_PATH, "utf8"));
   if (
@@ -59,7 +81,7 @@ try {
     pkgRaw.name !== "causoryn" ||
     typeof pkgRaw.version !== "string"
   ) {
-    console.error(`[causoryn-launcher] geçersiz plugin package.json: ${PKG_JSON_PATH}`);
+    console.error(`[causoryn-launcher] invalid plugin package.json: ${PKG_JSON_PATH}`);
     process.exit(2);
   }
 
@@ -71,7 +93,7 @@ try {
     cliExpectedVersion !== envExpectedVersion
   ) {
     console.error(
-      `[causoryn-launcher] çelişen sürüm pini: --expected-version=${cliExpectedVersion}, CAUSORYN_EXPECTED_VERSION=${envExpectedVersion}`,
+      `[causoryn-launcher] conflicting version pins: --expected-version=${cliExpectedVersion}, CAUSORYN_EXPECTED_VERSION=${envExpectedVersion}`,
     );
     process.exit(2);
   }
@@ -84,23 +106,27 @@ try {
 
   if (expectedVersion !== undefined && pkgRaw.version !== expectedVersion) {
     console.error(
-      `[causoryn-launcher] sürüm uyuşmazlığı: beklenen ${expectedVersion}, bulunan ${pkgRaw.version}`,
+      `[causoryn-launcher] version mismatch: expected ${expectedVersion}, found ${pkgRaw.version}`,
     );
     process.exit(2);
   }
+  verifiedVersion = pkgRaw.version;
 } catch (error) {
   console.error(
-    `[causoryn-launcher] package.json okunamadı: ${error instanceof Error ? error.message : String(error)}`,
+    `[causoryn-launcher] could not read package.json: ${error instanceof Error ? error.message : String(error)}`,
   );
   process.exit(2);
 }
 
 if (!existsSync(MCP_BUNDLE_PATH)) {
-  console.error(`[causoryn-launcher] MCP sunucu paketi bulunamadı: ${MCP_BUNDLE_PATH}`);
+  console.error(`[causoryn-launcher] MCP server bundle not found: ${MCP_BUNDLE_PATH}`);
   process.exit(2);
 }
 
-process.env["CAUSORYN_ASSET_ROOT"] ??= PKG_ROOT;
+process.env["CAUSORYN_ASSET_ROOT"] = resolveAssetRoot(
+  process.env["CAUSORYN_ASSET_ROOT"],
+  verifiedVersion,
+);
 
 const mcpArgs =
   forwardedArgs.length === 0 || forwardedArgs[0] === "mcp"

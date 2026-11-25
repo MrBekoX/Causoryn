@@ -14,11 +14,22 @@ const THIS_DIR = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.dirname(THIS_DIR);
 const EXPORT_SCRIPT_PATH = path.join(REPO_ROOT, "scripts", "export-public-tree.mjs");
 
-/** Sentetik yem literalleri çalışma zamanında birleştirilir (kaynakta ham sır yok). */
-const BAIT_USER = "ber" + "ka";
-const BAIT_DRIVE_REPO = "D:" + "\\Cau" + "soryn";
-const BAIT_DRIVE_TOOLS = "D:" + "\\to" + "ols\\go\\bin\\go.exe";
-const BAIT_DWFRUN = "dwf" + "run-0fbb3806";
+/**
+ * Synthetic bait values, assembled at runtime so this file never matches the
+ * scanner rules. Personal names and internal identifiers are modelled as
+ * private terms (configured per repository in the untracked
+ * `.git/info/causoryn-private-terms`); local machine paths as generic
+ * absolute drive-letter paths in documentation.
+ */
+const BAIT_PRIVATE_NAME = ["alice", "sample"].join("-");
+const BAIT_INTERNAL_RUN_ID = ["runid", "sample", "0001"].join("-");
+const BAIT_DRIVE_REPO = "D:" + "\\Work\\Sample";
+const BAIT_DRIVE_TOOLS = "D:" + "\\Work\\Toolchain\\go\\bin\\go.exe";
+/** Marker lines delimiting local-only entries that the export strips. */
+const LOCAL_ONLY_BEGIN_HASH = "# causoryn-export:local-only begin";
+const LOCAL_ONLY_END_HASH = "# causoryn-export:local-only end";
+const LOCAL_ONLY_BEGIN_SLASH = "// causoryn-export:local-only begin";
+const LOCAL_ONLY_END_SLASH = "// causoryn-export:local-only end";
 const BAIT_GH_PAT = "github_" + "pat_" + "11AAAAAA00000000000000_BBBBBBBBBB";
 const BAIT_AWS_KEY = "AKIA" + "IOSFODNN7EXAMPLE";
 const BAIT_WIN_PROFILE = "C:" + "\\Users\\" + "alice" + "\\project";
@@ -59,7 +70,20 @@ function writeRel(rootDir: string, relPosix: string, content: string): void {
   writeFileSync(target, content, "utf8");
 }
 
-function createSyntheticGitRepo(extraFiles?: Readonly<Record<string, string>>): string {
+const PRIVATE_FILE_PATHS = [
+  "raw/Causoryn_Teknik_Dokuman_v2.1.pdf",
+  "raw/context-inject/tech/third-party.md",
+  "wiki/sprint-8.md",
+  "docs/superpowers/plans/2026-11-20-plan.md",
+  "START-PROMPT.md",
+  "OPEN-SOURCE-READINESS-PROMPT.md",
+  "AGENTS.md",
+] as const;
+
+function createSyntheticGitRepo(
+  extraFiles?: Readonly<Record<string, string>>,
+  options?: { readonly includePrivateFiles?: boolean },
+): string {
   const repoDir = createTempDir("causoryn-pubexport-repo-");
 
   const baseFiles: Record<string, string> = {
@@ -75,8 +99,10 @@ function createSyntheticGitRepo(extraFiles?: Readonly<Record<string, string>>): 
       "node_modules/",
       "dist/",
       "# Yerel geçici çıktı dizinleri (asla commit edilmez)",
-      ".mimosa/",
-      ".video_agent/",
+      LOCAL_ONLY_BEGIN_HASH,
+      ".tool-cache/",
+      ".scratch-agent/",
+      LOCAL_ONLY_END_HASH,
       "out/",
       "",
     ].join("\n"),
@@ -84,20 +110,24 @@ function createSyntheticGitRepo(extraFiles?: Readonly<Record<string, string>>): 
     ".github/workflows/release.yml": "name: Release\n",
     "packages/causoryn/package.json": '{"name":"causoryn","version":"0.2.0"}\n',
     "packages/core/src/index.ts": 'export const version = "0.2.0";\n',
-    // Sentetik test yem dosyaları — bilinçli muafiyet kanıtı:
-    "tests/security-release/f6-security-release.test.ts": `// canary: ${BAIT_AWS_KEY}\n`,
+    // Test bait files carry split literals (non-matching by construction);
+    // there is no per-file exemption:
+    "tests/security-release/f6-security-release.test.ts": '// canary: "AKIA" + "IOSFODNN7EXAMPLE"\n',
     "packages/causoryn/test/setup-and-doctor.test.ts":
       'const sample = "C:\\\\Users\\\\demo\\\\.causoryn\\\\runtime\\\\scripts\\\\causoryn.mjs";\n',
     // Dışlanması gereken özel / telifli / iç dosyalar:
     "raw/Causoryn_Teknik_Dokuman_v2.1.pdf": "PRIVATE PDF",
-    "raw/context-inject/tech/third-party.md": `Verbatim ${BAIT_USER} note`,
-    "wiki/sprint-8.md": `Internal wiki ${BAIT_DWFRUN}`,
+    "raw/context-inject/tech/third-party.md": `Verbatim ${BAIT_PRIVATE_NAME} note`,
+    "wiki/sprint-8.md": `Internal wiki ${BAIT_INTERNAL_RUN_ID}`,
     "docs/superpowers/plans/2026-11-20-plan.md": `Internal plan ${BAIT_DRIVE_REPO}`,
     "START-PROMPT.md": "Internal start prompt\n",
     "OPEN-SOURCE-READINESS-PROMPT.md": "Internal audit prompt\n",
     "AGENTS.md": "Internal agent contract\n",
     ...(extraFiles ?? {}),
   };
+  if (options?.includePrivateFiles === false) {
+    for (const rel of PRIVATE_FILE_PATHS) delete baseFiles[rel];
+  }
 
   for (const [rel, content] of Object.entries(baseFiles)) {
     writeRel(repoDir, rel, content);
@@ -117,8 +147,50 @@ function createSyntheticGitRepo(extraFiles?: Readonly<Record<string, string>>): 
     env: gitEnv,
     shell: false,
   });
+  // Untracked, local-only private term list (never committed):
+  writeFileSync(
+    path.join(repoDir, ".git", "info", "causoryn-private-terms"),
+    `# local only\n${BAIT_PRIVATE_NAME}\n${BAIT_INTERNAL_RUN_ID}\n`,
+    "utf8",
+  );
 
   return repoDir;
+}
+
+const SYNTHETIC_GIT_ENV: NodeJS.ProcessEnv = {
+  ...process.env,
+  GIT_AUTHOR_NAME: "Causoryn Test",
+  GIT_AUTHOR_EMAIL: "test@example.invalid",
+  GIT_COMMITTER_NAME: "Causoryn Test",
+  GIT_COMMITTER_EMAIL: "test@example.invalid",
+};
+
+function gitIn(repoDir: string, args: readonly string[], input?: string): string {
+  return execFileSync("git", [...args], {
+    cwd: repoDir,
+    env: SYNTHETIC_GIT_ENV,
+    encoding: "utf8",
+    shell: false,
+    ...(input !== undefined ? { input } : {}),
+  });
+}
+
+/**
+ * Adds a raw index entry (any mode/path) without touching the working tree,
+ * then commits. `core.protectNTFS=false` lets Git for Windows record paths a
+ * POSIX contributor could commit (for example a backslash in a file name).
+ */
+function commitRawEntry(repoDir: string, mode: string, relPath: string, content: string): void {
+  const blob = gitIn(repoDir, ["hash-object", "-w", "--stdin"], content).trim();
+  gitIn(repoDir, [
+    "-c",
+    "core.protectNTFS=false",
+    "update-index",
+    "--add",
+    "--cacheinfo",
+    `${mode},${blob},${relPath}`,
+  ]);
+  gitIn(repoDir, ["-c", "core.protectNTFS=false", "commit", "-q", "-m", `raw entry ${relPath}`]);
 }
 
 async function loadExporter(): Promise<ExportPublicTreeModule> {
@@ -132,7 +204,7 @@ afterAll(() => {
   }
 });
 
-describe("scripts/export-public-tree.mjs — Seçenek 1 temiz açık kaynak dışa aktarıcı", { timeout: 20_000 }, () => {
+describe("scripts/export-public-tree.mjs — Seçenek 1 temiz açık kaynak dışa aktarıcı", { timeout: 60_000 }, () => {
   it("POZİTİF: raw/, wiki/, docs/superpowers/ ve iç prompt dosyalarını dışlar, .gitignore'ı temizler ve fail-closed doğrulamayı geçer", async () => {
     const { exportPublicTree } = await loadExporter();
     const repoDir = createSyntheticGitRepo();
@@ -176,10 +248,19 @@ describe("scripts/export-public-tree.mjs — Seçenek 1 temiz açık kaynak dı�
 
     // .gitignore iç araç satırları temizlenmiş, meşru girdiler korunmuş:
     const gitignore = readFileSync(path.join(outDir, ".gitignore"), "utf8");
-    expect(gitignore).not.toContain(".mimosa/");
-    expect(gitignore).not.toContain(".video_agent/");
+    expect(gitignore).not.toContain(".tool-cache/");
+    expect(gitignore).not.toContain(".scratch-agent/");
+    expect(gitignore).not.toContain("causoryn-export:local-only");
     expect(gitignore).toContain("node_modules/");
     expect(gitignore).toContain("dist/");
+    expect(gitignore).toContain("out/");
+
+    // The exported tree is exactly the committed tree minus private paths:
+    const committed = gitIn(repoDir, ["ls-tree", "-r", "--name-only", "--full-tree", "HEAD"])
+      .split("\n")
+      .filter((rel) => rel.length > 0 && !(PRIVATE_FILE_PATHS as readonly string[]).includes(rel))
+      .sort();
+    expect([...result.exportedFiles]).toEqual(committed);
   });
 
   it("CLI: node scripts/export-public-tree.mjs --repo <repo> --out <dir> exit 0 ile temiz çıktı üretir", () => {
@@ -193,20 +274,22 @@ describe("scripts/export-public-tree.mjs — Seçenek 1 temiz açık kaynak dı�
       { cwd: os.tmpdir(), encoding: "utf8", shell: false },
     );
     expect(res.status, res.stderr).toBe(0);
-    expect(res.stdout).toContain("PUBLIC_EXPORT YEŞİL");
+    expect(res.stdout).toContain("PUBLIC_EXPORT PASS");
     expect(existsSync(path.join(outDir, "raw"))).toBe(false);
     expect(existsSync(path.join(outDir, "LICENSE"))).toBe(true);
   });
 
   it("CLI: --verify-temp --ref HEAD geçici dizinde fail-closed doğrular, exit 0 döner ve geçici dizini temizler", () => {
-    const repoDir = createSyntheticGitRepo();
+    // --verify-temp gates the ref as it is published by `git push`, so the
+    // positive case is a repository that does not track private paths:
+    const repoDir = createSyntheticGitRepo(undefined, { includePrivateFiles: false });
     const res = spawnSync(
       process.execPath,
       [EXPORT_SCRIPT_PATH, "--repo", repoDir, "--verify-temp", "--ref", "HEAD"],
       { cwd: os.tmpdir(), encoding: "utf8", shell: false },
     );
     expect(res.status, res.stderr).toBe(0);
-    expect(res.stdout).toContain("PUBLIC_EXPORT YEŞİL");
+    expect(res.stdout).toContain("PUBLIC_EXPORT PASS");
     const pathMatch = res.stdout.match(/→\s*(.+?)\s*(?:\(|$)/m);
     const exportedTmp = pathMatch?.[1]?.trim();
     if (exportedTmp) {
@@ -214,9 +297,10 @@ describe("scripts/export-public-tree.mjs — Seçenek 1 temiz açık kaynak dı�
     }
 
     // Negatif: sızıntılı repoda --verify-temp exit 1 döner VE geçici dizin sızdırmaz:
-    const leakyRepo = createSyntheticGitRepo({
-      "docs/leak-temp.md": `token=${BAIT_GH_PAT}\n`,
-    });
+    const leakyRepo = createSyntheticGitRepo(
+      { "docs/leak-temp.md": `token=${BAIT_GH_PAT}\n` },
+      { includePrivateFiles: false },
+    );
     const tmpBefore = new Set(
       readdirSync(os.tmpdir()).filter((name) => name.startsWith("causoryn-export-gate-")),
     );
@@ -226,11 +310,25 @@ describe("scripts/export-public-tree.mjs — Seçenek 1 temiz açık kaynak dı�
       { cwd: os.tmpdir(), encoding: "utf8", shell: false },
     );
     expect(redRes.status).toBe(1);
-    expect(redRes.stderr).toContain("PUBLIC_EXPORT KIRMIZI");
+    expect(redRes.stderr).toContain("PUBLIC_EXPORT FAIL");
+    expect(redRes.stderr).toContain("docs/leak-temp.md:1 — github-fine-grained-pat");
     const leakedTmpDirs = readdirSync(os.tmpdir()).filter(
       (name) => name.startsWith("causoryn-export-gate-") && !tmpBefore.has(name),
     );
     expect(leakedTmpDirs, "hata sonrasında da geçici dizin temizlenmeli").toEqual([]);
+
+    // Negative: private paths that are tracked in the ref are published by
+    // `git push` even though a clean `--out` export prunes them:
+    const trackedPrivateRepo = createSyntheticGitRepo();
+    const privateRes = spawnSync(
+      process.execPath,
+      [EXPORT_SCRIPT_PATH, "--repo", trackedPrivateRepo, "--verify-temp", "--ref", "HEAD"],
+      { cwd: os.tmpdir(), encoding: "utf8", shell: false },
+    );
+    expect(privateRes.status).toBe(1);
+    for (const rel of PRIVATE_FILE_PATHS) {
+      expect(privateRes.stderr, rel).toContain(`private path tracked in ref: ${rel}`);
+    }
   });
 
   it("NEGATİF: dolu çıkış dizini (--out) fail-closed reddedilir", async () => {
@@ -240,7 +338,7 @@ describe("scripts/export-public-tree.mjs — Seçenek 1 temiz açık kaynak dı�
     writeFileSync(path.join(nonEmptyDir, "existing.txt"), "data", "utf8");
 
     expect(() => exportPublicTree({ repoRoot: repoDir, outDir: nonEmptyDir, ref: "HEAD" })).toThrow(
-      /boş|empty/i,
+      /must be empty/i,
     );
   });
 
@@ -254,22 +352,97 @@ describe("scripts/export-public-tree.mjs — Seçenek 1 temiz açık kaynak dı�
     ).toThrow(/ref/i);
   });
 
-  it("NEGATİF: dışa aktarılan ağaçta kişisel kullanıcı adı, yerel yol, dwfrun veya sır sızıntısı varsa fail-closed reddedilir", async () => {
+  it("NEGATİF: dışa aktarılan ağaçta kişisel kullanıcı adı, yerel yol, iç çalışma kimliği veya sır sızıntısı varsa fail-closed reddedilir", async () => {
     const { exportPublicTree } = await loadExporter();
     const leakyRepo = createSyntheticGitRepo({
       "docs/leaked-guide.md": [
-        `user: ${BAIT_USER}`,
+        `user: ${BAIT_PRIVATE_NAME}`,
         `win: ${BAIT_WIN_PROFILE}`,
         `repo: ${BAIT_DRIVE_REPO}`,
         `tools: ${BAIT_DRIVE_TOOLS}`,
-        `run: ${BAIT_DWFRUN}`,
+        `run: ${BAIT_INTERNAL_RUN_ID}`,
         `token: ${BAIT_GH_PAT}`,
       ].join("\n"),
     });
     const outDir = path.join(createTempDir("causoryn-pubexport-leak-"), "out");
 
-    expect(() => exportPublicTree({ repoRoot: leakyRepo, outDir, ref: "HEAD" })).toThrow(
-      /PUBLIC_EXPORT KIRMIZI|doğrulama başarısız/i,
+    let message = "";
+    try {
+      exportPublicTree({ repoRoot: leakyRepo, outDir, ref: "HEAD" });
+    } catch (error) {
+      message = error instanceof Error ? error.message : String(error);
+    }
+    expect(message).toMatch(/PUBLIC_EXPORT FAIL — verification failed/);
+    expect(message).toContain("docs/leaked-guide.md:1 — private-term-1");
+    expect(message).toContain("docs/leaked-guide.md:2 — local-user-profile-path");
+    expect(message).toContain("docs/leaked-guide.md:3 — local-drive-path");
+    expect(message).toContain("docs/leaked-guide.md:4 — local-drive-path");
+    expect(message).toContain("docs/leaked-guide.md:5 — private-term-2");
+    expect(message).toContain("docs/leaked-guide.md:6 — github-fine-grained-pat");
+    // Findings never echo the private terms themselves:
+    expect(message).not.toContain(BAIT_PRIVATE_NAME);
+    expect(message).not.toContain(BAIT_INTERNAL_RUN_ID);
+  });
+
+  it("NEGATIVE: files hidden by .gitattributes export-ignore are still scanned and export-subst is not applied (scanned set = committed tree)", async () => {
+    const { exportPublicTree } = await loadExporter();
+    const hiddenLeakRepo = createSyntheticGitRepo({
+      ".gitattributes": "* text=auto eol=lf\ndocs/hidden.md export-ignore\n",
+      "docs/hidden.md": `token: ${BAIT_GH_PAT}\n`,
+    });
+    const hiddenOut = path.join(createTempDir("causoryn-pubexport-hidden-"), "out");
+    expect(() => exportPublicTree({ repoRoot: hiddenLeakRepo, outDir: hiddenOut, ref: "HEAD" })).toThrow(
+      /docs\/hidden\.md:1 — github-fine-grained-pat/,
+    );
+
+    const substRepo = createSyntheticGitRepo({
+      ".gitattributes": "* text=auto eol=lf\ndocs/version.md export-subst\ndocs/kept.md export-ignore\n",
+      "docs/version.md": "Commit: $Format:%H$\n",
+      "docs/kept.md": "clean\n",
+    });
+    const substOut = path.join(createTempDir("causoryn-pubexport-subst-"), "out");
+    const res = exportPublicTree({ repoRoot: substRepo, outDir: substOut, ref: "HEAD" });
+    expect(res.verification.ok, JSON.stringify(res.verification.findings)).toBe(true);
+    expect(readFileSync(path.join(substOut, "docs", "version.md"), "utf8")).toBe("Commit: $Format:%H$\n");
+    expect(res.exportedFiles).toContain("docs/kept.md");
+  });
+
+  it("NEGATIVE: test bait files have no exemption — a joined secret or profile path in tests/ fails the export", async () => {
+    const { exportPublicTree } = await loadExporter();
+    for (const [rel, content, rule] of [
+      ["tests/security-release/f6-security-release.test.ts", `// canary: ${BAIT_AWS_KEY}\n`, "aws-access-key"],
+      ["packages/causoryn/test/setup-and-doctor.test.ts", `const p = "${BAIT_WIN_PROFILE}";\n`, "local-user-profile-path"],
+    ] as const) {
+      const repoDir = createSyntheticGitRepo({ [rel]: content });
+      const outDir = path.join(createTempDir("causoryn-pubexport-bait-"), "out");
+      expect(() => exportPublicTree({ repoRoot: repoDir, outDir, ref: "HEAD" }), rel).toThrow(
+        new RegExp(`${rel.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&")}:1 — ${rule}`),
+      );
+    }
+  });
+
+  it("FAIL-CLOSED: symbolic links, gitlinks and unsafe tree paths are rejected instead of being materialized", async () => {
+    const { exportPublicTree } = await loadExporter();
+    const cases: ReadonlyArray<readonly [string, string, string, RegExp]> = [
+      ["120000", "docs/link.md", "../../outside.txt", /unsupported tree entry \(symbolic link\): docs\/link\.md/],
+      ["100644", "docs\\escape.md", "clean\n", /unsafe tree path/],
+      ["100644", "docs/a:b.md", "clean\n", /unsafe tree path/],
+    ];
+    for (const [mode, rel, content, expected] of cases) {
+      const repoDir = createSyntheticGitRepo();
+      commitRawEntry(repoDir, mode, rel, content);
+      const outDir = path.join(createTempDir("causoryn-pubexport-entry-"), "out");
+      expect(() => exportPublicTree({ repoRoot: repoDir, outDir, ref: "HEAD" }), rel).toThrow(expected);
+      expect(existsSync(path.join(path.dirname(outDir), "outside.txt"))).toBe(false);
+    }
+
+    const gitlinkRepo = createSyntheticGitRepo();
+    const headOid = gitIn(gitlinkRepo, ["rev-parse", "HEAD"]).trim();
+    gitIn(gitlinkRepo, ["update-index", "--add", "--cacheinfo", `160000,${headOid},vendor/sub`]);
+    gitIn(gitlinkRepo, ["commit", "-q", "-m", "gitlink"]);
+    const gitlinkOut = path.join(createTempDir("causoryn-pubexport-gitlink-"), "out");
+    expect(() => exportPublicTree({ repoRoot: gitlinkRepo, outDir: gitlinkOut, ref: "HEAD" })).toThrow(
+      /unsupported tree entry \(submodule\): vendor\/sub/,
     );
   });
 
@@ -299,8 +472,10 @@ describe("scripts/export-public-tree.mjs — Seçenek 1 temiz açık kaynak dı�
       "docs/dev-example.md": "Example: C:\\Users\\dev\\repo and /home/dev/repo\n",
       "eslint.config.js": [
         "export default [{ ignores: [",
-        '  ".video_agent/**",',
-        '  ".mimosa/**",',
+        `  ${LOCAL_ONLY_BEGIN_SLASH}`,
+        '  ".scratch-agent/**",',
+        '  ".tool-cache/**",',
+        `  ${LOCAL_ONLY_END_SLASH}`,
         '  "dist/**",',
         "] }];",
         "",
@@ -311,8 +486,9 @@ describe("scripts/export-public-tree.mjs — Seçenek 1 temiz açık kaynak dı�
     expect(res.verification.ok, JSON.stringify(res.verification.findings)).toBe(true);
 
     const exportedEslint = readFileSync(path.join(outDir, "eslint.config.js"), "utf8");
-    expect(exportedEslint).not.toContain(".mimosa");
-    expect(exportedEslint).not.toContain(".video_agent");
+    expect(exportedEslint).not.toContain(".tool-cache");
+    expect(exportedEslint).not.toContain(".scratch-agent");
+    expect(exportedEslint).not.toContain("causoryn-export:local-only");
     expect(exportedEslint).toContain('"dist/**"');
 
     writeRel(outDir, "THIRD-PARTY-NOTICES.md", `leaked=${BAIT_GH_PAT}\n`);
@@ -342,15 +518,19 @@ describe("scripts/export-public-tree.mjs — Seçenek 1 temiz açık kaynak dı�
       ".gitattributes": ".gitignore -text\neslint.config.js -text\n",
       ".gitignore": [
         "node_modules/",
-        "   .mimosa/   ",
-        "   .video_agent/   ",
+        `   ${LOCAL_ONLY_BEGIN_HASH}   `,
+        "   .tool-cache/   ",
+        "   .scratch-agent/   ",
+        `   ${LOCAL_ONLY_END_HASH}   `,
         "dist/",
         "",
       ].join("\r\n"),
       "eslint.config.js": [
         "export default [{ ignores: [",
-        '    ".mimosa/**",   ',
-        '    ".video_agent/**",   ',
+        `    ${LOCAL_ONLY_BEGIN_SLASH}   `,
+        '    ".tool-cache/**",   ',
+        '    ".scratch-agent/**",   ',
+        `    ${LOCAL_ONLY_END_SLASH}   `,
         '  "dist/**",',
         "] }];",
         "",
@@ -380,5 +560,15 @@ describe("scripts/export-public-tree.mjs — Seçenek 1 temiz açık kaynak dı�
     expect(unchangedRes.verification.ok, JSON.stringify(unchangedRes.verification.findings)).toBe(true);
     expect(readFileSync(path.join(outUnchanged, ".gitignore"), "utf8")).toBe(cleanGitignore);
     expect(existsSync(path.join(outUnchanged, "eslint.config.js"))).toBe(false);
+
+    // 3) An unterminated local-only block fails closed instead of exporting
+    //    a half-sanitized file:
+    const unterminatedRepo = createSyntheticGitRepo({
+      ".gitignore": ["node_modules/", LOCAL_ONLY_BEGIN_HASH, ".tool-cache/", ""].join("\n"),
+    });
+    const outUnterminated = path.join(createTempDir("causoryn-pubexport-unterminated-"), "out");
+    expect(() =>
+      exportPublicTree({ repoRoot: unterminatedRepo, outDir: outUnterminated, ref: "HEAD" }),
+    ).toThrow(/unterminated local-only block in \.gitignore/);
   });
 });

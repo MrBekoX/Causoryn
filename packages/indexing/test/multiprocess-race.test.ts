@@ -92,7 +92,7 @@ function createTempArena(): TempArena {
     dataDir,
     dbPath,
     cleanup: () => {
-      rmSync(baseDir, { recursive: true, force: true });
+      rmSync(baseDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
     },
   };
 }
@@ -276,18 +276,16 @@ describe("IndexService — çoklu-süreç SQLite yarış kurtarması", { timeout
       const repoC = new SqliteGraphRepository(arena.dbPath);
       const repoD = new SqliteGraphRepository(arena.dbPath);
       try {
-        // C# analizi sırasında bariyerle ikisinin de aynı anda analyzeChanges=true görmesini garantileyelim.
-        let barrierResolve!: () => void;
-        const barrier = new Promise<void>((resolve) => {
-          barrierResolve = resolve;
-        });
-        let entered = 0;
-        const synchronizedAnalyze = async () => {
-          entered += 1;
-          if (entered >= 2) {
-            barrierResolve();
-          }
-          await barrier;
+        // Both runs see the change concurrently. Since Task 1.7 follow-up
+        // (finding 6) the build lease is claimed BEFORE analysis, so the two
+        // can no longer analyze at the same time (the former barrier that
+        // forced both into analysis would now deadlock by design): exactly
+        // one analyzes and publishes, the other waits for the live peer and
+        // reuses its snapshot without analyzing (outcome reused_peer).
+        let analyzeCalls = 0;
+        const countingAnalyze = async () => {
+          analyzeCalls += 1;
+          await new Promise((resolve) => setTimeout(resolve, 50));
           return stubAnalyzeCSharp();
         };
 
@@ -297,8 +295,9 @@ describe("IndexService — çoklu-süreç SQLite yarış kurtarması", { timeout
           repository: repoC,
           clock: () => T0,
           limits: { maxFiles: 100 },
-          csharp: { analyzeCSharp: synchronizedAnalyze },
+          csharp: { analyzeCSharp: countingAnalyze },
           tolerateConcurrentPublishRace: true,
+          peerPollIntervalMs: 20,
         });
         const syncServiceD = new IndexService({
           workspaceId: "default",
@@ -306,8 +305,9 @@ describe("IndexService — çoklu-süreç SQLite yarış kurtarması", { timeout
           repository: repoD,
           clock: () => T1,
           limits: { maxFiles: 100 },
-          csharp: { analyzeCSharp: synchronizedAnalyze },
+          csharp: { analyzeCSharp: countingAnalyze },
           tolerateConcurrentPublishRace: true,
+          peerPollIntervalMs: 20,
         });
 
         const [incC, incD] = await Promise.all([
@@ -316,6 +316,8 @@ describe("IndexService — çoklu-süreç SQLite yarış kurtarması", { timeout
         ]);
         const publishedFlags = [incC.published, incD.published].sort();
         expect(publishedFlags).toEqual([false, true]);
+        expect([incC.outcome, incD.outcome].sort()).toEqual(["published", "reused_peer"]);
+        expect(analyzeCalls).toBe(1);
         expect(incC.snapshotId).toBe(incD.snapshotId);
         expect(repoC.getLatestPublished("default")?.stale).toBe(false);
       } finally {
@@ -353,9 +355,12 @@ describe("IndexService — çoklu-süreç SQLite yarış kurtarması", { timeout
         clock: () => T1,
         limits: { maxFiles: 100 },
         tolerateConcurrentPublishRace: true,
+        // Async runs now wait for a live peer; bound the wait for this test.
+        peerPollIntervalMs: 20,
+        peerWaitTimeoutMs: 200,
       });
 
-      // Dosya değiştirilir ve repoA sequence=2 için aktif bir 'building' satırı açar.
+      // Dosya değiştirilir ve repoA sequence=2 için aktif bir 'building' satırı + canlı lease açar.
       writeFileSync(
         path.join(arena.workspaceDir, "src", "orders.ts"),
         "export function activeBuildOrder(): string { return 'v2'; }\n",
@@ -368,9 +373,22 @@ describe("IndexService — çoklu-süreç SQLite yarış kurtarması", { timeout
         analyzerFingerprint: "fp-test",
         createdAt: T1,
       });
+      repoA.acquireBuildLease({
+        workspaceId: "default",
+        buildId: activeBuild.buildId,
+        leaseId: "lease-live-peer-a",
+        ownerPid: process.pid,
+        hostLabel: "claude-code",
+        nowIso: T1,
+        ttlMs: 30_000,
+      });
 
       const syncFallback = serviceB.runIndex(arena.workspaceDir);
       expect(syncFallback.published).toBe(false);
+      expect(syncFallback.outcome).toBe("peer_busy");
+      expect(syncFallback.reused).toBe(true);
+      expect(syncFallback.waitingForPeer).toBe(true);
+      expect(syncFallback.peerStatus).toBe("waiting_for_peer");
       expect(syncFallback.snapshotId).toBe(initial.snapshotId);
       expect(syncFallback.stale).toBe(true);
       expect(
@@ -379,11 +397,17 @@ describe("IndexService — çoklu-süreç SQLite yarış kurtarması", { timeout
 
       const asyncFallback = await serviceB.runIndexAsync(arena.workspaceDir);
       expect(asyncFallback.published).toBe(false);
+      expect(asyncFallback.outcome).toBe("peer_busy");
+      expect(asyncFallback.waitingForPeer).toBe(true);
+      expect(asyncFallback.peerStatus).toBe("waiting_for_peer");
       expect(asyncFallback.snapshotId).toBe(initial.snapshotId);
       expect(asyncFallback.stale).toBe(true);
 
       const incFallback = await serviceB.runIncrementalIndexAsync(arena.workspaceDir);
       expect(incFallback.published).toBe(false);
+      expect(incFallback.outcome).toBe("peer_busy");
+      expect(incFallback.waitingForPeer).toBe(true);
+      expect(incFallback.peerStatus).toBe("waiting_for_peer");
       expect(incFallback.snapshotId).toBe(initial.snapshotId);
       expect(incFallback.stale).toBe(true);
 
@@ -412,6 +436,15 @@ describe("IndexService — çoklu-süreç SQLite yarış kurtarması", { timeout
         configHash: "cfg-hash",
         analyzerFingerprint: "fp-test",
         createdAt: T0,
+      });
+      repoA.acquireBuildLease({
+        workspaceId: "default",
+        buildId: active.buildId,
+        leaseId: "lease-live-peer-initial",
+        ownerPid: process.pid,
+        hostLabel: "codex",
+        nowIso: T0,
+        ttlMs: 30_000,
       });
 
       const serviceB = new IndexService({
@@ -710,7 +743,7 @@ describe(
             process.env[key] = val;
           }
         }
-        rmSync(tempRoot, { recursive: true, force: true });
+        rmSync(tempRoot, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
       }
     });
 
@@ -741,11 +774,19 @@ describe(
       };
 
       try {
-        // Asset kökünde rust-worker ikilisi de Cargo.toml da YOK; yalnızca yazılabilir önbellekte var!
+        // Asset kökünde rust-worker ikilisi YOK ama bütünlük parmak izi için Cargo.toml var;
+        // yürütülebilir ikili ve doğrulanan .sha256.json kaydı yazılabilir önbellekte.
         mkdirSync(path.join(fakeAssetRoot, "native", "python-worker"), { recursive: true });
         writeFileSync(
           path.join(fakeAssetRoot, "native", "python-worker", "worker.py"),
           "# marker\n",
+          "utf8",
+        );
+        const fakeRustManifest = path.join(fakeAssetRoot, "native", "rust-worker", "Cargo.toml");
+        mkdirSync(path.dirname(fakeRustManifest), { recursive: true });
+        writeFileSync(
+          fakeRustManifest,
+          '[package]\nname = "causoryn-rust-worker"\nversion = "0.1.0"\n',
           "utf8",
         );
         mkdirSync(cachedDebugDir, { recursive: true });
@@ -780,6 +821,21 @@ describe(
           writeFileSync(cachedBinaryPath, fakeUnixWorker, "utf8");
           chmodSync(cachedBinaryPath, 0o755);
         }
+
+        const {
+          computeRustWorkerSourceFingerprint,
+          readRegularFileSha256NoFollow,
+          rustWorkerIntegrityPath,
+        } = await import("../../../adapters/rust/src/analyzer.js");
+        const sourceFingerprint = computeRustWorkerSourceFingerprint(fakeRustManifest);
+        const binarySha256 = readRegularFileSha256NoFollow(cachedBinaryPath);
+        expect(sourceFingerprint).not.toBeNull();
+        expect(binarySha256).not.toBeNull();
+        writeFileSync(
+          rustWorkerIntegrityPath(cachedBinaryPath),
+          JSON.stringify({ sourceFingerprint, binarySha256 }, null, 2),
+          "utf8",
+        );
 
         writeFileSync(
           path.join(workspaceDir, "src", "lib.rs"),
@@ -831,7 +887,14 @@ describe(
             process.env[key] = val;
           }
         }
-        rmSync(tempRoot, { recursive: true, force: true });
+        try {
+          rmSync(tempRoot, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+        } catch (error) {
+          // Windows: the cached worker binary stays locked until the tree kill
+          // (taskkill /T, then the direct kill) has finished, which can outlast
+          // the retries under parallel load. The OS temp cleanup removes it later.
+          console.warn(`temp cleanup skipped for ${tempRoot}: ${(error as Error).message}`);
+        }
       }
     });
   },

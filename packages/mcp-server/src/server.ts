@@ -1,34 +1,64 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
-import type { z } from "zod";
+import { NODE_KINDS } from "@causoryn/domain";
+import { z } from "zod";
 
-import type { CausorynContext } from "./context.js";
+import type { ActiveIndexJobInfo, CausorynContext } from "./context.js";
 import { CausorynToolError } from "./errors.js";
 import {
+  buildEnvelope,
   envelopeOutputSchema,
   errorEnvelope,
   type Envelope,
 } from "./envelope.js";
 import {
+  AnalyzeImpactToolInputSchema,
+  ArchitectureTimelineToolInputSchema,
+  CheckArchitectureToolInputSchema,
+  CheckContractsToolInputSchema,
+  CompareArchitectureToolInputSchema,
+  ContractsToolInputSchema,
+  DeriveTestPlanToolInputSchema,
+  DetectContractDriftToolInputSchema,
+  ExportDocumentationCoreInputSchema,
+  FindSymbolsToolInputSchema,
+  GenerateOnboardingToolInputSchema,
+  GetAgentContextToolInputSchema,
+  GetCapabilitiesToolInputSchema,
+  GetEvidenceToolInputSchema,
+  GetSymbolContextToolInputSchema,
+  IndexStatusToolInputSchema,
+  MapSystemToolInputSchema,
+  ObservedTestRunToolInputSchema,
+  PreflightChangeCoreInputSchema,
+  PreflightChangeToolInputSchema,
+  RefreshIndexToolInputSchema,
+  StatusToolInputSchema,
+  TraceBusinessFlowToolInputSchema,
+  TraceExecutionToolInputSchema,
+  TraceToolInputSchema,
+  VerifyChangeCoreInputSchema,
+  VerifyChangeToolInputSchema,
+  WikiBuildToolInputSchema,
+  WikiDiffToolInputSchema,
+  WikiGetLinksToolInputSchema,
+  WikiGetPageToolInputSchema,
+  WikiGetTreeToolInputSchema,
+  WikiGetVersionsToolInputSchema,
+  WikiSearchToolInputSchema,
+  WorkspaceSummaryToolInputSchema,
+} from "./schemas.js";
+import {
   AmbiguityDataSchema,
   CapabilitiesDataSchema,
   FindSymbolsDataSchema,
-  FindSymbolsInputSchema,
-  GetCapabilitiesInputSchema,
   GetEvidenceDataSchema,
-  GetEvidenceInputSchema,
   GetSymbolContextDataSchema,
-  GetSymbolContextInputSchema,
   IndexStatusDataSchema,
-  IndexStatusInputSchema,
   MapDataSchema,
-  MapSystemInputSchema,
   RefreshIndexDataSchema,
-  RefreshIndexInputSchema,
   TraceExecutionDataSchema,
-  TraceExecutionInputSchema,
   WorkspaceSummaryDataSchema,
-  WorkspaceSummaryInputSchema,
   findSymbols,
   getCapabilities,
   getEvidence,
@@ -36,24 +66,19 @@ import {
   indexStatus,
   mapSystem,
   refreshIndex,
+  requireAuthorizedWorkspace,
   traceExecution,
   workspaceSummary,
 } from "./services.js";
 import {
   AnalyzeImpactDataSchema,
-  AnalyzeImpactInputSchema,
   ArchitectureTimelineDataSchema,
-  ArchitectureTimelineInputSchema,
   CheckArchitectureDataSchema,
-  CheckArchitectureInputSchema,
   CompareArchitectureDataSchema,
-  CompareArchitectureInputSchema,
   ExportDocumentationDataSchema,
   ExportDocumentationInputSchema,
   GenerateOnboardingDataSchema,
-  GenerateOnboardingInputSchema,
   GetAgentContextDataSchema,
-  GetAgentContextInputSchema,
   analyzeImpactTool,
   architectureTimeline,
   checkArchitecture,
@@ -64,19 +89,12 @@ import {
 } from "./services-architecture.js";
 import {
   WikiBuildDataSchema,
-  WikiBuildInputSchema,
   WikiDiffDataSchema,
-  WikiDiffInputSchema,
   WikiGetLinksDataSchema,
-  WikiGetLinksInputSchema,
   WikiGetPageDataSchema,
-  WikiGetPageInputSchema,
   WikiGetTreeDataSchema,
-  WikiGetTreeInputSchema,
   WikiGetVersionsDataSchema,
-  WikiGetVersionsInputSchema,
   WikiSearchDataSchema,
-  WikiSearchInputSchema,
   wikiBuild,
   wikiDiff,
   wikiGetLinks,
@@ -87,15 +105,10 @@ import {
 } from "./services-wiki.js";
 import {
   CheckContractsDataSchema,
-  CheckContractsInputSchema,
   DetectContractDriftDataSchema,
-  DetectContractDriftInputSchema,
   DeriveTestPlanDataSchema,
-  DeriveTestPlanInputSchema,
   PreflightChangeDataSchema,
-  PreflightChangeInputSchema,
   TraceBusinessFlowDataSchema,
-  TraceBusinessFlowInputSchema,
   checkContracts,
   detectContractDriftTool,
   deriveTestPlan,
@@ -104,38 +117,67 @@ import {
 } from "./services-differentiation.js";
 import {
   VerifyChangeDataSchema,
-  VerifyChangeInputSchema,
   verifyChangeTool,
 } from "./services-verification.js";
-import { SERVER_NAME, SERVER_VERSION } from "./version.js";
+import {
+  CORE_TOOL_NAMES,
+  DEPRECATED_TOOL_REPLACEMENTS,
+  HISTORY_TOOL_NAMES,
+  SERVER_NAME,
+  SERVER_VERSION,
+  TOOL_NAMES,
+  TOOL_PROFILES,
+  WIKI_TOOL_NAMES,
+  type ToolProfile,
+} from "./version.js";
 
 /**
- * MCP protokol adaptasyonu (TŞ v2.1 §5/§10, ADR-003): SDK McpServer
- * üzerinden tam olarak 29 gerçek araç yayımlanır (sprint-1: 5 çekirdek araç;
- * sprint-2 B6: causoryn_index_status + causoryn_refresh_index; sprint-2 B5:
- * causoryn_get_symbol_context; sprint-2 B4: causoryn_trace_execution;
- * sprint-3 C8: causoryn_analyze_impact, causoryn_check_architecture,
- * causoryn_compare_architecture, causoryn_get_agent_context,
- * causoryn_generate_onboarding, causoryn_export_documentation,
- * causoryn_architecture_timeline; sprint-4 W5 (Faz C2 Living Wiki, TŞ
- * §16A.8): causoryn_wiki_build + 6 salt-okunur wiki aracı; sprint-5
- * D2-D6 (Faz D Differentiation): causoryn_trace_business_flow,
- * causoryn_preflight_change, causoryn_check_contracts,
- * causoryn_detect_contract_drift, causoryn_derive_test_plan; sprint-6
- * E1-E3 (Faz E Agent Change Guard): causoryn_verify_change —
- * detect_contract_drift ile derive_test_plan arasında (TŞ §10.2 PDF s.10
- * katalog satır sırası); tools/list boş handler yayınlamaz — ADR-010).
- * Her araç:
- * - Zod inputSchema (SDK girdiyi otomatik doğrular; şema reddi protokol
- *   düzeyinde isError sonucu döner),
- * - Zod outputSchema (SDK structuredContent'i envelope şemasıyla doğrular),
- * - envelope yanıt (text fallback: JSON serileştirilmiş envelope — TŞ
- *   §10.1 "insan okunabilir kısa text fallback").
- *
- * Envelope düzeyi hatalar (WORKSPACE_NOT_AUTHORIZED, INDEX_NOT_READY, …)
- * isError=false structuredContent ile taşınır: statü sözleşmesidir, protokol
- * hatası değildir (TŞ §10.1 hata kodları yanıt gövdesinde yaşar).
+ * MCP protocol adapter exposing Causoryn's deterministic, read-only codebase
+ * intelligence tools with selectable tool profiles (`core`, `wiki`, `history`,
+ * `full`) and non-blocking cold/warm indexing behavior.
  */
+
+const DEFAULT_INDEX_RETRY_AFTER_MS = 3_000;
+const DEFAULT_SERVER_INDEX_WAIT_MS = 15_000;
+
+const NON_BLOCKING_BOOT_TOOLS: ReadonlySet<string> = new Set([
+  "causoryn_status",
+  "causoryn_get_capabilities",
+  "causoryn_index_status",
+  "causoryn_refresh_index",
+]);
+
+const TOOL_PROFILE_SET: ReadonlySet<string> = new Set<string>(TOOL_PROFILES);
+
+const StatusInspectDataSchema = z.strictObject({
+  capabilities: CapabilitiesDataSchema,
+  authorized: z.boolean(),
+  indexing: z.boolean(),
+  retryAfterMs: z.number().int().positive().optional(),
+  index: IndexStatusDataSchema,
+  summary: WorkspaceSummaryDataSchema.nullable(),
+});
+
+const StatusToolDataSchema = z.union([StatusInspectDataSchema, RefreshIndexDataSchema]);
+
+const MapSystemConsolidatedDataSchema = z.union([MapDataSchema, GenerateOnboardingDataSchema]);
+
+const TraceConsolidatedDataSchema = z.union([
+  AmbiguityDataSchema,
+  TraceExecutionDataSchema,
+  TraceBusinessFlowDataSchema,
+]);
+
+const PreflightConsolidatedDataSchema = z.union([
+  PreflightChangeDataSchema,
+  AnalyzeImpactDataSchema,
+  DeriveTestPlanDataSchema,
+]);
+
+const ContractsConsolidatedDataSchema = z.union([
+  CheckContractsDataSchema,
+  DetectContractDriftDataSchema,
+]);
 
 interface ToolRegistration {
   readonly name: string;
@@ -170,185 +212,528 @@ function envelopeResult(envelope: Envelope): CallToolResult {
   };
 }
 
-function buildRegistrations(context: CausorynContext): readonly ToolRegistration[] {
-  return [
+function normalizeProfiles(raw: ToolProfile | string | readonly ToolProfile[] | undefined): readonly ToolProfile[] {
+  if (raw === undefined) {
+    return ["core"];
+  }
+  const tokens = Array.isArray(raw)
+    ? raw
+    : String(raw)
+        .split(",")
+        .map((part) => part.trim())
+        .filter((part) => part.length > 0);
+  if (tokens.length === 0) {
+    return ["core"];
+  }
+  const out: ToolProfile[] = [];
+  const seen = new Set<string>();
+  for (const token of tokens) {
+    if (!TOOL_PROFILE_SET.has(token)) {
+      throw new Error(
+        `Invalid toolProfile "${token}"; valid profiles: ${TOOL_PROFILES.join(", ")}`,
+      );
+    }
+    if (!seen.has(token)) {
+      seen.add(token);
+      out.push(token as ToolProfile);
+    }
+  }
+  return out;
+}
+
+/** Optional capability of a rebindable context (see createDynamicCausorynContext). */
+interface ToolCallPinning {
+  runPinned<T>(work: () => Promise<T> | T): Promise<T>;
+}
+
+function toolCallPinningOf(context: CausorynContext): ToolCallPinning | undefined {
+  const candidate: CausorynContext & Partial<ToolCallPinning> = context;
+  return typeof candidate.runPinned === "function"
+    ? (candidate as ToolCallPinning)
+    : undefined;
+}
+
+function activeIndexingJobOf(context: CausorynContext): ActiveIndexJobInfo | null {
+  if (context.getActiveIndexJob !== undefined) {
+    return context.getActiveIndexJob();
+  }
+  const jobs = context.jobManager.jobs();
+  for (let i = jobs.length - 1; i >= 0; i -= 1) {
+    const job = jobs[i];
+    if (job !== undefined && (job.status === "running" || job.status === "queued")) {
+      return {
+        jobId: job.jobId,
+        status: job.status,
+        progressPercent: job.progressPercent,
+        phase: job.progress?.phase ?? (job.status === "queued" ? "queued" : "indexing"),
+      };
+    }
+  }
+  return null;
+}
+
+function withAppendedWarning(envelope: Envelope, warning: string): Envelope {
+  return buildEnvelope({
+    requestId: envelope.requestId,
+    workspaceId: envelope.workspaceId,
+    snapshotId: envelope.snapshotId,
+    status: envelope.status,
+    coverage: envelope.coverage,
+    warnings: [...envelope.warnings, warning],
+    data: envelope.data,
+    nextCursor: envelope.nextCursor,
+    error: envelope.error,
+  });
+}
+
+function resolveProfileToolNames(profiles: readonly ToolProfile[]): readonly string[] {
+  if (profiles.includes("full")) {
+    // Full profile registers all 29 legacy tools plus the 3 consolidated aliases (32 total).
+    const fullSet = new Set<string>(TOOL_NAMES);
+    const out: string[] = [...TOOL_NAMES];
+    for (const coreName of CORE_TOOL_NAMES) {
+      if (!fullSet.has(coreName)) {
+        fullSet.add(coreName);
+        out.push(coreName);
+      }
+    }
+    return out;
+  }
+  const out: string[] = [...CORE_TOOL_NAMES];
+  const seen = new Set<string>(out);
+  if (profiles.includes("wiki")) {
+    for (const name of WIKI_TOOL_NAMES) {
+      if (!seen.has(name)) {
+        seen.add(name);
+        out.push(name);
+      }
+    }
+  }
+  if (profiles.includes("history")) {
+    for (const name of HISTORY_TOOL_NAMES) {
+      if (!seen.has(name)) {
+        seen.add(name);
+        out.push(name);
+      }
+    }
+  }
+  return out;
+}
+
+function runStatusTool(
+  context: CausorynContext,
+  requestId: string,
+  input: z.infer<typeof StatusToolInputSchema>,
+  activeToolNames: readonly string[],
+): Envelope {
+  if (input.action === "refresh") {
+    return refreshIndex(context, requestId, {
+      ...(input.workspaceId === undefined ? {} : { workspaceId: input.workspaceId }),
+      mode: input.mode ?? "incremental",
+    });
+  }
+
+  const capEnvelope = getCapabilities(context, requestId, {
+    ...(input.workspace === undefined ? {} : { workspace: input.workspace }),
+  });
+  const capData = capEnvelope.data as z.infer<typeof CapabilitiesDataSchema>;
+  const capabilities = {
+    ...capData,
+    tools: [...activeToolNames],
+  };
+
+  const targetWorkspaceId = input.workspaceId ?? context.config.workspaceId;
+  if (context.config.allowRoots.length === 0 && input.workspaceId === undefined) {
+    return buildEnvelope({
+      requestId,
+      workspaceId: targetWorkspaceId,
+      snapshotId: null,
+      status: "ok",
+      coverage: null,
+      warnings: [
+        "No workspace root is authorized yet; configure --root, --allow-cwd, MCP roots/list, or allowRoots in CAUSORYN_CONFIG.",
+      ],
+      data: {
+        capabilities,
+        authorized: false,
+        indexing: false,
+        index: {
+          workspaceId: targetWorkspaceId,
+          jobId: null,
+          job: null,
+          latestSnapshot: null,
+        },
+        summary: null,
+      },
+    });
+  }
+
+  requireAuthorizedWorkspace(context, targetWorkspaceId);
+  const idxEnvelope = indexStatus(context, requestId, {
+    workspaceId: targetWorkspaceId,
+    ...(input.jobId === undefined ? {} : { jobId: input.jobId }),
+  });
+  const idxData = idxEnvelope.data as z.infer<typeof IndexStatusDataSchema>;
+  const activeJob = activeIndexingJobOf(context);
+  const summaryEnvelope =
+    idxData.latestSnapshot !== null
+      ? workspaceSummary(context, requestId, { workspaceId: targetWorkspaceId })
+      : null;
+  const summaryData =
+    summaryEnvelope === null
+      ? null
+      : (summaryEnvelope.data as z.infer<typeof WorkspaceSummaryDataSchema>);
+
+  const status: "ok" | "partial" =
+    summaryData === null && activeJob !== null
+      ? "partial"
+      : idxEnvelope.status === "partial"
+        ? "partial"
+        : "ok";
+
+  return buildEnvelope({
+    requestId,
+    workspaceId: targetWorkspaceId,
+    snapshotId: idxEnvelope.snapshotId,
+    status,
+    coverage: idxEnvelope.coverage,
+    warnings: idxEnvelope.warnings,
+    data: {
+      capabilities,
+      authorized: true,
+      indexing: activeJob !== null,
+      ...(activeJob !== null && summaryData === null
+        ? { retryAfterMs: DEFAULT_INDEX_RETRY_AFTER_MS }
+        : {}),
+      index: idxData,
+      summary: summaryData,
+    },
+  });
+}
+
+function buildAllRegistrations(
+  context: CausorynContext,
+  options: {
+    readonly isFullProfile: boolean;
+    readonly activeToolNames: readonly string[];
+  },
+): ReadonlyMap<string, ToolRegistration> {
+  const registrations: ToolRegistration[] = [
+    {
+      name: "causoryn_status",
+      title: "Workspace Status & Refresh",
+      description:
+        "Inspect server capabilities, workspace summary, coverage tiers, and index job progress (action='inspect', default), or queue an incremental/full re-index job (action='refresh').",
+      inputSchema: StatusToolInputSchema,
+      outputSchema: envelopeOutputSchema(StatusToolDataSchema),
+      annotations: WRITE_TOOL_ANNOTATIONS,
+      handler: (requestId, args) =>
+        runStatusTool(
+          context,
+          requestId,
+          args as z.infer<typeof StatusToolInputSchema>,
+          options.activeToolNames,
+        ),
+    },
     {
       name: "causoryn_get_capabilities",
-      title: "Causoryn yetenekleri",
+      title: "Server Capabilities",
       description:
-        "Adapter düzeyleri (L0–L4), sunucu limitleri, protokol revizyonu ve yayımlanan araç listesini döndürür. Snapshot gerektirmez.",
-      inputSchema: GetCapabilitiesInputSchema,
+        "Return supported language adapters, coverage tiers, server limits, protocol revision, and tool names without requiring a snapshot.",
+      inputSchema: GetCapabilitiesToolInputSchema,
       outputSchema: envelopeOutputSchema(CapabilitiesDataSchema),
       annotations: READ_ONLY_TOOL_ANNOTATIONS,
       handler: (requestId, args) =>
-        getCapabilities(context, requestId, args as z.infer<typeof GetCapabilitiesInputSchema>),
+        getCapabilities(context, requestId, args as z.infer<typeof GetCapabilitiesToolInputSchema>),
     },
     {
       name: "causoryn_workspace_summary",
-      title: "Workspace özeti",
+      title: "Workspace Summary",
       description:
-        "Proje/framework/entrypoint/coverage özeti; tüm sayılar yayınlanmış graph snapshot'ından türetilir.",
-      inputSchema: WorkspaceSummaryInputSchema,
+        "Return project file counts, languages, frameworks, entrypoints, and edge resolution breakdown from the published snapshot.",
+      inputSchema: WorkspaceSummaryToolInputSchema,
       outputSchema: envelopeOutputSchema(WorkspaceSummaryDataSchema),
       annotations: READ_ONLY_TOOL_ANNOTATIONS,
       handler: (requestId, args) =>
-        workspaceSummary(context, requestId, args as z.infer<typeof WorkspaceSummaryInputSchema>),
+        workspaceSummary(context, requestId, args as z.infer<typeof WorkspaceSummaryToolInputSchema>),
     },
     {
       name: "causoryn_index_status",
-      title: "İndeks durumu",
+      title: "Index Status",
       description:
-        "Snapshot, stale, iş (job) ilerlemesi ve tanıları raporlar: jobId verilirse o iş, verilmezse en son iş; iş/snapshot yoksa null alanlar + yönlendirici uyarı döner.",
-      inputSchema: IndexStatusInputSchema,
+        "Report the latest published snapshot, staleness flag, and background indexing job progress or diagnostics.",
+      inputSchema: IndexStatusToolInputSchema,
       outputSchema: envelopeOutputSchema(IndexStatusDataSchema),
       annotations: READ_ONLY_TOOL_ANNOTATIONS,
       handler: (requestId, args) =>
-        indexStatus(context, requestId, args as z.infer<typeof IndexStatusInputSchema>),
+        indexStatus(context, requestId, args as z.infer<typeof IndexStatusToolInputSchema>),
     },
     {
       name: "causoryn_refresh_index",
-      title: "İndeks yenileme",
+      title: "Refresh Index",
       description:
-        'Yeni snapshot işi başlatır (mode="full" | "incremental"): çağrı anında jobId döner, iş arka planda koşar; causoryn_index_status ile izlenir. mode="incremental" kaynak dosya karmaları değişmediyse mevcut yayını korur (no-op), senkron L0 başlangıç snapshot\'ını ise tam çok-dilli analize yükseltir. Yalnızca Causoryn\'in kendi graph deposuna (varsayılan süreç-içi InMemoryGraphRepository veya isteğe bağlı storage.dataDbPath SQLite kalıcı veri kökü) yazar; kaynak workspace dosyalarına yazmaz (Rust/Go sidecar\'ları derlenmemişse kendi toolchain target/cache dizinlerini kullanabilir).',
-      inputSchema: RefreshIndexInputSchema,
+        "Queue a background full or incremental snapshot build and return its jobId immediately; writes only to Causoryn's own data store.",
+      inputSchema: RefreshIndexToolInputSchema,
       outputSchema: envelopeOutputSchema(RefreshIndexDataSchema),
       annotations: WRITE_TOOL_ANNOTATIONS,
       handler: (requestId, args) =>
-        refreshIndex(context, requestId, args as z.infer<typeof RefreshIndexInputSchema>),
+        refreshIndex(context, requestId, args as z.infer<typeof RefreshIndexToolInputSchema>),
     },
     {
       name: "causoryn_map_system",
       title: "Architecture Map",
       description:
-        "L0–L3 düzeylerinde mimari harita: level/filters/maxNodes/cursor ile deterministik sıralı node+edge sayfaları; gerçek cursor sayfalama.",
-      inputSchema: MapSystemInputSchema,
-      outputSchema: envelopeOutputSchema(MapDataSchema),
+        "Return a paginated L0-L3 graph map, or set profile='onboarding' for entrypoints, central modules, learning order, and risk areas.",
+      inputSchema: MapSystemToolInputSchema,
+      outputSchema: envelopeOutputSchema(MapSystemConsolidatedDataSchema),
       annotations: READ_ONLY_TOOL_ANNOTATIONS,
-      handler: (requestId, args) =>
-        mapSystem(context, requestId, args as z.infer<typeof MapSystemInputSchema>),
+      handler: (requestId, args) => {
+        const parsed = args as z.infer<typeof MapSystemToolInputSchema>;
+        if (parsed.profile === "onboarding") {
+          let validatedLimits:
+            | {
+                readonly entryPointLimit?: number;
+                readonly topModuleCount?: number;
+                readonly maxLearningSteps?: number;
+                readonly maxCriticalFlows?: number;
+              }
+            | undefined;
+          if (parsed.limits !== undefined) {
+            const allowedLimitKeys = new Set([
+              "entryPointLimit",
+              "topModuleCount",
+              "maxLearningSteps",
+              "maxCriticalFlows",
+            ]);
+            for (const key of Object.keys(parsed.limits)) {
+              if (!allowedLimitKeys.has(key)) {
+                throw new CausorynToolError(
+                  "INVALID_ARGUMENT",
+                  `Unknown onboarding limit key: ${key}`,
+                );
+              }
+            }
+            validatedLimits = {
+              ...(parsed.limits["entryPointLimit"] === undefined
+                ? {}
+                : { entryPointLimit: parsed.limits["entryPointLimit"] }),
+              ...(parsed.limits["topModuleCount"] === undefined
+                ? {}
+                : { topModuleCount: parsed.limits["topModuleCount"] }),
+              ...(parsed.limits["maxLearningSteps"] === undefined
+                ? {}
+                : { maxLearningSteps: parsed.limits["maxLearningSteps"] }),
+              ...(parsed.limits["maxCriticalFlows"] === undefined
+                ? {}
+                : { maxCriticalFlows: parsed.limits["maxCriticalFlows"] }),
+            };
+          }
+          return generateOnboardingTool(context, requestId, {
+            ...(parsed.workspaceId === undefined ? {} : { workspaceId: parsed.workspaceId }),
+            audience: parsed.audience ?? "maintainer",
+            ...(validatedLimits === undefined ? {} : { limits: validatedLimits }),
+          });
+        }
+        let validatedFilters:
+          | {
+              readonly kinds?: z.infer<typeof FindSymbolsToolInputSchema>["kind"][];
+              readonly pathPrefix?: string;
+            }
+          | undefined;
+        if (parsed.filters !== undefined) {
+          if (parsed.filters.kinds !== undefined) {
+            const nodeKindSet = new Set<string>(NODE_KINDS);
+            const invalidKinds = parsed.filters.kinds.filter((k) => !nodeKindSet.has(k));
+            if (invalidKinds.length > 0) {
+              throw new CausorynToolError(
+                "INVALID_ARGUMENT",
+                `Invalid node kind(s) in filters.kinds: ${invalidKinds.join(", ")}`,
+              );
+            }
+          }
+          validatedFilters = {
+            ...(parsed.filters.kinds === undefined
+              ? {}
+              : { kinds: parsed.filters.kinds as z.infer<typeof FindSymbolsToolInputSchema>["kind"][] }),
+            ...(parsed.filters.pathPrefix === undefined
+              ? {}
+              : { pathPrefix: parsed.filters.pathPrefix }),
+          };
+        }
+        return mapSystem(context, requestId, {
+          ...(parsed.workspaceId === undefined ? {} : { workspaceId: parsed.workspaceId }),
+          ...(parsed.level === undefined ? {} : { level: parsed.level }),
+          ...(validatedFilters === undefined
+            ? {}
+            : {
+                filters: {
+                  ...(validatedFilters.kinds === undefined
+                    ? {}
+                    : { kinds: validatedFilters.kinds as (typeof NODE_KINDS)[number][] }),
+                  ...(validatedFilters.pathPrefix === undefined
+                    ? {}
+                    : { pathPrefix: validatedFilters.pathPrefix }),
+                },
+              }),
+          ...(parsed.maxNodes === undefined ? {} : { maxNodes: parsed.maxNodes }),
+          ...(parsed.cursor === undefined ? {} : { cursor: parsed.cursor }),
+        });
+      },
     },
     {
       name: "causoryn_find_symbols",
-      title: "Sembol arama",
+      title: "Find Symbols",
       description:
-        "qualifiedName üzerinde tam/önek/içerir dereceli sembol arama; kind filtresi, limit, AMBIGUOUS_SYMBOL adayları.",
-      inputSchema: FindSymbolsInputSchema,
-      outputSchema: envelopeOutputSchema(
-        // Hata yolu: AMBIGUOUS_SYMBOL data'sı aday listesi taşır (TŞ §10.3).
-        AmbiguityDataSchema.or(FindSymbolsDataSchema),
-      ),
+        "Search qualified symbol names by exact, prefix, or substring match with optional kind filter and disambiguation candidates.",
+      inputSchema: FindSymbolsToolInputSchema,
+      outputSchema: envelopeOutputSchema(AmbiguityDataSchema.or(FindSymbolsDataSchema)),
       annotations: READ_ONLY_TOOL_ANNOTATIONS,
       handler: (requestId, args) =>
-        findSymbols(context, requestId, args as z.infer<typeof FindSymbolsInputSchema>),
+        findSymbols(context, requestId, args as z.infer<typeof FindSymbolsToolInputSchema>),
     },
     {
       name: "causoryn_get_symbol_context",
-      title: "Sembol bağlamı",
+      title: "Symbol Context",
       description:
-        "Sembol node'u + istenen derinliğe kadar komşu kenarlar (edgeKinds filtreli, deterministik sıralı) + kanıt kayıtları; symbolId node kimliği veya qualifiedName kabul eder (belirsiz ad AMBIGUOUS_SYMBOL adayları döner).",
-      inputSchema: GetSymbolContextInputSchema,
-      outputSchema: envelopeOutputSchema(
-        // Hata yolu: AMBIGUOUS_SYMBOL data'sı aday listesi taşır (TŞ §10.3).
-        AmbiguityDataSchema.or(GetSymbolContextDataSchema),
-      ),
+        "Return a symbol node, bounded neighbor edges filtered by edgeKinds, and supporting source-span evidence records.",
+      inputSchema: GetSymbolContextToolInputSchema,
+      outputSchema: envelopeOutputSchema(AmbiguityDataSchema.or(GetSymbolContextDataSchema)),
       annotations: READ_ONLY_TOOL_ANNOTATIONS,
       handler: (requestId, args) =>
-        getSymbolContext(context, requestId, args as z.infer<typeof GetSymbolContextInputSchema>),
+        getSymbolContext(context, requestId, args as z.infer<typeof GetSymbolContextToolInputSchema>),
+    },
+    {
+      name: "causoryn_trace",
+      title: "Execution & Business Flow Trace",
+      description:
+        "Trace deterministic call paths over CALLS/ROUTES_TO edges (mode='execution', default) or cross-component request/event/contract flows (mode='business-flow') with explicit per-edge resolution and evidence.",
+      inputSchema: TraceToolInputSchema,
+      outputSchema: envelopeOutputSchema(TraceConsolidatedDataSchema),
+      annotations: READ_ONLY_TOOL_ANNOTATIONS,
+      handler: (requestId, args) => {
+        const parsed = args as z.infer<typeof TraceToolInputSchema>;
+        const target = parsed.entrypoint ?? parsed.flowSeed;
+        if (target === undefined) {
+          throw new CausorynToolError(
+            "INVALID_ARGUMENT",
+            "Provide entrypoint (or flowSeed) with a node ID, qualified symbol name, or endpoint.",
+          );
+        }
+        if (parsed.mode === "business-flow") {
+          return traceBusinessFlow(context, requestId, {
+            ...(parsed.workspaceId === undefined ? {} : { workspaceId: parsed.workspaceId }),
+            flowSeed: target,
+            ...(parsed.boundaries === undefined ? {} : { boundaries: parsed.boundaries }),
+            ...(parsed.maxHops === undefined ? {} : { maxHops: parsed.maxHops }),
+            ...(parsed.maxFlows === undefined ? {} : { maxFlows: parsed.maxFlows }),
+            ...(parsed.maxNodes === undefined ? {} : { maxNodes: parsed.maxNodes }),
+          });
+        }
+        return traceExecution(context, requestId, {
+          ...(parsed.workspaceId === undefined ? {} : { workspaceId: parsed.workspaceId }),
+          entrypoint: target,
+          ...(parsed.maxDepth === undefined ? {} : { maxDepth: parsed.maxDepth }),
+          ...(parsed.maxPaths === undefined ? {} : { maxPaths: parsed.maxPaths }),
+        });
+      },
     },
     {
       name: "causoryn_trace_execution",
-      title: "Execution Flow izi",
+      title: "Execution Flow Trace",
       description:
-        "Entrypoint'ten (framework endpoint adı 'POST /orders' veya sembol adı/kimliği) CALLS ve ROUTES_TO kenarları üzerinde sınırlı, deterministik çağrı yolları: her yolun kenar listesi, kenar başına resolution + evidence ayrı alanlarda; zincir etiketi en zayıf kenar resolution'ıdır (heuristic kenarlı zincir verified gibi sunulmaz); unresolved kenarda zincir durur ve status partial olur. maxDepth/maxPaths config tavanlarıyla sınırlıdır; kesme truncated + warnings ile raporlanır.",
-      inputSchema: TraceExecutionInputSchema,
-      outputSchema: envelopeOutputSchema(
-        // Hata yolu: AMBIGUOUS_SYMBOL data'sı aday listesi taşır (TŞ §10.3).
-        AmbiguityDataSchema.or(TraceExecutionDataSchema),
-      ),
+        "Trace bounded CALLS and ROUTES_TO call paths from an endpoint or symbol with explicit verified, heuristic, and unresolved labels.",
+      inputSchema: TraceExecutionToolInputSchema,
+      outputSchema: envelopeOutputSchema(AmbiguityDataSchema.or(TraceExecutionDataSchema)),
       annotations: READ_ONLY_TOOL_ANNOTATIONS,
       handler: (requestId, args) =>
-        traceExecution(context, requestId, args as z.infer<typeof TraceExecutionInputSchema>),
+        traceExecution(context, requestId, args as z.infer<typeof TraceExecutionToolInputSchema>),
     },
     {
       name: "causoryn_trace_business_flow",
-      title: "Business Flow izi",
+      title: "Business Flow Trace",
       description:
-        "flowSeed'den (node kimliği veya tam qualifiedName) iş akışı zincirleri: ROUTES_TO/CALLS/PRODUCES_CONTRACT/CONSUMES_CONTRACT/CONTAINS kenarlarında bounded BFS + kontrat node'larında ters yön izleme. Her segment kendi certainty/resolution'ını ayrı alanlarda taşır; kopukluklar uydurma köprüyle DEĞİL gap segmentiyle raporlanır ve status partial olur; sınırlar TŞ §20 tavanlarıyla kırpılır ve truncated/rationale ile bildirilir. Belirsiz seed AMBIGUOUS_SYMBOL adaylarıyla, bilinmeyen seed SYMBOL_NOT_FOUND ile reddedilir (otomatik kesinleştirme yok).",
-      inputSchema: TraceBusinessFlowInputSchema,
+        "Trace cross-component request, event, and contract flows from a seed symbol, reporting discontinuities honestly as gap segments.",
+      inputSchema: TraceBusinessFlowToolInputSchema,
       outputSchema: envelopeOutputSchema(TraceBusinessFlowDataSchema),
       annotations: READ_ONLY_TOOL_ANNOTATIONS,
       handler: (requestId, args) =>
         traceBusinessFlow(
           context,
           requestId,
-          args as z.infer<typeof TraceBusinessFlowInputSchema>,
+          args as z.infer<typeof TraceBusinessFlowToolInputSchema>,
         ),
     },
     {
       name: "causoryn_analyze_impact",
-      title: "Etki analizi",
+      title: "Impact Analysis",
       description:
-        "Hedef sembollerden ters kenar BFS ile bounded etki yolları: certainty (direct|indirect|possible) ile resolution (verified|heuristic|unresolved) ayrı alanlardır; mutlak etki iddiası üretilmez. Çözülemeyen hedefler unresolvedTargets'ta raporlanır; sınırlar TŞ §20 tavanlarına kırpılır ve rationale ile açıkça raporlanır.",
-      inputSchema: AnalyzeImpactInputSchema,
+        "Compute bounded reverse-dependency impact paths from target symbols with separate certainty and edge resolution labels.",
+      inputSchema: AnalyzeImpactToolInputSchema,
       outputSchema: envelopeOutputSchema(AnalyzeImpactDataSchema),
       annotations: READ_ONLY_TOOL_ANNOTATIONS,
       handler: (requestId, args) =>
-        analyzeImpactTool(context, requestId, args as z.infer<typeof AnalyzeImpactInputSchema>),
+        analyzeImpactTool(context, requestId, args as z.infer<typeof AnalyzeImpactToolInputSchema>),
     },
     {
       name: "causoryn_check_architecture",
       title: "Architecture Guard",
       description:
-        "Workspace kökündeki .causoryn/architecture.rules.yaml policy'sini yayınlanmış snapshot üzerinde değerlendirir (no-cycles Tarjan SCC + forbidden-dependency glob kuralları): TŞ §12 finding sözleşmesi {id, ruleId, severity, from, to, evidenceIds, suppression?, snapshotId}; baseline suppression (neden/sahip/tarih) bulguyu baskılar, policy'de karşılığı olmayan suppression orphanSuppressions'ta listelenir. Yalnızca bulgu raporlar; CI/çıkış kodu kararı vermez.",
-      inputSchema: CheckArchitectureInputSchema,
+        "Evaluate .causoryn/architecture.rules.yaml rules (cycle and forbidden-dependency checks) and optional baseline suppressions on the published snapshot.",
+      inputSchema: CheckArchitectureToolInputSchema,
       outputSchema: envelopeOutputSchema(CheckArchitectureDataSchema),
       annotations: READ_ONLY_TOOL_ANNOTATIONS,
       handler: async (requestId, args) =>
-        checkArchitecture(context, requestId, args as z.infer<typeof CheckArchitectureInputSchema>),
+        checkArchitecture(context, requestId, args as z.infer<typeof CheckArchitectureToolInputSchema>),
     },
     {
       name: "causoryn_compare_architecture",
       title: "Architecture Diff",
       description:
-        "İki git ref'i (commit/tag/branch/sha veya working-tree) arasındaki mimari diff: node ek-çıkar-değişen kümeleri, belgeli confidence'lı rename eşleşmeleri, kenar değişimleri ve API yüzeyi değişimleri. Snapshot blob'ları salt-okunur git okumasıyla alınır (checkout/reset/clean yok); analiz edilemeyen revizyon INVALID_REVISION döndürür.",
-      inputSchema: CompareArchitectureInputSchema,
+        "Compare two git refs or working-tree architecture snapshots read-only for added, removed, changed, renamed symbols and API surface changes.",
+      inputSchema: CompareArchitectureToolInputSchema,
       outputSchema: envelopeOutputSchema(CompareArchitectureDataSchema),
       annotations: READ_ONLY_TOOL_ANNOTATIONS,
       handler: async (requestId, args) =>
-        compareArchitecture(context, requestId, args as z.infer<typeof CompareArchitectureInputSchema>),
+        compareArchitecture(
+          context,
+          requestId,
+          args as z.infer<typeof CompareArchitectureToolInputSchema>,
+        ),
     },
     {
       name: "causoryn_get_agent_context",
-      title: "AI Agent GPS",
+      title: "Agent Context Search",
       description:
-        "Görev metnini yalnızca arama sorgusu olarak değerlendirip exact-symbol → graph-proximity → contract → freshness → fts ayaklarıyla sıralar: tokenBudget bütçesine kadar contextItems paketi (estimatedTokens, reason, evidence), omittedCount ve degrade ayaklar açıkça raporlanır. Görev metni çıktıya yazılmaz.",
-      inputSchema: GetAgentContextInputSchema,
+        "Rank relevant symbols and files for a query using exact-symbol, graph-proximity, contract, freshness, and full-text search signals within tokenBudget.",
+      inputSchema: GetAgentContextToolInputSchema,
       outputSchema: envelopeOutputSchema(GetAgentContextDataSchema),
       annotations: READ_ONLY_TOOL_ANNOTATIONS,
       handler: (requestId, args) =>
-        getAgentContext(context, requestId, args as z.infer<typeof GetAgentContextInputSchema>),
+        getAgentContext(context, requestId, args as z.infer<typeof GetAgentContextToolInputSchema>),
     },
     {
       name: "causoryn_generate_onboarding",
-      title: "Onboarding raporu",
+      title: "Onboarding Report",
       description:
-        "beginner|intermediate|maintainer profiline göre yapısal onboarding verisi: giriş noktaları, ilk 5 yüksek merkezi modül, öğrenme sırası (döngüler SCC ile tek adımda), kritik akışlar, testler, bilinmeyen kenarlar ve riskli alanlar. Açıklayıcı doğal dil host modelin işidir; bu araç şablon gerekçe taşır.",
-      inputSchema: GenerateOnboardingInputSchema,
+        "Generate structured onboarding data (entrypoints, central modules, learning order, critical flows, tests, and risk areas) for a chosen audience.",
+      inputSchema: GenerateOnboardingToolInputSchema,
       outputSchema: envelopeOutputSchema(GenerateOnboardingDataSchema),
       annotations: READ_ONLY_TOOL_ANNOTATIONS,
       handler: (requestId, args) =>
         generateOnboardingTool(
           context,
           requestId,
-          args as z.infer<typeof GenerateOnboardingInputSchema>,
+          args as z.infer<typeof GenerateOnboardingToolInputSchema>,
         ),
     },
     {
       name: "causoryn_export_documentation",
-      title: "Documentation export",
+      title: "Export Documentation",
       description:
-        "Deterministically exports the published architecture snapshot to an authorized output directory (`output.allowedOutputDirs`) in `json|markdown|mermaid|html|snapshot` format and `view`: `architecture` (default — layered SVG/Mermaid/brief + `architectureSummary.moduleIds`), `interactive` (HTML-only offline portal with pan/zoom/search/evidence drawer, default filename `causoryn-architecture-interactive.html`), or `full` (raw snapshot dump). Causoryn itself is strictly LLM-free (ADR-002 — zero model calls inside the engine). For rich visual architecture portals or onboarding blueprints, YOU (the host LLM) run a 2-step workflow: (1) call with `format: \"json\"` and `view: \"architecture\"` to read canonical `architectureSummary.moduleIds` (plus MCP evidence), then (2) synthesize grounded `annotations` (domains, moduleNotes, flows, guidedTour, decisions, risks) and call again with `format: \"html\"` and `view: \"interactive\"` (validated fail-closed). Omit `annotations` to generate a purely structural, model-free export directly from the graph. Atomic `.tmp` + rename writes only inside authorized directories (`EXPORT_NOT_ALLOWED` / `PATH_DENIED`); HTML is 100% offline with strict CSP (no CDN or analytics).",
-      inputSchema: ExportDocumentationInputSchema,
+        'Export snapshot to outputDir (json|markdown|mermaid|html|snapshot); view: architecture, interactive (offline HTML, causoryn-architecture-interactive.html), or full. LLM-free: (1) format:"json" view:"architecture" for architectureSummary.moduleIds, (2) annotations + format:"html" view:"interactive" (see architecture-blueprint skill), or omit annotations.',
+      inputSchema: options.isFullProfile
+        ? ExportDocumentationInputSchema
+        : ExportDocumentationCoreInputSchema,
       outputSchema: envelopeOutputSchema(ExportDocumentationDataSchema),
       annotations: WRITE_TOOL_ANNOTATIONS,
       handler: (requestId, args) =>
@@ -360,224 +745,515 @@ function buildRegistrations(context: CausorynContext): readonly ToolRegistration
     },
     {
       name: "causoryn_preflight_change",
-      title: "Preflight Manifest",
+      title: "Preflight Change",
       description:
-        "intent + targetSymbols/targetFiles hedef kümesinden ADAY Preflight Manifest üretir: impactCandidates (certainty/resolution ayrı alanlar), contractChecks, testPlanId (gömülü D6 test planının içerik adresli referansı), limitations ve sourceRevision (salt-okunur dosya okumasıyla HEAD; komut çalıştırma yok). KOD YAZMAZ: candidateOnly sabit true'dur ve çalışma ağacı değişmez; üretilen manifest yanıt gövdesinde döner ve causoryn_verify_change(preflightId) çözümü için yalnızca süreç-içi PreflightManifestStore belleğinde (FIFO 200) tutulur — diske veya kaynak ağaca asla yazılmaz. Sembole bağlanamayan hedef requiresDisambiguation + candidateTargets ile raporlanır (otomatik kesinleştirme yok, TŞ §10.3). Hedef dosyalar WorkspaceAccessPolicy kararı olmadan kullanılamaz (fail-closed).",
-      inputSchema: PreflightChangeInputSchema,
-      outputSchema: envelopeOutputSchema(PreflightChangeDataSchema),
+        "Generate a read-only preflight manifest with impact candidates and derived test plans; optionally narrow via include: ['impact', 'test-plan'].",
+      inputSchema: options.isFullProfile
+        ? PreflightChangeToolInputSchema
+        : PreflightChangeCoreInputSchema,
+      outputSchema: envelopeOutputSchema(PreflightConsolidatedDataSchema),
       annotations: READ_ONLY_TOOL_ANNOTATIONS,
-      handler: async (requestId, args) =>
-        preflightChange(context, requestId, args as z.infer<typeof PreflightChangeInputSchema>),
+      handler: async (requestId, args) => {
+        const parsed = args as z.infer<typeof PreflightChangeToolInputSchema>;
+        const include = parsed.include;
+        if (
+          include !== undefined &&
+          include.length === 1 &&
+          include[0] === "test-plan" &&
+          parsed.preflightId !== undefined &&
+          parsed.targetSymbols === undefined &&
+          parsed.targetFiles === undefined
+        ) {
+          return deriveTestPlan(context, requestId, {
+            ...(parsed.workspaceId === undefined ? {} : { workspaceId: parsed.workspaceId }),
+            preflightId: parsed.preflightId,
+            ...(parsed.maxDepth === undefined ? {} : { maxDepth: parsed.maxDepth }),
+            ...(parsed.maxCandidates === undefined ? {} : { maxCandidates: parsed.maxCandidates }),
+          });
+        }
+        if (
+          include !== undefined &&
+          include.length === 1 &&
+          include[0] === "impact" &&
+          parsed.intent === undefined &&
+          parsed.targetSymbols !== undefined &&
+          parsed.targetFiles === undefined
+        ) {
+          return analyzeImpactTool(context, requestId, {
+            ...(parsed.workspaceId === undefined ? {} : { workspaceId: parsed.workspaceId }),
+            targets: parsed.targetSymbols,
+            ...(parsed.maxDepth === undefined ? {} : { depth: parsed.maxDepth }),
+            ...(parsed.maxPaths === undefined ? {} : { maxPaths: parsed.maxPaths }),
+            ...(parsed.maxNodes === undefined ? {} : { maxNodes: parsed.maxNodes }),
+            ...(parsed.edgeKinds === undefined ? {} : { edgeKinds: parsed.edgeKinds }),
+          });
+        }
+        if (parsed.intent === undefined && include === undefined) {
+          throw new CausorynToolError(
+            "INVALID_ARGUMENT",
+            "intent is required for preflight change analysis (or pass include=['impact'|'test-plan'])",
+          );
+        }
+        const effectiveIncludeTestPlan =
+          include !== undefined ? include.includes("test-plan") : parsed.includeTestPlan;
+        return preflightChange(context, requestId, {
+          ...(parsed.workspaceId === undefined ? {} : { workspaceId: parsed.workspaceId }),
+          intent: parsed.intent ?? "change-analysis",
+          ...(parsed.targetSymbols === undefined ? {} : { targetSymbols: parsed.targetSymbols }),
+          ...(parsed.targetFiles === undefined ? {} : { targetFiles: parsed.targetFiles }),
+          ...(parsed.baseSnapshot === undefined ? {} : { baseSnapshot: parsed.baseSnapshot }),
+          ...(parsed.includeContracts === undefined
+            ? {}
+            : { includeContracts: parsed.includeContracts }),
+          ...(effectiveIncludeTestPlan === undefined
+            ? {}
+            : { includeTestPlan: effectiveIncludeTestPlan }),
+          ...(parsed.maxDepth === undefined ? {} : { maxDepth: parsed.maxDepth }),
+          ...(parsed.maxPaths === undefined ? {} : { maxPaths: parsed.maxPaths }),
+          ...(parsed.maxNodes === undefined ? {} : { maxNodes: parsed.maxNodes }),
+          ...(parsed.maxDisambiguationCandidates === undefined
+            ? {}
+            : { maxDisambiguationCandidates: parsed.maxDisambiguationCandidates }),
+        });
+      },
+    },
+    {
+      name: "causoryn_contracts",
+      title: "Contract Compatibility & Drift",
+      description:
+        "Evaluate contract spec version pairs for breaking/risk/safe compatibility (action='check', default) or detect drift with producer/consumer impact (action='drift').",
+      inputSchema: ContractsToolInputSchema,
+      outputSchema: envelopeOutputSchema(ContractsConsolidatedDataSchema),
+      annotations: READ_ONLY_TOOL_ANNOTATIONS,
+      handler: (requestId, args) => {
+        const parsed = args as z.infer<typeof ContractsToolInputSchema>;
+        if (parsed.action === "drift") {
+          if (parsed.base === undefined || parsed.target === undefined) {
+            throw new CausorynToolError(
+              "INVALID_ARGUMENT",
+              "base and target spec file arrays are required when action is 'drift'",
+            );
+          }
+          return detectContractDriftTool(context, requestId, {
+            ...(parsed.workspaceId === undefined ? {} : { workspaceId: parsed.workspaceId }),
+            base: parsed.base,
+            target: parsed.target,
+            ...(parsed.scope === undefined ? {} : { scope: parsed.scope }),
+            ...(parsed.anchorFiles === undefined ? {} : { anchorFiles: parsed.anchorFiles }),
+          });
+        }
+        if (parsed.contracts === undefined) {
+          throw new CausorynToolError(
+            "INVALID_ARGUMENT",
+            "contracts array is required when action is 'check'",
+          );
+        }
+        return checkContracts(context, requestId, {
+          ...(parsed.workspaceId === undefined ? {} : { workspaceId: parsed.workspaceId }),
+          contracts: parsed.contracts,
+          ...(parsed.snapshotId === undefined ? {} : { snapshotId: parsed.snapshotId }),
+        });
+      },
     },
     {
       name: "causoryn_check_contracts",
-      title: "Sözleşme değerlendirmesi",
+      title: "Check Contracts",
       description:
-        "Sözleşme sürüm çiftlerini (contracts: {name?, base, target} spec dosyaları; WorkspaceAccessPolicy ile salt okunur keşif) checkContractCompatibility çekirdeğiyle değerlendirir: backward-safe/risk/breaking_candidate/unknown sınıflaması, kural adı + eski/yeni satır kanıtı taşıyan bulgular ve çift-bağlanamayan tanılar ayrı raporlanır. Sınıflama statik delildir: serializer/runtime davranışı bilinemediğinde unknown üretilir ve breaking delilini gizlemez (TŞ §11).",
-      inputSchema: CheckContractsInputSchema,
+        "Evaluate OpenAPI, AsyncAPI, JSON Schema, SQL, or Protobuf spec version pairs for backward-safe, risk, breaking_candidate, or unknown compatibility.",
+      inputSchema: CheckContractsToolInputSchema,
       outputSchema: envelopeOutputSchema(CheckContractsDataSchema),
       annotations: READ_ONLY_TOOL_ANNOTATIONS,
       handler: (requestId, args) =>
-        checkContracts(context, requestId, args as z.infer<typeof CheckContractsInputSchema>),
+        checkContracts(context, requestId, args as z.infer<typeof CheckContractsToolInputSchema>),
     },
     {
       name: "causoryn_detect_contract_drift",
-      title: "Contract Drift",
+      title: "Detect Contract Drift",
       description:
-        "İki sürümün spec dosyaları (base/target) arasında canonical drift: K-013(7) contractChanges ({contractId, changeKind, summary}), breaking_candidate/risk/unknown AYRI alanlarda, PRODUCES_CONTRACT/CONSUMES_CONTRACT etki grafı (kenar resolution ASLA yükseltilmez; anchorFiles ile tüketici/üretici ankrajları taranır) ve tüketici kenarı bulunamayan değişiklikler unconsumedChanges'te dürüstçe raporlanır (unresolved consumers, TŞ §11). scope matchKey daraltmasıdır.",
-      inputSchema: DetectContractDriftInputSchema,
+        "Detect contract drift between base and target specs, map producer/consumer edges from anchorFiles, and report unconsumed changes.",
+      inputSchema: DetectContractDriftToolInputSchema,
       outputSchema: envelopeOutputSchema(DetectContractDriftDataSchema),
       annotations: READ_ONLY_TOOL_ANNOTATIONS,
       handler: (requestId, args) =>
         detectContractDriftTool(
           context,
           requestId,
-          args as z.infer<typeof DetectContractDriftInputSchema>,
+          args as z.infer<typeof DetectContractDriftToolInputSchema>,
         ),
     },
     {
       name: "causoryn_verify_change",
-      title: "Agent Change Guard",
+      title: "Verify Changes",
       description:
-        "Değişiklik sonrası mimari bütünlüğü tekrarlanabilir kurallarla DOĞRULAR; kod yazmaz, çalışma ağacını değiştirmez ve test ÇALIŞTIRMAZ (TŞ §10.4). Taban yayın (preflightId manifestinden veya baseSnapshot kimliğinden) ile working-tree projeksiyonunu dört denetimde değerlendirir: architecture (workspace kökündeki .causoryn/architecture.rules.yaml guard kuralları; dosya yoksa denetim not_evaluated), contracts (bu yüzeyden üretilemez — spec çifti girdide yoktur; istenirse not_evaluated), graph-diff (taban ↔ çalışma ağacı içerik farkı) ve test-plan (D6 adayları; koşum durumu dürüstlüğü: not_run varsayılan, observed yalnızca evidenceRef'li kanıtlı host kaydıyla — 'passed' iddiası yalnızca kanıt + gerçekten geçen rapor sayılarıyla mümkündür). Verdict sabit kural zincirinden gelir: no_findings | review_required | blocking_findings | inconclusive; no_findings güvenli/kod garantisi DEĞİLDİR ve her raporda dürüstlük uyarıları taşınır. Rapor byte-deterministiktir: aynı working-tree + aynı taban = bit-bit aynı rapor (sprint kapısı).",
-      inputSchema: VerifyChangeInputSchema,
+        "Verify working-tree changes read-only against a preflightId or baseSnapshot across architecture rules, graph-diff, and test-plan checks without running tests.",
+      inputSchema: options.isFullProfile
+        ? VerifyChangeToolInputSchema
+        : VerifyChangeCoreInputSchema,
       outputSchema: envelopeOutputSchema(VerifyChangeDataSchema),
       annotations: READ_ONLY_TOOL_ANNOTATIONS,
-      handler: (requestId, args) =>
-        verifyChangeTool(context, requestId, args as z.infer<typeof VerifyChangeInputSchema>),
+      handler: (requestId, args) => {
+        const raw = args as z.infer<typeof VerifyChangeCoreInputSchema>;
+        let validatedObservedTestRun: z.infer<typeof ObservedTestRunToolInputSchema> | undefined;
+        if (raw.observedTestRun !== undefined) {
+          const check = ObservedTestRunToolInputSchema.safeParse(raw.observedTestRun);
+          if (!check.success) {
+            throw new CausorynToolError(
+              "INVALID_ARGUMENT",
+              `Invalid observedTestRun: ${check.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ")}`,
+            );
+          }
+          validatedObservedTestRun = check.data;
+        }
+        const parsed: z.infer<typeof VerifyChangeToolInputSchema> = {
+          ...(raw.workspaceId === undefined ? {} : { workspaceId: raw.workspaceId }),
+          ...(raw.preflightId === undefined ? {} : { preflightId: raw.preflightId }),
+          ...(raw.baseSnapshot === undefined ? {} : { baseSnapshot: raw.baseSnapshot }),
+          ...(raw.baseRef === undefined ? {} : { baseRef: raw.baseRef }),
+          ...(raw.targetRevision === undefined ? {} : { targetRevision: raw.targetRevision }),
+          ...(raw.checks === undefined ? {} : { checks: raw.checks }),
+          ...(validatedObservedTestRun === undefined
+            ? {}
+            : { observedTestRun: validatedObservedTestRun }),
+        };
+        if (
+          parsed.preflightId === undefined &&
+          parsed.baseSnapshot === undefined &&
+          parsed.checks !== undefined &&
+          parsed.checks.length === 1 &&
+          parsed.checks[0] === "architecture"
+        ) {
+          const workspaceId = parsed.workspaceId ?? context.config.workspaceId;
+          requireAuthorizedWorkspace(context, workspaceId);
+          const latest = context.repository.getLatestPublished(workspaceId);
+          if (latest === undefined) {
+            throw new CausorynToolError(
+              "INDEX_NOT_READY",
+              `No published snapshot available for workspace: ${workspaceId}`,
+            );
+          }
+          return verifyChangeTool(context, requestId, {
+            ...parsed,
+            baseSnapshot: latest.snapshot.meta.id,
+          });
+        }
+        return verifyChangeTool(context, requestId, parsed);
+      },
     },
     {
       name: "causoryn_derive_test_plan",
-      title: "Test planı adayları",
+      title: "Derive Test Plan",
       description:
-        "changeSet (changedSymbols/changedFiles) için deterministik test adayları: TESTS kenarları (direct), değişen çağrı noktalarından CALLS zincirleri (call-site) ve test-dosyası adlandırma bağlamı (naming; daima heuristic). Her aday reason + evidenceIds + matchLevel taşır; TESTS kenarı bilmeyen değişen semboller missingCoverageCandidates'tır. Test ÇALIŞTIRILMAZ ve 'geçti' iddiası ÜRETİLMEZ (TŞ §15); plan kimliği içerik adreslidir (testplan:<sha256>) ve preflight_change testPlanId'siyle bire bir eşleşir. preflightId girdisi bu dilimde çözümlenmez (açık INVALID_ARGUMENT).",
-      inputSchema: DeriveTestPlanInputSchema,
+        "Derive deterministic test candidates from a changeSet or preflightId using TESTS edges, call-site chains, and naming heuristics without executing tests.",
+      inputSchema: DeriveTestPlanToolInputSchema,
       outputSchema: envelopeOutputSchema(DeriveTestPlanDataSchema),
       annotations: READ_ONLY_TOOL_ANNOTATIONS,
       handler: (requestId, args) =>
-        deriveTestPlan(context, requestId, args as z.infer<typeof DeriveTestPlanInputSchema>),
+        deriveTestPlan(context, requestId, args as z.infer<typeof DeriveTestPlanToolInputSchema>),
     },
     {
       name: "causoryn_get_evidence",
-      title: "Evidence provenance",
+      title: "Evidence Provenance",
       description:
-        "Node/edge/evidence/finding kimliğinin kanıt zinciri (TŞ §10.2 'node/edge/finding IDs'): her kayıt relativePath + startLine/endLine + sourceHash + analyzerId + rationale taşır; eksik alanlı eski kayıtlar partial=true + missingFields ile AÇIK işaretlenir, her kayıt bağlı graf bağlam referanslarını (contextRefs: katkı eden kenar / karşı uç node / bulgu) taşır ve chain özeti (targetKind/targetId/order/recordCount/partialCount/empty) deterministik düzene dair açık durum verir. finding:<sha256> kimlikleri snapshot'ta yaşamaz; workspace kökündeki .causoryn/architecture.rules.yaml policy'sinden deterministik türetilerek çözülür (check_architecture çıktısındaki kimlikleri kullanın). Policy yokluğu/bozukluğu POLICY_INVALID, türetilen bulgularla eşleşmeyen kimlik EVIDENCE_NOT_FOUND döndürür.",
-      inputSchema: GetEvidenceInputSchema,
+        "Retrieve deterministic evidence chain (source spans, contextRefs, partial/missingFields) for a node, edge, evidence, or finding ID (EVIDENCE_NOT_FOUND if missing).",
+      inputSchema: GetEvidenceToolInputSchema,
       outputSchema: envelopeOutputSchema(GetEvidenceDataSchema),
       annotations: READ_ONLY_TOOL_ANNOTATIONS,
       handler: (requestId, args) =>
-        getEvidence(context, requestId, args as z.infer<typeof GetEvidenceInputSchema>),
+        getEvidence(context, requestId, args as z.infer<typeof GetEvidenceToolInputSchema>),
     },
     {
       name: "causoryn_architecture_timeline",
       title: "Architecture Timeline",
       description:
-        "Git refs listesi veya bounded history-range üzerinden mimari zaman çizgisi: deterministik eşit aralıklı sampling (maxRevisions; uçlar korunur, atlanan noktalar skipped listesinde açık), seçilen noktaların snapshot blob'ları salt-okunur git okumasıyla alınır ve ardışık diff özetleri raporlanır. Faz E evrim görünümü: milestone bazlı özetler + ihlal trendi (no-cycles/forbidden ihlal sayıları nokta başına ayrı raporlanır — kalite tek sayıya indirgenmez). Analiz edilemeyen noktalar/aralıklar AÇIK raporlanır; hiçbir sayı uydurulmaz.",
-      inputSchema: ArchitectureTimelineInputSchema,
+        "Build a sampled architecture evolution timeline and per-metric rule violation trends across explicit git refs or a bounded history range read-only.",
+      inputSchema: ArchitectureTimelineToolInputSchema,
       outputSchema: envelopeOutputSchema(ArchitectureTimelineDataSchema),
       annotations: READ_ONLY_TOOL_ANNOTATIONS,
       handler: async (requestId, args) =>
         architectureTimeline(
           context,
           requestId,
-          args as z.infer<typeof ArchitectureTimelineInputSchema>,
+          args as z.infer<typeof ArchitectureTimelineToolInputSchema>,
         ),
     },
     {
       name: "causoryn_wiki_build",
-      title: "Wiki build",
+      title: "Build Living Wiki",
       description:
-        "Yayımlanmış graph snapshot'ından deterministik WikiSnapshot üretir ve YALNIZCA config wiki.dataDbPath ile beyanlı izinli Causoryn data-root SQLite dosyasına atomik publish ile yazar (kaynak workspace dosyalarına yazma yok; beyansız sunucuda default deny). Sayfa ağacı (TŞ §16A.1 taksonomisi; boş kategori no_data, uydurulmaz), çift yönlü linkler + broken-link diagnostics (K-013 #4), sayfa sürümleri ve wiki_fts aynı building satırına yazılır; aynı graph snapshot için ikinci build idempotent no-op raporlar. mode=full tüm sayfaları yeniden üretir; mode=incremental (K-013 #2, TŞ §16A.5 madde 4) W6 motoruyla yalnızca ilişkili pageId'leri yeniler (contentHash koruması); önceki WikiSnapshot/kaynak graph yoksa veya motor fallback kararı verirse graceful full build + data.fallbackReason (data.mode yürütülen modu bildirir).",
-      inputSchema: WikiBuildInputSchema,
+        "Generate and atomically publish a deterministic WikiSnapshot into the configured wiki SQLite data store (full or incremental mode).",
+      inputSchema: WikiBuildToolInputSchema,
       outputSchema: envelopeOutputSchema(WikiBuildDataSchema),
       annotations: WRITE_TOOL_ANNOTATIONS,
       handler: async (requestId, args) =>
-        wikiBuild(context, requestId, args as z.infer<typeof WikiBuildInputSchema>),
+        wikiBuild(context, requestId, args as z.infer<typeof WikiBuildToolInputSchema>),
     },
     {
       name: "causoryn_wiki_get_tree",
-      title: "Wiki sayfa ağacı",
+      title: "Wiki Page Tree",
       description:
-        "Wiki sayfa ağacı hiyerarşisi (salt okunur): 12 kök kategori + alt sayfalar taksonomi sırasıyla, childCount + coverage/freshness ile; depth alt ağaç tavanı, parentId alt ağaç kökü, limit/cursor (K-013 #5) sayfalama. no_data kategoriler dolgusuz listelenir.",
-      inputSchema: WikiGetTreeInputSchema,
+        "Read the hierarchical wiki page tree with coverage, freshness, child counts, depth cap, and cursor pagination.",
+      inputSchema: WikiGetTreeToolInputSchema,
       outputSchema: envelopeOutputSchema(WikiGetTreeDataSchema),
       annotations: READ_ONLY_TOOL_ANNOTATIONS,
       handler: (requestId, args) =>
-        wikiGetTree(context, requestId, args as z.infer<typeof WikiGetTreeInputSchema>),
+        wikiGetTree(context, requestId, args as z.infer<typeof WikiGetTreeToolInputSchema>),
     },
     {
       name: "causoryn_wiki_get_page",
-      title: "Wiki sayfası",
+      title: "Wiki Page",
       description:
-        "Tek wiki sayfası (salt okunur): generated layer bölümleri (sectionKey filtresi + bölüm sayfalaması), evidenceRefs provenance, coverage/freshness ve tüm bölümlerden türetilen sourceRefs. Overlay anotasyonlar bu araçta dönmez (TŞ §16A.6: ayrı yerel UI/CLI akışı).",
-      inputSchema: WikiGetPageInputSchema,
+        "Read a single generated wiki page with section filtering, evidence provenance, source references, and cursor pagination.",
+      inputSchema: WikiGetPageToolInputSchema,
       outputSchema: envelopeOutputSchema(WikiGetPageDataSchema),
       annotations: READ_ONLY_TOOL_ANNOTATIONS,
       handler: (requestId, args) =>
-        wikiGetPage(context, requestId, args as z.infer<typeof WikiGetPageInputSchema>),
+        wikiGetPage(context, requestId, args as z.infer<typeof WikiGetPageToolInputSchema>),
     },
     {
       name: "causoryn_wiki_search",
-      title: "Wiki arama",
+      title: "Wiki Search",
       description:
-        "Wiki sayfa araması (salt okunur): kaçışlı çok alanlı FTS5 sorgu; sıralama exact sembol/route > başlık > modül > BM25 > graph yakınlığı; matchedFields + evidenceIds relevance açıklaması, snippet, cursor/limit sayfalama (K-013 #5). Embedding skoru yoktur (kırmızı çizgi #1); yakınlık ayağı verisi yoksa skippedRankLegs ile dürüst degrade.",
-      inputSchema: WikiSearchInputSchema,
+        "Search generated wiki pages using escaped multi-field FTS5 ranking with matched fields, evidence IDs, and cursor pagination.",
+      inputSchema: WikiSearchToolInputSchema,
       outputSchema: envelopeOutputSchema(WikiSearchDataSchema),
       annotations: READ_ONLY_TOOL_ANNOTATIONS,
       handler: (requestId, args) =>
-        wikiSearch(context, requestId, args as z.infer<typeof WikiSearchInputSchema>),
+        wikiSearch(context, requestId, args as z.infer<typeof WikiSearchToolInputSchema>),
     },
     {
       name: "causoryn_wiki_get_links",
-      title: "Wiki bağlantıları",
+      title: "Wiki Page Links",
       description:
-        "Sayfanın outgoing + incoming (backlink) bağlantıları (salt okunur): resolution + evidence ile, linkKinds filtresi ve K-013 #5 sayfalama; toPageId=null kalan bozuk linkler brokenLinkDiagnostics ile raporlanır (K-013 #4: kayıt korunur, sessiz silinmez).",
-      inputSchema: WikiGetLinksInputSchema,
+        "Inspect outgoing and incoming wiki links with resolution, evidence references, and broken-link diagnostics.",
+      inputSchema: WikiGetLinksToolInputSchema,
       outputSchema: envelopeOutputSchema(WikiGetLinksDataSchema),
       annotations: READ_ONLY_TOOL_ANNOTATIONS,
       handler: (requestId, args) =>
-        wikiGetLinks(context, requestId, args as z.infer<typeof WikiGetLinksInputSchema>),
+        wikiGetLinks(context, requestId, args as z.infer<typeof WikiGetLinksToolInputSchema>),
     },
     {
       name: "causoryn_wiki_get_versions",
-      title: "Wiki sürümleri",
+      title: "Wiki Versions",
       description:
-        "Erişilebilir Git/snapshot revizyonları (salt okunur): veri kökündeki yayımlanmış WikiSnapshot revizyonu available (pageId ile sayfa sürümü: contentHash/linkSetHash/templateVersion/coverage); refs commit/tag/branch alias'ları salt-okunur git-read (cat-file) ile çözülür — çözülemeyen alias INVALID_REVISION, revizyon kaydı olmayan çözümlenmiş ref not_available + gerekçe.",
-      inputSchema: WikiGetVersionsInputSchema,
+        "List available published WikiSnapshot revisions or page versions and resolve optional git refs read-only.",
+      inputSchema: WikiGetVersionsToolInputSchema,
       outputSchema: envelopeOutputSchema(WikiGetVersionsDataSchema),
       annotations: READ_ONLY_TOOL_ANNOTATIONS,
       handler: async (requestId, args) =>
         wikiGetVersions(
           context,
           requestId,
-          args as z.infer<typeof WikiGetVersionsInputSchema>,
+          args as z.infer<typeof WikiGetVersionsToolInputSchema>,
         ),
     },
     {
       name: "causoryn_wiki_diff",
-      title: "Wiki diff",
+      title: "Wiki Diff",
       description:
-        "İki WikiSnapshot arası sayfa farkları (salt okunur; working tree değişmez): addedPages/removedPages, changedSections, addedLinks/removedLinks, coverageDelta ({previous, current, reason?} — K-013 #3) ve unresolvedDifferences. contractChanges ({contractId, changeKind, summary} — K-013 #7) iki WikiSnapshot'ın arka graph snapshot'larının sözleşme node yüzeyleri (ApiContract/EventContract/SchemaContract/ContractVersion) üzerinden hesaplanır; arka graph çözümlenemediğinde [] + çözümleme başarısızlığı uyarısı döner, iki yüzeyde de sözleşme kaydı yoksa gerçek [] döner (boşluk notu yok — K-013(7) gövdesi kesindir).",
-      inputSchema: WikiDiffInputSchema,
+        "Diff two published WikiSnapshots for added/removed pages, changed sections, link deltas, coverage deltas, and contract changes.",
+      inputSchema: WikiDiffToolInputSchema,
       outputSchema: envelopeOutputSchema(WikiDiffDataSchema),
       annotations: READ_ONLY_TOOL_ANNOTATIONS,
       handler: (requestId, args) =>
-        wikiDiff(context, requestId, args as z.infer<typeof WikiDiffInputSchema>),
+        wikiDiff(context, requestId, args as z.infer<typeof WikiDiffToolInputSchema>),
     },
   ];
+
+  const byName = new Map<string, ToolRegistration>();
+  for (const reg of registrations) {
+    byName.set(reg.name, reg);
+  }
+  return byName;
 }
 
 export type OutputSchemaProfile = "full" | "omit";
 
-export interface CreateCausorynServerOptions {
-  readonly outputSchemaProfile?: OutputSchemaProfile;
-  readonly beforeToolCall?: (toolName: string) => void | Promise<void>;
+export interface BeforeToolCallContext {
+  readonly toolName: string;
+  readonly progressToken?: string | number;
+  readonly sendProgress: (update: {
+    readonly progress: number;
+    readonly total?: number;
+    readonly message?: string;
+  }) => Promise<void>;
+  readonly signal: AbortSignal;
 }
 
-/** Context'i MCP McpServer'a bağlar; tam olarak 29 araç kaydeder. */
+export interface CreateCausorynServerOptions {
+  readonly outputSchemaProfile?: OutputSchemaProfile;
+  readonly toolProfile?: ToolProfile | string | readonly ToolProfile[];
+  readonly indexWaitTimeoutMs?: number;
+  readonly beforeToolCall?: (
+    toolName: string,
+    hookContext?: BeforeToolCallContext,
+  ) => void | Promise<void>;
+}
+
+/**
+ * Binds CausorynContext to an MCP McpServer using the selected tool profile
+ * (defaults to `core` with 11 lean consolidated tools and `outputSchemaProfile: "omit"`).
+ */
 export function createCausorynMcpServer(
   context: CausorynContext,
   options: CreateCausorynServerOptions = {},
 ): McpServer {
-  const outputSchemaProfile: OutputSchemaProfile = options.outputSchemaProfile ?? "full";
+  const outputSchemaProfile: OutputSchemaProfile = options.outputSchemaProfile ?? "omit";
+  const profiles = normalizeProfiles(options.toolProfile ?? context.config.toolProfile ?? "core");
+  const isFullProfile = profiles.includes("full");
+  const activeToolNames = resolveProfileToolNames(profiles);
+  const allRegistrations = buildAllRegistrations(context, {
+    isFullProfile,
+    activeToolNames,
+  });
+
   const server = new McpServer(
     { name: SERVER_NAME, version: SERVER_VERSION },
     { capabilities: { tools: {} } },
   );
-  for (const registration of buildRegistrations(context)) {
+
+  for (const name of activeToolNames) {
+    const registration = allRegistrations.get(name);
+    if (registration === undefined) continue;
+    const deprecatedReplacement = DEPRECATED_TOOL_REPLACEMENTS[registration.name];
+    const effectiveDescription =
+      isFullProfile && deprecatedReplacement !== undefined
+        ? `${registration.description} (Deprecated: use ${deprecatedReplacement})`
+        : registration.description;
+
     server.registerTool(
       registration.name,
       {
         title: registration.title,
-        description: registration.description,
+        description: effectiveDescription,
         inputSchema: registration.inputSchema,
         ...(outputSchemaProfile === "full" ? { outputSchema: registration.outputSchema } : {}),
         annotations: registration.annotations,
       },
       async (args, extra) => {
         const requestId = String(extra.requestId);
+        const progressToken = extra._meta?.progressToken;
+        const hookContext: BeforeToolCallContext = {
+          toolName: registration.name,
+          ...(progressToken === undefined ? {} : { progressToken }),
+          signal: extra.signal,
+          sendProgress: async (update) => {
+            if (progressToken === undefined) return;
+            try {
+              await extra.sendNotification({
+                method: "notifications/progress",
+                params: {
+                  progressToken,
+                  progress: update.progress,
+                  ...(update.total === undefined ? {} : { total: update.total }),
+                  ...(update.message === undefined ? {} : { message: update.message }),
+                },
+              });
+            } catch {
+              // Best-effort notification: never crash tool invocation on transport close.
+            }
+          },
+        };
+
         try {
-          await options.beforeToolCall?.(registration.name);
-          const envelope = await registration.handler(requestId, args);
-          if (outputSchemaProfile === "omit") {
-            registration.outputSchema.parse(envelope);
+          if (options.beforeToolCall !== undefined) {
+            await options.beforeToolCall(registration.name, hookContext);
+          } else if (
+            !NON_BLOCKING_BOOT_TOOLS.has(registration.name) &&
+            context.waitForInitialIndex !== undefined
+          ) {
+            await context.waitForInitialIndex({
+              timeoutMs: options.indexWaitTimeoutMs ?? DEFAULT_SERVER_INDEX_WAIT_MS,
+              signal: extra.signal,
+              ...(progressToken === undefined
+                ? {}
+                : {
+                    onProgress: (update) =>
+                      hookContext.sendProgress({
+                        progress: update.progress,
+                        total: update.total,
+                        message: update.message,
+                      }),
+                  }),
+            });
           }
+
+          const runHandler = async (): Promise<Envelope> => {
+            let envelope = await registration.handler(requestId, args);
+
+            if (envelope.status !== "error") {
+              if (deprecatedReplacement !== undefined) {
+                envelope = withAppendedWarning(
+                  envelope,
+                  `[Deprecated in favor of ${deprecatedReplacement}] Legacy tool ${registration.name} will be removed in a future release.`,
+                );
+              }
+              if (
+                !registration.name.startsWith("causoryn_wiki_") &&
+                envelope.snapshotId !== null &&
+                activeIndexingJobOf(context) !== null &&
+                !envelope.warnings.some((w) => /stale/i.test(w))
+              ) {
+                envelope = withAppendedWarning(
+                  envelope,
+                  "stale=true: background re-indexing is currently running; serving latest published snapshot",
+                );
+              }
+            }
+
+            if (outputSchemaProfile === "omit") {
+              registration.outputSchema.parse(envelope);
+            }
+            return envelope;
+          };
+          // A rebindable context (MCP roots binder) pins the whole handler to
+          // one context generation, so a roots/list_changed rebind during an
+          // await cannot switch this call to another workspace or close its
+          // database under it.
+          const pinning = toolCallPinningOf(context);
+          const envelope =
+            pinning === undefined ? await runHandler() : await pinning.runPinned(runHandler);
           return envelopeResult(envelope);
         } catch (error) {
           if (error instanceof CausorynToolError) {
+            if (
+              error.code === "INDEX_NOT_READY" &&
+              !registration.name.startsWith("causoryn_wiki_")
+            ) {
+              const activeJob = activeIndexingJobOf(context);
+              if (activeJob !== null) {
+                const indexingEnvelope = buildEnvelope({
+                  requestId,
+                  workspaceId: context.config.workspaceId,
+                  snapshotId: null,
+                  status: "partial",
+                  coverage: null,
+                  warnings: [
+                    `Workspace indexing is still in progress (jobId=${activeJob.jobId}, phase=${activeJob.phase}, progress=${String(activeJob.progressPercent)}%). Retry after ${String(DEFAULT_INDEX_RETRY_AFTER_MS)}ms or check causoryn_status.`,
+                  ],
+                  data: {
+                    indexing: true,
+                    status: "indexing",
+                    jobId: activeJob.jobId,
+                    progress: {
+                      phase: activeJob.phase,
+                      completed: activeJob.progressPercent,
+                      total: 100,
+                    },
+                    retryAfterMs: DEFAULT_INDEX_RETRY_AFTER_MS,
+                  },
+                });
+                return envelopeResult(indexingEnvelope);
+              }
+            }
             context.logger(
-              `tool ${registration.name} envelope hatası: ${error.code}: ${error.message}`,
+              `tool ${registration.name} envelope error: ${error.code}: ${error.message}`,
             );
             return envelopeResult(
               errorEnvelope(requestId, context.config.workspaceId, null, error),
             );
           }
-          // Ham hata mesajı (sürücü/kütüphane detayı: tablo adı, kimlik,
-          // mutlak yol…) YALNIZCA stderr loguna gider; istemciye requestId
-          // korelasyonlu genel mesaj döner (TŞ §10.1: stack/stack detayı
-          // sonuca girmez; iç detay sızması da aynı ilkeye tabidir).
           const detail = error instanceof Error ? error.message : String(error);
-          context.logger(`tool ${registration.name} beklenmeyen hata: ${detail}`);
+          context.logger(`tool ${registration.name} unexpected error: ${detail}`);
           return envelopeResult(
             errorEnvelope(
               requestId,
@@ -585,7 +1261,7 @@ export function createCausorynMcpServer(
               null,
               new CausorynToolError(
                 "INTERNAL_ERROR",
-                `Beklenmeyen iç hata; ayrıntılar sunucu loglarında (requestId: ${requestId})`,
+                `Unexpected internal error; inspect server stderr logs (requestId: ${requestId})`,
               ),
             ),
           );

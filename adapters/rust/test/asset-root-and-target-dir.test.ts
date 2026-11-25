@@ -18,7 +18,12 @@ import { describe, expect, it } from "vitest";
 import { analyzeCSharpWorkspace } from "@causoryn/adapter-csharp-roslyn";
 import { analyzeGoWorkspace } from "@causoryn/adapter-go";
 import { analyzePythonWorkspace } from "@causoryn/adapter-python";
-import { analyzeRustWorkspace } from "../src/analyzer.js";
+import {
+  analyzeRustWorkspace,
+  computeRustWorkerSourceFingerprint,
+  rustWorkerIntegrityPath,
+  writeRustWorkerIntegrityMetadata,
+} from "../src/analyzer.js";
 import {
   buildToolEnv,
   CARGO_ENV_ALLOWLIST,
@@ -209,11 +214,14 @@ describe("4 sidecar adapter dinamik asset root keşfi (CAUSORYN_ASSET_ROOT)", ()
 
       expect(capturedArgs).toHaveLength(1);
       expect(capturedArgs[0]).toEqual([
+        "-I",
         "-B",
+        "-X",
+        "utf8",
         path.join(tmpDir, "native", "python-worker", "worker.py"),
       ]);
     } finally {
-      rmSync(tmpDir, { recursive: true, force: true });
+      rmSync(tmpDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
     }
   });
 
@@ -280,7 +288,7 @@ describe("4 sidecar adapter dinamik asset root keşfi (CAUSORYN_ASSET_ROOT)", ()
 
       expect(flatArgs[0]).toEqual(["exec", flatDll]);
     } finally {
-      rmSync(tmpDir, { recursive: true, force: true });
+      rmSync(tmpDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
     }
   });
 
@@ -311,7 +319,7 @@ describe("4 sidecar adapter dinamik asset root keşfi (CAUSORYN_ASSET_ROOT)", ()
 
       expect(capturedCwds).toEqual([path.join(tmpDir, "native", "go-worker")]);
     } finally {
-      rmSync(tmpDir, { recursive: true, force: true });
+      rmSync(tmpDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
     }
   });
 
@@ -333,7 +341,7 @@ describe("4 sidecar adapter dinamik asset root keşfi (CAUSORYN_ASSET_ROOT)", ()
         },
       );
     } finally {
-      rmSync(tmpDir, { recursive: true, force: true });
+      rmSync(tmpDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
     }
   });
 });
@@ -401,7 +409,7 @@ describe("Rust yazılabilir CARGO_TARGET_DIR önbelleği ve fallback zinciri", (
     expect(outcome.spawnError.length).toBeGreaterThan(0);
   });
 
-  it("runCargoBuild: targetDir verildiğinde ve Cargo.lock mevcutsa --locked ekler; Cargo.lock yoksa veya targetDir tanımsızsa eklemez", async () => {
+  it("runCargoBuild: always passes --locked (with or without targetDir; without Cargo.lock cargo itself refuses to create one)", async () => {
     const tmpDir = mkdtempSync(path.join(os.tmpdir(), "causoryn-rs-locked-"));
     try {
       const safeTarget = path.join(tmpDir, "safe-target");
@@ -412,7 +420,7 @@ describe("Rust yazılabilir CARGO_TARGET_DIR önbelleği ve fallback zinciri", (
         "Cargo.toml",
       );
 
-      // 1) targetDir tanımlı + Cargo.lock mevcut → ["build", "--locked", "--manifest-path", manifestPath]
+      // 1) targetDir tanımlı + Cargo.lock mevcut → ["build", "--locked", "--manifest-path", manifestPath, "--target-dir", targetDir]
       const lockedArgs: Array<readonly string[]> = [];
       const lockedOutcome = await runCargoBuild({
         manifestPath: repoManifest,
@@ -429,10 +437,10 @@ describe("Rust yazılabilir CARGO_TARGET_DIR önbelleği ve fallback zinciri", (
       });
       expect(lockedOutcome.status).toBe(0);
       expect(lockedArgs).toEqual([
-        ["build", "--locked", "--manifest-path", repoManifest],
+        ["build", "--locked", "--manifest-path", repoManifest, "--target-dir", safeTarget],
       ]);
 
-      // 2) targetDir tanımsız (Cargo.lock mevcut olsa bile) → ["build", "--manifest-path", manifestPath]
+      // 2) targetDir tanımsız → ["build", "--locked", "--manifest-path", manifestPath]
       const noTargetArgs: Array<readonly string[]> = [];
       await withTemporaryEnv({ CARGO_TARGET_DIR: undefined }, async () => {
         const noTargetOutcome = await runCargoBuild({
@@ -449,9 +457,10 @@ describe("Rust yazılabilir CARGO_TARGET_DIR önbelleği ve fallback zinciri", (
         });
         expect(noTargetOutcome.status).toBe(0);
       });
-      expect(noTargetArgs).toEqual([["build", "--manifest-path", repoManifest]]);
+      expect(noTargetArgs).toEqual([["build", "--locked", "--manifest-path", repoManifest]]);
 
-      // 3) targetDir tanımlı ama Cargo.lock yok → ["build", "--manifest-path", manifestPath]
+      // 3) targetDir tanımlı ama Cargo.lock yok → still --locked (cargo then
+      //    fails instead of resolving dependencies afresh).
       const unlockedDir = path.join(tmpDir, "unlocked-crate");
       mkdirSync(unlockedDir, { recursive: true });
       const unlockedManifest = path.join(unlockedDir, "Cargo.toml");
@@ -473,10 +482,10 @@ describe("Rust yazılabilir CARGO_TARGET_DIR önbelleği ve fallback zinciri", (
       });
       expect(unlockedOutcome.status).toBe(0);
       expect(unlockedArgs).toEqual([
-        ["build", "--manifest-path", unlockedManifest],
+        ["build", "--locked", "--manifest-path", unlockedManifest, "--target-dir", safeTarget],
       ]);
     } finally {
-      rmSync(tmpDir, { recursive: true, force: true });
+      rmSync(tmpDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
     }
   });
 
@@ -531,6 +540,66 @@ describe("Rust yazılabilir CARGO_TARGET_DIR önbelleği ve fallback zinciri", (
     );
   });
 
+  it("negatif (c): relative, drive-relative, UNC and '..' target directories are refused (explicit and inherited CARGO_TARGET_DIR)", async () => {
+    const repoManifest = path.join(REPO_ROOT, "native", "rust-worker", "Cargo.toml");
+    const unsafeTargets = [
+      "relative-target",
+      path.join("nested", "target"),
+      "C:target",
+      "\\\\build-host\\share\\target",
+      "//build-host/share/target",
+      `${os.tmpdir()}${path.sep}..${path.sep}escape-target`,
+    ];
+    for (const target of unsafeTargets) {
+      let explicitSpawned = false;
+      const explicitOutcome = await runCargoBuild({
+        manifestPath: repoManifest,
+        timeoutMs: 5_000,
+        targetDir: target,
+        cargoExecutable: process.execPath,
+        spawnFn: () => {
+          explicitSpawned = true;
+          return createFakeSuccessChild("unused");
+        },
+      });
+      expect(explicitSpawned, `explicit targetDir ${target}`).toBe(false);
+      expect(explicitOutcome.status).toBeNull();
+      expect(explicitOutcome.spawnError).toContain("CARGO_TARGET_DIR");
+
+      await withTemporaryEnv({ CARGO_TARGET_DIR: target }, async () => {
+        expect("CARGO_TARGET_DIR" in buildToolEnv(CARGO_ENV_ALLOWLIST, null)).toBe(false);
+        let inheritedSpawned = false;
+        const inheritedOutcome = await runCargoBuild({
+          manifestPath: repoManifest,
+          timeoutMs: 5_000,
+          cargoExecutable: process.execPath,
+          spawnFn: () => {
+            inheritedSpawned = true;
+            return createFakeSuccessChild("unused");
+          },
+        });
+        expect(inheritedSpawned, `inherited CARGO_TARGET_DIR ${target}`).toBe(false);
+        expect(inheritedOutcome.status).toBeNull();
+        expect(inheritedOutcome.spawnError).toContain("CARGO_TARGET_DIR");
+      });
+    }
+
+    // A safe absolute inherited value is still passed through.
+    const safeTarget = path.join(os.tmpdir(), "causoryn-safe-inherited-target");
+    await withTemporaryEnv({ CARGO_TARGET_DIR: safeTarget }, () => {
+      expect(buildToolEnv(CARGO_ENV_ALLOWLIST, null)["CARGO_TARGET_DIR"]).toBe(safeTarget);
+    });
+  });
+
+  it("buildToolEnv disables the Windows cwd-first executable search for cargo, rustc and the linker", () => {
+    const env = buildToolEnv(CARGO_ENV_ALLOWLIST, null);
+    if (process.platform === "win32") {
+      expect(env["NoDefaultCurrentDirectoryInExePath"]).toBe("1");
+    } else {
+      expect(env["NoDefaultCurrentDirectoryInExePath"]).toBeUndefined();
+    }
+  });
+
   it("partial: güvensiz CAUSORYN_RUST_TARGET_DIR ve hazır binary yokluğunda analyzeRustWorkspace L0/L1 dosya düzeyine zarifçe düşer", async () => {
     const tmpDir = mkdtempSync(
       path.join(os.tmpdir(), "causoryn-rs-unsafe-target-"),
@@ -568,7 +637,7 @@ describe("Rust yazılabilir CARGO_TARGET_DIR önbelleği ve fallback zinciri", (
         },
       );
     } finally {
-      rmSync(tmpDir, { recursive: true, force: true });
+      rmSync(tmpDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
     }
   });
 
@@ -587,7 +656,23 @@ describe("Rust yazılabilir CARGO_TARGET_DIR önbelleği ve fallback zinciri", (
       const cacheDebugDir = path.join(cacheTargetDir, "debug");
 
       mkdirSync(cacheDebugDir, { recursive: true });
-      writeFileSync(path.join(cacheDebugDir, WORKER_BINARY_NAME), "bin", "utf8");
+      const workerSourceDir = path.join(assetRoot, "native", "rust-worker");
+      mkdirSync(path.join(workerSourceDir, "src"), { recursive: true });
+      const manifestPath = path.join(workerSourceDir, "Cargo.toml");
+      writeFileSync(
+        manifestPath,
+        '[package]\nname = "causoryn-rust-worker"\nversion = "0.1.0"\n',
+        "utf8",
+      );
+      writeFileSync(path.join(workerSourceDir, "src", "main.rs"), "fn main() {}\n", "utf8");
+      const cacheBinPath = path.join(cacheDebugDir, WORKER_BINARY_NAME);
+      writeFileSync(cacheBinPath, "bin", "utf8");
+      const sourceFingerprint = computeRustWorkerSourceFingerprint(manifestPath);
+      expect(sourceFingerprint).not.toBeNull();
+      writeRustWorkerIntegrityMetadata(cacheBinPath, {
+        sourceFingerprint: sourceFingerprint!,
+        binarySha256: createHash("sha256").update("bin", "utf8").digest("hex"),
+      });
 
       // Adım 2: assetRoot altında binary yok ama cacheTargetDir/debug altında var → cacheDebugDir kullanılır.
       const step2Paths: string[] = [];
@@ -674,7 +759,7 @@ describe("Rust yazılabilir CARGO_TARGET_DIR önbelleği ve fallback zinciri", (
         true,
       );
     } finally {
-      rmSync(tmpDir, { recursive: true, force: true });
+      rmSync(tmpDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
     }
   });
 
@@ -778,11 +863,13 @@ describe("Rust yazılabilir CARGO_TARGET_DIR önbelleği ve fallback zinciri", (
 
             expect(result.workerAvailable).toBe(true);
             expect(result.state).toBe("ready");
-            expect(
-              existsSync(
-                path.join(writableTargetDir, "debug", WORKER_BINARY_NAME),
-              ),
-            ).toBe(true);
+            const builtBinPath = path.join(
+              writableTargetDir,
+              "debug",
+              WORKER_BINARY_NAME,
+            );
+            expect(existsSync(builtBinPath)).toBe(true);
+            expect(existsSync(rustWorkerIntegrityPath(builtBinPath))).toBe(true);
             expect(existsSync(path.join(stagedRustWorker, "target"))).toBe(
               false,
             );
@@ -793,7 +880,7 @@ describe("Rust yazılabilir CARGO_TARGET_DIR önbelleği ve fallback zinciri", (
         expect(afterSnapshot).toEqual(beforeSnapshot);
       } finally {
         setTreePermissions(stagedPkgRoot, false);
-        rmSync(tmpDir, { recursive: true, force: true });
+        rmSync(tmpDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
       }
     },
     240_000,

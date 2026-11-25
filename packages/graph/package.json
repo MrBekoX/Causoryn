@@ -1,16 +1,16 @@
 {
   "name": "@causoryn/graph",
-  "version": "0.2.4",
+  "version": "0.3.0",
   "private": true,
   "license": "MIT",
-  "description": "GraphRepository sözleşmesi ve bellek içi gerçekleme: building → ready/partial atomik snapshot yayımlama, stale bayrağı (TŞ v2.1 §8, §9, ADR-005).",
+  "description": "Graph repository contract with an in-memory implementation, plus the analyses that run on published snapshots: impact, call and business-flow tracing, architecture guard and comparison, agent context, onboarding, timeline and documentation export.",
   "type": "module",
   "exports": {
     ".": "./src/index.ts"
   },
   "dependencies": {
-    "@causoryn/domain": "0.2.4",
-    "@causoryn/workspace": "0.2.4",
+    "@causoryn/domain": "0.3.0",
+    "@causoryn/workspace": "0.3.0",
     "yaml": "^2.9.1",
     "zod": "^4.6.7"
   }

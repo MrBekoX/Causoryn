@@ -1,50 +1,44 @@
-# Rust Worker stdin/stdout Protokolü — v1
+# Rust Worker stdin/stdout Protocol — v1
 
-> Kanıt: TŞ v2.1 §7 (dil sidecar worker'ları), §8 (Unified Evidence &
-> Knowledge Graph sözleşmesi), §23 (Faz G/M1-Rust dil planı). Alan adları,
-> `packages/domain/src/snapshot.ts`'teki createSnapshot GİRDİ sözleşmesiyle
-> (SnapshotNodeInput / SnapshotEdgeInput / SnapshotEvidenceInput — NodeRef
-> uçlu, ID'siz) birebir hizalıdır. Roslyn worker
-> (native/roslyn-worker/PROTOCOL.md) ile aynı kablolama desenidir; fark,
-> çözümleyicinin `syn` 3 (crates.io, `Cargo.lock` sürümü `3.0.10`) olması ve aşağıdaki DÜRÜST ÇÖZÜM
-> SINIRLARIDIR.
+> Field names match the `createSnapshot` INPUT contract in
+> `packages/domain/src/snapshot.ts` (`SnapshotNodeInput` / `SnapshotEdgeInput` /
+> `SnapshotEvidenceInput` — ID-less, with `NodeRef` endpoints). The wire pattern is the same as
+> the Roslyn worker's (`native/roslyn-worker/PROTOCOL.md`); the differences are the parser —
+> `syn` 3 from crates.io (`Cargo.lock` version `3.0.10`) — and the HONEST RESOLUTION LIMITS
+> below. The source of truth for these rules is `src/analyzer.rs`.
 
-**Causoryn Rust sidecar worker** — LLM çalıştırmayan, yerel ve
-deterministik Rust çözümleyicisi. Süreç stdin'den satır satır istek okur,
-her isteğe tek satır JSON yanıt döner ve analiz boyunca kullanıcı
-workspace'ine HİÇBİR YAZMA yapmaz (ADR-008; analiz tamamen bellek-içindedir).
+**Causoryn Rust sidecar worker** — a local, deterministic Rust analyzer that runs no LLM. The
+process reads requests line by line from stdin, answers each request with exactly one JSON line,
+and never writes to the user's workspace (analysis is entirely in memory).
 
-- **Taşıma:** yerel stdio; satır-bazlı JSON (her mesaj birebir tek satır).
-- **Kodlama:** BOM'suz UTF-8; JSON içi yeni satırlar `\n` kaçış dizisidir,
-  bu yüzden framing bozulmaz.
-- **stdout disiplini (kırmızı çizgi):** stdout'ta YALNIZCA protokol
-  satırları taşınır; tüm loglar `stderr`'e yazılır (`[rust-worker] `
-  öneki ile).
-- **Kodlama kuralı:** JSON anahtarları domain'deki alan adlarıyla aynıdır
-  (camelCase); opsiyonel alanlar `null` yerine YOK olarak yazılır — tek
-  istisna `id` alanıdır (hata yanıtlarında açıkça `null` taşınır).
-- **Bağımlılık sözleşmesi.** `syn` 3 AST analizi, `serde_json` JSON çerçeveleme ve
-  `proc-macro2` `span-locations` kaynak satırı kanıtı için kullanılır. SHA-256 bağımlılıksız uygulanır
-  (`src/sha256.rs`) ve Node `crypto` özetiyle kabul testlerinde
-  doğrulanır.
+- **Transport:** local stdio; line-delimited JSON (every message is exactly one line).
+- **Encoding:** UTF-8 without BOM; newlines inside JSON are `\n` escapes, so framing never breaks.
+- **stdout discipline:** stdout carries ONLY protocol lines; all logs go to `stderr` (prefix
+  `[rust-worker] `).
+- **Encoding rule:** JSON keys are the domain field names (camelCase); optional fields are
+  omitted instead of `null`. The only exception is `id`, which is an explicit `null` in error
+  responses when the request line could not be parsed.
+- **Dependency contract:** `syn` 3 for the AST, `serde_json` for JSON framing, and
+  `proc-macro2` with the `span-locations` feature for source-line evidence. SHA-256 is
+  implemented without a dependency (`src/sha256.rs`) and checked against the Node `crypto`
+  digest in the acceptance tests.
 
-## 1. Mesaj çerçeveleme
+## 1. Message framing
 
 ```
-stdout ← {"id":...,"status":"ready",...}\n     (istek başına tam olarak bir satır)
-stderr ← [rust-worker] ...                     (loglar; protokolün parçası değil)
+stdout ← {"id":...,"status":"ready",...}\n     (exactly one line per request)
+stderr ← [rust-worker] ...                     (logs; not part of the protocol)
 ```
 
-- İstemci, worker sürecini başlatır ve stdin'e istek satırları yazar.
-- Her boş olmayan satır bir istektir; boş satırlar sessizce atlanır.
-- Worker süreci istemci stdin'i kapattığında (EOF) `0` çıkış kodu ile biter.
-  Yalnızca stdio kablosu kırılırsa `1` ile biter.
-- Süreç, 256 MB stack'li ayrı thread'de koşar: derin iç içe AST'lerde syn
-  parse/visit recursion StackOverflow'a düşmeden ya PARSE_ERROR tanısına ya
-  da başarıyla tamamlanmış analize dönüşür (roslyn worker'daki iki katmanlı
-  savunmanın karşılığı).
+- The client starts the worker process and writes request lines to its stdin.
+- Every non-empty line is a request; empty lines are skipped silently.
+- The process exits with code `0` when the client closes stdin (EOF), and with `1` only if the
+  stdio pipe itself breaks.
+- The request loop runs on a separate thread with a 256 MB stack, so deeply nested ASTs end up
+  either as a `PARSE_ERROR` diagnostic or as a completed analysis instead of a stack overflow
+  (the counterpart of the Roslyn worker's two-layer defense).
 
-## 2. İstek — `type: "analyze"`
+## 2. Request — `type: "analyze"`
 
 ```json
 {
@@ -52,40 +46,39 @@ stderr ← [rust-worker] ...                     (loglar; protokolün parçası 
   "type": "analyze",
   "protocolVersion": "1",
   "files": [
-    { "path": "main.rs", "content": "... kaynak kod ..." }
+    { "path": "main.rs", "content": "... source code ..." }
   ]
 }
 ```
 
-| Alan | Tür | Kural |
+| Field | Type | Rule |
 |---|---|---|
-| `id` | string \| sayı | **Zorunlu.** Yanıtta birebir echo edilir. |
-| `type` | string | **Zorunlu.** Yalnızca `"analyze"` desteklenir. |
-| `protocolVersion` | string | Opsiyonel. Varsa `"1"` olmalıdır. |
-| `maxNodes` | tam sayı | Opsiyonel. Yanıt node bütçesi; `1..MaxResponseNodes` aralığında olmalı, dışı `INVALID_ARGUMENT`. Verilmezse `MaxResponseNodes` uygulanır. (bool kabul edilmez — JSON true/false sayı değildir.) |
-| `files` | dizi | **Zorunlu, en az 1.** Bellek-içi kaynak çantası. |
-| `files[].path` | string | **Zorunlu.** Workspace-relative POSIX yolu. Mutlak yol, `""`/`.`/`..` segmentleri reddedilir. Aynı yol iki kez verilemez. |
-| `files[].content` | string | **Zorunlu.** Tam kaynak kod. |
+| `id` | string \| number | **Required.** Echoed verbatim in the response. |
+| `type` | string | **Required.** Only `"analyze"` is supported. |
+| `protocolVersion` | string | Optional. If present it must be `"1"`. |
+| `maxNodes` | integer | Optional. Response node budget; must be within `1..MaxResponseNodes`, otherwise `INVALID_ARGUMENT`. Defaults to `MaxResponseNodes`. Booleans are rejected (JSON `true`/`false` are not numbers). |
+| `files` | array | **Required, at least 1.** In-memory bag of Rust sources. |
+| `files[].path` | string | **Required.** Workspace-relative POSIX path. Absolute paths and `""` / `.` / `..` segments are rejected. The same path cannot appear twice. |
+| `files[].content` | string | **Required.** Full source text. |
 
-İstek nesnesinde bilinmeyen alan → `INVALID_ARGUMENT` (kesin şema reddi,
-Zod strictObject disipliniyle aynı); `files[]` girdisinde bilinmeyen alan
-aynı şekilde reddedilir.
+An unknown field in the request object → `INVALID_ARGUMENT` (strict schema, the same discipline
+as Zod `strictObject`); an unknown field in a `files[]` entry is rejected the same way.
 
-### Kaynak sınırları (TŞ §9 resource budget; K-010: yalnızca boyut limitleri)
+### Resource limits (size limits only)
 
-| Sınır | Değer | Aşım davranışı |
+| Limit | Value | Behavior when exceeded |
 |---|---|---|
-| `MaxRequestLineBytes` | 64.000.000 bayt (UTF-8'de kötümser üst sınır) | Satır newline'a kadar DISCARD edilir; `id: null` + `LIMIT_EXCEEDED` yanıtı yazılır, döngü devam eder. |
-| `MaxFileCount` | 5.000 dosya/istek | İstek reddedilir: `LIMIT_EXCEEDED`. |
-| `MaxFileContentBytes` | 2.000.000 bayt/dosya (TŞ §20 `maxFileBytes` ile uyumlu) | İstek reddedilir: `LIMIT_EXCEEDED`. |
-| `MaxResponseNodes` | 250.000 node/yanıt (`maxNodes` ile altına çekilebilir) | Aşan node'lar YAYINLANMAZ; uçları yayınlanmayan kenarlar da düşer (dangling yok). Yanıta `RESPONSE_TRUNCATED` tanısı düşer ve `status: "partial"` olur — sessiz kesim yoktur. |
+| `MaxRequestLineBytes` | 64,000,000 bytes (a pessimistic upper bound for UTF-8) | The line is DISCARDED up to its newline; a response with `id: null` and `LIMIT_EXCEEDED` is written and the loop continues. |
+| `MaxFileCount` | 5,000 files per request | Request rejected: `LIMIT_EXCEEDED`. |
+| `MaxFileContentBytes` | 2,000,000 bytes per file (matches the server's default `maxFileBytes`) | Request rejected: `LIMIT_EXCEEDED`. |
+| `MaxResponseNodes` | 250,000 nodes per response (can be lowered with `maxNodes`) | The extra nodes are NOT emitted and edges whose endpoints were not emitted are dropped too (no dangling edges). The response gets a `RESPONSE_TRUNCATED` diagnostic and `status: "partial"` — truncation is never silent. |
 
-Sınırlar sabittir (protokol v1'de istekte yapılandırılamaz) ve aynı
-girdiye deterministik davranışı korur.
+The limits are fixed (not configurable per request in protocol v1) and keep the behavior
+deterministic for identical input.
 
-## 3. Yanıt — `status: "ready" | "partial"`
+## 3. Response — `status: "ready" | "partial"`
 
-Analiz tamamlandığında:
+When the analysis completes:
 
 ```json
 {
@@ -99,7 +92,7 @@ Analiz tamamlandığında:
     "routeDetection": "rust-attribute-macro-route-pattern",
     "frameworkLinkers": false
   },
-  "coverageRatio": 1.0,
+  "coverageRatio": 0.7419,
   "unsupportedConstructs": [...],
   "warnings": [],
   "diagnostics": [{ "relativePath": "...", "code": "PARSE_ERROR", "message": "...", "line": 3 }],
@@ -107,20 +100,21 @@ Analiz tamamlandığında:
 }
 ```
 
-- `status: "ready"` → tanı yok; `"partial"` → en az bir tanı var (TŞ §7:
-  "Parser başarısızsa yalnızca kanıtlanabilen bilgi sunulur"). Tanı kodları
-  worker-analiz düzeyidir: `PARSE_ERROR` (syn parse hatası),
-  `IMPL_UNKNOWN_TYPE` (bildirimi sette olmayan tipin impl'i modellenmez),
-  `MACRO_ITEM_SKIPPED` (makro ile tanımlı üst-düzey öğe atlanır),
-  `RESPONSE_TRUNCATED` (yanıt node bütçesi aşıldı — `maxNodes`/MaxResponseNodes;
-  uçları yayınlanmayan kenarlar düşer, dangling yok). `line` 1 tabanlıdır,
-  bilinmiyorsa 0.
-- `coverageRatio` = verified kenar / toplam kenar (4 ondalık; TS adapter
-  kuralı). Kenar yoksa 0.
-- `evidence` = kenarların taşıdığı kanıtların küme içinde tekil (dedupe)
-  listesi. Kenarın kendisi `evidence` alanında aynı kayıtları taşır.
+- `status: "ready"` → no diagnostics; `"partial"` → at least one diagnostic (when a parser fails,
+  only what can be proven is reported). Diagnostic codes are analysis-level: `PARSE_ERROR` (`syn`
+  parse error), `IMPL_UNKNOWN_TYPE` (an `impl` for a type not declared in the set is not
+  modeled), `MACRO_ITEM_SKIPPED` (a top-level item defined by a macro is skipped),
+  `RESPONSE_TRUNCATED` (the response node budget — `maxNodes` / `MaxResponseNodes` — was
+  exceeded; edges whose endpoints were not emitted are dropped, no dangling edges). `line` is
+  1-based, `0` if unknown.
+- `coverageRatio` = verified edges / all edges (4 decimals, the TypeScript adapter rule); `0`
+  when there are no edges.
+- `evidence` = de-duplicated list of the evidence carried by the edges; each edge also carries
+  the same records in its own `evidence` field.
+- `capabilities.symbolResolution: true` refers to the deterministic name tables described below;
+  there is no semantic resolver (no type checking, no trait dispatch, no `use` resolution).
 
-### Node alanları (domain GraphNode karşılığı — ID'siz)
+### Node fields (domain GraphNode equivalent — no IDs)
 
 ```json
 {
@@ -128,33 +122,47 @@ Analiz tamamlandığında:
   "qualifiedName": "crate::services::OrdersService",
   "language": "rust",
   "relativePath": "services.rs",
-  "attributes": { "sourceHash": "..." }
+  "attributes": {},
+  "span": { "startLine": 4, "endLine": 9 }
 }
 ```
 
-- `kind` — TŞ §8 27-node kataloğuyla sınırlıdır. Kullanılanlar: `File`,
-  `Class`, `Interface`, `Function`, `Method`, `Endpoint`, `UnknownExternal`.
-- `qualifiedName` kuralları (deterministik, kaynaktan türetilen):
-  - Modül yolu: relativePath → `.rs` son eki atılır → `/` ile
-    segmentlere bölünür → öndeki `src` segmenti atılır → sondaki
-    `main`/`lib`/`mod` segmenti atılır → kalanlar `::` ile birleşir ve
-    `crate::` öneki alınır (segment kalmadıysa `crate`).
-    Örnek: `services.rs` → `crate::services`; `main.rs` → `crate`.
-  - Serbest `fn` → `Function`: `<modül>::<fn>`.
-  - `struct` ve `enum` → `Class`: `<modül>::<Ad>` (TŞ §8 C# eşlemesinin
-    karşılığı; ask sözleşmesi: "struct/enum → Class").
-  - `trait` → `Interface`: `<modül>::<Trait>`.
-  - impl içindeki `fn` → `Method`: `<modül>::<Tip>::<fn>`; trait içindeki
-    metot bildirimi → `Method`: `<modül>::<Trait>::<metot>`.
-  - UnknownExternal: çağrı ifadesinin çözümlenen metni (ör.
-    `std::env::var`), çözülemeyen metot çağrısında metot adı, yolu
-    olmayan çağrıda `(anonim-cağrı)`.
-  - Endpoint: `"METHOD PATH"` (ör. `"GET /orders"`); `attributes`:
-    `method` + `path` (önde `/` ile).
-- `attributes` — File: `sourceHash` (UTF-8 SHA-256, 64 hex); Endpoint:
-  `method` + `path`; diğerleri boş nesne.
+- `span` — optional (protocol v1 stays compatible: clients ignore an unknown field, and an older
+  worker simply omits it). The 1-based, inclusive line range of the declaration from the syn
+  span of the item (`proc-macro2` `span-locations`, the same `span_lines` the evidence uses):
+  the `fn` item for Function nodes, the `struct` / `enum` item for Class, the `trait` item for
+  Interface, the `fn` inside an `impl` or `trait` for Method. syn item spans include the outer
+  attributes and doc comments (`#[derive(..)]`, `///`), so the range starts at the first of them;
+  it is the same range as the node's CONTAINS `ast-span` evidence. A node declared more than once
+  in one file (one method name in two `impl` blocks of a type, for example `fmt` in `impl Display`
+  and `impl Debug`) gets the smallest range that covers every declaration, so the result does
+  not depend on visit order; `impl` blocks do not widen the `struct` / `enum` node itself. File,
+  Endpoint and UnknownExternal nodes carry no `span`. The adapter
+  (`adapters/rust/src/node-span.ts`) accepts it only as positive integers with
+  `startLine <= endLine` inside the analyzed file and binds it to that file's `relativePath` and
+  source hash as the node `location`; anything else is dropped with one warning and the node
+  keeps its file anchor.
+- `kind` — limited to the domain node catalog. Used kinds: `File`, `Class`, `Interface`,
+  `Function`, `Method`, `Endpoint`, `UnknownExternal`.
+- `qualifiedName` rules (deterministic, derived from the source):
+  - Module path: take `relativePath`, drop the `.rs` suffix, split on `/`, drop a leading `src`
+    segment, drop a trailing `main` / `lib` / `mod` segment, join the rest with `::` and prefix
+    `crate::` (just `crate` when no segment is left). Example: `services.rs` → `crate::services`;
+    `main.rs` → `crate`.
+  - Free `fn` → `Function`: `<module>::<fn>`.
+  - `struct` and `enum` → `Class`: `<module>::<Name>`.
+  - `trait` → `Interface`: `<module>::<Trait>`.
+  - `fn` inside an `impl` → `Method`: `<module>::<Type>::<fn>`; a method declaration inside a
+    `trait` → `Method`: `<module>::<Trait>::<method>`.
+  - UnknownExternal: the call text as written (for example `std::env::var`), the method name for
+    an unresolved method call, or `(anonymous-call)` for a call whose callee is not a path (for
+    example calling a closure or a returned function value).
+  - Endpoint: `"METHOD PATH"` (for example `"GET /orders"`).
+- `attributes` — File: `sourceHash` (SHA-256 of the UTF-8 content, 64 hex); Endpoint: `method`
+  and `path` (with a leading `/`); other kinds: an empty object.
+- Endpoint and UnknownExternal nodes carry no `relativePath`.
 
-### Edge alanları (domain GraphEdge karşılığı — ID'siz)
+### Edge fields (domain GraphEdge equivalent — no IDs)
 
 ```json
 {
@@ -162,22 +170,20 @@ Analiz tamamlandığında:
   "from": { "kind": "Function", "qualifiedName": "crate::list_orders", "relativePath": "main.rs" },
   "to":   { "kind": "Method", "qualifiedName": "crate::services::OrdersService::list", "relativePath": "services.rs" },
   "resolution": "heuristic",
-  "evidence": [ { "kind": "semantic-symbol", "span": {...}, "analyzerId": "rust-worker", "analyzerVersion": "0.1.0", "rationale": "..." } ],
-  "ambiguity": { "candidates": ["..."], "reason": "..." }
+  "evidence": [ { "kind": "semantic-symbol", "span": {...}, "analyzerId": "rust-worker", "analyzerVersion": "0.1.0", "rationale": "..." } ]
 }
 ```
 
-- `from`/`to` domain **NodeRef** biçimidir (kind + qualifiedName +
-  relativePath); ID alanı YOKTUR — ID'ler TŞ §8 invariant (iii) gereği
-  domain normalizer'da (packages/domain `createSnapshot`) deterministik
-  üretilir. **Worker KİMLİK ÜRETMEZ** (TŞ §7.1).
-- Worker'ın ürettiği kenar türleri: `CONTAINS`, `CALLS`, `ROUTES_TO`.
-  (IMPORTS — `use` → IMPORTS kenarı — bu dilimde üretilmez;
-  `capabilities.importEdges: false` açık beyan.)
-- Aynı (kind, from, to, resolution) anahtarlı kenarlar birleştirilir;
-  evidence listeleri küme içinde tekilleşir ve sıralanır.
+- `from` / `to` use the domain **NodeRef** shape (kind + qualifiedName + relativePath); there is
+  NO ID field. IDs are derived deterministically by the domain normalizer (`createSnapshot`).
+  **The worker never generates identities.**
+- Edge kinds produced: `CONTAINS`, `CALLS`, `ROUTES_TO`. IMPORTS edges (`use` → IMPORTS) are not
+  produced (`capabilities.importEdges: false`).
+- `ambiguity` (`{ candidates, reason }`) is present only where the resolution table says so.
+- Edges with the same (kind, from, to, resolution) key are merged; their evidence lists are
+  de-duplicated and sorted.
 
-### Evidence alanları (domain Evidence karşılığı — ID'siz)
+### Evidence fields (domain Evidence equivalent — no IDs)
 
 ```json
 {
@@ -185,38 +191,60 @@ Analiz tamamlandığında:
   "span": { "relativePath": "main.rs", "startLine": 12, "endLine": 12, "sourceHash": "<sha256-hex>" },
   "analyzerId": "rust-worker",
   "analyzerVersion": "0.1.0",
-  "rationale": "CALLS: ... (verified; syn AST, semantik çözümleyici yoktur)."
+  "rationale": "CALLS: ... (verified; syn AST, no semantic resolver)."
 }
 ```
 
-- `span` her zaman mevcuttur; satırlar 1 tabanlıdır ve kaynak dosya
-  içeriği ile birebir eşleşir (kabul testleri bunu dosya metninden
-  hesaplar). Kanıt türleri: `ast-span` (CONTAINS + unresolved CALLS),
-  `semantic-symbol` (çözümlenmiş CALLS), `route-attribute` (ROUTES_TO) —
-  TŞ §8 kanıt türleri kümesinden.
-- **Dürüstlük notu:** syn'in SEMANTİK çözümleyicisi yoktur; "semantic-symbol"
-  kanıt türü burada yalnızca TŞ §8 kümesindeki karşılık gelen slotu
-  taşır. Dayanak her zaman AST + deterministik isim tablosudur ve
-  rationale metni bunu açıkça söyler.
+- `span` is always present; lines are 1-based and match the source file content exactly (the
+  acceptance tests compute them from the file text).
+- Evidence kinds: `ast-span` (CONTAINS and `unresolved` CALLS), `semantic-symbol` (`verified` and
+  `heuristic` CALLS), `route-attribute` (ROUTES_TO).
+- **Honesty note:** `syn` has no SEMANTIC resolver. The `semantic-symbol` evidence kind only fills
+  the matching slot of the domain evidence kinds; the basis is always the AST plus deterministic
+  name tables, and the rationale text says so.
 
-### Resolution kuralı (TŞ §8 — rust-worker karşılığı)
+### Resolution rules — honesty table
 
-| resolution | Ne zaman |
-|---|---|
-| `verified` | **(a)** Bare çağrı (`foo()`) AYNI dosyada (modülde) tanımlı `fn` ile eşleşir — ask sözleşmesi. **(b)** Nitelikli yol çağrısı (`a::B::c` / `B::c`) analiz seti isim tablosunda (impl metotları + serbest fn'ler) TEK eşleşme bulur. **(c)** ROUTES_TO: route özniteliği fn'e sözdizimsel olarak bağlıdır. Sınırlama (belgeli): nitelikli çağrının modül önekleri tam doğrulanmaz — eşleşme son iki segment + analiz seti tek adaydır. |
-| `heuristic` | **(a)** Metot çağrısı (`x.foo()`) — alıcı türü çözülemez (trait dispatch bu dilimde yok); tek isim adayı hedef gösterilir, çok aday `ambiguity` ile işaretlenir. **(b)** Bare çağrı başka dosyada tek adaya eşleşir (import kanıtı yok). **(c)** Nitelikli yol çağrısı çok aday bulur — `ambiguity` taşıyarak. |
-| `unresolved` | Hiçbir aday yok (ör. `std::env::var`, `Vec::new`); hedef açık UnknownExternal node'dur, **uydurma hedef üretilmez**. |
+The worker builds four name tables from the declarations of the whole request: free functions
+per module, free functions keyed by (last module segment, name), free functions by bare name,
+and methods keyed by (owning type or trait name, method name) plus by bare method name. Calls
+are resolved against these tables only; candidates are sorted. When several candidates exist,
+no edge is drawn to any of them: the call is `unresolved`, its target is an UnknownExternal node,
+and every candidate is listed in `ambiguity.candidates` and in the rationale.
 
-### `unsupportedConstructs` (bu dilimde modellenmeyenler)
+| Call shape | Candidates | resolution | Target / ambiguity |
+|---|---|---|---|
+| Bare call `foo()` | a free `fn foo` in the SAME module (file) | `verified` | that Function |
+| Bare call `foo()` | none in the same module, exactly one `fn foo` elsewhere in the set | `heuristic` | that Function (no import evidence) |
+| Bare call `foo()` | none in the same module, several elsewhere | `unresolved` + ambiguity | UnknownExternal (no edge to any candidate); `candidates` lists all of them |
+| Path call `a::B::c()` / `B::c()` | exactly one match on the LAST TWO segments (`B::c`: a method of type/trait `B`, or a free fn `c` in a module whose last segment is `B`) | `heuristic` + ambiguity | that symbol; `candidates` = `[it]`, `reason` starts with `unverified-module-prefix-suffix-match` because module prefixes and `use` imports are not checked |
+| Path call | several matches on the last two segments | `unresolved` + ambiguity | UnknownExternal (no edge to any candidate); `candidates` lists all of them |
+| Method call `x.foo()` | exactly one method named `foo` in the set | `heuristic` | that Method (the receiver type is not resolved) |
+| Method call `x.foo()` | several methods named `foo` (for example a trait declaration and its `impl`) | `unresolved` + ambiguity | UnknownExternal (no edge to any candidate); `candidates` lists all of them |
+| Any of the above | no candidate (for example `std::env::var`, `Vec::new`) | `unresolved` | UnknownExternal (call text or method name); **no invented target** |
+| Callee that is not a path (closure call, `f()()`, ...) | — | `unresolved` | UnknownExternal `(anonymous-call)` |
 
-`trait-method-dispatch` (metot çağrısı alıcı türü çözülmez → heuristic),
-`macro-defined-items` (makro gövdeleri/makro öğeleri gezilmez + tanı),
-`use-import-resolution` (IMPORTS yok), `cross-crate-symbol-resolution`
-(set dışı semboller UnknownExternal), `nested-fn-items` (fonksiyon içi
-nested fn/trait/impl gövdeleri gezilmez), `struct-literal-references`
-(`Order { .. }` kenarı üretmez).
+`verified` CALLS edges come only from same-module bare calls. Qualified paths are never
+`verified`, even with a single candidate, because the match ignores the module prefix (the unit
+test `two_segment_suffix_match_emits_heuristic_with_explicit_ambiguity_never_verified` in
+`src/analyzer.rs` pins this). CONTAINS edges are always `verified`.
 
-## 4. Hata yanıtı — `status: "error"`
+**Route detection (L3):** an attribute whose last path segment is `get`, `post`, `put`, `delete`,
+`patch`, `head`, `options`, `connect` or `trace` (case-insensitive; `actix_web::get` works too)
+with a string-literal path, or `#[route("…", method = …)]` / `method(…)` (axum / actix / rocket
+patterns), produces an Endpoint node and a `verified` `ROUTES_TO` edge to the attributed `fn`
+(`route-attribute` evidence: the attribute is syntactically bound to the item). A path without a
+leading `/` gets one.
+
+### `unsupportedConstructs` (not modeled)
+
+`trait-method-dispatch` (the receiver type of a method call is not resolved → heuristic),
+`macro-defined-items` (macro bodies and macro-defined items are not walked; a diagnostic is
+emitted), `use-import-resolution` (no IMPORTS), `cross-crate-symbol-resolution` (symbols outside
+the set become UnknownExternal), `nested-fn-items` (bodies of nested fn/trait/impl items inside a
+function are not walked), `struct-literal-references` (`Order { .. }` produces no edge).
+
+## 4. Error response — `status: "error"`
 
 ```json
 {
@@ -227,68 +255,64 @@ nested fn/trait/impl gövdeleri gezilmez), `struct-literal-references`
 }
 ```
 
-- İstek düzeyi sorunlar (şema ihlali, mutlak yol, `..` kaçışı, duplicate
-  yol, bilinmeyen `type`, bilinmeyen `protocolVersion`, bozuk JSON) tüm
-  isteği reddeder; döngü DEVAM EDER — sonraki satır işlenir.
-- `id`, satır ayrıştırılabilirse istemcinin gönderdiği değerle echo
-  edilir; ayrıştırılamazsa `null`. Bozuk satır döngüyü düşürmez.
-- Kodlar yalnızca TŞ §10.1 + K-008 kümesinden: `INVALID_ARGUMENT`,
-  `INTERNAL_ERROR`, `LIMIT_EXCEEDED` (kaynak sınırları — yukarıdaki
-  tablo). Worker kendi hata kodu icat etmez.
-- Dosya düzeyi ayrıştırma sorunları HATA DEĞİLDİR → `status:"partial"` +
-  `diagnostics` (yukarıda).
+- Request-level problems (schema violation, absolute path, `..` escape, duplicate path, unknown
+  `type`, unknown `protocolVersion`, malformed JSON) reject the whole request; the loop
+  CONTINUES with the next line.
+- `id` is echoed with the client's value when the line can be parsed, otherwise `null`. A
+  malformed line never stops the loop.
+- Error codes come only from the fixed set `INVALID_ARGUMENT`, `INTERNAL_ERROR`,
+  `LIMIT_EXCEEDED` (resource limits, table above); the worker never invents its own codes.
+- File-level parse problems are NOT errors → `status: "partial"` plus `diagnostics` (above).
 
-## 5. Sürüm alanı
+## 5. Version fields
 
-- `protocolVersion` istekte opsiyoneldir; mevcutsa `"1"` olmalıdır.
-- Yanıt her zaman `protocolVersion: "1"` taşır; `worker.analyzerVersion`
-  Cargo.toml `[package].version` ile senkron tutulur (kabul testi bunu
-  manifest'ten okuyarak doğrular) ve `Evidence.analyzerVersion`'a yazılır.
-- Kırılabilir değişiklik (alan adı/anlamsal değişim) → sürüm artışı; yeni
-  alan eklemek sürüm artışı gerektirmez.
+- `protocolVersion` is optional in requests; if present it must be `"1"`.
+- Responses always carry `protocolVersion: "1"`; `worker.analyzerVersion` is kept in sync with
+  `[package].version` in `Cargo.toml` (the acceptance test reads it from the manifest) and is
+  written to `Evidence.analyzerVersion`. It is the internal analyzer version and is independent
+  of the Causoryn package release version.
+- A breaking change (field name or meaning) bumps the version; adding a new field does not.
 
-## 6. Determinizm sözleşmesi (TŞ §8 invariant iv/vi)
+## 6. Determinism contract
 
-- Aynı `files` girdisi → birebir aynı yanıt satırı (kabul testi bunu iki
-  koşum arasında bayt-bayt doğrular).
-- Kaynaklar relativePath'e göre Ordinal sıralanır; node çıktısı
-  (kind, qualifiedName, relativePath) kanonik anahtarla, kenar çıktısı
-  (kind, from, to, resolution) kanonik anahtarla sıralanır; saat okunmaz;
-  BTreeMap/BTreeSet dışı sıralı olmayan yapı kullanılmaz.
+- Identical `files` input → byte-identical response line (the acceptance test compares two runs
+  byte for byte).
+- Sources are sorted by relativePath (ordinal); nodes are sorted by the canonical key
+  (kind, qualifiedName, relativePath) and edges by (kind, from, to, resolution); no clock is
+  read; only `BTreeMap` / `BTreeSet` ordered structures are used.
 
-## 7. Kabül koşusu (fixture)
+## 7. Acceptance run (fixture)
 
-`examples/fixture-rust-app/` (3 dosya: main.rs, services.rs,
-repositories.rs) stdin üzerinden gönderilir; kabul testleri
-`tests/rust-worker.test.ts` (`npx vitest run tests/rust-worker.test.ts`).
-Test bootstrap'ı cargo mevcutken derlemeyi HER TURDA koşturur
-(incremental) ve başarısız derlemede suite'i AÇIKÇA fail eder — Rust
-derleme regresyonu sessiz skip/yeşil ile geçiştirilmez; skip yalnızca
-cargo bulunamadığında meşrudur (çalıştırılamadı olarak raporlanır):
+`examples/fixture-rust-app/` (3 files: `main.rs`, `services.rs`, `repositories.rs`) is sent over
+stdin; acceptance tests are `tests/rust-worker.test.ts`
+(`npx vitest run tests/rust-worker.test.ts`) and `adapters/rust/test/rust-adapter.test.ts`. When
+`cargo` is available, the test bootstrap runs the (incremental) build on EVERY run and fails the
+suite explicitly on a build error; a Rust build regression never passes as a silent skip. A skip is
+legitimate only when `cargo` is not found (reported as not run). Rust unit tests: `cargo test` in
+`native/rust-worker`.
 
-- **Pozitif:** `GET /orders → list_orders` ve `POST /orders →
-  create_order` ROUTES_TO kenarları verified; `list_orders →
-  create_audit_entry` (aynı modül) ve `OrdersService::new →
-  OrderRepository::new` (nitelikli yol) CALLS verified; metot çağrısı
-  (`service.list()`) heuristic; `save` çağrısı trait + impl adaylarıyla
-  heuristic + ambiguity; `std::env::var` unresolved + UnknownExternal;
-  evidence satırları fixture metniyle eşleşir; node/edge türleri TŞ §8
-  kataloğu içinde.
-- **Negatif:** boş `files` / eksik `files` / `..` segmenti / mutlak yol /
-  duplicate path / bilinmeyen üst-düzey alan / files[] bilinmeyen alan /
-  eksik `id` / bilinmeyen `type` / bilinmeyen `protocolVersion` / bozuk
-  JSON / `maxNodes` aralık dışı (0, 250001) ya da tam sayı değil (1.5,
-  true) → `INVALID_ARGUMENT` + id echo; bozuk satırdan sonra worker
-  yaşamaya devam eder. Sınırlar: 3 MB içerik ve 5001 dosya →
-  `LIMIT_EXCEEDED`.
-- **Partial:** sözdizimi hatası → `status:"partial"` + dosya/satır
-  taşıyan tanılar; graph yine üretilir.
-- **Node bütçesi:** `maxNodes` aralık/tam-sayı reddiyeleri `INVALID_ARGUMENT`;
-  üst sınır (`250000`) kabul edilir; 13 node'lu kümeye `maxNodes: 5` →
-  5 node yayınlanır, uçları yayınlanmayan kenarlar düşer (dangling yok),
-  `RESPONSE_TRUNCATED` + `status:"partial"`, evidence yalnızca yayımlanan
-  kenarların kanıtlarından oluşur ve kırpılmış yanıt birebir
-  tekrarlanır. Sembol-yoğun girdi (8000 ayrı aynı-modül çağrı) tek
-  koşumda süre bütçesi içinde tamamlanır (push_edge BTreeMap indeksli —
-  O(E²) doğrusal tarama yok).
-- **Determinizm:** aynı istek iki koşuda birebir aynı yanıt satırı.
+- **Positive:** `GET /orders → list_orders` and `POST /orders → create_order` `ROUTES_TO` edges
+  are `verified`; `list_orders → create_audit_entry` (same module) is a `verified` CALLS edge; the
+  qualified-path calls `list_orders → OrdersService::new` and
+  `OrdersService::new → OrderRepository::new` are `heuristic` with
+  `ambiguity.candidates = [<the single match>]` and a reason containing
+  `unverified-module-prefix-suffix-match`; the method call `service.list()` is `heuristic`; the
+  `save` call is `unresolved` (no edge to either candidate) with ambiguity over the trait and
+  `impl` candidates (`OrderRepository::save`, `OrderStore::save`); `std::env::var` is `unresolved` with an
+  UnknownExternal target; a bare call that matches a single function in another file is
+  `heuristic`; evidence lines match the fixture text; node and edge kinds stay within the domain
+  catalog.
+- **Negative:** empty / missing `files`, a `..` segment, an absolute path, a duplicate path, an
+  unknown top-level field, an unknown `files[]` field, a missing `id`, an unknown `type`, an
+  unknown `protocolVersion`, malformed JSON, or `maxNodes` out of range (0, 250001) or not an
+  integer (1.5, `true`) → `INVALID_ARGUMENT` with the `id` echoed; the worker keeps running after
+  a malformed line. Limits: 3 MB of content and 5001 files → `LIMIT_EXCEEDED`.
+- **Partial:** a syntax error → `status: "partial"` with diagnostics carrying file and line; the
+  graph is still produced.
+- **Node budget:** `maxNodes` range and integer rejections give `INVALID_ARGUMENT`; the upper bound
+  (`250000`) is accepted; `maxNodes: 5` on a 13-node set emits 5 nodes, drops edges whose endpoints
+  were not emitted (no dangling edges), adds `RESPONSE_TRUNCATED` with `status: "partial"`, keeps
+  only the evidence of emitted edges, and the truncated response repeats byte for byte. A
+  symbol-heavy input (8,000 distinct same-module calls) finishes within the time budget in one run
+  (`push_edge` uses a `BTreeMap` index — no O(E²) linear scan).
+- **Determinism:** the same request gives a byte-identical response line in two runs.

@@ -101,7 +101,7 @@ const HALF_LINE_SCRIPT = `process.stdout.write('{"id":"x"}'); setTimeout(() => {
 /** Anında stderr yazıp çıkan sahte süreç (worker crash fallback). */
 const CRASH_SCRIPT = `process.stderr.write('sahte worker cakildi'); process.exit(1);`;
 /** Geçerli PROTOCOL.md v1 hata yanıtı yazıp çıkan sahte süreç (bulgu: status:'error' ayrımı). */
-const WORKER_ERROR_SCRIPT = `process.stdout.write(JSON.stringify({ id: 'analyze:adapter-b2-worker-error', protocolVersion: '1', status: 'error', error: { code: 'LIMIT_EXCEEDED', message: 'dosya sayısı sınırı aşıldı: 5001 > 5000' } }) + '\\n'); process.exit(0);`;
+const WORKER_ERROR_SCRIPT = `process.stdout.write(JSON.stringify({ id: 'analyze:adapter-b2-worker-error', protocolVersion: '1', status: 'error', error: { code: 'LIMIT_EXCEEDED', message: 'file count limit exceeded: 5001 > 5000' } }) + '\\n'); process.exit(0);`;
 
 /* ------------------------------------------------------------------ */
 /* Testler                                                             */
@@ -226,7 +226,7 @@ describe.skipIf(!dotnetAvailable)("adapters/csharp-roslyn (sprint-2 B2)", () => 
     expect(
       result.warnings.some(
         (warning) =>
-          warning.includes("Roslyn worker kullanılamıyor") &&
+          warning.includes("Roslyn worker unavailable") &&
           warning.includes("L0/L1"),
       ),
     ).toBe(true);
@@ -255,7 +255,7 @@ describe.skipIf(!dotnetAvailable)("adapters/csharp-roslyn (sprint-2 B2)", () => 
     expect(capture.child).not.toBeNull();
     expect(capture.child?.killed).toBe(true);
     expect(
-      result.warnings.some((warning) => warning.includes("zaman aşımı")),
+      result.warnings.some((warning) => warning.includes("timeout")),
     ).toBe(true);
   });
 
@@ -324,7 +324,7 @@ describe.skipIf(!dotnetAvailable)("adapters/csharp-roslyn (sprint-2 B2)", () => 
       result.warnings.some(
         (warning) =>
           warning.includes("LIMIT_EXCEEDED") &&
-          warning.includes("dosya sayısı sınırı"),
+          warning.includes("file count limit exceeded"),
       ),
     ).toBe(true);
     expect(result.nodes.length).toBe(FIXTURE_FILES.length);
@@ -339,7 +339,7 @@ describe.skipIf(!dotnetAvailable)("adapters/csharp-roslyn (sprint-2 B2)", () => 
         workspaceId: "adapter-b2-invalid",
         files: [{ path: "D:/outside/x.cs", content: "class X { }" }],
       }),
-    ).rejects.toThrowError(/Mutlak kaynak yolu/);
+    ).rejects.toThrowError(/Absolute source paths are not accepted/);
   });
 
   it("negatif girdi: '..' kaçışı ve duplicate path adapter API yüzeyinde reddedilir", async () => {
@@ -348,7 +348,7 @@ describe.skipIf(!dotnetAvailable)("adapters/csharp-roslyn (sprint-2 B2)", () => 
         workspaceId: "adapter-b2-escape",
         files: [{ path: "../escape.cs", content: "class X { }" }],
       }),
-    ).rejects.toThrowError(/kök dışına çıkıyor/);
+    ).rejects.toThrowError(/escapes the workspace root/);
     await expect(
       analyzeCSharpWorkspace({
         workspaceId: "adapter-b2-duplicate",
@@ -357,7 +357,7 @@ describe.skipIf(!dotnetAvailable)("adapters/csharp-roslyn (sprint-2 B2)", () => 
           { path: "a.cs", content: "class A { }" },
         ],
       }),
-    ).rejects.toThrowError(/iki kez verildi/);
+    ).rejects.toThrowError(/was given twice/);
   });
 });
 
@@ -442,6 +442,12 @@ describe("worker-process env sınırlaması (güvenlik bulgusu 1)", () => {
       // runtime) ve ReferenceResolver'ın okuduğu DOTNET_ROOT.
       expect(spawnOptions.env["PATH"]).toBeDefined();
       expect(spawnOptions.env["DOTNET_ROOT"]).toBe(WORKER_DIR);
+      // Task 1.1 izolasyonu: güvenilen cwd + DOTNET_STARTUP_HOOKS temiz + telemetry/nologo kapalı.
+      expect((spawnOptions as { cwd?: string }).cwd).toBe(dirname(WORKER_DLL));
+      expect(spawnOptions.env["DOTNET_STARTUP_HOOKS"]).toBe("");
+      expect(spawnOptions.env["DOTNET_CLI_TELEMETRY_OPTOUT"]).toBe("1");
+      expect(spawnOptions.env["DOTNET_NOLOGO"]).toBe("1");
+      expect(spawnOptions.env["DOTNET_SKIP_FIRST_TIME_EXPERIENCE"]).toBe("1");
     } finally {
       if (previousSecret === undefined) delete process.env["CAUSORYN_TEST_SECRET"];
       else process.env["CAUSORYN_TEST_SECRET"] = previousSecret;
@@ -487,7 +493,7 @@ describe("worker-process yanıt sınırı (güvenlik bulgusu 4)", () => {
     });
 
     expect(outcome.status).toBe("unavailable");
-    expect(outcome.detail).toContain("sınır");
+    expect(outcome.detail).toContain("limit");
     expect(killed.length).toBe(1); // süreç sonlandırıldı (kill kanıtı)
   });
 
@@ -543,7 +549,7 @@ describe("worker-process yanıt sınırı (güvenlik bulgusu 4)", () => {
     });
 
     expect(outcome.status).toBe("unavailable");
-    expect(outcome.detail).toContain("worker stderr çıktısı 64 karakter sınırını aştı");
+    expect(outcome.detail).toContain("worker stderr output exceeded the 64 character limit");
     expect(outcome.stderr.length).toBeLessThanOrEqual(64);
     expect(killed.length).toBe(1);
   });
@@ -571,7 +577,7 @@ describe("worker status:error fallback gerekçesi (denetim bulgusu 9)", () => {
               status: "error",
               error: {
                 code: "LIMIT_EXCEEDED",
-                message: "files sayısı sınırı aşıldı: 5001 > 5000",
+                message: "file count limit exceeded: 5001 > 5000",
               },
             }),
           ),
@@ -580,9 +586,9 @@ describe("worker status:error fallback gerekçesi (denetim bulgusu 9)", () => {
     expect(result.workerAvailable).toBe(false);
     expect(result.state).toBe("partial");
     const reasons = result.warnings.join("\n");
-    expect(reasons).toContain("isteği reddetti");
+    expect(reasons).toContain("rejected the request");
     expect(reasons).toContain("LIMIT_EXCEEDED");
-    expect(reasons).not.toContain("sözleşmeye aykırı");
+    expect(reasons).not.toContain("violates the protocol");
   });
 });
 

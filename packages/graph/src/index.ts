@@ -22,7 +22,7 @@ export {
   validateNode,
 } from "./validation.js";
 export { InMemoryGraphRepository } from "./memory-repository.js";
-export { generateOnboarding } from "./onboarding.js";
+export { generateOnboarding, ONBOARDING_LIMIT_CEILINGS } from "./onboarding.js";
 export type {
   GenerateOnboardingInput,
   LearningStep,
@@ -37,7 +37,13 @@ export type {
   OnboardingUnknownEdges,
   OnboardingWarning,
 } from "./onboarding.js";
-export { analyzeImpact, IMPACT_LIMIT_CEILINGS } from "./impact.js";
+export {
+  analyzeImpact,
+  DEFAULT_IMPACT_EDGE_KINDS,
+  IMPACT_LIMIT_CEILINGS,
+  MAX_IMPACT_EDGE_EVIDENCE_IDS,
+  MAX_IMPACT_PATH_EVIDENCE_IDS,
+} from "./impact.js";
 export type {
   AnalyzeImpactInput,
   ImpactAffectedNode,
@@ -97,8 +103,10 @@ export type {
 export {
   assertValidBlobPath,
   assertValidGitRef,
+  GIT_DEV_NULL,
   readGitBlob,
   readGitTree,
+  resolveGitCommitRef,
   runGit,
   WORKING_TREE_REF,
 } from "./git-read.js";
@@ -111,14 +119,18 @@ export type {
 export type {
   FileRecord,
   GraphRepository,
+  PruneSnapshotsResult,
   PublishableState,
   SnapshotBuildInfo,
   SnapshotBuildInput,
+  SnapshotMetaSummary,
   SnapshotRead,
   SymbolIndexEntry,
   SymbolSearchHit,
   SymbolSearchStore,
+  WorkspaceLanguageCoverageMeta,
   WorkspaceRecord,
+  WorkspaceSummaryMeta,
 } from "./repository.js";
 // Architecture Guard çekirdeği — sprint-3 C2 (TŞ §12). findViolations saf
 // motordur; MCP zarfı mcp-server katmanındadır.
@@ -168,6 +180,11 @@ export {
   AGENT_CONTEXT_LIMIT_CEILINGS,
   generateAgentContext,
 } from "./agent-context.js";
+export {
+  buildSafeFts5OrQuery,
+  buildSymbolFtsDocument,
+  tokenizeSymbolText,
+} from "./symbol-tokens.js";
 export type {
   AgentContextAppliedLimits,
   AgentContextInput,
@@ -211,6 +228,7 @@ export {
   ArchitectureGuidedTourStepSchema,
   ArchitectureModuleNoteAnnotationSchema,
   ArchitectureRiskAnnotationSchema,
+  MAX_VALIDATION_ERRORS,
   validateArchitectureAnnotations,
 } from "./architecture-annotations.js";
 export type {
@@ -285,14 +303,17 @@ export {
   TIMELINE_BASELINE_BLOB_PATH,
   TIMELINE_CEILINGS,
   TIMELINE_DEFAULTS,
+  TIMELINE_MAX_REFS,
   TIMELINE_POLICY_BLOB_PATH,
   TIMELINE_SNAPSHOT_BLOB_PATH,
+  TIMELINE_TRUST_WARNING_COMMITTED_GIT_BLOB,
   buildArchitectureTimeline,
   buildArchitectureTimelineFromGit,
   buildTimelineViolationTrend,
   readTimelinePointFromGit,
   readTimelineTrendBaselineFromGit,
   readTimelineTrendPolicyFromGit,
+  reconstructFileContentSetFromGitTree,
   selectSampledIndices,
   serializeSnapshotContentSet,
 } from "./timeline.js";
@@ -302,6 +323,7 @@ export type {
   ArchitectureTimelineWithTrend,
   BuildArchitectureTimelineInput,
   BuildTimelineViolationTrendInput,
+  ReadTimelinePointOptions,
   TimelineChangeSummary,
   TimelineDiffInterval,
   TimelineGitInput,
@@ -309,7 +331,9 @@ export type {
   TimelineLimits,
   TimelinePointContent,
   TimelinePointInput,
+  TimelineReconstructFromGitTree,
   TimelineSamplingReport,
+  TimelineSnapshotLookup,
   TimelineTrendBaselineResult,
   TimelineTrendMetric,
   TimelineTrendPointEvaluation,
@@ -318,6 +342,7 @@ export type {
   TimelineTrendSeries,
   TimelineTrendSeriesValue,
   TimelineTrendStep,
+  TimelineTrustWarning,
   TimelineUnanalyzedInterval,
   TimelineViolationTrend,
 } from "./timeline.js";

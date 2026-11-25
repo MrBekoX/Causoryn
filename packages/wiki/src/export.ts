@@ -1,6 +1,12 @@
+import { randomBytes } from "node:crypto";
 import { mkdirSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import path from "node:path";
 
+import {
+  escapeMarkdownBlock,
+  escapeMarkdownInline,
+  escapeMarkdownTableCell,
+} from "@causoryn/domain";
 import { OutputAccessPolicy } from "@causoryn/workspace";
 
 import { WikiProjectionError } from "./errors.js";
@@ -28,9 +34,11 @@ import { WikiProjectionSchema, type EvidenceRef, type WikiPage, type WikiPageSec
  *   OutputAccessPolicy (K-012, sprint-3 C6) ile denetlenir; wiki_build'in
  *   data-root'u ile KARIŞTIRILMAZ: export kullanıcı beyanlı output dizinine
  *   yazılır (wiki/mcp-tools.md yazma izin matrisi). Reddedilen hedefe hiçbir
- *   dosya HİÇBİR alt dizin oluşturulmadan yazılmaz. Her dosya `.tmp` + rename
- *   ile atomiktir; tmp önceden silinir (output dizinine konmuş symlink
- *   üzerinden kaçış kapatılır — C6 güvenlik bulgusu deseni).
+ *   dosya HİÇBİR alt dizin oluşturulmadan yazılmaz. Each file is written
+ *   atomically: content goes to a unique, unpredictable temp name in the
+ *   target directory opened with O_CREAT|O_EXCL (`wx`), then renamed over
+ *   the target. A pre-existing entry (file, directory or symlink) at any
+ *   temp-like path is never followed, removed or reused.
  *
  * HTML güvenliği (TŞ §16 + §16A.9): TÜM dinamik değerler escapeHtmlText'ten
  * geçer; belgede <script>, <link>, <iframe>, harici kaynak, CDN URL'si,
@@ -44,12 +52,13 @@ import { WikiProjectionSchema, type EvidenceRef, type WikiPage, type WikiPageSec
  * ham URL öbeği bile kalmaz (linkifier'ların tıklanabilir bağ üretmesi de
  * engellenir).
  *
- * Markdown güvenliği: hücre değerleri (başlık, yol, slug) GFM hücre
- * kaçışıyla kaçırılır (C6 escapeMarkdownCell deseni — kaçırılmayan
- * `![x](https://...)` ağa erişimli GFM görüntüleyicide beacon'dır).
- * Bölüm gövdelerinde satır yapısı korunurken ham inline HTML (`<` → `\<`) ve
- * görsel gömmeleri (`![` → `\![`) nötralize edilir; düz metin linkler
- * korunur (tıklama gerektirir, otomatik ağ isteği yapmaz).
+ * Markdown safety: escaping is shared through @causoryn/domain
+ * (markup-escape.ts), one helper per output context. Titles, ids, paths and
+ * warnings use `escapeMarkdownInline` (single line), the page index table
+ * uses `escapeMarkdownTableCell`, and section bodies use
+ * `escapeMarkdownBlock`, which keeps the generated line/list structure while
+ * escaping code spans, fences, headings, blockquotes, HTML, links and images
+ * on every line, normalising CR/CRLF to LF and defanging bare autolinks.
  *
  * Deterministik dosya adları: pageId kanonik sırasında sanitize edilmiş
  * slug + çakışmada `slug-<pageId[5..13]>` sondası (projection.ts:840
@@ -118,47 +127,10 @@ function escapeHtml(value: string): string {
  * http(s) kapsar. Gövdeye sızan file:// dizgisi HTML'e kaçışlı DÜZ METİN
  * olarak geçer — href üretilmediğinden link AÇILAMAZ (TŞ §16A.9 "keyfi
  * file:// link açma yetkisi verilmez" sağlanır) ve .md'de tıklama
- * gerektiren metindir (escapeMarkdownBody'deki tasarımsal koruma).
+ * gerektiren metindir (Markdown body text is escaped by escapeMarkdownBlock).
  */
 function escapeHtmlText(value: string): string {
   return escapeHtml(value).replace(/https?:\/\//g, (match) => match.replace(":", "&#58;"));
-}
-
-/**
- * Markdown hücre kaçışı (C6 escapeMarkdownCell deseni): GFM hücre ayracı,
- * satır sonları ve link/HTML metakarakterleri. Başlıklar ve meta değerleri
- * için kullanılır — kaçırılmayan `![x](https://...)` dizgisi ağa erişimli
- * GFM görüntüleyicide beacon/link'tir.
- */
-function escapeMarkdownCell(value: string): string {
-  return value
-    .replace(/\\/g, "\\\\")
-    .replace(/\|/g, "\\|")
-    .replace(/!/g, "\\!")
-    .replace(/\[/g, "\\[")
-    .replace(/\]/g, "\\]")
-    .replace(/\(/g, "\\(")
-    .replace(/\)/g, "\\)")
-    .replace(/</g, "\\<")
-    .replace(/>/g, "\\>")
-    .replace(/[\r\n\t]+/g, " ");
-}
-
-/**
- * Markdown blok gövde kaçışı: satır yapısı KORUNUR (hücre kaçışının aksine
- * satır sonları sıkıştırılmaz); ham inline HTML (`<` → `\<`, `>` → `\>`) ve
- * görsel gömmeleri (`![` → `\![`) nötralize edilir. `>` kaçışı yalnızca
- * kapanış etiketi kalıntısını temizlemez; satır başı `>` blockquote
- * sahteciliğini de kapatır. GFM'de `\<`/`\>`/`\!` sabit noktalama kaçışları
- * okunabilirliği korur. Düz `[link](url)` metni korunur: GFM'de tıklama
- * gerektiren bağdır, otomatik ağ isteği yapmaz.
- */
-function escapeMarkdownBody(value: string): string {
-  return value
-    .replace(/\\/g, "\\\\")
-    .replace(/</g, "\\<")
-    .replace(/>/g, "\\>")
-    .replace(/!\[/g, "\\![");
 }
 
 /* ------------------------------------------------------------------ */
@@ -202,7 +174,7 @@ function validateProjection(projection: WikiProjection): WikiProjection {
       .join("; ");
     throw new WikiProjectionError(
       "wiki/export-invalid-projection",
-      `Export girdisi WikiProjection şemasını geçmedi: ${detail}`,
+      `Export input failed WikiProjection schema validation: ${detail}`,
     );
   }
   return parsed.data;
@@ -294,7 +266,7 @@ function exportFileNamesByPageId(pages: readonly WikiPage[]): ReadonlyMap<string
     if (seen.has(fileName)) {
       throw new WikiProjectionError(
         "wiki/export-filename-collision",
-        `Export dosya adı çakışıyor (sessiz üzerine yazma yok): ${fileName} (pageId ${pageId})`,
+        `Export file name collision (no silent overwrite): ${fileName} (pageId ${pageId})`,
       );
     }
     seen.add(fileName);
@@ -343,16 +315,16 @@ function buildPageViews(projection: WikiProjection): readonly PageView[] {
 /** Bölüm bloğu (paylaşılan md kuralı): başlık + durum + kanıt + gövde. */
 function markdownSectionBlock(section: WikiPageSection): string[] {
   const lines: string[] = [];
-  lines.push(`## ${escapeMarkdownCell(section.sectionKey)}`);
+  lines.push(`## ${escapeMarkdownInline(section.sectionKey)}`);
   lines.push("");
-  lines.push(`- status: ${escapeMarkdownCell(section.status)}`);
+  lines.push(`- status: ${escapeMarkdownInline(section.status)}`);
   const refs = [...section.evidenceRefs].sort(byEvidenceRef);
   for (const ref of refs) {
-    lines.push(`- kanıt: ${escapeMarkdownCell(formatEvidenceRef(ref))}`);
+    lines.push(`- evidence: ${escapeMarkdownInline(formatEvidenceRef(ref))}`);
   }
   if (section.generatedMarkdown.length > 0) {
     lines.push("");
-    lines.push(escapeMarkdownBody(section.generatedMarkdown));
+    lines.push(escapeMarkdownBlock(section.generatedMarkdown));
   }
   lines.push("");
   return lines;
@@ -366,17 +338,17 @@ function markdownSectionBlock(section: WikiPageSection): string[] {
  */
 function renderPageMarkdown(view: PageView): string {
   const lines: string[] = [];
-  lines.push(`# ${escapeMarkdownCell(view.page.title)}`);
+  lines.push(`# ${escapeMarkdownInline(view.page.title)}`);
   lines.push("");
-  lines.push(`- pageId: ${escapeMarkdownCell(view.page.id)}`);
-  lines.push(`- wikiSnapshotId: ${escapeMarkdownCell(view.page.wikiSnapshotId)}`);
-  lines.push(`- kind: ${escapeMarkdownCell(view.page.kind)}`);
-  lines.push(`- parentId: ${view.page.parentId === null ? "(kök)" : escapeMarkdownCell(view.page.parentId)}`);
-  lines.push(`- slug: ${escapeMarkdownCell(view.page.slug)}`);
-  lines.push(`- route: ${escapeMarkdownCell(view.page.route)}`);
-  lines.push(`- freshness: ${escapeMarkdownCell(view.page.freshness)}`);
-  lines.push(`- coverage: ${escapeMarkdownCell(coverageLabel(view.page.coverage))}`);
-  lines.push(`- contentHash: ${escapeMarkdownCell(view.page.contentHash)}`);
+  lines.push(`- pageId: ${escapeMarkdownInline(view.page.id)}`);
+  lines.push(`- wikiSnapshotId: ${escapeMarkdownInline(view.page.wikiSnapshotId)}`);
+  lines.push(`- kind: ${escapeMarkdownInline(view.page.kind)}`);
+  lines.push(`- parentId: ${view.page.parentId === null ? "(root)" : escapeMarkdownInline(view.page.parentId)}`);
+  lines.push(`- slug: ${escapeMarkdownInline(view.page.slug)}`);
+  lines.push(`- route: ${escapeMarkdownInline(view.page.route)}`);
+  lines.push(`- freshness: ${escapeMarkdownInline(view.page.freshness)}`);
+  lines.push(`- coverage: ${escapeMarkdownInline(coverageLabel(view.page.coverage))}`);
+  lines.push(`- contentHash: ${escapeMarkdownInline(view.page.contentHash)}`);
   lines.push("");
   for (const section of view.sections) {
     lines.push(...markdownSectionBlock(section));
@@ -395,7 +367,7 @@ export function serializeWikiPageMarkdown(projection: WikiProjection, page: Wiki
   if (view === undefined) {
     throw new WikiProjectionError(
       "wiki/export-unknown-page",
-      `Sayfa bu projeksiyonda bulunamadı: ${page.id}`,
+      `Page not found in this projection: ${page.id}`,
     );
   }
   return renderPageMarkdown(view);
@@ -412,30 +384,30 @@ function renderIndexMarkdown(valid: WikiProjection): string {
   lines.push("");
   lines.push("## Snapshot");
   lines.push("");
-  lines.push(`- wikiSnapshotId: ${escapeMarkdownCell(valid.snapshot.id)}`);
-  lines.push(`- workspaceId: ${escapeMarkdownCell(valid.snapshot.workspaceId)}`);
-  lines.push(`- graphSnapshotId: ${escapeMarkdownCell(valid.snapshot.graphSnapshotId)}`);
-  lines.push(`- revisionRef: ${escapeMarkdownCell(valid.snapshot.revisionRef)}`);
-  lines.push(`- status: ${escapeMarkdownCell(valid.snapshot.status)}`);
-  lines.push(`- builtAt: ${escapeMarkdownCell(valid.snapshot.builtAt)}`);
-  lines.push(`- templateVersion: ${escapeMarkdownCell(valid.snapshot.templateVersion)}`);
+  lines.push(`- wikiSnapshotId: ${escapeMarkdownInline(valid.snapshot.id)}`);
+  lines.push(`- workspaceId: ${escapeMarkdownInline(valid.snapshot.workspaceId)}`);
+  lines.push(`- graphSnapshotId: ${escapeMarkdownInline(valid.snapshot.graphSnapshotId)}`);
+  lines.push(`- revisionRef: ${escapeMarkdownInline(valid.snapshot.revisionRef)}`);
+  lines.push(`- status: ${escapeMarkdownInline(valid.snapshot.status)}`);
+  lines.push(`- builtAt: ${escapeMarkdownInline(valid.snapshot.builtAt)}`);
+  lines.push(`- templateVersion: ${escapeMarkdownInline(valid.snapshot.templateVersion)}`);
   lines.push(`- pages: ${String(valid.pages.length)}`);
   lines.push(`- sections: ${String(valid.sections.length)}`);
   lines.push("");
-  lines.push(`## Uyarılar (${String(valid.warnings.length)})`);
+  lines.push(`## Warnings (${String(valid.warnings.length)})`);
   lines.push("");
   for (const warning of valid.warnings) {
-    lines.push(`- ${escapeMarkdownCell(warning)}`);
+    lines.push(`- ${escapeMarkdownInline(warning)}`);
   }
   lines.push("");
-  lines.push("## Sayfa dizini");
+  lines.push("## Page index");
   lines.push("");
-  lines.push("| başlık | tür | freshness | coverage | dosya |");
+  lines.push("| title | kind | freshness | coverage | file |");
   lines.push("| --- | --- | --- | --- | --- |");
   for (const view of views) {
     const fileName = fileNames.get(view.page.id) ?? "";
     lines.push(
-      `| ${escapeMarkdownCell(view.page.title)} | ${escapeMarkdownCell(view.page.kind)} | ${escapeMarkdownCell(view.page.freshness)} | ${escapeMarkdownCell(coverageLabel(view.page.coverage))} | ${escapeMarkdownCell(`${WIKI_EXPORT_MARKDOWN_DIR_NAME}/${fileName}`)} |`,
+      `| ${escapeMarkdownTableCell(view.page.title)} | ${escapeMarkdownTableCell(view.page.kind)} | ${escapeMarkdownTableCell(view.page.freshness)} | ${escapeMarkdownTableCell(coverageLabel(view.page.coverage))} | ${escapeMarkdownTableCell(`${WIKI_EXPORT_MARKDOWN_DIR_NAME}/${fileName}`)} |`,
     );
   }
   lines.push("");
@@ -490,7 +462,7 @@ function renderWikiHtml(valid: WikiProjection): string {
   ];
   const lines: string[] = [];
   lines.push("<!DOCTYPE html>");
-  lines.push('<html lang="tr">');
+  lines.push('<html lang="en">');
   lines.push("<head>");
   lines.push('<meta charset="utf-8">');
   lines.push(`<meta http-equiv="Content-Security-Policy" content="${WIKI_EXPORT_HTML_CSP}">`);
@@ -514,9 +486,9 @@ function renderWikiHtml(valid: WikiProjection): string {
   lines.push("</section>");
 
   lines.push("<section>");
-  lines.push(`<h2>Uyarılar (${escapeHtmlText(String(valid.warnings.length))})</h2>`);
+  lines.push(`<h2>Warnings (${escapeHtmlText(String(valid.warnings.length))})</h2>`);
   if (valid.warnings.length === 0) {
-    lines.push("<p>(uyarı yok)</p>");
+    lines.push("<p>(no warnings)</p>");
   } else {
     lines.push("<ul>");
     for (const warning of valid.warnings) {
@@ -527,9 +499,9 @@ function renderWikiHtml(valid: WikiProjection): string {
   lines.push("</section>");
 
   lines.push("<section>");
-  lines.push(`<h2>Sayfa dizini (${escapeHtmlText(String(views.length))})</h2>`);
+  lines.push(`<h2>Page index (${escapeHtmlText(String(views.length))})</h2>`);
   if (views.length === 0) {
-    lines.push("<p>(sayfa yok)</p>");
+    lines.push("<p>(no pages)</p>");
   } else {
     lines.push("<ul>");
     for (const [index, view] of views.entries()) {
@@ -547,7 +519,7 @@ function renderWikiHtml(valid: WikiProjection): string {
     lines.push(`<section id="${anchor}">`);
     lines.push(`<h2>${escapeHtmlText(view.page.title)}</h2>`);
     lines.push(
-      `<p class="meta">kind: ${escapeHtmlText(view.page.kind)} · slug: ${escapeHtmlText(view.page.slug)} · route: ${escapeHtmlText(view.page.route)} · parentId: ${view.page.parentId === null ? "(kök)" : escapeHtmlText(view.page.parentId)} · freshness: ${escapeHtmlText(view.page.freshness)} · coverage: ${escapeHtmlText(coverageLabel(view.page.coverage))} · contentHash: ${escapeHtmlText(view.page.contentHash)}</p>`,
+      `<p class="meta">kind: ${escapeHtmlText(view.page.kind)} · slug: ${escapeHtmlText(view.page.slug)} · route: ${escapeHtmlText(view.page.route)} · parentId: ${view.page.parentId === null ? "(root)" : escapeHtmlText(view.page.parentId)} · freshness: ${escapeHtmlText(view.page.freshness)} · coverage: ${escapeHtmlText(coverageLabel(view.page.coverage))} · contentHash: ${escapeHtmlText(view.page.contentHash)}</p>`,
     );
     for (const section of view.sections) {
       lines.push("<section>");
@@ -557,7 +529,7 @@ function renderWikiHtml(valid: WikiProjection): string {
       if (refs.length > 0) {
         lines.push("<ul>");
         for (const ref of refs) {
-          lines.push(`<li>kanıt: ${escapeHtmlText(formatEvidenceRef(ref))}</li>`);
+          lines.push(`<li>evidence: ${escapeHtmlText(formatEvidenceRef(ref))}</li>`);
         }
         lines.push("</ul>");
       }
@@ -618,7 +590,7 @@ export function buildWikiExportFileSet(projection: WikiProjection): readonly Wik
     if (fileName === undefined) {
       throw new WikiProjectionError(
         "wiki/export-filename-collision",
-        `Sayfa için export dosya adı türetilemedi: ${view.page.id}`,
+        `Could not derive an export file name for page: ${view.page.id}`,
       );
     }
     files.push({
@@ -654,7 +626,7 @@ export interface WikiExportWrittenFile {
   readonly path: string;
   /** UTF-8 bayt uzunluğu. */
   readonly bytes: number;
-  /** Yazma daima atomiktir: `.tmp` + rename. */
+  /** Always atomic: unique `wx` temp file in the target directory + rename. */
   readonly atomic: true;
 }
 
@@ -678,7 +650,7 @@ function contractCodeFor(decisionCode: string): "wiki/output-not-authorized" | "
  * kümesi üretilir → hedef OutputAccessPolicy ile denetlenir (reddedilen
  * hedefe HİÇBİR dosya yazılmaz, HİÇBİR alt dizin açılmaz) → markdown alt
  * dizini açılıp yeniden yetkilendirilir (realpath sarmalama, CWE-59) → her
- * dosya `.tmp` + rename ile atomik yazılır.
+ * dosya unique `wx` temp file + rename ile atomik yazılır.
  *
  * İşlem kapsamı (takım denetimi davranış notu, test ile kanıtlı): TÜM KÜME
  * atomik DEĞİLDİR — TŞ §16 "atomik write" dosya düzeyi taahhüttür
@@ -705,7 +677,7 @@ export function exportWikiOffline(
   if (!dirDecision.allowed) {
     throw new WikiProjectionError(
       contractCodeFor(dirDecision.code),
-      `Output yetkilendirmesi reddedildi (${dirDecision.code}): ${dirDecision.reason}`,
+      `Output authorization denied (${dirDecision.code}): ${dirDecision.reason}`,
     );
   }
   const canonicalDir = dirDecision.canonicalDir;
@@ -716,7 +688,7 @@ export function exportWikiOffline(
   } catch (error) {
     throw new WikiProjectionError(
       "wiki/export-write-failed",
-      `Markdown alt dizini açılamadı: ${markdownDir}: ${error instanceof Error ? error.message : String(error)}`,
+      `Could not create the markdown subdirectory: ${markdownDir}: ${error instanceof Error ? error.message : String(error)}`,
     );
   }
   // Alt dizin realpath'i beyanlı kök içinde kalmalı (önceden konmuş
@@ -726,7 +698,7 @@ export function exportWikiOffline(
   if (!markdownDecision.allowed) {
     throw new WikiProjectionError(
       contractCodeFor(markdownDecision.code),
-      `Markdown alt dizini yetkilendirmesi reddedildi (${markdownDecision.code}): ${markdownDecision.reason}`,
+      `Markdown subdirectory authorization denied (${markdownDecision.code}): ${markdownDecision.reason}`,
     );
   }
 
@@ -750,37 +722,41 @@ export function exportWikiOffline(
     ) {
       throw new WikiProjectionError(
         "wiki/output-path-denied",
-        `Export dosya adı güvenli değil (ayraç/null byte/".."): ${file.relativePath}`,
+        `Unsafe export file name (path separator/null byte/".."): ${file.relativePath}`,
       );
     }
     const decision = policy.authorizeFile(targetDir, fileName);
     if (!decision.allowed) {
       throw new WikiProjectionError(
         contractCodeFor(decision.code),
-        `Output yetkilendirmesi reddedildi (${decision.code}): ${decision.reason}`,
+        `Output authorization denied (${decision.code}): ${decision.reason}`,
       );
     }
     const targetPath = decision.canonicalPath;
-    const tmpPath = `${targetPath}.tmp`;
+    // Unique temp name next to the target (same directory, so rename stays
+    // atomic). `wx` = O_CREAT|O_EXCL: the open fails instead of following or
+    // reusing any entry that already exists at that path.
+    const tmpPath = path.join(
+      path.dirname(targetPath),
+      `.${path.basename(targetPath)}.${randomBytes(12).toString("hex")}.tmp`,
+    );
+    let tmpCreated = false;
     try {
-      // C6 savunma derinliği: kalan .tmp girdisi (özellikle önceden konmuş
-      // symlink) yazmadan ÖNCE kaldırılır; bağın hedefi dokunulmaz kalır.
-      try {
-        unlinkSync(tmpPath);
-      } catch {
-        // tmp yok: temizlik gereksiz; asıl yazma aşağıda.
-      }
-      writeFileSync(tmpPath, file.content, "utf8");
+      writeFileSync(tmpPath, file.content, { encoding: "utf8", flag: "wx" });
+      tmpCreated = true;
       renameSync(tmpPath, targetPath);
+      tmpCreated = false;
     } catch (error) {
-      try {
-        unlinkSync(tmpPath);
-      } catch {
-        // tmp oluşmadıysa temizlik gereksiz; asıl hata aşağıda raporlanır.
+      if (tmpCreated) {
+        try {
+          unlinkSync(tmpPath);
+        } catch {
+          // Best-effort cleanup of our own temp file; the write error is reported below.
+        }
       }
       throw new WikiProjectionError(
         "wiki/export-write-failed",
-        `Çıktı dosyası yazılamadı: ${targetPath}: ${error instanceof Error ? error.message : String(error)}`,
+        `Could not write output file: ${targetPath}: ${error instanceof Error ? error.message : String(error)}`,
       );
     }
     written.push({

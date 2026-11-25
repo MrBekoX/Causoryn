@@ -40,7 +40,10 @@ interface ClientSession {
 }
 
 async function connectMcpClient(context: CausorynContext): Promise<ClientSession> {
-  const server = createCausorynMcpServer(context);
+  const server = createCausorynMcpServer(context, {
+    toolProfile: "full",
+    outputSchemaProfile: "full",
+  });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   const client = new Client({ name: "pre-1-0-e2e-verifier", version: "1.0.0" });
   await server.connect(serverTransport);
@@ -176,6 +179,7 @@ describe("Pre-1.0 Cross-Track E2E — Test Intelligence + Snapshot Git Compare",
 
       const serializedPlanText = JSON.stringify(planResult);
       expect(serializedPlanText).not.toContain("geçti");
+      expect(serializedPlanText).not.toMatch(/\bpassed\b/i);
 
       const planData = planEnvelope.data as Record<string, unknown>;
       const summary = planData.summary as Record<string, number>;

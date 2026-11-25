@@ -125,10 +125,10 @@ export function contractErrorToToolError(
   ) {
     return new CausorynToolError("CONTRACT_PARSE_FAILED", error.message);
   }
-  log?.(`sözleşme kodu ${code} INTERNAL_ERROR'a eşlendi: ${error.message}`);
+  log?.(`contract error code ${code} mapped to INTERNAL_ERROR: ${error.message}`);
   return new CausorynToolError(
     "INTERNAL_ERROR",
-    "Beklenmeyen iç hata; ayrıntılar sunucu loglarında",
+    "Unexpected internal error; see the server logs for details",
   );
 }
 
@@ -153,7 +153,7 @@ export function preflightErrorToToolError(error: {
   }
   return new CausorynToolError(
     "INTERNAL_ERROR",
-    "Beklenmeyen iç hata; ayrıntılar sunucu loglarında",
+    "Unexpected internal error; see the server logs for details",
   );
 }
 
@@ -346,7 +346,7 @@ function resolveEnvelopeSnapshot(
   if (read === undefined || read.snapshot.meta.workspaceId !== workspaceId) {
     throw new CausorynToolError(
       "INVALID_REVISION",
-      `snapshotId çözümlenemedi: ${snapshotId} — bu workspace için yayınlanmış snapshot kimliği olmalı`,
+      `snapshotId could not be resolved: ${snapshotId} — it must be a snapshot ID published for this workspace`,
     );
   }
   return read;
@@ -604,14 +604,14 @@ export async function detectContractDriftTool(
       scopedContractIds.has(record.contractId),
     );
     rationale.push(
-      `scope daraltması uygulandı: ${String(input.scope.length)} matchKey; eşleşmeyen çiftlerin kayıtları rapordan düşürüldü`,
+      `scope filter applied: ${String(input.scope.length)} matchKey(s); records of non-matching pairs were dropped from the report`,
     );
   }
 
   const warnings = staleWarningOf(read);
   if (input.anchorFiles === undefined && contractChanges.length > 0) {
     warnings.push(
-      "anchorFiles verilmedi: tüketici/üretici ankrajları taranamadı; etki grafı boş ve tüm değişiklikler unconsumedChanges'te (unresolved consumers — TŞ §11)",
+      "anchorFiles not provided: consumer/producer anchors could not be scanned; the impact graph is empty and every change is listed in unconsumedChanges (unresolved consumers)",
     );
   }
 
@@ -801,68 +801,110 @@ function testPlanDataOf(plan: TestPlanResult): z.infer<typeof TestPlanDataSchema
 
 export const DeriveTestPlanInputSchema = z.strictObject({
   workspaceId: z.string().min(1).optional(),
-  /** TŞ §10.2 "changeSet?": değişen sembol/dosya kümesi. */
+  /** Changed symbol/file scope (mutually exclusive with preflightId). */
   changeSet: z
     .strictObject({
       changedSymbols: z.array(z.string().min(1)).min(1).optional(),
       changedFiles: z.array(z.string().min(1)).min(1).optional(),
     })
     .optional(),
-  /**
-   * TŞ §10.2 "preflightId?": BEYANLI ama bu dilimde ÇÖZÜMLENMEZ (süreç-içi
-   * PreflightManifestStore yalnızca verify_change içindir; derive_test_plan bu
-   * dilimde preflightId çözmez) — şemayı geçen değer açık INVALID_ARGUMENT ile
-   * reddedilir.
-   */
+  /** Preflight manifest ID stored in the server's in-memory PreflightManifestStore. */
   preflightId: z.string().min(1).optional(),
-  /** TŞ §20 resource budget (çekirdek tavanları TEST_PLAN_LIMIT_CEILINGS). */
+  /** Resource budget limits (capped by TEST_PLAN_LIMIT_CEILINGS). */
   maxDepth: z.number().int().positive().optional(),
   maxCandidates: z.number().int().positive().optional(),
 });
 
 /**
- * causoryn_derive_test_plan (TŞ §10.2 "Test Intelligence, test listesi/gap";
- * §15; sprint-5 D6): TESTS kenarları + test-dosyası adlandırma bağlamı +
- * değişen CALLS noktalarından deterministik test adayları türetir. Çıktı
- * YALNIZCA aday + gerekçe + kanıt referansı taşır: "bu testler geçti" türü
- * çalıştırma iddiası ÜRETİLMEZ ve test koşusu yapılmaz (TŞ §15 kırmızı
- * çizgisi; çıktı şemasında state/observedCount alanı yoktur).
+ * causoryn_derive_test_plan: derives deterministic test candidates from TESTS
+ * edges, naming heuristics, and CALLS chains. Accepts either an explicit
+ * `changeSet` or a `preflightId` stored in `deps.preflightStore`.
+ * Never executes tests and never claims test execution status.
  */
 export function deriveTestPlan(
-  deps: ServiceDeps,
+  deps: VerificationServiceDeps,
   requestId: string,
   input: z.infer<typeof DeriveTestPlanInputSchema>,
 ): Envelope {
   const workspaceId = input.workspaceId ?? deps.config.workspaceId;
-  requireAuthorizedWorkspace(deps, workspaceId);
-  const read = requireSnapshot(deps, workspaceId);
+  const root = requireAuthorizedWorkspace(deps, workspaceId);
 
   const changeSet = input.changeSet;
-  if (input.preflightId !== undefined) {
-    // Açık ret (uydurma çözümleme yok): süreç-içi PreflightManifestStore
-    // yalnızca verify_change içindir; derive_test_plan bu dilimde preflightId çözmez.
-    if (changeSet === undefined) {
-      throw new CausorynToolError(
-        "INVALID_ARGUMENT",
-        `preflightId bu araç yüzeyinde çözümlenemez (süreç-içi PreflightManifestStore yalnızca verify_change içindir; derive_test_plan bu dilimde preflightId çözmez): ${input.preflightId} — değişiklik kümesini changeSet ile verin`,
-      );
-    }
+  if (input.preflightId !== undefined && changeSet !== undefined) {
     throw new CausorynToolError(
       "INVALID_ARGUMENT",
-      "changeSet ve preflightId birlikte verilemez (TŞ §10.2 'changeSet/preflightId?' — tam birini verin); preflightId çözümlemesi bu dilimde yoktur",
+      "changeSet and preflightId cannot both be provided; supply exactly one",
     );
   }
-  if (changeSet === undefined) {
+  if (input.preflightId === undefined && changeSet === undefined) {
     throw new CausorynToolError(
       "INVALID_ARGUMENT",
-      "changeSet gerekli: changedSymbols ve/veya changedFiles kümesi verin (preflightId bu dilimde çözümlenmez)",
+      "Either changeSet (changedSymbols and/or changedFiles) or preflightId is required",
     );
+  }
+
+  let read = requireSnapshot(deps, workspaceId);
+  let resolvedChangedSymbols: readonly string[] | undefined = changeSet?.changedSymbols;
+  let resolvedChangedFiles: readonly string[] | undefined = changeSet?.changedFiles;
+
+  if (input.preflightId !== undefined) {
+    const manifest = deps.preflightStore?.get(input.preflightId);
+    if (manifest === undefined) {
+      throw new CausorynToolError(
+        "INVALID_ARGUMENT",
+        `preflightId not found or expired in this server process: ${input.preflightId}; run causoryn_preflight_change first or provide changeSet directly`,
+      );
+    }
+
+    const baseSnapshotRead = deps.repository.getSnapshot(manifest.baseSnapshotId);
+    if (baseSnapshotRead !== undefined) {
+      if (baseSnapshotRead.snapshot.meta.workspaceId !== workspaceId) {
+        throw new CausorynToolError(
+          "INVALID_ARGUMENT",
+          `preflightId belongs to a different workspace: ${input.preflightId}`,
+        );
+      }
+      read = baseSnapshotRead;
+    }
+
+    const snapshotNodeIds = new Set(read.snapshot.nodes.map((node) => node.id));
+    const symbols = new Set<string>();
+    const files = new Set<string>();
+
+    for (const target of manifest.identifiedTargets) {
+      if (target.origin === "file") {
+        const decision = deps.policy.checkFile(root, target.qualifiedName);
+        if (!decision.allowed) {
+          throw new CausorynToolError(
+            "PATH_DENIED",
+            `preflight target file is not authorized: ${target.qualifiedName}${decision.reason ? ` (${decision.reason})` : ""}`,
+          );
+        }
+        files.add(decision.relativePath ?? target.qualifiedName);
+      } else {
+        symbols.add(snapshotNodeIds.has(target.nodeId) ? target.nodeId : target.qualifiedName);
+      }
+    }
+    for (const unresolved of manifest.candidateTargets) {
+      symbols.add(unresolved.target);
+    }
+
+    const sortedSymbols = [...symbols].sort();
+    const sortedFiles = [...files].sort();
+    if (sortedSymbols.length === 0 && sortedFiles.length === 0) {
+      throw new CausorynToolError(
+        "INVALID_ARGUMENT",
+        `preflightId ${input.preflightId} contains no target symbols or files to derive a test plan from`,
+      );
+    }
+    resolvedChangedSymbols = sortedSymbols.length > 0 ? sortedSymbols : undefined;
+    resolvedChangedFiles = sortedFiles.length > 0 ? sortedFiles : undefined;
   }
 
   const plan = runDifferentiation(deps.logger, () =>
     deriveTestPlanCore(read.snapshot, {
-      ...(changeSet.changedSymbols === undefined ? {} : { changedSymbols: changeSet.changedSymbols }),
-      ...(changeSet.changedFiles === undefined ? {} : { changedFiles: changeSet.changedFiles }),
+      ...(resolvedChangedSymbols === undefined ? {} : { changedSymbols: resolvedChangedSymbols }),
+      ...(resolvedChangedFiles === undefined ? {} : { changedFiles: resolvedChangedFiles }),
       ...(input.maxDepth === undefined ? {} : { maxDepth: input.maxDepth }),
       ...(input.maxCandidates === undefined ? {} : { maxCandidates: input.maxCandidates }),
     }),
@@ -871,7 +913,7 @@ export function deriveTestPlan(
   const warnings = staleWarningOf(read);
   if (plan.truncated) {
     warnings.push(
-      `test planı sınırla kesildi (${plan.truncatedBy.join(", ")}); kesilmeyen adaylar mevcut olabilir (limitleri artırın; tavanlar TŞ §20 resource budget)`,
+      `test plan truncated by limits (${plan.truncatedBy.join(", ")}); more candidates may exist (raise the limits; ceilings are set by the resource budget)`,
     );
   }
 
@@ -1023,18 +1065,18 @@ export async function preflightChange(
     );
   } else {
     hostLimitations.push(
-      "test planı türetilmedi (includeTestPlan=false); testPlanId manifest'e bağlanmadı",
+      "test plan not derived (includeTestPlan=false); no testPlanId is attached to the manifest",
     );
   }
   if (input.includeContracts === false) {
     hostLimitations.push(
-      "sözleşme denetimi istenmedi (includeContracts=false); contractChecks boş bırakıldı",
+      "contract check not requested (includeContracts=false); contractChecks left empty",
     );
   } else {
     // Dürüst boşluk: sözleşme denetimi kaydı için D2/D3 sürüm çifti girdisi
     // gerekir; preflight girdisi taşımadığından kayıt ÜRETİLMEZ (uydurma yok).
     hostLimitations.push(
-      "sözleşme denetimi kaydı türetilmedi: preflight girdisinde sözleşme sürüm çifti yoktur (contractChecks boş; sözleşme değerlendirmesi causoryn_check_contracts/causoryn_detect_contract_drift araçlarındadır)",
+      "no contract check record derived: the preflight input has no contract version pair (contractChecks is empty; use causoryn_check_contracts or causoryn_detect_contract_drift to evaluate contracts)",
     );
   }
 
@@ -1091,7 +1133,7 @@ export async function preflightChange(
   const warnings = staleWarningOf(read);
   if (manifest.requiresDisambiguation) {
     warnings.push(
-      `${String(manifest.candidateTargets.length)} hedef sembole kesin bağlanamadı; candidateTargets ADAYDIR ve otomatik kesinleştirilmez (TŞ §10.3)`,
+      `${String(manifest.candidateTargets.length)} target(s) could not be linked to a single symbol; candidateTargets are only candidates and are not resolved automatically`,
     );
   }
 
@@ -1294,12 +1336,12 @@ export function traceBusinessFlow(
   const gapFlowCount = result.flows.filter((flow) => flow.hasGap).length;
   if (gapFlowCount > 0) {
     warnings.push(
-      `${String(gapFlowCount)} akış gap segmenti taşıyor: runtime feature flag/reflection/dinamik dispatch/existing olmayan kenar yüzünden kesin akış bilinmez; kopukluk uydurma köprüyle DEĞİL gap segmentiyle raporlandı (TŞ §14)`,
+      `${String(gapFlowCount)} flow(s) contain a gap segment: the exact flow is unknown because of runtime feature flags, reflection, dynamic dispatch, or missing edges; the break is reported as a gap segment, NOT bridged with a guessed edge`,
     );
   }
   if (result.truncated) {
     warnings.push(
-      `akış keşfi sınırla kesildi (${result.truncatedBy.join(", ")}); kesilmeyen akışlar mevcut olabilir (limitleri artırın; tavanlar TŞ §20 resource budget)`,
+      `flow discovery truncated by limits (${result.truncatedBy.join(", ")}); more flows may exist (raise the limits; ceilings are set by the resource budget)`,
     );
   }
 

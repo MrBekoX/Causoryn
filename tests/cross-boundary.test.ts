@@ -799,7 +799,7 @@ describe("B8 cross-boundary: degradasyon (worker yok → L0/L1, motor ayakta)", 
     expect(
       fallback?.warnings.some(
         (warning) =>
-          warning.includes("Roslyn worker kullanılamıyor") && warning.includes("L0/L1"),
+          warning.includes("Roslyn worker unavailable") && warning.includes("L0/L1"),
       ),
       "explicit degradasyon warning'i yok",
     ).toBe(true);

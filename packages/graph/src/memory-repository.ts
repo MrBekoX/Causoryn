@@ -11,11 +11,15 @@ import { finalizeSnapshotGraph, type SnapshotMetaInput } from "./finalize.js";
 import type {
   FileRecord,
   GraphRepository,
+  PruneSnapshotsResult,
   PublishableState,
   SnapshotBuildInfo,
   SnapshotBuildInput,
+  SnapshotMetaSummary,
   SnapshotRead,
+  WorkspaceLanguageCoverageMeta,
   WorkspaceRecord,
+  WorkspaceSummaryMeta,
 } from "./repository.js";
 import {
   requireNonEmptyField,
@@ -77,9 +81,24 @@ function isNewer(candidate: PublishedEntry, than: PublishedEntry): boolean {
   return a[2] > (b[2] as number);
 }
 
+interface MemoryFileFactRecord {
+  readonly workspaceId: string;
+  readonly relativePath: string;
+  readonly contentHash: string;
+  readonly analyzerFingerprint: string;
+  readonly language: string;
+  readonly publicInterfaceHash: string;
+  readonly nodesJson: string;
+  readonly edgesJson: string;
+  readonly evidenceJson: string;
+  readonly importedPathsJson: string;
+  readonly updatedAt: string;
+}
+
 export class InMemoryGraphRepository implements GraphRepository {
   private readonly workspaces = new Map<string, WorkspaceRecord>();
   private readonly files = new Map<string, FileRecord>();
+  private readonly fileFacts = new Map<string, MemoryFileFactRecord>();
   private readonly builds = new Map<string, MemoryBuild>();
   private readonly published = new Map<string, PublishedEntry>();
   private buildSerial = 0;
@@ -92,7 +111,7 @@ export class InMemoryGraphRepository implements GraphRepository {
     if (this.workspaces.has(record.id)) {
       throw new GraphRepositoryError(
         "graph/duplicate-workspace",
-        `Workspace zaten kayıtlı: ${record.id}`,
+        `Workspace is already registered: ${record.id}`,
       );
     }
     this.workspaces.set(record.id, { ...record });
@@ -102,7 +121,7 @@ export class InMemoryGraphRepository implements GraphRepository {
     if (!this.workspaces.has(record.workspaceId)) {
       throw new GraphRepositoryError(
         "graph/unknown-workspace",
-        `Bilinmeyen workspace: ${record.workspaceId}`,
+        `Unknown workspace: ${record.workspaceId}`,
       );
     }
     requireNonEmptyField("file.relativePath", record.relativePath);
@@ -115,7 +134,7 @@ export class InMemoryGraphRepository implements GraphRepository {
     ) {
       throw new GraphRepositoryError(
         "graph/invalid-file-size",
-        `file.sizeBytes negatif olmayan tam sayı olmalı: ${String(record.sizeBytes)}`,
+        `file.sizeBytes must be a non-negative integer: ${String(record.sizeBytes)}`,
       );
     }
     this.files.set(fileKey(record.workspaceId, record.relativePath), {
@@ -127,7 +146,7 @@ export class InMemoryGraphRepository implements GraphRepository {
     if (!this.workspaces.has(workspaceId)) {
       throw new GraphRepositoryError(
         "graph/unknown-workspace",
-        `Bilinmeyen workspace: ${workspaceId}`,
+        `Unknown workspace: ${workspaceId}`,
       );
     }
     const records: FileRecord[] = [];
@@ -143,7 +162,7 @@ export class InMemoryGraphRepository implements GraphRepository {
     if (!this.workspaces.has(workspaceId)) {
       throw new GraphRepositoryError(
         "graph/unknown-workspace",
-        `Bilinmeyen workspace: ${workspaceId}`,
+        `Unknown workspace: ${workspaceId}`,
       );
     }
     requireNonEmptyField("file.relativePath", relativePath);
@@ -154,7 +173,7 @@ export class InMemoryGraphRepository implements GraphRepository {
     if (!this.workspaces.has(input.workspaceId)) {
       throw new GraphRepositoryError(
         "graph/unknown-workspace",
-        `Bilinmeyen workspace: ${input.workspaceId}`,
+        `Unknown workspace: ${input.workspaceId}`,
       );
     }
     requireNonEmptyField("build.revision.id", input.revision.id);
@@ -168,7 +187,7 @@ export class InMemoryGraphRepository implements GraphRepository {
       ) {
         throw new GraphRepositoryError(
           "graph/build-already-active",
-          `Aynı revizyon için aktif build var: ${input.workspaceId}#${input.revision.id}@${input.revision.sequence}`,
+          `An active build already exists for this revision: ${input.workspaceId}#${input.revision.id}@${input.revision.sequence}`,
         );
       }
     }
@@ -197,7 +216,7 @@ export class InMemoryGraphRepository implements GraphRepository {
     if (build.nodes.has(node.id)) {
       throw new GraphRepositoryError(
         "graph/duplicate-node",
-        `Aynı node kimliği build içinde zaten var: ${node.id}`,
+        `Node id already exists in this build: ${node.id}`,
       );
     }
     build.nodes.set(node.id, node);
@@ -218,7 +237,7 @@ export class InMemoryGraphRepository implements GraphRepository {
         const missing = endpoint === edge.from ? "from" : "to";
         throw new GraphRepositoryError(
           "graph/dangling-edge",
-          `Kenar ucu bilinmeyen node'a işaret ediyor (${missing}): ${endpoint}`,
+          `Edge endpoint points to an unknown node (${missing}): ${endpoint}`,
         );
       }
     }
@@ -226,7 +245,7 @@ export class InMemoryGraphRepository implements GraphRepository {
     if (build.edges.has(edge.id)) {
       throw new GraphRepositoryError(
         "graph/duplicate-edge",
-        `Aynı edge kimliği build içinde zaten var: ${edge.id}`,
+        `Edge id already exists in this build: ${edge.id}`,
       );
     }
     build.edges.set(edge.id, edge);
@@ -287,12 +306,313 @@ export class InMemoryGraphRepository implements GraphRepository {
     return { snapshot: latest.graph, stale: this.isStale(latest) };
   }
 
+  getLatestSnapshotMeta(workspaceId: string): SnapshotMetaSummary | undefined {
+    requireNonEmptyField("workspaceId", workspaceId);
+    let latest: PublishedEntry | undefined;
+    for (const entry of this.published.values()) {
+      if (entry.graph.meta.workspaceId !== workspaceId) continue;
+      if (latest === undefined || isNewer(entry, latest)) latest = entry;
+    }
+    if (latest === undefined) return undefined;
+    const state = latest.graph.meta.state;
+    if (state !== "ready" && state !== "partial") return undefined;
+    return {
+      snapshotId: latest.graph.meta.id,
+      workspaceId: latest.graph.meta.workspaceId,
+      state,
+      revisionId: latest.graph.meta.revision.id,
+      revisionSequence: latest.graph.meta.revision.sequence,
+      configHash: latest.graph.meta.configHash,
+      analyzerFingerprint: latest.graph.meta.analyzerFingerprint,
+      createdAt: latest.graph.meta.createdAt,
+      publishedAt: latest.publishedAt,
+      nodeCount: latest.graph.nodes.length,
+      edgeCount: latest.graph.edges.length,
+      evidenceCount: latest.graph.evidence.length,
+      stale: this.isStale(latest),
+    };
+  }
+
+  getLatestWorkspaceSummaryMeta(workspaceId: string): WorkspaceSummaryMeta | undefined {
+    requireNonEmptyField("workspaceId", workspaceId);
+    let latest: PublishedEntry | undefined;
+    for (const entry of this.published.values()) {
+      if (entry.graph.meta.workspaceId !== workspaceId) continue;
+      if (latest === undefined || isNewer(entry, latest)) latest = entry;
+    }
+    if (latest === undefined) return undefined;
+    const state = latest.graph.meta.state;
+    if (state !== "ready" && state !== "partial") return undefined;
+
+    const snapshot = latest.graph;
+    let fileCount = 0;
+    const entrypoints: string[] = [];
+    const frameworkSet = new Set<string>();
+    const nodeById = new Map<string, GraphNode>();
+
+    interface MutableLangCoverage {
+      files: number;
+      hasNonFileSymbols: boolean;
+      hasSemanticEdges: boolean;
+      verifiedEdges: number;
+      heuristicEdges: number;
+      unresolvedEdges: number;
+    }
+    const langBuckets = new Map<string, MutableLangCoverage>();
+    const ensureLang = (lang: string): MutableLangCoverage => {
+      let bucket = langBuckets.get(lang);
+      if (bucket === undefined) {
+        bucket = {
+          files: 0,
+          hasNonFileSymbols: false,
+          hasSemanticEdges: false,
+          verifiedEdges: 0,
+          heuristicEdges: 0,
+          unresolvedEdges: 0,
+        };
+        langBuckets.set(lang, bucket);
+      }
+      return bucket;
+    };
+
+    for (const node of snapshot.nodes) {
+      nodeById.set(node.id, node);
+      if (node.kind === "File") {
+        fileCount += 1;
+      }
+      if (node.kind === "Endpoint" || node.kind === "Handler") {
+        entrypoints.push(node.qualifiedName);
+        if (node.kind === "Endpoint" && typeof node.attributes.framework === "string") {
+          frameworkSet.add(node.attributes.framework);
+        }
+      }
+      if (typeof node.language === "string" && node.language.length > 0) {
+        const bucket = ensureLang(node.language);
+        if (node.kind === "File") {
+          bucket.files += 1;
+        } else if (node.kind !== "Workspace" && node.kind !== "UnknownExternal") {
+          bucket.hasNonFileSymbols = true;
+        }
+      }
+    }
+
+    const edgeKindCounts = new Map<string, number>();
+    let verified = 0;
+    let heuristic = 0;
+    let unresolved = 0;
+
+    for (const edge of snapshot.edges) {
+      edgeKindCounts.set(edge.kind, (edgeKindCounts.get(edge.kind) ?? 0) + 1);
+      if (edge.resolution === "verified") {
+        verified += 1;
+      } else if (edge.resolution === "heuristic") {
+        heuristic += 1;
+      } else {
+        unresolved += 1;
+      }
+
+      const fromNode = nodeById.get(edge.from);
+      const toNode = nodeById.get(edge.to);
+      if (fromNode?.kind === "Workspace" && edge.kind === "CONTAINS") {
+        continue;
+      }
+      const lang =
+        typeof fromNode?.language === "string" && fromNode.language.length > 0
+          ? fromNode.language
+          : typeof toNode?.language === "string" && toNode.language.length > 0
+            ? toNode.language
+            : undefined;
+      if (lang === undefined) continue;
+      const bucket = ensureLang(lang);
+      if (edge.kind !== "CONTAINS") {
+        bucket.hasSemanticEdges = true;
+      }
+      if (edge.resolution === "verified") {
+        bucket.verifiedEdges += 1;
+      } else if (edge.resolution === "heuristic") {
+        bucket.heuristicEdges += 1;
+      } else {
+        bucket.unresolvedEdges += 1;
+      }
+    }
+
+    entrypoints.sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+    const frameworks = [...frameworkSet].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+
+    const sortedLangs = [...langBuckets.keys()].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+    const languages: Array<{ readonly language: string; readonly files: number }> = [];
+    const languageCoverage: WorkspaceLanguageCoverageMeta[] = [];
+    for (const lang of sortedLangs) {
+      const bucket = langBuckets.get(lang)!;
+      if (bucket.files > 0) {
+        languages.push({ language: lang, files: bucket.files });
+      }
+      languageCoverage.push({
+        language: lang,
+        files: bucket.files,
+        hasNonFileSymbols: bucket.hasNonFileSymbols,
+        hasSemanticEdges: bucket.hasSemanticEdges,
+        verifiedEdges: bucket.verifiedEdges,
+        heuristicEdges: bucket.heuristicEdges,
+        unresolvedEdges: bucket.unresolvedEdges,
+      });
+    }
+
+    const edgesByKind: Record<string, number> = {};
+    for (const kind of [...edgeKindCounts.keys()].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0))) {
+      edgesByKind[kind] = edgeKindCounts.get(kind) ?? 0;
+    }
+
+    return {
+      snapshotId: snapshot.meta.id,
+      workspaceId: snapshot.meta.workspaceId,
+      state,
+      revisionId: snapshot.meta.revision.id,
+      revisionSequence: snapshot.meta.revision.sequence,
+      stale: this.isStale(latest),
+      nodeCount: snapshot.nodes.length,
+      edgeCount: snapshot.edges.length,
+      evidenceCount: snapshot.evidence.length,
+      fileCount,
+      languages,
+      frameworks,
+      entrypoints,
+      edgesByKind,
+      resolutions: {
+        verified,
+        heuristic,
+        unresolved,
+      },
+      languageCoverage,
+    };
+  }
+
+  pruneOldSnapshots(
+    workspaceId: string,
+    keepCount = 2,
+  ): PruneSnapshotsResult {
+    requireNonEmptyField("workspaceId", workspaceId);
+    if (!Number.isInteger(keepCount) || keepCount < 1) {
+      throw new GraphRepositoryError(
+        "graph/invalid-limit",
+        `keepCount must be a positive integer: ${String(keepCount)}`,
+      );
+    }
+    const workspacePublished: PublishedEntry[] = [];
+    for (const entry of this.published.values()) {
+      if (entry.graph.meta.workspaceId === workspaceId) {
+        workspacePublished.push(entry);
+      }
+    }
+    workspacePublished.sort((a, b) => (isNewer(a, b) ? -1 : isNewer(b, a) ? 1 : 0));
+
+    let prunedSnapshotSids = 0;
+    for (let i = keepCount; i < workspacePublished.length; i += 1) {
+      const target = workspacePublished[i]!;
+      if (this.published.delete(target.graph.meta.id)) {
+        prunedSnapshotSids += 1;
+      }
+    }
+
+    const failedBuildIds: string[] = [];
+    for (const build of this.builds.values()) {
+      if (build.state === "failed" && build.input.workspaceId === workspaceId) {
+        failedBuildIds.push(build.buildId);
+      }
+    }
+    if (failedBuildIds.length > 2) {
+      for (let i = 0; i < failedBuildIds.length - 2; i += 1) {
+        if (this.builds.delete(failedBuildIds[i]!)) {
+          prunedSnapshotSids += 1;
+        }
+      }
+    }
+    return { prunedSnapshotSids, prunedFtsRows: 0 };
+  }
+
+  upsertFileFact(record: MemoryFileFactRecord): void {
+    if (!this.workspaces.has(record.workspaceId)) {
+      throw new GraphRepositoryError(
+        "graph/unknown-workspace",
+        `Unknown workspace: ${record.workspaceId}`,
+      );
+    }
+    requireNonEmptyField("fileFact.relativePath", record.relativePath);
+    requireNonEmptyField("fileFact.contentHash", record.contentHash);
+    requireNonEmptyField("fileFact.analyzerFingerprint", record.analyzerFingerprint);
+    requireNonEmptyField("fileFact.language", record.language);
+    requireNonEmptyField("fileFact.publicInterfaceHash", record.publicInterfaceHash);
+    requireTimestamp("fileFact.updatedAt", record.updatedAt);
+    this.fileFacts.set(fileKey(record.workspaceId, record.relativePath), { ...record });
+  }
+
+  upsertFileFacts(records: readonly MemoryFileFactRecord[]): void {
+    for (const record of records) {
+      this.upsertFileFact(record);
+    }
+  }
+
+  listFileFacts(
+    workspaceId: string,
+    analyzerFingerprint?: string,
+  ): readonly MemoryFileFactRecord[] {
+    if (!this.workspaces.has(workspaceId)) {
+      throw new GraphRepositoryError(
+        "graph/unknown-workspace",
+        `Unknown workspace: ${workspaceId}`,
+      );
+    }
+    const out: MemoryFileFactRecord[] = [];
+    for (const record of this.fileFacts.values()) {
+      if (record.workspaceId !== workspaceId) continue;
+      if (
+        analyzerFingerprint !== undefined &&
+        record.analyzerFingerprint !== analyzerFingerprint
+      ) {
+        continue;
+      }
+      out.push({ ...record });
+    }
+    out.sort((a, b) =>
+      a.relativePath < b.relativePath ? -1 : a.relativePath > b.relativePath ? 1 : 0,
+    );
+    return out;
+  }
+
+  deleteFileFact(workspaceId: string, relativePath: string): boolean {
+    if (!this.workspaces.has(workspaceId)) {
+      throw new GraphRepositoryError(
+        "graph/unknown-workspace",
+        `Unknown workspace: ${workspaceId}`,
+      );
+    }
+    requireNonEmptyField("fileFact.relativePath", relativePath);
+    return this.fileFacts.delete(fileKey(workspaceId, relativePath));
+  }
+
+  clearFileFacts(workspaceId: string): number {
+    if (!this.workspaces.has(workspaceId)) {
+      throw new GraphRepositoryError(
+        "graph/unknown-workspace",
+        `Unknown workspace: ${workspaceId}`,
+      );
+    }
+    let deleted = 0;
+    for (const [key, record] of this.fileFacts.entries()) {
+      if (record.workspaceId === workspaceId) {
+        this.fileFacts.delete(key);
+        deleted += 1;
+      }
+    }
+    return deleted;
+  }
+
   private requireActiveBuild(buildId: string): MemoryBuild {
     const build = this.builds.get(buildId);
     if (build === undefined || build.state !== "building") {
       throw new GraphRepositoryError(
         "graph/build-not-active",
-        `Aktif build yok: ${buildId}`,
+        `No active build: ${buildId}`,
       );
     }
     return build;
