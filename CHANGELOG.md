@@ -95,6 +95,7 @@ Before `1.0.0`, a breaking change bumps the minor version.
 - **C# external call names:** `UnknownExternal` names for library calls no longer repeat the namespace (previously for example `System.System.Console.WriteLine`).
 - **False `TS1470` in ESM projects:** the confined compiler host now exposes each workspace `package.json` `type` field, so files in `"type": "module"` packages are no longer analyzed as CommonJS.
 - **Honest job states:** an index run that publishes nothing is no longer reported as `done`; a host whose peer published first reports `reused` with outcome `reused_peer`.
+- **Worker responses after process exit:** a language worker that answers and then exits (stdin is closed after the request) no longer has its response replaced by "worker exited (exit=0)" and an L0/L1 fallback when Node reports the exit before the last stdout chunk; the early-exit outcome waits for the stdio streams to close (or 1 s after exit).
 - **Publish under concurrency:** the publish transaction takes the SQLite write lock up front (`BEGIN IMMEDIATE`), and lease heartbeats are renewed from the main thread while the indexing worker is busy, so a live build is not mistaken for an orphan.
 
 ### Security
