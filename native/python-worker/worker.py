@@ -67,7 +67,18 @@ MAX_RESPONSE_NODES = 250_000
 # Exception savunması her istisnayı istek-başına hata/INTERNAL_ERROR
 # yanıtına çevirir ve döngüyü ayakta tutar (json.loads derin JSON
 # RecursionError'u da ayrıca yakalanır — 'derin iç içe JSON' testi).
-MAX_AST_DEPTH = 1000
+#
+# The limit keeps headroom below the interpreter recursion limit (1000 by
+# default): the walk frames plus the frames above them and an ast.unparse of
+# a sub-expression must fit. A RecursionError that still occurs is isolated
+# per file (and per callable in the call pass): that file gets an
+# ADAPTER_INTERNAL diagnostic and the rest of the batch is analyzed.
+MAX_AST_DEPTH = max(100, min(500, sys.getrecursionlimit() // 2))
+
+# Upper bound for rendered expression text (ast.unparse) in qualified names,
+# rationales and warnings; longer renderings are cut and suffixed with a
+# content digest so distinct expressions stay distinct.
+MAX_RENDERED_EXPRESSION_CHARS = 200
 
 # TŞ §8 katalogları — worker liste dışı tür üretemez (çıkışta sert doğrulama).
 NODE_KINDS = frozenset(
@@ -153,6 +164,35 @@ def canonical(value: Any) -> str:
 def sha256_hex(content: str) -> str:
     """UTF-8 SHA-256 — domain sha256Hex(utf8Encode(content)) ile bit-bit aynı."""
     return hashlib.sha256(content.encode("utf-8")).hexdigest()
+
+
+def bounded_text(text: str) -> str:
+    """Caps rendered text at MAX_RENDERED_EXPRESSION_CHARS (plus a digest suffix)."""
+    if len(text) <= MAX_RENDERED_EXPRESSION_CHARS:
+        return text
+    digest = hashlib.sha256(text.encode("utf-8", "surrogatepass")).hexdigest()[:12]
+    return f"{text[:MAX_RENDERED_EXPRESSION_CHARS]}...#{digest}"
+
+
+def render_expression(node: ast.AST, source: str) -> str:
+    """Bounded `ast.unparse` rendering of an expression.
+
+    ast.unparse is recursive: an expression too deep to render falls back to
+    its (non-recursive) source segment, or to a positional placeholder.
+    """
+    try:
+        return bounded_text(ast.unparse(node))
+    except (RecursionError, ValueError):
+        segment = None
+        try:
+            segment = ast.get_source_segment(source, node)
+        except (RecursionError, ValueError):
+            segment = None
+        if segment:
+            return bounded_text(segment)
+        line = getattr(node, "lineno", 0)
+        column = getattr(node, "col_offset", 0)
+        return f"<expression at {line}:{column}>"
 
 
 def module_name_from_path(relative_path: str) -> str:
@@ -346,6 +386,7 @@ class FileAnalyzer:
         # Çağrı sahipleri: (ast node, kind, qn, class_qn)
         self.callables: List[Tuple[ast.stmt, str, str, Optional[str]]] = []
         self.depth_exceeded = False
+        self.recursion_exceeded = False
 
     # -- yardımcılar ----------------------------------------------------------
 
@@ -357,7 +398,11 @@ class FileAnalyzer:
 
     def external_ref(self, qualified_name: str) -> Dict[str, Any]:
         """Dış/çözümsüz hedef: dosya taşımaz (analiz seti dışı sembol)."""
-        return {"kind": "UnknownExternal", "qualifiedName": qualified_name}
+        return {"kind": "UnknownExternal", "qualifiedName": bounded_text(qualified_name)}
+
+    def render(self, node: ast.AST) -> str:
+        """Bounded rendering of an expression of this file (see render_expression)."""
+        return render_expression(node, self.content)
 
     def span(self, start_line: Optional[int], end_line: Optional[int]) -> Dict[str, Any]:
         start = start_line if isinstance(start_line, int) and start_line > 0 else 0
@@ -383,9 +428,13 @@ class FileAnalyzer:
     def analyze(self) -> None:
         self.collector.add_file_node(self.path, self.source_hash)
         self._register_imports(self.tree.body)
-        for statement in self.tree.body:
-            self._declare(statement, prefix=self.module, parent=self.file_ref(),
-                          in_class=False, class_qn=None, depth=1)
+        try:
+            for statement in self.tree.body:
+                self._declare(statement, prefix=self.module, parent=self.file_ref(),
+                              in_class=False, class_qn=None, depth=1)
+        except RecursionError:
+            # Isolated per file: the declarations collected so far are kept.
+            self.recursion_exceeded = True
         # Çok dosyalı setlerde import çözümlemesi için semboller global kayda yazılır.
         for kind, qualified in self.module_symbols.values():
             self.collector.register_symbol(qualified, kind, self.path)
@@ -478,7 +527,7 @@ class FileAnalyzer:
                 # 'sessiz kesim yoktur' disipliniyle açık uyarı yazılır.
                 if func.attr in HTTP_VERB_DECORATORS or func.attr in ROUTE_NAMED_DECORATORS:
                     self.collector.add_warning(
-                        f"{self.path}: decorator carrier '{ast.unparse(func)}' is not a simple name; "
+                        f"{self.path}: decorator carrier '{self.render(func)}' is not a simple name; "
                         f"no endpoint was produced for {handler_qn}"
                     )
                 continue
@@ -515,7 +564,7 @@ class FileAnalyzer:
                     self.evidence(
                         "route-attribute",
                         decorator,
-                        f"ROUTES_TO: {ast.unparse(decorator)} is bound to handler "
+                        f"ROUTES_TO: {self.render(decorator)} is bound to handler "
                         f"{handler_qn} (verified).",
                     ),
                 )
@@ -583,8 +632,12 @@ class FileAnalyzer:
 
     def resolve_calls(self) -> None:
         for node, kind, qualified, class_qn in self.callables:
-            for statement in node.body:
-                self._walk_calls(statement, (kind, qualified, class_qn), depth=1)
+            try:
+                for statement in node.body:
+                    self._walk_calls(statement, (kind, qualified, class_qn), depth=1)
+            except RecursionError:
+                # Isolated per callable: its remaining calls are skipped.
+                self.recursion_exceeded = True
 
     def _walk_calls(
         self,
@@ -647,7 +700,7 @@ class FileAnalyzer:
         if isinstance(func, ast.Attribute):
             chain = self._dotted_chain(func)
             if chain is None:
-                source = ast.unparse(func)
+                source = self.render(func)
                 finish(
                     "unresolved", self.external_ref(source),
                     f"CALLS: {owner_qn} → {source} could not be resolved (unresolved); "
@@ -669,7 +722,7 @@ class FileAnalyzer:
                 else:
                     finish(
                         "unresolved", self.external_ref(".".join(chain)),
-                        f"CALLS: {owner_qn} → {'.'.join(chain)} could not be resolved (unresolved); "
+                        f"CALLS: {owner_qn} → {bounded_text('.'.join(chain))} could not be resolved (unresolved); "
                         "no fabricated target was produced.",
                     )
                 return
@@ -688,14 +741,14 @@ class FileAnalyzer:
                     else:
                         finish(
                             "unresolved", self.external_ref(".".join(chain)),
-                            f"CALLS: {owner_qn} → {'.'.join(chain)} could not be resolved (unresolved); "
+                            f"CALLS: {owner_qn} → {bounded_text('.'.join(chain))} could not be resolved (unresolved); "
                             "no fabricated target was produced.",
                         )
                     return
                 # Modül düzeyi fonksiyon niteliği (ör. func.attr) çözümlenmez.
                 finish(
                     "unresolved", self.external_ref(".".join(chain)),
-                    f"CALLS: {owner_qn} → {'.'.join(chain)} could not be resolved (unresolved); "
+                    f"CALLS: {owner_qn} → {bounded_text('.'.join(chain))} could not be resolved (unresolved); "
                     "no fabricated target was produced.",
                 )
                 return
@@ -706,12 +759,12 @@ class FileAnalyzer:
 
             finish(
                 "unresolved", self.external_ref(".".join(chain)),
-                f"CALLS: {owner_qn} → {'.'.join(chain)} could not be resolved (unresolved); "
+                f"CALLS: {owner_qn} → {bounded_text('.'.join(chain))} could not be resolved (unresolved); "
                 "no fabricated target was produced.",
             )
             return
 
-        source = ast.unparse(func)
+        source = self.render(func)
         finish(
             "unresolved", self.external_ref(source),
             f"CALLS: {owner_qn} → {source} could not be resolved (unresolved); "
@@ -1083,6 +1136,14 @@ def analyze_request(request: Dict[str, Any]) -> Dict[str, Any]:
     # + ROUTES_TO) ve global sembol kaydı.
     for analyzer in analyzers:
         analyzer.analyze()
+
+    # Geçiş 2: çağrı çözümleme (tüm modüllerin sembolleri kayıtlı olduktan sonra;
+    # çok dosyalı import zincirleri doğru hedefe bağlanır).
+    for analyzer in analyzers:
+        analyzer.resolve_calls()
+
+    # Limits of both passes are reported once per file.
+    for analyzer in analyzers:
         if analyzer.depth_exceeded:
             collector.add_diagnostic(
                 analyzer.path,
@@ -1090,11 +1151,14 @@ def analyze_request(request: Dict[str, Any]) -> Dict[str, Any]:
                 f"AST traversal depth {MAX_AST_DEPTH} exceeded; deeper subtrees were skipped",
                 0,
             )
-
-    # Geçiş 2: çağrı çözümleme (tüm modüllerin sembolleri kayıtlı olduktan sonra;
-    # çok dosyalı import zincirleri doğru hedefe bağlanır).
-    for analyzer in analyzers:
-        analyzer.resolve_calls()
+        if analyzer.recursion_exceeded:
+            collector.add_diagnostic(
+                analyzer.path,
+                "ADAPTER_INTERNAL",
+                "AST traversal exceeded the interpreter recursion budget; "
+                "the declarations and calls of this file are partial",
+                0,
+            )
 
     return collector.response(request["id"], request.get("maxNodes"))
 

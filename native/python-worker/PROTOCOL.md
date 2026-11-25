@@ -95,9 +95,21 @@ CPython parser'ının yapısal sınırlarıdır — aşırı derin iç içe yap�
 "too many nested parentheses") ile reddedilir → dosya başına `SyntaxError`
 tanısı + yalnızca File node (L0), analiz `partial` sürer ve süreç yaşamaya
 devam eder (kabul testi: tests/python-worker.test.ts "aşırı derin iç içe
-yapı"). İkincil katman olarak AST gezinme derinliği 1000'i aşan alt
-ağaçlar atlanır ve dosya başına bir kez `ADAPTER_INTERNAL` tanısı yazılır;
-bu sayaç tipik koşumda tetiklenmez (parser sınırı daha önce devreye girer).
+yapı"). İkincil katman olarak AST gezinme derinliği `MAX_AST_DEPTH`'i aşan alt
+ağaçlar atlanır ve dosya başına bir kez `ADAPTER_INTERNAL` tanısı yazılır.
+`MAX_AST_DEPTH` is 500 (at most half the interpreter recursion limit), so
+the walk keeps headroom below the recursion limit; long operator chains
+such as `a + b + ...` parse without parentheses and reach this limit. A
+`RecursionError` that still occurs during the declaration or call pass is
+isolated per file (per callable in the call pass): the file gets an
+`ADAPTER_INTERNAL` diagnostic ("AST traversal exceeded the interpreter
+recursion budget; ...") and the rest of the batch is analyzed.
+
+Rendered expression text (`ast.unparse` of call targets and decorators in
+UnknownExternal names, rationales and warnings) is capped at 200
+characters; a longer rendering is cut and suffixed with `...#<12 hex
+digits of its SHA-256>`. An expression too deep for `ast.unparse` is
+rendered from its source segment instead.
 
 **Süreç yaşamlılığının gerçek mekanizması (takım denetimi tur-2
 netleştirmesi):** bildirim/çağrı gezinmesi REKÜRSİFTİR (`_declare` /
