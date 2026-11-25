@@ -765,10 +765,10 @@ describe("git okuma katmanı — geçici depo (salt-okunur cat-file/ls-tree)", (
       LANG: "C.UTF-8",
       LC_ALL: "C.UTF-8",
       TZ: "UTC",
-      OPENAI_API_KEY: "sk-live-secret",
+      OPENAI_API_KEY: "sk-live-" + "secret",
       GITHUB_TOKEN: "ghp_secret_token",
       AWS_SECRET_ACCESS_KEY: "aws-secret-key",
-      ANTHROPIC_API_KEY: "ant-secret-key",
+      ANTHROPIC_API_KEY: "ant-secret-" + "key",
       GIT_CONFIG_NOSYSTEM: "0",
       GIT_TERMINAL_PROMPT: "1",
     });

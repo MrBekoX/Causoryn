@@ -1570,7 +1570,7 @@ describe(
     const badPdbDir = buildReadyPkg("bad-pdb");
     writeFileSync(
       path.join(badPdbDir, "native", "roslyn-worker", "Causoryn.RoslynWorker.dll"),
-      "MZ...C:\\Users\\alice\\repo\\Causoryn.RoslynWorker.pdb",
+      "MZ...C:\\" + "Users\\alice\\repo\\Causoryn.RoslynWorker.pdb",
       "utf8",
     );
     expect(() => verifyMod.verifyPackageReady(badPdbDir)).toThrow(/Users|pdb/i);

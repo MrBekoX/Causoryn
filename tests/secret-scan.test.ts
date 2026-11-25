@@ -22,6 +22,7 @@ import { afterAll, describe, expect, it } from "vitest";
 const THIS_DIR = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.dirname(THIS_DIR);
 const SECRET_SCAN_PATH = path.join(REPO_ROOT, "scripts", "secret-scan.mjs");
+const LEAK_SCAN_PATH = path.join(REPO_ROOT, "scripts", "lib", "leak-scan.mjs");
 
 /** Kaynakta tek parça secret literal yazılmaz; çalışma zamanında birleştirilir. */
 const BAIT_AWS_KEY = "AKIA" + "IOSFODNN7EXAMPLE";
@@ -96,6 +97,8 @@ function createTempRepoSkeleton(options?: { readonly omitNative?: boolean }): {
 
   const scriptCopyPath = path.join(repoDir, "scripts", "secret-scan.mjs");
   copyFileSync(SECRET_SCAN_PATH, scriptCopyPath);
+  mkdirSync(path.join(repoDir, "scripts", "lib"), { recursive: true });
+  copyFileSync(LEAK_SCAN_PATH, path.join(repoDir, "scripts", "lib", "leak-scan.mjs"));
   writeFileSync(
     path.join(repoDir, "packages", "sample", "src", "clean.ts"),
     'export const ok = "clean";\n',
@@ -104,7 +107,44 @@ function createTempRepoSkeleton(options?: { readonly omitNative?: boolean }): {
   for (const rootFile of EXPECTED_ROOT_FILES) {
     writeFileSync(path.join(repoDir, rootFile), "# clean\n", "utf8");
   }
+  // Mirrors the real repository: staged build output is ignored by `.gitignore`,
+  // internal plans by the local-only `.git/info/exclude`.
+  writeFileSync(
+    path.join(repoDir, ".gitignore"),
+    "# clean\nintegrations/antigravity/causoryn/scripts/\n",
+    "utf8",
+  );
+  git(repoDir, ["init", "-q"]);
+  writeFileSync(path.join(repoDir, ".git", "info", "exclude"), "docs/superpowers/\n", "utf8");
   return { repoDir, scriptCopyPath };
+}
+
+/** Repository-relative POSIX path in the OS-native form the CLI prints. */
+function native(relPosix: string): string {
+  return relPosix.split("/").join(path.sep);
+}
+
+function git(cwd: string, args: readonly string[]): string {
+  return execFileSync("git", [...args], {
+    cwd,
+    encoding: "utf8",
+    shell: false,
+    env: { ...process.env, GIT_CONFIG_NOSYSTEM: "1" },
+  });
+}
+
+function runScan(
+  scriptCopyPath: string,
+  args: readonly string[] = [],
+  env: NodeJS.ProcessEnv = {},
+): ReturnType<typeof spawnSync> & { stdout: string; stderr: string } {
+  const res = spawnSync(process.execPath, [scriptCopyPath, ...args], {
+    cwd: os.tmpdir(),
+    encoding: "utf8",
+    shell: false,
+    env: { ...process.env, CAUSORYN_PRIVATE_TERMS: "", ...env },
+  });
+  return res as ReturnType<typeof spawnSync> & { stdout: string; stderr: string };
 }
 
 afterAll(() => {
@@ -113,7 +153,7 @@ afterAll(() => {
   }
 });
 
-describe("scripts/secret-scan.mjs — genişletilmiş kapsam (12 kök + kök dosyalar) ve desenler", () => {
+describe("scripts/secret-scan.mjs — genişletilmiş kapsam (12 kök + kök dosyalar) ve desenler", { timeout: 60_000 }, () => {
   it("SCAN_ROOTS tanımı 12 dizin kökünü kapsar; ROOT_TEXT_FILES kök metin dosyalarını listeler", () => {
     expect(existsSync(SECRET_SCAN_PATH), "scripts/secret-scan.mjs mevcut olmalı").toBe(true);
     const source = readFileSync(SECRET_SCAN_PATH, "utf8");
@@ -148,15 +188,19 @@ describe("scripts/secret-scan.mjs — genişletilmiş kapsam (12 kök + kök dos
       expect(rootFilesBody).toContain(`"${rootFile}"`);
     }
 
-    const excludeMatch = source.match(/const\s+EXCLUDE_SEGMENTS\s*=\s*new\s+Set\(\[([\s\S]*?)\]\);/);
-    expect(excludeMatch, "EXCLUDE_SEGMENTS tanımı bulunmalı").not.toBeNull();
-    const excludeBody = excludeMatch?.[1] ?? "";
-    for (const seg of ["target", "bin", "obj", "test", "tests", "node_modules", "dist"]) {
-      expect(excludeBody).toContain(`"${seg}"`);
+    // Coverage is no longer limited by directory-name or extension lists: files
+    // come from `git ls-files` (tracked + untracked-not-ignored) and the rules
+    // live in the shared scanner module used by the export gate as well.
+    // Build outputs (target/, bin/, obj/, node_modules/, dist/) stay out
+    // because `.gitignore` ignores them, not because of a name list.
+    expect(source).not.toMatch(/const\s+EXCLUDE_SEGMENTS\b/);
+    expect(source).not.toMatch(/const\s+TEXT_EXTENSIONS\b/);
+    expect(source).toContain('from "./lib/leak-scan.mjs"');
+    expect(source).not.toMatch(/basename\([^)]*\)\s*===\s*["']secret-scan\.mjs["']/);
+    const rootGitignore = readFileSync(path.join(REPO_ROOT, ".gitignore"), "utf8");
+    for (const ignored of ["node_modules/", "dist/", "bin/", "obj/", "native/rust-worker/target/"]) {
+      expect(rootGitignore).toContain(ignored);
     }
-    // docs ve skills artık taranan kökler olduğu için genel EXCLUDE_SEGMENTS içinde OLAMAZ.
-    expect(excludeBody).not.toContain('"docs"');
-    expect(excludeBody).not.toContain('"skills"');
   });
 
   it("gerçek secret-scan koşumu CWD bağımsız olarak (cwd: os.tmpdir()) exit 0 ve '12 kök tarandı' döndürür", () => {
@@ -314,6 +358,180 @@ describe("scripts/secret-scan.mjs — genişletilmiş kapsam (12 kök + kök dos
     expect(redRun.status).toBe(1);
     expect(redRun.stderr).toContain("SECRET_SCAN FAIL");
     expect(redRun.stderr).toContain(path.join("scripts", "check-helper.mjs"));
+    rmSync(path.join(repoDir, "scripts", "check-helper.mjs"));
+
+    // An ignored file that is force-added becomes tracked (and therefore
+    // published), so it is scanned again:
+    git(repoDir, ["add", "-f", "docs/superpowers/plans/internal-plan.md"]);
+    const trackedRun = runScan(scriptCopyPath);
+    expect(trackedRun.status).toBe(1);
+    expect(trackedRun.stderr).toContain(native("docs/superpowers/plans/internal-plan.md"));
+    expect(trackedRun.stderr).toContain("local-user-profile-path");
+  });
+
+  it("NEGATIVE: locations and file types the old extension/directory lists skipped are scanned", () => {
+    const { repoDir, scriptCopyPath } = createTempRepoSkeleton();
+    const leakyFiles = [
+      "tests/leak.test.ts",
+      "examples/demo/src/App.tsx",
+      "examples/demo/src/legacy.jsx",
+      "eslint.config.js",
+      "tsconfig.base.json",
+      "Dockerfile",
+      "id_rsa",
+      ".env.production",
+      ".npmrc",
+      "scripts/deploy.sh",
+      "scripts/setup.ps1",
+      "scripts/run.bat",
+      "scripts/run.cmd",
+      "certs/server.pem",
+      "certs/server.key",
+      "db/schema.sql",
+      "proto/api.proto",
+      "site/index.html",
+      "site/logo.svg",
+      "build/pom.xml",
+      "config/settings.ini",
+      "packages/sample/src/UPPER.TS",
+      "packages/sample/data.JSON",
+    ];
+    for (const rel of leakyFiles) {
+      mkdirSync(path.dirname(path.join(repoDir, rel)), { recursive: true });
+      writeFileSync(path.join(repoDir, rel), `leaked ${BAIT_AWS_KEY}\n`, "utf8");
+    }
+
+    const res = runScan(scriptCopyPath);
+    expect(res.status).toBe(1);
+    for (const rel of leakyFiles) {
+      expect(res.stderr, rel).toContain(`${native(rel)}:1 — aws-access-key`);
+    }
+  });
+
+  it("NEGATIVE: the self-skip is not name-based — any other secret-scan.mjs is scanned, the scanner's own files are clean", () => {
+    const { repoDir, scriptCopyPath } = createTempRepoSkeleton();
+    writeFileSync(
+      path.join(repoDir, "packages", "sample", "secret-scan.mjs"),
+      `export const leaked = "${BAIT_GH_FINE_PAT}";\n`,
+      "utf8",
+    );
+    const res = runScan(scriptCopyPath);
+    expect(res.status).toBe(1);
+    expect(res.stderr).toContain(`${native("packages/sample/secret-scan.mjs")}:1 — github-fine-grained-pat`);
+    expect(res.stderr).not.toContain(native("scripts/secret-scan.mjs"));
+    expect(res.stderr).not.toContain(native("scripts/lib/leak-scan.mjs"));
+  });
+
+  it("BOUNDARY: untracked files that are not ignored are scanned, ignored ones are not, --tracked-only limits to the index", () => {
+    const { repoDir, scriptCopyPath } = createTempRepoSkeleton();
+    writeFileSync(path.join(repoDir, ".gitignore"), "# clean\nlocal-cache/\n", "utf8");
+    mkdirSync(path.join(repoDir, "local-cache"), { recursive: true });
+    writeFileSync(path.join(repoDir, "local-cache", "dump.txt"), `${BAIT_AWS_KEY}\n`, "utf8");
+    expect(runScan(scriptCopyPath).status).toBe(0);
+
+    writeFileSync(path.join(repoDir, "docs", "draft.md"), `${BAIT_NPM_TOKEN}\n`, "utf8");
+    const untrackedRun = runScan(scriptCopyPath);
+    expect(untrackedRun.status).toBe(1);
+    expect(untrackedRun.stderr).toContain(`${native("docs/draft.md")}:1 — npm-token`);
+
+    const trackedOnlyRun = runScan(scriptCopyPath, ["--tracked-only"]);
+    expect(trackedOnlyRun.status, trackedOnlyRun.stderr).toBe(0);
+    git(repoDir, ["add", "docs/draft.md"]);
+    expect(runScan(scriptCopyPath, ["--tracked-only"]).status).toBe(1);
+
+    expect(runScan(scriptCopyPath, ["--unknown-flag"]).status).toBe(1);
+  });
+
+  it("FAIL-CLOSED: unreadable entries and non-git directories fail; tracked files deleted from the working tree are skipped", () => {
+    const { repoDir, scriptCopyPath } = createTempRepoSkeleton();
+    writeFileSync(path.join(repoDir, "docs", "gone.md"), "clean\n", "utf8");
+    writeFileSync(path.join(repoDir, "docs", "swapped.md"), "clean\n", "utf8");
+    git(repoDir, ["add", "docs/gone.md", "docs/swapped.md"]);
+
+    rmSync(path.join(repoDir, "docs", "gone.md"));
+    expect(runScan(scriptCopyPath).status).toBe(0);
+
+    rmSync(path.join(repoDir, "docs", "swapped.md"));
+    mkdirSync(path.join(repoDir, "docs", "swapped.md"));
+    const swappedRun = runScan(scriptCopyPath);
+    expect(swappedRun.status).toBe(1);
+    expect(swappedRun.stderr).toContain("SECRET_SCAN FAIL");
+    expect(swappedRun.stderr).toContain(native("docs/swapped.md"));
+
+    const notGit = mkdtempSync(path.join(os.tmpdir(), "causoryn-secret-scan-nogit-"));
+    tempDirs.push(notGit);
+    mkdirSync(path.join(notGit, "scripts", "lib"), { recursive: true });
+    copyFileSync(SECRET_SCAN_PATH, path.join(notGit, "scripts", "secret-scan.mjs"));
+    copyFileSync(LEAK_SCAN_PATH, path.join(notGit, "scripts", "lib", "leak-scan.mjs"));
+    const notGitRun = runScan(path.join(notGit, "scripts", "secret-scan.mjs"));
+    expect(notGitRun.status).toBe(1);
+    expect(notGitRun.stderr).toContain("SECRET_SCAN FAIL");
+  });
+
+  it("NEGATIVE: binary files are scanned through their printable strings, not skipped by extension", () => {
+    const { repoDir, scriptCopyPath } = createTempRepoSkeleton();
+    writeFileSync(
+      path.join(repoDir, "docs", "diagram.png"),
+      Buffer.concat([
+        Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x00, 0x00]),
+        Buffer.from(`author-path ${BAIT_WIN_PROFILE}`, "latin1"),
+        Buffer.from([0x00, 0x01]),
+      ]),
+    );
+    const res = runScan(scriptCopyPath);
+    expect(res.status).toBe(1);
+    expect(res.stderr).toContain(`${native("docs/diagram.png")}:@`);
+    expect(res.stderr).toContain("— local-user-profile-path");
+  });
+
+  it("PRIVACY: private terms from CAUSORYN_PRIVATE_TERMS and .git/info/causoryn-private-terms are enforced without echoing the term", () => {
+    const { repoDir, scriptCopyPath } = createTempRepoSkeleton();
+    const envTerm = ["sample", "corp", "internal"].join("-");
+    const fileTerm = ["work", "sample", "box"].join("-");
+    writeFileSync(path.join(repoDir, "docs", "notes.md"), `Built on ${envTerm.toUpperCase()}\n`, "utf8");
+    writeFileSync(path.join(repoDir, "packages", "sample", "src", "where.ts"), `// ${fileTerm}\n`, "utf8");
+
+    expect(runScan(scriptCopyPath).status).toBe(0);
+
+    const envRun = runScan(scriptCopyPath, [], { CAUSORYN_PRIVATE_TERMS: envTerm });
+    expect(envRun.status).toBe(1);
+    expect(envRun.stderr).toContain(`${native("docs/notes.md")}:1 — private-term-1`);
+    expect(envRun.stderr.toLowerCase()).not.toContain(envTerm);
+
+    writeFileSync(
+      path.join(repoDir, ".git", "info", "causoryn-private-terms"),
+      `# local only\n${fileTerm}\n`,
+      "utf8",
+    );
+    const fileRun = runScan(scriptCopyPath);
+    expect(fileRun.status).toBe(1);
+    expect(fileRun.stderr).toContain(`${native("packages/sample/src/where.ts")}:1 — private-term-1`);
+    expect(fileRun.stderr.toLowerCase()).not.toContain(fileTerm);
+
+    writeFileSync(path.join(repoDir, ".git", "info", "causoryn-private-terms"), "ab\n", "utf8");
+    const shortRun = runScan(scriptCopyPath);
+    expect(shortRun.status).toBe(1);
+    expect(shortRun.stderr).toContain("shorter than 3");
+  });
+
+  it("NEGATIVE: new credential families and local drive paths in docs are reported by the CLI", () => {
+    const { repoDir, scriptCopyPath } = createTempRepoSkeleton();
+    writeFileSync(
+      path.join(repoDir, "docs", "deploy.md"),
+      [
+        `token ${["gl", "pat-", "a1".repeat(10)].join("")}`,
+        `db ${["postgres", "://app:", "S3cr3tPw", "@db.internal/app"].join("")}`,
+        `${["API_", "KEY=", "a1b2c3d4e5f6g7h8"].join("")}`,
+        `tool ${["D:", "\\Work\\Sample\\go.exe"].join("")}`,
+      ].join("\n") + "\n",
+      "utf8",
+    );
+    const res = runScan(scriptCopyPath);
+    expect(res.status).toBe(1);
+    expect(res.stderr).toContain(`${native("docs/deploy.md")}:1 — gitlab-token`);
+    expect(res.stderr).toContain(`${native("docs/deploy.md")}:2 — connection-string-credentials`);
+    expect(res.stderr).toContain(`${native("docs/deploy.md")}:3 — dotenv-secret-assignment`);
+    expect(res.stderr).toContain(`${native("docs/deploy.md")}:4 — local-drive-path`);
   });
 
   it("SINIR: THIRD-PARTY-NOTICES.md ve licenses/ içindeki üçüncü taraf telif e-postaları yanlış pozitif üretmez, gerçek sırlar yine yakalanır", () => {
