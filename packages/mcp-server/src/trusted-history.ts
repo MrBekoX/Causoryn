@@ -6,6 +6,7 @@ import path from "node:path";
 import {
   GraphRepositoryError,
   readGitTree,
+  resolveGitCommitRef,
   serializeSnapshotContentSet,
   TIMELINE_SNAPSHOT_BLOB_PATH,
   WORKING_TREE_REF,
@@ -16,6 +17,15 @@ import {
 } from "@causoryn/graph";
 import type { PolicyDecision } from "@causoryn/workspace";
 
+import {
+  analyzeCommitContentSet,
+  COMMIT_ANALYSIS_NOTE,
+  describeCommitAnalysisFailure,
+  HISTORY_ANALYSIS_BUDGET_ENV,
+  HISTORY_CACHE_NOTE,
+  openHistoryCache,
+  type CommitContentAnalysis,
+} from "./history-commit-analysis.js";
 import type { ServiceDeps } from "./services.js";
 
 /**
@@ -31,25 +41,48 @@ import type { ServiceDeps } from "./services.js";
  *    commit tree is excluded by the workspace path/extension rules. The index
  *    keeps no per-commit history (snapshots are recorded against the working
  *    tree), so this is the only commit the index can vouch for.
- * 2. `reconstructFromGitTree` (`working-tree` ref): the local index's latest
- *    published snapshot — the engine's own analysis of the working tree —
- *    instead of the working-tree `.causoryn/architecture-snapshot.json` file.
- *    Commit refs are not reconstructed here: a file-level reconstruction
- *    would mix granularities with the symbol-level points from (1) and (3).
+ * 2. `reconstructFromGitTree`:
+ *    - `working-tree`: the local index's latest published snapshot — the
+ *      engine's own analysis of the working tree — instead of the working-tree
+ *      `.causoryn/architecture-snapshot.json` file.
+ *    - commit refs: the engine's own symbol-level analysis of the commit, run
+ *      from its git objects by a scratch index (history-commit-analysis.ts),
+ *      so these points have the same granularity as (1) and the index. With a
+ *      data root the result is cached; a cached point is free, fresh analyses
+ *      are limited per call (`maxFreshAnalyses`). A point beyond the budget or
+ *      whose analysis failed falls through to (3) and, without a committed
+ *      snapshot, stays unanalyzed with that reason.
  * 3. Otherwise the timeline core falls back to the repo-committed (or
  *    working-tree) snapshot file and marks the point with
  *    `snapshot-loaded-from-committed-git-blob`.
  *
  * Every check is conservative: any doubt (stale build, edited file, CRLF
  * conversion, untracked indexed file, unreadable path) means "not verified"
- * and the point falls back to (3) with its trust warning. Nothing is written.
+ * for (1). Nothing is written into the workspace; only the history cache
+ * under the data root is written.
  */
 export interface TrustedHistorySources {
   readonly snapshotLookup: TimelineSnapshotLookup;
   readonly reconstructFromGitTree: TimelineReconstructFromGitTree;
-  /** One line per ref that was served from the local index (envelope warnings). */
+  /** Lines for the envelope warnings: refs served from the index or analyzed from git objects. */
   readonly notes: () => readonly string[];
 }
+
+export interface TrustedHistoryOptions {
+  /** Fresh commit analyses this call may run (cache hits are free; 0 disables them). */
+  readonly maxFreshAnalyses: number;
+}
+
+type CommitPointResult =
+  | {
+      readonly kind: "analyzed";
+      readonly analysis: CommitContentAnalysis;
+      readonly fromCache: boolean;
+      readonly notCachedReason?: string;
+    }
+  | { readonly kind: "disabled" }
+  | { readonly kind: "budget-exceeded" }
+  | { readonly kind: "failed"; readonly reason: string };
 
 interface LoadedIndex {
   readonly snapshotId: string;
@@ -133,10 +166,45 @@ function inventoryHashOf(bytes: Buffer): string {
   return createHash("sha256").update(Buffer.from(bytes.toString("utf8"), "utf8")).digest("hex");
 }
 
+/** Git failures that keep their tool error mapping instead of an unanalyzed point. */
+function isRepositoryLevelGitError(error: unknown): boolean {
+  return (
+    error instanceof GraphRepositoryError &&
+    (error.code === "compare/repository-refused" || error.code === "compare/git-unavailable")
+  );
+}
+
+/** Envelope note of a point analyzed from git objects (fresh or cached). */
+function analyzedPointNote(
+  ref: string,
+  commitSha: string,
+  result: Extract<CommitPointResult, { kind: "analyzed" }>,
+): string {
+  const details: string[] = [];
+  if (result.fromCache) details.push(HISTORY_CACHE_NOTE);
+  const degraded = result.analysis.degradedWorkers;
+  if (degraded.length > 0) {
+    details.push(
+      `the ${degraded.join(", ")} worker could not run, so those files were analyzed at a lower level; the commit is analyzed again after an index build that runs that worker`,
+    );
+  } else if (result.analysis.state === "partial") {
+    details.push("the analysis is partial (analyzer diagnostics or no analyzable sources)");
+  }
+  if (result.analysis.skippedFiles > 0) {
+    details.push(
+      `${String(result.analysis.skippedFiles)} file(s) of the commit were not analyzed (above maxFileBytes, an unusable git path, or a path the working tree leads through a link or a refused name)`,
+    );
+  }
+  if (result.notCachedReason !== undefined) details.push(`not cached: ${result.notCachedReason}`);
+  const suffix = details.length === 0 ? "" : `; ${details.join("; ")}`;
+  return `'${ref}' (commit ${commitSha.slice(0, 12)}) ${COMMIT_ANALYSIS_NOTE}${suffix}`;
+}
+
 export function createTrustedHistorySources(
   deps: ServiceDeps,
   workspaceId: string,
   canonicalRoot: string,
+  options: TrustedHistoryOptions,
 ): TrustedHistorySources {
   const notes: string[] = [];
   const addNote = (note: string): void => {
@@ -285,8 +353,7 @@ export function createTrustedHistorySources(
     return loaded.contentSet;
   };
 
-  const reconstructFromGitTree: TimelineReconstructFromGitTree = async (_repoRoot, ref) => {
-    if (ref !== WORKING_TREE_REF) return undefined;
+  const workingTreePoint = async (): Promise<CompareContentSet | undefined> => {
     const loaded = loadIndex();
     if (loaded === null) return undefined;
     const proof = await loadDiskProof(loaded);
@@ -301,5 +368,85 @@ export function createTrustedHistorySources(
     return loaded.contentSet;
   };
 
-  return { snapshotLookup, reconstructFromGitTree, notes: () => [...notes] };
+  // Commit points analyzed from git objects. One result per commit SHA and
+  // call: the same commit named twice is analyzed (and budgeted) once.
+  const cache = openHistoryCache(deps, workspaceId, canonicalRoot);
+  const commitPoints = new Map<string, Promise<CommitPointResult>>();
+  let freshAnalyses = 0;
+  const budgetSkippedRefs: string[] = [];
+  const budgetHint =
+    cache === null
+      ? `configure a data root (--auto-data-dir or storage.dataDbPath) so analyzed commits are cached between calls, or raise ${HISTORY_ANALYSIS_BUDGET_ENV}`
+      : "run the tool again to analyze more points (analyzed commits are cached)";
+  const budgetReason = `analysis-budget-exceeded: this call analyzes at most ${String(options.maxFreshAnalyses)} commit(s) from git objects; ${budgetHint}`;
+
+  const resolveCommitPoint = async (commitSha: string): Promise<CommitPointResult> => {
+    const cached = cache === null ? undefined : await cache.lookup(commitSha);
+    if (cached !== undefined && !cached.stale) {
+      return { kind: "analyzed", analysis: cached.analysis, fromCache: true };
+    }
+    // A stale entry (analyzed without a worker that is available now) is
+    // refreshed when the budget allows and is used as is otherwise.
+    const servedStale = (): CommitPointResult | undefined =>
+      cached === undefined ? undefined : { kind: "analyzed", analysis: cached.analysis, fromCache: true };
+    if (options.maxFreshAnalyses === 0) return servedStale() ?? { kind: "disabled" };
+    if (freshAnalyses >= options.maxFreshAnalyses) return servedStale() ?? { kind: "budget-exceeded" };
+    freshAnalyses += 1;
+    let analysis: CommitContentAnalysis;
+    try {
+      analysis = await analyzeCommitContentSet(deps, workspaceId, canonicalRoot, commitSha);
+    } catch (error) {
+      if (isRepositoryLevelGitError(error)) throw error;
+      deps.logger(
+        `history: commit ${commitSha} could not be analyzed from its git objects: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      return servedStale() ?? { kind: "failed", reason: describeCommitAnalysisFailure(error) };
+    }
+    if (cache === null) return { kind: "analyzed", analysis, fromCache: false };
+    const stored = await cache.store(commitSha, analysis);
+    return stored
+      ? { kind: "analyzed", analysis, fromCache: false }
+      : {
+          kind: "analyzed",
+          analysis,
+          fromCache: false,
+          notCachedReason: "the history cache could not be written (see the server log)",
+        };
+  };
+
+  const reconstructFromGitTree: TimelineReconstructFromGitTree = async (_repoRoot, ref, commitSha) => {
+    if (ref === WORKING_TREE_REF) return workingTreePoint();
+    const sha = commitSha ?? (await resolveGitCommitRef(canonicalRoot, ref));
+    let pending = commitPoints.get(sha);
+    if (pending === undefined) {
+      pending = resolveCommitPoint(sha);
+      commitPoints.set(sha, pending);
+    }
+    const result = await pending;
+    switch (result.kind) {
+      case "analyzed":
+        addNote(analyzedPointNote(ref, sha, result));
+        return result.analysis.contentSet;
+      case "disabled":
+        return undefined;
+      case "budget-exceeded":
+        if (!budgetSkippedRefs.includes(ref)) budgetSkippedRefs.push(ref);
+        return { status: "unanalyzed", reason: budgetReason };
+      case "failed":
+        addNote(
+          `'${ref}' (commit ${sha.slice(0, 12)}) could not be analyzed from its git objects: ${result.reason}`,
+        );
+        return { status: "unanalyzed", reason: `commit-analysis-failed: ${result.reason}` };
+    }
+  };
+
+  const allNotes = (): readonly string[] => {
+    if (budgetSkippedRefs.length === 0) return [...notes];
+    return [
+      ...notes,
+      `${String(budgetSkippedRefs.length)} point(s) were not analyzed from their git objects because this call's budget of ${String(options.maxFreshAnalyses)} fresh commit analyses (${HISTORY_ANALYSIS_BUDGET_ENV}) was used up: ${budgetSkippedRefs.map((ref) => `'${ref}'`).join(", ")}; ${budgetHint}`,
+    ];
+  };
+
+  return { snapshotLookup, reconstructFromGitTree, notes: allNotes };
 }

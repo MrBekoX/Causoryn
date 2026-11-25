@@ -138,15 +138,38 @@ export type TimelineSnapshotLookup = (
 ) => CompareContentSet | undefined | Promise<CompareContentSet | undefined>;
 
 /**
+ * Outcome of a reconstruction that was attempted but produced no content
+ * (e.g. an analysis budget was used up, or the analysis failed). The point
+ * still falls back to the committed snapshot blob; when that blob does not
+ * exist, `reason` becomes the point's `unanalyzed` reason.
+ */
+export interface TimelineReconstructUnanalyzed {
+  readonly status: "unanalyzed";
+  readonly reason: string;
+}
+
+/**
  * Optional local source-tree reconstruction seam built on hardened read-only
  * `readGitTree`/`readGitBlob` access without trusting any repo-committed
- * `.causoryn/architecture-snapshot.json` file. Returning `undefined` falls
- * through to the legacy committed blob.
+ * `.causoryn/architecture-snapshot.json` file. `commitSha` is the canonical
+ * commit SHA of `ref` when the caller already resolved it (always for commit
+ * refs when `snapshotLookup` is given; never for `working-tree`). Returning
+ * `undefined` falls through to the legacy committed blob; a
+ * `TimelineReconstructUnanalyzed` outcome falls through as well but supplies
+ * the reason reported when no committed blob exists.
  */
 export type TimelineReconstructFromGitTree = (
   repoRoot: string,
   ref: string,
-) => Promise<CompareContentSet | undefined>;
+  commitSha?: string,
+) => Promise<CompareContentSet | TimelineReconstructUnanalyzed | undefined>;
+
+function isReconstructUnanalyzed(
+  value: CompareContentSet | TimelineReconstructUnanalyzed,
+): value is TimelineReconstructUnanalyzed {
+  const record = value as unknown as Record<string, unknown>;
+  return record.status === "unanalyzed" && typeof record.reason === "string";
+}
 
 /**
  * Options for `readTimelinePointFromGit` (backward-compatible superset of
@@ -1418,10 +1441,12 @@ export async function reconstructFileContentSetFromGitTree(
  * 1. `options.snapshotLookup(commitSha, ref)` — trusted locally-indexed
  *    snapshot (e.g., local SQLite history keyed by canonical commit SHA).
  *    ZERO `trustWarning`.
- * 2. `options.reconstructFromGitTree(repoRoot, ref)` — local reconstruction
- *    directly from hardened read-only `readGitTree`/`readGitBlob` source files
- *    without trusting any committed `.causoryn/architecture-snapshot.json`.
- *    ZERO `trustWarning`.
+ * 2. `options.reconstructFromGitTree(repoRoot, ref, commitSha?)` — local
+ *    reconstruction directly from hardened read-only `readGitTree`/`readGitBlob`
+ *    source files without trusting any committed
+ *    `.causoryn/architecture-snapshot.json`. ZERO `trustWarning`. An
+ *    `{ status: "unanalyzed", reason }` outcome falls through to (3); when the
+ *    ref has no committed blob, that reason is the point's reason.
  * 3. Legacy fallback: read repo-committed `.causoryn/architecture-snapshot.json`
  *    via hardened `readGitBlob`. Attaches explicit
  *    `trustWarning: "snapshot-loaded-from-committed-git-blob"` so callers know
@@ -1453,8 +1478,9 @@ export async function readTimelinePointFromGit(
   }
 
   // Tier 1: Trusted local snapshot lookup by canonical commit SHA (SQLite seam).
+  let commitSha: string | undefined;
   if (options?.snapshotLookup !== undefined && ref !== WORKING_TREE_REF) {
-    const commitSha =
+    commitSha =
       options.commitSha !== undefined && SHA_PATTERN.test(options.commitSha)
         ? options.commitSha
         : SHA_PATTERN.test(ref)
@@ -1474,21 +1500,43 @@ export async function readTimelinePointFromGit(
   }
 
   // Tier 2: Trusted local source-tree reconstruction via readGitTree/readGitBlob seam.
+  let reconstructReason: string | undefined;
   if (options?.reconstructFromGitTree !== undefined) {
-    const reconstructed = await options.reconstructFromGitTree(repoRoot, ref);
+    const knownSha =
+      ref === WORKING_TREE_REF
+        ? undefined
+        : (commitSha ??
+          (options.commitSha !== undefined && SHA_PATTERN.test(options.commitSha)
+            ? options.commitSha
+            : SHA_PATTERN.test(ref)
+              ? ref
+              : undefined));
+    const reconstructed = await options.reconstructFromGitTree(repoRoot, ref, knownSha);
     if (reconstructed !== undefined) {
-      const shapeError = describeManifestShapeError(reconstructed);
-      if (shapeError !== null) {
-        return {
-          status: "unanalyzed",
-          reason: `git-tree-reconstruct-invalid-shape: ${shapeError}`,
-        };
+      if (isReconstructUnanalyzed(reconstructed)) {
+        reconstructReason = reconstructed.reason;
+      } else {
+        const shapeError = describeManifestShapeError(reconstructed);
+        if (shapeError !== null) {
+          return {
+            status: "unanalyzed",
+            reason: `git-tree-reconstruct-invalid-shape: ${shapeError}`,
+          };
+        }
+        return { status: "analyzed", contentSet: reconstructed };
       }
-      return { status: "analyzed", contentSet: reconstructed };
     }
   }
 
   // Tier 3: Legacy fallback — repo-committed `.causoryn/architecture-snapshot.json` blob.
+  // When Tier 2 was attempted but produced nothing, its reason is kept.
+  const unanalyzed = (tier3Reason: string): TimelinePointContent => ({
+    status: "unanalyzed",
+    reason:
+      reconstructReason === undefined
+        ? tier3Reason
+        : `${reconstructReason}; committed snapshot fallback: ${tier3Reason}`,
+  });
   let raw: string;
   try {
     raw = await readGitBlob(repoRoot, ref, TIMELINE_SNAPSHOT_BLOB_PATH, options);
@@ -1497,10 +1545,9 @@ export async function readTimelinePointFromGit(
       error instanceof GraphRepositoryError &&
       error.code === "compare/blob-not-found"
     ) {
-      return {
-        status: "unanalyzed",
-        reason: `manifest-not-found: ${TIMELINE_SNAPSHOT_BLOB_PATH}`,
-      };
+      return reconstructReason === undefined
+        ? unanalyzed(`manifest-not-found: ${TIMELINE_SNAPSHOT_BLOB_PATH}`)
+        : { status: "unanalyzed", reason: reconstructReason };
     }
     throw error;
   }
@@ -1510,15 +1557,12 @@ export async function readTimelinePointFromGit(
     parsed = JSON.parse(raw);
   } catch (error) {
     const detail = error instanceof Error ? error.message : String(error);
-    return {
-      status: "unanalyzed",
-      reason: `manifest-not-json: ${detail}`,
-    };
+    return unanalyzed(`manifest-not-json: ${detail}`);
   }
 
   const shapeError = describeManifestShapeError(parsed);
   if (shapeError !== null) {
-    return { status: "unanalyzed", reason: `manifest-invalid-shape: ${shapeError}` };
+    return unanalyzed(`manifest-invalid-shape: ${shapeError}`);
   }
   // Şekil denetimi başarıyla geçti; sözleşme tipleri buradan itibaren geçerli.
   const set = parsed as CompareContentSet;
@@ -1600,8 +1644,11 @@ export async function readTimelineTrendBaselineFromGit(
  * kataloğuna uyumu) BİLİNLİKLE yapılmaz — derin doğrulama tek kaynak olarak
  * compare.ts'in diffContentSets sözleşmesine devredilir; ihlal aralıkta
  * `unanalyzed-interval` olarak raporlanır.
+ *
+ * Exported so stored content sets (e.g. a history cache entry) are checked
+ * with the same rules before use; returns null when the shape is valid.
  */
-function describeManifestShapeError(parsed: unknown): string | null {
+export function describeManifestShapeError(parsed: unknown): string | null {
   if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
     return "root must be an object";
   }

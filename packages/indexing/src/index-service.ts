@@ -261,7 +261,24 @@ export interface IndexServiceOptions {
   readonly leaseStaleCeilingMs?: number;
   /** Notified when this service acquires/releases a build lease (worker -> main thread bridge). */
   readonly onLeaseEvent?: (event: BuildLeaseEvent) => void;
+  /**
+   * Replaces the on-disk inventory walk of the async pipeline (e.g. the files
+   * of a git commit read from its objects). Root authorization, partitioning
+   * and the analyzers stay the same. Entries must use the inventory contract:
+   * root-relative POSIX paths, `sizeBytes` and `contentHash` of the UTF-8
+   * re-encoded `content`, and only paths the workspace policy allows. The
+   * service sorts them, rejects duplicate paths and enforces `limits.maxFiles`.
+   * Only the async runs use it: `runIndex`/`runIncrementalIndex` refuse a
+   * service with an injected source, and `getWorkerConfig()` returns undefined.
+   */
+  readonly inventorySource?: InventorySource;
 }
+
+/** Injected inventory (see `IndexServiceOptions.inventorySource`). */
+export type InventorySource = (
+  canonicalRoot: string,
+  maxFiles: number,
+) => Promise<readonly InventoryEntry[]>;
 
 /** Build lease lifecycle notification emitted by `IndexService`. */
 export interface BuildLeaseEvent {
@@ -1817,6 +1834,8 @@ export class IndexService {
   /** Hard lease heartbeat staleness ceiling (ms). */
   private readonly leaseStaleCeilingMs: number | undefined;
   private readonly onLeaseEvent: ((event: BuildLeaseEvent) => void) | undefined;
+  /** Injected inventory of the async pipeline (undefined: walk the root on disk). */
+  private readonly inventorySource: InventorySource | undefined;
   /** Leases currently held by runs of this service (renewed at phase boundaries). */
   private readonly heldLeases = new Set<ActiveBuildLeaseHandle>();
   private workspaceRegistered = false;
@@ -1866,6 +1885,7 @@ export class IndexService {
     );
     this.leaseStaleCeilingMs = ceiling > 0 ? ceiling : undefined;
     this.onLeaseEvent = options.onLeaseEvent;
+    this.inventorySource = options.inventorySource;
     const policyConfig = options.policy.config;
     const hashInput: JsonValue = {
       workspaceId: this.workspaceId,
@@ -2181,7 +2201,11 @@ export class IndexService {
    * off-thread indexing, or `undefined` when non-serializable test seams were injected.
    */
   getWorkerConfig(): IndexWorkerServiceConfig | undefined {
-    if (this.hasCustomCsharpStub || this.isPidAlive !== undefined) {
+    if (
+      this.hasCustomCsharpStub ||
+      this.isPidAlive !== undefined ||
+      this.inventorySource !== undefined
+    ) {
       return undefined;
     }
     const repoDbPath = (this.repository as { readonly dbPath?: unknown }).dbPath;
@@ -3504,6 +3528,12 @@ export class IndexService {
 
   /** Ortak hazırlık: yetki + workspace kaydı + senkron tam envanter (Discover). */
   private prepareRun(rootPath: string): PreparedRun {
+    if (this.inventorySource !== undefined) {
+      throw new IndexingError(
+        "indexing/internal",
+        "an injected inventory source is only supported by the async pipeline (runIndexAsync / runIncrementalIndexAsync)",
+      );
+    }
     const canonicalRoot = this.authorizeAndRegister(rootPath);
     const entries = collectInventory(this.policy, canonicalRoot, this.limits.maxFiles);
     return this.partitionPreparedRun(canonicalRoot, entries);
@@ -3512,12 +3542,40 @@ export class IndexService {
   /** Non-blocking async hazırlık: yetki + workspace kaydı + async envanter (v0.2.3). */
   private async prepareRunAsync(rootPath: string): Promise<PreparedRun> {
     const canonicalRoot = this.authorizeAndRegister(rootPath);
-    const entries = await collectInventoryAsync(
-      this.policy,
-      canonicalRoot,
-      this.limits.maxFiles,
-    );
+    const entries =
+      this.inventorySource === undefined
+        ? await collectInventoryAsync(this.policy, canonicalRoot, this.limits.maxFiles)
+        : await this.collectInjectedInventory(this.inventorySource, canonicalRoot);
     return this.partitionPreparedRun(canonicalRoot, entries);
+  }
+
+  /**
+   * Injected inventory under the on-disk inventory's guarantees: sorted by
+   * relative path, no duplicate paths, at most `limits.maxFiles` entries.
+   */
+  private async collectInjectedInventory(
+    source: InventorySource,
+    canonicalRoot: string,
+  ): Promise<InventoryEntry[]> {
+    const supplied = await source(canonicalRoot, this.limits.maxFiles);
+    if (supplied.length > this.limits.maxFiles) {
+      throw new IndexingError(
+        "indexing/limit-exceeded",
+        `file count exceeded the index.maxFiles limit (${String(this.limits.maxFiles)})`,
+      );
+    }
+    const entries = [...supplied].sort((a, b) =>
+      a.relativePath < b.relativePath ? -1 : a.relativePath > b.relativePath ? 1 : 0,
+    );
+    for (let index = 1; index < entries.length; index += 1) {
+      if (entries[index]?.relativePath === entries[index - 1]?.relativePath) {
+        throw new IndexingError(
+          "indexing/internal",
+          `the injected inventory lists a path more than once: ${String(entries[index]?.relativePath)}`,
+        );
+      }
+    }
+    return entries;
   }
 
   private authorizeAndRegister(rootPath: string): string {

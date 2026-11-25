@@ -158,6 +158,8 @@ export interface CausorynContext {
   ) => Promise<void>;
   /** Returns active queued/running indexing job info, or null if idle/terminal. */
   readonly getActiveIndexJob?: () => ActiveIndexJobInfo | null;
+  /** Per-call fresh commit analysis budget of the history tools (ContextOverrides). */
+  readonly historyMaxFreshAnalyses?: number;
 }
 
 export interface ContextOverrides {
@@ -173,6 +175,13 @@ export interface ContextOverrides {
   readonly deferAutoIndex?: boolean;
   /** Optional MCP host client identifier recorded in SQLite build_leases.host_label. */
   readonly hostLabel?: string;
+  /**
+   * Fresh commit analyses one history tool call may run (non-negative
+   * integer; 0 disables them, so commit points come only from the local
+   * index, the history cache or the committed snapshot file). Takes
+   * precedence over `CAUSORYN_HISTORY_MAX_ANALYSES` and the tool defaults.
+   */
+  readonly historyMaxFreshAnalyses?: number;
 }
 
 /**
@@ -187,6 +196,14 @@ export function createCausorynContext(
   overrides: ContextOverrides = {},
 ): CausorynContext {
   const config = parseCausorynServerConfig(rawConfig);
+  if (
+    overrides.historyMaxFreshAnalyses !== undefined &&
+    (!Number.isSafeInteger(overrides.historyMaxFreshAnalyses) || overrides.historyMaxFreshAnalyses < 0)
+  ) {
+    throw new CausorynConfigError([
+      `historyMaxFreshAnalyses must be a non-negative integer: ${String(overrides.historyMaxFreshAnalyses)}`,
+    ]);
+  }
   const policy = WorkspaceAccessPolicy.create({
     allowRoots: [...config.allowRoots],
     ignore: [...config.ignore],
@@ -528,6 +545,9 @@ export function createCausorynContext(
       startDeferredIndex,
       waitForInitialIndex,
       getActiveIndexJob,
+      ...(overrides.historyMaxFreshAnalyses === undefined
+        ? {}
+        : { historyMaxFreshAnalyses: overrides.historyMaxFreshAnalyses }),
       close: (): void => {
         try {
           (jobManager as { close?: () => void }).close?.();

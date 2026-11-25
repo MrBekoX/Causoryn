@@ -91,6 +91,12 @@ export interface ServiceDeps {
    * loglanır — istemciye genel mesaj gider, detay kaybolmaz (TŞ §10.1).
    */
   readonly logger: (message: string) => void;
+  /**
+   * Fresh commit analyses one history tool call may run (see
+   * history-commit-analysis.ts). Undefined: `CAUSORYN_HISTORY_MAX_ANALYSES`,
+   * then the tool default. 0 disables fresh analysis (embedding/test seam).
+   */
+  readonly historyMaxFreshAnalyses?: number;
 }
 
 /* ------------------------------------------------------------------ */
@@ -1220,8 +1226,9 @@ export function findSymbols(
     );
   }
 
-  // Derecelendirme: tam eşleşme (0) → önek (1) → içerir (2); bağlar
-  // qualifiedName + symbolId ile çözülür (deterministik, TŞ §8 invariant iv).
+  // Ranking: exact match (0) → prefix (1) → substring (2), with project symbols
+  // ahead of UnknownExternal placeholders below the exact tier; ties are broken
+  // by qualifiedName + symbolId (deterministic, TŞ §8 invariant iv).
   const rankOf = (qualifiedName: string): 0 | 1 | 2 | undefined => {
     const lowered = qualifiedName.toLowerCase();
     if (lowered === needle) return 0;
@@ -1236,6 +1243,16 @@ export function findSymbols(
         entry.rank !== undefined && (input.kind === undefined || entry.node.kind === input.kind),
     )
     .sort((a, b) => {
+      // Exact matches first. Below them, project symbols come before
+      // UnknownExternal placeholders (calls into code outside the workspace),
+      // so a loose query such as "Service" does not bury the project's own
+      // symbols under prefix-matching placeholders like "service.get".
+      const exactA = a.rank === 0 ? 0 : 1;
+      const exactB = b.rank === 0 ? 0 : 1;
+      if (exactA !== exactB) return exactA - exactB;
+      const externalA = a.node.kind === "UnknownExternal" ? 1 : 0;
+      const externalB = b.node.kind === "UnknownExternal" ? 1 : 0;
+      if (externalA !== externalB) return externalA - externalB;
       if (a.rank !== b.rank) return a.rank - b.rank;
       if (a.node.qualifiedName !== b.node.qualifiedName) {
         return a.node.qualifiedName < b.node.qualifiedName ? -1 : 1;

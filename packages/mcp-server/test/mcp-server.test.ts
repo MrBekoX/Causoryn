@@ -2171,3 +2171,58 @@ describe(
     });
   },
 );
+
+describe("causoryn_find_symbols — project symbols rank ahead of external placeholders", { timeout: 30_000 }, () => {
+  function rankingContext(): CausorynContext {
+    return contextWithPublishedSnapshot({
+      workspaceId: "default",
+      revision: { id: "working-tree", sequence: 1 },
+      configHash: "cfg-rank",
+      analyzerFingerprint: "rank@0.1.0",
+      state: "ready",
+      createdAt: "2026-11-25T00:00:00.000Z",
+      nodes: [
+        { kind: "Workspace", qualifiedName: "default" },
+        { kind: "File", qualifiedName: "src/cache.ts", relativePath: "src/cache.ts", language: "typescript" },
+        // Placeholders for calls into code outside the workspace: prefix matches for "service".
+        { kind: "UnknownExternal", qualifiedName: "service.get", language: "python" },
+        { kind: "UnknownExternal", qualifiedName: "service.handle", language: "python" },
+        { kind: "UnknownExternal", qualifiedName: "Service", language: "python" },
+        // Project symbols: substring matches only.
+        { kind: "Interface", qualifiedName: "IBasicCacheService", relativePath: "src/cache.ts", language: "typescript" },
+        { kind: "Function", qualifiedName: "createCacheService", relativePath: "src/cache.ts", language: "typescript" },
+      ],
+      edges: [],
+    });
+  }
+
+  it("keeps an exact placeholder match first, then lists project symbols before the other placeholders", async () => {
+    const pair = await connectClient(rankingContext());
+    try {
+      const envelope = expectEnvelope(await callTool(pair.client, "causoryn_find_symbols", { query: "Service", limit: 10 }));
+      const hits = (envelope.data as { hits: { qualifiedName: string; kind: string }[] }).hits;
+      expect(hits.map((h) => h.qualifiedName)).toEqual([
+        "Service", // exact match (placeholder) stays first
+        "IBasicCacheService", // project symbols: substring matches, code-unit order
+        "createCacheService",
+        "service.get", // remaining placeholders after every project symbol
+        "service.handle",
+      ]);
+    } finally {
+      await pair.close();
+    }
+  });
+
+  it("an explicit kind=UnknownExternal query still returns placeholders in match order", async () => {
+    const pair = await connectClient(rankingContext());
+    try {
+      const envelope = expectEnvelope(
+        await callTool(pair.client, "causoryn_find_symbols", { query: "service", kind: "UnknownExternal", limit: 10 }),
+      );
+      const hits = (envelope.data as { hits: { qualifiedName: string }[] }).hits;
+      expect(hits.map((h) => h.qualifiedName)).toEqual(["Service", "service.get", "service.handle"]);
+    } finally {
+      await pair.close();
+    }
+  });
+});
