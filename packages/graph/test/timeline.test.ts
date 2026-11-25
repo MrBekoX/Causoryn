@@ -12,6 +12,7 @@ import * as graphIndex from "../src/index.js";
 import {
   TIMELINE_CEILINGS,
   TIMELINE_DEFAULTS,
+  TIMELINE_MAX_REFS,
   buildArchitectureTimeline,
   buildArchitectureTimelineFromGit,
   selectSampledIndices,
@@ -1033,5 +1034,34 @@ describe("timeline git katmanı — geçici depo (salt-okunur)", () => {
     expect(trusted.points[0]?.trustWarning).toBeUndefined();
     expect(trusted.points[1]?.trustWarning).toBeUndefined();
     expect(trusted.warnings).toEqual([]);
+  }, 30_000);
+});
+
+describe("timeline refs bound (each ref costs sequential git reads)", () => {
+  it("rejects more than TIMELINE_MAX_REFS refs with timeline/invalid-limit before any ref is resolved", async () => {
+    // Explicit refs are resolved one by one with read-only git processes
+    // before sampling, so the list length is bounded up front. The bound is
+    // larger than the sampling ceiling: extra refs are listed as skipped.
+    expect(TIMELINE_MAX_REFS).toBeGreaterThanOrEqual(TIMELINE_CEILINGS.maxRevisions);
+    expect(Object.keys(graphIndex)).toContain("TIMELINE_MAX_REFS");
+    const scratch = await mkdtemp(path.join(tmpdir(), "causoryn-timeline-refs-"));
+    try {
+      const refs = Array.from({ length: TIMELINE_MAX_REFS + 1 }, (_, i) => `v${String(i)}`);
+      // A non-repository directory: had any ref been resolved first, the
+      // error would be compare/ref-not-found instead of the bound rejection.
+      await expect(buildArchitectureTimelineFromGit(scratch, { refs })).rejects.toMatchObject({
+        code: "timeline/invalid-limit",
+      });
+      // Exactly at the bound the list is accepted and resolution starts.
+      const atBound = buildArchitectureTimelineFromGit(scratch, {
+        refs: refs.slice(0, TIMELINE_MAX_REFS),
+      });
+      await expect(atBound).rejects.toBeInstanceOf(GraphRepositoryError);
+      await atBound.catch((error: unknown) => {
+        expect((error as GraphRepositoryError).code).not.toBe("timeline/invalid-limit");
+      });
+    } finally {
+      await rm(scratch, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+    }
   }, 30_000);
 });
