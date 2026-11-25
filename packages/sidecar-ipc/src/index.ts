@@ -49,6 +49,9 @@ export const DEFAULT_RESPONSE_MAX_CHARS = 64 * 1024 * 1024;
  */
 export const DEFAULT_KILL_FALLBACK_MS = 5_000;
 
+/** Time stdout gets to drain after 'exit' when 'close' does not follow. */
+export const EXIT_DRAIN_GRACE_MS = 1_000;
+
 /**
  * Tree-kill hook: terminates the child's whole process tree (e.g. Windows
  * `taskkill /T /F`). It may return a promise that settles once the tree
@@ -304,6 +307,7 @@ export function runLineJsonWorker(
 
   return new Promise<WorkerRunOutcome>((resolveOutcome) => {
     let settled = false;
+    let exitDrainTimer: ReturnType<typeof setTimeout> | undefined;
     let stderrText = "";
     let buffer = "";
     const stdoutDecoder = new StringDecoder("utf8");
@@ -317,6 +321,7 @@ export function runLineJsonWorker(
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      if (exitDrainTimer !== undefined) clearTimeout(exitDrainTimer);
       if (
         closing !== null &&
         !alreadyExited &&
@@ -461,7 +466,12 @@ export function runLineJsonWorker(
       }
     });
 
-    child.on("exit", (code: number | null, signal: NodeJS.Signals | null) => {
+    // 'exit' can fire before the last stdout chunk has been read: a worker that
+    // answers, then sees EOF on stdin and exits 0 would otherwise lose its
+    // response. The early-exit outcome is therefore reported on 'close' (all
+    // stdio delivered), or EXIT_DRAIN_GRACE_MS after 'exit' when 'close' does
+    // not follow (for example a grandchild still holds the pipe).
+    const reportExit = (code: number | null, signal: NodeJS.Signals | null): void => {
       finish(
         {
           status: "unavailable",
@@ -475,6 +485,13 @@ export function runLineJsonWorker(
         child,
         true,
       );
+    };
+    child.on("exit", (code: number | null, signal: NodeJS.Signals | null) => {
+      if (settled) return;
+      exitDrainTimer = setTimeout(() => reportExit(code, signal), EXIT_DRAIN_GRACE_MS);
+    });
+    child.on("close", (code: number | null, signal: NodeJS.Signals | null) => {
+      reportExit(code, signal);
     });
 
     child.stdin?.on("error", () => {});

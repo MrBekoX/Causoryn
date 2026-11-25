@@ -189,6 +189,55 @@ describe("runLineJsonWorker", () => {
     expect(fake.stdinEnded).toBe(true);
   });
 
+  it("keeps a response that is delivered after the process 'exit' event (stdout drains before 'close')", async () => {
+    // Real child processes may emit 'exit' before the last stdout chunk is read:
+    // a worker that answers, sees EOF on stdin and exits 0 must not lose its answer.
+    const fake = createFakeChild();
+    const outcome = await runLineJsonWorker({
+      command: WORKER_COMMAND,
+      args: [],
+      env: {},
+      requestPayload: { id: "req-exit-first" },
+      requestTimeoutMs: 5_000,
+      spawnProcess: () => {
+        setTimeout(() => {
+          const record = fake.child as unknown as Record<string, unknown>;
+          record["exitCode"] = 0;
+          fake.child.emit("exit", 0, null);
+          setTimeout(() => {
+            fake.stdout.emit("data", Buffer.from('{"id":"req-exit-first","status":"ready"}\n', "utf8"));
+            fake.child.emit("close", 0, null);
+          }, 20);
+        }, 0);
+        return fake.child;
+      },
+    });
+    expect(outcome.status).toBe("ok");
+    expect(outcome.response).toEqual({ id: "req-exit-first", status: "ready" });
+  });
+
+  it("reports an early exit once stdout has closed without a response line", async () => {
+    const fake = createFakeChild();
+    const outcome = await runLineJsonWorker({
+      command: WORKER_COMMAND,
+      args: [],
+      env: {},
+      requestPayload: { id: "req-exit-empty" },
+      requestTimeoutMs: 5_000,
+      spawnProcess: () => {
+        setTimeout(() => {
+          const record = fake.child as unknown as Record<string, unknown>;
+          record["exitCode"] = 0;
+          fake.child.emit("exit", 0, null);
+          fake.child.emit("close", 0, null);
+        }, 0);
+        return fake.child;
+      },
+    });
+    expect(outcome.status).toBe("unavailable");
+    expect(outcome.detail).toContain("worker exited (exit=0)");
+  });
+
   it("newline gelmeyen yarım satırda requestTimeoutMs sonunda süreci sonlandırır ve tam timeout detayı döner", async () => {
     const fake = createFakeChild();
     const requestTimeoutMs = 80;
