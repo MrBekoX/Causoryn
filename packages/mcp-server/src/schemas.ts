@@ -1,5 +1,5 @@
 import { NODE_KINDS } from "@causoryn/domain";
-import { EXPORT_DOCUMENTATION_FORMATS } from "@causoryn/graph";
+import { EXPORT_DOCUMENTATION_FORMATS, TIMELINE_MAX_REFS } from "@causoryn/graph";
 import { WikiLinkKindSchema, WikiPageKindSchema } from "@causoryn/wiki";
 import { z } from "zod";
 
@@ -371,7 +371,12 @@ export const DeriveTestPlanToolInputSchema = z.strictObject({
 
 export const ArchitectureTimelineToolInputSchema = z.strictObject({
   workspaceId: workspaceIdField(),
-  refs: z.array(z.string().min(1)).min(2).optional().describe("Explicit git refs list."),
+  refs: z
+    .array(z.string().min(1))
+    .min(2)
+    .max(TIMELINE_MAX_REFS)
+    .optional()
+    .describe("Explicit git refs list."),
   range: z
     .strictObject({
       from: z.string().min(1).describe("Start git ref."),

@@ -108,7 +108,7 @@ import { findViolations } from "./guard.js";
  * - timeline/insufficient-points: zaman çizgisi en az 2 nokta ister.
  * - timeline/duplicate-ref: aynı ref listede iki kez.
  * - timeline/invalid-limit: maxRevisions/maxRangeWalk tamsayı ve alt sınırın
- *   altında.
+ *   altında; or more than TIMELINE_MAX_REFS explicit refs.
  * - compare/invalid-ref, compare/ref-not-found, compare/invalid-repo-root,
  *   compare/git-*: C3 git-okuma katmanının kodları aynen korunur.
  */
@@ -257,6 +257,17 @@ export const TIMELINE_CEILINGS: TimelineLimits = {
   maxRevisions: 60,
   maxRangeWalk: 500,
 };
+
+/**
+ * Upper bound for an explicit `refs` list. Every ref is resolved with
+ * sequential read-only git processes before sampling (so a missing ref is
+ * never hidden by sampling), which makes the list length a direct cost
+ * driver. At most TIMELINE_CEILINGS.maxRevisions points are analyzed; the
+ * remaining refs are only reported as skipped, so 100 leaves room for a
+ * typical list of release tags while keeping the git work bounded. The MCP
+ * input schema enforces the same bound (defence in depth).
+ */
+export const TIMELINE_MAX_REFS = 100;
 
 const MIN_MAX_REVISIONS = 2;
 const MIN_MAX_RANGE_WALK = 2;
@@ -1726,10 +1737,19 @@ export async function buildArchitectureTimelineFromGit(
   let identifiers: readonly string[];
   if (hasRefs) {
     const refs = input.refs ?? [];
+    if (!Array.isArray(refs)) {
+      throw new GraphRepositoryError("timeline/invalid-input", "refs must be an array");
+    }
     if (refs.length < MIN_MAX_REVISIONS) {
       throw new GraphRepositoryError(
         "timeline/insufficient-points",
         `A timeline needs at least ${MIN_MAX_REVISIONS} refs (${refs.length} given)`,
+      );
+    }
+    if (refs.length > TIMELINE_MAX_REFS) {
+      throw new GraphRepositoryError(
+        "timeline/invalid-limit",
+        `refs accepts at most ${String(TIMELINE_MAX_REFS)} entries (${String(refs.length)} given); use range with maxRangeWalk for longer histories`,
       );
     }
     const seen = new Set<string>();
