@@ -887,7 +887,14 @@ describe(
             process.env[key] = val;
           }
         }
-        rmSync(tempRoot, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+        try {
+          rmSync(tempRoot, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+        } catch (error) {
+          // Windows: the cached worker binary stays locked until the tree kill
+          // (taskkill /T, then the direct kill) has finished, which can outlast
+          // the retries under parallel load. The OS temp cleanup removes it later.
+          console.warn(`temp cleanup skipped for ${tempRoot}: ${(error as Error).message}`);
+        }
       }
     });
   },
