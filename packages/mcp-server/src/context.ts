@@ -21,6 +21,7 @@ import {
   WorkspaceAccessPolicy,
 } from "@causoryn/workspace";
 import {
+  hardenSqliteConnection,
   SqliteGraphRepository,
   SqliteWikiStore,
   WikiStoreError,
@@ -876,7 +877,14 @@ function openWikiStores(
   let readDb: Database.Database;
   try {
     readDb = new Database(declaredResolved, { readonly: true });
-    search = new WikiSearchStore(readDb);
+    try {
+      // Same connection hardening as the writing stores (trusted_schema = OFF).
+      hardenSqliteConnection(readDb);
+      search = new WikiSearchStore(readDb);
+    } catch (error) {
+      readDb.close();
+      throw error;
+    }
   } catch (error) {
     store.close();
     const detail = error instanceof Error ? error.message : String(error);
