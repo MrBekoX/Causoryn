@@ -24,15 +24,33 @@ import {
  * window between the pre-open path verification and open(2). The module's
  * `open`/`openSync` imports are wrapped so a test hook runs immediately
  * before the real open, which makes the race deterministic on every OS.
+ *
+ * The module swallows errors thrown around open(2) and reports "missing",
+ * which is also the expected result here; every test therefore asserts via
+ * `expectSwapsCompleted` that the hook really ran to completion.
  */
 const hooks = vi.hoisted(() => ({
   beforeOpen: undefined as ((target: string) => void) | undefined,
+  completed: 0,
+  error: undefined as unknown,
 }));
 
 function runBeforeOpenHook(target: unknown): void {
   const hook = hooks.beforeOpen;
   hooks.beforeOpen = undefined;
-  hook?.(String(target));
+  if (hook === undefined) return;
+  try {
+    hook(String(target));
+    hooks.completed += 1;
+  } catch (error) {
+    hooks.error = error;
+    throw error;
+  }
+}
+
+function expectSwapsCompleted(count: number): void {
+  expect(hooks.error).toBeUndefined();
+  expect(hooks.completed).toBe(count);
 }
 
 vi.mock("node:fs", async (importOriginal) => {
@@ -67,6 +85,8 @@ function createTempDir(prefix: string): string {
 
 afterEach(() => {
   hooks.beforeOpen = undefined;
+  hooks.completed = 0;
+  hooks.error = undefined;
   while (tempDirs.length > 0) {
     const dir = tempDirs.pop();
     if (dir !== undefined) {
@@ -122,6 +142,7 @@ describe("safe-file-read — check-then-open races are detected after open", () 
     expect(await readOptionalBoundedTextFile(fixture.target, 1024)).toEqual({
       status: "missing",
     });
+    expectSwapsCompleted(1);
   });
 
   it("sync: an intermediate directory swapped for a junction/symlink before open is rejected", () => {
@@ -131,6 +152,7 @@ describe("safe-file-read — check-then-open races are detected after open", () 
     expect(readOptionalBoundedTextFileSync(fixture.target, 1024)).toEqual({
       status: "missing",
     });
+    expectSwapsCompleted(1);
   });
 
   it("with an explicit root, the same swap is rejected (async & sync)", async () => {
@@ -149,6 +171,7 @@ describe("safe-file-read — check-then-open races are detected after open", () 
         root: syncFixture.workspace,
       }),
     ).toEqual({ status: "missing" });
+    expectSwapsCompleted(2);
   });
 
   it("a file replaced by a different regular file before open is rejected (identity mismatch)", async () => {
@@ -168,34 +191,39 @@ describe("safe-file-read — check-then-open races are detected after open", () 
     expect(readOptionalBoundedTextFileSync(fixture.target, 1024)).toEqual({
       status: "missing",
     });
+    expectSwapsCompleted(2);
   });
 
-  it.skipIf(process.platform === "win32")(
-    "a regular file replaced by a FIFO before open neither blocks nor reads (O_NONBLOCK backstop)",
-    async () => {
-      const fixture = makeSwapFixture("fifo");
-      let releaser: ChildProcess | undefined;
-      const replaceWithFifo = (): void => {
-        unlinkSync(fixture.target);
-        const made = spawnSync("mkfifo", [fixture.target], { shell: false });
-        if (made.status !== 0) throw new Error("mkfifo failed");
-        // Releases a reader stuck in a blocking open(2), so a regression
-        // fails the timing assertion instead of hanging the worker.
-        releaser = startFifoReleaser(fixture.target, 2_500);
-      };
-      hooks.beforeOpen = replaceWithFifo;
-      try {
-        const start = performance.now();
-        expect(await readOptionalBoundedTextFile(fixture.target, 1024)).toEqual({
-          status: "missing",
-        });
-        expect(performance.now() - start).toBeLessThan(1_500);
-      } finally {
-        releaser?.kill();
-      }
-    },
-    10_000,
-  );
+  for (const variant of ["async", "sync"] as const) {
+    it.skipIf(process.platform === "win32")(
+      `${variant}: a regular file replaced by a FIFO before open neither blocks nor reads (O_NONBLOCK backstop)`,
+      async () => {
+        const fixture = makeSwapFixture(`fifo-${variant}`);
+        let releaser: ChildProcess | undefined;
+        hooks.beforeOpen = () => {
+          unlinkSync(fixture.target);
+          const made = spawnSync("mkfifo", [fixture.target], { shell: false });
+          if (made.status !== 0) throw new Error("mkfifo failed");
+          // Releases a reader stuck in a blocking open(2), so a regression
+          // fails the timing assertion instead of hanging the worker.
+          releaser = startFifoReleaser(fixture.target, 2_500);
+        };
+        try {
+          const start = performance.now();
+          const result =
+            variant === "async"
+              ? await readOptionalBoundedTextFile(fixture.target, 1024)
+              : readOptionalBoundedTextFileSync(fixture.target, 1024);
+          expect(result).toEqual({ status: "missing" });
+          expect(performance.now() - start).toBeLessThan(1_500);
+          expectSwapsCompleted(1);
+        } finally {
+          releaser?.kill();
+        }
+      },
+      10_000,
+    );
+  }
 
   it("an untouched file still reads normally through the wrapped open", async () => {
     const fixture = makeSwapFixture("control");
@@ -207,5 +235,6 @@ describe("safe-file-read — check-then-open races are detected after open", () 
       status: "ok",
       text: "inside: 1\n",
     });
+    expectSwapsCompleted(0);
   });
 });

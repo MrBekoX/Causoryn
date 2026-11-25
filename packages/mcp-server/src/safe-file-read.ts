@@ -78,6 +78,13 @@ function isUsablePath(value: string | undefined): value is string {
   );
 }
 
+/** The byte budget is a caller invariant; NaN/Infinity would disable the bound. */
+function requireByteBudget(maxBytes: number): void {
+  if (!Number.isSafeInteger(maxBytes) || maxBytes < 0) {
+    throw new RangeError("maxBytes must be a non-negative safe integer");
+  }
+}
+
 function normalizedTarget(absolutePath: string, options: BoundedTextReadOptions | undefined): string | undefined {
   if (!isUsablePath(absolutePath)) return undefined;
   if (options?.root !== undefined && !isUsablePath(options.root)) return undefined;
@@ -194,12 +201,15 @@ function decodeBounded(
  *   the root, changed identity around open, or could not be read.
  * - `{ status: "too-large", bytes }`: the fstat size, the bytes read or the
  *   decoded UTF-8 length exceeds `maxBytes`.
+ * - Throws RangeError only when `maxBytes` is not a non-negative safe
+ *   integer (caller invariant; filesystem conditions never throw).
  */
 export async function readOptionalBoundedTextFile(
   absolutePath: string,
   maxBytes: number,
   options?: BoundedTextReadOptions,
 ): Promise<BoundedTextReadResult> {
+  requireByteBudget(maxBytes);
   const target = normalizedTarget(absolutePath, options);
   if (target === undefined) return { status: "missing" };
 
@@ -266,6 +276,7 @@ export function readOptionalBoundedTextFileSync(
   maxBytes: number,
   options?: BoundedTextReadOptions,
 ): BoundedTextReadResult {
+  requireByteBudget(maxBytes);
   const target = normalizedTarget(absolutePath, options);
   if (target === undefined) return { status: "missing" };
 
