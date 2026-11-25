@@ -18,6 +18,7 @@ import {
   resolveWindowsSystemExecutable,
   resolveWorkerCommand,
   runLineJsonWorker,
+  withoutCwdExecutableSearch,
   withSanitizedPath,
   workerUnavailable,
   type WorkerRunOutcome,
@@ -31,48 +32,70 @@ import {
 export type { WorkerRunOutcome } from "@causoryn/sidecar-ipc";
 
 /**
- * go run modunda (goWorkerBinaryPath boşken) worker, go tool'unun TORUN
- * sürecidir: doğrudan kill yalnızca `go` sürecini öldürür; derlenen analiz
- * worker'ı arka planda kalmasın diye win32'de %SystemRoot%\System32\taskkill.exe
- * (absolute path) + kendi çocuğumuzun sayısal pid'i (/T ağaç, /F zorla)
- * uygulanır (kırmızı çizgi 6).
+ * Go toolchain isolation for both `go run` and the prebuilt binary:
+ * - GOTOOLCHAIN=local: never switch to (or download) another toolchain,
+ * - GOWORK=off: no go.work discovery,
+ * - GOPROXY=off: no network (the worker module has no dependencies),
+ * - GOENV=off: the user-level go env file (`go env -w`) is not read, so
+ *   GOFLAGS / CC / GOTOOLCHAIN values stored there do not apply,
+ * - GOFLAGS=-mod=readonly: go.mod is never rewritten,
+ * - CGO_ENABLED=0: the pure-Go worker never starts a C compiler.
  */
 const GO_ISOLATION_ENV_OVERRIDES = {
   GOTOOLCHAIN: "local",
   GOWORK: "off",
   GOPROXY: "off",
+  GOENV: "off",
+  GOFLAGS: "-mod=readonly",
+  CGO_ENABLED: "0",
 } as const;
 
+/**
+ * go run modunda (goWorkerBinaryPath boşken) worker, go tool'unun TORUN
+ * sürecidir: doğrudan kill yalnızca `go` sürecini öldürür; derlenen analiz
+ * worker'ı arka planda kalmasın diye win32'de %SystemRoot%\System32\taskkill.exe
+ * (absolute path, its own directory as cwd) + kendi çocuğumuzun sayısal
+ * pid'i (/T ağaç, /F zorla) uygulanır (kırmızı çizgi 6). The returned promise
+ * settles when taskkill has finished; the shared IPC core applies the direct
+ * kill only after that, while `go` is still alive to anchor the tree.
+ */
 function killProcessTree(
   spawnProcess: SpawnFunction,
   closing: ChildProcess,
   env: Readonly<Record<string, string>>,
-): void {
-  if (process.platform !== "win32") return;
+): Promise<void> | undefined {
+  if (process.platform !== "win32") return undefined;
   const pid = closing.pid;
-  if (pid === undefined) return;
-  // Absolute %SystemRoot%System32	askkill.exe with its own directory as
-  // cwd: a bare "taskkill" would be looked up in the cwd first.
+  if (pid === undefined) return undefined;
   const taskkill = resolveWindowsSystemExecutable("taskkill.exe");
-  try {
-    const killer = spawnProcess(
-      taskkill,
-      ["/pid", String(pid), "/T", "/F"],
-      {
-        stdio: ["pipe", "pipe", "pipe"],
-        env,
-        cwd: dirname(taskkill),
-        shell: false,
-        windowsHide: true,
-      },
-    );
-    killer.on("error", () => {});
+  return new Promise<void>((resolveKill) => {
+    let killer: ChildProcess;
+    try {
+      killer = spawnProcess(
+        taskkill,
+        ["/pid", String(pid), "/T", "/F"],
+        {
+          stdio: ["pipe", "pipe", "pipe"],
+          env: withoutCwdExecutableSearch(env),
+          cwd: dirname(taskkill),
+          shell: false,
+          windowsHide: true,
+        },
+      );
+    } catch {
+      // spawnProcess enjeksiyonları senkron patlayabilir; the direct kill follows.
+      resolveKill();
+      return;
+    }
+    killer.on("error", () => {
+      resolveKill();
+    });
     killer.once("exit", () => {
       killer.removeAllListeners();
+      killer.on("error", () => {});
+      resolveKill();
     });
-  } catch {
-    // spawnProcess enjeksiyonları senkron patlayabilir; doğrudan kill uygulanmıştır.
-  }
+  });
 }
 
 export interface RunGoWorkerAnalyzeInput {
@@ -152,9 +175,8 @@ export function runGoWorkerAnalyze(
     spawnProcess,
     ...(!isBinaryMode
       ? {
-          onKillChild: (closing: ChildProcess) => {
-            killProcessTree(spawnProcess, closing, env);
-          },
+          onKillChild: (closing: ChildProcess) =>
+            killProcessTree(spawnProcess, closing, env),
         }
       : {}),
   });

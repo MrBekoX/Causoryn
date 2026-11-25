@@ -651,8 +651,9 @@ describe("Task 1.1: Python isolated mode (-I -B -X utf8) & trusted cwd", () => {
 });
 
 describe("Task 1.1: Go toolchain isolation", () => {
-  it("forces GOTOOLCHAIN=local, GOWORK=off, GOPROXY=off, drops GOENV, and sets trusted cwd", async () => {
+  it("forces GOTOOLCHAIN=local, GOWORK=off, GOPROXY=off, GOENV=off, GOFLAGS=-mod=readonly, CGO_ENABLED=0, and sets trusted cwd", async () => {
     expect(GO_WORKER_ENV_ALLOWLIST).not.toContain("GOENV");
+    expect(GO_WORKER_ENV_ALLOWLIST).not.toContain("GOFLAGS");
 
     const workerDir = path.join(REPO_ROOT, "native", "go-worker");
     const captured: SidecarSpawnOptions[] = [];
@@ -663,6 +664,9 @@ describe("Task 1.1: Go toolchain isolation", () => {
         GOTOOLCHAIN: "auto",
         GOWORK: "/evil/go.work",
         GOPROXY: "https://evil.example",
+        GOFLAGS: "-toolexec=/evil/toolexec",
+        CGO_ENABLED: "1",
+        CC: "/evil/cc",
       },
       async () => {
         const outcome = await runGoWorkerAnalyze({
@@ -688,7 +692,12 @@ describe("Task 1.1: Go toolchain isolation", () => {
     expect(opts.env["GOTOOLCHAIN"]).toBe("local");
     expect(opts.env["GOWORK"]).toBe("off");
     expect(opts.env["GOPROXY"]).toBe("off");
-    expect(opts.env["GOENV"]).toBeUndefined();
+    // The user-level go env file (go env -w) is ignored, so GOFLAGS/CC/GOTOOLCHAIN
+    // set there cannot change how the worker is built.
+    expect(opts.env["GOENV"]).toBe("off");
+    expect(opts.env["GOFLAGS"]).toBe("-mod=readonly");
+    expect(opts.env["CGO_ENABLED"]).toBe("0");
+    expect(opts.env["CC"]).toBeUndefined();
   });
 });
 
