@@ -1,6 +1,6 @@
 # Causoryn for ZCode
 
-> **Monorepo development fixture:** this directory (`integrations/zcode/causoryn`) is a local development and test fixture of the Causoryn monorepo. End users install Causoryn with `npx causoryn@0.3.0 setup --client zcode --yes` or by adding the repository root marketplace (`https://github.com/MrBekoX/Causoryn`, root `marketplace.json`) in ZCode. See the [ZCode host guide](../../../docs/en/hosts/zcode.md).
+> **Monorepo development fixture:** this directory (`integrations/zcode/causoryn`) is a local development and test fixture of the Causoryn monorepo. End users install Causoryn with `npx causoryn@0.3.1 setup --client zcode --yes` or by adding the repository root marketplace (`https://github.com/MrBekoX/Causoryn`, root `marketplace.json`) in ZCode. See the [ZCode host guide](../../../docs/en/hosts/zcode.md).
 
 **Causoryn** is a local, **LLM-free** code-analysis engine exposed to ZCode as a `stdio` MCP server. It builds a read-only graph of an authorized workspace (files, symbols, calls, routes, contracts, tests) in which every edge carries source evidence. The distribution package also ships the `architecture-blueprint` skill for preparing optional, caller-supplied `annotations`. With the same snapshot and export inputs, exported artifacts are reproducible; prose written by the host model can vary.
 
@@ -75,8 +75,8 @@ tools and the seven `wiki` tools) are also part of `full`.
 - This fixture launches the bare bundle entrypoint, which reads **no command-line flags**. To
   get the legacy names, add `"CAUSORYN_TOOL_PROFILE": "full"` (or `wiki`, `history`,
   `wiki,history`) to the `env` block of `mcpServers.causoryn` in `.zcode-plugin/plugin.json`.
-- The packaged CLI entry written by `npx causoryn@0.3.0 setup --client zcode --yes` accepts
-  the flag: run `npx causoryn@0.3.0 setup --client zcode --tool-profile full --yes`, or append
+- The packaged CLI entry written by `npx causoryn@0.3.1 setup --client zcode --yes` accepts
+  the flag: run `npx causoryn@0.3.1 setup --client zcode --tool-profile full --yes`, or append
   `"--tool-profile", "full"` to its `args` in `~/.zcode/cli/config.json`; re-running setup keeps it.
   `--output-schema full` additionally advertises output schemas in `tools/list`.
 

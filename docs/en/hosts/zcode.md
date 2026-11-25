@@ -2,14 +2,14 @@
 
 > **Language:** [Türkçe](../../hosts/zcode.md) | **English** · [Documentation Hub](../README.md) · [Compatibility Matrix](../compatibility-matrix.md)
 
-> **Status:** reflects Causoryn 0.3.0 (default `core` tool profile with 11 tools; one shared per-workspace `graph.sqlite` for all hosts). Interactive ZCode desktop GUI installation is **`NOT RUN`** (see the verification section).
+> **Status:** reflects Causoryn 0.3.1 (default `core` tool profile with 11 tools; one shared per-workspace `graph.sqlite` for all hosts). Interactive ZCode desktop GUI installation is **`NOT RUN`** (see the verification section).
 
 > **Sources checked for this page:** `packages/causoryn/src/{setup.ts,doctor.ts,cli.ts,runtime-stage.ts}`, root `marketplace.json`, `packages/causoryn/.zcode-plugin/plugin.json`, `packages/causoryn/scripts/plugin-mcp-launcher.mjs`, `integrations/zcode/.claude-plugin/marketplace.json`, `integrations/zcode/causoryn/{.zcode-plugin/plugin.json,README.md}`, `packages/mcp-server/src/{runtime-cli.ts,cli-stdio.ts,stdio.ts}`.
 
 Causoryn is a local, deterministic MCP server for code intelligence. It makes no LLM or network API calls. On ZCode (GLM) it offers **two installation surfaces**:
 
-1. **CLI setup (recommended):** `npx causoryn@0.3.0 setup --client zcode --yes` configures `~/.zcode/cli/config.json` (`mcp.servers.causoryn`) and `~/.zcode/skills/`.
-2. **ZCode plugin marketplace:** the repository root `marketplace.json` (npm source) and the packaged `.zcode-plugin/plugin.json`, version-pinned through `plugin-mcp-launcher.mjs --expected-version 0.3.0`.
+1. **CLI setup (recommended):** `npx causoryn@0.3.1 setup --client zcode --yes` configures `~/.zcode/cli/config.json` (`mcp.servers.causoryn`) and `~/.zcode/skills/`.
+2. **ZCode plugin marketplace:** the repository root `marketplace.json` (npm source) and the packaged `.zcode-plugin/plugin.json`, version-pinned through `plugin-mcp-launcher.mjs --expected-version 0.3.1`.
 
 ## Verification status — desktop GUI (`NOT RUN`) vs automated schema and CLI tests
 
@@ -22,16 +22,16 @@ Causoryn is a local, deterministic MCP server for code intelligence. It makes no
 
 ```bash
 # Preview the planned changes without writing anything
-npx causoryn@0.3.0 setup --client zcode --dry-run
+npx causoryn@0.3.1 setup --client zcode --dry-run
 
 # Configure ~/.zcode/cli/config.json (mcp.servers.causoryn) + ~/.zcode/skills/
-npx causoryn@0.3.0 setup --client zcode --yes
+npx causoryn@0.3.1 setup --client zcode --yes
 
 # Read-only health and alignment check
-npx causoryn@0.3.0 doctor --client zcode
+npx causoryn@0.3.1 doctor --client zcode
 
 # Clean removal (mcp.servers.causoryn + the 5 Causoryn skills)
-npx causoryn@0.3.0 setup --client zcode --uninstall --yes
+npx causoryn@0.3.1 setup --client zcode --uninstall --yes
 ```
 
 ### What `setup --client zcode` does (`packages/causoryn/src/setup.ts`)
@@ -75,7 +75,7 @@ Common behaviour: ZCode counts as detected when `~/.zcode` or `~/.zcode/cli/conf
 
 ## 2. ZCode plugin marketplace (`marketplace.json` + `.zcode-plugin/plugin.json`)
 
-Add the repository marketplace in the ZCode desktop UI (**Settings → Plugin Management → Discover → +**) from the GitHub repository (`https://github.com/MrBekoX/Causoryn`) or a local checkout. The root `marketplace.json` declares an npm plugin source (`{ "source": "npm", "package": "causoryn", "version": "0.3.0" }`) with English and Turkish `description_i18n` metadata. (This GUI step is `NOT RUN` in verification.)
+Add the repository marketplace in the ZCode desktop UI (**Settings → Plugin Management → Discover → +**) from the GitHub repository (`https://github.com/MrBekoX/Causoryn`) or a local checkout. The root `marketplace.json` declares an npm plugin source (`{ "source": "npm", "package": "causoryn", "version": "0.3.1" }`) with English and Turkish `description_i18n` metadata. (This GUI step is `NOT RUN` in verification.)
 
 The packaged `packages/causoryn/.zcode-plugin/plugin.json` ships the skills (`"skills": "skills"`) and wires the server as:
 
@@ -88,7 +88,7 @@ The packaged `packages/causoryn/.zcode-plugin/plugin.json` ships the skills (`"s
       "args": [
         "${ZCODE_PLUGIN_ROOT}/scripts/plugin-mcp-launcher.mjs",
         "--expected-version",
-        "0.3.0",
+        "0.3.1",
         "--allow-cwd",
         "--auto-data-dir",
         "--client",
@@ -182,7 +182,7 @@ Across `causoryn.mjs mcp`, `plugin-mcp-launcher.mjs`, and the bare `mcp-server.m
 |---|---|
 | Servers from `~/.agents/mcp.json` are not available in ZCode | ZCode reads `~/.agents/mcp.json` only while `mcp.servers` is absent. `setup` copies those entries only when it creates `mcp.servers` itself; if `mcp.servers` already existed, copy the entries into it manually. |
 | `setup` stops with `cli/malformed-json` | `~/.zcode/cli/config.json` or `~/.agents/mcp.json` is not valid JSON, or `mcp` / `mcp.servers` is not an object. Fix it or restore the `.causoryn.backup`; nothing was written. |
-| `doctor` shows `ERROR` for the entry script | `~/.causoryn/runtime` or the original install was removed. Re-run `npx causoryn@0.3.0 setup --client zcode --yes`. |
+| `doctor` shows `ERROR` for the entry script | `~/.causoryn/runtime` or the original install was removed. Re-run `npx causoryn@0.3.1 setup --client zcode --yes`. |
 | `[causoryn-launcher]` version mismatch (exit `2`) | The installed plugin package does not match `--expected-version`. Update or reinstall the plugin. |
 | Server exits at start with "Unsupported Node.js version" | Node.js < 24. Install Node.js 24+ and re-run `setup`. |
 | Workspace tools return `WORKSPACE_NOT_AUTHORIZED` | `ZCODE_PROJECT_DIR` was refused and no safe root came from `roots/list`, or the fixture has no `allowRoots`. Open the project folder itself in ZCode, or declare the root. |

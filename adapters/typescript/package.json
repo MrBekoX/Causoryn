@@ -1,6 +1,6 @@
 {
   "name": "@causoryn/adapter-typescript",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "private": true,
   "license": "MIT",
   "description": "TypeScript/JavaScript language adapter: TypeScript Compiler API parsing and symbol resolution, framework route linkers and test intelligence.",
@@ -9,7 +9,7 @@
     ".": "./src/index.ts"
   },
   "dependencies": {
-    "@causoryn/domain": "0.3.0",
+    "@causoryn/domain": "0.3.1",
     "typescript": "5.9.3"
   }
 }

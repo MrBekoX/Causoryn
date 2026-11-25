@@ -17,7 +17,7 @@ function readPackageVersion(): string {
   } catch {
     // Fallback aşağıda.
   }
-  return "0.3.0";
+  return "0.3.1";
 }
 
 export const CAUSORYN_PACKAGE_NAME = "causoryn" as const;

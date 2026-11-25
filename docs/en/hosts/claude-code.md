@@ -2,7 +2,7 @@
 
 > **Language:** [Türkçe](../../hosts/claude-code.md) | **English** · [Documentation Hub](../README.md) · [Compatibility Matrix](../compatibility-matrix.md)
 
-> **Status:** reflects Causoryn 0.3.0 (default `core` tool profile with 11 tools; one shared per-workspace `graph.sqlite` for all hosts). See [CLI & Configuration](../cli-and-configuration.md) for the full flag reference and [MCP Tool Contracts](../tool-contracts.md) for the tool catalog.
+> **Status:** reflects Causoryn 0.3.1 (default `core` tool profile with 11 tools; one shared per-workspace `graph.sqlite` for all hosts). See [CLI & Configuration](../cli-and-configuration.md) for the full flag reference and [MCP Tool Contracts](../tool-contracts.md) for the tool catalog.
 
 > **Sources checked for this page:** `packages/causoryn/src/{setup.ts,doctor.ts,cli.ts}`, `packages/causoryn/scripts/{causoryn.mjs,plugin-mcp-launcher.mjs}`, `packages/causoryn/.claude-plugin/plugin.json`, `.claude-plugin/marketplace.json`, `packages/mcp-server/src/{stdio.ts,cli-stdio.ts,runtime-cli.ts,config.ts}`, `packages/mcp-server/scripts/build-bundle.mjs`.
 
@@ -24,7 +24,7 @@ Automated coverage of the 0.3.0 code paths used on this page: `tests/causoryn-se
 
 | Path | Who it is for | What runs |
 |---|---|---|
-| **A. `npx causoryn@0.3.0 setup`** (recommended) | End users | Packaged entrypoint `scripts/causoryn.mjs mcp --allow-cwd --auto-data-dir --client claude-code`, registered in `~/.claude.json` with the absolute Node binary |
+| **A. `npx causoryn@0.3.1 setup`** (recommended) | End users | Packaged entrypoint `scripts/causoryn.mjs mcp --allow-cwd --auto-data-dir --client claude-code`, registered in `~/.claude.json` with the absolute Node binary |
 | **B. Claude Code plugin marketplace** | End users who prefer `/plugin` | Packaged `plugin-mcp-launcher.mjs` from the installed npm package |
 | **C. Manual registration** (`.mcp.json` or `claude mcp add`) | Contributors working from a source checkout | Monorepo bundle `packages/mcp-server/dist/mcp-server.mjs` (configured only through `CAUSORYN_CONFIG`) |
 
@@ -34,16 +34,16 @@ Automated coverage of the 0.3.0 code paths used on this page: `tests/causoryn-se
 
 ```bash
 # Preview the planned changes without writing anything
-npx causoryn@0.3.0 setup --client claude-code --dry-run
+npx causoryn@0.3.1 setup --client claude-code --dry-run
 
 # Register the MCP server in ~/.claude.json and install the 5 skills into ~/.claude/skills/
-npx causoryn@0.3.0 setup --client claude-code --yes
+npx causoryn@0.3.1 setup --client claude-code --yes
 
 # Read-only health and alignment check
-npx causoryn@0.3.0 doctor --client claude-code
+npx causoryn@0.3.1 doctor --client claude-code
 
 # Clean removal (mcpServers.causoryn + the 5 Causoryn skills)
-npx causoryn@0.3.0 setup --client claude-code --uninstall --yes
+npx causoryn@0.3.1 setup --client claude-code --uninstall --yes
 ```
 
 ### What `setup --client claude-code` writes
@@ -98,7 +98,7 @@ npx causoryn@0.3.0 setup --client claude-code --uninstall --yes
 /plugin install causoryn@causoryn
 ```
 
-The root `.claude-plugin/marketplace.json` declares an npm source (`{ "source": "npm", "package": "causoryn", "version": "0.3.0" }`). The installed package's `.claude-plugin/plugin.json` ships the skills (`"skills": "./skills"`) and registers the server as:
+The root `.claude-plugin/marketplace.json` declares an npm source (`{ "source": "npm", "package": "causoryn", "version": "0.3.1" }`). The installed package's `.claude-plugin/plugin.json` ships the skills (`"skills": "./skills"`) and registers the server as:
 
 ```json
 {
@@ -109,7 +109,7 @@ The root `.claude-plugin/marketplace.json` declares an npm source (`{ "source": 
       "args": [
         "${CLAUDE_PLUGIN_ROOT}/scripts/plugin-mcp-launcher.mjs",
         "--expected-version",
-        "0.3.0",
+        "0.3.1",
         "--allow-cwd",
         "--auto-data-dir",
         "--client",
@@ -259,7 +259,7 @@ Every Causoryn entrypoint (`causoryn.mjs mcp`, `plugin-mcp-launcher.mjs`, and th
 | `setup` stops with `cli/malformed-json` | `~/.claude.json` is not valid JSON or `mcpServers` is not an object. Fix the file or restore `~/.claude.json.causoryn.backup`; nothing was written. |
 | `setup` refuses to write to a symbolic link | Symlinked config files are refused on purpose. Point `CLAUDE_CONFIG_DIR` at the real directory or replace the link with a regular file. |
 | `setup` reports "confirmation required" | Non-interactive shell without `--yes`. Re-run with `--dry-run` to review, then `--yes`. |
-| `doctor` shows `ERROR` for the entry script | `~/.causoryn/runtime` or the original install was removed. Re-run `npx causoryn@0.3.0 setup --client claude-code --yes`. |
+| `doctor` shows `ERROR` for the entry script | `~/.causoryn/runtime` or the original install was removed. Re-run `npx causoryn@0.3.1 setup --client claude-code --yes`. |
 | Server exits at start with "Unsupported Node.js version" | Node.js < 24. Install Node.js 24+ and re-run `setup` so `command` points at it. |
 | `[causoryn-launcher]` version mismatch (exit `2`) | The installed plugin package does not match `--expected-version`. Update or reinstall the plugin. |
 | Workspace tools return `WORKSPACE_NOT_AUTHORIZED` | `--allow-cwd` rejected the start directory and the host has not reported a usable root, or the bare bundle has no `allowRoots`. See section 4 or 5.1. |

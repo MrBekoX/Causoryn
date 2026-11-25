@@ -2,7 +2,7 @@
 
 > **Language:** [Türkçe](../wiki-spec.md) | **English** · [Documentation Hub](README.md)
 >
-> **Status:** reflects Causoryn 0.3.0 (default `core` tool profile; the Living Wiki tools are opt-in, see [§2](#2-enabling-the-wiki-tools-and-storage) and [CLI & Configuration](cli-and-configuration.md)).
+> **Status:** reflects Causoryn 0.3.1 (default `core` tool profile; the Living Wiki tools are opt-in, see [§2](#2-enabling-the-wiki-tools-and-storage) and [CLI & Configuration](cli-and-configuration.md)).
 >
 > **Source modules:** `packages/wiki/src/*` (pure projection, links, search, overlay, export cores) · `packages/storage-sqlite/src/{wiki-schema.ts,wiki-store.ts}` (SQLite persistence) · `packages/mcp-server/src/services-wiki.ts` (MCP services) · `packages/mcp-server/src/server.ts` + `schemas.ts` (tool registration and input schemas) · `packages/mcp-server/src/version.ts` (`WIKI_TOOL_NAMES`, tool profiles).
 

@@ -4,7 +4,7 @@
 
 **Causoryn**, MCP (`stdio`) üzerinden çalışan **yerel, deterministik, sıfır LLM'li, derleyici düzeyinde bir kod grafı ve `preflight -> verify` değişiklik koruyucusudur**. **TypeScript / JavaScript**, **C# / Roslyn**, **Python**, **Go** ve **Rust** için kanıta dayalı bağımlılık, sembol, hiyerarşi, rota, sözleşme ve test grafını tamamen salt okunur biçimde oluşturur; yalın bir **11 araçlık varsayılan `core` profili** (ayrıca isteğe bağlı `wiki`, `history` ve geriye dönük uyumlu `full` profilleri) ile **5 kanonik ajan skill'i** sunar.
 
-> **Durum:** Causoryn 0.3.0'ı yansıtır; bu bir pre-1.0 sürümdür (`1.0.0` değildir; tarihsel `v0.1.0` `4c9c188f` üzerinde dondurulmuş olarak kalır). Varsayılan MCP yüzeyi 11 araçlık `core` profilidir. Kalan `1.0.0` sürüm kapıları [Uygulama Durumu](implementation-status.md), [Teknik Backlog](BACKLOG.md) ve [CHANGELOG.md](../CHANGELOG.md) belgelerinde izlenir.
+> **Durum:** Causoryn 0.3.1'i yansıtır; bu bir pre-1.0 sürümdür (`1.0.0` değildir; tarihsel `v0.1.0` `4c9c188f` üzerinde dondurulmuş olarak kalır). Varsayılan MCP yüzeyi 11 araçlık `core` profilidir. Kalan `1.0.0` sürüm kapıları [Uygulama Durumu](implementation-status.md), [Teknik Backlog](BACKLOG.md) ve [CHANGELOG.md](../CHANGELOG.md) belgelerinde izlenir.
 
 ---
 

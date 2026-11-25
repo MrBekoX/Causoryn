@@ -2,7 +2,7 @@
 
 > **Dil / Language:** **Türkçe** | [English](en/implementation-status.md) · [Dokümantasyon Merkezi](README.md)
 
-> **Durum:** Causoryn 0.3.0'ı yansıtır (11 araçlı varsayılan `core` araç profili; `wiki`, `history` ve `full` geri kalanını ekler — bkz. [MCP Araç Sözleşmeleri](tool-contracts.md)). `1.0.0` ilan edilmedi; açık kapılar [3. bölümde](#3-kalan-100-sürüm-kapıları) ve [Mühendislik Backlog](BACKLOG.md) sayfasında listelenir.
+> **Durum:** Causoryn 0.3.1'i yansıtır (11 araçlı varsayılan `core` araç profili; `wiki`, `history` ve `full` geri kalanını ekler — bkz. [MCP Araç Sözleşmeleri](tool-contracts.md)). `1.0.0` ilan edilmedi; açık kapılar [3. bölümde](#3-kalan-100-sürüm-kapıları) ve [Mühendislik Backlog](BACKLOG.md) sayfasında listelenir.
 
 **Dürüstlük ilkesi:** bozuk, uygulanmamış veya çalıştırılmamış hiçbir şey `Done` olarak işaretlenmez. Kısmi işler `Partial`, hiç çalıştırılmamış kontroller `NOT RUN` olarak etiketlenir ve bilinen her sınırlama, sınırladığı yeteneğin yanında belirtilir.
 

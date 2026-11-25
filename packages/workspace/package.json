@@ -1,6 +1,6 @@
 {
   "name": "@causoryn/workspace",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "private": true,
   "license": "MIT",
   "description": "Workspace gateway: trusted-root validation, file inventory, ignore rules, symlink-escape protection, binary and size filters, and output path policies.",

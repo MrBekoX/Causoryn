@@ -1,6 +1,6 @@
 {
   "name": "@causoryn/indexing",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "private": true,
   "license": "MIT",
   "description": "Index coordinator: workspace inventory, language adapters (TypeScript/JavaScript, C# Roslyn and the Python, Go and Rust sidecar workers), background worker_threads index jobs, per-file incremental early cutoff and atomic snapshot publication.",
@@ -9,13 +9,13 @@
     ".": "./src/index.ts"
   },
   "dependencies": {
-    "@causoryn/adapter-csharp-roslyn": "0.3.0",
-    "@causoryn/adapter-go": "0.3.0",
-    "@causoryn/adapter-python": "0.3.0",
-    "@causoryn/adapter-rust": "0.3.0",
-    "@causoryn/adapter-typescript": "0.3.0",
-    "@causoryn/domain": "0.3.0",
-    "@causoryn/graph": "0.3.0",
-    "@causoryn/workspace": "0.3.0"
+    "@causoryn/adapter-csharp-roslyn": "0.3.1",
+    "@causoryn/adapter-go": "0.3.1",
+    "@causoryn/adapter-python": "0.3.1",
+    "@causoryn/adapter-rust": "0.3.1",
+    "@causoryn/adapter-typescript": "0.3.1",
+    "@causoryn/domain": "0.3.1",
+    "@causoryn/graph": "0.3.1",
+    "@causoryn/workspace": "0.3.1"
   }
 }
