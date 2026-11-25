@@ -398,9 +398,21 @@ describe("WorkspaceWatcher — Live Architecture (sprint-2 B7)", { timeout: 30_0
         );
 
         // AYNI içerik yeniden yazılır (touch benzeri): karma değişmez.
-        writeFileSync(path.join(harness.root, "src", "app.ts"), APP_V1, "utf8");
-
-        await waitFor(() => statsOf(harness.watcher).noOpSkipped >= 1, "no-op kaydı tutulmadı");
+        // macOS FSEvents does not deliver changes made before its stream is running,
+        // and the stream starts later on loaded runners: the identical content is
+        // written again every 2 s (well past the debounce window) until the watcher
+        // has seen it. Every write is a no-op by construction.
+        const appPath = path.join(harness.root, "src", "app.ts");
+        writeFileSync(appPath, APP_V1, "utf8");
+        let lastWrite = Date.now();
+        await waitFor(() => {
+          if (statsOf(harness.watcher).noOpSkipped >= 1) return true;
+          if (Date.now() - lastWrite >= 2_000) {
+            writeFileSync(appPath, APP_V1, "utf8");
+            lastWrite = Date.now();
+          }
+          return false;
+        }, "no-op kaydı tutulmadı");
         await expectConditionHolds(
           () => statsOf(harness.watcher).jobsEnqueued === 0,
           "no-op değişim iş açtı",
