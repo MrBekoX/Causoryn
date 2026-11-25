@@ -25,7 +25,7 @@ import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { beforeAll, describe, expect, it } from "vitest";
+import { beforeAll, describe, expect, it, vi } from "vitest";
 import { EventEmitter } from "node:events";
 import { createSnapshot } from "@causoryn/domain";
 import { resolveWindowsSystemExecutable } from "@causoryn/sidecar-ipc";
@@ -1715,6 +1715,8 @@ describe("worker-process env sınırlaması (M1-Go)", { timeout: 20_000 }, () =>
     }
     const spawned: Array<{ command: string; args: readonly string[] }> = [];
     const killed: boolean[] = [];
+    const events: string[] = [];
+    const taskkill = resolveWindowsSystemExecutable("taskkill.exe");
     const outcome = await runGoWorkerAnalyze({
       goBinaryPath: GO_BINARY,
       goWorkerBinaryPath: "",
@@ -1723,18 +1725,33 @@ describe("worker-process env sınırlaması (M1-Go)", { timeout: 20_000 }, () =>
       requestTimeoutMs: 300,
       spawnProcess: (command, args) => {
         spawned.push({ command, args: [...args] });
-        const child = makeStderrChild({ pid: 4242 });
+        const isTaskkill = command === taskkill;
+        events.push(isTaskkill ? "spawn:taskkill" : "spawn:go");
+        const child = makeStderrChild({ pid: isTaskkill ? 5151 : 4242 });
         const record = child as unknown as Record<string, unknown>;
         record.kill = () => {
+          events.push(isTaskkill ? "kill:taskkill" : "kill:go");
           killed.push(true);
           return true;
         };
+        if (isTaskkill) {
+          // taskkill finishes shortly after it was started.
+          setTimeout(() => {
+            events.push("exit:taskkill");
+            child.emit("exit", 0, null);
+          }, 20);
+        }
         return child;
       },
     });
     expect(outcome.status).toBe("timeout");
-    // Doğrudan kill her koşulda uygulanır (ağaç-kill ek savunmadır).
-    expect(killed.length).toBe(1);
+    // Doğrudan kill her koşulda uygulanır (ağaç-kill ek savunmadır); it only
+    // follows once taskkill has finished, so taskkill /T still finds the
+    // worker process under the live `go` parent.
+    await vi.waitFor(() => {
+      expect(killed.length).toBe(1);
+    });
+    expect(events).toEqual(["spawn:go", "spawn:taskkill", "exit:taskkill", "kill:go"]);
     // İkinci spawn: LİTERAL "taskkill" + SADECE kendi çocuğumuzun sayısal
     // pid'i (/T ağaç, /F zorla). Kullanıcı girdisi interpole edilmez.
     expect(spawned.length).toBe(2);

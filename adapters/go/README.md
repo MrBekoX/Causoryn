@@ -44,8 +44,14 @@ Worker süreci parent'ın TÜM env'ini miraslamaz; yalnızca go toolchain'in
 çalışması için gerekenler taşınır: `PATH`, `SystemRoot`, `COMSPEC`,
 `TEMP`, `TMP`, `USERPROFILE`, `HOME`, `APPDATA` (go env config),
 `LOCALAPPDATA` (GOCACHE default), `GOPATH`, `GOROOT`, `GOCACHE`,
-`GOMODCACHE`, `GOENV`. Anahtar/token gibi allowlist dışı değerler süreç
+`GOMODCACHE`. Anahtar/token gibi allowlist dışı değerler süreç
 listesinden okunamaz (güvenlik bulgusu 1 deseni).
+
+Ek olarak sabit override'lar uygulanır: `GOTOOLCHAIN=local`, `GOWORK=off`,
+`GOPROXY=off`, `GOENV=off` (kullanıcı `go env -w` dosyası okunmaz),
+`GOFLAGS=-mod=readonly`, `CGO_ENABLED=0`; win32'de child env'e
+`NoDefaultCurrentDirectoryInExePath=1` eklenir. win32 ağaç-kill'de
+`taskkill /T /F` doğrudan kill'den ÖNCE çalışır.
 
 ## Graceful fallback (motor çökmez)
 
