@@ -19,6 +19,7 @@ import {
   type TypeScriptAdapterResult,
 } from "../src/index.js";
 import { configureConfinedCompilerHost } from "../src/analyzer.js";
+import { createFakeConfinedFs } from "./fake-confined-fs.js";
 import type { SnapshotEdgeInput, SnapshotNodeInput } from "@causoryn/domain";
 
 const VIRTUAL_ROOT = path.resolve(tmpdir(), "causoryn-v023-virtual-root");
@@ -1089,11 +1090,45 @@ describe("Track 1 — Audit Remediation Regression Tests (SEC-02/03/04/06/10/11,
         p === `${rootPosix}/node_modules` ? ["evil", "safe", "pkg"] : ["secret-dir"],
     } as unknown as ts.CompilerHost;
 
+    // The confined host walks paths itself (lstat/readlink) before any
+    // following call; this probe models the same disk as the fake host above.
+    const realNodeModules = `${realRootPosix}/node_modules`;
+    const pnpmSafe = `${realNodeModules}/.pnpm/safe@1/node_modules/safe`;
+    const fakeFs = createFakeConfinedFs({
+      dirs: [
+        realRootPosix,
+        realNodeModules,
+        `${realRootPosix}/secret-dir`,
+        `${realNodeModules}/envlink`,
+        `${realNodeModules}/.pnpm`,
+        `${realNodeModules}/.pnpm/safe@1`,
+        `${realNodeModules}/.pnpm/safe@1/node_modules`,
+        pnpmSafe,
+        `${realNodeModules}/pkg`,
+        libDir,
+      ],
+      files: {
+        [`${realRootPosix}/.env`]: "SECRET=1",
+        [`${pnpmSafe}/index.d.ts`]: "export declare function safeFn(): number;",
+        [`${realNodeModules}/pkg/index.d.ts`]: "export declare function pkgFn(): number;",
+        [`${libDir}/lib.es2022.d.ts`]: "interface Array<T> {}",
+        "/etc/evil-outside/index.d.ts": "export declare const EVIL_OUTSIDE: string;",
+      },
+      links: {
+        [`${realNodeModules}/evil`]: "/etc/evil-outside",
+        [`${realNodeModules}/envlink/index.d.ts`]: `${realRootPosix}/.env`,
+        [`${realNodeModules}/safe`]: pnpmSafe,
+      },
+      realpaths: { [rootPosix]: realRootPosix, [libDir]: libDir },
+      readdirs: { [realNodeModules]: ["evil", "safe", "pkg"] },
+    });
     const resolutionHost = configureConfinedCompilerHost(
       fakeHost,
       new Map(),
       rootPosix,
       libDir,
+      new Map(),
+      { fs: fakeFs },
     );
 
     // 1) Out-of-root symlink escape through node_modules MUST be blocked!
@@ -1167,7 +1202,7 @@ describe("Track 1 — Audit Remediation Regression Tests (SEC-02/03/04/06/10/11,
         expect(JSON.stringify(result)).not.toContain("EVIL_SYMLINK_SECRET");
       }
     } finally {
-      rmSync(parentTemp, { recursive: true, force: true });
+      rmSync(parentTemp, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
     }
   });
 
