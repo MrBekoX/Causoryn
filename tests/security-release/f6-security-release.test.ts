@@ -198,7 +198,7 @@ const CREDENTIAL_CANARIES: readonly { readonly name: string; readonly sample: st
   { name: "google-api-key", sample: "AIza" + "a".repeat(35) },
   {
     name: "bearer-token",
-    sample: "Bearer " + "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.abcdefghij",
+    sample: "Bearer " + "eyJ" + "hbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.abcdefghij",
   },
   { name: "secret-assignment-literal", sample: "password" + ` = "${"s".repeat(28)}"` },
 ];

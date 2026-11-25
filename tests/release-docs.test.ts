@@ -5,6 +5,7 @@ import { describe, expect, it } from "vitest";
 import { CORE_TOOL_NAMES, SERVER_VERSION, TOOL_NAMES } from "../packages/mcp-server/src/version.js";
 import { CLONE_MAX_ATTEMPTS } from "./security-release/helpers/bundle-client.js";
 import { buildFixtureModel } from "./bench-release/fixture.js";
+import { findDocumentPrivacyLeaks } from "./helpers/leak-scan.js";
 
 /**
  * Sprint-7 F8+F9 release dokümantasyon doğrulama testi.
@@ -832,7 +833,7 @@ describe("BAĞIMSIZ DENETİM DÖNGÜSÜ (2026-11-18): doküman↔kod tam parite 
     expect(status).toContain("scripts/secret-scan.mjs");
   });
 
-  it("K-022 açık kaynak yönetişim dosyaları, temiz doküman yüzeyi (0 kişisel yol) ve wiki paritesi sağlanmış", () => {
+  it("K-022 açık kaynak yönetişim dosyaları, temiz doküman yüzeyi (0 kişisel yol) ve wiki paritesi sağlanmış", async () => {
     const governanceFiles = [
       "SECURITY.md",
       "CONTRIBUTING.md",
@@ -898,14 +899,15 @@ describe("BAĞIMSIZ DENETİM DÖNGÜSÜ (2026-11-18): doküman↔kod tam parite 
       path.join("integrations", "zcode", "causoryn", "README.md"),
       path.join("integrations", "antigravity", "causoryn", "README.md"),
     ];
-    const personalUser = "ber" + "ka";
-    const localRepoPathRe = new RegExp("D:[\\\\/]Cau" + "soryn", "i");
-    const localToolsPathRe = new RegExp("D:[\\\\/]to" + "ols", "i");
+    // Personal names, user-profile paths and local drive paths: shared leak
+    // scanner (generic detectors + the untracked private term list).
     for (const rel of userFacingDocs) {
       const text = readFileSync(path.join(REPO_ROOT, rel), "utf8");
-      expect(text, `${rel} kişisel kullanıcı adı içeremez`).not.toContain(personalUser);
-      expect(text, `${rel} yerel repo sürücü yolu içeremez`).not.toMatch(localRepoPathRe);
-      expect(text, `${rel} yerel tools sürücü yolu içeremez`).not.toMatch(localToolsPathRe);
+      const relPosix = rel.split(path.sep).join("/");
+      expect(
+        await findDocumentPrivacyLeaks(relPosix, text),
+        `${rel} kişisel kullanıcı adı / yerel sürücü veya profil yolu içeremez`,
+      ).toEqual([]);
     }
   });
 
@@ -936,7 +938,7 @@ describe("BAĞIMSIZ DENETİM DÖNGÜSÜ (2026-11-18): doküman↔kod tam parite 
     expect(text.slice(relatedIdx)).toContain("`integrations/antigravity/causoryn/README.md`");
   });
 
-  it("TR / EN tam dokümantasyon paritesi: 17 TR dokümanın her birinin docs/en/ karşılığı mevcut, kırık yerel markdown linki yok, EN tool-contracts 29 aracı ve EN security-pass/benchmarks pinli hashleri taşır", () => {
+  it("TR / EN tam dokümantasyon paritesi: 17 TR dokümanın her birinin docs/en/ karşılığı mevcut, kırık yerel markdown linki yok, EN tool-contracts 29 aracı ve EN security-pass/benchmarks pinli hashleri taşır", async () => {
     const bilingualPairs: ReadonlyArray<readonly [string, string]> = [
       ["docs/README.md", "docs/en/README.md"],
       ["docs/prompting-and-architecture-portals.md", "docs/en/prompting-and-architecture-portals.md"],
@@ -957,10 +959,6 @@ describe("BAĞIMSIZ DENETİM DÖNGÜSÜ (2026-11-18): doküman↔kod tam parite 
       ["docs/hosts/zcode.md", "docs/en/hosts/zcode.md"],
     ];
 
-    const personalUser = "ber" + "ka";
-    const localRepoPathRe = new RegExp("D:[\\\\/]Cau" + "soryn", "i");
-    const localToolsPathRe = new RegExp("D:[\\\\/]to" + "ols", "i");
-
     for (const [trRel, enRel] of bilingualPairs) {
       const trAbs = path.join(REPO_ROOT, ...trRel.split("/"));
       const enAbs = path.join(REPO_ROOT, ...enRel.split("/"));
@@ -970,9 +968,10 @@ describe("BAĞIMSIZ DENETİM DÖNGÜSÜ (2026-11-18): doküman↔kod tam parite 
       for (const [docRel, docAbs] of [[trRel, trAbs], [enRel, enAbs]] as const) {
         const content = readFileSync(docAbs, "utf8");
         expect(content.trim().length, `${docRel} boş olamaz`).toBeGreaterThan(200);
-        expect(content, `${docRel} kişisel kullanıcı adı içeremez`).not.toContain(personalUser);
-        expect(content, `${docRel} yerel sürücü yolu içeremez`).not.toMatch(localRepoPathRe);
-        expect(content, `${docRel} yerel tools yolu içeremez`).not.toMatch(localToolsPathRe);
+        expect(
+          await findDocumentPrivacyLeaks(docRel, content),
+          `${docRel} kişisel kullanıcı adı / yerel sürücü veya profil yolu içeremez`,
+        ).toEqual([]);
         expect(content, `${docRel} 1.0.0 yayınlandı iddiası taşıyamaz`).not.toMatch(/^## \[1\.0\.0\]/m);
 
         // Göreli markdown link kontrolü (kod blokları dışındaki [etiket](hedef) linkleri):
