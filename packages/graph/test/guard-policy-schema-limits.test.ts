@@ -87,6 +87,17 @@ describe("guard policy YAML errors do not echo source text", () => {
     expect(multiple.code).toBe("guard/policy-yaml-invalid");
     expect(multiple.message).not.toContain(MARKER);
   });
+
+  it("deeply nested input → guard/policy-yaml-invalid (RESOURCE_EXHAUSTION) without source text", () => {
+    const depth = 20_000;
+    const error = guardErrorOf(() =>
+      parseArchitecturePolicy(`version: 1\n${MARKER}: ${"[".repeat(depth)}${"]".repeat(depth)}\n`),
+    );
+    expect(error.code).toBe("guard/policy-yaml-invalid");
+    expect(error.message).toContain("RESOURCE_EXHAUSTION");
+    expect(error.message).not.toContain("[[");
+    expect(error.message).not.toContain(MARKER);
+  });
 });
 
 describe("guard policy YAML aliases are rejected as a policy error", () => {

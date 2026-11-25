@@ -538,7 +538,12 @@ function parseYamlOrThrow(text: string, yamlErrorCode: string): unknown {
         "YAML could not be parsed: aliases (*name) are not supported in policy and baseline files; write the referenced value out in full",
       );
     }
-    throw error;
+    // Any other parser failure is still a malformed-input outcome; its
+    // message is not carried over (it may embed parser internals or input).
+    throw new GuardError(
+      yamlErrorCode,
+      "YAML could not be parsed: the parser failed on this input; simplify the file structure",
+    );
   }
   return document;
 }

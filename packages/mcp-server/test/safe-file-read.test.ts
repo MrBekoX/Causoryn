@@ -362,6 +362,19 @@ describe("safe-file-read — workspace containment (symlinks, junctions, explici
   });
 });
 
+describe("safe-file-read — byte budget argument", () => {
+  it("rejects a maxBytes that is not a non-negative safe integer (no unbounded or empty read)", async () => {
+    const dir = createTempDir("budget");
+    const filePath = path.join(dir, "policy.yaml");
+    writeFileSync(filePath, "version: 1\n", "utf8");
+
+    for (const maxBytes of [Number.NaN, Number.POSITIVE_INFINITY, -1, 1.5]) {
+      await expect(readOptionalBoundedTextFile(filePath, maxBytes)).rejects.toThrow(RangeError);
+      expect(() => readOptionalBoundedTextFileSync(filePath, maxBytes)).toThrow(RangeError);
+    }
+  });
+});
+
 describe("safe-file-read — non-regular files never block or get read", () => {
   it.skipIf(IS_WINDOWS)(
     "returns 'missing' for a FIFO immediately, without waiting for a writer (async & sync)",
