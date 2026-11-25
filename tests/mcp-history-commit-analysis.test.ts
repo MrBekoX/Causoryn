@@ -7,6 +7,8 @@ import {
   readFileSync,
   realpathSync,
   rmSync,
+  symlinkSync,
+  unlinkSync,
   writeFileSync,
 } from "node:fs";
 import os from "node:os";
@@ -327,6 +329,13 @@ describe("history tools analyze commits from their git objects", { timeout: 180_
     const job = session.context.jobManager.refreshIndex(repo.root, { mode: "full" });
     const done = await session.context.jobManager.waitForJob(job.jobId);
     expect(done.status).toBe("done");
+    // With no fresh analysis left for t2, its stale entry is still served (with its note).
+    process.env[BUDGET_ENV] = "1";
+    const budgeted = await session.call("causoryn_compare_architecture", { baseRef: "t1", targetRef: "t2" });
+    expect(noteFor(budgeted, "t1")).toBe(analyzedNote("t1", repo.sha("t1")));
+    expect(noteFor(budgeted, "t2")).toContain(CACHED_NOTE);
+    expect(noteFor(budgeted, "t2")).toContain(degradedNote);
+    delete process.env[BUDGET_ENV];
     const third = await session.call("causoryn_compare_architecture", { baseRef: "t1", targetRef: "t2" });
     expect(noteFor(third, "t2")).toBe(analyzedNote("t2", repo.sha("t2")));
     expect(namesOf(diffOf(third).added).some((name) => name.endsWith("refund_order"))).toBe(true);
@@ -423,6 +432,31 @@ describe("history tools analyze commits from their git objects", { timeout: 180_
     // The cache lives under the data root, outside the workspace.
     expect(historyFiles(session.dataDir)).toHaveLength(2);
     expect(listTree(repo.root).some((entry) => entry.includes("history"))).toBe(false);
+  });
+
+  it("a commit file whose working-tree path now runs through a link is reported as not analyzed, never silently dropped", async () => {
+    const repo = makeRepo("causoryn-history-linked-");
+    repo.write("src/app.ts", "export function appMain(): number {\n  return 1;\n}\n");
+    repo.write("lib/linked.ts", "export function committedLinked(): number {\n  return 2;\n}\n");
+    repo.commit("with lib", "linked");
+    const outside = makeTempDir("causoryn-history-outside-");
+    writeFileSync(path.join(outside, "linked.ts"), "export function outsideOnly(): number {\n  return 3;\n}\n", "utf8");
+    removeDir(path.join(repo.root, "lib"));
+    try {
+      symlinkSync(outside, path.join(repo.root, "lib"), process.platform === "win32" ? "junction" : "dir");
+    } catch {
+      return; // links cannot be created here; nothing to check
+    }
+    cleanups.push(() => {
+      // Remove the link itself before the repository is deleted (never the outside target).
+      unlinkSync(path.join(repo.root, "lib"));
+    });
+    const session = await openSession(repo.root);
+    const envelope = await session.call("causoryn_compare_architecture", { baseRef: "linked", targetRef: "linked" });
+    const note = warningsOf(envelope).find((warning) => warning.startsWith(analyzedNote("linked", repo.sha("linked"))));
+    expect(note).toContain("1 file(s) of the commit were not analyzed");
+    expect(JSON.stringify(envelope)).not.toContain("outsideOnly");
+    expect((diffOf(envelope).summary as Record<string, number>).unchangedNodes).toBeGreaterThan(1);
   });
 
   it("a data root inside the workspace never receives history cache files", async () => {

@@ -22,6 +22,12 @@ import {
   type InventoryEntry,
 } from "@causoryn/indexing";
 
+import {
+  effectiveIgnorePatterns,
+  findMatchingIgnorePattern,
+  type WorkspacePolicyConfig,
+} from "@causoryn/workspace";
+
 import { readOptionalBoundedTextFile } from "./safe-file-read.js";
 import type { ServiceDeps } from "./services.js";
 import { SERVER_VERSION } from "./version.js";
@@ -75,6 +81,8 @@ const HISTORY_DIR_NAME = "history";
 /** Upper bound for one cache entry (read and write). */
 const MAX_HISTORY_CACHE_ENTRY_BYTES = 256 * 1024 * 1024;
 const BLOB_READ_CONCURRENCY = 6;
+/** The synchronous policy checks yield to the event loop after this many tree entries. */
+const POLICY_YIELD_EVERY = 64;
 const SYMLINK_MODE = "120000";
 const COMMIT_SHA_PATTERN = /^[0-9a-f]{40}$|^[0-9a-f]{64}$/;
 const POSITIVE_INTEGER_PATTERN = /^[1-9][0-9]*$/;
@@ -85,7 +93,11 @@ export interface CommitContentAnalysis {
   readonly state: "ready" | "partial";
   /** Files of the commit that were analyzed. */
   readonly fileCount: number;
-  /** Policy-allowed files that were not analyzed: above maxFileBytes or with an unusable git path. */
+  /**
+   * Files the ignore/extension rules allow that were not analyzed: above
+   * maxFileBytes, an unusable git path, or refused by the working-tree part of
+   * the policy (a link on the path, a Windows name alias).
+   */
   readonly skippedFiles: number;
   /**
    * Languages whose sidecar worker could not run ("C#", "Python", "Go",
@@ -156,6 +168,35 @@ export function resolveHistoryAnalysisBudget(
   return parsed;
 }
 
+function yieldToEventLoop(): Promise<void> {
+  return new Promise((resolve) => {
+    setImmediate(resolve);
+  });
+}
+
+/**
+ * Path-only part of the workspace policy for a file path: true when an ignore
+ * rule matches the file or one of its directories, or the extension filter
+ * excludes it (same rules and matcher as WorkspaceAccessPolicy.checkFile).
+ */
+function pathRuleFilter(config: WorkspacePolicyConfig): (relativePath: string) => boolean {
+  const patterns = effectiveIgnorePatterns(config);
+  return (relativePath) => {
+    const segments = relativePath.split("/");
+    for (let depth = 1; depth <= segments.length; depth += 1) {
+      const prefix = segments.slice(0, depth).join("/");
+      if (findMatchingIgnorePattern(prefix, depth < segments.length, patterns) !== undefined) {
+        return true;
+      }
+    }
+    const extension = path.posix.extname(relativePath).toLowerCase();
+    if (config.extensionFilterMode === "blacklist") {
+      return extension !== "" && config.binaryExtensions.includes(extension);
+    }
+    return !config.allowedExtensions.includes(extension);
+  };
+}
+
 /**
  * Policy-allowed files of `commitSha`, read from git objects into inventory
  * entries (same hash as the on-disk inventory: sha256 of the UTF-8 re-encoded
@@ -169,9 +210,13 @@ async function collectCommitInventory(
 ): Promise<{ readonly entries: InventoryEntry[]; readonly skippedFiles: number }> {
   const tree = await readGitTree(canonicalRoot, commitSha);
   const maxFileBytes = deps.policy.config.maxFileBytes;
+  const excludedByRules = pathRuleFilter(deps.policy.config);
   const candidates: string[] = [];
   let skippedFiles = 0;
+  let visited = 0;
   for (const entry of tree) {
+    visited += 1;
+    if (visited % POLICY_YIELD_EVERY === 0) await yieldToEventLoop();
     // Submodules (gitlinks) are "commit" entries; symlinks are blobs with mode 120000.
     if (entry.type !== "blob" || entry.mode === SYMLINK_MODE) continue;
     if (entry.path === TIMELINE_SNAPSHOT_BLOB_PATH) continue;
@@ -183,9 +228,16 @@ async function collectCommitInventory(
       skippedFiles += 1;
       continue;
     }
-    // Path-only decision (ignore rules + extension filter), as for the on-disk inventory.
+    // Ignore rules and extension filter on the commit's own path: such a file
+    // is not part of the inventory in any checkout, so it is left out silently.
+    if (excludedByRules(entry.path)) continue;
+    // The full policy decision also depends on the working tree (a link on the
+    // path, a Windows name alias): a file it refuses is reported as skipped.
     const decision = deps.policy.checkFile(canonicalRoot, path.resolve(canonicalRoot, entry.path), 0);
-    if (!decision.allowed) continue;
+    if (!decision.allowed) {
+      skippedFiles += 1;
+      continue;
+    }
     candidates.push(entry.path);
     if (candidates.length > maxFiles) {
       throw new CommitAnalysisLimitError(
@@ -305,9 +357,19 @@ interface HistoryCacheEntry {
   readonly contentSet: CompareContentSet;
 }
 
+/** A cache hit; `stale` marks an analysis the current toolchain could improve. */
+export interface CachedCommitAnalysis {
+  readonly analysis: CommitContentAnalysis;
+  /**
+   * True when the analysis ran without a worker that the latest published
+   * index ran: analyze again when the budget allows, otherwise use it as is.
+   */
+  readonly stale: boolean;
+}
+
 export interface HistoryCache {
   /** Cached analysis of `commitSha`, or undefined (a corrupt entry is removed). */
-  readonly lookup: (commitSha: string) => Promise<CommitContentAnalysis | undefined>;
+  readonly lookup: (commitSha: string) => Promise<CachedCommitAnalysis | undefined>;
   /** Stores an analysis; returns false when it could not be written (logged). */
   readonly store: (commitSha: string, analysis: CommitContentAnalysis) => Promise<boolean>;
 }
@@ -455,7 +517,7 @@ export function openHistoryCache(
     });
   };
 
-  const lookup = async (commitSha: string): Promise<CommitContentAnalysis | undefined> => {
+  const lookup = async (commitSha: string): Promise<CachedCommitAnalysis | undefined> => {
     if (!(await verifyDir())) return undefined;
     const file = fileFor(commitSha);
     const read = await readOptionalBoundedTextFile(file, MAX_HISTORY_CACHE_ENTRY_BYTES, { root: dir });
@@ -472,15 +534,15 @@ export function openHistoryCache(
       return undefined;
     }
     // An entry analyzed without a worker is stale once an index build ran that
-    // worker; the fresh analysis then replaces it.
+    // worker; a fresh analysis (when the budget allows) then replaces it.
     const nowAvailable = parsed.degradedWorkers.filter((language) => indexWorkers().get(language) === true);
     if (nowAvailable.length > 0) {
       deps.logger(
-        `history: analyzing commit ${commitSha} again: its cached analysis ran without the ${nowAvailable.join(", ")} worker, which the current index ran`,
+        `history: the cached analysis of commit ${commitSha} ran without the ${nowAvailable.join(", ")} worker, which the current index ran; it is analyzed again when the budget allows`,
       );
-      return undefined;
+      return { analysis: parsed, stale: true };
     }
-    return parsed;
+    return { analysis: parsed, stale: false };
   };
 
   const store = async (commitSha: string, analysis: CommitContentAnalysis): Promise<boolean> => {

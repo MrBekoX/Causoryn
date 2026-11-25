@@ -192,7 +192,7 @@ function analyzedPointNote(
   }
   if (result.analysis.skippedFiles > 0) {
     details.push(
-      `${String(result.analysis.skippedFiles)} file(s) above maxFileBytes or with an unusable git path were skipped`,
+      `${String(result.analysis.skippedFiles)} file(s) of the commit were not analyzed (above maxFileBytes, an unusable git path, or a path the working tree leads through a link or a refused name)`,
     );
   }
   if (result.notCachedReason !== undefined) details.push(`not cached: ${result.notCachedReason}`);
@@ -382,9 +382,15 @@ export function createTrustedHistorySources(
 
   const resolveCommitPoint = async (commitSha: string): Promise<CommitPointResult> => {
     const cached = cache === null ? undefined : await cache.lookup(commitSha);
-    if (cached !== undefined) return { kind: "analyzed", analysis: cached, fromCache: true };
-    if (options.maxFreshAnalyses === 0) return { kind: "disabled" };
-    if (freshAnalyses >= options.maxFreshAnalyses) return { kind: "budget-exceeded" };
+    if (cached !== undefined && !cached.stale) {
+      return { kind: "analyzed", analysis: cached.analysis, fromCache: true };
+    }
+    // A stale entry (analyzed without a worker that is available now) is
+    // refreshed when the budget allows and is used as is otherwise.
+    const servedStale = (): CommitPointResult | undefined =>
+      cached === undefined ? undefined : { kind: "analyzed", analysis: cached.analysis, fromCache: true };
+    if (options.maxFreshAnalyses === 0) return servedStale() ?? { kind: "disabled" };
+    if (freshAnalyses >= options.maxFreshAnalyses) return servedStale() ?? { kind: "budget-exceeded" };
     freshAnalyses += 1;
     let analysis: CommitContentAnalysis;
     try {
@@ -394,7 +400,7 @@ export function createTrustedHistorySources(
       deps.logger(
         `history: commit ${commitSha} could not be analyzed from its git objects: ${error instanceof Error ? error.message : String(error)}`,
       );
-      return { kind: "failed", reason: describeCommitAnalysisFailure(error) };
+      return servedStale() ?? { kind: "failed", reason: describeCommitAnalysisFailure(error) };
     }
     if (cache === null) return { kind: "analyzed", analysis, fromCache: false };
     const stored = await cache.store(commitSha, analysis);
