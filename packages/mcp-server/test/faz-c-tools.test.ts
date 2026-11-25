@@ -299,15 +299,15 @@ describe("graphErrorToToolError — refused git repository layout", () => {
   it("maps compare/repository-refused to PATH_DENIED with a fixed, path-free message and logs the detail", () => {
     const logs: string[] = [];
     const detail =
-      "Refusing to read the git repository at /srv/work/repo: the .git file points outside the analyzed root (/srv/other/.git)";
+      "Refusing to read the git repository at /srv/alpha-root/repo: the .git file points outside the analyzed root (/srv/beta-foreign/.git)";
     const mapped = graphErrorToToolError(
       new GraphRepositoryError("compare/repository-refused", detail),
       (message: string) => logs.push(message),
     );
     expect(mapped.code).toBe("PATH_DENIED");
     expect(mapped.message).toContain(".git");
-    expect(mapped.message).not.toContain("other");
-    expect(mapped.message).not.toContain("work");
+    expect(mapped.message).not.toContain("beta-foreign");
+    expect(mapped.message).not.toContain("alpha-root");
     expect(logs.join("\n")).toContain(detail);
   });
 });
