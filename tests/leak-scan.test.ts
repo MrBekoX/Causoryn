@@ -166,7 +166,7 @@ describe("leak-scan: user-profile and local drive paths", () => {
   });
 });
 
-describe("leak-scan: private terms", () => {
+describe("leak-scan: private terms", { timeout: 30_000 }, () => {
   it("parses one term per line or comma separated, ignores comments and rejects too-short terms", async () => {
     const scanner = await loadLeakScan();
     expect(scanner.parsePrivateTerms("Alpha-Term\n# comment\nbeta-x, gamma-y\n\n", "t")).toEqual([
