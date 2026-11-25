@@ -3,7 +3,13 @@ import Database from "better-sqlite3";
 import { canonicalJson, type JsonValue } from "@causoryn/domain";
 import { requireNonEmptyField, requireTimestamp } from "@causoryn/graph";
 
-import { applySchema, SCHEMA_VERSION } from "./schema.js";
+import {
+  applySchema,
+  createPrivateDatabaseFile,
+  hardenSqliteConnection,
+  SCHEMA_VERSION,
+  validUserVersion,
+} from "./schema.js";
 
 /**
  * SqliteWikiStore — Wiki projeksiyonunun kalıcı gerçeklemesi (TŞ v2.1
@@ -589,6 +595,8 @@ export class SqliteWikiStore {
   constructor(source: string | Database.Database) {
     if (typeof source === "string") {
       requireNonEmptyField("dbPath", source);
+      // A new database file is created owner-only (0o600) before SQLite opens it.
+      createPrivateDatabaseFile(source);
       this.db = new Database(source);
       this.owned = true;
     } else {
@@ -596,12 +604,14 @@ export class SqliteWikiStore {
       this.owned = false;
     }
     try {
+      hardenSqliteConnection(this.db);
       this.db.pragma("busy_timeout = 5000");
-      const version = this.db.pragma("user_version", { simple: true });
-      if (typeof version !== "number" || !Number.isInteger(version)) {
+      const rawVersion = this.db.pragma("user_version", { simple: true });
+      const version = validUserVersion(rawVersion);
+      if (version === undefined) {
         throw new WikiStoreError(
           "wiki/schema-corrupt",
-          `Could not read SQLite user_version: ${String(version)}`,
+          `Unexpected SQLite user_version: ${String(rawVersion)}; refusing to open it`,
         );
       }
       if (version > SCHEMA_VERSION) {

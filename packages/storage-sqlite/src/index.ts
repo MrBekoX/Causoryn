@@ -17,9 +17,12 @@
 export { GraphRepositoryError } from "@causoryn/graph";
 export {
   applySchema,
+  createPrivateDatabaseFile,
+  hardenSqliteConnection,
   readSqliteUserVersion,
   SCHEMA_VERSION,
   SchemaTooNewError,
+  validUserVersion,
 } from "./schema.js";
 export {
   currentLeaseHostname,
