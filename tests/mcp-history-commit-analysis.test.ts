@@ -292,27 +292,46 @@ describe("history tools analyze commits from their git objects", { timeout: 180_
     expect(added).toContain("BillingService");
   });
 
-  it("an analysis that ran without an available language worker is used but not cached", async () => {
+  it("an analysis without an available language worker is cached with a note and analyzed again once the index has that worker", async () => {
     const repo = makeHistoryRepo({ python: true });
     const session = await openSession(repo.root);
     const previous = process.env["CAUSORYN_PYTHON_WORKER_SCRIPT"];
+    const restoreWorker = (): void => {
+      if (previous === undefined) delete process.env["CAUSORYN_PYTHON_WORKER_SCRIPT"];
+      else process.env["CAUSORYN_PYTHON_WORKER_SCRIPT"] = previous;
+    };
+    const degradedNote = "the Python worker could not run";
+    const noteFor = (envelope: Record<string, unknown>, ref: string): string | undefined =>
+      warningsOf(envelope).find((warning) => warning.startsWith(analyzedNote(ref, repo.sha(ref))));
     process.env["CAUSORYN_PYTHON_WORKER_SCRIPT"] = path.join(
       makeTempDir("causoryn-no-python-worker-"),
       "missing-worker.py",
     );
     try {
-      const envelope = await session.call("causoryn_compare_architecture", { baseRef: "t1", targetRef: "t2" });
-      expect(namesOf(diffOf(envelope).added)).toContain("BillingService");
-      const note = warningsOf(envelope).find((warning) =>
-        warning.startsWith(analyzedNote("t2", repo.sha("t2"))),
-      );
-      expect(note).toBeDefined();
-      expect(note).toContain("not cached: a language worker was unavailable");
-      expect(historyFiles(session.dataDir)).toEqual([]);
+      const first = await session.call("causoryn_compare_architecture", { baseRef: "t1", targetRef: "t2" });
+      expect(namesOf(diffOf(first).added)).toContain("BillingService");
+      expect(noteFor(first, "t2")).toContain(degradedNote);
+      expect(noteFor(first, "t2")).not.toContain(CACHED_NOTE);
+      expect(historyFiles(session.dataDir)).toHaveLength(2);
+
+      // Still no worker and no index that has one: the cached result is served, with the note.
+      const second = await session.call("causoryn_compare_architecture", { baseRef: "t1", targetRef: "t2" });
+      expect(noteFor(second, "t2")).toContain(CACHED_NOTE);
+      expect(noteFor(second, "t2")).toContain(degradedNote);
     } finally {
-      if (previous === undefined) delete process.env["CAUSORYN_PYTHON_WORKER_SCRIPT"];
-      else process.env["CAUSORYN_PYTHON_WORKER_SCRIPT"] = previous;
+      restoreWorker();
     }
+    if (!pythonAvailable) return;
+
+    // An index build with the worker available makes the degraded entries stale.
+    const job = session.context.jobManager.refreshIndex(repo.root, { mode: "full" });
+    const done = await session.context.jobManager.waitForJob(job.jobId);
+    expect(done.status).toBe("done");
+    const third = await session.call("causoryn_compare_architecture", { baseRef: "t1", targetRef: "t2" });
+    expect(noteFor(third, "t2")).toBe(analyzedNote("t2", repo.sha("t2")));
+    expect(namesOf(diffOf(third).added).some((name) => name.endsWith("refund_order"))).toBe(true);
+    const fourth = await session.call("causoryn_compare_architecture", { baseRef: "t1", targetRef: "t2" });
+    expect(noteFor(fourth, "t2")).toBe(`${analyzedNote("t2", repo.sha("t2"))}; ${CACHED_NOTE}`);
   });
 
   it("budget: CAUSORYN_HISTORY_MAX_ANALYSES=1 analyzes one fresh point per call and the cache carries the rest", async () => {

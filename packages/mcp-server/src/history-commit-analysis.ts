@@ -50,9 +50,10 @@ import { SERVER_VERSION } from "./version.js";
  * unique temporary file (flag "wx", owner-only mode) and a rename, never
  * inside an authorized workspace root. The key covers the Causoryn and
  * indexing versions, the analyzer fingerprint schema and the policy
- * configuration, so analyzer or rule changes start a new entry. Entries whose
- * analysis ran without an available language worker are not cached (they
- * depend on this machine's toolchain). A corrupt entry is removed and the
+ * configuration, so analyzer or rule changes start a new entry. An analysis
+ * that ran without an available language worker records that worker; its
+ * entry is analyzed again once the latest published index ran the worker
+ * (the toolchain is available now). A corrupt entry is removed and the
  * commit is analyzed again.
  */
 
@@ -86,8 +87,42 @@ export interface CommitContentAnalysis {
   readonly fileCount: number;
   /** Policy-allowed files that were not analyzed: above maxFileBytes or with an unusable git path. */
   readonly skippedFiles: number;
-  /** True when a language worker could not run (the result depends on this machine's toolchain). */
-  readonly toolchainDegraded: boolean;
+  /**
+   * Languages whose sidecar worker could not run ("C#", "Python", "Go",
+   * "Rust"): their files were analyzed at a lower level, so the result
+   * depends on this machine's toolchain.
+   */
+  readonly degradedWorkers: readonly string[];
+}
+
+/** analyzerFingerprint key that records a sidecar worker's run state → language. */
+const WORKER_STATE_KEYS: ReadonlyMap<string, string> = new Map([
+  ["refsrc", "C#"],
+  ["pystate", "Python"],
+  ["gostate", "Go"],
+  ["ruststate", "Rust"],
+]);
+const DEGRADED_WORKER_STATES: ReadonlySet<string> = new Set(["worker-unavailable", "sync-run-degraded"]);
+const WORKER_LANGUAGES: ReadonlySet<string> = new Set(WORKER_STATE_KEYS.values());
+
+/** Language → whether its worker ran, for every worker the fingerprint records. */
+function workerStatesOf(analyzerFingerprint: string): Map<string, boolean> {
+  const states = new Map<string, boolean>();
+  for (const segment of analyzerFingerprint.split("|")) {
+    const separator = segment.indexOf("=");
+    if (separator < 0) continue;
+    const language = WORKER_STATE_KEYS.get(segment.slice(0, separator));
+    if (language === undefined) continue;
+    states.set(language, !DEGRADED_WORKER_STATES.has(segment.slice(separator + 1)));
+  }
+  return states;
+}
+
+function degradedWorkersOf(analyzerFingerprint: string): string[] {
+  return [...workerStatesOf(analyzerFingerprint)]
+    .filter(([, ran]) => !ran)
+    .map(([language]) => language)
+    .sort();
 }
 
 /** A failure that is reported as the point's reason as is (no internal detail). */
@@ -225,18 +260,16 @@ export async function analyzeCommitContentSet(
   });
   const run = await scratch.runIndexAsync(canonicalRoot);
   const contentSet = JSON.parse(serializeSnapshotContentSet(run.snapshot)) as CompareContentSet;
-  const fingerprint = run.snapshot.meta.analyzerFingerprint;
-  const toolchainDegraded =
-    fingerprint.includes("worker-unavailable") || fingerprint.includes("sync-run-degraded");
+  const degradedWorkers = degradedWorkersOf(run.snapshot.meta.analyzerFingerprint);
   deps.logger(
-    `history: commit ${commitSha} analyzed from git objects: ${String(inventory.entries.length)} file(s), state ${run.state}, ${String(run.warnings.length)} warning(s)${toolchainDegraded ? ", a language worker was unavailable" : ""}`,
+    `history: commit ${commitSha} analyzed from git objects: ${String(inventory.entries.length)} file(s), state ${run.state}, ${String(run.warnings.length)} warning(s)${degradedWorkers.length === 0 ? "" : `, worker(s) that could not run: ${degradedWorkers.join(", ")}`}`,
   );
   return {
     contentSet,
     state: run.state,
     fileCount: inventory.entries.length,
     skippedFiles: inventory.skippedFiles,
-    toolchainDegraded,
+    degradedWorkers,
   };
 }
 
@@ -268,6 +301,7 @@ interface HistoryCacheEntry {
   readonly state: "ready" | "partial";
   readonly fileCount: number;
   readonly skippedFiles: number;
+  readonly degradedWorkers: readonly string[];
   readonly contentSet: CompareContentSet;
 }
 
@@ -338,6 +372,13 @@ function parseHistoryCacheEntry(
   if (!isNonNegativeInteger(entry.fileCount) || !isNonNegativeInteger(entry.skippedFiles)) {
     return "invalid file counts";
   }
+  const degradedWorkers = entry.degradedWorkers;
+  if (
+    !Array.isArray(degradedWorkers) ||
+    !degradedWorkers.every((language) => typeof language === "string" && WORKER_LANGUAGES.has(language))
+  ) {
+    return "invalid degraded worker list";
+  }
   const shapeError = describeManifestShapeError(entry.contentSet);
   if (shapeError !== null) return `invalid content set: ${shapeError}`;
   return {
@@ -345,7 +386,7 @@ function parseHistoryCacheEntry(
     state: entry.state,
     fileCount: entry.fileCount,
     skippedFiles: entry.skippedFiles,
-    toolchainDegraded: false,
+    degradedWorkers: degradedWorkers as string[],
   };
 }
 
@@ -388,6 +429,24 @@ export function openHistoryCache(
   };
   const verifyDir = (): Promise<boolean> => isUsableDir(dir);
 
+  /** Worker run states of the latest published index (read once per cache handle). */
+  let indexWorkerStates: Map<string, boolean> | undefined;
+  const indexWorkers = (): Map<string, boolean> => {
+    if (indexWorkerStates === undefined) {
+      let fingerprint: string | undefined;
+      try {
+        fingerprint =
+          typeof deps.repository.getLatestSnapshotMeta === "function"
+            ? deps.repository.getLatestSnapshotMeta(workspaceId)?.analyzerFingerprint
+            : deps.repository.getLatestPublished(workspaceId)?.snapshot.meta.analyzerFingerprint;
+      } catch {
+        fingerprint = undefined;
+      }
+      indexWorkerStates = fingerprint === undefined ? new Map() : workerStatesOf(fingerprint);
+    }
+    return indexWorkerStates;
+  };
+
   const remove = async (file: string): Promise<void> => {
     await unlink(file).catch((error: unknown) => {
       if ((error as NodeJS.ErrnoException | undefined)?.code !== "ENOENT") {
@@ -410,6 +469,15 @@ export function openHistoryCache(
     if (typeof parsed === "string") {
       deps.logger(`history: ignoring and removing a corrupt history cache entry (${parsed}): ${file}`);
       await remove(file);
+      return undefined;
+    }
+    // An entry analyzed without a worker is stale once an index build ran that
+    // worker; the fresh analysis then replaces it.
+    const nowAvailable = parsed.degradedWorkers.filter((language) => indexWorkers().get(language) === true);
+    if (nowAvailable.length > 0) {
+      deps.logger(
+        `history: analyzing commit ${commitSha} again: its cached analysis ran without the ${nowAvailable.join(", ")} worker, which the current index ran`,
+      );
       return undefined;
     }
     return parsed;
@@ -441,6 +509,7 @@ export function openHistoryCache(
       state: analysis.state,
       fileCount: analysis.fileCount,
       skippedFiles: analysis.skippedFiles,
+      degradedWorkers: analysis.degradedWorkers,
       contentSet: analysis.contentSet,
     };
     const json = JSON.stringify(entry);

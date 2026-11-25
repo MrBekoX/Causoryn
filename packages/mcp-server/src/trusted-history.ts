@@ -182,10 +182,13 @@ function analyzedPointNote(
 ): string {
   const details: string[] = [];
   if (result.fromCache) details.push(HISTORY_CACHE_NOTE);
-  if (result.analysis.state === "partial") {
+  const degraded = result.analysis.degradedWorkers;
+  if (degraded.length > 0) {
     details.push(
-      "the analysis is partial (analyzer diagnostics, no analyzable sources or an unavailable language worker)",
+      `the ${degraded.join(", ")} worker could not run, so those files were analyzed at a lower level; the commit is analyzed again after an index build that runs that worker`,
     );
+  } else if (result.analysis.state === "partial") {
+    details.push("the analysis is partial (analyzer diagnostics or no analyzable sources)");
   }
   if (result.analysis.skippedFiles > 0) {
     details.push(
@@ -394,14 +397,6 @@ export function createTrustedHistorySources(
       return { kind: "failed", reason: describeCommitAnalysisFailure(error) };
     }
     if (cache === null) return { kind: "analyzed", analysis, fromCache: false };
-    if (analysis.toolchainDegraded) {
-      return {
-        kind: "analyzed",
-        analysis,
-        fromCache: false,
-        notCachedReason: "a language worker was unavailable, so the result depends on this machine's toolchain",
-      };
-    }
     const stored = await cache.store(commitSha, analysis);
     return stored
       ? { kind: "analyzed", analysis, fromCache: false }
