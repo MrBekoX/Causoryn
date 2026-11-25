@@ -830,8 +830,9 @@ describe("exportWikiOffline (atomic write temp files)", () => {
     expect(readFileSync(victim, "utf8")).toBe("VICTIM");
     expect(lstatSync(planted).isSymbolicLink()).toBe(true);
     const target = path.join(outputDir, "index.html");
+    const written = readFileSync(target, "utf8");
     expect(lstatSync(target).isSymbolicLink()).toBe(false);
-    expect(readFileSync(target, "utf8")).toBe(serializeWikiHtml(projection));
+    expect(written).toBe(serializeWikiHtml(projection));
   });
 });
 

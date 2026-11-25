@@ -28,7 +28,9 @@ import {
 } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 
-const NOFOLLOW_READ_FLAGS = fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0);
+/** O_NONBLOCK keeps an open of a FIFO from waiting; regular-file reads are unaffected. */
+const NOFOLLOW_READ_FLAGS =
+  fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0) | (fsConstants.O_NONBLOCK ?? 0);
 const PRIVATE_DIR_MODE = 0o700;
 const STICKY_BIT = 0o1000;
 
@@ -90,24 +92,21 @@ export function untrustedFileReason(st: Stats, label: string): string | null {
 }
 
 /**
- * Reads a regular file with lstat + O_NOFOLLOW + fstat identity matching.
- * Symlinks, special files and files swapped between lstat and open yield
- * null, as does a file larger than `maxBytes`.
+ * Reads a regular file through one descriptor: open (O_NOFOLLOW / O_NONBLOCK
+ * where available), then check the descriptor (regular file, size) and the
+ * path (lstat: not a link, same dev/ino as the descriptor). Symlinks, special
+ * files, a file swapped around the open and a file larger than `maxBytes`
+ * yield null; the bytes returned always belong to the checked file.
  */
 export function readRegularFileBytesNoFollow(filePath: string, maxBytes?: number): Buffer | null {
-  let st: Stats;
-  try {
-    st = lstatSync(filePath);
-  } catch {
-    return null;
-  }
-  if (st.isSymbolicLink() || !st.isFile()) return null;
-  if (maxBytes !== undefined && st.size > maxBytes) return null;
   let fd: number | null = null;
   try {
     fd = openSync(filePath, NOFOLLOW_READ_FLAGS);
     const fdStat = fstatSync(fd);
     if (!fdStat.isFile()) return null;
+    if (maxBytes !== undefined && fdStat.size > maxBytes) return null;
+    const st: Stats = lstatSync(filePath);
+    if (st.isSymbolicLink() || !st.isFile()) return null;
     if (st.ino !== 0 && (fdStat.dev !== st.dev || fdStat.ino !== st.ino)) return null;
     const chunks: Buffer[] = [];
     const buf = Buffer.allocUnsafe(64 * 1024);
@@ -134,26 +133,22 @@ export function readRegularFileBytesNoFollow(filePath: string, maxBytes?: number
 }
 
 /**
- * Streams a regular file through SHA-256 (lstat + O_NOFOLLOW + fstat
- * identity matching) and returns the digest together with the identity of
- * the file that was hashed; null for symlinks, special files or a swap
- * between lstat and open.
+ * Streams a regular file through SHA-256 and returns the digest together
+ * with the identity of the file that was hashed. Same order as
+ * {@link readRegularFileBytesNoFollow}: open, check the descriptor, then
+ * check the path (not a link, same identity); null for symlinks, special
+ * files or a file swapped around the open.
  */
 export function hashRegularFileNoFollow(
   filePath: string,
 ): { readonly sha256: string; readonly identity: FileIdentity } | null {
-  let st: BigIntStats;
-  try {
-    st = lstatSync(filePath, { bigint: true });
-  } catch {
-    return null;
-  }
-  if (st.isSymbolicLink() || !st.isFile()) return null;
   let fd: number | null = null;
   try {
     fd = openSync(filePath, NOFOLLOW_READ_FLAGS);
     const fdStat = fstatSync(fd, { bigint: true });
     if (!fdStat.isFile()) return null;
+    const st: BigIntStats = lstatSync(filePath, { bigint: true });
+    if (st.isSymbolicLink() || !st.isFile()) return null;
     if (st.ino !== 0n && (fdStat.dev !== st.dev || fdStat.ino !== st.ino)) return null;
     const hash = createHash("sha256");
     const buf = Buffer.allocUnsafe(64 * 1024);

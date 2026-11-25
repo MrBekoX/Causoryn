@@ -20,7 +20,7 @@
  *   an environment variable; findings never print the term itself.
  */
 import { execFileSync } from "node:child_process";
-import { lstatSync, readFileSync, readlinkSync } from "node:fs";
+import { closeSync, constants as fsConstants, fstatSync, openSync, readFileSync, readlinkSync } from "node:fs";
 import path from "node:path";
 
 /** Environment variable holding extra private terms (comma or newline separated). */
@@ -425,28 +425,37 @@ export function listRepoFiles(repoRoot, { trackedOnly = false } = {}) {
  */
 export function readWorkingTreeFile(repoRoot, relPosix, deleted) {
   const fullPath = path.join(repoRoot, ...relPosix.split("/"));
-  let stat;
+  const errorCode = (error) =>
+    error && typeof error === "object" && "code" in error ? error.code : undefined;
+  // readlink answers "is it a link?" without a separate check: a link is
+  // scanned as its target string (what Git publishes); EINVAL means "not a link".
   try {
-    stat = lstatSync(fullPath);
+    return Buffer.from(readlinkSync(fullPath), "utf8");
   } catch (error) {
-    if (
-      error &&
-      typeof error === "object" &&
-      "code" in error &&
-      error.code === "ENOENT" &&
-      deleted.has(relPosix)
-    ) {
-      return null;
+    const code = errorCode(error);
+    if (code === "ENOENT" && deleted.has(relPosix)) return null;
+    if (code !== "EINVAL" && code !== "UNKNOWN") throw error;
+  }
+  // Read through one descriptor; a directory (submodule) or special entry is refused.
+  let fd;
+  try {
+    fd = openSync(fullPath, fsConstants.O_RDONLY | (fsConstants.O_NONBLOCK ?? 0));
+  } catch (error) {
+    const code = errorCode(error);
+    if (code === "ENOENT" && deleted.has(relPosix)) return null;
+    if (code === "EISDIR" || code === "EPERM" || code === "EACCES") {
+      throw new Error(`Not a regular file (submodule or special entry): ${relPosix}`);
     }
     throw error;
   }
-  if (stat.isSymbolicLink()) {
-    return Buffer.from(readlinkSync(fullPath), "utf8");
+  try {
+    if (!fstatSync(fd).isFile()) {
+      throw new Error(`Not a regular file (submodule or special entry): ${relPosix}`);
+    }
+    return readFileSync(fd);
+  } finally {
+    closeSync(fd);
   }
-  if (!stat.isFile()) {
-    throw new Error(`Not a regular file (submodule or special entry): ${relPosix}`);
-  }
-  return readFileSync(fullPath);
 }
 
 /** Formats findings for stderr (no matched values are printed). */

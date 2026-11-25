@@ -24,6 +24,7 @@ import {
   assertSafeWritePath,
   isFreeOfLinkedComponents,
   publishFileNoClobber,
+  readRegularFileText,
   removeTreeNoFollow,
   writeExclusiveFile,
 } from "./fs-guard.js";
@@ -167,17 +168,14 @@ function classifyInstalledSkill(
   if (!dirStat.isDirectory()) {
     return { state: "foreign", reason: "is not a directory" };
   }
-  const skillFile = path.join(skillDir, "SKILL.md");
-  let fileStat;
-  try {
-    fileStat = lstatSync(skillFile);
-  } catch {
+  const skillRead = readRegularFileText(path.join(skillDir, "SKILL.md"));
+  if (skillRead.kind === "missing") {
     return { state: "foreign", reason: "has no SKILL.md" };
   }
-  if (!fileStat.isFile()) {
+  if (skillRead.kind !== "ok") {
     return { state: "foreign", reason: "has a SKILL.md that is not a regular file" };
   }
-  if (!isCausorynSkillContent(readFileSync(skillFile, "utf8"), skillName, expectedContent)) {
+  if (!isCausorynSkillContent(skillRead.text, skillName, expectedContent)) {
     return { state: "foreign", reason: "has a SKILL.md that does not belong to Causoryn" };
   }
   const entries = readdirSync(skillDir);
@@ -212,9 +210,9 @@ function isOwnedRuntimeDir(runtimeDir: string, trustedBases: readonly string[]):
   if (!isFreeOfLinkedComponents(runtimeDir, trustedBases, { includeTarget: true })) return false;
   try {
     if (!lstatSync(runtimeDir).isDirectory()) return false;
-    const manifestPath = path.join(runtimeDir, "package.json");
-    if (!lstatSync(manifestPath).isFile()) return false;
-    const manifest: unknown = JSON.parse(readFileSync(manifestPath, "utf8"));
+    const manifestRead = readRegularFileText(path.join(runtimeDir, "package.json"));
+    if (manifestRead.kind !== "ok") return false;
+    const manifest: unknown = JSON.parse(manifestRead.text);
     return isPlainObject(manifest) && manifest["name"] === "causoryn";
   } catch {
     return false;
