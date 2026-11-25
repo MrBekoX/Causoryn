@@ -918,7 +918,14 @@ describe("4. build-package.mjs + isolated npm pack end-to-end verification", () 
         expect(rel.includes("__pycache__")).toBe(false);
         expect(rel.endsWith(".pdb")).toBe(false);
         expect(rel.startsWith("dist/") && rel.endsWith(".map")).toBe(false);
-        expect(rel.includes(".mimosa/")).toBe(false);
+        // No dot-directory/dot-file (local tool caches, VCS metadata) is
+        // staged from the native worker sources:
+        if (rel.startsWith("native/")) {
+          expect(
+            rel.split("/").some((segment) => segment.startsWith(".")),
+            `${rel} is a dot-entry under native/`,
+          ).toBe(false);
+        }
       }
 
       // Pure LF line endings on executable scripts in the packed tarball

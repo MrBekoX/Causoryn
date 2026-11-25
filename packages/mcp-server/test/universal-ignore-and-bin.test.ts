@@ -132,12 +132,12 @@ describe("v0.2.3 Source 2: .git/info/exclude keşfi ve CWE-59 güvenliği", () =
     const ws = makeWorkspace();
     try {
       mkdirSync(path.join(ws.repoDir, ".git", "info"), { recursive: true });
-      mkdirSync(path.join(ws.repoDir, ".mimosa", "chunks"), { recursive: true });
+      mkdirSync(path.join(ws.repoDir, ".tool-cache", "chunks"), { recursive: true });
       mkdirSync(path.join(ws.repoDir, "local-scratch"), { recursive: true });
       mkdirSync(path.join(ws.repoDir, "kept"), { recursive: true });
       mkdirSync(path.join(ws.repoDir, "src"), { recursive: true });
 
-      writeFileSync(path.join(ws.repoDir, ".mimosa", "chunks", "blob.source"), "raw\n");
+      writeFileSync(path.join(ws.repoDir, ".tool-cache", "chunks", "blob.source"), "raw\n");
       writeFileSync(path.join(ws.repoDir, "local-scratch", "tmp.ts"), "export const t = 1;\n");
       writeFileSync(path.join(ws.repoDir, "kept", "important.ts"), "export const k = 1;\n");
       writeFileSync(path.join(ws.repoDir, "src", "app.ts"), "export const app = 1;\n");
@@ -147,7 +147,7 @@ describe("v0.2.3 Source 2: .git/info/exclude keşfi ve CWE-59 güvenliği", () =
           [
             "# local repo excludes",
             "",
-            ".mimosa/",
+            ".tool-cache/",
             "local-scratch/",
             "kept/*",
             "!kept/important.ts",
@@ -157,7 +157,7 @@ describe("v0.2.3 Source 2: .git/info/exclude keşfi ve CWE-59 güvenliği", () =
 
       for (const autoDataDir of [true, false]) {
         const { policy } = buildPolicy(ws, { autoDataDir });
-        expect(policy.checkPath(ws.repoDir, ".mimosa/chunks/blob.source").allowed).toBe(false);
+        expect(policy.checkPath(ws.repoDir, ".tool-cache/chunks/blob.source").allowed).toBe(false);
         expect(policy.checkPath(ws.repoDir, "local-scratch/tmp.ts").allowed).toBe(false);
         expect(policy.checkPath(ws.repoDir, "kept/important.ts").allowed).toBe(true);
         expect(policy.checkPath(ws.repoDir, "src/app.ts").allowed).toBe(true);
@@ -572,18 +572,18 @@ describe("v0.2.3 discoverWorkspaceIgnoreConfig — birim sözleşmesi, budama ve
     }
   });
 
-  it("varsayılan veya .git/info/exclude ile dışlanan dizinlerdeki (.mimosa, node_modules) nested .gitignore budanır", () => {
+  it("varsayılan veya .git/info/exclude ile dışlanan dizinlerdeki (.tool-cache, node_modules) nested .gitignore budanır", () => {
     const ws = makeWorkspace("causoryn-prune-");
     try {
       mkdirSync(path.join(ws.repoDir, ".git", "info"), { recursive: true });
-      mkdirSync(path.join(ws.repoDir, ".mimosa", "sub"), { recursive: true });
+      mkdirSync(path.join(ws.repoDir, ".tool-cache", "sub"), { recursive: true });
       mkdirSync(path.join(ws.repoDir, "node_modules", "pkg"), { recursive: true });
       mkdirSync(path.join(ws.repoDir, "frontend"), { recursive: true });
 
-      writeFileSync(path.join(ws.repoDir, ".git", "info", "exclude"), ".mimosa/\n", "utf8");
+      writeFileSync(path.join(ws.repoDir, ".git", "info", "exclude"), ".tool-cache/\n", "utf8");
       writeFileSync(
-        path.join(ws.repoDir, ".mimosa", "sub", ".gitignore"),
-        "mimosa-sentinel/\n",
+        path.join(ws.repoDir, ".tool-cache", "sub", ".gitignore"),
+        "tool-cache-sentinel/\n",
         "utf8",
       );
       writeFileSync(
@@ -594,9 +594,9 @@ describe("v0.2.3 discoverWorkspaceIgnoreConfig — birim sözleşmesi, budama ve
       writeFileSync(path.join(ws.repoDir, "frontend", ".gitignore"), "tmp-out/\n", "utf8");
 
       const discovered = discoverWorkspaceIgnoreConfig(ws.repoDir);
-      expect(discovered.extraIgnore).toContain(".mimosa/");
+      expect(discovered.extraIgnore).toContain(".tool-cache/");
       expect(discovered.extraIgnore).toContain("frontend/**/tmp-out/");
-      expect(discovered.extraIgnore.some((p) => p.includes("mimosa-sentinel"))).toBe(false);
+      expect(discovered.extraIgnore.some((p) => p.includes("tool-cache-sentinel"))).toBe(false);
       expect(discovered.extraIgnore.some((p) => p.includes("nm-sentinel"))).toBe(false);
     } finally {
       ws.cleanup();
