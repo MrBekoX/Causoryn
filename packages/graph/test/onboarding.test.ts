@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+
 import { describe, expect, it } from "vitest";
 
 import {
@@ -21,10 +23,25 @@ import {
 import { generateOnboarding as indexGenerateOnboarding } from "../src/index.js";
 
 import {
+  ONBOARDING_LIMIT_CEILINGS,
   generateOnboarding,
   type LearningStep,
   type OnboardingProfile,
 } from "../src/onboarding.js";
+
+/**
+ * Report digests produced by the reference implementation (the previous
+ * Kahn loop that re-sorted the ready list and used shift() per step),
+ * captured before the priority-queue refactor.
+ */
+const REFERENCE_ONBOARDING_DIGESTS: Record<string, string> = {
+  "positive:beginner": "8e3f803134e837cc2d660fd51b9ef02459bde24f6830d274cf388764a669378f",
+  "positive:intermediate": "f9dc47b410a6d6a74323bfb07d45e29c048f935c7834b55cde87e03d64eab897",
+  "positive:maintainer": "2fea8da00b77027e6fa0c92d5fdc764629de3bec5a11d9dddc617295240ad788",
+  "random-1": "f21b9f2bf825599796f00f225c9876347eb070c3bc5f0a4c41ecd400c40bee43",
+  "random-2": "897caaa3c523d0b632fbca253a3616c35b141f80f23faf105d5c05cfb5c608f7",
+  "random-3": "f2e2ea648eeec49785b09c5b6b9ba2053952a943872a39b67a31e91cc14d1c9c",
+};
 
 /**
  * causoryn_generate_onboarding çekirdeği — test üçlüsü (TŞ v2.1 §16; TŞ §8
@@ -710,5 +727,146 @@ describe("generateOnboarding — girdi doğrulama", () => {
         limits: { maxLearningSteps: 1.5 },
       }),
     );
+  });
+});
+
+/* ------------------------------------------------------------------ */
+/* Limit ceilings + learning-order determinism under the Kahn ordering */
+/* ------------------------------------------------------------------ */
+
+/** Seeded PRNG (mulberry32) so generated graphs are identical on every run. */
+function seededRandom(seed: number): () => number {
+  let state = seed >>> 0;
+  return () => {
+    state = (state + 0x6d2b79f5) >>> 0;
+    let value = state;
+    value = Math.imul(value ^ (value >>> 15), value | 1);
+    value ^= value + Math.imul(value ^ (value >>> 7), value | 61);
+    return ((value ^ (value >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+/**
+ * Random graph with dependency cycles (SCCs), mixed kinds and resolutions,
+ * endpoints and tests, built through createSnapshot (canonical ids).
+ */
+function randomOnboardingSnapshot(seed: number, nodeCount: number, edgeCount: number) {
+  const random = seededRandom(seed);
+  const kinds = ["Module", "Class", "Function", "Method", "Endpoint", "Test"] as const;
+  const refs = Array.from({ length: nodeCount }, (_, index) => {
+    const kind = kinds[Math.floor(random() * kinds.length)] ?? "Module";
+    const relativePath = `src/m${String(index % 17)}/file${String(index)}.ts`;
+    return { kind, qualifiedName: `pkg.n${String((index * 7919) % nodeCount)}.${kind}`, relativePath };
+  });
+  const edgeKinds = ["DEPENDS_ON", "IMPORTS", "CALLS", "ROUTES_TO", "TESTS"] as const;
+  const resolutions = ["verified", "verified", "heuristic", "unresolved"] as const;
+  const seen = new Set<string>();
+  const edges = [];
+  for (let attempt = 0; attempt < edgeCount * 3 && edges.length < edgeCount; attempt += 1) {
+    const from = refs[Math.floor(random() * nodeCount)];
+    const to = refs[Math.floor(random() * nodeCount)];
+    if (from === undefined || to === undefined || from === to) continue;
+    const kind = edgeKinds[Math.floor(random() * edgeKinds.length)] ?? "CALLS";
+    const key = `${kind}|${from.qualifiedName}|${to.qualifiedName}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    edges.push({
+      kind,
+      from,
+      to,
+      resolution: resolutions[Math.floor(random() * resolutions.length)] ?? "verified",
+      evidence: [
+        {
+          kind: "source" as const,
+          analyzerId: "fixture",
+          analyzerVersion: "0.0.0",
+          rationale: `edge ${key}`,
+        },
+      ],
+    });
+  }
+  return createSnapshot({
+    workspaceId: WS,
+    revision: { id: `rev-random-${String(seed)}`, sequence: 1 },
+    configHash: "cfg:random",
+    analyzerFingerprint: "fixture@0.0.0",
+    state: "ready",
+    createdAt: CREATED_AT,
+    nodes: refs.map((ref) => ({
+      kind: ref.kind,
+      qualifiedName: ref.qualifiedName,
+      relativePath: ref.relativePath,
+      language: "typescript",
+      location: { relativePath: ref.relativePath, startLine: 1, endLine: 5, sourceHash: `sha256:${ref.qualifiedName}` },
+    })),
+    edges,
+  });
+}
+
+function reportDigest(report: unknown): string {
+  return createHash("sha256")
+    .update(canonicalJson(JSON.parse(JSON.stringify(report))))
+    .digest("hex");
+}
+
+describe("generateOnboarding — limit ceilings and deterministic learning order", () => {
+  const snapshot = publishPositiveSnapshot();
+
+  it("clamps oversized limits to documented ceilings with an onboarding/limit-clamped warning", () => {
+    expect(ONBOARDING_LIMIT_CEILINGS).toEqual({
+      entryPointLimit: 100,
+      topModuleCount: 100,
+      maxLearningSteps: 500,
+      maxCriticalFlows: 50,
+    });
+    const big = randomOnboardingSnapshot(7, 900, 1_400);
+    const report = generateOnboarding(big, {
+      profile: "maintainer",
+      limits: {
+        entryPointLimit: 1_000_000,
+        topModuleCount: 1_000_000,
+        maxLearningSteps: 1_000_000,
+        maxCriticalFlows: 1_000_000,
+      },
+    });
+    expect(report.learningOrder.length).toBeLessThanOrEqual(ONBOARDING_LIMIT_CEILINGS.maxLearningSteps);
+    expect(report.learningOrder.length).toBe(ONBOARDING_LIMIT_CEILINGS.maxLearningSteps);
+    expect(report.topModules.length).toBeLessThanOrEqual(ONBOARDING_LIMIT_CEILINGS.topModuleCount);
+    expect(report.entryPoints.length).toBeLessThanOrEqual(
+      Math.max(ONBOARDING_LIMIT_CEILINGS.entryPointLimit, big.nodes.filter((n) => n.kind === "Endpoint").length),
+    );
+    expect(report.criticalFlows.length).toBeLessThanOrEqual(ONBOARDING_LIMIT_CEILINGS.maxCriticalFlows);
+    const clamped = report.warnings.filter((warning) => warning.code === "onboarding/limit-clamped");
+    expect(clamped.map((warning) => warning.message)).toEqual([
+      "entryPointLimit=1000000 exceeds the ceiling 100; clamped to 100",
+      "topModuleCount=1000000 exceeds the ceiling 100; clamped to 100",
+      "maxLearningSteps=1000000 exceeds the ceiling 500; clamped to 500",
+      "maxCriticalFlows=1000000 exceeds the ceiling 50; clamped to 50",
+    ]);
+  });
+
+  it("limits at the ceiling are applied without a clamp warning", () => {
+    const report = generateOnboarding(snapshot, {
+      profile: "maintainer",
+      limits: { ...ONBOARDING_LIMIT_CEILINGS },
+    });
+    expect(report.warnings.map((warning) => warning.code)).not.toContain("onboarding/limit-clamped");
+  });
+
+  it("learning order and the whole report stay byte-identical to the reference outputs (existing and generated fixtures)", () => {
+    // Digests captured with the previous sort()+shift() Kahn loop; the
+    // priority-queue ordering must reproduce them exactly.
+    const profiles: readonly OnboardingProfile[] = ["beginner", "intermediate", "maintainer"];
+    const digests: Record<string, string> = {};
+    for (const profile of profiles) {
+      digests[`positive:${profile}`] = reportDigest(generateOnboarding(snapshot, { profile }));
+    }
+    for (const seed of [1, 2, 3]) {
+      const generated = randomOnboardingSnapshot(seed, 120, 260);
+      digests[`random-${String(seed)}`] = reportDigest(
+        generateOnboarding(generated, { profile: "maintainer", limits: { maxLearningSteps: 500 } }),
+      );
+    }
+    expect(digests).toEqual(REFERENCE_ONBOARDING_DIGESTS);
   });
 });

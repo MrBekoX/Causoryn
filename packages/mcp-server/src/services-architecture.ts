@@ -939,6 +939,7 @@ export const GenerateOnboardingDataSchema = z.strictObject({
       code: z.enum([
         "onboarding/no-entry-endpoint",
         "onboarding/learning-order-truncated",
+        "onboarding/limit-clamped",
       ]),
       message: z.string(),
     }),

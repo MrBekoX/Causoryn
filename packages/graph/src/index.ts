@@ -22,7 +22,7 @@ export {
   validateNode,
 } from "./validation.js";
 export { InMemoryGraphRepository } from "./memory-repository.js";
-export { generateOnboarding } from "./onboarding.js";
+export { generateOnboarding, ONBOARDING_LIMIT_CEILINGS } from "./onboarding.js";
 export type {
   GenerateOnboardingInput,
   LearningStep,
