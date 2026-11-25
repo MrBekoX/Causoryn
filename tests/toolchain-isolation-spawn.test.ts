@@ -58,7 +58,16 @@ const IS_WIN = process.platform === "win32";
 
 const cleanup: string[] = [];
 afterAll(() => {
-  for (const dir of cleanup) rmSync(dir, { recursive: true, force: true });
+  for (const dir of cleanup) {
+    try {
+      // Windows keeps a just-exited worker binary locked for a moment (EPERM/EBUSY).
+      rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+    } catch (error) {
+      // A temp directory that is still locked after the retries is left to the OS
+      // temp cleanup; it must not turn a passing suite into a failure.
+      console.warn(`temp cleanup skipped for ${dir}: ${(error as Error).message}`);
+    }
+  }
 });
 
 function tempDir(prefix: string): string {
