@@ -143,7 +143,7 @@ Dört sidecar adapter'ın tamamı sıfır bağımlılıklı `@causoryn/sidecar-i
 | **TypeScript / JavaScript + SQLite çekirdeği** | Node.js >= 24 | Yok (`dist/mcp-server.mjs` + `better-sqlite3` prebuild'leri + paketlenmiş `dist/typescript-lib/lib*.d.ts`) | Kurulumdan sonra yerel |
 | **C# / Roslyn** | .NET 10 runtime (`dotnet exec`) | Önceden derlenmiş deterministik Release `Causoryn.RoslynWorker.dll` (`net10.0`, `Microsoft.CodeAnalysis.CSharp` `5.12.0`; `.pdb` veya `.resources.dll` dosyası yok) | Kurulumdan sonra yerel |
 | **Python** | Python 3.10+ (CI 3.12 kullanır) | Yok (`worker.py`, yalnızca stdlib `ast`, pip paketi yok, `__pycache__` yazımı yok) | Kurulumdan sonra yerel |
-| **Go** | `native/go-worker/go.mod` gereksinimini (`go 1.22`) karşılayan Go araç zinciri (`GOTOOLCHAIN=local` ile daha yeni araç zinciri indirilmez) | `go run ./cmd/worker` (`GOCACHE` içinde önbelleğe alınır) veya önceden derlenmiş bir `CAUSORYN_GO_WORKER_BIN`; yalnızca stdlib, dış modül yok | Kurulumdan sonra yerel |
+| **Go** | `native/go-worker/go.mod` gereksinimini (`go 1.26`) karşılayan Go araç zinciri (`GOTOOLCHAIN=local` ile daha yeni araç zinciri indirilmez) | `go run ./cmd/worker` (`GOCACHE` içinde önbelleğe alınır) veya önceden derlenmiş bir `CAUSORYN_GO_WORKER_BIN`; yalnızca stdlib, dış modül yok | Kurulumdan sonra yerel |
 | **Rust** | Rust / Cargo (`edition = 2021`) | İhtiyaç anında `~/.causoryn/cache/rust-worker-target` (veya `CAUSORYN_RUST_TARGET_DIR`) içine `cargo build --locked` | İlk derleme, önbellekte olmayan `Cargo.lock` crate'lerini (`syn` 3, `serde_json`, `proc-macro2`) crates.io'dan indirebilir; sonrasında sabitlenmiş ikili yerel olarak çalışır |
 
 ---

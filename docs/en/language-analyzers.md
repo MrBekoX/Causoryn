@@ -143,7 +143,7 @@ When `dotnet`, `python`, `go`, or `cargo` is missing, crashes, or times out, the
 | **TypeScript / JavaScript + SQLite core** | Node.js >= 24 | None (`dist/mcp-server.mjs` + `better-sqlite3` prebuilds + bundled `dist/typescript-lib/lib*.d.ts`) | Local after installation |
 | **C# / Roslyn** | .NET 10 runtime (`dotnet exec`) | Precompiled deterministic Release `Causoryn.RoslynWorker.dll` (`net10.0`, `Microsoft.CodeAnalysis.CSharp` `5.12.0`; no `.pdb` or `.resources.dll` files) | Local after installation |
 | **Python** | Python 3.10+ (CI uses 3.12) | None (`worker.py`, stdlib `ast` only, no pip packages, no `__pycache__` writes) | Local after installation |
-| **Go** | Go toolchain satisfying `native/go-worker/go.mod` (`go 1.22`; with `GOTOOLCHAIN=local` no newer toolchain is downloaded) | `go run ./cmd/worker` (cached in `GOCACHE`) or a prebuilt `CAUSORYN_GO_WORKER_BIN`; stdlib only, no external modules | Local after installation |
+| **Go** | Go toolchain satisfying `native/go-worker/go.mod` (`go 1.26`; with `GOTOOLCHAIN=local` no newer toolchain is downloaded) | `go run ./cmd/worker` (cached in `GOCACHE`) or a prebuilt `CAUSORYN_GO_WORKER_BIN`; stdlib only, no external modules | Local after installation |
 | **Rust** | Rust / Cargo (`edition = 2021`) | On-demand `cargo build --locked` into `~/.causoryn/cache/rust-worker-target` (or `CAUSORYN_RUST_TARGET_DIR`) | The first build may download uncached `Cargo.lock` crates (`syn` 3, `serde_json`, `proc-macro2`) from crates.io; afterwards the pinned binary runs locally |
 
 ---
