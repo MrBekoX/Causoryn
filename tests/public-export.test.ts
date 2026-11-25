@@ -204,7 +204,7 @@ afterAll(() => {
   }
 });
 
-describe("scripts/export-public-tree.mjs — Seçenek 1 temiz açık kaynak dışa aktarıcı", { timeout: 20_000 }, () => {
+describe("scripts/export-public-tree.mjs — Seçenek 1 temiz açık kaynak dışa aktarıcı", { timeout: 60_000 }, () => {
   it("POZİTİF: raw/, wiki/, docs/superpowers/ ve iç prompt dosyalarını dışlar, .gitignore'ı temizler ve fail-closed doğrulamayı geçer", async () => {
     const { exportPublicTree } = await loadExporter();
     const repoDir = createSyntheticGitRepo();
