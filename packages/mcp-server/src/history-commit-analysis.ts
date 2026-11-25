@@ -518,6 +518,8 @@ export function openHistoryCache(
   };
 
   const lookup = async (commitSha: string): Promise<CachedCommitAnalysis | undefined> => {
+    // The SHA becomes a file name: only canonical commit SHAs are looked up.
+    if (!COMMIT_SHA_PATTERN.test(commitSha)) return undefined;
     if (!(await verifyDir())) return undefined;
     const file = fileFor(commitSha);
     const read = await readOptionalBoundedTextFile(file, MAX_HISTORY_CACHE_ENTRY_BYTES, { root: dir });
@@ -546,6 +548,11 @@ export function openHistoryCache(
   };
 
   const store = async (commitSha: string, analysis: CommitContentAnalysis): Promise<boolean> => {
+    // The SHA becomes a file name: anything but a canonical commit SHA is never written.
+    if (!COMMIT_SHA_PATTERN.test(commitSha)) {
+      deps.logger(`history: refusing to cache an entry for a value that is not a commit SHA: ${JSON.stringify(commitSha.slice(0, 80))}`);
+      return false;
+    }
     // The data directory is checked before anything is created in it.
     if (!(await isUsableDir(dataDir))) {
       deps.logger(`history: the data directory is not usable for the history cache: ${dataDir}`);
