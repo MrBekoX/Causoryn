@@ -359,6 +359,33 @@ function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+/**
+ * Steps one prepared FTS5 MATCH statement. An `SQLITE_ERROR` while stepping a
+ * static, already-prepared statement comes from evaluating the MATCH
+ * expression and maps to `wiki/invalid-field` with a fixed message (no SQL or
+ * engine text); other failures map to `storage/driver-error`.
+ */
+function runFullTextQuery(run: () => unknown[]): unknown[] {
+  try {
+    return run();
+  } catch (error) {
+    const code =
+      error !== null && typeof error === "object" && "code" in error
+        ? (error as { code?: unknown }).code
+        : undefined;
+    if (code === "SQLITE_ERROR") {
+      throw new WikiStoreError(
+        "wiki/invalid-field",
+        "query cannot be evaluated by the full-text index; remove unsupported characters and retry",
+      );
+    }
+    throw new WikiStoreError(
+      "storage/driver-error",
+      `SQLite full-text search failed: ${errorText(error)}`,
+    );
+  }
+}
+
 function requireEnum<T extends string>(
   field: string,
   value: unknown,
@@ -1002,11 +1029,29 @@ export class SqliteWikiStore {
         `limit must be a positive integer: ${String(effectiveLimit)}`,
       );
     }
-    const phrase = `"${trimmed.replaceAll('"', '""')}"`;
+    // NUL and other control characters count as whitespace: FTS5 parses the
+    // MATCH expression as a C string, so an embedded NUL would cut the phrase.
+    let sanitized = "";
+    for (const ch of trimmed) {
+      const code = ch.charCodeAt(0);
+      sanitized += code < 0x20 || (code >= 0x7f && code <= 0x9f) ? " " : ch;
+    }
+    sanitized = sanitized.trim().replace(/\s+/gu, " ");
+    if (sanitized.length === 0) {
+      throw new WikiStoreError(
+        "wiki/invalid-field",
+        "query must contain searchable text",
+      );
+    }
+    const phrase = `"${sanitized.replaceAll('"', '""')}"`;
     // İki STATİK sorgu metni (workspace filtresi opsiyonel); SQL metnine
     // hiçbir girdi katılmaz, değerler parametreyle bağlanır.
-    const rows = (
+    const workspaceId =
       options?.workspaceId === undefined
+        ? undefined
+        : requireNonEmptyField("workspaceId", options.workspaceId);
+    const statement =
+      workspaceId === undefined
         ? this.stmt(
             `SELECT wiki_fts.page_id AS page_id,
                     wiki_snapshots.id AS wiki_snapshot_id,
@@ -1015,7 +1060,7 @@ export class SqliteWikiStore {
              WHERE wiki_fts MATCH ? AND wiki_snapshots.status IN ('ready','partial')
              ORDER BY wiki_fts.title, wiki_fts.page_id
              LIMIT ?`,
-          ).all(phrase, effectiveLimit)
+          )
         : this.stmt(
             `SELECT wiki_fts.page_id AS page_id,
                     wiki_snapshots.id AS wiki_snapshot_id,
@@ -1026,7 +1071,11 @@ export class SqliteWikiStore {
                AND wiki_snapshots.workspace_id = ?
              ORDER BY wiki_fts.title, wiki_fts.page_id
              LIMIT ?`,
-          ).all(phrase, requireNonEmptyField("workspaceId", options.workspaceId), effectiveLimit)
+          );
+    const rows = runFullTextQuery(() =>
+      workspaceId === undefined
+        ? statement.all(phrase, effectiveLimit)
+        : statement.all(phrase, workspaceId, effectiveLimit),
     ) as Array<{
       page_id: string;
       wiki_snapshot_id: string | null;

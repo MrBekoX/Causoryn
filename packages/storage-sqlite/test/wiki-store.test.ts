@@ -320,6 +320,25 @@ describe("wiki store — pozitif", () => {
     }
   });
 
+  it("searchWiki treats NUL bytes as whitespace instead of failing inside FTS5", () => {
+    const p = dbPath("fts-nul.db");
+    registerWorkspace(p);
+    const store = new SqliteWikiStore(p);
+    try {
+      const wikiSid = store.beginWikiBuild(wikiMeta(GRAPH_SNAPSHOT_ID));
+      fillFixture(store, wikiSid);
+      store.publishWiki(wikiSid, WIKI_ID, "ready", BUILT_AT);
+
+      const hits = store.searchWiki("CreateOrder\u0000");
+      expect(hits.map((hit) => hit.pageId)).toEqual(["p_api"]);
+      expect(() => store.searchWiki("\u0000\u0000")).toThrowError(
+        expect.objectContaining({ code: "wiki/invalid-field" }),
+      );
+    } finally {
+      store.close();
+    }
+  });
+
   it("searchWiki workspace filtresiyle cross-workspace hit döndürmez", () => {
     const p = dbPath("fts-scope.db");
     registerWorkspace(p);

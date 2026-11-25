@@ -19,7 +19,15 @@
  */
 export function normalizeWikiSearchQuery(rawQuery: string): string {
   if (typeof rawQuery !== "string") return "";
-  return rawQuery.trim().replace(/\s+/gu, " ");
+  // NUL and other C0/C1 control characters (and DEL) count as whitespace:
+  // FTS5 parses the MATCH expression as a C string, so an embedded NUL would
+  // end the phrase early and fail with an "unterminated string" error.
+  let withoutControls = "";
+  for (const ch of rawQuery) {
+    const code = ch.charCodeAt(0);
+    withoutControls += code < 0x20 || (code >= 0x7f && code <= 0x9f) ? " " : ch;
+  }
+  return withoutControls.trim().replace(/\s+/gu, " ");
 }
 
 /**
