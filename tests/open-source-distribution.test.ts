@@ -888,6 +888,7 @@ describe("4. build-package.mjs + isolated npm pack end-to-end verification", () 
       expect(files).toContain("dist/node_modules/better-sqlite3/LICENSE");
       expect(files).toContain("dist/typescript-lib/lib.es2022.full.d.ts");
       expect(files).toContain("scripts/lib/node-version-guard.mjs");
+      expect(files).toContain("scripts/lib/asset-root.mjs");
       expect(files).toContain("native/python-worker/worker.py");
       expect(files).toContain("native/go-worker/cmd/worker/main.go");
       expect(files).toContain("native/rust-worker/Cargo.toml");
@@ -933,6 +934,7 @@ describe("4. build-package.mjs + isolated npm pack end-to-end verification", () 
         "scripts/causoryn.mjs",
         "scripts/plugin-mcp-launcher.mjs",
         "scripts/lib/node-version-guard.mjs",
+        "scripts/lib/asset-root.mjs",
       ]) {
         const scriptBytes = readFileSync(path.join(unpackedPkg, relScript));
         expect(scriptBytes.includes(0x0d), `${relScript} contains CR bytes in tarball`).toBe(false);

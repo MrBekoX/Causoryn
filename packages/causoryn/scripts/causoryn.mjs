@@ -6,10 +6,11 @@
  * aittir; hiçbir başlık/log `stdout`'a yazılmaz, doğrudan `dist/mcp-server.mjs`
  * modülüne saf devir yapılır.
  */
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
+import { resolveAssetRootOverride } from "./lib/asset-root.mjs";
 import { assertSupportedNodeVersion } from "./lib/node-version-guard.mjs";
 
 assertSupportedNodeVersion();
@@ -25,7 +26,24 @@ if (rawArgs[0] === "mcp") {
     );
     process.exit(2);
   }
-  process.env["CAUSORYN_ASSET_ROOT"] ??= PKG_ROOT;
+  let pkgVersion;
+  try {
+    pkgVersion = JSON.parse(readFileSync(path.join(PKG_ROOT, "package.json"), "utf8")).version;
+  } catch {
+    pkgVersion = undefined;
+  }
+  if (typeof pkgVersion !== "string") {
+    console.error(`[causoryn] package.json of ${PKG_ROOT} has no readable version`);
+    process.exit(2);
+  }
+  const assetRoot = resolveAssetRootOverride(process.env["CAUSORYN_ASSET_ROOT"], PKG_ROOT, pkgVersion);
+  if (!assetRoot.ok) {
+    console.error(
+      `[causoryn] CAUSORYN_ASSET_ROOT rejected (${assetRoot.reason}): ${process.env["CAUSORYN_ASSET_ROOT"]?.trim()}`,
+    );
+    process.exit(2);
+  }
+  process.env["CAUSORYN_ASSET_ROOT"] = assetRoot.root;
   process.argv = [process.argv[0] ?? process.execPath, mcpBundlePath, ...rawArgs];
   await import(pathToFileURL(mcpBundlePath).href);
 } else {

@@ -46,6 +46,7 @@ const PURE_LF_SCRIPTS = [
   path.join("scripts", "causoryn.mjs"),
   path.join("scripts", "plugin-mcp-launcher.mjs"),
   path.join("scripts", "lib", "node-version-guard.mjs"),
+  path.join("scripts", "lib", "asset-root.mjs"),
 ];
 
 const LEAKED_BINARY_PATTERNS = [

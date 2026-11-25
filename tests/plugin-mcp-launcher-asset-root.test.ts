@@ -17,6 +17,7 @@ import {
   copyFileSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   realpathSync,
   rmSync,
   writeFileSync,
@@ -67,14 +68,12 @@ function makePackageDir(root: string, options: FakePackageOptions = {}): string 
   }
   if (options.withLauncher ?? false) {
     mkdirSync(path.join(root, "scripts", "lib"), { recursive: true });
-    copyFileSync(
-      path.join(PKG_SCRIPTS, "plugin-mcp-launcher.mjs"),
-      path.join(root, "scripts", "plugin-mcp-launcher.mjs"),
-    );
-    copyFileSync(
-      path.join(PKG_SCRIPTS, "lib", "node-version-guard.mjs"),
-      path.join(root, "scripts", "lib", "node-version-guard.mjs"),
-    );
+    for (const entry of ["plugin-mcp-launcher.mjs", "causoryn.mjs"]) {
+      copyFileSync(path.join(PKG_SCRIPTS, entry), path.join(root, "scripts", entry));
+    }
+    for (const lib of readdirSync(path.join(PKG_SCRIPTS, "lib"))) {
+      copyFileSync(path.join(PKG_SCRIPTS, "lib", lib), path.join(root, "scripts", "lib", lib));
+    }
     mkdirSync(path.join(root, "dist"), { recursive: true });
     writeFileSync(
       path.join(root, "dist", "mcp-server.mjs"),
@@ -91,17 +90,26 @@ interface LauncherRun {
   readonly stderr: string;
 }
 
-function runLauncher(pkgRoot: string, assetRoot: string | undefined, cwd: string): LauncherRun {
+function runEntry(args: readonly string[], assetRoot: string | undefined, cwd: string): LauncherRun {
   const env: NodeJS.ProcessEnv = { ...process.env };
   delete env["CAUSORYN_ASSET_ROOT"];
   delete env["CAUSORYN_EXPECTED_VERSION"];
   if (assetRoot !== undefined) env["CAUSORYN_ASSET_ROOT"] = assetRoot;
-  const res = spawnSync(
-    process.execPath,
-    [path.join(pkgRoot, "scripts", "plugin-mcp-launcher.mjs"), "--expected-version", VERSION, "--allow-cwd"],
-    { cwd, env, encoding: "utf8", shell: false, timeout: 30_000 },
-  );
+  const res = spawnSync(process.execPath, [...args], { cwd, env, encoding: "utf8", shell: false, timeout: 30_000 });
   return { status: res.status, stdout: res.stdout ?? "", stderr: res.stderr ?? "" };
+}
+
+function runLauncher(pkgRoot: string, assetRoot: string | undefined, cwd: string): LauncherRun {
+  return runEntry(
+    [path.join(pkgRoot, "scripts", "plugin-mcp-launcher.mjs"), "--expected-version", VERSION, "--allow-cwd"],
+    assetRoot,
+    cwd,
+  );
+}
+
+/** `causoryn mcp` through the CLI entry point (the command `causoryn setup` registers). */
+function runCliMcp(pkgRoot: string, assetRoot: string | undefined, cwd: string): LauncherRun {
+  return runEntry([path.join(pkgRoot, "scripts", "causoryn.mjs"), "mcp", "--allow-cwd"], assetRoot, cwd);
 }
 
 function reportedAssetRoot(run: LauncherRun): string | null {
@@ -180,6 +188,42 @@ describe("plugin-mcp-launcher.mjs — CAUSORYN_ASSET_ROOT", () => {
     expect(run.status).toBe(2);
     expect(run.stdout).toBe("");
     expect(run.stderr).toContain("[causoryn-launcher] CAUSORYN_ASSET_ROOT rejected");
+    expect(run.stderr).toMatch(reason);
+  });
+});
+
+describe("causoryn.mjs mcp — CAUSORYN_ASSET_ROOT (same rules as the plugin launcher)", () => {
+  it("binds the asset root to its own package when the variable is unset or blank", () => {
+    const base = tempDir("cli-unset");
+    const pkg = makePackageDir(path.join(base, "pkg"), { withLauncher: true });
+    const unset = runCliMcp(pkg, undefined, base);
+    expect(unset.status, unset.stderr).toBe(0);
+    expect(reportedAssetRoot(unset)).toBe(pkg);
+    const blank = runCliMcp(pkg, "  ", base);
+    expect(blank.status, blank.stderr).toBe(0);
+    expect(reportedAssetRoot(blank)).toBe(pkg);
+  });
+
+  it("keeps an override that points at a causoryn package of its own version with native/", () => {
+    const base = tempDir("cli-override");
+    const pkg = makePackageDir(path.join(base, "pkg"), { withLauncher: true });
+    const devTree = makePackageDir(path.join(base, "dev-tree"));
+    const run = runCliMcp(pkg, devTree, base);
+    expect(run.status, run.stderr).toBe(0);
+    expect(reportedAssetRoot(run)).toBe(devTree);
+  });
+
+  it.each([
+    ["a relative path", (base: string) => path.relative(base, makePackageDir(path.join(base, "rel-tree"))), /absolute path/],
+    ["a causoryn package of another version", (base: string) => makePackageDir(path.join(base, "old"), { version: "1.2.2" }), /causoryn@1.2.3/],
+    ["a causoryn package without native/", (base: string) => makePackageDir(path.join(base, "bare"), { withNative: false }), /native/],
+  ] as const)("rejects %s (exit 2, stderr only, server not started)", (_label, makeValue, reason) => {
+    const base = tempDir("cli-reject");
+    const pkg = makePackageDir(path.join(base, "pkg"), { withLauncher: true });
+    const run = runCliMcp(pkg, makeValue(base), base);
+    expect(run.status).toBe(2);
+    expect(run.stdout).toBe("");
+    expect(run.stderr).toContain("[causoryn] CAUSORYN_ASSET_ROOT rejected");
     expect(run.stderr).toMatch(reason);
   });
 });

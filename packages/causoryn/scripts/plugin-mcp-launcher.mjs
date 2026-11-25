@@ -12,10 +12,11 @@
  * aynı doğrulanmış sürümdeki `causoryn` paketini (`native/` ile) gösteriyorsa
  * kabul edilir, aksi halde başlatıcı `2` ile fail-closed çıkar.
  */
-import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
+import { resolveAssetRootOverride } from "./lib/asset-root.mjs";
 import { assertSupportedNodeVersion } from "./lib/node-version-guard.mjs";
 
 assertSupportedNodeVersion();
@@ -56,51 +57,17 @@ function parseLauncherArgs(argv) {
 }
 
 /**
- * Returns the asset root the server must use: this verified package when
- * CAUSORYN_ASSET_ROOT is unset or blank, otherwise the realpath of the override
- * after checking it is an absolute path to a directory holding the same
- * `causoryn@<verifiedVersion>` package with a `native/` directory. Exits 2 otherwise.
+ * Returns the asset root the server must use (see lib/asset-root.mjs): this
+ * verified package when CAUSORYN_ASSET_ROOT is unset or blank, otherwise the
+ * realpath of a valid same-version override. Exits 2 otherwise.
  */
 function resolveAssetRoot(rawValue, verifiedVersion) {
-  const value = rawValue?.trim();
-  if (value === undefined || value.length === 0) {
-    return PKG_ROOT;
-  }
-  const reject = (reason) => {
-    console.error(`[causoryn-launcher] CAUSORYN_ASSET_ROOT rejected (${reason}): ${value}`);
+  const result = resolveAssetRootOverride(rawValue, PKG_ROOT, verifiedVersion);
+  if (!result.ok) {
+    console.error(`[causoryn-launcher] CAUSORYN_ASSET_ROOT rejected (${result.reason}): ${rawValue?.trim()}`);
     process.exit(2);
-  };
-  if (!path.isAbsolute(value)) {
-    return reject("must be an absolute path");
   }
-  let resolved;
-  try {
-    resolved = realpathSync(value);
-  } catch {
-    return reject("does not exist");
-  }
-  if (!statSync(resolved).isDirectory()) {
-    return reject("is not a directory");
-  }
-  let marker;
-  try {
-    marker = JSON.parse(readFileSync(path.join(resolved, "package.json"), "utf8"));
-  } catch {
-    return reject("has no readable package.json");
-  }
-  if (
-    typeof marker !== "object" ||
-    marker === null ||
-    marker.name !== "causoryn" ||
-    marker.version !== verifiedVersion
-  ) {
-    return reject(`is not the causoryn@${verifiedVersion} package`);
-  }
-  const nativeDir = path.join(resolved, "native");
-  if (!existsSync(nativeDir) || !statSync(nativeDir).isDirectory()) {
-    return reject("has no native/ directory");
-  }
-  return resolved;
+  return result.root;
 }
 
 const { cliExpectedVersion, forwardedArgs } = parseLauncherArgs(process.argv.slice(2));
