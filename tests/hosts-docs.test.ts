@@ -151,8 +151,11 @@ describe("F1 bundle artifact (üretilebilirlik + koşullu determinizm)", () => {
     expect(pkg.scripts?.["build:bundle"]).toBeTruthy();
     const root = JSON.parse(readFileSync(rootPkg, "utf8")) as {
       dependencies?: Record<string, string>;
+      devDependencies?: Record<string, string>;
     };
-    expect(root.dependencies?.esbuild).toMatch(/^\^?0\.28\./);
+    // esbuild is a build tool (packages/mcp-server/scripts/build-bundle.mjs), not a runtime dependency:
+    expect(root.devDependencies?.esbuild).toMatch(/^\^?0\.28\./);
+    expect(root.dependencies?.esbuild).toBeUndefined();
   });
 
   it.runIf(artifactBuilt)("dist/mcp-server.mjs mevcut", () => {
