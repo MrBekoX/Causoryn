@@ -42,7 +42,13 @@ import {
   PROCESS_LEASE_INSTANCE_ID,
   type BuildLeaseLivenessContext,
 } from "./build-lease.js";
-import { applySchema, SCHEMA_VERSION } from "./schema.js";
+import {
+  applySchema,
+  createPrivateDatabaseFile,
+  hardenSqliteConnection,
+  SCHEMA_VERSION,
+  validUserVersion,
+} from "./schema.js";
 
 export { defaultIsPidAlive } from "./build-lease.js";
 
@@ -425,14 +431,19 @@ export class SqliteGraphRepository
   constructor(dbPath: string) {
     requireNonEmptyField("dbPath", dbPath);
     this.dbPath = dbPath;
+    // A new database file is created owner-only (0o600) before SQLite opens it.
+    createPrivateDatabaseFile(dbPath);
     this.db = new Database(dbPath);
     try {
+      hardenSqliteConnection(this.db);
       this.db.pragma("busy_timeout = 5000");
-      const version = this.db.pragma("user_version", { simple: true });
-      if (typeof version !== "number" || !Number.isInteger(version)) {
+      // Version checks run before any pragma that could write the file.
+      const rawVersion = this.db.pragma("user_version", { simple: true });
+      const version = validUserVersion(rawVersion);
+      if (version === undefined) {
         throw new GraphRepositoryError(
           "storage/schema-corrupt",
-          `Could not read SQLite user_version: ${String(version)}`,
+          `Unexpected SQLite user_version: ${String(rawVersion)}; refusing to open ${dbPath}`,
         );
       }
       if (version > SCHEMA_VERSION) {
@@ -489,6 +500,7 @@ export class SqliteGraphRepository
         : DEFAULT_HEARTBEAT_BUSY_TIMEOUT_MS;
     const db = new Database(this.dbPath, { fileMustExist: true });
     try {
+      hardenSqliteConnection(db);
       db.pragma(`busy_timeout = ${String(busyTimeoutMs)}`);
     } catch (error) {
       db.close();

@@ -12,7 +12,7 @@ import path from "node:path";
 
 import Database from "better-sqlite3";
 
-import { SCHEMA_VERSION } from "./schema.js";
+import { createPrivateDatabaseFile, hardenSqliteConnection, SCHEMA_VERSION } from "./schema.js";
 
 /**
  * One-time migration from the legacy per-client workspace databases
@@ -99,6 +99,7 @@ function inspectCandidate(filePath: string): LegacyDbCandidateReport {
   let db: Database.Database | undefined;
   try {
     db = new Database(filePath, { readonly: true, fileMustExist: true });
+    hardenSqliteConnection(db);
     const version = db.pragma("user_version", { simple: true });
     if (typeof version !== "number" || !Number.isInteger(version)) {
       return { path: filePath, valid: false, reason: "unreadable user_version" };
@@ -170,6 +171,9 @@ export async function migrateLegacyWorkspaceDatabase(
   );
   const source = new Database(chosen.path, { readonly: true, fileMustExist: true });
   try {
+    hardenSqliteConnection(source);
+    // The copy (and therefore the published target) is owner-only (0o600).
+    createPrivateDatabaseFile(tempPath);
     await source.backup(tempPath);
   } catch (error) {
     rmSync(tempPath, { force: true });

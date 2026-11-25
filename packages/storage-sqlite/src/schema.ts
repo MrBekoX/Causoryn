@@ -1,3 +1,5 @@
+import { closeSync, openSync } from "node:fs";
+
 import Database from "better-sqlite3";
 import { buildSymbolFtsDocument } from "@causoryn/graph";
 
@@ -65,6 +67,52 @@ import { applyWikiSchema } from "./wiki-schema.js";
 export const SCHEMA_VERSION = 5;
 
 /**
+ * Per-connection hardening applied to every SQLite connection Causoryn opens
+ * (read-write, read-only and heartbeat connections alike).
+ *
+ * `trusted_schema = OFF`: SQL functions that are not marked innocuous (and
+ * virtual tables that are not marked innocuous) can no longer run from
+ * schema objects such as views, triggers, CHECK/DEFAULT expressions or
+ * expression indexes. Causoryn's own schema uses none of these, so normal
+ * operation is unchanged, while a tampered schema cannot make queries call
+ * application functions as a side effect.
+ */
+export function hardenSqliteConnection(db: Database.Database): void {
+  db.pragma("trusted_schema = OFF");
+}
+
+/**
+ * Returns the `PRAGMA user_version` value when it is a non-negative integer,
+ * otherwise `undefined`. Causoryn only ever stamps 0 (new file) or 1..N; a
+ * negative or non-integer value means the file was not written by Causoryn
+ * (or was altered), so callers refuse it before anything writes the file.
+ */
+export function validUserVersion(raw: unknown): number | undefined {
+  return typeof raw === "number" && Number.isInteger(raw) && raw >= 0 ? raw : undefined;
+}
+
+/**
+ * Creates a database file that does not exist yet with owner-only
+ * permissions (0o600 on POSIX; the mode is ignored on Windows). The SQLite
+ * unix VFS gives the `-wal`, `-shm` and journal files the mode of the main
+ * database file, so they are owner-only as well. The file is created with
+ * O_CREAT|O_EXCL (`wx`): an existing entry is never truncated, re-permissioned
+ * or followed. SQLite treats the empty file as a new database. Special names
+ * (`:memory:`, empty, `file:` URIs) are left to SQLite; any other open error
+ * is also left to SQLite so its usual error is reported.
+ */
+export function createPrivateDatabaseFile(dbPath: string): void {
+  if (dbPath === "" || dbPath === ":memory:" || dbPath.startsWith("file:")) return;
+  let fd: number;
+  try {
+    fd = openSync(dbPath, "wx", 0o600);
+  } catch {
+    return;
+  }
+  closeSync(fd);
+}
+
+/**
  * Typed refusal for a database whose `user_version` is newer than this build's
  * `SCHEMA_VERSION`. Carries both versions so callers can pick a fallback file.
  */
@@ -99,9 +147,11 @@ export function readSqliteUserVersion(dbPath: string): number | undefined {
     throw error;
   }
   try {
-    const version = db.pragma("user_version", { simple: true });
-    if (typeof version !== "number" || !Number.isInteger(version)) {
-      throw new Error(`Could not read SQLite user_version: ${String(version)}`);
+    hardenSqliteConnection(db);
+    const raw = db.pragma("user_version", { simple: true });
+    const version = validUserVersion(raw);
+    if (version === undefined) {
+      throw new Error(`Unexpected SQLite user_version: ${String(raw)}`);
     }
     return version;
   } finally {
@@ -111,9 +161,10 @@ export function readSqliteUserVersion(dbPath: string): number | undefined {
 
 /** Applies the schema when `user_version < SCHEMA_VERSION`; the DDL is fully static. */
 export function applySchema(db: Database.Database): void {
-  const version = db.pragma("user_version", { simple: true });
-  if (typeof version !== "number" || !Number.isInteger(version)) {
-    throw new Error(`Could not read SQLite user_version: ${String(version)}`);
+  const raw = db.pragma("user_version", { simple: true });
+  const version = validUserVersion(raw);
+  if (version === undefined) {
+    throw new Error(`Unexpected SQLite user_version: ${String(raw)}; refusing to apply the schema`);
   }
   if (version > SCHEMA_VERSION) {
     throw new SchemaTooNewError(version, SCHEMA_VERSION);
