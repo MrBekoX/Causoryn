@@ -2,7 +2,7 @@ import { renameSync, unlinkSync, writeFileSync } from "node:fs";
 
 import { z } from "zod";
 
-import { snapshotCanonicalJson, type SnapshotGraph } from "@causoryn/domain";
+import { escapeMermaidLabel, snapshotCanonicalJson, type SnapshotGraph } from "@causoryn/domain";
 import { OutputAccessPolicy } from "@causoryn/workspace";
 
 import { GraphRepositoryError } from "./errors.js";
@@ -136,18 +136,6 @@ function escapeMarkdownCell(value: string): string {
     .replace(/</g, "\\<")
     .replace(/>/g, "\\>")
     .replace(/[\r\n\t]+/g, " ");
-}
-
-/** Mermaid etiket kaçışı: tırnaklı etiket içinde güvenli HTML entity'leri. */
-function escapeMermaidLabel(value: string): string {
-  return value
-    .replace(/[\r\n\t]+/g, " ")
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/#/g, "&#35;")
-    .replace(/\|/g, "&#124;");
 }
 
 function byId<T extends { readonly id: string }>(a: T, b: T): number {

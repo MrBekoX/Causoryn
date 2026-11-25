@@ -60,3 +60,10 @@ export type {
   SnapshotInput,
   SnapshotNodeInput,
 } from "./snapshot.js";
+export {
+  escapeMarkdownBlock,
+  escapeMarkdownInline,
+  escapeMarkdownTableCell,
+  escapeMermaidLabel,
+  markdownCodeSpan,
+} from "./markup-escape.js";

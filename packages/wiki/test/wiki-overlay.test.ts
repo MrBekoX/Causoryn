@@ -1047,6 +1047,42 @@ describe("renderAnnotationBlock", () => {
     expect(renderAnnotationBlock(host)).toBe(renderAnnotationBlock(host));
   });
 
+  it("hostile annotation text stays inside the blockquote and renders as literal text", () => {
+    const hostile: WikiAnnotation = {
+      id: "annot`id",
+      stablePageId: "page-1",
+      sectionKey: "deps`\n# Injected key",
+      authorKind: "host_model_proposal",
+      origin: "host_model_proposal",
+      verified: false,
+      body: [
+        "First line\r```mermaid\r%%{init: {'theme':'dark'}}%%\rclick A call alert(1)\r```",
+        "# Injected heading\r\n<script>alert(1)</script>",
+        "![beacon](https://evil.test/b.png) www.evil.test",
+        "~~~",
+      ].join("\n"),
+      annotationVersion: 0,
+      updatedAt: T_ANNOT,
+    };
+    const block = renderAnnotationBlock(hostile);
+    // CommonMark line endings: LF, CR and CRLF all start a new line.
+    const lines = block.split(/\r\n|\r|\n/);
+    for (const line of lines) {
+      expect(line.startsWith(">"), JSON.stringify(line)).toBe(true);
+      const content = line.replace(/^> ?/, "");
+      expect(/^ {0,3}(?:`{3,}|~{3,})/.test(content), JSON.stringify(line)).toBe(false);
+      expect(/^ {0,3}#{1,6} /.test(content), JSON.stringify(line)).toBe(false);
+    }
+    expect(block).not.toContain("\r");
+    expect(block).not.toMatch(/(?<!\\)<script>/);
+    expect(block).not.toMatch(/(?<!\\)!\[beacon\]/);
+    expect(/(?:https?|ftp):\/\/|www\./i.test(block)).toBe(false);
+    // Identifiers are code spans whose fence outlasts any backtick inside.
+    const header = lines[0] ?? "";
+    expect(header).toContain("sectionKey:``deps` # Injected key``");
+    expect(header).toContain("annotationId:``annot`id``");
+  });
+
   it("renderWikiPageWithOverlay: overlay generated içeriğin DIŞINA eklenir; boş overlay dokumaz", () => {
     expect(renderWikiPageWithOverlay("üretilmiş içerik", "")).toBe(
       "üretilmiş içerik",
