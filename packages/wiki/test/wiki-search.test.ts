@@ -457,6 +457,69 @@ describe("wiki search — pozitif", () => {
   });
 });
 
+describe("wiki search — NUL bytes and full-text engine errors", () => {
+  it("normalizeWikiSearchQuery treats NUL and other control characters as whitespace", () => {
+    expect(normalizeWikiSearchQuery("ord\u0000ers")).toBe("ord ers");
+    expect(normalizeWikiSearchQuery("\u0000orders\u0001\u007f")).toBe("orders");
+    expect(normalizeWikiSearchQuery("\u0000\u0000")).toBe("");
+  });
+
+  it("a query with NUL bytes runs as a normal phrase search instead of failing in SQLite", () => {
+    const db = new Database(path.join(tempRoot, "nul.sqlite"));
+    try {
+      seedMainWiki(db);
+      const search = openSearchStore(db);
+      const result = search.search({ workspaceId: WS, query: "orders\u0000" });
+      expect(result.query).toBe("orders");
+      expect(result.matchExpression).toBe('"orders"');
+      expect(result.totalMatches).toBe(7);
+      expect(() => search.search({ workspaceId: WS, query: "\u0000" })).toThrowError(
+        expect.objectContaining({ code: "wiki/empty-query" }),
+      );
+    } finally {
+      db.close();
+    }
+  });
+
+  function failingDatabase(error: Error): ConstructorParameters<typeof WikiSearchStore>[0] {
+    return {
+      prepare: () => ({
+        get: () => ({ sid: 1, id: "wikisnap-stub" }),
+        all: () => {
+          throw error;
+        },
+      }),
+    };
+  }
+
+  function sqliteError(code: string, message: string): Error {
+    return Object.assign(new Error(message), { name: "SqliteError", code });
+  }
+
+  it("an FTS5 query error maps to wiki/invalid-field without SQL, engine text or stack in the message", () => {
+    const search = new WikiSearchStore(
+      failingDatabase(sqliteError("SQLITE_ERROR", 'fts5: syntax error near "SELECT wiki_fts"')),
+    );
+    let thrown: unknown;
+    try {
+      search.search({ workspaceId: WS, query: "orders" });
+    } catch (error) {
+      thrown = error;
+    }
+    expect(thrown).toBeInstanceOf(WikiSearchError);
+    expect((thrown as WikiSearchError).code).toBe("wiki/invalid-field");
+    const message = (thrown as Error).message;
+    expect(message).not.toMatch(/SELECT|fts5|wiki_fts|syntax error|\n\s+at /i);
+  });
+
+  it("other SQLite failures map to a storage driver error (internal, logged by the service layer)", () => {
+    const search = new WikiSearchStore(failingDatabase(sqliteError("SQLITE_CORRUPT", "database disk image is malformed")));
+    expect(() => search.search({ workspaceId: WS, query: "orders" })).toThrowError(
+      expect.objectContaining({ code: "storage/driver-error" }),
+    );
+  });
+});
+
 describe("wiki search — negatif", () => {
   it("MATCH metakarakterli sorgu '\"()*' kaçışlanır, patlamaz", () => {
     const db = new Database(path.join(tempRoot, "meta.sqlite"));

@@ -176,6 +176,36 @@ const SQL_SECTIONS = `SELECT page_id, evidence_refs_json
  WHERE wiki_snapshot_sid = ?
  ORDER BY page_id, position`;
 
+/**
+ * Runs one FTS5 MATCH statement and maps SQLite failures to search contract
+ * codes. The SQL text is static and already prepared, so an `SQLITE_ERROR`
+ * raised while stepping comes from evaluating the MATCH expression: it maps
+ * to `wiki/invalid-field` with a fixed message (no SQL, engine text or stack
+ * reaches the caller). Any other failure is an environment error
+ * (`storage/driver-error`); the service layer logs its detail to stderr and
+ * returns a generic internal error.
+ */
+function runFullTextQuery(run: () => unknown[]): unknown[] {
+  try {
+    return run();
+  } catch (error) {
+    const code =
+      error !== null && typeof error === "object" && "code" in error
+        ? (error as { code?: unknown }).code
+        : undefined;
+    if (code === "SQLITE_ERROR") {
+      throw new WikiSearchError(
+        "wiki/invalid-field",
+        "query cannot be evaluated by the full-text index; remove unsupported characters and retry",
+      );
+    }
+    throw new WikiSearchError(
+      "storage/driver-error",
+      `SQLite full-text search failed: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+}
+
 function asRecord(value: unknown, what: string): Record<string, unknown> {
   if (value === null || typeof value !== "object" || Array.isArray(value)) {
     throw new WikiSearchError(
@@ -337,9 +367,10 @@ export class WikiSearchStore {
     const snapshot = this.resolveSnapshot(workspaceId, input.wikiSnapshotId);
     const matchExpression = buildWikiMatchExpression(query);
 
-    const candidateRows = this.db
-      .prepare(SQL_CANDIDATES)
-      .all(matchExpression, snapshot.sid) as unknown[];
+    const candidateStatement = this.db.prepare(SQL_CANDIDATES);
+    const candidateRows = runFullTextQuery(() =>
+      candidateStatement.all(matchExpression, snapshot.sid),
+    );
     const candidates = candidateRows.map((row) =>
       this.toCandidate(asRecord(row, "wiki_fts candidate row")),
     );
@@ -348,9 +379,10 @@ export class WikiSearchStore {
     // pageId kümeleri adaylarla kesiştirilir ve kanonik sırada yazılır.
     const matchedByField = new Map<WikiSearchMatchedField, Set<string>>();
     for (const fieldQuery of SQL_FIELD_MATCH) {
-      const rows = this.db
-        .prepare(fieldQuery.sql)
-        .all(`${fieldQuery.column}:${matchExpression}`, snapshot.sid) as unknown[];
+      const fieldStatement = this.db.prepare(fieldQuery.sql);
+      const rows = runFullTextQuery(() =>
+        fieldStatement.all(`${fieldQuery.column}:${matchExpression}`, snapshot.sid),
+      );
       const pageIds = new Set<string>();
       for (const row of rows) {
         pageIds.add(asString(asRecord(row, "fts field row"), "page_id"));
