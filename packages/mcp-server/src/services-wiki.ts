@@ -1157,17 +1157,26 @@ export function wikiGetTree(
 
     const maxDepth = input.depth ?? Number.MAX_SAFE_INTEGER;
     const ordered: { pageId: string; depth: number }[] = [];
-    const queue: { pageId: string; depth: number }[] = subtreeRoots.map((pageId) => ({
-      pageId,
-      depth: 1,
-    }));
-    while (queue.length > 0) {
-      const entry = queue.shift();
+    // Breadth-first walk with a visited set: a stored parent chain that loops
+    // (self-parent, A → B → C → A) can neither revisit pages nor make the
+    // walk unbounded; each page is listed at most once, at its first depth.
+    const visited = new Set<string>();
+    const queue: { pageId: string; depth: number }[] = [];
+    for (const pageId of subtreeRoots) {
+      if (visited.has(pageId)) continue;
+      visited.add(pageId);
+      queue.push({ pageId, depth: 1 });
+    }
+    for (let head = 0; head < queue.length; head += 1) {
+      const entry = queue[head];
       if (entry === undefined) break;
       if (entry.depth > maxDepth) continue;
       ordered.push(entry);
+      if (entry.depth >= maxDepth) continue;
       const children = childrenByParent.get(entry.pageId) ?? [];
       for (const child of [...children].sort()) {
+        if (visited.has(child)) continue;
+        visited.add(child);
         queue.push({ pageId: child, depth: entry.depth + 1 });
       }
     }
