@@ -1756,7 +1756,32 @@ describe("stdio.ts — gerçek alt-süreç CLI modları ve geriye dönük uyumlu
         }
       });
 
-      const [, summaryMsg] = await Promise.all([pInit, pSummary]);
+      const [, firstSummaryMsg] = await Promise.all([pInit, pSummary]);
+      // While the background initial index is still running the server answers
+      // `partial` with `data.indexing` and `retryAfterMs` (documented contract);
+      // a client retries. Slow runners need more than one call.
+      let summaryMsg = firstSummaryMsg;
+      const retryDeadline = Date.now() + 120_000;
+      for (let nextId = 12; Date.now() < retryDeadline; nextId += 1) {
+        const pending = (
+          summaryMsg["result"] as {
+            structuredContent?: { status?: string; data?: { indexing?: boolean; retryAfterMs?: number } };
+          }
+        ).structuredContent;
+        if (pending?.status !== "partial" || pending.data?.indexing !== true) break;
+        const retryAfterMs = Math.min(pending.data?.retryAfterMs ?? 1_000, 3_000);
+        await new Promise((resolve) => setTimeout(resolve, retryAfterMs));
+        const pRetry = waitFor(nextId);
+        child.stdin?.write(
+          `${JSON.stringify({
+            jsonrpc: "2.0",
+            id: nextId,
+            method: "tools/call",
+            params: { name: "causoryn_map_system", arguments: { workspaceId: "alpha-service" } },
+          })}\n`,
+        );
+        summaryMsg = await pRetry;
+      }
       child.stdin?.end();
       const exitCode = await exitPromise;
       clearTimeout(killTimer);
@@ -1772,7 +1797,7 @@ describe("stdio.ts — gerçek alt-süreç CLI modları ve geriye dönük uyumlu
     } finally {
       sandbox.cleanup();
     }
-  });
+  }, 180_000);
 
   it("göreli ZCODE_PLUGIN_DATA değerini --data-dir ile simetrik olarak fail-closed reddeder", () => {
     const sandbox = createTempSandbox();
