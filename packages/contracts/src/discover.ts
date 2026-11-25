@@ -11,7 +11,12 @@ import { discoverJsonSchemaContracts } from "./json-schema-discovery.js";
 import { discoverOpenApiContracts } from "./openapi-discovery.js";
 import { discoverProtobufContracts } from "./protobuf-discovery.js";
 import { discoverSqlContracts } from "./sql-discovery.js";
-import { assertSpecTextPrechecks, isPlainObject } from "./parse-safety.js";
+import {
+  assertSpecTextPrechecks,
+  describeSpecParserFailure,
+  describeSpecSyntaxError,
+  isPlainObject,
+} from "./parse-safety.js";
 import { compareContractCandidates, compareDiagnostics, compareStrings } from "./order.js";
 import type {
   ContractCandidate,
@@ -83,7 +88,7 @@ function sniffYamlRoot(text: string): SniffResult {
       return {
         ok: false,
         code: "contracts/spec-yaml-invalid",
-        error: "YAML syntax error: " + (first?.message ?? "unknown"),
+        error: "YAML syntax error: " + describeSpecSyntaxError(first),
       };
     }
     return { ok: true, root: document.toJS() };
@@ -94,7 +99,7 @@ function sniffYamlRoot(text: string): SniffResult {
       // yaml kütüphanesinin alias limiti ReferenceError'ı sniff toJS'inde
       // aşar — parse-safety ile aynı eşleme: alias → limit-exceeded.
       code: message.includes("alias") ? "contracts/limit-exceeded" : "contracts/spec-yaml-invalid",
-      error: "YAML could not be parsed: " + message,
+      error: "YAML could not be parsed: " + describeSpecParserFailure(error),
     };
   }
 }
