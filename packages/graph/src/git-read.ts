@@ -12,6 +12,7 @@ import {
   sanitizePathValue,
   trustedWorkingDirectory,
 } from "./executable-resolution.js";
+import { validateRepositoryLayout, type RepositoryLayout } from "./git-repository-layout.js";
 
 /**
  * Git okuma katmanı — causoryn_compare_architecture spawn yardımcısı
@@ -70,6 +71,16 @@ const GIT_ALLOWED_SUBCOMMANDS: ReadonlySet<string> = new Set([
 ]);
 
 /**
+ * Exact argument shapes per subcommand. `cat-file` runs only as
+ * `cat-file <type> <object>` / `cat-file -t <object>`: forms such as
+ * `--textconv`, `--filters`, `--path` or the batch modes apply
+ * repository-configured diff/filter drivers (commands) and are refused.
+ * `ls-tree` accepts only `-r`, `--full-tree`, `-z` and one ref.
+ */
+const CAT_FILE_MODES: ReadonlySet<string> = new Set(["blob", "commit", "tag", "tree", "-t"]);
+const LS_TREE_FLAGS: ReadonlySet<string> = new Set(["-r", "--full-tree", "-z"]);
+
+/**
  * Per-invocation `-c` overrides placed BEFORE the subcommand so malicious
  * `.git/config` entries (`core.fsmonitor`, `core.sshCommand`, `diff.external`,
  * `core.hooksPath`, `protocol.ext.allow`, etc.) can never execute external
@@ -86,6 +97,10 @@ const GIT_HARDENED_CONFIG_FLAGS: readonly string[] = [
   "core.sshCommand=false",
   "-c",
   "core.askPass=",
+  // An empty credential.helper resets the helper list collected from the
+  // repository config (gitcredentials(7)); no transport is reachable anyway.
+  "-c",
+  "credential.helper=",
   "-c",
   "diff.external=false",
   "-c",
@@ -113,6 +128,15 @@ const GIT_HARDENED_CONFIG_FLAGS: readonly string[] = [
   "-c",
   "safe.bareRepository=explicit",
 ];
+
+/**
+ * Global options of every repository-bound git call: `-C <root>`, `--no-pager`
+ * (a `pager.<cmd>` / core.pager value never starts, even on a terminal) and
+ * the hardened `-c` overrides. All precede the subcommand.
+ */
+function repositoryGlobalOptions(repoRoot: string): string[] {
+  return ["-C", repoRoot, "--no-pager", ...GIT_HARDENED_CONFIG_FLAGS];
+}
 
 /**
  * Safe Git ref grammar (linear-time O(n), zero ReDoS):
@@ -434,12 +458,96 @@ function resolveGitRuntime(repoRoot: string): GitRuntime {
   return runtime;
 }
 
-/** Hardened git env for one runtime (PATH replaced by the sanitized copy). */
-function gitEnvFor(runtime: GitRuntime): Record<string, string> {
+/**
+ * Hardened git env for one repository read (PATH replaced by the sanitized
+ * copy). GIT_CEILING_DIRECTORIES = parent of the canonical root, so git's
+ * repository discovery never continues above the analyzed root (e.g. when the
+ * root's .git directory is not a valid git directory). git(1), ENVIRONMENT:
+ * "GIT_CEILING_DIRECTORIES ... Git should not chdir up into while looking for
+ * a repository directory"; https://git-scm.com/docs/git#Documentation/git.txt-GITCEILINGDIRECTORIES
+ */
+function gitEnvFor(runtime: GitRuntime, layout: RepositoryLayout): Record<string, string> {
   const env = buildGitEnv(process.env);
   if (runtime.sanitizedPath.length > 0) env["PATH"] = runtime.sanitizedPath;
   else delete env["PATH"];
+  const parent = path.dirname(layout.root);
+  if (parent !== layout.root) {
+    if (parent.includes(path.delimiter)) {
+      throw new GraphRepositoryError(
+        "compare/git-unavailable",
+        `Refusing to read the git repository at ${layout.root}: the parent directory contains the path list ` +
+          `separator ${JSON.stringify(path.delimiter)}, so repository discovery above the root cannot be blocked`,
+      );
+    }
+    env["GIT_CEILING_DIRECTORIES"] = parent;
+  }
   return env;
+}
+
+function notAllowed(message: string): GraphRepositoryError {
+  return new GraphRepositoryError("compare/git-command-not-allowed", message);
+}
+
+/** `<ref>` or `<ref>:<path>` for cat-file; ref and path use the read-API grammars. */
+function assertValidObjectName(objectName: string | undefined): void {
+  if (objectName === undefined || objectName.length === 0 || objectName.startsWith("-")) {
+    throw notAllowed(`git cat-file needs one object name that does not start with '-': ${String(objectName)}`);
+  }
+  const separator = objectName.indexOf(":");
+  if (separator < 0) {
+    assertValidGitRef(objectName);
+    return;
+  }
+  assertValidGitRef(objectName.slice(0, separator));
+  assertValidBlobPath(objectName.slice(separator + 1));
+}
+
+/** Refuses every argument shape the read APIs do not use (see CAT_FILE_MODES). */
+function assertReadOnlyArguments(subcommand: string, args: readonly string[]): void {
+  if (subcommand === "rev-parse") {
+    if (
+      args.length !== 4 ||
+      args[1] !== "--verify" ||
+      args[2] !== "--end-of-options" ||
+      args[3] === undefined
+    ) {
+      throw notAllowed(
+        "git rev-parse may only run in the read-only form ['rev-parse', '--verify', '--end-of-options', '<ref>^{commit}']",
+      );
+    }
+    const rawTarget = args[3];
+    const refToValidate = rawTarget.endsWith("^{commit}")
+      ? rawTarget.slice(0, -"^{commit}".length)
+      : rawTarget;
+    assertValidGitRef(refToValidate);
+    return;
+  }
+  if (subcommand === "cat-file") {
+    if (args.length !== 3 || !CAT_FILE_MODES.has(args[1] ?? "")) {
+      throw notAllowed(
+        "git cat-file may only run as ['cat-file', 'blob'|'commit'|'tag'|'tree'|'-t', '<object>']; " +
+          `rejected: ${JSON.stringify(args)}`,
+      );
+    }
+    assertValidObjectName(args[2]);
+    return;
+  }
+  if (subcommand === "ls-tree") {
+    const flags = args.slice(1, -1);
+    const ref = args.length >= 2 ? args[args.length - 1] : undefined;
+    if (
+      ref === undefined ||
+      ref.startsWith("-") ||
+      flags.some((flag) => !LS_TREE_FLAGS.has(flag)) ||
+      new Set(flags).size !== flags.length
+    ) {
+      throw notAllowed(
+        "git ls-tree may only run as ['ls-tree', ('-r'|'--full-tree'|'-z')..., '<ref>']; " +
+          `rejected: ${JSON.stringify(args)}`,
+      );
+    }
+    assertValidGitRef(ref);
+  }
 }
 
 function processOptions(
@@ -650,9 +758,7 @@ async function assertPartialCloneSupported(
     await gitProcessRunner(
       runtime.gitPath,
       [
-        "-C",
-        repoRoot,
-        ...GIT_HARDENED_CONFIG_FLAGS,
+        ...repositoryGlobalOptions(repoRoot),
         ...safeFlags,
         "config",
         "--includes",
@@ -739,32 +845,18 @@ export async function runGit(
         `${subcommand === undefined ? "<none>" : subcommand}`,
     );
   }
-  if (subcommand === "rev-parse") {
-    if (
-      args.length !== 4 ||
-      args[1] !== "--verify" ||
-      args[2] !== "--end-of-options" ||
-      args[3] === undefined
-    ) {
-      throw new GraphRepositoryError(
-        "compare/git-command-not-allowed",
-        "git rev-parse may only run in the read-only form ['rev-parse', '--verify', '--end-of-options', '<ref>^{commit}']",
-      );
-    }
-    const rawTarget = args[3];
-    const refToValidate = rawTarget.endsWith("^{commit}")
-      ? rawTarget.slice(0, -"^{commit}".length)
-      : rawTarget;
-    assertValidGitRef(refToValidate);
-  }
+  assertReadOnlyArguments(subcommand, args);
+  // Before any git process touches the repository: the .git entry, gitdir
+  // pointer and redirections must stay local and belong to this root.
+  const layout = await validateRepositoryLayout(repoRoot, subcommand);
   const runtime = resolveGitRuntime(repoRoot);
-  const env = gitEnvFor(runtime);
+  const env = gitEnvFor(runtime, layout);
   const safeFlags = safeDirectoryFlags(await readProtectedSafeDirectories(runtime));
   await assertPartialCloneSupported(runtime, repoRoot, env, safeFlags);
   try {
     const result = await gitProcessRunner(
       runtime.gitPath,
-      ["-C", repoRoot, ...GIT_HARDENED_CONFIG_FLAGS, ...safeFlags, ...args],
+      [...repositoryGlobalOptions(repoRoot), ...safeFlags, ...args],
       processOptions(runtime, env, options),
     );
     return result.stdout;
