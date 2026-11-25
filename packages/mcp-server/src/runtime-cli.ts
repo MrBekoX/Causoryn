@@ -28,7 +28,9 @@ import {
 } from "@causoryn/storage-sqlite";
 import type { WikiSearchStore } from "@causoryn/wiki";
 import {
+  inspectLinkTargets,
   isUncOrDevicePath,
+  LINK_TARGET_INSPECTION_ENABLED,
   type OutputAccessPolicy,
   type WorkspaceAccessPolicy,
 } from "@causoryn/workspace";
@@ -64,8 +66,9 @@ import { discoverWorkspaceIgnoreConfig } from "./workspace-ignore-discovery.js";
  * - `$HOME`, dosya sistemi kökü (`/`, `C:\`), `~/.causoryn`, `ZCODE_PLUGIN_DATA`,
  *   `--data-dir`, Causoryn eklenti/bundle kurulum dizinleri, hassas kullanıcı
  *   dizinleri (`~/.ssh`, `~/.aws`, `~/.gnupg`, `~/.kube`, `~/.claude`,
- *   `~/.codex`, `~/.zcode`) ve OS sistem dizinleri ASLA proje kökü olarak
- *   yetkilendirilmez.
+ *   `~/.codex`, `~/.zcode`, `~/.config`, `~/.docker`, `~/.azure`, `~/.gcloud`,
+ *   `~/.npm`, `~/.cargo`, `~/Library`, `%APPDATA%`, `%LOCALAPPDATA%`) ve OS
+ *   sistem dizinleri ASLA proje kökü olarak yetkilendirilmez.
  * - Analiz edilen kaynak ağaca tek bayt bile yazılmaz; `--auto-data-dir`
  *   dizinleri oluşturulmadan ÖNCE yetkili köklerin dışında kaldığı doğrulanır.
  */
@@ -699,6 +702,11 @@ function deriveForbiddenPluginDirs(
   return entries;
 }
 
+/**
+ * Credential and tool configuration directories below the home directory; the
+ * directory itself and everything inside it is rejected as a project root.
+ * Platform independent on purpose (deterministic, and harmless where absent).
+ */
 const SENSITIVE_HOME_SUBDIRS = [
   ".ssh",
   ".aws",
@@ -707,7 +715,19 @@ const SENSITIVE_HOME_SUBDIRS = [
   ".claude",
   ".codex",
   ".zcode",
+  ".config",
+  ".docker",
+  ".azure",
+  ".gcloud",
+  ".npm",
+  ".cargo",
+  "Library",
+  path.join("AppData", "Roaming"),
+  path.join("AppData", "Local"),
 ] as const;
+
+/** Environment-named per-user application data directories (Windows profile layout). */
+const SENSITIVE_ENV_DIR_KEYS = ["APPDATA", "LOCALAPPDATA"] as const;
 
 const POSIX_SYSTEM_DIRS = [
   "/etc",
@@ -768,11 +788,91 @@ function readEnvValue(env: NodeJS.ProcessEnv, key: string): string | undefined {
   return undefined;
 }
 
-function deriveSensitiveUserDirs(homeDir: string): ResolvedDirEntry[] {
-  if (homeDir.trim().length === 0) return [];
-  return SENSITIVE_HOME_SUBDIRS.map((subdir) =>
-    toResolvedDirEntry(path.join(homeDir, subdir)),
-  );
+/** Like `resolveRealOrLexical`, but with the native realpath (8.3 short names expanded). */
+function resolveNativeRealOrLexical(inputPath: string): string {
+  const abs = path.resolve(inputPath);
+  if (isUncOrDevicePath(inputPath) || isUncOrDevicePath(abs)) {
+    return abs;
+  }
+  // Mocked `node:fs` modules may not carry `.native`; fall back to the JS realpath.
+  const native = (realpathSync as { native?: (p: string) => string }).native;
+  const realpath = typeof native === "function" ? native : realpathSync;
+  const tailSegments: string[] = [];
+  let cursor = abs;
+  for (;;) {
+    try {
+      const realAncestor = stripWin32DevicePrefix(realpath(cursor));
+      return tailSegments.length === 0 ? realAncestor : path.join(realAncestor, ...tailSegments.reverse());
+    } catch {
+      const parent = path.dirname(cursor);
+      if (parent === cursor) return abs;
+      tailSegments.push(path.basename(cursor));
+      cursor = parent;
+    }
+  }
+}
+
+/**
+ * Every spelling of a directory used by the sensitive-directory comparison:
+ * lexical, realpath and native long-name form. A directory reached through a
+ * link to a UNC/device target is compared lexically only (never followed).
+ */
+function sensitivePathForms(dir: string): string[] {
+  const lexical = path.resolve(dir);
+  if (isUncOrDevicePath(dir) || isUncOrDevicePath(lexical)) {
+    return [lexical];
+  }
+  if (LINK_TARGET_INSPECTION_ENABLED && !inspectLinkTargets(lexical).ok) {
+    return [lexical];
+  }
+  return [lexical, resolveRealOrLexical(lexical), resolveNativeRealOrLexical(lexical)];
+}
+
+function deriveSensitiveUserDirs(homeDir: string, env: NodeJS.ProcessEnv): string[][] {
+  const rawDirs: string[] = [];
+  if (homeDir.trim().length > 0) {
+    for (const subdir of SENSITIVE_HOME_SUBDIRS) {
+      rawDirs.push(path.join(homeDir, subdir));
+    }
+  }
+  for (const key of SENSITIVE_ENV_DIR_KEYS) {
+    const value = readEnvValue(env, key)?.trim();
+    if (value !== undefined && value.length > 0 && path.isAbsolute(value)) {
+      rawDirs.push(value);
+    }
+  }
+  return rawDirs.map(sensitivePathForms);
+}
+
+function anyFormSameOrInside(targets: readonly string[], containers: readonly string[]): boolean {
+  return targets.some((target) => containers.some((container) => isSameOrInsideComparable(target, container)));
+}
+
+/**
+ * Same-or-inside test against the sensitive directories. The OS temp directory
+ * may itself live inside one (Windows: %LOCALAPPDATA%\Temp); projects inside the
+ * temp directory stay usable there, while the bare temp root is rejected
+ * separately as an exact system directory.
+ */
+function isInsideSensitiveUserDir(
+  candidateForms: readonly string[],
+  homeDir: string,
+  env: NodeJS.ProcessEnv,
+): boolean {
+  const rawTemp = os.tmpdir().trim();
+  const tempForms = rawTemp.length === 0 || isUncOrDevicePath(rawTemp) ? [] : sensitivePathForms(rawTemp);
+  for (const entryForms of deriveSensitiveUserDirs(homeDir, env)) {
+    if (!anyFormSameOrInside(candidateForms, entryForms)) continue;
+    if (
+      tempForms.length > 0 &&
+      anyFormSameOrInside(tempForms, entryForms) &&
+      anyFormSameOrInside(candidateForms, tempForms)
+    ) {
+      continue;
+    }
+    return true;
+  }
+  return false;
 }
 
 function deriveSystemDirs(env: NodeJS.ProcessEnv): ResolvedDirEntry[] {
@@ -850,6 +950,13 @@ export function inspectProjectRootSafety(
   if (isUncOrDevicePath(lexicalCandidate)) {
     return { safe: false, reason: "unc-or-device-path" };
   }
+  // Links whose target is a UNC/device path are rejected before realpathSync follows them.
+  if (LINK_TARGET_INSPECTION_ENABLED) {
+    const inspection = inspectLinkTargets(lexicalCandidate);
+    if (!inspection.ok) {
+      return { safe: false, reason: inspection.reason };
+    }
+  }
 
   let real: string;
   try {
@@ -868,14 +975,23 @@ export function inspectProjectRootSafety(
 
   // 2) Kullanıcı ev dizini ($HOME) ve tüm üst ataları (ör. /home, /Users, C:\Users)
   const rawHome = options.homeDir ?? os.homedir();
+  // Native long-name form of the candidate (8.3 short names expanded) for the
+  // home and sensitive-directory comparisons below.
+  const realNative = resolveNativeRealOrLexical(real);
   if (rawHome.trim().length > 0 && !isUncOrDevicePath(rawHome)) {
     const realHome = resolveRealOrLexical(rawHome);
-    if (isSameComparablePath(real, rawHome) || isSameComparablePath(real, realHome)) {
+    const homeForms = sensitivePathForms(rawHome);
+    if (
+      isSameComparablePath(real, rawHome) ||
+      isSameComparablePath(real, realHome) ||
+      homeForms.some((homeForm) => isSameComparablePath(realNative, homeForm))
+    ) {
       return { safe: false, reason: `user home directory ($HOME) rejected: ${real}` };
     }
     if (
       isSameOrInsideComparable(rawHome, real) ||
-      isSameOrInsideComparable(realHome, real)
+      isSameOrInsideComparable(realHome, real) ||
+      homeForms.some((homeForm) => isSameOrInsideComparable(homeForm, realNative))
     ) {
       return { safe: false, reason: "home-ancestor-directory" };
     }
@@ -907,9 +1023,9 @@ export function inspectProjectRootSafety(
     return { safe: false, reason: "plugin-install-directory" };
   }
 
-  // 5) Hassas kullanıcı kimlik/yapılandırma dizinleri (~/.ssh, ~/.aws, ~/.gnupg, ~/.kube, ~/.claude, ~/.codex, ~/.zcode)
-  const sensitiveEntries = deriveSensitiveUserDirs(rawHome);
-  if (isInsideResolvedDirs(lexicalCandidate, real, sensitiveEntries)) {
+  // 5) Sensitive credential/tool configuration directories (SENSITIVE_HOME_SUBDIRS,
+  //    %APPDATA%, %LOCALAPPDATA%), compared in lexical, realpath and native forms.
+  if (isInsideSensitiveUserDir([lexicalCandidate, real, realNative], rawHome, env)) {
     return { safe: false, reason: "sensitive-directory" };
   }
 
