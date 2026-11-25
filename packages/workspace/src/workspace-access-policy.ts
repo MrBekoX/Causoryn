@@ -2,7 +2,14 @@ import { realpathSync, statSync } from "node:fs";
 import path from "node:path";
 
 import { findMatchingIgnorePattern } from "./ignore-matcher.js";
-import { isUncOrDevicePath } from "./path-safety.js";
+import {
+  describeLinkInspectionFailure,
+  describeWindowsPathSegmentIssue,
+  findWindowsUnsafePathSegment,
+  inspectLinkTargets,
+  isUncOrDevicePath,
+  LINK_TARGET_INSPECTION_ENABLED,
+} from "./path-safety.js";
 import {
   effectiveIgnorePatterns,
   parseWorkspacePolicyConfig,
@@ -34,6 +41,31 @@ import { WorkspacePolicyError, type PolicyErrorCode } from "./policy-error.js";
  */
 
 const IS_WIN = process.platform === "win32";
+
+/**
+ * Volumes that alias names (Windows 8.3 short names and letter case, macOS letter
+ * case) need ignore rules re-applied to the native canonical long-name path:
+ * `fs.realpathSync` keeps the spelling it was given (`GIT~1`, `.GIT`), while
+ * `fs.realpathSync.native` reports the name stored on disk.
+ */
+const CHECK_NATIVE_NAME_ALIASES = IS_WIN || process.platform === "darwin";
+
+/** Upper bound for the per-instance root caches (roots are few in practice). */
+const ROOT_CACHE_CAP = 256;
+
+function nativeRealpath(target: string): string {
+  // Mocked `node:fs` modules may not carry `.native`; fall back to the JS realpath.
+  const native = (realpathSync as { native?: (p: string) => string }).native;
+  return typeof native === "function" ? native(target) : realpathSync(target);
+}
+
+function rememberBounded<V>(cache: Map<string, V>, key: string, value: V): void {
+  if (cache.size >= ROOT_CACHE_CAP) {
+    const oldest = cache.keys().next().value;
+    if (oldest !== undefined) cache.delete(oldest);
+  }
+  cache.set(key, value);
+}
 
 export type PolicyAllow = {
   readonly allowed: true;
@@ -98,9 +130,21 @@ function isLexicalEscape(nativeRelative: string): boolean {
   );
 }
 
+/** Windows-only lexical check shared by root and candidate paths. */
+function windowsSegmentDeny(code: PolicyErrorCode, rawPath: string, label: string): PolicyDeny | undefined {
+  if (!IS_WIN) return undefined;
+  const finding = findWindowsUnsafePathSegment(rawPath);
+  if (finding === undefined) return undefined;
+  return deny(code, `${label}: ${describeWindowsPathSegmentIssue(finding)}`, `windows-${finding.issue}`);
+}
+
 export class WorkspaceAccessPolicy {
   private readonly canonicalRoots: readonly string[];
   private readonly ignorePatterns: readonly string[];
+  /** Root paths whose components were inspected for UNC/device link targets. */
+  private readonly linkSafeRoots = new Map<string, true>();
+  /** canonicalRoot → native canonical (long-name, on-disk case) root. */
+  private readonly nativeRoots = new Map<string, string>();
 
   private constructor(readonly config: WorkspacePolicyConfig) {
     this.canonicalRoots = config.allowRoots.map((root) => {
@@ -109,6 +153,15 @@ export class WorkspaceAccessPolicy {
           "workspace/policy-invalid",
           `allowRoot must not be a UNC or Win32 device path (rejected before filesystem access): ${root}`,
         );
+      }
+      if (LINK_TARGET_INSPECTION_ENABLED) {
+        const inspection = inspectLinkTargets(root);
+        if (!inspection.ok) {
+          throw new WorkspacePolicyError(
+            "workspace/policy-invalid",
+            `allowRoot is not usable: ${describeLinkInspectionFailure(inspection)}`,
+          );
+        }
       }
       try {
         return realpathSync(root);
@@ -152,6 +205,14 @@ export class WorkspaceAccessPolicy {
         "root path must not be a UNC or Win32 device path (rejected before filesystem access)",
         "unc-or-device-path",
       );
+    }
+    const aliasDeny = windowsSegmentDeny("workspace/root-not-authorized", rootPath, "root path is not usable");
+    if (aliasDeny !== undefined) {
+      return aliasDeny;
+    }
+    const linkDeny = this.inspectRootLinks(rootPath);
+    if (linkDeny !== undefined) {
+      return linkDeny;
     }
     let canonical: string;
     try {
@@ -197,6 +258,12 @@ export class WorkspaceAccessPolicy {
         "unc-or-device-path",
       );
     }
+    // 2b) Windows name aliases: `a.pem::$DATA`, `a.pem.`, `a.pem ` and device names
+    //     (NUL, CON, ...) would name a different object than the deny rules see.
+    const aliasDeny = windowsSegmentDeny("workspace/path-denied", candidatePath, "candidate path is not usable");
+    if (aliasDeny !== undefined) {
+      return aliasDeny;
+    }
 
     // 3) Leksik çözümleme: `..` ve mutlak yollar normalize edilir (OWASP: normalize before IO).
     //    `\\?\` aygıt önekleri path işlemlerinden ÖNCE sıyırılır (win32 path.resolve
@@ -228,18 +295,25 @@ export class WorkspaceAccessPolicy {
       );
     }
 
+    // 3b) Links below the (already canonical) root whose target is a UNC/device path
+    //     are rejected from lstat/readlink alone, before any stat/realpath follows them.
+    if (LINK_TARGET_INSPECTION_ENABLED) {
+      const inspection = inspectLinkTargets(absolute, { startDir: rootDecision.canonicalRoot });
+      if (!inspection.ok) {
+        return deny(
+          "workspace/path-denied",
+          `candidate path is not usable: ${describeLinkInspectionFailure(inspection)}`,
+          inspection.reason,
+        );
+      }
+    }
+
     // 4) Ignore kuralları: dosyanın kendisi VE ata dizinleri değerlendirilir.
     const lexicalPosix = toPosixRelative(relative);
     if (lexicalPosix !== ".") {
-      const segments = lexicalPosix.split("/");
-      const isFile = this.existsAsFile(absolute);
-      for (let depth = 1; depth <= segments.length; depth += 1) {
-        const prefix = segments.slice(0, depth).join("/");
-        const isDirectoryCandidate = depth < segments.length || !isFile;
-        const matched = findMatchingIgnorePattern(prefix, isDirectoryCandidate, this.ignorePatterns);
-        if (matched !== undefined) {
-          return deny("workspace/path-denied", "candidate path matches an ignore rule", matched);
-        }
+      const matched = this.matchIgnoreRules(lexicalPosix, absolute);
+      if (matched !== undefined) {
+        return deny("workspace/path-denied", "candidate path matches an ignore rule", matched);
       }
     }
 
@@ -262,19 +336,23 @@ export class WorkspaceAccessPolicy {
     const canonicalRelative = path.relative(rootDecision.canonicalRoot, resolved);
     const canonicalPosix = toPosixRelative(canonicalRelative);
     if (canonicalPosix !== "." && canonicalPosix !== lexicalPosix) {
-      const canonicalSegments = canonicalPosix.split("/");
-      const canonicalIsFile = this.existsAsFile(resolved);
-      for (let depth = 1; depth <= canonicalSegments.length; depth += 1) {
-        const prefix = canonicalSegments.slice(0, depth).join("/");
-        const isDirectoryCandidate = depth < canonicalSegments.length || !canonicalIsFile;
-        const matched = findMatchingIgnorePattern(prefix, isDirectoryCandidate, this.ignorePatterns);
-        if (matched !== undefined) {
-          return deny(
-            "workspace/path-denied",
-            "the canonical real path matches an ignore rule (ignore bypass through a symlink was blocked)",
-            matched,
-          );
-        }
+      const matched = this.matchIgnoreRules(canonicalPosix, resolved);
+      if (matched !== undefined) {
+        return deny(
+          "workspace/path-denied",
+          "the canonical real path matches an ignore rule (ignore bypass through a symlink was blocked)",
+          matched,
+        );
+      }
+    }
+    // 5c) Native long-name re-check: an 8.3 short name (`GIT~1`) or a letter-case
+    //     alias survives `realpathSync` unchanged; the native real path expands it
+    //     to the stored name, so ignore rules see `.git` and containment is
+    //     verified on the same canonical form.
+    if (CHECK_NATIVE_NAME_ALIASES) {
+      const nativeDeny = this.checkNativeNameAliases(rootDecision.canonicalRoot, absolute, canonicalPosix);
+      if (nativeDeny !== undefined) {
+        return nativeDeny;
       }
     }
     // Dönen relativePath canonical'dır: kök içine işaret eden symlink'in
@@ -345,6 +423,102 @@ export class WorkspaceAccessPolicy {
     return decision;
   }
 
+  /**
+   * First ignore rule matching `posixRelative` or any of its ancestors; the last
+   * segment is treated as a directory unless `absoluteForFileCheck` is a file.
+   */
+  private matchIgnoreRules(posixRelative: string, absoluteForFileCheck: string): string | undefined {
+    const segments = posixRelative.split("/");
+    const isFile = this.existsAsFile(absoluteForFileCheck);
+    for (let depth = 1; depth <= segments.length; depth += 1) {
+      const prefix = segments.slice(0, depth).join("/");
+      const isDirectoryCandidate = depth < segments.length || !isFile;
+      const matched = findMatchingIgnorePattern(prefix, isDirectoryCandidate, this.ignorePatterns);
+      if (matched !== undefined) {
+        return matched;
+      }
+    }
+    return undefined;
+  }
+
+  /**
+   * Inspects every component of a root path for UNC/device link targets before the
+   * first realpath/stat. The verdict for a root is cached per instance: the path
+   * down to the root is the user's own environment, while every candidate below
+   * the root is inspected again on each call.
+   */
+  private inspectRootLinks(rootPath: string): PolicyDeny | undefined {
+    if (!LINK_TARGET_INSPECTION_ENABLED) {
+      return undefined;
+    }
+    const key = comparablePath(path.resolve(rootPath));
+    if (this.linkSafeRoots.has(key)) {
+      return undefined;
+    }
+    const inspection = inspectLinkTargets(rootPath);
+    if (!inspection.ok) {
+      return deny(
+        "workspace/root-not-authorized",
+        `root path is not usable: ${describeLinkInspectionFailure(inspection)}`,
+        inspection.reason,
+      );
+    }
+    rememberBounded(this.linkSafeRoots, key, true);
+    return undefined;
+  }
+
+  /** Native canonical form of an authorized canonical root (cached per instance). */
+  private nativeRootOf(canonicalRoot: string): string | undefined {
+    const cached = this.nativeRoots.get(canonicalRoot);
+    if (cached !== undefined) {
+      return cached;
+    }
+    let nativeRoot: string;
+    try {
+      nativeRoot = nativeRealpath(canonicalRoot);
+    } catch {
+      return undefined;
+    }
+    rememberBounded(this.nativeRoots, canonicalRoot, nativeRoot);
+    return nativeRoot;
+  }
+
+  private checkNativeNameAliases(
+    canonicalRoot: string,
+    absolute: string,
+    canonicalPosix: string,
+  ): PolicyDeny | undefined {
+    const nativeRoot = this.nativeRootOf(canonicalRoot);
+    const nativeResolved = this.resolveRealpath(absolute, nativeRealpath);
+    if (nativeRoot === undefined || nativeResolved === undefined) {
+      return deny(
+        "workspace/path-denied",
+        "the native canonical path of the candidate could not be resolved",
+        "native-realpath",
+      );
+    }
+    if (!isInside(nativeRoot, nativeResolved)) {
+      return deny(
+        "workspace/path-denied",
+        "the native canonical path of the candidate escapes the root",
+        "realpath-containment",
+      );
+    }
+    const nativePosix = toPosixRelative(path.relative(nativeRoot, nativeResolved));
+    if (nativePosix === "." || comparablePath(nativePosix) === comparablePath(canonicalPosix)) {
+      return undefined;
+    }
+    const matched = this.matchIgnoreRules(nativePosix, nativeResolved);
+    if (matched === undefined) {
+      return undefined;
+    }
+    return deny(
+      "workspace/path-denied",
+      "the native canonical long-name path matches an ignore rule (a short-name or letter-case alias was blocked)",
+      matched,
+    );
+  }
+
   private existsAsFile(absolutePath: string): boolean {
     try {
       return statSync(absolutePath).isFile();
@@ -367,9 +541,12 @@ export class WorkspaceAccessPolicy {
    * gerçek yolu + kalan segmentler (henüz var olmayan planlanan dosya,
    * symlink'li ata üzerinden kaçışa yine kapatıktır — CWE-59).
    */
-  private resolveRealpath(absolutePath: string): string | undefined {
+  private resolveRealpath(
+    absolutePath: string,
+    realpath: (target: string) => string = realpathSync,
+  ): string | undefined {
     try {
-      return realpathSync(absolutePath);
+      return realpath(absolutePath);
     } catch {
       // yok: ata zincirinde ilerle
     }
@@ -384,7 +561,7 @@ export class WorkspaceAccessPolicy {
       missing.unshift(base);
       prefix = parent;
       try {
-        return path.join(realpathSync(prefix), ...missing);
+        return path.join(realpath(prefix), ...missing);
       } catch {
         // ata da yok: zincire devam
       }
