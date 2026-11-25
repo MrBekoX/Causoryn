@@ -2,7 +2,7 @@
 
 > **Dil / Language:** **Türkçe** | [English](en/architecture.md) · [Dokümantasyon Merkezi](README.md)
 >
-> **Durum:** Causoryn 0.3.0'ı yansıtır (1.0 öncesi; varsayılan `core` araç profili, workspace başına tek paylaşılan `graph.sqlite`, `worker_threads` ile indeksleme). Durum kolonları proje dürüstlük kuralını izler — çalışmayan hiçbir şey Done olarak yazılmaz — ve [Uygulama Durumu](implementation-status.md) ile çapraz denetlenir.
+> **Durum:** Causoryn 0.3.1'i yansıtır (1.0 öncesi; varsayılan `core` araç profili, workspace başına tek paylaşılan `graph.sqlite`, `worker_threads` ile indeksleme). Durum kolonları proje dürüstlük kuralını izler — çalışmayan hiçbir şey Done olarak yazılmaz — ve [Uygulama Durumu](implementation-status.md) ile çapraz denetlenir.
 >
 > **Kapsam:** monorepo **18 npm workspace paketi** içerir (`12 packages/*` + `5 adapters/*` + `1 integrations/zcode/causoryn`; monorepo kökü dahil **19 `package.json` manifesti**); bunlara ek olarak standalone `apps/visualizer`, 4 `native/*` dil sidecar'ı, kökteki 4-host plugin marketplace manifestleri, 5 GitHub Actions iş akışı (`.github/workflows/{ci,release,security,codeql,scorecard}.yml`), `.github/dependabot.yml` ve `integrations/antigravity/causoryn` bulunur. Tarihsel `v0.1.0` etiketi `4c9c188f` üzerinde kilitli kalır.
 

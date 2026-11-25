@@ -2,7 +2,7 @@
 
 > **Language:** [Türkçe](../cli-and-configuration.md) | **English** · [Documentation Hub](README.md)
 >
-> **Status:** reflects Causoryn 0.3.0 (default `core` tool profile, one shared `graph.sqlite` per workspace; see [MCP Tool Contracts](tool-contracts.md) for the tools themselves).
+> **Status:** reflects Causoryn 0.3.1 (default `core` tool profile, one shared `graph.sqlite` per workspace; see [MCP Tool Contracts](tool-contracts.md) for the tools themselves).
 >
 > **Source modules:** `packages/causoryn/src/{cli.ts,setup.ts,doctor.ts,runtime-stage.ts,types.ts}`, `packages/causoryn/scripts/{causoryn.mjs,plugin-mcp-launcher.mjs,lib/node-version-guard.mjs,verify-package-ready.mjs}`, `packages/mcp-server/src/{cli-stdio.ts,stdio.ts,runtime-cli.ts,config.ts,context.ts,workspace-ignore-discovery.ts}`, `packages/workspace/src/{policy-config.ts,path-safety.ts,ignore-matcher.ts,output-policy.ts}`.
 
@@ -12,12 +12,12 @@ This reference covers every `causoryn` CLI subcommand and flag, the MCP tool pro
 
 ## 1. CLI Subcommands & Flags (`causoryn`)
 
-For quick setup and a read-only health check, use `@latest` (an exact pin such as `@0.3.0` also works and is recommended for CI):
+For quick setup and a read-only health check, use `@latest` (an exact pin such as `@0.3.1` also works and is recommended for CI):
 
 ```bash
 npx causoryn@latest setup --yes        # register the MCP server + 5 skills for the hosts detected on this machine
 npx causoryn@latest doctor             # read-only check of Node.js, runtime files, sidecar toolchains and host configs
-# Exact pin: npx causoryn@0.3.0 setup --yes && npx causoryn@0.3.0 doctor
+# Exact pin: npx causoryn@0.3.1 setup --yes && npx causoryn@0.3.1 doctor
 ```
 
 The `causoryn` binary (`packages/causoryn/scripts/causoryn.mjs`) exposes:
@@ -112,7 +112,7 @@ Checked subsystems:
 
 ### 1.4 `causoryn --version` & `causoryn --help`
 
-- `causoryn --version` (also `-v`, `version`): prints the package version (`0.3.0` for this release) and exits `0`.
+- `causoryn --version` (also `-v`, `version`): prints the package version (`0.3.1` for this release) and exits `0`.
 - `causoryn --help` (also `-h`, `help`, or no arguments): prints the usage text above and exits `0`.
 
 ---
@@ -355,25 +355,25 @@ Every child process the MCP server starts (sidecars, `git`, `cargo`; on Windows 
 **Explicit root with the wiki and history tools:**
 
 ```bash
-npx causoryn@0.3.0 mcp --root /work/orders-service --auto-data-dir --client ci --tool-profile wiki,history
+npx causoryn@0.3.1 mcp --root /work/orders-service --auto-data-dir --client ci --tool-profile wiki,history
 ```
 
 **Full legacy catalog with published output schemas, via environment variables:**
 
 ```bash
-CAUSORYN_TOOL_PROFILE=full CAUSORYN_MCP_OUTPUT_SCHEMA_PROFILE=full npx causoryn@0.3.0 mcp --allow-cwd --auto-data-dir
+CAUSORYN_TOOL_PROFILE=full CAUSORYN_MCP_OUTPUT_SCHEMA_PROFILE=full npx causoryn@0.3.1 mcp --allow-cwd --auto-data-dir
 ```
 
 **Root from `CAUSORYN_CONFIG` with an in-memory graph (no data directory, no exports, no wiki):**
 
 ```bash
-CAUSORYN_CONFIG='{"allowRoots":["/work/orders-service"]}' npx causoryn@0.3.0 mcp
+CAUSORYN_CONFIG='{"allowRoots":["/work/orders-service"]}' npx causoryn@0.3.1 mcp
 ```
 
 **Root from `CAUSORYN_CONFIG` with persistence, exports and the wiki:**
 
 ```bash
-CAUSORYN_CONFIG='{"allowRoots":["/work/orders-service"],"results":{"maxDepth":6}}' npx causoryn@0.3.0 mcp --auto-data-dir --tool-profile wiki
+CAUSORYN_CONFIG='{"allowRoots":["/work/orders-service"],"results":{"maxDepth":6}}' npx causoryn@0.3.1 mcp --auto-data-dir --tool-profile wiki
 ```
 
 **Preview and remove:**

@@ -1,6 +1,6 @@
 {
   "name": "causoryn",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Deterministic, local, LLM-free codebase and change intelligence for ZCode (GLM): read-only workspace graphs, architecture maps, preflight checks, post-change verification, and living wiki.",
   "description_i18n": {
     "en": "Deterministic, local, LLM-free codebase and change intelligence for ZCode (GLM): read-only workspace graphs, architecture maps, preflight checks, post-change verification, and living wiki.",
@@ -30,7 +30,7 @@
       "args": [
         "${ZCODE_PLUGIN_ROOT}/scripts/plugin-mcp-launcher.mjs",
         "--expected-version",
-        "0.3.0",
+        "0.3.1",
         "--allow-cwd",
         "--auto-data-dir",
         "--client",

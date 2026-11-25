@@ -1,6 +1,6 @@
 {
   "name": "@causoryn/preflight",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "private": true,
   "license": "MIT",
   "description": "Preflight core: candidate-only change manifests (impact candidates, contract checks, test-plan reference, limitations and a read-only source revision) and deterministic test-plan derivation. It never writes code.",
@@ -9,7 +9,7 @@
     ".": "./src/index.ts"
   },
   "dependencies": {
-    "@causoryn/domain": "0.3.0",
-    "@causoryn/graph": "0.3.0"
+    "@causoryn/domain": "0.3.1",
+    "@causoryn/graph": "0.3.1"
   }
 }

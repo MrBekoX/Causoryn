@@ -2,7 +2,7 @@
 
 > **Dil / Language:** **Türkçe** | [English](../en/hosts/claude-code.md) · [Dokümantasyon Merkezi](../README.md) · [Uyumluluk Matrisi](../compatibility-matrix.md)
 
-> **Durum:** Causoryn 0.3.0'ı yansıtır (11 araçlı varsayılan `core` araç profili; tüm host'lar için workspace başına tek, paylaşılan `graph.sqlite`). Bayrakların tam başvurusu için [CLI ve Konfigürasyon](../cli-and-configuration.md), araç kataloğu için [MCP Araç Sözleşmeleri](../tool-contracts.md) sayfasına bakın.
+> **Durum:** Causoryn 0.3.1'i yansıtır (11 araçlı varsayılan `core` araç profili; tüm host'lar için workspace başına tek, paylaşılan `graph.sqlite`). Bayrakların tam başvurusu için [CLI ve Konfigürasyon](../cli-and-configuration.md), araç kataloğu için [MCP Araç Sözleşmeleri](../tool-contracts.md) sayfasına bakın.
 
 > **Bu sayfa için denetlenen kaynaklar:** `packages/causoryn/src/{setup.ts,doctor.ts,cli.ts}`, `packages/causoryn/scripts/{causoryn.mjs,plugin-mcp-launcher.mjs}`, `packages/causoryn/.claude-plugin/plugin.json`, `.claude-plugin/marketplace.json`, `packages/mcp-server/src/{stdio.ts,cli-stdio.ts,runtime-cli.ts,config.ts}`, `packages/mcp-server/scripts/build-bundle.mjs`.
 
@@ -24,7 +24,7 @@ Bu sayfada kullanılan 0.3.0 kod yollarının otomatik kapsamı: `tests/causoryn
 
 | Yol | Kimin için | Ne çalışır |
 |---|---|---|
-| **A. `npx causoryn@0.3.0 setup`** (önerilen) | Son kullanıcılar | Paketli giriş noktası `scripts/causoryn.mjs mcp --allow-cwd --auto-data-dir --client claude-code`; mutlak Node binary'siyle `~/.claude.json` içine kaydedilir |
+| **A. `npx causoryn@0.3.1 setup`** (önerilen) | Son kullanıcılar | Paketli giriş noktası `scripts/causoryn.mjs mcp --allow-cwd --auto-data-dir --client claude-code`; mutlak Node binary'siyle `~/.claude.json` içine kaydedilir |
 | **B. Claude Code plugin pazaryeri** | `/plugin` akışını tercih eden son kullanıcılar | Kurulu npm paketindeki paketli `plugin-mcp-launcher.mjs` |
 | **C. Elle kayıt** (`.mcp.json` veya `claude mcp add`) | Kaynak checkout üzerinde çalışan katkıcılar | Monorepo bundle `packages/mcp-server/dist/mcp-server.mjs` (yalnızca `CAUSORYN_CONFIG` ile yapılandırılır) |
 
@@ -34,16 +34,16 @@ Bu sayfada kullanılan 0.3.0 kod yollarının otomatik kapsamı: `tests/causoryn
 
 ```bash
 # Hiçbir şey yazmadan planlanan değişiklikleri önizleyin
-npx causoryn@0.3.0 setup --client claude-code --dry-run
+npx causoryn@0.3.1 setup --client claude-code --dry-run
 
 # MCP sunucusunu ~/.claude.json içine kaydedin ve 5 skill'i ~/.claude/skills/ altına kurun
-npx causoryn@0.3.0 setup --client claude-code --yes
+npx causoryn@0.3.1 setup --client claude-code --yes
 
 # Salt okunur sağlık ve hizalama kontrolü
-npx causoryn@0.3.0 doctor --client claude-code
+npx causoryn@0.3.1 doctor --client claude-code
 
 # Temiz kaldırma (mcpServers.causoryn + 5 Causoryn skill'i)
-npx causoryn@0.3.0 setup --client claude-code --uninstall --yes
+npx causoryn@0.3.1 setup --client claude-code --uninstall --yes
 ```
 
 ### `setup --client claude-code` neyi yazar
@@ -98,7 +98,7 @@ npx causoryn@0.3.0 setup --client claude-code --uninstall --yes
 /plugin install causoryn@causoryn
 ```
 
-Kök `.claude-plugin/marketplace.json` bir npm kaynağı beyan eder (`{ "source": "npm", "package": "causoryn", "version": "0.3.0" }`). Kurulu paketin `.claude-plugin/plugin.json` dosyası skill'leri taşır (`"skills": "./skills"`) ve sunucuyu şöyle kaydeder:
+Kök `.claude-plugin/marketplace.json` bir npm kaynağı beyan eder (`{ "source": "npm", "package": "causoryn", "version": "0.3.1" }`). Kurulu paketin `.claude-plugin/plugin.json` dosyası skill'leri taşır (`"skills": "./skills"`) ve sunucuyu şöyle kaydeder:
 
 ```json
 {
@@ -109,7 +109,7 @@ Kök `.claude-plugin/marketplace.json` bir npm kaynağı beyan eder (`{ "source"
       "args": [
         "${CLAUDE_PLUGIN_ROOT}/scripts/plugin-mcp-launcher.mjs",
         "--expected-version",
-        "0.3.0",
+        "0.3.1",
         "--allow-cwd",
         "--auto-data-dir",
         "--client",
@@ -259,7 +259,7 @@ Her Causoryn giriş noktası (`causoryn.mjs mcp`, `plugin-mcp-launcher.mjs` ve �
 | `setup`, `cli/malformed-json` ile duruyor | `~/.claude.json` geçerli JSON değil ya da `mcpServers` bir nesne değil. Dosyayı düzeltin veya `~/.claude.json.causoryn.backup` yedeğini geri yükleyin; hiçbir şey yazılmadı. |
 | `setup` sembolik bir linke yazmayı reddediyor | Sembolik linkli config dosyaları bilinçli olarak reddedilir. `CLAUDE_CONFIG_DIR`'i gerçek dizine yönlendirin ya da linki normal bir dosyayla değiştirin. |
 | `setup` "confirmation required" bildiriyor | `--yes` verilmeden etkileşimsiz kabukta çalıştırıldı. Gözden geçirmek için `--dry-run` ile, ardından `--yes` ile yeniden çalıştırın. |
-| `doctor` giriş betiği için `ERROR` gösteriyor | `~/.causoryn/runtime` ya da orijinal kurulum kaldırılmış. `npx causoryn@0.3.0 setup --client claude-code --yes` komutunu yeniden çalıştırın. |
+| `doctor` giriş betiği için `ERROR` gösteriyor | `~/.causoryn/runtime` ya da orijinal kurulum kaldırılmış. `npx causoryn@0.3.1 setup --client claude-code --yes` komutunu yeniden çalıştırın. |
 | Sunucu açılışta "Unsupported Node.js version" ile çıkıyor | Node.js < 24. Node.js 24+ kurun ve `command` onu göstersin diye `setup`'ı yeniden çalıştırın. |
 | `[causoryn-launcher]` sürüm uyuşmazlığı (çıkış `2`) | Kurulu plugin paketi `--expected-version` ile eşleşmiyor. Plugin'i güncelleyin veya yeniden kurun. |
 | Workspace araçları `WORKSPACE_NOT_AUTHORIZED` döndürüyor | `--allow-cwd` başlangıç dizinini reddetti ve host kullanılabilir bir kök bildirmedi ya da çıplak bundle'da `allowRoots` yok. Bkz. bölüm 4 veya 5.1. |

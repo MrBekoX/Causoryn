@@ -2,7 +2,7 @@
 
 > **Language:** [Türkçe](../../adr/ADR-002-no-llm.md) | **English** · [Documentation Hub](../README.md)
 >
-> **Status:** Accepted — foundational engine boundary, current for Causoryn 0.3.0 (pre-1.0).
+> **Status:** Accepted — foundational engine boundary, current for Causoryn 0.3.1 (pre-1.0).
 > **Dates:** recorded 2026-11-02; re-verified 2026-11-20 and 2026-11-23 (host-written annotations and MCP `.describe()` guidance); reviewed again for 0.3.0 (tool profiles, `worker_threads` indexing).
 
 ## Context

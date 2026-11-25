@@ -2,7 +2,7 @@
 
 > **Language:** [Türkçe](../prompting-and-architecture-portals.md) | **English** · [Documentation Hub](README.md) · [Root README](../../README.md)
 >
-> **Status:** reflects Causoryn 0.3.0. Tool names below are those of the default `core` profile (11 tools); rows marked with a profile need the server to be started with `--tool-profile wiki`, `history` or `full` (see [Tool Profiles](tool-contracts.md#tool-profiles---tool-profile--causoryn_tool_profile)).
+> **Status:** reflects Causoryn 0.3.1. Tool names below are those of the default `core` profile (11 tools); rows marked with a profile need the server to be started with `--tool-profile wiki`, `history` or `full` (see [Tool Profiles](tool-contracts.md#tool-profiles---tool-profile--causoryn_tool_profile)).
 
 This guide explains how to prompt your AI coding agent in natural language to use **Causoryn** both for **purely deterministic, zero-LLM static analysis** and for **host-LLM annotated interactive architecture portals** (`causoryn-architecture-interactive.html`).
 

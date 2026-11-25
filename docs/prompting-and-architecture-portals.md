@@ -2,7 +2,7 @@
 
 > **Dil / Language:** **Türkçe** | [English](en/prompting-and-architecture-portals.md) · [Dokümantasyon Merkezi](README.md) · [Kök README](../README.md)
 >
-> **Durum:** Causoryn 0.3.0'ı yansıtır. Aşağıdaki araç adları varsayılan `core` profilinin (11 araç) adlarıdır; bir profille işaretlenmiş satırlar, sunucunun `--tool-profile wiki`, `history` veya `full` ile başlatılmasını gerektirir (bkz. [Araç Profilleri](tool-contracts.md)).
+> **Durum:** Causoryn 0.3.1'i yansıtır. Aşağıdaki araç adları varsayılan `core` profilinin (11 araç) adlarıdır; bir profille işaretlenmiş satırlar, sunucunun `--tool-profile wiki`, `history` veya `full` ile başlatılmasını gerektirir (bkz. [Araç Profilleri](tool-contracts.md)).
 
 Bu rehber, yapay zekâ kodlama ajanınızı doğal dille yönlendirerek **Causoryn**'i hem **tamamen deterministik, sıfır-LLM statik analiz** için hem de **host LLM anotasyonlu etkileşimli mimari portallar** (`causoryn-architecture-interactive.html`) için nasıl kullanacağınızı açıklar.
 

@@ -1,6 +1,6 @@
 {
   "name": "@causoryn/storage-sqlite",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "private": true,
   "license": "MIT",
   "description": "SQLite + FTS5 graph repository and Living Wiki store: schema, WAL, atomic snapshot publication, symbol search and per-file facts for incremental indexing.",
@@ -9,8 +9,8 @@
     ".": "./src/index.ts"
   },
   "dependencies": {
-    "@causoryn/domain": "0.3.0",
-    "@causoryn/graph": "0.3.0",
+    "@causoryn/domain": "0.3.1",
+    "@causoryn/graph": "0.3.1",
     "better-sqlite3": "^13.2.0"
   }
 }

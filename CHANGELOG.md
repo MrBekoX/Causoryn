@@ -8,17 +8,6 @@ Before `1.0.0`, a breaking change bumps the minor version.
 
 ## [Unreleased]
 
-### Added
-
-- **Commit analysis for the history tools:** `causoryn_compare_architecture` and `causoryn_architecture_timeline` analyze a commit that the local index does not cover from its git objects. The tree is listed and the blobs are read with the hardened read-only git calls (no checkout, nothing written into the workspace), and a scratch in-memory index analyzes the files the workspace rules would index; symlinks, submodules, ignored and secret paths are never read. Commit points have the same symbol-level detail as index points. Source files come from the commit; project and build inputs outside the source inventory (C# `.csproj` / `Directory.Build.props`, installed `node_modules` / NuGet packages) and the workspace rules come from the working tree and the current config. A committed `.causoryn/architecture-snapshot.json` is now only the last fallback.
-- **History cache:** analyzed commits are cached under `<data root>/history/`, only when the data root is outside every workspace root (exclusive temporary file + rename, owner-only mode). The cache key covers the Causoryn and indexing versions, the analyzer fingerprint schema and the workspace rules; corrupt or oversized entries are removed and the commit is analyzed again. A commit analyzed without a language worker is analyzed again once the index has run that worker.
-- **`CAUSORYN_HISTORY_MAX_ANALYSES`:** how many commits one call may analyze fresh (defaults: compare `2`, timeline `4`). Cached commits do not count; points over the budget stay unanalyzed with `analysis-budget-exceeded`, and the next call continues from the cache. Internal seams: `IndexServiceOptions.inventorySource` (an in-memory inventory for the async index run) and `ContextOverrides.historyMaxFreshAnalyses`.
-
-### Fixed
-
-- **History tools in repositories without committed snapshots:** compare `HEAD~1` → `HEAD` failed with `INVALID_REVISION` (`manifest-not-found`) and every timeline point stayed unanalyzed unless `.causoryn/architecture-snapshot.json` was committed at each ref. Those commits are now analyzed from their git objects (see Added). The engine's own analysis also takes precedence over a committed snapshot file, which is used only as the last fallback with its trust warning.
-- **`causoryn_find_symbols` ranking:** project symbols now rank ahead of `UnknownExternal` placeholders (calls into code outside the workspace) below the exact-match tier. Previously a loose query such as `Service` returned prefix-matching placeholders like `service.get` first and the project's own `IBasicCacheService` only at position 27 on a real repository. Exact matches keep their place; `kind: "UnknownExternal"` queries are unchanged. The `0.3.0` notes said placeholders were dropped whenever project symbols match; only placeholders that share a project symbol's name are dropped, and that sentence is corrected below.
-
 ### Remaining 1.0.0 Release Gates (Pre-1.0 Honesty Policy — `1.0.0` Not Declared)
 
 `1.0.0` will not be declared until the open gates below are closed (see [`docs/en/implementation-status.md`](docs/en/implementation-status.md) and [`docs/en/BACKLOG.md`](docs/en/BACKLOG.md)):
@@ -35,6 +24,23 @@ Before `1.0.0`, a breaking change bumps the minor version.
 - Real-browser acceptance run of the offline visualizer (`apps/visualizer`); the `causoryn_export_documentation(format="html", view="interactive")` MCP surface has been available since `0.2.2`.
 - Bundle fidelity decision for the bare monorepo bundle's default lib (`.d.ts`) files (`packages/causoryn` already ships `dist/typescript-lib/lib*.d.ts` and reaches `state: "ready"`; the bare `packages/mcp-server/dist/` bundle does not include them).
 - Rate-limit/concurrency resource budget enforcement across concurrent MCP requests (currently out of scope). Already closed: the dedicated secret-scan gate (`scripts/secret-scan.mjs` over 13 directory roots + 13 root files) and `npm audit` with **0 vulnerabilities**.
+
+## [0.3.1] - 2026-11-25
+
+### Release Decision
+
+**`0.3.1` is a Pre-1.0 patch release — explicitly NOT `1.0.0`.** It fixes `causoryn_find_symbols` ranking and lets the history tools analyze commits without committed architecture snapshots; the MCP tool surface, envelope schema and configuration stay compatible with `0.3.0`, so no migration is needed. Root `package.json`, every workspace package, `packages/causoryn/package.json`, `SERVER_VERSION`, `INDEXING_VERSION`, `server.json`, and the four host marketplace/plugin manifests are kept in sync at `0.3.1`. The open gates under `[Unreleased]` keep `1.0.0` closed.
+
+### Added
+
+- **Commit analysis for the history tools:** `causoryn_compare_architecture` and `causoryn_architecture_timeline` analyze a commit that the local index does not cover from its git objects. The tree is listed and the blobs are read with the hardened read-only git calls (no checkout, nothing written into the workspace), and a scratch in-memory index analyzes the files the workspace rules would index; symlinks, submodules, ignored and secret paths are never read. Commit points have the same symbol-level detail as index points. Source files come from the commit; project and build inputs outside the source inventory (C# `.csproj` / `Directory.Build.props`, installed `node_modules` / NuGet packages) and the workspace rules come from the working tree and the current config. A committed `.causoryn/architecture-snapshot.json` is now only the last fallback.
+- **History cache:** analyzed commits are cached under `<data root>/history/`, only when the data root is outside every workspace root (exclusive temporary file + rename, owner-only mode). The cache key covers the Causoryn and indexing versions, the analyzer fingerprint schema and the workspace rules; corrupt or oversized entries are removed and the commit is analyzed again. A commit analyzed without a language worker is analyzed again once the index has run that worker.
+- **`CAUSORYN_HISTORY_MAX_ANALYSES`:** how many commits one call may analyze fresh (defaults: compare `2`, timeline `4`). Cached commits do not count; points over the budget stay unanalyzed with `analysis-budget-exceeded`, and the next call continues from the cache. Internal seams: `IndexServiceOptions.inventorySource` (an in-memory inventory for the async index run) and `ContextOverrides.historyMaxFreshAnalyses`.
+
+### Fixed
+
+- **History tools in repositories without committed snapshots:** compare `HEAD~1` → `HEAD` failed with `INVALID_REVISION` (`manifest-not-found`) and every timeline point stayed unanalyzed unless `.causoryn/architecture-snapshot.json` was committed at each ref. Those commits are now analyzed from their git objects (see Added). The engine's own analysis also takes precedence over a committed snapshot file, which is used only as the last fallback with its trust warning.
+- **`causoryn_find_symbols` ranking:** project symbols now rank ahead of `UnknownExternal` placeholders (calls into code outside the workspace) below the exact-match tier. Previously a loose query such as `Service` returned prefix-matching placeholders like `service.get` first and the project's own `IBasicCacheService` only at position 27 on a real repository. Exact matches keep their place; `kind: "UnknownExternal"` queries are unchanged. The `0.3.0` notes said placeholders were dropped whenever project symbols match; only placeholders that share a project symbol's name are dropped, and that sentence is corrected below.
 
 ## [0.3.0] - 2026-11-24
 

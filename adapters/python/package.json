@@ -1,6 +1,6 @@
 {
   "name": "@causoryn/adapter-python",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "private": true,
   "license": "MIT",
   "description": "Python language adapter: runs the stdlib ast sidecar worker with request timeouts and an L0/L1 fallback.",
@@ -9,7 +9,7 @@
     ".": "./src/index.ts"
   },
   "dependencies": {
-    "@causoryn/domain": "0.3.0",
-    "@causoryn/sidecar-ipc": "0.3.0"
+    "@causoryn/domain": "0.3.1",
+    "@causoryn/sidecar-ipc": "0.3.1"
   }
 }

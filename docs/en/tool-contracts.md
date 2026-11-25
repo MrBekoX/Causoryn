@@ -2,7 +2,7 @@
 
 > **Language:** [Türkçe](../tool-contracts.md) | **English** · [Documentation Hub](README.md)
 >
-> **Status:** reflects Causoryn 0.3.0 (default `core` tool profile with 11 tools; `wiki`, `history` and `full` are opt-in via `--tool-profile`). See [CLI & Configuration](cli-and-configuration.md) for how the server is started.
+> **Status:** reflects Causoryn 0.3.1 (default `core` tool profile with 11 tools; `wiki`, `history` and `full` are opt-in via `--tool-profile`). See [CLI & Configuration](cli-and-configuration.md) for how the server is started.
 >
 > **Source of truth:** `packages/mcp-server/src/version.ts` (`CORE_TOOL_NAMES`, `WIKI_TOOL_NAMES`, `HISTORY_TOOL_NAMES`, `TOOL_NAMES`, `DEPRECATED_TOOL_REPLACEMENTS`), `packages/mcp-server/src/server.ts` (registrations, profile resolution, annotations, deprecation and indexing envelopes), `packages/mcp-server/src/schemas.ts` (wire input schemas), `packages/mcp-server/src/services*.ts` (handlers and data schemas), `packages/mcp-server/src/errors.ts` (fixed error table), `packages/mcp-server/src/envelope.ts`, `packages/mcp-server/src/runtime-cli.ts`. Verification: `tests/release-docs.test.ts` checks that the tables below list exactly the 11 core tools and exactly the 29 legacy/full tools; `tests/mcp-tool-surface-budget.test.ts` checks the core `tools/list` budget.
 
