@@ -29,6 +29,11 @@ const config = {
     // in-memory tests then see multi-second scheduling stalls). Tests that need
     // a precise limit set their own; a real hang still fails.
     testTimeout: 20_000,
+    // CI runners have 4 vCPUs, and many suites start heavy child processes
+    // (.NET Roslyn, cargo, go, python, MCP servers) on top of the test workers,
+    // which starved timing-sensitive tests. On CI: at most 2 test workers, and a
+    // failed test is retried once (the reporter still lists retried tests).
+    ...(process.env["CI"] === "true" ? { maxWorkers: 2, retry: 1 } : {}),
   },
 };
 
