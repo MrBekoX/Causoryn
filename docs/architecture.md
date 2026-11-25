@@ -128,7 +128,7 @@ flowchart TD
 | `apps/visualizer` | Sıfır bağımlılıklı çevrimdışı HTML+SVG graph viewer üretici (inline CSS/JS, katı CSP, resolution renk kodlaması, seçimden evidence'a panel) | Partial: DOM düzeyinde Vitest ve statik incelemeyle doğrulandı; gerçek bir headless tarayıcı koşusu yapılmadı |
 | `integrations/zcode/causoryn` | ZCode geliştirici plugin paketi: `.zcode-plugin/plugin.json` (`mcpServers` + `userConfig`), skill'ler, geliştirme marketplace'i (`.claude-plugin/marketplace.json`) | Partial: manifestler testlerle doğrulandı; canlı bir ZCode GUI kurulumu yapılmadı |
 | `integrations/antigravity/causoryn` | Antigravity plugin dizini: `plugin.json`, `mcp_config.json` (birincil yerel yükleyici yapılandırması), `mcp.json` (taşınabilir manifest), `README.md` ve `build:bundle` ile sahnelenen `scripts/mcp-server.mjs` + `scripts/index-worker.mjs` + vendored `better-sqlite3` | Partial: doğrudan `stdio` el sıkışması doğrulandı; `agy` CLI kurulum/smoke NOT RUN |
-| `scripts/` | `scripts/secret-scan.mjs` (13 dizin kökü + 13 kök metin dosyası), `scripts/generate-sbom.mjs` (CycloneDX 1.5 SBOM + `SHA256SUMS.txt`), `scripts/export-public-tree.mjs` (sızıntı doğrulamalı temiz açık kaynak ağacı dışa aktarımı) | Done |
+| `scripts/` | `scripts/secret-scan.mjs` (izlenen ve yok sayılmayan izlenmeyen her dosya; ortak tarayıcı `scripts/lib/leak-scan.mjs`), `scripts/generate-sbom.mjs` (CycloneDX 1.5 SBOM + `SHA256SUMS.txt`), `scripts/export-public-tree.mjs` (sızıntı doğrulamalı temiz açık kaynak ağacı dışa aktarımı) | Done |
 | `examples/fixture-*` (8 dizin) | Deterministik fixture'lar: `ts-orders`, `ts-express`, `ts-nextjs`, `csharp-orders`, `contract-drift`, `python-app`, `go-app`, `rust-app` | Done |
 | `tests/` | Entegrasyon, smoke, paketlenmiş bundle güvenliği, araç zinciri izolasyonu, benchmark, secret-scan, açık ağaç dışa aktarımı, SBOM/release iş akışı, dağıtım ve iki dilli doküman paritesi süitleri | Done (`tests/bench-release` varsayılan koşudan hariç tutulur) |
 
@@ -218,7 +218,7 @@ TypeScript `5.9.3` sabitlenmiştir, çünkü `typescript-eslint` `typescript >=4
 - `npm run build:package` (`--workspace packages/causoryn`) + `node packages/causoryn/scripts/verify-package-ready.mjs` -> yayımlanabilir paketi sahneler ve doğrular.
 - `npm run typecheck` -> `tsc -p tsconfig.typecheck.json` (`packages/*` ve `adapters/*` kaynakları ve testleri, `tests/**`, `integrations/*/causoryn/test`, `apps/*/src` ve Vitest config'leri üzerinde `noEmit`).
 - `npm run lint` -> ESLint flat config (`typescript-eslint` recommended).
-- `npm run secret-scan` -> `node scripts/secret-scan.mjs`, 13 dizin kökünü ve 13 kök metin dosyasını kimlik bilgileri, API token'ları, kişisel e-postalar ve yerel kullanıcı profili yolları için tarar; herhangi bir eşleşmede veya eksik kökte `1` koduyla çıkar.
+- `npm run secret-scan` -> `node scripts/secret-scan.mjs`, izlenen ve yok sayılmayan izlenmeyen her dosyayı (en az 13 dizin kökü ve 13 kök metin dosyası) kimlik bilgileri, API token'ları, kişisel e-postalar ve yerel kullanıcı profili yolları için tarar; herhangi bir eşleşmede veya eksik kökte `1` koduyla çıkar.
 - Modül çözümlemesi `NodeNext`'tir: göreli TypeScript importları açık `.js` belirteçleri kullanır.
 
 ## İlgili belgeler
