@@ -21,13 +21,13 @@
  *
  * C6 desenleri (packages/graph/src/export.ts) KOPYALA-UYARLA, bağımlılıksız:
  * - escapeHtml: aynı karakter kümesi (&, <, >, ", ').
- * - Kısıtlayıcı CSP meta: C6'daki `default-src 'none'; style-src
- *   'unsafe-inline'; base-uri 'none'; form-action 'none'` tabanına BİR
- *   istisna eklenir: `script-src 'unsafe-inline'`. Gerekçe: TŞ §16 viewer'ı
- *   ETKİLEŞİMLİDİR (selection → get_evidence akışı); bu akış çevrimdışı
- *   gömülü betikle sağlanır. CSP yine TÜM yükleme yollarını kapatır:
- *   img/font/connect/frame/media 'none'dan türer (default-src), yalnızca
- *   belge İÇİNDEKİ statik betik ve stil çalışır. Harici kaynak sıfırdır.
+ * - Restrictive CSP meta: `default-src 'none'; base-uri 'none';
+ *   form-action 'none'` plus SHA-256 hash sources for the embedded blocks:
+ *   `script-src 'sha256-…'` (the viewer is interactive: selection →
+ *   evidence panel, served by one static inline script) and
+ *   `style-src 'sha256-…'` (one static inline stylesheet). No
+ *   'unsafe-inline'; every load path stays closed and no external source
+ *   is used.
  * - Kanonik sıra: node/edge/evidence/wiki sayfaları id'ye göre bayt-artan
  *   sıralanır; aynı girdi iki koşumda bit-bit aynı HTML üretir (TŞ §8
  *   invariant vi'nin viewer karşılığı; girdi dizi sırasından bağımsız).
@@ -46,13 +46,15 @@
  *   innerHTML YOK, fetch/XHR YOK).
  *
  * Katman sözleşmesi: SAF FONKSİYON — bu modül fs/ağ/saat/rastgelelik
- * okumaz, girdiyi mutate etmez, hiçbir @causoryn/* paketini import etmez
+ * okumaz (node:crypto only hashes the static blocks for the CSP), girdiyi mutate etmez, hiçbir @causoryn/* paketini import etmez
  * (apps/ workspaces dışıdır; yapısal tipler yerel tanımlıdır, domain tipleri
  * yapısal olarak uyumludur). Herhangi bir orkestrasyon katmanı bu fonksiyonu
  * çağırıp çıktıyı izinli output dizinine yazabilir (TŞ §16 "Viewer server
  * dışında ayrıca paketlenebilir"; yazma yetkilendirmesi OutputAccessPolicy
  * katmanının işidir — burada tekrarlanmaz).
  */
+
+import { createHash } from "node:crypto";
 
 /* ------------------------------------------------------------------ */
 /* Hata türü                                                           */
@@ -166,15 +168,6 @@ export interface ViewerInput {
 /* ------------------------------------------------------------------ */
 /* Sabitler                                                            */
 /* ------------------------------------------------------------------ */
-
-/**
- * Kısıtlayıcı offline CSP (C6 tabanı + çevrimdışı etkileşim istisnası).
- * default-src 'none': img/font/connect/frame/media/worker dahil TÜM
- * yükleme yolları kapalıdır; script-src/style-src 'unsafe-inline' yalnızca
- * belge içi gömülü betik ve stil için gereklidir. Harici köken sıfırdır.
- */
-export const VIEWER_CSP_POLICY =
-  "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'";
 
 /** Çözüm seviyesi renkleri: verified=yeşil, heuristic=sarı, unresolved=gri. */
 const RESOLUTION_COLORS: Readonly<Record<ViewerResolution, string>> = {
@@ -740,6 +733,26 @@ const VIEWER_CSS = [
 ].join("\n");
 
 /* ------------------------------------------------------------------ */
+/* Content Security Policy                                             */
+/* ------------------------------------------------------------------ */
+
+/** CSP hash source for one inline block: base64 SHA-256 of its exact text. */
+function cspHashSource(blockText: string): string {
+  return `'sha256-${createHash("sha256").update(blockText, "utf8").digest("base64")}'`;
+}
+
+/**
+ * Restrictive offline CSP. default-src 'none' closes every load path
+ * (img/font/connect/frame/media/worker); script-src and style-src allow
+ * exactly the two embedded blocks by SHA-256 hash, so no other inline
+ * script, event handler or style can run ('unsafe-inline' is not used).
+ * Both blocks are static constants, which keeps the policy deterministic.
+ * The `<script type="application/json">` data island is not executable and
+ * needs no script permission.
+ */
+export const VIEWER_CSP_POLICY = `default-src 'none'; script-src ${cspHashSource(VIEWER_APP_JS)}; style-src ${cspHashSource(VIEWER_CSS)}; base-uri 'none'; form-action 'none'`;
+
+/* ------------------------------------------------------------------ */
 /* Statik bölümler                                                     */
 /* ------------------------------------------------------------------ */
 
@@ -849,9 +862,8 @@ export function generateViewerHtml(input: ViewerInput): string {
   lines.push('<meta name="viewport" content="width=device-width, initial-scale=1">');
   lines.push('<meta name="referrer" content="no-referrer">');
   lines.push("<title>Causoryn Architecture Viewer</title>");
-  lines.push("<style>");
-  lines.push(VIEWER_CSS);
-  lines.push("</style>");
+  // Each block's text must equal its hashed constant byte for byte (CSP hash).
+  lines.push(`<style>${VIEWER_CSS}</style>`);
   lines.push("</head>");
   lines.push("<body>");
   lines.push("<h1>Causoryn Architecture Viewer</h1>");
@@ -881,9 +893,7 @@ export function generateViewerHtml(input: ViewerInput): string {
   lines.push('<script id="causoryn-data" type="application/json">');
   lines.push(islandJson);
   lines.push("</script>");
-  lines.push("<script>");
-  lines.push(VIEWER_APP_JS);
-  lines.push("</script>");
+  lines.push(`<script>${VIEWER_APP_JS}</script>`);
   lines.push(
     "<noscript><p>The evidence panel needs scripts enabled; no network requests are made.</p></noscript>",
   );
