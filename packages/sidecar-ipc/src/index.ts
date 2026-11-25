@@ -17,7 +17,12 @@ import { existsSync } from "node:fs";
 import path from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import { fileURLToPath } from "node:url";
-import { isFullyQualifiedPath, resolveExecutable, sanitizePathValue } from "./executable.js";
+import {
+  isFullyQualifiedPath,
+  resolveExecutable,
+  sanitizePathValue,
+  withoutCwdExecutableSearch,
+} from "./executable.js";
 
 export {
   collectUntrustedRoots,
@@ -30,12 +35,83 @@ export {
   sanitizePathValue,
   trustedSearchDirectories,
   trustedWorkingDirectory,
+  withoutCwdExecutableSearch,
   type ExecutableSearchEnv,
   type ResolveExecutableOptions,
 } from "./executable.js";
 
 /** Tek yanıt satırı ve stderr birikimi için varsayılan karakter bütçesi (64 MiB). */
 export const DEFAULT_RESPONSE_MAX_CHARS = 64 * 1024 * 1024;
+
+/**
+ * How long a tree-kill hook may run before the direct kill is applied anyway
+ * (a hung `taskkill` must not leave the worker running).
+ */
+export const DEFAULT_KILL_FALLBACK_MS = 5_000;
+
+/**
+ * Tree-kill hook: terminates the child's whole process tree (e.g. Windows
+ * `taskkill /T /F`). It may return a promise that settles once the tree
+ * kill has finished.
+ */
+export type ProcessTreeKill = (child: ChildProcess) => void | PromiseLike<void>;
+
+function isPromiseLike(value: unknown): value is PromiseLike<void> {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    typeof (value as { then?: unknown }).then === "function"
+  );
+}
+
+/**
+ * Terminates a running child process. Without a tree-kill hook the child is
+ * killed directly. With a hook, the hook runs FIRST and the direct kill only
+ * follows once the hook has settled (or after `fallbackMs`, or right away
+ * when the hook throws or returns nothing): killing the parent first would
+ * leave its own children without a live parent, and `taskkill /T` can then
+ * no longer find them. Never throws.
+ */
+export function terminateChildProcess(
+  child: ChildProcess,
+  treeKill?: ProcessTreeKill,
+  fallbackMs: number = DEFAULT_KILL_FALLBACK_MS,
+): void {
+  const directKill = (): void => {
+    if (child.exitCode !== null || child.signalCode !== null) return;
+    try {
+      child.kill();
+    } catch {
+      // The process is already gone or cannot be signalled.
+    }
+  };
+  if (treeKill === undefined) {
+    directKill();
+    return;
+  }
+  let pending: void | PromiseLike<void>;
+  try {
+    pending = treeKill(child);
+  } catch {
+    directKill();
+    return;
+  }
+  if (!isPromiseLike(pending)) {
+    directKill();
+    return;
+  }
+  let settled = false;
+  const afterTreeKill = (): void => {
+    if (settled) return;
+    settled = true;
+    clearTimeout(fallbackTimer);
+    directKill();
+  };
+  // Both callbacks run asynchronously, after fallbackTimer is initialized.
+  const fallbackTimer = setTimeout(afterTreeKill, fallbackMs);
+  fallbackTimer.unref();
+  Promise.resolve(pending).then(afterTreeKill, afterTreeKill);
+}
 
 /** Worker spawn seçenekleri; shell her zaman kapalıdır, cwd yalnızca tanımlıyken eklenir. */
 export interface SidecarSpawnOptions {
@@ -79,8 +155,13 @@ export interface RunLineJsonWorkerInput {
   readonly stderrMaxChars?: number;
   /** Test enjeksiyonu; default node:child_process.spawn. */
   readonly spawnProcess?: SidecarSpawnFunction;
-  /** Çalışmakta olan çocuk süreç sonlandırılırken çağrılan ek temizlik kancası. */
-  readonly onKillChild?: (child: ChildProcess) => void;
+  /**
+   * Tree-kill hook used when a still-running child is terminated; it runs
+   * before the direct kill (see terminateChildProcess).
+   */
+  readonly onKillChild?: ProcessTreeKill;
+  /** Delay before the direct kill when onKillChild has not settled; default DEFAULT_KILL_FALLBACK_MS. */
+  readonly killFallbackMs?: number;
 }
 
 export interface ResolveCausorynAssetRootOptions {
@@ -243,8 +324,7 @@ export function runLineJsonWorker(
         closing.exitCode === null &&
         closing.signalCode === null
       ) {
-        closing.kill();
-        input.onKillChild?.(closing);
+        terminateChildProcess(closing, input.onKillChild, input.killFallbackMs);
       }
       closing?.removeAllListeners();
       closing?.stdout?.removeAllListeners();
@@ -253,18 +333,19 @@ export function runLineJsonWorker(
       resolveOutcome(outcome);
     };
 
+    const childEnv = withoutCwdExecutableSearch(input.env);
     const spawnOptions: SidecarSpawnOptions =
       input.cwd !== undefined
         ? {
             stdio: ["pipe", "pipe", "pipe"],
-            env: input.env,
+            env: childEnv,
             cwd: input.cwd,
             shell: false,
             windowsHide: true,
           }
         : {
             stdio: ["pipe", "pipe", "pipe"],
-            env: input.env,
+            env: childEnv,
             shell: false,
             windowsHide: true,
           };

@@ -17,7 +17,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   buildAllowlistedWorkerEnv,
   resolveCausorynAssetRoot,
@@ -553,9 +553,14 @@ describe("runLineJsonWorker", () => {
       "stdio",
       "windowsHide",
     ]);
+    // win32 children additionally get NoDefaultCurrentDirectoryInExePath=1.
+    const expectedEnv =
+      process.platform === "win32"
+        ? { PATH: "/bin", NoDefaultCurrentDirectoryInExePath: "1" }
+        : { PATH: "/bin" };
     expect(firstOpts).toEqual({
       stdio: ["pipe", "pipe", "pipe"],
-      env: { PATH: "/bin" },
+      env: expectedEnv,
       shell: false,
       windowsHide: true,
     });
@@ -563,7 +568,7 @@ describe("runLineJsonWorker", () => {
     expect("cwd" in secondOpts).toBe(true);
     expect(secondOpts).toEqual({
       stdio: ["pipe", "pipe", "pipe"],
-      env: { PATH: "/bin" },
+      env: expectedEnv,
       cwd: "/repo/native/go-worker",
       shell: false,
       windowsHide: true,
@@ -793,5 +798,120 @@ describe("resolveCausorynAssetRoot", () => {
     } finally {
       rmSync(tmpDir, { recursive: true, force: true });
     }
+  });
+});
+
+describe("runLineJsonWorker process termination and child environment", () => {
+  const IS_WIN = process.platform === "win32";
+
+  it("runs the tree-kill hook BEFORE the direct kill and kills directly only once the hook has settled", async () => {
+    const events: string[] = [];
+    const fake = createFakeChild({ pid: 9101 });
+    const record = fake.child as unknown as Record<string, unknown>;
+    record["kill"] = (): boolean => {
+      events.push("direct-kill");
+      fake.killCount += 1;
+      record["killed"] = true;
+      return true;
+    };
+    let releaseHook: () => void = () => {};
+    const hookDone = new Promise<void>((resolve) => {
+      releaseHook = resolve;
+    });
+
+    const outcome = await runLineJsonWorker({
+      command: WORKER_COMMAND,
+      args: [],
+      env: {},
+      requestPayload: { id: "tree-kill-order" },
+      requestTimeoutMs: 50,
+      spawnProcess: () => fake.child,
+      onKillChild: () => {
+        events.push("tree-kill");
+        return hookDone;
+      },
+    });
+
+    expect(outcome.status).toBe("timeout");
+    // The parent must still be alive while the tree kill enumerates its children.
+    expect(events).toEqual(["tree-kill"]);
+    expect(fake.killCount).toBe(0);
+
+    releaseHook();
+    await vi.waitFor(() => {
+      expect(events).toEqual(["tree-kill", "direct-kill"]);
+    });
+    expect(fake.killCount).toBe(1);
+  });
+
+  it("applies the direct kill after the fallback delay when the tree-kill hook never settles", async () => {
+    const fake = createFakeChild({ pid: 9102 });
+    const outcome = await runLineJsonWorker({
+      command: WORKER_COMMAND,
+      args: [],
+      env: {},
+      requestPayload: { id: "tree-kill-hang" },
+      requestTimeoutMs: 50,
+      killFallbackMs: 80,
+      spawnProcess: () => fake.child,
+      onKillChild: () => new Promise<void>(() => {}),
+    });
+    expect(outcome.status).toBe("timeout");
+    expect(fake.killCount).toBe(0);
+    await vi.waitFor(() => {
+      expect(fake.killCount).toBe(1);
+    });
+  });
+
+  it("still kills the child directly when the tree-kill hook throws or is absent", async () => {
+    const throwing = createFakeChild({ pid: 9103 });
+    await runLineJsonWorker({
+      command: WORKER_COMMAND,
+      args: [],
+      env: {},
+      requestPayload: { id: "tree-kill-throws" },
+      requestTimeoutMs: 50,
+      spawnProcess: () => throwing.child,
+      onKillChild: () => {
+        throw new Error("taskkill unavailable");
+      },
+    });
+    expect(throwing.killCount).toBe(1);
+
+    const plain = createFakeChild({ pid: 9104 });
+    await runLineJsonWorker({
+      command: WORKER_COMMAND,
+      args: [],
+      env: {},
+      requestPayload: { id: "no-tree-kill" },
+      requestTimeoutMs: 50,
+      spawnProcess: () => plain.child,
+    });
+    expect(plain.killCount).toBe(1);
+  });
+
+  it("disables the Windows cwd-first executable search in every child environment (POSIX env unchanged)", async () => {
+    const captured: SidecarSpawnOptions[] = [];
+    const fake = createFakeChild();
+    await runLineJsonWorker({
+      command: WORKER_COMMAND,
+      args: [],
+      env: { PATH: "/bin", NODEFAULTCURRENTDIRECTORYINEXEPATH: "0" },
+      requestPayload: { id: "child-env" },
+      requestTimeoutMs: 5_000,
+      spawnProcess: (_cmd, _args, options) => {
+        captured.push(options);
+        queueMicrotask(() => {
+          fake.stdout.emit("data", Buffer.from('{"ok":true}\n', "utf8"));
+        });
+        return fake.child;
+      },
+    });
+    expect(captured).toHaveLength(1);
+    expect(captured[0]?.env).toEqual(
+      IS_WIN
+        ? { PATH: "/bin", NoDefaultCurrentDirectoryInExePath: "1" }
+        : { PATH: "/bin", NODEFAULTCURRENTDIRECTORYINEXEPATH: "0" },
+    );
   });
 });

@@ -322,6 +322,27 @@ export function trustedWorkingDirectory(
 }
 
 /**
+ * Copy of a child environment in which Windows' cwd-first executable search
+ * is disabled (`NoDefaultCurrentDirectoryInExePath=1`, any other spelling of
+ * the key is replaced) for the processes the child itself starts. Defence in
+ * depth: Causoryn only starts absolute paths, but a toolchain may start
+ * helpers by bare name from a directory it does not control. On other
+ * platforms the copy is unchanged.
+ */
+export function withoutCwdExecutableSearch(
+  env: Readonly<Record<string, string>>,
+  platform: NodeJS.Platform = process.platform,
+): Record<string, string> {
+  const next: Record<string, string> = { ...env };
+  if (platform !== "win32") return next;
+  for (const key of Object.keys(next)) {
+    if (key.toUpperCase() === "NODEFAULTCURRENTDIRECTORYINEXEPATH") delete next[key];
+  }
+  next["NoDefaultCurrentDirectoryInExePath"] = "1";
+  return next;
+}
+
+/**
  * Absolute path of a Windows system tool such as `taskkill.exe`:
  * `%SystemRoot%\System32\<fileName>`, falling back to
  * `C:\Windows\System32\<fileName>` when SystemRoot is missing or malformed.
