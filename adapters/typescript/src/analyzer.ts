@@ -466,18 +466,18 @@ function runAnalysis(input: TypeScriptAdapterInput): AnalysisRun {
   const compilerOptions = buildProgramCompilerOptions(loadedConfigs.configs);
   const resolvedLibDir = resolveTypeScriptLibDir();
   const host = createCompilerHostWithDefaultLib(compilerOptions, resolvedLibDir);
-  /**
-   * SEC-04: CompilerHost + ModuleResolutionHost disk fallback'i kesinlikle
-   * sınırlandırılır — `entries` (WorkspaceAccessPolicy izinli kaynaklar)
-   * dışındaki workspace dosyaları (.env.js, ../outside-secret.js, symlink,
-   * bundle vb.) diskten ASLA okunmaz.
-   */
+  /* SEC-04: workspace files outside `entries` (the sources allowed by the
+   * WorkspaceAccessPolicy) are never read from disk (.env.js, ../secret.js,
+   * links, bundles, ...); node_modules declarations skipped by the confined
+   * host are reported as warnings. */
+  const hostWarnings: string[] = [];
   const resolutionHost = configureConfinedCompilerHost(
     host,
     entries,
     rootPosix,
     resolvedLibDir,
     moduleFormat.projections,
+    { addWarning: (message) => hostWarnings.push(message) },
   );
   const resolveOne = (
     moduleName: string,
@@ -519,7 +519,7 @@ function runAnalysis(input: TypeScriptAdapterInput): AnalysisRun {
   }
 
   const assembler = new GraphAssembler(input.workspaceId);
-  for (const warning of [...loadedConfigs.warnings, ...loadedPackages.warnings, ...moduleFormat.warnings]) assembler.addWarning(warning);
+  for (const warning of [...loadedConfigs.warnings, ...loadedPackages.warnings, ...moduleFormat.warnings, ...hostWarnings]) assembler.addWarning(warning);
   const context: AnalysisContext = {
     workspaceId: input.workspaceId,
     compilerOptions,
@@ -2620,13 +2620,69 @@ function buildPackageJsonProjections(
   return projections;
 }
 
+// Imported here (imports are hoisted) so line numbers pinned by tests above stay stable.
+import {
+  classifyLinkTarget,
+  createNodeConfinedFsProbe,
+  isSafePathSegment,
+  isUncDeviceOrNtPath,
+  MAX_CONFINED_DISK_FILE_BYTES,
+  MAX_CONFINED_DISK_TOTAL_BYTES,
+  MAX_CONFINED_LINK_HOPS,
+  type ConfinedFsProbe,
+  type ConfinedFsStat,
+} from "./confined-fs.js";
+
+/** Options of `configureConfinedCompilerHost`; the defaults are used in production. */
+export interface ConfinedCompilerHostOptions {
+  /** File system probe (default: `node:fs`; tests inject an in-memory probe). */
+  readonly fs?: ConfinedFsProbe;
+  /** Per-file disk read limit in bytes (default MAX_CONFINED_DISK_FILE_BYTES). */
+  readonly maxDiskFileBytes?: number;
+  /** Total disk read budget in bytes for this host (default MAX_CONFINED_DISK_TOTAL_BYTES). */
+  readonly maxDiskTotalBytes?: number;
+  /** Receives one English warning per skipped declaration file / exhausted budget. */
+  readonly addWarning?: (message: string) => void;
+}
+
+/** Outcome of walking one path component by component without following links. */
+type ConfinedWalk =
+  | { readonly kind: "resolved"; readonly real: string; readonly stat: ConfinedFsStat }
+  | { readonly kind: "escaped"; readonly target: string }
+  | { readonly kind: "missing" }
+  | { readonly kind: "refused" };
+
+interface ConfinedRegion {
+  /** Canonical key segments (lexical and real spelling) whose subtree belongs to the region. */
+  readonly keySegments: readonly (readonly string[])[];
+  /** Real path the walk starts from (trusted: workspace root or TypeScript lib dir). */
+  readonly base: string;
+}
+
+const MAX_CONFINED_CACHE_ENTRIES = 200_000;
+
+function splitPosixAbsolute(normalized: string): string[] | undefined {
+  if (normalized === "/") return [""];
+  if (/^[a-zA-Z]:\/?$/.test(normalized)) return [normalized.slice(0, 2)];
+  if (!normalized.startsWith("/") && !/^[a-zA-Z]:\//.test(normalized)) return undefined;
+  return normalized.split("/");
+}
+
 /**
- * SEC-04: CompilerHost + ModuleResolutionHost disk fallback'ini kesinlikle
- * sınırlar — `entries` dışındaki workspace dosyaları (.env.js, ../secret.js,
- * symlink, bundle vb.) diskten ASLA okunmaz. Disk erişimi yalnızca:
- * (a) TypeScript yerleşik lib*.d.ts dizini (`resolvedLibDir`), ve
- * (b) `rootPosix` içindeki `node_modules` altındaki `.d.ts`/`.d.mts`/`.d.cts`/
- *     `package.json` dosyaları için izin verilir.
+ * SEC-04: confines the CompilerHost + ModuleResolutionHost disk fallback.
+ * Workspace files outside `entries` (.env.js, ../secret.js, links, bundles,
+ * ...) are never read from disk. Disk access is limited to:
+ * (a) the bundled TypeScript `lib*.d.ts` directory (`resolvedLibDir`), and
+ * (b) `.d.ts` / `.d.mts` / `.d.cts` / `package.json` files under a
+ *     `node_modules` directory inside `rootPosix`.
+ *
+ * No path is handed to a following file system call: every candidate is
+ * first checked lexically (NUL, UNC/device/NT prefixes, reserved Windows
+ * device names, region and policy), then walked component by component with
+ * `lstat`. Links are resolved by reading their target; a UNC/device target or
+ * a target outside the regions is never touched. Reads are bounded per file
+ * and per run and refuse non-regular files. The host never writes, never
+ * exposes the process environment and never enumerates the disk.
  */
 export function configureConfinedCompilerHost(
   host: ts.CompilerHost,
@@ -2634,42 +2690,46 @@ export function configureConfinedCompilerHost(
   rootPosix: string,
   resolvedLibDir: string | undefined,
   packageJsonProjections: ReadonlyMap<string, string> = new Map(),
+  options: ConfinedCompilerHostOptions = {},
 ): ts.ModuleResolutionHost {
-  const baseFileExists = host.fileExists.bind(host);
-  const baseReadFile = host.readFile.bind(host);
-  const baseDirectoryExists = host.directoryExists?.bind(host);
-  const baseRealpath = host.realpath?.bind(host);
-  const baseGetDirectories = host.getDirectories?.bind(host);
+  const probe = options.fs ?? createNodeConfinedFsProbe();
+  const maxFileBytes = options.maxDiskFileBytes ?? MAX_CONFINED_DISK_FILE_BYTES;
+  const maxTotalBytes = options.maxDiskTotalBytes ?? MAX_CONFINED_DISK_TOTAL_BYTES;
+  const emittedWarnings = new Set<string>();
+  const warn = (message: string): void => {
+    if (options.addWarning === undefined || emittedWarnings.has(message)) return;
+    emittedWarnings.add(message);
+    options.addWarning(message);
+  };
 
   const withTrailingSlash = (key: string): string =>
     key.endsWith("/") ? key : `${key}/`;
 
-  const tryBaseRealpath = (p: string): string | undefined => {
-    if (baseRealpath === undefined || p.includes("\0")) return undefined;
-    try {
-      const real = baseRealpath(p);
-      return typeof real === "string" && real.length > 0 ? real : undefined;
-    } catch {
-      return undefined;
-    }
+  /** Real path of a trusted region base, never for UNC/device input. */
+  const realBaseOf = (base: string): string | undefined => {
+    if (probe === undefined || base.includes("\0") || isUncDeviceOrNtPath(base)) return undefined;
+    const real = probe.realpath(base);
+    if (real === undefined || real.includes("\0") || isUncDeviceOrNtPath(real)) return undefined;
+    return normalizePosixPath(real);
   };
 
+  const rootIsRemote = isUncDeviceOrNtPath(rootPosix);
   const rootKey = canonicalPath(rootPosix);
   const rootKeyWithSlash = withTrailingSlash(rootKey);
-  const realRootRaw = tryBaseRealpath(rootPosix);
-  const realRootKey =
-    realRootRaw === undefined ? undefined : canonicalPath(realRootRaw);
+  const realRootPosix = rootIsRemote ? undefined : realBaseOf(rootPosix);
+  const realRootKey = realRootPosix === undefined ? undefined : canonicalPath(realRootPosix);
   const realRootKeyWithSlash =
     realRootKey === undefined ? undefined : withTrailingSlash(realRootKey);
 
+  const libIsRemote = resolvedLibDir !== undefined && isUncDeviceOrNtPath(resolvedLibDir);
   const libDirKey =
-    resolvedLibDir === undefined ? undefined : canonicalPath(resolvedLibDir);
+    resolvedLibDir === undefined || libIsRemote ? undefined : canonicalPath(resolvedLibDir);
   const libDirKeyWithSlash =
     libDirKey === undefined ? undefined : withTrailingSlash(libDirKey);
-  const realLibDirRaw =
-    resolvedLibDir === undefined ? undefined : tryBaseRealpath(resolvedLibDir);
+  const realLibDirPosix =
+    resolvedLibDir === undefined || libIsRemote ? undefined : realBaseOf(resolvedLibDir);
   const realLibDirKey =
-    realLibDirRaw === undefined ? undefined : canonicalPath(realLibDirRaw);
+    realLibDirPosix === undefined ? undefined : canonicalPath(realLibDirPosix);
   const realLibDirKeyWithSlash =
     realLibDirKey === undefined ? undefined : withTrailingSlash(realLibDirKey);
 
@@ -2683,6 +2743,7 @@ export function configureConfinedCompilerHost(
     (realLibDirKey !== undefined && candidateKey === realLibDirKey);
 
   const relativeUnderAllowedRoot = (candidateKey: string): string | undefined => {
+    if (rootIsRemote) return undefined;
     if (candidateKey.startsWith(rootKeyWithSlash)) {
       return candidateKey.slice(rootKeyWithSlash.length);
     }
@@ -2701,9 +2762,7 @@ export function configureConfinedCompilerHost(
     return rel.startsWith("node_modules/") || rel.includes("/node_modules/");
   };
 
-  const isAllowedDiskFile = (candidatePath: string): boolean => {
-    if (candidatePath.includes("\0")) return false;
-    const key = canonicalPath(candidatePath);
+  const isAllowedDiskFileKey = (key: string): boolean => {
     if (isInAllowedLibDir(key)) return true;
     if (!isInRootNodeModules(key)) return false;
     const lower = key.toLowerCase();
@@ -2715,9 +2774,7 @@ export function configureConfinedCompilerHost(
     );
   };
 
-  const isAllowedDiskDir = (candidatePath: string): boolean => {
-    if (candidatePath.includes("\0")) return false;
-    const key = canonicalPath(candidatePath);
+  const isAllowedDiskDirKey = (key: string): boolean => {
     if (isInAllowedLibDirOrSelf(key)) return true;
     const rel = relativeUnderAllowedRoot(key);
     if (rel === undefined) return false;
@@ -2729,34 +2786,223 @@ export function configureConfinedCompilerHost(
     );
   };
 
-  // SEC-04-R1: CWE-59 symlink escape guard on BOTH fileExists and readFile.
-  const isRealpathConfinedDiskFile = (p: string): boolean => {
-    if (p.includes("\0")) return false;
-    const key = canonicalPath(p);
-    if (isInAllowedLibDir(key)) {
-      if (baseRealpath === undefined) return true;
-      const real = tryBaseRealpath(p);
-      return real !== undefined && isInAllowedLibDir(canonicalPath(real));
+  const lexicallyUsable = (p: string): boolean =>
+    !p.includes("\0") && !isUncDeviceOrNtPath(p);
+  const isAllowedDiskFile = (p: string): boolean =>
+    lexicallyUsable(p) && isAllowedDiskFileKey(canonicalPath(p));
+  const isAllowedDiskDir = (p: string): boolean =>
+    lexicallyUsable(p) && isAllowedDiskDirKey(canonicalPath(p));
+
+  /* -------------------------- link-aware walk -------------------------- */
+
+  const regionOf = (keys: readonly string[], base: string): ConfinedRegion => ({
+    keySegments: keys
+      .map((key) => splitPosixAbsolute(key))
+      .filter((segments): segments is string[] => segments !== undefined),
+    base,
+  });
+  const regions: ConfinedRegion[] = [];
+  if (libDirKey !== undefined && resolvedLibDir !== undefined) {
+    regions.push(regionOf(
+      realLibDirKey === undefined ? [libDirKey] : [libDirKey, realLibDirKey],
+      realLibDirPosix ?? normalizePosixPath(resolvedLibDir),
+    ));
+  }
+  if (!rootIsRemote) {
+    regions.push(regionOf(
+      realRootKey === undefined ? [rootKey] : [rootKey, realRootKey],
+      realRootPosix ?? normalizePosixPath(rootPosix),
+    ));
+  }
+
+  /** Region of a normalized absolute path and the segments below its base. */
+  const locate = (
+    normalized: string,
+  ): { readonly base: string; readonly rest: string[] } | undefined => {
+    const segments = splitPosixAbsolute(normalized);
+    if (segments === undefined) return undefined;
+    const canonicalSegments = splitPosixAbsolute(canonicalPath(normalized));
+    if (canonicalSegments === undefined || canonicalSegments.length !== segments.length) {
+      return undefined;
     }
-    if (!isAllowedDiskFile(p)) return false;
-    if (baseRealpath === undefined) return false;
-    const real = tryBaseRealpath(p);
-    return real !== undefined && isAllowedDiskFile(real);
+    for (const region of regions) {
+      for (const keySegments of region.keySegments) {
+        if (keySegments.length > canonicalSegments.length) continue;
+        if (keySegments.every((segment, index) => canonicalSegments[index] === segment)) {
+          return { base: region.base, rest: segments.slice(keySegments.length) };
+        }
+      }
+    }
+    return undefined;
   };
 
-  const isRealpathConfinedDiskDir = (p: string): boolean => {
-    if (p.includes("\0")) return false;
-    const key = canonicalPath(p);
-    if (isInAllowedLibDirOrSelf(key)) {
-      if (baseRealpath === undefined) return true;
-      const real = tryBaseRealpath(p);
-      return real !== undefined && isInAllowedLibDirOrSelf(canonicalPath(real));
-    }
-    if (!isAllowedDiskDir(p)) return false;
-    if (baseRealpath === undefined) return false;
-    const real = tryBaseRealpath(p);
-    return real !== undefined && isAllowedDiskDir(real);
+  const lstatCache = new Map<string, ConfinedFsStat | null>();
+  const readlinkCache = new Map<string, string | null>();
+  const cachedLstat = (p: string): ConfinedFsStat | undefined => {
+    if (probe === undefined) return undefined;
+    const hit = lstatCache.get(p);
+    if (hit !== undefined) return hit ?? undefined;
+    if (lstatCache.size >= MAX_CONFINED_CACHE_ENTRIES) lstatCache.clear();
+    const stat = probe.lstat(p);
+    lstatCache.set(p, stat ?? null);
+    return stat;
   };
+  const cachedReadlink = (p: string): string | undefined => {
+    if (probe === undefined) return undefined;
+    const hit = readlinkCache.get(p);
+    if (hit !== undefined) return hit ?? undefined;
+    if (readlinkCache.size >= MAX_CONFINED_CACHE_ENTRIES) readlinkCache.clear();
+    const target = probe.readlink(p);
+    readlinkCache.set(p, target ?? null);
+    return target;
+  };
+
+  const appendSegments = (base: string, rest: readonly string[]): string => {
+    if (rest.length === 0) return base;
+    return base.endsWith("/") ? `${base}${rest.join("/")}` : `${base}/${rest.join("/")}`;
+  };
+
+  /**
+   * Resolves `inputPath` without ever following a link implicitly. Only
+   * `lstat`/`readlink` of components whose parent chain was already verified
+   * to be real, link-free directories inside a region are performed.
+   */
+  const walk = (inputPath: string): ConfinedWalk => {
+    if (probe === undefined || !lexicallyUsable(inputPath)) return { kind: "refused" };
+    const start = locate(normalizePosixPath(inputPath));
+    if (start === undefined) return { kind: "refused" };
+    let current = start.base;
+    const remaining = [...start.rest];
+    let currentStat: ConfinedFsStat | undefined;
+    let hops = 0;
+    if (remaining.length === 0) {
+      currentStat = cachedLstat(current);
+      if (currentStat === undefined) return { kind: "missing" };
+      if (currentStat.kind === "symlink") return { kind: "refused" };
+      return { kind: "resolved", real: current, stat: currentStat };
+    }
+    while (remaining.length > 0) {
+      const segment = remaining.shift() as string;
+      const windowsStyle = /^[a-zA-Z]:/.test(current);
+      if (!isSafePathSegment(segment, windowsStyle)) return { kind: "refused" };
+      const next = appendSegments(current, [segment]);
+      const stat = cachedLstat(next);
+      if (stat === undefined) return { kind: "missing" };
+      if (stat.kind === "symlink") {
+        hops += 1;
+        if (hops > MAX_CONFINED_LINK_HOPS) return { kind: "refused" };
+        const rawTarget = cachedReadlink(next);
+        if (rawTarget === undefined) return { kind: "missing" };
+        const target = classifyLinkTarget(rawTarget);
+        if (target === undefined) {
+          // UNC/device/NT or drive-relative target: reported, never touched.
+          const lexical = rawTarget.replace(/\\/g, "/").replace(/\/+$/, "");
+          return { kind: "escaped", target: appendSegments(lexical, remaining) };
+        }
+        let absoluteTarget: string;
+        if (/^[a-zA-Z]:\//.test(target)) {
+          absoluteTarget = normalizePosixPath(target);
+        } else if (target.startsWith("/")) {
+          absoluteTarget = normalizePosixPath(windowsStyle ? `${current.slice(0, 2)}${target}` : target);
+        } else {
+          absoluteTarget = normalizePosixPath(appendSegments(current, [target]));
+        }
+        const located = locate(absoluteTarget);
+        if (located === undefined) {
+          return { kind: "escaped", target: appendSegments(absoluteTarget, remaining) };
+        }
+        current = located.base;
+        remaining.unshift(...located.rest);
+        currentStat = undefined;
+        continue;
+      }
+      if (remaining.length > 0 && stat.kind !== "directory") return { kind: "missing" };
+      current = next;
+      currentStat = stat;
+    }
+    if (currentStat === undefined) {
+      // The path ended on a link to a region base; inspect the base itself.
+      currentStat = cachedLstat(current);
+      if (currentStat === undefined) return { kind: "missing" };
+      if (currentStat.kind === "symlink") return { kind: "refused" };
+    }
+    return { kind: "resolved", real: current, stat: currentStat };
+  };
+
+  /** Display path of a disk file for warnings: workspace-relative or the base name. */
+  const displayPath = (p: string): string => {
+    const normalized = normalizePosixPath(p);
+    const rel = relativeUnderAllowedRoot(canonicalPath(normalized));
+    if (rel !== undefined) {
+      const segments = normalized.split("/");
+      return segments.slice(segments.length - rel.split("/").length).join("/");
+    }
+    return normalized.slice(normalized.lastIndexOf("/") + 1);
+  };
+
+  /** A regular disk file inside the policy (requested and real path). */
+  const resolveDiskFile = (p: string): { readonly real: string; readonly stat: ConfinedFsStat } | undefined => {
+    if (!isAllowedDiskFile(p)) return undefined;
+    const key = canonicalPath(p);
+    const result = walk(p);
+    if (result.kind !== "resolved") return undefined;
+    const realKey = canonicalPath(result.real);
+    const confined = isInAllowedLibDir(key)
+      ? isInAllowedLibDir(realKey)
+      : isAllowedDiskFileKey(realKey);
+    if (!confined) return undefined;
+    if (result.stat.kind !== "file") {
+      if (result.stat.kind === "other") {
+        warn(`declaration file skipped: ${displayPath(p)} is not a regular file`);
+      }
+      return undefined;
+    }
+    if (result.stat.size > maxFileBytes) {
+      warn(
+        `declaration file skipped: ${displayPath(p)} exceeds the ${String(maxFileBytes)}-byte disk read limit`,
+      );
+      return undefined;
+    }
+    return { real: result.real, stat: result.stat };
+  };
+
+  /** Real path of a disk directory inside the policy (requested and real path). */
+  const resolveDiskDir = (p: string): string | undefined => {
+    if (!isAllowedDiskDir(p)) return undefined;
+    const key = canonicalPath(p);
+    const result = walk(p);
+    if (result.kind !== "resolved" || result.stat.kind !== "directory") return undefined;
+    const realKey = canonicalPath(result.real);
+    const confined = isInAllowedLibDirOrSelf(key)
+      ? isInAllowedLibDirOrSelf(realKey)
+      : isAllowedDiskDirKey(realKey);
+    return confined ? result.real : undefined;
+  };
+
+  let diskBytesRead = 0;
+  const readDiskFile = (p: string): string | undefined => {
+    if (probe === undefined) return undefined;
+    const file = resolveDiskFile(p);
+    if (file === undefined) return undefined;
+    if (diskBytesRead + file.stat.size > maxTotalBytes) {
+      warn(
+        `declaration reads stopped: the ${String(maxTotalBytes)}-byte total disk read budget of this analysis was used; remaining node_modules declarations were not read`,
+      );
+      return undefined;
+    }
+    const read = probe.readText(file.real, file.stat, maxFileBytes);
+    if (read.status === "too-large") {
+      warn(
+        `declaration file skipped: ${displayPath(p)} exceeds the ${String(maxFileBytes)}-byte disk read limit`,
+      );
+      return undefined;
+    }
+    if (read.status !== "ok") return undefined;
+    diskBytesRead += read.bytes;
+    return read.text;
+  };
+
+  /* --------------------------- memory model --------------------------- */
 
   const memoryDirectories = new Set<string>();
   const memoryChildDirs = new Map<string, Set<string>>();
@@ -2781,13 +3027,16 @@ export function configureConfinedCompilerHost(
     }
   }
 
+  /* ------------------------- host overrides ------------------------- */
+
   // Workspace package.json manifests are never read from disk here; the host
   // serves only their module-format projection (see buildPackageJsonProjections).
-  host.fileExists = (p: string): boolean =>
-    !p.includes("\0") &&
-    (entries.has(canonicalPath(p)) ||
-      packageJsonProjections.has(canonicalPath(p)) ||
-      (isAllowedDiskFile(p) && baseFileExists(p) && isRealpathConfinedDiskFile(p)));
+  host.fileExists = (p: string): boolean => {
+    if (p.includes("\0")) return false;
+    const key = canonicalPath(p);
+    if (entries.has(key) || packageJsonProjections.has(key)) return true;
+    return resolveDiskFile(p) !== undefined;
+  };
 
   host.readFile = (p: string): string | undefined => {
     if (p.includes("\0")) return undefined;
@@ -2796,62 +3045,98 @@ export function configureConfinedCompilerHost(
     if (hit !== undefined) return hit.content;
     const projected = packageJsonProjections.get(key);
     if (projected !== undefined) return projected;
-    return isAllowedDiskFile(p) && isRealpathConfinedDiskFile(p)
-      ? baseReadFile(p)
-      : undefined;
+    return readDiskFile(p);
   };
 
-  const resolutionHost: ts.ModuleResolutionHost = {
+  const confinedDirectoryExists = (p: string): boolean =>
+    !p.includes("\0") &&
+    (memoryDirectories.has(canonicalPath(p)) || resolveDiskDir(p) !== undefined);
+  host.directoryExists = confinedDirectoryExists;
+
+  const confinedRealpath = (p: string): string => {
+    if (p.includes("\0")) return p;
+    if (entries.has(canonicalPath(p))) return p;
+    if (!isAllowedDiskFile(p) && !isAllowedDiskDir(p)) return p;
+    // An escaping link is not hidden behind its lexical path: the (never
+    // touched) target is returned so `isAllowedResolved` rejects it.
+    const result = walk(p);
+    if (result.kind === "resolved") return result.real;
+    if (result.kind === "escaped") return result.target;
+    return p;
+  };
+  host.realpath = confinedRealpath;
+
+  host.getDirectories = (p: string): string[] => {
+    if (p.includes("\0")) return [];
+    const key = canonicalPath(p);
+    const memChildren = memoryChildDirs.get(key);
+    const memList = memChildren === undefined ? [] : [...memChildren].sort();
+    const realDir = probe === undefined ? undefined : resolveDiskDir(p);
+    if (probe === undefined || realDir === undefined) return memList;
+    const childPrefix = p.endsWith("/") || p.endsWith("\\") ? p : `${p}/`;
+    const names = probe.readdir(realDir) ?? [];
+    const diskDirs = names.filter(
+      (name) =>
+        name.length > 0 &&
+        !name.includes("\0") &&
+        !name.includes("/") &&
+        !name.includes("\\") &&
+        resolveDiskDir(`${childPrefix}${name}`) !== undefined,
+    );
+    if (memList.length === 0) return diskDirs;
+    return [...new Set([...memList, ...diskDirs])].sort();
+  };
+
+  // The disk is never enumerated: only in-memory sources under `rootDir` are
+  // listed (extension and depth filters apply; include/exclude globs do not).
+  host.readDirectory = (
+    rootDir: string,
+    extensions: readonly string[] | undefined,
+    _excludes: readonly string[] | undefined,
+    _includes: readonly string[] | undefined,
+    depth?: number,
+  ): string[] => {
+    if (rootDir.includes("\0")) return [];
+    const dirKeyWithSlash = withTrailingSlash(canonicalPath(rootDir));
+    const lowerExtensions = extensions?.map((extension) => extension.toLowerCase());
+    const listed: string[] = [];
+    for (const entry of entries.values()) {
+      const key = canonicalPath(entry.absolutePath);
+      if (!key.startsWith(dirKeyWithSlash)) continue;
+      const nestedDirs = key.slice(dirKeyWithSlash.length).split("/").length - 1;
+      if (depth !== undefined && depth > 0 && nestedDirs >= depth) continue;
+      if (
+        lowerExtensions !== undefined &&
+        lowerExtensions.length > 0 &&
+        !lowerExtensions.some((extension) => key.toLowerCase().endsWith(extension))
+      ) {
+        continue;
+      }
+      listed.push(entry.absolutePath);
+    }
+    return listed.sort();
+  };
+
+  const refuseWrite = (): never => {
+    throw new DomainError(
+      "adapter/confined-host-write",
+      "The confined compiler host never writes files or creates directories",
+    );
+  };
+  host.writeFile = refuseWrite;
+  // `createDirectory` is part of the runtime host (used by emit) but not of the public type.
+  (host as { createDirectory?: (directory: string) => void }).createDirectory = refuseWrite;
+  // The analyzed workspace never sees the process environment.
+  host.getEnvironmentVariable = () => "";
+  // stdout carries only the MCP protocol: resolution traces are discarded.
+  host.trace = () => undefined;
+
+  return {
     fileExists: (p: string) => host.fileExists(p),
     readFile: (p: string) => host.readFile(p),
+    directoryExists: confinedDirectoryExists,
+    realpath: confinedRealpath,
   };
-
-  if (baseDirectoryExists !== undefined) {
-    const confinedDirectoryExists = (p: string): boolean =>
-      !p.includes("\0") &&
-      (memoryDirectories.has(canonicalPath(p)) ||
-        (isAllowedDiskDir(p) && baseDirectoryExists(p) && isRealpathConfinedDiskDir(p)));
-    resolutionHost.directoryExists = confinedDirectoryExists;
-    host.directoryExists = confinedDirectoryExists;
-  }
-
-  if (baseRealpath !== undefined) {
-    const confinedRealpath = (p: string): string => {
-      if (p.includes("\0")) return p;
-      if (entries.has(canonicalPath(p))) return p;
-      if (!isAllowedDiskFile(p) && !isAllowedDiskDir(p)) return p;
-      // Escaping symlink'leri leksik yol arkasına SAKLAMAZ: gerçek hedefi döner,
-      // böylece `isAllowedResolved` kök dışı hedefi kesin biçimde reddeder.
-      return tryBaseRealpath(p) ?? p;
-    };
-    resolutionHost.realpath = confinedRealpath;
-    host.realpath = confinedRealpath;
-  }
-
-  if (baseGetDirectories !== undefined) {
-    host.getDirectories = (p: string): string[] => {
-      if (p.includes("\0")) return [];
-      const key = canonicalPath(p);
-      const memChildren = memoryChildDirs.get(key);
-      const memList = memChildren === undefined ? [] : [...memChildren].sort();
-      if (!isAllowedDiskDir(p) || !isRealpathConfinedDiskDir(p)) {
-        return memList;
-      }
-      const childPrefix = p.endsWith("/") || p.endsWith("\\") ? p : `${p}/`;
-      let diskDirs: string[];
-      try {
-        diskDirs = baseGetDirectories(p).filter(
-          (name) => !name.includes("\0") && isRealpathConfinedDiskDir(`${childPrefix}${name}`),
-        );
-      } catch {
-        diskDirs = [];
-      }
-      if (memList.length === 0) return diskDirs;
-      return [...new Set([...memList, ...diskDirs])].sort();
-    };
-  }
-
-  return resolutionHost;
 }
 
 /** Statik CommonJS `require("...")` çağrısını tanır; dinamik ifadeleri yoksayar. */
