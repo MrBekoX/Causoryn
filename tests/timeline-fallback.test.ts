@@ -287,6 +287,47 @@ describe("Task 3.2 — timeline.ts SQLite snapshotLookup, Git-Tree reconstructio
       expect(timeline.warnings).toEqual([]);
     });
 
+    it("reconstructFromGitTree receives the canonical commit SHA resolved for snapshotLookup (none for working-tree)", async () => {
+      const seen: Array<{ ref: string; commitSha: string | undefined }> = [];
+      const reconstruct = async (
+        root: string,
+        ref: string,
+        commitSha?: string,
+      ): Promise<CompareContentSet> => {
+        seen.push({ ref, commitSha });
+        return reconstructFileContentSetFromGitTree(root, ref);
+      };
+      await buildArchitectureTimelineFromGit(repoRoot, {
+        refs: ["v1", "v2"],
+        snapshotLookup: () => undefined,
+        reconstructFromGitTree: reconstruct,
+      });
+      await readTimelinePointFromGit(repoRoot, "working-tree", {
+        snapshotLookup: () => undefined,
+        reconstructFromGitTree: reconstruct,
+      });
+      expect(seen).toEqual([
+        { ref: "v1", commitSha: shaV1 },
+        { ref: "v2", commitSha: shaV2 },
+        { ref: "working-tree", commitSha: undefined },
+      ]);
+    });
+
+    it("an unanalyzed reconstructFromGitTree outcome still falls back to the committed snapshot with its trust warning", async () => {
+      const point = await readTimelinePointFromGit(repoRoot, "v2", {
+        snapshotLookup: () => undefined,
+        reconstructFromGitTree: async () => ({
+          status: "unanalyzed",
+          reason: "analysis-budget-exceeded: test budget",
+        }),
+      });
+      expect(point.status).toBe("analyzed");
+      if (point.status === "analyzed") {
+        expect(point.trustWarning).toBe(TIMELINE_TRUST_WARNING_COMMITTED_GIT_BLOB);
+        expect(point.contentSet.nodes).toHaveLength(trustedV2().nodes.length);
+      }
+    });
+
     it("malformed content returned by snapshotLookup or reconstructFromGitTree degrades cleanly to unanalyzed", async () => {
       const badLookup = await readTimelinePointFromGit(repoRoot, "v1", {
         snapshotLookup: () =>
@@ -426,6 +467,22 @@ describe("Task 3.2 — timeline.ts SQLite snapshotLookup, Git-Tree reconstructio
       expect(timeline.points[1]?.trustWarning).toBeUndefined();
       expect(timeline.warnings).toEqual([]);
       expect(timeline.points[0]?.unanalyzedReason).toContain(TIMELINE_SNAPSHOT_BLOB_PATH);
+    });
+
+    it("an unanalyzed reconstructFromGitTree outcome is the point's reason when no committed snapshot exists", async () => {
+      const timeline = await buildArchitectureTimelineFromGit(bareRepoRoot, {
+        refs: ["r1", "r2"],
+        reconstructFromGitTree: async (root, ref) =>
+          ref === "r1"
+            ? reconstructFileContentSetFromGitTree(root, ref)
+            : { status: "unanalyzed", reason: "analysis-budget-exceeded: test budget" },
+      });
+      expect(timeline.analyzedPoints).toBe(1);
+      expect(timeline.points[1]?.status).toBe("unanalyzed");
+      expect(timeline.points[1]?.unanalyzedReason).toBe("analysis-budget-exceeded: test budget");
+      expect(timeline.points[1]?.trustWarning).toBeUndefined();
+      const interval = timeline.intervals[0];
+      expect(interval?.kind).toBe("unanalyzed-interval");
     });
 
     it("rejects non-function snapshotLookup / reconstructFromGitTree with timeline/invalid-input", async () => {
