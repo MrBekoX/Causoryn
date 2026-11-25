@@ -1,7 +1,9 @@
-import { cpSync, existsSync, mkdirSync, realpathSync, renameSync, rmSync } from "node:fs";
+import { randomBytes } from "node:crypto";
+import { cpSync, existsSync, lstatSync, mkdirSync, realpathSync, renameSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
+import { assertNoLinkedComponents, removeTreeNoFollow } from "./fs-guard.js";
 import {
   CausorynCliError,
   type StagePersistentRuntimeOptions,
@@ -40,6 +42,16 @@ function safeRealpath(targetPath: string): string | null {
     return realpathSync(targetPath);
   } catch {
     return null;
+  }
+}
+
+/** lstat-based existence check (a dangling link counts as existing). */
+function pathExists(targetPath: string): boolean {
+  try {
+    lstatSync(targetPath);
+    return true;
+  } catch {
+    return false;
   }
 }
 
@@ -124,7 +136,8 @@ export function stagePersistentRuntime(
     }
   }
 
-  const baseCausorynDir = path.join(path.resolve(options.homeDir), ".causoryn");
+  const homeDir = path.resolve(options.homeDir);
+  const baseCausorynDir = path.join(homeDir, ".causoryn");
   const targetDir = path.join(baseCausorynDir, "runtime");
 
   if (isSameRuntimeDir(sourceDir, targetDir)) {
@@ -135,14 +148,26 @@ export function stagePersistentRuntime(
     };
   }
 
+  // CWE-59: neither ~/.causoryn nor ~/.causoryn/runtime may be a link (links
+  // above the home directory are fine). Checked again after mkdir.
+  assertNoLinkedComponents(targetDir, homeDir, { includeTarget: true });
   mkdirSync(baseCausorynDir, { recursive: true, mode: 0o700 });
+  assertNoLinkedComponents(targetDir, homeDir, { includeTarget: true });
 
-  const stamp = `${String(process.pid)}-${String(Date.now())}`;
+  const stamp = `${String(process.pid)}-${String(Date.now())}-${randomBytes(6).toString("hex")}`;
   const stagingDir = path.join(baseCausorynDir, `.runtime-stage-${stamp}`);
   const backupDir = path.join(baseCausorynDir, `.runtime-prev-${stamp}`);
 
-  rmSync(stagingDir, { recursive: true, force: true });
-  mkdirSync(stagingDir, { recursive: true, mode: 0o700 });
+  // Non-recursive mkdir fails with EEXIST if anything already sits at the
+  // (unpredictable) staging name, so a planted entry is never reused.
+  try {
+    mkdirSync(stagingDir, { mode: 0o700 });
+  } catch (error) {
+    throw new CausorynCliError(
+      "cli/runtime-stage-failed",
+      `Could not create the runtime staging directory: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
 
   try {
     for (const entry of RUNTIME_STAGE_ENTRIES) {
@@ -151,9 +176,14 @@ export function stagePersistentRuntime(
       cpSync(srcEntry, path.join(stagingDir, entry), { recursive: true });
     }
 
-    const hadPrevious = existsSync(targetDir);
+    const hadPrevious = pathExists(targetDir);
     if (hadPrevious) {
-      rmSync(backupDir, { recursive: true, force: true });
+      if (pathExists(backupDir)) {
+        throw new CausorynCliError(
+          "cli/runtime-stage-failed",
+          `Refusing to reuse an existing runtime backup path: ${backupDir}`,
+        );
+      }
       renameSync(targetDir, backupDir);
     }
 
@@ -170,11 +200,15 @@ export function stagePersistentRuntime(
       throw swapError;
     }
 
-    if (hadPrevious && existsSync(backupDir)) {
-      rmSync(backupDir, { recursive: true, force: true });
+    if (hadPrevious) {
+      removeTreeNoFollow(backupDir);
     }
   } catch (error) {
-    rmSync(stagingDir, { recursive: true, force: true });
+    try {
+      removeTreeNoFollow(stagingDir);
+    } catch {
+      // Best-effort cleanup; the original error is reported below.
+    }
     if (error instanceof CausorynCliError) throw error;
     throw new CausorynCliError(
       "cli/runtime-stage-failed",

@@ -8,16 +8,25 @@ import {
   lstatSync,
   mkdirSync,
   openSync,
+  readdirSync,
   readFileSync,
   renameSync,
+  rmdirSync,
   rmSync,
   statSync,
-  writeFileSync,
+  unlinkSync,
 } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
+import {
+  assertSafeWritePath,
+  isFreeOfLinkedComponents,
+  publishFileNoClobber,
+  removeTreeNoFollow,
+  writeExclusiveFile,
+} from "./fs-guard.js";
 import { insertMissingOwnedKeys } from "./owned-keys.js";
 import {
   getPersistentRuntimeDir,
@@ -88,8 +97,16 @@ function assertConfigAndBackupTargetsSafe(targetPath: string): boolean {
   return existed;
 }
 
+/**
+ * Uninstall removal of one installed skill. `skill-dir` removes the skill
+ * directory (it holds only Causoryn's SKILL.md); `skill-file` removes only
+ * SKILL.md and keeps the directory with the user's other files.
+ */
 interface FileRemoveInstruction {
   readonly targetPath: string;
+  readonly mode: "skill-dir" | "skill-file";
+  readonly skillName: string;
+  readonly expectedContent: string | null;
 }
 
 interface PlannedExecution {
@@ -101,6 +118,107 @@ interface PlannedExecution {
   readonly writes: readonly FileWriteInstruction[];
   readonly removals: readonly FileRemoveInstruction[];
   readonly projectedConfigs: ReadonlyMap<string, string>;
+  /** Home and explicitly configured host directories (CWE-59 trust bases). */
+  readonly trustedBases: readonly string[];
+}
+
+type InstalledSkillState =
+  | { readonly state: "absent" }
+  | { readonly state: "owned"; readonly onlySkillFile: boolean }
+  | { readonly state: "foreign"; readonly reason: string };
+
+/**
+ * True when an installed SKILL.md was written by Causoryn: it equals the
+ * packaged skill, or its front matter names this skill and it refers to
+ * Causoryn (an older Causoryn version).
+ */
+function isCausorynSkillContent(
+  content: string,
+  skillName: string,
+  expectedContent: string | null,
+): boolean {
+  if (expectedContent !== null && content === expectedContent) return true;
+  const frontMatter = /^---\r?\n([\s\S]*?)\r?\n---/.exec(content);
+  if (frontMatter === null) return false;
+  const nameLine = /^name:[ \t]*["']?([A-Za-z0-9_.-]+)["']?[ \t]*$/m.exec(frontMatter[1] ?? "");
+  return nameLine?.[1] === skillName && /causoryn/i.test(content);
+}
+
+/** Classifies an installed skill directory without following links. */
+function classifyInstalledSkill(
+  skillDir: string,
+  skillName: string,
+  expectedContent: string | null,
+  trustedBases: readonly string[],
+): InstalledSkillState {
+  let dirStat;
+  try {
+    dirStat = lstatSync(skillDir);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return { state: "absent" };
+    return { state: "foreign", reason: "could not be inspected" };
+  }
+  if (!isFreeOfLinkedComponents(skillDir, trustedBases)) {
+    return { state: "foreign", reason: "is below a symbolic link or junction" };
+  }
+  if (dirStat.isSymbolicLink()) {
+    return { state: "foreign", reason: "is a symbolic link or junction" };
+  }
+  if (!dirStat.isDirectory()) {
+    return { state: "foreign", reason: "is not a directory" };
+  }
+  const skillFile = path.join(skillDir, "SKILL.md");
+  let fileStat;
+  try {
+    fileStat = lstatSync(skillFile);
+  } catch {
+    return { state: "foreign", reason: "has no SKILL.md" };
+  }
+  if (!fileStat.isFile()) {
+    return { state: "foreign", reason: "has a SKILL.md that is not a regular file" };
+  }
+  if (!isCausorynSkillContent(readFileSync(skillFile, "utf8"), skillName, expectedContent)) {
+    return { state: "foreign", reason: "has a SKILL.md that does not belong to Causoryn" };
+  }
+  const entries = readdirSync(skillDir);
+  return { state: "owned", onlySkillFile: entries.length === 1 && entries[0] === "SKILL.md" };
+}
+
+/** Executes one planned skill removal, re-validating it first (no link is followed). */
+function removeInstalledSkill(removal: FileRemoveInstruction, trustedBases: readonly string[]): void {
+  const skillDir = removal.mode === "skill-dir" ? removal.targetPath : path.dirname(removal.targetPath);
+  const current = classifyInstalledSkill(
+    skillDir,
+    removal.skillName,
+    removal.expectedContent,
+    trustedBases,
+  );
+  if (current.state !== "owned") return;
+  unlinkSync(path.join(skillDir, "SKILL.md"));
+  if (removal.mode === "skill-dir") {
+    try {
+      rmdirSync(skillDir);
+    } catch (err) {
+      // A file created meanwhile keeps the directory (never removed recursively).
+      if ((err as NodeJS.ErrnoException).code !== "ENOTEMPTY" && (err as NodeJS.ErrnoException).code !== "EEXIST") {
+        throw err;
+      }
+    }
+  }
+}
+
+/** True when the persistent runtime directory is a real directory staged by Causoryn. */
+function isOwnedRuntimeDir(runtimeDir: string, trustedBases: readonly string[]): boolean {
+  if (!isFreeOfLinkedComponents(runtimeDir, trustedBases, { includeTarget: true })) return false;
+  try {
+    if (!lstatSync(runtimeDir).isDirectory()) return false;
+    const manifestPath = path.join(runtimeDir, "package.json");
+    if (!lstatSync(manifestPath).isFile()) return false;
+    const manifest: unknown = JSON.parse(readFileSync(manifestPath, "utf8"));
+    return isPlainObject(manifest) && manifest["name"] === "causoryn";
+  } catch {
+    return false;
+  }
 }
 
 function buildNoClientsDetectedMessage(uninstall: boolean): string {
@@ -940,9 +1058,19 @@ function planSkillsForClient(params: {
   readonly actions: SetupAction[];
   readonly writes: FileWriteInstruction[];
   readonly removals: FileRemoveInstruction[];
+  readonly trustedBases: readonly string[];
 }): void {
-  const { homeDir, claudeConfigDir, client, skillsSourceDir, uninstall, actions, writes, removals } =
-    params;
+  const {
+    homeDir,
+    claudeConfigDir,
+    client,
+    skillsSourceDir,
+    uninstall,
+    actions,
+    writes,
+    removals,
+    trustedBases,
+  } = params;
   const hostSkillsRoot = getHostSkillsDir(homeDir, client, claudeConfigDir);
 
   for (const skillName of CANONICAL_SKILL_NAMES) {
@@ -950,15 +1078,39 @@ function planSkillsForClient(params: {
     const destSkillFile = path.join(destSkillDir, "SKILL.md");
 
     if (uninstall) {
-      if (existsSync(destSkillDir)) {
-        removals.push({ targetPath: destSkillDir });
+      // Remove only what Causoryn installed; never follow links.
+      let expectedContent: string | null = null;
+      try {
+        expectedContent = readSourceSkillFileSync(path.join(skillsSourceDir, skillName, "SKILL.md"));
+      } catch {
+        expectedContent = null;
+      }
+      const installed = classifyInstalledSkill(destSkillDir, skillName, expectedContent, trustedBases);
+      if (installed.state === "owned") {
+        removals.push({
+          targetPath: installed.onlySkillFile ? destSkillDir : destSkillFile,
+          mode: installed.onlySkillFile ? "skill-dir" : "skill-file",
+          skillName,
+          expectedContent,
+        });
         actions.push({
           client,
           kind: "skill",
           operation: "remove",
           targetPath: destSkillFile,
           backupPath: null,
-          detail: `removed skill ${skillName}`,
+          detail: installed.onlySkillFile
+            ? `removed skill ${skillName}`
+            : `removed skill ${skillName} (kept the directory: it contains other files)`,
+        });
+      } else if (installed.state === "foreign") {
+        actions.push({
+          client,
+          kind: "skill",
+          operation: "noop",
+          targetPath: destSkillFile,
+          backupPath: null,
+          detail: `kept ${destSkillDir}: not created by Causoryn (it ${installed.reason})`,
         });
       }
       continue;
@@ -1079,11 +1231,8 @@ function atomicWriteFile(
   const tmpPath = `${destPath}.causoryn.${suffix}.tmp`;
   let renamed = false;
   try {
-    if (typeof data === "string") {
-      writeFileSync(tmpPath, data, { encoding: "utf8", mode });
-    } else {
-      writeFileSync(tmpPath, data, { mode });
-    }
+    // "wx": an entry planted at the temporary name is never followed or reused.
+    writeExclusiveFile(tmpPath, data, mode);
     if (process.platform !== "win32") {
       chmodSync(tmpPath, mode);
     }
@@ -1100,13 +1249,45 @@ function atomicWriteFile(
   }
 }
 
+/**
+ * Writes a backup that never replaces an existing file: the bytes go to an
+ * exclusive temporary file first and are then published without clobbering.
+ * Returns false when `backupPath` already exists (nothing is written).
+ */
+function writeBackupNoClobber(
+  backupPath: string,
+  data: Buffer,
+  mode: number,
+  suffix: string,
+): boolean {
+  const tmpPath = `${backupPath}.${suffix}.tmp`;
+  try {
+    writeExclusiveFile(tmpPath, data, mode);
+    if (process.platform !== "win32") {
+      chmodSync(tmpPath, mode);
+    }
+    return publishFileNoClobber(tmpPath, backupPath);
+  } finally {
+    try {
+      rmSync(tmpPath, { force: true });
+    } catch {
+      // Best-effort cleanup of the temporary backup file.
+    }
+  }
+}
+
 function writeFileAtomicWithBackup(
   instruction: FileWriteInstruction,
+  trustedBases: readonly string[],
   renameFn: typeof renameSync = renameSync,
 ): void {
   const { targetPath, content, createBackup, defaultMode = 0o600 } = instruction;
   const parentDir = path.dirname(targetPath);
+  // CWE-59: no component below the home / configured host directory may be a
+  // link; checked before and after creating missing parent directories.
+  assertSafeWritePath(targetPath, trustedBases);
   mkdirSync(parentDir, { recursive: true });
+  assertSafeWritePath(targetPath, trustedBases);
 
   const existed = assertRegularOrAbsentTarget(targetPath);
   const originalBytes = existed ? readFileSync(targetPath) : null;
@@ -1122,15 +1303,22 @@ function writeFileAtomicWithBackup(
   if (createBackup && existed && originalBytes !== null) {
     const primaryBackupPath = `${targetPath}.causoryn.backup`;
     const primaryBackupExisted = assertRegularOrAbsentTarget(primaryBackupPath);
-    if (!primaryBackupExisted) {
-      // First-time backup preserves the user's original pre-Causoryn config forever.
-      atomicWriteFile(primaryBackupPath, originalBytes, effectiveMode, `bk-${suffix}`, renameFn);
-    } else {
+    // First-time backup preserves the user's original pre-Causoryn config forever;
+    // it is published without clobbering, so a concurrent writer cannot replace it.
+    const wrotePrimary =
+      !primaryBackupExisted &&
+      writeBackupNoClobber(primaryBackupPath, originalBytes, effectiveMode, `bk-${suffix}`);
+    if (!wrotePrimary) {
       // NEVER overwrite the original .causoryn.backup; write a secondary timestamped backup instead.
       const stamp = new Date().toISOString().replace(/[:.]/g, "-");
       const secondaryBackupPath = `${targetPath}.causoryn.${stamp}-${nonce}.backup`;
       assertRegularOrAbsentTarget(secondaryBackupPath);
-      atomicWriteFile(secondaryBackupPath, originalBytes, effectiveMode, `bk2-${suffix}`, renameFn);
+      if (!writeBackupNoClobber(secondaryBackupPath, originalBytes, effectiveMode, `bk2-${suffix}`)) {
+        throw new CausorynCliError(
+          "cli/io-error",
+          `Refusing to overwrite an existing backup file: ${secondaryBackupPath}`,
+        );
+      }
     }
   }
 
@@ -1201,6 +1389,12 @@ function buildExecutionPlan(options: ExtendedSetupOptions): {
     selectedClients = detectInstalledClients(homeDir, codexHomeDir, claudeConfigDir);
     noClientsDetected = selectedClients.length === 0;
   }
+
+  // CWE-59 trust bases: the home directory plus host config directories the
+  // user configured explicitly (they may themselves be links; resolved once).
+  const trustedBases: string[] = [homeDir];
+  if (claudeConfigDir !== null) trustedBases.push(claudeConfigDir);
+  if (path.relative(path.join(homeDir, ".codex"), codexHomeDir) !== "") trustedBases.push(codexHomeDir);
 
   const targetRuntimeDir = getPersistentRuntimeDir(homeDir);
   const needsRuntimeStage =
@@ -1316,8 +1510,15 @@ function buildExecutionPlan(options: ExtendedSetupOptions): {
         actions,
         writes,
         removals,
+        trustedBases,
       });
     }
+  }
+
+  // Fail before any mutation (and in --dry-run) when a planned write would go
+  // through a link below the home directory or a configured host directory.
+  for (const writeOp of writes) {
+    assertSafeWritePath(writeOp.targetPath, trustedBases);
   }
 
   return {
@@ -1334,6 +1535,7 @@ function buildExecutionPlan(options: ExtendedSetupOptions): {
       writes,
       removals,
       projectedConfigs,
+      trustedBases,
     },
   };
 }
@@ -1411,15 +1613,17 @@ export async function runSetup(options: ExtendedSetupOptions = {}): Promise<Exte
 
   const renameFn = options.renameFile ?? renameSync;
   for (const writeOp of plan.writes) {
-    writeFileAtomicWithBackup(writeOp, renameFn);
+    writeFileAtomicWithBackup(writeOp, plan.trustedBases, renameFn);
   }
 
   for (const removeOp of plan.removals) {
-    rmSync(removeOp.targetPath, { recursive: true, force: true });
+    removeInstalledSkill(removeOp, plan.trustedBases);
   }
 
   let runtimeCleanedUp = false;
-  if (uninstall && existsSync(plan.targetRuntimeDir)) {
+  // Only a real runtime directory staged by Causoryn is removed; a link (or
+  // anything below a link) is left alone and nothing inside is followed.
+  if (uninstall && isOwnedRuntimeDir(plan.targetRuntimeDir, plan.trustedBases)) {
     const stillReferenced = anyRemainingHostReferencesRuntime({
       homeDir,
       codexHomeDir,
@@ -1428,7 +1632,7 @@ export async function runSetup(options: ExtendedSetupOptions = {}): Promise<Exte
       projectedConfigs: plan.projectedConfigs,
     });
     if (!stillReferenced) {
-      rmSync(plan.targetRuntimeDir, { recursive: true, force: true });
+      removeTreeNoFollow(plan.targetRuntimeDir);
       runtimeCleanedUp = true;
     }
   }
