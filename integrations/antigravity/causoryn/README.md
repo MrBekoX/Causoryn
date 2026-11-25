@@ -23,9 +23,9 @@
 This plugin directory carries two synchronized MCP server definitions so both the built-in Antigravity customization loader and the TŞ §17.1 portable plugin specification resolve the same server cleanly:
 
 1. **`mcp_config.json` (Primary — native Antigravity plugin loader):**
-   The built-in Antigravity plugin loader discovers MCP servers from `<plugin_dir>/mcp_config.json` and spawns `node` with the plugin-relative entrypoint `"scripts/mcp-server.mjs"`.
+   The built-in Antigravity plugin loader discovers MCP servers from `<plugin_dir>/mcp_config.json`, expands `${PLUGIN_ROOT}` to the plugin directory, and spawns `node` with `"${PLUGIN_ROOT}/scripts/mcp-server.mjs"`. The entry is anchored at the plugin root because `node` would resolve a bare relative path against the host's working directory.
 2. **`mcp.json` (Portable manifest — TŞ v2.1 §17.1):**
-   Uses `"${PLUGIN_ROOT}/scripts/mcp-server.mjs"` per the TŞ §17.1 portable plugin manifest contract (no fragile parent-directory `../../..` traversal into monorepo build folders, and no `--data-dir` CLI flag because `stdio.ts` reads configuration solely from `CAUSORYN_CONFIG`).
+   Uses the same `"${PLUGIN_ROOT}/scripts/mcp-server.mjs"` per the TŞ §17.1 portable plugin manifest contract (no fragile parent-directory `../../..` traversal into monorepo build folders, and no `--data-dir` CLI flag because `stdio.ts` reads configuration solely from `CAUSORYN_CONFIG`).
 3. **`plugin.json` (Clean top-level manifest):**
    Contains only fields supported by the native Antigravity loader (`name`, `displayName`, `version`, `description`, `suggestedPrompts`). Unknown top-level keys such as `$schema` are intentionally omitted because the native loader silently discards them.
 4. **Global server naming (`"causoryn"`):**

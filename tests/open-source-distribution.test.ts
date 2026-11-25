@@ -48,6 +48,8 @@ const DOLLAR_BRACE = "$" + "{";
 const CLAUDE_PLUGIN_ROOT_TOKEN = DOLLAR_BRACE + "CLAUDE_PLUGIN_ROOT}";
 const ZCODE_PLUGIN_ROOT_TOKEN = DOLLAR_BRACE + "ZCODE_PLUGIN_ROOT}";
 const ZCODE_PROJECT_DIR_TOKEN = DOLLAR_BRACE + "ZCODE_PROJECT_DIR}";
+/** Antigravity expands this token to the plugin directory in a plugin's mcp_config.json. */
+const ANTIGRAVITY_PLUGIN_ROOT_TOKEN = DOLLAR_BRACE + "PLUGIN_ROOT}";
 
 const CREDENTIAL_PATTERN =
   /(api[_-]?key|secret|token|password|credential|bearer|private[_-]?key)/i;
@@ -606,6 +608,7 @@ describe("2. Repo-root & packages/causoryn 4-host manifests (0.3.0 parity + zero
     expect(agyServers["causoryn"]?.["command"]).toBe("npx");
     expect(agyServers["causoryn"]?.["args"]).toEqual([
       "-y",
+      "--ignore-scripts",
       "causoryn@0.3.0",
       "mcp",
       "--allow-cwd",
@@ -617,7 +620,14 @@ describe("2. Repo-root & packages/causoryn 4-host manifests (0.3.0 parity + zero
     const rootMcp = readJsonObject(path.join(REPO_ROOT, "mcp.json"));
     const portableServers = rootMcp["mcpServers"] as Record<string, Record<string, unknown>>;
     expect(portableServers["causoryn"]?.["command"]).toBe("npx");
-    expect(portableServers["causoryn"]?.["args"]).toContain("causoryn@0.3.0");
+    expect(portableServers["causoryn"]?.["args"]).toEqual([
+      "-y",
+      "--ignore-scripts",
+      "causoryn@0.3.0",
+      "mcp",
+      "--allow-cwd",
+      "--auto-data-dir",
+    ]);
 
     const serverJson = readJsonObject(path.join(REPO_ROOT, "server.json"));
     expect(serverJson["name"]).toBe("io.github.mrbekox/causoryn");
@@ -678,6 +688,7 @@ describe("2. Repo-root & packages/causoryn 4-host manifests (0.3.0 parity + zero
     expect(codexServers["causoryn"]?.["startup_timeout_sec"]).toBe(30);
     expect(codexServers["causoryn"]?.["args"]).toEqual([
       "-y",
+      "--ignore-scripts",
       "--package",
       "causoryn@0.3.0",
       "causoryn",
@@ -698,8 +709,9 @@ describe("2. Repo-root & packages/causoryn 4-host manifests (0.3.0 parity + zero
     const pkgAgyMcp = readJsonObject(path.join(PKG_DIR, "mcp_config.json"));
     const pkgAgyServers = pkgAgyMcp["mcpServers"] as Record<string, Record<string, unknown>>;
     expect(pkgAgyServers["causoryn"]?.["command"]).toBe("node");
+    // Anchored at the plugin root, so the host's working directory never selects the launcher:
     expect(pkgAgyServers["causoryn"]?.["args"]).toEqual([
-      "scripts/plugin-mcp-launcher.mjs",
+      `${ANTIGRAVITY_PLUGIN_ROOT_TOKEN}/scripts/plugin-mcp-launcher.mjs`,
       "--expected-version",
       "0.3.0",
       "--allow-cwd",
