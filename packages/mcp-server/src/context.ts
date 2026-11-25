@@ -10,7 +10,16 @@ import {
   isTerminalIndexJobStatus,
   type IndexJobStatus,
 } from "@causoryn/indexing";
-import { OutputAccessPolicy, WorkspaceAccessPolicy } from "@causoryn/workspace";
+import {
+  describeLinkInspectionFailure,
+  describeWindowsPathSegmentIssue,
+  findWindowsUnsafePathSegment,
+  inspectLinkTargets,
+  isUncOrDevicePath,
+  LINK_TARGET_INSPECTION_ENABLED,
+  OutputAccessPolicy,
+  WorkspaceAccessPolicy,
+} from "@causoryn/workspace";
 import {
   SqliteGraphRepository,
   SqliteWikiStore,
@@ -558,12 +567,25 @@ function validateDataDbPath(
   declared: string,
   allowRoots: readonly string[],
 ): string {
+  // UNC / Win32 device declarations are rejected before any filesystem call
+  // (resolving them on Windows would open an outbound SMB session).
+  if (isUncOrDevicePath(declared)) {
+    throw new CausorynConfigError([
+      `${fieldName} must not be a UNC or Win32 device path (rejected before filesystem access): ${declared}`,
+    ]);
+  }
   const issues: string[] = [];
   if (!path.isAbsolute(declared)) {
     issues.push(`${fieldName} must be an absolute path: ${declared}`);
   }
   if (declared.includes("\0")) {
     issues.push(`${fieldName} must not contain a NUL byte`);
+  }
+  if (process.platform === "win32") {
+    const finding = findWindowsUnsafePathSegment(declared);
+    if (finding !== undefined) {
+      issues.push(`${fieldName} is not usable: ${describeWindowsPathSegmentIssue(finding)}`);
+    }
   }
   const declaredResolved = path.resolve(declared);
   const stripWin32DevicePrefix = (value: string): string => {
@@ -602,6 +624,25 @@ function validateDataDbPath(
     ]);
   }
   const parentDir = path.dirname(declaredResolved);
+  const sqliteArtifacts = [
+    declaredResolved,
+    `${declaredResolved}-wal`,
+    `${declaredResolved}-shm`,
+    `${declaredResolved}-journal`,
+  ];
+  // Links on the way to the database (or a side file that is itself a link) whose
+  // target is a UNC/device path are rejected from lstat/readlink alone, before the
+  // stat/realpath calls below follow them.
+  if (LINK_TARGET_INSPECTION_ENABLED) {
+    for (const artifactPath of sqliteArtifacts) {
+      const inspection = inspectLinkTargets(artifactPath);
+      if (!inspection.ok) {
+        throw new CausorynConfigError([
+          `${fieldName} is not usable: ${describeLinkInspectionFailure(inspection)}`,
+        ]);
+      }
+    }
+  }
   let parentStat: Stats;
   try {
     parentStat = statSync(parentDir);
@@ -626,12 +667,6 @@ function validateDataDbPath(
   }
   // CWE-59 savunması: SQLite ana dosyası ve WAL/SHM/journal yan dosyaları için
   // lstatSync + fail-closed realpathSync denetimi (sarkan symlink ve dizin reddi).
-  const sqliteArtifacts = [
-    declaredResolved,
-    `${declaredResolved}-wal`,
-    `${declaredResolved}-shm`,
-    `${declaredResolved}-journal`,
-  ];
   for (const artifactPath of sqliteArtifacts) {
     let artifactLstat: Stats | undefined;
     try {
