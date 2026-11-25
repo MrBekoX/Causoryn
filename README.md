@@ -67,7 +67,7 @@ npx causoryn@latest setup --client zcode --yes
 # Register an optional tool profile; re-running setup keeps your env, --tool-profile and other entry keys
 npx causoryn@latest setup --client claude-code --tool-profile wiki,history --yes
 
-# Verify runtime, sidecar toolchain minimums (.NET 10, Python 3.10, Go 1.22), host alignment and legacy index files (100% read-only)
+# Verify runtime, sidecar toolchain minimums (.NET 10, Python 3.10, Go 1.26), host alignment and legacy index files (100% read-only)
 npx causoryn@latest doctor
 
 # Uninstall cleanly from a host
@@ -246,7 +246,7 @@ Causoryn is **not** a single-file JS artifact — its runtime properties vary tr
 | **TypeScript / JavaScript** (L2 + L3: `.ts/.tsx/.mts/.cts/.js/.jsx/.mjs/.cjs`, ESM + CJS, `tsconfig`/`jsconfig`, monorepo workspaces, CHA `INHERITS`/`IMPLEMENTS`) | In-process TS Compiler API + bundled `dist/typescript-lib/lib*.d.ts` | Zero-compile | 100% offline |
 | **C# / Roslyn** (L2 + L3: `SemanticModel`, CHA `INHERITS`/`IMPLEMENTS`, read-only `obj/project.assets.json` NuGet discovery) | **.NET 10 runtime** (`dotnet exec`, isolated `DOTNET_STARTUP_HOOKS=""`) | Prebuilt deterministic Release Roslyn DLL (zero-compile) | 100% offline |
 | **Python** (L2 + L3) | **Python 3.10+** (`python -I -B -X utf8`, `python3` tried first on POSIX, stdlib `ast`) | Zero-compile | 100% offline |
-| **Go** (L1/heuristic + L3: directory + `go.mod` package keying) | **Go 1.22+** (`GOTOOLCHAIN=local`, `GOWORK=off`, `GOPROXY=off`, stdlib `go/parser`) | On-demand `go run` (or prebuilt `CAUSORYN_GO_WORKER_BIN`) | 100% offline |
+| **Go** (L1/heuristic + L3: directory + `go.mod` package keying) | **Go 1.26+** (`GOTOOLCHAIN=local`, `GOWORK=off`, `GOPROXY=off`, stdlib `go/parser`) | On-demand `go run` (or prebuilt `CAUSORYN_GO_WORKER_BIN`) | 100% offline |
 | **Rust** (L1/heuristic + L3: staged crate build outside the workspace + SHA-256 binary pinning) | **Rust / Cargo** (`syn` 3 sidecar) | On-demand `cargo build --locked` of a staged crate copy in `~/.causoryn/cache/rust-worker-target` | An uncached build can fetch locked crates from `crates.io`; a populated cache supports offline use |
 
 Missing optional sidecar toolchains (`dotnet`, `python`, `go`, `cargo`) never crash the server — they degrade honestly to L0/L1 file-level provenance (`npx causoryn@latest doctor` inspects sidecar readiness). Every tool the MCP server starts is resolved to an absolute path outside the analyzed workspace.

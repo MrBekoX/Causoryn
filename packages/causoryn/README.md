@@ -33,7 +33,7 @@
 | **TypeScript / JavaScript** (L2 + L3: `.ts/.tsx/.mts/.cts/.js/.jsx/.mjs/.cjs`, ESM + CJS, `tsconfig`/`jsconfig` paths, monorepo workspaces, CHA `INHERITS`/`IMPLEMENTS`) | In-process TS Compiler API + bundled `dist/typescript-lib/lib*.d.ts` | Zero-compile | 100% offline |
 | **C# / Roslyn** (L2 + L3: CHA `INHERITS`/`IMPLEMENTS`, read-only `obj/project.assets.json` NuGet discovery) | **.NET 10 runtime** (`dotnet exec`, isolated `DOTNET_STARTUP_HOOKS=""`) | Prebuilt deterministic Release Roslyn DLL (zero-compile) | 100% offline |
 | **Python** (L2 + L3) | **Python 3.10+** (`python3` then `python` on macOS/Linux, `python` on Windows; run as `-I -B -X utf8`, stdlib `ast`) | Zero-compile | 100% offline |
-| **Go** (L1/heuristic + L3: directory + `go.mod` package keying) | **Go 1.22+** (`GOTOOLCHAIN=local`, `GOWORK=off`, `GOPROXY=off`, stdlib `go/parser`) | On-demand `go run` (or `CAUSORYN_GO_WORKER_BIN`) | 100% offline |
+| **Go** (L1/heuristic + L3: directory + `go.mod` package keying) | **Go 1.26+** (`GOTOOLCHAIN=local`, `GOWORK=off`, `GOPROXY=off`, stdlib `go/parser`) | On-demand `go run` (or `CAUSORYN_GO_WORKER_BIN`) | 100% offline |
 | **Rust** (L1/heuristic + L3: isolated Cargo `cwd` + SHA-256 binary pinning) | **Rust / Cargo** (`syn` 3 sidecar) | On-demand `cargo build --locked` into `~/.causoryn/cache/rust-worker-target` | An uncached build can fetch locked crates from `crates.io`; a populated cache supports offline use |
 
 If an optional language sidecar toolchain (`dotnet`, `python`, `go`, `cargo`) is unavailable on a machine, Causoryn degrades gracefully and honestly to L0/L1 file-level provenance (`npx causoryn@latest doctor` inspects sidecar readiness).
@@ -63,7 +63,7 @@ npx causoryn@latest setup --client zcode --yes
 npx causoryn@latest setup --client claude-code --tool-profile core,history --yes
 
 # Verify installation health (read-only; reports HEALTHY, DEGRADED, NOT CONFIGURED, or UNHEALTHY;
-# a toolchain below its floor — Python 3.10, Go 1.22, .NET 10 runtime — reports DEGRADED)
+# a toolchain below its floor — Python 3.10, Go 1.26, .NET 10 runtime — reports DEGRADED)
 npx causoryn@latest doctor
 
 # Cleanly remove Causoryn from a host (cleans up ~/.causoryn/runtime when no remaining host points to it)
