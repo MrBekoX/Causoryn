@@ -7,7 +7,7 @@ import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { TIMELINE_MAX_REFS } from "@causoryn/graph";
 import { describe, expect, it } from "vitest";
 
-import { createCausorynContext, createCausorynMcpServer } from "../src/index.js";
+import { createCausorynContext, createCausorynMcpServer, refreshIndex } from "../src/index.js";
 import { ArchitectureTimelineToolInputSchema } from "../src/schemas.js";
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
@@ -32,6 +32,32 @@ describe("causoryn_architecture_timeline input bounds", () => {
       ArchitectureTimelineToolInputSchema.safeParse({ refs: refsOf(TIMELINE_MAX_REFS + 1) })
         .success,
     ).toBe(false);
+  });
+});
+
+describe("refresh requests are coalesced and the response says so", { timeout: 60_000 }, () => {
+  it("a second identical refresh while the first is still queued returns the same jobId with a coalesced warning", async () => {
+    const context = createCausorynContext(
+      { workspaceId: "default", allowRoots: [FIXTURE_ROOT], autoIndex: false },
+      { logger: () => {} },
+    );
+    try {
+      // Both calls run synchronously, before the job queue starts draining.
+      const first = refreshIndex(context, "req-refresh-1", { mode: "full" });
+      const second = refreshIndex(context, "req-refresh-2", { mode: "full" });
+      const firstData = first.data as { jobId: string; status: string };
+      const secondData = second.data as { jobId: string; status: string };
+      expect(first.warnings).toEqual([]);
+      expect(secondData.jobId).toBe(firstData.jobId);
+      expect(secondData.status).toBe("queued");
+      expect(second.warnings).toEqual([
+        `refresh request coalesced into queued job ${firstData.jobId} (1 merged request(s)); no new job was created`,
+      ]);
+      const done = await context.jobManager.waitForJob(firstData.jobId);
+      expect(["done", "reused"]).toContain(done.status);
+    } finally {
+      context.close();
+    }
   });
 });
 
