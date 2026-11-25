@@ -491,6 +491,22 @@ describe("WorkspaceAccessPolicy — links to UNC/device targets", () => {
     },
   );
 
+  it.skipIf(!IS_WIN || !CAN_CREATE_FILE_SYMLINK)(
+    "re-inspects a nested root on every call: a component that later becomes a UNC link is denied",
+    () => {
+      const root = makeRoot();
+      const nested = path.join(root, "packages", "app");
+      mkdirSync(nested, { recursive: true });
+      const policy = WorkspaceAccessPolicy.create({ allowRoots: [root] });
+      expect(policy.authorizeRoot(nested).allowed).toBe(true);
+      // The same root path, now reached through a link to a UNC share:
+      rmSync(path.join(root, "packages"), { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+      symlinkSync("\\\\127.0.0.1\\causoryn-none\\", path.join(root, "packages"), "dir");
+      expect(denyRule(policy.authorizeRoot(nested))).toBe("unc-or-device-link-target");
+      expect(denyRule(policy.checkFile(nested, "index.ts"))).toBe("unc-or-device-link-target");
+    },
+  );
+
   it("keeps accepting a root reached through an ordinary directory link (canonical forms)", () => {
     const base = makeRoot();
     const realRoot = path.join(base, "real");

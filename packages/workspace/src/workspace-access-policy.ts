@@ -141,8 +141,12 @@ function windowsSegmentDeny(code: PolicyErrorCode, rawPath: string, label: strin
 export class WorkspaceAccessPolicy {
   private readonly canonicalRoots: readonly string[];
   private readonly ignorePatterns: readonly string[];
-  /** Root paths whose components were inspected for UNC/device link targets. */
-  private readonly linkSafeRoots = new Map<string, true>();
+  /**
+   * Lexical forms of the declared allowRoots. Their components were inspected for
+   * UNC/device link targets once, in the constructor (they are the user's own
+   * configuration); paths below them are inspected again on every call.
+   */
+  private readonly declaredRoots: readonly string[];
   /** canonicalRoot → native canonical (long-name, on-disk case) root. */
   private readonly nativeRoots = new Map<string, string>();
 
@@ -171,6 +175,7 @@ export class WorkspaceAccessPolicy {
         return path.resolve(root);
       }
     });
+    this.declaredRoots = config.allowRoots.map((root) => path.resolve(root));
     this.ignorePatterns = effectiveIgnorePatterns(config);
   }
 
@@ -442,20 +447,23 @@ export class WorkspaceAccessPolicy {
   }
 
   /**
-   * Inspects every component of a root path for UNC/device link targets before the
-   * first realpath/stat. The verdict for a root is cached per instance: the path
-   * down to the root is the user's own environment, while every candidate below
-   * the root is inspected again on each call.
+   * Inspects the components of a root path for UNC/device link targets before the
+   * first realpath/stat. Nothing is cached: a component below a declared allowRoot
+   * may change between calls, so it is inspected on every call. The walk starts at
+   * the declared allowRoot that lexically contains the root (its own components
+   * were inspected in the constructor); a root spelled outside every declared root
+   * is inspected from the filesystem root.
    */
   private inspectRootLinks(rootPath: string): PolicyDeny | undefined {
     if (!LINK_TARGET_INSPECTION_ENABLED) {
       return undefined;
     }
-    const key = comparablePath(path.resolve(rootPath));
-    if (this.linkSafeRoots.has(key)) {
-      return undefined;
-    }
-    const inspection = inspectLinkTargets(rootPath);
+    const resolved = path.resolve(rootPath);
+    const declared = this.declaredRoots.find((declaredRoot) => isInside(declaredRoot, resolved));
+    const inspection = inspectLinkTargets(
+      resolved,
+      declared === undefined ? {} : { startDir: declared },
+    );
     if (!inspection.ok) {
       return deny(
         "workspace/root-not-authorized",
@@ -463,7 +471,6 @@ export class WorkspaceAccessPolicy {
         inspection.reason,
       );
     }
-    rememberBounded(this.linkSafeRoots, key, true);
     return undefined;
   }
 
