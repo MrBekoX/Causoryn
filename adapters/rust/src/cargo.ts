@@ -28,6 +28,7 @@ import {
   renameSync,
   rmSync,
 } from "node:fs";
+import { homedir } from "node:os";
 import { basename, delimiter, dirname, isAbsolute, join, resolve } from "node:path";
 import {
   isFullyQualifiedPath,
@@ -39,7 +40,11 @@ import {
   trustedWorkingDirectory,
   withoutCwdExecutableSearch,
 } from "@causoryn/sidecar-ipc";
-import { hashRegularFileNoFollow, preparePrivateDirectory } from "./file-integrity.js";
+import {
+  hashRegularFileNoFollow,
+  preparePrivateDirectory,
+  untrustedToolchainConfigAbove,
+} from "./file-integrity.js";
 import { WORKER_BINARY_NAME } from "./types.js";
 
 /**
@@ -570,6 +575,12 @@ export interface StagedRustWorkerBuildInput {
   readonly cargoExecutable?: string;
   readonly outputMaxChars?: number;
   readonly spawnFn?: CargoSpawnFunction;
+  /**
+   * Toolchain configuration files (`.cargo/config.toml`, `rust-toolchain.toml`)
+   * in or below this directory are the user's own; default os.homedir().
+   * See untrustedToolchainConfigAbove.
+   */
+  readonly trustedConfigRoot?: string | null;
 }
 
 export interface StagedRustWorkerBuildOutcome {
@@ -661,6 +672,18 @@ export async function buildRustWorkerFromStagedSource(
   if (insideUntrusted(stagingDir, input.untrustedRoots)) {
     cleanup();
     return fail(`Rust worker build refused: the staging directory resolves inside the analyzed workspace (${stagingDir})`);
+  }
+  // cargo and rustup read configuration from every ancestor of their cwd.
+  const foreignConfig = untrustedToolchainConfigAbove(
+    stagingDir,
+    input.trustedConfigRoot !== undefined ? input.trustedConfigRoot : homedir(),
+  );
+  if (foreignConfig !== null) {
+    cleanup();
+    return fail(
+      `Rust worker build refused: cargo would read ${foreignConfig}, a toolchain configuration file above the build ` +
+        "directory that is not owned by the current user; remove it or set CAUSORYN_RUST_TARGET_DIR to a directory below your home directory",
+    );
   }
 
   try {
