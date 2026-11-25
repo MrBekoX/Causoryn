@@ -1268,3 +1268,142 @@ describe("verifyChange — E3 test durumu dürüstlüğü", () => {
     ).toBe(true);
   });
 });
+
+/* ------------------------------------------------------------------ */
+/* Trust boundary: rules provenance + host-asserted evidence isolation */
+/* ------------------------------------------------------------------ */
+
+describe("verifyChange — architecture rules provenance and host evidence isolation", () => {
+  const base = cleanTree();
+  const violation = violatingTree();
+  const COMMIT = "0123456789abcdef0123456789abcdef01234567";
+
+  it("rules loaded from the untrusted working tree never yield a clean pass: no_findings is downgraded to review_required and the report carries the trust warning", () => {
+    const report = verifyChange({
+      baseSnapshot: base,
+      targetSnapshot: base,
+      checks: ["architecture", "graph-diff", "test-plan"],
+      guardPolicy: CLEAN_POLICY,
+      guardBaseline: EMPTY_BASELINE,
+      rulesProvenance: {
+        source: "working-tree",
+        ref: "HEAD",
+        refOrigin: "default-head",
+        fallbackReason: "rules-not-in-ref",
+      },
+    });
+    expect(report.checks.architecture.status).toBe("evaluated");
+    expect(report.verdict).toBe("review_required");
+    expect(report.verdictRationale[0]?.rule).toBe(VERIFY_VERDICT_RULES.untrustedRules);
+    expect(report.verdictRationale[0]?.detail).toContain("working tree");
+    expect(report.trustWarning).toBe("architecture-rules-loaded-from-untrusted-working-tree");
+    expect(report.rulesProvenance).toEqual({
+      source: "working-tree",
+      ref: "HEAD",
+      refOrigin: "default-head",
+      fallbackReason: "rules-not-in-ref",
+    });
+    // The trust signal is part of the hashed report body (reportId) and of
+    // the serialized surface, not only of an outer envelope.
+    const serialized = serializeVerificationReport(report);
+    expect(serialized).toContain(
+      '"trustWarning":"architecture-rules-loaded-from-untrusted-working-tree"',
+    );
+    expect(serialized).toContain('"rulesProvenance":{');
+    const trusted = verifyChange({
+      baseSnapshot: base,
+      targetSnapshot: base,
+      checks: ["architecture", "graph-diff", "test-plan"],
+      guardPolicy: CLEAN_POLICY,
+      guardBaseline: EMPTY_BASELINE,
+      rulesProvenance: { source: "git-ref", ref: "HEAD", commit: COMMIT, refOrigin: "default-head" },
+    });
+    expect(trusted.reportId).not.toBe(report.reportId);
+  });
+
+  it("rules loaded from a trusted git ref keep the clean verdict and the report records ref, commit and ref origin (an explicit old baseRef is reported, not hidden)", () => {
+    const report = verifyChange({
+      baseSnapshot: base,
+      targetSnapshot: base,
+      checks: ["architecture", "graph-diff", "test-plan"],
+      guardPolicy: CLEAN_POLICY,
+      guardBaseline: EMPTY_BASELINE,
+      rulesProvenance: { source: "git-ref", ref: "v1.0.0", commit: COMMIT, refOrigin: "explicit" },
+    });
+    expect(report.verdict).toBe("no_findings");
+    expect(report.verdictRationale[0]?.rule).toBe(VERIFY_VERDICT_RULES.cleanResolved);
+    expect(report.trustWarning).toBeUndefined();
+    expect(report.rulesProvenance).toEqual({
+      source: "git-ref",
+      ref: "v1.0.0",
+      commit: COMMIT,
+      refOrigin: "explicit",
+    });
+    expect(
+      report.limitations.some((entry) => entry.includes("v1.0.0") && entry.includes(COMMIT)),
+    ).toBe(true);
+  });
+
+  it("untrusted rules do not soften harder verdicts: blocking findings stay blocking and the untrusted rule is still listed", () => {
+    const report = verifyChange({
+      baseSnapshot: base,
+      targetSnapshot: violation,
+      checks: ["architecture", "graph-diff"],
+      guardPolicy: CLEAN_POLICY,
+      guardBaseline: EMPTY_BASELINE,
+      rulesProvenance: { source: "working-tree", fallbackReason: "ref-unreadable" },
+    });
+    expect(report.verdict).toBe("blocking_findings");
+    expect(report.verdictRationale[0]?.rule).toBe(VERIFY_VERDICT_RULES.blockingFinding);
+    expect(
+      report.verdictRationale.some((rule) => rule.rule === VERIFY_VERDICT_RULES.untrustedRules),
+    ).toBe(true);
+    expect(report.trustWarning).toBe("architecture-rules-loaded-from-untrusted-working-tree");
+  });
+
+  it("rules provenance is ignored when the architecture check was not requested", () => {
+    const report = verifyChange({
+      baseSnapshot: base,
+      targetSnapshot: base,
+      checks: ["graph-diff", "test-plan"],
+      rulesProvenance: { source: "working-tree", fallbackReason: "rules-not-in-ref" },
+    });
+    expect(report.verdict).toBe("no_findings");
+    expect(report.trustWarning).toBeUndefined();
+    expect(report.rulesProvenance).toBeUndefined();
+  });
+
+  it("host-asserted observedTestRun.evidenceIds stay inside the test run section and are never merged into engine evidence", () => {
+    const report = verifyChange({
+      baseSnapshot: base,
+      targetSnapshot: modifiedTree(),
+      changedSymbols: [SVC],
+      checks: ["test-plan", "graph-diff"],
+      observedTestRun: {
+        state: "host_asserted",
+        evidenceRef: "reports/vitest-summary.json",
+        observedCount: 1,
+        evidenceIds: ["host-claimed-evidence-1"],
+      },
+    });
+    expect(report.tests.state).toBe("host_asserted");
+    if (report.tests.state !== "host_asserted") throw new Error("expected host_asserted");
+    expect(report.tests.evidenceIds).toEqual(["host-claimed-evidence-1"]);
+    expect(report.checks.testPlan.run).toEqual(report.tests);
+    expect(report.evidenceIds).not.toContain("host-claimed-evidence-1");
+    expect(report.checks.testPlan.evidenceIds).not.toContain("host-claimed-evidence-1");
+    const notRequested = verifyChange({
+      baseSnapshot: base,
+      targetSnapshot: base,
+      checks: ["graph-diff"],
+      observedTestRun: {
+        state: "host_asserted",
+        evidenceRef: "reports/vitest-summary.json",
+        observedCount: 1,
+        evidenceIds: ["host-claimed-evidence-2"],
+      },
+    });
+    expect(notRequested.evidenceIds).not.toContain("host-claimed-evidence-2");
+    expect(notRequested.checks.testPlan.evidenceIds).not.toContain("host-claimed-evidence-2");
+  });
+});

@@ -42,6 +42,7 @@ export { verifyChange, serializeVerificationReport } from "./verify-change.js";
 export {
   NO_FINDINGS_CORE_DISCLAIMER,
   NO_FINDINGS_DISCLAIMER,
+  UNTRUSTED_RULES_TRUST_WARNING,
   VERIFY_CHECK_NAMES,
   VERIFY_VERDICT_RULES,
 } from "./types.js";
@@ -56,6 +57,7 @@ export type {
   VerifyContractDriftEntry,
   VerifyFileAuthorizationDecision,
   VerifyFileAuthorizer,
+  VerifyRulesProvenance,
   VerifyTargetRevision,
   VerifyVerdict,
   VerifyVerdictRule,
