@@ -252,7 +252,7 @@ describe("doctor: legacy per-host index files (graph-<client>.sqlite)", { timeou
 });
 
 describe("Task 1.1 & 1.8b — doctor.ts probe cwd isolation, absolute node path check, honest status", () => {
-  it("defaultToolchainProbe runs with cwd: os.tmpdir() instead of untrusted process.cwd()", () => {
+  it("defaultToolchainProbe runs from the executable's own directory, never the untrusted process.cwd() or the shared os.tmpdir()", () => {
     const untrustedDir = createTempDir("untrusted-cwd");
     mkdirSync(path.join(untrustedDir, ".cargo"), { recursive: true });
     writeFileSync(
@@ -277,9 +277,10 @@ describe("Task 1.1 & 1.8b — doctor.ts probe cwd isolation, absolute node path 
       expect(outcome.available).toBe(true);
       expect(outcome.version).not.toBeNull();
       const probedCwd = realpathSync(outcome.version!);
-      const expectedTmp = realpathSync(os.tmpdir());
-      expect(probedCwd.toLowerCase()).toBe(expectedTmp.toLowerCase());
+      const expectedCwd = realpathSync(path.dirname(process.execPath));
+      expect(probedCwd.toLowerCase()).toBe(expectedCwd.toLowerCase());
       expect(probedCwd.toLowerCase()).not.toBe(realpathSync(untrustedDir).toLowerCase());
+      expect(probedCwd.toLowerCase()).not.toBe(realpathSync(os.tmpdir()).toLowerCase());
     } finally {
       process.chdir(prevCwd);
     }

@@ -1,14 +1,16 @@
 /**
  * Absolute executable resolution (Windows cwd-first search hardening).
  *
- * The same suite runs against both copies of the resolver:
- * packages/sidecar-ipc/src/executable.ts and
- * packages/graph/src/executable-resolution.ts.
+ * The same suite runs against every copy of the resolver:
+ * packages/sidecar-ipc/src/executable.ts,
+ * packages/graph/src/executable-resolution.ts and
+ * packages/causoryn/src/executable-resolution.ts.
  */
 import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import * as cliCopy from "../packages/causoryn/src/executable-resolution.js";
 import * as graphCopy from "../packages/graph/src/executable-resolution.js";
 import * as sidecarCopy from "../packages/sidecar-ipc/src/executable.js";
 
@@ -51,6 +53,7 @@ async function withEnvAndCwd<T>(
 for (const [label, impl] of [
   ["sidecar-ipc", sidecarCopy],
   ["graph copy", graphCopy],
+  ["cli copy", cliCopy],
 ] as const) {
   describe(`executable resolution (${label})`, () => {
     let tmp: string;
