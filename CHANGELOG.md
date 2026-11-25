@@ -78,6 +78,7 @@ Before `1.0.0`, a breaking change bumps the minor version.
 - **`causoryn doctor`:** accepts absolute Node executable paths and reports `NOT CONFIGURED` (no configured host) or `DEGRADED` (host warnings, or a toolchain that is installed but below its minimum or unusable) instead of a false `HEALTHY`.
 - **Python command:** the default is `python3` then `python` on POSIX (`python` on Windows), shared by the Python adapter and `causoryn doctor`; an explicit `pythonCommand` is used as is. Indexes with Python files rebuild once after the upgrade.
 - **Typecheck coverage:** `npm run typecheck` now also covers `integrations/*/causoryn/test` and `apps/*/src`.
+- **CI macOS leg:** the merge gate runs macOS on GitHub's Intel x64 pool (`macos-26-intel`). GitHub's standard macOS arm64 pool has been capacity constrained since late October 2026, and during peak hours jobs were cancelled before any step ran ("The job was not acquired by Runner of type hosted even after multiple attempts"). The nightly off-peak run (`schedule`, 03:17 UTC) and manual dispatch add an Apple Silicon `macos-26` leg.
 - **Release workflow:** three jobs (`verify-and-test` → hermetic `build-and-pack`, with `verify-package-ready.mjs` immediately before `npm pack` → `publish`); `SHA256SUMS.txt` and the CycloneDX SBOM are generated immediately after `npm pack`, before the packed tarball is smoke-tested.
 
 ### Fixed

@@ -67,7 +67,7 @@ Bu kapılar kapanana kadar `1.0.0` ilan edilmez. [Mühendislik Backlog](BACKLOG.
 
 1. **Antigravity `agy` CLI canlı kurulum + smoke** — doğrudan stdio el sıkışması otomatikleştirildi; `agy` ikilisi bulunmadığı için tüm `agy` CLI adımları `NOT RUN` olarak kalır.
 2. **ZCode masaüstü GUI kurulumu + `tools/list` smoke'u** — otomatik koşumlar bir geliştiricinin masaüstü profilini asla değiştirmesin diye ertelendi.
-3. **Canlı macOS / Linux / ARM64 host smoke'u** — 3-OS GitHub Actions CI `ubuntu-latest`, `windows-latest` ve `macos-15` üzerinde geçer; canlı etkileşimli host koşumları yalnızca Windows x64 için mevcuttur.
+3. **Canlı macOS / Linux / ARM64 host smoke'u** — 3-OS GitHub Actions CI `ubuntu-latest`, `windows-latest` ve `macos-26-intel` üzerinde geçer (Apple Silicon `macos-26` gece koşusunda); canlı etkileşimli host koşumları yalnızca Windows x64 için mevcuttur.
 4. **MCP TypeScript SDK v1.x (`^1.32.2`) → v2 yükseltmesi.**
 5. **Live Architecture watcher MCP yüzeyi** — dosya başına `file_facts` erken kesmesi ve TypeScript `oldProgram` yeniden kullanımı teslim edildi; süreç içi dosya sistemi watcher'ını MCP üzerinden sunmak açık kalır (**Partial**).
 6. **Sidecar dillerinde `Test` / `TESTS` çıkarımı** (C#, Python, Go, Rust) — bugün bunları yalnızca TypeScript/JavaScript üretir, dolayısıyla `direct` test planı sinyali yalnızca orada vardır.

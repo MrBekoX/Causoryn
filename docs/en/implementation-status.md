@@ -67,7 +67,7 @@ Sections 1–3 describe 0.3.0. Sections 4–13 are dated historical records: the
 
 1. **Antigravity `agy` CLI live install + smoke** — the direct stdio handshake is automated; all `agy` CLI steps remain `NOT RUN` because no `agy` binary was available.
 2. **ZCode desktop GUI install + `tools/list` smoke** — deferred so automated runs never modify a developer's desktop profile.
-3. **Live macOS / Linux / ARM64 host smoke** — 3-OS GitHub Actions CI passes on `ubuntu-latest`, `windows-latest` and `macos-15`; live interactive host runs exist only for Windows x64.
+3. **Live macOS / Linux / ARM64 host smoke** — 3-OS GitHub Actions CI passes on `ubuntu-latest`, `windows-latest` and `macos-26-intel` (Apple Silicon `macos-26` in the nightly run); live interactive host runs exist only for Windows x64.
 4. **MCP TypeScript SDK v1.x (`^1.32.2`) → v2 upgrade.**
 5. **Live Architecture watcher MCP surface** — per-file `file_facts` early cutoff and TypeScript `oldProgram` reuse are shipped; exposing the in-process filesystem watcher over MCP remains open (**Partial**).
 6. **`Test` / `TESTS` extraction in the sidecar languages** (C#, Python, Go, Rust) — today only TypeScript/JavaScript emit them, so the `direct` test-plan signal exists only there.
