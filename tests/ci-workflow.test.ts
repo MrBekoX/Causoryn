@@ -11,7 +11,7 @@
  *   `persist-credentials: false`, Linux job'larında ilk adım `step-security/harden-runner`
  *   (Docker-dışı job'larda `disable-sudo-and-containers: true`; Docker tabanlı Scorecard'da
  *   container runtime korunur), ve `run:` bloklarında sıfır `${{ ... }}` interpolasyonu.
- * - CI (`ci.yml`): 3-OS matrisi (`ubuntu-latest`, `windows-latest`, sabit `macos-15`), deterministik Release + RestoreLockedMode Roslyn + locked Rust,
+ * - CI (`ci.yml`): 3-OS merge kapısı (`ubuntu-latest`, `windows-latest`, Intel `macos-26-intel`) + gece/dispatch arm64 `macos-26`, deterministik Release + RestoreLockedMode Roslyn + locked Rust,
  *   `npm audit --audit-level=high`, cross-platform `export-public-tree.mjs --verify-temp` ve testler.
  * - Release (`release.yml`): korumalı `v*.*.*` etiket tabanlı üç-job hermetik CD (`verify-and-test`
  *   salt-okunur → `build-and-pack` temiz checkout, sıfır test, `verify-package-ready.mjs` hemen
@@ -138,7 +138,8 @@ interface WorkflowJob {
   readonly strategy?: {
     readonly "fail-fast"?: boolean;
     readonly matrix?: {
-      readonly os?: readonly string[];
+      /** Static OS list, or a `${{ fromJSON(...) }}` expression (see {@link matrixOsLegs}). */
+      readonly os?: readonly string[] | string;
       readonly include?: readonly WorkflowMatrixInclude[];
     };
   };
@@ -193,6 +194,23 @@ interface DependabotUpdate {
 interface DependabotDoc {
   readonly version?: number;
   readonly updates?: readonly DependabotUpdate[];
+}
+
+/**
+ * The OS legs a matrix job expands to. A static list is returned as is; a
+ * `${{ fromJSON(cond && '[...]' || '[...]') }}` expression is resolved by
+ * taking its JSON array literals: `when: "conditional"` is the first (taken
+ * when the condition holds), `when: "default"` the last one.
+ */
+function matrixOsLegs(job: WorkflowJob | undefined, when: "default" | "conditional" | "all" = "all"): string[] {
+  const os = job?.strategy?.matrix?.os;
+  if (os === undefined) return [];
+  if (typeof os !== "string") return [...os];
+  const arrays = [...os.matchAll(/'(\[[^']*\])'/g)].map((m) => JSON.parse(m[1] ?? "[]") as string[]);
+  if (arrays.length === 0) return [];
+  if (when === "conditional") return arrays[0] ?? [];
+  if (when === "default") return arrays[arrays.length - 1] ?? [];
+  return [...new Set(arrays.flat())];
 }
 
 function loadWorkflow(filePath: string, label: string): { readonly raw: string; readonly doc: WorkflowDoc } {
@@ -278,7 +296,7 @@ describe("Tüm GitHub Actions iş akışları — ortak tedarik zinciri güvenli
         const runsOn = String(job["runs-on"] ?? "");
         const hasLinux =
           runsOn.includes("ubuntu") ||
-          (job.strategy?.matrix?.os ?? []).some((osName) => osName.includes("ubuntu"));
+          matrixOsLegs(job).some((osName) => osName.includes("ubuntu"));
         const usesDockerAction = steps.some((s) => usesPinnedAction(s, "ossf/scorecard-action"));
 
         if (hasLinux) {
@@ -379,9 +397,13 @@ describe(".github/workflows/ci.yml — CI sözleşmesi ve SHA-sabitli güvenlik 
     expect(triggers?.["pull_request_target"]).toBeUndefined();
     expect(triggers?.["push"]).toEqual({ branches: ["main"] });
     expect(triggers?.["pull_request"]).toEqual({ branches: ["main"] });
+    // Nightly off-peak run (adds the Apple Silicon leg) and manual dispatch:
+    expect(triggers?.["schedule"]).toEqual([{ cron: "17 3 * * *" }]);
+    expect(triggers).toHaveProperty("workflow_dispatch");
+    expect(Object.keys(triggers ?? {}).sort()).toEqual(["pull_request", "push", "schedule", "workflow_dispatch"]);
   });
 
-  it("ubuntu-latest, windows-latest ve sabitlenmiş macos-15 üzerinde fail-fast: false matris tanımlar", () => {
+  it("merge kapısı ubuntu-latest, windows-latest ve Intel macos-26-intel üzerinde; arm64 macos-26 yalnızca gece/dispatch koşusunda (fail-fast: false)", () => {
     const { doc } = loadWorkflow(CI_WORKFLOW_PATH, ".github/workflows/ci.yml");
     const jobs = Object.values(doc.jobs ?? {});
     expect(jobs.length).toBeGreaterThanOrEqual(1);
@@ -389,11 +411,22 @@ describe(".github/workflows/ci.yml — CI sözleşmesi ve SHA-sabitli güvenlik 
     const matrixJob = jobs.find((job) => job.strategy?.matrix !== undefined);
     expect(matrixJob, "matris tanımlı CI job bulunmalı").toBeDefined();
     expect(matrixJob?.strategy?.["fail-fast"]).toBe(false);
-    expect(matrixJob?.strategy?.matrix?.os).toEqual([
+    // push / pull_request (merge gate): the arm64 pool is not on the gate path.
+    expect(matrixOsLegs(matrixJob, "default")).toEqual(["ubuntu-latest", "windows-latest", "macos-26-intel"]);
+    // schedule / workflow_dispatch: the gate legs plus Apple Silicon.
+    expect(matrixOsLegs(matrixJob, "conditional")).toEqual([
       "ubuntu-latest",
       "windows-latest",
-      "macos-15",
+      "macos-26-intel",
+      "macos-26",
     ]);
+    const osExpr = String(matrixJob?.strategy?.matrix?.os);
+    expect(
+      osExpr.startsWith(
+        "${{ fromJSON((github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && '",
+      ),
+    ).toBe(true);
+    expect(matrixJob?.name).toBe("Verify (${{ matrix.os }})");
     expect(matrixJob?.["runs-on"]).toBe("${{ matrix.os }}");
   });
 
