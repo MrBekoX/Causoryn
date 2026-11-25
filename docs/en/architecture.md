@@ -128,7 +128,7 @@ flowchart TD
 | `apps/visualizer` | Zero-dependency offline HTML+SVG graph viewer generator (inline CSS/JS, strict CSP, resolution color coding, selection-to-evidence panel) | Partial: verified by DOM-level Vitest and static inspection; a real headless-browser run has not been executed |
 | `integrations/zcode/causoryn` | ZCode developer plugin package: `.zcode-plugin/plugin.json` (`mcpServers` + `userConfig`), skills, dev marketplace (`.claude-plugin/marketplace.json`) | Partial: manifests validated by tests; a live ZCode GUI install has not been executed |
 | `integrations/antigravity/causoryn` | Antigravity plugin directory: `plugin.json`, `mcp_config.json` (primary local loader config), `mcp.json` (portable manifest), `README.md`, and `build:bundle`-staged `scripts/mcp-server.mjs` + `scripts/index-worker.mjs` + vendored `better-sqlite3` | Partial: direct `stdio` handshake verified; `agy` CLI install/smoke NOT RUN |
-| `scripts/` | `scripts/secret-scan.mjs` (13 directory roots + 13 root text files), `scripts/generate-sbom.mjs` (CycloneDX 1.5 SBOM + `SHA256SUMS.txt`), `scripts/export-public-tree.mjs` (clean public tree export with leak verification) | Done |
+| `scripts/` | `scripts/secret-scan.mjs` (every tracked and untracked-not-ignored file; shared scanner `scripts/lib/leak-scan.mjs`), `scripts/generate-sbom.mjs` (CycloneDX 1.5 SBOM + `SHA256SUMS.txt`), `scripts/export-public-tree.mjs` (clean public tree export with leak verification) | Done |
 | `examples/fixture-*` (8 directories) | Deterministic fixtures: `ts-orders`, `ts-express`, `ts-nextjs`, `csharp-orders`, `contract-drift`, `python-app`, `go-app`, `rust-app` | Done |
 | `tests/` | Integration, smoke, packaged-bundle security, toolchain isolation, benchmark, secret-scan, public export, SBOM/release workflow, distribution, and bilingual doc-parity suites | Done (`tests/bench-release` is excluded from the default run) |
 
@@ -218,7 +218,7 @@ TypeScript `5.9.3` is pinned because `typescript-eslint` requires `typescript >=
 - `npm run build:package` (`--workspace packages/causoryn`) + `node packages/causoryn/scripts/verify-package-ready.mjs` -> stage and verify the publishable package.
 - `npm run typecheck` -> `tsc -p tsconfig.typecheck.json` (`noEmit` over `packages/*` and `adapters/*` sources and tests, `tests/**`, `integrations/*/causoryn/test`, `apps/*/src`, and the Vitest configs).
 - `npm run lint` -> ESLint flat config (`typescript-eslint` recommended).
-- `npm run secret-scan` -> `node scripts/secret-scan.mjs` scans 13 directory roots and 13 root text files for credentials, API tokens, personal emails, and local user-profile paths; it exits `1` on any match or missing root.
+- `npm run secret-scan` -> `node scripts/secret-scan.mjs` scans every tracked and untracked-not-ignored file (at least the 13 directory roots and 13 root text files) for credentials, API tokens, personal emails, and local user-profile paths; it exits `1` on any match or missing root.
 - Module resolution is `NodeNext`: relative TypeScript imports use explicit `.js` specifiers.
 
 ## Related Documentation

@@ -40,6 +40,8 @@ Before `1.0.0`, a breaking change bumps the minor version.
 - **ZCode shares the index with the other hosts.** The base data directory is now `--data-dir` > `~/.causoryn` for every host; `ZCODE_PLUGIN_DATA` is only a fallback when `~/.causoryn` cannot be created or written. ZCode users whose index lived under `ZCODE_PLUGIN_DATA` re-index once.
 - **Index job status `reused`.** Job records (`causoryn_status` `data.index.job`, legacy `causoryn_index_status`) report `status` `queued`, `running`, `done`, `reused`, `failed` plus `outcome` (`published`, `unchanged`, `reused_peer`, `peer_busy`, `failed`) and `published`. A run that publishes nothing is now `reused` (or `failed` with outcome `peer_busy`), never `done`; clients that polled for `done` must also accept `reused`.
 - **Analyzer fingerprint `fp3`.** Real TypeScript declaration spans, ESM/CommonJS module-format detection, and English evidence text changed analyzer output, so snapshots and `file_facts` written by earlier releases are not reused: the first `0.3.0` start re-indexes each workspace once.
+- **Go 1.26 minimum.** The Go worker and `causoryn doctor` require Go 1.26, the oldest Go release line that still gets security fixes (`native/go-worker/go.mod` was `go 1.22`). With an older Go, `doctor` reports `DEGRADED` and Go files fall back to L0/L1 analysis.
+- **Stricter workspace boundaries from the security hardening.** A root that is only a subdirectory of a git repository no longer reads that parent repository (Git-based tools report the ref as not found); `causoryn setup` stops when a host configuration directory below the home directory is a symbolic link or junction (`CLAUDE_CONFIG_DIR` / `CODEX_HOME` can point at the real directory); architecture policy YAML rejects aliases; NuGet package folders outside the trusted NuGet roots and the workspace are ignored with a warning; `--allow-cwd` refuses projects inside `~/.config` or `~/Library` (use `--root`).
 
 ### Migration
 
@@ -58,7 +60,7 @@ Before `1.0.0`, a breaking change bumps the minor version.
 - **Waiting for a live peer build:** async runs claim the build lease before analysis; when a live peer holds it they wait (progress phase `waiting_for_peer`, up to `CAUSORYN_PEER_WAIT_TIMEOUT_MS`, default 15 min) and then reuse the peer's snapshot without re-analysis when the inputs match (`outcome: "reused_peer"`).
 - **Schema forward guard and legacy migration:** a `graph.sqlite` stamped by a newer schema is never opened for writing (`storage/schema-too-new`); the CLI uses `graph.schema-<N>.sqlite` instead. Legacy `graph-<client>.sqlite` files are migrated once (read-only `quick_check`, online backup, no-clobber publish).
 - **`causoryn setup --tool-profile <list>`** writes `--tool-profile <list>` into every generated entry (`core`, `full`, `wiki`, `history`, or a comma list); `--all-detected` is an explicit alias of the default host selection.
-- **`causoryn doctor` toolchain minimums and legacy files:** probes the .NET 10 runtime (`dotnet --list-runtimes`), Python 3.10 and Go 1.22, reports per-toolchain `status` (`ok`, `warn`, `absent`) and `minimumVersion`, and lists legacy `graph-<client>.sqlite` files (read-only; never deletes them).
+- **`causoryn doctor` toolchain minimums and legacy files:** probes the .NET 10 runtime (`dotnet --list-runtimes`), Python 3.10 and Go 1.26, reports per-toolchain `status` (`ok`, `warn`, `absent`) and `minimumVersion`, and lists legacy `graph-<client>.sqlite` files (read-only; never deletes them).
 - **Warm boot, streaming snapshot hashing, and retention GC:** `computeStreamingSnapshotId` hashes the same canonical bytes as before without building one large string (IDs are unchanged); `getLatestSnapshotMeta` avoids hydrating the full graph on startup; `MAX_PUBLISHED_CACHE_ENTRIES = 1` lowers warm memory; `pruneOldSnapshots` keeps the newest 2 published snapshots and removes orphan rows, including orphan `symbol_fts` entries.
 - **Semantic fidelity:** TypeScript monorepo workspace package resolution (`package.json` `name`/`exports`/`types`/`main`/`workspaces`, confined to `rootDir`); class-hierarchy edges (`INHERITS`, `IMPLEMENTS`) for TypeScript (`TypeChecker`) and C# Roslyn (`INamedTypeSymbol.BaseType`/`Interfaces`), used by impact analysis and `causoryn_preflight_change`; read-only C# NuGet reference discovery from `obj/project.assets.json` (bounded, symlink/UNC-guarded); per-language `coverage.byLanguage` in envelopes so one language cannot hide degradation in another.
 - **Code localization in `causoryn_get_agent_context`:** identifier and path tokenization (`camelCase`, `PascalCase`, `snake_case`, `kebab-case`) with SQLite FTS5 BM25 plus structural-degree ranking; production sources rank above test files and `UnknownExternal` placeholders unless the query asks about tests; matched external concepts propagate one hop back to their production callers.
@@ -79,6 +81,7 @@ Before `1.0.0`, a breaking change bumps the minor version.
 - **Python command:** the default is `python3` then `python` on POSIX (`python` on Windows), shared by the Python adapter and `causoryn doctor`; an explicit `pythonCommand` is used as is. Indexes with Python files rebuild once after the upgrade.
 - **Typecheck coverage:** `npm run typecheck` now also covers `integrations/*/causoryn/test` and `apps/*/src`.
 - **CI macOS leg:** the merge gate runs macOS on GitHub's Intel x64 pool (`macos-26-intel`). GitHub's standard macOS arm64 pool has been capacity constrained since late October 2026, and during peak hours jobs were cancelled before any step ran ("The job was not acquired by Runner of type hosted even after multiple attempts"). The nightly off-peak run (`schedule`, 03:17 UTC) and manual dispatch add an Apple Silicon `macos-26` leg.
+- **Index refresh queue:** identical queued refreshes (same root and mode) are merged into the waiting job and reported with a warning; at most 16 refreshes can wait (`LIMIT_EXCEEDED` beyond that). The wiki tree walk tolerates cyclic parent links, and the onboarding learning order is computed in O((V+E) log V) with unchanged output.
 - **Release workflow:** three jobs (`verify-and-test` → hermetic `build-and-pack`, with `verify-package-ready.mjs` immediately before `npm pack` → `publish`); `SHA256SUMS.txt` and the CycloneDX SBOM are generated immediately after `npm pack`, before the packed tarball is smoke-tested.
 
 ### Fixed
@@ -105,6 +108,52 @@ Before `1.0.0`, a breaking change bumps the minor version.
   - Git children additionally get an empty `GIT_ALLOW_PROTOCOL` and per-protocol `protocol.<name>.allow=never` pins; partial-clone (promisor) repositories are refused on git older than 2.45; the user's system and global `safe.directory` entries are forwarded with `-c`.
 - **Path safety:** a shared lexical check rejects UNC and Win32 device paths (`\\host\share`, `//host/share`, `\\?\`, `\\.\`) before any filesystem call; project-root safety also rejects `$HOME` ancestors (`C:\Users`, `/home`, `/Users`) and `/tmp`, `/var`, `/bin`, `/sbin`, `/lib`, `/dev`.
 - **Interactive HTML portal:** `script-src 'unsafe-inline'` is replaced by a deterministic `script-src 'sha256-<hash>'` Content Security Policy.
+- **Git reads confined to the analyzed repository:**
+  - A root without its own `.git` no longer falls back to a parent repository (`GIT_CEILING_DIRECTORIES` is the parent of the canonical root). A `.git` file may only point inside the root, or to a linked worktree or submodule git directory that points back to it. A `.git` entry that is a symbolic link is not followed.
+  - Network (UNC) and device paths in the gitdir pointer, `commondir`, alternates, config include paths and `core.worktree` are refused before git starts.
+  - Read commands are limited to the exact `cat-file` / `ls-tree` / `rev-parse` forms Causoryn uses (no textconv or filter forms), and every repository-bound call runs with `--no-pager` and an empty `credential.helper`.
+  - Source-revision resolution checks the gitdir pointer before touching its target and never reads `HEAD`, refs or `packed-refs` through a symbolic link. Its size-limit notes no longer include exact file sizes.
+- **Workspace and output path policies:**
+  - On Windows they reject, before any stat or realpath, alternate data streams (`:` after the drive), segments ending in a dot or space, reserved device names, the `\??\` prefix, and links whose target is a UNC or device path.
+  - Ignore rules are re-checked against the native long-name path, so 8.3 short names and letter-case aliases no longer bypass deny globs.
+  - The part of a root below a declared `allowRoot` is re-inspected on every call.
+  - The file inventory no longer hands link entries to the policy, and it stops with `LIMIT_EXCEEDED` beyond 256 nested directories.
+  - `storage.dataDbPath` and `wiki.dataDbPath` reject UNC, device and aliased declarations before filesystem access.
+  - `--allow-cwd` and MCP roots/list also reject `~/.config`, `~/.docker`, `~/.azure`, `~/.gcloud`, `~/.npm`, `~/.cargo`, `~/Library`, `%APPDATA%` and `%LOCALAPPDATA%`, including their 8.3 spellings.
+- **Policy and baseline files:**
+  - They are read only when they are regular files inside the workspace. Symlinked or junctioned path segments, FIFOs and devices are refused on every platform, and the opened descriptor's identity is checked against the verified path.
+  - The YAML no longer accepts aliases, and parse errors report the error code and line/column without echoing file content.
+  - Files are bounded: at most 500 rules, 1000 suppressions, plus capped field lengths and error-message size.
+- **Language adapters:**
+  - **TypeScript:** the confined compiler host resolves links component by component before any filesystem access. It never follows a link to a UNC/device path or out of the workspace and the TypeScript lib directory. `node_modules` declaration reads are bounded (16 MiB per file, 512 MiB per run, regular files only), and the host never writes files, exposes the process environment or lists the disk.
+  - **C#:** NuGet `packageFolders` from `obj/project.assets.json` are used only inside trusted NuGet package roots (`NUGET_PACKAGES`, the user-level NuGet.Config folders, `~/.nuget/packages`) or the workspace. Workspace project reads refuse intermediate links. The Roslyn worker loads each reference on its own, skips empty or non-regular reference DLLs, validates `DOTNET_ROOT`, and runs with `DOTNET_EnableDiagnostics=0` and an empty `DOTNET_ADDITIONAL_DEPS`.
+  - **Python:** recursion limits are isolated per file, so the rest of the batch is still analyzed, and rendered expression text is capped at 200 characters.
+- **Native toolchains:**
+  - On Windows, process trees are stopped with `taskkill /T` before the direct kill, and child environments set `NoDefaultCurrentDirectoryInExePath=1`.
+  - `causoryn doctor` resolves toolchains to absolute paths and probes them from their installation directory.
+  - The Go worker also runs with `GOENV=off`, `GOFLAGS=-mod=readonly` and `CGO_ENABLED=0`.
+  - Rust worker builds always use `--locked`, and target directories must be absolute local paths. The build cache is private to the current user, and cached binaries and their pins must be single-link files owned by that user. The pin is computed from the freshly built bytes, and the binary's identity is re-checked right before it starts. Builds are refused when another user's cargo/rustup configuration sits above the build directory.
+- **Rendering and storage:**
+  - Markdown and Mermaid exports (architecture brief, full-view Mermaid, offline wiki Markdown, annotation overlay) escape repository and annotation text per output context. Fences, headings, HTML, links, images, bare autolinks and Mermaid directives cannot be introduced through symbol names, paths or notes.
+  - The standalone viewer's CSP allows its embedded script and stylesheet only by SHA-256 hash (no `'unsafe-inline'`).
+  - Offline wiki export files are written through unique exclusive-create temp files.
+  - SQLite databases are created owner-only (0o600, including `-wal`/`-shm`), and every connection (including the read-only wiki search connection) runs with `PRAGMA trusted_schema = OFF`. A database with a negative `user_version` is refused.
+  - Wiki full-text search treats NUL bytes as whitespace and reports FTS5 errors as invalid-argument errors.
+- **Release and supply chain:**
+  - The publish job checks the downloaded tarball and SBOM against SHA-256 digests that `build-and-pack` exports before any packaged code runs, and requires `SHA256SUMS.txt` to list both files. Existing GitHub Release assets are never overwritten.
+  - The security workflow adds `cargo-audit` (0.23.0, `--deny warnings`) for the Rust worker lockfile and `govulncheck` (v1.10.0) for the Go worker.
+  - The SBOM lists the SQLite library compiled into the bundled better-sqlite3 prebuilds, and esbuild moved to `devDependencies`.
+  - Plugin manifests anchor their entry scripts at the host's plugin root (`${PLUGIN_ROOT}` for Antigravity), and `npx` manifests pass `--ignore-scripts`.
+  - `causoryn mcp` and the plugin launcher accept an inherited `CAUSORYN_ASSET_ROOT` only when it points at a causoryn package of the same version with `native/`.
+- **Secret scanning and setup:**
+  - `secret-scan` and the public export gate share one scanner. It covers every tracked and untracked-not-ignored file, detects binaries by content, adds detectors for more credential families plus generic user-profile and local-path detectors, supports an optional untracked private-term list (`.git/info/causoryn-private-terms` or `CAUSORYN_PRIVATE_TERMS`), and fails closed on read errors.
+  - The export gate reads the committed tree directly, so `.gitattributes export-ignore` cannot hide files from it.
+  - `causoryn setup` refuses to write, back up or stage through linked directories below the home directory, and never overwrites an existing backup. `--uninstall` removes only the skills and runtime files Causoryn created, without following links.
+- **MCP tool trust and limits:**
+  - `causoryn_verify_change` no longer reports `no_findings` when architecture rules or the baseline were read from the working tree instead of a trusted git ref: a result that would otherwise be clean becomes `review_required` (rationale rule `untrusted-rules`). The report records `rulesProvenance` and `trustWarning`, and host-supplied test evidence ids stay in the test-run section.
+  - Every string and array in the tool input schemas has a finite maximum. `causoryn_architecture_timeline` accepts at most 100 refs, and onboarding limits are clamped to documented ceilings with an `onboarding/limit-clamped` warning.
+  - A roots/list_changed rebind no longer moves an in-flight tool call to the new workspace or closes its database; the previous context is closed after its calls finish.
+  - A git repository layout that would read outside the analyzed root is reported as `PATH_DENIED` with a fixed message (the reason goes to the server log). `LIMIT_EXCEEDED` messages for policy, baseline and git blob reads name the limit but no longer the file's exact size.
 
 ### Documentation
 

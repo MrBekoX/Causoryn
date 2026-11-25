@@ -184,7 +184,7 @@ Aşağıdaki tablo kayıtlı koşum sonuçlarıdır; bu belge güncellenirken ye
 | typecheck | `npm run typecheck` | exit 0 (önceki yayın hazırlığı) |
 | build | `npm run build` | exit 0 (önceki yayın hazırlığı) |
 | lint | `npm run lint` | exit 0, sıfır ihlal (önceki yayın hazırlığı) |
-| secret-scan | `npm run secret-scan` | exit 0 (`scripts/secret-scan.mjs`, 13 kök + 13 kök metin dosyası, 0 eşleşme) |
+| secret-scan | `npm run secret-scan` | exit 0 (`scripts/secret-scan.mjs`, izlenen ve yok sayılmayan her dosya, 0 eşleşme) |
 | security | `npx vitest run tests/security-release/` | 36/36 (2026-11-24 dahil) |
 | bench | `npm run bench` | 2026-11-10: 8/8; medyan 11.8/13.0/10.7 ms, soğuk indeks 16370.3 ms; hedefler referanstır ([benchmark'lar](benchmarks.md)) |
 | npm audit | `npm audit --json` | `K-022` koşumunda **0 güvenlik açığı** (`eslint@10.15.0` ve `typescript-eslint@8.73.0` yükseltmesiyle) |
@@ -434,7 +434,7 @@ The table below lists recorded run results; they were not re-run while this page
 | typecheck | `npm run typecheck` | exit 0 (earlier release preparation) |
 | build | `npm run build` | exit 0 (earlier release preparation) |
 | lint | `npm run lint` | exit 0, zero violations (earlier release preparation) |
-| secret-scan | `npm run secret-scan` | exit 0 (`scripts/secret-scan.mjs`, 13 roots + 13 root text files, 0 matches) |
+| secret-scan | `npm run secret-scan` | exit 0 (`scripts/secret-scan.mjs`, every tracked and untracked-not-ignored file, 0 matches) |
 | security | `npx vitest run tests/security-release/` | 36/36 (including 2026-11-24) |
 | benchmark | `npm run bench` | 2026-11-10: 8/8; medians 11.8/13.0/10.7 ms, cold index 16370.3 ms; targets are reference baselines ([benchmarks](en/benchmarks.md)) |
 | npm audit | `npm audit --json` | **0 vulnerabilities** in the `K-022` run (after upgrading to `eslint@10.15.0` and `typescript-eslint@8.73.0`) |
