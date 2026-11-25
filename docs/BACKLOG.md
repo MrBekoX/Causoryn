@@ -2,7 +2,7 @@
 
 > **Dil / Language:** **Türkçe** | [English](en/BACKLOG.md) · [Dokümantasyon Merkezi](README.md)
 
-> **Durum:** Causoryn 0.3.1'i yansıtır (11 araçlık varsayılan `core` araç profili). `1.0.0` ilan edilmemiştir.
+> **Durum:** Causoryn 0.3.2'i yansıtır (11 araçlık varsayılan `core` araç profili). `1.0.0` ilan edilmemiştir.
 
 Bu sayfa; özgün teslim fazlarının bağımlılık sırasını, o plandan sonra teslim edilenleri, kapanış koşullarıyla birlikte açık `1.0.0` sürüm kapılarını ve 1.0 sonrası adayları kaydeder. Her durumun kanıtı [Uygulama Durumu](implementation-status.md) belgesindedir; sürüm notları [CHANGELOG.md](../CHANGELOG.md) içindedir. Çalışmayan hiçbir şey `Done` olarak işaretlenmez.
 

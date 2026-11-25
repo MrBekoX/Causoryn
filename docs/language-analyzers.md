@@ -2,7 +2,7 @@
 
 > **Dil / Language:** **Türkçe** | [English](en/language-analyzers.md) · [Dokümantasyon Merkezi](README.md)
 >
-> **Durum:** Causoryn 0.3.1'i yansıtır (1.0 öncesi). İç analizör sürümleri `0.1.0` olarak kalır (bkz. §6).
+> **Durum:** Causoryn 0.3.2'i yansıtır (1.0 öncesi). İç analizör sürümleri `0.1.0` olarak kalır (bkz. §6).
 >
 > **Kaynak modüller:** `packages/indexing/src/{index.ts,index-service.ts,job-manager.ts,inventory.ts,fingerprint.ts}`, `packages/workspace/src/ignore-matcher.ts`, `packages/mcp-server/src/{services.ts,workspace-ignore-discovery.ts}`, `packages/sidecar-ipc/src/index.ts`, `adapters/typescript/src/{analyzer.ts,tsconfig-loader.ts}`, `adapters/{csharp-roslyn,python,go,rust}/src/*`, `native/{roslyn-worker,python-worker,go-worker,rust-worker}`.
 

@@ -2,7 +2,7 @@
 
 > **Dil / Language:** **Türkçe** | [English](../en/hosts/codex.md) · [Dokümantasyon Merkezi](../README.md) · [Uyumluluk Matrisi](../compatibility-matrix.md)
 
-> **Durum:** Causoryn 0.3.1'i yansıtır (11 araçlı varsayılan `core` araç profili; tüm host'lar için workspace başına tek, paylaşılan `graph.sqlite`). Bayrakların tam başvurusu için [CLI ve Konfigürasyon](../cli-and-configuration.md), araç kataloğu için [MCP Araç Sözleşmeleri](../tool-contracts.md) sayfasına bakın.
+> **Durum:** Causoryn 0.3.2'i yansıtır (11 araçlı varsayılan `core` araç profili; tüm host'lar için workspace başına tek, paylaşılan `graph.sqlite`). Bayrakların tam başvurusu için [CLI ve Konfigürasyon](../cli-and-configuration.md), araç kataloğu için [MCP Araç Sözleşmeleri](../tool-contracts.md) sayfasına bakın.
 
 > **Bu sayfa için denetlenen kaynaklar:** `packages/causoryn/src/{setup.ts,toml-patch.ts,doctor.ts,cli.ts}`, `packages/causoryn/.codex-plugin/{plugin.json,mcp.json}`, `.agents/plugins/marketplace.json`, `packages/mcp-server/src/{stdio.ts,cli-stdio.ts,runtime-cli.ts,config.ts}`, `packages/mcp-server/scripts/build-bundle.mjs`.
 
@@ -24,8 +24,8 @@ Bu sayfada kullanılan 0.3.0 kod yollarının otomatik kapsamı: `tests/causoryn
 
 | Yol | Kimin için | Ne çalışır |
 |---|---|---|
-| **A. `npx causoryn@0.3.1 setup`** (önerilen) | Son kullanıcılar | Paketli giriş noktası `scripts/causoryn.mjs mcp --allow-cwd --auto-data-dir --client codex`; mutlak Node binary'siyle `config.toml` içine kaydedilir |
-| **B. Codex plugin pazaryeri** | Plugin'leri tercih eden son kullanıcılar | `.codex-plugin/mcp.json` içinden `npx -y --ignore-scripts --package causoryn@0.3.1 causoryn mcp …` |
+| **A. `npx causoryn@0.3.2 setup`** (önerilen) | Son kullanıcılar | Paketli giriş noktası `scripts/causoryn.mjs mcp --allow-cwd --auto-data-dir --client codex`; mutlak Node binary'siyle `config.toml` içine kaydedilir |
+| **B. Codex plugin pazaryeri** | Plugin'leri tercih eden son kullanıcılar | `.codex-plugin/mcp.json` içinden `npx -y --ignore-scripts --package causoryn@0.3.2 causoryn mcp …` |
 | **C. Elle kayıt** (`codex mcp add` veya `config.toml`) | Kaynak checkout üzerinde çalışan katkıcılar | Monorepo bundle `packages/mcp-server/dist/mcp-server.mjs` (yalnızca `CAUSORYN_CONFIG` ile yapılandırılır) |
 
 ---
@@ -34,16 +34,16 @@ Bu sayfada kullanılan 0.3.0 kod yollarının otomatik kapsamı: `tests/causoryn
 
 ```bash
 # Hiçbir şey yazmadan planlanan değişiklikleri önizleyin
-npx causoryn@0.3.1 setup --client codex --dry-run
+npx causoryn@0.3.2 setup --client codex --dry-run
 
 # $CODEX_HOME/config.toml içindeki [mcp_servers.causoryn] tablosunu yamalayın ve 5 skill'i ~/.agents/skills/ altına kurun
-npx causoryn@0.3.1 setup --client codex --yes
+npx causoryn@0.3.2 setup --client codex --yes
 
 # Salt okunur sağlık ve hizalama kontrolü
-npx causoryn@0.3.1 doctor --client codex
+npx causoryn@0.3.2 doctor --client codex
 
 # Temiz kaldırma ([mcp_servers.causoryn] ve alt tabloları + 5 Causoryn skill'i)
-npx causoryn@0.3.1 setup --client codex --uninstall --yes
+npx causoryn@0.3.2 setup --client codex --uninstall --yes
 ```
 
 ### `setup --client codex` neyi yazar
@@ -82,7 +82,7 @@ startup_timeout_sec = 30
 
 Kök `.agents/plugins/marketplace.json`, Codex plugin pazaryeri şemasını izler:
 
-- `source: { "source": "npm", "package": "causoryn", "version": "0.3.1" }`
+- `source: { "source": "npm", "package": "causoryn", "version": "0.3.2" }`
 - `policy.installation: "AVAILABLE"` ve `policy.authentication: "ON_INSTALL"`. Causoryn hiçbir kimlik bilgisine veya API anahtarına ihtiyaç duymaz; `"ON_INSTALL"`, kurulum anında onay için pazaryeri politika şemasını karşılar.
 
 Kurulu paketin `.codex-plugin/plugin.json` dosyası skill'leri taşır (`"skills": "./skills"`) ve `mcpServers` alanını `./.codex-plugin/mcp.json` dosyasına yönlendirir:
@@ -96,7 +96,7 @@ Kurulu paketin `.codex-plugin/plugin.json` dosyası skill'leri taşır (`"skills
         "-y",
         "--ignore-scripts",
         "--package",
-        "causoryn@0.3.1",
+        "causoryn@0.3.2",
         "causoryn",
         "mcp",
         "--allow-cwd",
@@ -251,7 +251,7 @@ Her Causoryn giriş noktası `stdout`'a **yalnızca MCP JSON-RPC 2.0 çerçevele
 |---|---|
 | `setup`, `cli/malformed-toml` ile duruyor | `config.toml` dosyasında bir sözdizimi sorunu ya da tekrarlanan bir tablo başlığı var. Düzeltin veya `config.toml.causoryn.backup` yedeğini geri yükleyin; hiçbir şey yazılmadı. |
 | Codex bir başlangıç zaman aşımı bildiriyor | Soğuk açılış yapılandırılmış zaman aşımını aştı. Girdide `startup_timeout_sec = 30` (veya daha yüksek) değerini koruyun. |
-| `doctor` giriş betiği için `ERROR` gösteriyor | `~/.causoryn/runtime` ya da orijinal kurulum kaldırılmış. `npx causoryn@0.3.1 setup --client codex --yes` komutunu yeniden çalıştırın. |
+| `doctor` giriş betiği için `ERROR` gösteriyor | `~/.causoryn/runtime` ya da orijinal kurulum kaldırılmış. `npx causoryn@0.3.2 setup --client codex --yes` komutunu yeniden çalıştırın. |
 | Sunucu açılışta "Unsupported Node.js version" ile çıkıyor | Node.js < 24. Node.js 24+ kurun ve `setup`'ı yeniden çalıştırın. |
 | Ek `args` kayboldu | `setup`'ı yeniden çalıştırmak argüman listesini yeniden üretir ve yalnızca `--tool-profile` ile `--output-schema` argümanlarınızı (ayrıca `[mcp_servers.causoryn.env]` tablosunu ve tablonun diğer anahtarlarını) korur. Diğer argümanları yeniden uygulayın veya profil için `setup --tool-profile <list>` kullanın. |
 | Workspace araçları `WORKSPACE_NOT_AUTHORIZED` döndürüyor | Başlangıç dizini `--allow-cwd` tarafından reddedildi ve kullanılabilir bir kök bildirilmedi ya da çıplak bundle'da `allowRoots` yok. Bkz. bölüm 4 veya 5.1. |

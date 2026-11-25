@@ -2,11 +2,11 @@
 
 > **Dil / Language:** **Türkçe** | [English](en/security-pass.md) · [Dokümantasyon Merkezi](README.md)
 >
-> **Durum:** Causoryn 0.3.1'i yansıtır (1.0 öncesi). Aşağıdaki paketlenmiş bundle tehdit matrisi en son 2026-11-24'te yeniden koşuldu (bkz. [Yöntem](#paketlenmiş-bundle-test-yöntemi)).
+> **Durum:** Causoryn 0.3.2'i yansıtır (1.0 öncesi). Aşağıdaki paketlenmiş bundle tehdit matrisi en son 2026-11-24'te yeniden koşuldu (bkz. [Yöntem](#paketlenmiş-bundle-test-yöntemi)).
 >
 > **Tek paragrafta tehdit modeli:** Causoryn güvenmediği depoları analiz eder. Analiz edilen bir workspace içindeki kaynak dosyalar, yorumlar, yapılandırma dosyaları, Git metadata'sı ve araç zinciri yapılandırması asla talimat veya yürütülebilir yapılandırma olarak değil, her zaman veri olarak ele alınır. Causoryn hiçbir model veya telemetri çağrısı yapmaz, workspace'e hiçbir şey yazmaz, kendi veritabanını ayrı bir veri dizininde tutar ve sonuçları yalnızca MCP `stdio` üzerinden döndürür.
 
-**Bundle kimliği:** `packages/mcp-server/dist/mcp-server.mjs` SHA-256 `86dba82b383613ee70bc1c8bae9748e56b6c831f345c334e0a20f959621c8b64`. `dist/bundle-manifest.json` bu özeti `index-worker.mjs`, `mcp-server.mjs.LEGAL.txt` ve vendored native SQLite çalışma zamanıyla birlikte kaydeder (36 kayıt). Özet tek bir yerel build'i tanımlar; aşağıdaki tarihli sonuçlar matriste listelenen test oturumlarını açıklar.
+**Bundle kimliği:** `packages/mcp-server/dist/mcp-server.mjs` SHA-256 `928f5dd8a26f3b012138e055c98b3581c1ec0d48629fb0bea7330807477aaab6`. `dist/bundle-manifest.json` bu özeti `index-worker.mjs`, `mcp-server.mjs.LEGAL.txt` ve vendored native SQLite çalışma zamanıyla birlikte kaydeder (36 kayıt). Özet tek bir yerel build'i tanımlar; aşağıdaki tarihli sonuçlar matriste listelenen test oturumlarını açıklar.
 
 ## 1. Çalışma zamanı güvenlik sınırları
 

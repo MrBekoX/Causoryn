@@ -10,17 +10,17 @@
   },
   "metadata": {
     "description": "Official Causoryn plugin marketplace for Codex: local, deterministic, LLM-free codebase and change intelligence MCP server.",
-    "version": "0.3.1"
+    "version": "0.3.2"
   },
   "plugins": [
     {
       "name": "causoryn",
-      "version": "0.3.1",
+      "version": "0.3.2",
       "description": "Deterministic, local, LLM-free codebase and change intelligence via MCP: read-only workspace graphs, architecture maps, preflight analysis, post-change verification, and living wiki.",
       "source": {
         "source": "npm",
         "package": "causoryn",
-        "version": "0.3.1"
+        "version": "0.3.2"
       },
       "policy": {
         "installation": "AVAILABLE",

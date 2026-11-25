@@ -2,11 +2,11 @@
 
 > **Language:** [Türkçe](../security-pass.md) | **English** · [Documentation Hub](README.md)
 >
-> **Status:** reflects Causoryn 0.3.1 (pre-1.0). The packaged-bundle threat matrix below was last re-run on 2026-11-24 (see [Methodology](#packaged-bundle-test-methodology)).
+> **Status:** reflects Causoryn 0.3.2 (pre-1.0). The packaged-bundle threat matrix below was last re-run on 2026-11-24 (see [Methodology](#packaged-bundle-test-methodology)).
 >
 > **Threat model in one paragraph:** Causoryn analyzes repositories it does not trust. Source files, comments, configuration files, Git metadata, and toolchain configuration inside an analyzed workspace are treated as data, never as instructions or executable configuration. Causoryn makes no model or telemetry calls, writes nothing into the workspace, keeps its own database in a separate data directory, and returns results only over MCP `stdio`.
 
-**Bundle identity:** `packages/mcp-server/dist/mcp-server.mjs` SHA-256 `86dba82b383613ee70bc1c8bae9748e56b6c831f345c334e0a20f959621c8b64`. `dist/bundle-manifest.json` records this digest together with `index-worker.mjs`, `mcp-server.mjs.LEGAL.txt`, and the vendored native SQLite runtime (36 entries). The digest identifies one local build; the dated results below describe the test sessions listed in the matrix.
+**Bundle identity:** `packages/mcp-server/dist/mcp-server.mjs` SHA-256 `928f5dd8a26f3b012138e055c98b3581c1ec0d48629fb0bea7330807477aaab6`. `dist/bundle-manifest.json` records this digest together with `index-worker.mjs`, `mcp-server.mjs.LEGAL.txt`, and the vendored native SQLite runtime (36 entries). The digest identifies one local build; the dated results below describe the test sessions listed in the matrix.
 
 ## 1. Runtime Security Boundaries
 

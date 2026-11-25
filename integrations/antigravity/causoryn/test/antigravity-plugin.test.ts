@@ -595,7 +595,7 @@ describe("antigravity plugin.json (yerel yükleyici izinli alanlar + TŞ §17.1)
     const manifest = validatePluginManifest(parsed, "plugin.json");
     expect(manifest.name).toBe("causoryn");
     expect(manifest.displayName).toBe("Causoryn");
-    expect(manifest.version).toBe("0.3.1");
+    expect(manifest.version).toBe("0.3.2");
     expect(manifest.description).toBe(
       "Local, evidence-backed codebase and change intelligence via MCP.",
     );

@@ -2,7 +2,7 @@
 
 > **Language:** [Türkçe](../architecture.md) | **English** · [Documentation Hub](README.md)
 >
-> **Status:** reflects Causoryn 0.3.1 (pre-1.0; default `core` tool profile, one shared `graph.sqlite` per workspace, `worker_threads` indexing). Status columns follow the project honesty rule — nothing that does not work is called Done — and are cross-checked against [Implementation Status](implementation-status.md).
+> **Status:** reflects Causoryn 0.3.2 (pre-1.0; default `core` tool profile, one shared `graph.sqlite` per workspace, `worker_threads` indexing). Status columns follow the project honesty rule — nothing that does not work is called Done — and are cross-checked against [Implementation Status](implementation-status.md).
 >
 > **Scope:** the monorepo has **18 npm workspace packages** (`12 packages/*` + `5 adapters/*` + `1 integrations/zcode/causoryn`; **19 `package.json` manifests** including the monorepo root), the standalone `apps/visualizer`, 4 `native/*` language sidecars, root 4-host plugin marketplace manifests, 5 GitHub Actions workflows (`.github/workflows/{ci,release,security,codeql,scorecard}.yml`), `.github/dependabot.yml`, and `integrations/antigravity/causoryn`. The historical `v0.1.0` tag stays frozen at `4c9c188f`.
 

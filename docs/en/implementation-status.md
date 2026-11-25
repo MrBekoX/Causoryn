@@ -2,7 +2,7 @@
 
 > **Language:** [Türkçe](../implementation-status.md) | **English** · [Documentation Hub](README.md)
 
-> **Status:** reflects Causoryn 0.3.1 (default `core` tool profile with 11 tools; `wiki`, `history` and `full` add the rest — see [MCP Tool Contracts](tool-contracts.md)). `1.0.0` is not declared; the open gates are listed in [section 3](#3-remaining-100-release-gates) and in the [Engineering Backlog](BACKLOG.md).
+> **Status:** reflects Causoryn 0.3.2 (default `core` tool profile with 11 tools; `wiki`, `history` and `full` add the rest — see [MCP Tool Contracts](tool-contracts.md)). `1.0.0` is not declared; the open gates are listed in [section 3](#3-remaining-100-release-gates) and in the [Engineering Backlog](BACKLOG.md).
 
 **Honesty policy:** nothing that is broken, unimplemented, or unexecuted is marked `Done`. Partial work is labelled `Partial`, checks that were never executed are labelled `NOT RUN`, and every known limitation is stated next to the capability it limits.
 

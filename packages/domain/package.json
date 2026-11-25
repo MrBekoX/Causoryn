@@ -1,6 +1,6 @@
 {
   "name": "@causoryn/domain",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "private": true,
   "license": "MIT",
   "description": "Causoryn graph and evidence domain contracts: node, edge and evidence schemas, canonical JSON, deterministic IDs and snapshot construction.",

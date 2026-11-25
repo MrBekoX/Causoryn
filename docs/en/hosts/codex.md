@@ -2,7 +2,7 @@
 
 > **Language:** [Türkçe](../../hosts/codex.md) | **English** · [Documentation Hub](../README.md) · [Compatibility Matrix](../compatibility-matrix.md)
 
-> **Status:** reflects Causoryn 0.3.1 (default `core` tool profile with 11 tools; one shared per-workspace `graph.sqlite` for all hosts). See [CLI & Configuration](../cli-and-configuration.md) for the full flag reference and [MCP Tool Contracts](../tool-contracts.md) for the tool catalog.
+> **Status:** reflects Causoryn 0.3.2 (default `core` tool profile with 11 tools; one shared per-workspace `graph.sqlite` for all hosts). See [CLI & Configuration](../cli-and-configuration.md) for the full flag reference and [MCP Tool Contracts](../tool-contracts.md) for the tool catalog.
 
 > **Sources checked for this page:** `packages/causoryn/src/{setup.ts,toml-patch.ts,doctor.ts,cli.ts}`, `packages/causoryn/.codex-plugin/{plugin.json,mcp.json}`, `.agents/plugins/marketplace.json`, `packages/mcp-server/src/{stdio.ts,cli-stdio.ts,runtime-cli.ts,config.ts}`, `packages/mcp-server/scripts/build-bundle.mjs`.
 
@@ -24,8 +24,8 @@ Automated coverage of the 0.3.0 code paths used on this page: `tests/causoryn-se
 
 | Path | Who it is for | What runs |
 |---|---|---|
-| **A. `npx causoryn@0.3.1 setup`** (recommended) | End users | Packaged entrypoint `scripts/causoryn.mjs mcp --allow-cwd --auto-data-dir --client codex`, registered in `config.toml` with the absolute Node binary |
-| **B. Codex plugin marketplace** | End users who prefer plugins | `npx -y --ignore-scripts --package causoryn@0.3.1 causoryn mcp …` from `.codex-plugin/mcp.json` |
+| **A. `npx causoryn@0.3.2 setup`** (recommended) | End users | Packaged entrypoint `scripts/causoryn.mjs mcp --allow-cwd --auto-data-dir --client codex`, registered in `config.toml` with the absolute Node binary |
+| **B. Codex plugin marketplace** | End users who prefer plugins | `npx -y --ignore-scripts --package causoryn@0.3.2 causoryn mcp …` from `.codex-plugin/mcp.json` |
 | **C. Manual registration** (`codex mcp add` or `config.toml`) | Contributors working from a source checkout | Monorepo bundle `packages/mcp-server/dist/mcp-server.mjs` (configured only through `CAUSORYN_CONFIG`) |
 
 ---
@@ -34,16 +34,16 @@ Automated coverage of the 0.3.0 code paths used on this page: `tests/causoryn-se
 
 ```bash
 # Preview the planned changes without writing anything
-npx causoryn@0.3.1 setup --client codex --dry-run
+npx causoryn@0.3.2 setup --client codex --dry-run
 
 # Patch [mcp_servers.causoryn] in $CODEX_HOME/config.toml and install the 5 skills into ~/.agents/skills/
-npx causoryn@0.3.1 setup --client codex --yes
+npx causoryn@0.3.2 setup --client codex --yes
 
 # Read-only health and alignment check
-npx causoryn@0.3.1 doctor --client codex
+npx causoryn@0.3.2 doctor --client codex
 
 # Clean removal ([mcp_servers.causoryn] and its sub-tables + the 5 Causoryn skills)
-npx causoryn@0.3.1 setup --client codex --uninstall --yes
+npx causoryn@0.3.2 setup --client codex --uninstall --yes
 ```
 
 ### What `setup --client codex` writes
@@ -82,7 +82,7 @@ startup_timeout_sec = 30
 
 The root `.agents/plugins/marketplace.json` follows the Codex plugin marketplace schema:
 
-- `source: { "source": "npm", "package": "causoryn", "version": "0.3.1" }`
+- `source: { "source": "npm", "package": "causoryn", "version": "0.3.2" }`
 - `policy.installation: "AVAILABLE"` and `policy.authentication: "ON_INSTALL"`. Causoryn needs no credentials or API keys; `"ON_INSTALL"` satisfies the marketplace policy schema for install-time confirmation.
 
 The installed package's `.codex-plugin/plugin.json` ships the skills (`"skills": "./skills"`) and points `mcpServers` at `./.codex-plugin/mcp.json`:
@@ -96,7 +96,7 @@ The installed package's `.codex-plugin/plugin.json` ships the skills (`"skills":
         "-y",
         "--ignore-scripts",
         "--package",
-        "causoryn@0.3.1",
+        "causoryn@0.3.2",
         "causoryn",
         "mcp",
         "--allow-cwd",
@@ -251,7 +251,7 @@ Every Causoryn entrypoint writes **only MCP JSON-RPC 2.0 frames** to `stdout`; a
 |---|---|
 | `setup` stops with `cli/malformed-toml` | `config.toml` has a syntax problem or a duplicated table header. Fix it or restore `config.toml.causoryn.backup`; nothing was written. |
 | Codex reports a start-up timeout | Cold start exceeded the configured timeout. Keep `startup_timeout_sec = 30` (or higher) on the entry. |
-| `doctor` shows `ERROR` for the entry script | `~/.causoryn/runtime` or the original install was removed. Re-run `npx causoryn@0.3.1 setup --client codex --yes`. |
+| `doctor` shows `ERROR` for the entry script | `~/.causoryn/runtime` or the original install was removed. Re-run `npx causoryn@0.3.2 setup --client codex --yes`. |
 | Server exits at start with "Unsupported Node.js version" | Node.js < 24. Install Node.js 24+ and re-run `setup`. |
 | Extra `args` disappeared | Re-running `setup` regenerates the argument list and keeps only your `--tool-profile` and `--output-schema` arguments (plus `[mcp_servers.causoryn.env]` and other keys of the table). Re-apply other arguments, or use `setup --tool-profile <list>` for the profile. |
 | Workspace tools return `WORKSPACE_NOT_AUTHORIZED` | The start directory was refused by `--allow-cwd` and no usable root was reported, or the bare bundle has no `allowRoots`. See section 4 or 5.1. |
