@@ -128,7 +128,11 @@ for (const [label, impl] of [
     it("collectUntrustedRoots adds the process cwd, but never a filesystem root or the home directory", async () => {
       await withEnvAndCwd({}, workspace, () => {
         const roots = impl.collectUntrustedRoots([]);
-        expect(roots.map((r) => r.toLowerCase())).toContain(path.resolve(workspace).toLowerCase());
+        // process.cwd() is what gets added. On macOS it reports the real path
+        // (/private/var/...) of a tmpdir under /var/..., so compare with it
+        // rather than with the lexical workspace path.
+        expect(roots.map((r) => r.toLowerCase())).toContain(path.resolve(process.cwd()).toLowerCase());
+        expect(impl.isWithinUntrustedRoots(workspace, roots)).toBe(true);
       });
       await withEnvAndCwd({}, os.homedir(), () => {
         expect(impl.processCwdUntrustedRoot()).toBeNull();

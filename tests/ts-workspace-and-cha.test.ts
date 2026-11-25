@@ -5,6 +5,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  realpathSync,
   rmSync,
   symlinkSync,
   writeFileSync,
@@ -1019,7 +1020,9 @@ describe("Wave 2A — C# Read-Only NuGet obj/project.assets.json Discovery", { t
       );
 
       const discovered = discoverNugetReferenceDirs(workspaceRoot);
-      expect(discovered.referenceDirs).toEqual([pkgLibDir]);
+      // Discovered directories are canonical real paths (on macOS the tmpdir
+      // /var/... resolves to /private/var/...).
+      expect(discovered.referenceDirs).toEqual([realpathSync(pkgLibDir)]);
       expect(discovered.referenceDirs.length).toBeLessThanOrEqual(MAX_NUGET_REFERENCE_DIRS);
 
       // Verify analyzeCSharpWorkspace forwards discovered referenceDirs to the worker request.
