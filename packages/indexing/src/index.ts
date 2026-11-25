@@ -97,6 +97,7 @@ export type {
   IndexRunResult,
   IndexServiceOptions,
   IndexWorkerServiceConfig,
+  InventorySource,
   PythonIndexOptions,
   RustIndexOptions,
 } from "./index-service.js";
