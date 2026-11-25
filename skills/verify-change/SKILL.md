@@ -18,11 +18,12 @@ tool profile.
    - If you executed tests via host tools and have a verifiable evidence reference, report them honestly: `causoryn_verify_change` `{"preflightId": "<preflightId>", "observedTestRun": {"state": "host_asserted", "evidenceRef": "<test report path or CI run URL>", "observedCount": 12, "passedCount": 12, "failedCount": 0}}`. Otherwise omit `observedTestRun`; test execution status then stays `not_run`.
 2. **Interpret the Verification Verdict & Checks**
    - Deterministic verdicts: `no_findings` | `review_required` | `blocking_findings` | `inconclusive`.
+   - Rule provenance: `rulesProvenance` names where `.causoryn/architecture.rules.yaml` and the baseline were read from (`source`, `ref`, `commit`, `refOrigin`). If the rules file is not committed at the trusted base ref, or that ref cannot be read (no git repository, no commits), the rules come from the working tree: the report carries `trustWarning` and `rulesProvenance.source: "working-tree"`, and a result without findings is `review_required` (rule `untrusted-rules`), never `no_findings`. Commit the rules file, or pass a `baseRef` that contains it, to get a trusted result.
    - Four check surfaces:
      - `architecture`: evaluates `.causoryn/architecture.rules.yaml` (`no-cycles` SCC + `forbidden-dependency` globs). If no policy file exists in the workspace, it reports `not_evaluated` rather than failing.
      - `contracts`: reports `not_evaluated` when no spec-pair inputs exist on this surface; run `causoryn_contracts` directly whenever API/schema specs changed (see step 3).
      - `graph-diff`: added, removed, and modified symbols/edges between the base snapshot and the working-tree projection.
-     - `test-plan`: maps candidate tests from the preflight test plan with honest run status (`not_run`, or `host_asserted` when you supplied `observedTestRun` — Causoryn records it as a host claim, never as engine-verified).
+     - `test-plan`: maps candidate tests from the preflight test plan with honest run status (`not_run`, or `host_asserted` when you supplied `observedTestRun` — Causoryn records it as a host claim, never as engine-verified). Evidence IDs you pass in `observedTestRun.evidenceIds` appear only under `tests` / `checks.testPlan.run`, never in the report's top-level `evidenceIds`.
 3. **Follow-Up Diagnostics**
    - If `architecture` reports rule violations or `POLICY_INVALID`, re-run the rules alone against the latest snapshot with `causoryn_verify_change` `{"checks": ["architecture"]}` and inspect offending edges with `causoryn_get_evidence` `{"id": "<edge or finding id>"}`.
    - If API/schema specs changed, check the pair with `causoryn_contracts` `{"action": "check", "contracts": [{"base": "<old spec path>", "target": "<new spec path>"}]}`.

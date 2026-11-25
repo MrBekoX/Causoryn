@@ -20,9 +20,11 @@ import type { SnapshotGraph } from "@causoryn/domain";
 import {
   OBSERVED_TEST_RUN_SCHEMA,
   TEST_RUN_STATUS_SCHEMA,
+  UNTRUSTED_RULES_TRUST_WARNING,
   VerificationError,
   verifyChange,
   type VerificationReport,
+  type VerifyRulesProvenance,
 } from "@causoryn/verification";
 import { z } from "zod";
 
@@ -206,6 +208,7 @@ const VerifyVerdictRuleSchema = z.strictObject({
   rule: z.enum([
     "blocking-finding",
     "missing-input",
+    "untrusted-rules",
     "suppressed-finding",
     "unresolved-target",
     "warning-finding",
@@ -361,7 +364,18 @@ export const VerifyChangeDataSchema = z.strictObject({
     })
     .optional(),
   limitations: z.array(z.string()),
-  trustWarning: z.string().optional(),
+  /** Where the architecture rules/baseline came from (architecture check requested only). */
+  rulesProvenance: z
+    .strictObject({
+      source: z.enum(["git-ref", "working-tree"]),
+      ref: z.string().optional(),
+      commit: z.string().optional(),
+      refOrigin: z.enum(["explicit", "preflight-manifest", "default-head"]).optional(),
+      fallbackReason: z.enum(["rules-not-in-ref", "ref-unreadable"]).optional(),
+    })
+    .optional(),
+  /** Present when the rules came from the untrusted working tree (verdict is never no_findings). */
+  trustWarning: z.literal(UNTRUSTED_RULES_TRUST_WARNING).optional(),
 });
 
 /* ------------------------------------------------------------------ */
@@ -371,8 +385,6 @@ export const VerifyChangeDataSchema = z.strictObject({
 const DEFAULT_VERIFY_CHECKS = ["architecture", "graph-diff", "test-plan"] as const;
 const ARCHITECTURE_POLICY_BLOB_PATH = ".causoryn/architecture.rules.yaml";
 const ARCHITECTURE_BASELINE_BLOB_PATH = ".causoryn/architecture.baseline.yaml";
-const UNTRUSTED_WORKING_TREE_RULES_WARNING =
-  "architecture-rules-loaded-from-untrusted-working-tree" as const;
 
 /**
  * Asynchronous working-tree projection using a scratch InMemoryGraphRepository
@@ -408,12 +420,19 @@ function readGuardText(
   return readOptionalBoundedTextFile(absolutePath, maxBytes);
 }
 
+type TrustedGitBlobRead =
+  | { readonly status: "ok"; readonly text: string }
+  /** The ref was read but the file does not exist in that commit. */
+  | { readonly status: "missing" }
+  /** The ref/blob could not be read (git unavailable, not a repository, git error). */
+  | { readonly status: "unreadable" };
+
 async function tryReadTrustedGitBlob(
   canonicalRoot: string,
   ref: string,
   blobPath: string,
   maxBytes: number,
-): Promise<{ readonly status: "ok"; readonly text: string } | { readonly status: "missing" }> {
+): Promise<TrustedGitBlobRead> {
   try {
     const text = await readGitBlob(canonicalRoot, ref, blobPath, {
       maxBufferBytes: maxBytes,
@@ -435,13 +454,15 @@ async function tryReadTrustedGitBlob(
           `${blobPath} at git ref ${ref} exceeds config.maxFileBytes (${String(maxBytes)})`,
         );
       }
+      if (error.code === "compare/blob-not-found") {
+        return { status: "missing" };
+      }
       if (
-        error.code === "compare/blob-not-found" ||
         error.code === "compare/ref-not-found" ||
         error.code === "compare/git-unavailable" ||
         error.code === "compare/git-command-failed"
       ) {
-        return { status: "missing" };
+        return { status: "unreadable" };
       }
     }
     throw error;
@@ -449,37 +470,50 @@ async function tryReadTrustedGitBlob(
 }
 
 /**
- * Loads architecture policy and baseline with git-ref trust precedence:
- * 1. Inside a git repository, loads `.causoryn/architecture.rules.yaml` (and if
- *    present, `.causoryn/architecture.baseline.yaml`) from the trusted base ref
- *    (`baseRef`, manifest `sourceRevision.head`, or `HEAD`) via `readGitBlob`.
- *    When rules are loaded from the trusted base commit, an untracked/modified
- *    working-tree baseline is NOT loaded so agents cannot bypass rules in the
- *    same diff.
- * 2. Falls back to the working tree ONLY when the workspace is not a git repo or
- *    the policy file does not exist in the base commit, emitting an explicit
- *    `trustWarning` (`"architecture-rules-loaded-from-untrusted-working-tree"`).
+ * Loads architecture policy and baseline with git-ref trust precedence and
+ * reports where they came from (`provenance`, reflected in the report and
+ * in the verdict by the verification core).
+ *
+ * Trust rule:
+ * 1. The trusted base ref is the caller's `baseRef`, else the preflight
+ *    manifest's `sourceRevision.head`, else `HEAD`. The ref is resolved to a
+ *    commit once and both files are read from that commit, so the rules and
+ *    the baseline always come from the same commit. When the rules come from
+ *    git, a modified or untracked working-tree baseline is NOT loaded, so the
+ *    diff under verification cannot weaken or suppress its own rules.
+ * 2. An explicit `baseRef` is the caller's trusted choice even when it names
+ *    an old commit; it must resolve (fail closed with INVALID_REVISION /
+ *    INVALID_ARGUMENT otherwise) and the report names the ref, the resolved
+ *    commit and `refOrigin: "explicit"`, so a reviewer can see which rules
+ *    were applied.
+ * 3. The working tree is used only when the rules file does not exist at the
+ *    trusted commit (`rules-not-in-ref`) or the trusted ref cannot be read
+ *    (`ref-unreadable`: not a git repository, no commits, git error). Such a
+ *    result is untrusted: the report carries `trustWarning` and the verdict
+ *    can never be `no_findings` (verdict rule `untrusted-rules`).
  */
 async function loadGuardInputs(
   deps: VerificationServiceDeps,
   canonicalRoot: string,
   architectureRequested: boolean,
   trustedBaseRef: string,
+  refOrigin: NonNullable<VerifyRulesProvenance["refOrigin"]>,
   explicitBaseRef: string | undefined,
 ): Promise<{
   readonly guardPolicy: ArchitecturePolicy | undefined;
   readonly guardBaseline: ArchitectureBaseline | undefined;
   readonly warning: string | undefined;
-  readonly trustWarning: typeof UNTRUSTED_WORKING_TREE_RULES_WARNING | undefined;
+  readonly provenance: VerifyRulesProvenance | undefined;
 }> {
   if (!architectureRequested) {
     return {
       guardPolicy: undefined,
       guardBaseline: undefined,
       warning: undefined,
-      trustWarning: undefined,
+      provenance: undefined,
     };
   }
+  let trustedCommit: string | undefined;
   if (explicitBaseRef !== undefined) {
     if (explicitBaseRef === WORKING_TREE_REF) {
       throw new CausorynToolError(
@@ -489,42 +523,41 @@ async function loadGuardInputs(
     }
     assertValidGitRef(explicitBaseRef);
     try {
-      await resolveGitCommitRef(canonicalRoot, explicitBaseRef);
+      trustedCommit = await resolveGitCommitRef(canonicalRoot, explicitBaseRef);
     } catch (error) {
       if (error instanceof GraphRepositoryError) {
         throw graphErrorToToolError(error);
       }
       throw error;
     }
-  }
-
-  const maxBytes = deps.config.maxFileBytes;
-
-  // 1) Try trusted git base ref first (only when ref is a valid non-working-tree git ref).
-  let canQueryGitRef = false;
-  if (trustedBaseRef !== WORKING_TREE_REF) {
+  } else if (trustedBaseRef !== WORKING_TREE_REF) {
     try {
       assertValidGitRef(trustedBaseRef);
-      canQueryGitRef = true;
+      trustedCommit = await resolveGitCommitRef(canonicalRoot, trustedBaseRef);
     } catch (error) {
-      if (explicitBaseRef !== undefined) {
-        throw error;
-      }
-      canQueryGitRef = false;
+      // Implicit base ref that cannot be resolved (not a git repository, no
+      // commits yet, git unavailable): fall back below, flagged as untrusted.
+      if (!(error instanceof GraphRepositoryError)) throw error;
+      trustedCommit = undefined;
     }
   }
 
-  if (canQueryGitRef) {
+  const maxBytes = deps.config.maxFileBytes;
+  const consultedRef = trustedBaseRef === WORKING_TREE_REF ? undefined : trustedBaseRef;
+
+  // 1) Trusted git base commit first.
+  let fallbackReason: NonNullable<VerifyRulesProvenance["fallbackReason"]> = "ref-unreadable";
+  if (trustedCommit !== undefined) {
     const gitPolicyRead = await tryReadTrustedGitBlob(
       canonicalRoot,
-      trustedBaseRef,
+      trustedCommit,
       ARCHITECTURE_POLICY_BLOB_PATH,
       maxBytes,
     );
     if (gitPolicyRead.status === "ok") {
       const gitBaselineRead = await tryReadTrustedGitBlob(
         canonicalRoot,
-        trustedBaseRef,
+        trustedCommit,
         ARCHITECTURE_BASELINE_BLOB_PATH,
         maxBytes,
       );
@@ -537,12 +570,19 @@ async function loadGuardInputs(
         guardPolicy: policy,
         guardBaseline: baseline,
         warning: undefined,
-        trustWarning: undefined,
+        provenance: {
+          source: "git-ref",
+          ...(consultedRef === undefined ? {} : { ref: consultedRef }),
+          commit: trustedCommit,
+          refOrigin,
+        },
       };
     }
+    fallbackReason = gitPolicyRead.status === "missing" ? "rules-not-in-ref" : "ref-unreadable";
   }
 
-  // 2) Fallback: non-git workspace or untracked policy file — load from working tree with explicit trust warning.
+  // 2) Fallback: rules not committed at the trusted commit, or the trusted
+  //    ref is unreadable — load from the working tree, flagged untrusted.
   const policyRead = await readGuardText(
     path.join(canonicalRoot, ".causoryn", "architecture.rules.yaml"),
     maxBytes,
@@ -559,7 +599,7 @@ async function loadGuardInputs(
       guardBaseline: undefined,
       warning:
         "architecture check could not be evaluated: .causoryn/architecture.rules.yaml was not found in the base commit or workspace root",
-      trustWarning: undefined,
+      provenance: undefined,
     };
   }
   const baselineRead = await readGuardText(
@@ -579,7 +619,12 @@ async function loadGuardInputs(
     guardPolicy: policy,
     guardBaseline: baseline,
     warning: undefined,
-    trustWarning: UNTRUSTED_WORKING_TREE_RULES_WARNING,
+    provenance: {
+      source: "working-tree",
+      ...(consultedRef === undefined ? {} : { ref: consultedRef }),
+      refOrigin,
+      fallbackReason,
+    },
   };
 }
 
@@ -682,12 +727,20 @@ export async function verifyChangeTool(
   const requestedChecks = input.checks ?? [...DEFAULT_VERIFY_CHECKS];
   const architectureRequested = requestedChecks.includes("architecture");
   const contractsRequested = requestedChecks.includes("contracts");
-  const trustedBaseRef = input.baseRef ?? manifest?.sourceRevision?.head ?? "HEAD";
+  const manifestHead = manifest?.sourceRevision?.head;
+  const trustedBaseRef = input.baseRef ?? manifestHead ?? "HEAD";
+  const refOrigin: NonNullable<VerifyRulesProvenance["refOrigin"]> =
+    input.baseRef !== undefined
+      ? "explicit"
+      : manifestHead !== undefined
+        ? "preflight-manifest"
+        : "default-head";
   const guard = await loadGuardInputs(
     deps,
     canonicalRoot,
     architectureRequested,
     trustedBaseRef,
+    refOrigin,
     input.baseRef,
   ).catch((error: unknown) => rethrowAsToolError(error, requestId));
 
@@ -714,6 +767,7 @@ export async function verifyChangeTool(
       },
       ...(guard.guardPolicy === undefined ? {} : { guardPolicy: guard.guardPolicy }),
       ...(guard.guardBaseline === undefined ? {} : { guardBaseline: guard.guardBaseline }),
+      ...(guard.provenance === undefined ? {} : { rulesProvenance: guard.provenance }),
       ...(input.observedTestRun === undefined
         ? {}
         : {
@@ -745,9 +799,13 @@ export async function verifyChangeTool(
   const warnings = staleWarningOf(baseRead);
   warnings.push(...projection.warnings);
   if (guard.warning !== undefined) warnings.push(guard.warning);
-  if (guard.trustWarning !== undefined) {
+  if (report.trustWarning !== undefined) {
+    const reason =
+      guard.provenance?.fallbackReason === "rules-not-in-ref"
+        ? `not found in git ref ${trustedBaseRef}`
+        : `git ref ${trustedBaseRef} could not be read`;
     warnings.push(
-      `${guard.trustWarning}: .causoryn/architecture.rules.yaml was loaded from the untrusted working tree (not found in git ref ${trustedBaseRef}); verify rules were not weakened in this diff`,
+      `${report.trustWarning}: .causoryn/architecture.rules.yaml was loaded from the untrusted working tree (${reason}); the verdict cannot be no_findings, verify rules were not weakened in this diff`,
     );
   }
   if (contractsRequested && report.checks.contracts.status === "not_evaluated") {
@@ -763,10 +821,9 @@ export async function verifyChangeTool(
     status: envelopeStatusOf(baseRead),
     coverage: coverageOf(baseSnapshot),
     warnings,
-    data: {
-      ...report,
-      ...(guard.trustWarning === undefined ? {} : { trustWarning: guard.trustWarning }),
-    },
+    // trustWarning and rulesProvenance are part of the report itself (and of
+    // its reportId hash), not an envelope-only annotation.
+    data: report,
   });
 }
 

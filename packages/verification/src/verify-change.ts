@@ -39,8 +39,10 @@ import {
 import {
   NO_FINDINGS_CORE_DISCLAIMER,
   NO_FINDINGS_DISCLAIMER,
+  UNTRUSTED_RULES_TRUST_WARNING,
   VERIFY_CHECK_NAMES,
   VERIFY_VERDICT_RULES,
+  type VerifyRulesProvenance,
   type ArchitectureCheckResult,
   type ContractsCheckResult,
   type GraphDiffCheckResult,
@@ -114,6 +116,9 @@ import {
  *   2. missing-input     : istenen denetim not_evaluated (girdi eksik / policy
  *      reddi) → inconclusive; tamamlanmamış değerlendirme review_required
  *      izlenimi veremez.
+ *   2b. untrusted-rules  : architecture evaluated with rules read from the
+ *      working tree (rulesProvenance.source "working-tree") → review_required;
+ *      the report also carries trustWarning + rulesProvenance.
  *   3. suppressed-finding: suppression uygulanmış bulgu → review_required
  *      (baseline istisnası inceleme gerektirir).
  *   4. unresolved-target : kapsam hedefi çözülemedi → review_required
@@ -172,6 +177,7 @@ function verdictOfFirstRule(first: VerifyVerdictRule): VerifyVerdict {
       return "blocking_findings";
     case VERIFY_VERDICT_RULES.missingInput:
       return "inconclusive";
+    case VERIFY_VERDICT_RULES.untrustedRules:
     case VERIFY_VERDICT_RULES.suppressedFinding:
     case VERIFY_VERDICT_RULES.unresolvedTarget:
     case VERIFY_VERDICT_RULES.warningFinding:
@@ -328,6 +334,70 @@ function testStatusOf(
     ...(observed.passedCount === undefined ? {} : { passedCount: observed.passedCount }),
     ...(observed.failedCount === undefined ? {} : { failedCount: observed.failedCount }),
   };
+}
+
+const RULES_REF_ORIGINS: ReadonlySet<string> = new Set([
+  "explicit",
+  "preflight-manifest",
+  "default-head",
+]);
+const RULES_FALLBACK_REASONS: ReadonlySet<string> = new Set([
+  "rules-not-in-ref",
+  "ref-unreadable",
+]);
+
+/**
+ * Validates and copies the host-stated rules provenance (fail-closed: an
+ * unknown source or malformed field is invalid-input, never silently
+ * treated as trusted). Only defined fields are copied so the canonical
+ * report body stays byte-deterministic.
+ */
+function normalizeRulesProvenance(
+  input: VerifyRulesProvenance | undefined,
+): VerifyRulesProvenance | undefined {
+  if (input === undefined) return undefined;
+  if (input.source !== "git-ref" && input.source !== "working-tree") {
+    throw invalid(`rulesProvenance.source must be "git-ref" or "working-tree": ${String(input.source)}`);
+  }
+  if (input.ref !== undefined) requireNonBlank("rulesProvenance.ref", input.ref);
+  if (input.commit !== undefined) requireNonBlank("rulesProvenance.commit", input.commit);
+  if (input.refOrigin !== undefined && !RULES_REF_ORIGINS.has(input.refOrigin)) {
+    throw invalid(`rulesProvenance.refOrigin is not supported: ${String(input.refOrigin)}`);
+  }
+  if (input.fallbackReason !== undefined) {
+    if (input.source !== "working-tree" || !RULES_FALLBACK_REASONS.has(input.fallbackReason)) {
+      throw invalid(
+        `rulesProvenance.fallbackReason is only valid for source "working-tree": ${String(input.fallbackReason)}`,
+      );
+    }
+  }
+  if (input.source === "working-tree" && input.commit !== undefined) {
+    throw invalid("rulesProvenance.commit is only valid for source \"git-ref\"");
+  }
+  return {
+    source: input.source,
+    ...(input.ref === undefined ? {} : { ref: input.ref }),
+    ...(input.commit === undefined ? {} : { commit: input.commit }),
+    ...(input.refOrigin === undefined ? {} : { refOrigin: input.refOrigin }),
+    ...(input.fallbackReason === undefined ? {} : { fallbackReason: input.fallbackReason }),
+  };
+}
+
+/** Human-readable provenance line for the architecture check limitations. */
+function rulesProvenanceLimitation(provenance: VerifyRulesProvenance): string {
+  const origin = provenance.refOrigin === undefined ? "" : `; ref origin: ${provenance.refOrigin}`;
+  if (provenance.source === "git-ref") {
+    return (
+      `architecture rules and baseline were read from git ref "${provenance.ref ?? "(unspecified)"}"` +
+      `${provenance.commit === undefined ? "" : ` (commit ${provenance.commit})`}${origin}`
+    );
+  }
+  return (
+    "architecture rules were read from the working tree, not from a trusted git ref" +
+    `${provenance.ref === undefined ? "" : ` (consulted ref: "${provenance.ref}")`}` +
+    `${provenance.fallbackReason === undefined ? "" : `; reason: ${provenance.fallbackReason}`}${origin}` +
+    "; the change under verification may have modified them, so a clean result requires review"
+  );
 }
 
 /** Koşum durumu nesnesinin şema invariantlarını savunmada yeniden doğrular. */
@@ -572,6 +642,10 @@ export function verifyChange(input: VerifyChangeInput): VerificationReport {
   const evidence = new Set<string>();
 
   // 7) architecture denetimi: C2 guard kuralları hedef snapshot üzerinde.
+  //    Rules provenance only matters when the architecture check is requested.
+  const rulesProvenance = requested.has("architecture")
+    ? normalizeRulesProvenance(input.rulesProvenance)
+    : undefined;
   let architecture: ArchitectureCheckResult;
   if (!requested.has("architecture")) {
     architecture = {
@@ -605,17 +679,25 @@ export function verifyChange(input: VerifyChangeInput): VerificationReport {
     for (const finding of findings) {
       for (const id of finding.evidenceIds) evidence.add(id);
     }
+    const architectureLimitations: string[] = usedDefaultBaseline
+      ? ["guardBaseline not provided; an empty suppression set was applied"]
+      : [];
+    if (rulesProvenance !== undefined) {
+      architectureLimitations.push(rulesProvenanceLimitation(rulesProvenance));
+    }
     architecture = {
       status: "evaluated",
       findings,
       suppressedCount,
       evidenceIds: sortedUnique(findings.flatMap((finding) => [...finding.evidenceIds])),
-      limitations: usedDefaultBaseline
-        ? ["guardBaseline not provided; an empty suppression set was applied"]
-        : [],
+      limitations: architectureLimitations,
     };
   }
   limitations.push(...architecture.limitations);
+  // Trust boundary: an architecture result computed from working-tree rules
+  // is never a clean pass (the diff being verified may have edited them).
+  const untrustedRulesEvaluated =
+    architecture.status === "evaluated" && rulesProvenance?.source === "working-tree";
 
   // 8) contracts denetimi: D2/D3 kayıtlarının sınıflama eşlemesi (kaynak
   //    sınıflama korunur; uydurma sınıflama yok — D4 eşleme disiplini).
@@ -731,7 +813,9 @@ export function verifyChange(input: VerifyChangeInput): VerificationReport {
       candidateStatuses: [],
       missingCoverageCandidates: [],
       unresolvedTargets: [],
-      evidenceIds: observedRun === undefined ? [] : [...observedRun.evidenceIds],
+      // Host-asserted evidence ids live only in `run` (the host_asserted
+      // block); they are never mixed into engine-derived evidence.
+      evidenceIds: [],
       limitations: [`"test-plan" check not requested (checks parameter)`],
     };
   } else {
@@ -758,7 +842,7 @@ export function verifyChange(input: VerifyChangeInput): VerificationReport {
         candidateStatuses: [],
         missingCoverageCandidates: [],
         unresolvedTargets: [],
-        evidenceIds: observedRun === undefined ? [] : [...observedRun.evidenceIds],
+        evidenceIds: [],
         limitations: [
           "test plan is empty: base and target are identical (empty change set), so no test candidate can be derived; deciding which tests to run is up to the user or host workflow",
         ],
@@ -783,13 +867,11 @@ export function verifyChange(input: VerifyChangeInput): VerificationReport {
             ? ("host_asserted" as const)
             : ("not_run" as const),
       }));
-      const candidateEvidence = plan.candidates.flatMap(
+      // Engine evidence only: host-asserted observedTestRun.evidenceIds are
+      // unverified claims and stay inside the host_asserted `run` block.
+      const planEvidence = plan.candidates.flatMap(
         (candidate: TestPlanCandidate) => [...candidate.evidenceIds],
       );
-      const planEvidence =
-        observedRun === undefined
-          ? candidateEvidence
-          : [...candidateEvidence, ...observedRun.evidenceIds];
       for (const id of planEvidence) evidence.add(id);
       testPlan = {
         status: scopeUnresolved > 0 ? "partial" : "evaluated",
@@ -885,6 +967,15 @@ export function verifyChange(input: VerifyChangeInput): VerificationReport {
     rationale.push({
       rule: VERIFY_VERDICT_RULES.missingInput,
       detail: `requested check(s) not evaluated: ${notEvaluatedNames.join(", ")} (missing input or rejected policy; the check could not run)`,
+    });
+  }
+  if (untrustedRulesEvaluated) {
+    rationale.push({
+      rule: VERIFY_VERDICT_RULES.untrustedRules,
+      detail:
+        "architecture rules were read from the working tree instead of a trusted git ref" +
+        `${rulesProvenance?.ref === undefined ? "" : ` (consulted ref: ${rulesProvenance.ref})`}` +
+        "; review changes to .causoryn/architecture.rules.yaml and .causoryn/architecture.baseline.yaml before relying on this result",
     });
   }
   if (suppressedFindings > 0) {
@@ -997,6 +1088,8 @@ export function verifyChange(input: VerifyChangeInput): VerificationReport {
     checks: { architecture, contracts, graphDiff, testPlan },
     ...(alignment === undefined ? {} : { preflightAlignment: alignment }),
     limitations: sortedUnique(limitations),
+    ...(rulesProvenance === undefined ? {} : { rulesProvenance }),
+    ...(untrustedRulesEvaluated ? { trustWarning: UNTRUSTED_RULES_TRUST_WARNING } : {}),
   };
 
   const contentHash = sha256Hex(utf8Encode(canonicalJson(reportBodyJsonValue(body))));
@@ -1189,6 +1282,22 @@ function reportBodyJsonValue(
       ? {}
       : { preflightAlignment: alignmentJsonValue(body.preflightAlignment) }),
     limitations: [...body.limitations],
+    ...(body.rulesProvenance === undefined
+      ? {}
+      : { rulesProvenance: rulesProvenanceJsonValue(body.rulesProvenance) }),
+    ...(body.trustWarning === undefined ? {} : { trustWarning: body.trustWarning }),
+  };
+}
+
+function rulesProvenanceJsonValue(provenance: VerifyRulesProvenance): JsonValue {
+  return {
+    source: provenance.source,
+    ...(provenance.ref === undefined ? {} : { ref: provenance.ref }),
+    ...(provenance.commit === undefined ? {} : { commit: provenance.commit }),
+    ...(provenance.refOrigin === undefined ? {} : { refOrigin: provenance.refOrigin }),
+    ...(provenance.fallbackReason === undefined
+      ? {}
+      : { fallbackReason: provenance.fallbackReason }),
   };
 }
 

@@ -162,6 +162,11 @@ describe("Task 1.6 — verify_change defaults, async projection, trusted git rul
   it("omits unevaluable 'contracts' from default checks so default verify_change does NOT degrade to inconclusive", async () => {
     const root = makeTempDir("default-checks");
     writeTsFixture(root);
+    // Rules committed at HEAD: the clean default path is the trusted-rules
+    // path (working-tree rules can never produce no_findings).
+    runGit(root, ["init", "-q"]);
+    runGit(root, ["add", "."]);
+    runGit(root, ["commit", "-q", "-m", "initial commit with architecture rules"]);
     const context = createCausorynContext(
       { workspaceId: "default", allowRoots: [root], autoIndex: true },
       { clock: fixedClock },
@@ -194,6 +199,9 @@ describe("Task 1.6 — verify_change defaults, async projection, trusted git rul
       expect(data.checks.testPlan.status).toBe("evaluated");
       expect(data.incompleteChecks).toEqual([]);
       expect(data.verdict).toBe("no_findings");
+      expect(data.trustWarning).toBeUndefined();
+      expect(data.rulesProvenance?.source).toBe("git-ref");
+      expect(data.rulesProvenance?.commit).toBe(runGit(root, ["rev-parse", "HEAD"]));
 
       // Explicitly requesting contracts still evaluates as not_evaluated -> inconclusive.
       const withContracts = await verifyChangeTool(
@@ -325,6 +333,12 @@ suppressions:
           w.includes("architecture-rules-loaded-from-untrusted-working-tree"),
         ),
       ).toBe(true);
+      // Clean architecture result + untrusted rules is never a clean pass.
+      expect(data.checks.architecture.status).toBe("evaluated");
+      expect(data.verdict).toBe("review_required");
+      expect(data.verdictRationale[0]?.rule).toBe("untrusted-rules");
+      expect(data.rulesProvenance?.source).toBe("working-tree");
+      expect(data.rulesProvenance?.fallbackReason).toBe("ref-unreadable");
     } finally {
       context.close();
     }
@@ -361,8 +375,81 @@ suppressions:
           w.includes("architecture-rules-loaded-from-untrusted-working-tree"),
         ),
       ).toBe(true);
+      expect(data.verdict).toBe("review_required");
+      expect(data.verdictRationale[0]?.rule).toBe("untrusted-rules");
+      expect(data.rulesProvenance).toEqual({
+        source: "working-tree",
+        ref: "HEAD",
+        refOrigin: "default-head",
+        fallbackReason: "rules-not-in-ref",
+      });
     } finally {
       gitCtx.close();
+    }
+  }, 60_000);
+
+  it("an unreadable trusted base (repository without commits) falls back to working-tree rules but never yields no_findings", async () => {
+    const root = makeTempDir("unborn-head");
+    writeTsFixture(root);
+    runGit(root, ["init", "-q"]);
+    const context = createCausorynContext(
+      { workspaceId: "default", allowRoots: [root], autoIndex: true },
+      { clock: fixedClock },
+    );
+    try {
+      const latest = context.repository.getLatestPublished("default");
+      expect(latest).toBeDefined();
+      const envelope = await verifyChangeTool(
+        context,
+        "req-verify-unborn",
+        VerifyChangeInputSchema.parse({ baseSnapshot: latest!.snapshot.meta.id }),
+      );
+      const data = VerifyChangeDataSchema.parse(envelope.data);
+      expect(data.checks.architecture.status).toBe("evaluated");
+      expect(data.verdict).toBe("review_required");
+      expect(data.verdictRationale[0]?.rule).toBe("untrusted-rules");
+      expect(data.trustWarning).toBe("architecture-rules-loaded-from-untrusted-working-tree");
+      expect(data.rulesProvenance?.source).toBe("working-tree");
+      expect(data.rulesProvenance?.fallbackReason).toBe("ref-unreadable");
+    } finally {
+      context.close();
+    }
+  }, 60_000);
+
+  it("keeps host-asserted observedTestRun.evidenceIds out of the report's engine evidence over verifyChangeTool", async () => {
+    const root = makeTempDir("host-evidence-isolation");
+    writeTsFixture(root);
+    const context = createCausorynContext(
+      { workspaceId: "default", allowRoots: [root], autoIndex: true },
+      { clock: fixedClock },
+    );
+    try {
+      const pf = await preflightChange(context, "req-pf-host-ev", {
+        intent: "host evidence isolation",
+        targetFiles: ["src/order-service.ts"],
+      });
+      const preflightId = (pf.data as Record<string, unknown>).preflightId as string;
+      const envelope = await verifyChangeTool(
+        context,
+        "req-verify-host-ev",
+        VerifyChangeInputSchema.parse({
+          preflightId,
+          checks: ["test-plan", "graph-diff"],
+          observedTestRun: {
+            state: "host_asserted",
+            evidenceRef: "reports/vitest.json",
+            observedCount: 1,
+            evidenceIds: ["host-claimed-evidence-mcp"],
+          },
+        }),
+      );
+      const data = VerifyChangeDataSchema.parse(envelope.data);
+      if (data.tests.state !== "host_asserted") throw new Error("expected host_asserted");
+      expect(data.tests.evidenceIds).toEqual(["host-claimed-evidence-mcp"]);
+      expect(data.evidenceIds).not.toContain("host-claimed-evidence-mcp");
+      expect(data.checks.testPlan.evidenceIds).not.toContain("host-claimed-evidence-mcp");
+    } finally {
+      context.close();
     }
   }, 60_000);
 
@@ -574,6 +661,13 @@ suppressions:
       const pinnedData = VerifyChangeDataSchema.parse(pinned.data);
       expect(pinnedData.verdict).toBe("blocking_findings");
       expect(pinnedData.trustWarning).toBeUndefined();
+      // An explicit (older) baseRef is the caller's trusted choice; the report names it.
+      expect(pinnedData.rulesProvenance).toEqual({
+        source: "git-ref",
+        ref: strictCommitSha,
+        commit: strictCommitSha,
+        refOrigin: "explicit",
+      });
 
       // 2) baseRef='working-tree' is rejected fail-closed with INVALID_ARGUMENT
       await expect(
