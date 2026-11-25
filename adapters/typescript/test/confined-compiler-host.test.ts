@@ -79,11 +79,11 @@ describe("confined compiler host: link resolution before file system access", ()
     const fake = createFakeConfinedFs({
       dirs: [ROOT, `${ROOT}/node_modules`, `${ROOT}/node_modules/@scope`, LIB],
       links: {
-        [`${ROOT}/node_modules/evil`]: "\\\\attacker.example\\share\\pkg",
-        [`${ROOT}/node_modules/evil2`]: "//attacker.example/share/pkg",
-        [`${ROOT}/node_modules/evil3`]: "\\\\?\\UNC\\attacker.example\\share",
+        [`${ROOT}/node_modules/evil`]: "\\\\remote.example\\share\\pkg",
+        [`${ROOT}/node_modules/evil2`]: "//remote.example/share/pkg",
+        [`${ROOT}/node_modules/evil3`]: "\\\\?\\UNC\\remote.example\\share",
         [`${ROOT}/node_modules/@scope/pipe`]: "\\\\.\\pipe\\evil",
-        [`${ROOT}/node_modules/nt`]: "\\??\\UNC\\attacker.example\\share",
+        [`${ROOT}/node_modules/nt`]: "\\??\\UNC\\remote.example\\share",
       },
       readdirs: { [`${ROOT}/node_modules`]: ["evil", "evil2", "evil3", "nt", "@scope"] },
     });
