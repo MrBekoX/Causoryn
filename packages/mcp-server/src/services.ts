@@ -925,7 +925,14 @@ export function refreshIndex(
     snapshotId: null,
     status: "ok",
     coverage: null,
-    warnings: [],
+    // A freshly created job never carries coalescedRequests; a value means
+    // this request joined an identical job that was already queued.
+    warnings:
+      started.coalescedRequests === undefined
+        ? []
+        : [
+            `refresh request coalesced into queued job ${started.jobId} (${String(started.coalescedRequests)} merged request(s)); no new job was created`,
+          ],
     data: {
       jobId: started.jobId,
       mode: started.mode,

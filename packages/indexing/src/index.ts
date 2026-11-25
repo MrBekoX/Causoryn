@@ -109,6 +109,7 @@ export type {
   SqliteRepositoryConstructor,
 } from "./index-worker-core.js";
 export {
+  DEFAULT_MAX_PENDING_INDEX_JOBS,
   IndexJobManager,
   isTerminalIndexJobStatus,
   validateWorkerEntryPath,

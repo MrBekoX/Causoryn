@@ -143,6 +143,12 @@ export interface IndexJobRecord {
   readonly cachedFiles?: number;
   /** True when early cutoff avoided invalidating reverse dependents (Task 2.6). */
   readonly earlyCutoffApplied?: boolean;
+  /**
+   * Number of later identical refresh requests (same root and mode) that were
+   * merged into this job while it was still queued; absent when none. A
+   * coalesced request returns this job's record instead of opening a new job.
+   */
+  readonly coalescedRequests?: number;
 }
 
 export interface IndexJobManagerOptions {
@@ -169,6 +175,19 @@ export interface IndexJobManagerOptions {
   readonly workerFixedClockIso?: string;
   /** Optional progress listener notified whenever any job emits a progress event. */
   readonly onProgress?: (jobId: string, event: IndexProgressEvent) => void;
+  /**
+   * Merge a refresh request into an already QUEUED job for the same root and
+   * mode (default true). A running job is never a merge target: changes made
+   * after a run started need a new run.
+   */
+  readonly coalescePendingRefreshes?: boolean;
+  /**
+   * Upper bound for jobs waiting in the queue (default
+   * DEFAULT_MAX_PENDING_INDEX_JOBS). A request that would open a new job
+   * beyond it is rejected with indexing/limit-exceeded; coalesced requests
+   * are never rejected.
+   */
+  readonly maxPendingJobs?: number;
 }
 
 /** İş "running" aşamasına geçtiğinde raporlanan başlangıç yüzdesi. */
@@ -176,6 +195,13 @@ const RUNNING_PROGRESS_PERCENT = 10;
 
 /** Varsayılan işletim kaydı sınırı. */
 const DEFAULT_MAX_JOBS = 100;
+
+/**
+ * Default bound for queued (not yet running) jobs. With coalescing, at most
+ * one queued job exists per (root, mode), so the bound only matters for many
+ * roots or when coalescing is disabled.
+ */
+export const DEFAULT_MAX_PENDING_INDEX_JOBS = 16;
 
 /**
  * Static ESM bootstrap used ONLY when spawning `index-worker.ts` directly from
@@ -425,6 +451,8 @@ export class IndexJobManager {
   private readonly jobIdGenerator: () => string;
   private readonly scheduler: (task: () => void) => void;
   private readonly maxJobs: number;
+  private readonly coalescePendingRefreshes: boolean;
+  private readonly maxPendingJobs: number;
   private readonly workerDbPath: string | undefined;
   private readonly workerEntryPath: string | undefined;
   private readonly useWorkerThread: boolean;
@@ -462,6 +490,15 @@ export class IndexJobManager {
       });
     this.scheduler = options.scheduler ?? ((task) => setImmediate(task));
     this.maxJobs = options.maxJobs ?? DEFAULT_MAX_JOBS;
+    this.coalescePendingRefreshes = options.coalescePendingRefreshes ?? true;
+    const maxPendingJobs = options.maxPendingJobs ?? DEFAULT_MAX_PENDING_INDEX_JOBS;
+    if (!Number.isInteger(maxPendingJobs) || maxPendingJobs < 1) {
+      throw new IndexingError(
+        "indexing/internal",
+        `maxPendingJobs must be a positive integer: ${String(maxPendingJobs)}`,
+      );
+    }
+    this.maxPendingJobs = maxPendingJobs;
     this.workerDbPath = options.workerDbPath;
     this.workerEntryPath = options.workerEntryPath;
     this.useWorkerThread = options.useWorkerThread ?? true;
@@ -513,6 +550,22 @@ export class IndexJobManager {
       throw new IndexingError(
         "indexing/root-not-authorized",
         `root is not authorized (${decision.code}): ${decision.reason}`,
+      );
+    }
+
+    // Coalesce: an identical refresh that has not started yet would produce
+    // the same result, so the request joins the queued job (its change set
+    // is merged) instead of queueing another full run.
+    if (this.coalescePendingRefreshes) {
+      const pendingJobId = this.findQueuedJob(rootPath, input.mode);
+      if (pendingJobId !== undefined) {
+        return this.coalesceInto(pendingJobId, input.changeSet, input.onProgress);
+      }
+    }
+    if (this.queue.length >= this.maxPendingJobs) {
+      throw new IndexingError(
+        "indexing/limit-exceeded",
+        `indexing queue is full (${String(this.queue.length)} pending job(s), limit ${String(this.maxPendingJobs)}); wait for a queued job to finish before requesting another refresh`,
       );
     }
 
@@ -688,6 +741,44 @@ export class IndexJobManager {
   /* ---------------------------------------------------------------- */
   /* İç kuyruk                                                        */
   /* ---------------------------------------------------------------- */
+
+  /** Oldest job still waiting in the queue for the same root and mode. */
+  private findQueuedJob(rootPath: string, mode: IndexJobMode): string | undefined {
+    for (const jobId of this.queue) {
+      const record = this.records.get(jobId);
+      if (
+        record !== undefined &&
+        record.status === "queued" &&
+        record.mode === mode &&
+        this.roots.get(jobId) === rootPath
+      ) {
+        return jobId;
+      }
+    }
+    return undefined;
+  }
+
+  /** Merges one refresh request into a queued job and returns its updated record. */
+  private coalesceInto(
+    jobId: string,
+    changeSet: readonly string[] | undefined,
+    onProgress: IndexProgressCallback | undefined,
+  ): IndexJobRecord {
+    const current = this.records.get(jobId) as IndexJobRecord;
+    const merged = Object.freeze(
+      [...new Set([...current.changeSet, ...(changeSet ?? [])])].sort(),
+    );
+    const updated = freezeRecord({
+      ...current,
+      changeSet: merged,
+      coalescedRequests: (current.coalescedRequests ?? 0) + 1,
+    });
+    this.records.set(jobId, updated);
+    if (onProgress !== undefined) {
+      this.subscribeProgress(jobId, onProgress);
+    }
+    return updated;
+  }
 
   private enqueue(jobId: string): void {
     if (this.closed) return;
