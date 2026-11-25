@@ -2789,7 +2789,6 @@ export class IndexService {
       prepared.entries,
       prevMeta.analyzerFingerprint,
       createdAt,
-      prepared.canonicalRoot,
       prepared.entries.length,
       prepared.tsEntries.length,
       0,
@@ -3338,7 +3337,6 @@ export class IndexService {
       prepared.entries,
       prevMeta.analyzerFingerprint,
       createdAt,
-      prepared.canonicalRoot,
       prepared.entries.length,
       prepared.tsEntries.length,
       prepared.csEntries.length,
@@ -3671,7 +3669,6 @@ export class IndexService {
   private openBuild(
     analyzerFingerprint: string,
     createdAt: string,
-    canonicalRoot: string,
   ): {
     readonly buildId: string;
     readonly workspaceNode: GraphNode;
@@ -3693,7 +3690,10 @@ export class IndexService {
       }),
       kind: "Workspace",
       qualifiedName: this.workspaceId,
-      attributes: { rootPath: canonicalRoot },
+      // No absolute root path in the graph: snapshots are exported and
+      // committed (`format: "snapshot"`), and the path embeds the OS user name
+      // and the local folder layout. The root stays in the workspace record.
+      attributes: {},
     };
     this.repository.addNode(build.buildId, workspaceNode);
     return { buildId: build.buildId, workspaceNode, build };
@@ -3842,7 +3842,6 @@ export class IndexService {
     entries: readonly InventoryEntry[],
     analyzerFingerprint: string,
     createdAt: string,
-    canonicalRoot: string,
     fileCount: number,
     tsFileCount: number,
     csFileCount: number,
@@ -3903,7 +3902,7 @@ export class IndexService {
 
     try {
       const openAndBind = (): ReturnType<IndexService["openBuild"]> => {
-        const opened = this.openBuild(analyzerFingerprint, createdAt, canonicalRoot);
+        const opened = this.openBuild(analyzerFingerprint, createdAt);
         if (leaseStore !== undefined && activeLease !== undefined) {
           const bound = leaseStore.bindBuildLeaseBuildId?.(
             this.workspaceId,
@@ -4118,7 +4117,6 @@ export class IndexService {
       entries,
       fingerprint,
       createdAt,
-      canonicalRoot,
       entries.length,
       tsEntries.length,
       csEntries.length,
@@ -4644,7 +4642,6 @@ export class IndexService {
       entries,
       fingerprint,
       createdAt,
-      canonicalRoot,
       entries.length,
       tsEntries.length,
       csEntries.length,
