@@ -25,7 +25,7 @@ Automated coverage of the 0.3.0 code paths used on this page: `tests/causoryn-se
 | Path | Who it is for | What runs |
 |---|---|---|
 | **A. `npx causoryn@0.3.0 setup`** (recommended) | End users | Packaged entrypoint `scripts/causoryn.mjs mcp --allow-cwd --auto-data-dir --client codex`, registered in `config.toml` with the absolute Node binary |
-| **B. Codex plugin marketplace** | End users who prefer plugins | `npx -y --package causoryn@0.3.0 causoryn mcp …` from `.codex-plugin/mcp.json` |
+| **B. Codex plugin marketplace** | End users who prefer plugins | `npx -y --ignore-scripts --package causoryn@0.3.0 causoryn mcp …` from `.codex-plugin/mcp.json` |
 | **C. Manual registration** (`codex mcp add` or `config.toml`) | Contributors working from a source checkout | Monorepo bundle `packages/mcp-server/dist/mcp-server.mjs` (configured only through `CAUSORYN_CONFIG`) |
 
 ---
@@ -94,6 +94,7 @@ The installed package's `.codex-plugin/plugin.json` ships the skills (`"skills":
       "command": "npx",
       "args": [
         "-y",
+        "--ignore-scripts",
         "--package",
         "causoryn@0.3.0",
         "causoryn",

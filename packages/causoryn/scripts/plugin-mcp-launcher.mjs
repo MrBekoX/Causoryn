@@ -5,8 +5,14 @@
  * İç içe `npx` alt-süreci açmadan kurulu plugin dizinindeki `package.json`
  * sürüm bütünlüğünü doğrular, `CAUSORYN_ASSET_ROOT` ortamını bağlar ve saf
  * `stdout` disipliniyle doğrudan `dist/mcp-server.mjs` modülünü yükler.
+ *
+ * `CAUSORYN_ASSET_ROOT`, sunucunun sidecar worker kaynaklarını (`native/`)
+ * yüklediği kökü seçer. Tanımsız/boşsa doğrulanmış paket köküne bağlanır;
+ * miras alınan bir değer (geliştirme override'ı) yalnızca mutlak, var olan ve
+ * aynı doğrulanmış sürümdeki `causoryn` paketini (`native/` ile) gösteriyorsa
+ * kabul edilir, aksi halde başlatıcı `2` ile fail-closed çıkar.
  */
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
@@ -49,8 +55,57 @@ function parseLauncherArgs(argv) {
   return { cliExpectedVersion, forwardedArgs };
 }
 
+/**
+ * Returns the asset root the server must use: this verified package when
+ * CAUSORYN_ASSET_ROOT is unset or blank, otherwise the realpath of the override
+ * after checking it is an absolute path to a directory holding the same
+ * `causoryn@<verifiedVersion>` package with a `native/` directory. Exits 2 otherwise.
+ */
+function resolveAssetRoot(rawValue, verifiedVersion) {
+  const value = rawValue?.trim();
+  if (value === undefined || value.length === 0) {
+    return PKG_ROOT;
+  }
+  const reject = (reason) => {
+    console.error(`[causoryn-launcher] CAUSORYN_ASSET_ROOT rejected (${reason}): ${value}`);
+    process.exit(2);
+  };
+  if (!path.isAbsolute(value)) {
+    return reject("must be an absolute path");
+  }
+  let resolved;
+  try {
+    resolved = realpathSync(value);
+  } catch {
+    return reject("does not exist");
+  }
+  if (!statSync(resolved).isDirectory()) {
+    return reject("is not a directory");
+  }
+  let marker;
+  try {
+    marker = JSON.parse(readFileSync(path.join(resolved, "package.json"), "utf8"));
+  } catch {
+    return reject("has no readable package.json");
+  }
+  if (
+    typeof marker !== "object" ||
+    marker === null ||
+    marker.name !== "causoryn" ||
+    marker.version !== verifiedVersion
+  ) {
+    return reject(`is not the causoryn@${verifiedVersion} package`);
+  }
+  const nativeDir = path.join(resolved, "native");
+  if (!existsSync(nativeDir) || !statSync(nativeDir).isDirectory()) {
+    return reject("has no native/ directory");
+  }
+  return resolved;
+}
+
 const { cliExpectedVersion, forwardedArgs } = parseLauncherArgs(process.argv.slice(2));
 
+let verifiedVersion;
 try {
   const pkgRaw = JSON.parse(readFileSync(PKG_JSON_PATH, "utf8"));
   if (
@@ -88,6 +143,7 @@ try {
     );
     process.exit(2);
   }
+  verifiedVersion = pkgRaw.version;
 } catch (error) {
   console.error(
     `[causoryn-launcher] could not read package.json: ${error instanceof Error ? error.message : String(error)}`,
@@ -100,7 +156,10 @@ if (!existsSync(MCP_BUNDLE_PATH)) {
   process.exit(2);
 }
 
-process.env["CAUSORYN_ASSET_ROOT"] ??= PKG_ROOT;
+process.env["CAUSORYN_ASSET_ROOT"] = resolveAssetRoot(
+  process.env["CAUSORYN_ASSET_ROOT"],
+  verifiedVersion,
+);
 
 const mcpArgs =
   forwardedArgs.length === 0 || forwardedArgs[0] === "mcp"

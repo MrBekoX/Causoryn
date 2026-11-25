@@ -25,7 +25,7 @@ Bu sayfada kullanılan 0.3.0 kod yollarının otomatik kapsamı: `tests/causoryn
 | Yol | Kimin için | Ne çalışır |
 |---|---|---|
 | **A. `npx causoryn@0.3.0 setup`** (önerilen) | Son kullanıcılar | Paketli giriş noktası `scripts/causoryn.mjs mcp --allow-cwd --auto-data-dir --client codex`; mutlak Node binary'siyle `config.toml` içine kaydedilir |
-| **B. Codex plugin pazaryeri** | Plugin'leri tercih eden son kullanıcılar | `.codex-plugin/mcp.json` içinden `npx -y --package causoryn@0.3.0 causoryn mcp …` |
+| **B. Codex plugin pazaryeri** | Plugin'leri tercih eden son kullanıcılar | `.codex-plugin/mcp.json` içinden `npx -y --ignore-scripts --package causoryn@0.3.0 causoryn mcp …` |
 | **C. Elle kayıt** (`codex mcp add` veya `config.toml`) | Kaynak checkout üzerinde çalışan katkıcılar | Monorepo bundle `packages/mcp-server/dist/mcp-server.mjs` (yalnızca `CAUSORYN_CONFIG` ile yapılandırılır) |
 
 ---
@@ -94,6 +94,7 @@ Kurulu paketin `.codex-plugin/plugin.json` dosyası skill'leri taşır (`"skills
       "command": "npx",
       "args": [
         "-y",
+        "--ignore-scripts",
         "--package",
         "causoryn@0.3.0",
         "causoryn",

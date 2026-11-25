@@ -215,8 +215,12 @@ function validatePluginManifest(value: unknown, label: string): AntigravityPlugi
 
 /**
  * Antigravity MCP manifest doğrulayıcısı:
- * - mode === "local"    → mcp_config.json ("scripts/mcp-server.mjs" eklenti-içi göreli yol)
+ * - mode === "local"    → mcp_config.json (yerleşik yükleyici; PLUGIN_ROOT token + "/scripts/mcp-server.mjs")
  * - mode === "portable" → mcp.json (PLUGIN_ROOT token + "/scripts/mcp-server.mjs" TŞ §17.1 yolu)
+ * - İki dosyada da giriş noktası eklenti köküne bağlıdır: Antigravity, eklentinin
+ *   mcp_config.json dosyasında PLUGIN_ROOT token'ını eklenti dizinine genişletir
+ *   (yerleşik mcp-app-development skill dokümanı). Çıplak göreli yol, node tarafından
+ *   host'un çalışma dizinine göre çözüldüğünden reddedilir.
  * - Sunucu anahtarı eklenti adıyla ("causoryn") eşleşmeli; generic "engine" reddedilir.
  * - env.CAUSORYN_CONFIG gerçek sunucu şemasıyla (parseCausorynServerConfig:
  *   z.strictObject + mutlak allowRoots) doğrulanır.
@@ -270,36 +274,19 @@ function validateMcpManifest(
   }
 
   const entry = args[0] as string;
-  if (mode === "portable") {
-    const requiredPrefix = `${PLUGIN_ROOT_TOKEN}/`;
-    if (!entry.startsWith(requiredPrefix)) {
-      throw new Error(
-        `${label}: ilk arg "${requiredPrefix}" önekiyle başlamalı (yol dilimleme güvenliği, TŞ §17.1)`,
-      );
-    }
-    const relativeAfterToken = entry.slice(requiredPrefix.length);
-    if (relativeAfterToken !== EXPECTED_LOCAL_ENTRY) {
-      throw new Error(
-        `${label}: taşınabilir giriş noktası "${EXPECTED_PORTABLE_ENTRY}" olmalı, gelen "${entry}"`,
-      );
-    }
-  } else {
-    if (
-      path.isAbsolute(entry) ||
-      entry.startsWith("/") ||
-      entry.startsWith("\\") ||
-      /^[A-Za-z]:/.test(entry) ||
-      entry.includes(DOLLAR_BRACE)
-    ) {
-      throw new Error(
-        `${label}: yerel giriş noktası eklenti-içi göreli yol olmalı (mutlak yol veya token yasak), gelen "${entry}"`,
-      );
-    }
-    if (entry !== EXPECTED_LOCAL_ENTRY) {
-      throw new Error(
-        `${label}: yerel giriş noktası "${EXPECTED_LOCAL_ENTRY}" olmalı, gelen "${entry}"`,
-      );
-    }
+  const requiredPrefix = `${PLUGIN_ROOT_TOKEN}/`;
+  if (!entry.startsWith(requiredPrefix)) {
+    throw new Error(
+      mode === "local"
+        ? `${label}: yerel giriş noktası eklenti köküne bağlı olmalı ("${requiredPrefix}" önekiyle başlamalı); çıplak göreli yol host çalışma dizinine göre çözülür, mutlak yol taşınabilir değildir — gelen "${entry}"`
+        : `${label}: ilk arg "${requiredPrefix}" önekiyle başlamalı (yol dilimleme güvenliği, TŞ §17.1)`,
+    );
+  }
+  const relativeAfterToken = entry.slice(requiredPrefix.length);
+  if (relativeAfterToken !== EXPECTED_LOCAL_ENTRY) {
+    throw new Error(
+      `${label}: giriş noktası "${EXPECTED_PORTABLE_ENTRY}" olmalı, gelen "${entry}"`,
+    );
   }
 
   const env = asRecord(serverEntry.env);
@@ -417,12 +404,21 @@ export function withStagingRetrySync<T>(
   throw lastError instanceof Error ? lastError : new Error(String(lastError));
 }
 
+/**
+ * Host davranışı: Antigravity, eklentinin mcp_config.json dosyasındaki PLUGIN_ROOT
+ * token'ını eklenti dizinine genişletir; başka bir token genişletilmez.
+ */
+function expandPluginRootToken(args: readonly string[]): string[] {
+  return args.map((arg) => arg.split(PLUGIN_ROOT_TOKEN).join(PLUGIN_DIR));
+}
+
 async function runMcpConfigHandshakeOnce(
   server: AntigravityMcpServerEntry,
+  cwd: string,
 ): Promise<PluginSpawnHandshakeResult> {
   const childEnv: NodeJS.ProcessEnv = { ...process.env, ...server.env };
-  const child: ChildProcess = spawn(server.command, server.args, {
-    cwd: PLUGIN_DIR,
+  const child: ChildProcess = spawn(server.command, expandPluginRootToken(server.args), {
+    cwd,
     env: childEnv,
     shell: false,
     stdio: ["pipe", "pipe", "pipe"],
@@ -571,11 +567,12 @@ async function runMcpConfigHandshakeOnce(
 /** Paralel vitest koşumunda bundle.test.ts yeniden-sahneleme penceresine dayanıklı sarmalayıcı. */
 async function runMcpConfigHandshake(
   server: AntigravityMcpServerEntry,
+  cwd: string,
 ): Promise<PluginSpawnHandshakeResult> {
   let lastError: unknown;
   for (let attempt = 0; attempt < 3; attempt += 1) {
     try {
-      return await runMcpConfigHandshakeOnce(server);
+      return await runMcpConfigHandshakeOnce(server, cwd);
     } catch (error) {
       lastError = error;
       if (attempt < 2) sleepSync(1_500);
@@ -624,7 +621,7 @@ describe("antigravity plugin.json (yerel yükleyici izinli alanlar + TŞ §17.1)
 });
 
 describe("antigravity mcp_config.json (yerel Antigravity eklenti yükleyicisi birincil tanımı)", () => {
-  it("mcpServers.causoryn altında node + scripts/mcp-server.mjs + default-deny CAUSORYN_CONFIG tanımlar", () => {
+  it("mcpServers.causoryn altında node + eklenti köküne bağlı scripts/mcp-server.mjs + default-deny CAUSORYN_CONFIG tanımlar", () => {
     const manifest = validateMcpManifest(
       parseJsonStrict(readMcpConfigJsonRaw(), "mcp_config.json"),
       "mcp_config.json",
@@ -632,7 +629,7 @@ describe("antigravity mcp_config.json (yerel Antigravity eklenti yükleyicisi bi
     );
     const server = manifest.mcpServers["causoryn"];
     expect(server?.command).toBe("node");
-    expect(server?.args).toEqual(["scripts/mcp-server.mjs"]);
+    expect(server?.args).toEqual([EXPECTED_PORTABLE_ENTRY]);
     expect(server?.env["CAUSORYN_CONFIG"]).toBe('{"allowRoots":[]}');
 
     const parsedServerConfig = parseCausorynServerConfig(
@@ -732,8 +729,7 @@ describe("sahnelenmiş bundle bağlantısı + gerçek stdio el sıkışması (cw
         "local",
       );
       expect(resolvedPortableBundleArg(portableManifest)).toBe(STAGED_BUNDLE_PATH);
-      const localArg = localManifest.mcpServers["causoryn"]?.args[0] ?? "";
-      expect(path.resolve(PLUGIN_DIR, localArg)).toBe(STAGED_BUNDLE_PATH);
+      expect(resolvedPortableBundleArg(localManifest)).toBe(STAGED_BUNDLE_PATH);
       withStagingRetrySync(() => {
         expect(existsSync(STAGED_BUNDLE_PATH)).toBe(true);
         expect(existsSync(STAGED_MANIFEST_PATH)).toBe(true);
@@ -771,7 +767,7 @@ describe("sahnelenmiş bundle bağlantısı + gerçek stdio el sıkışması (cw
   });
 
   it.skipIf(STAGED_BUNDLE_SKIP_REASON)(
-    "mcp_config.json command+args+env ile gerçek spawn: initialize, tools/list (11 core araç), causoryn_status (ok), causoryn_map_system (WORKSPACE_NOT_AUTHORIZED), saf JSON-RPC stdout",
+    "mcp_config.json command+args+env ile gerçek spawn (PLUGIN_ROOT host tarafından genişletilir, cwd eklenti dışı bir dizin): initialize, tools/list (11 core araç), causoryn_status (ok), causoryn_map_system (WORKSPACE_NOT_AUTHORIZED), saf JSON-RPC stdout",
     async () => {
       const localManifest = validateMcpManifest(
         parseJsonStrict(readMcpConfigJsonRaw(), "mcp_config.json"),
@@ -781,7 +777,15 @@ describe("sahnelenmiş bundle bağlantısı + gerçek stdio el sıkışması (cw
       const server = localManifest.mcpServers["causoryn"];
       expect(server).toBeDefined();
 
-      const session = await runMcpConfigHandshake(server as AntigravityMcpServerEntry);
+      // The host's working directory is unrelated to the plugin (e.g. an analyzed repository);
+      // the plugin-root anchored entry must not depend on it.
+      const unrelatedCwd = mkdtempSync(path.join(os.tmpdir(), "causoryn-antigravity-cwd-"));
+      let session: PluginSpawnHandshakeResult;
+      try {
+        session = await runMcpConfigHandshake(server as AntigravityMcpServerEntry, unrelatedCwd);
+      } finally {
+        rmSync(unrelatedCwd, { recursive: true, force: true });
+      }
 
       expect(session.stdoutLines.length).toBe(4);
       for (const line of session.stdoutLines) {
@@ -993,7 +997,22 @@ describe("negatif durumlar: bozuk/eksik/yasak manifest alanları açık reddedil
     };
     expect(() =>
       validateMcpManifest(localAbsolute, "sentetik-mcp-config.json", "local"),
-    ).toThrowError(/göreli yol olmalı/);
+    ).toThrowError(/eklenti köküne bağlı olmalı/);
+
+    // A bare relative entry is resolved by node against the host's working directory
+    // (possibly an analyzed repository), so it is rejected:
+    const localBareRelative = {
+      mcpServers: {
+        causoryn: {
+          command: "node",
+          args: [EXPECTED_LOCAL_ENTRY],
+          env: { CAUSORYN_CONFIG: '{"allowRoots":[]}' },
+        },
+      },
+    };
+    expect(() =>
+      validateMcpManifest(localBareRelative, "sentetik-mcp-config.json", "local"),
+    ).toThrowError(/çalışma dizinine göre çözülür/);
   });
 
   it("env.CAUSORYN_CONFIG bozuk JSON, bilinmeyen anahtar (dataDir) veya göreli allowRoots içerdiğinde reddedilir", () => {
@@ -1014,7 +1033,7 @@ describe("negatif durumlar: bozuk/eksik/yasak manifest alanları açık reddedil
       mcpServers: {
         causoryn: {
           command: "node",
-          args: [EXPECTED_LOCAL_ENTRY],
+          args: [EXPECTED_PORTABLE_ENTRY],
           env: { CAUSORYN_CONFIG: '{"allowRoots":[],"dataDir":"/tmp"}' },
         },
       },
@@ -1060,8 +1079,10 @@ describe("docs/hosts/antigravity.md — dürüstlük beyanı ve çift manifest g
     const docRaw = readFileSync(DOC_PATH, "utf8");
     expect(docRaw.includes("integrations/antigravity/causoryn/mcp_config.json")).toBe(true);
     expect(docRaw.includes("integrations/antigravity/causoryn/README.md")).toBe(true);
-    expect(docRaw.includes('"scripts/mcp-server.mjs"')).toBe(true);
-    expect(docRaw.includes(`${PLUGIN_ROOT_TOKEN}/scripts/mcp-server.mjs`)).toBe(true);
+    // Both manifests are documented with the plugin-root anchored entry; the bare relative form is gone.
+    expect(docRaw.includes('"scripts/mcp-server.mjs"')).toBe(false);
+    expect(docRaw.includes(`"${PLUGIN_ROOT_TOKEN}/scripts/mcp-server.mjs"`)).toBe(true);
+    expect(docRaw.includes(`${PLUGIN_ROOT_TOKEN}/scripts/plugin-mcp-launcher.mjs`)).toBe(true);
     expect(docRaw.includes("bundle-manifest.json")).toBe(true);
     expect(docRaw.includes("CAUSORYN_CONFIG")).toBe(true);
     expect(docRaw.includes("$schema")).toBe(true);

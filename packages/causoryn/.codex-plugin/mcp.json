@@ -4,6 +4,7 @@
       "command": "npx",
       "args": [
         "-y",
+        "--ignore-scripts",
         "--package",
         "causoryn@0.3.0",
         "causoryn",
