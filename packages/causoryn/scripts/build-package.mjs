@@ -61,17 +61,21 @@ const EXCLUDED_NATIVE_DIR_NAMES = new Set([
   "target",
   "obj",
   "__pycache__",
-  ".mimosa",
-  ".video_agent",
-  ".git",
   "node_modules",
 ]);
 
 const EXCLUDED_NATIVE_FILE_NAMES = new Set([
   "test-build.lock",
-  ".DS_Store",
   "Thumbs.db",
 ]);
+
+/**
+ * Hidden entries (names starting with ".") under the native worker sources
+ * are never staged: they are local tool caches, editor state or VCS
+ * metadata, not worker runtime files. A hidden entry the package really
+ * needs must be added here explicitly (currently none).
+ */
+export const NATIVE_HIDDEN_ENTRY_ALLOWLIST = new Set([]);
 
 const MIT_LICENSE_TEMPLATE = [
   "Permission is hereby granted, free of charge, to any person obtaining a copy",
@@ -261,12 +265,13 @@ export function verifyManifestVersionParity(repoRoot, pkgDir) {
   return expectedVersion;
 }
 
-function copyNativeFiltered(srcDir, destDir, workerName) {
+export function copyNativeFiltered(srcDir, destDir, workerName) {
   mkdirSync(destDir, { recursive: true });
   const entries = readdirSync(srcDir, { withFileTypes: true }).sort((a, b) =>
     a.name < b.name ? -1 : a.name > b.name ? 1 : 0,
   );
   for (const entry of entries) {
+    if (entry.name.startsWith(".") && !NATIVE_HIDDEN_ENTRY_ALLOWLIST.has(entry.name)) continue;
     if (entry.isDirectory()) {
       if (EXCLUDED_NATIVE_DIR_NAMES.has(entry.name)) continue;
       // go-worker/bin yalnızca test sahte ikililerini barındırır;
