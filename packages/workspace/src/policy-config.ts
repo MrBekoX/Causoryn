@@ -2,7 +2,10 @@ import path from "node:path";
 
 import { z } from "zod";
 
+import { findWindowsUnsafePathSegment, isWindowsDriveAbsolutePath } from "./path-safety.js";
 import type { PolicyErrorCode } from "./policy-error.js";
+
+const IS_WIN = process.platform === "win32";
 
 /**
  * Workspace policy konfigürasyon şeması — TŞ v2.1 §20'deki `causoryn.config`
@@ -156,10 +159,21 @@ export const workspacePolicyConfigSchema = z.strictObject({
    */
   allowRoots: z
     .array(
-      noNullByte("allowRoot entry").refine(
-        (value) => path.isAbsolute(value),
-        "allowRoot must be an absolute path (a relative root would depend on the CWD)",
-      ),
+      noNullByte("allowRoot entry")
+        .refine(
+          (value) => path.isAbsolute(value),
+          "allowRoot must be an absolute path (a relative root would depend on the CWD)",
+        )
+        // Windows: `\work` is "absolute" for path.isAbsolute but depends on the
+        // current drive, and UNC/device forms are network or device paths.
+        .refine(
+          (value) => !IS_WIN || isWindowsDriveAbsolutePath(value),
+          "allowRoot must be a drive-letter absolute path on Windows (for example C:\\work\\repo)",
+        )
+        .refine(
+          (value) => !IS_WIN || findWindowsUnsafePathSegment(value) === undefined,
+          "allowRoot must not contain a colon after the drive, a segment ending with a dot or a space, or a reserved device name",
+        ),
     )
     .default([]),
   /** Default ignore listesi; verilmemişse TŞ §20 listesi kullanılır. */

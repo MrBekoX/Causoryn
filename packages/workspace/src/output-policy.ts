@@ -1,7 +1,14 @@
 import { realpathSync, statSync } from "node:fs";
 import path from "node:path";
 
-import { isUncOrDevicePath } from "./path-safety.js";
+import {
+  describeLinkInspectionFailure,
+  describeWindowsPathSegmentIssue,
+  findWindowsUnsafePathSegment,
+  inspectLinkTargets,
+  isUncOrDevicePath,
+  LINK_TARGET_INSPECTION_ENABLED,
+} from "./path-safety.js";
 
 /**
  * OutputAccessPolicy — export_documentation çıktı yetkilendirmesi
@@ -117,6 +124,42 @@ function deny(code: OutputPolicyErrorCode, reason: string, rule?: string): Outpu
   return rule === undefined ? { allowed: false, code, reason } : { allowed: false, code, reason, rule };
 }
 
+/**
+ * Windows-only hardening shared by directory paths and file names: alternate data
+ * streams, trailing dots/spaces and reserved device names (NUL, CON, COM1, ...),
+ * then UNC/device link targets (lstat/readlink only, before any realpath/stat).
+ */
+function windowsOutputPathDeny(
+  rawPath: string,
+  label: string,
+  inspectFrom?: { readonly absolute: string; readonly startDir?: string },
+): OutputDeny | undefined {
+  if (IS_WIN) {
+    const finding = findWindowsUnsafePathSegment(rawPath);
+    if (finding !== undefined) {
+      return deny(
+        "workspace/output-path-denied",
+        `${label}: ${describeWindowsPathSegmentIssue(finding)}`,
+        `windows-${finding.issue}`,
+      );
+    }
+  }
+  if (LINK_TARGET_INSPECTION_ENABLED && inspectFrom !== undefined) {
+    const inspection = inspectLinkTargets(
+      inspectFrom.absolute,
+      inspectFrom.startDir === undefined ? {} : { startDir: inspectFrom.startDir },
+    );
+    if (!inspection.ok) {
+      return deny(
+        "workspace/output-path-denied",
+        `${label}: ${describeLinkInspectionFailure(inspection)}`,
+        inspection.reason,
+      );
+    }
+  }
+  return undefined;
+}
+
 export class OutputAccessPolicy {
   /** Beyanlı output kökleri; kanonik + leksik sıralı (deterministik dizi). */
   private readonly canonicalDirs: readonly string[];
@@ -159,6 +202,12 @@ export class OutputAccessPolicy {
           "workspace/output-policy-invalid",
           `an output directory declaration must not be a UNC or Win32 device path (rejected before filesystem access): ${declared}`,
         );
+      }
+      const hardeningDeny = windowsOutputPathDeny(declared, "output directory declaration is not usable", {
+        absolute: path.resolve(declared),
+      });
+      if (hardeningDeny !== undefined) {
+        throw new OutputPolicyError("workspace/output-policy-invalid", `${hardeningDeny.reason} (${declared})`);
       }
       let canonical: string;
       try {
@@ -219,6 +268,12 @@ export class OutputAccessPolicy {
         "output directory path must not be a UNC or Win32 device path (rejected before filesystem access)",
         "unc-or-device-path",
       );
+    }
+    const hardeningDeny = windowsOutputPathDeny(dirPath, "output directory path is not usable", {
+      absolute: path.resolve(dirPath),
+    });
+    if (hardeningDeny !== undefined) {
+      return hardeningDeny;
     }
     let canonical: string;
     try {
@@ -284,6 +339,15 @@ export class OutputAccessPolicy {
         "write target escapes the declared directory after lexical resolution",
         "..",
       );
+    }
+    // Windows name aliases in the file name, and a write target that is itself a
+    // link to a UNC/device path (a write would follow it to the network).
+    const hardeningDeny = windowsOutputPathDeny(fileName, "file name is not usable", {
+      absolute,
+      startDir: dirDecision.canonicalDir,
+    });
+    if (hardeningDeny !== undefined) {
+      return hardeningDeny;
     }
     // realpath sarmalama (CWE-59): mevcut dosya/symlink kendisiyle çözülür;
     // henüz var olmayan hedef için en derin mevcut ata + kalan segment —

@@ -42,4 +42,20 @@ export type {
 
 export { findMatchingIgnorePattern, matchesIgnorePattern } from "./ignore-matcher.js";
 
-export { assertNotUncOrDevicePath, isUncOrDevicePath } from "./path-safety.js";
+export {
+  assertNotUncOrDevicePath,
+  describeLinkInspectionFailure,
+  describeWindowsPathSegmentIssue,
+  findWindowsUnsafePathSegment,
+  inspectLinkTargets,
+  isUncOrDevicePath,
+  isWindowsDriveAbsolutePath,
+  LINK_TARGET_INSPECTION_ENABLED,
+} from "./path-safety.js";
+export type {
+  LinkInspectionFs,
+  LinkInspectionOptions,
+  LinkInspectionResult,
+  WindowsPathSegmentFinding,
+  WindowsPathSegmentIssue,
+} from "./path-safety.js";
