@@ -235,13 +235,16 @@ describe("visualizer — pozitif: offline HTML + SVG graph + gömülü evidence"
       );
 
       // Hash-only CSP: inline event handlers or style attributes would be blocked.
-      let withoutBlocks = page;
-      for (let previous = ""; previous !== withoutBlocks; ) {
-        previous = withoutBlocks;
-        withoutBlocks = withoutBlocks
-          .replace(/<script\b[^>]*>[\s\S]*?<\/script\b[^>]*>/gi, "")
-          .replace(/<style\b[^>]*>[\s\S]*?<\/style\b[^>]*>/gi, "");
+      // Text outside the <script>/<style> blocks, taken from the gaps between
+      // matches (no replace-based stripping): no other tag may open one.
+      const gaps: string[] = [];
+      let last = 0;
+      for (const block of page.matchAll(/<(script|style)\b[^>]*>[\s\S]*?<\/\1\b[^>]*>/gi)) {
+        gaps.push(page.slice(last, block.index));
+        last = block.index + block[0].length;
       }
+      gaps.push(page.slice(last));
+      const withoutBlocks = gaps.join("\n");
       expect(/<script\b/i.test(withoutBlocks)).toBe(false);
       expect(/<style\b/i.test(withoutBlocks)).toBe(false);
       expect(/\son[a-z]+\s*=/i.test(withoutBlocks)).toBe(false);

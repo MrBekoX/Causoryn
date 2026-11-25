@@ -1,9 +1,13 @@
 import {
+  closeSync,
   constants as fsConstants,
   copyFileSync,
+  fstatSync,
   linkSync,
   lstatSync,
+  openSync,
   readdirSync,
+  readFileSync,
   rmdirSync,
   unlinkSync,
   writeFileSync,
@@ -183,5 +187,45 @@ export function publishFileNoClobber(tmpPath: string, destPath: string): boolean
   } catch (err) {
     if (errnoCode(err) === "EEXIST") return false;
     throw err;
+  }
+}
+
+/** Outcome of {@link readRegularFileText}. */
+export type RegularFileTextRead =
+  | { readonly kind: "ok"; readonly text: string }
+  | { readonly kind: "missing" }
+  | { readonly kind: "not-regular" };
+
+const NO_FOLLOW_READ_FLAGS =
+  fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0) | (fsConstants.O_NONBLOCK ?? 0);
+
+/**
+ * Reads a regular file's UTF-8 text through one descriptor: open first
+ * (O_NOFOLLOW / O_NONBLOCK where available), then check the descriptor
+ * (regular file, at most `maxBytes`) and the path (not a link, same
+ * identity as the descriptor). The text returned always belongs to the
+ * file that was checked; a link, special file or swapped file is
+ * `not-regular`.
+ */
+export function readRegularFileText(filePath: string, maxBytes = 1024 * 1024): RegularFileTextRead {
+  let fd: number | undefined;
+  try {
+    fd = openSync(filePath, NO_FOLLOW_READ_FLAGS);
+  } catch (err) {
+    return (err as NodeJS.ErrnoException).code === "ENOENT" ? { kind: "missing" } : { kind: "not-regular" };
+  }
+  try {
+    const opened = fstatSync(fd);
+    if (!opened.isFile() || opened.size > maxBytes) return { kind: "not-regular" };
+    const atPath = lstatSync(filePath);
+    if (atPath.isSymbolicLink() || !atPath.isFile()) return { kind: "not-regular" };
+    if (atPath.ino !== 0 && (atPath.dev !== opened.dev || atPath.ino !== opened.ino)) {
+      return { kind: "not-regular" };
+    }
+    return { kind: "ok", text: readFileSync(fd, "utf8") };
+  } catch {
+    return { kind: "not-regular" };
+  } finally {
+    closeSync(fd);
   }
 }
