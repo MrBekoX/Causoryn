@@ -196,6 +196,38 @@ function statsOf(watcher: WorkspaceWatcher): WorkspaceWatcherStats {
   return watcher.stats();
 }
 
+/**
+ * macOS FSEvents does not deliver changes made before its stream is running,
+ * and on loaded runners the stream starts noticeably after `start()`. Writes
+ * `content` and, while the watcher has received no event since this call,
+ * writes the identical content again every 2 s (well past the debounce
+ * window). As soon as any event arrived the stream is live and nothing more
+ * is written, so job counts and change sets are not affected.
+ */
+async function writeUntilObserved(harness: Harness, filePath: string, content: string): Promise<void> {
+  const before = statsOf(harness.watcher).eventsReceived;
+  writeFileSync(filePath, content, "utf8");
+  let lastWrite = Date.now();
+  await waitFor(() => {
+    if (statsOf(harness.watcher).eventsReceived > before) return true;
+    if (Date.now() - lastWrite >= 2_000) {
+      writeFileSync(filePath, content, "utf8");
+      lastWrite = Date.now();
+    }
+    return false;
+  }, `no watcher event for ${path.basename(filePath)}`);
+}
+
+/**
+ * Proves the watch stream is live before a burst of writes, with a probe file
+ * under node_modules (a default deny path: the event is filtered, no job opens).
+ */
+async function waitForLiveWatchStream(harness: Harness): Promise<void> {
+  const probeDir = path.join(harness.root, "node_modules");
+  mkdirSync(probeDir, { recursive: true });
+  await writeUntilObserved(harness, path.join(probeDir, ".watch-probe"), "probe\n");
+}
+
 async function cleanup(harness: Harness): Promise<void> {
   harness.watcher.stop();
   rmSync(harness.root, { recursive: true, force: true });
@@ -211,7 +243,7 @@ describe("WorkspaceWatcher — Live Architecture (sprint-2 B7)", { timeout: 30_0
         harness.watcher.start();
         expect(harness.watcher.state).toBe("watching");
 
-        writeFileSync(path.join(harness.root, "src", "app.ts"), APP_V2, "utf8");
+        await writeUntilObserved(harness, path.join(harness.root, "src", "app.ts"), APP_V2);
 
         // Koşul beklemesi: yeni snapshot yayımlanana dek (sabit sleep yok).
         let secondId: string | undefined;
@@ -274,7 +306,7 @@ describe("WorkspaceWatcher — Live Architecture (sprint-2 B7)", { timeout: 30_0
         ).toBe(false);
 
         harness.watcher.start();
-        writeFileSync(path.join(harness.root, "secrets", "leak.ts"), "export const k = 2;\n", "utf8");
+        await writeUntilObserved(harness, path.join(harness.root, "secrets", "leak.ts"), "export const k = 2;\n");
 
         // Kanıt: olay gerçekten geldi VE politika kararıyla düşürüldü.
         await waitFor(() => statsOf(harness.watcher).eventsFiltered >= 1, "olay süzülme kanıtı yok");
@@ -302,6 +334,8 @@ describe("WorkspaceWatcher — Live Architecture (sprint-2 B7)", { timeout: 30_0
       try {
         const firstId = await runInitialFullIndex(harness);
         harness.watcher.start();
+        // The burst below must not fall before the watch stream is running.
+        await waitForLiveWatchStream(harness);
         // Başlangıç sakinliği: setup yazımlarının kuyruğu boşalsın (koşulla).
         await waitFor(
           () => statsOf(harness.watcher).pendingPaths === 0 && statsOf(harness.watcher).jobsEnqueued === 0,
@@ -362,10 +396,10 @@ describe("WorkspaceWatcher — Live Architecture (sprint-2 B7)", { timeout: 30_0
           "başlangıç sakinliği",
         );
 
-        writeFileSync(
+        await writeUntilObserved(
+          harness,
           path.join(harness.root, "tsconfig.json"),
           '{"compilerOptions":{"strict":true}}\n',
-          "utf8",
         );
 
         await waitFor(() => statsOf(harness.watcher).jobsEnqueued >= 1, "invalidation işi açılmadı");
@@ -397,22 +431,10 @@ describe("WorkspaceWatcher — Live Architecture (sprint-2 B7)", { timeout: 30_0
           "başlangıç sakinliği",
         );
 
-        // AYNI içerik yeniden yazılır (touch benzeri): karma değişmez.
-        // macOS FSEvents does not deliver changes made before its stream is running,
-        // and the stream starts later on loaded runners: the identical content is
-        // written again every 2 s (well past the debounce window) until the watcher
-        // has seen it. Every write is a no-op by construction.
-        const appPath = path.join(harness.root, "src", "app.ts");
-        writeFileSync(appPath, APP_V1, "utf8");
-        let lastWrite = Date.now();
-        await waitFor(() => {
-          if (statsOf(harness.watcher).noOpSkipped >= 1) return true;
-          if (Date.now() - lastWrite >= 2_000) {
-            writeFileSync(appPath, APP_V1, "utf8");
-            lastWrite = Date.now();
-          }
-          return false;
-        }, "no-op kaydı tutulmadı");
+        // AYNI içerik yeniden yazılır (touch benzeri): karma değişmez. Every
+        // (re)write is identical, so each one is a no-op by construction.
+        await writeUntilObserved(harness, path.join(harness.root, "src", "app.ts"), APP_V1);
+        await waitFor(() => statsOf(harness.watcher).noOpSkipped >= 1, "no-op kaydı tutulmadı");
         await expectConditionHolds(
           () => statsOf(harness.watcher).jobsEnqueued === 0,
           "no-op değişim iş açtı",
