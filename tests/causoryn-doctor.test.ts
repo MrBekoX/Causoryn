@@ -23,13 +23,13 @@ import { defaultToolchainProbe } from "../packages/causoryn/src/doctor.js";
 
 /**
  * Probe that answers like supported sidecar toolchains. Doctor checks the
- * version floors (Python >= 3.10, Go >= 1.22, .NET 10 runtime), so the output
+ * version floors (Python >= 3.10, Go >= 1.26, .NET 10 runtime), so the output
  * must look like the real `--version` / `--list-runtimes` output.
  */
 const SUPPORTED_TOOLCHAIN_OUTPUT: Readonly<Record<string, string>> = {
   dotnet: "Microsoft.NETCore.App 10.0.11 [/usr/share/dotnet/shared/Microsoft.NETCore.App]",
   python: "Python 3.12.4",
-  go: "go version go1.22.5 linux/amd64",
+  go: "go version go1.26.11 linux/amd64",
   cargo: "cargo 1.100.0 (3acc79c0c 2026-11-05)",
 };
 
