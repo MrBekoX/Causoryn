@@ -5,7 +5,10 @@
  * Paketlenen tüm üçüncü-parti npm + Roslyn (.NET) bileşenlerini gerçek
  * `packages/causoryn/THIRD-PARTY-NOTICES.md`, `package-lock.json` ve
  * `packages/causoryn/native/roslyn-worker/Causoryn.RoslynWorker.deps.json`
- * kaynaklarından dinamik ve sürümlü `purl` değerleriyle okur.
+ * kaynaklarından dinamik ve sürümlü `purl` değerleriyle okur. better-sqlite3
+ * prebuild'lerine derlenmiş SQLite kütüphanesi, sürümü
+ * `node_modules/better-sqlite3/deps/sqlite3/sqlite3.h` başlığından okunarak
+ * ayrı bir bileşen olarak eklenir.
  */
 import { createHash } from "node:crypto";
 import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
@@ -60,7 +63,9 @@ function parseRedistributedComponentsFromNotices(noticesPath) {
 
     if (section === 1) {
       if (name.toLowerCase().startsWith("sqlite")) {
-        continue; // Public domain embedded C library bundled inside better-sqlite3
+        // Its notices heading carries no version; the component is added by
+        // readEmbeddedSqliteComponent() from the vendored amalgamation header.
+        continue;
       }
       npmComponents.push({
         type: "library",
@@ -80,9 +85,41 @@ function parseRedistributedComponentsFromNotices(noticesPath) {
     }
   }
 
-  return [...npmComponents, ...nugetComponents].sort((a, b) =>
-    a.purl < b.purl ? -1 : a.purl > b.purl ? 1 : 0,
-  );
+  return [...npmComponents, ...nugetComponents];
+}
+
+const SQLITE_VERSION_DEFINE = /^#define SQLITE_VERSION\s+"(\d+\.\d+\.\d+)"/m;
+
+/**
+ * The SQLite library compiled into the better-sqlite3 prebuilt native addons
+ * that ship in `dist/node_modules/better-sqlite3/prebuilds/`. Its version is
+ * read from the amalgamation header of the installed better-sqlite3 package
+ * (`deps/sqlite3/sqlite3.h`, the source those prebuilds are compiled from).
+ * Fails closed when the header or its version define is missing, so the SBOM
+ * never silently omits the embedded database engine.
+ */
+function readEmbeddedSqliteComponent(repoRoot) {
+  const headerPath = path.join(repoRoot, "node_modules", "better-sqlite3", "deps", "sqlite3", "sqlite3.h");
+  if (!existsSync(headerPath)) {
+    throw new Error(`[generate-sbom] missing better-sqlite3 SQLite amalgamation header (sqlite3.h): ${headerPath}`);
+  }
+  const version = SQLITE_VERSION_DEFINE.exec(readFileSync(headerPath, "utf8"))?.[1];
+  if (version === undefined) {
+    throw new Error(`[generate-sbom] no SQLITE_VERSION define in ${headerPath}`);
+  }
+  return {
+    type: "library",
+    name: "sqlite",
+    version,
+    description: "SQLite library compiled into the better-sqlite3 prebuilt native addons",
+    purl: `pkg:generic/sqlite@${version}`,
+    cpe: `cpe:2.3:a:sqlite:sqlite:${version}:*:*:*:*:*:*:*`,
+    licenses: [{ license: { name: "Public Domain", url: "https://www.sqlite.org/copyright.html" } }],
+  };
+}
+
+function sortByPurl(components) {
+  return [...components].sort((a, b) => (a.purl < b.purl ? -1 : a.purl > b.purl ? 1 : 0));
 }
 
 /**
@@ -107,11 +144,12 @@ export function buildCycloneDxSbom(options = {}) {
     throw new Error(`[generate-sbom] missing packages/causoryn/package.json: ${pkgJsonPath}`);
   }
   const pkg = JSON.parse(readFileSync(pkgJsonPath, "utf8"));
-  const components = parseRedistributedComponentsFromNotices(noticesPath);
+  const noticeComponents = parseRedistributedComponentsFromNotices(noticesPath);
 
-  if (components.length === 0) {
+  if (noticeComponents.length === 0) {
     throw new Error("[generate-sbom] parsed 0 redistributed components from THIRD-PARTY-NOTICES.md");
   }
+  const components = sortByPurl([...noticeComponents, readEmbeddedSqliteComponent(repoRoot)]);
 
   // Roslyn deps.json çapraz doğrulaması: en az Microsoft.CodeAnalysis.CSharp yer almalı.
   if (existsSync(roslynDepsPath)) {

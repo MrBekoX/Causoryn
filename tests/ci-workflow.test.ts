@@ -17,19 +17,33 @@
  *   salt-okunur → `build-and-pack` temiz checkout, sıfır test, `verify-package-ready.mjs` hemen
  *   ardından `npm pack` → `publish` OIDC/environment), hermetik derleme (`cache: npm` YOK),
  *   `fetch-depth: 0` + `origin/main` ata doğrulaması, tek-tarball doğrulaması, derin izole smoke
- *   testi (`--version`, `doctor --json`, MCP `initialize`), CycloneDX SBOM, `sha256sum -c`,
- *   `attest-build-provenance`, prerelease-farkında OIDC `npm publish` (`--tag next`) ve idempotent
- *   `gh release create --verify-tag`.
+ *   testi (`--version`, `doctor --json`, MCP `initialize`), CycloneDX SBOM (gömülü SQLite dahil),
+ *   smoke öncesi job `outputs` olarak dışa aktarılan tarball/SBOM SHA-256 özetleri ve publish'te
+ *   bu çıktılarla yeniden karşılaştırma (betikler fikstür artefaktlarında da çalıştırılır),
+ *   `sha256sum -c`, `attest-build-provenance`, prerelease-farkında OIDC `npm publish`
+ *   (`--tag next`) ve üzerine yazmayan (`--clobber` yok) `gh release create --verify-tag`.
  * - Security (`security.yml`): fail-closed `zizmor`, PR `dependency-review-action` (yüksek açık +
- *   güncel SPDX copyleft lisans engeli) ve fail-closed çoklu-ekosistem (`npm` + `--locked-mode`
- *   NuGet JSON taraması, `NU1900` uyarılarında fail-closed).
+ *   güncel SPDX copyleft lisans engeli), fail-closed çoklu-ekosistem (`npm` + `--locked-mode`
+ *   NuGet JSON taraması, `NU1900` uyarılarında fail-closed), tam sürümlü `cargo-audit`
+ *   (`--deny warnings`) ve `govulncheck` (`GOTOOLCHAIN=local`); `go.mod` desteklenen Go hattı.
  * - CodeQL (`codeql.yml`): 5 dil matrisi, doğru Go `setupGo < init < goBuild < analyze` sırası
  *   ve fork PR güvenli `upload:` ifadesi.
  * - OpenSSF Scorecard (`scorecard.yml`): `publish_results: true` iş akışı kısıtlarına tam uyum.
  * - Dependabot (`.github/dependabot.yml`): monorepo workspace kapsamı, tedarik zinciri `cooldown`
  *   ve `patterns` tanımlı `groups`.
  */
-import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
@@ -111,6 +125,7 @@ interface WorkflowStep {
   readonly name?: string;
   readonly if?: string;
   readonly shell?: string;
+  readonly "continue-on-error"?: boolean | string;
   readonly uses?: string;
   readonly "working-directory"?: string;
   readonly with?: Readonly<Record<string, unknown>>;
@@ -131,6 +146,8 @@ interface WorkflowJob {
   readonly environment?: string | Readonly<Record<string, unknown>>;
   readonly permissions?: Readonly<Record<string, unknown>>;
   readonly "timeout-minutes"?: number;
+  readonly "continue-on-error"?: boolean | string;
+  readonly outputs?: Readonly<Record<string, unknown>>;
   readonly env?: Readonly<Record<string, unknown>>;
   readonly defaults?: Readonly<Record<string, unknown>>;
   readonly container?: unknown;
@@ -229,6 +246,79 @@ function collectAllSteps(doc: WorkflowDoc): WorkflowStep[] {
     }
   }
   return steps;
+}
+
+/**
+ * Release steps cannot run outside a real tag push, so the security-relevant
+ * `run:` scripts of release.yml are executed here against fixture artifacts.
+ * They need bash with GNU coreutils/findutils (`sha256sum`, `find -printf`):
+ * present on Linux runners and in Git Bash; the behavioral cases are skipped
+ * where they are missing (e.g. BSD userland on macOS).
+ */
+const GNU_BASH_AVAILABLE = ((): boolean => {
+  const probe = spawnSync(
+    "bash",
+    ["--noprofile", "--norc", "-c", "command -v sha256sum >/dev/null && find . -maxdepth 0 -printf '' && grep -Fxq x <<< x"],
+    { encoding: "utf8", shell: false, timeout: 15_000 },
+  );
+  return probe.status === 0;
+})();
+
+interface BashStepResult {
+  readonly status: number | null;
+  readonly stdout: string;
+  readonly stderr: string;
+}
+
+/** Runs a workflow `run:` script the way GitHub runs `shell: bash` on Linux (`bash --noprofile --norc -eo pipefail`). */
+function runBashStep(script: string, cwd: string, env: Readonly<Record<string, string>>): BashStepResult {
+  const scriptPath = path.join(cwd, ".step.sh");
+  writeFileSync(scriptPath, script, "utf8");
+  const res = spawnSync("bash", ["--noprofile", "--norc", "-eo", "pipefail", scriptPath], {
+    cwd,
+    env: { ...process.env, ...env },
+    encoding: "utf8",
+    shell: false,
+    timeout: 60_000,
+  });
+  rmSync(scriptPath, { force: true });
+  return { status: res.status, stdout: res.stdout ?? "", stderr: res.stderr ?? "" };
+}
+
+function expectRejected(result: BashStepResult, reason: RegExp): void {
+  expect(result.status, `step should fail; stdout=${result.stdout}`).not.toBe(0);
+  expect(`${result.stdout}\n${result.stderr}`).toMatch(reason);
+}
+
+function sha256Hex(content: string | Buffer): string {
+  return createHash("sha256").update(content).digest("hex");
+}
+
+interface ReleaseArtifactFixture {
+  readonly root: string;
+  readonly tgzName: string;
+  readonly tgzSha256: string;
+  readonly sbomSha256: string;
+}
+
+/** Creates `<tmp>/release-artifacts/{causoryn-<version>.tgz, causoryn-sbom.cdx.json, SHA256SUMS.txt}` in the generate-sbom.mjs format. */
+function makeReleaseArtifactFixture(version: string): ReleaseArtifactFixture {
+  const root = mkdtempSync(path.join(os.tmpdir(), "causoryn-release-step-"));
+  const dir = path.join(root, "release-artifacts");
+  mkdirSync(dir, { recursive: true });
+  const tgzName = `causoryn-${version}.tgz`;
+  const tgzBody = `fixture tarball ${version}\n`;
+  const sbomBody = '{"bomFormat":"CycloneDX"}\n';
+  writeFileSync(path.join(dir, tgzName), tgzBody, "utf8");
+  writeFileSync(path.join(dir, "causoryn-sbom.cdx.json"), sbomBody, "utf8");
+  const tgzSha256 = sha256Hex(tgzBody);
+  const sbomSha256 = sha256Hex(sbomBody);
+  writeFileSync(
+    path.join(dir, "SHA256SUMS.txt"),
+    `${tgzSha256}  ${tgzName}\n${sbomSha256}  causoryn-sbom.cdx.json\n`,
+    "utf8",
+  );
+  return { root, tgzName, tgzSha256, sbomSha256 };
 }
 
 describe("Tüm GitHub Actions iş akışları — ortak tedarik zinciri güvenlik sözleşmesi (K-025)", () => {
@@ -826,6 +916,346 @@ describe(".github/workflows/release.yml — üç-job hermetik OIDC Trusted Publi
     expect(raw).not.toContain("NODE_AUTH_TOKEN");
   });
 
+  it("build-and-pack exports the tarball and SBOM SHA-256 as job outputs before any package code runs, and re-checks them after the smoke test", () => {
+    const { doc } = loadWorkflow(RELEASE_WORKFLOW_PATH, ".github/workflows/release.yml");
+    const buildPackJob = doc.jobs?.["build-and-pack"];
+    expect(buildPackJob?.outputs).toEqual({
+      tarball_name: "${{ steps.digests.outputs.tarball_name }}",
+      tarball_sha256: "${{ steps.digests.outputs.tarball_sha256 }}",
+      sbom_sha256: "${{ steps.digests.outputs.sbom_sha256 }}",
+    });
+
+    const steps = buildPackJob?.steps ?? [];
+    const sbomIdx = steps.findIndex((s) => (s.run ?? "").includes("scripts/generate-sbom.mjs"));
+    const digestsIdx = steps.findIndex((s) => s.id === "digests");
+    const smokeIdx = steps.findIndex((s) => (s.run ?? "").includes("doctor --json"));
+    const uploadIdx = steps.findIndex((s) => usesPinnedAction(s, "actions/upload-artifact"));
+    const reverifyIdx = steps.findIndex(
+      (s, idx) => idx > smokeIdx && JSON.stringify(s.env ?? {}).includes("steps.digests.outputs."),
+    );
+
+    // Digests are fixed right after SHA256SUMS.txt/SBOM generation, before the smoke test executes the package.
+    expect(digestsIdx, "digests step must directly follow generate-sbom.mjs").toBe(sbomIdx + 1);
+    expect(digestsIdx).toBeLessThan(smokeIdx);
+    const digestsStep = steps[digestsIdx];
+    expect(digestsStep?.env?.["RELEASE_TAG"]).toBe("${{ github.ref_name }}");
+    const digestsRun = digestsStep?.run ?? "";
+    for (const fragment of [
+      "sha256sum",
+      'grep -Fxq "$TGZ_SHA256  $TGZ_NAME" release-artifacts/SHA256SUMS.txt',
+      'grep -Fxq "$SBOM_SHA256  causoryn-sbom.cdx.json" release-artifacts/SHA256SUMS.txt',
+      "wc -l < release-artifacts/SHA256SUMS.txt",
+      'echo "tarball_name=$TGZ_NAME"',
+      'echo "tarball_sha256=$TGZ_SHA256"',
+      'echo "sbom_sha256=$SBOM_SHA256"',
+      '>> "$GITHUB_OUTPUT"',
+    ]) {
+      expect(digestsRun, `digests step must contain: ${fragment}`).toContain(fragment);
+    }
+
+    // After the smoke test and before the upload, the artifacts still match the exported digests.
+    expect(reverifyIdx).toBeGreaterThan(smokeIdx);
+    expect(reverifyIdx).toBeLessThan(uploadIdx);
+    expect(steps[reverifyIdx]?.env).toEqual({
+      TGZ_NAME: "${{ steps.digests.outputs.tarball_name }}",
+      TGZ_SHA256: "${{ steps.digests.outputs.tarball_sha256 }}",
+      SBOM_SHA256: "${{ steps.digests.outputs.sbom_sha256 }}",
+    });
+    expect(steps[reverifyIdx]?.run ?? "").toContain("sha256sum --strict -c");
+    expect(steps[reverifyIdx]?.run ?? "").toContain("find release-artifacts -mindepth 1 -printf");
+  });
+
+  it("publish recomputes the downloaded digests against the build-and-pack job outputs and requires SHA256SUMS.txt to list both expected files (fail-closed)", () => {
+    const { doc } = loadWorkflow(RELEASE_WORKFLOW_PATH, ".github/workflows/release.yml");
+    const publishSteps = doc.jobs?.["publish"]?.steps ?? [];
+    const verifyStep = publishSteps.find((s) => (s.run ?? "").includes("sha256sum -c SHA256SUMS.txt"));
+    expect(verifyStep, "publish checksum step must exist").toBeDefined();
+    expect(verifyStep?.env).toEqual({
+      RELEASE_TAG: "${{ github.ref_name }}",
+      EXPECTED_TGZ_NAME: "${{ needs.build-and-pack.outputs.tarball_name }}",
+      EXPECTED_TGZ_SHA256: "${{ needs.build-and-pack.outputs.tarball_sha256 }}",
+      EXPECTED_SBOM_SHA256: "${{ needs.build-and-pack.outputs.sbom_sha256 }}",
+    });
+    const run = verifyStep?.run ?? "";
+    for (const fragment of [
+      "^[0-9a-f]{64}$",
+      'EXPECTED_TGZ="causoryn-${RELEASE_TAG#v}.tgz"',
+      '"$EXPECTED_TGZ_NAME" != "$EXPECTED_TGZ"',
+      '"$ACTUAL_TGZ_SHA256" != "$EXPECTED_TGZ_SHA256"',
+      '"$ACTUAL_SBOM_SHA256" != "$EXPECTED_SBOM_SHA256"',
+      'grep -Fxq "$EXPECTED_TGZ_SHA256  $EXPECTED_TGZ" release-artifacts/SHA256SUMS.txt',
+      'grep -Fxq "$EXPECTED_SBOM_SHA256  causoryn-sbom.cdx.json" release-artifacts/SHA256SUMS.txt',
+      "find release-artifacts -mindepth 1 -printf",
+    ]) {
+      expect(run, `publish checksum step must contain: ${fragment}`).toContain(fragment);
+    }
+  });
+
+  it.runIf(GNU_BASH_AVAILABLE)(
+    "release.yml digest scripts behave fail-closed on fixture artifacts (digests step → re-verify → publish verification)",
+    () => {
+      const { doc } = loadWorkflow(RELEASE_WORKFLOW_PATH, ".github/workflows/release.yml");
+      const buildPackSteps = doc.jobs?.["build-and-pack"]?.steps ?? [];
+      const digestsRun = buildPackSteps.find((s) => s.id === "digests")?.run ?? "";
+      const smokeIdx = buildPackSteps.findIndex((s) => (s.run ?? "").includes("doctor --json"));
+      const reverifyRun =
+        buildPackSteps.find(
+          (s, idx) => idx > smokeIdx && JSON.stringify(s.env ?? {}).includes("steps.digests.outputs."),
+        )?.run ?? "";
+      const publishRun =
+        (doc.jobs?.["publish"]?.steps ?? []).find((s) =>
+          (s.run ?? "").includes("sha256sum -c SHA256SUMS.txt"),
+        )?.run ?? "";
+      expect(digestsRun.length).toBeGreaterThan(0);
+      expect(reverifyRun.length).toBeGreaterThan(0);
+      expect(publishRun.length).toBeGreaterThan(0);
+
+      const fixtures: ReleaseArtifactFixture[] = [];
+      const fresh = (): ReleaseArtifactFixture => {
+        const fx = makeReleaseArtifactFixture("9.8.7");
+        fixtures.push(fx);
+        return fx;
+      };
+      const artifactsDir = (fx: ReleaseArtifactFixture): string => path.join(fx.root, "release-artifacts");
+      const publishEnv = (fx: ReleaseArtifactFixture): Record<string, string> => ({
+        RELEASE_TAG: "v9.8.7",
+        EXPECTED_TGZ_NAME: fx.tgzName,
+        EXPECTED_TGZ_SHA256: fx.tgzSha256,
+        EXPECTED_SBOM_SHA256: fx.sbomSha256,
+      });
+      try {
+        // 1. digests step writes the three outputs for consistent artifacts.
+        const ok = fresh();
+        const outputFile = path.join(ok.root, "github-output.txt");
+        writeFileSync(outputFile, "", "utf8");
+        const digests = runBashStep(digestsRun, ok.root, { RELEASE_TAG: "v9.8.7", GITHUB_OUTPUT: outputFile });
+        expect(digests.status, digests.stderr).toBe(0);
+        expect(readFileSync(outputFile, "utf8").split(/\r?\n/).filter(Boolean)).toEqual([
+          `tarball_name=${ok.tgzName}`,
+          `tarball_sha256=${ok.tgzSha256}`,
+          `sbom_sha256=${ok.sbomSha256}`,
+        ]);
+
+        // 2. digests step refuses a SHA256SUMS.txt that omits the tarball line.
+        const missingLine = fresh();
+        writeFileSync(
+          path.join(artifactsDir(missingLine), "SHA256SUMS.txt"),
+          `${missingLine.sbomSha256}  causoryn-sbom.cdx.json\n`,
+          "utf8",
+        );
+        const missingOut = path.join(missingLine.root, "github-output.txt");
+        writeFileSync(missingOut, "", "utf8");
+        expectRejected(
+          runBashStep(digestsRun, missingLine.root, { RELEASE_TAG: "v9.8.7", GITHUB_OUTPUT: missingOut }),
+          /SHA256SUMS\.txt does not list exactly/,
+        );
+        expect(readFileSync(missingOut, "utf8")).toBe("");
+
+        // 3. re-verify step passes untouched artifacts and rejects a tarball changed during the smoke test.
+        const reverifyEnv = (fx: ReleaseArtifactFixture): Record<string, string> => ({
+          TGZ_NAME: fx.tgzName,
+          TGZ_SHA256: fx.tgzSha256,
+          SBOM_SHA256: fx.sbomSha256,
+          RUNNER_TEMP: fx.root,
+        });
+        const untouched = fresh();
+        const reverifyOk = runBashStep(reverifyRun, untouched.root, reverifyEnv(untouched));
+        expect(reverifyOk.status, reverifyOk.stderr).toBe(0);
+        const changedDuringSmoke = fresh();
+        writeFileSync(path.join(artifactsDir(changedDuringSmoke), changedDuringSmoke.tgzName), "changed\n", "utf8");
+        expectRejected(
+          runBashStep(reverifyRun, changedDuringSmoke.root, reverifyEnv(changedDuringSmoke)),
+          /FAILED/,
+        );
+        const extraFile = fresh();
+        writeFileSync(path.join(artifactsDir(extraFile), "extra.txt"), "x\n", "utf8");
+        expectRejected(runBashStep(reverifyRun, extraFile.root, reverifyEnv(extraFile)), /must contain exactly/);
+
+        // 4. publish verification accepts the exact build output ...
+        const good = fresh();
+        const publishOk = runBashStep(publishRun, good.root, publishEnv(good));
+        expect(publishOk.status, publishOk.stderr).toBe(0);
+
+        // ... and rejects a self-consistent bundle that differs from the build output
+        // (tarball and SHA256SUMS.txt both replaced, so `sha256sum -c` alone would pass):
+        const swapped = fresh();
+        const swappedBody = "swapped tarball\n";
+        writeFileSync(path.join(artifactsDir(swapped), swapped.tgzName), swappedBody, "utf8");
+        writeFileSync(
+          path.join(artifactsDir(swapped), "SHA256SUMS.txt"),
+          `${sha256Hex(swappedBody)}  ${swapped.tgzName}\n${swapped.sbomSha256}  causoryn-sbom.cdx.json\n`,
+          "utf8",
+        );
+        expectRejected(runBashStep(publishRun, swapped.root, publishEnv(swapped)), /Tarball digest mismatch/);
+
+        // ... a SHA256SUMS.txt that does not list the tarball:
+        const unlisted = fresh();
+        writeFileSync(
+          path.join(artifactsDir(unlisted), "SHA256SUMS.txt"),
+          `${unlisted.sbomSha256}  causoryn-sbom.cdx.json\n`,
+          "utf8",
+        );
+        expectRejected(runBashStep(publishRun, unlisted.root, publishEnv(unlisted)), /SHA256SUMS\.txt does not list exactly/);
+
+        // ... an extra file, a missing/invalid exported digest, and a tag/name mismatch:
+        const extra = fresh();
+        writeFileSync(path.join(artifactsDir(extra), "causoryn-other.tgz"), "x\n", "utf8");
+        expectRejected(runBashStep(publishRun, extra.root, publishEnv(extra)), /must contain exactly/);
+        const noOutputs = fresh();
+        expectRejected(
+          runBashStep(publishRun, noOutputs.root, { ...publishEnv(noOutputs), EXPECTED_TGZ_SHA256: "" }),
+          /did not export valid SHA-256 digests/,
+        );
+        const wrongTag = fresh();
+        expectRejected(
+          runBashStep(publishRun, wrongTag.root, { ...publishEnv(wrongTag), RELEASE_TAG: "v9.8.8" }),
+          /Tarball identity mismatch/,
+        );
+      } finally {
+        for (const fx of fixtures) rmSync(fx.root, { recursive: true, force: true });
+      }
+    },
+    120_000,
+  );
+
+  it("GitHub Release assets are never overwritten: no --clobber; an existing asset is compared by SHA-256 and a different digest fails the run", () => {
+    const { raw, doc } = loadWorkflow(RELEASE_WORKFLOW_PATH, ".github/workflows/release.yml");
+    expect(raw).not.toContain("--clobber");
+    const ghReleaseStep = (doc.jobs?.["publish"]?.steps ?? []).find((s) =>
+      (s.run ?? "").includes("gh release create"),
+    );
+    const run = ghReleaseStep?.run ?? "";
+    for (const fragment of [
+      "gh release view \"$RELEASE_TAG\" --repo \"$GH_REPO\" --json assets --jq '.assets[].name'",
+      'gh release download "$RELEASE_TAG" --repo "$GH_REPO" --pattern "$name" --dir "$DOWNLOAD_DIR"',
+      '"$local_sha" != "$remote_sha"',
+      'gh release upload "$RELEASE_TAG" --repo "$GH_REPO" "$asset"',
+    ]) {
+      expect(run, `GitHub Release step must contain: ${fragment}`).toContain(fragment);
+    }
+    // The mismatch branch exits non-zero before anything is uploaded for that asset.
+    const mismatchIdx = run.indexOf('"$local_sha" != "$remote_sha"');
+    const exitIdx = run.indexOf("exit 1", mismatchIdx);
+    const uploadIdx = run.indexOf('gh release upload "$RELEASE_TAG"');
+    expect(exitIdx).toBeGreaterThan(mismatchIdx);
+    expect(uploadIdx).toBeGreaterThan(exitIdx);
+  });
+
+  it.runIf(GNU_BASH_AVAILABLE)(
+    "GitHub Release step against a stub gh: creates a new release, skips identical assets, uploads only missing ones and fails on a different digest",
+    () => {
+      const { doc } = loadWorkflow(RELEASE_WORKFLOW_PATH, ".github/workflows/release.yml");
+      const run =
+        (doc.jobs?.["publish"]?.steps ?? []).find((s) => (s.run ?? "").includes("gh release create"))?.run ?? "";
+      expect(run.length).toBeGreaterThan(0);
+      // Shell function shadowing the gh CLI: a release "exists" when FAKE_RELEASE_DIR exists,
+      // its files are the release assets, and an upload over an existing asset fails (no clobber).
+      const fakeGh = [
+        "gh() {",
+        "  printf '%s\\n' \"$*\" >> \"$FAKE_GH_LOG\"",
+        "  [[ \"$1\" == release ]] || return 2",
+        "  local sub=\"$2\"; shift 2",
+        "  case \"$sub\" in",
+        "    view)",
+        "      [[ -d \"$FAKE_RELEASE_DIR\" ]] || return 1",
+        "      if [[ \" $* \" == *\" --json \"* ]]; then ls -1 \"$FAKE_RELEASE_DIR\"; fi ;;",
+        "    download)",
+        "      local pattern='' dir=''",
+        "      while (($#)); do case \"$1\" in --pattern) pattern=\"$2\"; shift 2 ;; --dir) dir=\"$2\"; shift 2 ;; *) shift ;; esac; done",
+        "      cp \"$FAKE_RELEASE_DIR/$pattern\" \"$dir/\" ;;",
+        "    upload)",
+        "      local file=\"${*: -1}\"",
+        "      [[ ! -e \"$FAKE_RELEASE_DIR/$(basename \"$file\")\" ]] || return 1",
+        "      cp \"$file\" \"$FAKE_RELEASE_DIR/\" ;;",
+        "    create) ;;",
+        "    *) return 2 ;;",
+        "  esac",
+        "}",
+        "",
+      ].join("\n");
+
+      const fixtures: ReleaseArtifactFixture[] = [];
+      const runRelease = (
+        fx: ReleaseArtifactFixture,
+        existingAssets: Readonly<Record<string, string>> | null,
+        tag = "v9.8.7",
+      ): BashStepResult & { readonly log: string[]; readonly releaseDir: string } => {
+        const releaseDir = path.join(fx.root, "fake-release");
+        if (existingAssets !== null) {
+          mkdirSync(releaseDir);
+          for (const [name, body] of Object.entries(existingAssets)) {
+            writeFileSync(path.join(releaseDir, name), body, "utf8");
+          }
+        }
+        const logPath = path.join(fx.root, "gh.log");
+        writeFileSync(logPath, "", "utf8");
+        const result = runBashStep(fakeGh + run, fx.root, {
+          RELEASE_TAG: tag,
+          GH_REPO: "owner/repo",
+          GH_TOKEN: "unused",
+          FAKE_RELEASE_DIR: releaseDir,
+          FAKE_GH_LOG: logPath,
+        });
+        return { ...result, log: readFileSync(logPath, "utf8").split(/\r?\n/).filter(Boolean), releaseDir };
+      };
+      const fresh = (): ReleaseArtifactFixture => {
+        const fx = makeReleaseArtifactFixture("9.8.7");
+        fixtures.push(fx);
+        return fx;
+      };
+      const artifact = (fx: ReleaseArtifactFixture, name: string): string =>
+        readFileSync(path.join(fx.root, "release-artifacts", name), "utf8");
+      const uploads = (log: readonly string[]): string[] =>
+        log.filter((line) => line.startsWith("release upload ")).map((line) => path.basename(line.split(" ").pop() ?? ""));
+
+      try {
+        // New release: a single `gh release create --verify-tag` with all three assets, no upload.
+        const created = runRelease(fresh(), null);
+        expect(created.status, created.stderr).toBe(0);
+        const createLine = created.log.find((line) => line.startsWith("release create v9.8.7 --repo owner/repo"));
+        expect(createLine).toContain(
+          "release-artifacts/causoryn-9.8.7.tgz release-artifacts/SHA256SUMS.txt release-artifacts/causoryn-sbom.cdx.json",
+        );
+        expect(createLine).toContain("--verify-tag");
+        expect(createLine).not.toContain("--prerelease");
+        expect(uploads(created.log)).toEqual([]);
+
+        const pre = makeReleaseArtifactFixture("9.8.7-rc.1");
+        fixtures.push(pre);
+        const prerelease = runRelease(pre, null, "v9.8.7-rc.1");
+        expect(prerelease.status, prerelease.stderr).toBe(0);
+        expect(prerelease.log.find((line) => line.startsWith("release create"))).toContain("--prerelease");
+
+        // Existing release with identical assets: nothing is uploaded again.
+        const same = fresh();
+        const identical = runRelease(same, {
+          [same.tgzName]: artifact(same, same.tgzName),
+          "SHA256SUMS.txt": artifact(same, "SHA256SUMS.txt"),
+          "causoryn-sbom.cdx.json": artifact(same, "causoryn-sbom.cdx.json"),
+        });
+        expect(identical.status, identical.stderr).toBe(0);
+        expect(uploads(identical.log)).toEqual([]);
+        expect(identical.log.some((line) => line.startsWith("release create"))).toBe(false);
+
+        // Existing release missing two assets: only those are uploaded.
+        const partial = fresh();
+        const partialRun = runRelease(partial, { [partial.tgzName]: artifact(partial, partial.tgzName) });
+        expect(partialRun.status, partialRun.stderr).toBe(0);
+        expect(uploads(partialRun.log)).toEqual(["SHA256SUMS.txt", "causoryn-sbom.cdx.json"]);
+
+        // Existing asset with a different digest: the run fails and nothing is uploaded or replaced.
+        const differs = fresh();
+        const differsRun = runRelease(differs, { [differs.tgzName]: "different tarball\n" });
+        expectRejected(differsRun, /already exists with a different SHA-256/);
+        expect(uploads(differsRun.log)).toEqual([]);
+        expect(readFileSync(path.join(differsRun.releaseDir, differs.tgzName), "utf8")).toBe("different tarball\n");
+      } finally {
+        for (const fx of fixtures) rmSync(fx.root, { recursive: true, force: true });
+      }
+    },
+    120_000,
+  );
+
   it("scripts/generate-sbom.mjs tüm yeniden dağıtılan npm + Roslyn bileşenlerini sürümlü purl ile CycloneDX 1.5 SBOM olarak üretir", async () => {
     const sbomScriptPath = path.join(REPO_ROOT, "scripts", "generate-sbom.mjs");
     expect(existsSync(sbomScriptPath), "scripts/generate-sbom.mjs bulunmalı").toBe(true);
@@ -859,12 +1289,111 @@ describe(".github/workflows/release.yml — üç-job hermetik OIDC Trusted Publi
       "ajv",
       "Microsoft.CodeAnalysis.Common",
       "Microsoft.CodeAnalysis.CSharp",
+      "sqlite",
     ]) {
       expect(names, `SBOM bileşeni eksik: ${requiredComp}`).toContain(requiredComp);
     }
     for (const comp of sbom.components) {
       expect(comp.version, `SBOM sürümü boş: ${comp.name}`).toMatch(/^\d+\.\d+\.\d+/);
       expect(comp.purl, `SBOM purl sürümü içermeli: ${comp.name}`).toContain(`@${comp.version}`);
+    }
+    // The SQLite version is the one compiled into the vendored better-sqlite3 prebuilds.
+    const sqliteHeader = readFileSync(
+      path.join(REPO_ROOT, "node_modules", "better-sqlite3", "deps", "sqlite3", "sqlite3.h"),
+      "utf8",
+    );
+    const headerVersion = /^#define SQLITE_VERSION\s+"(\d+\.\d+\.\d+)"/m.exec(sqliteHeader)?.[1];
+    expect(sbom.components.find((c) => c.name === "sqlite")?.version).toBe(headerVersion);
+  });
+
+  it("generate-sbom.mjs lists the SQLite library compiled into better-sqlite3 (version from the vendored sqlite3.h, public domain) and fails closed when that header is missing", async () => {
+    const mod = (await import(new URL("../scripts/generate-sbom.mjs", import.meta.url).href)) as {
+      readonly buildCycloneDxSbom: (options?: { readonly repoRoot?: string }) => {
+        readonly components: ReadonlyArray<Record<string, unknown>>;
+      };
+    };
+    const fakeRoot = mkdtempSync(path.join(os.tmpdir(), "causoryn-sbom-sqlite-"));
+    try {
+      const pkgDir = path.join(fakeRoot, "packages", "causoryn");
+      mkdirSync(pkgDir, { recursive: true });
+      writeFileSync(
+        path.join(pkgDir, "package.json"),
+        JSON.stringify({ name: "causoryn", version: "1.2.3", license: "MIT" }),
+        "utf8",
+      );
+      writeFileSync(
+        path.join(pkgDir, "THIRD-PARTY-NOTICES.md"),
+        [
+          "## 1. npm",
+          "",
+          "### better-sqlite3 (13.2.0) — MIT",
+          "",
+          "### SQLite (embedded in better-sqlite3 prebuilt native addons) — Public Domain",
+          "",
+        ].join("\n"),
+        "utf8",
+      );
+      expect(() => mod.buildCycloneDxSbom({ repoRoot: fakeRoot })).toThrow(/sqlite3\.h/);
+
+      const headerDir = path.join(fakeRoot, "node_modules", "better-sqlite3", "deps", "sqlite3");
+      mkdirSync(headerDir, { recursive: true });
+      writeFileSync(path.join(headerDir, "sqlite3.h"), "/* header */\n#define SQLITE_VERSION_NUMBER 3099009\n", "utf8");
+      expect(() => mod.buildCycloneDxSbom({ repoRoot: fakeRoot })).toThrow(/SQLITE_VERSION/);
+
+      writeFileSync(
+        path.join(headerDir, "sqlite3.h"),
+        '/* header */\n#define SQLITE_VERSION        "3.99.9"\n#define SQLITE_VERSION_NUMBER 3099009\n',
+        "utf8",
+      );
+      const sbom = mod.buildCycloneDxSbom({ repoRoot: fakeRoot });
+      const sqliteComponents = sbom.components.filter((c) => c["name"] === "sqlite");
+      expect(sqliteComponents).toHaveLength(1);
+      const sqlite = sqliteComponents[0]!;
+      expect(sqlite["type"]).toBe("library");
+      expect(sqlite["version"]).toBe("3.99.9");
+      expect(sqlite["purl"]).toBe("pkg:generic/sqlite@3.99.9");
+      expect(sqlite["cpe"]).toBe("cpe:2.3:a:sqlite:sqlite:3.99.9:*:*:*:*:*:*:*");
+      expect(sqlite["licenses"]).toEqual([
+        { license: { name: "Public Domain", url: "https://www.sqlite.org/copyright.html" } },
+      ]);
+      expect(sbom.components.map((c) => c["name"])).toContain("better-sqlite3");
+    } finally {
+      rmSync(fakeRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("generate-sbom.mjs writes SHA256SUMS.txt as exactly two `<sha256>  <name>` lines (tarball, SBOM) — the format release.yml matches with grep -Fx", async () => {
+    const mod = (await import(new URL("../scripts/generate-sbom.mjs", import.meta.url).href)) as {
+      readonly generateReleaseArtifacts: (options: { readonly repoRoot?: string; readonly artifactsDir: string }) => {
+        readonly tgzName: string;
+        readonly tgzSha: string;
+        readonly sbomName: string;
+        readonly sbomSha: string;
+      };
+    };
+    const fakeRoot = mkdtempSync(path.join(os.tmpdir(), "causoryn-sbom-sums-"));
+    try {
+      const pkgDir = path.join(fakeRoot, "packages", "causoryn");
+      mkdirSync(pkgDir, { recursive: true });
+      writeFileSync(path.join(pkgDir, "package.json"), JSON.stringify({ name: "causoryn", version: "1.2.3" }), "utf8");
+      writeFileSync(path.join(pkgDir, "THIRD-PARTY-NOTICES.md"), "## 1. npm\n\n### zod (4.1.0) — MIT\n", "utf8");
+      const headerDir = path.join(fakeRoot, "node_modules", "better-sqlite3", "deps", "sqlite3");
+      mkdirSync(headerDir, { recursive: true });
+      writeFileSync(path.join(headerDir, "sqlite3.h"), '#define SQLITE_VERSION "3.99.9"\n', "utf8");
+      const artifactsDir = path.join(fakeRoot, "release-artifacts");
+      mkdirSync(artifactsDir);
+      writeFileSync(path.join(artifactsDir, "causoryn-1.2.3.tgz"), "tarball\n", "utf8");
+
+      const res = mod.generateReleaseArtifacts({ repoRoot: fakeRoot, artifactsDir });
+      expect(res.tgzName).toBe("causoryn-1.2.3.tgz");
+      expect(res.tgzSha).toBe(sha256Hex("tarball\n"));
+      expect(res.sbomName).toBe("causoryn-sbom.cdx.json");
+      expect(res.sbomSha).toBe(sha256Hex(readFileSync(path.join(artifactsDir, "causoryn-sbom.cdx.json"))));
+      expect(readFileSync(path.join(artifactsDir, "SHA256SUMS.txt"), "utf8")).toBe(
+        `${res.tgzSha}  causoryn-1.2.3.tgz\n${res.sbomSha}  causoryn-sbom.cdx.json\n`,
+      );
+    } finally {
+      rmSync(fakeRoot, { recursive: true, force: true });
     }
   });
 });
@@ -947,6 +1476,68 @@ describe(".github/workflows/security.yml — zizmor, Dependency Review ve çoklu
     expect(joined).not.toContain("frameworkCount === 0");
     expect(joined).toContain("report.problems");
     expect(joined).toContain("api.nuget.org");
+  });
+
+  it("cargo-audit job audits the shipped native/rust-worker/Cargo.lock with an exact, --locked cargo-audit version (fail-closed, --deny warnings)", () => {
+    const { doc } = loadWorkflow(SECURITY_WORKFLOW_PATH, ".github/workflows/security.yml");
+    const job = doc.jobs?.["cargo-audit"];
+    expect(job, "cargo-audit job tanımlı olmalı").toBeDefined();
+    expect(job?.["runs-on"]).toBe("ubuntu-latest");
+    expect(job?.if).toBeUndefined();
+    expect(job?.permissions).toEqual({ contents: "read" });
+    const steps = job?.steps ?? [];
+    expect(steps.some((s) => usesPinnedAction(s, "dtolnay/rust-toolchain"))).toBe(true);
+    const runs = steps.map((s) => (s.run ?? "").trim());
+    const installIdx = runs.findIndex((r) => /^cargo install --locked --version \d+\.\d+\.\d+ cargo-audit$/.test(r));
+    const auditIdx = runs.indexOf("cargo audit --file native/rust-worker/Cargo.lock --deny warnings");
+    expect(installIdx, "cargo-audit exact-version --locked install step").toBeGreaterThanOrEqual(0);
+    expect(auditIdx).toBeGreaterThan(installIdx);
+  });
+
+  it("govulncheck job checks native/go-worker with an exact govulncheck version on the go.mod toolchain (GOTOOLCHAIN=local, fail-closed)", () => {
+    const { doc } = loadWorkflow(SECURITY_WORKFLOW_PATH, ".github/workflows/security.yml");
+    const job = doc.jobs?.["govulncheck"];
+    expect(job, "govulncheck job tanımlı olmalı").toBeDefined();
+    expect(job?.["runs-on"]).toBe("ubuntu-latest");
+    expect(job?.if).toBeUndefined();
+    expect(job?.permissions).toEqual({ contents: "read" });
+    expect(job?.env?.["GOTOOLCHAIN"]).toBe("local");
+    const steps = job?.steps ?? [];
+    const setupGo = steps.find((s) => usesPinnedAction(s, "actions/setup-go"));
+    expect(setupGo?.with?.["go-version-file"]).toBe("native/go-worker/go.mod");
+    expect(setupGo?.with?.["cache"]).toBe(false);
+    const runs = steps.map((s) => (s.run ?? "").trim());
+    const installIdx = runs.findIndex((r) =>
+      /^go install golang\.org\/x\/vuln\/cmd\/govulncheck@v\d+\.\d+\.\d+$/.test(r),
+    );
+    const checkIdx = runs.indexOf("govulncheck ./...");
+    expect(installIdx, "govulncheck exact-version install step").toBeGreaterThanOrEqual(0);
+    expect(checkIdx).toBeGreaterThan(installIdx);
+    expect(steps[checkIdx]?.["working-directory"]).toBe("native/go-worker");
+  });
+
+  it("no security.yml job or step is allowed to fail open (no continue-on-error, no `|| true`)", () => {
+    const { doc } = loadWorkflow(SECURITY_WORKFLOW_PATH, ".github/workflows/security.yml");
+    for (const [jobId, job] of Object.entries(doc.jobs ?? {})) {
+      expect(job["continue-on-error"], `${jobId} continue-on-error`).toBeUndefined();
+      for (const step of job.steps ?? []) {
+        expect(step["continue-on-error"], `${jobId}/${step.name ?? "?"} continue-on-error`).toBeUndefined();
+        expect(step.run ?? "", `${jobId}/${step.name ?? "?"} || true`).not.toMatch(/\|\|\s*true\b/);
+      }
+    }
+  });
+});
+
+describe("native/go-worker/go.mod — supported Go release line", () => {
+  it("declares a still-supported Go line (>= 1.26: Go supports the two newest major releases, 1.27 and 1.26 as of 2026-11) and no toolchain download directive", () => {
+    const goMod = readFileSync(path.join(REPO_ROOT, "native", "go-worker", "go.mod"), "utf8");
+    const goLine = /^go (\d+)\.(\d+)(?:\.(\d+))?\s*$/m.exec(goMod);
+    expect(goLine, "go.mod go directive").not.toBeNull();
+    expect(Number(goLine?.[1])).toBe(1);
+    expect(Number(goLine?.[2])).toBeGreaterThanOrEqual(26);
+    expect(goMod).not.toMatch(/^toolchain\s/m);
+    // The worker stays stdlib-only, so govulncheck covers the standard library it is built with.
+    expect(goMod).not.toMatch(/^require\b/m);
   });
 });
 

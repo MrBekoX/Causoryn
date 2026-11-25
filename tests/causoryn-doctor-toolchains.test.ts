@@ -2,6 +2,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readdirSync,
+  readFileSync,
   rmSync,
   statSync,
   writeFileSync,
@@ -25,7 +26,7 @@ import { defaultToolchainProbe } from "../packages/causoryn/src/doctor.js";
 
 /**
  * Doctor sidecar-toolchain health: an installed toolchain that is below the
- * supported floor (Python >= 3.10, Go >= 1.22, .NET 10 runtime) or whose probe
+ * supported floor (Python >= 3.10, Go >= 1.26, .NET 10 runtime) or whose probe
  * fails is a warning that makes the report DEGRADED; an absent optional
  * toolchain is informational only. Doctor stays strictly read-only.
  */
@@ -98,7 +99,7 @@ const HEALTHY_OUTPUT: Readonly<Record<string, string>> = {
     "Microsoft.NETCore.App 10.0.11 [/usr/share/dotnet/shared/Microsoft.NETCore.App]",
   ].join("\n"),
   python: "Python 3.12.4",
-  go: "go version go1.22.5 linux/amd64",
+  go: "go version go1.26.11 linux/amd64",
   cargo: "cargo 1.100.0 (3acc79c0c 2026-11-05)",
 };
 
@@ -177,11 +178,15 @@ describe("doctor: sidecar toolchain health feeds the overall status", { timeout:
       expect(report.toolchains[id].mode, id).toBe("sidecar-ready");
     }
     expect(report.toolchains.python.minimumVersion).toBe("3.10");
-    expect(report.toolchains.go.minimumVersion).toBe("1.22");
+    expect(report.toolchains.go.minimumVersion).toBe("1.26");
+    // The doctor floor is the Go line native/go-worker/go.mod declares.
+    expect(report.toolchains.go.minimumVersion).toBe(
+      /^go (\d+\.\d+)/m.exec(readFileSync(new URL("../native/go-worker/go.mod", import.meta.url), "utf8"))?.[1],
+    );
     expect(report.toolchains.dotnet.minimumVersion).toBe("10.0");
     expect(report.toolchains.cargo.minimumVersion).toBeNull();
     expect(report.toolchains.python.version).toBe("3.12.4");
-    expect(report.toolchains.go.version).toBe("1.22.5");
+    expect(report.toolchains.go.version).toBe("1.26.11");
     expect(report.toolchains.dotnet.version).toBe("10.0.11");
     expect(report.toolchains.cargo.version).toBe("1.100.0");
 
@@ -190,7 +195,7 @@ describe("doctor: sidecar toolchain health feeds the overall status", { timeout:
       sb,
       makeProbe({
         python: ok("Python 3.10.0"),
-        go: ok("go version go1.22 darwin/arm64"),
+        go: ok("go version go1.26 darwin/arm64"),
         dotnet: ok("Microsoft.NETCore.App 10.0.0 [C:\\Program Files\\dotnet\\shared\\Microsoft.NETCore.App]"),
       }),
     );
@@ -200,7 +205,7 @@ describe("doctor: sidecar toolchain health feeds the overall status", { timeout:
   it.each([
     ["python", ok("Python 3.9.18"), /Python 3\.9\.18 is below the supported minimum 3\.10/],
     ["python", ok("Python 2.7.18"), /below the supported minimum 3\.10/],
-    ["go", ok("go version go1.21.13 linux/amd64"), /Go 1\.21\.13 is below the supported minimum 1\.22/],
+    ["go", ok("go version go1.25.9 linux/amd64"), /Go 1\.25\.9 is below the supported minimum 1\.26/],
     [
       "dotnet",
       ok(

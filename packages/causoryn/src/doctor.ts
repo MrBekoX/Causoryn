@@ -494,13 +494,14 @@ const SIDECAR_TOOLCHAIN_SPECS: readonly SidecarToolchainSpec[] = [
     commands: () => ["go"],
     args: ["version"],
     label: "Go",
-    minimumVersion: "1.22",
+    // Same Go line as native/go-worker/go.mod (oldest supported Go release line).
+    minimumVersion: "1.26",
     check: (output, cmd) =>
       checkVersionFloor({
         output,
         pattern: /\bgo(\d+)\.(\d+)(?:\.(\d+))?/,
         label: "Go",
-        minimum: { major: 1, minor: 22 },
+        minimum: { major: 1, minor: 26 },
         cmd,
         args: ["version"],
       }),
