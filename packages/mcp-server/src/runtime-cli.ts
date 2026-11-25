@@ -13,6 +13,7 @@ import {
   realpathSync,
   statSync,
 } from "node:fs";
+import { AsyncLocalStorage } from "node:async_hooks";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -1712,80 +1713,136 @@ export function buildWorkspaceAutoConfig(
 export interface DynamicCausorynContext extends CausorynContext {
   readonly current: CausorynContext;
   rebind(nextContext: CausorynContext): void;
+  /**
+   * Runs one unit of work (a tool call) pinned to the context generation that
+   * is active when it starts. Every getter read inside `work` — including
+   * after awaits — resolves to that generation, and a `rebind` during `work`
+   * defers closing it until `work` settles.
+   */
+  runPinned<T>(work: () => Promise<T> | T): Promise<T>;
+}
+
+/** One bound context plus the number of pinned calls still using it. */
+interface ContextGeneration {
+  readonly context: CausorynContext;
+  inFlight: number;
+  /** No longer the active binding (rebound away or the wrapper was closed). */
+  retired: boolean;
+  closed: boolean;
 }
 
 /**
- * Getter tabanlı dinamik `CausorynContext` sarmalayıcısı; `rebind` çağrısında
- * tüm araçların okuduğu aktif bağlamı atomik değiştirir ve eski bağlamı kapatır.
+ * Getter-based dynamic `CausorynContext` wrapper used by the MCP roots binder.
+ *
+ * `rebind` atomically switches the binding that NEW work sees. Work started
+ * through `runPinned` keeps its generation for its whole lifetime (resolved
+ * through AsyncLocalStorage, so awaits inside a tool call cannot observe a
+ * rebind), and a retired generation is closed only after its last pinned
+ * call settles — an in-flight call never finishes against another workspace
+ * or a closed SQLite connection. Reads outside `runPinned` use the current
+ * binding.
  */
 export function createDynamicCausorynContext(
   initialContext: CausorynContext,
 ): DynamicCausorynContext {
-  let active = initialContext;
+  const pinnedGeneration = new AsyncLocalStorage<ContextGeneration>();
+  let activeGeneration: ContextGeneration = {
+    context: initialContext,
+    inFlight: 0,
+    retired: false,
+    closed: false,
+  };
+  const target = (): CausorynContext =>
+    (pinnedGeneration.getStore() ?? activeGeneration).context;
+  const closeGeneration = (generation: ContextGeneration): void => {
+    if (generation.closed) return;
+    generation.closed = true;
+    try {
+      generation.context.close();
+    } catch (error) {
+      activeGeneration.context.logger(
+        `[causoryn] could not close the previous context: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  };
+  const retire = (generation: ContextGeneration): void => {
+    generation.retired = true;
+    if (generation.inFlight === 0) closeGeneration(generation);
+  };
   return {
     get current(): CausorynContext {
-      return active;
+      return activeGeneration.context;
     },
     get config(): CausorynServerConfig {
-      return active.config;
+      return target().config;
     },
     get policy(): WorkspaceAccessPolicy {
-      return active.policy;
+      return target().policy;
     },
     get repository(): GraphRepository {
-      return active.repository;
+      return target().repository;
     },
     get symbolSearch(): SymbolSearchStore | null {
-      return active.symbolSearch;
+      return target().symbolSearch;
     },
     get indexService(): IndexService {
-      return active.indexService;
+      return target().indexService;
     },
     get jobManager(): IndexJobManager {
-      return active.jobManager;
+      return target().jobManager;
     },
     get outputPolicy(): OutputAccessPolicy | null {
-      return active.outputPolicy;
+      return target().outputPolicy;
     },
     get wikiStore(): SqliteWikiStore | null {
-      return active.wikiStore;
+      return target().wikiStore;
     },
     get wikiSearch(): WikiSearchStore | null {
-      return active.wikiSearch;
+      return target().wikiSearch;
     },
     get preflightStore(): PreflightManifestStore {
-      return active.preflightStore;
+      return target().preflightStore;
     },
     get clock(): () => string {
-      return active.clock;
+      return target().clock;
     },
     get logger(): (message: string) => void {
-      return active.logger;
+      return target().logger;
     },
     startDeferredIndex(): void {
-      active.startDeferredIndex?.();
+      target().startDeferredIndex?.();
     },
     waitForInitialIndex(timeoutOrOptions?: number | WaitForInitialIndexOptions): Promise<void> {
-      return active.waitForInitialIndex
-        ? active.waitForInitialIndex(timeoutOrOptions)
+      const context = target();
+      return context.waitForInitialIndex
+        ? context.waitForInitialIndex(timeoutOrOptions)
         : Promise.resolve();
     },
     getActiveIndexJob(): ActiveIndexJobInfo | null {
-      return active.getActiveIndexJob ? active.getActiveIndexJob() : null;
+      const context = target();
+      return context.getActiveIndexJob ? context.getActiveIndexJob() : null;
     },
     close(): void {
-      active.close();
+      // Shutdown: the active generation closes now, or after its in-flight
+      // calls settle. Idempotent (a generation is closed at most once).
+      retire(activeGeneration);
     },
     rebind(nextContext: CausorynContext): void {
-      if (nextContext === active) return;
-      const previous = active;
-      active = nextContext;
+      if (nextContext === activeGeneration.context) return;
+      const previous = activeGeneration;
+      activeGeneration = { context: nextContext, inFlight: 0, retired: false, closed: false };
+      retire(previous);
+    },
+    async runPinned<T>(work: () => Promise<T> | T): Promise<T> {
+      // Nested calls stay on the generation that is already pinned.
+      if (pinnedGeneration.getStore() !== undefined) return await work();
+      const generation = activeGeneration;
+      generation.inFlight += 1;
       try {
-        previous.close();
-      } catch (error) {
-        active.logger(
-          `[causoryn] could not close the previous context: ${error instanceof Error ? error.message : String(error)}`,
-        );
+        return await pinnedGeneration.run(generation, work);
+      } finally {
+        generation.inFlight -= 1;
+        if (generation.retired && generation.inFlight === 0) closeGeneration(generation);
       }
     },
   };

@@ -241,6 +241,18 @@ function normalizeProfiles(raw: ToolProfile | string | readonly ToolProfile[] | 
   return out;
 }
 
+/** Optional capability of a rebindable context (see createDynamicCausorynContext). */
+interface ToolCallPinning {
+  runPinned<T>(work: () => Promise<T> | T): Promise<T>;
+}
+
+function toolCallPinningOf(context: CausorynContext): ToolCallPinning | undefined {
+  const candidate: CausorynContext & Partial<ToolCallPinning> = context;
+  return typeof candidate.runPinned === "function"
+    ? (candidate as ToolCallPinning)
+    : undefined;
+}
+
 function activeIndexingJobOf(context: CausorynContext): ActiveIndexJobInfo | null {
   if (context.getActiveIndexJob !== undefined) {
     return context.getActiveIndexJob();
@@ -1165,31 +1177,41 @@ export function createCausorynMcpServer(
             });
           }
 
-          let envelope = await registration.handler(requestId, args);
+          const runHandler = async (): Promise<Envelope> => {
+            let envelope = await registration.handler(requestId, args);
 
-          if (envelope.status !== "error") {
-            if (deprecatedReplacement !== undefined) {
-              envelope = withAppendedWarning(
-                envelope,
-                `[Deprecated in favor of ${deprecatedReplacement}] Legacy tool ${registration.name} will be removed in a future release.`,
-              );
+            if (envelope.status !== "error") {
+              if (deprecatedReplacement !== undefined) {
+                envelope = withAppendedWarning(
+                  envelope,
+                  `[Deprecated in favor of ${deprecatedReplacement}] Legacy tool ${registration.name} will be removed in a future release.`,
+                );
+              }
+              if (
+                !registration.name.startsWith("causoryn_wiki_") &&
+                envelope.snapshotId !== null &&
+                activeIndexingJobOf(context) !== null &&
+                !envelope.warnings.some((w) => /stale/i.test(w))
+              ) {
+                envelope = withAppendedWarning(
+                  envelope,
+                  "stale=true: background re-indexing is currently running; serving latest published snapshot",
+                );
+              }
             }
-            if (
-              !registration.name.startsWith("causoryn_wiki_") &&
-              envelope.snapshotId !== null &&
-              activeIndexingJobOf(context) !== null &&
-              !envelope.warnings.some((w) => /stale/i.test(w))
-            ) {
-              envelope = withAppendedWarning(
-                envelope,
-                "stale=true: background re-indexing is currently running; serving latest published snapshot",
-              );
-            }
-          }
 
-          if (outputSchemaProfile === "omit") {
-            registration.outputSchema.parse(envelope);
-          }
+            if (outputSchemaProfile === "omit") {
+              registration.outputSchema.parse(envelope);
+            }
+            return envelope;
+          };
+          // A rebindable context (MCP roots binder) pins the whole handler to
+          // one context generation, so a roots/list_changed rebind during an
+          // await cannot switch this call to another workspace or close its
+          // database under it.
+          const pinning = toolCallPinningOf(context);
+          const envelope =
+            pinning === undefined ? await runHandler() : await pinning.runPinned(runHandler);
           return envelopeResult(envelope);
         } catch (error) {
           if (error instanceof CausorynToolError) {
