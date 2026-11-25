@@ -1,8 +1,14 @@
 import { spawnSync } from "node:child_process";
 import { existsSync, readdirSync, readFileSync, statSync, type Dirent } from "node:fs";
-import os from "node:os";
 import path from "node:path";
 
+import {
+  collectUntrustedRoots,
+  resolveExecutable,
+  sanitizePathValue,
+  trustedWorkingDirectory,
+  withoutCwdExecutableSearch,
+} from "./executable-resolution.js";
 import { getPersistentRuntimeDir } from "./runtime-stage.js";
 import {
   detectInstalledClients,
@@ -66,6 +72,12 @@ export const DOCTOR_PROBE_ENV_ALLOWLIST = [
   "RUSTUP_HOME",
 ] as const;
 
+/**
+ * Probe environment: allowlisted variables only, plus the same Go toolchain
+ * pinning the Go adapter uses (GOTOOLCHAIN=local, GOENV=off, GOWORK=off, so
+ * doctor reports the toolchain the adapter will actually run) and, on
+ * win32, NoDefaultCurrentDirectoryInExePath=1.
+ */
 export function buildDoctorProbeEnv(
   sourceEnv: NodeJS.ProcessEnv = process.env,
 ): Record<string, string> {
@@ -77,18 +89,52 @@ export function buildDoctorProbeEnv(
     }
   }
   env["PYTHONIOENCODING"] = "utf-8";
-  return env;
+  env["GOTOOLCHAIN"] = "local";
+  env["GOENV"] = "off";
+  env["GOWORK"] = "off";
+  return withoutCwdExecutableSearch(env);
 }
 
+const PROBE_NOT_FOUND: ToolchainProbeOutcome = {
+  available: false,
+  version: null,
+  detail: "ENOENT",
+  failure: "not-found",
+};
+
+/**
+ * Runs `<command> <args>` and classifies the result. The command is resolved
+ * to an absolute executable first (relative, empty and cwd PATH entries are
+ * skipped; see executable-resolution.ts) and runs from its own directory —
+ * a fixed directory of the toolchain installation — rather than from the
+ * shared temporary directory, where project files such as go.mod,
+ * rust-toolchain.toml, .python-version or global.json could select another
+ * toolchain. Nothing is created on disk.
+ */
 export function defaultToolchainProbe(
   command: string,
   args: readonly string[],
   timeoutMs: number,
 ): ToolchainProbeOutcome {
+  const untrustedRoots = collectUntrustedRoots();
   const probeEnv = buildDoctorProbeEnv();
+  for (const key of Object.keys(probeEnv)) {
+    if (key.toUpperCase() !== "PATH") continue;
+    const sanitized = sanitizePathValue(probeEnv[key] ?? "", untrustedRoots);
+    if (sanitized.length > 0) probeEnv[key] = sanitized;
+    else delete probeEnv[key];
+  }
   const runOnce = (cmd: string): ToolchainProbeOutcome => {
-    const res = spawnSync(cmd, [...args], {
-      cwd: os.tmpdir(),
+    const executable = resolveExecutable(cmd, { env: probeEnv, untrustedRoots });
+    if (executable === null) {
+      return PROBE_NOT_FOUND;
+    }
+    const cwd = trustedWorkingDirectory([path.dirname(executable)], untrustedRoots);
+    if (cwd === null) {
+      return PROBE_NOT_FOUND;
+    }
+    const res = spawnSync(executable, [...args], {
+      cwd,
       shell: false,
       timeout: timeoutMs,
       windowsHide: true,
