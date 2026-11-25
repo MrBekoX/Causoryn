@@ -364,7 +364,7 @@ public static class WorkerAnalyzer
 
         // 2) Referanslar + derleme (bellek-içi; workspace'e dokunulmaz — ADR-008).
         var referencePaths = ReferenceResolver.Resolve(request.ReferenceDirs, "net10.0", warnings);
-        var references = referencePaths.Select(p => (MetadataReference)MetadataReference.CreateFromFile(p)).ToList();
+        var references = ReferenceResolver.LoadMetadataReferences(referencePaths, warnings);
         var compilationSets = BuildCompilations(entries, projects, references, warnings);
         var compilationByTree = new Dictionary<SyntaxTree, CSharpCompilation>();
         foreach (var set in compilationSets)

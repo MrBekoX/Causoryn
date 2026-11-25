@@ -958,6 +958,10 @@ describe("Wave 2A — C# Read-Only NuGet obj/project.assets.json Discovery", { t
     const workspaceRoot = path.join(tempParent, "cs-app");
     const nugetCache = path.join(tempParent, "nuget-cache");
     const outsideDir = path.join(tempParent, "outside-dlls");
+    // packageFolders are honoured only inside trusted NuGet roots or the
+    // workspace: the simulated cache outside the workspace is declared trusted.
+    const previousNugetPackages = process.env["NUGET_PACKAGES"];
+    process.env["NUGET_PACKAGES"] = nugetCache;
     try {
       mkdirSync(path.join(workspaceRoot, "obj"), { recursive: true });
       const pkgLibDir = path.join(nugetCache, "acme.external", "1.0.0", "lib", "net10.0");
@@ -1191,6 +1195,8 @@ describe("Wave 2A — C# Read-Only NuGet obj/project.assets.json Discovery", { t
         rmSync(capRoot, { recursive: true, force: true });
       }
     } finally {
+      if (previousNugetPackages === undefined) delete process.env["NUGET_PACKAGES"];
+      else process.env["NUGET_PACKAGES"] = previousNugetPackages;
       rmSync(tempParent, { recursive: true, force: true });
     }
   });

@@ -16,6 +16,7 @@ import { dirname } from "node:path";
 import {
   buildAllowlistedWorkerEnv,
   isFullyQualifiedPath,
+  isWithinUntrustedRoots,
   collectUntrustedRoots,
   resolveWorkerCommand,
   runLineJsonWorker,
@@ -58,10 +59,37 @@ export interface RunWorkerAnalyzeInput {
 
 const DOTNET_ISOLATION_ENV_OVERRIDES = {
   DOTNET_STARTUP_HOOKS: "",
+  DOTNET_ADDITIONAL_DEPS: "",
+  // No diagnostic IPC server, debugger or profiler attach for the worker.
+  DOTNET_EnableDiagnostics: "0",
   DOTNET_CLI_TELEMETRY_OPTOUT: "1",
   DOTNET_NOLOGO: "1",
   DOTNET_SKIP_FIRST_TIME_EXPERIENCE: "1",
 } as const;
+
+const UNC_OR_DEVICE_PREFIX = /^(?:[\\/]{2}|\\\?\?\\)/;
+
+/**
+ * Drops DOTNET_ROOT unless it is a fully qualified local path outside the
+ * analyzed workspace root(s): the worker loads reference-pack metadata from
+ * it, so it must never point into analyzed content or at a remote share.
+ */
+export function withValidatedDotnetRoot(
+  env: Readonly<Record<string, string>>,
+  workspaceRoots: readonly string[],
+): Record<string, string> {
+  const result: Record<string, string> = { ...env };
+  const dotnetRoot = result["DOTNET_ROOT"];
+  if (dotnetRoot === undefined) return result;
+  const trimmed = dotnetRoot.trim();
+  const usable =
+    trimmed.length > 0 &&
+    !UNC_OR_DEVICE_PREFIX.test(trimmed) &&
+    isFullyQualifiedPath(trimmed) &&
+    !isWithinUntrustedRoots(trimmed, workspaceRoots.filter((root) => isFullyQualifiedPath(root)));
+  if (!usable) delete result["DOTNET_ROOT"];
+  return result;
+}
 
 export function runWorkerAnalyze(
   input: RunWorkerAnalyzeInput,
@@ -75,7 +103,10 @@ export function runWorkerAnalyze(
   }
   const untrustedRoots = collectUntrustedRoots(input.untrustedRoots ?? []);
   const env = withSanitizedPath(
-    buildAllowlistedWorkerEnv(WORKER_ENV_ALLOWLIST, DOTNET_ISOLATION_ENV_OVERRIDES),
+    withValidatedDotnetRoot(
+      buildAllowlistedWorkerEnv(WORKER_ENV_ALLOWLIST, DOTNET_ISOLATION_ENV_OVERRIDES),
+      input.untrustedRoots ?? [],
+    ),
     untrustedRoots,
   );
   // Absolute executable: a bare name would be searched in the cwd first on Windows.

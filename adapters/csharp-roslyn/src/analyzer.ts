@@ -43,7 +43,12 @@ import {
   readdirSync,
   realpathSync,
 } from "node:fs";
-import { isAbsolute, join, posix as pathPosix } from "node:path";
+import { join, posix as pathPosix, relative, resolve, sep } from "node:path";
+import {
+  trustedNugetPackageRoots,
+  type NugetTrustOptions,
+  type TrustedNugetRoot,
+} from "./nuget-roots.js";
 import {
   mapNodeLocation,
   nodeSpanSources,
@@ -52,9 +57,11 @@ import {
 } from "./node-span.js";
 import { resolveCSharpProjects } from "./project-model.js";
 import {
+  canonicalLocalPath,
+  isFullyQualifiedLocalPath,
   isInsideRealDir,
-  isUncOrDevicePath,
   readBoundedFileNoFollow,
+  resolveLocalRealDirectory,
   resolveSafeRealRoot,
   stripTrailingSeparators,
 } from "./safe-fs.js";
@@ -644,11 +651,15 @@ function validateSafeLocalDirectory(rawDir: string): string | null
 {
   if (rawDir.length === 0 || rawDir.includes("\0")) return null;
   const trimmed = rawDir.trim();
-  if (trimmed.length === 0 || isUncOrDevicePath(trimmed) || !isAbsolute(trimmed))
+  if (trimmed.length === 0 || !isFullyQualifiedLocalPath(trimmed))
   {
     return null;
   }
   const normalized = stripTrailingSeparators(trimmed);
+  // The ancestors are walked first (links resolved manually, remote targets
+  // refused), so the leaf lstat below never traverses a link to a remote host.
+  const real = resolveLocalRealDirectory(normalized);
+  if (real === null) return null;
   let stat;
   try
   {
@@ -659,21 +670,39 @@ function validateSafeLocalDirectory(rawDir: string): string | null
     return null;
   }
   if (stat.isSymbolicLink() || !stat.isDirectory()) return null;
-  try
-  {
-    const real = realpathSync(normalized);
-    if (isUncOrDevicePath(real)) return null;
-    return real;
-  }
-  catch
-  {
-    return null;
-  }
+  return real;
+}
+
+/**
+ * Real path of a `packageFolders` entry when it lies inside a trusted NuGet
+ * root or the workspace (checked lexically before any file system access and
+ * again on the real path); null otherwise.
+ */
+function confinePackageFolder(rawKey: string, trustedRoots: readonly TrustedNugetRoot[]): string | null
+{
+  if (rawKey.length === 0 || rawKey.includes("\0")) return null;
+  const trimmed = rawKey.trim();
+  if (!isFullyQualifiedLocalPath(trimmed)) return null;
+  const candidate = resolve(stripTrailingSeparators(trimmed));
+  const owners = trustedRoots.filter(
+    (root) =>
+      isInsideRealDir(root.lexical, candidate) ||
+      isInsideRealDir(root.real, candidate) ||
+      isInsideRealDir(root.canonical, candidate),
+  );
+  if (owners.length === 0) return null;
+  const real = validateSafeLocalDirectory(candidate);
+  if (real === null) return null;
+  const canonical = canonicalLocalPath(real);
+  if (canonical === null) return null;
+  return owners.some((root) => isInsideRealDir(root.canonical, canonical)) ? real : null;
 }
 
 function extractNugetDirsFromAssetsContent(
   content: string,
   discovered: Set<string>,
+  trustedRoots: readonly TrustedNugetRoot[],
+  onIgnoredPackageFolders: (count: number) => void,
 ): void
 {
   let parsed: unknown;
@@ -687,20 +716,28 @@ function extractNugetDirsFromAssetsContent(
   }
   if (!isRecord(parsed)) return;
 
-  // 1) Validated local packageFolders (reject UNC/device paths, relative paths, and symlinks).
+  // 1) packageFolders confined to the trusted NuGet roots and the workspace
+  //    (UNC/device, relative, linked and outside entries are ignored).
   const rawPackageFolders = parsed["packageFolders"];
   if (!isRecord(rawPackageFolders)) return;
   const packageFolders: string[] = [];
+  let ignoredFolders = 0;
   for (const key of Object.getOwnPropertyNames(rawPackageFolders).sort())
   {
     if (FORBIDDEN_JSON_KEYS.has(key)) continue;
     if (!Object.prototype.hasOwnProperty.call(rawPackageFolders, key)) continue;
-    const realFolder = validateSafeLocalDirectory(key);
-    if (realFolder !== null && !packageFolders.includes(realFolder))
+    const realFolder = confinePackageFolder(key, trustedRoots);
+    if (realFolder === null)
+    {
+      ignoredFolders += 1;
+      continue;
+    }
+    if (!packageFolders.includes(realFolder))
     {
       packageFolders.push(realFolder);
     }
   }
+  if (ignoredFolders > 0) onIgnoredPackageFolders(ignoredFolders);
   if (packageFolders.length === 0) return;
 
   // 2) Map library keys -> safe relative package paths.
@@ -803,7 +840,10 @@ function extractNugetDirsFromAssetsContent(
  * compile-time DLL directories from `obj/project.assets.json` inside `rootDir`.
  * Degrades silently with zero crashes if absent, malformed, or oversized (> 8 MB).
  */
-export function discoverNugetReferenceDirs(rootDir: string): NugetReferenceDiscoveryResult
+export function discoverNugetReferenceDirs(
+  rootDir: string,
+  trustOptions: NugetTrustOptions = {},
+): NugetReferenceDiscoveryResult
 {
   const warnings: string[] = [];
   const realRoot = resolveSafeRealRoot(rootDir);
@@ -811,6 +851,13 @@ export function discoverNugetReferenceDirs(rootDir: string): NugetReferenceDisco
   {
     return { referenceDirs: [], warnings };
   }
+  const canonicalRoot = canonicalLocalPath(realRoot);
+  const trustedRoots: TrustedNugetRoot[] = [
+    ...trustedNugetPackageRoots(trustOptions),
+    ...(canonicalRoot === null
+      ? []
+      : [{ lexical: resolve(stripTrailingSeparators(rootDir)), real: realRoot, canonical: canonicalRoot }]),
+  ];
 
   const assetsFiles: string[] = [];
   const queue: Array<{ readonly dir: string; readonly depth: number }> = [
@@ -837,8 +884,10 @@ export function discoverNugetReferenceDirs(rootDir: string): NugetReferenceDisco
         const realObj = realpathSync(objDir);
         if (isInsideRealDir(realRoot, realObj))
         {
+          // lstat, not exists(): a linked assets file is never followed.
           const assetsPath = join(realObj, "project.assets.json");
-          if (existsSync(assetsPath))
+          const assetsStat = lstatSync(assetsPath, { throwIfNoEntry: false });
+          if (assetsStat !== undefined && !assetsStat.isSymbolicLink() && assetsStat.isFile())
           {
             assetsFiles.push(assetsPath);
           }
@@ -890,7 +939,12 @@ export function discoverNugetReferenceDirs(rootDir: string): NugetReferenceDisco
     if (discovered.size >= MAX_NUGET_REFERENCE_DIRS) break;
     const content = readBoundedFileNoFollow(assetsPath, realRoot, MAX_PROJECT_ASSETS_BYTES);
     if (content === null) continue;
-    extractNugetDirsFromAssetsContent(content, discovered);
+    const displayPath = relative(realRoot, assetsPath).split(sep).join("/");
+    extractNugetDirsFromAssetsContent(content, discovered, trustedRoots, (count) => {
+      warnings.push(
+        `${displayPath}: ignored ${String(count)} NuGet packageFolders ${count === 1 ? "entry" : "entries"} outside the trusted NuGet package roots and the workspace`,
+      );
+    });
   }
 
   const referenceDirs = [...discovered]
@@ -946,6 +1000,7 @@ export async function analyzeCSharpWorkspace(
 
   // 1.5) Read-only NuGet `obj/project.assets.json` referenceDirs discovery (bounded, symlink/UNC-safe).
   const mergedRefDirs = new Set<string>();
+  const nugetWarnings: string[] = [];
   if (input.rootDir !== undefined)
   {
     const discovered = discoverNugetReferenceDirs(input.rootDir);
@@ -953,6 +1008,7 @@ export async function analyzeCSharpWorkspace(
     {
       mergedRefDirs.add(dir);
     }
+    nugetWarnings.push(...discovered.warnings);
   }
   if (input.referenceDirs !== undefined)
   {
@@ -1003,7 +1059,7 @@ export async function analyzeCSharpWorkspace(
       : {}),
   });
 
-  const skipped: string[] = [...projectModel.warnings];
+  const skipped: string[] = [...nugetWarnings, ...projectModel.warnings];
   if (outcome.status === "ok")
   {
     const mapped = mapWorkerResponse(

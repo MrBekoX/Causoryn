@@ -3,6 +3,7 @@ export {
   discoverNugetReferenceDirs,
 } from "./analyzer.js";
 export { resolveCSharpProjects } from "./project-model.js";
+export { trustedNugetPackageRoots, type NugetTrustOptions, type TrustedNugetRoot } from "./nuget-roots.js";
 export {
   CSHARP_ROSLYN_ADAPTER_ID,
   CSHARP_ROSLYN_ADAPTER_VERSION,
