@@ -11,6 +11,7 @@
  * array and shell: false; request content travels on stdin only.
  */
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
@@ -355,6 +356,157 @@ describe.skipIf(!pythonAvailable)("python worker output amplification", () => {
     const [length, line] = result.stdout.split("\n");
     expect(Number(length)).toBeLessThan(1_000);
     expect(JSON.parse(line ?? "{}")).toMatchObject({ id: "big", status: "error", error: { code: "LIMIT_EXCEEDED" } });
+  });
+
+  it("a deep call chain after a long file prefix renders its fallback segments without rescanning the file", () => {
+    // ast.unparse raises RecursionError deep in the call walk; the source-segment
+    // fallback used to re-split the file up to the line on every call (~22 s here).
+    const comments = "# padding comment line that only takes space\n".repeat(Math.floor(1_900_000 / 46));
+    const content = `${comments}def f():\n    a${"()".repeat(480)}\n`;
+
+    const run = runWorker(request("fallback", [{ path: "fallback.py", content }]), 12_000);
+
+    expect(run.status).toBe(0);
+    const response = JSON.parse(responseLines(run.stdout)[0] ?? "{}") as WorkerResponse;
+    expect(response.status).toBe("ready");
+    const externals = new Set((response.nodes ?? []).filter((node) => node.kind === "UnknownExternal").map((node) => node.qualifiedName));
+    const bound = (text: string): string =>
+      text.length <= 200 ? text : `${text.slice(0, 200)}...#${createHash("sha256").update(text).digest("hex").slice(0, 12)}`;
+    for (let pairs = 1; pairs < 480; pairs += 1) {
+      // The rendering is bounded, and the UnknownExternal name bounds it again.
+      expect(externals.has(bound(bound(`a${"()".repeat(pairs)}`)))).toBe(true);
+    }
+  }, 60_000);
+
+  it("the per-file source segments match ast.get_source_segment", () => {
+    const harness = [
+      "import ast, importlib.util, sys",
+      "spec = importlib.util.spec_from_file_location('causoryn_python_worker', sys.argv[1])",
+      "worker = importlib.util.module_from_spec(spec)",
+      "spec.loader.exec_module(worker)",
+      "source = ('x = (a +\\r\\n     b)\\r\\n'",
+      "          \"y = 'ü€𝄞' + f(1,\\r    2)\\r\"",
+      "          '\\x0cz = [c,\\n  d]  # form feed\\n'",
+      "          \"def g():\\n\\treturn h(  'ñ' ,\\n\\t\\tk) + m[\\n  i]\\n\"",
+      "          \"w = {\\n 'q': (\\n  1), **{'r': 2}}\\n\"",
+      "          'v = f\"{a!r:>{width}} {b}\"\\n'",
+      "          'last = (1 +\\n 2)')",
+      "tree = ast.parse(source)",
+      "analyzer = worker.FileAnalyzer('t.py', source, tree, worker.RequestCollector())",
+      "count = 0",
+      "for node in ast.walk(tree):",
+      "    if isinstance(node, (ast.expr, ast.stmt)) and getattr(node, 'end_lineno', None) is not None:",
+      "        expected = ast.get_source_segment(source, node)",
+      "        actual = analyzer.source_segment(node)",
+      "        if actual != expected:",
+      "            print('MISMATCH', repr(expected), repr(actual))",
+      "            sys.exit(1)",
+      "        count += 1",
+      "print('ok', count)",
+    ].join("\n");
+
+    const result = spawnSync("python", ["-I", "-B", "-c", harness, WORKER_SCRIPT], { encoding: "utf8", shell: false, timeout: 60_000 });
+
+    expect(result.stderr).toBe("");
+    expect(result.stdout.trim()).toMatch(/^ok \d+$/);
+    expect(Number(result.stdout.trim().split(" ")[1])).toBeGreaterThan(40);
+    expect(result.status).toBe(0);
+  });
+
+  it("rendering long expressions is bounded per file: past the budget a callee is named by its source range", () => {
+    // Every callee of this chain carries the whole 1.5 MB literal (rendered or sliced per call).
+    const content = `def f():\n    a("${"x".repeat(1_500_000)}")${"()".repeat(480)}\n`;
+    const files = [{ path: "big_chain.py", content }];
+
+    const { response, raw } = analyze(files);
+
+    expect(response.error).toBeUndefined();
+    const externals = (response.nodes ?? []).filter((node) => node.kind === "UnknownExternal").map((node) => node.qualifiedName);
+    const ranged = externals.filter((name) => /^<expression at big_chain\.py:2:4\.\.2:\d+>$/.test(name));
+    expect(ranged.length).toBeGreaterThan(400);
+    expect(new Set(externals).size).toBe(externals.length);
+    expect(longest(externals)).toBeLessThan(300);
+    expect(analyze(files).raw).toBe(raw);
+  }, 120_000);
+
+  it("nested long callee expressions are rendered within the per-file budget", () => {
+    // m[m[...m["<60 KB>"]()...]()]() — every level's callee is a distinct ~60 KB expression.
+    const shape = (index: number): string => {
+      let text = `m["${String(index).padStart(4, "0")}${"x".repeat(60_000)}"]`;
+      for (let level = 0; level < 90; level += 1) text = `m[${text}()]`;
+      return `${text}()`;
+    };
+    const content = `def f():\n${Array.from({ length: 30 }, (_, i) => `    ${shape(i)}`).join("\n")}\n`;
+
+    const run = runWorker(request("nested", [{ path: "nested.py", content }]), 60_000);
+
+    expect(run.status).toBe(0);
+    const response = JSON.parse(responseLines(run.stdout)[0] ?? "{}") as WorkerResponse;
+    expect(response.status).toBe("ready");
+    const externals = (response.nodes ?? []).filter((node) => node.kind === "UnknownExternal").map((node) => node.qualifiedName);
+    // 30 shapes x 91 callees (plus the bare name m); at most ~4 MB of them rendered.
+    expect(new Set(externals).size).toBe(externals.length);
+    const rendered = externals.filter((name) => name.startsWith("m[") && TRUNCATED.test(name));
+    expect(rendered.length).toBeGreaterThan(0);
+    expect(rendered.length).toBeLessThanOrEqual(70);
+    expect(externals.filter((name) => name.startsWith("<expression at nested.py:")).length).toBeGreaterThan(2_000);
+  }, 120_000);
+
+  it("ast.unparse is not attempted where it must raise RecursionError, and the output is the same", () => {
+    // Deep in the call walk of a()()...() unparse needs more frames than are left;
+    // each doomed attempt costs about a millisecond of unwinding.
+    const harness = [
+      "import ast, importlib.util, json, sys",
+      "spec = importlib.util.spec_from_file_location('causoryn_python_worker', sys.argv[1])",
+      "worker = importlib.util.module_from_spec(spec)",
+      "spec.loader.exec_module(worker)",
+      "content = 'def f():\\n    a' + '()' * 480 + '\\n'",
+      "request = {'id': 's', 'files': [{'path': 's.py', 'content': content}]}",
+      "real_unparse = ast.unparse",
+      "failures = [0]",
+      "def counting_unparse(node):",
+      "    try:",
+      "        return real_unparse(node)",
+      "    except RecursionError:",
+      "        failures[0] += 1",
+      "        raise",
+      "ast.unparse = counting_unparse",
+      "skipped = json.dumps(worker.analyze_request(request), sort_keys=True)",
+      "skipped_failures = failures[0]",
+      "worker._spine_depth = lambda node, cap: 0",
+      "attempted = json.dumps(worker.analyze_request(request), sort_keys=True)",
+      "print(skipped_failures, failures[0] - skipped_failures, skipped == attempted)",
+    ].join("\n");
+
+    const result = spawnSync("python", ["-I", "-B", "-c", harness, WORKER_SCRIPT], { encoding: "utf8", shell: false, timeout: 120_000 });
+
+    expect(result.stderr).toBe("");
+    const [withSkip, withoutSkip, same] = result.stdout.trim().split(" ");
+    expect(Number(withoutSkip)).toBeGreaterThan(150);
+    expect(Number(withSkip)).toBeLessThan(20);
+    expect(same).toBe("True");
+  }, 120_000);
+
+  it("the render budget is shared by the files of a request", () => {
+    // Each file renders ~214 KB of long callee expressions (under the per-file
+    // budget); together they exceed the request budget, so the last files are named by range.
+    const shape = (index: number): string => {
+      let text = `m["${String(index).padStart(4, "0")}${"x".repeat(1_000)}"]`;
+      for (let level = 0; level < 90; level += 1) text = `m[${text}()]`;
+      return `${text}()`;
+    };
+    const files = Array.from({ length: 8 }, (_, file) => ({
+      path: `f${String(file)}.py`,
+      content: `def f():\n    ${shape(file * 2)}\n    ${shape(file * 2 + 1)}\n`,
+    }));
+
+    const { response } = analyze(files);
+
+    expect(response.error).toBeUndefined();
+    const externals = (response.nodes ?? []).filter((node) => node.kind === "UnknownExternal").map((node) => node.qualifiedName);
+    expect(new Set(externals).size).toBe(externals.length);
+    expect(externals.filter((name) => name.startsWith("<expression at f0.py:"))).toHaveLength(0);
+    expect(externals.filter((name) => name.startsWith("<expression at f7.py:")).length).toBe(2 * 91);
   });
 
   it("lone surrogates in request fields are answered with an error line and the loop keeps running", () => {

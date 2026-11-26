@@ -471,3 +471,67 @@ func TestLongCallChainTextIsHashedLinearly(t *testing.T) {
 		}
 	}
 }
+
+// nestedIndexShape — m[m[...m["<id><payload>"]()...]()]() with `levels`
+// wrappers. It returns the statement and every callee text (innermost first):
+// each callee starts at a different offset, so no running hash is shared.
+func nestedIndexShape(id, payload, levels int) (string, []string) {
+	text := fmt.Sprintf("m[\"%04d%s\"]", id, strings.Repeat("x", payload))
+	callees := []string{text}
+	for level := 0; level < levels; level++ {
+		text = "m[" + text + "()]"
+		callees = append(callees, text)
+	}
+	return text + "()", callees
+}
+
+// Nested callee texts with different starts (each just under the 64 KiB
+// hashing bound) are hashed in full one by one, so a 2 MB file could cost
+// ~0.9 GB of SHA-256. Content digests are limited to 4,000,000 hashed bytes
+// per file; past that a callee gets a digest of its file and byte range,
+// which still keeps every text distinct.
+func TestHashedCalleeBytesAreBoundedPerFile(t *testing.T) {
+	var body strings.Builder
+	body.WriteString("package p\n\nfunc f() {\n")
+	var all []string
+	for i := 0; i < 8; i++ {
+		statement, callees := nestedIndexShape(i, 60_000, 470)
+		body.WriteString("\t" + statement + "\n")
+		all = append(all, callees...)
+	}
+	body.WriteString("}\n")
+
+	res := Analyze([]SourceFile{{RelativePath: "p/n.go", SourceHash: "hn", Content: body.String()}}, 0)
+
+	names := map[string]bool{}
+	for _, n := range res.Nodes {
+		if n.Kind == "UnknownExternal" {
+			names[n.QualifiedName] = true
+		}
+	}
+	contentHashed, truncated := 0, 0
+	for _, text := range all {
+		sum := sha256.Sum256([]byte(text))
+		if names[text[:200]+"...#"+hex.EncodeToString(sum[:])[:12]] {
+			contentHashed += len(text)
+		}
+	}
+	for name := range names {
+		if truncatedName.MatchString(name) {
+			truncated++
+		}
+	}
+	if contentHashed > 4_000_000 {
+		t.Fatalf("%d bytes of callee text were content-hashed in one file; the per-file bound is 4000000", contentHashed)
+	}
+	if contentHashed == 0 {
+		t.Fatalf("callees within the per-file bound must keep their content digest")
+	}
+	if truncated != len(all) {
+		t.Fatalf("expected %d distinct bounded callee names, got %d", len(all), truncated)
+	}
+	again := Analyze([]SourceFile{{RelativePath: "p/n.go", SourceHash: "hn", Content: body.String()}}, 0)
+	if !reflect.DeepEqual(res, again) {
+		t.Fatalf("bounded hashing must be deterministic")
+	}
+}

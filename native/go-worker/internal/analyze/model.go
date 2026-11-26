@@ -72,6 +72,12 @@ const (
 	// hashed: its digest is taken over its file and byte range instead (the
 	// text is still identified exactly). Real call texts stay far below it.
 	MaxHashedTextBytes = 65_536
+	// MaxHashedBytesPerFile — content digests of one file's call-expression
+	// texts hash at most this many bytes in total. Nested callee texts start
+	// at different offsets and share no running hash, so without it a file
+	// of nested long callees costs about depth × length; past it every
+	// further long text gets the digest of its file and byte range.
+	MaxHashedBytesPerFile = 4_000_000
 	// MaxResponseBytes — serialized bytes of the nodes, edges, evidence and
 	// warnings of one response. Once spent, nothing more is admitted and the
 	// response gets a RESPONSE_TRUNCATED diagnostic (status partial). It stays

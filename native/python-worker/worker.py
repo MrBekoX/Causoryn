@@ -80,6 +80,42 @@ MAX_AST_DEPTH = max(100, min(500, sys.getrecursionlimit() // 2))
 # content digest so distinct expressions stay distinct.
 MAX_RENDERED_EXPRESSION_CHARS = 200
 
+# Budgets for rendering long expressions: source bytes of every rendered
+# expression longer than MAX_RENDERED_EXPRESSION_CHARS (ast.unparse or its
+# source-segment fallback, and the digest of the result; ast.unparse visits at
+# most one node per source byte). Past either budget such an expression is
+# named by its source range instead, so nested or chained long expressions
+# cannot make rendering quadratic. Real code stays far below both: 35,460
+# files of CPython's Lib (site-packages included) render 222 KB in total,
+# at most 8.6 KB in one file.
+MAX_RENDER_SOURCE_BYTES_PER_FILE = 256_000
+MAX_RENDER_SOURCE_BYTES_PER_REQUEST = 1_000_000
+
+# Line splitting of ast.get_source_segment (ast._splitlines_no_ff): \r\n, \n
+# and \r end a line; form feeds and other characters do not.
+_SOURCE_LINE = re.compile(r"(.*?(?:\r\n|\n|\r|$))")
+
+# ast.unparse enters every child through _Unparser.traverse, NodeVisitor.visit
+# and the node's visit_<Kind> method: at least three frames per nesting level.
+_UNPARSE_FRAMES_PER_LEVEL = 3
+
+
+def _spine_depth(node: ast.AST, cap: int) -> int:
+    """Length of the call/attribute/subscript chain below `node` (following
+    Call.func, Attribute.value and Subscript.value), counted up to `cap`: a
+    lower bound of the node's nesting depth, found without recursion."""
+    depth = 1
+    current = node
+    while depth <= cap:
+        if isinstance(current, ast.Call):
+            current = current.func
+        elif isinstance(current, (ast.Attribute, ast.Subscript)):
+            current = current.value
+        else:
+            break
+        depth += 1
+    return depth
+
 # Upper bound for declared qualified names and literal route paths (import-
 # derived UnknownExternal names use the expression bound above). Without it
 # one long identifier is copied into every edge endpoint, rationale and key
@@ -227,27 +263,6 @@ def escape_lone_surrogates(text: str) -> str:
     if is_utf8_text(text):
         return text
     return text.encode("utf-8", "backslashreplace").decode("utf-8")
-
-
-def render_expression(node: ast.AST, source: str) -> str:
-    """Bounded `ast.unparse` rendering of an expression.
-
-    ast.unparse is recursive: an expression too deep to render falls back to
-    its (non-recursive) source segment, or to a positional placeholder.
-    """
-    try:
-        return bounded_text(ast.unparse(node))
-    except (RecursionError, ValueError):
-        segment = None
-        try:
-            segment = ast.get_source_segment(source, node)
-        except (RecursionError, ValueError):
-            segment = None
-        if segment:
-            return bounded_text(segment)
-        line = getattr(node, "lineno", 0)
-        column = getattr(node, "col_offset", 0)
-        return f"<expression at {line}:{column}>"
 
 
 def module_name_from_path(relative_path: str) -> str:
@@ -457,6 +472,14 @@ class FileAnalyzer:
         self.callables: List[Tuple[ast.stmt, str, str, Optional[str]]] = []
         self.depth_exceeded = False
         self.recursion_exceeded = False
+        # Source lines, their UTF-8 forms and byte offsets: split once per file
+        # (on first use) instead of on every source-segment fallback.
+        self._source_lines: Optional[List[str]] = None
+        self._line_bytes: Dict[int, bytes] = {}
+        self._line_byte_starts: Optional[List[int]] = None
+        self._render_bytes_left = MAX_RENDER_SOURCE_BYTES_PER_FILE
+        # Call-walk depth of the call being resolved (0 outside the walk).
+        self._walk_depth = 0
 
     # -- yardımcılar ----------------------------------------------------------
 
@@ -471,8 +494,105 @@ class FileAnalyzer:
         return {"kind": "UnknownExternal", "qualifiedName": bounded_text(qualified_name)}
 
     def render(self, node: ast.AST) -> str:
-        """Bounded rendering of an expression of this file (see render_expression)."""
-        return render_expression(node, self.content)
+        """Bounded `ast.unparse` rendering of an expression of this file.
+
+        ast.unparse is recursive: an expression too deep to render falls back to
+        its source segment, or to a positional placeholder. An expression whose
+        source is longer than MAX_RENDERED_EXPRESSION_CHARS bytes is charged at
+        its source size against the file's and the request's render budgets;
+        once either is spent it is named by its source range (`<expression at
+        path:line:col..end_line:end_col>`, distinct per expression) instead.
+        """
+        size = self._source_size(node)
+        if size is not None and size > MAX_RENDERED_EXPRESSION_CHARS:
+            collector = self.collector
+            if size > self._render_bytes_left or size > collector.render_bytes_left:
+                # Sticky for the file (and for the request once it is spent),
+                # so the cut is deterministic.
+                self._render_bytes_left = 0
+                if size > collector.render_bytes_left:
+                    collector.render_bytes_left = 0
+                return bounded_text(
+                    f"<expression at {self.path}:{node.lineno}:{node.col_offset}"
+                    f"..{node.end_lineno}:{node.end_col_offset}>"
+                )
+            self._render_bytes_left -= size
+            collector.render_bytes_left -= size
+        try:
+            free_frames = sys.getrecursionlimit() - self._walk_depth
+            spine_cap = free_frames // _UNPARSE_FRAMES_PER_LEVEL + 1
+            if _UNPARSE_FRAMES_PER_LEVEL * _spine_depth(node, spine_cap) > free_frames:
+                # ast.unparse would certainly raise RecursionError here (it
+                # uses at least three frames per nesting level, and at least
+                # _walk_depth frames are in use); skip the doomed attempt,
+                # whose unwinding costs about a millisecond per call.
+                raise RecursionError
+            return bounded_text(ast.unparse(node))
+        except (RecursionError, ValueError):
+            segment = None
+            try:
+                segment = self.source_segment(node)
+            except (RecursionError, ValueError, IndexError):
+                segment = None
+            if segment:
+                return bounded_text(segment)
+            line = getattr(node, "lineno", 0)
+            column = getattr(node, "col_offset", 0)
+            return f"<expression at {line}:{column}>"
+
+    def _release_source_lines(self) -> None:
+        """Drops the line caches at the end of a pass (rebuilt on demand)."""
+        self._source_lines = None
+        self._line_bytes = {}
+        self._line_byte_starts = None
+
+    def _lines(self) -> List[str]:
+        if self._source_lines is None:
+            self._source_lines = [match[0] for match in _SOURCE_LINE.finditer(self.content)]
+        return self._source_lines
+
+    def _encoded_line(self, index: int) -> bytes:
+        encoded = self._line_bytes.get(index)
+        if encoded is None:
+            encoded = self._lines()[index].encode("utf-8")
+            self._line_bytes[index] = encoded
+        return encoded
+
+    def _source_size(self, node: ast.AST) -> Optional[int]:
+        """UTF-8 byte length of the source of `node`; None without positions."""
+        lineno = getattr(node, "lineno", None)
+        end_lineno = getattr(node, "end_lineno", None)
+        col_offset = getattr(node, "col_offset", None)
+        end_col_offset = getattr(node, "end_col_offset", None)
+        if None in (lineno, end_lineno, col_offset, end_col_offset):
+            return None
+        if self._line_byte_starts is None:
+            starts = [0]
+            for line in self._lines():
+                starts.append(starts[-1] + len(line.encode("utf-8")))
+            self._line_byte_starts = starts
+        starts = self._line_byte_starts
+        if not (1 <= lineno <= end_lineno < len(starts)):
+            return None
+        return (starts[end_lineno - 1] + end_col_offset) - (starts[lineno - 1] + col_offset)
+
+    def source_segment(self, node: ast.AST) -> Optional[str]:
+        """ast.get_source_segment(self.content, node) (padded=False), with the
+        file split into lines once instead of once per call."""
+        try:
+            if node.end_lineno is None or node.end_col_offset is None:
+                return None
+            lineno = node.lineno - 1
+            end_lineno = node.end_lineno - 1
+            col_offset = node.col_offset
+            end_col_offset = node.end_col_offset
+        except AttributeError:
+            return None
+        if end_lineno == lineno:
+            return self._encoded_line(lineno)[col_offset:end_col_offset].decode()
+        first = self._encoded_line(lineno)[col_offset:].decode()
+        last = self._encoded_line(end_lineno)[:end_col_offset].decode()
+        return "".join([first, *self._lines()[lineno + 1:end_lineno], last])
 
     def span(self, start_line: Optional[int], end_line: Optional[int]) -> Dict[str, Any]:
         start = start_line if isinstance(start_line, int) and start_line > 0 else 0
@@ -514,6 +634,7 @@ class FileAnalyzer:
                 {name: (member_kind, member_qn, self.path)
                  for name, (member_kind, member_qn) in members.items()},
             )
+        self._release_source_lines()
 
     def _declare(
         self,
@@ -718,15 +839,18 @@ class FileAnalyzer:
     # -- geçiş 2: çağrı çözümleme ---------------------------------------------------
 
     def resolve_calls(self) -> None:
-        for node, kind, qualified, class_qn in self.callables:
-            if self.collector.budget_exceeded:
-                return  # nothing more can be admitted
-            try:
-                for statement in node.body:
-                    self._walk_calls(statement, (kind, qualified, class_qn), depth=1)
-            except RecursionError:
-                # Isolated per callable: its remaining calls are skipped.
-                self.recursion_exceeded = True
+        try:
+            for node, kind, qualified, class_qn in self.callables:
+                if self.collector.budget_exceeded:
+                    return  # nothing more can be admitted
+                try:
+                    for statement in node.body:
+                        self._walk_calls(statement, (kind, qualified, class_qn), depth=1)
+                except RecursionError:
+                    # Isolated per callable: its remaining calls are skipped.
+                    self.recursion_exceeded = True
+        finally:
+            self._release_source_lines()
 
     def _walk_calls(
         self,
@@ -741,7 +865,11 @@ class FileAnalyzer:
             return  # nothing more can be admitted
 
         if isinstance(statement, ast.Call):
+            # Each walk level is one Python frame: renders of this call know
+            # at least this many frames are in use (see render).
+            self._walk_depth = depth
             self._resolve_call(statement, owner)
+            self._walk_depth = 0
 
         # İç içe bildirimlere İNİLMEZ: kendi gövdeleri, bildirim geçişinde
         # kaydedildikleri kendi callables kaydıyla ayrı sahiplikle gezilir.
@@ -1012,6 +1140,8 @@ class RequestCollector:
         self.symbol_registry: Dict[str, Tuple[str, str]] = {}
         # class_qualified_name → {üye adı → (kind, qn, relative_path)}
         self.class_member_registry: Dict[str, Dict[str, Tuple[str, str, str]]] = {}
+        # Long-expression render budget of the request (FileAnalyzer.render).
+        self.render_bytes_left = MAX_RENDER_SOURCE_BYTES_PER_REQUEST
         # Response size budget (MAX_RESPONSE_BYTES): serialized bytes admitted so far.
         self._budget_used = 0
         self.budget_exceeded = False

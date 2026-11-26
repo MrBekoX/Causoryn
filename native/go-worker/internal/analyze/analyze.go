@@ -111,6 +111,10 @@ type fileCtx struct {
 	// spanDigests — digests of the call-expression texts of this file that
 	// exceed MaxRenderedTextBytes, keyed by byte range (see prepareSpanDigests).
 	spanDigests map[spanKey]string
+	// hashedBytes — bytes hashed for content digests (MaxHashedBytesPerFile);
+	// hashBudgetSpent is sticky, so the cut is deterministic.
+	hashedBytes     int
+	hashBudgetSpent bool
 }
 
 // spanKey — the byte range [start, end) of a source text in its file.
@@ -133,8 +137,10 @@ func exprSpan(fset *token.FileSet, content string, e ast.Expr) (spanKey, bool) {
 // share a start offset — a call chain a(x)()() or a(x).b().c(), whose callee
 // texts are successive prefixes of one span — are hashed in one pass of a
 // running SHA-256 instead of once each from the start, so the cost is linear
-// in the span instead of quadratic. A text longer than MaxHashedTextBytes gets
-// a digest of its file and byte range instead.
+// in the span instead of quadratic. A text longer than MaxHashedTextBytes, or
+// any long text once the file has hashed MaxHashedBytesPerFile bytes, gets a
+// digest of its file and byte range instead. Starts are processed in source
+// order, so which texts fall past the bound is deterministic.
 func (f *fileCtx) prepareSpanDigests(spans []spanKey) {
 	endsByStart := map[int][]int{}
 	for _, s := range spans {
@@ -146,7 +152,13 @@ func (f *fileCtx) prepareSpanDigests(spans []spanKey) {
 		}
 		endsByStart[s.start] = append(endsByStart[s.start], s.end)
 	}
-	for start, ends := range endsByStart {
+	starts := make([]int, 0, len(endsByStart))
+	for start := range endsByStart {
+		starts = append(starts, start)
+	}
+	sort.Ints(starts)
+	for _, start := range starts {
+		ends := endsByStart[start]
 		sort.Ints(ends)
 		f.hashSpans(start, ends)
 	}
@@ -164,11 +176,15 @@ func (f *fileCtx) hashSpans(start int, ends []int) {
 		if _, done := f.spanDigests[key]; done {
 			continue
 		}
-		if end-start > MaxHashedTextBytes {
+		if f.hashBudgetSpent || end-start > MaxHashedTextBytes || f.hashedBytes+(end-written) > MaxHashedBytesPerFile {
+			if end-start <= MaxHashedTextBytes {
+				f.hashBudgetSpent = true
+			}
 			f.spanDigests[key] = rangeDigest(f, key)
 			continue
 		}
 		_, _ = io.WriteString(h, f.content[written:end])
+		f.hashedBytes += end - written
 		written = end
 		f.spanDigests[key] = digestHex12(h.Sum(nil))
 	}
