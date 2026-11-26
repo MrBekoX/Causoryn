@@ -114,7 +114,13 @@ export class InMemoryGraphRepository implements GraphRepository {
         `Workspace is already registered: ${record.id}`,
       );
     }
-    this.workspaces.set(record.id, { ...record });
+    // Same shape as the SQLite store: the canonical-root mark is kept only when set.
+    this.workspaces.set(record.id, {
+      id: record.id,
+      rootPath: record.rootPath,
+      createdAt: record.createdAt,
+      ...(record.rootCanonical === true ? { rootCanonical: true } : {}),
+    });
   }
 
   getWorkspace(workspaceId: string): WorkspaceRecord | undefined {
@@ -127,8 +133,8 @@ export class InMemoryGraphRepository implements GraphRepository {
     requireNonEmptyField("workspaceId", workspaceId);
     requireNonEmptyField("workspace.rootPath", toRootPath);
     const record = this.workspaces.get(workspaceId);
-    if (record === undefined || record.rootPath !== fromRootPath) return false;
-    this.workspaces.set(workspaceId, { ...record, rootPath: toRootPath });
+    if (record === undefined || record.rootPath !== fromRootPath || record.rootCanonical === true) return false;
+    this.workspaces.set(workspaceId, { ...record, rootPath: toRootPath, rootCanonical: true });
     return true;
   }
 

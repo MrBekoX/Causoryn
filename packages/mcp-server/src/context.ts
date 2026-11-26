@@ -3,7 +3,7 @@ import { lstatSync, realpathSync, statSync, type Stats } from "node:fs";
 import path from "node:path";
 
 import { GraphRepositoryError, InMemoryGraphRepository } from "@causoryn/graph";
-import type { GraphRepository, SymbolSearchStore } from "@causoryn/graph";
+import type { GraphRepository, SymbolSearchStore, WorkspaceRecord } from "@causoryn/graph";
 import {
   IndexJobManager,
   IndexService,
@@ -812,16 +812,20 @@ function comparableWorkspaceRoot(root: string): string {
  * primary root. Data in a graph/wiki database is keyed by workspace id only, so
  * a database recorded for another root under the same id would otherwise be
  * served once tool authorization passes for the new root. A new record stores
- * the canonical root; an existing record (including a 0.3.2 record, which holds
- * `allowRoots[0]` verbatim) must name the same directory canonically, or the
- * database is refused before any of its rows are read. The refusal does not
- * repeat the recorded root, and the database is left unchanged.
+ * the canonical root, marked `rootCanonical`; an existing record must name the
+ * same directory, or the database is refused before any of its rows are read.
+ * The refusal does not repeat the recorded root, and the record is left
+ * unchanged.
  *
- * A matching record that does not hold the canonical root yet (a 0.3.2
- * verbatim spelling: trailing separator, letter case, a link) is rewritten to
- * the canonical root it matched. Kept verbatim, a link spelling would be
- * re-resolved on every open and follow the link to whatever directory it
- * names later, so the old data would be served for that directory.
+ * A marked record is compared as recorded (comparison key only, no link is
+ * followed): resolving it again would follow a recorded path, or a parent of
+ * it, that later became a link to whatever directory it names then, so the
+ * old data would be served for that directory.
+ *
+ * An unmarked record (0.3.2 stored `allowRoots[0]` verbatim: trailing
+ * separator, letter case, a link) is resolved once and must name the same
+ * directory canonically; it is then upgraded to the canonical root it matched
+ * and marked (compare-and-set), so later opens compare it as recorded.
  */
 function bindWorkspaceRecord(
   repository: SqliteGraphRepository,
@@ -837,6 +841,8 @@ function bindWorkspaceRecord(
     new CausorynConfigError([
       `${fieldName} holds workspace "${workspaceId}" recorded for a different root than allowRoots[0]; refusing to open it so data indexed for another directory is not served. Use a separate ${fieldName} for this root, or a different workspaceId.`,
     ]);
+  const recordedKey = (record: WorkspaceRecord): string =>
+    record.rootCanonical === true ? comparisonKey(record.rootPath) : comparableWorkspaceRoot(record.rootPath);
   let existing = repository.getWorkspace(workspaceId);
   if (existing === undefined) {
     try {
@@ -844,6 +850,7 @@ function bindWorkspaceRecord(
         id: workspaceId,
         rootPath: canonicalRoot,
         createdAt: clock(),
+        rootCanonical: true,
       });
       return;
     } catch (error) {
@@ -856,13 +863,13 @@ function bindWorkspaceRecord(
       if (existing === undefined) throw error;
     }
   }
-  if (comparableWorkspaceRoot(existing.rootPath) !== declaredKey) throw mismatch();
-  if (existing.rootPath === canonicalRoot) return;
+  if (recordedKey(existing) !== declaredKey) throw mismatch();
+  if (existing.rootCanonical === true) return;
   if (repository.updateWorkspaceRootPath(workspaceId, existing.rootPath, canonicalRoot)) return;
-  // The row changed between the read and the update (another process): check
-  // the root it holds now like any existing record.
+  // The row changed between the read and the update (another process
+  // upgraded or replaced it): check the root it holds now like any existing record.
   const current = repository.getWorkspace(workspaceId);
-  if (current === undefined || comparableWorkspaceRoot(current.rootPath) !== declaredKey) throw mismatch();
+  if (current === undefined || recordedKey(current) !== declaredKey) throw mismatch();
 }
 
 function openStorageRepository(

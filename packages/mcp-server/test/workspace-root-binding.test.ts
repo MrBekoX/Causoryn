@@ -1,4 +1,13 @@
-import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  realpathSync,
+  renameSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
@@ -184,6 +193,53 @@ function storedRootPath(dbFile: string): string | undefined {
   } finally {
     db.close();
   }
+}
+
+/** The workspace row as stored, including the canonical-root mark (schema v6). */
+function storedRecord(dbFile: string): { readonly rootPath: string; readonly rootCanonical: number } | undefined {
+  const db = new Database(dbFile, { readonly: true });
+  try {
+    const row = db.prepare("SELECT root_path, root_canonical FROM workspaces WHERE id = ?").get(WS) as
+      | { root_path: string; root_canonical: number }
+      | undefined;
+    return row === undefined ? undefined : { rootPath: row.root_path, rootCanonical: row.root_canonical };
+  } finally {
+    db.close();
+  }
+}
+
+function userVersion(dbFile: string): unknown {
+  const db = new Database(dbFile, { readonly: true });
+  try {
+    return db.pragma("user_version", { simple: true });
+  } finally {
+    db.close();
+  }
+}
+
+/**
+ * A database exactly as 0.3.2 left it: schema v5 (the workspaces table has no
+ * root_canonical column) and the workspace row holding allowRoots[0] verbatim.
+ */
+function writeLegacy032Database(dbFile: string, recordedRoot: string): void {
+  const legacy = new SqliteGraphRepository(dbFile);
+  try {
+    legacy.registerWorkspace({ id: WS, rootPath: recordedRoot, createdAt: LEGACY_CREATED_AT });
+  } finally {
+    legacy.close();
+  }
+  const raw = new Database(dbFile);
+  try {
+    raw.exec("ALTER TABLE workspaces DROP COLUMN root_canonical; PRAGMA user_version = 5;");
+  } finally {
+    raw.close();
+  }
+}
+
+/** Moves the directory at `dirPath` aside and puts a link to `target` in its place. */
+function replaceWithLinkTo(dirPath: string, target: string): void {
+  renameSync(dirPath, `${dirPath}-moved-away`);
+  symlinkSync(target, dirPath, IS_WIN ? "junction" : "dir");
 }
 
 function expectRootMismatchRefusal(
@@ -373,6 +429,104 @@ describe("CAU-03 — graph DB bound to the canonical workspace root", { timeout:
       expect((outcome.error as Error).message, recordedRoot).not.toContain(recordedRoot);
     }
   });
+
+  it("a new record holds the canonical root and is marked; a warm start with the same root leaves it as written", () => {
+    let snapshotA: string;
+    const first = open(graphConfig(rootA));
+    try {
+      snapshotA = first.repository.getLatestPublished(WS)?.snapshot.meta.id as string;
+      expect(snapshotA).toMatch(/^snapshot:/);
+    } finally {
+      first.close();
+    }
+    expect(storedRecord(graphDbPath())).toEqual({ rootPath: canonicalRoot(rootA), rootCanonical: 1 });
+
+    const logs: string[] = [];
+    const again = open(graphConfig(rootA), logs);
+    try {
+      expect(again.repository.getLatestPublished(WS)?.snapshot.meta.id).toBe(snapshotA);
+      expect(logs.some((line) => line.includes(`persistent index loaded: workspace=${WS} snapshot=${snapshotA}`))).toBe(true);
+    } finally {
+      again.close();
+    }
+    expect(storedRecord(graphDbPath())).toEqual({ rootPath: canonicalRoot(rootA), rootCanonical: 1 });
+  });
+
+  it("a marked record is compared as recorded: once its root path is turned into a link to another directory, the database is refused for the link and for that directory", () => {
+    open(graphConfig(rootA)).close();
+    const recorded = storedRecord(graphDbPath());
+    expect(recorded).toEqual({ rootPath: canonicalRoot(rootA), rootCanonical: 1 });
+
+    // The recorded path itself now names root B.
+    replaceWithLinkTo(rootA, rootB);
+    for (const declared of [rootA, rootB]) {
+      const outcome = tryOpen(graphConfig(declared));
+      expect(outcome.served?.graphNodes ?? "", declared).not.toContain("only-in-a.ts");
+      expectRootMismatchRefusal(outcome, "storage.dataDbPath");
+    }
+    // Never rewritten to the directory the link names.
+    expect(storedRecord(graphDbPath())).toEqual(recorded);
+  });
+
+  it("a marked record is refused once a parent directory of its root is turned into a link to another tree", () => {
+    const parentA = path.join(tempRoot, "tree-a");
+    const parentB = path.join(tempRoot, "tree-b");
+    const projectA = path.join(parentA, "proj");
+    writeWorkspace(projectA, "only-in-a.ts", "export function onlyInA(): number {\n  return 1;\n}\n");
+    writeWorkspace(path.join(parentB, "proj"), "only-in-b.ts", "export function onlyInB(): number {\n  return 2;\n}\n");
+    open(graphConfig(projectA)).close();
+    const recorded = storedRecord(graphDbPath());
+    expect(recorded).toEqual({ rootPath: canonicalRoot(projectA), rootCanonical: 1 });
+
+    replaceWithLinkTo(parentA, parentB);
+    const outcome = tryOpen(graphConfig(projectA));
+    expect(outcome.served?.graphNodes ?? "").not.toContain("only-in-a.ts");
+    expect(outcome.error).toBeInstanceOf(CausorynConfigError);
+    expect((outcome.error as Error).message).toMatch(/different root/);
+    expect(storedRecord(graphDbPath())).toEqual(recorded);
+  });
+
+  it("a 0.3.2 database (schema v5, no root_canonical column) migrates on open; its verbatim record is upgraded to the canonical root and marked, so it is compared as recorded from then on", () => {
+    const legacySpelling = IS_WIN ? `${rootA.toUpperCase()}${path.sep}` : `${rootA}${path.sep}`;
+    writeLegacy032Database(graphDbPath(), legacySpelling);
+    expect(userVersion(graphDbPath())).toBe(5);
+
+    let snapshotA: string;
+    const first = open(graphConfig(rootA));
+    try {
+      const read = first.repository.getLatestPublished(WS);
+      expect(JSON.stringify(read?.snapshot.nodes)).toContain("only-in-a.ts");
+      snapshotA = read?.snapshot.meta.id as string;
+    } finally {
+      first.close();
+    }
+    const canonicalA = canonicalRoot(rootA);
+    expect(userVersion(graphDbPath())).toBe(6);
+    expect(storedRecord(graphDbPath())).toEqual({ rootPath: canonicalA, rootCanonical: 1 });
+
+    const logs: string[] = [];
+    const again = open(graphConfig(rootA), logs);
+    try {
+      expect(again.repository.getLatestPublished(WS)?.snapshot.meta.id).toBe(snapshotA);
+      expect(logs.some((line) => line.includes("persistent index loaded"))).toBe(true);
+    } finally {
+      again.close();
+    }
+
+    replaceWithLinkTo(rootA, rootB);
+    for (const declared of [rootA, rootB]) {
+      const outcome = tryOpen(graphConfig(declared));
+      expect(outcome.served?.graphNodes ?? "", declared).not.toContain("only-in-a.ts");
+      expectRootMismatchRefusal(outcome, "storage.dataDbPath");
+    }
+    expect(storedRecord(graphDbPath())).toEqual({ rootPath: canonicalA, rootCanonical: 1 });
+  });
+
+  it("a 0.3.2 database recorded for another root is refused without being upgraded or marked", () => {
+    writeLegacy032Database(graphDbPath(), rootA);
+    expectRootMismatchRefusal(tryOpen(graphConfig(rootB)), "storage.dataDbPath");
+    expect(storedRecord(graphDbPath())).toEqual({ rootPath: rootA, rootCanonical: 0 });
+  });
 });
 
 describe("CAU-03 — wiki DB bound to the canonical workspace root", { timeout: 60_000 }, () => {
@@ -458,5 +612,60 @@ describe("CAU-03 — wiki DB bound to the canonical workspace root", { timeout: 
     const outcome = tryOpen(wikiConfig(link));
     expect(outcome.served?.annotationIds ?? []).not.toContain("annot-a");
     expectRootMismatchRefusal(outcome, "wiki.dataDbPath");
+  });
+
+  it("a marked wiki record is compared as recorded: once its root path is turned into a link to another directory, the wiki DB is refused for the link and for that directory", () => {
+    let wikiSnapshotA: string;
+    const first = open(wikiConfig(rootA));
+    try {
+      wikiSnapshotA = publishWikiWithAnnotation(first.wikiStore as SqliteWikiStore);
+    } finally {
+      first.close();
+    }
+    const recorded = storedRecord(wikiDbPath());
+    expect(recorded).toEqual({ rootPath: canonicalRoot(rootA), rootCanonical: 1 });
+
+    // Warm start with the same root keeps serving the pages and annotations.
+    const warm = tryOpen(wikiConfig(rootA));
+    expect(warm.error).toBeUndefined();
+    expect(warm.served?.wikiSnapshotId).toBe(wikiSnapshotA);
+    expect(warm.served?.annotationIds).toEqual(["annot-a"]);
+    expect(storedRecord(wikiDbPath())).toEqual(recorded);
+
+    replaceWithLinkTo(rootA, rootB);
+    for (const declared of [rootA, rootB]) {
+      const outcome = tryOpen(wikiConfig(declared));
+      expect(outcome.served?.wikiSnapshotId, declared).not.toBe(wikiSnapshotA);
+      expect(outcome.served?.annotationIds ?? [], declared).not.toContain("annot-a");
+      expectRootMismatchRefusal(outcome, "wiki.dataDbPath");
+    }
+    expect(storedRecord(wikiDbPath())).toEqual(recorded);
+  });
+
+  it("a 0.3.2 wiki database (schema v5, no root_canonical column) migrates on open and its record is upgraded and marked", () => {
+    const legacySpelling = `${rootA}${path.sep}`;
+    writeLegacy032Database(wikiDbPath(), legacySpelling);
+    expect(userVersion(wikiDbPath())).toBe(5);
+
+    let wikiSnapshotA: string;
+    const first = open(wikiConfig(rootA));
+    try {
+      wikiSnapshotA = publishWikiWithAnnotation(first.wikiStore as SqliteWikiStore);
+    } finally {
+      first.close();
+    }
+    const canonicalA = canonicalRoot(rootA);
+    expect(userVersion(wikiDbPath())).toBe(6);
+    expect(storedRecord(wikiDbPath())).toEqual({ rootPath: canonicalA, rootCanonical: 1 });
+
+    const reopened = tryOpen(wikiConfig(rootA));
+    expect(reopened.error).toBeUndefined();
+    expect(reopened.served?.wikiSnapshotId).toBe(wikiSnapshotA);
+
+    replaceWithLinkTo(rootA, rootB);
+    const outcome = tryOpen(wikiConfig(rootA));
+    expect(outcome.served?.annotationIds ?? []).not.toContain("annot-a");
+    expectRootMismatchRefusal(outcome, "wiki.dataDbPath");
+    expect(storedRecord(wikiDbPath())).toEqual({ rootPath: canonicalA, rootCanonical: 1 });
   });
 });

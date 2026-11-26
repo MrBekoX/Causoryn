@@ -625,10 +625,37 @@ describe("InMemoryGraphRepository.updateWorkspaceRootPath — CAU-03 legacy root
   it("replaces the recorded root only while it still holds the expected value", () => {
     const repo = makeRepo();
     expect(repo.updateWorkspaceRootPath(WS, "D:/fixture/orders", "D:/real/orders")).toBe(true);
-    expect(repo.getWorkspace(WS)).toEqual({ id: WS, rootPath: "D:/real/orders", createdAt: CREATED_AT });
+    // The upgrade also marks the record as holding a canonical root.
+    expect(repo.getWorkspace(WS)).toEqual({ id: WS, rootPath: "D:/real/orders", createdAt: CREATED_AT, rootCanonical: true });
     // A stale expectation (another writer changed the row) changes nothing.
     expect(repo.updateWorkspaceRootPath(WS, "D:/fixture/orders", "D:/elsewhere")).toBe(false);
     expect(repo.getWorkspace(WS)?.rootPath).toBe("D:/real/orders");
+  });
+
+  it("upgrades a record once: a record already marked canonical is never rewritten, even when its root matches", () => {
+    const repo = makeRepo();
+    expect(repo.updateWorkspaceRootPath(WS, "D:/fixture/orders", "D:/fixture/orders")).toBe(true);
+    expect(repo.getWorkspace(WS)?.rootCanonical).toBe(true);
+    expect(repo.updateWorkspaceRootPath(WS, "D:/fixture/orders", "D:/elsewhere")).toBe(false);
+    expect(repo.getWorkspace(WS)?.rootPath).toBe("D:/fixture/orders");
+
+    repo.registerWorkspace({ id: "ws_marked", rootPath: "D:/fixture/marked", createdAt: CREATED_AT, rootCanonical: true });
+    expect(repo.getWorkspace("ws_marked")).toEqual({
+      id: "ws_marked",
+      rootPath: "D:/fixture/marked",
+      createdAt: CREATED_AT,
+      rootCanonical: true,
+    });
+    expect(repo.updateWorkspaceRootPath("ws_marked", "D:/fixture/marked", "D:/elsewhere")).toBe(false);
+    expect(repo.getWorkspace("ws_marked")?.rootPath).toBe("D:/fixture/marked");
+  });
+
+  it("a record registered with rootCanonical: false carries no mark", () => {
+    const repo = makeRepo();
+    repo.registerWorkspace({ id: "ws_unmarked", rootPath: "D:/fixture/unmarked", createdAt: CREATED_AT, rootCanonical: false });
+    const record = repo.getWorkspace("ws_unmarked");
+    expect(record).toEqual({ id: "ws_unmarked", rootPath: "D:/fixture/unmarked", createdAt: CREATED_AT });
+    expect(record !== undefined && Object.hasOwn(record, "rootCanonical")).toBe(false);
   });
 
   it("reports an unknown id as not updated and rejects empty fields", () => {
