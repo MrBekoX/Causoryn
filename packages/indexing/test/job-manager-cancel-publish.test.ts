@@ -175,6 +175,33 @@ describe("IndexService isCancelled (the job side of the cancel flag)", { timeout
     ]);
   });
 
+  it("a cancel that lands between the file-facts check and its write transaction writes no file facts", async () => {
+    const dataDir = makeTempDir("causoryn-cancel-facts-");
+    const dbPath = path.join(dataDir, "index.sqlite");
+    const repository = new SqliteGraphRepository(dbPath);
+    cleanups.push(() => {
+      repository.close();
+    });
+    // The job manager sets the flag at any point of the job's synchronous tail;
+    // here it lands right after the first cancel check (the one before the
+    // file facts are prepared), before their write transaction starts.
+    let checks = 0;
+    const service = new IndexService({
+      workspaceId: WS,
+      policy: WorkspaceAccessPolicy.create({ allowRoots: [TS_FIXTURE_ROOT] }),
+      repository,
+      clock,
+      limits: { maxFiles: 1_000 },
+      isCancelled: () => {
+        checks += 1;
+        return checks >= 2;
+      },
+    });
+    await expect(service.runIndexAsync(TS_FIXTURE_ROOT)).rejects.toThrow(/cancelled before persisting file facts/);
+    expect(repository.getLatestPublished(WS)).toBeUndefined();
+    expect(storeState(dbPath).fileFacts).toBe(0);
+  });
+
   it("a run that is never cancelled publishes as before (control)", async () => {
     const dataDir = makeTempDir("causoryn-cancel-check-control-");
     const dbPath = path.join(dataDir, "index.sqlite");

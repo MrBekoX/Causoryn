@@ -2759,20 +2759,36 @@ export class IndexService {
         }
       }
     }
-    const existingFacts = store.listFileFacts(this.workspaceId);
-    this.withTransaction(() => {
-      if (toUpsert.length > 0) {
-        store.upsertFileFacts(toUpsert);
+    const write = (): void => {
+      // With a cancel check (an index job worker) this runs in a BEGIN IMMEDIATE
+      // transaction and checks again inside it, as publishUnlessCancelled does:
+      // the job manager sets the flag before it releases the build lease, and
+      // the release needs the write lock, so a job cancelled before it holds the
+      // lock writes nothing.
+      if (this.isCancelled !== undefined) {
+        this.throwIfCancelled("persisting file facts");
       }
-      for (const existing of existingFacts) {
-        if (
-          !currentLanguagePaths.has(existing.relativePath) ||
-          diagnosticPaths.has(existing.relativePath)
-        ) {
-          store.deleteFileFact(this.workspaceId, existing.relativePath);
+      const existingFacts = store.listFileFacts(this.workspaceId);
+      this.withTransaction(() => {
+        if (toUpsert.length > 0) {
+          store.upsertFileFacts(toUpsert);
         }
-      }
-    });
+        for (const existing of existingFacts) {
+          if (
+            !currentLanguagePaths.has(existing.relativePath) ||
+            diagnosticPaths.has(existing.relativePath)
+          ) {
+            store.deleteFileFact(this.workspaceId, existing.relativePath);
+          }
+        }
+      });
+    };
+    const leaseStore = this.repository as GraphRepository & Partial<BuildLeaseStore>;
+    if (this.isCancelled !== undefined && typeof leaseStore.withImmediateTransaction === "function") {
+      leaseStore.withImmediateTransaction(write);
+      return;
+    }
+    write();
   }
 
   /**
