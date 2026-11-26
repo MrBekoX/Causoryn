@@ -77,7 +77,7 @@ Hard dependency spine: **Foundation → Deep mapping → Architecture intelligen
 | 9 | **Living Wiki surface** | **Partial** — FTS5 search, CAS overlay and incremental page selection active; `wiki_search` declares `kinds` / `scope` / `language` / `revision` / `resolution` but rejects them | Accept those filters, add `WIKI_NOTE_CONFLICT` to MCP error guidance together with a consented note-writing flow, and narrow incremental link/FTS rewrites |
 | 10 | **Interactive portal and visualizer browser acceptance** | **Partial** — DOM and security tests and the SHA-256 CSP verified | Real-browser acceptance of the offline interactions |
 | 11 | **Bare monorepo bundle default-lib scope** | **Partial** — `packages/causoryn` bundles `dist/typescript-lib/lib*.d.ts` and reaches `state: "ready"`; `packages/mcp-server/dist/` does not | Stage default-lib `.d.ts` files in the bare bundle or document the boundary as permanent |
-| 12 | **Rate-limit / concurrency budget** | **Open** — size, depth and timeout ceilings enforced; no request concurrency limiter | Add concurrent-call and resource-budget enforcement across MCP requests |
+| 12 | **Rate-limit / concurrency budget** | **Open** — size, depth and timeout ceilings enforced; no general request concurrency limiter (the history tools' fresh commit analyses have their own concurrency limit and byte/time budgets) | Add concurrent-call and resource-budget enforcement across MCP requests |
 
 ### Known 0.3.0 boundaries outside the gate list
 

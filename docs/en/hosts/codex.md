@@ -62,7 +62,7 @@ startup_timeout_sec = 30
 - **`startup_timeout_sec = 30`** gives cold Node.js + SQLite start-up enough headroom. A value of `30` or more that you set is kept as written; a lower or unusable value is raised to `30`, and the setup output says so.
 - **Absolute Node binary:** `command` is the `process.execPath` of the Node.js that ran `setup` (Node.js ≥ 24 is required).
 - **Persistent runtime:** when `setup` runs from an `_npx` cache or the OS temp directory, it first copies the package to `~/.causoryn/runtime` and points `args[0]` there, so the registration survives `npx` cache eviction.
-- **Skills:** the five canonical skills `causoryn`, `map-system`, `preflight-change`, `verify-change`, and `architecture-blueprint` are written to `~/.agents/skills/<name>/SKILL.md` (in your home directory, not under `CODEX_HOME`). Pass `--no-skill` to skip them. `architecture-blueprint` guides Codex in drafting optional `annotations` from MCP evidence; to export without annotations, call `causoryn_export_documentation` directly ([architecture export contract](../tool-contracts.md)). Skills are guidance text for the host model: a tool a skill mentions can only be called if the active tool profile registers it.
+- **Skills:** the five canonical skills `causoryn`, `map-system`, `preflight-change`, `verify-change`, and `architecture-blueprint` are written to `~/.agents/skills/<name>/SKILL.md` (in your home directory, not under `CODEX_HOME`). Pass `--no-skill` to skip them. `architecture-blueprint` guides Codex in drafting optional `annotations` from MCP evidence; to export without annotations, call `causoryn_export_documentation` directly ([architecture export contract](../tool-contracts.md)). Skills are guidance text for the host model: a tool a skill mentions can only be called if the active tool profile registers it. An existing `SKILL.md` that setup cannot prove Causoryn installed (your own skill with the same name, or a Causoryn skill you edited) is kept and reported as `skipped skill …`; the install record is `~/.causoryn/installed-skills.json` ([CLI & Configuration](../cli-and-configuration.md)).
 
 ### How `setup` behaves (all hosts)
 
@@ -72,7 +72,7 @@ startup_timeout_sec = 30
 - **Atomic, idempotent writes:** temporary file + rename, existing file mode kept (new files `0600`); an identical second run reports `noop`.
 - **Fail-closed parsing:** malformed TOML (unclosed strings, arrays, or tables, a line without `=`, an empty table header, or a duplicated table header such as two `[mcp_servers.causoryn]` tables) stops the run with `cli/malformed-toml` before anything is written. Symbolic-link targets are refused.
 - **Exit codes:** `setup` exits `0` on success, `1` when no host was detected and none was named, and `2` on any error.
-- **Uninstall:** removes `[mcp_servers.causoryn]` and every `[mcp_servers.causoryn.*]` sub-table, the five skill directories, and `~/.causoryn/runtime` when no other host config still references it.
+- **Uninstall:** removes `[mcp_servers.causoryn]` and every `[mcp_servers.causoryn.*]` sub-table, the Causoryn skills whose ownership is proven (an edited or foreign `SKILL.md` is kept and reported), and `~/.causoryn/runtime` when no other host config still references it.
 
 ### `doctor` checks
 
@@ -252,6 +252,9 @@ Every Causoryn entrypoint writes **only MCP JSON-RPC 2.0 frames** to `stdout`; a
 | `setup` stops with `cli/malformed-toml` | `config.toml` has a syntax problem or a duplicated table header. Fix it or restore `config.toml.causoryn.backup`; nothing was written. |
 | Codex reports a start-up timeout | Cold start exceeded the configured timeout. Keep `startup_timeout_sec = 30` (or higher) on the entry. |
 | `doctor` shows `ERROR` for the entry script | `~/.causoryn/runtime` or the original install was removed. Re-run `npx causoryn@0.3.2 setup --client codex --yes`. |
+| `setup` reports `skipped skill <name>: … was not created by Causoryn` (or `… was changed after Causoryn installed it`) | A `SKILL.md` with a Causoryn skill name exists that setup cannot prove it installed: your own skill, or a Causoryn skill you edited. It was kept. Leave it, or move it away and re-run setup to install Causoryn's version. |
+| `setup` stops with `Refusing to use <dir>: it is writable by other users` or `… it is owned by another user` | On POSIX an existing `~/.causoryn` must belong to you and must not be writable by group or others, because it holds the staged runtime and the skill install record. Run `chmod go-w ~/.causoryn`, or remove the directory or give it to your user, then re-run setup; nothing was changed. |
+| `setup` stops with `<file> changed while setup was running, so it was left as it is` | A skill file that setup planned to replace or remove changed during the run (for example while the confirmation prompt was open), and it was left as it is. Run setup again. |
 | Server exits at start with "Unsupported Node.js version" | Node.js < 24. Install Node.js 24+ and re-run `setup`. |
 | Extra `args` disappeared | Re-running `setup` regenerates the argument list and keeps only your `--tool-profile` and `--output-schema` arguments (plus `[mcp_servers.causoryn.env]` and other keys of the table). Re-apply other arguments, or use `setup --tool-profile <list>` for the profile. |
 | Workspace tools return `WORKSPACE_NOT_AUTHORIZED` | The start directory was refused by `--allow-cwd` and no usable root was reported, or the bare bundle has no `allowRoots`. See section 4 or 5.1. |
