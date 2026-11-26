@@ -501,6 +501,8 @@ describe.skipIf(!dotnetAvailable)("roslyn-worker projects: request validation", 
     // The valid using of the same project still applies (Console resolves).
     expect(callEdge(response, "App.Runner.Run", "System.Console.WriteLine")?.resolution).toBe("verified");
     expect(JSON.stringify(response?.edges ?? [])).not.toContain("Injected");
+    // Nor does it become a declaration: no node carries the injected class.
+    expect(JSON.stringify(response?.nodes ?? [])).not.toContain("Injected");
   });
 
   it("several invalid global usings of one project give one detailed warning plus a count (bounded warnings)", () => {
