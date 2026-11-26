@@ -277,6 +277,29 @@ export interface AncestorIgnoreMatchOptions {
   readonly budget: IgnoreMatchBudget;
   /** Folds letter case of patterns and path; defaults to the platform rule (Windows only). */
   readonly caseInsensitive?: boolean;
+  /**
+   * Folds each path segment before matching, in place of plain lower-casing
+   * (implies case-insensitive pattern compilation). See {@link lookAlikeFold}.
+   */
+  readonly foldSegment?: (segment: string) => string;
+}
+
+/**
+ * Folds a path segment to the spelling a case-insensitive filesystem may treat it
+ * as: compatibility decomposition (NFKD), combining marks dropped, and each
+ * character upper-cased then lower-cased. NTFS compares names by upper-casing, so
+ * U+0131 (dotless i) and U+017F (long s) match "i" and "s" there; JavaScript
+ * lower-casing alone keeps them apart. Used only for the secret / VCS deny rules,
+ * where folding too much denies a look-alike name (fail closed) and folding too
+ * little would allow one.
+ */
+export function lookAlikeFold(segment: string): string {
+  let folded = "";
+  for (const ch of segment.normalize("NFKD")) {
+    if (/\p{M}/u.test(ch)) continue;
+    folded += ch.toUpperCase().toLowerCase();
+  }
+  return folded;
 }
 
 /**
@@ -298,7 +321,8 @@ export function findFirstAncestorIgnoreMatch(
   patterns: readonly string[],
   options: AncestorIgnoreMatchOptions,
 ): AncestorIgnoreMatch {
-  const caseInsensitive = options.caseInsensitive ?? IS_WIN;
+  const foldSegment = options.foldSegment;
+  const caseInsensitive = foldSegment !== undefined || (options.caseInsensitive ?? IS_WIN);
   const budget = options.budget;
   // The policy splits on `/`; the single-pattern matcher also treats `\` as a
   // separator inside each prefix. Tokens follow the matcher, checkpoints (the
@@ -306,7 +330,7 @@ export function findFirstAncestorIgnoreMatch(
   const tokens: string[] = [];
   const checkpoints: number[] = [];
   for (const segment of posixRelative.split("/")) {
-    const folded = caseInsensitive ? segment.toLowerCase() : segment;
+    const folded = foldSegment !== undefined ? foldSegment(segment) : caseInsensitive ? segment.toLowerCase() : segment;
     for (const token of toPosix(folded).split("/")) {
       tokens.push(token);
     }

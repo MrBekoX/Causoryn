@@ -1,8 +1,9 @@
-import { realpathSync, statSync } from "node:fs";
+import { lstatSync, realpathSync, statSync } from "node:fs";
 import path from "node:path";
 
 import {
   findFirstAncestorIgnoreMatch,
+  lookAlikeFold,
   IGNORE_MATCH_WORK_BUDGET,
   type IgnoreMatchBudget,
 } from "./ignore-matcher.js";
@@ -58,13 +59,42 @@ const CHECK_NATIVE_NAME_ALIASES = IS_WIN || process.platform === "darwin";
 const ROOT_CACHE_CAP = 256;
 
 /**
- * Default secret / VCS deny rules (TŞ §20) that are matched letter-case
- * insensitively on every platform when they are configured (Claude Security F44).
- * On a case-insensitive Linux volume (WSL drvfs, ext4/f2fs casefold) `.GIT/config`
- * opens `.git/config`, and neither `fs.realpathSync` nor `realpathSync.native`
- * reports the on-disk spelling there. Other patterns keep the platform's case rule.
+ * Default secret / VCS deny rules (TŞ §20) that are matched again, when they are
+ * configured, with each segment folded by {@link lookAlikeFold} on every platform
+ * (Claude Security F44). On a case-insensitive volume (WSL drvfs, ext4/f2fs
+ * casefold, NTFS) `.GIT/config` opens `.git/config`, and so does `.gıt/config`
+ * on NTFS, which upper-cases U+0131 to "I"; neither `fs.realpathSync` nor
+ * `realpathSync.native` reports the on-disk spelling on drvfs. Other patterns keep
+ * the platform's case rule.
  */
 const CASE_FOLDED_DENY_PATTERNS: ReadonlySet<string> = new Set(["**/.git/**", "**/.env*", "**/*.pem"]);
+
+/**
+ * True when an existing component of `lexicalRoot` below `trustedStart` is a
+ * symbolic link or junction. Purely lstat-based and stops at the first missing
+ * component (nothing below it exists to be a link).
+ */
+function crossesLink(lexicalRoot: string, trustedStart: string): boolean {
+  const relative = path.relative(trustedStart, lexicalRoot);
+  if (relative === "" || relative.startsWith("..") || path.isAbsolute(relative)) {
+    return false;
+  }
+  let current = trustedStart;
+  for (const part of relative.split(path.sep)) {
+    if (part.length === 0) continue;
+    current = path.join(current, part);
+    let entry;
+    try {
+      entry = lstatSync(current);
+    } catch {
+      return false;
+    }
+    if (entry.isSymbolicLink()) {
+      return true;
+    }
+  }
+  return false;
+}
 
 /**
  * The one reason given for every root outside the declared allowRoots, whatever the
@@ -207,9 +237,7 @@ export class WorkspaceAccessPolicy {
     });
     this.declaredRoots = config.allowRoots.map((root) => path.resolve(root));
     this.ignorePatterns = effectiveIgnorePatterns(config);
-    this.caseFoldedPatterns = IS_WIN
-      ? []
-      : this.ignorePatterns.filter((pattern) => CASE_FOLDED_DENY_PATTERNS.has(pattern));
+    this.caseFoldedPatterns = this.ignorePatterns.filter((pattern) => CASE_FOLDED_DENY_PATTERNS.has(pattern));
   }
 
   /** Şemayı doğrulayıp politikayı kurar; geçersiz config → POLICY_INVALID hatası. */
@@ -269,6 +297,12 @@ export class WorkspaceAccessPolicy {
     try {
       canonical = realpathSync(lexicalRoot);
     } catch {
+      // A root below a link that cannot be resolved (a dangling link planted in
+      // the repository) gets the same answer as any root outside the allowRoots,
+      // so the reason never tells whether a link target outside them exists.
+      if (crossesLink(lexicalRoot, trustedStart)) {
+        return deny("workspace/root-not-authorized", ROOT_NOT_DECLARED_REASON);
+      }
       return deny(
         "workspace/root-not-authorized",
         "root could not be resolved to a real path (missing or inaccessible); an unverifiable root cannot be trusted",
@@ -518,7 +552,7 @@ export class WorkspaceAccessPolicy {
     }
     return findFirstAncestorIgnoreMatch(posixRelative, lastIsDirectory, this.caseFoldedPatterns, {
       budget,
-      caseInsensitive: true,
+      foldSegment: lookAlikeFold,
     });
   }
 
