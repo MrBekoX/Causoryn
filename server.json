@@ -23,6 +23,10 @@
         {
           "type": "positional",
           "value": "--ignore-scripts"
+        },
+        {
+          "type": "positional",
+          "value": "--prefix=~/"
         }
       ],
       "packageArguments": [

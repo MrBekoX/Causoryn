@@ -204,11 +204,18 @@ function codexArgsWith(bootstrap: string): string[] {
 /**
  * The MCP Registry `server.json` has no working-directory or plugin-root field
  * and must use `npx` for an npm package, and the server binds MCP roots only
- * when `--allow-cwd` is set. This exact argument list is a documented residual.
+ * when `--allow-cwd` is set. npm's prefix is pinned to the user's home
+ * directory (`--prefix=~/`, expanded by npm itself), so the project's
+ * `.npmrc` and `node_modules` are not read (F20,
+ * tests/registry-npx-context.test.ts); npx still runs in the client's working
+ * directory. This exact argument list is a documented residual.
  */
 const REGISTRY_RESIDUAL = {
   file: "server.json",
-  runtimeArguments: [{ type: "positional", value: "--ignore-scripts" }],
+  runtimeArguments: [
+    { type: "positional", value: "--ignore-scripts" },
+    { type: "positional", value: "--prefix=~/" },
+  ],
   packageArguments: [
     { type: "positional", value: "mcp" },
     { type: "positional", value: "--allow-cwd" },

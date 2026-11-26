@@ -649,8 +649,11 @@ describe("2. Repo-root & packages/causoryn 4-host manifests (0.3.2 parity + zero
     expect(serverPackages).toHaveLength(1);
     expect(serverPackages[0]?.["version"]).toBe("0.3.2");
     expect(serverPackages[0]?.["registryBaseUrl"]).toBe("https://registry.npmjs.org");
+    // F20: npm's prefix is pinned to the home directory, so the project's
+    // .npmrc and node_modules are not read (tests/registry-npx-context.test.ts).
     expect(serverPackages[0]?.["runtimeArguments"]).toEqual([
       { type: "positional", value: "--ignore-scripts" },
+      { type: "positional", value: "--prefix=~/" },
     ]);
     const pkgArgs = serverPackages[0]?.["packageArguments"] as Array<Record<string, unknown>>;
     expect(pkgArgs).toEqual([
