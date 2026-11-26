@@ -9,7 +9,9 @@
  *
  * The in-memory file system resolves paths the way the kernel does: links in
  * the middle of a path are followed, ".." applies to the directory reached so
- * far, lstat and readlink do not follow the last component.
+ * far, lstat and readlink do not follow the last component. readdir lists the
+ * entries with their lstat types; a name that is not valid UTF-8 is listed as
+ * its bytes with encoding "buffer" and lossily decoded otherwise, as Node does.
  */
 import path from "node:path";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
@@ -25,10 +27,12 @@ const memfs = vi.hoisted(() => {
   interface Entry {
     readonly kind: "dir" | "file" | "link";
     readonly ino: number;
-    /** File content or link text. */
-    readonly data: string;
+    /** File content (text or bytes) or link text. */
+    readonly data: string | Buffer;
   }
   const volume = new Map<string, Entry>();
+  /** Names of the entries in each directory (readdir). */
+  const children = new Map<string, Set<string>>();
   let nextIno = 1;
 
   const parentOf = (p: string): string => {
@@ -39,8 +43,14 @@ const memfs = vi.hoisted(() => {
   const errno = (code: string, p: string): NodeJS.ErrnoException =>
     Object.assign(new Error(`${code}: ${p}`), { code });
 
-  const put = (p: string, kind: Entry["kind"], data = ""): void => {
+  const put = (p: string, kind: Entry["kind"], data: string | Buffer = ""): void => {
     volume.set(p, { kind, ino: nextIno++, data });
+    if (p !== "/") {
+      const parent = parentOf(p);
+      const names = children.get(parent) ?? new Set<string>();
+      names.add(p.slice(parent === "/" ? 1 : parent.length + 1));
+      children.set(parent, names);
+    }
   };
   const dir = (p: string): void => {
     const missing: string[] = [];
@@ -50,13 +60,30 @@ const memfs = vi.hoisted(() => {
     }
     for (const at of missing.reverse()) put(at, "dir");
   };
-  const file = (p: string, content: string): void => {
+  const file = (p: string, content: string | Buffer): void => {
     dir(parentOf(p));
     put(p, "file", content);
   };
   const link = (p: string, target: string): void => {
     dir(parentOf(p));
     put(p, "link", target);
+  };
+  /**
+   * Entry names that are bytes, not valid UTF-8 (POSIX allows any byte but
+   * "/" and NUL). Kept under a private key; readdir reports them the way Node
+   * does on POSIX: as the bytes with encoding "buffer", as their lossy UTF-8
+   * decoding (U+FFFD, a name that does not exist) otherwise.
+   */
+  const rawNames = new Map<string, Buffer>();
+  const rawLink = (parent: string, name: Buffer, target: string): void => {
+    const key = `\u0000raw:${name.toString("hex")}`;
+    rawNames.set(key, name);
+    link(childOf(parent, key), target);
+  };
+  const clear = (): void => {
+    volume.clear();
+    children.clear();
+    rawNames.clear();
   };
 
   interface Found {
@@ -84,7 +111,8 @@ const memfs = vi.hoisted(() => {
       if (entry.kind === "link" && (!last || followLast)) {
         state.hops += 1;
         if (state.hops > 40) throw errno("ELOOP", original);
-        const target = walk(entry.data.startsWith("/") ? "/" : current, entry.data, true, state, original);
+        const text = String(entry.data);
+        const target = walk(text.startsWith("/") ? "/" : current, text, true, state, original);
         if (last) return target;
         if (target.entry === undefined) throw errno("ENOENT", original);
         if (target.entry.kind !== "dir") throw errno("ENOTDIR", original);
@@ -120,13 +148,39 @@ const memfs = vi.hoisted(() => {
     readlink: async (p: unknown) => {
       const { entry } = existing(String(p), false);
       if (entry.kind !== "link") throw errno("EINVAL", String(p));
-      return entry.data;
+      return String(entry.data);
     },
     realpath: async (p: unknown) => existing(String(p), true).at,
+    /** Follows a link at the last component, like readdir(3); entry types as lstat reports them. */
+    readdir: async (p: unknown, options?: { encoding?: string }) => {
+      const found = existing(String(p), true);
+      if (found.entry.kind !== "dir") throw errno("ENOTDIR", String(p));
+      return [...(children.get(found.at) ?? [])].sort().map((key) => {
+        const kind = volume.get(childOf(found.at, key))!.kind;
+        const raw = rawNames.get(key);
+        const name =
+          options?.encoding === "buffer"
+            ? (raw ?? Buffer.from(key, "utf8"))
+            : raw === undefined
+              ? key
+              : raw.toString("utf8");
+        return {
+          name,
+          parentPath: String(p),
+          isFile: () => kind === "file",
+          isDirectory: () => kind === "dir",
+          isSymbolicLink: () => kind === "link",
+          isFIFO: () => false,
+          isSocket: () => false,
+          isBlockDevice: () => false,
+          isCharacterDevice: () => false,
+        };
+      });
+    },
     open: async (p: unknown) => {
       const { entry } = existing(String(p), true);
       if (entry.kind === "dir") throw errno("EISDIR", String(p));
-      const bytes = Buffer.from(entry.data, "utf8");
+      const bytes = typeof entry.data === "string" ? Buffer.from(entry.data, "utf8") : entry.data;
       let offset = 0;
       return {
         stat: async (options?: { bigint?: boolean }) => stats(entry, options?.bigint),
@@ -140,7 +194,7 @@ const memfs = vi.hoisted(() => {
       };
     },
   };
-  return { volume, dir, file, link, fs };
+  return { volume, clear, dir, file, link, rawLink, fs };
 });
 
 vi.mock("node:fs/promises", () => ({ ...memfs.fs, default: memfs.fs }));
@@ -158,7 +212,7 @@ afterAll(() => {
   Object.defineProperty(process, "platform", realPlatform);
 });
 beforeEach(() => {
-  memfs.volume.clear();
+  memfs.clear();
 });
 
 /** A git directory at `gitDir` (HEAD, objects/info). */
@@ -250,5 +304,84 @@ describe("POSIX semantics: refusals name no resolved location outside the root",
     expect(error.message).toContain('"in/l/x.cfg"');
     expectNotNamed(error.message, "/w/outside");
     expect(error.message).not.toContain("causoryn-unused-share");
+  });
+});
+
+describe("POSIX semantics: an alternates line keeps its CR, as git reads it (F40)", () => {
+  it("refuses 'evil\\r' where objects/evil<CR> links into another object store", async () => {
+    gitDirectoryAt("/w/root/.git");
+    gitDirectoryAt("/w/other/.git");
+    memfs.link("/w/root/.git/objects/evil\r", "/w/other/.git/objects");
+    memfs.file("/w/root/.git/objects/info/alternates", "evil\r\n");
+
+    const error = await rejection(() => layoutModule.validateRepositoryLayout("/w/root", "rev-parse"));
+
+    expect(error.code).toBe("compare/repository-refused");
+    expect(error.message).toContain("objects/info/alternates");
+    expectNotNamed(error.message, "/w/other");
+  });
+});
+
+describe("POSIX semantics: links below refs/ and at fixed git directory entries stay in scope (F7)", () => {
+  it("refuses a loose ref that is a relative symbolic link to another repository's ref", async () => {
+    gitDirectoryAt("/w/root/.git");
+    memfs.file("/w/other/.git/refs/heads/main", "0123456789012345678901234567890123456789\n");
+    memfs.link("/w/root/.git/refs/heads/x", "../../../../other/.git/refs/heads/main");
+
+    const error = await rejection(() => layoutModule.validateRepositoryLayout("/w/root", "rev-parse"));
+
+    expect(error.code).toBe("compare/repository-refused");
+    expect(error.message).toContain("outside the repository");
+    expectNotNamed(error.message, "/w/other");
+  });
+
+  it("refuses a link outside the repository below a ref directory that links inside the root", async () => {
+    gitDirectoryAt("/w/root/.git");
+    memfs.file("/w/outside/secret", "TOP-SECRET-LINE\n");
+    memfs.link("/w/root/tagstore/v1", "/w/outside/secret");
+    memfs.link("/w/root/.git/refs/tags", "/w/root/tagstore");
+
+    const error = await rejection(() => layoutModule.validateRepositoryLayout("/w/root", "rev-parse"));
+
+    expect(error.code).toBe("compare/repository-refused");
+    expect(error.message).toContain("outside the repository");
+    expectNotNamed(error.message, "/w/outside");
+  });
+
+  it("accepts HEAD as the symbolic link 'refs/heads/main' and a ref directory that links to itself", async () => {
+    gitDirectoryAt("/w/root/.git");
+    memfs.volume.delete("/w/root/.git/HEAD");
+    memfs.file("/w/root/.git/refs/heads/main", "0123456789012345678901234567890123456789\n");
+    memfs.link("/w/root/.git/HEAD", "refs/heads/main");
+    memfs.link("/w/root/.git/refs/heads/loop", ".");
+
+    const layout = await layoutModule.validateRepositoryLayout("/w/root", "rev-parse");
+
+    expect(layout.kind).toBe("git-directory");
+  });
+
+  it("refuses a link below refs/ whose name is not valid UTF-8 (checked by its bytes, not a U+FFFD name)", async () => {
+    gitDirectoryAt("/w/root/.git");
+    memfs.file("/w/outside/secret", "TOP-SECRET-LINE\n");
+    // git reads the byte name, e.g. through HEAD's "ref: refs/heads/<0xff>".
+    memfs.rawLink("/w/root/.git/refs/heads", Buffer.from([0xff]), "/w/outside/secret");
+
+    const error = await rejection(() => layoutModule.validateRepositoryLayout("/w/root", "rev-parse"));
+
+    expect(error.code).toBe("compare/repository-refused");
+    expect(error.message).toContain("UTF-8");
+    expectNotNamed(error.message, "/w/outside");
+  });
+
+  it("counts every directory listing against the file system budget", async () => {
+    gitDirectoryAt("/w/root/.git");
+    for (let index = 0; index < layoutModule.MAX_LAYOUT_FS_OPERATIONS + 100; index += 1) {
+      memfs.dir(`/w/root/.git/refs/heads/d${String(index)}`);
+    }
+
+    const error = await rejection(() => layoutModule.validateRepositoryLayout("/w/root", "rev-parse"));
+
+    expect(error.code).toBe("compare/repository-refused");
+    expect(error.message).toContain("file system operations");
   });
 });

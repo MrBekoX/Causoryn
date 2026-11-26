@@ -25,9 +25,32 @@
  * - an alternates entry (nested alternates included) whose object directory
  *   does not resolve inside the analyzed root, the git directory or the
  *   common directory: another object store on the machine is never read,
+ * - a symbolic link directly in the git or common directory, or anywhere
+ *   below refs/, info/, reftable/ or an object directory (loose objects,
+ *   pack/, info/), that leads outside the analyzed root, the git directory
+ *   and the common directory: git follows such links when it reads refs,
+ *   grafts, shallow, packed-refs or objects, and echoes graft, shallow and
+ *   packed-refs lines in its errors (a link, or a directory in those trees,
+ *   whose name is not valid UTF-8 is refused too: it cannot be checked by
+ *   the name git uses),
  * - a metadata file that is not a regular file (FIFO, socket, device): it is
  *   judged on its descriptor after a non-blocking open and never read, so it
- *   cannot block the read before git's timeout starts.
+ *   cannot block the read before git's timeout starts,
+ * - metadata whose path text git would read differently than this check can:
+ *   a gitdir pointer or commondir with a NUL, CR or LF left after git strips
+ *   the trailing CR/LF, an alternates entry with a CR or LF, a path (pointer,
+ *   commondir, alternates entry, include path, core.worktree) whose bytes are
+ *   not valid UTF-8 (git on POSIX opens the bytes, Git for Windows maps them
+ *   to other characters), and a `%(prefix)/` include whose rest is relative
+ *   (git resolves it against its own installation prefix).
+ *
+ * Metadata is parsed from its bytes as git parses it: pointer files lose only
+ * trailing CR/LF (setup.c), alternates entries are split on LF only, a quoted
+ * entry is unquoted to bytes and git's one skipped byte after its closing
+ * quote is skipped here too, so the rest of the line is checked as the next
+ * entry (odb.c parse_alternates, quote.c unquote_c_style), and a
+ * `%(prefix)/<absolute path>` include is checked at <absolute path>, the file
+ * git opens (path.c interpolate_path, exec-cmd.c system_path).
  *
  * Upward discovery is blocked separately by git-read (GIT_CEILING_DIRECTORIES
  * set to the parent of the root); a root without a `.git` entry is reported
@@ -51,14 +74,14 @@
  * there, also at the end of a directory name).
  *
  * The work is bounded per call: at most MAX_LAYOUT_FS_OPERATIONS file system
- * operations (lstat, readlink, realpath, open), and an identically spelled
- * path is resolved once; metadata that would need more is refused.
+ * operations (lstat, readlink, realpath, open, readdir), and an identically
+ * spelled path is resolved once; metadata that would need more is refused.
  *
  * Refusal messages name the metadata text as written and paths inside the
  * analyzed root, never a resolved location outside it.
  */
-import { constants as fsConstants } from "node:fs";
-import { lstat, open, readlink, realpath } from "node:fs/promises";
+import { constants as fsConstants, type Dirent } from "node:fs";
+import { lstat, open, readdir, readlink, realpath } from "node:fs/promises";
 import path from "node:path";
 
 import { GraphRepositoryError } from "./errors.js";
@@ -89,13 +112,15 @@ const MAX_ALTERNATE_DEPTH = 5;
 const MAX_INCLUDE_DEPTH = 10;
 const MAX_SCANNED_FILES = 64;
 /**
- * Upper bound on the file system operations (lstat, readlink, realpath, open)
- * of one validateRepositoryLayout call. A checkout, linked worktree or
- * submodule with a few config includes and alternates needs well under a
- * hundred; 64 scanned files whose paths are each walked both ways stay in the
- * low thousands. Metadata that would need more (thousands of include or
- * alternates entries, a path text with thousands of components) is refused:
- * this check runs before git starts, so the git timeout does not bound it.
+ * Upper bound on the file system operations (lstat, readlink, realpath, open,
+ * readdir) of one validateRepositoryLayout call. A checkout, linked worktree
+ * or submodule with a few config includes and alternates needs well under a
+ * hundred, plus one directory listing per ref directory and per loose object
+ * directory (at most 256 of those); 64 scanned files whose paths are each
+ * walked both ways stay in the low thousands. Metadata that would need more
+ * (thousands of include or alternates entries or ref directories, a path text
+ * with thousands of components) is refused: this check runs before git
+ * starts, so the git timeout does not bound it.
  */
 export const MAX_LAYOUT_FS_OPERATIONS = 10_000;
 const READ_CHUNK_BYTES = 64 * 1024;
@@ -118,6 +143,54 @@ const COMMON_DIR_ENTRIES = [
   "info",
   "info/grafts",
 ] as const;
+
+/**
+ * Directories below the git and common directory whose whole tree git reads
+ * from (loose refs, grafts, reftable tables); links anywhere below them must
+ * stay in scope. Object directories are scanned the same way, at their real
+ * location.
+ */
+const LINK_SCANNED_TREES = ["refs", "info", "reftable"] as const;
+
+/** git's `%(prefix)/` include prefix (path.c interpolate_path). */
+const PREFIX_INCLUDE = "%(prefix)/";
+
+const NUL = 0x00;
+const LF = 0x0a;
+const CR = 0x0d;
+const QUOTE = 0x22;
+const HASH = 0x23;
+const BACKSLASH = 0x5c;
+
+/** Escapes of git's unquote_c_style (quote.c) and the byte each stands for. */
+const C_ESCAPES: ReadonlyMap<number, number> = new Map([
+  [0x61, 0x07], // \a
+  [0x62, 0x08], // \b
+  [0x66, 0x0c], // \f
+  [0x6e, 0x0a], // \n
+  [0x72, 0x0d], // \r
+  [0x74, 0x09], // \t
+  [0x76, 0x0b], // \v
+  [BACKSLASH, BACKSLASH],
+  [QUOTE, QUOTE],
+]);
+
+const UTF8 = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
+
+/**
+ * `bytes` as text when they are valid UTF-8, undefined otherwise. Only then
+ * is the name checked here byte for byte the name git opens: git on POSIX
+ * opens the bytes as they are, and Git for Windows maps bytes that are not
+ * valid UTF-8 to other characters (0xFF to U+00FF), while a lossy decode
+ * would check a U+FFFD name that exists for neither. A BOM is kept.
+ */
+function exactUtf8(bytes: Uint8Array): string | undefined {
+  try {
+    return UTF8.decode(bytes);
+  } catch {
+    return undefined;
+  }
+}
 
 const NETWORK_OR_DEVICE_PREFIX = /^(?:[\\/]{2}|[\\/]\?\?[\\/])/;
 
@@ -249,6 +322,8 @@ function startingPoint(split: SplitPath, bases: readonly string[]): { current: s
 interface LocalResolution {
   readonly path: string;
   readonly exists: boolean;
+  /** A symbolic link was followed on the way (path may then not be canonical). */
+  readonly linked: boolean;
 }
 
 /** State of one validateRepositoryLayout call. */
@@ -261,6 +336,8 @@ interface LayoutCheck {
   scannedFiles: number;
   /** Resolutions by spelled path: an identically spelled path is walked once. */
   readonly resolved: Map<string, LocalResolution>;
+  /** Canonical directories whose links were scanned (scanLinks): each is listed once. */
+  readonly scannedDirs: Set<string>;
 }
 
 /**
@@ -329,6 +406,7 @@ async function walkPath(
       return {
         path: path.join(next, ...queue),
         exists: false,
+        linked: hops > 0,
         linksFollowed: hops,
         parentAfterMissing: queue.includes(".."),
       };
@@ -368,7 +446,7 @@ async function walkPath(
     current = target.root;
     queue = [...target.parts, ...queue];
   }
-  return { path: current, exists: true, linksFollowed: hops, parentAfterMissing: false };
+  return { path: current, exists: true, linked: hops > 0, linksFollowed: hops, parentAfterMissing: false };
 }
 
 async function sameResolution(check: LayoutCheck, a: LocalResolution, b: LocalResolution): Promise<boolean> {
@@ -417,7 +495,7 @@ async function resolveLocal(
       );
     }
   }
-  const resolution: LocalResolution = { path: physical.path, exists: physical.exists };
+  const resolution: LocalResolution = { path: physical.path, exists: physical.exists, linked: physical.linked };
   check.resolved.set(spelled, resolution);
   return resolution;
 }
@@ -446,6 +524,92 @@ async function canonical(
   const resolved = await resolveLocal(check, where, target, bases);
   if (!resolved.exists) return undefined;
   return realLocation(check, where, resolved.path);
+}
+
+/**
+ * Resolves the entry at `spelled` (see resolveLocal) and refuses it when it
+ * leads, through links, outside `scope`; an entry that does not exist is
+ * judged by the path it would have. Returns the canonical location of an
+ * existing entry.
+ */
+async function linkWithinScope(
+  check: LayoutCheck,
+  where: string,
+  spelled: string,
+  bases: readonly string[],
+  scope: readonly string[],
+): Promise<string | undefined> {
+  const resolved = await resolveLocal(check, where, spelled, bases);
+  // Without a link on the way, the walk from a canonical base is canonical.
+  const location =
+    resolved.exists && resolved.linked ? ((await realLocation(check, where, resolved.path)) ?? resolved.path) : resolved.path;
+  if (!scope.some((dir) => isSameOrInside(location, dir))) {
+    throw refusal(
+      check.root,
+      `${where} is a symbolic link that leads outside the repository; git follows it, so links in the git ` +
+        "metadata must stay inside the analyzed root, its git directory or its common directory",
+    );
+  }
+  return resolved.exists ? location : undefined;
+}
+
+/**
+ * Lists `dir` once per call (by its canonical location `canonicalDir`) and
+ * applies linkWithinScope to every entry that is a symbolic link, or whose
+ * type the listing does not report. With `recursive`, subdirectories and
+ * in-scope links to directories are scanned the same way. `label` names
+ * `dir` in refusals ("." for a git directory itself; metadata names only,
+ * never a resolved location). Each listing counts as one file system
+ * operation; a missing directory (or a link to a file) is skipped, any other
+ * listing failure is a refusal (git may still read there).
+ */
+async function scanLinks(
+  check: LayoutCheck,
+  dir: string,
+  canonicalDir: string,
+  label: string,
+  recursive: boolean,
+  bases: readonly string[],
+  scope: readonly string[],
+): Promise<void> {
+  if (check.scannedDirs.has(canonicalDir)) return;
+  check.scannedDirs.add(canonicalDir);
+  let entries: Array<Dirent<Buffer>>;
+  spend(check);
+  try {
+    // Names as bytes: a lossy decoding would name an entry that does not exist.
+    entries = await readdir(dir, { withFileTypes: true, encoding: "buffer" });
+  } catch (error) {
+    if (isMissingEntryError(error)) return;
+    throw refusal(check.root, `${JSON.stringify(label)} in the git metadata could not be listed (${errorCode(error)})`);
+  }
+  for (const entry of entries) {
+    const descend = entry.isDirectory();
+    const knownType =
+      descend ||
+      entry.isFile() ||
+      entry.isFIFO() ||
+      entry.isSocket() ||
+      entry.isBlockDevice() ||
+      entry.isCharacterDevice();
+    // A plain file holds no link to follow; nothing else needs its name.
+    if (knownType && !(descend && recursive)) continue;
+    const name = exactUtf8(entry.name);
+    if (name === undefined) {
+      throw notUtf8Refusal(check.root, `the name of an entry in ${JSON.stringify(label)} in the git metadata`);
+    }
+    const file = path.join(dir, name);
+    const named = label === "." ? name : `${label}/${name}`;
+    if (descend) {
+      await scanLinks(check, file, path.join(canonicalDir, name), named, true, bases, scope);
+      continue;
+    }
+    const location = await linkWithinScope(check, `${JSON.stringify(named)} in the git metadata`, file, bases, scope);
+    // A link to a file fails the listing with ENOTDIR and is skipped there.
+    if (recursive && location !== undefined) {
+      await scanLinks(check, file, location, named, true, bases, scope);
+    }
+  }
 }
 
 /**
@@ -481,13 +645,15 @@ function isMissingEntryError(error: unknown): boolean {
  * - an lstat after the open must show that the path still names the opened
  *   file (dev, ino) and is no link (Windows has no O_NOFOLLOW): a file swapped
  *   in before or after the open is refused.
+ * The content is returned as bytes: git reads metadata as bytes, so every
+ * parser here does too and decodes a path only once it is valid UTF-8.
  */
 async function readBounded(
   check: LayoutCheck,
   file: string,
   label: string,
   maxBytes: number,
-): Promise<string | undefined> {
+): Promise<Buffer | undefined> {
   const { root } = check;
   const shown = `${label}${located(root, file)}`;
   let handle;
@@ -531,7 +697,7 @@ async function readBounded(
     if (total > maxBytes) {
       throw refusal(root, `${label} is larger than the ${String(maxBytes)}-byte limit`);
     }
-    return Buffer.concat(chunks, total).toString("utf8");
+    return Buffer.concat(chunks, total);
   } finally {
     await handle.close().catch(() => undefined);
   }
@@ -544,7 +710,7 @@ async function readMetadata(
   label: string,
   maxBytes: number,
   bases: readonly string[],
-): Promise<string | undefined> {
+): Promise<Buffer | undefined> {
   const resolved = await resolveLocal(check, label, file, bases);
   if (!resolved.exists) return undefined;
   return readBounded(check, resolved.path, label, maxBytes);
@@ -581,7 +747,10 @@ function isSpace(c: string): boolean {
  * Parses git config text the way git's config.c does for the parts that
  * matter here: section headers (`[s]`, `[s "sub"]`, `[s.sub]`, entries on the
  * header line), comments, quoting, escapes and line continuations. Returns
- * null on any syntax git itself rejects.
+ * null on any syntax git itself rejects. Every character that has a meaning
+ * here is ASCII, so the layout check passes the file's bytes as Latin-1 text
+ * (one character per byte): values then keep the exact bytes git reads, and
+ * a path value is decoded only after it proved to be valid UTF-8.
  */
 export function parseGitConfig(text: string): GitConfigEntry[] | null {
   const src = (text.charCodeAt(0) === 0xfeff ? text.slice(1) : text).replace(/\r\n/g, "\n");
@@ -710,12 +879,47 @@ export function parseGitConfig(text: string): GitConfigEntry[] | null {
 /* metadata checks                                                     */
 /* ------------------------------------------------------------------ */
 
-/** git's gitfile format: "gitdir: <path>" with trailing CR/LF stripped. */
-function parseGitfile(content: string): string | undefined {
-  if (!content.startsWith("gitdir: ")) return undefined;
-  const value = content.slice("gitdir: ".length).replace(/[\r\n]+$/, "");
-  if (value.length === 0 || /[\r\n\0]/.test(value)) return undefined;
-  return value;
+/** A path text that is not valid UTF-8 (see exactUtf8). */
+function notUtf8Refusal(root: string, where: string): GraphRepositoryError {
+  return refusal(
+    root,
+    `${where} is not valid UTF-8, so git would open a different name than the one that can be checked`,
+  );
+}
+
+/**
+ * The path text of a pointer file (the .git file's `gitdir: ` value, commondir,
+ * a worktree gitdir file) as git reads it: setup.c strips only trailing CR and
+ * LF and then uses the rest as a C string. A NUL left inside would cut git's
+ * path there, a CR or LF left inside stays part of git's path: either way git
+ * would use a path other than the text, so both are refused, like bytes that
+ * are not valid UTF-8. Undefined when nothing is left.
+ */
+function pointerText(root: string, where: string, bytes: Buffer): string | undefined {
+  let end = bytes.length;
+  while (end > 0 && (bytes[end - 1] === LF || bytes[end - 1] === CR)) end -= 1;
+  const raw = bytes.subarray(0, end);
+  if (raw.length === 0) return undefined;
+  if (raw.includes(NUL) || raw.includes(CR) || raw.includes(LF)) {
+    throw refusal(
+      root,
+      `${where} has a NUL, CR or LF inside its path text, where git would read a different path than the one that can be checked`,
+    );
+  }
+  const text = exactUtf8(raw);
+  if (text === undefined) throw notUtf8Refusal(root, where);
+  return text;
+}
+
+const GITFILE_PREFIX = Buffer.from("gitdir: ", "latin1");
+const UTF8_BOM = Buffer.from([0xef, 0xbb, 0xbf]);
+
+/** git's gitfile format (setup.c read_gitfile_gently): "gitdir: <path>", see pointerText. */
+function parseGitfile(root: string, content: Buffer): string | undefined {
+  if (content.length < GITFILE_PREFIX.length || !content.subarray(0, GITFILE_PREFIX.length).equals(GITFILE_PREFIX)) {
+    return undefined;
+  }
+  return pointerText(root, "the gitdir pointer in the .git file", content.subarray(GITFILE_PREFIX.length));
 }
 
 function assertLocalPathText(root: string, where: string, value: string): void {
@@ -726,41 +930,98 @@ function assertLocalPathText(root: string, where: string, value: string): void {
   }
 }
 
-/** Minimal C-style unquoting as used by git for quoted alternates entries. */
-function unquoteCStyle(value: string): string | null {
-  if (!value.startsWith('"')) return value;
-  let out = "";
-  for (let i = 1; i < value.length; i += 1) {
-    const c = value[i]!;
-    if (c === '"') return out;
-    if (c !== "\\") {
-      out += c;
+function isOctalDigit(byte: number | undefined): byte is number {
+  return byte !== undefined && byte >= 0x30 && byte <= 0x37;
+}
+
+/**
+ * git's unquote_c_style (quote.c) on bytes, from the opening quote at
+ * `start`: `\a \b \f \n \r \t \v \\ \"` and `\ooo` (first digit 0-3) each
+ * stand for one byte. Returns the bytes and the index after the closing
+ * quote, or null where git's own unquoting fails.
+ */
+function unquoteCStyle(bytes: Buffer, start: number): { readonly value: Buffer; readonly end: number } | null {
+  const out: number[] = [];
+  let i = start + 1;
+  while (i < bytes.length) {
+    const c = bytes[i++]!;
+    if (c === QUOTE) return { value: Buffer.from(out), end: i };
+    if (c !== BACKSLASH) {
+      out.push(c);
       continue;
     }
-    i += 1;
-    const e = value[i];
+    const e = bytes[i++];
     if (e === undefined) return null;
-    const simple: Record<string, string> = {
-      a: "\x07",
-      b: "\b",
-      f: "\f",
-      n: "\n",
-      r: "\r",
-      t: "\t",
-      v: "\v",
-      "\\": "\\",
-      '"': '"',
-    };
-    if (simple[e] !== undefined) {
-      out += simple[e];
+    const simple = C_ESCAPES.get(e);
+    if (simple !== undefined) {
+      out.push(simple);
       continue;
     }
-    const octal = /^[0-3][0-7]{2}/.exec(value.slice(i));
-    if (octal === null) return null;
-    out += String.fromCharCode(parseInt(octal[0], 8));
+    const second = bytes[i];
+    const third = bytes[i + 1];
+    if (e < 0x30 || e > 0x33 || !isOctalDigit(second) || !isOctalDigit(third)) return null;
+    out.push(((e - 0x30) << 6) | ((second - 0x30) << 3) | (third - 0x30));
     i += 2;
   }
   return null;
+}
+
+function lineEnd(bytes: Buffer, from: number): number {
+  const index = bytes.indexOf(LF, from);
+  return index < 0 ? bytes.length : index;
+}
+
+/**
+ * The entries of an objects/info/alternates file exactly as git reads them
+ * (odb.c parse_alternates with an LF separator): an entry starting with `#`
+ * is a comment up to the next LF; one starting with `"` is unquoted to bytes
+ * (unquoteCStyle) and ends at its closing quote; any other entry ends at the
+ * next LF, a CR included. After an entry git skips exactly one byte (the LF,
+ * or after a closing quote whatever byte follows it), so text after a closing
+ * quote is the next entry. Empty entries are dropped. Refused: a NUL (git
+ * stops reading there) and a quoted entry git cannot unquote (git would then
+ * read the line as a plain path, quotes included).
+ */
+function alternatesEntries(root: string, bytes: Buffer): Buffer[] {
+  if (bytes.includes(NUL)) {
+    throw refusal(root, "objects/info/alternates contains a NUL byte, where git stops reading it");
+  }
+  const entries: Buffer[] = [];
+  let i = 0;
+  while (i < bytes.length) {
+    let entry: Buffer | undefined;
+    let end: number;
+    if (bytes[i] === HASH) {
+      end = lineEnd(bytes, i);
+    } else if (bytes[i] === QUOTE) {
+      const quoted = unquoteCStyle(bytes, i);
+      if (quoted === null) throw refusal(root, `objects/info/alternates has a malformed quoted entry`);
+      entry = quoted.value;
+      end = quoted.end;
+    } else {
+      end = lineEnd(bytes, i);
+      entry = bytes.subarray(i, end);
+    }
+    i = end < bytes.length ? end + 1 : end;
+    if (entry !== undefined && entry.length > 0) entries.push(entry);
+  }
+  return entries;
+}
+
+/**
+ * A config path value (include path, core.worktree) as git reads it: the
+ * value holds the file's bytes (see parseGitConfig), which must be valid
+ * UTF-8 so that the name checked here is the one git opens.
+ */
+function configPathText(root: string, where: string, value: string): string {
+  const text = exactUtf8(Buffer.from(value, "latin1"));
+  if (text === undefined) throw notUtf8Refusal(root, where);
+  return text;
+}
+
+/** Metadata text for a refusal message: a lossy decode of the bytes is enough there. */
+function shownConfigText(value: string): string {
+  return Buffer.from(value, "latin1").toString("utf8");
 }
 
 /** Fails closed when include/alternates files form an unusually large graph. */
@@ -780,7 +1041,8 @@ function countScannedFile(check: LayoutCheck): void {
  * `scope` (the canonical analyzed root, git directory and common directory):
  * an object store elsewhere on the machine is never read (CAU-06). An entry
  * that does not exist yet is judged by the path it would have, so it cannot
- * be created outside the scope after this check.
+ * be created outside the scope after this check. The links below an existing
+ * alternate object directory are held to the same scope (scanLinks).
  */
 async function checkAlternates(
   check: LayoutCheck,
@@ -794,14 +1056,16 @@ async function checkAlternates(
   if (depth > MAX_ALTERNATE_DEPTH) return;
   countScannedFile(check);
   const file = path.join(objectsDir, "info", "alternates");
-  const text = await readMetadata(check, file, "objects/info/alternates", MAX_ALTERNATES_BYTES, bases);
-  if (text === undefined) return;
-  for (const rawLine of text.split("\n")) {
-    const line = rawLine.replace(/\r$/, "");
-    if (line.length === 0 || line.startsWith("#")) continue;
-    const entry = unquoteCStyle(line);
-    if (entry === null) throw refusal(root, `objects/info/alternates has a malformed quoted entry`);
+  const bytes = await readMetadata(check, file, "objects/info/alternates", MAX_ALTERNATES_BYTES, bases);
+  if (bytes === undefined) return;
+  for (const raw of alternatesEntries(root, bytes)) {
     const where = "an objects/info/alternates entry";
+    // git keeps a CR or LF in the path (a CRLF line names "<entry>\r").
+    if (raw.includes(CR) || raw.includes(LF)) {
+      throw refusal(root, `${where} contains a CR or LF character, which git keeps as part of the path`);
+    }
+    const entry = exactUtf8(raw);
+    if (entry === undefined) throw notUtf8Refusal(root, where);
     assertLocalPathText(root, where, entry);
     const named = `${where} (${JSON.stringify(entry)})`;
     // git: realpath(<objects dir>) + "/" + entry, resolved component by
@@ -817,6 +1081,7 @@ async function checkAlternates(
       );
     }
     if (resolved.exists) {
+      await scanLinks(check, location, location, entry, true, bases, scope);
       await checkAlternates(check, location, depth + 1, bases, scope);
     }
   }
@@ -831,9 +1096,11 @@ async function readConfigEntries(
 ): Promise<GitConfigEntry[] | undefined> {
   const resolved = await resolveLocal(check, label, spelled, bases);
   if (!resolved.exists) return undefined;
-  const text = await readBounded(check, resolved.path, label, MAX_CONFIG_BYTES);
-  if (text === undefined) return undefined;
-  const entries = parseGitConfig(text);
+  const bytes = await readBounded(check, resolved.path, label, MAX_CONFIG_BYTES);
+  if (bytes === undefined) return undefined;
+  // git skips a UTF-8 BOM at the start of a config file (config.c).
+  const body = bytes.subarray(0, 3).equals(UTF8_BOM) ? bytes.subarray(3) : bytes;
+  const entries = parseGitConfig(body.toString("latin1"));
   if (entries === null) {
     throw refusal(check.root, `${label}${located(check.root, resolved.path)} could not be parsed as git config`);
   }
@@ -876,17 +1143,36 @@ async function checkConfigFile(
   for (const entry of entries) {
     if (isCoreWorktree(entry) && entry.value !== null) {
       const where = `core.worktree in ${label}`;
-      assertLocalPathText(root, where, entry.value);
-      await resolveLocal(check, `${where} (${JSON.stringify(entry.value)})`, joinRaw(gitDir, entry.value), bases);
+      const worktree = configPathText(root, where, entry.value);
+      assertLocalPathText(root, where, worktree);
+      await resolveLocal(check, `${where} (${JSON.stringify(worktree)})`, joinRaw(gitDir, worktree), bases);
       continue;
     }
     if (!isIncludePath(entry)) continue;
-    const value = entry.value!;
-    const where = `${entry.section}${entry.subsection === null ? "" : `.${entry.subsection}`}.path in ${label}`;
+    const subsection = entry.subsection === null ? "" : `.${shownConfigText(entry.subsection)}`;
+    const where = `${entry.section}${subsection}.path in ${label}`;
+    const value = configPathText(root, where, entry.value!);
     assertLocalPathText(root, where, value);
-    // Home- and prefix-relative includes name the user's own files.
-    if (value.startsWith("~") || value.startsWith("%(prefix)/")) continue;
-    const include = joinRaw(spelledDirectory(spelled), value);
+    // Home-relative includes name the user's own files.
+    if (value.startsWith("~")) continue;
+    let include: string;
+    if (value.startsWith(PREFIX_INCLUDE)) {
+      // git (path.c interpolate_path, exec-cmd.c system_path): the rest is used
+      // as is when it is absolute (`//host/share` included), otherwise it is
+      // joined to git's installation prefix, which this check does not know.
+      const rest = value.slice(PREFIX_INCLUDE.length);
+      assertLocalPathText(root, where, rest);
+      if (!path.isAbsolute(rest)) {
+        throw refusal(
+          root,
+          `${where} (${JSON.stringify(value)}) names a file relative to git's installation prefix (%(prefix)/), ` +
+            "which cannot be checked",
+        );
+      }
+      include = rest;
+    } else {
+      include = joinRaw(spelledDirectory(spelled), value);
+    }
     const resolved = await resolveLocal(check, `${where} (${JSON.stringify(value)})`, include, bases);
     if (resolved.exists) {
       await checkConfigFile(check, include, `included config ${JSON.stringify(value)}`, gitDir, depth + 1, bases);
@@ -894,17 +1180,16 @@ async function checkConfigFile(
   }
 }
 
+/** Reads a pointer file (commondir, a worktree gitdir file); see pointerText. */
 async function readPointer(
   check: LayoutCheck,
   file: string,
   label: string,
   bases: readonly string[],
 ): Promise<string | undefined> {
-  const text = await readMetadata(check, file, label, MAX_POINTER_BYTES, bases);
-  if (text === undefined) return undefined;
-  const value = text.replace(/[\r\n]+$/, "");
-  if (value.length === 0 || /[\r\n\0]/.test(value)) return undefined;
-  return value;
+  const bytes = await readMetadata(check, file, label, MAX_POINTER_BYTES, bases);
+  if (bytes === undefined) return undefined;
+  return pointerText(check.root, label, bytes);
 }
 
 /** Linked worktree: <common>/worktrees/<name> whose gitdir file names <root>/.git. */
@@ -934,12 +1219,13 @@ async function isSubmoduleOf(
 ): Promise<boolean> {
   const entries = await readConfigEntries(check, path.join(gitDir, "config"), "the submodule config", bases);
   if (entries === undefined) return false;
-  let worktree: string | null | undefined;
+  let value: string | null | undefined;
   for (const entry of entries) {
-    if (isCoreWorktree(entry)) worktree = entry.value;
+    if (isCoreWorktree(entry)) value = entry.value;
   }
-  if (worktree === undefined || worktree === null) return false;
+  if (value === undefined || value === null) return false;
   const where = "core.worktree in the submodule config";
+  const worktree = configPathText(check.root, where, value);
   assertLocalPathText(check.root, where, worktree);
   // git: chdir(<git dir>), then chdir(<core.worktree>) (setup.c).
   const target = await canonical(check, `${where} (${JSON.stringify(worktree)})`, joinRaw(gitDir, worktree), bases);
@@ -964,7 +1250,7 @@ export async function validateRepositoryLayout(
     );
   }
   // fsOperations: the realpath above.
-  const check: LayoutCheck = { root, fsOperations: 1, scannedFiles: 0, resolved: new Map() };
+  const check: LayoutCheck = { root, fsOperations: 1, scannedFiles: 0, resolved: new Map(), scannedDirs: new Set() };
   const dotGit = path.join(root, ".git");
   let entry;
   spend(check);
@@ -987,7 +1273,7 @@ export async function validateRepositoryLayout(
     gitDir = dotGit;
   } else if (entry.isFile()) {
     const content = await readBounded(check, dotGit, "the .git file", MAX_POINTER_BYTES);
-    const pointer = content === undefined ? undefined : parseGitfile(content);
+    const pointer = content === undefined ? undefined : parseGitfile(root, content);
     if (pointer === undefined) {
       throw refusal(root, "the .git file is not a valid 'gitdir: <path>' pointer");
     }
@@ -1068,7 +1354,33 @@ export async function validateRepositoryLayout(
       );
     }
     await checkAlternates(check, objectsDir, 0, allBases, allBases);
+    await scanLinks(check, objectsDir, objectsDir, "objects", true, allBases, allBases);
   }
+  await checkMetadataLinks(check, commonDir === gitDir ? [gitDir] : [gitDir, commonDir], allBases);
 
   return { kind, root, gitDir, commonDir };
+}
+
+/**
+ * Holds the links git follows when it reads refs and grafts to the scope:
+ * every entry directly in each git directory (git reads them as metadata:
+ * packed-refs, shallow, ...; and any of them as a ref when a ref names it:
+ * HEAD, ORIG_HEAD, and lower-case names too, by git's first ref lookup rule), and
+ * the whole refs/, info/ and reftable/ trees. A tree root that is a link was
+ * resolved, and held to the scope, by the listing of its git directory before.
+ */
+async function checkMetadataLinks(check: LayoutCheck, gitDirs: readonly string[], scope: readonly string[]): Promise<void> {
+  for (const dir of gitDirs) {
+    await scanLinks(check, dir, dir, ".", false, scope, scope);
+  }
+  for (const dir of gitDirs) {
+    for (const tree of LINK_SCANNED_TREES) {
+      const spelled = path.join(dir, tree);
+      const where = `${tree} in the git directory`;
+      const resolved = await resolveLocal(check, where, spelled, scope);
+      if (!resolved.exists) continue;
+      const location = resolved.linked ? await realLocation(check, where, resolved.path) : resolved.path;
+      if (location !== undefined) await scanLinks(check, spelled, location, tree, true, scope, scope);
+    }
+  }
 }
