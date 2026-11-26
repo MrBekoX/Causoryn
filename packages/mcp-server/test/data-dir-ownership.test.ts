@@ -35,6 +35,10 @@ const hooks = vi.hoisted(() => ({
    * the requested mode.
    */
   mkdirPerm: undefined as number | undefined,
+  /** Runs right after a successful mkdir (e.g. to swap the new entry before the chmod). */
+  afterMkdir: undefined as ((target: string) => void) | undefined,
+  /** Runs after each lstat, once its result is taken (e.g. to swap an entry after its identity was recorded). */
+  afterLstat: undefined as ((target: string) => void) | undefined,
 }));
 
 function key(target: string): string {
@@ -63,8 +67,11 @@ vi.mock("node:fs", async (importOriginal) => {
     copy.mode = (stat.mode & 0o170000) | perm;
     return copy as unknown as T;
   };
-  const lstatSync = ((target: unknown, options?: unknown) =>
-    view(target, (actual.lstatSync as (p: unknown, o?: unknown) => unknown)(target, options))) as typeof actual.lstatSync;
+  const lstatSync = ((target: unknown, options?: unknown) => {
+    const result = view(target, (actual.lstatSync as (p: unknown, o?: unknown) => unknown)(target, options));
+    if (hooks.posix) hooks.afterLstat?.(String(target));
+    return result;
+  }) as typeof actual.lstatSync;
   const statSync = ((target: unknown, options?: unknown) =>
     view(target, (actual.statSync as (p: unknown, o?: unknown) => unknown)(target, options))) as typeof actual.statSync;
   const chmodSync = ((target: unknown, mode: unknown) => {
@@ -81,31 +88,46 @@ vi.mock("node:fs", async (importOriginal) => {
   }) as typeof actual.chmodSync;
   const mkdirSync = ((target: unknown, options?: unknown) => {
     const forced = hooks.posix ? hooks.mkdirPerm : undefined;
-    if (forced === undefined) return (actual.mkdirSync as (p: unknown, o?: unknown) => unknown)(target, options);
     // Every component this call creates gets the forced permission bits.
     const missing: string[] = [];
-    let cursor = String(target).replace(/[\\/]+$/, "");
-    for (;;) {
-      if (actual.existsSync(cursor)) break;
-      missing.push(cursor);
-      const parent = cursor.replace(/[\\/][^\\/]*$/, "");
-      if (parent === cursor || parent.length === 0) break;
-      cursor = parent;
+    if (forced !== undefined) {
+      let cursor = String(target).replace(/[\\/]+$/, "");
+      for (;;) {
+        if (actual.existsSync(cursor)) break;
+        missing.push(cursor);
+        const parent = cursor.replace(/[\\/][^\\/]*$/, "");
+        if (parent === cursor || parent.length === 0) break;
+        cursor = parent;
+      }
     }
     const result = (actual.mkdirSync as (p: unknown, o?: unknown) => unknown)(target, options);
-    for (const created of missing) hooks.perms.set(ownerKey(created), forced);
+    for (const created of missing) hooks.perms.set(ownerKey(created), forced as number);
+    if (hooks.posix) hooks.afterMkdir?.(String(target));
     return result;
   }) as typeof actual.mkdirSync;
   return { ...actual, lstatSync, statSync, chmodSync, mkdirSync };
 });
 
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  statSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
 import { CausorynConfigError, buildWorkspaceAutoConfig, createCausorynContext } from "../src/index.js";
 
 const IS_WIN = process.platform === "win32";
+/** A directory link that needs no privilege (a junction on Windows). */
+const DIR_LINK_TYPE = IS_WIN ? "junction" : "dir";
 
 const CAN_FILE_LINK: boolean = (() => {
   const probe = mkdtempSync(path.join(tmpdir(), "causoryn-owner-probe-"));
@@ -136,6 +158,8 @@ beforeEach(() => {
   hooks.chmodIgnored.clear();
   hooks.chmodCalls.length = 0;
   hooks.mkdirPerm = undefined;
+  hooks.afterMkdir = undefined;
+  hooks.afterLstat = undefined;
 });
 
 afterEach(() => {
@@ -299,6 +323,62 @@ describe("prepareWorkspaceDataDir — ownership and permissions (F41, emulated P
         expect(hooks.chmodCalls.some((call) => call.path === key(dir) && call.mode === 0o700), dir).toBe(true);
       }
     }
+  });
+
+  it("refuses a directory it created that was swapped for a link before the chmod, without chmod'ing through the link", () => {
+    emulatePosix();
+    const sandbox = makeSandbox();
+    const victim = path.join(sandbox.outside, "victim-dir");
+    mkdirSync(victim);
+    hooks.perms.set(key(victim), 0o755);
+    const workspaces = path.join(sandbox.base, "workspaces");
+    hooks.afterMkdir = (target) => {
+      if (key(target) !== key(workspaces)) return;
+      hooks.afterMkdir = undefined;
+      renameSync(target, `${target}.moved`);
+      symlinkSync(victim, target, DIR_LINK_TYPE);
+    };
+    const error = configError(() => buildConfig(sandbox));
+    expect(error.message).toMatch(/symbolic link/);
+    expect(hooks.chmodCalls.filter((call) => call.path === key(workspaces) || call.path === key(victim))).toEqual([]);
+    expect(hooks.perms.get(key(victim))).toBe(0o755);
+  });
+
+  it("refuses a directory it created that another user replaced right after the mkdir, without chmod'ing it", () => {
+    emulatePosix();
+    const sandbox = makeSandbox();
+    const workspaces = path.join(sandbox.base, "workspaces");
+    hooks.afterMkdir = (target) => {
+      if (key(target) !== key(workspaces)) return;
+      hooks.afterMkdir = undefined;
+      renameSync(target, `${target}.moved`);
+      mkdirSync(target);
+      hooks.owners.set(key(target), OTHER_UID);
+    };
+    const error = configError(() => buildConfig(sandbox));
+    expect(error.message).toMatch(/changed after it was created/);
+    expect(hooks.chmodCalls.filter((call) => call.path === key(workspaces))).toEqual([]);
+  });
+
+  it("refuses a directory it created that was replaced after its identity was recorded, before the chmod", () => {
+    emulatePosix();
+    const sandbox = makeSandbox();
+    const workspaces = path.join(sandbox.base, "workspaces");
+    let armed = false;
+    hooks.afterMkdir = (target) => {
+      if (key(target) === key(workspaces)) armed = true;
+    };
+    hooks.afterLstat = (target) => {
+      // The first lstat after the mkdir records the identity; then the entry is swapped.
+      if (!armed || key(target) !== key(workspaces)) return;
+      armed = false;
+      hooks.afterMkdir = undefined;
+      renameSync(target, `${target}.moved`);
+      mkdirSync(target);
+    };
+    const error = configError(() => buildConfig(sandbox));
+    expect(error.message).toMatch(/changed after it was created/);
+    expect(hooks.chmodCalls.filter((call) => call.path === key(workspaces))).toEqual([]);
   });
 
   it("fails closed when chmod fails on a Causoryn-owned directory that must be narrowed", () => {

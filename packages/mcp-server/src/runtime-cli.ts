@@ -1394,8 +1394,13 @@ function assertPrivateDataDirectory(dir: string, access: "user-supplied" | "owne
  * Sets a directory this run just created to 0700 (POSIX) and verifies it the
  * same way as the data directories; a chmod failure stops startup.
  */
-function makeCreatedDirectoryPrivate(dir: string): void {
-  if (serverUid() === undefined) return;
+function makeCreatedDirectoryPrivate(dir: string, created: Stats): void {
+  const uid = serverUid();
+  if (uid === undefined) return;
+  // chmod follows links: the entry is lstat'd first and must still be the
+  // directory this run created (not a link, owned by the server's uid, the
+  // device and inode recorded right after mkdir) before anything is changed.
+  assertSameCreatedDirectory(dir, created, uid);
   try {
     chmodSync(dir, 0o700);
   } catch (error) {
@@ -1404,7 +1409,52 @@ function makeCreatedDirectoryPrivate(dir: string): void {
       `the data directory permissions could not be restricted (${code}); refusing a data directory other local users can access: ${dir}`,
     ]);
   }
+  assertSameCreatedDirectory(dir, created, uid);
   assertPrivateDataDirectory(dir, "owner-only");
+}
+
+/**
+ * lstat of a directory created by this run, right after its mkdir: a real
+ * directory, not a link, owned by the server's uid (POSIX). Its device and
+ * inode then bind every later chmod to it.
+ */
+function recordCreatedDirectory(dir: string): Stats {
+  let st: Stats;
+  try {
+    st = lstatSync(dir);
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException | undefined)?.code ?? "unknown error";
+    throw new CausorynConfigError([`the data directory status could not be verified: ${dir} (${code})`]);
+  }
+  const uid = serverUid();
+  if (st.isSymbolicLink()) {
+    throw new CausorynConfigError([`the data directory must not be a symbolic link (CWE-59): ${dir}`]);
+  }
+  if (!st.isDirectory() || (uid !== undefined && st.uid !== uid)) {
+    throw new CausorynConfigError([
+      `the data directory changed after it was created (not a directory of the server's user); refusing it: ${dir}`,
+    ]);
+  }
+  return st;
+}
+
+/** The path still names the directory recorded after mkdir (lstat: not a link, same owner, device and inode). */
+function assertSameCreatedDirectory(dir: string, created: Stats, uid: number): void {
+  let st: Stats;
+  try {
+    st = lstatSync(dir);
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException | undefined)?.code ?? "unknown error";
+    throw new CausorynConfigError([`the data directory status could not be verified: ${dir} (${code})`]);
+  }
+  if (st.isSymbolicLink()) {
+    throw new CausorynConfigError([`the data directory must not be a symbolic link (CWE-59): ${dir}`]);
+  }
+  if (!st.isDirectory() || st.uid !== uid || st.dev !== created.dev || st.ino !== created.ino) {
+    throw new CausorynConfigError([
+      `the data directory changed after it was created (another directory or owner); refusing it: ${dir}`,
+    ]);
+  }
 }
 
 /** The components of `dir` that do not exist yet (what a recursive mkdir creates), shortest first. */
@@ -1451,8 +1501,10 @@ function ensurePrivateDataDirectory(
   } catch (error) {
     if ((error as NodeJS.ErrnoException | undefined)?.code !== "EEXIST") throw unusable(error);
   }
-  for (const createdDir of created) {
-    makeCreatedDirectoryPrivate(createdDir);
+  // Identities first, recorded right after mkdir (shortest first), then each is narrowed.
+  const recorded = created.map((createdDir) => ({ dir: createdDir, stat: recordCreatedDirectory(createdDir) }));
+  for (const entry of recorded) {
+    makeCreatedDirectoryPrivate(entry.dir, entry.stat);
   }
   const createdNow = created.some((createdDir) => path.resolve(createdDir) === path.resolve(dir));
   assertPrivateDataDirectory(dir, createdNow ? "owner-only" : access);
