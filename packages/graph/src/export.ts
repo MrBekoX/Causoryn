@@ -123,54 +123,6 @@ function escapeHtml(value: string): string {
     .replace(/\|/g, "&#124;");
 }
 
-/**
- * GFM extended email autolink (`user@host.tld`, also the email inside a
- * `mailto:` or `xmpp:` autolink): an `@` right after a character an email
- * local part may end with. The domain Markdown helpers defang URL and `www.`
- * autolinks but not this one.
- *
- * A backslash before the `@` is not enough: GitHub's renderer still links
- * `user\@host.tld` (checked with `gh api -X POST /markdown -f mode=gfm` on
- * 2026-11-26), and it links `user@.host` too, so whatever follows the `@`
- * does not matter. A zero-width space written as the character reference
- * `&#8203;` between the local part and the `@` stops the link there, in a
- * table cell and behind `mailto:` / `xmpp:`, and renders invisibly, so the
- * text reads the same. The single-character lookbehind keeps the match linear.
- */
-const EMAIL_AUTOLINK_AT = /(?<=[A-Za-z0-9.+_-])@/g;
-
-/**
- * Character references in repository text (`&#64;`, `&commat;`) would decode
- * to an `@` that GitHub then links, so every `&` of the text is
- * backslash-escaped first (`\&commat;` renders as the literal text
- * `&commat;`; the domain helpers already turn `#` into `\#`, which breaks
- * numeric references, but leave `&` as it is).
- */
-const AMPERSAND = /&/g;
-
-function defangEmailAutolinks(escaped: string): string {
-  return escaped.replace(AMPERSAND, "\\&").replace(EMAIL_AUTOLINK_AT, "&#8203;@");
-}
-
-/**
- * Full-view Markdown escaping (security scan F50). Cell values (file paths,
- * symbol names, rationale) and snapshot meta are untrusted repository text
- * (TŞ §19). They go through the same @causoryn/domain helpers as the
- * architecture brief and wiki exports: backslash escapes for link, image,
- * HTML, code-span, strikethrough, heading and table syntax, line endings and
- * tabs collapsed to one space, control characters replaced with U+FFFD, and
- * bare `https://`, `http://`, `ftp://` and `www.` autolinks defanged; `&` and
- * email autolinks are handled on top (defangEmailAutolinks).
- */
-function markdownTableCell(value: string): string {
-  return defangEmailAutolinks(escapeMarkdownTableCell(value));
-}
-
-/** One single-line meta value of the full view (see markdownTableCell). */
-function markdownInline(value: string): string {
-  return defangEmailAutolinks(escapeMarkdownInline(value));
-}
-
 function byId<T extends { readonly id: string }>(a: T, b: T): number {
   if (a.id < b.id) return -1;
   if (a.id > b.id) return 1;
@@ -230,7 +182,11 @@ export function serializeDocumentationJson(snapshot: SnapshotGraph): string {
 
 /**
  * Deterministik Markdown dokümanı: sabit şablon, id sıralı tablolar; hücre
- * değerleri markdownTableCell, meta satırları markdownInline ile kaçırılır.
+ * değerleri escapeMarkdownTableCell, meta satırları escapeMarkdownInline ile
+ * kaçırılır (security scan F50): the same @causoryn/domain helpers as the
+ * architecture brief and wiki exports, so repository text cannot form a URL,
+ * `www.` or email autolink, a GitHub @-mention or a decoded character
+ * reference, nor any other Markdown structure.
  */
 export function serializeDocumentationMarkdown(snapshot: SnapshotGraph): string {
   const ordered = canonicallyOrdered(snapshot);
@@ -240,15 +196,15 @@ export function serializeDocumentationMarkdown(snapshot: SnapshotGraph): string 
   lines.push("");
   lines.push("## Snapshot");
   lines.push("");
-  lines.push(`- id: ${markdownInline(ordered.meta.id)}`);
-  lines.push(`- workspaceId: ${markdownInline(ordered.meta.workspaceId)}`);
+  lines.push(`- id: ${escapeMarkdownInline(ordered.meta.id)}`);
+  lines.push(`- workspaceId: ${escapeMarkdownInline(ordered.meta.workspaceId)}`);
   lines.push(
-    `- revision: ${markdownInline(ordered.meta.revision.id)} (sequence ${String(ordered.meta.revision.sequence)})`,
+    `- revision: ${escapeMarkdownInline(ordered.meta.revision.id)} (sequence ${String(ordered.meta.revision.sequence)})`,
   );
-  lines.push(`- configHash: ${markdownInline(ordered.meta.configHash)}`);
-  lines.push(`- analyzerFingerprint: ${markdownInline(ordered.meta.analyzerFingerprint)}`);
-  lines.push(`- state: ${markdownInline(ordered.meta.state)}`);
-  lines.push(`- createdAt: ${markdownInline(ordered.meta.createdAt)}`);
+  lines.push(`- configHash: ${escapeMarkdownInline(ordered.meta.configHash)}`);
+  lines.push(`- analyzerFingerprint: ${escapeMarkdownInline(ordered.meta.analyzerFingerprint)}`);
+  lines.push(`- state: ${escapeMarkdownInline(ordered.meta.state)}`);
+  lines.push(`- createdAt: ${escapeMarkdownInline(ordered.meta.createdAt)}`);
   lines.push("");
   lines.push(`## Nodes (${String(ordered.nodes.length)})`);
   lines.push("");
@@ -256,7 +212,7 @@ export function serializeDocumentationMarkdown(snapshot: SnapshotGraph): string 
   lines.push("| --- | --- | --- | --- | --- |");
   for (const node of ordered.nodes) {
     lines.push(
-      `| ${markdownTableCell(node.id)} | ${markdownTableCell(node.kind)} | ${markdownTableCell(node.qualifiedName)} | ${markdownTableCell(node.language ?? "")} | ${markdownTableCell(formatLocation(node.location))} |`,
+      `| ${escapeMarkdownTableCell(node.id)} | ${escapeMarkdownTableCell(node.kind)} | ${escapeMarkdownTableCell(node.qualifiedName)} | ${escapeMarkdownTableCell(node.language ?? "")} | ${escapeMarkdownTableCell(formatLocation(node.location))} |`,
     );
   }
   lines.push("");
@@ -266,7 +222,7 @@ export function serializeDocumentationMarkdown(snapshot: SnapshotGraph): string 
   lines.push("| --- | --- | --- | --- | --- | --- |");
   for (const edge of ordered.edges) {
     lines.push(
-      `| ${markdownTableCell(edge.id)} | ${markdownTableCell(edge.kind)} | ${markdownTableCell(edge.from)} | ${markdownTableCell(edge.to)} | ${markdownTableCell(edge.resolution)} | ${markdownTableCell(edge.evidenceIds.join(","))} |`,
+      `| ${escapeMarkdownTableCell(edge.id)} | ${escapeMarkdownTableCell(edge.kind)} | ${escapeMarkdownTableCell(edge.from)} | ${escapeMarkdownTableCell(edge.to)} | ${escapeMarkdownTableCell(edge.resolution)} | ${escapeMarkdownTableCell(edge.evidenceIds.join(","))} |`,
     );
   }
   lines.push("");
@@ -276,7 +232,7 @@ export function serializeDocumentationMarkdown(snapshot: SnapshotGraph): string 
   lines.push("| --- | --- | --- | --- | --- | --- |");
   for (const evidence of ordered.evidence) {
     lines.push(
-      `| ${markdownTableCell(evidence.id)} | ${markdownTableCell(evidence.kind)} | ${markdownTableCell(evidence.analyzerId)} | ${markdownTableCell(evidence.analyzerVersion)} | ${markdownTableCell(formatLocation(evidence.span))} | ${markdownTableCell(evidence.rationale)} |`,
+      `| ${escapeMarkdownTableCell(evidence.id)} | ${escapeMarkdownTableCell(evidence.kind)} | ${escapeMarkdownTableCell(evidence.analyzerId)} | ${escapeMarkdownTableCell(evidence.analyzerVersion)} | ${escapeMarkdownTableCell(formatLocation(evidence.span))} | ${escapeMarkdownTableCell(evidence.rationale)} |`,
     );
   }
   lines.push("");

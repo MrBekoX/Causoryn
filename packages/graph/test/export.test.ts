@@ -824,27 +824,28 @@ describe("Markdown serializer — GFM autolinks in repository text (security sca
     const output = serializeDocumentationMarkdown(snapshot);
 
     // Escaped forms checked against GitHub's renderer on 2026-11-26
-    // (`gh api -X POST /markdown -f mode=gfm`, synthetic strings, in a table
-    // cell and in a list item): `https\://…` and `www\.…` render as plain
-    // text, and so does `user&#8203;@host` (a zero-width space before the
-    // `@`, invisible in the rendered page). A backslash before the `@`
-    // (`user\@host`) does NOT stop GitHub: it still renders
-    // `<a href="mailto:…">`, also behind `mailto:` and `xmpp:`.
+    // (`gh api -X POST /markdown -f mode=gfm`, synthetic strings, in a
+    // paragraph, list item, blockquote, heading and table cell): `https\://…`
+    // and `www\.…` render as plain text, and so does
+    // `user&#8203;@&#8203;host` (a zero-width space on both sides of the `@`,
+    // invisible in the rendered page), for emails, `mailto:` / `xmpp:` and
+    // `@scope` / `@user` alike. Not enough there: `user\@host` (still a
+    // `mailto:` link) and `react&#8203;@latest` (GitHub links `@latest` as a
+    // user mention).
     expect(output).not.toMatch(/(?:https?|ftp):\/\//i);
     expect(output).not.toMatch(/www\./i);
-    expect(output).not.toMatch(/[A-Za-z0-9.+_-]@/);
-    expect(output).not.toContain("\\@");
+    expect(output.split("&#8203;@&#8203;").join("")).not.toContain("@");
     expect(output).toContain("app::routes::https\\://evil.test/login");
     expect(output).toContain("www\\.evil.test/routes.ts");
-    expect(output).toContain("app::notify::ops&#8203;@evil.test");
+    expect(output).toContain("app::notify::ops&#8203;@&#8203;evil.test");
     expect(output).toContain(
-      "ROUTES_TO http\\://evil.test/a ftp\\://evil.test/b mailto:sec&#8203;@evil.test xmpp:bot&#8203;@evil.test/r",
+      "ROUTES_TO http\\://evil.test/a ftp\\://evil.test/b mailto:sec&#8203;@&#8203;evil.test xmpp:bot&#8203;@&#8203;evil.test/r",
     );
     expect(output).toContain("- revision: www\\.evil.test (sequence 1)");
-    expect(output).toContain("- analyzerFingerprint: typescript-adapter&#8203;@0.1.0");
-    // An `@` that cannot end an email local part is left as it is (GitHub
-    // does not link `node_modules/@scope/...`).
-    expect(output).toContain("node_modules/@scope/pkg/index.ts");
+    expect(output).toContain("- analyzerFingerprint: typescript-adapter&#8203;@&#8203;0.1.0");
+    // A scoped package path gets the same treatment: GitHub links `@scope`
+    // as a mention when such a user or organization exists.
+    expect(output).toContain("node_modules/&#8203;@&#8203;scope/pkg/index.ts");
   });
 
   it("defangs every email autolink shape GitHub links, and entity-encoded `@` in repository text", () => {
@@ -868,10 +869,11 @@ describe("Markdown serializer — GFM autolinks in repository text (security sca
     });
     const output = serializeDocumentationMarkdown(snapshot);
     expect(output).toContain(
-      "app::m::ops&#8203;@.evil.test ops.&#8203;@evil.test a+b&#8203;@evil.test x_&#8203;@evil.test ops&#8203;@-evil.test",
+      "app::m::ops&#8203;@&#8203;.evil.test ops.&#8203;@&#8203;evil.test a+b&#8203;@&#8203;evil.test " +
+        "x_&#8203;@&#8203;evil.test ops&#8203;@&#8203;-evil.test",
     );
     expect(output).toContain("app::e::ops\\&\\#64;evil.test ops\\&commat;evil.test a\\&amp;b");
-    expect(output).not.toMatch(/(?<!\\)&(?!#8203;@)/);
+    expect(output.split("&#8203;@&#8203;").join("")).not.toMatch(/(?<!\\)&/);
   });
 
   it("escapes code-span and strikethrough markers and replaces control characters like the other Markdown exports", () => {
