@@ -61,10 +61,13 @@ function stampVersion(file: string, version: number): void {
   db.close();
 }
 
-function makeLegacyDb(file: string, marker: string): void {
+// A real pre-0.3.3 install records allowRoots[0] as the workspace root in the
+// root-hashed data dir, so the legacy fixture records the workspace it belongs
+// to (CAU-03: a DB recorded for another root is refused at open).
+function makeLegacyDb(file: string, marker: string, rootPath: string): void {
   const repo = new SqliteGraphRepository(file);
   try {
-    repo.registerWorkspace({ id: "project", rootPath: "/legacy", createdAt: "2026-11-01T00:00:00.000Z" });
+    repo.registerWorkspace({ id: "project", rootPath, createdAt: "2026-11-01T00:00:00.000Z" });
     repo.upsertFile({
       workspaceId: "project",
       relativePath: marker,
@@ -156,7 +159,7 @@ describe("legacy graph-<client>.sqlite migration", { timeout: 120_000 }, () => {
     });
     const sharedPath = config.storage.dataDbPath as string;
     const dataDir = path.dirname(sharedPath);
-    makeLegacyDb(path.join(dataDir, "graph-claude-code.sqlite"), "legacy/marker.ts");
+    makeLegacyDb(path.join(dataDir, "graph-claude-code.sqlite"), "legacy/marker.ts", workspaceDir);
 
     const prepare = (runtimeCli as unknown as {
       prepareWorkspaceDatabase?: (
@@ -196,7 +199,7 @@ describe("legacy graph-<client>.sqlite migration", { timeout: 120_000 }, () => {
     });
     const sharedPath = config.storage.dataDbPath as string;
     const dataDir = path.dirname(sharedPath);
-    makeLegacyDb(path.join(dataDir, "graph-codex.sqlite"), "legacy/from-codex.ts");
+    makeLegacyDb(path.join(dataDir, "graph-codex.sqlite"), "legacy/from-codex.ts", workspaceDir);
     expect(existsSync(sharedPath)).toBe(false);
 
     const child = spawn(
