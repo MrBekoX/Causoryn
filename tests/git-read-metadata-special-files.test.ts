@@ -53,6 +53,11 @@ const fsHooks = vi.hoisted(() => ({
   beforeLstat: undefined as undefined | ((file: string, options?: import("node:fs").StatOptions) => unknown),
   /** Link text for a simulated symbolic link (undefined: real readlink). */
   readlink: undefined as undefined | ((file: string) => string | undefined),
+  /**
+   * Runs before the real realpath: a returned value is the result, a thrown
+   * error is the failure, undefined passes through.
+   */
+  beforeRealpath: undefined as undefined | ((file: string) => string | undefined),
   opened: [] as Array<{ readonly file: string; readonly flags: unknown }>,
 }));
 
@@ -69,6 +74,11 @@ vi.mock("node:fs/promises", async (importOriginal) => {
     if (text !== undefined) return text;
     return actual.readlink(file, options as never);
   };
+  const realpath = async (file: import("node:fs").PathLike, options?: unknown) => {
+    const replaced = fsHooks.beforeRealpath?.(String(file));
+    if (replaced !== undefined) return replaced;
+    return actual.realpath(file, options as never);
+  };
   const open = async (
     file: import("node:fs").PathLike,
     flags?: string | number,
@@ -77,7 +87,7 @@ vi.mock("node:fs/promises", async (importOriginal) => {
     fsHooks.opened.push({ file: String(file), flags });
     return actual.open(file, flags, mode);
   };
-  return { ...actual, lstat, readlink, open };
+  return { ...actual, lstat, readlink, realpath, open };
 });
 
 const cleanup: string[] = [];
@@ -88,6 +98,7 @@ afterEach(() => {
   fsHooks.lstat = undefined;
   fsHooks.beforeLstat = undefined;
   fsHooks.readlink = undefined;
+  fsHooks.beforeRealpath = undefined;
   fsHooks.opened.length = 0;
   setGitProcessRunnerForTesting(undefined);
   resetGitRuntimeCachesForTesting();
@@ -353,6 +364,46 @@ describe("git metadata paths: '..' after a link is applied to the link target (s
   });
 });
 
+/**
+ * A ".." after a part that does not exist yet cannot be judged: git on POSIX
+ * applies it to whatever is created there before git runs, and a symbolic
+ * link created there moves it to the link's target. Both readings agreeing
+ * on the folded path today proves nothing about that, so it is refused.
+ */
+describe("git metadata paths: a '..' after a part that does not exist is refused (every platform)", () => {
+  it("refuses a config include 'nope/../later.cfg' whose 'nope' does not exist", async () => {
+    const { root, gitDir } = fakeRepository("causoryn-meta-missing-dotdot-include-");
+    writeFileSync(path.join(gitDir, "config"), "[include]\n\tpath = nope/../later.cfg\n", "utf8");
+
+    const error = await rejection(() => validateRepositoryLayout(root, "rev-parse"));
+
+    expect(error.code).toBe("compare/repository-refused");
+    expect(error.message).toContain("include.path");
+    expect(error.message).toContain('"nope/../later.cfg"');
+  });
+
+  it("refuses an alternates entry '../nope/../store' whose 'nope' does not exist", async () => {
+    const { root, gitDir } = nestedRepository("causoryn-meta-missing-dotdot-alt-");
+    writeFileSync(path.join(gitDir, "objects", "info", "alternates"), "../nope/../store\n", "utf8");
+
+    const error = await rejection(() => validateRepositoryLayout(root, "rev-parse"));
+
+    expect(error.code).toBe("compare/repository-refused");
+    expect(error.message).toContain("objects/info/alternates");
+    expect(error.message).toContain('"../nope/../store"');
+  });
+
+  it("still accepts a missing entry without a '..' after it", async () => {
+    const { root, gitDir } = nestedRepository("causoryn-meta-missing-plain-");
+    writeFileSync(path.join(gitDir, "config"), "[include]\n\tpath = nope/later.cfg\n", "utf8");
+    writeFileSync(path.join(gitDir, "objects", "info", "alternates"), "../nope/store\n", "utf8");
+
+    const layout = await validateRepositoryLayout(root, "rev-parse");
+
+    expect(layout.kind).toBe("git-directory");
+  });
+});
+
 /* ------------------------------------------------------------------ */
 /* lstat failures other than "missing" (every platform)                */
 /* ------------------------------------------------------------------ */
@@ -404,6 +455,41 @@ describe("git metadata reader: only a missing entry reads as absent (every platf
       expect(samePath(layout.commonDir, gitDir)).toBe(true);
     });
   }
+
+  // The objects directory's realpath is where its alternates are read: an
+  // error other than "missing" must not skip the objects and alternates checks.
+  it("refuses when the objects directory cannot be resolved (EACCES) instead of skipping its checks", async () => {
+    const { root, gitDir } = nestedRepository("causoryn-meta-eacces-objects-");
+    const outsideStore = tempDir("causoryn-meta-eacces-objects-store-");
+    writeFileSync(path.join(gitDir, "objects", "info", "alternates"), `${outsideStore}\n`, "utf8");
+    const objects = path.join(gitDir, "objects");
+    fsHooks.beforeRealpath = (file) => {
+      if (samePath(file, objects)) throw errnoError("EACCES");
+      return undefined;
+    };
+
+    const error = await rejection(() => validateRepositoryLayout(root, "rev-parse"));
+
+    expect(error.code).toBe("compare/repository-refused");
+    expect(error.message).toContain("the objects directory");
+    expect(error.message).toContain("EACCES");
+    expectNotNamed(error.message, outsideStore);
+  });
+
+  for (const code of ["ENOENT", "ENOTDIR"]) {
+    it(`still treats ${code} from the objects directory's realpath as a missing objects directory`, async () => {
+      const { root, gitDir } = nestedRepository(`causoryn-meta-${code.toLowerCase()}-objects-`);
+      const objects = path.join(gitDir, "objects");
+      fsHooks.beforeRealpath = (file) => {
+        if (samePath(file, objects)) throw errnoError(code);
+        return undefined;
+      };
+
+      const layout = await validateRepositoryLayout(root, "rev-parse");
+
+      expect(layout.kind).toBe("git-directory");
+    });
+  }
 });
 
 /* ------------------------------------------------------------------ */
@@ -411,22 +497,44 @@ describe("git metadata reader: only a missing entry reads as absent (every platf
 /* ------------------------------------------------------------------ */
 
 describe("git metadata refusals do not name resolved locations outside the workspace (every platform)", () => {
-  it("does not name a link outside the root, nor its target, when it leads to a network path", async () => {
+  // The include text names no outside path: every outside location in the
+  // refusal would come from resolving it (through .git/in), so none may appear.
+  it("names neither an outside link nor its target when an include reaches it through a link in the root", async () => {
     const { root, gitDir } = fakeRepository("causoryn-meta-msg-netlink-");
     const outside = tempDir("causoryn-meta-msg-netlink-outside-");
-    const outsideLink = path.join(outside, "l");
-    simulateLinks([[outsideLink, "\\\\127.0.0.1\\causoryn-unused-share\\x"]]);
-    writeFileSync(
-      path.join(gitDir, "config"),
-      `[include]\n\tpath = ${outsideLink.replace(/\\/g, "/")}/x.cfg\n`,
-      "utf8",
-    );
+    simulateLinks([
+      [path.join(gitDir, "in"), outside],
+      [path.join(outside, "l"), "//127.0.0.1/causoryn-unused-share/x"],
+    ]);
+    writeFileSync(path.join(gitDir, "config"), "[include]\n\tpath = in/l/x.cfg\n", "utf8");
 
     const error = await rejection(() => validateRepositoryLayout(root, "rev-parse"));
 
     expect(error.code).toBe("compare/repository-refused");
     expect(error.message).toContain("network or device path");
-    expectNotNamed(error.message, outsideLink);
+    expect(error.message).toContain('"in/l/x.cfg"');
+    expectNotNamed(error.message, outside);
+    expect(error.message).not.toContain("causoryn-unused-share");
+  });
+
+  // Here the include text itself spells the outside link (with '/' on every
+  // platform, so on POSIX it is the link's own path). The refusal quotes that
+  // text as written; outside the quote it names neither the link nor its target.
+  it("names an outside link that leads to a network path only inside the quoted include text", async () => {
+    const { root, gitDir } = fakeRepository("causoryn-meta-msg-netlink-abs-");
+    const outside = tempDir("causoryn-meta-msg-netlink-abs-outside-");
+    const outsideLink = path.join(outside, "l");
+    simulateLinks([[outsideLink, "//127.0.0.1/causoryn-unused-share/x"]]);
+    const includeText = `${outsideLink.replace(/\\/g, "/")}/x.cfg`;
+    writeFileSync(path.join(gitDir, "config"), `[include]\n\tpath = ${includeText}\n`, "utf8");
+
+    const error = await rejection(() => validateRepositoryLayout(root, "rev-parse"));
+
+    expect(error.code).toBe("compare/repository-refused");
+    expect(error.message).toContain("network or device path");
+    const quoted = JSON.stringify(includeText);
+    expect(error.message).toContain(quoted);
+    expectNotNamed(error.message.split(quoted).join(""), outsideLink);
     expect(error.message).not.toContain("causoryn-unused-share");
   });
 

@@ -298,6 +298,31 @@ describe("git-read: linked worktrees and submodules keep working", () => {
   }, 60_000);
 });
 
+describe("git-read: git addresses the root that was validated", () => {
+  // The layout check resolves the root to its canonical path; git must run
+  // there (`-C <canonical root>`), not at a spelling whose links could be
+  // pointed elsewhere between the check and the git call.
+  it("passes the canonical root to -C when the root is given through a link", async () => {
+    const holder = tempDir("causoryn-git-canonical-root-");
+    const real = path.join(holder, "real");
+    const head = await initRepo(real, "a.txt", "a\n");
+    const spelled = path.join(holder, "via-link");
+    linkDirectory(real, spelled);
+    const directories: string[] = [];
+    setGitProcessRunnerForTesting((file, args, options) => {
+      const flag = args.indexOf("-C");
+      if (flag >= 0) directories.push(args[flag + 1]!);
+      return defaultGitProcessRunner(file, args, options);
+    });
+
+    expect(await resolveGitCommitRef(spelled, "HEAD")).toBe(head);
+    expect(await readGitBlob(spelled, "HEAD", "a.txt")).toBe("a\n");
+
+    expect(directories.length).toBeGreaterThan(0);
+    for (const directory of directories) expect(directory).toBe(realpathSync.native(real));
+  }, 60_000);
+});
+
 describe("git-read: network and device paths inside the git directory are refused before git starts", () => {
   async function repoWith(mutate: (gitDir: string) => void): Promise<string> {
     const root = tempDir("causoryn-git-unc-meta-");

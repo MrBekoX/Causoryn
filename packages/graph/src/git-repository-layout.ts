@@ -43,8 +43,15 @@
  * folded lexically before links are followed (Git for Windows: Win32 path
  * normalisation). A path whose two readings name different locations is
  * refused, so the location validated here is the one git uses on either
- * platform. Separators are the ones git uses: `/` and `\` on Windows, only
- * `/` on POSIX (a backslash is an ordinary file-name character there).
+ * platform. A ".." after a part that does not exist is refused as well: git
+ * on POSIX would apply it to whatever is created there later, the target of
+ * a symbolic link included. Separators are the ones git uses: `/` and `\` on
+ * Windows, only `/` on POSIX (a backslash is an ordinary file-name character
+ * there, also at the end of a directory name).
+ *
+ * The work is bounded per call: at most MAX_LAYOUT_FS_OPERATIONS file system
+ * operations (lstat, readlink, realpath), and an identically spelled path is
+ * resolved once; metadata that would need more is refused.
  *
  * Refusal messages name the metadata text as written and paths inside the
  * analyzed root, never a resolved location outside it.
@@ -80,6 +87,16 @@ const MAX_ALTERNATE_DEPTH = 5;
 /** git's include depth limit is 10 (config.c MAX_INCLUDE_DEPTH). */
 const MAX_INCLUDE_DEPTH = 10;
 const MAX_SCANNED_FILES = 64;
+/**
+ * Upper bound on the file system operations (lstat, readlink, realpath) of
+ * one validateRepositoryLayout call. A checkout, linked worktree or submodule
+ * with a few config includes and alternates needs well under a hundred;
+ * 64 scanned files whose paths are each walked both ways stay in the low
+ * thousands. Metadata that would need more (thousands of include or
+ * alternates entries, a path text with thousands of components) is refused:
+ * this check runs before git starts, so the git timeout does not bound it.
+ */
+export const MAX_LAYOUT_FS_OPERATIONS = 10_000;
 const READ_CHUNK_BYTES = 64 * 1024;
 
 /** Git directory entries whose links are checked (relative to gitDir / commonDir). */
@@ -158,6 +175,8 @@ function sameLocation(a: string, b: string): boolean {
 
 /** Path separators as git splits them on this platform (see module header). */
 const SEPARATORS = process.platform === "win32" ? /[\\/]+/ : /\/+/;
+/** A path text that ends with one of those separators. */
+const TRAILING_SEPARATOR = process.platform === "win32" ? /[\\/]$/ : /\/$/;
 
 /** Components of a path text, split as git splits them; empty and "." parts dropped, ".." kept. */
 function components(text: string): string[] {
@@ -194,7 +213,7 @@ function splitRaw(driveOf: string, text: string): SplitPath {
  */
 function joinRaw(base: string, text: string): string {
   if (path.isAbsolute(text)) return text;
-  return /[\\/]$/.test(base) ? `${base}${text}` : `${base}${path.sep}${text}`;
+  return TRAILING_SEPARATOR.test(base) ? `${base}${text}` : `${base}${path.sep}${text}`;
 }
 
 /** The directory part of a path as git spelled it (config.c: up to the last separator). */
@@ -231,6 +250,32 @@ interface LocalResolution {
   readonly exists: boolean;
 }
 
+/** State of one validateRepositoryLayout call. */
+interface LayoutCheck {
+  /** Canonical analyzed root (named in refusals). */
+  readonly root: string;
+  /** File system operations made so far (see MAX_LAYOUT_FS_OPERATIONS). */
+  fsOperations: number;
+  /** Config include and alternates files checked so far (see MAX_SCANNED_FILES). */
+  scannedFiles: number;
+  /** Resolutions by spelled path: an identically spelled path is walked once. */
+  readonly resolved: Map<string, LocalResolution>;
+}
+
+/**
+ * Counts one lstat, readlink or realpath against the call's budget, before it
+ * is made: past the budget the check fails closed instead of going on.
+ */
+function spend(check: LayoutCheck): void {
+  check.fsOperations += 1;
+  if (check.fsOperations > MAX_LAYOUT_FS_OPERATIONS) {
+    throw refusal(
+      check.root,
+      `checking its metadata paths would take more than ${String(MAX_LAYOUT_FS_OPERATIONS)} file system operations`,
+    );
+  }
+}
+
 /**
  * - "physical": ".." applies to the directory reached so far, after links
  *   (git on POSIX); link text is joined onto the link's directory unnormalised.
@@ -252,12 +297,13 @@ interface Walk extends LocalResolution {
  * readlink failure is a refusal, since git may still be able to read there.
  */
 async function walkPath(
-  root: string,
+  check: LayoutCheck,
   where: string,
   spelled: string,
   bases: readonly string[],
   reading: Reading,
 ): Promise<Walk> {
+  const { root } = check;
   const start = reading === "physical" ? splitRaw(root, spelled) : splitAbsolute(path.resolve(root, spelled));
   let { current, queue } = startingPoint(start, bases);
   // Below a base (the analyzed root, the git or common directory) the walk
@@ -272,6 +318,7 @@ async function walkPath(
     }
     const next = path.join(current, part);
     let entry;
+    spend(check);
     try {
       entry = await lstat(next);
     } catch (error) {
@@ -295,6 +342,7 @@ async function walkPath(
     }
     const linkWhere = `a symbolic link on the way to ${where}${located(root, next)}`;
     let linkText: string;
+    spend(check);
     try {
       linkText = await readlink(next);
     } catch (error) {
@@ -322,10 +370,12 @@ async function walkPath(
   return { path: current, exists: true, linksFollowed: hops, parentAfterMissing: false };
 }
 
-async function sameResolution(a: LocalResolution, b: LocalResolution): Promise<boolean> {
+async function sameResolution(check: LayoutCheck, a: LocalResolution, b: LocalResolution): Promise<boolean> {
   if (a.exists !== b.exists) return false;
   if (sameLocation(a.path, b.path)) return true;
   if (!a.exists) return false;
+  spend(check);
+  spend(check);
   const [realA, realB] = await Promise.all([realpath(a.path).catch(() => a.path), realpath(b.path).catch(() => b.path)]);
   return sameLocation(realA, realB);
 }
@@ -334,43 +384,67 @@ async function sameResolution(a: LocalResolution, b: LocalResolution): Promise<b
  * Resolves `spelled` (an absolute path text, see joinRaw) both ways git
  * reads it and refuses it when the two readings name different locations.
  * `bases` are canonical directories known to contain no links; components
- * leading to one of them are not walked again.
+ * leading to one of them are not walked again. A path spelled the same way
+ * as one resolved before in this call is not walked again.
  */
 async function resolveLocal(
-  root: string,
+  check: LayoutCheck,
   where: string,
   spelled: string,
   bases: readonly string[],
 ): Promise<LocalResolution> {
-  const physical = await walkPath(root, where, spelled, bases, "physical");
-  // Without links every ".." removed a real directory, so both readings agree.
-  if (physical.linksFollowed === 0 && !physical.parentAfterMissing) {
-    return { path: physical.path, exists: physical.exists };
-  }
-  const lexical = await walkPath(root, where, spelled, bases, "lexical");
-  if (!(await sameResolution(physical, lexical))) {
+  const known = check.resolved.get(spelled);
+  if (known !== undefined) return known;
+  const physical = await walkPath(check, where, spelled, bases, "physical");
+  // git on POSIX applies a ".." after a missing part to whatever is created
+  // there before it runs, the target of a symbolic link created there
+  // included; what both readings fold the path to now proves nothing.
+  if (physical.parentAfterMissing) {
     throw refusal(
-      root,
-      `${where} names a different location depending on whether ".." is applied after symbolic links ` +
-        "(git on POSIX) or before them (Git for Windows)",
+      check.root,
+      `${where} has a ".." after a part that does not exist, which git would apply to whatever is created there`,
     );
   }
-  return { path: physical.path, exists: physical.exists };
+  // Without links every ".." removed a real directory, so both readings agree.
+  if (physical.linksFollowed > 0) {
+    const lexical = await walkPath(check, where, spelled, bases, "lexical");
+    if (!(await sameResolution(check, physical, lexical))) {
+      throw refusal(
+        check.root,
+        `${where} names a different location depending on whether ".." is applied after symbolic links ` +
+          "(git on POSIX) or before them (Git for Windows)",
+      );
+    }
+  }
+  const resolution: LocalResolution = { path: physical.path, exists: physical.exists };
+  check.resolved.set(spelled, resolution);
+  return resolution;
+}
+
+/**
+ * The realpath of an entry a walk found. Only a missing entry (ENOENT or
+ * ENOTDIR: removed since the walk) reads as absent; any other failure is a
+ * refusal, since git may still resolve the path and read there.
+ */
+async function realLocation(check: LayoutCheck, where: string, file: string): Promise<string | undefined> {
+  spend(check);
+  try {
+    return await realpath(file);
+  } catch (error) {
+    if (isMissingEntryError(error)) return undefined;
+    throw refusal(check.root, `${where} could not be resolved (${errorCode(error)})`);
+  }
 }
 
 async function canonical(
-  root: string,
+  check: LayoutCheck,
   where: string,
   target: string,
   bases: readonly string[],
 ): Promise<string | undefined> {
-  const resolved = await resolveLocal(root, where, target, bases);
+  const resolved = await resolveLocal(check, where, target, bases);
   if (!resolved.exists) return undefined;
-  try {
-    return await realpath(resolved.path);
-  } catch {
-    return undefined;
-  }
+  return realLocation(check, where, resolved.path);
 }
 
 /**
@@ -396,13 +470,15 @@ function isMissingEntryError(error: unknown): boolean {
  * this check could not look at.
  */
 async function readBounded(
-  root: string,
+  check: LayoutCheck,
   file: string,
   label: string,
   maxBytes: number,
 ): Promise<string | undefined> {
+  const { root } = check;
   const shown = `${label}${located(root, file)}`;
   let before;
+  spend(check);
   try {
     before = await lstat(file, { bigint: true });
   } catch (error) {
@@ -447,15 +523,15 @@ async function readBounded(
 
 /** Reads a metadata file after resolving its path without network links. */
 async function readMetadata(
-  root: string,
+  check: LayoutCheck,
   file: string,
   label: string,
   maxBytes: number,
   bases: readonly string[],
 ): Promise<string | undefined> {
-  const resolved = await resolveLocal(root, label, file, bases);
+  const resolved = await resolveLocal(check, label, file, bases);
   if (!resolved.exists) return undefined;
-  return readBounded(root, resolved.path, label, maxBytes);
+  return readBounded(check, resolved.path, label, maxBytes);
 }
 
 /* ------------------------------------------------------------------ */
@@ -671,15 +747,14 @@ function unquoteCStyle(value: string): string | null {
   return null;
 }
 
-interface ScanState {
-  scannedFiles: number;
-}
-
 /** Fails closed when include/alternates files form an unusually large graph. */
-function countScannedFile(root: string, state: ScanState): void {
-  state.scannedFiles += 1;
-  if (state.scannedFiles > MAX_SCANNED_FILES) {
-    throw refusal(root, `more than ${String(MAX_SCANNED_FILES)} config include or alternates files would have to be checked`);
+function countScannedFile(check: LayoutCheck): void {
+  check.scannedFiles += 1;
+  if (check.scannedFiles > MAX_SCANNED_FILES) {
+    throw refusal(
+      check.root,
+      `more than ${String(MAX_SCANNED_FILES)} config include or alternates files would have to be checked`,
+    );
   }
 }
 
@@ -692,18 +767,18 @@ function countScannedFile(root: string, state: ScanState): void {
  * be created outside the scope after this check.
  */
 async function checkAlternates(
-  root: string,
+  check: LayoutCheck,
   objectsDir: string,
   depth: number,
   bases: readonly string[],
   scope: readonly string[],
-  state: ScanState,
 ): Promise<void> {
+  const { root } = check;
   // git ignores alternates nested deeper than MAX_ALTERNATE_DEPTH.
   if (depth > MAX_ALTERNATE_DEPTH) return;
-  countScannedFile(root, state);
+  countScannedFile(check);
   const file = path.join(objectsDir, "info", "alternates");
-  const text = await readMetadata(root, file, "objects/info/alternates", MAX_ALTERNATES_BYTES, bases);
+  const text = await readMetadata(check, file, "objects/info/alternates", MAX_ALTERNATES_BYTES, bases);
   if (text === undefined) return;
   for (const rawLine of text.split("\n")) {
     const line = rawLine.replace(/\r$/, "");
@@ -715,8 +790,9 @@ async function checkAlternates(
     const named = `${where} (${JSON.stringify(entry)})`;
     // git: realpath(<objects dir>) + "/" + entry, resolved component by
     // component (odb.c link_alt_odb_entry, strbuf_realpath).
-    const resolved = await resolveLocal(root, named, joinRaw(objectsDir, entry), bases);
-    const location = resolved.exists ? await realpath(resolved.path).catch(() => resolved.path) : resolved.path;
+    const resolved = await resolveLocal(check, named, joinRaw(objectsDir, entry), bases);
+    // An entry removed since the walk is judged by the path it had.
+    const location = (resolved.exists ? await realLocation(check, named, resolved.path) : undefined) ?? resolved.path;
     if (!scope.some((dir) => isSameOrInside(location, dir))) {
       throw refusal(
         root,
@@ -725,25 +801,25 @@ async function checkAlternates(
       );
     }
     if (resolved.exists) {
-      await checkAlternates(root, location, depth + 1, bases, scope, state);
+      await checkAlternates(check, location, depth + 1, bases, scope);
     }
   }
 }
 
 /** Reads the config file at `spelled` (a path as git spells it, see joinRaw). */
 async function readConfigEntries(
-  root: string,
+  check: LayoutCheck,
   spelled: string,
   label: string,
   bases: readonly string[],
 ): Promise<GitConfigEntry[] | undefined> {
-  const resolved = await resolveLocal(root, label, spelled, bases);
+  const resolved = await resolveLocal(check, label, spelled, bases);
   if (!resolved.exists) return undefined;
-  const text = await readBounded(root, resolved.path, label, MAX_CONFIG_BYTES);
+  const text = await readBounded(check, resolved.path, label, MAX_CONFIG_BYTES);
   if (text === undefined) return undefined;
   const entries = parseGitConfig(text);
   if (entries === null) {
-    throw refusal(root, `${label}${located(root, resolved.path)} could not be parsed as git config`);
+    throw refusal(check.root, `${label}${located(check.root, resolved.path)} could not be parsed as git config`);
   }
   return entries;
 }
@@ -768,24 +844,24 @@ function isCoreWorktree(entry: GitConfigEntry): boolean {
  * core.worktree resolve against.
  */
 async function checkConfigFile(
-  root: string,
+  check: LayoutCheck,
   spelled: string,
   label: string,
   gitDir: string,
   depth: number,
   bases: readonly string[],
-  state: ScanState,
 ): Promise<void> {
+  const { root } = check;
   // git itself stops with an error beyond MAX_INCLUDE_DEPTH.
   if (depth > MAX_INCLUDE_DEPTH) return;
-  countScannedFile(root, state);
-  const entries = await readConfigEntries(root, spelled, label, bases);
+  countScannedFile(check);
+  const entries = await readConfigEntries(check, spelled, label, bases);
   if (entries === undefined) return;
   for (const entry of entries) {
     if (isCoreWorktree(entry) && entry.value !== null) {
       const where = `core.worktree in ${label}`;
       assertLocalPathText(root, where, entry.value);
-      await resolveLocal(root, `${where} (${JSON.stringify(entry.value)})`, joinRaw(gitDir, entry.value), bases);
+      await resolveLocal(check, `${where} (${JSON.stringify(entry.value)})`, joinRaw(gitDir, entry.value), bases);
       continue;
     }
     if (!isIncludePath(entry)) continue;
@@ -795,20 +871,20 @@ async function checkConfigFile(
     // Home- and prefix-relative includes name the user's own files.
     if (value.startsWith("~") || value.startsWith("%(prefix)/")) continue;
     const include = joinRaw(spelledDirectory(spelled), value);
-    const resolved = await resolveLocal(root, `${where} (${JSON.stringify(value)})`, include, bases);
+    const resolved = await resolveLocal(check, `${where} (${JSON.stringify(value)})`, include, bases);
     if (resolved.exists) {
-      await checkConfigFile(root, include, `included config ${JSON.stringify(value)}`, gitDir, depth + 1, bases, state);
+      await checkConfigFile(check, include, `included config ${JSON.stringify(value)}`, gitDir, depth + 1, bases);
     }
   }
 }
 
 async function readPointer(
-  root: string,
+  check: LayoutCheck,
   file: string,
   label: string,
   bases: readonly string[],
 ): Promise<string | undefined> {
-  const text = await readMetadata(root, file, label, MAX_POINTER_BYTES, bases);
+  const text = await readMetadata(check, file, label, MAX_POINTER_BYTES, bases);
   if (text === undefined) return undefined;
   const value = text.replace(/[\r\n]+$/, "");
   if (value.length === 0 || /[\r\n\0]/.test(value)) return undefined;
@@ -817,7 +893,7 @@ async function readPointer(
 
 /** Linked worktree: <common>/worktrees/<name> whose gitdir file names <root>/.git. */
 async function isLinkedWorktreeOf(
-  root: string,
+  check: LayoutCheck,
   gitDir: string,
   dotGit: string,
   bases: readonly string[],
@@ -826,21 +902,21 @@ async function isLinkedWorktreeOf(
   const matches =
     process.platform === "win32" ? parentName.toLowerCase() === "worktrees" : parentName === "worktrees";
   if (!matches) return false;
-  const backPointer = await readPointer(root, path.join(gitDir, "gitdir"), "the worktree gitdir file", bases);
+  const backPointer = await readPointer(check, path.join(gitDir, "gitdir"), "the worktree gitdir file", bases);
   if (backPointer === undefined) return false;
-  assertLocalPathText(root, "the worktree gitdir file", backPointer);
+  assertLocalPathText(check.root, "the worktree gitdir file", backPointer);
   const named = `the worktree gitdir file (${JSON.stringify(backPointer)})`;
-  const target = await canonical(root, named, joinRaw(gitDir, backPointer), bases);
+  const target = await canonical(check, named, joinRaw(gitDir, backPointer), bases);
   return target !== undefined && sameLocation(target, dotGit);
 }
 
 /** Submodule: a git dir whose core.worktree resolves to the root. */
 async function isSubmoduleOf(
-  root: string,
+  check: LayoutCheck,
   gitDir: string,
   bases: readonly string[],
 ): Promise<boolean> {
-  const entries = await readConfigEntries(root, path.join(gitDir, "config"), "the submodule config", bases);
+  const entries = await readConfigEntries(check, path.join(gitDir, "config"), "the submodule config", bases);
   if (entries === undefined) return false;
   let worktree: string | null | undefined;
   for (const entry of entries) {
@@ -848,10 +924,10 @@ async function isSubmoduleOf(
   }
   if (worktree === undefined || worktree === null) return false;
   const where = "core.worktree in the submodule config";
-  assertLocalPathText(root, where, worktree);
+  assertLocalPathText(check.root, where, worktree);
   // git: chdir(<git dir>), then chdir(<core.worktree>) (setup.c).
-  const target = await canonical(root, `${where} (${JSON.stringify(worktree)})`, joinRaw(gitDir, worktree), bases);
-  return target !== undefined && sameLocation(target, root);
+  const target = await canonical(check, `${where} (${JSON.stringify(worktree)})`, joinRaw(gitDir, worktree), bases);
+  return target !== undefined && sameLocation(target, check.root);
 }
 
 /**
@@ -871,8 +947,11 @@ export async function validateRepositoryLayout(
       `git ${subcommand} failed: the analyzed root does not exist or cannot be read: ${repoRoot}`,
     );
   }
+  // fsOperations: the realpath above.
+  const check: LayoutCheck = { root, fsOperations: 1, scannedFiles: 0, resolved: new Map() };
   const dotGit = path.join(root, ".git");
   let entry;
+  spend(check);
   try {
     entry = await lstat(dotGit);
   } catch {
@@ -891,7 +970,7 @@ export async function validateRepositoryLayout(
     kind = "git-directory";
     gitDir = dotGit;
   } else if (entry.isFile()) {
-    const content = await readBounded(root, dotGit, "the .git file", MAX_POINTER_BYTES);
+    const content = await readBounded(check, dotGit, "the .git file", MAX_POINTER_BYTES);
     const pointer = content === undefined ? undefined : parseGitfile(content);
     if (pointer === undefined) {
       throw refusal(root, "the .git file is not a valid 'gitdir: <path>' pointer");
@@ -899,16 +978,16 @@ export async function validateRepositoryLayout(
     assertLocalPathText(root, "the gitdir pointer in the .git file", pointer);
     // git (setup.c read_gitfile_gently): <dir of .git>/<pointer>, then realpath.
     const named = `the gitdir pointer in the .git file (${JSON.stringify(pointer)})`;
-    const target = await canonical(root, named, joinRaw(root, pointer), [root]);
+    const target = await canonical(check, named, joinRaw(root, pointer), [root]);
     if (target === undefined) {
       throw refusal(root, `the .git file points to a directory that does not exist (${JSON.stringify(pointer)})`);
     }
     gitDir = target;
     if (isSameOrInside(target, root)) {
       kind = "gitfile-within-root";
-    } else if (await isLinkedWorktreeOf(root, target, dotGit, [root])) {
+    } else if (await isLinkedWorktreeOf(check, target, dotGit, [root])) {
       kind = "linked-worktree";
-    } else if (await isSubmoduleOf(root, target, [root])) {
+    } else if (await isSubmoduleOf(check, target, [root])) {
       kind = "submodule";
     } else {
       throw refusal(
@@ -923,17 +1002,20 @@ export async function validateRepositoryLayout(
 
   const bases = [root, gitDir];
   let commonDir = gitDir;
-  const commonPointer = await readPointer(root, path.join(gitDir, "commondir"), "the commondir file", bases);
+  const commonPointer = await readPointer(check, path.join(gitDir, "commondir"), "the commondir file", bases);
   if (commonPointer !== undefined) {
     assertLocalPathText(root, "the commondir file", commonPointer);
     // git (setup.c get_common_dir_noenv): <git dir>/<commondir>, then realpath.
     const named = `the commondir file (${JSON.stringify(commonPointer)})`;
-    const resolved = await canonical(root, named, joinRaw(gitDir, commonPointer), bases);
+    const resolved = await canonical(check, named, joinRaw(gitDir, commonPointer), bases);
     if (resolved === undefined) {
       throw refusal(root, `the commondir file points to a directory that does not exist`);
     }
-    const expectedCommon =
-      kind === "linked-worktree" ? await realpath(path.dirname(path.dirname(gitDir))).catch(() => undefined) : undefined;
+    let expectedCommon: string | undefined;
+    if (kind === "linked-worktree") {
+      spend(check);
+      expectedCommon = await realpath(path.dirname(path.dirname(gitDir))).catch(() => undefined);
+    }
     const accepted =
       kind === "linked-worktree"
         ? expectedCommon !== undefined && sameLocation(resolved, expectedCommon)
@@ -948,20 +1030,19 @@ export async function validateRepositoryLayout(
   const allBases = commonDir === gitDir ? bases : [...bases, commonDir];
 
   for (const name of GIT_DIR_ENTRIES) {
-    await resolveLocal(root, `${name} in the git directory`, path.join(gitDir, name), allBases);
+    await resolveLocal(check, `${name} in the git directory`, path.join(gitDir, name), allBases);
   }
   for (const name of COMMON_DIR_ENTRIES) {
-    await resolveLocal(root, `${name} in the git directory`, path.join(commonDir, name), allBases);
+    await resolveLocal(check, `${name} in the git directory`, path.join(commonDir, name), allBases);
   }
 
-  const state: ScanState = { scannedFiles: 0 };
-  await checkConfigFile(root, path.join(commonDir, "config"), "the repository config", gitDir, 0, allBases, state);
-  await checkConfigFile(root, path.join(gitDir, "config.worktree"), "the worktree config", gitDir, 0, allBases, state);
+  await checkConfigFile(check, path.join(commonDir, "config"), "the repository config", gitDir, 0, allBases);
+  await checkConfigFile(check, path.join(gitDir, "config.worktree"), "the worktree config", gitDir, 0, allBases);
   // git reads objects (and resolves relative alternates entries) at the real
   // location of the objects directory, so both checks use its realpath: an
   // objects link that leaves the repository is refused, and a relative entry
   // is judged where git will resolve it, not by its lexical spelling (CAU-06).
-  const objectsDir = await canonical(root, "the objects directory", path.join(commonDir, "objects"), allBases);
+  const objectsDir = await canonical(check, "the objects directory", path.join(commonDir, "objects"), allBases);
   if (objectsDir !== undefined) {
     if (!allBases.some((dir) => isSameOrInside(objectsDir, dir))) {
       throw refusal(
@@ -970,7 +1051,7 @@ export async function validateRepositoryLayout(
           "analyzed root, its git directory or its common directory are used",
       );
     }
-    await checkAlternates(root, objectsDir, 0, allBases, allBases, state);
+    await checkAlternates(check, objectsDir, 0, allBases, allBases);
   }
 
   return { kind, root, gitDir, commonDir };

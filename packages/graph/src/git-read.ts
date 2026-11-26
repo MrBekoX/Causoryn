@@ -133,10 +133,12 @@ const GIT_HARDENED_CONFIG_FLAGS: readonly string[] = [
 /**
  * Global options of every repository-bound git call: `-C <root>`, `--no-pager`
  * (a `pager.<cmd>` / core.pager value never starts, even on a terminal) and
- * the hardened `-c` overrides. All precede the subcommand.
+ * the hardened `-c` overrides. All precede the subcommand. `root` is the
+ * canonical root validateRepositoryLayout checked, so git runs in the
+ * directory that was validated even if a link in the given spelling changes.
  */
-function repositoryGlobalOptions(repoRoot: string): string[] {
-  return ["-C", repoRoot, "--no-pager", ...GIT_HARDENED_CONFIG_FLAGS];
+function repositoryGlobalOptions(root: string): string[] {
+  return ["-C", root, "--no-pager", ...GIT_HARDENED_CONFIG_FLAGS];
 }
 
 /**
@@ -433,7 +435,7 @@ function cacheSet<V>(cache: Map<string, V>, key: string, value: V): void {
 /**
  * Resolves git to an absolute path from PATH (never the cwd, never a PATH
  * entry inside the analyzed repository) and picks a cwd outside it. The
- * repository itself is addressed only through `-C <repoRoot>`.
+ * repository itself is addressed only through `-C <canonical root>`.
  */
 function resolveGitRuntime(repoRoot: string): GitRuntime {
   const untrustedRoots = collectUntrustedRoots([repoRoot]);
@@ -743,7 +745,7 @@ const PARTIAL_CLONE_KEY_PATTERN =
 
 async function assertPartialCloneSupported(
   runtime: GitRuntime,
-  repoRoot: string,
+  root: string,
   env: Readonly<Record<string, string>>,
   safeFlags: readonly string[],
 ): Promise<void> {
@@ -759,7 +761,7 @@ async function assertPartialCloneSupported(
     await gitProcessRunner(
       runtime.gitPath,
       [
-        ...repositoryGlobalOptions(repoRoot),
+        ...repositoryGlobalOptions(root),
         ...safeFlags,
         "config",
         "--includes",
@@ -853,11 +855,11 @@ export async function runGit(
   const runtime = resolveGitRuntime(repoRoot);
   const env = gitEnvFor(runtime, layout);
   const safeFlags = safeDirectoryFlags(await readProtectedSafeDirectories(runtime));
-  await assertPartialCloneSupported(runtime, repoRoot, env, safeFlags);
+  await assertPartialCloneSupported(runtime, layout.root, env, safeFlags);
   try {
     const result = await gitProcessRunner(
       runtime.gitPath,
-      [...repositoryGlobalOptions(repoRoot), ...safeFlags, ...args],
+      [...repositoryGlobalOptions(layout.root), ...safeFlags, ...args],
       processOptions(runtime, env, options),
     );
     return result.stdout;
