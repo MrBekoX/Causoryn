@@ -86,9 +86,11 @@ export {
   API_SURFACE_NODE_KINDS,
   compareIdentityKey,
   diffContentSets,
+  RENAME_MATCHING_BUDGET,
 } from "./compare.js";
 export type {
   ArchitectureDiff,
+  DiffContentSetsOptions,
   CompareContentSet,
   CompareEdge,
   CompareNode,

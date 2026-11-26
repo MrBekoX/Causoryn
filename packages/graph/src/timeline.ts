@@ -720,10 +720,12 @@ export function buildArchitectureTimeline(
     try {
       // TEK yeniden kullanım noktası: diff özetleri compare.ts çekirdeğinden
       // gelir; bu modül sayıları yeniden hesaplamaz/yorumlamaz.
-      const diff = diffContentSets(
-        fromContent.contentSet,
-        toContent.contentSet,
-      );
+      const diff = diffContentSets(fromContent.contentSet, toContent.contentSet, {
+        // Renames reported as removed + added must not go unnoticed (F5).
+        onWarning: (warning) => {
+          warnings.push(`interval '${fromPoint.ref}'..'${toPoint.ref}': ${warning}`);
+        },
+      });
       intervals.push({
         kind: "diff",
         ...base,
