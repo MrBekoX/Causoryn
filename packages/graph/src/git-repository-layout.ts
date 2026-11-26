@@ -21,7 +21,12 @@
  * - any symbolic link on the way to those targets, or at fixed git directory
  *   entries (HEAD, config, refs, objects, packed-refs, ...), whose target is
  *   such a path,
- * - any other gitdir pointer that leaves the root.
+ * - any other gitdir pointer that leaves the root,
+ * - an alternates entry (nested alternates included) whose object directory
+ *   does not resolve inside the analyzed root, the git directory or the
+ *   common directory: another object store on the machine is never read,
+ * - a metadata file that is not a regular file (FIFO, socket, device): it is
+ *   never opened, so it cannot block the read before git's timeout starts.
  *
  * Upward discovery is blocked separately by git-read (GIT_CEILING_DIRECTORIES
  * set to the parent of the root); a root without a `.git` entry is reported
@@ -224,23 +229,55 @@ async function canonical(
   }
 }
 
-/** Bounded read of a small metadata file at an already link-checked path. */
+/**
+ * O_NONBLOCK: an open() of a FIFO that replaced the file after lstat returns
+ * at once instead of waiting for a writer; the identity check then refuses
+ * it. Both flags are undefined (0) on Windows.
+ */
+const METADATA_OPEN_FLAGS =
+  fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0) | (fsConstants.O_NONBLOCK ?? 0);
+
+function isMissingEntryError(error: unknown): boolean {
+  const code = (error as NodeJS.ErrnoException | undefined)?.code;
+  return code === "ENOENT" || code === "ENOTDIR";
+}
+
+/**
+ * Bounded read of a small metadata file at an already link-checked path.
+ * lstat comes first and only a regular file is opened, so a FIFO, socket or
+ * device never blocks the read (the git subprocess timeout does not cover
+ * this step). The opened handle must be the file the lstat saw (dev, ino).
+ * A missing entry or a directory reads as absent.
+ */
 async function readBounded(
   root: string,
   file: string,
   label: string,
   maxBytes: number,
 ): Promise<string | undefined> {
-  const openFlags = fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0);
-  let handle;
+  let before;
   try {
-    handle = await open(file, openFlags);
+    before = await lstat(file, { bigint: true });
   } catch {
     return undefined;
   }
+  if (before.isDirectory()) return undefined;
+  if (!before.isFile()) {
+    throw refusal(root, `${label} (${file}) is not a regular file`);
+  }
+  let handle;
   try {
-    const info = await handle.stat();
-    if (!info.isFile()) return undefined;
+    handle = await open(file, METADATA_OPEN_FLAGS);
+  } catch (error) {
+    if (isMissingEntryError(error)) return undefined;
+    throw refusal(root, `${label} (${file}) could not be opened as a regular file`);
+  }
+  try {
+    const info = await handle.stat({ bigint: true });
+    const sameInode = info.ino === 0n || before.ino === 0n || info.ino === before.ino;
+    if (!info.isFile() || info.dev !== before.dev || !sameInode) {
+      throw refusal(root, `${label} (${file}) changed while it was read`);
+    }
     const chunks: Buffer[] = [];
     let total = 0;
     const hardCap = maxBytes + 1;
@@ -498,11 +535,20 @@ function countScannedFile(root: string, state: ScanState): void {
   }
 }
 
+/**
+ * Checks objects/info/alternates (nested alternates included). Every
+ * alternate object directory must resolve, through any links, inside
+ * `scope` (the canonical analyzed root, git directory and common directory):
+ * an object store elsewhere on the machine is never read (CAU-06). An entry
+ * that does not exist yet is judged by the path it would have, so it cannot
+ * be created outside the scope after this check.
+ */
 async function checkAlternates(
   root: string,
   objectsDir: string,
   depth: number,
   bases: readonly string[],
+  scope: readonly string[],
   state: ScanState,
 ): Promise<void> {
   // git ignores alternates nested deeper than MAX_ALTERNATE_DEPTH.
@@ -516,11 +562,20 @@ async function checkAlternates(
     if (line.length === 0 || line.startsWith("#")) continue;
     const entry = unquoteCStyle(line);
     if (entry === null) throw refusal(root, `objects/info/alternates has a malformed quoted entry`);
-    assertLocalPathText(root, "an objects/info/alternates entry", entry);
+    const where = "an objects/info/alternates entry";
+    assertLocalPathText(root, where, entry);
     const target = path.resolve(objectsDir, entry);
-    const resolved = await canonical(root, "an objects/info/alternates entry", target, bases);
-    if (resolved !== undefined) {
-      await checkAlternates(root, resolved, depth + 1, bases, state);
+    const resolved = await resolveLocal(root, where, target, bases);
+    const location = resolved.exists ? await realpath(resolved.path).catch(() => resolved.path) : resolved.path;
+    if (!scope.some((dir) => isSameOrInside(location, dir))) {
+      throw refusal(
+        root,
+        `${where} points outside the repository (${location}); only object directories inside the analyzed ` +
+          "root, its git directory or its common directory are used",
+      );
+    }
+    if (resolved.exists) {
+      await checkAlternates(root, location, depth + 1, bases, scope, state);
     }
   }
 }
@@ -740,7 +795,7 @@ export async function validateRepositoryLayout(
   const state: ScanState = { scannedFiles: 0 };
   await checkConfigFile(root, path.join(commonDir, "config"), "the repository config", gitDir, 0, allBases, state);
   await checkConfigFile(root, path.join(gitDir, "config.worktree"), "the worktree config", gitDir, 0, allBases, state);
-  await checkAlternates(root, path.join(commonDir, "objects"), 0, allBases, state);
+  await checkAlternates(root, path.join(commonDir, "objects"), 0, allBases, allBases, state);
 
   return { kind, root, gitDir, commonDir };
 }

@@ -7,9 +7,11 @@
  * - Network (UNC) and device paths in the gitdir pointer, commondir,
  *   alternates, config include paths and core.worktree are refused before
  *   git is started; a symbolic-link `.git` entry is not followed.
+ * - Alternate object stores (nested ones included) must lie inside the
+ *   analyzed root, its git directory or its common directory (CAU-06).
  */
 import { execFile as execFileCallback } from "node:child_process";
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { cpSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
@@ -47,11 +49,13 @@ async function rejection(action: () => Promise<unknown>): Promise<GraphRepositor
 }
 
 const cleanup: string[] = [];
+// Removing a few dozen fixture repositories can exceed the default 10 s hook
+// timeout on a loaded machine.
 afterAll(() => {
   for (const dir of cleanup) {
     rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
-});
+}, 120_000);
 afterEach(() => {
   setGitProcessRunnerForTesting(undefined);
   resetGitRuntimeCachesForTesting();
@@ -348,16 +352,188 @@ describe("git-read: network and device paths inside the git directory are refuse
     expect(calls).toEqual([]);
   }, 60_000);
 
-  it("a regular repository with local alternates and includes still reads", async () => {
-    const reference = tempDir("causoryn-git-alt-ref-");
-    await initRepo(reference, "ref.txt", "ref\n");
-    const root = tempDir("causoryn-git-alt-root-");
+  // The local include half of the former "local alternates and includes"
+  // test; its alternates half pointed at an object store in another directory
+  // and now lives in the CAU-06 block below as a refusal.
+  it("a regular repository with a local config include still reads", async () => {
+    const root = tempDir("causoryn-git-include-root-");
     const head = await initRepo(root, "a.txt", "a\n");
-    mkdirSync(path.join(root, ".git", "objects", "info"), { recursive: true });
-    writeFileSync(path.join(root, ".git", "objects", "info", "alternates"), `${path.join(reference, ".git", "objects")}\n`, "utf8");
     writeFileSync(path.join(root, ".git", "local.cfg"), "[user]\n\tname = Included\n", "utf8");
     await plainGit(root, ["config", "include.path", "local.cfg"]);
     expect(await resolveGitCommitRef(root, "HEAD")).toBe(head);
     expect(await readGitBlob(root, "HEAD", "a.txt")).toBe("a\n");
+  }, 60_000);
+});
+
+/**
+ * CAU-06 (CWE-668): objects/info/alternates lets git read objects from
+ * another object store. Every alternate object directory (nested alternates
+ * included) must resolve inside the analyzed root, its git directory or its
+ * common directory; anything else is refused before git starts.
+ */
+describe("git-read: alternates stay inside the repository (CAU-06)", () => {
+  function writeAlternates(objectsDir: string, lines: readonly string[]): void {
+    mkdirSync(path.join(objectsDir, "info"), { recursive: true });
+    writeFileSync(path.join(objectsDir, "info", "alternates"), `${lines.join("\n")}\n`, "utf8");
+  }
+
+  async function referenceRepo(prefix: string): Promise<{ readonly dir: string; readonly head: string }> {
+    const dir = tempDir(prefix);
+    const head = await initRepo(dir, "ref.txt", "ref\n");
+    return { dir, head };
+  }
+
+  async function expectAlternatesRefused(root: string): Promise<void> {
+    const calls = blockRepositoryBoundGit();
+    const error = await rejection(() => resolveGitCommitRef(root, "HEAD"));
+    expect(error.code).toBe("compare/repository-refused");
+    expect(error.message).toContain("objects/info/alternates");
+    expect(error.message).toContain("outside the repository");
+    expect(calls).toEqual([]);
+  }
+
+  // Replaces the former acceptance of an alternate in another directory
+  // ("a regular repository with local alternates and includes still reads"):
+  // CAU-06 requires that such an object store is no longer used.
+  it("refuses an alternates entry that names an object store in another directory", async () => {
+    const reference = await referenceRepo("causoryn-git-alt-ref-");
+    const root = tempDir("causoryn-git-alt-root-");
+    await initRepo(root, "a.txt", "a\n");
+    writeAlternates(path.join(root, ".git", "objects"), [path.join(reference.dir, ".git", "objects")]);
+    await expectAlternatesRefused(root);
+    expect((await rejection(() => readGitBlob(root, reference.head, "ref.txt"))).code).toBe("compare/repository-refused");
+  }, 60_000);
+
+  it("refuses a relative alternates entry that climbs out of the repository", async () => {
+    const holder = tempDir("causoryn-git-alt-rel-");
+    const reference = path.join(holder, "reference");
+    await initRepo(reference, "ref.txt", "ref\n");
+    const root = path.join(holder, "root");
+    await initRepo(root, "a.txt", "a\n");
+    // Relative alternates resolve against <root>/.git/objects.
+    writeAlternates(path.join(root, ".git", "objects"), ["../../../reference/.git/objects"]);
+    await expectAlternatesRefused(root);
+  }, 60_000);
+
+  it("refuses an outside alternates entry that does not exist yet", async () => {
+    const outside = tempDir("causoryn-git-alt-missing-");
+    const root = tempDir("causoryn-git-alt-missing-root-");
+    await initRepo(root, "a.txt", "a\n");
+    writeAlternates(path.join(root, ".git", "objects"), [path.join(outside, "later", "objects")]);
+    await expectAlternatesRefused(root);
+  }, 60_000);
+
+  it("refuses an alternates entry inside the root that leaves it through a link", async () => {
+    const reference = await referenceRepo("causoryn-git-alt-link-ref-");
+    const root = tempDir("causoryn-git-alt-link-root-");
+    await initRepo(root, "a.txt", "a\n");
+    linkDirectory(path.join(reference.dir, ".git"), path.join(root, "linked-store"));
+    writeAlternates(path.join(root, ".git", "objects"), [path.join(root, "linked-store", "objects")]);
+    await expectAlternatesRefused(root);
+  }, 60_000);
+
+  it("refuses a nested alternates entry that leaves the repository", async () => {
+    const reference = await referenceRepo("causoryn-git-alt-nested-ref-");
+    const root = tempDir("causoryn-git-alt-nested-root-");
+    await initRepo(root, "a.txt", "a\n");
+    const inner = path.join(root, ".git", "inner-objects");
+    mkdirSync(inner, { recursive: true });
+    writeAlternates(inner, [path.join(reference.dir, ".git", "objects")]);
+    writeAlternates(path.join(root, ".git", "objects"), ["../inner-objects"]);
+    await expectAlternatesRefused(root);
+  }, 60_000);
+
+  it("still reads objects reachable only through an alternate inside the git directory", async () => {
+    const reference = await referenceRepo("causoryn-git-alt-inside-ref-");
+    const root = tempDir("causoryn-git-alt-inside-root-");
+    await initRepo(root, "a.txt", "a\n");
+    cpSync(path.join(reference.dir, ".git", "objects"), path.join(root, ".git", "ref-objects"), { recursive: true });
+    writeAlternates(path.join(root, ".git", "objects"), ["../ref-objects"]);
+    expect(await resolveGitCommitRef(root, reference.head)).toBe(reference.head);
+    expect(await readGitBlob(root, reference.head, "ref.txt")).toBe("ref\n");
+  }, 60_000);
+
+  it("a linked worktree still reads an alternate inside its common directory", async () => {
+    const reference = await referenceRepo("causoryn-git-alt-wt-ref-");
+    const main = tempDir("causoryn-git-alt-wt-main-");
+    await initRepo(main, "main.txt", "main\n");
+    cpSync(path.join(reference.dir, ".git", "objects"), path.join(main, ".git", "ref-objects"), { recursive: true });
+    writeAlternates(path.join(main, ".git", "objects"), [path.join(main, ".git", "ref-objects")]);
+    const holder = tempDir("causoryn-git-alt-wt-");
+    const worktree = path.join(holder, "wt");
+    await plainGit(main, ["worktree", "add", "-q", "-b", "feature", worktree]);
+    expect(await readGitBlob(worktree, reference.head, "ref.txt")).toBe("ref\n");
+    expect(await readGitBlob(worktree, "HEAD", "main.txt")).toBe("main\n");
+  }, 60_000);
+
+  it("refuses a linked worktree whose common directory has an alternate outside the repository", async () => {
+    const reference = await referenceRepo("causoryn-git-alt-wt-out-ref-");
+    const main = tempDir("causoryn-git-alt-wt-out-main-");
+    await initRepo(main, "main.txt", "main\n");
+    const holder = tempDir("causoryn-git-alt-wt-out-");
+    const worktree = path.join(holder, "wt");
+    await plainGit(main, ["worktree", "add", "-q", "-b", "feature", worktree]);
+    writeAlternates(path.join(main, ".git", "objects"), [path.join(reference.dir, ".git", "objects")]);
+    await expectAlternatesRefused(worktree);
+  }, 60_000);
+
+  it("refuses a submodule git directory whose alternates leave the submodule's repository", async () => {
+    const library = tempDir("causoryn-git-alt-sub-lib-");
+    await initRepo(library, "lib.txt", "lib\n");
+    const reference = await referenceRepo("causoryn-git-alt-sub-ref-");
+    const superproject = tempDir("causoryn-git-alt-super-");
+    await initRepo(superproject, "super.txt", "super\n");
+    await plainGit(superproject, [
+      "-c",
+      "protocol.file.allow=always",
+      "submodule",
+      "add",
+      "-q",
+      pathToFileURL(library).href,
+      "libs/lib",
+    ]);
+    const submoduleRoot = path.join(superproject, "libs", "lib");
+    writeAlternates(path.join(superproject, ".git", "modules", "libs", "lib", "objects"), [
+      path.join(reference.dir, ".git", "objects"),
+    ]);
+    await expectAlternatesRefused(submoduleRoot);
+  }, 60_000);
+
+  // Evidence, not a behaviour change: the git child environment is an
+  // allowlist, so object-store and repository overrides in the server's own
+  // environment never reach git.
+  it("does not pass object directory or repository overrides from the environment to git", async () => {
+    const reference = await referenceRepo("causoryn-git-alt-env-ref-");
+    const root = tempDir("causoryn-git-alt-env-root-");
+    await initRepo(root, "a.txt", "a\n");
+    const overrides: Record<string, string> = {
+      GIT_ALTERNATE_OBJECT_DIRECTORIES: path.join(reference.dir, ".git", "objects"),
+      GIT_OBJECT_DIRECTORY: path.join(reference.dir, ".git", "objects"),
+      GIT_DIR: path.join(reference.dir, ".git"),
+      GIT_COMMON_DIR: path.join(reference.dir, ".git"),
+      GIT_WORK_TREE: reference.dir,
+      GIT_INDEX_FILE: path.join(reference.dir, ".git", "index"),
+      GIT_NAMESPACE: "causoryn-test",
+    };
+    const saved = Object.fromEntries(Object.keys(overrides).map((key) => [key, process.env[key]]));
+    const seen: Array<Readonly<Record<string, string>>> = [];
+    setGitProcessRunnerForTesting((file, args, options) => {
+      if (args.includes("-C")) seen.push(options.env);
+      return defaultGitProcessRunner(file, args, options);
+    });
+    Object.assign(process.env, overrides);
+    try {
+      expect(await readGitBlob(root, "HEAD", "a.txt")).toBe("a\n");
+      expect((await rejection(() => readGitBlob(root, reference.head, "ref.txt"))).code).toBe("compare/blob-not-found");
+    } finally {
+      for (const [key, value] of Object.entries(saved)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    }
+    expect(seen.length).toBeGreaterThan(0);
+    for (const env of seen) {
+      for (const key of Object.keys(overrides)) expect(env[key]).toBeUndefined();
+    }
   }, 60_000);
 });
