@@ -5,11 +5,12 @@ import {
   fstatSync,
   lstatSync,
   openSync,
+  readlinkSync,
   readSync,
   realpathSync,
   type BigIntStats,
 } from "node:fs";
-import { lstat, open, realpath } from "node:fs/promises";
+import { lstat, open, readlink, realpath } from "node:fs/promises";
 import path from "node:path";
 
 import { inspectLinkTargets, isUncOrDevicePath, LINK_TARGET_INSPECTION_ENABLED } from "./path-safety.js";
@@ -29,24 +30,42 @@ import { inspectLinkTargets, isUncOrDevicePath, LINK_TARGET_INSPECTION_ENABLED }
  *   3. open of the verified path with O_RDONLY|O_NOFOLLOW|O_NONBLOCK|O_NOCTTY
  *      where defined (POSIX; Windows relies on steps 2 and 4);
  *   4. fstat: a regular file with the same (dev, ino) as the pre-open lstat;
- *   5. size bound from fstat, then a read capped at maxBytes + 1 bytes and a
+ *   5. Linux only: the kernel's current path of the descriptor
+ *      (readlink of /proc/self/fd/<fd>) must be exactly the verified canonical
+ *      path; a deleted file (" (deleted)" suffix) or any other path is refused;
+ *   6. size bound from fstat, then a read capped at maxBytes + 1 bytes and a
  *      UTF-8 decode whose byte length must also fit;
- *   6. the caller's `authorize` decision, made while the descriptor is open;
- *   7. a post-open re-verification of the path whose final (dev, ino) must
+ *   7. the caller's `authorize` decision, made while the descriptor is open;
+ *   8. a post-open re-verification of the path whose final (dev, ino) must
  *      match the descriptor again.
  *
  * The content is returned only when every step passes, so an authorization
  * decision made on the path is bound to the file actually read.
  *
- * Residual limits (no openat/O_RESOLVE_BENEATH in Node): a component swapped
- * for a link in the window between the walk (step 2) and open(2) is still
- * traversed by open itself; steps 4 and 7 then reject the descriptor and its
- * bytes are never returned, but on Windows such an open can contact a network
- * share named by a junction before the rejection. lstat reports only
- * symlinks, junctions and app-exec links as links on Windows; other reparse
- * points look like plain directories. Identity checks assume the filesystem
- * reports real inodes; a filesystem reporting inode 0 for every file makes
- * the descriptor comparison vacuous (the alias slow path never matches on it).
+ * Guarantee per platform (Node has no openat/O_RESOLVE_BENEATH, so open(2)
+ * itself still traverses whatever the path names at that instant):
+ * - Linux with procfs: step 5 is bound to the descriptor, not to a path, so a
+ *   file outside the root is never returned, even to an attacker who toggles
+ *   a component between a directory and a link (a renameat2(RENAME_EXCHANGE)
+ *   loop) and wins every path-based check. Its location is checked before its
+ *   size is reported. A readlink failure while /proc/self/fd exists is a
+ *   rejection; only when procfs is not mounted at all do steps 2, 4 and 8
+ *   decide alone, as on the platforms below.
+ * - macOS, other POSIX systems and Windows: no descriptor path is available
+ *   to Node (macOS F_GETPATH and Windows GetFinalPathNameByHandle are not
+ *   exposed), so steps 2, 4 and 8 are path-based. They reject a single swap
+ *   that persists across open (a component swapped for a link before open
+ *   and restored after it, a file replaced around open), but an attacker who
+ *   can toggle a component between a directory and a link fast enough to
+ *   win every check's timing can still have a file outside the root read.
+ *   On Windows such an open can also contact a network share named by a
+ *   junction before any rejection.
+ * lstat reports only symlinks, junctions and app-exec links as links on
+ * Windows; other reparse points look like plain directories. Identity checks
+ * assume the filesystem reports real inodes; a filesystem reporting inode 0
+ * for every file makes the descriptor comparison vacuous (the alias slow path
+ * never matches on it). On a case-insensitive Linux filesystem, a path
+ * spelled in another letter case than on disk fails step 5 and is refused.
  */
 
 /** (dev, ino) of the opened file. */
@@ -72,11 +91,14 @@ export type BoundedFileReadRejection =
   | "unsafe-component"
   /** The final component is not a regular file (symlink, FIFO, device, directory...). */
   | "not-regular-file"
-  /** The opened descriptor is not the verified file (swapped around open or read). */
+  /**
+   * The opened descriptor is not the verified file (swapped around open or
+   * read; on Linux also: its kernel path is not the verified path).
+   */
   | "identity-changed"
   /** The caller's `authorize` callback refused the opened file. */
   | "not-authorized"
-  /** open/fstat/read failed. */
+  /** open/fstat/read failed (on Linux also: the descriptor's path could not be read). */
   | "read-failed";
 
 export type BoundedFileReadResult =
@@ -124,6 +146,17 @@ const OPEN_FLAGS =
   (fsConstants.O_NOFOLLOW ?? 0) |
   (fsConstants.O_NONBLOCK ?? 0) |
   (fsConstants.O_NOCTTY ?? 0);
+
+/** Linux procfs directory of this process's open descriptors. */
+const PROC_SELF_FD = "/proc/self/fd";
+
+/**
+ * Read at call time (not cached) so the Linux-only descriptor check can be
+ * exercised on every host by tests that present the reader a Linux platform.
+ */
+function descriptorPathCheckApplies(): boolean {
+  return process.platform === "linux";
+}
 
 /** Verified walk: start directory (not itself inspected) and the components below it. */
 interface ReadPlan {
@@ -456,11 +489,53 @@ function confirmIdentity(
   return provisional;
 }
 
-/** Checks the fstat result against the pre-open lstat; returns a terminal result or undefined to continue. */
-function checkDescriptor(opened: BigIntStats, before: BigIntStats, maxBytes: number): BoundedFileReadResult | undefined {
-  if (!opened.isFile() || !sameIdentity(opened, before)) return rejected("identity-changed");
+/** The fstat result must be a regular file with the pre-open lstat's identity. */
+function isVerifiedFile(opened: BigIntStats, before: BigIntStats): boolean {
+  return opened.isFile() && sameIdentity(opened, before);
+}
+
+/** Size verdict from fstat: a terminal result, or undefined to continue reading. */
+function sizeVerdict(opened: BigIntStats, maxBytes: number): BoundedFileReadResult | undefined {
   const size = Number(opened.size);
   return size > maxBytes ? { status: "too-large", bytes: size } : undefined;
+}
+
+/**
+ * The kernel's path of the descriptor must be the verified path exactly. A
+ * file deleted after open reads back as "<path> (deleted)" and is refused like
+ * any other path; a file legitimately named "... (deleted)" matches itself.
+ */
+function locationVerdict(kernelPath: string, expectedPath: string): BoundedFileReadRejection | undefined {
+  return kernelPath === expectedPath ? undefined : "identity-changed";
+}
+
+/**
+ * Linux step 5: where the descriptor actually is. A rejection reason, or
+ * undefined when the path matches or procfs is not mounted. A readlink
+ * failure with procfs mounted (e.g. ENAMETOOLONG for a very long real path)
+ * is refused, so it cannot be used to fall back to the path-based checks.
+ */
+function descriptorLocationSync(fd: number, expectedPath: string): BoundedFileReadRejection | undefined {
+  if (!descriptorPathCheckApplies()) return undefined;
+  let kernelPath: string;
+  try {
+    kernelPath = readlinkSync(`${PROC_SELF_FD}/${fd}`);
+  } catch {
+    return lstatOrUndefinedSync(PROC_SELF_FD)?.isDirectory() === true ? "read-failed" : undefined;
+  }
+  return locationVerdict(kernelPath, expectedPath);
+}
+
+/** Async counterpart of {@link descriptorLocationSync}. */
+async function descriptorLocation(fd: number, expectedPath: string): Promise<BoundedFileReadRejection | undefined> {
+  if (!descriptorPathCheckApplies()) return undefined;
+  let kernelPath: string;
+  try {
+    kernelPath = await readlink(`${PROC_SELF_FD}/${fd}`);
+  } catch {
+    return (await lstatOrUndefined(PROC_SELF_FD))?.isDirectory() === true ? "read-failed" : undefined;
+  }
+  return locationVerdict(kernelPath, expectedPath);
 }
 
 /**
@@ -495,8 +570,12 @@ export function readBoundedTextFileSync(
     } catch {
       return rejected("read-failed");
     }
-    const early = checkDescriptor(opened, before, maxBytes);
-    if (early !== undefined) return early;
+    if (!isVerifiedFile(opened, before)) return rejected("identity-changed");
+    // Located before the size is reported or any byte is read.
+    const misplaced = descriptorLocationSync(fd, readPlan.openPath);
+    if (misplaced !== undefined) return rejected(misplaced);
+    const tooLarge = sizeVerdict(opened, maxBytes);
+    if (tooLarge !== undefined) return tooLarge;
 
     const maxRead = maxBytes + 1;
     const chunkSize = Math.min(READ_CHUNK_BYTES, maxRead);
@@ -553,8 +632,12 @@ export async function readBoundedTextFile(
     } catch {
       return rejected("read-failed");
     }
-    const early = checkDescriptor(opened, before, maxBytes);
-    if (early !== undefined) return early;
+    if (!isVerifiedFile(opened, before)) return rejected("identity-changed");
+    // Located before the size is reported or any byte is read.
+    const misplaced = await descriptorLocation(handle.fd, readPlan.openPath);
+    if (misplaced !== undefined) return rejected(misplaced);
+    const tooLarge = sizeVerdict(opened, maxBytes);
+    if (tooLarge !== undefined) return tooLarge;
 
     const maxRead = maxBytes + 1;
     const chunkSize = Math.min(READ_CHUNK_BYTES, maxRead);

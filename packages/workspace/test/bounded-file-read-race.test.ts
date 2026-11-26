@@ -24,9 +24,11 @@ import {
 /**
  * Check-then-open races and I/O ordering for the shared bounded reader.
  * `node:fs` and `node:fs/promises` are wrapped so that (1) every path-taking
- * call made while `io.recording` is set is recorded, and (2) test hooks run
- * immediately before/after open(2) and after fstat. Races are therefore
- * deterministic on every OS, and the ordering of metadata I/O is observable.
+ * call made while `io.recording` is set is recorded, (2) test hooks run
+ * immediately before each lstat, before/after open(2) and after fstat, and
+ * (3) `io.proc` can stand in for Linux procfs (`/proc/self/fd`). Races are
+ * therefore deterministic on every OS, and the ordering of metadata I/O is
+ * observable.
  */
 const io = vi.hoisted(() => ({
   recording: false,
@@ -38,10 +40,45 @@ const io = vi.hoisted(() => ({
   zeroInodes: false,
   /** lstat of this path reports a different inode (a file swapped after fstat). */
   spoofInodeOf: undefined as string | undefined,
+  /** Runs before every lstat (sync and async) with its target (not counted in hooksRun). */
+  beforeLstat: undefined as ((target: string) => void) | undefined,
+  /**
+   * Stand-in for Linux procfs. `dir` is a real directory reported for an lstat
+   * of `/proc/self/fd` (undefined: procfs is not mounted, ENOENT); `link`
+   * answers readlink of `/proc/self/fd/<fd>` (an Error is thrown).
+   */
+  proc: undefined as
+    | { readonly dir: string | undefined; readonly link: (fd: number) => string | Error }
+    | undefined,
   hooksRun: 0,
 }));
 
-const foldCase = (value: string): string => (process.platform === "win32" ? value.toLowerCase() : value);
+const PROC_SELF_FD = "/proc/self/fd";
+
+function enoent(target: string): Error {
+  return Object.assign(new Error(`ENOENT: no such file or directory, '${target}'`), { code: "ENOENT" });
+}
+
+/** The fake procfs answer for an lstat of `/proc/self/fd`, or undefined when the call is not for it. */
+function fakeProcDir(target: unknown): { readonly dir: string } | undefined {
+  if (io.proc === undefined || String(target) !== PROC_SELF_FD) return undefined;
+  if (io.proc.dir === undefined) throw enoent(PROC_SELF_FD);
+  return { dir: io.proc.dir };
+}
+
+/** The fake procfs answer for readlink of `/proc/self/fd/<fd>`, or undefined when not for it. */
+function fakeProcLink(target: unknown): { readonly link: string } | undefined {
+  const text = String(target);
+  if (io.proc === undefined || !text.startsWith(`${PROC_SELF_FD}/`)) return undefined;
+  const answer = io.proc.link(Number(text.slice(PROC_SELF_FD.length + 1)));
+  if (answer instanceof Error) throw answer;
+  return { link: answer };
+}
+
+/** Host platform, captured before any test stubs `process.platform`. */
+const IS_WIN_HOST = process.platform === "win32";
+
+const foldCase = (value: string): string => (IS_WIN_HOST ? value.toLowerCase() : value);
 
 /** lstat result with the inode bumped when `target` is `io.spoofInodeOf`. */
 function maybeSpoofInode<T>(target: unknown, stats: T): T {
@@ -76,6 +113,9 @@ vi.mock("node:fs", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:fs")>();
   const lstatSync = ((...args: Parameters<typeof actual.lstatSync>) => {
     record("lstat", args[0]);
+    io.beforeLstat?.(String(args[0]));
+    const proc = fakeProcDir(args[0]);
+    if (proc !== undefined) return actual.lstatSync(proc.dir, args[1]);
     return maybeSpoofInode(args[0], maybeZeroInode(actual.lstatSync(...args)));
   }) as typeof actual.lstatSync;
   const statSync = ((...args: Parameters<typeof actual.statSync>) => {
@@ -96,6 +136,8 @@ vi.mock("node:fs", async (importOriginal) => {
   );
   const readlinkSync = ((...args: Parameters<typeof actual.readlinkSync>) => {
     record("readlink", args[0]);
+    const proc = fakeProcLink(args[0]);
+    if (proc !== undefined) return proc.link;
     return actual.readlinkSync(...args);
   }) as typeof actual.readlinkSync;
   const openSync = ((...args: Parameters<typeof actual.openSync>) => {
@@ -144,6 +186,9 @@ vi.mock("node:fs/promises", async (importOriginal) => {
     });
   const lstat = (async (...args: Parameters<typeof actual.lstat>) => {
     record("lstat", args[0]);
+    io.beforeLstat?.(String(args[0]));
+    const proc = fakeProcDir(args[0]);
+    if (proc !== undefined) return actual.lstat(proc.dir, args[1]);
     return maybeSpoofInode(args[0], maybeZeroInode(await actual.lstat(...args)));
   }) as typeof actual.lstat;
   const stat = (async (...args: Parameters<typeof actual.stat>) => {
@@ -156,6 +201,8 @@ vi.mock("node:fs/promises", async (importOriginal) => {
   }) as typeof actual.realpath;
   const readlink = (async (...args: Parameters<typeof actual.readlink>) => {
     record("readlink", args[0]);
+    const proc = fakeProcLink(args[0]);
+    if (proc !== undefined) return proc.link;
     return actual.readlink(...args);
   }) as typeof actual.readlink;
   const open = (async (...args: Parameters<typeof actual.open>) => {
@@ -175,6 +222,13 @@ vi.mock("node:fs/promises", async (importOriginal) => {
 
 const tempDirs: string[] = [];
 
+const REAL_PLATFORM = Object.getOwnPropertyDescriptor(process, "platform") as PropertyDescriptor;
+
+/** Makes the reader see `platform` (restored after each test); module-load constants keep the host's. */
+function stubPlatform(platform: NodeJS.Platform): void {
+  Object.defineProperty(process, "platform", { ...REAL_PLATFORM, value: platform });
+}
+
 function createTempDir(label: string): string {
   const dir = realpathSync.native(mkdtempSync(path.join(os.tmpdir(), `causoryn-bounded-race-${label}-`)));
   tempDirs.push(dir);
@@ -189,7 +243,10 @@ afterEach(() => {
   io.afterFstat = undefined;
   io.zeroInodes = false;
   io.spoofInodeOf = undefined;
+  io.beforeLstat = undefined;
+  io.proc = undefined;
   io.hooksRun = 0;
+  Object.defineProperty(process, "platform", REAL_PLATFORM);
   while (tempDirs.length > 0) {
     const dir = tempDirs.pop();
     if (dir !== undefined) {
@@ -209,7 +266,7 @@ const READERS: ReadonlyArray<readonly [string, Reader]> = [
   ["sync", (absolutePath, maxBytes, options) => Promise.resolve(readBoundedTextFileSync(absolutePath, maxBytes, options))],
 ];
 
-const fold = (value: string): string => (process.platform === "win32" ? value.toLowerCase() : value);
+const fold = (value: string): string => (IS_WIN_HOST ? value.toLowerCase() : value);
 
 function isSameOrInside(container: string, target: string): boolean {
   const c = fold(container);
@@ -219,7 +276,11 @@ function isSameOrInside(container: string, target: string): boolean {
 
 interface SwapFixture {
   readonly root: string;
+  /** `<root>/cfg`, the component the attacker swaps. */
+  readonly cfg: string;
   readonly target: string;
+  /** The file the swapped-in link leads to (outside the root). */
+  readonly outsideTarget: string;
   /** Replaces `<root>/cfg` with a junction/symlink to a directory outside the root. */
   readonly swap: () => void;
   /** Puts the original `<root>/cfg` back (the attacker hides the swap again). */
@@ -236,7 +297,9 @@ function makeSwapFixture(label: string): SwapFixture {
   writeFileSync(path.join(outside, "a.yaml"), "outside: 1\n", "utf8");
   return {
     root,
+    cfg,
     target: path.join(cfg, "a.yaml"),
+    outsideTarget: path.join(outside, "a.yaml"),
     swap: () => {
       renameSync(cfg, moved);
       symlinkSync(outside, cfg, "junction");
@@ -351,6 +414,151 @@ describe.each(READERS)("bounded-file-read with unknown (zero) inodes (%s)", (_la
       status: "rejected",
       reason: "outside-root",
     });
+  });
+});
+
+/**
+ * A toggling attacker (on Linux a renameat2(RENAME_EXCHANGE) loop) that wins
+ * every path-based check: `<root>/cfg` is the real directory whenever it is
+ * lstat'd itself, and the link whenever the file below it is lstat'd or
+ * opened. The pre-open lstat, the fstat and the post-open re-walk then all
+ * agree on the outside file, so only a check bound to the descriptor itself
+ * can tell. Returns the cleanup that leaves the real directory in place.
+ */
+function toggleOnEveryCheck(fixture: SwapFixture): { readonly swaps: () => number; readonly stop: () => void } {
+  let swapped = false;
+  let swaps = 0;
+  io.beforeLstat = (target) => {
+    if (fold(target) === fold(fixture.cfg) && swapped) {
+      fixture.restore();
+      swapped = false;
+    } else if (fold(target) === fold(fixture.target) && !swapped) {
+      fixture.swap();
+      swapped = true;
+      swaps += 1;
+    }
+  };
+  return {
+    swaps: () => swaps,
+    stop: () => {
+      io.beforeLstat = undefined;
+      if (swapped) fixture.restore();
+      swapped = false;
+    },
+  };
+}
+
+/**
+ * Linux procfs for the reader: on a Linux host the kernel answers; elsewhere
+ * the reader is made to see Linux and `/proc/self/fd/<fd>` answers `location`
+ * (what the kernel reports for the descriptor: its file's current path).
+ */
+function procReports(location: () => string): void {
+  if (process.platform === "linux") return;
+  stubPlatform("linux");
+  io.proc = { dir: createTempDir("fake-proc-fd"), link: () => location() };
+}
+
+/** The reader sees Linux with a fake procfs on every host (edge cases the kernel cannot be made to produce). */
+function fakeLinuxProc(proc: { readonly mounted: boolean; readonly link: (fd: number) => string | Error }): void {
+  stubPlatform("linux");
+  io.proc = { dir: proc.mounted ? createTempDir("fake-proc-fd") : undefined, link: proc.link };
+}
+
+function procFdReadlinks(): string[] {
+  return io.calls
+    .filter((call) => call.op === "readlink" && call.target.startsWith(`${PROC_SELF_FD}/`))
+    .map((call) => call.target);
+}
+
+describe.each(READERS)("bounded-file-read descriptor location on Linux (%s)", (_label, read) => {
+  it("a component toggled between directory and link around every check is rejected by the descriptor's kernel path", async () => {
+    const fixture = makeSwapFixture("toggle");
+    procReports(() => fixture.outsideTarget);
+    const toggle = toggleOnEveryCheck(fixture);
+    let result: BoundedFileReadResult;
+    try {
+      result = await read(fixture.target, 1024, { root: fixture.root });
+    } finally {
+      toggle.stop();
+    }
+
+    expect(result).toEqual({ status: "rejected", reason: "identity-changed" });
+    expect(toggle.swaps()).toBeGreaterThan(0);
+  });
+
+  it("the descriptor's location is verified before its size: a toggled-in outside file's size is not reported", async () => {
+    const fixture = makeSwapFixture("toggle-size");
+    procReports(() => fixture.outsideTarget);
+    const toggle = toggleOnEveryCheck(fixture);
+    let result: BoundedFileReadResult;
+    try {
+      result = await read(fixture.target, 4, { root: fixture.root });
+    } finally {
+      toggle.stop();
+    }
+
+    expect(result).toEqual({ status: "rejected", reason: "identity-changed" });
+  });
+
+  it("a descriptor the kernel places at the verified path reads normally, and the check is made", async () => {
+    const fixture = makeSwapFixture("proc-match");
+    procReports(() => fixture.target);
+
+    io.recording = true;
+    const result = await read(fixture.target, 1024, { root: fixture.root });
+    io.recording = false;
+
+    expect(result).toMatchObject({ status: "ok", text: "inside: 1\n" });
+    expect(procFdReadlinks()).toHaveLength(1);
+    expect(procFdReadlinks()[0]).toMatch(/^\/proc\/self\/fd\/\d+$/);
+  });
+
+  it("a descriptor whose file was deleted (kernel path ends in ' (deleted)') is rejected", async () => {
+    const fixture = makeSwapFixture("proc-deleted");
+    fakeLinuxProc({ mounted: true, link: () => `${fixture.target} (deleted)` });
+
+    expect(await read(fixture.target, 1024, { root: fixture.root })).toEqual({
+      status: "rejected",
+      reason: "identity-changed",
+    });
+  });
+
+  it("a readlink failure while procfs is mounted is a rejection, not a silent fallback", async () => {
+    const fixture = makeSwapFixture("proc-error");
+    // e.g. ENAMETOOLONG for a descriptor whose real path is longer than a page.
+    fakeLinuxProc({
+      mounted: true,
+      link: () => Object.assign(new Error("ENAMETOOLONG: name too long"), { code: "ENAMETOOLONG" }),
+    });
+
+    expect(await read(fixture.target, 1024, { root: fixture.root })).toEqual({
+      status: "rejected",
+      reason: "read-failed",
+    });
+  });
+
+  it("without procfs the path-based checks decide alone (a normal file still reads)", async () => {
+    const fixture = makeSwapFixture("proc-missing");
+    fakeLinuxProc({ mounted: false, link: () => enoent(PROC_SELF_FD) });
+
+    expect(await read(fixture.target, 1024, { root: fixture.root })).toMatchObject({
+      status: "ok",
+      text: "inside: 1\n",
+    });
+  });
+
+  it("other platforms do not consult /proc (no descriptor path is available there)", async () => {
+    const fixture = makeSwapFixture("proc-other-os");
+    stubPlatform("darwin");
+    io.proc = { dir: createTempDir("fake-proc-fd"), link: () => fixture.outsideTarget };
+
+    io.recording = true;
+    const result = await read(fixture.target, 1024, { root: fixture.root });
+    io.recording = false;
+
+    expect(result).toMatchObject({ status: "ok", text: "inside: 1\n" });
+    expect(procFdReadlinks()).toEqual([]);
   });
 });
 
