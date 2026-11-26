@@ -1,5 +1,14 @@
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -145,6 +154,109 @@ describe("CAU-10: setup only upgrades skills Causoryn owns", () => {
     expect(skillAction(upgrade.actions, "map-system").operation).toBe("noop");
     expect(readFileSync(path.join(realDir, "SKILL.md"), "utf8")).toBe(causorynSkillBody("v1")("map-system"));
     expect(readFileSync(zcodeSkillFile(sb, "causoryn"), "utf8")).toBe(causorynSkillBody("v2")("causoryn"));
+  });
+
+  it("an up-to-date rerun says why it did not record the skills when ~/.causoryn is a link", async () => {
+    const sb = createSetupSandbox("record-linked-warn");
+    const v1 = writeFakePackage(path.join(sb.root, "pkg-v1"), causorynSkillBody("v1"));
+    await runSetup({ ...baseOptions(sb, v1), clients: ["zcode"] });
+    const causorynDir = path.join(sb.home, ".causoryn");
+    const realDir = path.join(sb.root, "real-causoryn");
+    renameSync(causorynDir, realDir);
+    symlinkSync(realDir, causorynDir, "junction");
+    const before = readFileSync(path.join(realDir, "installed-skills.json"));
+
+    const rerun = await runSetup({ ...baseOptions(sb, v1), clients: ["zcode"] });
+    expect(rerun.applied).toBe(false);
+    for (const skillName of CANONICAL_SKILL_NAMES) {
+      const detail = skillAction(rerun.actions, skillName).detail;
+      expect(detail).toMatch(/already up to date/);
+      expect(detail).toMatch(/install record .* is below a link/);
+    }
+    expect(readFileSync(path.join(realDir, "installed-skills.json")).equals(before)).toBe(true);
+  });
+
+  it("an up-to-date rerun leaves an install record that is not a regular file alone, still succeeds and says so", async () => {
+    const sb = createSetupSandbox("record-not-regular");
+    const v1 = writeFakePackage(path.join(sb.root, "pkg-v1"), causorynSkillBody("v1"));
+    const recordPath = path.join(sb.home, ".causoryn", "installed-skills.json");
+    await runSetup({ ...baseOptions(sb, v1), clients: ["zcode"] });
+    rmSync(recordPath);
+    mkdirSync(path.join(recordPath, "kept"), { recursive: true });
+
+    const rerun = await runSetup({ ...baseOptions(sb, v1), clients: ["zcode"] });
+    expect(rerun.applied).toBe(false);
+    for (const skillName of CANONICAL_SKILL_NAMES) {
+      const action = skillAction(rerun.actions, skillName);
+      expect(action.operation).toBe("noop");
+      expect(action.detail).toMatch(/already up to date/);
+      expect(action.detail).toMatch(/install record .* could not be read/);
+      expect(action.detail).toContain(recordPath);
+    }
+    expect(lstatSync(recordPath).isDirectory()).toBe(true);
+    expect(existsSync(path.join(recordPath, "kept"))).toBe(true);
+  });
+
+  it("an up-to-date rerun does not write through an install record that is a symbolic link", async () => {
+    const sb = createSetupSandbox("record-symlink");
+    const v1 = writeFakePackage(path.join(sb.root, "pkg-v1"), causorynSkillBody("v1"));
+    const recordPath = path.join(sb.home, ".causoryn", "installed-skills.json");
+    await runSetup({ ...baseOptions(sb, v1), clients: ["zcode"] });
+    const elsewhere = path.join(sb.root, "elsewhere-record.json");
+    renameSync(recordPath, elsewhere);
+    const target = readFileSync(elsewhere, "utf8");
+    try {
+      symlinkSync(elsewhere, recordPath, "file");
+    } catch (err) {
+      // Unprivileged Windows cannot create file symbolic links; the directory case above still runs.
+      if ((err as NodeJS.ErrnoException | undefined)?.code === "EPERM") return;
+      throw err;
+    }
+
+    const rerun = await runSetup({ ...baseOptions(sb, v1), clients: ["zcode"] });
+    expect(rerun.applied).toBe(false);
+    expect(skillAction(rerun.actions, "causoryn").detail).toMatch(/install record .* could not be read/);
+    expect(lstatSync(recordPath).isSymbolicLink()).toBe(true);
+    expect(readFileSync(elsewhere, "utf8")).toBe(target);
+  });
+
+  it("an up-to-date rerun keeps an oversized install record byte-identical, so other hosts' entries are not lost", async () => {
+    const sb = createSetupSandbox("record-oversized");
+    const v1 = writeFakePackage(path.join(sb.root, "pkg-v1"), causorynSkillBody("v1"));
+    const recordPath = path.join(sb.home, ".causoryn", "installed-skills.json");
+    await runSetup({ ...baseOptions(sb, v1), clients: ["zcode"] });
+    const parsed = JSON.parse(readFileSync(recordPath, "utf8")) as {
+      description: string;
+      skills: Array<{ path: string; sha256: string }>;
+    };
+    // An entry for another host's skill, and a record larger than setup reads (1 MiB).
+    parsed.skills.push({
+      path: path.resolve(path.join(sb.home, ".claude", "skills", "map-system", "SKILL.md")),
+      sha256: "a".repeat(64),
+    });
+    parsed.description = "x".repeat(1024 * 1024 + 1);
+    writeFileSync(recordPath, JSON.stringify(parsed), "utf8");
+    const before = readFileSync(recordPath);
+
+    const rerun = await runSetup({ ...baseOptions(sb, v1), clients: ["zcode"] });
+    expect(rerun.applied).toBe(false);
+    expect(skillAction(rerun.actions, "map-system").detail).toMatch(/install record .* could not be read/);
+    expect(readFileSync(recordPath).equals(before)).toBe(true);
+  });
+
+  it("an up-to-date rerun leaves an install record in a format it does not understand (a newer schemaVersion) byte-identical", async () => {
+    const sb = createSetupSandbox("record-newer-format");
+    const v1 = writeFakePackage(path.join(sb.root, "pkg-v1"), causorynSkillBody("v1"));
+    const recordPath = path.join(sb.home, ".causoryn", "installed-skills.json");
+    await runSetup({ ...baseOptions(sb, v1), clients: ["zcode"] });
+    const parsed = JSON.parse(readFileSync(recordPath, "utf8")) as Record<string, unknown>;
+    writeFileSync(recordPath, `${JSON.stringify({ ...parsed, schemaVersion: 2 }, null, 2)}\n`, "utf8");
+    const before = readFileSync(recordPath);
+
+    const rerun = await runSetup({ ...baseOptions(sb, v1), clients: ["zcode"] });
+    expect(rerun.applied).toBe(false);
+    expect(skillAction(rerun.actions, "verify-change").detail).toMatch(/install record .* could not be read/);
+    expect(readFileSync(recordPath).equals(before)).toBe(true);
   });
 
   it("an up-to-date rerun with an intact install record changes nothing", async () => {

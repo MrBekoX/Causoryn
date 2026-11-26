@@ -1325,9 +1325,14 @@ function planSkillsForClient(params: {
     if (current === content) {
       // Exactly the shipped content, so provably Causoryn's: record it again
       // in case the install record was lost, so that a later release still
-      // recognizes it. Not where the record cannot be written, and not below
-      // a link (setup never writes there, so it never claims such a file).
-      if (recordTrusted && isFreeOfLinkedComponents(destSkillFile, trustedBases)) {
+      // recognizes it. Not below a link (setup never writes there, so it never
+      // claims such a file), and only into a record that was read in full or
+      // does not exist: a record below a link, or one that could not be read
+      // (not a regular file, too large, a format this version does not
+      // understand), is left as it is instead of failing an otherwise
+      // unchanged run or being replaced by the selected hosts' entries only.
+      const unusableRecord = describeUnusableRecord(homeDir, record, recordTrusted);
+      if (unusableRecord === null && isFreeOfLinkedComponents(destSkillFile, trustedBases)) {
         record.set(destSkillFile, sha256OfText(content));
       }
       actions.push({
@@ -1336,7 +1341,10 @@ function planSkillsForClient(params: {
         operation: "noop",
         targetPath: destSkillFile,
         backupPath: null,
-        detail: `unchanged: skill ${skillName} is already up to date`,
+        detail:
+          unusableRecord === null
+            ? `unchanged: skill ${skillName} is already up to date`
+            : `unchanged: skill ${skillName} is already up to date (not recorded: ${unusableRecord}, so it was left as it is)`,
       });
       continue;
     }
@@ -1599,6 +1607,24 @@ export type ExtendedSetupOptions = SetupOptions & {
 /** Causoryn's skill install record (CAU-10). */
 function getSkillInstallRecordPath(homeDir: string): string {
   return path.join(homeDir, ".causoryn", SKILL_INSTALL_RECORD_FILE);
+}
+
+/**
+ * Why the install record must not take a re-recorded entry, or null when it
+ * may (it was read in full, or does not exist yet).
+ */
+function describeUnusableRecord(homeDir: string, record: SkillInstallRecord, recordTrusted: boolean): string | null {
+  const recordPath = getSkillInstallRecordPath(homeDir);
+  if (!recordTrusted) {
+    return `the skill install record ${recordPath} is below a link (or a path component that is not a directory)`;
+  }
+  if (record.state === "unreadable") {
+    return `the skill install record ${recordPath} could not be read (it is not a regular file of at most 1 MiB)`;
+  }
+  if (record.state === "malformed") {
+    return `the skill install record ${recordPath} could not be read (it is not in a format this version of Causoryn understands)`;
+  }
+  return null;
 }
 
 /** Non-throwing {@link assertPrivateDirectory}: true when `dir` is absent or private. */
