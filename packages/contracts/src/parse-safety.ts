@@ -293,6 +293,7 @@ function indexDocument(root: unknown, mergeByDefault: boolean): DocumentIndex {
       lastAnchor.set(anchor, item);
     }
     if (isPair(item)) {
+      if (isCollection(item.key)) throw collectionKeyRefused();
       if (isMergePair(item, mergeByDefault)) hasMerge = true;
       else if (mayConvertToObjectKey(item.key)) objectKeys += 1;
     }
@@ -376,6 +377,22 @@ function walkPostOrder(
   }
 }
 
+/**
+ * A collection used as a mapping key (`? [a, b]: x`, `{[0]: 0}`) is refused
+ * before conversion: the library stringifies such a key with key.toString(),
+ * and a key nested in a key is stringified again at every level with growing
+ * indentation, so a 20 KB spec took over 8 s. No OpenAPI, AsyncAPI or JSON
+ * Schema document has one (their keys are strings; JSON cannot express one).
+ * Aliases and scalars as keys stay allowed: an alias key prints as `*name`.
+ */
+function collectionKeyRefused(): ContractDiscoveryError {
+  return new ContractDiscoveryError(
+    "contracts/limit-exceeded",
+    "Spec uses a collection (sequence or mapping) as a mapping key; such keys are not supported in specs, " +
+      "because converting them costs more with every level they are nested",
+  );
+}
+
 function limitExceeded(work: number): ContractDiscoveryError {
   return new ContractDiscoveryError(
     "contracts/limit-exceeded",
@@ -395,8 +412,10 @@ function limitExceeded(work: number): ContractDiscoveryError {
  *   whole document once per alias inside it; it runs on the first use of an
  *   anchor, and on every use while the count is 0 (an anchored subtree with
  *   no scalar, such as `&e []`);
- * - a key that converts to an object copies every anchor name and is
- *   stringified;
+ * - a collection used as a mapping key is refused outright
+ *   ({@link collectionKeyRefused}); any other key that converts to an object
+ *   (an alias, a date or binary scalar) copies every anchor name and is
+ *   stringified once;
  * - a merge (`<<`) converts its source maps again (aliases inside charged in
  *   full) and copies their entries; after one, every anchor is treated as
  *   unchecked again, and the first alias to an anchored inline merge source

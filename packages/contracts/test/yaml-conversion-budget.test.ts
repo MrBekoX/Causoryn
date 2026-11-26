@@ -107,6 +107,56 @@ describe("F24: yaml toJS work is bounded before conversion", () => {
     expect(result.code).toBe("contracts/limit-exceeded");
     expect(result.ms).toBeLessThan(fastBound(spec));
   });
+
+  /**
+   * Review round 2: the library stringifies a collection-valued key with
+   * key.toString(), and a key nested in a key is stringified again at every
+   * level, with growing indentation (about K × D²). 98 `{` and one `[` stay
+   * under the bracket-nesting precheck; measured before this fix: K = 10,000
+   * (20 KB) took 8.4 s in parseStructuredSpec and 16.8 s in discovery.
+   */
+  it("refuses nested collection-valued keys (no aliases), in the .yaml sniff and the parse", () => {
+    const depth = 98;
+    const spec = [
+      'openapi: "3.0.0"',
+      `k: ${"{".repeat(depth)}[${list(10_000, () => "0")}]: 0${"}: 0".repeat(depth - 1)}}`,
+      "paths: {}",
+    ].join("\n");
+    const viaYaml = refusal(() => discoverContractsFromTexts("ws-1", [{ relativePath: "api/openapi.yaml", text: spec }]));
+    expect(viaYaml.code).toBe("contracts/limit-exceeded");
+    expect(viaYaml.ms).toBeLessThan(fastBound(spec));
+
+    const viaParse = refusal(() => parseStructuredSpec("api/openapi.yaml", spec));
+    expect(viaParse.code).toBe("contracts/limit-exceeded");
+    expect(viaParse.ms).toBeLessThan(fastBound(spec));
+  });
+
+  it.each([
+    ["an explicit sequence key", ["? [a, b]", ": pair"]],
+    ["an explicit mapping key", ["? {k: v}", ": map"]],
+    ["a flow sequence key", ["m: {[0]: 0}"]],
+    ["a collection key inside a sequence of pairs", ["p: !!pairs [? [a] : 1]"]],
+  ])("refuses %s, which no OpenAPI, AsyncAPI or JSON Schema document uses", (_label, lines) => {
+    const spec = ['openapi: "3.0.0"', "paths: {}", ...lines].join("\n");
+    const result = refusal(() => parseStructuredSpec("api/openapi.yaml", spec));
+    expect(result.code).toBe("contracts/limit-exceeded");
+  });
+
+  it("refuses many keys that convert to objects (dates) after many anchors, by the work bound", () => {
+    const spec = [
+      "%YAML 1.1",
+      "---",
+      'openapi: "3.0.0"',
+      "anchors:",
+      ...Array.from({ length: 10_000 }, (_, index) => `  - &a${String(index)} 0`),
+      "dates:",
+      ...Array.from({ length: 2_000 }, (_, index) => `  ${String(2001 + Math.floor(index / 365))}-01-${String((index % 28) + 1).padStart(2, "0")}T00:00:${String(index % 60).padStart(2, "0")}Z: ${String(index)}`),
+      "paths: {}",
+    ].join("\n");
+    const result = refusal(() => parseStructuredSpec("api/openapi.yaml", spec));
+    expect(result.code).toBe("contracts/limit-exceeded");
+    expect(result.ms).toBeLessThan(fastBound(spec));
+  });
 });
 
 /** Structural form of a converted value (Maps, Sets, Dates, symbols, NaN compare by content). */
@@ -160,7 +210,23 @@ const NORMAL_SPECS: ReadonlyArray<readonly [string, string]> = [
     ].join("\n"),
   ],
   ["explicit-merge.yaml", ["base: &b {x: 1}", "child:", "  !!merge <<: *b", "  y: 2"].join("\n")],
-  ["complex-keys.yaml", ["? [a, b]", ": pair", "? {k: v}", ": map", "&k plain: 1", "again: *k"].join("\n")],
+  // Keys that convert to objects but are not collections: the library still
+  // stringifies them (an alias key prints as `*l`, a date or binary scalar once).
+  [
+    "object-keys.yaml",
+    [
+      "%YAML 1.1",
+      "---",
+      "list: &l [a, b]",
+      "? *l",
+      ": aliased-collection",
+      "2001-12-14: date-key",
+      "? !!binary aGVsbG8=",
+      ": binary-key",
+      "&k plain: 1",
+      "again: *k",
+    ].join("\n"),
+  ],
   ["tags.yaml", ["bin: !!binary aGVsbG8=", "set: !!set {a, b}", "omap: !!omap [{a: 1}, {b: 2}]", "big: 12345678901234567890"].join("\n")],
   ["schema.json", JSON.stringify({ $schema: "https://json-schema.org/draft/2020-12/schema", $id: "x", properties: { a: { type: "string" } } }, null, 2)],
 ];
