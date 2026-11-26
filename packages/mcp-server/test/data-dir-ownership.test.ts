@@ -6,9 +6,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
  * ZCODE_PLUGIN_DATA or storage.dataDbPath):
  * - F41: prepareWorkspaceDataDir refuses a base, `workspaces`, workspace or
  *   `exports` directory that is a link or (POSIX) owned by another uid; it
- *   removes group/other write from the base and `workspaces` directories and
- *   makes the workspace and `exports` directories owner-only, and a chmod that
- *   fails or does not take effect stops startup (fail closed).
+ *   refuses a pre-existing (user-supplied) base that group or others can
+ *   write; every directory it creates itself, and Causoryn's own `workspaces`,
+ *   workspace and `exports` directories, are made owner-only (0700) explicitly,
+ *   whatever the umask or a default ACL gave mkdir; a chmod that fails or does
+ *   not take effect stops startup (fail closed).
  * - F48: validateDataDbPath refuses a database or -wal/-shm/-journal side file
  *   that is a symbolic link (lstat), and (POSIX) a database file or parent
  *   directory owned by another uid or writable by group or others.
@@ -27,6 +29,12 @@ const hooks = vi.hoisted(() => ({
   chmodFails: new Set<string>(),
   chmodIgnored: new Set<string>(),
   chmodCalls: [] as Array<{ readonly path: string; readonly mode: number }>,
+  /**
+   * Permission bits mkdir gives a new directory whatever mode was asked for
+   * (a umask of 002 applied to the default 0777, or a default ACL); undefined:
+   * the requested mode.
+   */
+  mkdirPerm: undefined as number | undefined,
 }));
 
 function key(target: string): string {
@@ -71,7 +79,24 @@ vi.mock("node:fs", async (importOriginal) => {
     }
     if (!hooks.chmodIgnored.has(pathKey)) hooks.perms.set(pathKey, Number(mode) & 0o7777);
   }) as typeof actual.chmodSync;
-  return { ...actual, lstatSync, statSync, chmodSync };
+  const mkdirSync = ((target: unknown, options?: unknown) => {
+    const forced = hooks.posix ? hooks.mkdirPerm : undefined;
+    if (forced === undefined) return (actual.mkdirSync as (p: unknown, o?: unknown) => unknown)(target, options);
+    // Every component this call creates gets the forced permission bits.
+    const missing: string[] = [];
+    let cursor = String(target).replace(/[\\/]+$/, "");
+    for (;;) {
+      if (actual.existsSync(cursor)) break;
+      missing.push(cursor);
+      const parent = cursor.replace(/[\\/][^\\/]*$/, "");
+      if (parent === cursor || parent.length === 0) break;
+      cursor = parent;
+    }
+    const result = (actual.mkdirSync as (p: unknown, o?: unknown) => unknown)(target, options);
+    for (const created of missing) hooks.perms.set(ownerKey(created), forced);
+    return result;
+  }) as typeof actual.mkdirSync;
+  return { ...actual, lstatSync, statSync, chmodSync, mkdirSync };
 });
 
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
@@ -110,6 +135,7 @@ beforeEach(() => {
   hooks.chmodFails.clear();
   hooks.chmodIgnored.clear();
   hooks.chmodCalls.length = 0;
+  hooks.mkdirPerm = undefined;
 });
 
 afterEach(() => {
@@ -215,37 +241,69 @@ describe("prepareWorkspaceDataDir — ownership and permissions (F41, emulated P
     }
   });
 
-  it("refuses a base or `workspaces` directory writable by group or others, and never chmods it", () => {
+  it("refuses a pre-existing (user-supplied) base directory writable by group or others, and never chmods it", () => {
     emulatePosix();
-    for (const [which, perm] of [["base", 0o777], ["workspaces", 0o775], ["base", 0o1777]] as const) {
+    for (const perm of [0o777, 0o775, 0o1777]) {
       const sandbox = makeSandbox();
-      const dirs = workspaceDirs(sandbox);
-      const target = which === "base" ? sandbox.base : dirs.workspaces;
+      workspaceDirs(sandbox);
       hooks.perms.clear();
       hooks.chmodCalls.length = 0;
-      hooks.perms.set(key(target), perm);
+      hooks.perms.set(key(sandbox.base), perm);
       const error = configError(() => buildConfig(sandbox));
-      expect(error.message, which).toMatch(/writable by group or others/);
-      expect(error.message, which).toContain(`chmod go-w ${target}`);
-      expect(hooks.chmodCalls.some((call) => call.path === key(target)), which).toBe(false);
-      expect(hooks.perms.get(key(target)), which).toBe(perm);
+      expect(error.message, perm.toString(8)).toMatch(/writable by group or others/);
+      expect(error.message, perm.toString(8)).toContain(`chmod go-w ${sandbox.base}`);
+      expect(hooks.chmodCalls.some((call) => call.path === key(sandbox.base)), perm.toString(8)).toBe(false);
+      expect(hooks.perms.get(key(sandbox.base)), perm.toString(8)).toBe(perm);
     }
   });
 
-  it("makes the workspace and `exports` directories owner-only", () => {
+  it("makes Causoryn's own `workspaces`, workspace and `exports` directories owner-only", () => {
     emulatePosix();
     const sandbox = makeSandbox();
     const dirs = workspaceDirs(sandbox);
+    hooks.perms.set(key(dirs.workspaces), 0o775);
     hooks.perms.set(key(dirs.workspace), 0o755);
     hooks.perms.set(key(dirs.exports), 0o777);
     buildConfig(sandbox);
+    expect(hooks.perms.get(key(dirs.workspaces))).toBe(0o700);
     expect(hooks.perms.get(key(dirs.workspace))).toBe(0o700);
     expect(hooks.perms.get(key(dirs.exports))).toBe(0o700);
   });
 
-  it("fails closed when chmod fails on a workspace or `exports` directory that must be narrowed", () => {
+  it("makes every directory it creates owner-only explicitly, even when mkdir ignores the requested mode (umask 002 or a default ACL)", () => {
     emulatePosix();
-    for (const which of ["workspace", "exports"] as const) {
+    hooks.mkdirPerm = 0o775;
+    // --data-dir whose ancestors do not exist yet, and the default ~/.causoryn.
+    for (const useDefault of [false, true]) {
+      const sandbox = makeSandbox();
+      hooks.chmodCalls.length = 0;
+      const base = useDefault ? path.join(sandbox.home, ".causoryn") : path.join(sandbox.root, "new", "nested", "data");
+      const config = buildWorkspaceAutoConfig({
+        roots: [sandbox.project],
+        autoDataDir: true,
+        ...(useDefault ? {} : { dataDir: base }),
+        homeDir: sandbox.home,
+        env: {},
+        logger: () => {},
+      });
+      const workspace = path.dirname(config.storage.dataDbPath as string);
+      const created = [
+        ...(useDefault ? [] : [path.join(sandbox.root, "new"), path.join(sandbox.root, "new", "nested")]),
+        base,
+        path.dirname(workspace),
+        workspace,
+        path.join(workspace, "exports"),
+      ];
+      for (const dir of created) {
+        expect(hooks.perms.get(key(dir)), dir).toBe(0o700);
+        expect(hooks.chmodCalls.some((call) => call.path === key(dir) && call.mode === 0o700), dir).toBe(true);
+      }
+    }
+  });
+
+  it("fails closed when chmod fails on a Causoryn-owned directory that must be narrowed", () => {
+    emulatePosix();
+    for (const which of ["workspaces", "workspace", "exports"] as const) {
       const sandbox = makeSandbox();
       const dirs = workspaceDirs(sandbox);
       const target = dirs[which];

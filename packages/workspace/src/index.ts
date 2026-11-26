@@ -50,6 +50,7 @@ export {
   matchesIgnorePattern,
 } from "./ignore-matcher.js";
 export type { AncestorIgnoreMatch, IgnoreMatchBudget, IgnoreRuleSet } from "./ignore-matcher.js";
+export { compileIgnorePattern, type CompiledIgnorePattern, findMatchingIgnorePatternWithBudget, IGNORE_PATTERN_ATTEMPT_STEPS, matchesIgnorePatternWithBudget } from "./ignore-matcher.js";
 
 // Descriptor-based bounded reader shared by inventory, contract discovery and
 // MCP optional reads (CAU-02 / CAU-05: top-down path verification, the

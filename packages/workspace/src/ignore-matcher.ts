@@ -529,3 +529,179 @@ function appendClosure(
   }
   return appended;
 }
+
+/**
+ * Fixed charge, in matcher steps, of one budgeted pattern attempt (the
+ * dispatch, the directory-only and anchoring checks, taking the basename), so
+ * a long list of attempts that each do almost no matching is bounded as well.
+ * A pattern given as a string also pays its cache key (its length) per attempt.
+ */
+export const IGNORE_PATTERN_ATTEMPT_STEPS = 8;
+
+/**
+ * A pattern compiled once (with the platform's case rule, like
+ * matchesIgnorePattern) for many budgeted attempts; see compileIgnorePattern.
+ */
+export interface CompiledIgnorePattern {
+  /** The pattern as written. */
+  readonly pattern: string;
+}
+
+interface CompiledIgnorePatternImpl extends CompiledIgnorePattern {
+  readonly compiled: CompiledPattern;
+}
+
+/**
+ * Compiles `pattern` for matchesIgnorePatternWithBudget /
+ * findMatchingIgnorePatternWithBudget; linear in its length (callers that
+ * compile untrusted patterns charge that to their own budget). The shared
+ * pattern cache is not touched.
+ */
+export function compileIgnorePattern(pattern: string): CompiledIgnorePattern {
+  const compiled: CompiledIgnorePatternImpl = { pattern, compiled: compilePattern(pattern, IS_WIN) };
+  return compiled;
+}
+
+/** A candidate normalised once for many budgeted attempts. */
+interface BudgetedCandidate {
+  readonly path: string;
+  readonly basename: string;
+  segments: readonly string[] | undefined;
+}
+
+/** Normalises `candidatePosixPath` like matchesIgnorePattern, charging its length. */
+function budgetedCandidate(candidatePosixPath: string, budget: IgnoreMatchBudget): BudgetedCandidate | undefined {
+  budget.remaining -= candidatePosixPath.length + 1;
+  if (budget.remaining < 0) return undefined;
+  const normalized = toPosix(candidatePosixPath);
+  const candidate = IS_WIN ? normalized.toLowerCase() : normalized;
+  return { path: candidate, basename: candidate.slice(candidate.lastIndexOf("/") + 1), segments: undefined };
+}
+
+/** matchSegments with every segment-level step and every segment match charged to `budget`. */
+function matchSegmentsWithBudget(
+  patSegs: readonly string[],
+  candSegs: readonly string[],
+  budget: IgnoreMatchBudget,
+): boolean {
+  let pi = 0;
+  let ci = 0;
+  let starIdx = -1;
+  let matchIdx = 0;
+  const pLen = patSegs.length;
+  const cLen = candSegs.length;
+
+  while (ci < cLen) {
+    budget.remaining -= 1;
+    if (budget.remaining < 0) return false;
+    const pSeg = pi < pLen ? patSegs[pi] : undefined;
+    if (pSeg === "**") {
+      starIdx = pi;
+      matchIdx = ci;
+      pi += 1;
+    } else if (pSeg !== undefined && matchSegment(pSeg, candSegs[ci] as string, budget)) {
+      pi += 1;
+      ci += 1;
+    } else if (budget.remaining < 0) {
+      return false;
+    } else if (starIdx !== -1) {
+      pi = starIdx + 1;
+      matchIdx += 1;
+      ci = matchIdx;
+    } else {
+      return false;
+    }
+  }
+
+  while (pi < pLen && patSegs[pi] === "**") {
+    pi += 1;
+  }
+
+  return pi === pLen;
+}
+
+/** The compiled form of a budgeted attempt's pattern; a string pays for its cache key. */
+function compiledForAttempt(
+  pattern: string | CompiledIgnorePattern,
+  budget: IgnoreMatchBudget,
+): CompiledPattern | undefined {
+  if (typeof pattern !== "string") return (pattern as CompiledIgnorePatternImpl).compiled;
+  // The cache key is built and hashed per attempt; a miss also compiles: both linear in the length.
+  budget.remaining -= pattern.length;
+  if (budget.remaining < 0) return undefined;
+  return compilePatternCached(pattern, IS_WIN);
+}
+
+/** One budgeted attempt against a normalised candidate (the matchesIgnorePattern decision). */
+function attemptWithBudget(
+  candidate: BudgetedCandidate,
+  isDirectory: boolean,
+  pattern: string | CompiledIgnorePattern,
+  budget: IgnoreMatchBudget,
+): boolean {
+  budget.remaining -= IGNORE_PATTERN_ATTEMPT_STEPS;
+  if (budget.remaining < 0) return false;
+  const compiled = compiledForAttempt(pattern, budget);
+  if (compiled === undefined) return false;
+  if (compiled.dirOnly && !isDirectory) {
+    return false;
+  }
+  if (!compiled.anchored) {
+    const seg = compiled.segments[0];
+    if (seg === undefined) {
+      return false;
+    }
+    if (seg === "**") {
+      return true;
+    }
+    return matchSegment(seg, candidate.basename, budget) && budget.remaining >= 0;
+  }
+  if (candidate.segments === undefined) {
+    budget.remaining -= candidate.path.length + 1;
+    if (budget.remaining < 0) return false;
+    candidate.segments = candidate.path.split("/");
+  }
+  return matchSegmentsWithBudget(compiled.segments, candidate.segments, budget) && budget.remaining >= 0;
+}
+
+/**
+ * matchesIgnorePattern with the work it really does charged to `budget`: the
+ * candidate normalisation and splitting (its length), a fixed
+ * IGNORE_PATTERN_ATTEMPT_STEPS per attempt, the cache key of a string pattern
+ * (its length) and every step of the two-pointer segment matchers. With a
+ * budget that suffices the decision is exactly matchesIgnorePattern's; once
+ * `budget.remaining < 0` the result is false and is not a decision (the caller
+ * must not use it).
+ */
+export function matchesIgnorePatternWithBudget(
+  candidatePosixPath: string,
+  isDirectory: boolean,
+  pattern: string | CompiledIgnorePattern,
+  budget: IgnoreMatchBudget,
+): boolean {
+  const candidate = budgetedCandidate(candidatePosixPath, budget);
+  return candidate !== undefined && attemptWithBudget(candidate, isDirectory, pattern, budget);
+}
+
+/**
+ * findMatchingIgnorePattern charged like matchesIgnorePatternWithBudget, with
+ * the candidate normalised once for the whole list. The first matching pattern
+ * as written; undefined when none matches, or when the budget ran out first
+ * (`budget.remaining < 0`).
+ */
+export function findMatchingIgnorePatternWithBudget(
+  candidatePosixPath: string,
+  isDirectory: boolean,
+  patterns: readonly (string | CompiledIgnorePattern)[],
+  budget: IgnoreMatchBudget,
+): string | undefined {
+  const candidate = budgetedCandidate(candidatePosixPath, budget);
+  if (candidate === undefined) return undefined;
+  for (const pattern of patterns) {
+    if (attemptWithBudget(candidate, isDirectory, pattern, budget)) {
+      return typeof pattern === "string" ? pattern : pattern.pattern;
+    }
+    if (budget.remaining < 0) return undefined;
+  }
+  return undefined;
+}

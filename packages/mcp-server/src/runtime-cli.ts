@@ -1327,18 +1327,18 @@ function permissionText(mode: number): string {
 
 /**
  * F41: a data directory that exists (just created or reused) must be a real
- * directory, not a link, and on POSIX be owned by the server's uid. The
- * containers (the base and `workspaces` directories, which the user may have
- * chosen) are refused when group or others can write them, like `setup`'s
- * assertPrivateDirectory (they are never chmod'ed); the workspace and
- * `exports` directories are Causoryn's own and are made owner-only (0700). A
- * chmod that fails, or a mode that is still too open afterwards (a file
- * system that ignores chmod), stops startup: another local user could
+ * directory, not a link, and on POSIX be owned by the server's uid. A base
+ * directory the user supplied (it existed before this run) is refused when
+ * group or others can write it, like `setup`'s assertPrivateDirectory (it is
+ * never chmod'ed); every directory this run created and Causoryn's own
+ * `workspaces`, workspace and `exports` directories are made owner-only
+ * (0700). A chmod that fails, or a mode that is still too open afterwards (a
+ * file system that ignores chmod), stops startup: another local user could
  * otherwise read or replace the index. Windows ACLs are not inspected here
  * (no uid there; the history cache trusts only a data root inside the user's
  * profile).
  */
-function assertPrivateDataDirectory(dir: string, access: "no-shared-write" | "owner-only"): void {
+function assertPrivateDataDirectory(dir: string, access: "user-supplied" | "owner-only"): void {
   const inspect = (): Stats => {
     let st: Stats;
     try {
@@ -1365,7 +1365,7 @@ function assertPrivateDataDirectory(dir: string, access: "no-shared-write" | "ow
   const initialOwner = ownerProblem(st.uid);
   if (initialOwner !== undefined) throw new CausorynConfigError([initialOwner]);
   const mode = st.mode;
-  if (access === "no-shared-write") {
+  if (access === "user-supplied") {
     if ((mode & GROUP_OR_OTHER_WRITE) === 0) return;
     throw new CausorynConfigError([
       `the data directory is writable by group or others (mode ${permissionText(mode)}; another local user could replace the index). Restrict it with \`chmod go-w ${dir}\` or choose another --data-dir: ${dir}`,
@@ -1391,13 +1391,51 @@ function assertPrivateDataDirectory(dir: string, access: "no-shared-write" | "ow
 }
 
 /**
+ * Sets a directory this run just created to 0700 (POSIX) and verifies it the
+ * same way as the data directories; a chmod failure stops startup.
+ */
+function makeCreatedDirectoryPrivate(dir: string): void {
+  if (serverUid() === undefined) return;
+  try {
+    chmodSync(dir, 0o700);
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException | undefined)?.code ?? "unknown error";
+    throw new CausorynConfigError([
+      `the data directory permissions could not be restricted (${code}); refusing a data directory other local users can access: ${dir}`,
+    ]);
+  }
+  assertPrivateDataDirectory(dir, "owner-only");
+}
+
+/** The components of `dir` that do not exist yet (what a recursive mkdir creates), shortest first. */
+function missingPathPrefixes(dir: string): string[] {
+  const missing: string[] = [];
+  for (const prefix of enumeratePathPrefixes(dir)) {
+    if (missing.length > 0) {
+      missing.push(prefix);
+      continue;
+    }
+    try {
+      lstatSync(prefix);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException | undefined)?.code === "ENOENT") missing.push(prefix);
+    }
+  }
+  return missing;
+}
+
+/**
  * Creates `dir` when missing (recursively for the base, whose ancestors may
- * not exist yet) and verifies it with assertPrivateDataDirectory. A directory
- * that cannot be created or written is DataDirUnusableError (fallback allowed).
+ * not exist yet) and verifies it with assertPrivateDataDirectory. Every
+ * directory created here is chmod'ed to 0700 explicitly (POSIX): mkdir's mode
+ * is reduced by the umask and shaped by a default ACL of the parent, and is
+ * not relied on, so neither leaves a directory Causoryn made itself open or
+ * makes such a startup fatal. A directory that cannot be created or written
+ * is DataDirUnusableError (fallback allowed).
  */
 function ensurePrivateDataDirectory(
   dir: string,
-  access: "no-shared-write" | "owner-only",
+  access: "user-supplied" | "owner-only",
   options: { readonly recursive: boolean; readonly writable: boolean },
 ): void {
   const unusable = (error: unknown): DataDirUnusableError => {
@@ -1407,12 +1445,17 @@ function ensurePrivateDataDirectory(
       `${code} while creating ${dir}`,
     );
   };
+  const created = options.recursive ? missingPathPrefixes(dir) : missingPathPrefixes(dir).slice(-1);
   try {
     mkdirSync(dir, { recursive: options.recursive, mode: 0o700 });
   } catch (error) {
     if ((error as NodeJS.ErrnoException | undefined)?.code !== "EEXIST") throw unusable(error);
   }
-  assertPrivateDataDirectory(dir, access);
+  for (const createdDir of created) {
+    makeCreatedDirectoryPrivate(createdDir);
+  }
+  const createdNow = created.some((createdDir) => path.resolve(createdDir) === path.resolve(dir));
+  assertPrivateDataDirectory(dir, createdNow ? "owner-only" : access);
   if (!options.writable) return;
   try {
     accessSync(dir, fsConstants.W_OK);
@@ -1519,7 +1562,9 @@ function discoverIgnoreConfigReported(
         console.error(message);
       });
     log(
-      `[causoryn] ignore discovery stopped at its ${discovery.limitReached} budget in ${root}; the ignore patterns accepted before that point are used (the workspace has unusually large ignore files or unusually wide directories)`,
+      discovery.limitReached === "negation-work"
+        ? `[causoryn] ignore discovery reached its negation-work budget in ${root}; later ignore entries were kept without the negation check, so files that a "!" rule re-includes may be ignored (the workspace has unusually large ignore files)`
+        : `[causoryn] ignore discovery stopped at its ${discovery.limitReached} budget in ${root}; the ignore patterns accepted before that point are used and later nested .gitignore files were not read, so files they ignore may be indexed (the workspace has unusually large ignore files or unusually wide directories)`,
     );
   }
   return discovery;
@@ -1695,8 +1740,8 @@ function prepareWorkspaceDataDir(
   // F41: created (or reused) top down, each one verified before anything is
   // created inside it: not a link and, on POSIX, owned by the server's uid
   // with no group/other write (the workspace directories owner-only).
-  ensurePrivateDataDirectory(baseDataDir, "no-shared-write", { recursive: true, writable: false });
-  ensurePrivateDataDirectory(workspacesDir, "no-shared-write", { recursive: false, writable: false });
+  ensurePrivateDataDirectory(baseDataDir, "user-supplied", { recursive: true, writable: false });
+  ensurePrivateDataDirectory(workspacesDir, "owner-only", { recursive: false, writable: false });
   ensurePrivateDataDirectory(workspaceDataDir, "owner-only", { recursive: false, writable: true });
   ensurePrivateDataDirectory(exportsDir, "owner-only", { recursive: false, writable: true });
 
