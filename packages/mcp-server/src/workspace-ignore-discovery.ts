@@ -5,19 +5,16 @@ import {
   fstatSync,
   lstatSync,
   openSync,
-  readdirSync,
+  opendirSync,
   readSync,
   realpathSync,
   statSync,
+  type Dir,
   type Dirent,
 } from "node:fs";
 import path from "node:path";
 
-import {
-  DEFAULT_IGNORE_PATTERNS,
-  findMatchingIgnorePattern,
-  matchesIgnorePattern,
-} from "@causoryn/workspace";
+import { DEFAULT_IGNORE_PATTERNS, matchesIgnorePattern } from "@causoryn/workspace";
 
 // Causoryn v0.2.3 — Modüler, salt-okunur, deterministik workspace ignore keşfi
 // ve akıllı `bin/` ayrımı (AC-3, AC-4).
@@ -34,6 +31,17 @@ import {
 //      <= 4 sınırlı taramada bulunan `.csproj`/`.fsproj`/`.vbproj` dizinlerinin
 //      en fazla 128 `<dir>/bin/**` deseni konur; böylece Node (`bin/cli.ts`) ve
 //      Rust (`src/bin/main.rs`) kaynakları gizlenmez.
+//
+// Total work budgets of one discovery run (F46 / F49): the per-file and
+// per-walk caps above are each bounded, but their product is not. Every
+// pattern match (the negation-conflict check of every parsed entry, kept or
+// dropped, and the prune check of every child directory, pruned or not) is
+// charged to MAX_DISCOVERY_MATCH_WORK, and every directory entry the walks
+// examine is charged to MAX_DISCOVERY_DIRECTORY_ENTRIES. When a budget runs
+// out, discovery stops right there: the patterns accepted so far are kept
+// (each passed the full negation check), the remaining sources are skipped and
+// `limitReached` names the budget. The charges depend only on the workspace
+// content, so the same input always stops at the same place.
 
 export const MAX_IGNORE_FILE_BYTES = 256 * 1024;
 export const MAX_NESTED_GITIGNORE_DEPTH = 6;
@@ -46,6 +54,18 @@ export const MAX_CSPROJ_BIN_PATTERNS = 128;
 export const MAX_LINES_PER_IGNORE_FILE = 4_000;
 export const MAX_NEGATED_ANCESTOR_DEPTH = 16;
 export const MAX_WILDCARDS_PER_PATTERN = 16;
+
+/** Directory entries (files and directories, pruned or not) all walks of one run may examine. */
+export const MAX_DISCOVERY_DIRECTORY_ENTRIES = 200_000;
+/**
+ * Match work one run may spend, in matcher step units (see matchWorkCost). At
+ * the measured worst case of a few nanoseconds per unit this keeps a hostile
+ * workspace to a stall of about a second; a large monorepo uses a few percent
+ * of it.
+ */
+export const MAX_DISCOVERY_MATCH_WORK = 250_000_000;
+/** Fixed charge of one matcher call (normalisation, pattern cache lookup, splitting). */
+export const DISCOVERY_MATCH_CALL_COST = 100;
 
 const MAX_NEGATED_MATCH_TARGETS = 64;
 const MAX_PATTERN_LENGTH = 512;
@@ -64,13 +84,108 @@ const SMART_BIN_SUBDIR_PATTERNS: readonly string[] = [
   "**/bin/AnyCPU/**",
 ];
 
+/** The total work budget of a discovery run that ran out. */
+export type IgnoreDiscoveryLimit = "directory-entries" | "match-work";
+
+/** Total work budgets of one run; omitted fields use the MAX_DISCOVERY_* defaults. */
+export interface IgnoreDiscoveryBudgets {
+  readonly maxDirectoryEntries?: number;
+  readonly maxMatchWork?: number;
+}
+
 export interface WorkspaceIgnoreDiscoveryOptions {
   readonly hasExplicitIgnore?: boolean;
+  /** Lower total budgets than the defaults (tests and tuning). */
+  readonly budgets?: IgnoreDiscoveryBudgets;
 }
 
 export interface WorkspaceIgnoreDiscoveryResult {
   readonly extraIgnore: readonly string[];
   readonly refinedDefaultIgnore?: readonly string[];
+  /**
+   * Set when a total work budget ran out: discovery stopped there, kept the
+   * patterns it had accepted and skipped the remaining sources.
+   */
+  readonly limitReached?: IgnoreDiscoveryLimit;
+}
+
+/** A pattern with its match weight (see patternMatchWeight), computed once. */
+interface WeightedPattern {
+  readonly pattern: string;
+  readonly weight: number;
+}
+
+/**
+ * Factor of the candidate length in the worst-case step count of one
+ * matchesIgnorePattern call (two-pointer glob, SEC-01): a literal pattern scans
+ * the candidate once; a pattern whose only wildcards are whole `**` segments
+ * backtracks per segment; any other wildcard can backtrack per character.
+ */
+function patternMatchWeight(pattern: string): number {
+  if (!hasWildcardChars(pattern)) return 1;
+  const segments = pattern.split(/[\\/]/);
+  const globstarOnly = segments.every((segment) => segment === "**" || !hasWildcardChars(segment));
+  return globstarOnly ? segments.length + 1 : pattern.length + 1;
+}
+
+function weighPatterns(patterns: readonly string[]): WeightedPattern[] {
+  return patterns.map((pattern) => ({ pattern, weight: patternMatchWeight(pattern) }));
+}
+
+/** Upper bound of the work of one matcher call, in step units. */
+function matchWorkCost(candidate: string, pattern: WeightedPattern): number {
+  return DISCOVERY_MATCH_CALL_COST + pattern.weight * (candidate.length + 1) + pattern.pattern.length;
+}
+
+/** The two total budgets of one discovery run; once one runs out every later charge fails. */
+class DiscoveryBudget {
+  private matchWork: number;
+  private directoryEntries: number;
+  limitReached: IgnoreDiscoveryLimit | undefined;
+
+  constructor(budgets: IgnoreDiscoveryBudgets | undefined) {
+    this.matchWork = budgets?.maxMatchWork ?? MAX_DISCOVERY_MATCH_WORK;
+    this.directoryEntries = budgets?.maxDirectoryEntries ?? MAX_DISCOVERY_DIRECTORY_ENTRIES;
+  }
+
+  get exhausted(): boolean {
+    return this.limitReached !== undefined;
+  }
+
+  /** Pays for one examined directory entry; false once the budget is gone. */
+  chargeDirectoryEntry(): boolean {
+    if (this.limitReached !== undefined) return false;
+    if (this.directoryEntries <= 0) {
+      this.limitReached = "directory-entries";
+      return false;
+    }
+    this.directoryEntries -= 1;
+    return true;
+  }
+
+  /** One charged match; undefined (and no match is run) once the budget cannot pay for it. */
+  match(candidate: string, isDirectory: boolean, pattern: WeightedPattern): boolean | undefined {
+    if (this.limitReached !== undefined) return undefined;
+    const cost = matchWorkCost(candidate, pattern);
+    if (cost > this.matchWork) {
+      this.limitReached = "match-work";
+      return undefined;
+    }
+    this.matchWork -= cost;
+    return matchesIgnorePattern(candidate, isDirectory, pattern.pattern);
+  }
+
+  /**
+   * Whether any pattern matches, tried in order like findMatchingIgnorePattern
+   * with every attempt charged; undefined when the budget ran out first.
+   */
+  matchesAny(candidate: string, isDirectory: boolean, patterns: readonly WeightedPattern[]): boolean | undefined {
+    for (const pattern of patterns) {
+      const matched = this.match(candidate, isDirectory, pattern);
+      if (matched !== false) return matched;
+    }
+    return false;
+  }
 }
 
 function stripWin32DevicePrefix(p: string): string {
@@ -206,12 +321,35 @@ function readSafeRegularFileUtf8(
   }
 }
 
-function readSortedDirents(dirPath: string): Dirent[] {
+/**
+ * Entries of `dirPath` sorted by name, each one charged to the directory-entry
+ * budget as it is read; undefined once the budget runs out (the partial
+ * listing is dropped, so the outcome does not depend on the directory order).
+ * An unreadable directory has no entries.
+ */
+function readSortedDirents(dirPath: string, budget: DiscoveryBudget): Dirent[] | undefined {
+  const entries: Dirent[] = [];
+  let dir: Dir;
   try {
-    return readdirSync(dirPath, { withFileTypes: true }).sort((a, b) => compareLex(a.name, b.name));
+    dir = opendirSync(dirPath);
+  } catch {
+    return entries;
+  }
+  try {
+    for (let entry = dir.readSync(); entry !== null; entry = dir.readSync()) {
+      if (!budget.chargeDirectoryEntry()) return undefined;
+      entries.push(entry);
+    }
   } catch {
     return [];
+  } finally {
+    try {
+      dir.closeSync();
+    } catch {
+      // A close failure of a read-only directory handle is not actionable.
+    }
   }
+  return entries.sort((a, b) => compareLex(a.name, b.name));
 }
 
 function scopeNestedPattern(
@@ -279,33 +417,39 @@ interface NegatedTarget {
   readonly targetPath: string;
   readonly isDir: boolean;
   readonly ancestors: readonly string[];
-  readonly rawNegPattern: string;
+  readonly negPattern: WeightedPattern;
   readonly hasWildcard: boolean;
 }
 
+/**
+ * True when the entry could ignore the negated target (or one of its
+ * ancestors), or when the match budget ran out before that was settled (the
+ * entry is then dropped like a conflicting one; the caller stops the parse).
+ */
 function wouldOverIgnoreNegatedTarget(
-  rawLocalPattern: string,
+  localPattern: WeightedPattern,
   body: string,
   dirOnly: boolean,
   target: NegatedTarget,
+  budget: DiscoveryBudget,
 ): boolean {
   for (const ancestor of target.ancestors) {
-    if (matchesIgnorePattern(ancestor, true, rawLocalPattern)) {
+    if (budget.match(ancestor, true, localPattern) !== false) {
       return true;
     }
   }
-  if (matchesIgnorePattern(target.targetPath, target.isDir, rawLocalPattern)) {
+  if (budget.match(target.targetPath, target.isDir, localPattern) !== false) {
     return true;
   }
   if (target.hasWildcard || target.isDir) {
-    if (matchesIgnorePattern(body, dirOnly, target.rawNegPattern)) {
+    if (budget.match(body, dirOnly, target.negPattern) !== false) {
       return true;
     }
     const bodySegments = body.split("/").filter((s) => s.length > 0);
     const maxAnc = Math.min(bodySegments.length - 1, MAX_NEGATED_ANCESTOR_DEPTH);
     for (let i = 1; i <= maxAnc; i += 1) {
       const anc = bodySegments.slice(0, i).join("/");
-      if (matchesIgnorePattern(anc, true, target.rawNegPattern)) {
+      if (budget.match(anc, true, target.negPattern) !== false) {
         return true;
       }
     }
@@ -318,13 +462,16 @@ function wouldOverIgnoreNegatedTarget(
  * satır/joker/derinlik tavanlı ve deterministik biçimde ayrıştırır.
  * `subDirPosix === ""` ise kök seviyesinde tutar; aksi hâlde her deseni
  * `<subDirPosix>` altına kapsamlandırır.
+ * Every negation-conflict match is charged to `budget`; once it runs out the
+ * parse stops and returns the patterns accepted before that point.
  */
 function parseSafeIgnoreFileContent(
   raw: string,
   subDirPosix: string,
   maxPatterns: number,
+  budget: DiscoveryBudget,
 ): string[] {
-  if (maxPatterns <= 0) {
+  if (maxPatterns <= 0 || budget.exhausted) {
     return [];
   }
   const text = raw.startsWith("\uFEFF") ? raw.slice(1) : raw;
@@ -378,7 +525,7 @@ function parseSafeIgnoreFileContent(
               targetPath: cleaned,
               isDir,
               ancestors,
-              rawNegPattern: rawNeg,
+              negPattern: { pattern: rawNeg, weight: patternMatchWeight(rawNeg) },
               hasWildcard: negHasWildcard,
             });
           } else {
@@ -455,12 +602,16 @@ function parseSafeIgnoreFileContent(
       ) {
         continue;
       }
+      const localPattern: WeightedPattern = { pattern: posix, weight: patternMatchWeight(posix) };
       let conflictsWithNegation = false;
       for (const target of negatedTargets) {
-        if (wouldOverIgnoreNegatedTarget(posix, body, dirOnly, target)) {
+        if (wouldOverIgnoreNegatedTarget(localPattern, body, dirOnly, target, budget)) {
           conflictsWithNegation = true;
           break;
         }
+      }
+      if (budget.exhausted) {
+        break;
       }
       if (conflictsWithNegation) {
         continue;
@@ -491,7 +642,7 @@ function parseSafeIgnoreFileContent(
   return patterns;
 }
 
-function readGitInfoExclude(canonicalRoot: string, maxPatterns: number): string[] {
+function readGitInfoExclude(canonicalRoot: string, maxPatterns: number, budget: DiscoveryBudget): string[] {
   const gitDir = path.join(canonicalRoot, ".git");
   if (!isVerifiedChildDirectory(gitDir, canonicalRoot)) {
     return [];
@@ -505,7 +656,7 @@ function readGitInfoExclude(canonicalRoot: string, maxPatterns: number): string[
   if (content === null) {
     return [];
   }
-  return parseSafeIgnoreFileContent(content, "", maxPatterns);
+  return parseSafeIgnoreFileContent(content, "", maxPatterns, budget);
 }
 
 interface WalkQueueItem {
@@ -514,16 +665,21 @@ interface WalkQueueItem {
   readonly depth: number;
 }
 
+/**
+ * .NET project directories of the bounded scan. It stops early when a total
+ * budget runs out; the caller then does not apply the incomplete result.
+ */
 function scanDotnetProjectDirs(
   canonicalRoot: string,
-  prunePatterns: readonly string[],
+  prunePatterns: readonly WeightedPattern[],
+  budget: DiscoveryBudget,
 ): string[] {
   const foundDirs = new Set<string>();
   const queue: WalkQueueItem[] = [{ absDir: canonicalRoot, relPosix: "", depth: 0 }];
   let head = 0;
   let visitedDirs = 0;
 
-  while (head < queue.length) {
+  while (head < queue.length && !budget.exhausted) {
     const current = queue[head] as WalkQueueItem;
     head += 1;
     visitedDirs += 1;
@@ -534,7 +690,8 @@ function scanDotnetProjectDirs(
       continue;
     }
 
-    const dirents = readSortedDirents(current.absDir);
+    const dirents = readSortedDirents(current.absDir, budget);
+    if (dirents === undefined) break;
     let hasProjectFile = false;
 
     for (const dirent of dirents) {
@@ -561,7 +718,11 @@ function scanDotnetProjectDirs(
         }
         const childRelPosix =
           current.relPosix === "" ? dirent.name : `${current.relPosix}/${dirent.name}`;
-        if (findMatchingIgnorePattern(childRelPosix, true, prunePatterns) !== undefined) {
+        const pruned = budget.matchesAny(childRelPosix, true, prunePatterns);
+        if (pruned === undefined) {
+          break;
+        }
+        if (pruned) {
           continue;
         }
         queue.push({
@@ -634,20 +795,21 @@ function collectNestedGitignorePatterns(
   extraIgnore: string[],
   seenExtra: Set<string>,
   initialPrunePatterns: readonly string[],
+  budget: DiscoveryBudget,
 ): void {
   if (extraIgnore.length >= MAX_DISCOVERED_IGNORE_PATTERNS) {
     return;
   }
 
-  const prunePatterns: string[] = [...initialPrunePatterns];
-  const pruneSeen = new Set<string>(prunePatterns);
+  const prunePatterns: WeightedPattern[] = weighPatterns(initialPrunePatterns);
+  const pruneSeen = new Set<string>(initialPrunePatterns);
   const queue: WalkQueueItem[] = [{ absDir: canonicalRoot, relPosix: "", depth: 0 }];
   const maxQueueSize = MAX_NESTED_WALK_DIRS + 1;
   let head = 0;
   let visitedDirs = 0;
   let nestedFilesRead = 0;
 
-  while (head < queue.length) {
+  while (head < queue.length && !budget.exhausted) {
     if (
       nestedFilesRead >= MAX_NESTED_GITIGNORE_FILES ||
       extraIgnore.length >= MAX_DISCOVERED_IGNORE_PATTERNS
@@ -667,7 +829,10 @@ function collectNestedGitignorePatterns(
       }
     }
 
-    const dirents = readSortedDirents(current.absDir);
+    const dirents = readSortedDirents(current.absDir, budget);
+    if (dirents === undefined) {
+      break;
+    }
 
     if (current.depth > 0) {
       const gitignoreEntry = dirents.find(
@@ -682,7 +847,7 @@ function collectNestedGitignorePatterns(
         if (content !== null) {
           nestedFilesRead += 1;
           const remaining = MAX_DISCOVERED_IGNORE_PATTERNS - extraIgnore.length;
-          const scopedPatterns = parseSafeIgnoreFileContent(content, current.relPosix, remaining);
+          const scopedPatterns = parseSafeIgnoreFileContent(content, current.relPosix, remaining, budget);
           appendCappedUnique(
             extraIgnore,
             seenExtra,
@@ -692,10 +857,11 @@ function collectNestedGitignorePatterns(
           for (const p of scopedPatterns) {
             if (!pruneSeen.has(p)) {
               pruneSeen.add(p);
-              prunePatterns.push(p);
+              prunePatterns.push({ pattern: p, weight: patternMatchWeight(p) });
             }
           }
           if (
+            budget.exhausted ||
             nestedFilesRead >= MAX_NESTED_GITIGNORE_FILES ||
             extraIgnore.length >= MAX_DISCOVERED_IGNORE_PATTERNS
           ) {
@@ -722,7 +888,11 @@ function collectNestedGitignorePatterns(
         }
         const childRelPosix =
           current.relPosix === "" ? dirent.name : `${current.relPosix}/${dirent.name}`;
-        if (findMatchingIgnorePattern(childRelPosix, true, prunePatterns) !== undefined) {
+        const pruned = budget.matchesAny(childRelPosix, true, prunePatterns);
+        if (pruned === undefined) {
+          return;
+        }
+        if (pruned) {
           continue;
         }
         queue.push({
@@ -756,6 +926,7 @@ export function discoverWorkspaceIgnoreConfig(
 
   const extraIgnore: string[] = [];
   const seenExtra = new Set<string>();
+  const budget = new DiscoveryBudget(options.budgets);
 
   // Kaynak 1: Kök .gitignore
   const rootGitignoreRaw = readSafeRegularFileUtf8(
@@ -767,39 +938,48 @@ export function discoverWorkspaceIgnoreConfig(
     appendCappedUnique(
       extraIgnore,
       seenExtra,
-      parseSafeIgnoreFileContent(rootGitignoreRaw, "", MAX_DISCOVERED_IGNORE_PATTERNS),
+      parseSafeIgnoreFileContent(rootGitignoreRaw, "", MAX_DISCOVERED_IGNORE_PATTERNS, budget),
       MAX_DISCOVERED_IGNORE_PATTERNS,
     );
   }
 
   // Kaynak 2: .git/info/exclude (yalnızca .git gerçek non-symlink dizinse)
-  if (extraIgnore.length < MAX_DISCOVERED_IGNORE_PATTERNS) {
+  if (extraIgnore.length < MAX_DISCOVERED_IGNORE_PATTERNS && !budget.exhausted) {
     appendCappedUnique(
       extraIgnore,
       seenExtra,
-      readGitInfoExclude(canonicalRoot, MAX_DISCOVERED_IGNORE_PATTERNS - extraIgnore.length),
+      readGitInfoExclude(canonicalRoot, MAX_DISCOVERED_IGNORE_PATTERNS - extraIgnore.length, budget),
       MAX_DISCOVERED_IGNORE_PATTERNS,
     );
   }
 
-  // Kaynak 4: Akıllı bin/ ayrımı (yalnızca açık ignore verilmediğinde)
+  // Kaynak 4: Akıllı bin/ ayrımı (yalnızca açık ignore verilmediğinde). The
+  // refinement replaces `**/bin/**` as a whole, so it is applied only when
+  // the scan completed within the budgets; otherwise the defaults stay.
   let refinedDefaultIgnore: readonly string[] | undefined;
-  if (options.hasExplicitIgnore !== true) {
-    const csprojPrunePatterns: readonly string[] = [...DEFAULT_IGNORE_PATTERNS, ...extraIgnore];
-    const dotnetProjectDirs = scanDotnetProjectDirs(canonicalRoot, csprojPrunePatterns);
-    refinedDefaultIgnore = buildRefinedDefaultIgnore(dotnetProjectDirs);
+  if (options.hasExplicitIgnore !== true && !budget.exhausted) {
+    const csprojPrunePatterns = weighPatterns([...DEFAULT_IGNORE_PATTERNS, ...extraIgnore]);
+    const dotnetProjectDirs = scanDotnetProjectDirs(canonicalRoot, csprojPrunePatterns, budget);
+    if (!budget.exhausted) {
+      refinedDefaultIgnore = buildRefinedDefaultIgnore(dotnetProjectDirs);
+    }
   }
 
   // Kaynak 3: İç içe (nested) .gitignore yürüyüşü
-  const nestedPruneBase = refinedDefaultIgnore ?? DEFAULT_IGNORE_PATTERNS;
-  collectNestedGitignorePatterns(
-    canonicalRoot,
-    extraIgnore,
-    seenExtra,
-    [...nestedPruneBase, ...extraIgnore],
-  );
+  if (!budget.exhausted) {
+    const nestedPruneBase = refinedDefaultIgnore ?? DEFAULT_IGNORE_PATTERNS;
+    collectNestedGitignorePatterns(
+      canonicalRoot,
+      extraIgnore,
+      seenExtra,
+      [...nestedPruneBase, ...extraIgnore],
+      budget,
+    );
+  }
 
-  return refinedDefaultIgnore !== undefined
-    ? { extraIgnore, refinedDefaultIgnore }
-    : { extraIgnore };
+  return {
+    extraIgnore,
+    ...(refinedDefaultIgnore !== undefined ? { refinedDefaultIgnore } : {}),
+    ...(budget.limitReached !== undefined ? { limitReached: budget.limitReached } : {}),
+  };
 }

@@ -1,17 +1,13 @@
 import {
   accessSync,
   chmodSync,
-  closeSync,
   constants as fsConstants,
   existsSync,
-  fstatSync,
   lstatSync,
   mkdirSync,
-  openSync,
-  readFileSync,
-  readSync,
   realpathSync,
   statSync,
+  type Stats,
 } from "node:fs";
 import { AsyncLocalStorage } from "node:async_hooks";
 import os from "node:os";
@@ -32,6 +28,7 @@ import {
   inspectLinkTargets,
   isUncOrDevicePath,
   LINK_TARGET_INSPECTION_ENABLED,
+  readBoundedTextFileSync,
   type OutputAccessPolicy,
   type WorkspaceAccessPolicy,
 } from "@causoryn/workspace";
@@ -484,31 +481,123 @@ function isSameAsResolvedDirs(
 }
 
 /**
+ * Root-safety probe of the entries below a candidate directory (F18 / F23).
+ * The directory itself is canonical (a realpath, or an ancestor of one); every
+ * entry below it may be planted by the analyzed repository, so:
+ * - nothing below a link is touched: components are lstat'd top down;
+ * - a link whose target chain reaches a UNC/device path (Windows) is refused
+ *   from lstat/readlink alone, before anything follows it (outbound SMB/NTLM);
+ * - file contents are read only with the descriptor-bound bounded reader
+ *   (no link, regular file, size-capped), never unbounded.
+ */
+
+/** What lstat reports for an entry (a link is never followed). */
+type ProbedKind = "file" | "directory" | "link" | "other" | "missing";
+
+/** Top-down lstat of `root/<segments...>`: the first link met ends the walk. */
+function probeBelow(root: string, segments: readonly string[]): ProbedKind {
+  let current = root;
+  for (let index = 0; index < segments.length; index += 1) {
+    current = path.join(current, segments[index] as string);
+    let st: Stats;
+    try {
+      st = lstatSync(current);
+    } catch {
+      return "missing";
+    }
+    if (st.isSymbolicLink()) return "link";
+    const isLast = index === segments.length - 1;
+    if (isLast) return st.isFile() ? "file" : st.isDirectory() ? "directory" : "other";
+    if (!st.isDirectory()) return "missing";
+  }
+  return "missing";
+}
+
+/** Why following `target` (below the canonical `root`) is refused, or undefined when its links are local. */
+function unsafeLinkReason(root: string, target: string): string | undefined {
+  if (!LINK_TARGET_INSPECTION_ENABLED) return undefined;
+  const inspection = inspectLinkTargets(target, { startDir: root });
+  return inspection.ok ? undefined : inspection.reason;
+}
+
+/** Result of probing a plugin/bundle marker, which rejects the root when present. */
+type MarkerProbe =
+  | { readonly kind: "absent" }
+  | { readonly kind: "present"; readonly text?: string }
+  | { readonly kind: "unsafe-link"; readonly reason: string };
+
+const ABSENT_MARKER: MarkerProbe = { kind: "absent" };
+
+/**
+ * Existence of a marker below `root`, as `existsSync` reported it before, but
+ * a link on the way is followed only after its target chain was inspected.
+ */
+function probeMarkerExists(root: string, segments: readonly string[]): MarkerProbe {
+  const kind = probeBelow(root, segments);
+  if (kind === "missing") return ABSENT_MARKER;
+  if (kind !== "link") return { kind: "present" };
+  const target = path.join(root, ...segments);
+  const reason = unsafeLinkReason(root, target);
+  if (reason !== undefined) return { kind: "unsafe-link", reason };
+  return existsSync(target) ? { kind: "present" } : ABSENT_MARKER;
+}
+
+const MAX_PLUGIN_MANIFEST_BYTES = 64 * 1024;
+/** Root package.json read by the monorepo check (bounded, like the manifests). */
+const MAX_ROOT_PACKAGE_JSON_BYTES = 64 * 1024;
+
+/**
+ * Text of a plugin manifest below `root` (bounded reader, at most 64 KiB).
+ * A manifest reached through a link (a symlinked plugin install, which keeps
+ * being detected) is read only after the link's target chain was inspected,
+ * through the bounded reader at its resolved location.
+ */
+function readPluginManifest(root: string, segments: readonly string[]): MarkerProbe {
+  const manifestPath = path.join(root, ...segments);
+  const direct = readBoundedTextFileSync(manifestPath, MAX_PLUGIN_MANIFEST_BYTES, { root });
+  if (direct.status === "ok") return { kind: "present", text: direct.text };
+  if (direct.status !== "rejected" || probeBelow(root, segments) !== "link") return ABSENT_MARKER;
+  const reason = unsafeLinkReason(root, manifestPath);
+  if (reason !== undefined) return { kind: "unsafe-link", reason };
+  let resolved: string;
+  try {
+    resolved = stripWin32DevicePrefix(realpathSync(manifestPath));
+  } catch {
+    return ABSENT_MARKER;
+  }
+  if (isUncOrDevicePath(resolved)) return { kind: "unsafe-link", reason: "unc-or-device-link-target" };
+  const viaLink = readBoundedTextFileSync(resolved, MAX_PLUGIN_MANIFEST_BYTES, { root: path.dirname(resolved) });
+  return viaLink.status === "ok" ? { kind: "present", text: viaLink.text } : ABSENT_MARKER;
+}
+
+/**
  * Bir dizinin `package.json` `"workspaces"` + monorepo kaynak işaretleri
  * (`AGENTS.md` veya `packages/` + `adapters/` dizinleri) taşıyan monorepo
  * kaynak kökü olup olmadığını denetler (kök plugin manifesti barındırsa bile
  * geliştirici ve kamuya açık dışa aktarılmış monorepo kökü reddedilmez;
  * ancak `node_modules`, `_npx` veya yasaklı eklenti dizinleri içindeki Git
  * klonları asla monorepo sayılmaz).
+ * The markers grant an exemption, so a link never counts as one: they are
+ * lstat'd only and package.json is read with the bounded reader (F18 / F23).
  */
 function isMonorepoWorkspaceRoot(
   dirPath: string,
   forbiddenEntries: readonly ResolvedDirEntry[] = [],
 ): boolean {
+  const hasAgentsMd = probeBelow(dirPath, ["AGENTS.md"]) === "file";
+  const hasMonorepoDirs =
+    probeBelow(dirPath, ["packages"]) === "directory" && probeBelow(dirPath, ["adapters"]) === "directory";
+  if (!hasAgentsMd && !hasMonorepoDirs) {
+    return false;
+  }
+  const pkg = readBoundedTextFileSync(path.join(dirPath, "package.json"), MAX_ROOT_PACKAGE_JSON_BYTES, {
+    root: dirPath,
+  });
+  if (pkg.status !== "ok") {
+    return false;
+  }
   try {
-    const hasAgentsMd =
-      existsSync(path.join(dirPath, "AGENTS.md")) &&
-      statSync(path.join(dirPath, "AGENTS.md")).isFile();
-    const hasMonorepoDirs =
-      existsSync(path.join(dirPath, "packages")) &&
-      statSync(path.join(dirPath, "packages")).isDirectory() &&
-      existsSync(path.join(dirPath, "adapters")) &&
-      statSync(path.join(dirPath, "adapters")).isDirectory();
-    if (!hasAgentsMd && !hasMonorepoDirs) {
-      return false;
-    }
-    const pkgRaw = readFileSync(path.join(dirPath, "package.json"), "utf8");
-    const parsed: unknown = JSON.parse(pkgRaw);
+    const parsed: unknown = JSON.parse(pkg.text);
     if (!isPlainObject(parsed)) {
       return false;
     }
@@ -531,6 +620,18 @@ function isMonorepoWorkspaceRoot(
   return true;
 }
 
+const PLUGIN_MANIFEST_SEGMENTS: readonly (readonly string[])[] = [
+  [".zcode-plugin", "plugin.json"],
+  [".claude-plugin", "plugin.json"],
+  [".codex-plugin", "plugin.json"],
+  ["plugin.json"],
+];
+
+/**
+ * Plugin install markers of a directory above the server script. A marker
+ * behind a UNC/device link counts as present (fail closed: the directory is
+ * forbidden) and is never followed.
+ */
 function hasPluginInstallMarkers(
   dirPath: string,
   forbiddenEntries: readonly ResolvedDirEntry[] = [],
@@ -538,90 +639,43 @@ function hasPluginInstallMarkers(
   if (isMonorepoWorkspaceRoot(dirPath, forbiddenEntries)) {
     return false;
   }
+  const marked = (segments: readonly string[]): boolean => probeMarkerExists(dirPath, segments).kind !== "absent";
   return (
-    existsSync(path.join(dirPath, ".zcode-plugin", "plugin.json")) ||
-    existsSync(path.join(dirPath, ".claude-plugin", "plugin.json")) ||
-    existsSync(path.join(dirPath, ".codex-plugin", "plugin.json")) ||
-    (existsSync(path.join(dirPath, "plugin.json")) &&
-      existsSync(path.join(dirPath, "mcp_config.json")))
+    PLUGIN_MANIFEST_SEGMENTS.slice(0, 3).some(marked) ||
+    (marked(["plugin.json"]) && marked(["mcp_config.json"]))
   );
 }
 
-const MAX_PLUGIN_MANIFEST_BYTES = 64 * 1024;
-const PLUGIN_MANIFEST_CHUNK_BYTES = 16 * 1024;
+/** Whether a candidate (or an ancestor) is a Causoryn plugin/bundle install. */
+type CausorynInstallVerdict =
+  | { readonly kind: "none" }
+  | { readonly kind: "causoryn-install" }
+  | { readonly kind: "unsafe-link"; readonly reason: string };
 
-function readBoundedPluginManifestSync(manifestPath: string): string | null {
-  let fd: number;
-  try {
-    // O_NOFOLLOW bilinçli olarak eklenmez: symlink'li paket/eklenti manifestleri desteklenir.
-    // Read-only open (no file is created); the mode argument only documents that.
-    fd = openSync(manifestPath, fsConstants.O_RDONLY, 0o600);
-  } catch {
-    return null;
-  }
-
-  try {
-    const fdStat = fstatSync(fd);
-    if (!fdStat.isFile() || fdStat.size > MAX_PLUGIN_MANIFEST_BYTES) {
-      return null;
-    }
-    const maxRead = MAX_PLUGIN_MANIFEST_BYTES + 1;
-    const chunks: Buffer[] = [];
-    let totalBytes = 0;
-    while (totalBytes < maxRead) {
-      const toRead = Math.min(PLUGIN_MANIFEST_CHUNK_BYTES, maxRead - totalBytes);
-      const buf = Buffer.allocUnsafe(toRead);
-      const bytesRead = readSync(fd, buf, 0, toRead, null);
-      if (bytesRead === 0) {
-        break;
-      }
-      chunks.push(bytesRead === buf.length ? buf : buf.subarray(0, bytesRead));
-      totalBytes += bytesRead;
-    }
-    if (totalBytes > MAX_PLUGIN_MANIFEST_BYTES) {
-      return null;
-    }
-    return Buffer.concat(chunks, totalBytes).toString("utf8");
-  } catch {
-    return null;
-  } finally {
-    try {
-      closeSync(fd);
-    } catch {
-      // Kapatma hatası yoksayılır.
-    }
-  }
-}
-
-function hasCausorynNamedPluginManifest(
+function causorynInstallVerdict(
   dirPath: string,
   forbiddenEntries: readonly ResolvedDirEntry[] = [],
-): boolean {
+): CausorynInstallVerdict {
   if (isMonorepoWorkspaceRoot(dirPath, forbiddenEntries)) {
-    return false;
+    return { kind: "none" };
   }
-  if (existsSync(path.join(dirPath, "bundle-manifest.json"))) {
-    return true;
-  }
-  const manifestCandidates = [
-    path.join(dirPath, ".zcode-plugin", "plugin.json"),
-    path.join(dirPath, ".claude-plugin", "plugin.json"),
-    path.join(dirPath, ".codex-plugin", "plugin.json"),
-    path.join(dirPath, "plugin.json"),
-  ];
-  for (const manifestPath of manifestCandidates) {
+  const bundleManifest = probeMarkerExists(dirPath, ["bundle-manifest.json"]);
+  if (bundleManifest.kind === "unsafe-link") return bundleManifest;
+  if (bundleManifest.kind === "present") return { kind: "causoryn-install" };
+  for (const segments of PLUGIN_MANIFEST_SEGMENTS) {
+    const manifest = readPluginManifest(dirPath, segments);
+    if (manifest.kind === "unsafe-link") return manifest;
+    if (manifest.kind !== "present" || manifest.text === undefined) continue;
     try {
-      const raw = readBoundedPluginManifestSync(manifestPath);
-      if (raw === null) continue;
-      const parsed: unknown = JSON.parse(raw);
+      const parsed: unknown = JSON.parse(manifest.text);
       if (isPlainObject(parsed) && parsed["name"] === "causoryn") {
-        return true;
+        return { kind: "causoryn-install" };
       }
     } catch {
       // Okunamayan aday atlanır.
     }
   }
-  return false;
+  return { kind: "none" };
 }
 
 export interface SafeProjectRootOptions {
@@ -684,7 +738,7 @@ function deriveForbiddenPluginDirs(
 
     if (
       !isMonorepoWorkspaceRoot(scriptDir, entries) &&
-      existsSync(path.join(scriptDir, "bundle-manifest.json"))
+      probeMarkerExists(scriptDir, ["bundle-manifest.json"]).kind !== "absent"
     ) {
       entries.push(toResolvedDirEntry(scriptDir));
     }
@@ -1041,10 +1095,15 @@ export function inspectProjectRootSafety(
     return { safe: false, reason: "system-directory" };
   }
 
-  // Adayın kendisi (veya monorepo olmayan üst atası) Causoryn plugin kurulumuysa reddet
+  // Adayın kendisi (veya monorepo olmayan üst atası) Causoryn plugin kurulumuysa reddet.
+  // A plugin/bundle marker behind a UNC/device link rejects the root (fail closed, never followed).
   let ancestorCursor = real;
   while (true) {
-    if (hasCausorynNamedPluginManifest(ancestorCursor, forbiddenEntries)) {
+    const verdict = causorynInstallVerdict(ancestorCursor, forbiddenEntries);
+    if (verdict.kind === "unsafe-link") {
+      return { safe: false, reason: verdict.reason };
+    }
+    if (verdict.kind === "causoryn-install") {
       return {
         safe: false,
         reason: "plugin-install-directory",
@@ -1254,6 +1313,114 @@ function assertNotSymlinkDirectory(targetDir: string): void {
   }
 }
 
+/** The server's uid where the platform has one (POSIX); read at call time. */
+function serverUid(): number | undefined {
+  return typeof process.getuid === "function" ? process.getuid() : undefined;
+}
+
+const GROUP_OR_OTHER_WRITE = 0o022;
+const GROUP_OR_OTHER_ANY = 0o077;
+
+function permissionText(mode: number): string {
+  return (mode & 0o7777).toString(8).padStart(3, "0");
+}
+
+/**
+ * F41: a data directory that exists (just created or reused) must be a real
+ * directory, not a link, and on POSIX be owned by the server's uid. The
+ * containers (the base and `workspaces` directories, which the user may have
+ * chosen) are refused when group or others can write them, like `setup`'s
+ * assertPrivateDirectory (they are never chmod'ed); the workspace and
+ * `exports` directories are Causoryn's own and are made owner-only (0700). A
+ * chmod that fails, or a mode that is still too open afterwards (a file
+ * system that ignores chmod), stops startup: another local user could
+ * otherwise read or replace the index. Windows ACLs are not inspected here
+ * (no uid there; the history cache trusts only a data root inside the user's
+ * profile).
+ */
+function assertPrivateDataDirectory(dir: string, access: "no-shared-write" | "owner-only"): void {
+  const inspect = (): Stats => {
+    let st: Stats;
+    try {
+      st = lstatSync(dir);
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException | undefined)?.code ?? "unknown error";
+      throw new CausorynConfigError([`the data directory status could not be verified: ${dir} (${code})`]);
+    }
+    if (st.isSymbolicLink()) {
+      throw new CausorynConfigError([`the data directory must not be a symbolic link (CWE-59): ${dir}`]);
+    }
+    if (!st.isDirectory()) {
+      throw new DataDirUnusableError(`the data directory path is not a directory: ${dir}`, `${dir} is not a directory`);
+    }
+    return st;
+  };
+  const st = inspect();
+  const uid = serverUid();
+  if (uid === undefined) return;
+  const ownerProblem = (owner: number): string | undefined =>
+    owner === uid
+      ? undefined
+      : `the data directory is owned by uid ${String(owner)}, not the server's uid ${String(uid)} (another local user could read or replace the index): ${dir}`;
+  const initialOwner = ownerProblem(st.uid);
+  if (initialOwner !== undefined) throw new CausorynConfigError([initialOwner]);
+  const mode = st.mode;
+  if (access === "no-shared-write") {
+    if ((mode & GROUP_OR_OTHER_WRITE) === 0) return;
+    throw new CausorynConfigError([
+      `the data directory is writable by group or others (mode ${permissionText(mode)}; another local user could replace the index). Restrict it with \`chmod go-w ${dir}\` or choose another --data-dir: ${dir}`,
+    ]);
+  }
+  if ((mode & GROUP_OR_OTHER_ANY) === 0) return;
+  try {
+    chmodSync(dir, 0o700);
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException | undefined)?.code ?? "unknown error";
+    throw new CausorynConfigError([
+      `the data directory permissions could not be restricted (mode ${permissionText(mode)}, ${code}); refusing a data directory other local users can access: ${dir}`,
+    ]);
+  }
+  const after = inspect();
+  const afterOwner = ownerProblem(after.uid);
+  if (afterOwner !== undefined) throw new CausorynConfigError([afterOwner]);
+  if ((after.mode & GROUP_OR_OTHER_ANY) !== 0) {
+    throw new CausorynConfigError([
+      `the data directory permissions did not change (mode ${permissionText(after.mode)}; the file system may ignore chmod); refusing a data directory other local users can access: ${dir}`,
+    ]);
+  }
+}
+
+/**
+ * Creates `dir` when missing (recursively for the base, whose ancestors may
+ * not exist yet) and verifies it with assertPrivateDataDirectory. A directory
+ * that cannot be created or written is DataDirUnusableError (fallback allowed).
+ */
+function ensurePrivateDataDirectory(
+  dir: string,
+  access: "no-shared-write" | "owner-only",
+  options: { readonly recursive: boolean; readonly writable: boolean },
+): void {
+  const unusable = (error: unknown): DataDirUnusableError => {
+    const code = (error as NodeJS.ErrnoException | undefined)?.code ?? "unknown error";
+    return new DataDirUnusableError(
+      `the data directory could not be created or is not writable: ${dir} (${code})`,
+      `${code} while creating ${dir}`,
+    );
+  };
+  try {
+    mkdirSync(dir, { recursive: options.recursive, mode: 0o700 });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException | undefined)?.code !== "EEXIST") throw unusable(error);
+  }
+  assertPrivateDataDirectory(dir, access);
+  if (!options.writable) return;
+  try {
+    accessSync(dir, fsConstants.W_OK);
+  } catch (error) {
+    throw unusable(error);
+  }
+}
+
 function enumeratePathPrefixes(targetPath: string): string[] {
   const resolved = path.resolve(targetPath);
   const parsed = path.parse(resolved);
@@ -1332,6 +1499,30 @@ function assertDataDirAncestorsSafe(
       }
     }
   }
+}
+
+/**
+ * Ignore discovery of `root`; a run that stopped at one of its total work
+ * budgets (F46 / F49) is reported on stderr, and startup goes on with the
+ * patterns accepted before that point.
+ */
+function discoverIgnoreConfigReported(
+  root: string,
+  hasExplicitIgnore: boolean,
+  logger: ((message: string) => void) | undefined,
+): ReturnType<typeof discoverWorkspaceIgnoreConfig> {
+  const discovery = discoverWorkspaceIgnoreConfig(root, { hasExplicitIgnore });
+  if (discovery.limitReached !== undefined) {
+    const log =
+      logger ??
+      ((message: string): void => {
+        console.error(message);
+      });
+    log(
+      `[causoryn] ignore discovery stopped at its ${discovery.limitReached} budget in ${root}; the ignore patterns accepted before that point are used (the workspace has unusually large ignore files or unusually wide directories)`,
+    );
+  }
+  return discovery;
 }
 
 function mergeExtraIgnore(
@@ -1501,26 +1692,13 @@ function prepareWorkspaceDataDir(
   assertNotSymlinkDirectory(exportsDir);
   assertDataDirAncestorsSafe(exportsDir, effectiveRoots, canonicalRoots);
 
-  try {
-    mkdirSync(workspaceDataDir, { recursive: true, mode: 0o700 });
-    mkdirSync(exportsDir, { recursive: true, mode: 0o700 });
-    accessSync(workspaceDataDir, fsConstants.W_OK);
-    accessSync(exportsDir, fsConstants.W_OK);
-  } catch (error) {
-    const code = (error as NodeJS.ErrnoException | undefined)?.code ?? "unknown error";
-    throw new DataDirUnusableError(
-      `the data directory could not be created or is not writable: ${workspaceDataDir} (${code})`,
-      `${code} while creating ${workspaceDataDir}`,
-    );
-  }
-  if (process.platform !== "win32") {
-    try {
-      chmodSync(workspaceDataDir, 0o700);
-      chmodSync(exportsDir, 0o700);
-    } catch {
-      // Dosya sistemi izin daraltmayı desteklemiyorsa sessiz geçilir.
-    }
-  }
+  // F41: created (or reused) top down, each one verified before anything is
+  // created inside it: not a link and, on POSIX, owned by the server's uid
+  // with no group/other write (the workspace directories owner-only).
+  ensurePrivateDataDirectory(baseDataDir, "no-shared-write", { recursive: true, writable: false });
+  ensurePrivateDataDirectory(workspacesDir, "no-shared-write", { recursive: false, writable: false });
+  ensurePrivateDataDirectory(workspaceDataDir, "owner-only", { recursive: false, writable: true });
+  ensurePrivateDataDirectory(exportsDir, "owner-only", { recursive: false, writable: true });
 
   // Oluşturma sonrası realpath doğrulaması (TOCTOU savunması).
   const realWorkspaceDataDir = stripWin32DevicePrefix(realpathSync(workspaceDataDir));
@@ -1593,7 +1771,7 @@ export function buildWorkspaceAutoConfig(
       path.isAbsolute(firstRoot) &&
       !firstRoot.includes("\0");
     const discovery = canDiscoverPrimary
-      ? discoverWorkspaceIgnoreConfig(firstRoot, { hasExplicitIgnore })
+      ? discoverIgnoreConfigReported(firstRoot, hasExplicitIgnore, options.logger)
       : undefined;
     const extraIgnore = mergeExtraIgnore(baseExtraIgnore, discovery?.extraIgnore ?? []);
     return parseCausorynServerConfig({
@@ -1676,7 +1854,7 @@ export function buildWorkspaceAutoConfig(
   const baseStorage = isPlainObject(rawBase["storage"]) ? rawBase["storage"] : {};
   const baseWiki = isPlainObject(rawBase["wiki"]) ? rawBase["wiki"] : {};
   const baseOutput = isPlainObject(rawBase["output"]) ? rawBase["output"] : {};
-  const discovery = discoverWorkspaceIgnoreConfig(primaryRoot, { hasExplicitIgnore });
+  const discovery = discoverIgnoreConfigReported(primaryRoot, hasExplicitIgnore, options.logger);
   const extraIgnore = mergeExtraIgnore(baseExtraIgnore, discovery.extraIgnore);
 
   const mergedConfig: Record<string, unknown> = {

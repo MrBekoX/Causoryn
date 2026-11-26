@@ -36,6 +36,7 @@ import {
 import {
   effectiveIgnorePatterns,
   findMatchingIgnorePattern,
+  isUncOrDevicePath,
   type WorkspacePolicyConfig,
 } from "@causoryn/workspace";
 
@@ -106,8 +107,11 @@ import { SERVER_VERSION } from "./version.js";
  * never served. The device and inode the directory check saw are checked
  * again (lstat: not a link, same identity) right before each temporary file
  * create, rename and unlink; a directory that changed in between is not
- * written to or removed from. Windows ACLs are not inspected (no uid there):
- * the private default data root is the protection on that platform.
+ * written to or removed from. Windows has no uid and Node cannot read a DACL
+ * without native code, so there the cache directory is trusted only when its
+ * real path lies inside the user's profile or %LOCALAPPDATA% (private to the
+ * user by default) and its path has no link or junction below them; a data
+ * root anywhere else gets fresh analyses, never a cache (windowsTrustProblem).
  *
  * Retention: after a store, entries beyond `maxEntries` or `maxTotalBytes`
  * (all entries of the directory, whatever their key) are evicted oldest
@@ -954,6 +958,13 @@ interface DirIdentity {
 export interface HistoryCacheFileSystem {
   /** The server's uid; undefined where there is none (Windows): owner and mode are not checked. */
   readonly getuid?: () => number | undefined;
+  /** Platform whose trust rules apply (default process.platform). */
+  readonly platform?: NodeJS.Platform;
+  /**
+   * Windows: the per-user directories whose default ACL is private to the
+   * server's user (default: the profile, os.homedir(), and %LOCALAPPDATA%).
+   */
+  readonly privateProfileDirs?: () => readonly string[];
   /** lstat (never follows a final link). */
   readonly lstat?: (target: string) => Promise<HistoryCacheStat>;
   /** Stat of an opened entry (`target` is the path it was opened by). */
@@ -1084,6 +1095,58 @@ function defaultGetuid(): number | undefined {
   return typeof process.getuid === "function" ? process.getuid() : undefined;
 }
 
+/** The user's profile and %LOCALAPPDATA% (absolute, never a UNC/device path). */
+function defaultPrivateProfileDirs(): readonly string[] {
+  const candidates = [os.homedir(), process.env["LOCALAPPDATA"] ?? ""];
+  return candidates.filter((dir) => dir.trim().length > 0 && path.isAbsolute(dir) && !isUncOrDevicePath(dir));
+}
+
+/** Every prefix of an absolute path below its root, shortest first. */
+function pathPrefixes(target: string): string[] {
+  const resolved = path.resolve(target);
+  const root = path.parse(resolved).root;
+  const prefixes: string[] = [];
+  let current = root;
+  for (const segment of resolved.slice(root.length).split(/[\\/]/)) {
+    if (segment.length === 0) continue;
+    current = path.join(current, segment);
+    prefixes.push(current);
+  }
+  return prefixes;
+}
+
+/**
+ * F43 — why a cache directory is not trusted on Windows, or undefined. Node
+ * cannot read a DACL without native code and the server never spawns icacls,
+ * so ownership cannot be checked there. The cache is trusted only inside a
+ * per-user directory whose default ACL grants access to the user (and
+ * SYSTEM/Administrators) alone: its native real path must lie inside one of
+ * them, and no component of the path it is used by may be a link or junction
+ * (one could be retargeted after the check), except the private directory
+ * itself or a directory above it (a relocated profile). Anywhere else, such as
+ * a --data-dir in a new folder at a drive root (which inherits write access
+ * for every authenticated user), every commit is analyzed fresh instead.
+ */
+async function windowsTrustProblem(
+  target: string,
+  realTarget: string,
+  privateDirs: readonly string[],
+  lstatFn: (target: string) => Promise<HistoryCacheStat>,
+): Promise<string | undefined> {
+  const lexicalPrivate = privateDirs.map((dir) => path.resolve(dir));
+  for (const prefix of pathPrefixes(target)) {
+    const stat = await lstatFn(prefix);
+    if (!stat.isSymbolicLink()) continue;
+    if (lexicalPrivate.some((dir) => isSameOrInside(dir, prefix))) continue;
+    return `reached through a link or junction (${prefix}); Windows ACLs are not inspected, so only a path of real directories inside the user's profile is trusted`;
+  }
+  for (const dir of lexicalPrivate) {
+    const realPrivate = await realpath(dir).catch(() => undefined);
+    if (realPrivate !== undefined && isSameOrInside(realTarget, realPrivate)) return undefined;
+  }
+  return "outside the user's profile; Windows ACLs are not inspected, so only a data root inside the profile (the default ~/.causoryn) is trusted and every commit is analyzed fresh";
+}
+
 /**
  * Why a cache directory or entry is not trusted on POSIX (another owner, or
  * group/other write permission), or undefined. Without a uid (Windows)
@@ -1113,6 +1176,8 @@ export function openHistoryCache(
   const fileSystemLstat = options.fileSystem?.lstat ?? ((target: string) => lstat(target));
   const fileSystemFstat = options.fileSystem?.fstat ?? ((handle: FileHandle) => handle.stat());
   const getuid = options.fileSystem?.getuid ?? defaultGetuid;
+  const platform = options.fileSystem?.platform ?? process.platform;
+  const privateProfileDirs = options.fileSystem?.privateProfileDirs ?? defaultPrivateProfileDirs;
   const quota = options.quota ?? resolveHistoryCacheQuota(deps.logger);
   const dataDir = path.dirname(path.resolve(dataDbPath));
   const dir = path.join(dataDir, HISTORY_DIR_NAME);
@@ -1156,6 +1221,13 @@ export function openHistoryCache(
       if (comparable(realTarget) !== comparable(expected)) {
         logOnce(`history: the history cache directory does not resolve inside the data directory and is not used: ${target}`);
         return undefined;
+      }
+      if (platform === "win32") {
+        const windowsProblem = await windowsTrustProblem(target, realTarget, privateProfileDirs(), fileSystemLstat);
+        if (windowsProblem !== undefined) {
+          logOnce(`history: the history cache directory is ${windowsProblem}; it is not trusted: ${target}`);
+          return undefined;
+        }
       }
       const problem = ownershipProblem(stat, getuid());
       if (problem !== undefined) {
