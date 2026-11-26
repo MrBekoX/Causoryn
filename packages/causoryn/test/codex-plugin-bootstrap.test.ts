@@ -39,6 +39,7 @@ interface CodexEntry {
   readonly command: string;
   readonly args: readonly string[];
   readonly cwd?: unknown;
+  readonly env?: Record<string, string>;
   readonly env_vars?: unknown;
 }
 
@@ -129,19 +130,39 @@ function plantProject(dir: string, version: string): string {
   return marker;
 }
 
-/** Codex forwards only its default variables plus the manifest's env_vars (rmcp-client utils.rs). */
-function codexLikeEnv(overrides: Readonly<Record<string, string | undefined>>): NodeJS.ProcessEnv {
-  const env: NodeJS.ProcessEnv = {};
+const NODE_DIR = path.dirname(process.execPath);
+const SYSTEM_DIRS =
+  process.platform === "win32"
+    ? [path.join(process.env["SYSTEMROOT"] ?? "C:\\Windows", "System32"), process.env["SYSTEMROOT"] ?? "C:\\Windows"]
+    : ["/usr/bin", "/bin"];
+
+/** A PATH with only absolute entries, the running node's directory first (independent of the host's PATH). */
+function controlledPath(...before: string[]): string {
+  return [...before, NODE_DIR, ...SYSTEM_DIRS].join(path.delimiter);
+}
+
+/**
+ * The child environment Codex builds (rmcp-client utils.rs
+ * create_env_for_mcp_server): its default variables and the manifest's
+ * env_vars taken from Codex's own environment (`codexProcess`), then the
+ * manifest's `env` map, which wins. Codex clears everything else
+ * (utils/pty child_command.rs env_clear).
+ */
+function codexLikeEnv(
+  codexProcess: Readonly<Record<string, string | undefined>>,
+  manifestEnv: Readonly<Record<string, string>> | undefined = codexEntry().env,
+): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = { PATH: controlledPath() };
   // process.env lookups are case-insensitive on Windows, so one spelling each.
-  for (const key of ["PATH", "PATHEXT", "SYSTEMROOT", "WINDIR", "TEMP", "TMP", "TMPDIR"]) {
+  for (const key of ["PATHEXT", "SYSTEMROOT", "WINDIR", "TEMP", "TMP", "TMPDIR"]) {
     const value = process.env[key];
     if (value !== undefined) env[key] = value;
   }
-  for (const [key, value] of Object.entries(overrides)) {
+  for (const [key, value] of Object.entries(codexProcess)) {
     if (value === undefined) delete env[key];
     else env[key] = value;
   }
-  return env;
+  return { ...env, ...manifestEnv };
 }
 
 function runBootstrap(
@@ -165,6 +186,9 @@ describe("Codex plugin manifest bootstrap", () => {
     expect(entry.command).toBe("node");
     expect(entry.cwd).toBeUndefined();
     expect(entry.env_vars).toEqual(["CODEX_HOME"]);
+    // cmd.exe (inside any .cmd/.bat shim on the way to node) and libuv in the
+    // server's process tree then never search the current directory.
+    expect(entry.env).toEqual({ NoDefaultCurrentDirectoryInExePath: "1" });
     expect(entry.args.slice(0, 2)).toEqual(["--input-type=module", "--eval"]);
     expect(entry.args[3]).toBe("--");
     expect(launcherArgs(entry)).toEqual([
@@ -310,4 +334,123 @@ describe("Codex plugin manifest bootstrap", () => {
     expect(run.stub).toBeUndefined();
     expect(run.stderr).toContain("version mismatch");
   });
+});
+
+/**
+ * Codex resolves the bare `node` from the child's PATH: on Windows through
+ * which 8 (an empty or relative entry is joined against Codex's own working
+ * directory), on macOS through its posix_spawn search and on Linux through
+ * Rust's execvp-style search (an empty entry means the child's cwd, the
+ * project). An unsafe entry before the directory that supplies `node` lets a
+ * repository supply it on some launch. Once this bootstrap runs the real node
+ * was chosen, so it refuses that PATH to stop the next repository; it cannot
+ * help when PATH already selected a planted binary, since then it never runs.
+ */
+describe("Codex plugin bootstrap PATH and node checks", () => {
+  function unsafeEntries(): ReadonlyArray<[string, string]> {
+    return process.platform === "win32"
+      ? [
+          ["empty", ""],
+          ["relative", "relative-bin"],
+          ["drive-relative", "C:relative-bin"],
+          ["UNC", "\\\\causoryn-unreachable-host\\share\\bin"],
+          ["device", "\\\\?\\C:\\causoryn-device-bin"],
+        ]
+      : [
+          ["empty", ""],
+          ["relative", "relative-bin"],
+          ["tilde", "~/bin"],
+        ];
+  }
+
+  it("refuses an empty or non-absolute PATH entry that comes before the node it runs", () => {
+    const entry = codexEntry();
+    const version = manifestVersion(entry);
+    const codexHome = tempDir("home");
+    stageInstall(codexHome, version);
+    const project = tempDir("project");
+    const marker = plantProject(project, version);
+
+    for (const [label, unsafe] of unsafeEntries()) {
+      const run = runBootstrap(
+        entry,
+        project,
+        codexLikeEnv({ CODEX_HOME: codexHome, PATH: controlledPath(unsafe) }),
+      );
+      expect(run.status, `${label}: ${run.stderr}`).toBe(2);
+      expect(run.stub, label).toBeUndefined();
+      expect(run.stderr, label).toContain("PATH entry");
+      expect(run.stderr, label).toContain("causoryn setup");
+    }
+    expect(existsSync(marker)).toBe(false);
+  });
+
+  it("accepts an unsafe PATH entry after the directory that supplies node, which can never select it", () => {
+    const entry = codexEntry();
+    const version = manifestVersion(entry);
+    const codexHome = tempDir("home");
+    stageInstall(codexHome, version);
+    const project = tempDir("project");
+
+    const run = runBootstrap(
+      entry,
+      project,
+      codexLikeEnv({ CODEX_HOME: codexHome, PATH: [controlledPath(), "", "relative-bin"].join(path.delimiter) }),
+    );
+    expect(run.status, run.stderr).toBe(0);
+    expect(realpathSync(run.stub?.cwd ?? "")).toBe(realpathSync(project));
+  });
+
+  it("refuses to run when the node binary itself lives inside the workspace", () => {
+    const entry = codexEntry();
+    const version = manifestVersion(entry);
+    const codexHome = tempDir("home");
+    stageInstall(codexHome, version);
+    const project = tempDir("project");
+    const bin = path.join(project, "tools");
+    mkdirSync(bin, { recursive: true });
+    const copiedNode = path.join(bin, path.basename(process.execPath));
+    copyFileSync(process.execPath, copiedNode);
+
+    const result = spawnSync(copiedNode, [...entry.args], {
+      cwd: project,
+      env: codexLikeEnv({ CODEX_HOME: codexHome, PATH: controlledPath(bin) }),
+      encoding: "utf8",
+      shell: false,
+    });
+    expect(result.status, result.stderr).toBe(2);
+    expect(result.stdout.trim()).toBe("");
+    expect(result.stderr).toContain("node runs from inside the workspace");
+  });
+
+  it.runIf(process.platform === "win32")(
+    "with the manifest env, a .cmd shim that calls node by name never picks the project's node.exe",
+    () => {
+      const project = tempDir("project");
+      // A planted node.exe (a copy of cmd.exe prints its banner instead of a Node version).
+      const systemRoot = process.env["SYSTEMROOT"] ?? "C:\\Windows";
+      copyFileSync(path.join(systemRoot, "System32", "cmd.exe"), path.join(project, "node.exe"));
+      // A version-manager style shim first in PATH that starts node by name.
+      const shimDir = tempDir("shim");
+      writeFileSync(path.join(shimDir, "node.cmd"), "@node.exe %*\r\n");
+      const env = codexLikeEnv({ PATH: controlledPath(shimDir) });
+
+      // Codex: which 8 picks <shimDir>\node.cmd; Rust's Command runs a batch
+      // file through cmd.exe /e:ON /v:OFF /d /c with the child env and cwd.
+      const runShim = (childEnv: NodeJS.ProcessEnv): string =>
+        spawnSync(
+          path.join(systemRoot, "System32", "cmd.exe"),
+          ["/e:ON", "/v:OFF", "/d", "/c", `"${path.join(shimDir, "node.cmd")}" --version`],
+          { cwd: project, env: childEnv, encoding: "utf8", shell: false, windowsVerbatimArguments: true },
+        ).stdout.trim();
+
+      expect(env["NoDefaultCurrentDirectoryInExePath"]).toBe("1");
+      expect(runShim(env)).toBe(process.version);
+
+      // Control: without the variable cmd.exe searches the project first.
+      const unguarded = { ...env };
+      delete unguarded["NoDefaultCurrentDirectoryInExePath"];
+      expect(runShim(unguarded)).not.toBe(process.version);
+    },
+  );
 });

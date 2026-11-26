@@ -133,19 +133,26 @@ const HOST_WITHOUT_CWD_FIELD: Readonly<Record<string, string>> = {
  *   `which::which_in` (8.0.0), which searches only PATH for a name without a
  *   separator (finder.rs), then Rust's `Command`, which has not searched the
  *   current directory since Rust 1.58; on Unix it is an execvp-style PATH search;
- * - Codex spawns it directly (no shell) with its default variables plus
- *   `env_vars` (rmcp-client utils.rs), so no NODE_OPTIONS reaches it;
- * - the eval'd bootstrap imports only `node:` builtins and reaches the launcher
- *   by an absolute path under CODEX_HOME (or `<home>/.codex`) in Codex's fixed
- *   layout `plugins/cache/<marketplace>/<plugin>/<version>` (core-plugins
- *   store.rs), refusing links below the cache and an install inside the
- *   workspace (packages/causoryn/test/codex-plugin-bootstrap.test.ts).
+ * - Codex spawns it directly (no shell) into a cleared environment holding its
+ *   default variables, `env_vars`, and the manifest `env` map, applied last
+ *   (rmcp-client utils.rs, utils/pty child_command.rs), so no NODE_OPTIONS
+ *   reaches it. That `env` sets NoDefaultCurrentDirectoryInExePath, so cmd.exe
+ *   (when PATH yields a .cmd/.bat shim) and libuv in the server never search
+ *   the cwd (learn.microsoft.com NeedCurrentDirectoryForExePathW);
+ * - the eval'd bootstrap imports only `node:` builtins, refuses a node binary
+ *   inside the workspace and an empty or non-absolute PATH entry before the
+ *   one that supplies node, and reaches the launcher by an absolute path under
+ *   CODEX_HOME (or `<home>/.codex`) in Codex's fixed layout
+ *   `plugins/cache/<marketplace>/<plugin>/<version>` (core-plugins store.rs),
+ *   refusing links below the cache and an install inside the workspace
+ *   (packages/causoryn/test/codex-plugin-bootstrap.test.ts).
  * The bootstrap text is pinned by hash: changing it means re-reviewing it.
  */
 const CODEX_SESSION_DIR_BOOTSTRAP = {
   file: "packages/causoryn/.codex-plugin/mcp.json",
-  bootstrapSha256: "cbf1fd0eb38e9c5420527d9f94012a5bb064026c66038d863287e1556d9d3882",
+  bootstrapSha256: "8c7231dce63fb8a1e1db64812caa8bda3b171b8674eed30248b3723ea0a9bc1c",
   launcherArgs: ["--expected-version", "0.3.2", "--allow-cwd", "--auto-data-dir", "--client", "codex"],
+  env: { NoDefaultCurrentDirectoryInExePath: "1" },
   envVars: ["CODEX_HOME"],
 } as const;
 
@@ -171,7 +178,9 @@ function codexBootstrapViolations(where: string, entry: Record<string, unknown>)
   if (JSON.stringify(entry["env_vars"]) !== JSON.stringify(CODEX_SESSION_DIR_BOOTSTRAP.envVars)) {
     violations.push(`${where}: env_vars must be exactly ["CODEX_HOME"]`);
   }
-  if (entry["env"] !== undefined) violations.push(`${where}: must not set env`);
+  if (JSON.stringify(entry["env"]) !== JSON.stringify(CODEX_SESSION_DIR_BOOTSTRAP.env)) {
+    violations.push(`${where}: env must be exactly {"NoDefaultCurrentDirectoryInExePath":"1"}`);
+  }
   return violations;
 }
 
@@ -488,6 +497,22 @@ describe("host launch manifests never start the server from the analyzed project
         { file: CODEX_SESSION_DIR_BOOTSTRAP.file, name: "causoryn", entry: { ...codexEntry(), cwd: "." } },
       ],
       [
+        "Codex: bootstrap form without the cwd-search guard",
+        {
+          file: CODEX_SESSION_DIR_BOOTSTRAP.file,
+          name: "causoryn",
+          entry: Object.fromEntries(Object.entries(codexEntry()).filter(([key]) => key !== "env")),
+        },
+      ],
+      [
+        "Codex: bootstrap form setting more variables",
+        {
+          file: CODEX_SESSION_DIR_BOOTSTRAP.file,
+          name: "causoryn",
+          entry: { ...codexEntry(), env: { NoDefaultCurrentDirectoryInExePath: "1", NODE_OPTIONS: "--require x" } },
+        },
+      ],
+      [
         "Codex: bootstrap form forwarding more variables",
         {
           file: CODEX_SESSION_DIR_BOOTSTRAP.file,
@@ -780,8 +805,10 @@ describe.runIf(STAGED_PACKAGE_PRESENT)("manifest launch forms start the staged p
         writeFileSync(path.join(project, "node.cmd"), `@echo x> "${marker}"\r\n`);
       }
 
-      // Codex forwards only its default variables plus env_vars; the harness's
-      // NoDefaultCurrentDirectoryInExePath is not among them.
+      // Codex clears the environment and passes its default variables plus
+      // env_vars, then the manifest's env map (rmcp-client utils.rs). The
+      // harness's own NoDefaultCurrentDirectoryInExePath is not among the
+      // defaults; the variable may only come from the manifest.
       const codexEnv: NodeJS.ProcessEnv = {};
       for (const key of CODEX_DEFAULT_ENV_VARS) {
         // `env` is a plain copy, so look names up case-insensitively (Windows spells "Path").
@@ -793,6 +820,17 @@ describe.runIf(STAGED_PACKAGE_PRESENT)("manifest launch forms start the staged p
       }
       codexEnv["CODEX_HOME"] = codexHome;
       expect(codexEnv["NoDefaultCurrentDirectoryInExePath"]).toBeUndefined();
+      // The bootstrap refuses an empty or relative PATH entry before the one
+      // that supplies node (its own tests cover that); start from a PATH that
+      // puts this node first so the run does not depend on the host's PATH.
+      codexEnv["PATH"] = [
+        path.dirname(process.execPath),
+        ...(codexEnv["PATH"] ?? "")
+          .split(path.delimiter)
+          .filter((entry) => (process.platform === "win32" ? /^[A-Za-z]:[\\/]/.test(entry) : entry.startsWith("/"))),
+      ].join(path.delimiter);
+      Object.assign(codexEnv, server["env"] as Record<string, string>);
+      expect(codexEnv["NoDefaultCurrentDirectoryInExePath"]).toBe("1");
 
       const program = resolveLikeCodex(String(server["command"]), codexEnv);
       if (path.isAbsolute(program)) {
