@@ -129,7 +129,7 @@ Both `scripts/causoryn.mjs` and `scripts/plugin-mcp-launcher.mjs` run this depen
 
 ### 2.2 `scripts/plugin-mcp-launcher.mjs` & version pinning
 
-Host plugin manifests (`.claude-plugin/plugin.json`, `.zcode-plugin/plugin.json`, `.codex-plugin/mcp.json`, `packages/causoryn/mcp_config.json`) start `scripts/plugin-mcp-launcher.mjs` with `node` directly instead of a nested `npx` process, from the plugin root wherever the host has a `cwd` field:
+Host plugin manifests (`.claude-plugin/plugin.json`, `.zcode-plugin/plugin.json`, `packages/causoryn/mcp_config.json`) start `scripts/plugin-mcp-launcher.mjs` with `node` directly instead of a nested `npx` process, from the plugin root wherever the host has a `cwd` field. `.codex-plugin/mcp.json` starts it through an inline `--eval` bootstrap that loads the launcher by its absolute path in Codex's plugin cache under `CODEX_HOME` (see the [Codex guide](hosts/codex.md)). The launcher:
 
 - Accepts `--expected-version <semver>` (or `--expected-version=<semver>`) and/or `CAUSORYN_EXPECTED_VERSION`; all other arguments are forwarded to the server.
 - Accepts `--project-dir <dir>` (or `--project-dir=<dir>`; ZCode passes `${ZCODE_PROJECT_DIR}`): a fully qualified local path to an existing directory (no UNC/device path, no NUL, no unexpanded `${…}`) becomes the server's working directory just before the bundle loads, so `--allow-cwd` applies its project-root safety check to it. Any other value is ignored with `[causoryn-launcher] --project-dir ignored (<reason>)` on `stderr`, and the server waits for MCP `roots/list`. The flag is never forwarded to the server.

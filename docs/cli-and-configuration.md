@@ -129,7 +129,7 @@ Hem `scripts/causoryn.mjs` hem de `scripts/plugin-mcp-launcher.mjs`, herhangi bi
 
 ### 2.2 `scripts/plugin-mcp-launcher.mjs` ve sürüm pinleme
 
-Host plugin manifestleri (`.claude-plugin/plugin.json`, `.zcode-plugin/plugin.json`, `.codex-plugin/mcp.json`, `packages/causoryn/mcp_config.json`), iç içe bir `npx` süreci yerine `scripts/plugin-mcp-launcher.mjs`'i doğrudan `node` ile ve host'un `cwd` alanı olan her yerde plugin kökünden başlatır:
+Host plugin manifestleri (`.claude-plugin/plugin.json`, `.zcode-plugin/plugin.json`, `packages/causoryn/mcp_config.json`), iç içe bir `npx` süreci yerine `scripts/plugin-mcp-launcher.mjs`'i doğrudan `node` ile ve host'un `cwd` alanı olan her yerde plugin kökünden başlatır. `.codex-plugin/mcp.json` onu, başlatıcıyı `CODEX_HOME` altındaki Codex plugin önbelleğinden mutlak yoluyla yükleyen satır içi bir `--eval` bootstrap'i üzerinden başlatır (bkz. [Codex kılavuzu](hosts/codex.md)). Başlatıcı:
 
 - `--expected-version <semver>` (veya `--expected-version=<semver>`) ve/veya `CAUSORYN_EXPECTED_VERSION` kabul eder; diğer tüm argümanlar sunucuya aktarılır.
 - `--project-dir <dir>` (veya `--project-dir=<dir>`; ZCode `${ZCODE_PROJECT_DIR}` geçirir) kabul eder: var olan bir dizine giden tam nitelikli yerel bir yol (UNC/aygıt yolu, NUL ve genişletilmemiş `${…}` yok) bundle yüklenmeden hemen önce sunucunun çalışma dizini olur; böylece `--allow-cwd` proje kökü güvenlik denetimini ona uygular. Başka her değer `stderr` üzerinde `[causoryn-launcher] --project-dir ignored (<reason>)` ile yok sayılır ve sunucu MCP `roots/list` bekler. Bayrak sunucuya asla iletilmez.

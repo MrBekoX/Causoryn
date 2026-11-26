@@ -25,7 +25,7 @@ Bu sayfada kullanılan 0.3.0 kod yollarının otomatik kapsamı: `tests/causoryn
 | Yol | Kimin için | Ne çalışır |
 |---|---|---|
 | **A. `npx causoryn@0.3.2 setup`** (önerilen) | Son kullanıcılar | Paketli giriş noktası `scripts/causoryn.mjs mcp --allow-cwd --auto-data-dir --client codex`; mutlak Node binary'siyle `config.toml` içine kaydedilir |
-| **B. Codex plugin pazaryeri** | Yalnızca skill'ler (plugin sunucusu workspace bağlamaz, bkz. bölüm 2) | `.codex-plugin/mcp.json` içinden, plugin kökünde (`cwd: "."`) başlatılan `node ./scripts/plugin-mcp-launcher.mjs --expected-version 0.3.2 …` |
+| **B. Codex plugin pazaryeri** | Plugin'leri tercih eden son kullanıcılar | `.codex-plugin/mcp.json` içinden `node --input-type=module --eval <bootstrap> -- --expected-version 0.3.2 --allow-cwd …`; bootstrap başlatıcıyı `CODEX_HOME` altındaki Codex plugin önbelleğinden yükler |
 | **C. Elle kayıt** (`codex mcp add` veya `config.toml`) | Kaynak checkout üzerinde çalışan katkıcılar | Monorepo bundle `packages/mcp-server/dist/mcp-server.mjs` (yalnızca `CAUSORYN_CONFIG` ile yapılandırılır) |
 
 ---
@@ -93,7 +93,10 @@ Kurulu paketin `.codex-plugin/plugin.json` dosyası skill'leri taşır (`"skills
     "causoryn": {
       "command": "node",
       "args": [
-        "./scripts/plugin-mcp-launcher.mjs",
+        "--input-type=module",
+        "--eval",
+        "<bootstrap: see below>",
+        "--",
         "--expected-version",
         "0.3.2",
         "--allow-cwd",
@@ -101,14 +104,16 @@ Kurulu paketin `.codex-plugin/plugin.json` dosyası skill'leri taşır (`"skills
         "--client",
         "codex"
       ],
-      "cwd": ".",
+      "env_vars": [
+        "CODEX_HOME"
+      ],
       "startup_timeout_sec": 30
     }
   }
 }
 ```
 
-Codex göreli bir `cwd` değerini plugin köküne ekler ve plugin MCP yapılandırmasında değişken genişletmez; bu yüzden sunucu analiz edilen projeden değil, kurulu plugin'den başlar (`./scripts/plugin-mcp-launcher.mjs`, paket sürümünü `--expected-version` ile denetler) ve projenin npm yapılandırması, `node_modules` veya `node_modules/.bin` dizini başlatmaya katılmaz. **Sınırlama:** Codex proje dizinini geçirmez ve MCP `roots/list` göndermez; `--allow-cwd` ise plugin dizinini reddeder. Bu yüzden plugin'in başlattığı sunucunun yetkili bir workspace'i olmaz ve workspace araçları `WORKSPACE_NOT_AUTHORIZED` döner. Sunucu için Seçenek A'yı (`npx causoryn@0.3.2 setup --client codex --yes`) kullanın; plugin skill'leri sağlamaya devam eder.
+Manifestte `cwd` yoktur; bu yüzden Codex sunucuyu oturum (proje) dizininde başlatır ve `--allow-cwd` olağan güvenlik denetiminden sonra projeyi bağlar. Çıplak `node`, Codex tarafından yalnızca `PATH` üzerinden çözülür (ayırıcı içermeyen bir komut adı için geçerli dizinde arama yapılmaz) ve Node, `--eval` için açık bayraklar olmadan `node.config.json`, `.env` veya `package.json` okumaz. Satır içi bootstrap (tam metni `.codex-plugin/mcp.json` içindedir) yalnızca `node:` yerleşik modüllerini import eder ve başlatıcıyı Codex'in plugin önbelleğindeki mutlak gerçek yoluyla yükler: `<CODEX_HOME veya ~/.codex>/plugins/cache/causoryn/causoryn/<version>/scripts/plugin-mcp-launcher.mjs` (`env_vars`, `CODEX_HOME`'u geçirir). `--expected-version` eksik veya geçersizse, `CODEX_HOME` mutlak değilse, önbellek yolu bir link'ten geçiyorsa, o sürümde kurulu bir plugin yoksa ya da kurulum workspace'in içindeyse çıkış kodu `2` ve `stderr` üzerinde bir `[causoryn-codex] …` satırıyla durur; başlatıcı ardından paket sürümünü yeniden denetler. Hiçbir npm süreci çalışmaz ve hiçbir proje dosyası yüklenmez. **Artık risk:** göreli veya boş bir `PATH` girdisi ya da Windows'ta önce bir `.cmd` / `.bat` shim'ine çözülen bir `node`, yine projeden bir `node` seçebilir; Seçenek A mutlak Node binary'sini kaydettiği için bundan etkilenmez. Farklı bir pazaryeri adı, uzak bir yürütücü veya değişmiş bir Codex önbellek düzeni, bootstrap'in başka bir şey yüklemek yerine `2` ile durmasına yol açar.
 
 ## 3. Codex'te araç profilleri
 
@@ -145,7 +150,7 @@ CAUSORYN_TOOL_PROFILE = "full"
 - 0.3.0 öncesi sürümler host başına `graph-<client>.sqlite` dosyaları kullanıyordu. `graph.sqlite` henüz yoksa 0.3.0'ın ilk açılışı en yeni geçerli olanı bir kez ona kopyalar; eski dosyalar yerinde kalır ve `causoryn doctor` bunları listeler, böylece silebilirsiniz. `fp3` analizör parmak izi yine de 0.3.0'ın ilk açılışında bir kez yeniden indekslemeye yol açar.
 - Dizinler `0700` kipiyle oluşturulur ve her yetkili proje kökünün kesinlikle dışında bulunmalıdır. Analiz edilen kaynak ağacına hiçbir şey yazılmaz.
 - İndeksleme bir `worker_threads` worker'ında çalışır. Paketli giriş noktasıyla (Seçenek A ve B), ilk indeks yayımlanmadan önce yapılan bir araç çağrısı en fazla `CAUSORYN_INDEX_WAIT_MS` kadar bekler (varsayılan `15000`; `0` = bekleme) ve ardından `data.status: "indexing"`, `jobId`, `progress` ve `retryAfterMs` ile birlikte `status: "partial"` döndürür. `causoryn_status` hemen yanıt verir.
-- `--allow-cwd`, Codex'in sunucuyu başlattığı dizini bir güvenlik denetiminden sonra bağlar; bu denetim `$HOME`, dosya sistemi köklerini, sistem dizinlerini, `~/.codex`, plugin kurulum dizinlerini ve Causoryn veri dizinini reddeder. Başlangıç dizini reddedildiğinde sunucu MCP `roots/list` üzerinden güvenli bir kök gelmesini bekler; o zamana kadar workspace araçları `WORKSPACE_NOT_AUTHORIZED` döndürür. Codex'i projenin içinde başlatın ya da `args` dizisine `"--root", "/path/to/your-project"` ekleyin. Bu, Seçenek A ve C için geçerlidir; plugin sunucusu (Seçenek B) plugin kökünde başlar ve Codex kök göndermez.
+- `--allow-cwd`, Codex'in sunucuyu başlattığı dizini bir güvenlik denetiminden sonra bağlar; bu denetim `$HOME`, dosya sistemi köklerini, sistem dizinlerini, `~/.codex`, plugin kurulum dizinlerini ve Causoryn veri dizinini reddeder. Başlangıç dizini reddedildiğinde sunucu MCP `roots/list` üzerinden güvenli bir kök gelmesini bekler; o zamana kadar workspace araçları `WORKSPACE_NOT_AUTHORIZED` döndürür. Codex'i projenin içinde başlatın ya da `args` dizisine `"--root", "/path/to/your-project"` ekleyin.
 
 ---
 
@@ -256,7 +261,7 @@ Her Causoryn giriş noktası `stdout`'a **yalnızca MCP JSON-RPC 2.0 çerçevele
 | Sunucu açılışta "Unsupported Node.js version" ile çıkıyor | Node.js < 24. Node.js 24+ kurun ve `setup`'ı yeniden çalıştırın. |
 | Ek `args` kayboldu | `setup`'ı yeniden çalıştırmak argüman listesini yeniden üretir ve yalnızca `--tool-profile` ile `--output-schema` argümanlarınızı (ayrıca `[mcp_servers.causoryn.env]` tablosunu ve tablonun diğer anahtarlarını) korur. Diğer argümanları yeniden uygulayın veya profil için `setup --tool-profile <list>` kullanın. |
 | Workspace araçları `WORKSPACE_NOT_AUTHORIZED` döndürüyor | Başlangıç dizini `--allow-cwd` tarafından reddedildi ve kullanılabilir bir kök bildirilmedi ya da çıplak bundle'da `allowRoots` yok. Bkz. bölüm 4 veya 5.1. |
-| Codex plugin'iyle workspace araçları her zaman `WORKSPACE_NOT_AUTHORIZED` döndürüyor | Beklenen davranış: plugin sunucusu plugin kökünde başlar ve Codex bir proje kökü bildirmez. `npx causoryn@0.3.2 setup --client codex --yes` (Seçenek A) çalıştırın; plugin'in skill'leri çalışmaya devam eder. |
+| Codex plugin sunucusu açılışta `[causoryn-codex] …` ile çıkıyor (çıkış `2`) | Bootstrap kurulu plugin'in yerini kanıtlayamadı: `CODEX_HOME` göreli, `<CODEX_HOME veya ~/.codex>/plugins/cache/causoryn/causoryn/` altında o sürümde bir Causoryn plugin'i yok, bu yolda bir link var ya da kurulum workspace'in içinde. Plugin'i yeniden kurun, `CODEX_HOME`'u düzeltin veya Seçenek A'yı (`npx causoryn@0.3.2 setup --client codex --yes`) kullanın. |
 | Wiki veya history araçları `tools/list` içinde yok | Varsayılan `core` profili etkin. Bkz. bölüm 3. |
 
 ## İlgili sayfalar

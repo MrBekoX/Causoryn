@@ -25,7 +25,7 @@ Automated coverage of the 0.3.0 code paths used on this page: `tests/causoryn-se
 | Path | Who it is for | What runs |
 |---|---|---|
 | **A. `npx causoryn@0.3.2 setup`** (recommended) | End users | Packaged entrypoint `scripts/causoryn.mjs mcp --allow-cwd --auto-data-dir --client codex`, registered in `config.toml` with the absolute Node binary |
-| **B. Codex plugin marketplace** | Skills only (the plugin server binds no workspace, see section 2) | `node ./scripts/plugin-mcp-launcher.mjs --expected-version 0.3.2 …` from `.codex-plugin/mcp.json`, started in the plugin root (`cwd: "."`) |
+| **B. Codex plugin marketplace** | End users who prefer plugins | `node --input-type=module --eval <bootstrap> -- --expected-version 0.3.2 --allow-cwd …` from `.codex-plugin/mcp.json`; the bootstrap loads the launcher from Codex's plugin cache under `CODEX_HOME` |
 | **C. Manual registration** (`codex mcp add` or `config.toml`) | Contributors working from a source checkout | Monorepo bundle `packages/mcp-server/dist/mcp-server.mjs` (configured only through `CAUSORYN_CONFIG`) |
 
 ---
@@ -93,7 +93,10 @@ The installed package's `.codex-plugin/plugin.json` ships the skills (`"skills":
     "causoryn": {
       "command": "node",
       "args": [
-        "./scripts/plugin-mcp-launcher.mjs",
+        "--input-type=module",
+        "--eval",
+        "<bootstrap: see below>",
+        "--",
         "--expected-version",
         "0.3.2",
         "--allow-cwd",
@@ -101,14 +104,16 @@ The installed package's `.codex-plugin/plugin.json` ships the skills (`"skills":
         "--client",
         "codex"
       ],
-      "cwd": ".",
+      "env_vars": [
+        "CODEX_HOME"
+      ],
       "startup_timeout_sec": 30
     }
   }
 }
 ```
 
-Codex joins a relative `cwd` onto the plugin root and expands no variables in a plugin MCP config, so the server starts from the installed plugin (`./scripts/plugin-mcp-launcher.mjs`, which checks the package version against `--expected-version`), never from the analyzed project, and the project's npm configuration, `node_modules` or `node_modules/.bin` take no part in starting it. **Limitation:** Codex passes no project directory and sends no MCP `roots/list`, and `--allow-cwd` refuses the plugin directory, so a server started by the plugin has no authorized workspace and workspace tools return `WORKSPACE_NOT_AUTHORIZED`. Use Option A (`npx causoryn@0.3.2 setup --client codex --yes`) for the server; the plugin still provides the skills.
+The manifest has no `cwd`, so Codex starts the server in the session (project) directory and `--allow-cwd` binds the project after its usual safety check. The bare `node` is resolved by Codex from `PATH` only (it does not search the current directory for a command name without a separator), and Node reads no `node.config.json`, `.env` or `package.json` for `--eval` without explicit flags. The inline bootstrap (the full text is in `.codex-plugin/mcp.json`) imports only `node:` built-ins and loads the launcher by its absolute real path in Codex's plugin cache, `<CODEX_HOME or ~/.codex>/plugins/cache/causoryn/causoryn/<version>/scripts/plugin-mcp-launcher.mjs` (`env_vars` passes `CODEX_HOME` through). It stops with exit code `2` and a `[causoryn-codex] …` line on `stderr` when `--expected-version` is missing or invalid, `CODEX_HOME` is not absolute, the cache path passes through a link, no plugin of that version is installed, or the install lies inside the workspace; the launcher then checks the package version again. No npm process runs and no project file is loaded. **Residual:** a relative or empty `PATH` entry, or a `node` that resolves first to a `.cmd` / `.bat` shim on Windows, can still select a `node` from the project; Option A is not affected because it registers the absolute Node binary. A different marketplace name, a remote executor or a changed Codex cache layout makes the bootstrap stop with exit code `2` instead of loading anything else.
 
 ## 3. Tool profiles in Codex
 
@@ -145,7 +150,7 @@ CAUSORYN_TOOL_PROFILE = "full"
 - Releases before 0.3.0 used per-host `graph-<client>.sqlite` files. When `graph.sqlite` does not exist yet, the first 0.3.0 start copies the newest valid one into it once; the legacy files stay in place and `causoryn doctor` lists them so you can delete them. The `fp3` analyzer fingerprint still makes the first 0.3.0 start re-index once.
 - Directories are created with mode `0700` and must lie strictly outside every authorized project root. Nothing is written into the analyzed source tree.
 - Indexing runs in a `worker_threads` worker. With the packaged entrypoint (Options A and B), a tool call made before the first index is published waits up to `CAUSORYN_INDEX_WAIT_MS` (default `15000`; `0` = do not wait) and then returns `status: "partial"` with `data.status: "indexing"`, `jobId`, `progress`, and `retryAfterMs`. `causoryn_status` answers immediately.
-- `--allow-cwd` binds the directory Codex starts the server in, after a safety check that refuses `$HOME`, filesystem roots, system directories, `~/.codex`, plugin install directories, and the Causoryn data directory. When the start directory is refused, the server waits for a safe root from MCP `roots/list`; until then workspace tools return `WORKSPACE_NOT_AUTHORIZED`. Start Codex inside the project, or add `"--root", "/path/to/your-project"` to `args`. This applies to Options A and C; the plugin server (Option B) starts in the plugin root, and Codex sends no roots.
+- `--allow-cwd` binds the directory Codex starts the server in, after a safety check that refuses `$HOME`, filesystem roots, system directories, `~/.codex`, plugin install directories, and the Causoryn data directory. When the start directory is refused, the server waits for a safe root from MCP `roots/list`; until then workspace tools return `WORKSPACE_NOT_AUTHORIZED`. Start Codex inside the project, or add `"--root", "/path/to/your-project"` to `args`.
 
 ---
 
@@ -256,7 +261,7 @@ Every Causoryn entrypoint writes **only MCP JSON-RPC 2.0 frames** to `stdout`; a
 | Server exits at start with "Unsupported Node.js version" | Node.js < 24. Install Node.js 24+ and re-run `setup`. |
 | Extra `args` disappeared | Re-running `setup` regenerates the argument list and keeps only your `--tool-profile` and `--output-schema` arguments (plus `[mcp_servers.causoryn.env]` and other keys of the table). Re-apply other arguments, or use `setup --tool-profile <list>` for the profile. |
 | Workspace tools return `WORKSPACE_NOT_AUTHORIZED` | The start directory was refused by `--allow-cwd` and no usable root was reported, or the bare bundle has no `allowRoots`. See section 4 or 5.1. |
-| Workspace tools always return `WORKSPACE_NOT_AUTHORIZED` with the Codex plugin | Expected: the plugin server starts in the plugin root and Codex reports no project root. Run `npx causoryn@0.3.2 setup --client codex --yes` (Option A); the plugin's skills keep working. |
+| The Codex plugin server exits at start with `[causoryn-codex] …` (exit `2`) | The bootstrap could not prove where the installed plugin is: `CODEX_HOME` is relative, no Causoryn plugin of that version is in `<CODEX_HOME or ~/.codex>/plugins/cache/causoryn/causoryn/`, a link lies on that path, or the install is inside the workspace. Reinstall the plugin, fix `CODEX_HOME`, or use Option A (`npx causoryn@0.3.2 setup --client codex --yes`). |
 | Wiki or history tools are missing from `tools/list` | Default `core` profile. See section 3. |
 
 ## Related pages
