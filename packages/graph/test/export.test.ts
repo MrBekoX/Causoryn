@@ -823,19 +823,55 @@ describe("Markdown serializer — GFM autolinks in repository text (security sca
 
     const output = serializeDocumentationMarkdown(snapshot);
 
+    // Escaped forms checked against GitHub's renderer on 2026-11-26
+    // (`gh api -X POST /markdown -f mode=gfm`, synthetic strings, in a table
+    // cell and in a list item): `https\://…` and `www\.…` render as plain
+    // text, and so does `user&#8203;@host` (a zero-width space before the
+    // `@`, invisible in the rendered page). A backslash before the `@`
+    // (`user\@host`) does NOT stop GitHub: it still renders
+    // `<a href="mailto:…">`, also behind `mailto:` and `xmpp:`.
     expect(output).not.toMatch(/(?:https?|ftp):\/\//i);
     expect(output).not.toMatch(/www\./i);
-    expect(output).not.toMatch(/[A-Za-z0-9.+_-]@[A-Za-z0-9_-]/);
+    expect(output).not.toMatch(/[A-Za-z0-9.+_-]@/);
+    expect(output).not.toContain("\\@");
     expect(output).toContain("app::routes::https\\://evil.test/login");
     expect(output).toContain("www\\.evil.test/routes.ts");
-    expect(output).toContain("app::notify::ops\\@evil.test");
+    expect(output).toContain("app::notify::ops&#8203;@evil.test");
     expect(output).toContain(
-      "ROUTES_TO http\\://evil.test/a ftp\\://evil.test/b mailto:sec\\@evil.test xmpp:bot\\@evil.test/r",
+      "ROUTES_TO http\\://evil.test/a ftp\\://evil.test/b mailto:sec&#8203;@evil.test xmpp:bot&#8203;@evil.test/r",
     );
     expect(output).toContain("- revision: www\\.evil.test (sequence 1)");
-    expect(output).toContain("- analyzerFingerprint: typescript-adapter\\@0.1.0");
-    // An `@` that cannot start an email autolink is left as it is.
+    expect(output).toContain("- analyzerFingerprint: typescript-adapter&#8203;@0.1.0");
+    // An `@` that cannot end an email local part is left as it is (GitHub
+    // does not link `node_modules/@scope/...`).
     expect(output).toContain("node_modules/@scope/pkg/index.ts");
+  });
+
+  it("defangs every email autolink shape GitHub links, and entity-encoded `@` in repository text", () => {
+    // GitHub (same check as above) links `ops@.evil.test`, `ops.@evil.test`,
+    // `a+b@…`, `x_@…` and `ops@-evil.test`, and decodes `&#64;` / `&commat;`
+    // to an `@` it then links. The escaped row below (`\&\#64;`, `\&commat;`,
+    // `\&amp;`) renders the entity text literally, with no link (checked the
+    // same way on 2026-11-26).
+    const snapshot = createSnapshot({
+      workspaceId: WS,
+      revision: { id: "rev-md-email", sequence: 1 },
+      configHash: "confighash-md-email",
+      analyzerFingerprint: "typescript-adapter@0.1.0",
+      state: "ready",
+      createdAt: CREATED_AT,
+      nodes: [
+        nodeInput("Function", "app::m::ops@.evil.test ops.@evil.test a+b@evil.test x_@evil.test ops@-evil.test", "src/m.ts", 1, 2),
+        nodeInput("Function", "app::e::ops&#64;evil.test ops&commat;evil.test a&amp;b", "src/e.ts", 1, 2),
+      ],
+      edges: [],
+    });
+    const output = serializeDocumentationMarkdown(snapshot);
+    expect(output).toContain(
+      "app::m::ops&#8203;@.evil.test ops.&#8203;@evil.test a+b&#8203;@evil.test x_&#8203;@evil.test ops&#8203;@-evil.test",
+    );
+    expect(output).toContain("app::e::ops\\&\\#64;evil.test ops\\&commat;evil.test a\\&amp;b");
+    expect(output).not.toMatch(/(?<!\\)&(?!#8203;@)/);
   });
 
   it("escapes code-span and strikethrough markers and replaces control characters like the other Markdown exports", () => {

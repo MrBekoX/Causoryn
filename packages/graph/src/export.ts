@@ -125,16 +125,31 @@ function escapeHtml(value: string): string {
 
 /**
  * GFM extended email autolink (`user@host.tld`, also the email inside a
- * `mailto:` or `xmpp:` autolink): an `@` between a local-part character and a
- * domain character. The domain Markdown helpers defang URL and `www.`
- * autolinks but not this one. A backslash escape is valid before any ASCII
- * punctuation, so the text renders unchanged while no link forms. Single-
- * character lookarounds, no quantifier: linear on any input.
+ * `mailto:` or `xmpp:` autolink): an `@` right after a character an email
+ * local part may end with. The domain Markdown helpers defang URL and `www.`
+ * autolinks but not this one.
+ *
+ * A backslash before the `@` is not enough: GitHub's renderer still links
+ * `user\@host.tld` (checked with `gh api -X POST /markdown -f mode=gfm` on
+ * 2026-11-26), and it links `user@.host` too, so whatever follows the `@`
+ * does not matter. A zero-width space written as the character reference
+ * `&#8203;` between the local part and the `@` stops the link there, in a
+ * table cell and behind `mailto:` / `xmpp:`, and renders invisibly, so the
+ * text reads the same. The single-character lookbehind keeps the match linear.
  */
-const EMAIL_AUTOLINK_AT = /(?<=[A-Za-z0-9.+_-])@(?=[A-Za-z0-9_-])/g;
+const EMAIL_AUTOLINK_AT = /(?<=[A-Za-z0-9.+_-])@/g;
+
+/**
+ * Character references in repository text (`&#64;`, `&commat;`) would decode
+ * to an `@` that GitHub then links, so every `&` of the text is
+ * backslash-escaped first (`\&commat;` renders as the literal text
+ * `&commat;`; the domain helpers already turn `#` into `\#`, which breaks
+ * numeric references, but leave `&` as it is).
+ */
+const AMPERSAND = /&/g;
 
 function defangEmailAutolinks(escaped: string): string {
-  return escaped.replace(EMAIL_AUTOLINK_AT, "\\@");
+  return escaped.replace(AMPERSAND, "\\&").replace(EMAIL_AUTOLINK_AT, "&#8203;@");
 }
 
 /**
@@ -144,8 +159,8 @@ function defangEmailAutolinks(escaped: string): string {
  * architecture brief and wiki exports: backslash escapes for link, image,
  * HTML, code-span, strikethrough, heading and table syntax, line endings and
  * tabs collapsed to one space, control characters replaced with U+FFFD, and
- * bare `https://`, `http://`, `ftp://` and `www.` autolinks defanged; email
- * autolinks are defanged on top (defangEmailAutolinks).
+ * bare `https://`, `http://`, `ftp://` and `www.` autolinks defanged; `&` and
+ * email autolinks are handled on top (defangEmailAutolinks).
  */
 function markdownTableCell(value: string): string {
   return defangEmailAutolinks(escapeMarkdownTableCell(value));
