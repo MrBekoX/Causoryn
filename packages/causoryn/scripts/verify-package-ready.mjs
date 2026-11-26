@@ -14,7 +14,7 @@
  *    or `.pdb` references.
  * 4. `package.json#mcpName === "io.github.mrbekox/causoryn"` and `package.json#bin.causoryn`
  *    is the launcher `scripts/causoryn.cmd` (F20).
- * 5. Published entry scripts (`scripts/causoryn.cmd`, `lib/cmd-argv-check.mjs`, `causoryn.mjs`,
+ * 5. Published entry scripts (`scripts/causoryn.cmd`, `lib/windows-argv.mjs`, `causoryn.mjs`,
  *    `plugin-mcp-launcher.mjs`, `lib/node-version-guard.mjs`, `lib/asset-root.mjs`)
  *    exist and contain ZERO `\r` (0x0d) bytes (pure LF).
  */
@@ -49,7 +49,7 @@ const PURE_LF_SCRIPTS = [
   // The npm bin (F20): one file read by POSIX sh and by cmd.exe; a CR would
   // end up in sh's last argument.
   path.join("scripts", "causoryn.cmd"),
-  path.join("scripts", "lib", "cmd-argv-check.mjs"),
+  path.join("scripts", "lib", "windows-argv.mjs"),
   path.join("scripts", "causoryn.mjs"),
   path.join("scripts", "plugin-mcp-launcher.mjs"),
   path.join("scripts", "lib", "node-version-guard.mjs"),

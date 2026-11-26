@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import os from "node:os";
 import path from "node:path";
@@ -197,8 +197,15 @@ describe.skipIf(NPM_CLI === undefined)("F20: the registry npx entry keeps npm ou
  * `sh` looked up on that PATH, so `node_modules/.bin/sh` runs first.
  *
  * The launcher is exercised as shipped (packages/causoryn/scripts/causoryn.cmd and
- * scripts/lib/cmd-argv-check.mjs) with a probe CLI that reports its argv,
+ * scripts/lib/windows-argv.mjs) with a probe CLI that reports its argv,
  * node and stdin; the control is the same probe behind the previous bin form.
+ *
+ * Review round 4: on Windows the launcher no longer puts `%*` on a command
+ * line (where cmd.exe would parse it once more than npm escapes for): it
+ * echoes `%*` unparsed in UTF-8 into two captures, with two different FOR
+ * variables, and node takes the arguments from them. Every argument then
+ * reaches the CLI exactly, or the start is refused (exit 2); nothing an
+ * argument contains is ever run.
  */
 
 const IS_WINDOWS = process.platform === "win32";
@@ -225,10 +232,10 @@ function probePackage(root: string, form: BinForm): string {
   writeFileSync(path.join(dir, "scripts", "causoryn.mjs"), form === "shebang" ? `#!/usr/bin/env node\n${cli}` : cli);
   if (form === "launcher") {
     writeFileSync(path.join(dir, "scripts", "causoryn.cmd"), readFileSync(path.join(PKG_DIR, "scripts", "causoryn.cmd")));
-    writeFileSync(
-      path.join(dir, "scripts", "lib", "cmd-argv-check.mjs"),
-      readFileSync(path.join(PKG_DIR, "scripts", "lib", "cmd-argv-check.mjs")),
-    );
+    // The launcher's helpers as shipped (scripts/lib/*.mjs).
+    for (const name of readdirSync(path.join(PKG_DIR, "scripts", "lib"))) {
+      if (name.endsWith(".mjs")) copyFileSync(path.join(PKG_DIR, "scripts", "lib", name), path.join(dir, "scripts", "lib", name));
+    }
     chmodSync(path.join(dir, "scripts", "causoryn.cmd"), 0o755);
   } else {
     chmodSync(path.join(dir, "scripts", "causoryn.mjs"), 0o755);
@@ -246,7 +253,7 @@ function plantedProject(plant: Plant | null): Sandbox & { readonly root: string 
   const cache = path.join(root, "npm-cache");
   const project = path.join(root, "project");
   const binDir = path.join(project, "node_modules", ".bin");
-  for (const dir of [home, cache, binDir]) mkdirSync(dir, { recursive: true });
+  for (const dir of [home, cache, binDir, path.join(root, "tmp")]) mkdirSync(dir, { recursive: true });
   writeFileSync(path.join(project, "package.json"), JSON.stringify({ name: "planted-project", version: "1.0.0" }));
   const marker = `HIJACK-${String(plant).toUpperCase()}`;
   const winScript = `@echo ${marker}\r\n@exit /b 7\r\n`;
@@ -287,13 +294,7 @@ interface ProbeRun {
  * entry's environment variables. The harness running these tests may itself
  * set NoDefaultCurrentDirectoryInExePath, so it is removed first.
  */
-function runProbe(
-  sandbox: Sandbox & { readonly root: string },
-  form: BinForm,
-  args: readonly string[],
-  options: { readonly registryEnv: boolean; readonly input?: string },
-): ProbeRun {
-  const pkg = probePackage(sandbox.root, form);
+function probeEnvironment(sandbox: Sandbox, registryEnv: boolean): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = {};
   for (const [key, value] of Object.entries(process.env)) {
     if (/^npm_/i.test(key) || /^NoDefaultCurrentDirectoryInExePath$/i.test(key)) continue;
@@ -302,18 +303,29 @@ function runProbe(
   Object.assign(env, {
     HOME: sandbox.home,
     USERPROFILE: sandbox.home,
+    // The sandbox's own temporary directory (plantedProject), where the Windows launcher writes its captures.
+    TEMP: path.join(path.dirname(sandbox.home), "tmp"),
+    TMP: path.join(path.dirname(sandbox.home), "tmp"),
     npm_config_cache: sandbox.cache,
     npm_config_update_notifier: "false",
     npm_config_fund: "false",
     npm_config_audit: "false",
     npm_config_yes: "true",
-    ...(options.registryEnv ? registryEnvironment() : {}),
+    ...(registryEnv ? registryEnvironment() : {}),
   });
-  const result = spawnSync(
-    process.execPath,
-    [NPM_CLI as string, "exec", ...registryRuntimeArguments(), "--offline", `--package=${pkg}`, "--", "causoryn", ...args],
-    { cwd: sandbox.project, env, encoding: "utf8", timeout: 120_000, ...(options.input === undefined ? {} : { input: options.input }) },
-  );
+  return env;
+}
+
+/** The launcher's capture directories left in a sandbox's temporary directory. */
+function leftoverCaptures(sandbox: { readonly root: string }): string[] {
+  return readdirSync(path.join(sandbox.root, "tmp")).filter((name) => name.startsWith("causoryn-argv-"));
+}
+
+function probeNpmArguments(pkg: string, args: readonly string[]): string[] {
+  return [NPM_CLI as string, "exec", ...registryRuntimeArguments(), "--offline", `--package=${pkg}`, "--", "causoryn", ...args];
+}
+
+function probeRun(result: { status: number | null; stdout: string; stderr: string }): ProbeRun {
   const line = result.stdout.split(/\r?\n/).find((entry) => entry.startsWith("CAUSORYN-PROBE "));
   return {
     status: result.status,
@@ -321,6 +333,23 @@ function runProbe(
     stderr: result.stderr,
     probe: line === undefined ? null : (JSON.parse(line.slice("CAUSORYN-PROBE ".length)) as ProbeRun["probe"]),
   };
+}
+
+function runProbe(
+  sandbox: Sandbox & { readonly root: string },
+  form: BinForm,
+  args: readonly string[],
+  options: { readonly registryEnv: boolean; readonly input?: string },
+): ProbeRun {
+  const pkg = probePackage(sandbox.root, form);
+  const result = spawnSync(process.execPath, probeNpmArguments(pkg, args), {
+    cwd: sandbox.project,
+    env: probeEnvironment(sandbox, options.registryEnv),
+    encoding: "utf8",
+    timeout: 120_000,
+    ...(options.input === undefined ? {} : { input: options.input }),
+  });
+  return probeRun(result);
 }
 
 function expectServerRan(run: ProbeRun, args: readonly string[] = []): void {
@@ -405,12 +434,19 @@ describe.skipIf(NPM_CLI === undefined)("F20 round 3: the server starts with npm'
     expect(run.stdout).toContain("HIJACK-BIN-SH");
   });
 
-  // Arguments with spaces, quotes, %, &, parentheses, backslashes and non-ASCII
-  // text reach the CLI exactly as the previous bin passed them.
+  /**
+   * Arguments reach the CLI exactly as the previous `#!/usr/bin/env node` bin
+   * passed them: spaces, quotes, %, cmd.exe operators outside quotes, /?,
+   * best-fit quote look-alikes, full-width operators and non-ASCII text.
+   */
   const EXACT_ARGUMENT_SETS: ReadonlyArray<readonly string[]> = [
-    ["plain", "a b", "50%", "%PATH%", "(x)", "!x!", "", "tab\tx", "trail\\", "x & echo INJECTED", "--flag=va lue", "Çağrı ğüşöıİ", "日本語"],
+    ["plain", "a b", "50%", "%PATH%", "%a", "(x)", "!x!", "", "tab\tx", "trail\\", "x & echo INJECTED", "--flag=va lue", "Çağrı ğüşöıİ", "日本語"],
     ['a"b'],
     ['\\"q', "c:\\dir with space\\"],
+    ["a&echo,INJECTED", "a|b", "<y>", "a^b", 'q"&echo,INJECTED&"q', ")&echo,INJECTED&("],
+    ["/?", "a/?b", "--root", "x /? y"],
+    ["＂&echo,INJECTED&＂", "“&echo,INJECTED&”", "„&echo,INJECTED&„", "ʺ&echo,INJECTED&ʺ", "x\u030E&echo,INJECTED&x\u030E", "″&echo,INJECTED&″"],
+    ["＆＜＞｜＾", "ＡＢ＆ｃｄ"],
   ];
   it.each(EXACT_ARGUMENT_SETS.map((set) => [JSON.stringify(set), set] as const))("passes %s through unchanged", (_label, args) => {
     const control = runProbe(plantedProject(null), "shebang", args, { registryEnv: true });
@@ -420,47 +456,270 @@ describe.skipIf(NPM_CLI === undefined)("F20 round 3: the server starts with npm'
     expect(`${run.stdout}${run.stderr}`).not.toMatch(/^INJECTED/m);
   });
 
-  it.runIf(IS_WINDOWS)("fails closed: a checker that approves nothing stops the start", () => {
-    const sandbox = plantedProject(null);
-    const pkg = probePackage(sandbox.root, "launcher");
-    // Replace the checker with a module that exits 0 without approving.
-    writeFileSync(path.join(pkg, "scripts", "lib", "cmd-argv-check.mjs"), "export {};\n");
-    const env: NodeJS.ProcessEnv = {};
-    for (const [key, value] of Object.entries(process.env)) {
-      if (!/^npm_/i.test(key)) env[key] = value;
-    }
-    Object.assign(env, { npm_node_execpath: process.execPath, ...registryEnvironment() });
-    const run = spawnSync(process.env["ComSpec"] ?? "cmd.exe", ["/d", "/s", "/c", `""${path.join(pkg, "scripts", "causoryn.cmd")}" mcp"`], {
-      cwd: sandbox.project,
-      env,
-      encoding: "utf8",
-      windowsVerbatimArguments: true,
-    });
-    expect(run.status).toBe(2);
-    expect(run.stdout).not.toContain("CAUSORYN-PROBE");
-  });
-
   /**
-   * On Windows the launcher is one more batch level than npm escapes for
-   * (npm escapes for the cmd-shim level only), so an argument with a cmd.exe
-   * operator outside double quotes would be split or executed. The launcher
-   * refuses to start instead; on POSIX the same arguments pass unchanged.
+   * A FOR body expands references to its variable. The launcher's two
+   * captures use different variables, so any reference stays literal in one
+   * of them: such arguments are refused, never run, and an argument that
+   * only looks like one (`%a`) passes unchanged (above).
    */
-  const OPERATOR_ARGUMENT_SETS: ReadonlyArray<readonly string[]> = [["a&b"], ["a|b"], ["<y>"], ["a^b"], ['q"&echo INJECTED&"q']];
-  it.each(OPERATOR_ARGUMENT_SETS.map((set) => [JSON.stringify(set), set] as const))(
-    "never lets cmd.exe re-parse %s: refused on Windows, unchanged on POSIX",
+  const FOR_REFERENCE_SETS: ReadonlyArray<readonly string[]> = [
+    ["mcp", "%~$X&echo,INJECTED&:#"],
+    ["mcp", "%~$X&echo,INJECTED&:]"],
+    ["mcp", "%~$X&echo,INJECTED&:a"],
+    ["%#"],
+    ["%]"],
+    ["%~fa"],
+    ["%~dpa"],
+  ];
+  it.each(FOR_REFERENCE_SETS.map((set) => [JSON.stringify(set), set] as const))(
+    "never runs a FOR variable reference in %s: refused on Windows, unchanged on POSIX",
     (_label, args) => {
       const run = runProbe(plantedProject(null), "launcher", args, { registryEnv: true });
       expect(`${run.stdout}${run.stderr}`).not.toMatch(/^INJECTED/m);
       if (IS_WINDOWS) {
         expect(run.probe).toBeNull();
         expect(run.status).toBe(2);
-        expect(run.stderr).toMatch(/outside double quotes/);
+        expect(run.stderr).toMatch(/refusing to start/);
       } else {
         expectServerRan(run, args);
       }
     },
   );
+
+  it.runIf(IS_WINDOWS)("leaves no capture behind; an argument cmd.exe cannot take stops the start before the CLI runs", () => {
+    const sandbox = plantedProject(null);
+    expectServerRan(runProbe(sandbox, "launcher", ["mcp"], { registryEnv: true }), ["mcp"]);
+    expect(leftoverCaptures(sandbox)).toEqual([]);
+    const refused = runProbe(sandbox, "launcher", ["%#"], { registryEnv: true });
+    expect(refused.status).toBe(2);
+    expect(leftoverCaptures(sandbox)).toEqual([]);
+    const tooLong = runProbe(sandbox, "launcher", ["x".repeat(8100)], { registryEnv: true });
+    expect(tooLong.probe).toBeNull();
+    expect(tooLong.status).not.toBe(0);
+    expect(leftoverCaptures(sandbox)).toEqual([]);
+  });
+});
+
+/* ------------------------------------------------------------------ */
+/* F20 round 4: Windows console code pages                             */
+/* ------------------------------------------------------------------ */
+
+const CHCP = path.join(process.env["SystemRoot"] ?? "C:\\Windows", "System32", "chcp.com");
+const POWERSHELL = path.join(process.env["SystemRoot"] ?? "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
+
+/**
+ * Runs `npm exec … causoryn <args>` (as runProbe) in a new, hidden console
+ * whose code page is first set to `codePage` (PowerShell Start-Process opens
+ * the console; the console of the test runner is never changed). Reports the
+ * console's code page before and after the run.
+ */
+function runProbeInConsole(
+  codePage: number,
+  args: readonly string[],
+): ProbeRun & { readonly before: number | null; readonly after: number | null } {
+  const sandbox = plantedProject(null);
+  const pkg = probePackage(sandbox.root, "launcher");
+  const driver = path.join(sandbox.root, "console-driver.cjs");
+  const job = path.join(sandbox.root, "console-job.json");
+  const out = path.join(sandbox.root, "console-out.json");
+  writeFileSync(
+    driver,
+    [
+      'const { spawnSync } = require("node:child_process");',
+      'const fs = require("node:fs");',
+      'const job = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));',
+      'const cp = () => { const r = spawnSync(job.chcp, [], { encoding: "latin1" }); const m = /(\\d+)\\D*$/.exec(String(r.stdout).trim()); return m ? Number(m[1]) : null; };',
+      'spawnSync(job.chcp, [String(job.codePage)], { stdio: ["ignore", "ignore", "ignore"] });',
+      "const before = cp();",
+      'const run = spawnSync(process.execPath, job.argv, { cwd: job.cwd, env: job.env, encoding: "utf8", timeout: 120000 });',
+      "const after = cp();",
+      "fs.writeFileSync(job.out, JSON.stringify({ before, after, status: run.status, stdout: String(run.stdout), stderr: String(run.stderr) }));",
+      "",
+    ].join("\n"),
+  );
+  writeFileSync(
+    job,
+    JSON.stringify({ chcp: CHCP, codePage, argv: probeNpmArguments(pkg, args), cwd: sandbox.project, env: probeEnvironment(sandbox, true), out }),
+  );
+  const quote = (text: string): string => `'"${text.replace(/'/g, "''")}"'`;
+  const started = spawnSync(
+    POWERSHELL,
+    [
+      "-NoProfile",
+      "-NonInteractive",
+      "-Command",
+      `Start-Process -FilePath ${quote(process.execPath)} -ArgumentList ${quote(driver)},${quote(job)} -WindowStyle Hidden -Wait`,
+    ],
+    { encoding: "utf8", timeout: 180_000 },
+  );
+  expect(existsSync(out), `${started.stdout}\n${started.stderr}`).toBe(true);
+  const result = JSON.parse(readFileSync(out, "utf8")) as { before: number | null; after: number | null; status: number | null; stdout: string; stderr: string };
+  return { ...probeRun(result), before: result.before, after: result.after };
+}
+
+/** Characters whose cp932 (Shift-JIS) trail byte is 0x5E (`^`) or 0x7C (`|`). */
+function shiftJisTrailCharacters(): string {
+  const decoder = new TextDecoder("shift_jis");
+  let out = "";
+  for (const lead of [0x81, 0x82, 0x83, 0x88, 0x89, 0x8a]) {
+    for (const trail of [0x5e, 0x7c]) {
+      const text = decoder.decode(Uint8Array.of(lead, trail));
+      if (text.length === 1 && text !== "\uFFFD") out += text;
+    }
+  }
+  return out;
+}
+
+/**
+ * cmd.exe writes internal command output in the console code page, with
+ * best-fit: in 437, 850, 857 and 1252, U+FF02 ＂, U+201C “, U+201D ”,
+ * U+201E „, U+02BA ʺ, U+030E and (857) U+2033 ″ become `"`, and in 932 a
+ * trail byte can be 0x5E or 0x7C. The launcher captures in UTF-8 (chcp
+ * 65001) and restores the console's code page.
+ */
+describe.skipIf(NPM_CLI === undefined || !IS_WINDOWS)(
+  "F20 round 4: the capture is exact in every console code page",
+  () => {
+    const BEST_FIT = ["＂&echo,INJECTED&＂", "“&echo,INJECTED&”", "„&echo,INJECTED&„", "ʺ&echo,INJECTED&ʺ", "x\u030E&echo,INJECTED&x\u030E", "″&echo,INJECTED&″"];
+    it.each([
+      [857, BEST_FIT],
+      [437, BEST_FIT],
+      [1252, BEST_FIT],
+      [932, [shiftJisTrailCharacters(), "＆＜＞｜＾", "a b"]],
+    ] as const)("code page %i: arguments pass unchanged and the code page is restored", (codePage, args) => {
+      const run = runProbeInConsole(codePage, args);
+      expect(run.before).toBe(codePage);
+      expect(`${run.stdout}${run.stderr}`).not.toMatch(/^INJECTED/m);
+      expectServerRan(run, args);
+      expect(run.after).toBe(codePage);
+    });
+
+    it("code page 857: a refused start restores the code page too", () => {
+      const run = runProbeInConsole(857, ["%~$X&echo,INJECTED&:#"]);
+      expect(run.before).toBe(857);
+      expect(`${run.stdout}${run.stderr}`).not.toMatch(/^INJECTED/m);
+      expect(run.probe).toBeNull();
+      expect(run.status).toBe(2);
+      expect(run.after).toBe(857);
+    });
+  },
+);
+
+/* ------------------------------------------------------------------ */
+/* F20 round 4: without npm (a global install)                         */
+/* ------------------------------------------------------------------ */
+
+/** Git for Windows' bash.exe, found next to the git.exe on PATH (not WSL's System32\bash.exe). */
+const GIT_BASH = IS_WINDOWS
+  ? (process.env["PATH"] ?? "")
+      .split(path.delimiter)
+      .filter((dir) => dir !== "" && existsSync(path.join(dir, "git.exe")))
+      .map((dir) => path.join(dir, "..", "bin", "bash.exe"))
+      .find((file) => existsSync(file))
+  : undefined;
+
+/**
+ * A global install runs the launcher without npm: it finds node.exe on PATH
+ * only (`%~$PATH:`), never in the current directory, whichever shim starts
+ * it (causoryn.cmd from cmd.exe, causoryn.ps1 from PowerShell, causoryn from
+ * Git Bash). The directory it runs in plants node.cmd, node.bat and a
+ * node.exe (a copy of cmd.exe, which would print its banner).
+ */
+describe.skipIf(NPM_CLI === undefined || !IS_WINDOWS)("F20 round 4: a global install finds node on PATH only", () => {
+  function globalInstall(): { prefix: string; cwd: string; env: NodeJS.ProcessEnv } {
+    const sandbox = plantedProject(null);
+    const pkg = probePackage(sandbox.root, "launcher");
+    const prefix = path.join(sandbox.root, "global");
+    const env: NodeJS.ProcessEnv = {};
+    for (const [key, value] of Object.entries(process.env)) {
+      if (/^npm_/i.test(key) || /^NoDefaultCurrentDirectoryInExePath$/i.test(key)) continue;
+      env[key] = value;
+    }
+    Object.assign(env, { HOME: sandbox.home, USERPROFILE: sandbox.home, npm_config_cache: sandbox.cache, npm_config_update_notifier: "false" });
+    const install = spawnSync(process.execPath, [NPM_CLI as string, "install", "-g", "--offline", "--ignore-scripts", "--install-links", "--prefix", prefix, pkg], {
+      cwd: sandbox.project,
+      env,
+      encoding: "utf8",
+    });
+    expect(install.status, install.stderr).toBe(0);
+    const cwd = sandbox.project;
+    writeFileSync(path.join(cwd, "node.cmd"), "@echo HIJACK-CWD-NODE\r\n@exit /b 7\r\n");
+    writeFileSync(path.join(cwd, "node.bat"), "@echo HIJACK-CWD-NODE\r\n@exit /b 7\r\n");
+    copyFileSync(process.env["ComSpec"] ?? "C:\\Windows\\System32\\cmd.exe", path.join(cwd, "node.exe"));
+    return { prefix, cwd, env };
+  }
+
+  function expectProbe(stdout: string, stderr: string, args: readonly string[]): void {
+    // The planted node.exe is a copy of cmd.exe: its banner ends with the copyright line.
+    expect(stdout, stderr).not.toMatch(/HIJACK-|\(c\) Microsoft Corporation/);
+    const line = stdout.split(/\r?\n/).find((entry) => entry.startsWith("CAUSORYN-PROBE "));
+    expect(line, `${stdout}\n${stderr}`).toBeDefined();
+    const probe = JSON.parse((line as string).slice("CAUSORYN-PROBE ".length)) as { argv: string[]; execPath: string };
+    expect(probe.argv).toEqual(args);
+    // node.exe from PATH (the one running these tests), not the directory's node.exe.
+    expect(probe.execPath.toLowerCase()).toBe(process.execPath.toLowerCase());
+  }
+
+  it("from cmd.exe (causoryn.cmd)", () => {
+    const { prefix, cwd, env } = globalInstall();
+    const run = spawnSync(process.env["ComSpec"] ?? "cmd.exe", ["/d", "/s", "/c", `""${path.join(prefix, "causoryn.cmd")}" mcp "a b""`], {
+      cwd,
+      env,
+      encoding: "utf8",
+      windowsVerbatimArguments: true,
+    });
+    expectProbe(run.stdout, run.stderr, ["mcp", "a b"]);
+  });
+
+  it("from PowerShell (causoryn.ps1)", () => {
+    const { prefix, cwd, env } = globalInstall();
+    const run = spawnSync(
+      POWERSHELL,
+      ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", `& '${path.join(prefix, "causoryn.ps1")}' mcp 'a b'`],
+      { cwd, env, encoding: "utf8" },
+    );
+    expectProbe(run.stdout, run.stderr, ["mcp", "a b"]);
+  });
+
+  it.runIf(GIT_BASH !== undefined)("from Git Bash (causoryn)", () => {
+    const { prefix, cwd, env } = globalInstall();
+    const run = spawnSync(GIT_BASH as string, ["-c", '"$0" mcp "a b"', path.join(prefix, "causoryn").split("\\").join("/")], { cwd, env, encoding: "utf8" });
+    expectProbe(run.stdout, run.stderr, ["mcp", "a b"]);
+  });
+
+  /** Documented residual (BatBadBut), as for PowerShell below: Git Bash (MSYS) starts the sh shim's .cmd through cmd.exe too. */
+  it.runIf(GIT_BASH !== undefined)("documented residual: Git Bash lets cmd.exe split an argument with an operator before the launcher runs", () => {
+    const { prefix, cwd, env } = globalInstall();
+    const run = spawnSync(GIT_BASH as string, ["-c", '"$0" mcp "x&echo,INJECTED-SH"', path.join(prefix, "causoryn").split("\\").join("/")], {
+      cwd,
+      env,
+      encoding: "utf8",
+    });
+    expectProbe(run.stdout, run.stderr, ["mcp", "x"]);
+    expect(run.stdout).toMatch(/^INJECTED-SH\r?$/m);
+  });
+
+  /**
+   * Documented residual (BatBadBut): cmd-shim's .ps1 shim (and its sh shim
+   * under Git Bash) starts the launcher, a .cmd file, so Windows runs it
+   * through `cmd.exe /c`, and PowerShell quotes an argument only when it has
+   * spaces. Measured with Windows PowerShell 5.1 and Git Bash: in an argument
+   * without spaces cmd.exe acts on `& | < > ^`, expands `%NAME%`, and treats
+   * full-width ＂ as text, before the launcher runs; `causoryn mcp
+   * 'x&echo,INJECTED-PS'` runs the echo. The previous bin's shims started
+   * node.exe directly. Nothing in the launcher can see or undo what cmd.exe
+   * did before it starts; npx and `causoryn setup` do not go this way.
+   */
+  it("documented residual: PowerShell lets cmd.exe split an argument with an operator before the launcher runs", () => {
+    const { prefix, cwd, env } = globalInstall();
+    const run = spawnSync(
+      POWERSHELL,
+      ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", `& '${path.join(prefix, "causoryn.ps1")}' mcp 'x&echo,INJECTED-PS'`],
+      { cwd, env, encoding: "utf8" },
+    );
+    expectProbe(run.stdout, run.stderr, ["mcp", "x"]);
+    expect(run.stdout).toMatch(/^INJECTED-PS\r?$/m);
+  });
 });
 
 interface AjvInstance {

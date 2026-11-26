@@ -1547,7 +1547,7 @@ describe(
         "utf8",
       );
       writeFileSync(path.join(pkgDir, "scripts", "causoryn.cmd"), ":; exit 0 #\n@exit /b 0\n", "utf8");
-      writeFileSync(path.join(pkgDir, "scripts", "lib", "cmd-argv-check.mjs"), '"use strict";\n', "utf8");
+      writeFileSync(path.join(pkgDir, "scripts", "lib", "windows-argv.mjs"), '"use strict";\n', "utf8");
       return pkgDir;
     };
 
@@ -1621,7 +1621,7 @@ describe(
     // Negative 7: missing package root LICENSE, dist/index.js, mcp-server.mjs.LEGAL.txt, or Roslyn deps.json
     for (const relMissing of [
       path.join("scripts", "causoryn.cmd"),
-      path.join("scripts", "lib", "cmd-argv-check.mjs"),
+      path.join("scripts", "lib", "windows-argv.mjs"),
       "LICENSE",
       path.join("dist", "index.js"),
       path.join("dist", "mcp-server.mjs.LEGAL.txt"),
