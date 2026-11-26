@@ -2751,10 +2751,17 @@ export class IndexService {
     if (!isFileFactStore(this.repository)) return;
     this.throwIfCancelled("persisting file facts");
     const store = this.repository;
+    // A diagnostic that names no file (a worker's RESPONSE_TRUNCATED: response
+    // or node budget reached) means any file of the run may have incomplete
+    // facts: none is cached, and the cached facts of the run's files are
+    // dropped, so the next incremental run analyses them again instead of
+    // reporting a truncated analysis as complete.
+    const wholeRunIncomplete = diagnosticPaths.has("");
+    const uncached = (relativePath: string): boolean => wholeRunIncomplete || diagnosticPaths.has(relativePath);
     const toUpsert: FileFactRecord[] = [];
     for (const map of factMaps) {
       for (const [relativePath, record] of map) {
-        if (!diagnosticPaths.has(relativePath)) {
+        if (!uncached(relativePath)) {
           toUpsert.push(record);
         }
       }
@@ -2774,10 +2781,7 @@ export class IndexService {
           store.upsertFileFacts(toUpsert);
         }
         for (const existing of existingFacts) {
-          if (
-            !currentLanguagePaths.has(existing.relativePath) ||
-            diagnosticPaths.has(existing.relativePath)
-          ) {
+          if (!currentLanguagePaths.has(existing.relativePath) || uncached(existing.relativePath)) {
             store.deleteFileFact(this.workspaceId, existing.relativePath);
           }
         }
