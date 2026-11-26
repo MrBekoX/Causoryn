@@ -244,8 +244,8 @@ function writeWideAssets(projectDir: string, local: string, early?: string): voi
   writeRawAssets(projectDir, [local], targets, libraries);
 }
 
-const PER_FILE_STOP = (displayPath: string): string =>
-  `${displayPath}: NuGet reference discovery stopped after 10000 file system probes for this assets file; its remaining entries were not inspected`;
+const PER_FILE_STOP = (displayPath: string, share = 10_000): string =>
+  `${displayPath}: NuGet reference discovery stopped after ${String(share)} file system probes for this assets file; its remaining entries were not inspected`;
 const GLOBAL_STOP =
   "NuGet reference discovery stopped after 20000 file system probes; the remaining project.assets.json entries were not inspected";
 
@@ -275,18 +275,24 @@ describe("NuGet assets discovery budget (security finding F45)", () => {
     expect(discovered.warnings).toEqual([PER_FILE_STOP("a/obj/project.assets.json")]);
   }, 60_000);
 
-  it("the global probe budget still bounds the whole discovery across assets files", () => {
-    const base = tempDir("causoryn-nuget-global-");
+  it("crafted assets files that sort first get only their fair share of the global budget: later legitimate files are still discovered", () => {
+    const base = tempDir("causoryn-nuget-fair-");
     const ws = join(base, "ws");
     const local = join(ws, "packages");
-    for (const name of ["a1", "a2", "a3", "a4", "a5"]) writeWideAssets(join(ws, name), local);
-    makePackage(local, "Acme.Last");
-    writeAssets(join(ws, "z"), [local], ["Acme.Last"]);
+    const crafted = ["a1", "a2", "a3", "a4", "a5"];
+    for (const name of crafted) writeWideAssets(join(ws, name), local);
+    const legitimate = ["l1", "l2", "l3"].map((name) => {
+      const id = `Acme.${name.toUpperCase()}`;
+      const dll = makePackage(local, id);
+      writeAssets(join(ws, name), [local], [id]);
+      return realpathSync(dll);
+    });
 
     const discovered = discoverNugetReferenceDirs(ws, noTrust());
-    expect(discovered.referenceDirs).toEqual([]);
-    expect(discovered.warnings).toContain(PER_FILE_STOP("a1/obj/project.assets.json"));
-    expect(discovered.warnings[discovered.warnings.length - 1]).toBe(GLOBAL_STOP);
+    expect(discovered.referenceDirs).toEqual([...legitimate].sort());
+    // 8 assets files share the 20,000 probes: each crafted one stops at 20,000 / 8.
+    expect(discovered.warnings).toEqual(crafted.map((name) => PER_FILE_STOP(`${name}/obj/project.assets.json`, 2_500)));
+    expect(discovered.warnings).not.toContain(GLOBAL_STOP);
   }, 120_000);
 
   it("a packageFolders key with more than 256 path components is ignored without spending the budget", () => {

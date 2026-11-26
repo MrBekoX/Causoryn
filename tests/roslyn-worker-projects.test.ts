@@ -160,6 +160,12 @@ const LIB_CONSOLE_SOURCE = [
 
 const TOP_LEVEL_TOOL = "System.Console.WriteLine(\"tool\");\n";
 
+/** References `Injected`, the class an injected global using name would declare. */
+const INJECTION_PROBE = {
+  path: "App/Probe.cs",
+  content: ["namespace App;", "", "public static class Probe", "{", "    public static object Make() => new Injected();", "}", ""].join("\n"),
+};
+
 const MAIN_PROGRAM = [
   "namespace Svc;",
   "",
@@ -417,7 +423,10 @@ describe.skipIf(!dotnetAvailable)("roslyn-worker projects: request validation", 
   beforeAll(() => {
     const requests = [
       analyze("bad-unknown-project-field", [file], [{ path: "App/App.csproj", extra: 1 }]),
-      analyze("bad-using-injection", [file], [
+      // The probe references the class the dropped "name" would declare if its
+      // text reached the generated global usings tree (`global using global::System;
+      // class Injected { };` sorts last and would compile cleanly).
+      analyze("bad-using-injection", [file, INJECTION_PROBE], [
         { path: "App/App.csproj", globalUsings: [...SDK_DEFAULT_USINGS, { name: "System; class Injected { }" }] },
       ]),
       analyze("bad-using-unknown-field", [file], [
@@ -501,9 +510,27 @@ describe.skipIf(!dotnetAvailable)("roslyn-worker projects: request validation", 
     expect(skipped[0]).not.toMatch(/[çğıöşüÇĞİÖŞÜ]/);
     // The valid using of the same project still applies (Console resolves).
     expect(callEdge(response, "App.Runner.Run", "System.Console.WriteLine")?.resolution).toBe("verified");
-    expect(JSON.stringify(response?.edges ?? [])).not.toContain("Injected");
-    // Nor does it become a declaration: no node carries the injected class.
-    expect(JSON.stringify(response?.nodes ?? [])).not.toContain("Injected");
+  });
+
+  it("bad-using-injection: the dropped text never reaches the compilation (the class it would declare stays unknown)", () => {
+    const response = responses.get("bad-using-injection");
+    expect(response?.status).not.toBe("error");
+    // `new Injected()` in the probe does not bind: CS0246 is reported for it ...
+    const probeDiagnostics = (response?.diagnostics ?? []).filter((diag) => diag.relativePath === INJECTION_PROBE.path);
+    expect(probeDiagnostics.map((diag) => diag.code)).toContain("CS0246");
+    expect(probeDiagnostics.find((diag) => diag.code === "CS0246")?.message).toContain("Injected");
+    // ... the creation stays an unresolved call, never a verified edge to an `Injected` symbol ...
+    const creations = (response?.edges ?? []).filter(
+      (edge) => edge.kind === "CALLS" && edge.from.qualifiedName === "App.Probe.Make",
+    );
+    expect(creations.length).toBeGreaterThan(0);
+    for (const edge of creations) {
+      expect(edge.resolution).toBe("unresolved");
+      expect(edge.to.kind).toBe("UnknownExternal");
+    }
+    expect((response?.nodes ?? []).some((node) => node.kind !== "UnknownExternal" && node.qualifiedName === "Injected")).toBe(false);
+    // ... and the generated global usings tree compiles without any diagnostic.
+    expect((response?.warnings ?? []).filter((warning) => warning.startsWith("generated global using"))).toEqual([]);
   });
 
   it("several invalid global usings of one project give one detailed warning plus a count (bounded warnings)", () => {

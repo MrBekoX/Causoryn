@@ -547,12 +547,27 @@ const MAX_ASSETS_DIR_VISITS = 512;
 const MAX_NUGET_PROBES = 20_000;
 
 /**
- * Probes one assets file may spend out of MAX_NUGET_PROBES (half of it), so a
- * single crafted file cannot starve the assets files after it. A legitimate
- * file needs far fewer: discovery stops at MAX_NUGET_REFERENCE_DIRS
- * directories, each a few probes deep.
+ * Upper bound of one assets file's share of MAX_NUGET_PROBES (half of it). The
+ * share itself is fair (nugetProbeShare): what is left of the global budget
+ * divided by the assets files still to be read, so crafted files that sort
+ * first cannot spend the probes of the files after them. A legitimate file
+ * needs far fewer: discovery stops at MAX_NUGET_REFERENCE_DIRS directories,
+ * each a few probes deep.
  */
 const MAX_NUGET_PROBES_PER_ASSETS_FILE = 10_000;
+
+/**
+ * Probe share of the next assets file: the remaining global probes split
+ * evenly over the files still to be read, at most
+ * MAX_NUGET_PROBES_PER_ASSETS_FILE. A file never spends more than its share,
+ * so the remaining probes per remaining file never drop below
+ * MAX_NUGET_PROBES / MAX_ASSETS_FILES (625): every later file keeps at least
+ * the share it had at the start, whatever the files before it contain.
+ */
+function nugetProbeShare(remaining: number, filesLeft: number): number
+{
+  return Math.min(MAX_NUGET_PROBES_PER_ASSETS_FILE, Math.floor(remaining / Math.max(1, filesLeft)));
+}
 
 /**
  * A `packageFolders` entry with more path components than this is ignored
@@ -583,21 +598,22 @@ function probesExhausted(budget: NugetProbeBudget): boolean
 }
 
 /**
- * Spends `count` probes of both budgets. When the global budget cannot cover
- * them the whole discovery stops; when only the file's budget cannot, just
- * the current assets file stops.
+ * Spends `count` probes of both budgets. When the file's share cannot cover
+ * them just the current assets file stops. The share never exceeds what is
+ * left globally (nugetProbeShare), so the global check is a safety net that
+ * stops the whole discovery only if that ever stopped holding.
  */
 function spendProbes(budget: NugetProbeBudget, count: number): boolean
 {
   if (probesExhausted(budget)) return false;
-  if (budget.remaining < count)
-  {
-    budget.exhausted = true;
-    return false;
-  }
   if (budget.fileRemaining < count)
   {
     budget.fileExhausted = true;
+    return false;
+  }
+  if (budget.remaining < count)
+  {
+    budget.exhausted = true;
     return false;
   }
   budget.remaining -= count;
@@ -1066,14 +1082,16 @@ export function discoverNugetReferenceDirs(
     fileExhausted: false,
     resolvedDirs: new Map(),
   };
-  for (const assetsPath of assetsFiles.sort((a, b) => (a < b ? -1 : a > b ? 1 : 0)))
+  const orderedAssetsFiles = [...assetsFiles].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+  for (const [index, assetsPath] of orderedAssetsFiles.entries())
   {
     if (discovered.size >= MAX_NUGET_REFERENCE_DIRS || budget.exhausted) break;
     const content = readBoundedFileNoFollow(assetsPath, realRoot, MAX_PROJECT_ASSETS_BYTES);
     if (content === null) continue;
     const displayPath = relative(realRoot, assetsPath).split(sep).join("/");
-    // Each assets file gets its own share, so one crafted file cannot starve the rest.
-    budget.fileRemaining = MAX_NUGET_PROBES_PER_ASSETS_FILE;
+    // Each assets file gets a fair share, so crafted files cannot starve the rest.
+    const share = nugetProbeShare(budget.remaining, orderedAssetsFiles.length - index);
+    budget.fileRemaining = share;
     budget.fileExhausted = false;
     extractNugetDirsFromAssetsContent(
       content,
@@ -1099,7 +1117,7 @@ export function discoverNugetReferenceDirs(
     if (budget.fileExhausted && !budget.exhausted)
     {
       warnings.push(
-        `${displayPath}: NuGet reference discovery stopped after ${String(MAX_NUGET_PROBES_PER_ASSETS_FILE)} file system probes for this assets file; its remaining entries were not inspected`,
+        `${displayPath}: NuGet reference discovery stopped after ${String(share)} file system probes for this assets file; its remaining entries were not inspected`,
       );
     }
   }
