@@ -483,6 +483,9 @@ describe("resolveCSharpProjects: ownership, references and safety", () => {
   });
 });
 
+/** U+1D49C MATHEMATICAL SCRIPT CAPITAL A: a letter (\p{L}) outside the BMP, a surrogate pair in UTF-16. */
+const SUPPLEMENTARY_LETTER = "\u{1D49C}";
+
 /** 600 distinct `Using` names in one item: more than the worker's 512 per project. */
 const MANY_USINGS = Array.from({ length: 600 }, (_, index) => `N${String(index).padStart(3, "0")}`).join(";");
 
@@ -501,6 +504,28 @@ describe("resolveCSharpProjects: per-project limits of the worker protocol (secu
     expect(usings).not.toContain("N505");
     expect(result.warnings).toEqual([
       "C# project 'App/App.csproj': 607 global usings exceed the limit of 512 per project; 95 Using items were dropped (the .NET SDK defaults and the first items in evaluation order were kept)",
+    ]);
+  });
+
+  it("names and aliases with a supplementary-plane letter are skipped like the worker (C# identifiers are UTF-16 code units)", () => {
+    const root = workspace({
+      "Directory.Build.props": [
+        "<Project>",
+        "  <ItemGroup>",
+        `    <Using Include="System.${SUPPLEMENTARY_LETTER}Lib" />`,
+        `    <Using Include="System.Text" Alias="${SUPPLEMENTARY_LETTER}" />`,
+        "  </ItemGroup>",
+        "</Project>",
+        "",
+      ].join("\n"),
+      "App/App.csproj": project(props({ ImplicitUsings: "enable" })),
+      "App/Program.cs": "class P { }",
+    });
+    const result = resolveCSharpProjects(root, ["App/Program.cs"]);
+    expect(names(result.projects[0])).toEqual(BASE);
+    expect(result.warnings).toEqual([
+      `C# project 'App/App.csproj': Using item 'System.${SUPPLEMENTARY_LETTER}Lib' in Directory.Build.props is not a dotted C# name; skipped`,
+      `C# project 'App/App.csproj': Using item 'System.Text' in Directory.Build.props has an alias that is not a C# identifier (${SUPPLEMENTARY_LETTER}); skipped`,
     ]);
   });
 
@@ -677,6 +702,7 @@ describe.skipIf(!dotnetAvailable)("analyzeCSharpWorkspace: SDK implicit global u
 
 describe.skipIf(!dotnetAvailable)("analyzeCSharpWorkspace: a project with too many global usings stays analyzable (live worker, F22)", () => {
   let crowded: RoslynAdapterResult | null = null;
+  let supplementary: RoslynAdapterResult | null = null;
 
   beforeAll(async () => {
     const build = buildRoslynWorkerBinary();
@@ -697,7 +723,24 @@ describe.skipIf(!dotnetAvailable)("analyzeCSharpWorkspace: a project with too ma
       ],
       options: { workerDllPath: WORKER_DLL, requestTimeoutMs: 120_000 },
     });
+    const supplementaryRoot = workspace({
+      "Directory.Build.props": `<Project>\n  <ItemGroup>\n    <Using Include="System.${SUPPLEMENTARY_LETTER}Lib" />\n  </ItemGroup>\n</Project>\n`,
+      "App/App.csproj": sdkProject("enable"),
+      "App/Runner.cs": RUNNER_SOURCE,
+    });
+    supplementary = await analyzeCSharpWorkspace({
+      workspaceId: "csproj-model-supplementary",
+      rootDir: supplementaryRoot,
+      files: [{ path: "App/Runner.cs", content: RUNNER_SOURCE }],
+      options: { workerDllPath: WORKER_DLL, requestTimeoutMs: 120_000 },
+    });
   }, 300_000);
+
+  it("a Using name with a supplementary-plane letter does not make the worker reject the request", () => {
+    expect(supplementary?.workerAvailable).toBe(true);
+    expect(callTo(supplementary, "App.Runner.Run", "System.Console.WriteLine")).toBe("verified");
+    expect((supplementary?.warnings ?? []).some((warning) => warning.includes("is not a dotted C# name; skipped"))).toBe(true);
+  });
 
   it("the worker accepts the request: symbols and verified BCL calls of the project are kept", () => {
     expect(crowded?.workerAvailable).toBe(true);

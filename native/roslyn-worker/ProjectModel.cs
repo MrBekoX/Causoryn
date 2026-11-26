@@ -110,7 +110,7 @@ internal static class ProjectModel
                 path,
                 directory,
                 project.AssemblyName ?? string.Empty,
-                ValidateGlobalUsings(project.GlobalUsings, path),
+                ValidateGlobalUsings(project.GlobalUsings, path, warnings),
                 ValidateProjectReferences(project.ProjectReferences, path)));
         }
 
@@ -251,7 +251,17 @@ internal static class ProjectModel
         return builder.ToString();
     }
 
-    private static IReadOnlyList<GlobalUsingSpec> ValidateGlobalUsings(List<GlobalUsingIn>? usings, string projectPath)
+    /**
+     * Validates the global usings of one project. The schema stays strict (an
+     * unknown field, or more than MaxGlobalUsingsPerProject entries, rejects
+     * the request), but an entry whose content cannot be a global using (not a
+     * dotted C# name, an alias that is not one identifier, static together with
+     * an alias) is dropped with a warning (security finding F22, round 2): one
+     * such entry must not make the whole request fail, which would drop every
+     * C# file of the workspace to file-level facts. A dropped entry never
+     * reaches the generated global usings tree.
+     */
+    private static IReadOnlyList<GlobalUsingSpec> ValidateGlobalUsings(List<GlobalUsingIn>? usings, string projectPath, List<string> warnings)
     {
         if (usings is null || usings.Count == 0)
         {
@@ -266,6 +276,7 @@ internal static class ProjectModel
         }
 
         var unique = new HashSet<GlobalUsingSpec>();
+        var skipped = 0;
         foreach (var item in usings)
         {
             if (item.ExtensionData is { Count: > 0 })
@@ -275,29 +286,50 @@ internal static class ProjectModel
                     $"projects[].globalUsings[] entry contains unknown field(s): {string.Join(", ", item.ExtensionData.Keys)}");
             }
 
-            if (item.Name is null || !IsDottedName(item.Name))
+            if (item.Name is null)
             {
                 throw new ProtocolException(
                     ProtocolErrorCodes.InvalidArgument,
-                    $"projects[].globalUsings[].name is not a dotted C# name in project {projectPath}: {item.Name ?? "null"}");
+                    $"projects[].globalUsings[] entry requires the 'name' field (project {projectPath})");
+            }
+
+            if (!IsDottedName(item.Name))
+            {
+                Skip($"global using '{Snippet(item.Name)}' of project '{projectPath}' was skipped: it is not a dotted C# name");
+                continue;
             }
 
             if (item.Alias is not null && !IdentifierPattern.IsMatch(item.Alias))
             {
-                throw new ProtocolException(
-                    ProtocolErrorCodes.InvalidArgument,
-                    $"projects[].globalUsings[].alias is not a C# identifier in project {projectPath}: {item.Alias}");
+                Skip($"global using '{Snippet(item.Name)}' of project '{projectPath}' was skipped: it has an alias that is not a C# identifier ('{Snippet(item.Alias)}')");
+                continue;
             }
 
             var isStatic = item.Static == true;
             if (isStatic && item.Alias is not null)
             {
-                throw new ProtocolException(
-                    ProtocolErrorCodes.InvalidArgument,
-                    $"a global using cannot be both static and aliased in project {projectPath}: {item.Name}");
+                Skip($"global using '{Snippet(item.Name)}' of project '{projectPath}' was skipped: it is both static and aliased");
+                continue;
             }
 
             unique.Add(new GlobalUsingSpec(item.Name, item.Alias, isStatic));
+        }
+
+        // One detailed warning per project, then a count: the warnings stay
+        // bounded however many entries a project model carries.
+        if (skipped > 1)
+        {
+            warnings.Add($"{(skipped - 1).ToString(CultureInfo.InvariantCulture)} further global usings of project '{projectPath}' were skipped for the same kinds of reasons");
+        }
+
+        void Skip(string detail)
+        {
+            if (skipped == 0)
+            {
+                warnings.Add(detail);
+            }
+
+            skipped += 1;
         }
 
         static int Rank(GlobalUsingSpec spec) => spec.Alias is not null ? 2 : spec.IsStatic ? 1 : 0;
@@ -377,6 +409,30 @@ internal static class ProjectModel
         }
 
         return result;
+    }
+
+    private const int MaxSnippetLength = 160;
+
+    /** Request text quoted in a warning: control characters flattened, length capped (no surrogate pair split). */
+    private static string Snippet(string value)
+    {
+        var builder = new StringBuilder(Math.Min(value.Length, MaxSnippetLength));
+        foreach (var ch in value)
+        {
+            if (builder.Length >= MaxSnippetLength)
+            {
+                if (char.IsHighSurrogate(builder[^1]))
+                {
+                    builder.Length -= 1;
+                }
+
+                return builder.Append("...").ToString();
+            }
+
+            builder.Append(char.IsControl(ch) ? ' ' : ch);
+        }
+
+        return builder.ToString();
     }
 
     private static bool IsDottedName(string name)

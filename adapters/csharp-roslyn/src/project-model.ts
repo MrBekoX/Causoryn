@@ -427,9 +427,23 @@ function isNetFrameworkTarget(tfm: string | undefined): boolean {
 /* Global using list                                                   */
 /* ------------------------------------------------------------------ */
 
+/** A UTF-16 surrogate code unit (half of a character outside the Basic Multilingual Plane). */
+const SURROGATE_CODE_UNIT = /[\uD800-\uDFFF]/;
+
+/**
+ * One C# identifier exactly as the worker accepts it (security finding F22,
+ * round 2). The worker's .NET pattern classifies UTF-16 code units, and C#
+ * (Roslyn) does too: a letter outside the BMP such as U+1D49C is a surrogate
+ * pair (category Cs), no identifier character (CS1056). The `/u` pattern here
+ * classifies code points and would accept it, so surrogates are refused first.
+ */
+function isWorkerIdentifier(value: string): boolean {
+  return !SURROGATE_CODE_UNIT.test(value) && IDENTIFIER_PATTERN.test(value);
+}
+
 function isDottedName(name: string): boolean {
   if (name.length === 0 || name.length > MAX_DOTTED_NAME_LENGTH) return false;
-  return name.split(".").every((segment) => IDENTIFIER_PATTERN.test(segment));
+  return name.split(".").every((segment) => isWorkerIdentifier(segment));
 }
 
 /** `source` of the SDK's implicit Using items (also quoted in warnings). */
@@ -485,7 +499,7 @@ function finalizeUsings(
       warnings.push(`${label}: Using item '${snippet(item.name)}' in ${item.source} is not a dotted C# name; skipped`);
       continue;
     }
-    if (item.alias !== undefined && !IDENTIFIER_PATTERN.test(item.alias)) {
+    if (item.alias !== undefined && !isWorkerIdentifier(item.alias)) {
       warnings.push(`${label}: Using item '${snippet(item.name)}' in ${item.source} has an alias that is not a C# identifier (${snippet(item.alias)}); skipped`);
       continue;
     }

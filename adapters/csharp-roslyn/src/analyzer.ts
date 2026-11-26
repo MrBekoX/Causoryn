@@ -546,25 +546,62 @@ const MAX_ASSETS_DIR_VISITS = 512;
  */
 const MAX_NUGET_PROBES = 20_000;
 
+/**
+ * Probes one assets file may spend out of MAX_NUGET_PROBES (half of it), so a
+ * single crafted file cannot starve the assets files after it. A legitimate
+ * file needs far fewer: discovery stops at MAX_NUGET_REFERENCE_DIRS
+ * directories, each a few probes deep.
+ */
+const MAX_NUGET_PROBES_PER_ASSETS_FILE = 10_000;
+
+/**
+ * A `packageFolders` entry with more path components than this is ignored
+ * before any probe (real package folders are a handful of components deep), so
+ * one absurd entry can never ask for more probes than a file has.
+ */
+const MAX_PACKAGE_FOLDER_COMPONENTS = 256;
+
 /** Usable `packageFolders` entries per assets file (NuGet writes the global packages folder plus fallback folders). */
 const MAX_NUGET_PACKAGE_FOLDERS = 8;
 
-/** Probe budget of one discovery plus the directories already resolved (each pair is probed once). */
+/**
+ * Probe budget of one discovery (global) and of the assets file being read,
+ * plus the directories already resolved (each pair is probed once).
+ */
 interface NugetProbeBudget {
   remaining: number;
   exhausted: boolean;
+  fileRemaining: number;
+  fileExhausted: boolean;
   readonly resolvedDirs: Map<string, string | null>;
 }
 
-/** Spends `count` probes; false (and the budget is marked exhausted) when they are not left. */
+/** True when the current assets file may not probe any further (its own or the global budget is spent). */
+function probesExhausted(budget: NugetProbeBudget): boolean
+{
+  return budget.exhausted || budget.fileExhausted;
+}
+
+/**
+ * Spends `count` probes of both budgets. When the global budget cannot cover
+ * them the whole discovery stops; when only the file's budget cannot, just
+ * the current assets file stops.
+ */
 function spendProbes(budget: NugetProbeBudget, count: number): boolean
 {
-  if (budget.exhausted || budget.remaining < count)
+  if (probesExhausted(budget)) return false;
+  if (budget.remaining < count)
   {
     budget.exhausted = true;
     return false;
   }
+  if (budget.fileRemaining < count)
+  {
+    budget.fileExhausted = true;
+    return false;
+  }
   budget.remaining -= count;
+  budget.fileRemaining -= count;
   return true;
 }
 
@@ -655,7 +692,7 @@ function resolveNonSymlinkDirWithinBase(
   if (memo !== undefined) return memo;
   const resolved = resolveNonSymlinkDirWithinBaseUncached(baseRealDir, segments, budget);
   // An exhausted budget is no answer: the pair stays unresolved and is not recorded.
-  if (!budget.exhausted) budget.resolvedDirs.set(memoKey, resolved);
+  if (!probesExhausted(budget)) budget.resolvedDirs.set(memoKey, resolved);
   return resolved;
 }
 
@@ -722,20 +759,29 @@ function validateSafeLocalDirectory(rawDir: string): string | null
   return real;
 }
 
+/** Outcome of confining one `packageFolders` entry. */
+type ConfinedPackageFolder =
+  | { readonly kind: "usable"; readonly real: string }
+  | { readonly kind: "ignored" }
+  | { readonly kind: "too-deep" };
+
+const IGNORED_PACKAGE_FOLDER: ConfinedPackageFolder = { kind: "ignored" };
+
 /**
  * Real path of a `packageFolders` entry when it lies inside a trusted NuGet
  * root or the workspace (checked lexically before any file system access and
- * again on the real path); null otherwise.
+ * again on the real path); "ignored" otherwise, "too-deep" (no probe spent)
+ * for more than MAX_PACKAGE_FOLDER_COMPONENTS path components.
  */
 function confinePackageFolder(
   rawKey: string,
   trustedRoots: readonly TrustedNugetRoot[],
   budget: NugetProbeBudget,
-): string | null
+): ConfinedPackageFolder
 {
-  if (rawKey.length === 0 || rawKey.includes("\0")) return null;
+  if (rawKey.length === 0 || rawKey.includes("\0")) return IGNORED_PACKAGE_FOLDER;
   const trimmed = rawKey.trim();
-  if (!isFullyQualifiedLocalPath(trimmed)) return null;
+  if (!isFullyQualifiedLocalPath(trimmed)) return IGNORED_PACKAGE_FOLDER;
   const candidate = resolve(stripTrailingSeparators(trimmed));
   const owners = trustedRoots.filter(
     (root) =>
@@ -743,15 +789,19 @@ function confinePackageFolder(
       isInsideRealDir(root.real, candidate) ||
       isInsideRealDir(root.canonical, candidate),
   );
-  if (owners.length === 0) return null;
+  if (owners.length === 0) return IGNORED_PACKAGE_FOLDER;
+  const components = candidate.split(sep).length;
+  if (components > MAX_PACKAGE_FOLDER_COMPONENTS) return { kind: "too-deep" };
   // validateSafeLocalDirectory + canonicalLocalPath: one lstat per path
   // component plus realpath, lstat and the canonical realpath.
-  if (!spendProbes(budget, candidate.split(sep).length + 4)) return null;
+  if (!spendProbes(budget, components + 4)) return IGNORED_PACKAGE_FOLDER;
   const real = validateSafeLocalDirectory(candidate);
-  if (real === null) return null;
+  if (real === null) return IGNORED_PACKAGE_FOLDER;
   const canonical = canonicalLocalPath(real);
-  if (canonical === null) return null;
-  return owners.some((root) => isInsideRealDir(root.canonical, canonical)) ? real : null;
+  if (canonical === null) return IGNORED_PACKAGE_FOLDER;
+  return owners.some((root) => isInsideRealDir(root.canonical, canonical))
+    ? { kind: "usable", real }
+    : IGNORED_PACKAGE_FOLDER;
 }
 
 function extractNugetDirsFromAssetsContent(
@@ -761,6 +811,7 @@ function extractNugetDirsFromAssetsContent(
   budget: NugetProbeBudget,
   onIgnoredPackageFolders: (count: number) => void,
   onSkippedPackageFolders: (count: number) => void,
+  onTooDeepPackageFolders: (count: number) => void,
 ): void
 {
   let parsed: unknown;
@@ -784,22 +835,29 @@ function extractNugetDirsFromAssetsContent(
     .sort()
     .filter((key) => !FORBIDDEN_JSON_KEYS.has(key) && Object.prototype.hasOwnProperty.call(rawPackageFolders, key));
   let inspectedKeys = 0;
+  let tooDeepFolders = 0;
   for (const key of folderKeys)
   {
-    if (packageFolders.length >= MAX_NUGET_PACKAGE_FOLDERS || budget.exhausted) break;
+    if (packageFolders.length >= MAX_NUGET_PACKAGE_FOLDERS || probesExhausted(budget)) break;
     inspectedKeys += 1;
-    const realFolder = confinePackageFolder(key, trustedRoots, budget);
-    if (realFolder === null)
+    const confined = confinePackageFolder(key, trustedRoots, budget);
+    if (confined.kind === "too-deep")
     {
-      if (!budget.exhausted) ignoredFolders += 1;
+      tooDeepFolders += 1;
       continue;
     }
-    if (!packageFolders.includes(realFolder))
+    if (confined.kind === "ignored")
     {
-      packageFolders.push(realFolder);
+      if (!probesExhausted(budget)) ignoredFolders += 1;
+      continue;
+    }
+    if (!packageFolders.includes(confined.real))
+    {
+      packageFolders.push(confined.real);
     }
   }
   if (ignoredFolders > 0) onIgnoredPackageFolders(ignoredFolders);
+  if (tooDeepFolders > 0) onTooDeepPackageFolders(tooDeepFolders);
   if (packageFolders.length >= MAX_NUGET_PACKAGE_FOLDERS && inspectedKeys < folderKeys.length)
   {
     onSkippedPackageFolders(folderKeys.length - inspectedKeys);
@@ -848,7 +906,7 @@ function extractNugetDirsFromAssetsContent(
 
   for (const pkgKey of sortedPkgKeys)
   {
-    if (discovered.size >= MAX_NUGET_REFERENCE_DIRS || budget.exhausted) break;
+    if (discovered.size >= MAX_NUGET_REFERENCE_DIRS || probesExhausted(budget)) break;
     const pkgInfo = targetPackages[pkgKey];
     if (!isRecord(pkgInfo)) continue;
     if (pkgInfo["type"] !== undefined && pkgInfo["type"] !== "package") continue;
@@ -867,7 +925,7 @@ function extractNugetDirsFromAssetsContent(
 
     for (const compileKey of compileEntries)
     {
-      if (discovered.size >= MAX_NUGET_REFERENCE_DIRS || budget.exhausted) break;
+      if (discovered.size >= MAX_NUGET_REFERENCE_DIRS || probesExhausted(budget)) break;
       if (!compileKey.toLowerCase().endsWith(".dll")) continue;
       const compileSegments = validateSafeRelativeSegments(compileKey);
       if (compileSegments === null || compileSegments.length === 0) continue;
@@ -1001,13 +1059,22 @@ export function discoverNugetReferenceDirs(
   }
 
   const discovered = new Set<string>();
-  const budget: NugetProbeBudget = { remaining: MAX_NUGET_PROBES, exhausted: false, resolvedDirs: new Map() };
+  const budget: NugetProbeBudget = {
+    remaining: MAX_NUGET_PROBES,
+    exhausted: false,
+    fileRemaining: MAX_NUGET_PROBES_PER_ASSETS_FILE,
+    fileExhausted: false,
+    resolvedDirs: new Map(),
+  };
   for (const assetsPath of assetsFiles.sort((a, b) => (a < b ? -1 : a > b ? 1 : 0)))
   {
     if (discovered.size >= MAX_NUGET_REFERENCE_DIRS || budget.exhausted) break;
     const content = readBoundedFileNoFollow(assetsPath, realRoot, MAX_PROJECT_ASSETS_BYTES);
     if (content === null) continue;
     const displayPath = relative(realRoot, assetsPath).split(sep).join("/");
+    // Each assets file gets its own share, so one crafted file cannot starve the rest.
+    budget.fileRemaining = MAX_NUGET_PROBES_PER_ASSETS_FILE;
+    budget.fileExhausted = false;
     extractNugetDirsFromAssetsContent(
       content,
       discovered,
@@ -1023,7 +1090,18 @@ export function discoverNugetReferenceDirs(
           `${displayPath}: only the first ${String(MAX_NUGET_PACKAGE_FOLDERS)} usable NuGet packageFolders entries were inspected; ${String(count)} further ${count === 1 ? "entry was" : "entries were"} skipped`,
         );
       },
+      (count) => {
+        warnings.push(
+          `${displayPath}: ignored ${String(count)} NuGet packageFolders ${count === 1 ? "entry" : "entries"} with more than ${String(MAX_PACKAGE_FOLDER_COMPONENTS)} path components`,
+        );
+      },
     );
+    if (budget.fileExhausted && !budget.exhausted)
+    {
+      warnings.push(
+        `${displayPath}: NuGet reference discovery stopped after ${String(MAX_NUGET_PROBES_PER_ASSETS_FILE)} file system probes for this assets file; its remaining entries were not inspected`,
+      );
+    }
   }
   if (budget.exhausted)
   {

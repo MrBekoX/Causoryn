@@ -227,32 +227,83 @@ function writeRawAssets(
   );
 }
 
+/**
+ * An assets file under `projectDir` whose package `acme.wide/1.0.0` exists but whose
+ * 30,000 compile entries all lie in distinct, missing directories (4 probes each).
+ * `early` adds a package with a real DLL that sorts before it.
+ */
+function writeWideAssets(projectDir: string, local: string, early?: string): void {
+  mkdirSync(join(local, "acme.wide", "1.0.0", "lib"), { recursive: true });
+  const wideCompile = Object.fromEntries(Array.from({ length: 30_000 }, (_, index) => [`lib/d${String(index)}/x.dll`, {}]));
+  const targets: Record<string, unknown> = { "Acme.Wide/1.0.0": { type: "package", compile: wideCompile } };
+  const libraries: Record<string, unknown> = { "Acme.Wide/1.0.0": { type: "package", path: "acme.wide/1.0.0" } };
+  if (early !== undefined) {
+    targets[`${early}/1.0.0`] = { type: "package", compile: { [`lib/net10.0/${early}.dll`]: {} } };
+    libraries[`${early}/1.0.0`] = { type: "package", path: `${early.toLowerCase()}/1.0.0` };
+  }
+  writeRawAssets(projectDir, [local], targets, libraries);
+}
+
+const PER_FILE_STOP = (displayPath: string): string =>
+  `${displayPath}: NuGet reference discovery stopped after 10000 file system probes for this assets file; its remaining entries were not inspected`;
+const GLOBAL_STOP =
+  "NuGet reference discovery stopped after 20000 file system probes; the remaining project.assets.json entries were not inspected";
+
 describe("NuGet assets discovery budget (security finding F45)", () => {
-  it("stops with a warning once the file system probe budget is spent; packages found before it are kept", () => {
+  it("one assets file stops at its own probe budget with a warning; packages found before it are kept", () => {
     const base = tempDir("causoryn-nuget-budget-");
     const ws = join(base, "ws");
     const local = join(ws, "packages");
     const realDll = makePackage(local, "Acme.Early");
-    mkdirSync(join(local, "acme.wide", "1.0.0", "lib"), { recursive: true });
-    // 30,000 compile entries in distinct, missing directories of one existing package.
-    const wideCompile = Object.fromEntries(Array.from({ length: 30_000 }, (_, index) => [`lib/d${String(index)}/x.dll`, {}]));
-    writeRawAssets(
-      ws,
-      [local],
-      {
-        "Acme.Early/1.0.0": { type: "package", compile: { "lib/net10.0/Acme.Early.dll": {} } },
-        "Acme.Wide/1.0.0": { type: "package", compile: wideCompile },
-      },
-      {
-        "Acme.Early/1.0.0": { type: "package", path: "acme.early/1.0.0" },
-        "Acme.Wide/1.0.0": { type: "package", path: "acme.wide/1.0.0" },
-      },
-    );
+    writeWideAssets(ws, local, "Acme.Early");
 
     const discovered = discoverNugetReferenceDirs(ws, noTrust());
     expect(discovered.referenceDirs).toEqual([realpathSync(realDll)]);
+    expect(discovered.warnings).toEqual([PER_FILE_STOP("obj/project.assets.json")]);
+  }, 60_000);
+
+  it("one crafted assets file cannot starve the assets files after it", () => {
+    const base = tempDir("causoryn-nuget-starve-");
+    const ws = join(base, "ws");
+    const local = join(ws, "packages");
+    writeWideAssets(join(ws, "a"), local);
+    const laterDll = makePackage(local, "Acme.Later");
+    writeAssets(join(ws, "b"), [local], ["Acme.Later"]);
+
+    const discovered = discoverNugetReferenceDirs(ws, noTrust());
+    expect(discovered.referenceDirs).toEqual([realpathSync(laterDll)]);
+    expect(discovered.warnings).toEqual([PER_FILE_STOP("a/obj/project.assets.json")]);
+  }, 60_000);
+
+  it("the global probe budget still bounds the whole discovery across assets files", () => {
+    const base = tempDir("causoryn-nuget-global-");
+    const ws = join(base, "ws");
+    const local = join(ws, "packages");
+    for (const name of ["a1", "a2", "a3", "a4", "a5"]) writeWideAssets(join(ws, name), local);
+    makePackage(local, "Acme.Last");
+    writeAssets(join(ws, "z"), [local], ["Acme.Last"]);
+
+    const discovered = discoverNugetReferenceDirs(ws, noTrust());
+    expect(discovered.referenceDirs).toEqual([]);
+    expect(discovered.warnings).toContain(PER_FILE_STOP("a1/obj/project.assets.json"));
+    expect(discovered.warnings[discovered.warnings.length - 1]).toBe(GLOBAL_STOP);
+  }, 120_000);
+
+  it("a packageFolders key with more than 256 path components is ignored without spending the budget", () => {
+    const base = tempDir("causoryn-nuget-deep-key-");
+    const ws = join(base, "ws");
+    const local = join(ws, "packages");
+    mkdirSync(local, { recursive: true });
+    // Lexically inside the workspace, so only its depth makes it unusable.
+    const deepKey = join(ws, ...Array.from({ length: 20_001 }, () => "x"));
+    writeRawAssets(join(ws, "a"), [deepKey], {}, {});
+    const laterDll = makePackage(local, "Acme.After");
+    writeAssets(join(ws, "b"), [local], ["Acme.After"]);
+
+    const discovered = discoverNugetReferenceDirs(ws, noTrust());
+    expect(discovered.referenceDirs).toEqual([realpathSync(laterDll)]);
     expect(discovered.warnings).toEqual([
-      "NuGet reference discovery stopped after 20000 file system probes; the remaining project.assets.json entries were not inspected",
+      "a/obj/project.assets.json: ignored 1 NuGet packageFolders entry with more than 256 path components",
     ]);
   }, 60_000);
 

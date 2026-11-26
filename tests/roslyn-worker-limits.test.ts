@@ -223,7 +223,7 @@ describe.skipIf(!dotnetAvailable)("roslyn-worker emitted text bounds (F9 / F29)"
     expect(ambiguous?.ambiguity?.reason).toContain("first 64 of 100 candidates");
   }, 120_000);
 
-  it("F9: the response text budget truncates explicitly instead of growing with the input", () => {
+  it("F9: the response size budget truncates explicitly instead of growing with the input", () => {
     const methods = Array.from({ length: 20_000 }, (_, index) => `    public void m${String(index).padStart(5, "0")}() { }`);
     const content = [`namespace ${longNamespace(2, 500)};`, "public class Wide", "{", ...methods, "}", ""].join("\n");
     const raw = analyzeRaw("text-budget", [{ path: "Wide/Wide.cs", content }]);
@@ -231,14 +231,53 @@ describe.skipIf(!dotnetAvailable)("roslyn-worker emitted text bounds (F9 / F29)"
     const response = JSON.parse(raw) as WorkerResponse;
     expect(response.status).toBe("partial");
     const truncated = (response.diagnostics ?? []).find((diag) => diag.code === "RESPONSE_TRUNCATED");
-    expect(truncated?.message).toContain("response text budget");
+    expect(truncated?.message).toContain("response size budget");
     const nodes = response.nodes ?? [];
     expect(nodes.length).toBeGreaterThan(1000);
     expect(nodes.length).toBeLessThan(20_000);
-    const emitted = new Set(nodes.map((node) => `${node.kind}\u001f${node.qualifiedName}\u001f${node.relativePath ?? ""}`));
-    for (const edge of response.edges ?? []) {
-      expect(emitted.has(`${edge.from.kind}\u001f${edge.from.qualifiedName}\u001f${edge.from.relativePath ?? ""}`)).toBe(true);
-      expect(emitted.has(`${edge.to.kind}\u001f${edge.to.qualifiedName}\u001f${edge.to.relativePath ?? ""}`)).toBe(true);
-    }
+    expectNoDanglingEdges(response);
   }, 300_000);
+
+  // Round 2: the budget is the SERIALIZED response size (field names, kinds, spans,
+  // source hashes and escaping included), so a truncated response stays below the
+  // adapter's 64M-character line cap for short and medium names as well.
+  it.each([
+    ["short names", "Short", 45_000],
+    ["medium (~100-character) names", longNamespace(2, 45), 30_000],
+  ])("F9: with %s a truncated response still fits the adapter's response cap", (_label, ns, count) => {
+    const methods = Array.from({ length: count }, (_, index) => {
+      const name = `m${String(index).padStart(5, "0")}`;
+      const next = `m${String(index + 1).padStart(5, "0")}`;
+      return index + 1 < count ? `    public void ${name}() { ${next}(); }` : `    public void ${name}() { }`;
+    });
+    const content = [`namespace ${ns};`, "public class Chain", "{", ...methods, "}", ""].join("\n");
+    const raw = analyzeRaw(`size-budget-${String(count)}`, [{ path: "Chain/Chain.cs", content }]);
+    expect(raw.length).toBeLessThan(ADAPTER_RESPONSE_MAX_CHARS);
+    const response = JSON.parse(raw) as WorkerResponse;
+    expect(response.status).toBe("partial");
+    expect((response.diagnostics ?? []).some((diag) => diag.code === "RESPONSE_TRUNCATED")).toBe(true);
+    expect((response.nodes ?? []).length).toBeGreaterThan(1000);
+    expectNoDanglingEdges(response);
+  }, 600_000);
+
+  it("F9: compiler diagnostics and unresolved-call warnings are part of the response size budget", () => {
+    const calls = Array.from({ length: 60_000 }, (_, index) => `        u${String(index).padStart(5, "0")}();`);
+    const content = ["class Unresolved", "{", "    void Run()", "    {", ...calls, "    }", "}", ""].join("\n");
+    const raw = analyzeRaw("size-budget-unresolved", [{ path: "Bad/Unresolved.cs", content }]);
+    expect(raw.length).toBeLessThan(ADAPTER_RESPONSE_MAX_CHARS);
+    const response = JSON.parse(raw) as WorkerResponse;
+    expect(response.status).toBe("partial");
+    expect((response.diagnostics ?? []).some((diag) => diag.code === "RESPONSE_TRUNCATED")).toBe(true);
+    expect((response.diagnostics ?? []).some((diag) => diag.code === "CS0103")).toBe(true);
+    expectNoDanglingEdges(response);
+  }, 600_000);
 });
+
+function expectNoDanglingEdges(response: WorkerResponse): void {
+  const key = (node: NodeRef): string => `${node.kind}\u001f${node.qualifiedName}\u001f${node.relativePath ?? ""}`;
+  const emitted = new Set((response.nodes ?? []).map(key));
+  for (const edge of response.edges ?? []) {
+    expect(emitted.has(key(edge.from))).toBe(true);
+    expect(emitted.has(key(edge.to))).toBe(true);
+  }
+}

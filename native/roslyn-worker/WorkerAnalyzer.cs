@@ -103,20 +103,25 @@ public static class WorkerAnalyzer
          */
         private readonly int _nodeLimit;
 
-        /** Characters charged against MaxResponseTextChars so far (see Charge). */
-        private long _textChars;
+        /** Serialized response characters charged so far (see Charge / ChargeMandatory). */
+        private long _responseChars;
+
+        /** Of _responseChars, the part spent on compiler diagnostics (TryChargeDiagnostic). */
+        private long _diagnosticChars;
 
         private bool _warningsSuppressed;
 
         public bool Truncated { get; private set; }
 
         /**
-         * Response text budget (security finding F9): the names, rationales,
-         * candidates and warnings the response carries are charged here; once
-         * MaxResponseTextChars is reached nothing more is admitted (sticky), the
-         * response gets a RESPONSE_TRUNCATED diagnostic and status "partial".
+         * Response size budget (security finding F9): every record the response
+         * carries is charged with the length it has in the serialized JSON line
+         * (field names, kinds, spans, source hashes and escaping included, see
+         * SerializedLength); once MaxResponseChars is reached nothing more is
+         * admitted (sticky), the response gets a RESPONSE_TRUNCATED diagnostic
+         * and status "partial", and the remaining analysis phases are skipped.
          */
-        public bool TextBudgetExceeded { get; private set; }
+        public bool ResponseBudgetExceeded { get; private set; }
 
         public GraphAssembler(int nodeLimit)
         {
@@ -127,13 +132,45 @@ public static class WorkerAnalyzer
 
         private bool Charge(long chars)
         {
-            if (TextBudgetExceeded || _textChars + chars > MaxResponseTextChars)
+            if (ResponseBudgetExceeded || _responseChars + chars > MaxResponseChars)
             {
-                TextBudgetExceeded = true;
+                ResponseBudgetExceeded = true;
                 return false;
             }
 
-            _textChars += chars;
+            _responseChars += chars;
+            return true;
+        }
+
+        /**
+         * Charges an entry that is always emitted (the envelope, request-level
+         * warnings, phase diagnostics); it never refuses, but what it uses is no
+         * longer available to the graph.
+         */
+        public void ChargeMandatory(long chars)
+        {
+            _responseChars += chars;
+            if (_responseChars > MaxResponseChars)
+            {
+                ResponseBudgetExceeded = true;
+            }
+        }
+
+        /**
+         * Charges one compiler diagnostic: refused once diagnostics would use more
+         * than MaxDiagnosticResponseChars, or the response more than its budget,
+         * so a file full of errors leaves room for the graph. A refusal does not
+         * close the budget for the graph.
+         */
+        public bool TryChargeDiagnostic(long chars)
+        {
+            if (_diagnosticChars + chars > MaxDiagnosticResponseChars || _responseChars + chars > MaxResponseChars)
+            {
+                return false;
+            }
+
+            _diagnosticChars += chars;
+            _responseChars += chars;
             return true;
         }
 
@@ -171,7 +208,7 @@ public static class WorkerAnalyzer
                 Truncated = true;
                 return record;
             }
-            if (!Charge(NodeTextChars(record.Node)))
+            if (!Charge(NodeResponseChars(record.Node)))
             {
                 return record; // not admitted, like the node limit above
             }
@@ -204,7 +241,7 @@ public static class WorkerAnalyzer
             var key = $"{kind}\u001e{from.Key}\u001e{to.Key}";
             if (!_edges.TryGetValue(key, out var record))
             {
-                if (!Charge(EdgeTextChars(from, to, ambiguity) + EvidenceTextChars(evidence)))
+                if (!Charge(EdgeResponseChars(kind, from, to, resolution, ambiguity) + EvidenceResponseChars(evidence)))
                 {
                     return;
                 }
@@ -215,7 +252,7 @@ public static class WorkerAnalyzer
                 return;
             }
 
-            if (!record.HasEvidence(evidence) && !Charge(EvidenceTextChars(evidence)))
+            if (!record.HasEvidence(evidence) && !Charge(EvidenceResponseChars(evidence)))
             {
                 return; // the edge keeps the evidence it already has (>= 1)
             }
@@ -230,12 +267,12 @@ public static class WorkerAnalyzer
                 return;
             }
 
-            if (!Charge(message.Length))
+            if (!Charge(SerializedLength(message) + 1))
             {
                 if (!_warningsSuppressed)
                 {
                     _warningsSuppressed = true;
-                    Warnings.Add("further warnings were not emitted: the response text budget was reached");
+                    Warnings.Add("further warnings were not emitted: the response size budget was reached");
                 }
 
                 return;
@@ -423,6 +460,15 @@ public static class WorkerAnalyzer
         var referencePaths = ReferenceResolver.Resolve(request.ReferenceDirs, "net10.0", warnings);
         var references = ReferenceResolver.LoadMetadataReferences(referencePaths, warnings);
         var compilationSets = BuildCompilations(entries, projects, references, warnings);
+
+        // Response size budget (security finding F9): the envelope and the
+        // request-level warnings so far are always emitted.
+        assembler.ChargeMandatory(SerializedLength(CreateResponse(request.Id, string.Empty, 0d, new(), new(), new(), new(), new())) + EnvelopeReserveChars);
+        foreach (var warning in warnings)
+        {
+            assembler.ChargeMandatory(SerializedLength(warning) + 1);
+        }
+
         var compilationByTree = new Dictionary<SyntaxTree, CSharpCompilation>();
         foreach (var set in compilationSets)
         {
@@ -494,7 +540,9 @@ public static class WorkerAnalyzer
                     });
                 }
 
-                warnings.Add("diagnostics phase could not complete: " + ex.Message);
+                var phaseWarning = "diagnostics phase could not complete: " + ex.Message;
+                warnings.Add(phaseWarning);
+                assembler.ChargeMandatory(SerializedLength(phaseWarning) + 1);
             }
         }
 
@@ -516,6 +564,21 @@ public static class WorkerAnalyzer
             return byCode != 0 ? byCode : string.CompareOrdinal(a.Message, b.Message);
         });
 
+        // Compiler diagnostics take at most their share of the response size
+        // budget; the rest of the canonical order is not emitted (counted below).
+        var keptDiagnostics = 0;
+        while (keptDiagnostics < diagnostics.Count &&
+               assembler.TryChargeDiagnostic(SerializedLength(diagnostics[keptDiagnostics]) + 1))
+        {
+            keptDiagnostics += 1;
+        }
+
+        var droppedDiagnostics = diagnostics.Count - keptDiagnostics;
+        if (droppedDiagnostics > 0)
+        {
+            diagnostics.RemoveRange(keptDiagnostics, droppedDiagnostics);
+        }
+
         var registry = new Dictionary<ISymbol, NodeRecord>(SymbolEqualityComparer.Default);
         var controllers = new List<(SourceEntry Entry, ControllerInfo Info)>();
 
@@ -527,31 +590,36 @@ public static class WorkerAnalyzer
          */
         void RunPhaseIsolated(SourceEntry phaseEntry, Action phase)
         {
+            if (assembler.ResponseBudgetExceeded)
+            {
+                return; // nothing more could be emitted (F9)
+            }
+
             try
             {
                 phase();
             }
             catch (InsufficientExecutionStackException)
             {
-                diagnostics.Add(new DiagnosticOut
+                AddMandatoryDiagnostic(diagnostics, assembler, new DiagnosticOut
                 {
                     RelativePath = phaseEntry.RelativePath,
                     Code = "ADAPTER_INTERNAL",
                     Message = "resolution phase hit the depth limit (InsufficientExecutionStackException); phase skipped for this file",
                     Line = 0,
                 });
-                warnings.Add($"resolution depth limit: {phaseEntry.RelativePath} (phase skipped)");
+                AddMandatoryWarning(assembler, $"resolution depth limit: {phaseEntry.RelativePath} (phase skipped)");
             }
             catch (Exception ex)
             {
-                diagnostics.Add(new DiagnosticOut
+                AddMandatoryDiagnostic(diagnostics, assembler, new DiagnosticOut
                 {
                     RelativePath = phaseEntry.RelativePath,
                     Code = "ADAPTER_INTERNAL",
                     Message = ex.Message,
                     Line = 0,
                 });
-                warnings.Add($"resolution phase failed: {phaseEntry.RelativePath} ({ex.GetType().Name})");
+                AddMandatoryWarning(assembler, $"resolution phase failed: {phaseEntry.RelativePath} ({ex.GetType().Name})");
             }
         }
 
@@ -601,13 +669,24 @@ public static class WorkerAnalyzer
         }
 
         // 7) Kanonik çıktı (TŞ §8 invariant iv/vi).
-        if (assembler.TextBudgetExceeded)
+        if (assembler.ResponseBudgetExceeded || droppedDiagnostics > 0)
         {
+            var parts = new List<string>();
+            if (droppedDiagnostics > 0)
+            {
+                parts.Add($"{droppedDiagnostics.ToString(CultureInfo.InvariantCulture)} compiler diagnostics");
+            }
+
+            if (assembler.ResponseBudgetExceeded)
+            {
+                parts.Add("the excess nodes, edges, evidence and warnings");
+            }
+
             diagnostics.Add(new DiagnosticOut
             {
                 RelativePath = string.Empty,
                 Code = "RESPONSE_TRUNCATED",
-                Message = $"response text budget exceeded ({MaxResponseTextChars.ToString(System.Globalization.CultureInfo.InvariantCulture)} characters of names, rationales and warnings); excess nodes, edges, evidence and warnings were not emitted",
+                Message = $"response size budget reached ({MaxResponseChars.ToString(CultureInfo.InvariantCulture)} serialized characters, at most {MaxDiagnosticResponseChars.ToString(CultureInfo.InvariantCulture)} of them for compiler diagnostics); {string.Join(" and ", parts)} were not emitted",
                 Line = 0,
             });
         }
@@ -630,29 +709,47 @@ public static class WorkerAnalyzer
             ? 0d
             : Math.Round((double)verified * 10000d / edges.Count, 4, MidpointRounding.AwayFromZero) / 10000d;
 
-        return new WorkerResponse
-        {
-            Id = request.Id,
-            Status = diagnostics.Count > 0 ? "partial" : "ready",
-            Worker = new WorkerInfo(),
-            Capabilities = new CapabilitiesOut
-            {
-                AstParse = true,
-                SymbolResolution = true,
-                ContainsEdges = true,
-                CallEdges = true,
-                ImportEdges = false,
-                FrameworkLinkers = false,
-            },
-            CoverageRatio = coverageRatio,
-            UnsupportedConstructs = UnsupportedConstructs.ToList(),
-            Warnings = warnings,
-            Diagnostics = diagnostics,
-            Nodes = assembler.SortedNodes(),
-            Edges = edges,
-            Evidence = assembler.SortedDistinctEvidence(),
-        };
+        return CreateResponse(
+            request.Id,
+            diagnostics.Count > 0 ? "partial" : "ready",
+            coverageRatio,
+            warnings,
+            diagnostics,
+            assembler.SortedNodes(),
+            edges,
+            assembler.SortedDistinctEvidence());
     }
+
+    private static WorkerResponse CreateResponse(
+        JsonElement id,
+        string status,
+        double coverageRatio,
+        List<string> warnings,
+        List<DiagnosticOut> diagnostics,
+        List<NodeOut> nodes,
+        List<EdgeOut> edges,
+        List<EvidenceOut> evidence) => new()
+    {
+        Id = id,
+        Status = status,
+        Worker = new WorkerInfo(),
+        Capabilities = new CapabilitiesOut
+        {
+            AstParse = true,
+            SymbolResolution = true,
+            ContainsEdges = true,
+            CallEdges = true,
+            ImportEdges = false,
+            FrameworkLinkers = false,
+        },
+        CoverageRatio = coverageRatio,
+        UnsupportedConstructs = UnsupportedConstructs.ToList(),
+        Warnings = warnings,
+        Diagnostics = diagnostics,
+        Nodes = nodes,
+        Edges = edges,
+        Evidence = evidence,
+    };
 
     private static void ValidateRequest(WorkerRequest request)
     {
@@ -919,6 +1016,11 @@ public static class WorkerAnalyzer
         int depth,
         DeclarationDepthGuard depthGuard)
     {
+        if (assembler.ResponseBudgetExceeded)
+        {
+            return; // nothing more could be emitted (F9)
+        }
+
         if (depth > MaxTraversalDepth)
         {
             depthGuard.Report(entry, member, assembler);
@@ -1368,6 +1470,11 @@ public static class WorkerAnalyzer
 
     private static void VisitNode(CallContext context, SyntaxNode node, NodeRecord? caller, int depth)
     {
+        if (context.Assembler.ResponseBudgetExceeded)
+        {
+            return; // nothing more could be emitted (F9)
+        }
+
         if (depth > MaxTraversalDepth)
         {
             ReportDepthExceeded(context, node);
@@ -1402,7 +1509,7 @@ public static class WorkerAnalyzer
 
         context.DepthReported = true;
         var lineSpan = context.Entry.Tree.GetLineSpan(node.Span);
-        context.Diagnostics.Add(new DiagnosticOut
+        AddMandatoryDiagnostic(context.Diagnostics, context.Assembler, new DiagnosticOut
         {
             RelativePath = context.Entry.RelativePath,
             Code = "ADAPTER_INTERNAL",
@@ -2189,15 +2296,27 @@ public static class WorkerAnalyzer
     private const int MaxAmbiguityCandidates = 64;
 
     /**
-     * Response text budget: characters of node names, edge endpoints, evidence
-     * rationales (counted twice: edge evidence plus the top-level evidence
-     * list), ambiguity candidates and warnings. Names are capped, but one
-     * capped namespace prefix is still repeated in every member below it, so
-     * the total needs its own bound. 40M stays below the adapter's default
-     * 64M-character response cap, so a truncated response is still accepted
-     * as "partial" instead of being discarded.
+     * Response size budget, in characters of the serialized response line
+     * (security finding F9): every node, edge, evidence record (counted twice:
+     * in its edge and in the top-level evidence list), warning and compiler
+     * diagnostic is charged with its exact JSON length (SerializedLength), plus
+     * the envelope and a reserve for node spans set after admission. Names are
+     * capped, but one capped prefix is still repeated in every member below it
+     * and short names carry the same per-record overhead, so the total needs its
+     * own bound. 60M leaves 7M of headroom below the C# adapter's default
+     * response cap (64 x 1024 x 1024 = 67,108,864 characters), so a truncated
+     * response is still accepted as "partial" instead of being discarded.
      */
-    private const long MaxResponseTextChars = 40_000_000;
+    private const long MaxResponseChars = 60_000_000;
+
+    /** Share of MaxResponseChars compiler diagnostics may use, so a file full of errors leaves room for the graph. */
+    private const long MaxDiagnosticResponseChars = 16_000_000;
+
+    /** Reserve on top of the measured empty envelope (coverage digits, array separators). */
+    private const long EnvelopeReserveChars = 256;
+
+    /** Upper bound of the `,"span":{"startLine":…,"endLine":…}` a node may get after admission. */
+    private const long NodeSpanReserveChars = 56;
 
     /**
      * `text` when it fits MaxEmittedTextLength; otherwise its first characters
@@ -2238,38 +2357,39 @@ public static class WorkerAnalyzer
         };
     }
 
-    private static long NodeTextChars(NodeOut node)
-    {
-        long chars = node.QualifiedName.Length + (node.RelativePath?.Length ?? 0);
-        foreach (var value in node.Attributes.Values)
-        {
-            if (value is string text)
-            {
-                chars += text.Length;
-            }
-        }
+    /** Length of `value` serialized exactly as in the response line (same options, so escaping included). */
+    private static long SerializedLength<T>(T value) => JsonSerializer.Serialize(value, ProtocolJson.Options).Length;
 
-        return chars;
+    /** A node in the `nodes` array: its JSON, the separator and the span reserve. */
+    private static long NodeResponseChars(NodeOut node) => SerializedLength(node) + 1 + NodeSpanReserveChars;
+
+    /** A new edge in the `edges` array without its evidence (charged per record, EvidenceResponseChars). */
+    private static long EdgeResponseChars(string kind, NodeRecord from, NodeRecord to, string resolution, AmbiguityOut? ambiguity) =>
+        SerializedLength(new EdgeOut
+        {
+            Kind = kind,
+            From = from.Ref,
+            To = to.Ref,
+            Resolution = resolution,
+            Ambiguity = ambiguity,
+        }) + 1;
+
+    /** One evidence record: in its edge and again in the top-level `evidence` list. */
+    private static long EvidenceResponseChars(EvidenceOut evidence) => 2L * (SerializedLength(evidence) + 1);
+
+    /** Adds a diagnostic that is always emitted and charges it (F9). */
+    private static void AddMandatoryDiagnostic(List<DiagnosticOut> diagnostics, GraphAssembler assembler, DiagnosticOut diagnostic)
+    {
+        diagnostics.Add(diagnostic);
+        assembler.ChargeMandatory(SerializedLength(diagnostic) + 1);
     }
 
-    private static long EdgeTextChars(NodeRecord from, NodeRecord to, AmbiguityOut? ambiguity)
+    /** Adds a warning that is always emitted (not de-duplicated, like before) and charges it (F9). */
+    private static void AddMandatoryWarning(GraphAssembler assembler, string message)
     {
-        long chars = from.Ref.QualifiedName.Length + (from.Ref.RelativePath?.Length ?? 0) +
-            to.Ref.QualifiedName.Length + (to.Ref.RelativePath?.Length ?? 0);
-        if (ambiguity is not null)
-        {
-            chars += ambiguity.Reason.Length;
-            foreach (var candidate in ambiguity.Candidates)
-            {
-                chars += candidate.Length;
-            }
-        }
-
-        return chars;
+        assembler.Warnings.Add(message);
+        assembler.ChargeMandatory(SerializedLength(message) + 1);
     }
-
-    private static long EvidenceTextChars(EvidenceOut evidence) =>
-        2L * (evidence.Rationale.Length + (evidence.Span?.RelativePath.Length ?? 0));
 
     /** Reports the declaration depth limit once per file (WalkMember). */
     private sealed class DeclarationDepthGuard
@@ -2291,7 +2411,7 @@ public static class WorkerAnalyzer
 
             _reported = true;
             var lineSpan = entry.Tree.GetLineSpan(node.Span);
-            _diagnostics.Add(new DiagnosticOut
+            AddMandatoryDiagnostic(_diagnostics, assembler, new DiagnosticOut
             {
                 RelativePath = entry.RelativePath,
                 Code = "ADAPTER_INTERNAL",
