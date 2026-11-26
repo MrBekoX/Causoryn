@@ -9,6 +9,7 @@
     ".": "./src/index.ts"
   },
   "dependencies": {
+    "@causoryn/contracts": "0.3.2",
     "@causoryn/domain": "0.3.2",
     "@causoryn/workspace": "0.3.2",
     "yaml": "^2.9.1",

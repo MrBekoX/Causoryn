@@ -13,15 +13,25 @@ import {
  */
 const failure = vi.hoisted(() => ({ next: undefined as Error | undefined }));
 
+// The guard parses through parseDocument (the linear duplicate-key parse of
+// @causoryn/contracts); `parse` is wrapped as well so the failure is injected
+// whichever entry point parses.
 vi.mock("yaml", async (importOriginal) => {
   const actual = await importOriginal<typeof import("yaml")>();
-  const parse = ((...args: Parameters<typeof actual.parse>) => {
+  const throwPendingFailure = (): void => {
     const error = failure.next;
     failure.next = undefined;
     if (error !== undefined) throw error;
+  };
+  const parse = ((...args: Parameters<typeof actual.parse>) => {
+    throwPendingFailure();
     return actual.parse(...args);
   }) as typeof actual.parse;
-  return { ...actual, default: { ...actual, parse }, parse };
+  const parseDocument = ((...args: Parameters<typeof actual.parseDocument>) => {
+    throwPendingFailure();
+    return actual.parseDocument(...args);
+  }) as typeof actual.parseDocument;
+  return { ...actual, default: { ...actual, parse, parseDocument }, parse, parseDocument };
 });
 
 afterEach(() => {

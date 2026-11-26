@@ -1,5 +1,6 @@
 import { z } from "zod";
-import { parse as parseYaml, YAMLParseError, type ErrorCode as YamlErrorCode } from "yaml";
+import { YAMLParseError, type ErrorCode as YamlErrorCode } from "yaml";
+import { parseYamlDocument } from "@causoryn/contracts";
 import { EDGE_KINDS, type EdgeKind } from "@causoryn/domain";
 
 /**
@@ -522,10 +523,23 @@ function describeYamlParseError(error: YAMLParseError): string {
   return `YAML could not be parsed: ${error.code} (${reason})${where}`;
 }
 
+/**
+ * Same outcome as yaml's `parse(text, YAML_PARSE_OPTIONS)`: the first error
+ * is thrown, warnings are dropped and aliases are not expanded. The document
+ * is parsed with a linear duplicate-key check (`parseYamlDocument`: same tree
+ * and errors as the library's default check, which compares each new key of
+ * a map with every earlier key: O(k²) for a policy or baseline file of up to
+ * `maxFileBytes` from the repository, CWE-407).
+ */
 function parseYamlOrThrow(text: string, yamlErrorCode: string): unknown {
   let document: unknown;
   try {
-    document = parseYaml(text, YAML_PARSE_OPTIONS);
+    const parsed = parseYamlDocument(text);
+    // toJS would otherwise write its warnings (which embed source text) to stderr.
+    parsed.options.logLevel = YAML_PARSE_OPTIONS.logLevel;
+    const firstError = parsed.errors[0];
+    if (firstError !== undefined) throw firstError;
+    document = parsed.toJS({ maxAliasCount: YAML_PARSE_OPTIONS.maxAliasCount });
   } catch (error) {
     if (error instanceof YAMLParseError) {
       throw new GuardError(yamlErrorCode, describeYamlParseError(error));
