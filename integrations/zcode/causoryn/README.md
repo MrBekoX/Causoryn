@@ -143,7 +143,7 @@ variable (JSON). The plugin wires it through user configuration:
     "type": "stdio",
     "command": "node",
     "args": ["${CLAUDE_PLUGIN_ROOT}/../../../packages/mcp-server/dist/mcp-server.mjs"],
-    "cwd": "${CLAUDE_PROJECT_DIR}",
+    "cwd": "${CLAUDE_PLUGIN_ROOT}",
     "env": { "CAUSORYN_CONFIG": "${user_config.config_json}" }
   }
 }

@@ -84,7 +84,7 @@ With no detected host and no `--client`/`--all`, `setup` writes nothing and exit
      ```
    - Or run `npx causoryn@latest setup --client claude-code --yes` (`~/.claude.json` + `~/.claude/skills/`).
 3. **Codex** (Codex CLI / Desktop):
-   - Add the repository marketplace (`.agents/plugins/marketplace.json` + `.codex-plugin/plugin.json`) via Codex plugin management, or run `npx causoryn@latest setup --client codex --yes` (`$CODEX_HOME/config.toml` `[mcp_servers.causoryn]` with `startup_timeout_sec` of at least 30 — a higher value you set is kept — + `~/.agents/skills/`).
+   - Run `npx causoryn@latest setup --client codex --yes` (recommended). The repository marketplace (`.agents/plugins/marketplace.json` + `.codex-plugin/plugin.json`) installs the skills, but its server starts in the plugin directory and Codex reports no project root, so it has no authorized workspace; setup writes the server entry (`$CODEX_HOME/config.toml` `[mcp_servers.causoryn]` with `startup_timeout_sec` of at least 30 — a higher value you set is kept — + `~/.agents/skills/`).
 4. **ZCode (GLM)**:
    - Open **Plugin Marketplace -> New / Discover**, add `https://github.com/MrBekoX/Causoryn` (uses root `marketplace.json` and `.zcode-plugin/plugin.json`), and install `causoryn`.
    - Or run `npx causoryn@latest setup --client zcode --yes` (writes `~/.zcode/cli/config.json` `mcp.servers.causoryn` while preserving any existing `~/.agents/mcp.json` fallback servers, plus `~/.zcode/skills/`).

@@ -65,7 +65,7 @@ Bu nedenle hiçbir skill veya araç adını bilmeniz gerekmez — sonucu isteyin
 
 ### C. Başka bir araç profili gerektiren prompt'lar
 
-Bu araçlar varsayılan `core` profilinde kayıtlı değildir. Profili host yapılandırmanızdaki sunucu argümanlarına ekleyin (örneğin `causoryn mcp --allow-cwd --auto-data-dir --tool-profile wiki`) veya `CAUSORYN_TOOL_PROFILE` değişkenini ayarlayın, ardından host'u yeniden başlatın; `npx causoryn@latest setup --tool-profile wiki --yes` bayrağı host kayıtlarına sizin yerinize yazar. Profil olmadan ajan bu araçları hiç görmez.
+Bu araçlar varsayılan `core` profilinde kayıtlı değildir. Bayrağı host kayıtlarına yazmak için `npx causoryn@latest setup --tool-profile wiki --yes` çalıştırın (önerilen) ya da mevcut bir host kaydının sunucu argümanlarına `--tool-profile wiki` ekleyin veya `CAUSORYN_TOOL_PROFILE` değişkenini ayarlayın, ardından host'u yeniden başlatın. Profil olmadan ajan bu araçları hiç görmez.
 
 | Amaç | Kopyala-yapıştır prompt (Türkçe) | Copy-paste prompt (English) | Araçlar | Gereken profil |
 |---|---|---|---|---|

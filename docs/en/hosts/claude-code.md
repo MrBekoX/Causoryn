@@ -120,7 +120,7 @@ The root `.claude-plugin/marketplace.json` declares an npm source (`{ "source": 
 }
 ```
 
-`plugin-mcp-launcher.mjs` checks that the installed `package.json` is `causoryn` at exactly the `--expected-version` (and that `CAUSORYN_EXPECTED_VERSION`, if set, agrees). It does not spawn a nested `npx` process. On a mismatch or a missing bundle it exits `2` with a `[causoryn-launcher]` message on `stderr`. Otherwise it sets `CAUSORYN_ASSET_ROOT` and imports `dist/mcp-server.mjs` directly, keeping `stdout` reserved for MCP frames. `${CLAUDE_PLUGIN_ROOT}` is never accepted as an analyzed project root.
+`plugin-mcp-launcher.mjs` checks that the installed `package.json` is `causoryn` at exactly the `--expected-version` (and that `CAUSORYN_EXPECTED_VERSION`, if set, agrees). It does not spawn a nested `npx` process. On a mismatch or a missing bundle it exits `2` with a `[causoryn-launcher]` message on `stderr`. Otherwise it sets `CAUSORYN_ASSET_ROOT` and imports `dist/mcp-server.mjs` directly, keeping `stdout` reserved for MCP frames. `${CLAUDE_PLUGIN_ROOT}` is never accepted as an analyzed project root. Claude Code's plugin MCP config has no `cwd` field, so Claude Code chooses the directory the server starts in (the session directory, bound through `--allow-cwd` or MCP `roots/list`); the entry script is anchored at `${CLAUDE_PLUGIN_ROOT}`, and how Claude Code resolves the bare `node` command is up to the host. `causoryn setup` (Option A) writes the absolute Node binary instead.
 
 ## 3. Tool profiles in Claude Code
 

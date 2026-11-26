@@ -65,14 +65,14 @@ Son kullanıcılar Antigravity'nin eklenti yükleyicisini depo köküne (`https:
 
 | Konum | `plugin.json` | `mcp_config.json` sunucu başlatma |
 |---|---|---|
-| Depo kökü | `name`, `displayName`, `version` `0.3.2`, `description`, `author`, `homepage`, `repository`, `suggestedPrompts` | `npx -y --ignore-scripts causoryn@0.3.2 mcp --allow-cwd --auto-data-dir --client antigravity` |
-| `packages/causoryn` (yayımlanan npm paketi) | Aynı alanlar | `node ${PLUGIN_ROOT}/scripts/plugin-mcp-launcher.mjs --expected-version 0.3.2 --allow-cwd --auto-data-dir --client antigravity` |
+| Depo kökü | `name`, `displayName`, `version` `0.3.2`, `description`, `author`, `homepage`, `repository`, `suggestedPrompts` | `cwd: ${PLUGIN_ROOT}` ile `npx -y --ignore-scripts --prefix ${PLUGIN_DATA} causoryn@0.3.2 mcp --allow-cwd --auto-data-dir --client antigravity` |
+| `packages/causoryn` (yayımlanan npm paketi) | Aynı alanlar | `cwd: ${PLUGIN_ROOT}` ile `node ${PLUGIN_ROOT}/scripts/plugin-mcp-launcher.mjs --expected-version 0.3.2 --allow-cwd --auto-data-dir --client antigravity` |
 
 Paket dizini varyantı `plugin-mcp-launcher.mjs` kullanır: kurulu `package.json` dosyasının tam olarak `--expected-version` sürümündeki `causoryn` olduğunu (ve tanımlıysa `CAUSORYN_EXPECTED_VERSION` ile uyuştuğunu) denetler; herhangi bir uyuşmazlıkta `stderr` üzerine `[causoryn-launcher]` mesajı yazarak `2` ile çıkar; aksi halde iç içe bir `npx` süreci açmadan `dist/mcp-server.mjs` modülünü doğrudan import eder. Başlatıcı yolu `${PLUGIN_ROOT}` ile eklenti köküne bağlanır; Antigravity bu token'ı bir eklentinin `mcp_config.json` dosyasında eklenti dizinine genişletir (yerleşik `mcp-app-development` skill dokümanı). Çıplak göreli bir yol, `node` tarafından host'un sunucuyu başlattığı çalışma dizinine göre çözülürdü.
 
-`npx` manifestleri `--ignore-scripts` geçirir: yayımlanan `causoryn` paketinin bağımlılığı ve kurulum betiği yoktur (SQLite native eklentisi `dist/` içinde önceden derlenmiş gelir), bu yüzden kurulum sırasında hiçbir şeyin çalışması gerekmez.
+`npx` manifestleri `--ignore-scripts` geçirir: yayımlanan `causoryn` paketinin bağımlılığı ve kurulum betiği yoktur (SQLite native eklentisi `dist/` içinde önceden derlenmiş gelir), bu yüzden kurulum sırasında hiçbir şeyin çalışması gerekmez. Her Antigravity manifesti sunucuyu `cwd: ${PLUGIN_ROOT}` ile başlatır; `npx` manifestleri ayrıca npm prefix'ini eklentinin veri dizinine sabitler (`--prefix ${PLUGIN_DATA}`). Böylece analiz edilen projenin npm yapılandırması, `node_modules` ve `node_modules/.bin` dizini sunucunun çözümlenmesine katılmaz. `--allow-cwd` eklenti dizinini reddettiği için workspace MCP `roots/list` üzerinden bağlanır.
 
-İki kök manifest daha diğer MCP istemcilerine hizmet eder: `mcp.json` (`type: "stdio"` ve `npx -y --ignore-scripts causoryn@0.3.2 mcp --allow-cwd --auto-data-dir` içeren taşınabilir `mcpServers.causoryn`) ve `server.json` (MCP Registry girdisi `io.github.mrbekox/causoryn`, npm paketi `causoryn`, `stdio` taşıması, argümanlar `mcp --allow-cwd --auto-data-dir`).
+İki kök manifest daha diğer MCP istemcilerine hizmet eder: `mcp.json` (`type: "stdio"`, `cwd: ${PLUGIN_ROOT}` ve `npx -y --ignore-scripts --prefix ${PLUGIN_DATA} causoryn@0.3.2 mcp --allow-cwd --auto-data-dir` içeren taşınabilir `mcpServers.causoryn`) ve `server.json` (MCP Registry girdisi `io.github.mrbekox/causoryn`, npm paketi `causoryn`, `stdio` taşıması, runtime argümanı `--ignore-scripts`, paket argümanları `mcp --allow-cwd --auto-data-dir`). Registry biçiminde çalışma dizini veya eklenti kökü alanı yoktur; bu yüzden `npx`'i proje dizininde çalıştıran bir registry istemcisi paketi yine o projenin npm bağlamında çözer. Bu belgelenmiş bir artık sınırdır; `causoryn setup` mutlak runtime yolunu kaydederek bundan kaçınır.
 
 ---
 
@@ -154,6 +154,7 @@ Uygulanan kural: `agy` CLI yoksa CLI adımlarının çalıştırılmadığı aç
       "args": [
         "${PLUGIN_ROOT}/scripts/mcp-server.mjs"
       ],
+      "cwd": "${PLUGIN_ROOT}",
       "env": {
         "CAUSORYN_CONFIG": "{\"allowRoots\":[]}"
       }
@@ -172,6 +173,7 @@ Uygulanan kural: `agy` CLI yoksa CLI adımlarının çalıştırılmadığı aç
       "args": [
         "${PLUGIN_ROOT}/scripts/mcp-server.mjs"
       ],
+      "cwd": "${PLUGIN_ROOT}",
       "env": {
         "CAUSORYN_CONFIG": "{\"allowRoots\":[]}"
       }
@@ -185,6 +187,7 @@ Uygulanan kural: `agy` CLI yoksa CLI adımlarının çalıştırılmadığı aç
 | `mcpServers.causoryn` | Sunucu anahtarı `causoryn` | Paylaşılan sunucu ad alanında çakışmaları önler |
 | `command` | `node` | Yerel `stdio` süreci; LLM veya harici API çağrısı yok |
 | `args[0]` | Hem `mcp_config.json` hem `mcp.json` içinde `"${PLUGIN_ROOT}/scripts/mcp-server.mjs"` | Sahnelenmiş, derlenmiş esbuild çıktısı; ham `.ts` giriş noktaları, çıplak göreli veya mutlak yollar ve üst dizin kaçışları fikstür testi tarafından reddedilir |
+| `cwd` | Her iki manifestte `"${PLUGIN_ROOT}"` | Sunucu analiz edilen bir projede değil, eklenti dizininde başlar; fikstür testi proje dizini olan bir `cwd` değerini reddeder |
 | `env.CAUSORYN_CONFIG` | `{"allowRoots":[]}` | **Default deny**; `parseCausorynServerConfig` ile doğrulanır (katı nesne, mutlak `allowRoots`); bir kök yetkilendirilene kadar workspace araçları `WORKSPACE_NOT_AUTHORIZED` döner |
 
 ### Çıplak `stdio.ts` ve paketlenmiş `cli-stdio.ts`

@@ -129,9 +129,10 @@ Both `scripts/causoryn.mjs` and `scripts/plugin-mcp-launcher.mjs` run this depen
 
 ### 2.2 `scripts/plugin-mcp-launcher.mjs` & version pinning
 
-Host plugin manifests (`.claude-plugin/plugin.json`, `.zcode-plugin/plugin.json`, `packages/causoryn/mcp_config.json`) start `scripts/plugin-mcp-launcher.mjs` with `node` directly instead of a nested `npx` process:
+Host plugin manifests (`.claude-plugin/plugin.json`, `.zcode-plugin/plugin.json`, `.codex-plugin/mcp.json`, `packages/causoryn/mcp_config.json`) start `scripts/plugin-mcp-launcher.mjs` with `node` directly instead of a nested `npx` process, from the plugin root wherever the host has a `cwd` field:
 
 - Accepts `--expected-version <semver>` (or `--expected-version=<semver>`) and/or `CAUSORYN_EXPECTED_VERSION`; all other arguments are forwarded to the server.
+- Accepts `--project-dir <dir>` (or `--project-dir=<dir>`; ZCode passes `${ZCODE_PROJECT_DIR}`): a fully qualified local path to an existing directory (no UNC/device path, no NUL, no unexpanded `${…}`) becomes the server's working directory just before the bundle loads, so `--allow-cwd` applies its project-root safety check to it. Any other value is ignored with `[causoryn-launcher] --project-dir ignored (<reason>)` on `stderr`, and the server waits for MCP `roots/list`. The flag is never forwarded to the server.
 - Exits `2` on `stderr` if the two pins disagree, if `package.json#name` is not `causoryn`, if `package.json#version` differs from the pin, or if `dist/mcp-server.mjs` is missing. This stops a stale cached plugin copy from running silently.
 - Sets `CAUSORYN_ASSET_ROOT` to the package root when unset or blank and imports `dist/mcp-server.mjs`. An inherited value is kept only when it is an absolute path to an existing directory holding the same `causoryn` package version (its `package.json`) with a `native/` directory; anything else exits `2` with `[causoryn-launcher] CAUSORYN_ASSET_ROOT rejected …` on `stderr`.
 
@@ -353,6 +354,8 @@ Every child process the MCP server starts (sidecars, `git`, `cargo`; on Windows 
 
 ## 8. Examples
 
+The `npx` examples run from a directory outside the analyzed project with npm's prefix pinned to a directory you own (`--prefix`), so the project's `.npmrc`, `node_modules` and `node_modules/.bin` take no part in resolving the server, and they name the project with `--root` or `CAUSORYN_CONFIG`. For daily use, `causoryn setup` registers the absolute runtime path instead.
+
 **Typical host entry written by `setup` (Claude Code, `~/.claude.json`):**
 
 ```json
@@ -370,25 +373,25 @@ Every child process the MCP server starts (sidecars, `git`, `cargo`; on Windows 
 **Explicit root with the wiki and history tools:**
 
 ```bash
-npx causoryn@0.3.2 mcp --root /work/orders-service --auto-data-dir --client ci --tool-profile wiki,history
+npx -y --ignore-scripts --prefix ~/.npx-causoryn causoryn@0.3.2 mcp --root /work/orders-service --auto-data-dir --client ci --tool-profile wiki,history
 ```
 
 **Full legacy catalog with published output schemas, via environment variables:**
 
 ```bash
-CAUSORYN_TOOL_PROFILE=full CAUSORYN_MCP_OUTPUT_SCHEMA_PROFILE=full npx causoryn@0.3.2 mcp --allow-cwd --auto-data-dir
+CAUSORYN_TOOL_PROFILE=full CAUSORYN_MCP_OUTPUT_SCHEMA_PROFILE=full npx -y --ignore-scripts --prefix ~/.npx-causoryn causoryn@0.3.2 mcp --root /work/orders-service --auto-data-dir
 ```
 
 **Root from `CAUSORYN_CONFIG` with an in-memory graph (no data directory, no exports, no wiki):**
 
 ```bash
-CAUSORYN_CONFIG='{"allowRoots":["/work/orders-service"]}' npx causoryn@0.3.2 mcp
+CAUSORYN_CONFIG='{"allowRoots":["/work/orders-service"]}' npx -y --ignore-scripts --prefix ~/.npx-causoryn causoryn@0.3.2 mcp
 ```
 
 **Root from `CAUSORYN_CONFIG` with persistence, exports and the wiki:**
 
 ```bash
-CAUSORYN_CONFIG='{"allowRoots":["/work/orders-service"],"results":{"maxDepth":6}}' npx causoryn@0.3.2 mcp --auto-data-dir --tool-profile wiki
+CAUSORYN_CONFIG='{"allowRoots":["/work/orders-service"],"results":{"maxDepth":6}}' npx -y --ignore-scripts --prefix ~/.npx-causoryn causoryn@0.3.2 mcp --auto-data-dir --tool-profile wiki
 ```
 
 **Preview and remove:**

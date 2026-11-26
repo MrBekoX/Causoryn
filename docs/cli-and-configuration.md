@@ -129,9 +129,10 @@ Hem `scripts/causoryn.mjs` hem de `scripts/plugin-mcp-launcher.mjs`, herhangi bi
 
 ### 2.2 `scripts/plugin-mcp-launcher.mjs` ve sürüm pinleme
 
-Host plugin manifestleri (`.claude-plugin/plugin.json`, `.zcode-plugin/plugin.json`, `packages/causoryn/mcp_config.json`), iç içe bir `npx` süreci yerine `scripts/plugin-mcp-launcher.mjs`'i doğrudan `node` ile başlatır:
+Host plugin manifestleri (`.claude-plugin/plugin.json`, `.zcode-plugin/plugin.json`, `.codex-plugin/mcp.json`, `packages/causoryn/mcp_config.json`), iç içe bir `npx` süreci yerine `scripts/plugin-mcp-launcher.mjs`'i doğrudan `node` ile ve host'un `cwd` alanı olan her yerde plugin kökünden başlatır:
 
 - `--expected-version <semver>` (veya `--expected-version=<semver>`) ve/veya `CAUSORYN_EXPECTED_VERSION` kabul eder; diğer tüm argümanlar sunucuya aktarılır.
+- `--project-dir <dir>` (veya `--project-dir=<dir>`; ZCode `${ZCODE_PROJECT_DIR}` geçirir) kabul eder: var olan bir dizine giden tam nitelikli yerel bir yol (UNC/aygıt yolu, NUL ve genişletilmemiş `${…}` yok) bundle yüklenmeden hemen önce sunucunun çalışma dizini olur; böylece `--allow-cwd` proje kökü güvenlik denetimini ona uygular. Başka her değer `stderr` üzerinde `[causoryn-launcher] --project-dir ignored (<reason>)` ile yok sayılır ve sunucu MCP `roots/list` bekler. Bayrak sunucuya asla iletilmez.
 - İki pin birbirini tutmazsa, `package.json#name` `causoryn` değilse, `package.json#version` pinden farklıysa veya `dist/mcp-server.mjs` eksikse `stderr`'e yazarak `2` ile çıkar. Bu, önbellekte kalmış bayat bir plugin kopyasının sessizce çalışmasını engeller.
 - `CAUSORYN_ASSET_ROOT` ayarlı değilse veya boşsa paket köküne ayarlar ve `dist/mcp-server.mjs`'i içe aktarır. Miras alınan bir değer yalnızca aynı `causoryn` paket sürümünü (`package.json`) ve bir `native/` dizinini barındıran, var olan bir dizinin mutlak yoluysa korunur; aksi halde `stderr`'e `[causoryn-launcher] CAUSORYN_ASSET_ROOT rejected …` yazarak `2` ile çıkar.
 
@@ -353,6 +354,8 @@ MCP sunucusunun başlattığı her alt süreç (sidecar'lar, `git`, `cargo`; Win
 
 ## 8. Örnekler
 
+`npx` örnekleri analiz edilen projenin dışındaki bir dizinden, npm prefix'i size ait bir dizine sabitlenerek (`--prefix`) çalışır; böylece projenin `.npmrc`, `node_modules` ve `node_modules/.bin` dizini sunucunun çözümlenmesine katılmaz ve proje `--root` veya `CAUSORYN_CONFIG` ile adlandırılır. Günlük kullanım için `causoryn setup` bunun yerine mutlak runtime yolunu kaydeder.
+
 **`setup`'ın yazdığı tipik host kaydı (Claude Code, `~/.claude.json`):**
 
 ```json
@@ -370,25 +373,25 @@ MCP sunucusunun başlattığı her alt süreç (sidecar'lar, `git`, `cargo`; Win
 **Wiki ve history araçlarıyla açık kök:**
 
 ```bash
-npx causoryn@0.3.2 mcp --root /work/orders-service --auto-data-dir --client ci --tool-profile wiki,history
+npx -y --ignore-scripts --prefix ~/.npx-causoryn causoryn@0.3.2 mcp --root /work/orders-service --auto-data-dir --client ci --tool-profile wiki,history
 ```
 
 **Ortam değişkenleri aracılığıyla, yayımlanmış çıktı şemalarıyla tam legacy katalog:**
 
 ```bash
-CAUSORYN_TOOL_PROFILE=full CAUSORYN_MCP_OUTPUT_SCHEMA_PROFILE=full npx causoryn@0.3.2 mcp --allow-cwd --auto-data-dir
+CAUSORYN_TOOL_PROFILE=full CAUSORYN_MCP_OUTPUT_SCHEMA_PROFILE=full npx -y --ignore-scripts --prefix ~/.npx-causoryn causoryn@0.3.2 mcp --root /work/orders-service --auto-data-dir
 ```
 
 **Bellek-içi graph ile `CAUSORYN_CONFIG`'ten kök (veri dizini yok, dışa aktarım yok, wiki yok):**
 
 ```bash
-CAUSORYN_CONFIG='{"allowRoots":["/work/orders-service"]}' npx causoryn@0.3.2 mcp
+CAUSORYN_CONFIG='{"allowRoots":["/work/orders-service"]}' npx -y --ignore-scripts --prefix ~/.npx-causoryn causoryn@0.3.2 mcp
 ```
 
 **Kalıcılık, dışa aktarımlar ve wiki ile `CAUSORYN_CONFIG`'ten kök:**
 
 ```bash
-CAUSORYN_CONFIG='{"allowRoots":["/work/orders-service"],"results":{"maxDepth":6}}' npx causoryn@0.3.2 mcp --auto-data-dir --tool-profile wiki
+CAUSORYN_CONFIG='{"allowRoots":["/work/orders-service"],"results":{"maxDepth":6}}' npx -y --ignore-scripts --prefix ~/.npx-causoryn causoryn@0.3.2 mcp --auto-data-dir --tool-profile wiki
 ```
 
 **Önizleme ve kaldırma:**

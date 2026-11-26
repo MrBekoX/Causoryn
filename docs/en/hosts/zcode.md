@@ -89,23 +89,25 @@ The packaged `packages/causoryn/.zcode-plugin/plugin.json` ships the skills (`"s
         "${ZCODE_PLUGIN_ROOT}/scripts/plugin-mcp-launcher.mjs",
         "--expected-version",
         "0.3.2",
+        "--project-dir",
+        "${ZCODE_PROJECT_DIR}",
         "--allow-cwd",
         "--auto-data-dir",
         "--client",
         "zcode"
       ],
-      "cwd": "${ZCODE_PROJECT_DIR}"
+      "cwd": "${ZCODE_PLUGIN_ROOT}"
     }
   }
 }
 ```
 
-`plugin-mcp-launcher.mjs` checks that the installed `package.json` is `causoryn` at exactly `--expected-version` (and agrees with `CAUSORYN_EXPECTED_VERSION` if set) without spawning a nested `npx` process, exits `2` with a `[causoryn-launcher]` message on `stderr` on any mismatch or missing bundle, and otherwise imports `dist/mcp-server.mjs` directly.
+`plugin-mcp-launcher.mjs` checks that the installed `package.json` is `causoryn` at exactly `--expected-version` (and agrees with `CAUSORYN_EXPECTED_VERSION` if set) without spawning a nested `npx` process, exits `2` with a `[causoryn-launcher]` message on `stderr` on any mismatch or missing bundle, and otherwise imports `dist/mcp-server.mjs` directly. `node` starts in the plugin root (`cwd: ${ZCODE_PLUGIN_ROOT}`), never in the analyzed project; the project arrives as `--project-dir ${ZCODE_PROJECT_DIR}`. The launcher accepts it only as a fully qualified local path to an existing directory (no UNC/device path, no NUL, no unexpanded `${…}`), enters it just before the bundle loads, and never forwards the flag, so `--allow-cwd` still applies its project-root safety check. Any other value is ignored with a `[causoryn-launcher] --project-dir ignored (…)` note on `stderr`; the server then starts in the plugin root, which `--allow-cwd` refuses, and waits for MCP `roots/list`.
 
 ### ZCode environment variables and safety boundaries
 
 - **`ZCODE_PLUGIN_ROOT`:** read-only installation root of the plugin. `deriveForbiddenPluginDirs` (`packages/mcp-server/src/runtime-cli.ts`) never lets `ZCODE_PLUGIN_ROOT` or `~/.zcode/plugins` be authorized as an analyzed project root.
-- **`ZCODE_PROJECT_DIR`:** the active project directory, passed as `cwd`. `--allow-cwd` checks it with `inspectProjectRootSafety` before authorizing it. Refused candidates include UNC and device paths, filesystem roots, `$HOME` and its ancestors, OS system directories, sensitive directories (`~/.ssh`, `~/.aws`, `~/.gnupg`, `~/.kube`, `~/.claude`, `~/.codex`, `~/.zcode`), plugin install directories, and Causoryn data directories. When the directory is refused, the server starts with no authorized root and binds the first safe `file://` root the client reports through MCP `roots/list` (also on `notifications/roots/list_changed`); until then workspace tools return `WORKSPACE_NOT_AUTHORIZED`.
+- **`ZCODE_PROJECT_DIR`:** the active project directory, passed as `--project-dir` (the launcher enters it before the server starts). `--allow-cwd` checks it with `inspectProjectRootSafety` before authorizing it. Refused candidates include UNC and device paths, filesystem roots, `$HOME` and its ancestors, OS system directories, sensitive directories (`~/.ssh`, `~/.aws`, `~/.gnupg`, `~/.kube`, `~/.claude`, `~/.codex`, `~/.zcode`), plugin install directories, and Causoryn data directories. When the directory is refused, the server starts with no authorized root and binds the first safe `file://` root the client reports through MCP `roots/list` (also on `notifications/roots/list_changed`); until then workspace tools return `WORKSPACE_NOT_AUTHORIZED`.
 - **`ZCODE_PLUGIN_DATA`:** ZCode uses the same base data directory as every other host (`--data-dir` > `~/.causoryn`), so all hosts share one index per workspace. `ZCODE_PLUGIN_DATA` is only a fallback, used when `~/.causoryn` cannot be created or written; when set it must be an absolute path (UNC/device paths are rejected) and is validated even when it is not used. Existing ZCode users whose index lived under `ZCODE_PLUGIN_DATA` re-index once. Causoryn verifies that the data directory lies strictly outside every authorized workspace before creating anything; the analyzed source tree is never written.
 
 ---
@@ -159,7 +161,7 @@ The fixture manifest launches the compiled monorepo bundle and hands the user co
       "args": [
         "${CLAUDE_PLUGIN_ROOT}/../../../packages/mcp-server/dist/mcp-server.mjs"
       ],
-      "cwd": "${CLAUDE_PROJECT_DIR}",
+      "cwd": "${CLAUDE_PLUGIN_ROOT}",
       "env": {
         "CAUSORYN_CONFIG": "${user_config.config_json}"
       }
@@ -189,7 +191,7 @@ Across `causoryn.mjs mcp`, `plugin-mcp-launcher.mjs`, and the bare `mcp-server.m
 | `setup` stops with `Refusing to read the ZCode fallback config …` | `~/.agents/mcp.json` is a symbolic link, not a regular file, or larger than 1 MiB (a linked directory on its path is reported as `Refusing to read through a symbolic link or junction …`). Replace it with a regular file, or add its servers to `mcp.servers` in `~/.zcode/cli/config.json` by hand, then re-run setup. |
 | `[causoryn-launcher]` version mismatch (exit `2`) | The installed plugin package does not match `--expected-version`. Update or reinstall the plugin. |
 | Server exits at start with "Unsupported Node.js version" | Node.js < 24. Install Node.js 24+ and re-run `setup`. |
-| Workspace tools return `WORKSPACE_NOT_AUTHORIZED` | `ZCODE_PROJECT_DIR` was refused and no safe root came from `roots/list`, or the fixture has no `allowRoots`. Open the project folder itself in ZCode, or declare the root. |
+| Workspace tools return `WORKSPACE_NOT_AUTHORIZED` | `ZCODE_PROJECT_DIR` was refused (or the launcher ignored `--project-dir`; see the `[causoryn-launcher]` line on `stderr`) and no safe root came from `roots/list`, or the fixture has no `allowRoots`. Open the project folder itself in ZCode, or declare the root. |
 | Wiki or history tools are missing from `tools/list` | Default `core` profile. See section 3. |
 
 ## Related pages

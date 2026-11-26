@@ -89,23 +89,25 @@ Paketlenmiş `packages/causoryn/.zcode-plugin/plugin.json`, skill'leri taşır (
         "${ZCODE_PLUGIN_ROOT}/scripts/plugin-mcp-launcher.mjs",
         "--expected-version",
         "0.3.2",
+        "--project-dir",
+        "${ZCODE_PROJECT_DIR}",
         "--allow-cwd",
         "--auto-data-dir",
         "--client",
         "zcode"
       ],
-      "cwd": "${ZCODE_PROJECT_DIR}"
+      "cwd": "${ZCODE_PLUGIN_ROOT}"
     }
   }
 }
 ```
 
-`plugin-mcp-launcher.mjs`, iç içe bir `npx` süreci başlatmadan kurulu `package.json` dosyasının tam olarak `--expected-version` sürümündeki `causoryn` olduğunu (ve tanımlıysa `CAUSORYN_EXPECTED_VERSION` ile uyuştuğunu) denetler; herhangi bir uyuşmazlıkta veya bundle eksikse `stderr` üzerine `[causoryn-launcher]` mesajı yazarak `2` ile çıkar; aksi halde `dist/mcp-server.mjs` modülünü doğrudan import eder.
+`plugin-mcp-launcher.mjs`, iç içe bir `npx` süreci başlatmadan kurulu `package.json` dosyasının tam olarak `--expected-version` sürümündeki `causoryn` olduğunu (ve tanımlıysa `CAUSORYN_EXPECTED_VERSION` ile uyuştuğunu) denetler; herhangi bir uyuşmazlıkta veya bundle eksikse `stderr` üzerine `[causoryn-launcher]` mesajı yazarak `2` ile çıkar; aksi halde `dist/mcp-server.mjs` modülünü doğrudan import eder. `node` analiz edilen projede değil, plugin kökünde başlar (`cwd: ${ZCODE_PLUGIN_ROOT}`); proje `--project-dir ${ZCODE_PROJECT_DIR}` olarak gelir. Başlatıcı bu değeri yalnızca var olan bir dizine giden tam nitelikli yerel bir yol olarak kabul eder (UNC/aygıt yolu, NUL ve genişletilmemiş `${…}` yok), bundle yüklenmeden hemen önce o dizine geçer ve bayrağı sunucuya iletmez; böylece `--allow-cwd` proje kökü güvenlik denetimini uygulamaya devam eder. Başka her değer `stderr` üzerinde bir `[causoryn-launcher] --project-dir ignored (…)` notuyla yok sayılır; sunucu bu durumda `--allow-cwd`'nin reddettiği plugin kökünde başlar ve MCP `roots/list` bekler.
 
 ### ZCode ortam değişkenleri ve güvenlik sınırları
 
 - **`ZCODE_PLUGIN_ROOT`:** eklentinin salt okunur kurulum kökü. `deriveForbiddenPluginDirs` (`packages/mcp-server/src/runtime-cli.ts`), `ZCODE_PLUGIN_ROOT` veya `~/.zcode/plugins` dizinlerinin analiz edilen bir proje kökü olarak yetkilendirilmesine hiçbir zaman izin vermez.
-- **`ZCODE_PROJECT_DIR`:** `cwd` olarak geçirilen etkin proje dizini. `--allow-cwd`, bu dizini yetkilendirmeden önce `inspectProjectRootSafety` ile denetler. Reddedilen adaylar arasında UNC ve aygıt yolları, dosya sistemi kökleri, `$HOME` ve üst dizinleri, işletim sistemi dizinleri, hassas dizinler (`~/.ssh`, `~/.aws`, `~/.gnupg`, `~/.kube`, `~/.claude`, `~/.codex`, `~/.zcode`), eklenti kurulum dizinleri ve Causoryn veri dizinleri bulunur. Dizin reddedildiğinde sunucu yetkili bir kök olmadan başlar ve istemcinin MCP `roots/list` üzerinden bildirdiği ilk güvenli `file://` köke bağlanır (`notifications/roots/list_changed` bildiriminde de); o zamana kadar workspace araçları `WORKSPACE_NOT_AUTHORIZED` döner.
+- **`ZCODE_PROJECT_DIR`:** `--project-dir` olarak geçirilen etkin proje dizini (başlatıcı, sunucu başlamadan önce bu dizine geçer). `--allow-cwd`, bu dizini yetkilendirmeden önce `inspectProjectRootSafety` ile denetler. Reddedilen adaylar arasında UNC ve aygıt yolları, dosya sistemi kökleri, `$HOME` ve üst dizinleri, işletim sistemi dizinleri, hassas dizinler (`~/.ssh`, `~/.aws`, `~/.gnupg`, `~/.kube`, `~/.claude`, `~/.codex`, `~/.zcode`), eklenti kurulum dizinleri ve Causoryn veri dizinleri bulunur. Dizin reddedildiğinde sunucu yetkili bir kök olmadan başlar ve istemcinin MCP `roots/list` üzerinden bildirdiği ilk güvenli `file://` köke bağlanır (`notifications/roots/list_changed` bildiriminde de); o zamana kadar workspace araçları `WORKSPACE_NOT_AUTHORIZED` döner.
 - **`ZCODE_PLUGIN_DATA`:** ZCode diğer tüm host'larla aynı taban veri dizinini (`--data-dir` > `~/.causoryn`) kullanır; böylece tüm host'lar workspace başına tek bir indeksi paylaşır. `ZCODE_PLUGIN_DATA` yalnızca `~/.causoryn` oluşturulamadığında veya yazılamadığında yedek olarak kullanılır; ayarlandığında mutlak bir yol olmalıdır (UNC/aygıt yolları reddedilir) ve kullanılmasa bile doğrulanır. İndeksi `ZCODE_PLUGIN_DATA` altında bulunan mevcut ZCode kullanıcıları bir kez yeniden indeksler. Causoryn herhangi bir şey oluşturmadan önce veri dizininin yetkili tüm workspace'lerin kesinlikle dışında olduğunu doğrular; analiz edilen kaynak ağaca hiçbir zaman yazılmaz.
 
 ---
@@ -159,7 +161,7 @@ Fikstür manifesti derlenmiş monorepo bundle'ını başlatır ve kullanıcı ko
       "args": [
         "${CLAUDE_PLUGIN_ROOT}/../../../packages/mcp-server/dist/mcp-server.mjs"
       ],
-      "cwd": "${CLAUDE_PROJECT_DIR}",
+      "cwd": "${CLAUDE_PLUGIN_ROOT}",
       "env": {
         "CAUSORYN_CONFIG": "${user_config.config_json}"
       }
@@ -189,7 +191,7 @@ Fikstür manifesti derlenmiş monorepo bundle'ını başlatır ve kullanıcı ko
 | `setup`, `Refusing to read the ZCode fallback config …` ile duruyor | `~/.agents/mcp.json` sembolik bağlantı, normal bir dosya değil veya 1 MiB'tan büyük (yolundaki link olan bir dizin `Refusing to read through a symbolic link or junction …` olarak raporlanır). Normal bir dosyayla değiştirin ya da sunucularını `~/.zcode/cli/config.json` içindeki `mcp.servers` altına elle ekleyin, ardından setup'ı yeniden çalıştırın. |
 | `[causoryn-launcher]` sürüm uyuşmazlığı (çıkış `2`) | Kurulu eklenti paketi `--expected-version` ile eşleşmiyor. Eklentiyi güncelleyin veya yeniden kurun. |
 | Sunucu başlangıçta "Unsupported Node.js version" ile çıkıyor | Node.js < 24. Node.js 24+ kurun ve `setup` komutunu yeniden çalıştırın. |
-| Workspace araçları `WORKSPACE_NOT_AUTHORIZED` döndürüyor | `ZCODE_PROJECT_DIR` reddedildi ve `roots/list` üzerinden güvenli bir kök gelmedi ya da fikstürde `allowRoots` yok. Proje klasörünün kendisini ZCode'da açın veya kökü beyan edin. |
+| Workspace araçları `WORKSPACE_NOT_AUTHORIZED` döndürüyor | `ZCODE_PROJECT_DIR` reddedildi (ya da başlatıcı `--project-dir` değerini yok saydı; `stderr` üzerindeki `[causoryn-launcher]` satırına bakın) ve `roots/list` üzerinden güvenli bir kök gelmedi ya da fikstürde `allowRoots` yok. Proje klasörünün kendisini ZCode'da açın veya kökü beyan edin. |
 | Wiki veya history araçları `tools/list` içinde yok | Varsayılan `core` profili. Bkz. bölüm 3. |
 
 ## İlgili sayfalar

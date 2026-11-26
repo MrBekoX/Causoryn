@@ -120,7 +120,7 @@ Kök `.claude-plugin/marketplace.json` bir npm kaynağı beyan eder (`{ "source"
 }
 ```
 
-`plugin-mcp-launcher.mjs`, kurulu `package.json` dosyasının tam olarak `--expected-version` sürümündeki `causoryn` paketi olduğunu (ve tanımlıysa `CAUSORYN_EXPECTED_VERSION` değeriyle uyuştuğunu) denetler. İç içe bir `npx` süreci başlatmaz. Sürüm uyuşmazlığında ya da bundle eksikse `stderr` üzerine bir `[causoryn-launcher]` mesajı yazarak `2` ile çıkar. Aksi halde `CAUSORYN_ASSET_ROOT` değerini atar ve `dist/mcp-server.mjs` modülünü doğrudan import eder; böylece `stdout` MCP çerçevelerine ayrılmış kalır. `${CLAUDE_PLUGIN_ROOT}` hiçbir zaman analiz edilen proje kökü olarak kabul edilmez.
+`plugin-mcp-launcher.mjs`, kurulu `package.json` dosyasının tam olarak `--expected-version` sürümündeki `causoryn` paketi olduğunu (ve tanımlıysa `CAUSORYN_EXPECTED_VERSION` değeriyle uyuştuğunu) denetler. İç içe bir `npx` süreci başlatmaz. Sürüm uyuşmazlığında ya da bundle eksikse `stderr` üzerine bir `[causoryn-launcher]` mesajı yazarak `2` ile çıkar. Aksi halde `CAUSORYN_ASSET_ROOT` değerini atar ve `dist/mcp-server.mjs` modülünü doğrudan import eder; böylece `stdout` MCP çerçevelerine ayrılmış kalır. `${CLAUDE_PLUGIN_ROOT}` hiçbir zaman analiz edilen proje kökü olarak kabul edilmez. Claude Code'un plugin MCP yapılandırmasında `cwd` alanı yoktur; sunucunun başladığı dizini Claude Code seçer (`--allow-cwd` veya MCP `roots/list` ile bağlanan oturum dizini). Giriş betiği `${CLAUDE_PLUGIN_ROOT}`'a bağlıdır; çıplak `node` komutunun nasıl çözüleceği host'a kalmıştır. `causoryn setup` (Seçenek A) bunun yerine mutlak Node binary'sini yazar.
 
 ## 3. Claude Code'da araç profilleri
 

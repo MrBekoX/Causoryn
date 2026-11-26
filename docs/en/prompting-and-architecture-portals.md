@@ -65,7 +65,7 @@ You therefore do not need to know any skill or tool name — ask for the outcome
 
 ### C. Prompts That Need Another Tool Profile
 
-These tools are not registered in the default `core` profile. Add the profile to the server arguments in your host config (for example `causoryn mcp --allow-cwd --auto-data-dir --tool-profile wiki`) or set `CAUSORYN_TOOL_PROFILE`, then restart the host; `npx causoryn@latest setup --tool-profile wiki --yes` writes the flag into the host entries for you. Without the profile the agent will not see these tools at all.
+These tools are not registered in the default `core` profile. Run `npx causoryn@latest setup --tool-profile wiki --yes` to write the flag into the host entries (recommended), or add `--tool-profile wiki` to the server arguments of an existing host entry or set `CAUSORYN_TOOL_PROFILE`, then restart the host. Without the profile the agent will not see these tools at all.
 
 | Goal | Copy-paste prompt (English) | Kopyala-yapıştır prompt (Türkçe) | Tools | Required profile |
 |---|---|---|---|---|

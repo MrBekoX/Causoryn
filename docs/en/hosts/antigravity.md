@@ -65,14 +65,14 @@ End users can also point Antigravity's plugin loader at the repository root (`ht
 
 | Location | `plugin.json` | `mcp_config.json` server launch |
 |---|---|---|
-| Repository root | `name`, `displayName`, `version` `0.3.2`, `description`, `author`, `homepage`, `repository`, `suggestedPrompts` | `npx -y --ignore-scripts causoryn@0.3.2 mcp --allow-cwd --auto-data-dir --client antigravity` |
-| `packages/causoryn` (published npm package) | Same fields | `node ${PLUGIN_ROOT}/scripts/plugin-mcp-launcher.mjs --expected-version 0.3.2 --allow-cwd --auto-data-dir --client antigravity` |
+| Repository root | `name`, `displayName`, `version` `0.3.2`, `description`, `author`, `homepage`, `repository`, `suggestedPrompts` | `npx -y --ignore-scripts --prefix ${PLUGIN_DATA} causoryn@0.3.2 mcp --allow-cwd --auto-data-dir --client antigravity` with `cwd: ${PLUGIN_ROOT}` |
+| `packages/causoryn` (published npm package) | Same fields | `node ${PLUGIN_ROOT}/scripts/plugin-mcp-launcher.mjs --expected-version 0.3.2 --allow-cwd --auto-data-dir --client antigravity` with `cwd: ${PLUGIN_ROOT}` |
 
 The package-directory variant uses `plugin-mcp-launcher.mjs`: it checks that the installed `package.json` is `causoryn` at exactly `--expected-version` (and agrees with `CAUSORYN_EXPECTED_VERSION` if set), exits `2` with a `[causoryn-launcher]` message on `stderr` on any mismatch, and otherwise imports `dist/mcp-server.mjs` directly without a nested `npx` process. The launcher path is anchored with `${PLUGIN_ROOT}`, which Antigravity expands to the plugin directory in a plugin's `mcp_config.json` (built-in `mcp-app-development` skill documentation); a bare relative path would be resolved by `node` against the working directory the host starts the server in.
 
-The `npx` manifests pass `--ignore-scripts`: the published `causoryn` package has no dependencies and no install scripts (the SQLite native addon ships prebuilt inside `dist/`), so nothing needs to run at install time.
+The `npx` manifests pass `--ignore-scripts`: the published `causoryn` package has no dependencies and no install scripts (the SQLite native addon ships prebuilt inside `dist/`), so nothing needs to run at install time. Every Antigravity manifest starts the server with `cwd: ${PLUGIN_ROOT}`, and the `npx` manifests also pin npm's prefix to the plugin's data directory (`--prefix ${PLUGIN_DATA}`), so the analyzed project's npm configuration, `node_modules` and `node_modules/.bin` take no part in resolving the server. Because `--allow-cwd` refuses the plugin directory, the workspace is bound from MCP `roots/list`.
 
-Two further root manifests serve other MCP clients: `mcp.json` (portable `mcpServers.causoryn` with `type: "stdio"` and `npx -y --ignore-scripts causoryn@0.3.2 mcp --allow-cwd --auto-data-dir`) and `server.json` (MCP Registry entry `io.github.mrbekox/causoryn`, npm package `causoryn`, `stdio` transport, arguments `mcp --allow-cwd --auto-data-dir`).
+Two further root manifests serve other MCP clients: `mcp.json` (portable `mcpServers.causoryn` with `type: "stdio"`, `cwd: ${PLUGIN_ROOT}` and `npx -y --ignore-scripts --prefix ${PLUGIN_DATA} causoryn@0.3.2 mcp --allow-cwd --auto-data-dir`) and `server.json` (MCP Registry entry `io.github.mrbekox/causoryn`, npm package `causoryn`, `stdio` transport, runtime argument `--ignore-scripts`, package arguments `mcp --allow-cwd --auto-data-dir`). The registry format has no working-directory or plugin-root field, so a registry client that runs `npx` in the project directory still resolves the package in that project's npm context; this is a documented residual, and `causoryn setup` avoids it by registering the absolute runtime path.
 
 ---
 
@@ -154,6 +154,7 @@ Rule applied: if the `agy` CLI is absent, report explicitly that the CLI steps w
       "args": [
         "${PLUGIN_ROOT}/scripts/mcp-server.mjs"
       ],
+      "cwd": "${PLUGIN_ROOT}",
       "env": {
         "CAUSORYN_CONFIG": "{\"allowRoots\":[]}"
       }
@@ -172,6 +173,7 @@ Rule applied: if the `agy` CLI is absent, report explicitly that the CLI steps w
       "args": [
         "${PLUGIN_ROOT}/scripts/mcp-server.mjs"
       ],
+      "cwd": "${PLUGIN_ROOT}",
       "env": {
         "CAUSORYN_CONFIG": "{\"allowRoots\":[]}"
       }
@@ -185,6 +187,7 @@ Rule applied: if the `agy` CLI is absent, report explicitly that the CLI steps w
 | `mcpServers.causoryn` | Server key `causoryn` | Avoids collisions in the shared server namespace |
 | `command` | `node` | Local `stdio` process; no LLM or external API calls |
 | `args[0]` | `"${PLUGIN_ROOT}/scripts/mcp-server.mjs"` in both `mcp_config.json` and `mcp.json` | Staged compiled esbuild output; raw `.ts` entrypoints, bare relative or absolute paths, and parent-directory escapes are rejected by the fixture test |
+| `cwd` | `"${PLUGIN_ROOT}"` in both manifests | The server starts in the plugin directory, never in an analyzed project; the fixture test rejects a project-directory `cwd` |
 | `env.CAUSORYN_CONFIG` | `{"allowRoots":[]}` | **Default deny**, validated by `parseCausorynServerConfig` (strict object, absolute `allowRoots`); workspace tools return `WORKSPACE_NOT_AUTHORIZED` until a root is authorized |
 
 ### Bare `stdio.ts` vs packaged `cli-stdio.ts`
