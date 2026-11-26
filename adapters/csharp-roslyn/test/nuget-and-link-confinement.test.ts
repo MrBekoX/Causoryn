@@ -207,6 +207,87 @@ describe("NuGet packageFolders confinement", () => {
   });
 });
 
+/** Writes `obj/project.assets.json` with explicit targets/libraries (net10.0) and package folders. */
+function writeRawAssets(
+  projectDir: string,
+  packageFolders: readonly string[],
+  targets: Record<string, unknown>,
+  libraries: Record<string, unknown>,
+): void {
+  mkdirSync(join(projectDir, "obj"), { recursive: true });
+  writeFileSync(
+    join(projectDir, "obj", "project.assets.json"),
+    JSON.stringify({
+      version: 3,
+      targets: { "net10.0": targets },
+      libraries,
+      packageFolders: Object.fromEntries(packageFolders.map((folder) => [folder, {}])),
+    }),
+    "utf8",
+  );
+}
+
+describe("NuGet assets discovery budget (security finding F45)", () => {
+  it("stops with a warning once the file system probe budget is spent; packages found before it are kept", () => {
+    const base = tempDir("causoryn-nuget-budget-");
+    const ws = join(base, "ws");
+    const local = join(ws, "packages");
+    const realDll = makePackage(local, "Acme.Early");
+    mkdirSync(join(local, "acme.wide", "1.0.0", "lib"), { recursive: true });
+    // 30,000 compile entries in distinct, missing directories of one existing package.
+    const wideCompile = Object.fromEntries(Array.from({ length: 30_000 }, (_, index) => [`lib/d${String(index)}/x.dll`, {}]));
+    writeRawAssets(
+      ws,
+      [local],
+      {
+        "Acme.Early/1.0.0": { type: "package", compile: { "lib/net10.0/Acme.Early.dll": {} } },
+        "Acme.Wide/1.0.0": { type: "package", compile: wideCompile },
+      },
+      {
+        "Acme.Early/1.0.0": { type: "package", path: "acme.early/1.0.0" },
+        "Acme.Wide/1.0.0": { type: "package", path: "acme.wide/1.0.0" },
+      },
+    );
+
+    const discovered = discoverNugetReferenceDirs(ws, noTrust());
+    expect(discovered.referenceDirs).toEqual([realpathSync(realDll)]);
+    expect(discovered.warnings).toEqual([
+      "NuGet reference discovery stopped after 20000 file system probes; the remaining project.assets.json entries were not inspected",
+    ]);
+  }, 60_000);
+
+  it("compile entries that share a directory probe it once (the probe budget is not spent per entry)", () => {
+    const base = tempDir("causoryn-nuget-memo-");
+    const ws = join(base, "ws");
+    const local = join(ws, "packages");
+    const dllDir = makePackage(local, "Acme.Shared");
+    // 5,000 entries in the same existing directory; only the last DLL exists.
+    const compile = Object.fromEntries(Array.from({ length: 5_000 }, (_, index) => [`lib/net10.0/m${String(index).padStart(4, "0")}.dll`, {}]));
+    writeFileSync(join(dllDir, "m4999.dll"), "stub", "utf8");
+    writeRawAssets(ws, [local], { "Acme.Shared/1.0.0": { type: "package", compile } }, {
+      "Acme.Shared/1.0.0": { type: "package", path: "acme.shared/1.0.0" },
+    });
+    const discovered = discoverNugetReferenceDirs(ws, noTrust());
+    expect(discovered.referenceDirs).toEqual([realpathSync(dllDir)]);
+    expect(discovered.warnings).toEqual([]);
+  }, 60_000);
+
+  it("only the first 8 package folders of an assets file are inspected, with a warning", () => {
+    const base = tempDir("causoryn-nuget-folders-");
+    const ws = join(base, "ws");
+    const folders = Array.from({ length: 12 }, (_, index) => join(ws, `f${String(index).padStart(2, "0")}`));
+    for (const folder of folders) mkdirSync(folder, { recursive: true });
+    const firstDll = makePackage(folders[0]!, "Acme.First");
+    makePackage(folders[11]!, "Acme.Last");
+    writeAssets(ws, folders, ["Acme.First", "Acme.Last"]);
+    const discovered = discoverNugetReferenceDirs(ws, noTrust());
+    expect(discovered.referenceDirs).toEqual([realpathSync(firstDll)]);
+    expect(discovered.warnings).toEqual([
+      "obj/project.assets.json: only the first 8 usable NuGet packageFolders entries were inspected; 4 further entries were skipped",
+    ]);
+  });
+});
+
 describe("intermediate links in workspace reads", () => {
   it("readBoundedFileNoFollow refuses a path whose intermediate directory is a link, even inside the root", () => {
     const root = tempDir("causoryn-cs-intermediate-");

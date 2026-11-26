@@ -127,6 +127,16 @@ export const MAX_PROJECT_FILE_BYTES = 1024 * 1024;
 /** Maximum number of MSBuild projects forwarded to the worker (mirrors Protocol.cs MaxProjectCount). */
 export const MAX_CSHARP_PROJECTS = 1024;
 
+/**
+ * Maximum `globalUsings` entries of one project (mirrors Protocol.cs
+ * MaxGlobalUsingsPerProject). The worker rejects a whole request above it, so
+ * the project model keeps at most this many and drops the rest with a warning.
+ */
+export const MAX_GLOBAL_USINGS_PER_PROJECT = 512;
+
+/** Maximum `projectReferences` entries of one project (mirrors Protocol.cs MaxProjectReferencesPerProject). */
+export const MAX_PROJECT_REFERENCES_PER_PROJECT = 512;
+
 /** One `global using` directive the .NET SDK generates for a project (MSBuild `Using` item). */
 export interface CSharpGlobalUsing {
   /** Dotted namespace or type name (`Include`). */

@@ -537,6 +537,37 @@ const MAX_ASSETS_SCAN_DEPTH = 4;
 const MAX_ASSETS_FILES = 32;
 const MAX_ASSETS_DIR_VISITS = 512;
 
+/**
+ * Total file system probes (lstat / realpath / readlink) of one NuGet
+ * discovery, across every assets file (security finding F45). The entries of
+ * an untrusted `project.assets.json` would otherwise cost package folders x
+ * packages x compile entries x path depth probes. Same budget as the project
+ * model's MAX_DIRECTORY_PROBES; discovery stops with a warning when it is spent.
+ */
+const MAX_NUGET_PROBES = 20_000;
+
+/** Usable `packageFolders` entries per assets file (NuGet writes the global packages folder plus fallback folders). */
+const MAX_NUGET_PACKAGE_FOLDERS = 8;
+
+/** Probe budget of one discovery plus the directories already resolved (each pair is probed once). */
+interface NugetProbeBudget {
+  remaining: number;
+  exhausted: boolean;
+  readonly resolvedDirs: Map<string, string | null>;
+}
+
+/** Spends `count` probes; false (and the budget is marked exhausted) when they are not left. */
+function spendProbes(budget: NugetProbeBudget, count: number): boolean
+{
+  if (budget.exhausted || budget.remaining < count)
+  {
+    budget.exhausted = true;
+    return false;
+  }
+  budget.remaining -= count;
+  return true;
+}
+
 const FORBIDDEN_JSON_KEYS: ReadonlySet<string> = new Set([
   "__proto__",
   "constructor",
@@ -616,12 +647,29 @@ function selectPreferredTargetKey(targetKeys: readonly string[]): string | undef
 function resolveNonSymlinkDirWithinBase(
   baseRealDir: string,
   segments: readonly string[],
+  budget: NugetProbeBudget,
+): string | null
+{
+  const memoKey = `${baseRealDir}\u0000${segments.join("/")}`;
+  const memo = budget.resolvedDirs.get(memoKey);
+  if (memo !== undefined) return memo;
+  const resolved = resolveNonSymlinkDirWithinBaseUncached(baseRealDir, segments, budget);
+  // An exhausted budget is no answer: the pair stays unresolved and is not recorded.
+  if (!budget.exhausted) budget.resolvedDirs.set(memoKey, resolved);
+  return resolved;
+}
+
+function resolveNonSymlinkDirWithinBaseUncached(
+  baseRealDir: string,
+  segments: readonly string[],
+  budget: NugetProbeBudget,
 ): string | null
 {
   let current = baseRealDir;
   for (const seg of segments)
   {
     current = join(current, seg);
+    if (!spendProbes(budget, 1)) return null;
     let stat;
     try
     {
@@ -634,6 +682,7 @@ function resolveNonSymlinkDirWithinBase(
     if (stat.isSymbolicLink() || !stat.isDirectory()) return null;
   }
 
+  if (!spendProbes(budget, 1)) return null;
   let realTarget: string;
   try
   {
@@ -678,7 +727,11 @@ function validateSafeLocalDirectory(rawDir: string): string | null
  * root or the workspace (checked lexically before any file system access and
  * again on the real path); null otherwise.
  */
-function confinePackageFolder(rawKey: string, trustedRoots: readonly TrustedNugetRoot[]): string | null
+function confinePackageFolder(
+  rawKey: string,
+  trustedRoots: readonly TrustedNugetRoot[],
+  budget: NugetProbeBudget,
+): string | null
 {
   if (rawKey.length === 0 || rawKey.includes("\0")) return null;
   const trimmed = rawKey.trim();
@@ -691,6 +744,9 @@ function confinePackageFolder(rawKey: string, trustedRoots: readonly TrustedNuge
       isInsideRealDir(root.canonical, candidate),
   );
   if (owners.length === 0) return null;
+  // validateSafeLocalDirectory + canonicalLocalPath: one lstat per path
+  // component plus realpath, lstat and the canonical realpath.
+  if (!spendProbes(budget, candidate.split(sep).length + 4)) return null;
   const real = validateSafeLocalDirectory(candidate);
   if (real === null) return null;
   const canonical = canonicalLocalPath(real);
@@ -702,7 +758,9 @@ function extractNugetDirsFromAssetsContent(
   content: string,
   discovered: Set<string>,
   trustedRoots: readonly TrustedNugetRoot[],
+  budget: NugetProbeBudget,
   onIgnoredPackageFolders: (count: number) => void,
+  onSkippedPackageFolders: (count: number) => void,
 ): void
 {
   let parsed: unknown;
@@ -722,14 +780,18 @@ function extractNugetDirsFromAssetsContent(
   if (!isRecord(rawPackageFolders)) return;
   const packageFolders: string[] = [];
   let ignoredFolders = 0;
-  for (const key of Object.getOwnPropertyNames(rawPackageFolders).sort())
+  const folderKeys = Object.getOwnPropertyNames(rawPackageFolders)
+    .sort()
+    .filter((key) => !FORBIDDEN_JSON_KEYS.has(key) && Object.prototype.hasOwnProperty.call(rawPackageFolders, key));
+  let inspectedKeys = 0;
+  for (const key of folderKeys)
   {
-    if (FORBIDDEN_JSON_KEYS.has(key)) continue;
-    if (!Object.prototype.hasOwnProperty.call(rawPackageFolders, key)) continue;
-    const realFolder = confinePackageFolder(key, trustedRoots);
+    if (packageFolders.length >= MAX_NUGET_PACKAGE_FOLDERS || budget.exhausted) break;
+    inspectedKeys += 1;
+    const realFolder = confinePackageFolder(key, trustedRoots, budget);
     if (realFolder === null)
     {
-      ignoredFolders += 1;
+      if (!budget.exhausted) ignoredFolders += 1;
       continue;
     }
     if (!packageFolders.includes(realFolder))
@@ -738,6 +800,10 @@ function extractNugetDirsFromAssetsContent(
     }
   }
   if (ignoredFolders > 0) onIgnoredPackageFolders(ignoredFolders);
+  if (packageFolders.length >= MAX_NUGET_PACKAGE_FOLDERS && inspectedKeys < folderKeys.length)
+  {
+    onSkippedPackageFolders(folderKeys.length - inspectedKeys);
+  }
   if (packageFolders.length === 0) return;
 
   // 2) Map library keys -> safe relative package paths.
@@ -782,7 +848,7 @@ function extractNugetDirsFromAssetsContent(
 
   for (const pkgKey of sortedPkgKeys)
   {
-    if (discovered.size >= MAX_NUGET_REFERENCE_DIRS) break;
+    if (discovered.size >= MAX_NUGET_REFERENCE_DIRS || budget.exhausted) break;
     const pkgInfo = targetPackages[pkgKey];
     if (!isRecord(pkgInfo)) continue;
     if (pkgInfo["type"] !== undefined && pkgInfo["type"] !== "package") continue;
@@ -801,7 +867,7 @@ function extractNugetDirsFromAssetsContent(
 
     for (const compileKey of compileEntries)
     {
-      if (discovered.size >= MAX_NUGET_REFERENCE_DIRS) break;
+      if (discovered.size >= MAX_NUGET_REFERENCE_DIRS || budget.exhausted) break;
       if (!compileKey.toLowerCase().endsWith(".dll")) continue;
       const compileSegments = validateSafeRelativeSegments(compileKey);
       if (compileSegments === null || compileSegments.length === 0) continue;
@@ -814,8 +880,9 @@ function extractNugetDirsFromAssetsContent(
 
       for (const pkgFolder of packageFolders)
       {
-        const resolvedDir = resolveNonSymlinkDirWithinBase(pkgFolder, fullDirSegments);
+        const resolvedDir = resolveNonSymlinkDirWithinBase(pkgFolder, fullDirSegments, budget);
         if (resolvedDir === null) continue;
+        if (!spendProbes(budget, 1)) break;
         const dllPath = join(resolvedDir, dllFileName);
         let dllStat;
         try
@@ -934,17 +1001,35 @@ export function discoverNugetReferenceDirs(
   }
 
   const discovered = new Set<string>();
+  const budget: NugetProbeBudget = { remaining: MAX_NUGET_PROBES, exhausted: false, resolvedDirs: new Map() };
   for (const assetsPath of assetsFiles.sort((a, b) => (a < b ? -1 : a > b ? 1 : 0)))
   {
-    if (discovered.size >= MAX_NUGET_REFERENCE_DIRS) break;
+    if (discovered.size >= MAX_NUGET_REFERENCE_DIRS || budget.exhausted) break;
     const content = readBoundedFileNoFollow(assetsPath, realRoot, MAX_PROJECT_ASSETS_BYTES);
     if (content === null) continue;
     const displayPath = relative(realRoot, assetsPath).split(sep).join("/");
-    extractNugetDirsFromAssetsContent(content, discovered, trustedRoots, (count) => {
-      warnings.push(
-        `${displayPath}: ignored ${String(count)} NuGet packageFolders ${count === 1 ? "entry" : "entries"} outside the trusted NuGet package roots and the workspace`,
-      );
-    });
+    extractNugetDirsFromAssetsContent(
+      content,
+      discovered,
+      trustedRoots,
+      budget,
+      (count) => {
+        warnings.push(
+          `${displayPath}: ignored ${String(count)} NuGet packageFolders ${count === 1 ? "entry" : "entries"} outside the trusted NuGet package roots and the workspace`,
+        );
+      },
+      (count) => {
+        warnings.push(
+          `${displayPath}: only the first ${String(MAX_NUGET_PACKAGE_FOLDERS)} usable NuGet packageFolders entries were inspected; ${String(count)} further ${count === 1 ? "entry was" : "entries were"} skipped`,
+        );
+      },
+    );
+  }
+  if (budget.exhausted)
+  {
+    warnings.push(
+      `NuGet reference discovery stopped after ${String(MAX_NUGET_PROBES)} file system probes; the remaining project.assets.json entries were not inspected`,
+    );
   }
 
   const referenceDirs = [...discovered]

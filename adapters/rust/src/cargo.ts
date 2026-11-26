@@ -17,6 +17,7 @@
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import {
+  appendFileSync,
   chmodSync,
   constants as fsConstants,
   copyFileSync,
@@ -24,6 +25,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readdirSync,
+  readFileSync,
   realpathSync,
   renameSync,
   rmSync,
@@ -556,6 +558,33 @@ function copyRegularTree(srcDir: string, destDir: string): void {
   }
 }
 
+/** A `[workspace]` table header line (TOML allows blanks inside the brackets and a trailing comment). */
+const WORKSPACE_TABLE_HEADER = /^[ \t]*\[[ \t]*workspace[ \t]*\][ \t]*(?:#.*)?$/m;
+
+/**
+ * Makes the staged crate its own workspace root (security finding F11).
+ * Without a `[workspace]` table cargo searches the parent directories of the
+ * manifest for a `Cargo.toml` with `[workspace]` and adopts the first one as the
+ * workspace root, whose `[patch]` and `Cargo.lock` then govern the build
+ * (https://doc.rust-lang.org/cargo/reference/workspaces.html, "The members and
+ * exclude fields"; manifest.html#the-workspace-field: "inferred as the first
+ * Cargo.toml with [workspace] upwards in the filesystem"). A `[workspace]` table
+ * in the package's own manifest makes it the root package, so that search never
+ * starts and nothing above the cache directory can join the build. Only the
+ * private staged copy is changed; the shipped manifest (and with it the source
+ * fingerprint of the integrity pin) stays as it is.
+ */
+function declareStagedWorkspaceRoot(stagedManifestPath: string): void {
+  const manifest = readFileSync(stagedManifestPath, "utf8");
+  if (WORKSPACE_TABLE_HEADER.test(manifest)) return;
+  const separator = manifest.length === 0 || manifest.endsWith("\n") ? "" : "\n";
+  appendFileSync(
+    stagedManifestPath,
+    `${separator}\n# Added by Causoryn to the staged copy: this crate is its own workspace root.\n[workspace]\n`,
+    "utf8",
+  );
+}
+
 function copyRegularFileIfPresent(from: string, to: string): void {
   const st = (() => {
     try {
@@ -611,7 +640,10 @@ export interface StagedRustWorkerBuildOutcome {
  * inside it and `--locked` is used. cargo config discovery and rustup's
  * toolchain-file discovery both walk the cwd's ancestors, so building in the
  * package directory (e.g. <repo>/node_modules/...) would read the analyzed
- * repository's `.cargo/config.toml` / `rust-toolchain.toml`. Every build uses
+ * repository's `.cargo/config.toml` / `rust-toolchain.toml`. The staged
+ * manifest declares its own `[workspace]` table, so cargo never adopts a
+ * `Cargo.toml` above the cache as the workspace root (declareStagedWorkspaceRoot).
+ * Every build uses
  * a new target directory, and the output is copied (not linked) to the
  * destination, so the result is always freshly produced bytes. The cache,
  * staging and destination directories are private to the current user
@@ -699,6 +731,7 @@ export async function buildRustWorkerFromStagedSource(
     copyRegularFileIfPresent(join(sourceDir, "Cargo.lock"), join(stagingDir, "Cargo.lock"));
     copyRegularFileIfPresent(join(sourceDir, "build.rs"), join(stagingDir, "build.rs"));
     copyRegularTree(join(sourceDir, "src"), join(stagingDir, "src"));
+    declareStagedWorkspaceRoot(join(stagingDir, "Cargo.toml"));
   } catch (error) {
     cleanup();
     const detail = error instanceof Error ? error.message : String(error);

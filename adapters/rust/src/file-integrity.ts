@@ -8,7 +8,9 @@
  *   one hard link and, on POSIX, owned by the current user and not
  *   writable by group/other users.
  * - The cache directory is private to the current user (POSIX 0700) and
- *   lies below ancestors that other users cannot rename entries in.
+ *   lies below ancestors that other users cannot rename entries in; on
+ *   Windows, where no owner or ACL is visible, it must resolve inside the
+ *   user profile.
  * - The identity (device, inode, size, mtime) of a hashed file is recorded
  *   so the file can be re-checked right before it is executed.
  */
@@ -26,7 +28,8 @@ import {
   type BigIntStats,
   type Stats,
 } from "node:fs";
-import { dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { homedir } from "node:os";
+import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 
 /** O_NONBLOCK keeps an open of a FIFO from waiting; regular-file reads are unaffected. */
 const NOFOLLOW_READ_FLAGS =
@@ -242,6 +245,61 @@ export function untrustedToolchainConfigAbove(
   }
 }
 
+/** Path with links resolved for its nearest existing ancestor; the missing rest is appended lexically. */
+function realpathOfNearestExisting(target: string): string {
+  let current = resolve(target);
+  const rest: string[] = [];
+  for (;;) {
+    try {
+      const real = realpathSync.native(current);
+      return rest.length === 0 ? real : join(real, ...rest.reverse());
+    } catch {
+      const parent = dirname(current);
+      if (parent === current) return resolve(target);
+      rest.push(basename(current));
+      current = parent;
+    }
+  }
+}
+
+/**
+ * Windows (security finding F38): Node exposes neither the owner nor the ACL
+ * of a directory, so privacy cannot be verified directly. A directory is
+ * trusted only when its real path (junctions and symlinks resolved, also for
+ * the not yet existing part's nearest ancestor) lies inside the user's profile
+ * directory, whose default ACL admits only the user, SYSTEM and
+ * Administrators, and new directories inherit it. Anything else, for example
+ * `C:\causoryn-cache` (inheriting "Authenticated Users: Modify" from the drive
+ * root), is refused: fail closed.
+ */
+function windowsPerUserLocationProblem(dir: string, perUserRoot: string | null): string | null {
+  if (perUserRoot === null || perUserRoot.trim().length === 0 || !isAbsolute(perUserRoot)) {
+    return `the user profile directory is unknown, so the directory cannot be shown to be private to the current user (${dir})`;
+  }
+  let realRoot: string;
+  try {
+    realRoot = realpathSync.native(perUserRoot);
+  } catch {
+    return `the user profile directory could not be resolved (${perUserRoot})`;
+  }
+  const realDir = realpathOfNearestExisting(dir);
+  if (!isSameOrBelow(realDir, realRoot)) {
+    return (
+      `the directory resolves outside the user profile (${realDir} is not inside ${realRoot}); ` +
+      "Windows access control lists cannot be inspected here, so only a location inside the profile is trusted"
+    );
+  }
+  return null;
+}
+
+export interface PrivateDirectoryOptions {
+  /**
+   * Windows only: the per-user directory the cache must resolve inside;
+   * default os.homedir(). null means none is known (every location is refused).
+   */
+  readonly perUserRoot?: string | null;
+}
+
 /**
  * Makes `dir` a private cache directory and checks that it can be trusted.
  * Returns null when it can, otherwise an English reason.
@@ -252,9 +310,22 @@ export function untrustedToolchainConfigAbove(
  *   the current user, and a world-writable ancestor must have the sticky
  *   bit, so no other user can rename the cache away and put another one in
  *   its place. (Group-writable ancestors are accepted.)
+ * - Windows: the directory must resolve inside the user profile
+ *   (windowsPerUserLocationProblem), checked before anything is created and
+ *   again on the existing directory.
  * - The directory itself must not be a symlink.
  */
-export function preparePrivateDirectory(dir: string, create: boolean): string | null {
+export function preparePrivateDirectory(
+  dir: string,
+  create: boolean,
+  options: PrivateDirectoryOptions = {},
+): string | null {
+  const isWindows = process.platform === "win32";
+  const perUserRoot = !isWindows ? null : options.perUserRoot !== undefined ? options.perUserRoot : homedir();
+  if (isWindows) {
+    const problem = windowsPerUserLocationProblem(dir, perUserRoot);
+    if (problem !== null) return problem;
+  }
   if (create) {
     try {
       mkdirSync(dir, { recursive: true, mode: PRIVATE_DIR_MODE });
@@ -272,6 +343,7 @@ export function preparePrivateDirectory(dir: string, create: boolean): string | 
   if (st.isSymbolicLink() || !st.isDirectory()) {
     return `the path is a symlink or not a directory (${dir})`;
   }
+  if (isWindows) return windowsPerUserLocationProblem(dir, perUserRoot);
   const uid = currentUid();
   if (uid === undefined) return null;
   if (st.uid !== uid) {

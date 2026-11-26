@@ -103,7 +103,20 @@ public static class WorkerAnalyzer
          */
         private readonly int _nodeLimit;
 
+        /** Characters charged against MaxResponseTextChars so far (see Charge). */
+        private long _textChars;
+
+        private bool _warningsSuppressed;
+
         public bool Truncated { get; private set; }
+
+        /**
+         * Response text budget (security finding F9): the names, rationales,
+         * candidates and warnings the response carries are charged here; once
+         * MaxResponseTextChars is reached nothing more is admitted (sticky), the
+         * response gets a RESPONSE_TRUNCATED diagnostic and status "partial".
+         */
+        public bool TextBudgetExceeded { get; private set; }
 
         public GraphAssembler(int nodeLimit)
         {
@@ -111,6 +124,18 @@ public static class WorkerAnalyzer
         }
 
         public List<string> Warnings { get; } = new();
+
+        private bool Charge(long chars)
+        {
+            if (TextBudgetExceeded || _textChars + chars > MaxResponseTextChars)
+            {
+                TextBudgetExceeded = true;
+                return false;
+            }
+
+            _textChars += chars;
+            return true;
+        }
 
         public NodeRecord EnsureNode(string kind, string qualifiedName, string? relativePath, Dictionary<string, object>? attributes)
         {
@@ -146,6 +171,10 @@ public static class WorkerAnalyzer
                 Truncated = true;
                 return record;
             }
+            if (!Charge(NodeTextChars(record.Node)))
+            {
+                return record; // not admitted, like the node limit above
+            }
             _nodes.Add(key, record);
             return record;
         }
@@ -175,8 +204,20 @@ public static class WorkerAnalyzer
             var key = $"{kind}\u001e{from.Key}\u001e{to.Key}";
             if (!_edges.TryGetValue(key, out var record))
             {
+                if (!Charge(EdgeTextChars(from, to, ambiguity) + EvidenceTextChars(evidence)))
+                {
+                    return;
+                }
+
                 record = new EdgeRecord(from, to, kind, resolution, ambiguity);
                 _edges.Add(key, record);
+                record.AddEvidence(evidence);
+                return;
+            }
+
+            if (!record.HasEvidence(evidence) && !Charge(EvidenceTextChars(evidence)))
+            {
+                return; // the edge keeps the evidence it already has (>= 1)
             }
 
             record.AddEvidence(evidence);
@@ -184,10 +225,24 @@ public static class WorkerAnalyzer
 
         public void AddWarning(string message)
         {
-            if (_warningSeen.Add(message))
+            if (_warningSeen.Contains(message))
             {
-                Warnings.Add(message);
+                return;
             }
+
+            if (!Charge(message.Length))
+            {
+                if (!_warningsSuppressed)
+                {
+                    _warningsSuppressed = true;
+                    Warnings.Add("further warnings were not emitted: the response text budget was reached");
+                }
+
+                return;
+            }
+
+            _warningSeen.Add(message);
+            Warnings.Add(message);
         }
 
         public List<NodeOut> SortedNodes() =>
@@ -246,6 +301,8 @@ public static class WorkerAnalyzer
             public string Resolution { get; }
             public AmbiguityOut? Ambiguity { get; }
             public IReadOnlyCollection<EvidenceOut> Evidence => _evidence.Values;
+
+            public bool HasEvidence(EvidenceOut evidence) => _evidence.ContainsKey(GraphAssembler.EvidenceKey(evidence));
 
             public void AddEvidence(EvidenceOut evidence)
             {
@@ -508,7 +565,7 @@ public static class WorkerAnalyzer
                 var fileRecord = assembler.EnsureNode(
                     "File", entry.RelativePath, entry.RelativePath,
                     new Dictionary<string, object> { ["sourceHash"] = entry.SourceHash });
-                WalkCompilationUnit(entry, fileRecord.Node, model, assembler, registry, controllers);
+                WalkCompilationUnit(entry, fileRecord.Node, model, assembler, registry, controllers, diagnostics);
             });
         }
 
@@ -544,6 +601,17 @@ public static class WorkerAnalyzer
         }
 
         // 7) Kanonik çıktı (TŞ §8 invariant iv/vi).
+        if (assembler.TextBudgetExceeded)
+        {
+            diagnostics.Add(new DiagnosticOut
+            {
+                RelativePath = string.Empty,
+                Code = "RESPONSE_TRUNCATED",
+                Message = $"response text budget exceeded ({MaxResponseTextChars.ToString(System.Globalization.CultureInfo.InvariantCulture)} characters of names, rationales and warnings); excess nodes, edges, evidence and warnings were not emitted",
+                Line = 0,
+            });
+        }
+
         if (assembler.Truncated)
         {
             // Güvenlik bulgusu 4: sessiz kesim yok — tanı düşer, status
@@ -817,19 +885,28 @@ public static class WorkerAnalyzer
         SemanticModel model,
         GraphAssembler assembler,
         Dictionary<ISymbol, NodeRecord> registry,
-        List<(SourceEntry Entry, ControllerInfo Info)> controllers)
+        List<(SourceEntry Entry, ControllerInfo Info)> controllers,
+        List<DiagnosticOut> diagnostics)
     {
         if (entry.Tree.GetRoot() is not CompilationUnitSyntax unit)
         {
             return;
         }
 
+        var depthGuard = new DeclarationDepthGuard(diagnostics);
         foreach (var member in unit.Members)
         {
-            WalkMember(entry, member, string.Empty, fileNode, model, assembler, registry, controllers);
+            WalkMember(entry, member, string.Empty, fileNode, model, assembler, registry, controllers, depth: 0, depthGuard);
         }
     }
 
+    /**
+     * Declaration walk (security finding F29): limited to MaxTraversalDepth
+     * levels like WalkMemberHierarchies and VisitNode, with one diagnostic per
+     * file. A namespace's prefix is composed once (capped, CapText) and shared
+     * by all of its children, so a deep nesting keeps one bounded prefix per
+     * level instead of a growing copy per child.
+     */
     private static void WalkMember(
         SourceEntry entry,
         SyntaxNode member,
@@ -838,22 +915,32 @@ public static class WorkerAnalyzer
         SemanticModel model,
         GraphAssembler assembler,
         Dictionary<ISymbol, NodeRecord> registry,
-        List<(SourceEntry Entry, ControllerInfo Info)> controllers)
+        List<(SourceEntry Entry, ControllerInfo Info)> controllers,
+        int depth,
+        DeclarationDepthGuard depthGuard)
     {
+        if (depth > MaxTraversalDepth)
+        {
+            depthGuard.Report(entry, member, assembler);
+            return;
+        }
+
         switch (member)
         {
             case NamespaceDeclarationSyntax ns:
+                var nsChildPrefix = JoinNamespace(nsPrefix, ns.Name.ToString());
                 foreach (var child in ns.Members)
                 {
-                    WalkMember(entry, child, JoinNamespace(nsPrefix, ns.Name.ToString()), fileNode, model, assembler, registry, controllers);
+                    WalkMember(entry, child, nsChildPrefix, fileNode, model, assembler, registry, controllers, depth + 1, depthGuard);
                 }
 
                 break;
 
             case FileScopedNamespaceDeclarationSyntax fsns:
+                var fsnsChildPrefix = JoinNamespace(nsPrefix, fsns.Name.ToString());
                 foreach (var child in fsns.Members)
                 {
-                    WalkMember(entry, child, JoinNamespace(nsPrefix, fsns.Name.ToString()), fileNode, model, assembler, registry, controllers);
+                    WalkMember(entry, child, fsnsChildPrefix, fileNode, model, assembler, registry, controllers, depth + 1, depthGuard);
                 }
 
                 break;
@@ -862,7 +949,7 @@ public static class WorkerAnalyzer
                 RegisterType(entry, typeDecl, nsPrefix, fileNode, model, assembler, registry, controllers);
                 foreach (var child in typeDecl.Members)
                 {
-                    WalkMember(entry, child, nsPrefix, fileNode, model, assembler, registry, controllers);
+                    WalkMember(entry, child, nsPrefix, fileNode, model, assembler, registry, controllers, depth + 1, depthGuard);
                 }
 
                 break;
@@ -880,7 +967,7 @@ public static class WorkerAnalyzer
     private static string JoinNamespace(string prefix, string name)
     {
         var trimmed = name.Trim();
-        return prefix.Length == 0 ? trimmed : $"{prefix}.{trimmed}";
+        return CapText(prefix.Length == 0 ? trimmed : $"{prefix}.{trimmed}");
     }
 
     private static void RegisterType(
@@ -958,7 +1045,8 @@ public static class WorkerAnalyzer
         GraphAssembler assembler,
         Dictionary<ISymbol, NodeRecord> registry)
     {
-        var qualifiedName = $"{ownerQualifiedName}.{memberName}";
+        memberName = CapText(memberName);
+        var qualifiedName = MemberQualifiedName(ownerQualifiedName, memberName);
         var record = assembler.EnsureNode(kind, qualifiedName, entry.RelativePath, null);
         var symbol = declaration switch
         {
@@ -987,8 +1075,8 @@ public static class WorkerAnalyzer
         var symbol = model.GetDeclaredSymbol(localFunction);
         // Top-level local function sentetik Program sınıfına derlenir; bu
         // kural PROTOCOL.md'de belgelenmiştir (qualifiedName: Program.<ad>).
-        var ownerDisplay = symbol?.ContainingType?.ToDisplayString() ?? "Program";
-        var qualifiedName = $"{ownerDisplay}.{localFunction.Identifier.ValueText}";
+        var ownerDisplay = CapText(symbol?.ContainingType?.ToDisplayString() ?? "Program");
+        var qualifiedName = MemberQualifiedName(ownerDisplay, localFunction.Identifier.ValueText);
         var record = assembler.EnsureNode("Function", qualifiedName, entry.RelativePath, null);
         if (symbol is not null)
         {
@@ -1201,7 +1289,7 @@ public static class WorkerAnalyzer
                 continue;
             }
 
-            var rawName = baseTypeSyntax.Type.ToString().Trim();
+            var rawName = CapText(baseTypeSyntax.Type.ToString().Trim());
             if (rawName.Length == 0)
             {
                 continue;
@@ -1367,16 +1455,14 @@ public static class WorkerAnalyzer
             return;
         }
 
-        var expressionText = invocation.Expression.ToString().Trim();
+        var expressionText = CapText(invocation.Expression.ToString().Trim());
         var info = context.Model.GetSymbolInfo(invocation);
 
         if (info.Symbol is null && info.CandidateSymbols.Length > 0)
         {
-            EmitUnresolvedCall(context, caller, invocation, expressionText, new AmbiguityOut
-            {
-                Candidates = info.CandidateSymbols.Select(s => s.ToDisplayString()).ToList(),
-                Reason = "Overload ambiguity; the semantic model could not select a single candidate.",
-            });
+            EmitUnresolvedCall(context, caller, invocation, expressionText, BoundedAmbiguity(
+                info.CandidateSymbols,
+                "Overload ambiguity; the semantic model could not select a single candidate."));
             return;
         }
 
@@ -1414,16 +1500,14 @@ public static class WorkerAnalyzer
             return;
         }
 
-        var expressionText = creation.ToString().Trim();
+        var expressionText = CapText(creation.ToString().Trim());
         var info = context.Model.GetSymbolInfo(creation);
 
         if (info.Symbol is null && info.CandidateSymbols.Length > 0)
         {
-            EmitUnresolvedCall(context, caller, creation, expressionText, new AmbiguityOut
-            {
-                Candidates = info.CandidateSymbols.Select(s => s.ToDisplayString()).ToList(),
-                Reason = "Constructor overload ambiguity; the semantic model could not select a single candidate.",
-            });
+            EmitUnresolvedCall(context, caller, creation, expressionText, BoundedAmbiguity(
+                info.CandidateSymbols,
+                "Constructor overload ambiguity; the semantic model could not select a single candidate."));
             return;
         }
 
@@ -1500,17 +1584,17 @@ public static class WorkerAnalyzer
 
             case IMethodSymbol method when method.MethodKind == MethodKind.LocalFunction:
                 kind = "Function";
-                qualifiedName = $"{method.ContainingType?.ToDisplayString() ?? "Program"}.{method.Name}";
+                qualifiedName = MemberQualifiedName(CapText(method.ContainingType?.ToDisplayString() ?? "Program"), method.Name);
                 break;
 
             case IMethodSymbol method:
                 kind = "Method";
-                qualifiedName = $"{TypeQualifiedName(method.ContainingType)}.{method.Name}";
+                qualifiedName = MemberQualifiedName(TypeQualifiedName(method.ContainingType), method.Name);
                 break;
 
             case IPropertySymbol property:
                 kind = "Method"; // property → Method yaklaşımı (PROTOCOL.md)
-                qualifiedName = $"{TypeQualifiedName(property.ContainingType)}.{property.Name}";
+                qualifiedName = MemberQualifiedName(TypeQualifiedName(property.ContainingType), property.Name);
                 break;
 
             case INamedTypeSymbol type:
@@ -1559,10 +1643,10 @@ public static class WorkerAnalyzer
         }
 
         var owner = type.ContainingType is null
-            ? type.Name
-            : $"{TypeQualifiedName(type.ContainingType)}.{type.Name}";
+            ? CapText(type.Name)
+            : MemberQualifiedName(TypeQualifiedName(type.ContainingType), type.Name);
         var ns = type.ContainingNamespace;
-        return ns is { IsGlobalNamespace: false } ? $"{ns.ToDisplayString()}.{owner}" : owner;
+        return ns is { IsGlobalNamespace: false } ? CapText($"{CapText(ns.ToDisplayString())}.{owner}") : owner;
     }
 
     /**
@@ -1575,15 +1659,16 @@ public static class WorkerAnalyzer
         switch (symbol)
         {
             case IMethodSymbol method:
-                return $"{TypeQualifiedName(method.ContainingType)}.{method.OriginalDefinition.Name}";
+                return MemberQualifiedName(TypeQualifiedName(method.ContainingType), method.OriginalDefinition.Name);
             case IPropertySymbol property:
-                return $"{TypeQualifiedName(property.ContainingType)}.{property.OriginalDefinition.Name}";
+                return MemberQualifiedName(TypeQualifiedName(property.ContainingType), property.OriginalDefinition.Name);
             case INamedTypeSymbol type:
                 return TypeQualifiedName(type);
             default:
                 var ns = symbol.ContainingNamespace;
-                var nsPrefix = ns is { IsGlobalNamespace: false } ? $"{ns.ToDisplayString()}." : string.Empty;
-                return $"{nsPrefix}{symbol.Name}";
+                return ns is { IsGlobalNamespace: false }
+                    ? MemberQualifiedName(CapText(ns.ToDisplayString()), symbol.Name)
+                    : CapText(symbol.Name);
         }
     }
 
@@ -1626,13 +1711,14 @@ public static class WorkerAnalyzer
         }
 
         var pathValue = context.Model.GetConstantValue(arguments[0].Expression);
-        if (!pathValue.HasValue || pathValue.Value is not string path)
+        if (!pathValue.HasValue || pathValue.Value is not string rawPath)
         {
             assembler.AddWarning(
                 $"Minimal API route not modeled: {context.Entry.RelativePath} '{name}(...)' — the route pattern is not a constant string");
             return;
         }
 
+        var path = CapText(rawPath);
         List<string> verbs;
         if (isMethods)
         {
@@ -1653,7 +1739,7 @@ public static class WorkerAnalyzer
         {
             var endpoint = assembler.EnsureNode(
                 "Endpoint",
-                $"{verb} {path}",
+                CapText($"{verb} {path}"),
                 context.Entry.RelativePath,
                 new Dictionary<string, object> { ["method"] = verb, ["path"] = path });
 
@@ -1705,7 +1791,7 @@ public static class WorkerAnalyzer
             var value = context.Model.GetConstantValue(initializer);
             if (value.HasValue && value.Value is string verb)
             {
-                verbs.Add(verb.ToUpperInvariant());
+                verbs.Add(CapText(verb.ToUpperInvariant()));
             }
         }
 
@@ -1746,7 +1832,7 @@ public static class WorkerAnalyzer
                 }
 
                 context.Assembler.AddWarning(
-                    $"ROUTES_TO unresolved: {context.Entry.RelativePath} minimal API handler symbol not found ('{expression}')");
+                    $"ROUTES_TO unresolved: {context.Entry.RelativePath} minimal API handler symbol not found ('{CapText(expression.ToString())}')");
                 return null;
             }
 
@@ -1801,16 +1887,16 @@ public static class WorkerAnalyzer
                     semanticDisplay: $"{AspNetMvcNamespace}.RouteAttribute",
                     simpleNames: new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "Route", "RouteAttribute" });
 
-                var template = ComposeTemplate(
+                var template = CapText(ComposeTemplate(
                     classRoute.Template,
                     methodRoute?.Template ?? verbAttribute.Template ?? string.Empty,
                     controllerName,
-                    method.Identifier.ValueText);
+                    method.Identifier.ValueText));
 
                 var verb = verbAttribute.Verb ?? string.Empty;
                 var endpoint = assembler.EnsureNode(
                     "Endpoint",
-                    $"{verb} {template}",
+                    CapText($"{verb} {template}"),
                     entry.RelativePath,
                     new Dictionary<string, object> { ["method"] = verb, ["path"] = template });
 
@@ -1819,7 +1905,7 @@ public static class WorkerAnalyzer
                 if (actionRecord is null)
                 {
                     assembler.AddWarning(
-                        $"ROUTES_TO unresolved: {controller.QualifiedName}.{method.Identifier.ValueText} action is not in the symbol registry");
+                        $"ROUTES_TO unresolved: {MemberQualifiedName(controller.QualifiedName, method.Identifier.ValueText)} action is not in the symbol registry");
                     continue;
                 }
 
@@ -2081,5 +2167,138 @@ public static class WorkerAnalyzer
         }
 
         return record;
+    }
+
+    /* ------------------------------------------------------------------ */
+    /* Emitted text bounds (security findings F9 and F29)                  */
+    /* ------------------------------------------------------------------ */
+
+    /**
+     * Upper bound of every name the worker copies out of the source text:
+     * qualified names (namespace prefixes, types, members, symbol display
+     * names), call texts of unresolved calls, base-type texts, route paths and
+     * ambiguity candidates. Real code stays far below it, so its names are
+     * emitted unchanged; a longer text is cut by CapText.
+     */
+    private const int MaxEmittedTextLength = 1024;
+
+    /** Length of the `~<16 hex>` suffix CapText appends. */
+    private const int CappedSuffixLength = 17;
+
+    /** Ambiguity candidates listed per call site (the remaining ones are counted in the reason). */
+    private const int MaxAmbiguityCandidates = 64;
+
+    /**
+     * Response text budget: characters of node names, edge endpoints, evidence
+     * rationales (counted twice: edge evidence plus the top-level evidence
+     * list), ambiguity candidates and warnings. Names are capped, but one
+     * capped namespace prefix is still repeated in every member below it, so
+     * the total needs its own bound. 40M stays below the adapter's default
+     * 64M-character response cap, so a truncated response is still accepted
+     * as "partial" instead of being discarded.
+     */
+    private const long MaxResponseTextChars = 40_000_000;
+
+    /**
+     * `text` when it fits MaxEmittedTextLength; otherwise its first characters
+     * plus `~` and the first 16 hex digits of the SHA-256 of the whole text.
+     * Deterministic, and distinct long texts stay distinct. The cut never
+     * splits a surrogate pair.
+     */
+    private static string CapText(string text)
+    {
+        if (text.Length <= MaxEmittedTextLength)
+        {
+            return text;
+        }
+
+        var cut = MaxEmittedTextLength - CappedSuffixLength;
+        if (char.IsHighSurrogate(text[cut - 1]))
+        {
+            cut -= 1;
+        }
+
+        return string.Concat(text.AsSpan(0, cut), "~", Sha256Hex(text).AsSpan(0, CappedSuffixLength - 1));
+    }
+
+    /** `owner.member`, both parts and the result capped. */
+    private static string MemberQualifiedName(string owner, string member) =>
+        CapText($"{owner}.{CapText(member)}");
+
+    /** At most MaxAmbiguityCandidates capped candidate names; the reason says how many were left out. */
+    private static AmbiguityOut BoundedAmbiguity(IReadOnlyList<ISymbol> candidates, string reason)
+    {
+        var listed = candidates.Take(MaxAmbiguityCandidates).Select(s => CapText(s.ToDisplayString())).ToList();
+        return new AmbiguityOut
+        {
+            Candidates = listed,
+            Reason = candidates.Count > listed.Count
+                ? $"{reason} Only the first {listed.Count.ToString(CultureInfo.InvariantCulture)} of {candidates.Count.ToString(CultureInfo.InvariantCulture)} candidates are listed."
+                : reason,
+        };
+    }
+
+    private static long NodeTextChars(NodeOut node)
+    {
+        long chars = node.QualifiedName.Length + (node.RelativePath?.Length ?? 0);
+        foreach (var value in node.Attributes.Values)
+        {
+            if (value is string text)
+            {
+                chars += text.Length;
+            }
+        }
+
+        return chars;
+    }
+
+    private static long EdgeTextChars(NodeRecord from, NodeRecord to, AmbiguityOut? ambiguity)
+    {
+        long chars = from.Ref.QualifiedName.Length + (from.Ref.RelativePath?.Length ?? 0) +
+            to.Ref.QualifiedName.Length + (to.Ref.RelativePath?.Length ?? 0);
+        if (ambiguity is not null)
+        {
+            chars += ambiguity.Reason.Length;
+            foreach (var candidate in ambiguity.Candidates)
+            {
+                chars += candidate.Length;
+            }
+        }
+
+        return chars;
+    }
+
+    private static long EvidenceTextChars(EvidenceOut evidence) =>
+        2L * (evidence.Rationale.Length + (evidence.Span?.RelativePath.Length ?? 0));
+
+    /** Reports the declaration depth limit once per file (WalkMember). */
+    private sealed class DeclarationDepthGuard
+    {
+        private readonly List<DiagnosticOut> _diagnostics;
+        private bool _reported;
+
+        public DeclarationDepthGuard(List<DiagnosticOut> diagnostics)
+        {
+            _diagnostics = diagnostics;
+        }
+
+        public void Report(SourceEntry entry, SyntaxNode node, GraphAssembler assembler)
+        {
+            if (_reported)
+            {
+                return;
+            }
+
+            _reported = true;
+            var lineSpan = entry.Tree.GetLineSpan(node.Span);
+            _diagnostics.Add(new DiagnosticOut
+            {
+                RelativePath = entry.RelativePath,
+                Code = "ADAPTER_INTERNAL",
+                Message = $"declaration nesting depth exceeded the {MaxTraversalDepth.ToString(CultureInfo.InvariantCulture)} limit; deeper declarations were skipped",
+                Line = lineSpan.IsValid ? lineSpan.StartLinePosition.Line + 1 : 0,
+            });
+            assembler.AddWarning($"declaration depth limit exceeded: {entry.RelativePath} (deeper declarations skipped)");
+        }
     }
 }
