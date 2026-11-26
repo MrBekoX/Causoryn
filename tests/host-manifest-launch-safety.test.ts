@@ -1,5 +1,8 @@
 import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import {
+  copyFileSync,
+  cpSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -7,6 +10,7 @@ import {
   readFileSync,
   realpathSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from "node:fs";
 import os from "node:os";
@@ -29,9 +33,8 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
  *
  * Every JSON manifest in the repository that declares MCP servers is scanned
  * (not a fixed list), so a new manifest is held to the same rules. The rules:
- * - the spawn `cwd` is pinned to the plugin root (a plugin-root variable, or a
- *   relative cwd in a Codex native plugin, which Codex joins onto the plugin
- *   root); it never names the project directory;
+ * - the spawn `cwd` is pinned to the plugin root (a plugin-root variable); it
+ *   never names the project directory;
  * - the command is `node` with an entry script anchored at the plugin root,
  *   or `npx` with `--ignore-scripts` and `--prefix` pinned to a plugin-owned
  *   directory, so npm's project config and local tree are not the project's;
@@ -39,8 +42,9 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
  *   `--project-dir` flag (the launcher applies the `--allow-cwd` safety check
  *   to it after the host has started `node` in the plugin root).
  *
- * The exceptions below are host limitations, not safe forms. Each is pinned to
- * its exact shape, so neither can widen silently.
+ * The exceptions below are pinned to their exact shape, so none can widen
+ * silently. Claude Code and the registry entry are host limitations; the
+ * Codex bootstrap is a source-verified form (see CODEX_SESSION_DIR_BOOTSTRAP).
  */
 
 const REPO_ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
@@ -117,6 +121,76 @@ const KNOWN_MANIFESTS: readonly string[] = [
 const HOST_WITHOUT_CWD_FIELD: Readonly<Record<string, string>> = {
   "packages/causoryn/.claude-plugin/plugin.json": token("CLAUDE_PLUGIN_ROOT"),
 };
+
+/**
+ * Codex expands no variables in a plugin MCP config and its MCP client
+ * declares no `roots` capability, so a server started in the plugin root can
+ * never learn the workspace. This form omits `cwd` instead: Codex then starts
+ * the server in the session directory (codex-rs rmcp-client
+ * stdio_server_launcher.rs `cwd.unwrap_or(fallback_cwd)`, core session/mcp.rs)
+ * and `--allow-cwd` binds it after its safety check. Why that is safe:
+ * - `node` is resolved without the cwd: on Windows Codex calls
+ *   `which::which_in` (8.0.0), which searches only PATH for a name without a
+ *   separator (finder.rs), then Rust's `Command`, which has not searched the
+ *   current directory since Rust 1.58; on Unix it is an execvp-style PATH search;
+ * - Codex spawns it directly (no shell) with its default variables plus
+ *   `env_vars` (rmcp-client utils.rs), so no NODE_OPTIONS reaches it;
+ * - the eval'd bootstrap imports only `node:` builtins and reaches the launcher
+ *   by an absolute path under CODEX_HOME (or `<home>/.codex`) in Codex's fixed
+ *   layout `plugins/cache/<marketplace>/<plugin>/<version>` (core-plugins
+ *   store.rs), refusing links below the cache and an install inside the
+ *   workspace (packages/causoryn/test/codex-plugin-bootstrap.test.ts).
+ * The bootstrap text is pinned by hash: changing it means re-reviewing it.
+ */
+const CODEX_SESSION_DIR_BOOTSTRAP = {
+  file: "packages/causoryn/.codex-plugin/mcp.json",
+  bootstrapSha256: "cbf1fd0eb38e9c5420527d9f94012a5bb064026c66038d863287e1556d9d3882",
+  launcherArgs: ["--expected-version", "0.3.2", "--allow-cwd", "--auto-data-dir", "--client", "codex"],
+  envVars: ["CODEX_HOME"],
+} as const;
+
+/** Every deviation of an entry from the pinned Codex bootstrap form. */
+function codexBootstrapViolations(where: string, entry: Record<string, unknown>): string[] {
+  const violations: string[] = [];
+  const args = stringArgs(entry);
+  const expectedArgs = [
+    "--input-type=module",
+    "--eval",
+    args[2] ?? "",
+    "--",
+    ...CODEX_SESSION_DIR_BOOTSTRAP.launcherArgs,
+  ];
+  if (entry["command"] !== "node") violations.push(`${where}: command must be "node"`);
+  if (entry["cwd"] !== undefined) violations.push(`${where}: must not set cwd (runs in the session directory)`);
+  if (JSON.stringify(args) !== JSON.stringify(expectedArgs)) {
+    violations.push(`${where}: args do not match the pinned bootstrap form`);
+  }
+  if (createHash("sha256").update(args[2] ?? "", "utf8").digest("hex") !== CODEX_SESSION_DIR_BOOTSTRAP.bootstrapSha256) {
+    violations.push(`${where}: bootstrap text changed; re-review it and update the pinned hash`);
+  }
+  if (JSON.stringify(entry["env_vars"]) !== JSON.stringify(CODEX_SESSION_DIR_BOOTSTRAP.envVars)) {
+    violations.push(`${where}: env_vars must be exactly ["CODEX_HOME"]`);
+  }
+  if (entry["env"] !== undefined) violations.push(`${where}: must not set env`);
+  return violations;
+}
+
+function codexEntry(): Record<string, unknown> {
+  const servers = (readJson(CODEX_SESSION_DIR_BOOTSTRAP.file) as Record<string, Record<string, unknown>>)[
+    "mcpServers"
+  ];
+  const entry = servers?.["causoryn"];
+  if (!isRecord(entry)) throw new Error("no causoryn server in the Codex manifest");
+  return entry;
+}
+
+function codexBootstrap(): string {
+  return stringArgs(codexEntry())[2] ?? "";
+}
+
+function codexArgsWith(bootstrap: string): string[] {
+  return ["--input-type=module", "--eval", bootstrap, "--", ...CODEX_SESSION_DIR_BOOTSTRAP.launcherArgs];
+}
 
 /**
  * The MCP Registry `server.json` has no working-directory or plugin-root field
@@ -203,30 +277,17 @@ function stringArgs(entry: Record<string, unknown>): string[] {
   return Array.isArray(args) ? args.filter((arg): arg is string => typeof arg === "string") : [];
 }
 
-/** Codex joins a relative plugin MCP `cwd` onto the plugin root (codex-rs/codex-mcp/src/plugin_config.rs). */
-function isCodexNativePluginManifest(file: string): boolean {
-  return file.split("/").includes(".codex-plugin");
+function isPluginRootCwd(cwd: unknown): boolean {
+  return typeof cwd === "string" && PLUGIN_ROOT_TOKENS.has(cwd);
 }
 
-function isPluginRootCwd(file: string, cwd: unknown): boolean {
-  if (typeof cwd !== "string") return false;
-  if (PLUGIN_ROOT_TOKENS.has(cwd)) return true;
-  return isCodexNativePluginManifest(file) && (cwd === "." || cwd === "./");
-}
-
-function anchoredEntryScript(file: string, cwd: unknown, script: string | undefined): boolean {
+/** A relative entry script resolves against the spawn cwd, so only a plugin-root variable anchors it. */
+function anchoredEntryScript(script: string | undefined): boolean {
   if (script === undefined) return false;
   for (const rootToken of PLUGIN_ROOT_TOKENS) {
     if (script.startsWith(`${rootToken}/`)) return true;
   }
-  // A relative entry script resolves against the spawn cwd. Only a Codex
-  // native plugin, whose relative cwd Codex joins onto the plugin root and
-  // which has no plugin-root variable, may use one.
-  return (
-    script.startsWith("./") &&
-    isCodexNativePluginManifest(file) &&
-    (cwd === "." || cwd === "./")
-  );
+  return false;
 }
 
 /** npm options given to npx before the package spec. */
@@ -259,8 +320,16 @@ function launchViolations(server: ServerEntry): string[] {
   if (typeof cwd === "string" && PROJECT_DIR_TOKEN.test(cwd)) {
     violations.push(`${where}: cwd names the project directory (${cwd})`);
   }
+  for (const arg of args) {
+    if (PROJECT_DIR_TOKEN.test(arg) && file === CODEX_SESSION_DIR_BOOTSTRAP.file) {
+      violations.push(`${where}: project directory variable in the Codex bootstrap (${arg})`);
+    }
+  }
+  if (file === CODEX_SESSION_DIR_BOOTSTRAP.file) {
+    return [...violations, ...codexBootstrapViolations(where, entry)];
+  }
   if (hostWithoutCwd === undefined) {
-    if (!isPluginRootCwd(file, cwd)) {
+    if (!isPluginRootCwd(cwd)) {
       violations.push(`${where}: cwd must be pinned to the plugin root, found ${JSON.stringify(cwd)}`);
     }
   } else if (cwd !== undefined) {
@@ -273,7 +342,7 @@ function launchViolations(server: ServerEntry): string[] {
       if (script === undefined || !script.startsWith(`${hostWithoutCwd}/`)) {
         violations.push(`${where}: entry script must start with ${hostWithoutCwd}/`);
       }
-    } else if (!anchoredEntryScript(file, cwd, script)) {
+    } else if (!anchoredEntryScript(script)) {
       violations.push(`${where}: entry script is not anchored at the plugin root (${String(script)})`);
     }
   } else if (command === "npx") {
@@ -331,7 +400,7 @@ describe("host launch manifests never start the server from the analyzed project
         const options = npxOptions(args);
         const prefix = options[options.indexOf("--prefix") + 1];
         const pinned =
-          isPluginRootCwd(server.file, server.entry["cwd"]) &&
+          isPluginRootCwd(server.entry["cwd"]) &&
           options.includes("--prefix") &&
           prefix !== undefined &&
           PLUGIN_OWNED_TOKENS.has(prefix);
@@ -388,11 +457,42 @@ describe("host launch manifests never start the server from the analyzed project
         },
       ],
       [
-        "relative entry script outside a Codex plugin",
+        "relative entry script with a relative cwd",
         {
           file: "mcp_config.json",
           name: "causoryn",
           entry: { command: "node", args: ["./scripts/plugin-mcp-launcher.mjs"], cwd: "." },
+        },
+      ],
+      [
+        "Codex: relative launcher, which resolves in the project when cwd is the session directory",
+        {
+          file: CODEX_SESSION_DIR_BOOTSTRAP.file,
+          name: "causoryn",
+          entry: { command: "node", args: ["./scripts/plugin-mcp-launcher.mjs", ...CODEX_SESSION_DIR_BOOTSTRAP.launcherArgs] },
+        },
+      ],
+      [
+        "Codex: bootstrap text not the reviewed one",
+        {
+          file: CODEX_SESSION_DIR_BOOTSTRAP.file,
+          name: "causoryn",
+          entry: {
+            ...codexEntry(),
+            args: codexArgsWith(`${codexBootstrap()}await import("./scripts/plugin-mcp-launcher.mjs");`),
+          },
+        },
+      ],
+      [
+        "Codex: bootstrap form with a pinned cwd",
+        { file: CODEX_SESSION_DIR_BOOTSTRAP.file, name: "causoryn", entry: { ...codexEntry(), cwd: "." } },
+      ],
+      [
+        "Codex: bootstrap form forwarding more variables",
+        {
+          file: CODEX_SESSION_DIR_BOOTSTRAP.file,
+          name: "causoryn",
+          entry: { ...codexEntry(), env_vars: ["CODEX_HOME", "NODE_OPTIONS"] },
         },
       ],
       [
@@ -435,6 +535,52 @@ function expandTokens(value: string, vars: Readonly<Record<string, string>>): st
     out = out.split(token(name)).join(replacement);
   }
   return out;
+}
+
+/** Same directory regardless of spelling (8.3 short names, junctions, case on win32). */
+function samePath(left: string, right: string): boolean {
+  const a = realpathSync.native(left);
+  const b = realpathSync.native(right);
+  return process.platform === "win32" ? a.toLowerCase() === b.toLowerCase() : a === b;
+}
+
+/** The root the server logged for `phrase`, e.g. "authorized workspace via --allow-cwd". */
+function loggedRoot(stderr: string, phrase: string): string | undefined {
+  const escaped = phrase.replace(/[.*+?^${}()|[\]\\-]/g, "\\$&");
+  return new RegExp(`\\[causoryn\\] ${escaped}: (.+?) \\(workspaceId=`).exec(stderr)?.[1];
+}
+
+function expectLoggedRoot(stderr: string, phrase: string, expected: string): void {
+  const logged = loggedRoot(stderr, phrase);
+  expect(logged, `no "${phrase}" line in stderr: ${stderr}`).toBeDefined();
+  expect(samePath(logged ?? "", expected), `${logged ?? ""} is not ${expected}`).toBe(true);
+}
+
+/** Codex's default MCP server variables (rmcp-client utils.rs DEFAULT_ENV_VARS / WINDOWS_CORE_ENV_VARS). */
+const CODEX_DEFAULT_ENV_VARS: readonly string[] =
+  process.platform === "win32"
+    ? ["PATH", "PATHEXT", "SHELL", "COMSPEC", "SYSTEMROOT", "WINDIR", "SYSTEMDRIVE", "USERNAME", "USERDOMAIN",
+       "USERPROFILE", "HOMEDRIVE", "HOMEPATH", "PROGRAMFILES", "PROGRAMFILES(X86)", "PROGRAMW6432", "PROGRAMDATA",
+       "LOCALAPPDATA", "APPDATA", "TEMP", "TMP", "TMPDIR", "POWERSHELL", "PWSH"]
+    : ["HOME", "LOGNAME", "PATH", "SHELL", "USER", "__CF_USER_TEXT_ENCODING", "LANG", "LC_ALL", "TERM", "TMPDIR", "TZ"];
+
+/**
+ * How Codex resolves a bare `command` (rmcp-client program_resolver.rs): on
+ * Windows `which::which_in(program, PATH, cwd)`, which for a name without a
+ * separator tries only `<PATH entry>/<name>` and `+ PATHEXT` (which 8.0.0
+ * finder.rs); elsewhere the name is passed on unchanged to an execvp-style
+ * PATH search. Neither consults the spawn cwd.
+ */
+function resolveLikeCodex(program: string, env: NodeJS.ProcessEnv): string {
+  if (process.platform !== "win32") return program;
+  const exts = (env["PATHEXT"] ?? ".COM;.EXE;.BAT;.CMD").split(";").filter((ext) => ext.length > 0);
+  for (const entry of (env["PATH"] ?? "").split(";")) {
+    const base = path.resolve(entry, program);
+    for (const candidate of [base, ...exts.map((ext) => base + ext)]) {
+      if (existsSync(candidate) && !statSync(candidate).isDirectory()) return candidate;
+    }
+  }
+  throw new Error(`${program} not found on PATH`);
 }
 
 function manifestServer(file: string): Record<string, unknown> {
@@ -565,7 +711,7 @@ describe.runIf(STAGED_PACKAGE_PRESENT)("manifest launch forms start the staged p
       const server = manifestServer("packages/causoryn/.zcode-plugin/plugin.json");
       const vars = { ZCODE_PLUGIN_ROOT: PKG_DIR, ZCODE_PROJECT_DIR: projectDir };
       const cwd = expandTokens(String(server["cwd"]), vars);
-      expect(realpathSync.native(cwd)).toBe(realpathSync.native(PKG_DIR));
+      expect(samePath(cwd, PKG_DIR)).toBe(true);
       const run = await launchAndReadStatus(
         String(server["command"]),
         stringArgs(server).map((arg) => expandTokens(arg, vars)),
@@ -574,7 +720,7 @@ describe.runIf(STAGED_PACKAGE_PRESENT)("manifest launch forms start the staged p
         undefined,
       );
       expect(run.authorized, run.stderr).toBe(true);
-      expect(run.stderr).toContain(`authorized workspace via --allow-cwd: ${realpathSync.native(projectDir)}`);
+      expectLoggedRoot(run.stderr, "authorized workspace via --allow-cwd", projectDir);
     },
   );
 
@@ -596,17 +742,67 @@ describe.runIf(STAGED_PACKAGE_PRESENT)("manifest launch forms start the staged p
   );
 
   it(
-    "Codex: a relative cwd joined onto the plugin root starts the launcher; with no MCP roots the workspace stays unauthorized",
-    { timeout: 60_000 },
+    "Codex: started in the session directory, the bootstrap reaches the CODEX_HOME install and binds the project, ignoring everything the project planted",
+    { timeout: 120_000 },
     async () => {
-      const server = manifestServer("packages/causoryn/.codex-plugin/mcp.json");
-      // codex-rs/codex-mcp/src/plugin_config.rs: relative cwd = plugin_root.join(cwd).
-      const cwd = path.join(PKG_DIR, String(server["cwd"]));
-      const run = await launchAndReadStatus(String(server["command"]), stringArgs(server), cwd, env, undefined);
-      // Codex's MCP client declares no roots capability, so nothing can bind a
-      // workspace here; this is the documented host-dependent residual.
-      expect(run.authorized, run.stderr).toBe(false);
-      expect(run.stderr).toContain("--allow-cwd rejected");
+      const server = manifestServer(CODEX_SESSION_DIR_BOOTSTRAP.file);
+      const args = stringArgs(server);
+      const version = args[args.indexOf("--expected-version") + 1] ?? "";
+      const codexHome = path.join(fakeHome, ".codex");
+      // Codex installs a plugin as real directories under
+      // CODEX_HOME/plugins/cache/<marketplace>/<plugin>/<version> (core-plugins store.rs).
+      const install = path.join(codexHome, "plugins", "cache", "causoryn", "causoryn", version);
+      for (const part of ["package.json", "scripts", "dist", "native", ".codex-plugin"]) {
+        cpSync(path.join(PKG_DIR, part), path.join(install, part), { recursive: true });
+      }
+
+      const project = path.join(sandbox, "codex-project");
+      const marker = path.join(project, "PLANTED-CODE-RAN");
+      const payload = `require("node:fs").writeFileSync(${JSON.stringify(marker)}, "x");\n`;
+      mkdirSync(path.join(project, "src"), { recursive: true });
+      mkdirSync(path.join(project, "scripts"), { recursive: true });
+      mkdirSync(path.join(project, "node_modules", "causoryn", "scripts"), { recursive: true });
+      writeFileSync(path.join(project, "src", "index.ts"), "export const answer = 42;\n");
+      writeFileSync(path.join(project, "evil.cjs"), payload);
+      writeFileSync(path.join(project, "scripts", "plugin-mcp-launcher.mjs"), `import "node:fs"; ${payload.replace("require", "process.getBuiltinModule")}`);
+      writeFileSync(
+        path.join(project, "node_modules", "causoryn", "package.json"),
+        JSON.stringify({ name: "causoryn", version, bin: { causoryn: "scripts/causoryn.mjs" } }),
+      );
+      writeFileSync(path.join(project, "node_modules", "causoryn", "scripts", "causoryn.mjs"), payload);
+      writeFileSync(path.join(project, ".npmrc"), "node-options=--require ./evil.cjs\n");
+      writeFileSync(path.join(project, "node.config.json"), JSON.stringify({ nodeOptions: { require: "./evil.cjs" } }));
+      writeFileSync(path.join(project, ".env"), "NODE_OPTIONS=--require ./evil.cjs\n");
+      writeFileSync(path.join(project, "package.json"), JSON.stringify({ name: "victim", type: "commonjs" }));
+      if (process.platform === "win32") {
+        // A project node.exe/node.cmd: what a cwd-first lookup would start instead of Node.
+        copyFileSync(path.join(process.env["SYSTEMROOT"] ?? "C:\\Windows", "System32", "cmd.exe"), path.join(project, "node.exe"));
+        writeFileSync(path.join(project, "node.cmd"), `@echo x> "${marker}"\r\n`);
+      }
+
+      // Codex forwards only its default variables plus env_vars; the harness's
+      // NoDefaultCurrentDirectoryInExePath is not among them.
+      const codexEnv: NodeJS.ProcessEnv = {};
+      for (const key of CODEX_DEFAULT_ENV_VARS) {
+        // `env` is a plain copy, so look names up case-insensitively (Windows spells "Path").
+        const found = Object.keys(env).find((name) =>
+          process.platform === "win32" ? name.toUpperCase() === key : name === key,
+        );
+        const value = found === undefined ? undefined : env[found];
+        if (value !== undefined) codexEnv[key] = value;
+      }
+      codexEnv["CODEX_HOME"] = codexHome;
+      expect(codexEnv["NoDefaultCurrentDirectoryInExePath"]).toBeUndefined();
+
+      const program = resolveLikeCodex(String(server["command"]), codexEnv);
+      if (path.isAbsolute(program)) {
+        expect(samePath(path.dirname(program), project), `resolved ${program} inside the project`).toBe(false);
+      }
+      expect(server["cwd"]).toBeUndefined(); // Codex then uses the session directory: the project.
+      const run = await launchAndReadStatus(program, args, project, codexEnv, undefined);
+      expect(run.authorized, run.stderr).toBe(true);
+      expectLoggedRoot(run.stderr, "authorized workspace via --allow-cwd", project);
+      expect(existsSync(marker), "project-planted code ran").toBe(false);
     },
   );
 
@@ -624,7 +820,7 @@ describe.runIf(STAGED_PACKAGE_PRESENT)("manifest launch forms start the staged p
         [projectDir],
       );
       expect(run.authorized, run.stderr).toBe(true);
-      expect(run.stderr).toContain(`bound workspace via MCP roots/list: ${realpathSync.native(projectDir)}`);
+      expectLoggedRoot(run.stderr, "bound workspace via MCP roots/list", projectDir);
     },
   );
 });

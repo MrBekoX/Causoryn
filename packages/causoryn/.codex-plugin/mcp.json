@@ -3,7 +3,10 @@
     "causoryn": {
       "command": "node",
       "args": [
-        "./scripts/plugin-mcp-launcher.mjs",
+        "--input-type=module",
+        "--eval",
+        "import{realpathSync,statSync as stat}from\"node:fs\";import{homedir}from\"node:os\";import{isAbsolute,join,relative,sep}from\"node:path\";import{pathToFileURL}from\"node:url\";const real=realpathSync.native;const fail=(why)=>{console.error(`[causoryn-codex] ${why}`);process.exit(2)};const argv=process.argv,at=argv.indexOf(\"--expected-version\"),version=argv[at+1]??\"\";if(at<1||!/^[0-9A-Za-z][0-9A-Za-z._+-]*$/.test(version))fail(\"--expected-version is missing or invalid\");const home=process.env.CODEX_HOME;if(home&&!isAbsolute(home))fail(\"CODEX_HOME must be an absolute path\");let root;try{const cache=real(join(home||join(homedir(),\".codex\"),\"plugins\",\"cache\"));root=join(cache,\"causoryn\",\"causoryn\",version);if(real(root)!==root)fail(`the plugin install must not be reached through a link: ${root}`)}catch(error){fail(`no installed Causoryn ${version} plugin under the Codex home: ${error.message}`)}const rel=relative(real(process.cwd()),root);if(rel===\"\"||(!isAbsolute(rel)&&rel!==\"..\"&&!rel.startsWith(\"..\"+sep)))fail(\"the plugin install is inside the workspace\");const launcher=join(root,\"scripts\",\"plugin-mcp-launcher.mjs\");if(!stat(launcher,{throwIfNoEntry:false})?.isFile())fail(`launcher not found: ${launcher}`);process.argv=[argv[0],launcher,...argv.slice(1)];await import(pathToFileURL(launcher).href);",
+        "--",
         "--expected-version",
         "0.3.2",
         "--allow-cwd",
@@ -11,7 +14,9 @@
         "--client",
         "codex"
       ],
-      "cwd": ".",
+      "env_vars": [
+        "CODEX_HOME"
+      ],
       "startup_timeout_sec": 30
     }
   }
