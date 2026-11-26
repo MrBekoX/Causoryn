@@ -160,9 +160,13 @@ assets file can cause is bounded:
   discovery stops with the warning `NuGet reference discovery stopped after
   20000 file system probes; the remaining project.assets.json entries were not
   inspected`;
-- each assets file may spend at most 10,000 of them
-  (`MAX_NUGET_PROBES_PER_ASSETS_FILE`), so one crafted file cannot starve the
-  assets files after it;
+- the probes are split fairly: each assets file may spend what is left of the
+  global budget divided by the assets files still to be read, at most 10,000
+  (`MAX_NUGET_PROBES_PER_ASSETS_FILE`), so crafted files that sort first cannot
+  spend the probes of the legitimate files after them; a file that uses up its
+  share stops with the warning `<assets file>: NuGet reference discovery
+  stopped after <share> file system probes for this assets file; its remaining
+  entries were not inspected`;
 - each package folder / package directory pair is resolved once and the
   result is reused;
 - a `packageFolders` entry with more than 256 path components

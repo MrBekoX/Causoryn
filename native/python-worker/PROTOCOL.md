@@ -112,7 +112,21 @@ Rendered expression text (`ast.unparse` of call targets and decorators in
 UnknownExternal names, rationales and warnings) is capped at 200
 characters; a longer rendering is cut and suffixed with `...#<12 hex
 digits of its SHA-256>`. An expression too deep for `ast.unparse` is
-rendered from its source segment instead.
+rendered from its source segment instead; that fallback splits the file into
+lines once per pass (the same splitting and slicing as
+`ast.get_source_segment`), and an `ast.unparse` attempt that must hit the
+recursion limit (at least three frames per call / attribute / subscript level
+on top of the call walk's frames) is skipped, with the same output.
+
+Rendering an expression whose source is longer than 200 bytes is charged at
+its source size against two budgets: `MAX_RENDER_SOURCE_BYTES_PER_FILE`
+(256,000 bytes) and `MAX_RENDER_SOURCE_BYTES_PER_REQUEST` (1,000,000 bytes).
+Past either, such an expression is named by its source range instead,
+`<expression at path:line:col..end_line:end_col>` (distinct per expression,
+bounded like any rendering); the cut is sticky for the file, and for the
+request once its budget is spent, so it is deterministic. Real code stays far
+below both budgets (CPython's Lib renders at most 8.6 KB in one file), so its
+output is unchanged.
 
 Declared qualified names (Function, Method and Class nodes) and literal route
 paths are bounded the same way at 512 characters (`MAX_QUALIFIED_NAME_CHARS`).
