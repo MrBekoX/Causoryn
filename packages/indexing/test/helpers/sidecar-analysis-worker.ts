@@ -1,12 +1,19 @@
 import { spawnSync } from "node:child_process";
-import { appendFileSync, existsSync, writeFileSync } from "node:fs";
+import { appendFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { parentPort } from "node:worker_threads";
 
-import { buildAllowlistedWorkerEnv, runLineJsonWorker } from "@causoryn/sidecar-ipc";
-
 import type { InventoryAnalysisResult, InventoryAnalysisTask } from "../../src/index-worker-core.js";
 import { serveInventoryAnalysisRequests } from "../../src/index-worker-serve.js";
+import {
+  ANSWERING_SIDECAR,
+  CHILD_ENV,
+  FAKE_GRANDCHILD,
+  FAKE_SIDECAR,
+  never,
+  startSidecar,
+  whenExists,
+} from "./fake-sidecar.js";
 
 /**
  * Inventory analysis worker entry for the sidecar tests: the real request
@@ -25,28 +32,6 @@ import { serveInventoryAnalysisRequests } from "../../src/index-worker-serve.js"
  * Every start of the worker appends a line to CAUSORYN_TEST_SIDECAR_WORKER_STARTS when set.
  */
 
-/** Records its pid (written atomically enough for the test: one small write), optionally starts a grandchild, then runs. */
-const FAKE_SIDECAR = [
-  'const fs = require("node:fs");',
-  "const [pidFile, grandchildCode] = process.argv.slice(1);",
-  "fs.writeFileSync(pidFile, String(process.pid));",
-  "if (grandchildCode) {",
-  '  require("node:child_process").spawn(process.execPath, ["-e", grandchildCode, pidFile + ".grandchild"], { stdio: "ignore" });',
-  "}",
-  "setInterval(() => {}, 1000);",
-].join("\n");
-const FAKE_GRANDCHILD = [
-  'const fs = require("node:fs");',
-  "fs.writeFileSync(process.argv[1], String(process.pid));",
-  "setInterval(() => {}, 1000);",
-].join("\n");
-const ANSWERING_SIDECAR = [
-  'require("node:fs").writeFileSync(process.argv[1], String(process.pid));',
-  'process.stdout.write(JSON.stringify({ ok: true }) + "\\n");',
-].join("\n");
-
-const CHILD_ENV = buildAllowlistedWorkerEnv(["SystemRoot", "PATH", "TEMP", "TMP"]);
-
 const startsLog = process.env["CAUSORYN_TEST_SIDECAR_WORKER_STARTS"];
 if (startsLog !== undefined && startsLog.length > 0) appendFileSync(startsLog, "start\n", "utf8");
 
@@ -57,26 +42,6 @@ const RESULT: InventoryAnalysisResult = {
   fileCount: 0,
   warningCount: 0,
 };
-
-function startSidecar(script: string, pidFile: string, ...extra: string[]): Promise<unknown> {
-  return runLineJsonWorker({
-    command: process.execPath,
-    args: ["-e", script, pidFile, ...extra],
-    env: CHILD_ENV,
-    requestPayload: { id: "fake-sidecar" },
-    requestTimeoutMs: 600_000,
-  });
-}
-
-async function whenExists(file: string): Promise<void> {
-  while (!existsSync(file)) {
-    await new Promise((resolve) => setTimeout(resolve, 20));
-  }
-}
-
-function never(): Promise<never> {
-  return new Promise<never>(() => {});
-}
 
 async function analyze(task: InventoryAnalysisTask): Promise<InventoryAnalysisResult> {
   const pidFile = path.join(task.rootPath, "sidecar.pid");

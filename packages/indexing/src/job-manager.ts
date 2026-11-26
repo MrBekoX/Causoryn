@@ -24,6 +24,8 @@ import type {
   IndexWorkerResultSummary,
   IndexWorkerTaskInput,
 } from "./index-worker.js";
+import type { IndexWorkerCancelRequest } from "./index-worker-core.js";
+import { SIDECAR_CANCEL_GRACE_MS, trackSidecarWorker } from "./index-worker-sidecars.js";
 
 /**
  * IndexJobManager — snapshot iş yönetimi (TŞ v2.1 §10.2, sprint-2 B6).
@@ -188,6 +190,18 @@ export interface IndexJobManagerOptions {
    * are never rejected.
    */
   readonly maxPendingJobs?: number;
+  /**
+   * Called once per index job worker thread, after the thread has exited and
+   * the sidecar processes it still reported as running were killed from this
+   * thread (`orphanedSidecarPids`; empty when the worker's sidecars had
+   * exited, or it stopped them itself on a cancel). It may come after the job
+   * settled: a cancelled or failed job settles first. Listener errors are
+   * ignored.
+   */
+  readonly onWorkerReleased?: (release: {
+    readonly jobId: string;
+    readonly orphanedSidecarPids: readonly number[];
+  }) => void;
 }
 
 /** İş "running" aşamasına geçtiğinde raporlanan başlangıç yüzdesi. */
@@ -460,6 +474,7 @@ export class IndexJobManager {
   private readonly onProgressListener:
     | ((jobId: string, event: IndexProgressEvent) => void)
     | undefined;
+  private readonly onWorkerReleased: IndexJobManagerOptions["onWorkerReleased"];
   /** Sayaç tabanlı default jobId üretimi için monoton sayaç. */
   private counter = 0;
 
@@ -471,7 +486,8 @@ export class IndexJobManager {
   private readonly queue: string[] = [];
   private draining = false;
   private lastJobId: string | undefined;
-  private activeWorker: Worker | undefined;
+  /** Gives the active worker job up (close()): see runInWorkerThread. */
+  private activeWorkerCancel: (() => void) | undefined;
   /** Stops lease tracking (main-thread heartbeat) of the active worker job. */
   private activeWorkerLeaseCleanup: ((release: boolean) => void) | undefined;
   private closed = false;
@@ -504,6 +520,7 @@ export class IndexJobManager {
     this.useWorkerThread = options.useWorkerThread ?? true;
     this.workerFixedClockIso = options.workerFixedClockIso;
     this.onProgressListener = options.onProgress;
+    this.onWorkerReleased = options.onWorkerReleased;
   }
 
   /**
@@ -678,22 +695,24 @@ export class IndexJobManager {
    * - prevents new jobs and post-close repository mutations,
    * - cancels all queued and in-flight jobs and settles pending waiters cleanly,
    * - clears progress listeners,
-   * - terminates any active off-thread indexing `Worker`.
+   * - gives any active off-thread indexing `Worker` up: it is asked to stop
+   *   (it closes the job's data store, so the job publishes nothing more, and
+   *   stops its sidecar processes) and terminated once it answered or after
+   *   SIDECAR_CANCEL_GRACE_MS; sidecar processes it still reports as running
+   *   then are killed from this thread (see runInWorkerThread).
    */
   close(): void {
     if (this.closed) return;
     this.closed = true;
 
-    const worker = this.activeWorker;
-    this.activeWorker = undefined;
+    const cancelWorker = this.activeWorkerCancel;
+    this.activeWorkerCancel = undefined;
     // Release the worker's lease from the main thread so the next context
     // (e.g. after a roots rebind) never waits for a terminated build.
     const leaseCleanup = this.activeWorkerLeaseCleanup;
     this.activeWorkerLeaseCleanup = undefined;
     leaseCleanup?.(true);
-    if (worker !== undefined) {
-      void worker.terminate().catch(() => {});
-    }
+    cancelWorker?.();
 
     const cancelledMessage = "Indexing job cancelled: job manager closed";
     const cancelJob = (jobId: string): void => {
@@ -971,7 +990,30 @@ export class IndexJobManager {
           : new Worker(pathToFileURL(workerEntry.path), {
               workerData: payload,
             });
-      this.activeWorker = worker;
+
+      // Sidecar processes (finding F33): the worker reports the pid of every
+      // sidecar process it starts and exits. Giving the worker up (it
+      // finished, failed or the job was cancelled) terminates it and kills,
+      // from this thread, what it still reports as running: the adapters'
+      // timeouts and tree kills ran on the worker's event loop, and on Windows
+      // a terminating worker cannot finish exiting while a child holds its
+      // stdio pipes (index-worker-sidecars.ts).
+      const tracked = trackSidecarWorker(worker);
+      let cancelling = false;
+      let cancelTimer: NodeJS.Timeout | undefined;
+      const stopWorker = (): void => {
+        clearTimeout(cancelTimer);
+        tracked.stop();
+      };
+      const releaseListener = this.onWorkerReleased;
+      tracked.onReaped(({ orphanedSidecarPids }) => {
+        clearTimeout(cancelTimer);
+        try {
+          releaseListener?.({ jobId, orphanedSidecarPids });
+        } catch {
+          // Listener errors must never crash the indexing job queue.
+        }
+      });
 
       // Main-thread lease tracking (finding 2): the worker reports the lease
       // it acquired; the main thread renews it on its own connection so a
@@ -990,8 +1032,8 @@ export class IndexJobManager {
       this.activeWorkerLeaseCleanup = stopLeaseTracking;
 
       const clearActiveWorker = (): void => {
-        if (this.activeWorker === worker) {
-          this.activeWorker = undefined;
+        if (this.activeWorkerCancel === cancel) {
+          this.activeWorkerCancel = undefined;
         }
         if (this.activeWorkerLeaseCleanup === stopLeaseTracking) {
           this.activeWorkerLeaseCleanup = undefined;
@@ -1003,7 +1045,7 @@ export class IndexJobManager {
         settled = true;
         stopLeaseTracking(true);
         clearActiveWorker();
-        void worker.terminate().catch(() => {});
+        stopWorker();
         resolve(summary);
       };
 
@@ -1013,7 +1055,7 @@ export class IndexJobManager {
         const heldLease = trackedLeaseId !== undefined;
         stopLeaseTracking(true);
         clearActiveWorker();
-        void worker.terminate().catch(() => {});
+        stopWorker();
         if (heldLease && !this.closed) {
           // The worker died holding the lease: its building row (if any) is
           // now lease-less, so recover it right away (stale flag stays honest).
@@ -1022,10 +1064,52 @@ export class IndexJobManager {
         reject(error);
       };
 
+      /**
+       * Gives the job up because the job manager closed: the job settles now,
+       * and the worker is asked to stop (`cancel`: it closes the job's data
+       * store, so the job publishes nothing more, and stops its sidecar
+       * processes with the adapters' own tree kills). It is terminated once
+       * it answered `cancelled`, or after SIDECAR_CANCEL_GRACE_MS when it
+       * cannot read the request (a long synchronous phase); the sidecar
+       * processes it still reports as running then are killed from this
+       * thread.
+       */
+      const cancel = (): void => {
+        if (cancelling) return;
+        cancelling = true;
+        if (!settled) {
+          settled = true;
+          stopLeaseTracking(true);
+          clearActiveWorker();
+          reject(
+            new IndexingError(
+              "indexing/internal",
+              "Indexing job cancelled: job manager closed",
+            ),
+          );
+        }
+        const request: IndexWorkerCancelRequest = { type: "cancel" };
+        try {
+          worker.postMessage(request);
+        } catch {
+          stopWorker();
+          return;
+        }
+        cancelTimer = setTimeout(stopWorker, SIDECAR_CANCEL_GRACE_MS);
+        cancelTimer.unref();
+      };
+      this.activeWorkerCancel = cancel;
+
       worker.on("message", (raw: unknown) => {
-        if (this.closed) return;
         if (raw === null || typeof raw !== "object") return;
         const msg = raw as IndexWorkerMessage;
+        if (msg.type === "cancelled") {
+          // The worker closed the job's data store and stopped its sidecar
+          // processes: it can go now.
+          if (cancelling) stopWorker();
+          return;
+        }
+        if (this.closed) return;
         if (msg.type === "lease") {
           if (typeof msg.leaseId !== "string" || msg.leaseId.length === 0) return;
           if (msg.event === "acquired") {

@@ -28,7 +28,7 @@ import {
   type PythonIndexOptions,
   type RustIndexOptions,
 } from "./index-service.js";
-import { serveInventoryAnalysisRequests } from "./index-worker-serve.js";
+import { serveIndexJob, serveInventoryAnalysisRequests } from "./index-worker-serve.js";
 
 /**
  * Pure dependency-injected indexing worker core (Task 2.5 — Node.js `worker_threads` + SQLite WAL).
@@ -177,6 +177,16 @@ export type InventoryAnalysisWorkerMessage =
       readonly message: string;
     };
 
+/**
+ * Main thread → index job worker: the job is given up (its job manager
+ * closed). The worker closes the job's data store, so the run writes and
+ * publishes nothing more, stops its sidecar processes and answers
+ * `cancelled`; the main thread terminates it then (see serveIndexJob).
+ */
+export interface IndexWorkerCancelRequest {
+  readonly type: "cancel";
+}
+
 export type IndexWorkerMessage =
   | {
       readonly type: "progress";
@@ -190,6 +200,16 @@ export type IndexWorkerMessage =
       readonly type: "lease";
       readonly event: "acquired" | "released";
       readonly leaseId: string;
+    }
+  | {
+      /** A sidecar process of the worker started or exited (its pid, for the main thread's cleanup). */
+      readonly type: "sidecar";
+      readonly event: "spawned" | "exited";
+      readonly pid: number;
+    }
+  | {
+      /** Answer to a `cancel` request: the job's data store is closed and its sidecar processes were stopped. */
+      readonly type: "cancelled";
     }
   | {
       readonly type: "done";
@@ -242,14 +262,38 @@ function summarizeRunResult(result: IndexRunResult): IndexWorkerResultSummary {
 /**
  * Executes a single indexing task using a dedicated single-writer SQLite WAL connection
  * supplied via `SqliteRepoCtor`.
+ *
+ * Aborting `signal` cancels the task: its connection is closed at once, so the run
+ * writes and publishes nothing more (it fails at its next data store access) while
+ * its sidecar processes are being stopped; the job manager that aborts it has
+ * already released its build lease and settled the job. A task whose signal is
+ * already aborted does not start.
  */
 export async function runIndexWorkerTask(
   payload: IndexWorkerTaskInput,
   onProgress: IndexProgressCallback | undefined,
   SqliteRepoCtor: SqliteRepositoryConstructor,
   onLeaseEvent?: (event: BuildLeaseEvent) => void,
+  signal?: AbortSignal,
 ): Promise<IndexWorkerResultSummary> {
+  if (signal?.aborted === true) {
+    throw new IndexingError("indexing/internal", "Indexing job cancelled before it started");
+  }
   const repository = new SqliteRepoCtor(payload.dbPath);
+  let repositoryClosed = false;
+  const closeRepository = (): void => {
+    if (repositoryClosed) return;
+    repositoryClosed = true;
+    repository.close();
+  };
+  const onAbort = (): void => {
+    try {
+      closeRepository();
+    } catch {
+      // The connection is unusable either way.
+    }
+  };
+  signal?.addEventListener("abort", onAbort, { once: true });
   try {
     const policy = WorkspaceAccessPolicy.create(payload.policyConfig);
     const clock =
@@ -298,7 +342,8 @@ export async function runIndexWorkerTask(
 
     return summarizeRunResult(result);
   } finally {
-    repository.close();
+    signal?.removeEventListener("abort", onAbort);
+    closeRepository();
   }
 }
 
@@ -376,7 +421,9 @@ export function startInventoryAnalysisWorker(): void {
  * Starts the `worker_threads` indexing loop using a statically injected
  * `SqliteGraphRepository` constructor. Idempotent per worker thread. A
  * worker started with InventoryAnalysisWorkerData serves the inventory
- * analysis mode instead (it uses no SQLite connection).
+ * analysis mode instead (it uses no SQLite connection). The job runs under
+ * serveIndexJob (index-worker-serve.ts): progress, lease and result messages,
+ * sidecar process reports and the `cancel` request.
  */
 export function startIndexWorker(SqliteRepoCtor: SqliteRepositoryConstructor): void {
   if (workerStarted) return;
@@ -396,38 +443,7 @@ export function startIndexWorker(SqliteRepoCtor: SqliteRepositoryConstructor): v
     port.postMessage(errorMsg);
     return;
   }
-  const payload = workerData;
-  void (async () => {
-    try {
-      const result = await runIndexWorkerTask(
-        payload,
-        (event) => {
-          const progressMsg: IndexWorkerMessage = {
-            type: "progress",
-            phase: event.phase,
-            completed: event.completed,
-            total: event.total,
-            message: event.message,
-          };
-          port.postMessage(progressMsg);
-        },
-        SqliteRepoCtor,
-        (event) => {
-          const leaseMsg: IndexWorkerMessage = {
-            type: "lease",
-            event: event.type,
-            leaseId: event.leaseId,
-          };
-          port.postMessage(leaseMsg);
-        },
-      );
-      const doneMsg: IndexWorkerMessage = { type: "done", result };
-      port.postMessage(doneMsg);
-    } catch (error) {
-      const code = error instanceof IndexingError ? error.code : "indexing/internal";
-      const message = error instanceof Error ? error.message : String(error);
-      const errorMsg: IndexWorkerMessage = { type: "error", code, message };
-      port.postMessage(errorMsg);
-    }
-  })();
+  serveIndexJob(port, workerData, (payload, hooks) =>
+    runIndexWorkerTask(payload, hooks.onProgress, SqliteRepoCtor, hooks.onLeaseEvent, hooks.signal),
+  );
 }

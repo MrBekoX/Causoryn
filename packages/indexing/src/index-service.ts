@@ -711,12 +711,24 @@ const JS_REGEX_PREFIX_TOKENS = new Set([
 ]);
 
 /**
- * Pure O(n) comment-stripping lexer for brace-delimited languages (TS/JS/Go/Rust/C#).
+ * Linear-time comment-stripping lexer for brace-delimited languages (TS/JS/Go/Rust/C#).
  * Zero backtracking regexes; handles single-line comments, block comments, string
  * literals, JS/TS regex literals (`/pattern/flags`), nested template literal
- * `${ ... }` expressions, and CRLF cleanly.
+ * `${ ... }` expressions, and CRLF cleanly. Exported for its tests.
+ *
+ * Regex literal candidates stay linear on hostile input (security finding F8):
+ * a candidate that does not close on its line yields a plain `/` token and the
+ * lexer goes on right after it, so later candidates on the same line would walk
+ * the same tail again (one line of `(/[` repeated cost about n^2/6 reads). A
+ * scan's next step depends only on its position and whether it is inside a
+ * character class, so every such (position, state) a scan passes is marked;
+ * a later scan that reaches a marked state has the same future and ends
+ * unclosed too. Marks of a scan that does close are never reached again: the
+ * lexer continues after that literal. Each (position, state) is thus walked
+ * at most once by unclosed scans, and the tokens are exactly those of the
+ * previous rescanning lexer.
  */
-function tokenizeBraceSource(
+export function tokenizeBraceSource(
   content: string,
   options: { readonly isJsTs?: boolean } = {},
 ): string[] {
@@ -725,6 +737,67 @@ function tokenizeBraceSource(
   const len = content.length;
   const templateBraceDepthStack: number[] = [];
   let i = 0;
+  /**
+   * Regex scan states already walked, per position: bit 1 outside a character
+   * class, bit 2 inside one (allocated on the first regex candidate).
+   */
+  let walkedRegexStates: Uint8Array | undefined;
+
+  /**
+   * Scans the JS/TS regex literal candidate whose `/` is at `start`: returns
+   * the index after its closing `/` and flags, or -1 when it does not close on
+   * its line (line break, backslash before a line break, or end of input).
+   */
+  const scanJsRegexLiteral = (start: number): number => {
+    walkedRegexStates ??= new Uint8Array(len);
+    const walked = walkedRegexStates;
+    let cur = start + 1;
+    let inCharClass = false;
+    while (cur < len) {
+      const state = inCharClass ? 2 : 1;
+      const seen = walked[cur] ?? 0;
+      if ((seen & state) !== 0) {
+        // An earlier scan walked on from this very state and did not close.
+        return -1;
+      }
+      walked[cur] = seen | state;
+      const code = content.charCodeAt(cur);
+      if (code === 10 || code === 13) {
+        // Regex literals cannot span unescaped line breaks
+        return -1;
+      }
+      if (code === 92) {
+        if (
+          cur + 1 < len &&
+          content.charCodeAt(cur + 1) !== 10 &&
+          content.charCodeAt(cur + 1) !== 13
+        ) {
+          cur += 2;
+          continue;
+        }
+        return -1;
+      }
+      if (code === 91) {
+        inCharClass = true;
+        cur += 1;
+        continue;
+      }
+      if (code === 93) {
+        inCharClass = false;
+        cur += 1;
+        continue;
+      }
+      if (code === 47 && !inCharClass) {
+        cur += 1;
+        while (cur < len && isAsciiAlphaCode(content.charCodeAt(cur))) {
+          cur += 1;
+        }
+        return cur;
+      }
+      cur += 1;
+    }
+    return -1;
+  };
 
   const scanJsTemplateChunk = (startIndex: number): void => {
     let cur = startIndex + 1;
@@ -782,51 +855,10 @@ function tokenizeBraceSource(
     if (isJsTs && ch === 47) {
       const prev = tokens[tokens.length - 1];
       if (prev === undefined || JS_REGEX_PREFIX_TOKENS.has(prev)) {
-        const start = i;
-        let cur = i + 1;
-        let inCharClass = false;
-        let closed = false;
-        while (cur < len) {
-          const code = content.charCodeAt(cur);
-          if (code === 10 || code === 13) {
-            // Regex literals cannot span unescaped line breaks
-            break;
-          }
-          if (code === 92) {
-            if (
-              cur + 1 < len &&
-              content.charCodeAt(cur + 1) !== 10 &&
-              content.charCodeAt(cur + 1) !== 13
-            ) {
-              cur += 2;
-            } else {
-              break;
-            }
-            continue;
-          }
-          if (code === 91) {
-            inCharClass = true;
-            cur += 1;
-            continue;
-          }
-          if (code === 93) {
-            inCharClass = false;
-            cur += 1;
-            continue;
-          }
-          if (code === 47 && !inCharClass) {
-            cur += 1;
-            while (cur < len && isAsciiAlphaCode(content.charCodeAt(cur))) {
-              cur += 1;
-            }
-            closed = true;
-            break;
-          }
-          cur += 1;
-        }
-        if (closed) {
-          tokens.push(content.slice(start, cur));
-          i = cur;
+        const end = scanJsRegexLiteral(i);
+        if (end >= 0) {
+          tokens.push(content.slice(i, end));
+          i = end;
           continue;
         }
       }
