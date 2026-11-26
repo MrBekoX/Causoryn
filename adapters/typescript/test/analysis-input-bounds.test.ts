@@ -237,6 +237,90 @@ describe("binary operator chains the TypeScript binder walks iteratively", { tim
     expect(limitDiagnostics(result, "src/builder.ts")).toHaveLength(1);
     expectHealthyFileAnalyzed(result);
   });
+
+  /**
+   * Test files: describe/it extraction walks the file on an explicit stack, so
+   * the Test nodes of a file with such a chain do not depend on the stack size
+   * of the thread the adapter runs on (vitest runs this on a process main
+   * thread, the in-process IndexService path).
+   */
+  function testsOf(result: TypeScriptAdapterResult, relativePath: string) {
+    return {
+      tests: result.nodes
+        .filter((n) => n.kind === "Test" && n.relativePath === relativePath)
+        .map((n) => n.qualifiedName)
+        .sort(),
+      testsEdges: result.edges
+        .filter((e) => e.kind === "TESTS" && e.from.relativePath === relativePath)
+        .map((e) => `${e.from.qualifiedName} -> ${e.to.qualifiedName} (${e.resolution})`)
+        .sort(),
+    };
+  }
+
+  function commaChainTestFile(links: number): string {
+    return [
+      "function f() { return 1; }",
+      'describe("bundle", () => {',
+      '  it("runs the chain", () => {',
+      `    ${Array.from({ length: links }, () => "f()").join(",\n    ")};`,
+      "  });",
+      '  it("after the chain", () => {',
+      "    f();",
+      "  });",
+      "});",
+      "",
+    ].join("\n");
+  }
+
+  function assignmentChainTestFile(links: number): string {
+    return [
+      '"use strict";',
+      `${Array.from({ length: links }, (_, i) => `exports.e${String(i)} = `).join("")}void 0;`,
+      "function e0() { return 1; }",
+      "exports.e0 = e0;",
+      'describe("exports", () => {',
+      '  it("calls e0", () => {',
+      "    e0();",
+      "  });",
+      "});",
+      "",
+    ].join("\n");
+  }
+
+  it("extracts describe/it Test nodes of a test file holding a 5000-term comma chain", () => {
+    const result = analyze([{ relativePath: "src/bundle.test.js", content: commaChainTestFile(CHAIN) }]);
+
+    expect(fileDiagnostics(result, "src/bundle.test.js")).toEqual([]);
+    expect(testsOf(result, "src/bundle.test.js")).toEqual({
+      tests: ["bundle > after the chain", "bundle > runs the chain"],
+      testsEdges: [
+        "bundle > after the chain -> f (verified)",
+        "bundle > runs the chain -> f (verified)",
+      ],
+    });
+  });
+
+  it("extracts describe/it Test nodes of a test file holding a 5000-link export assignment chain", () => {
+    const result = analyze([{ relativePath: "src/exports.test.js", content: assignmentChainTestFile(CHAIN) }]);
+
+    expect(fileDiagnostics(result, "src/exports.test.js")).toEqual([]);
+    expect(testsOf(result, "src/exports.test.js")).toEqual({
+      tests: ["exports > calls e0"],
+      testsEdges: ["exports > calls e0 -> e0 (verified)"],
+    });
+  });
+
+  it("yields the same Test nodes for a test file whatever the depth of its chains", () => {
+    for (const [relativePath, build] of [
+      ["src/bundle.test.js", commaChainTestFile],
+      ["src/exports.test.js", assignmentChainTestFile],
+    ] as const) {
+      const shallow = analyze([{ relativePath, content: build(3) }]);
+      const deep = analyze([{ relativePath, content: build(CHAIN) }]);
+      expect(testsOf(deep, relativePath)).toEqual(testsOf(shallow, relativePath));
+      expect(fileDiagnostics(deep, relativePath)).toEqual(fileDiagnostics(shallow, relativePath));
+    }
+  });
 });
 
 describe("framework detection on deeply nested expressions", { timeout: 120_000 }, () => {

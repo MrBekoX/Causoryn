@@ -1114,21 +1114,31 @@ function extractTestDefinitions(
 
   // One bounded "outer > inner" suite path: every test copies it into its name.
   const testPath = (suitePath: string | undefined, title: string): string => boundName(suitePath === undefined ? title : `${suitePath} > ${title}`);
-  const walk = (node: ts.Node, suitePath: string | undefined): void => {
+  // A suite or test call descends into its callee, then into its arguments with
+  // the callback replaced by its body (which gets `bodyPath`); nothing else.
+  const callChildren = (
+    call: ts.CallExpression,
+    match: BddBlockMatch,
+    suitePath: string | undefined,
+    bodyPath: string | undefined,
+  ): ChosenChildren<string | undefined> =>
+    new ChosenChildren<string | undefined>([
+      [call.expression, suitePath],
+      ...call.arguments.map((arg): readonly [ts.Node, string | undefined] =>
+        arg === match.callback ? [match.callback.body, bodyPath] : [arg, suitePath],
+      ),
+    ]);
+
+  // Pre-order walk on an explicit stack (see walkPreOrder): chains the nesting
+  // screen admits (thousands of `,` or `=` links) cannot overflow this phase,
+  // so a test file yields the same Test nodes whatever the thread's stack size
+  // (the IndexService also runs the adapter in-process, on its main thread).
+  walkPreOrder<string | undefined>(sourceFile, undefined, (node, suitePath) => {
     if (ts.isCallExpression(node)) {
       const suiteMatch = matchSuiteCall(node);
       if (suiteMatch !== undefined) {
         testBlockCalls.add(node);
-        const nextSuitePath = testPath(suitePath, suiteMatch.title);
-        walk(node.expression, suitePath);
-        for (const arg of node.arguments) {
-          if (arg === suiteMatch.callback) {
-            walk(suiteMatch.callback.body, nextSuitePath);
-          } else {
-            walk(arg, suitePath);
-          }
-        }
-        return;
+        return callChildren(node, suiteMatch, suitePath, testPath(suitePath, suiteMatch.title));
       }
 
       const testMatch = matchTestCall(node);
@@ -1147,21 +1157,11 @@ function extractTestDefinitions(
           `CONTAINS: test definition '${testRecord.node.qualifiedName}' in ${entry.relativePath}, matched by AST span evidence.`,
         );
         testCallbacks.set(testMatch.callback, testRecord);
-        walk(node.expression, suitePath);
-        for (const arg of node.arguments) {
-          if (arg === testMatch.callback) {
-            walk(testMatch.callback.body, suitePath);
-          } else {
-            walk(arg, suitePath);
-          }
-        }
-        return;
+        return callChildren(node, testMatch, suitePath, suitePath);
       }
     }
-    ts.forEachChild(node, (child) => walk(child, suitePath));
-  };
-
-  walk(sourceFile, undefined);
+    return suitePath;
+  });
 }
 
 /* ------------------------------------------------------------------ */
@@ -4221,19 +4221,40 @@ function pushChildrenInReverse(stack: ts.Node[], node: ts.Node): void {
 }
 
 /**
+ * A `walkPreOrder` visitor's choice of the nodes to descend into instead of the
+ * node's own children, each with its context, in the order to visit them.
+ */
+class ChosenChildren<C> {
+  constructor(readonly entries: readonly (readonly [ts.Node, C])[]) {}
+}
+
+/**
  * Visits `root` and its descendants in pre-order (the order of a recursive
  * `ts.forEachChild` walk) on an explicit stack, so chains the TypeScript
  * binder accepts (thousands of `,` or `=` links) cannot overflow an analysis
- * phase. `visit` returns the context handed to the node's children.
+ * phase. `visit` returns the context handed to the node's children, or the
+ * `ChosenChildren` to descend into instead.
  */
-function walkPreOrder<C>(root: ts.Node, rootContext: C, visit: (node: ts.Node, context: C) => C): void {
+function walkPreOrder<C>(
+  root: ts.Node,
+  rootContext: C,
+  visit: (node: ts.Node, context: C) => C | ChosenChildren<C>,
+): void {
   const nodes: ts.Node[] = [root];
   const contexts: C[] = [rootContext];
   for (let node = nodes.pop(); node !== undefined; node = nodes.pop()) {
-    const childContext = visit(node, contexts.pop() as C);
+    const outcome = visit(node, contexts.pop() as C);
+    if (outcome instanceof ChosenChildren) {
+      for (let index = outcome.entries.length - 1; index >= 0; index -= 1) {
+        const [child, childContext] = outcome.entries[index] as readonly [ts.Node, C];
+        nodes.push(child);
+        contexts.push(childContext);
+      }
+      continue;
+    }
     const firstChild = nodes.length;
     pushChildrenInReverse(nodes, node);
-    for (let index = firstChild; index < nodes.length; index += 1) contexts.push(childContext);
+    for (let index = firstChild; index < nodes.length; index += 1) contexts.push(outcome);
   }
 }
 
