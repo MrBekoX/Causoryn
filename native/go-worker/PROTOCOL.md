@@ -79,6 +79,9 @@ weaker no-`go.mod` rules described below.
 | `MaxFileCount` | 5,000 files per request (also applies to `moduleFiles`) | Request rejected: `LIMIT_EXCEEDED`. |
 | `MaxFileContentBytes` | 2,000,000 bytes per file (UTF-8; also applies to `moduleFiles`) | Request rejected: `LIMIT_EXCEEDED`. |
 | `MaxResponseNodes` | 250,000 nodes per response | When the hard ceiling or the request budget is reached, the extra nodes are NOT emitted and edges whose endpoints were not emitted are dropped too (no dangling edges). The response gets a `RESPONSE_TRUNCATED` diagnostic and `status: "partial"` — truncation is never silent. |
+| `MaxRenderedTextBytes` | 200 bytes per call-expression text | Call-expression text (UnknownExternal names, including bare identifiers and route handler texts, and the rationales that quote it) is cut to its longest prefix of at most 200 bytes, on a UTF-8 rune boundary, followed by `...#` and the first 12 hex digits of the SHA-256 of the full text. Deterministic, and distinct texts stay distinct. Texts within the bound are unchanged; bounding adds no diagnostic. |
+| `MaxQualifiedNameBytes` | 512 bytes per name | Declared qualified names (Function, Method, Class, Interface and Type nodes) and the import paths, package names and directories quoted in rationales, ambiguity reasons and candidate labels are bounded the same way (`...#<12 hex>` marker). |
+| `MaxAmbiguityCandidates` | 64 candidates per ambiguity | Method, interface-method and package candidate lists are sorted and capped at the first 64 entries. A capped list sets `candidatesTruncated: true` and `candidateCount` (the full count) on the `ambiguity`, and its `reason` ends with `Only the first 64 of <n> sorted candidates are listed (candidates truncated).`; a rationale that states the candidate count keeps the full count. |
 
 The limits are fixed (not configurable per request in protocol v1) and keep the behavior
 deterministic for identical input. Function bodies whose AST walk depth exceeds 1000 are
@@ -156,7 +159,8 @@ file and the result becomes `partial`.
   - File: the `relativePath` itself.
   - Endpoint: `"<METHOD> <path>"` (e.g. `"* /orders"`, `"GET /users"`).
   - UnknownExternal: the source text of the call expression (e.g. `json.NewEncoder(w).Encode`)
-    or the bare identifier.
+    or the bare identifier, bounded at 200 bytes (`MaxRenderedTextBytes`).
+  - Function, Method and type names are bounded at 512 bytes (`MaxQualifiedNameBytes`).
   - `<package>` is the package clause name only. Two packages with the same name in different
     directories can therefore produce the same `qualifiedName`; their nodes stay distinct
     because the node key also includes `relativePath`.
@@ -183,7 +187,11 @@ file and the result becomes `partial`.
   (`capabilities.importEdges: false`); import declarations are used only to resolve calls.
 - UnknownExternal nodes carry NO `relativePath` (a symbol outside the analysis set has no file).
 - Edges with the same (kind, from, to) are merged into one edge; their evidence is merged and
-  de-duplicated.
+  de-duplicated. Each edge keeps the set of its evidence keys, so a merge costs one key
+  computation and one set lookup per evidence record.
+- `ambiguity` carries `candidates` and `reason`. `candidatesTruncated: true` and
+  `candidateCount` appear only when the candidate list was capped (`MaxAmbiguityCandidates`);
+  an uncapped list keeps exactly the two fields.
 
 ### Evidence fields (domain Evidence equivalent — no IDs)
 

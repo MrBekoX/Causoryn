@@ -28,7 +28,8 @@ analiz tamamen bellek-içindedir).
 - **stdout disiplini (kırmızı çizgi):** stdout'ta YALNIZCA protokol
   satırları taşınır; tüm loglar `stderr`'e yazılır (`[python-worker] `
   öneki ile). **Log kanalı UTF-8'dir:** worker kendi stderr'ini
-  `reconfigure(encoding="utf-8")` ile sabitler ve adapter spawn env'inde
+  `reconfigure(encoding="utf-8", errors="backslashreplace")` ile sabitler
+  (a lone surrogate in a log line is escaped instead of raising) ve adapter spawn env'inde
   `PYTHONIOENCODING=utf-8` değerini parent'tan bağımsız sabitler — piped
   stderr locale kod sayfasına (Windows ANSI) düşemez (takım denetimi
   bulgusu; kabul testi: "stderr UTF-8 kodlanır — PYTHONIOENCODING olmasa
@@ -110,6 +111,12 @@ UnknownExternal names, rationales and warnings) is capped at 200
 characters; a longer rendering is cut and suffixed with `...#<12 hex
 digits of its SHA-256>`. An expression too deep for `ast.unparse` is
 rendered from its source segment instead.
+
+Declared qualified names (Function, Method and Class nodes) and literal route
+paths are bounded the same way at 512 characters (`MAX_QUALIFIED_NAME_CHARS`).
+Import-derived UnknownExternal names use the 200-character bound; rationales
+and ambiguity candidates quote the bounded node name. Texts within a bound are
+emitted unchanged, and bounding adds no diagnostic.
 
 **Süreç yaşamlılığının gerçek mekanizması (takım denetimi tur-2
 netleştirmesi):** bildirim/çağrı gezinmesi REKÜRSİFTİR (`_declare` /
@@ -271,7 +278,11 @@ verified) → `services.orders_service.create_order` (heuristic; import) →
   fiilen rota kaydı içindir (bilinen-ad kuralı).
 - `@carrier.route("/path")` / `@carrier.api_route("/path")` → Flask tarzı:
   `methods=["GET","POST"]` kwarg'ındaki her method için bir Endpoint;
-  belirtilmezse Flask varsayılanı **GET**.
+  belirtilmezse Flask varsayılanı **GET**. The methods list is de-duplicated
+  in source order; each entry is bounded at 200 characters. More than 16
+  distinct entries (`MAX_ROUTE_METHODS`) → only the first 16 are used and a
+  warning says so (`<file>: the methods list of decorator '<carrier>.<attr>'
+  on <handler> has <n> distinct entries; only the first 16 were used`).
 - **Taşıyıcı basit ad DEĞİLSE** (ör. `@routers["main"].get("/x")`,
   subscript/nitelik zincirli taşıyıcı): endpoint ÜRETİLMEZ ve `warnings`'e
   açık not yazılır — "sessiz kesim yoktur" disiplini (takım denetimi
@@ -280,6 +291,10 @@ verified) → `services.orders_service.create_order` (heuristic; import) →
 - Endpoint yolu LİTERAL string sabiti OLMALIDIR (`ast.Constant`); değişken
   / ifadesel yol → endpoint ÜRETİLMEZ + `warnings`'e açık not (sessiz kesim
   yoktur).
+- A lone surrogate in a route literal (path or `methods` entry, for example
+  `"\ud800"`) cannot be written as UTF-8: it is replaced by its `\uXXXX`
+  escape text (`\ud800`), deterministically, before the path is bounded at
+  512 characters; the rest of the batch is analyzed as usual.
 - Modül düzeyi çağrılar (`app = FastAPI()` vb.) caller'sızdır → CALLS
   üretilmez (`unsupportedConstructs: "module-level-calls"`).
 
@@ -308,6 +323,14 @@ verified) → `services.orders_service.create_order` (heuristic; import) →
   tüm isteği reddeder; döngü DEVAM EDER — sonraki satır işlenir.
 - `id`, satır ayrıştırılabilirse istemcinin gönderdiği değerle echo
   edilir; ayrıştırılamazsa/geçersizse `null`. Bozuk satır döngüyü düşürmez.
+- A string `id`, a `files[].path` or a `files[].content` that holds a lone
+  surrogate (for example from a `\ud800` JSON escape) is rejected with
+  `INVALID_ARGUMENT` (`... must be valid Unicode text (it contains a lone
+  surrogate)`); such an `id` is answered with `id: null`.
+- A response that still cannot be encoded as UTF-8 is replaced by an
+  `INTERNAL_ERROR` line (`the response could not be encoded as UTF-8 (it
+  contains a lone surrogate)`) that echoes the request `id` when the id itself
+  can be encoded; the process keeps running.
 - Kodlar yalnızca TŞ §10.1 + K-008 kümesinden: `INVALID_ARGUMENT`,
   `INTERNAL_ERROR`, `LIMIT_EXCEEDED` (kaynak sınırları — yukarıdaki
   tablo). Worker kendi hata kodu icat etmez.
