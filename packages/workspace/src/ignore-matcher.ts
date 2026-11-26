@@ -32,11 +32,34 @@ function toPosix(p: string): string {
 }
 
 /**
+ * Work left for one ancestor-aware ignore decision, in matcher steps (one step per
+ * inner-loop iteration of the segment matcher, plus one per automaton transition).
+ * Shared by every pass that belongs to the same decision and decremented in place.
+ */
+export interface IgnoreMatchBudget {
+  remaining: number;
+}
+
+/**
+ * Steps one policy decision may spend on ignore matching (Claude Security F32).
+ * An ordinary configuration (the default list, or 1000 typical .gitignore lines
+ * on a path 30 directories deep) needs well under a quarter of it; a crafted
+ * pattern set against a deep directory chain exhausts it in a few milliseconds
+ * and the decision fails closed.
+ */
+export const IGNORE_MATCH_WORK_BUDGET = 1_000_000;
+
+/** Budget of the exported single-pattern helpers, which run without a cap. */
+const UNBOUNDED: IgnoreMatchBudget = { remaining: Number.POSITIVE_INFINITY };
+
+/**
  * Tek yol segmenti üzerinde `*` (0+ karakter) ve `?` (1 karakter) eşler.
  * İki işaretçili deterministik algoritma: O(|pattern| * |text|) üst sınırı,
- * O(1) bellek, sıfır RegExp, sıfır özyineleme (SEC-01).
+ * O(1) bellek, sıfır RegExp, sıfır özyineleme (SEC-01). Her döngü adımı
+ * `budget`tan düşülür; bütçe biterse eşleşme yok sayılır ve çağıran
+ * `budget.remaining < 0` ile tükenmeyi ayırt eder.
  */
-function matchSegment(pattern: string, text: string): boolean {
+function matchSegment(pattern: string, text: string, budget: IgnoreMatchBudget = UNBOUNDED): boolean {
   let pi = 0;
   let ti = 0;
   let starIdx = -1;
@@ -45,6 +68,10 @@ function matchSegment(pattern: string, text: string): boolean {
   const tLen = text.length;
 
   while (ti < tLen) {
+    budget.remaining -= 1;
+    if (budget.remaining < 0) {
+      return false;
+    }
     if (
       pi < pLen &&
       (pattern.charCodeAt(pi) === CHAR_QUESTION ||
@@ -116,6 +143,12 @@ interface CompiledPattern {
   readonly segments: readonly string[];
   readonly dirOnly: boolean;
   readonly anchored: boolean;
+  /**
+   * `closureEnd[i]` = first index `j >= i` whose segment is not `**` (or the
+   * segment count): from state `i`, letting each `**` match zero segments reaches
+   * every state in `i..closureEnd[i]`.
+   */
+  readonly closureEnd: readonly number[];
 }
 
 function compilePattern(rawPattern: string, caseInsensitive: boolean): CompiledPattern {
@@ -140,10 +173,16 @@ function compilePattern(rawPattern: string, caseInsensitive: boolean): CompiledP
     }
     segments.push(seg);
   }
+  const closureEnd = new Array<number>(segments.length + 1);
+  closureEnd[segments.length] = segments.length;
+  for (let index = segments.length - 1; index >= 0; index -= 1) {
+    closureEnd[index] = segments[index] === "**" ? (closureEnd[index + 1] as number) : index;
+  }
   return {
     segments,
     dirOnly,
     anchored,
+    closureEnd,
   };
 }
 
@@ -220,4 +259,193 @@ export function findMatchingIgnorePattern(
     }
   }
   return undefined;
+}
+
+export type AncestorIgnoreMatch =
+  | {
+      readonly kind: "matched";
+      /** The first matching pattern, as written. */
+      readonly pattern: string;
+      /** Number of `/` segments of the shortest matching ancestor (the path itself = all). */
+      readonly depth: number;
+    }
+  | { readonly kind: "none" }
+  /** The budget ran out before the decision was complete; callers fail closed. */
+  | { readonly kind: "budget-exhausted" };
+
+export interface AncestorIgnoreMatchOptions {
+  readonly budget: IgnoreMatchBudget;
+  /** Folds letter case of patterns and path; defaults to the platform rule (Windows only). */
+  readonly caseInsensitive?: boolean;
+}
+
+/**
+ * Matches `posixRelative` AND each of its ancestors against `patterns` in one pass
+ * per pattern (Claude Security F32). The result is exactly that of calling
+ * {@link findMatchingIgnorePattern} on every `/` prefix from the shallowest to the
+ * full path (ancestors as directories, the last segment as a directory only when
+ * `lastIsDirectory`) and taking the first hit, but each pattern walks the path
+ * once: an anchored pattern runs as a set of automaton states over the segments
+ * instead of being restarted for every prefix, so a pattern with many segments no
+ * longer costs (prefixes × segments × backtracking).
+ *
+ * Every step is charged to `options.budget`; when it runs out the result is
+ * `budget-exhausted` and the caller must treat the path as denied.
+ */
+export function findFirstAncestorIgnoreMatch(
+  posixRelative: string,
+  lastIsDirectory: boolean,
+  patterns: readonly string[],
+  options: AncestorIgnoreMatchOptions,
+): AncestorIgnoreMatch {
+  const caseInsensitive = options.caseInsensitive ?? IS_WIN;
+  const budget = options.budget;
+  // The policy splits on `/`; the single-pattern matcher also treats `\` as a
+  // separator inside each prefix. Tokens follow the matcher, checkpoints (the
+  // prefixes that are actually decided) follow the `/` segments.
+  const tokens: string[] = [];
+  const checkpoints: number[] = [];
+  for (const segment of posixRelative.split("/")) {
+    const folded = caseInsensitive ? segment.toLowerCase() : segment;
+    for (const token of toPosix(folded).split("/")) {
+      tokens.push(token);
+    }
+    checkpoints.push(tokens.length);
+  }
+  const depthCount = checkpoints.length;
+  let best: { readonly pattern: string; readonly depth: number } | undefined;
+  for (const pattern of patterns) {
+    // Only a shallower match can still change the answer: at the same depth the
+    // earlier pattern wins, as in the per-prefix loop.
+    const maxDepth = best === undefined ? depthCount : best.depth - 1;
+    if (maxDepth < 1) {
+      break;
+    }
+    const depth = shallowestMatchingDepth(
+      compilePatternCached(pattern, caseInsensitive),
+      tokens,
+      checkpoints,
+      maxDepth,
+      lastIsDirectory,
+      budget,
+    );
+    if (budget.remaining < 0) {
+      return { kind: "budget-exhausted" };
+    }
+    if (depth !== undefined) {
+      best = { pattern, depth };
+    }
+  }
+  return best === undefined ? { kind: "none" } : { kind: "matched", pattern: best.pattern, depth: best.depth };
+}
+
+/** Shallowest checkpoint depth (1-based, at most `maxDepth`) at which `compiled` matches. */
+function shallowestMatchingDepth(
+  compiled: CompiledPattern,
+  tokens: readonly string[],
+  checkpoints: readonly number[],
+  maxDepth: number,
+  lastIsDirectory: boolean,
+  budget: IgnoreMatchBudget,
+): number | undefined {
+  const depthCount = checkpoints.length;
+  const isDirectoryAt = (depth: number): boolean => depth < depthCount || lastIsDirectory;
+  if (!compiled.anchored) {
+    const segment = compiled.segments[0];
+    if (segment === undefined) {
+      return undefined;
+    }
+    for (let depth = 1; depth <= maxDepth; depth += 1) {
+      if (compiled.dirOnly && !isDirectoryAt(depth)) {
+        continue;
+      }
+      budget.remaining -= 1;
+      if (budget.remaining < 0) {
+        return undefined;
+      }
+      // Basename of the prefix = its last token.
+      if (segment === "**" || matchSegment(segment, tokens[(checkpoints[depth - 1] as number) - 1] as string, budget)) {
+        return budget.remaining < 0 ? undefined : depth;
+      }
+      if (budget.remaining < 0) {
+        return undefined;
+      }
+    }
+    return undefined;
+  }
+
+  // Anchored: state `i` = the first `i` pattern segments match the tokens read so
+  // far. `**` matches zero or more segments (closure), any other segment exactly
+  // one. The active states are kept ascending and duplicate-free in two buffers
+  // that are swapped per token.
+  const patternSegments = compiled.segments;
+  const closureEnd = compiled.closureEnd;
+  const finalState = patternSegments.length;
+  let current = new Int32Array(finalState + 1);
+  let next = new Int32Array(finalState + 1);
+  let currentLength = appendClosure(current, 0, 0, closureEnd);
+  let depth = 1;
+  const lastToken = checkpoints[maxDepth - 1] as number;
+  for (let tokenIndex = 0; tokenIndex < lastToken; tokenIndex += 1) {
+    const token = tokens[tokenIndex] as string;
+    let nextLength = 0;
+    for (let index = 0; index < currentLength; index += 1) {
+      budget.remaining -= 1;
+      if (budget.remaining < 0) {
+        return undefined;
+      }
+      const state = current[index] as number;
+      if (state >= finalState) {
+        continue;
+      }
+      const patternSegment = patternSegments[state] as string;
+      if (patternSegment === "**") {
+        nextLength = appendClosure(next, nextLength, state, closureEnd);
+      } else if (matchSegment(patternSegment, token, budget)) {
+        nextLength = appendClosure(next, nextLength, state + 1, closureEnd);
+      } else if (budget.remaining < 0) {
+        return undefined;
+      }
+    }
+    if (nextLength === 0) {
+      return undefined; // no longer prefix can match either
+    }
+    const swap = current;
+    current = next;
+    next = swap;
+    currentLength = nextLength;
+    if (tokenIndex + 1 === checkpoints[depth - 1]) {
+      const accepts = current[currentLength - 1] === finalState;
+      if (accepts && !(compiled.dirOnly && !isDirectoryAt(depth))) {
+        return depth;
+      }
+      depth += 1;
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Appends the closure of `state` (`state..closureEnd[state]`) to the ascending,
+ * duplicate-free `states[0..length)` and returns the new length. Callers pass
+ * non-decreasing states, and `closureEnd` is monotone, so the result stays
+ * ascending: only the part above the current last element is appended.
+ */
+function appendClosure(
+  states: Int32Array,
+  length: number,
+  state: number,
+  closureEnd: readonly number[],
+): number {
+  let from = state;
+  if (length > 0 && (states[length - 1] as number) >= from) {
+    from = (states[length - 1] as number) + 1;
+  }
+  let appended = length;
+  const end = closureEnd[state] as number;
+  for (let value = from; value <= end; value += 1) {
+    states[appended] = value;
+    appended += 1;
+  }
+  return appended;
 }

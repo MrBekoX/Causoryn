@@ -261,16 +261,48 @@ export function inspectLinkTargets(
   }
 }
 
-/** Human-readable explanation for a failed {@link inspectLinkTargets} result. */
+export interface LinkInspectionDescriptionOptions {
+  /**
+   * Directory the reader of the message is authorized for. A link path inside it
+   * is named relative to it; a link path outside it is left out.
+   */
+  readonly within?: string;
+  readonly pathApi?: PathApi;
+}
+
+/** `linkPath` relative to `within` (POSIX separators), or undefined when it lies outside. */
+function linkPathInside(linkPath: string, options: LinkInspectionDescriptionOptions): string | undefined {
+  if (options.within === undefined || isUncOrDevicePath(linkPath)) {
+    return undefined;
+  }
+  const pathApi = options.pathApi ?? path;
+  const within = pathApi.resolve(options.within);
+  const resolved = pathApi.resolve(linkPath);
+  if (!isSameOrInside(pathApi, within, resolved)) {
+    return undefined;
+  }
+  const relative = splitSegments(pathApi.relative(within, resolved)).join("/");
+  return relative.length === 0 ? "." : relative;
+}
+
+/**
+ * Human-readable explanation for a failed {@link inspectLinkTargets} result, safe to
+ * return to an MCP client (Claude Security F42): the readlink target is never
+ * included, and the link path only when it lies inside `options.within` (named
+ * relative to it). Without `within` the message names no path at all.
+ */
 export function describeLinkInspectionFailure(
   result: Exclude<LinkInspectionResult, { readonly ok: true }>,
+  options: LinkInspectionDescriptionOptions = {},
 ): string {
+  const inside = linkPathInside(result.linkPath, options);
+  const where = inside === undefined ? "" : `: ${inside}`;
   switch (result.reason) {
     case "unc-or-device-link-target":
-      return `a link resolves to a UNC or Win32 device target (rejected before the link is followed): ${result.linkPath} -> ${result.target}`;
+      return `a path component is a link to a UNC or Win32 device target (rejected before the link is followed)${where}`;
     case "link-target-unreadable":
-      return `a link target could not be read (refusing to follow it): ${result.linkPath}`;
+      return `a link target could not be read (refusing to follow it)${where}`;
     case "too-many-links":
-      return `too many links while resolving the path (refusing to follow further): ${result.linkPath}`;
+      return `too many links while resolving the path (refusing to follow further)${where}`;
   }
 }

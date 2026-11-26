@@ -1,7 +1,11 @@
 import { realpathSync, statSync } from "node:fs";
 import path from "node:path";
 
-import { findMatchingIgnorePattern } from "./ignore-matcher.js";
+import {
+  findFirstAncestorIgnoreMatch,
+  IGNORE_MATCH_WORK_BUDGET,
+  type IgnoreMatchBudget,
+} from "./ignore-matcher.js";
 import {
   describeLinkInspectionFailure,
   describeWindowsPathSegmentIssue,
@@ -23,10 +27,10 @@ import { WorkspacePolicyError, type PolicyErrorCode } from "./policy-error.js";
  * başlamaz", §19 tehdit modeli, §25/2; sprint-1 görev 2).
  *
  * Karar sırası her aday için sabittir (determinizm, TŞ §6):
- *   1. kök yetkilendirmesi (realpath canonicalization + allowlist)
+ *   1. kök yetkilendirmesi (önce leksik allowlist, sonra realpath canonicalization + allowlist)
  *   2. null byte reddi
  *   3. leksik `..`/mutlak yol sarmalama kontrolü (OWASP normalize)
- *   4. ignore kuralları (atalar dahil)
+ *   4. ignore kuralları (atalar dahil; karar başına iş bütçesi, aşımda red)
  *   5. realpath (symlink/junction) sarmalama kontrolü (CWE-59; TŞ §19)
  *   5b. kanonik gerçek yola ignore kurallarının YENİDEN uygulanması
  *       (kök-içi symlink'in secret-deny listini bypass etmesi engellenir)
@@ -52,6 +56,30 @@ const CHECK_NATIVE_NAME_ALIASES = IS_WIN || process.platform === "darwin";
 
 /** Upper bound for the per-instance root caches (roots are few in practice). */
 const ROOT_CACHE_CAP = 256;
+
+/**
+ * Default secret / VCS deny rules (TŞ §20) that are matched letter-case
+ * insensitively on every platform when they are configured (Claude Security F44).
+ * On a case-insensitive Linux volume (WSL drvfs, ext4/f2fs casefold) `.GIT/config`
+ * opens `.git/config`, and neither `fs.realpathSync` nor `realpathSync.native`
+ * reports the on-disk spelling there. Other patterns keep the platform's case rule.
+ */
+const CASE_FOLDED_DENY_PATTERNS: ReadonlySet<string> = new Set(["**/.git/**", "**/.env*", "**/*.pem"]);
+
+/**
+ * The one reason given for every root outside the declared allowRoots, whatever the
+ * filesystem holds at that path (Claude Security F21: no existence/file-type oracle).
+ */
+const ROOT_NOT_DECLARED_REASON =
+  "root is not inside a user-declared allowRoot (explicit authorization required)";
+
+type IgnoreRuleOutcome =
+  | { readonly kind: "matched"; readonly pattern: string }
+  | { readonly kind: "none" }
+  | { readonly kind: "budget-exhausted" };
+
+const IGNORE_BUDGET_DENY_REASON =
+  "ignore rule matching for this path exceeded its work budget; the path is denied (fail closed)";
 
 function nativeRealpath(target: string): string {
   // Mocked `node:fs` modules may not carry `.native`; fall back to the JS realpath.
@@ -141,6 +169,8 @@ function windowsSegmentDeny(code: PolicyErrorCode, rawPath: string, label: strin
 export class WorkspaceAccessPolicy {
   private readonly canonicalRoots: readonly string[];
   private readonly ignorePatterns: readonly string[];
+  /** Configured patterns from {@link CASE_FOLDED_DENY_PATTERNS} (empty where all matching folds case). */
+  private readonly caseFoldedPatterns: readonly string[];
   /**
    * Lexical forms of the declared allowRoots. Their components were inspected for
    * UNC/device link targets once, in the constructor (they are the user's own
@@ -163,7 +193,7 @@ export class WorkspaceAccessPolicy {
         if (!inspection.ok) {
           throw new WorkspacePolicyError(
             "workspace/policy-invalid",
-            `allowRoot is not usable: ${describeLinkInspectionFailure(inspection)}`,
+            `allowRoot is not usable (${root}): ${describeLinkInspectionFailure(inspection, { within: root })}`,
           );
         }
       }
@@ -177,6 +207,9 @@ export class WorkspaceAccessPolicy {
     });
     this.declaredRoots = config.allowRoots.map((root) => path.resolve(root));
     this.ignorePatterns = effectiveIgnorePatterns(config);
+    this.caseFoldedPatterns = IS_WIN
+      ? []
+      : this.ignorePatterns.filter((pattern) => CASE_FOLDED_DENY_PATTERNS.has(pattern));
   }
 
   /** Şemayı doğrulayıp politikayı kurar; geçersiz config → POLICY_INVALID hatası. */
@@ -196,6 +229,12 @@ export class WorkspaceAccessPolicy {
    * allowRoot'lar (veya bunların alt dizinleri) kabul edilir; kök gerçek
    * yola (realpath) çözümlenemiyorsa ve bir dizin değilse reddedilir
    * (TŞ §20: MCP isteği tek başına kök ekleyemez).
+   *
+   * The decision is lexical first (Claude Security F21): a root that is not spelled
+   * inside a declared allowRoot (its declared or its canonical form) is denied with
+   * one fixed reason before any lstat/readlink/realpath/stat, so the caller learns
+   * nothing about what exists outside the authorized area. Inside it, the real path
+   * must stay inside an allowRoot before its type is reported.
    */
   authorizeRoot(rootPath: string): PolicyDecision {
     if (rootPath.length === 0) {
@@ -215,18 +254,31 @@ export class WorkspaceAccessPolicy {
     if (aliasDeny !== undefined) {
       return aliasDeny;
     }
-    const linkDeny = this.inspectRootLinks(rootPath);
+    // Lexical gate: nothing below touches the filesystem for a root spelled outside
+    // the declared area.
+    const lexicalRoot = path.resolve(rootPath);
+    const trustedStart = this.declaredAreaOf(lexicalRoot);
+    if (trustedStart === undefined) {
+      return deny("workspace/root-not-authorized", ROOT_NOT_DECLARED_REASON);
+    }
+    const linkDeny = this.inspectRootLinks(lexicalRoot, trustedStart);
     if (linkDeny !== undefined) {
       return linkDeny;
     }
     let canonical: string;
     try {
-      canonical = realpathSync(rootPath);
+      canonical = realpathSync(lexicalRoot);
     } catch {
       return deny(
         "workspace/root-not-authorized",
         "root could not be resolved to a real path (missing or inaccessible); an unverifiable root cannot be trusted",
       );
+    }
+    // Containment before the type check: the type of a link target outside the
+    // allowRoots is never reported.
+    const declared = this.canonicalRoots.find((canonicalRoot) => isInside(canonicalRoot, canonical));
+    if (declared === undefined) {
+      return deny("workspace/root-not-authorized", ROOT_NOT_DECLARED_REASON);
     }
     let isDirectory = true;
     try {
@@ -237,14 +289,20 @@ export class WorkspaceAccessPolicy {
     if (!isDirectory) {
       return deny("workspace/root-not-authorized", "root is not a directory");
     }
-    const declared = this.canonicalRoots.find((canonicalRoot) => isInside(canonicalRoot, canonical));
-    if (declared === undefined) {
-      return deny(
-        "workspace/root-not-authorized",
-        "root is not in the user-declared allowRoots list (explicit authorization required)",
-      );
-    }
     return { allowed: true, canonicalRoot: canonical, relativePath: "." };
+  }
+
+  /**
+   * The declared allowRoot (declared spelling first, then its canonical form) that
+   * lexically contains `lexicalRoot`, or undefined. Purely lexical. Both forms are
+   * trusted start points for link inspection: the declared form was inspected in
+   * the constructor, and the canonical form is that root's resolved real path.
+   */
+  private declaredAreaOf(lexicalRoot: string): string | undefined {
+    return (
+      this.declaredRoots.find((declaredRoot) => isInside(declaredRoot, lexicalRoot)) ??
+      this.canonicalRoots.find((canonicalRoot) => isInside(canonicalRoot, lexicalRoot))
+    );
   }
 
   /** Yol erişim kararı: yetki → null byte → traversal → ignore → symlink escape. */
@@ -307,18 +365,23 @@ export class WorkspaceAccessPolicy {
       if (!inspection.ok) {
         return deny(
           "workspace/path-denied",
-          `candidate path is not usable: ${describeLinkInspectionFailure(inspection)}`,
+          `candidate path is not usable: ${describeLinkInspectionFailure(inspection, { within: rootDecision.canonicalRoot })}`,
           inspection.reason,
         );
       }
     }
 
     // 4) Ignore kuralları: dosyanın kendisi VE ata dizinleri değerlendirilir.
+    //    One work budget covers every ignore pass of this decision (F32).
+    const ignoreBudget: IgnoreMatchBudget = { remaining: IGNORE_MATCH_WORK_BUDGET };
     const lexicalPosix = toPosixRelative(relative);
     if (lexicalPosix !== ".") {
-      const matched = this.matchIgnoreRules(lexicalPosix, absolute);
-      if (matched !== undefined) {
-        return deny("workspace/path-denied", "candidate path matches an ignore rule", matched);
+      const outcome = this.matchIgnoreRules(lexicalPosix, absolute, ignoreBudget);
+      if (outcome.kind === "budget-exhausted") {
+        return deny("workspace/path-denied", IGNORE_BUDGET_DENY_REASON, "ignore-match-budget");
+      }
+      if (outcome.kind === "matched") {
+        return deny("workspace/path-denied", "candidate path matches an ignore rule", outcome.pattern);
       }
     }
 
@@ -341,12 +404,15 @@ export class WorkspaceAccessPolicy {
     const canonicalRelative = path.relative(rootDecision.canonicalRoot, resolved);
     const canonicalPosix = toPosixRelative(canonicalRelative);
     if (canonicalPosix !== "." && canonicalPosix !== lexicalPosix) {
-      const matched = this.matchIgnoreRules(canonicalPosix, resolved);
-      if (matched !== undefined) {
+      const outcome = this.matchIgnoreRules(canonicalPosix, resolved, ignoreBudget);
+      if (outcome.kind === "budget-exhausted") {
+        return deny("workspace/path-denied", IGNORE_BUDGET_DENY_REASON, "ignore-match-budget");
+      }
+      if (outcome.kind === "matched") {
         return deny(
           "workspace/path-denied",
           "the canonical real path matches an ignore rule (ignore bypass through a symlink was blocked)",
-          matched,
+          outcome.pattern,
         );
       }
     }
@@ -355,7 +421,12 @@ export class WorkspaceAccessPolicy {
     //     to the stored name, so ignore rules see `.git` and containment is
     //     verified on the same canonical form.
     if (CHECK_NATIVE_NAME_ALIASES) {
-      const nativeDeny = this.checkNativeNameAliases(rootDecision.canonicalRoot, absolute, canonicalPosix);
+      const nativeDeny = this.checkNativeNameAliases(
+        rootDecision.canonicalRoot,
+        absolute,
+        canonicalPosix,
+        ignoreBudget,
+      );
       if (nativeDeny !== undefined) {
         return nativeDeny;
       }
@@ -429,45 +500,45 @@ export class WorkspaceAccessPolicy {
   }
 
   /**
-   * First ignore rule matching `posixRelative` or any of its ancestors; the last
-   * segment is treated as a directory unless `absoluteForFileCheck` is a file.
+   * First ignore rule matching `posixRelative` or any of its ancestors (shallowest
+   * ancestor first, then pattern order); the last segment is treated as a directory
+   * unless `absoluteForFileCheck` is a file. All ancestors are matched in one pass
+   * under `budget` (F32). Where matching is case-sensitive, the configured secret /
+   * VCS deny rules are then matched again with letter case folded (F44).
    */
-  private matchIgnoreRules(posixRelative: string, absoluteForFileCheck: string): string | undefined {
-    const segments = posixRelative.split("/");
-    const isFile = this.existsAsFile(absoluteForFileCheck);
-    for (let depth = 1; depth <= segments.length; depth += 1) {
-      const prefix = segments.slice(0, depth).join("/");
-      const isDirectoryCandidate = depth < segments.length || !isFile;
-      const matched = findMatchingIgnorePattern(prefix, isDirectoryCandidate, this.ignorePatterns);
-      if (matched !== undefined) {
-        return matched;
-      }
+  private matchIgnoreRules(
+    posixRelative: string,
+    absoluteForFileCheck: string,
+    budget: IgnoreMatchBudget,
+  ): IgnoreRuleOutcome {
+    const lastIsDirectory = !this.existsAsFile(absoluteForFileCheck);
+    const exact = findFirstAncestorIgnoreMatch(posixRelative, lastIsDirectory, this.ignorePatterns, { budget });
+    if (exact.kind !== "none" || this.caseFoldedPatterns.length === 0) {
+      return exact;
     }
-    return undefined;
+    return findFirstAncestorIgnoreMatch(posixRelative, lastIsDirectory, this.caseFoldedPatterns, {
+      budget,
+      caseInsensitive: true,
+    });
   }
 
   /**
    * Inspects the components of a root path for UNC/device link targets before the
    * first realpath/stat. Nothing is cached: a component below a declared allowRoot
    * may change between calls, so it is inspected on every call. The walk starts at
-   * the declared allowRoot that lexically contains the root (its own components
-   * were inspected in the constructor); a root spelled outside every declared root
-   * is inspected from the filesystem root.
+   * `trustedStart`, the allowRoot form that lexically contains the root (roots
+   * spelled outside every allowRoot never get here). The denial names a link path
+   * only inside `trustedStart`, never a link target (F42).
    */
-  private inspectRootLinks(rootPath: string): PolicyDeny | undefined {
+  private inspectRootLinks(lexicalRoot: string, trustedStart: string): PolicyDeny | undefined {
     if (!LINK_TARGET_INSPECTION_ENABLED) {
       return undefined;
     }
-    const resolved = path.resolve(rootPath);
-    const declared = this.declaredRoots.find((declaredRoot) => isInside(declaredRoot, resolved));
-    const inspection = inspectLinkTargets(
-      resolved,
-      declared === undefined ? {} : { startDir: declared },
-    );
+    const inspection = inspectLinkTargets(lexicalRoot, { startDir: trustedStart });
     if (!inspection.ok) {
       return deny(
         "workspace/root-not-authorized",
-        `root path is not usable: ${describeLinkInspectionFailure(inspection)}`,
+        `root path is not usable: ${describeLinkInspectionFailure(inspection, { within: trustedStart })}`,
         inspection.reason,
       );
     }
@@ -494,6 +565,7 @@ export class WorkspaceAccessPolicy {
     canonicalRoot: string,
     absolute: string,
     canonicalPosix: string,
+    budget: IgnoreMatchBudget,
   ): PolicyDeny | undefined {
     const nativeRoot = this.nativeRootOf(canonicalRoot);
     const nativeResolved = this.resolveRealpath(absolute, nativeRealpath);
@@ -515,14 +587,17 @@ export class WorkspaceAccessPolicy {
     if (nativePosix === "." || comparablePath(nativePosix) === comparablePath(canonicalPosix)) {
       return undefined;
     }
-    const matched = this.matchIgnoreRules(nativePosix, nativeResolved);
-    if (matched === undefined) {
+    const outcome = this.matchIgnoreRules(nativePosix, nativeResolved, budget);
+    if (outcome.kind === "budget-exhausted") {
+      return deny("workspace/path-denied", IGNORE_BUDGET_DENY_REASON, "ignore-match-budget");
+    }
+    if (outcome.kind === "none") {
       return undefined;
     }
     return deny(
       "workspace/path-denied",
       "the native canonical long-name path matches an ignore rule (a short-name or letter-case alias was blocked)",
-      matched,
+      outcome.pattern,
     );
   }
 

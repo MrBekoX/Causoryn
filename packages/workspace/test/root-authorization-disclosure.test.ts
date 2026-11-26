@@ -1,0 +1,294 @@
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
+
+import { afterEach, describe, expect, it, vi } from "vitest";
+
+/**
+ * Root authorization and link-inspection messages must not disclose anything
+ * about paths outside the authorized area:
+ *
+ * - authorizeRoot decides lexically against the declared allowRoots before any
+ *   filesystem access, so a root outside them cannot be used as an existence or
+ *   file-type oracle (Claude Security F21 / F73).
+ * - Link-inspection denials never echo readlink targets, and name a link path
+ *   only when it lies inside the authorized directory (Claude Security F42).
+ *
+ * `node:fs` is wrapped to record every metadata call and to fake links, so the
+ * Windows-only link checks can be exercised without creating real UNC links.
+ */
+
+const io = vi.hoisted(() => ({
+  recording: false,
+  calls: [] as string[],
+  /** Lower-cased absolute path → raw link target reported by readlink. */
+  fakeLinks: new Map<string, string>(),
+}));
+
+vi.mock("node:fs", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:fs")>();
+  const nodePath = await import("node:path");
+  const record = (op: string, target: unknown): void => {
+    if (io.recording) io.calls.push(`${op} ${String(target)}`);
+  };
+  const fakeTarget = (target: unknown): string | undefined =>
+    io.fakeLinks.get(nodePath.resolve(String(target)).toLowerCase());
+  const lstatSync = ((...args: Parameters<typeof actual.lstatSync>) => {
+    record("lstat", args[0]);
+    if (fakeTarget(args[0]) !== undefined) {
+      return { isSymbolicLink: () => true };
+    }
+    return actual.lstatSync(...args);
+  }) as typeof actual.lstatSync;
+  const readlinkSync = ((...args: Parameters<typeof actual.readlinkSync>) => {
+    record("readlink", args[0]);
+    const fake = fakeTarget(args[0]);
+    return fake ?? actual.readlinkSync(...args);
+  }) as typeof actual.readlinkSync;
+  const statSync = ((...args: Parameters<typeof actual.statSync>) => {
+    record("stat", args[0]);
+    return actual.statSync(...args);
+  }) as typeof actual.statSync;
+  const realpathSync = Object.assign(
+    ((...args: Parameters<typeof actual.realpathSync>) => {
+      record("realpath", args[0]);
+      return actual.realpathSync(...args);
+    }) as typeof actual.realpathSync,
+    {
+      native: ((...args: Parameters<typeof actual.realpathSync.native>) => {
+        record("realpath.native", args[0]);
+        return actual.realpathSync.native(...args);
+      }) as typeof actual.realpathSync.native,
+    },
+  );
+  const overrides = { lstatSync, readlinkSync, statSync, realpathSync };
+  return { ...actual, ...overrides, default: { ...actual, ...overrides } };
+});
+
+import { describeLinkInspectionFailure, WorkspaceAccessPolicy } from "../src/index.js";
+import type { PolicyDecision } from "../src/index.js";
+
+const IS_WIN = process.platform === "win32";
+
+const cleanups: string[] = [];
+
+afterEach(() => {
+  io.recording = false;
+  io.calls = [];
+  io.fakeLinks.clear();
+  while (cleanups.length > 0) {
+    rmSync(cleanups.pop() as string, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+  }
+});
+
+function makeDir(prefix: string): string {
+  const dir = mkdtempSync(path.join(tmpdir(), prefix));
+  cleanups.push(dir);
+  return dir;
+}
+
+function denyOf(decision: PolicyDecision): { code: string; reason: string; rule?: string } {
+  if (decision.allowed) {
+    throw new Error(`expected a deny decision, got allowed: ${decision.canonicalRoot}`);
+  }
+  return decision.rule === undefined
+    ? { code: decision.code, reason: decision.reason }
+    : { code: decision.code, reason: decision.reason, rule: decision.rule };
+}
+
+/** Runs `fn` while recording the `node:fs` metadata calls it makes. */
+function recordFsCalls<T>(fn: () => T): { result: T; calls: string[] } {
+  io.calls = [];
+  io.recording = true;
+  try {
+    return { result: fn(), calls: [...io.calls] };
+  } finally {
+    io.recording = false;
+  }
+}
+
+function fakeLink(linkPath: string, target: string): void {
+  io.fakeLinks.set(path.resolve(linkPath).toLowerCase(), target);
+}
+
+const CAN_CREATE_FILE_SYMLINK: boolean = (() => {
+  const probe = mkdtempSync(path.join(tmpdir(), "causoryn-rootauth-probe-"));
+  try {
+    writeFileSync(path.join(probe, "t.txt"), "probe");
+    symlinkSync(path.join(probe, "t.txt"), path.join(probe, "l.txt"), "file");
+    return readFileSync(path.join(probe, "l.txt"), "utf8") === "probe";
+  } catch {
+    return false;
+  } finally {
+    rmSync(probe, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+  }
+})();
+
+describe("authorizeRoot — lexical authorization before filesystem access (F21)", () => {
+  it("denies a root outside every allowRoot without touching the filesystem", () => {
+    const root = makeDir("causoryn-rootauth-root-");
+    const outside = makeDir("causoryn-rootauth-outside-");
+    mkdirSync(path.join(outside, "dir"));
+    writeFileSync(path.join(outside, "file.txt"), "x");
+    const policy = WorkspaceAccessPolicy.create({ allowRoots: [root] });
+
+    for (const probe of [
+      path.join(outside, "dir"),
+      path.join(outside, "file.txt"),
+      path.join(outside, "missing"),
+      path.join(root, "..", path.basename(outside), "dir"),
+    ]) {
+      const { result, calls } = recordFsCalls(() => policy.authorizeRoot(probe));
+      expect(result.allowed, probe).toBe(false);
+      expect(calls, `filesystem calls for ${probe}`).toEqual([]);
+    }
+  });
+
+  it("returns one fixed reason for every root outside the allowRoots (no existence or file-type oracle)", () => {
+    const root = makeDir("causoryn-rootauth-root-");
+    const outside = makeDir("causoryn-rootauth-outside-");
+    mkdirSync(path.join(outside, "dir"));
+    writeFileSync(path.join(outside, "file.txt"), "x");
+    const policy = WorkspaceAccessPolicy.create({ allowRoots: [root] });
+
+    const denials = [
+      path.join(outside, "dir"),
+      path.join(outside, "file.txt"),
+      path.join(outside, "missing", "deeper"),
+    ].map((probe) => denyOf(policy.authorizeRoot(probe)));
+    for (const denial of denials) {
+      expect(denial.code).toBe("workspace/root-not-authorized");
+      expect(denial).toEqual(denials[0]);
+      expect(denial.reason).not.toContain(outside);
+    }
+  });
+
+  it("denies a link spelled outside the allowRoots even when it resolves into them", () => {
+    const root = makeDir("causoryn-rootauth-root-");
+    const outside = makeDir("causoryn-rootauth-outside-");
+    const alias = path.join(outside, "alias-to-root");
+    symlinkSync(root, alias, "junction");
+    const policy = WorkspaceAccessPolicy.create({ allowRoots: [root] });
+    const { result, calls } = recordFsCalls(() => policy.authorizeRoot(alias));
+    expect(denyOf(result).code).toBe("workspace/root-not-authorized");
+    expect(calls).toEqual([]);
+  });
+
+  it("keeps authorizing declared roots, nested roots and both declared and canonical spellings", () => {
+    const base = makeDir("causoryn-rootauth-base-");
+    const real = path.join(base, "real");
+    mkdirSync(path.join(real, "packages", "app"), { recursive: true });
+    const alias = path.join(base, "alias");
+    symlinkSync(real, alias, "junction");
+    const policy = WorkspaceAccessPolicy.create({ allowRoots: [alias] });
+
+    for (const accepted of [alias, path.join(alias, "packages", "app"), real, path.join(real, "packages")]) {
+      expect(policy.authorizeRoot(accepted).allowed, accepted).toBe(true);
+    }
+  });
+
+  it("keeps the detailed reasons for roots inside the allowRoots (missing, not a directory)", () => {
+    const root = makeDir("causoryn-rootauth-root-");
+    writeFileSync(path.join(root, "file.txt"), "x");
+    const policy = WorkspaceAccessPolicy.create({ allowRoots: [root] });
+    expect(denyOf(policy.authorizeRoot(path.join(root, "missing"))).reason).toMatch(/missing or inaccessible/);
+    expect(denyOf(policy.authorizeRoot(path.join(root, "file.txt"))).reason).toMatch(/not a directory/);
+  });
+
+  it.skipIf(!CAN_CREATE_FILE_SYMLINK)(
+    "does not report the file type of a link target outside the allowRoots",
+    () => {
+      const root = makeDir("causoryn-rootauth-root-");
+      const outside = makeDir("causoryn-rootauth-outside-");
+      writeFileSync(path.join(outside, "id_ed25519"), "key");
+      mkdirSync(path.join(outside, "dir"));
+      symlinkSync(path.join(outside, "id_ed25519"), path.join(root, "to-file"), "file");
+      symlinkSync(path.join(outside, "dir"), path.join(root, "to-dir"), "junction");
+      const policy = WorkspaceAccessPolicy.create({ allowRoots: [root] });
+      const toFile = denyOf(policy.authorizeRoot(path.join(root, "to-file")));
+      const toDir = denyOf(policy.authorizeRoot(path.join(root, "to-dir")));
+      expect(toFile).toEqual(toDir);
+      expect(toFile.reason).not.toMatch(/not a directory/);
+    },
+  );
+});
+
+describe("describeLinkInspectionFailure — no readlink targets in client messages (F42)", () => {
+  const uncFailure = {
+    ok: false,
+    reason: "unc-or-device-link-target",
+    linkPath: "C:\\Users\\victim\\Links\\share",
+    target: "\\\\fileserver\\finance$",
+  } as const;
+
+  it("names neither the link path nor its target by default", () => {
+    const message = describeLinkInspectionFailure(uncFailure);
+    expect(message).toMatch(/UNC or Win32 device target/);
+    expect(message).not.toContain("fileserver");
+    expect(message).not.toContain("finance$");
+    expect(message).not.toContain("victim");
+  });
+
+  it("names a link path inside the authorized directory relative to it, never the target", () => {
+    const inside = describeLinkInspectionFailure(
+      { ...uncFailure, linkPath: "C:\\work\\repo\\share" },
+      { within: "C:\\work\\repo", pathApi: path.win32 },
+    );
+    expect(inside).toContain("share");
+    expect(inside).not.toContain("C:\\work");
+    expect(inside).not.toContain("fileserver");
+
+    const nested = describeLinkInspectionFailure(
+      { ok: false, reason: "too-many-links", linkPath: "/work/repo/a/b" },
+      { within: "/work/repo", pathApi: path.posix },
+    );
+    expect(nested).toContain("a/b");
+    expect(nested).not.toContain("/work/repo");
+  });
+
+  it("leaves out a link path outside the authorized directory", () => {
+    const outside = describeLinkInspectionFailure(uncFailure, { within: "C:\\work\\repo", pathApi: path.win32 });
+    expect(outside).not.toContain("victim");
+    expect(outside).not.toContain("fileserver");
+    const unreadable = describeLinkInspectionFailure(
+      { ok: false, reason: "link-target-unreadable", linkPath: "/etc/elsewhere" },
+      { within: "/work/repo", pathApi: path.posix },
+    );
+    expect(unreadable).toMatch(/could not be read/);
+    expect(unreadable).not.toContain("/etc/elsewhere");
+  });
+});
+
+describe("WorkspaceAccessPolicy — link denials do not echo targets (F42)", () => {
+  it.skipIf(!IS_WIN)("names only the in-root link path for candidate and root denials", () => {
+    const root = makeDir("causoryn-rootauth-root-");
+    mkdirSync(path.join(root, "src"));
+    const policy = WorkspaceAccessPolicy.create({ allowRoots: [root] });
+    fakeLink(path.join(root, "share"), "\\\\fileserver.example\\finance$\\");
+
+    const candidate = denyOf(policy.checkPath(root, "share/report.ts"));
+    expect(candidate.rule).toBe("unc-or-device-link-target");
+    expect(candidate.reason).toContain("share");
+    expect(candidate.reason).not.toContain("fileserver");
+    expect(candidate.reason).not.toContain(root);
+
+    const nestedRoot = denyOf(policy.authorizeRoot(path.join(root, "share", "sub")));
+    expect(nestedRoot.rule).toBe("unc-or-device-link-target");
+    expect(nestedRoot.reason).not.toContain("fileserver");
+    expect(nestedRoot.reason).not.toContain(root);
+  });
+
+  it.skipIf(!IS_WIN)("does not name a hop outside the root when a link chain leaves it", () => {
+    const root = makeDir("causoryn-rootauth-root-");
+    const outside = makeDir("causoryn-rootauth-outside-");
+    const hop = path.join(outside, "hop");
+    fakeLink(path.join(root, "out"), hop);
+    fakeLink(hop, "\\\\fileserver.example\\share");
+    const policy = WorkspaceAccessPolicy.create({ allowRoots: [root] });
+
+    const denial = denyOf(policy.checkPath(root, "out/x.ts"));
+    expect(denial.rule).toBe("unc-or-device-link-target");
+    expect(denial.reason).not.toContain(outside);
+    expect(denial.reason).not.toContain("fileserver");
+  });
+});
