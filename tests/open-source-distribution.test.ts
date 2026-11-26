@@ -709,6 +709,8 @@ describe("2. Repo-root & packages/causoryn 4-host manifests (0.3.2 parity + zero
     expect(codexServers["causoryn"]?.["command"]).toBe("node");
     expect(codexServers["causoryn"]?.["cwd"]).toBeUndefined();
     expect(codexServers["causoryn"]?.["env_vars"]).toEqual(["CODEX_HOME"]);
+    // Keeps cmd.exe (inside a .cmd/.bat node shim) and libuv from searching the project.
+    expect(codexServers["causoryn"]?.["env"]).toEqual({ NoDefaultCurrentDirectoryInExePath: "1" });
     expect(codexServers["causoryn"]?.["startup_timeout_sec"]).toBe(30);
     const codexArgs = codexServers["causoryn"]?.["args"] as string[];
     expect(codexArgs.slice(0, 2)).toEqual(["--input-type=module", "--eval"]);
