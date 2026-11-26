@@ -46,6 +46,13 @@ type analysisContext struct {
 	addEdge              func(Edge)
 	warnings             *[]string
 	declSpan             func(*fileCtx, token.Pos, token.Pos) *Span
+	// Candidate lists and package matches are computed once per key instead
+	// of once per call (lazily allocated; see analyze.go).
+	methodCandidates map[string]candidateList
+	ifaceCandidates  map[string]candidateList
+	importMatches    map[int]importMatch
+	pkgCallees       map[calleeKey]pkgCallees
+	pkgTexts         map[pkgKey]pkgLabel
 }
 
 // matchRoute — kayıt çağrısı kalıbını tanır; eşleşmezse nil.
@@ -156,20 +163,21 @@ func classifyHandler(ctx *analysisContext, fi *funcInfo, expr ast.Expr) *callTar
 				resolution: ResolutionVerified,
 				rationale: fmt.Sprintf(
 					"ROUTES_TO: %s is a handler function defined in package '%s' in the same directory (go/ast, verified).",
-					samePkg.qname, fi.pkg,
+					samePkg.qname, fi.file.pkgNameText,
 				),
 			}
 		}
+		name := boundExprText(h.Name)
 		return &callTarget{
-			ref:        NodeRef{Kind: "UnknownExternal", QualifiedName: h.Name},
+			ref:        NodeRef{Kind: "UnknownExternal", QualifiedName: name},
 			resolution: ResolutionUnresolved,
 			rationale: fmt.Sprintf(
 				"ROUTES_TO: handler name '%s' did not match any defined symbol (unresolved).",
-				h.Name,
+				name,
 			),
 		}
 	default:
-		text := exprText(ctx.fset, fi.file.content, expr)
+		text := boundExprText(exprText(ctx.fset, fi.file.content, expr))
 		target := classifyExpr(ctx, fi, expr)
 		if target == nil {
 			return nil

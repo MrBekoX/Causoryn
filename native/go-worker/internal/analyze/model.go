@@ -9,8 +9,12 @@
 package analyze
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"sort"
+	"unicode/utf8"
 )
 
 // Analyzer kimliği — Evidence.analyzerId karşılığı; TS adapter sabitiyle
@@ -43,6 +47,46 @@ const (
 // tanısı + uyarı verilir ve analiz partial olur (Roslyn worker'daki 1000
 // derinlik savunmasının Go karşılığı).
 const MaxAstDepth = 1000
+
+// Output bounds for text copied from the analyzed source. Without them one
+// source string is copied into every node key, edge key, rationale and
+// evidence key that quotes it, so a small file can force gigabytes of output.
+const (
+	// MaxRenderedTextBytes — call-expression text (UnknownExternal names and
+	// the rationales that quote them); the same 200 limit and "...#<digest>"
+	// marker as the Python worker's rendered expressions.
+	MaxRenderedTextBytes = 200
+	// MaxQualifiedNameBytes — declared qualified names and other name-like
+	// source text (import paths, package names, directories) quoted in
+	// rationales, ambiguity reasons and candidate labels.
+	MaxQualifiedNameBytes = 512
+	// MaxAmbiguityCandidates — the first N sorted candidates of an ambiguity are
+	// listed; a longer list carries candidatesTruncated + candidateCount and
+	// says so in its reason.
+	MaxAmbiguityCandidates = 64
+)
+
+// boundText returns s when it fits in limit bytes. Otherwise it returns the
+// longest prefix that fits (cut on a UTF-8 rune boundary), "...#" and the
+// first 12 hex digits of the SHA-256 of the full text, so distinct texts stay
+// distinct and the result is deterministic.
+func boundText(s string, limit int) string {
+	if len(s) <= limit {
+		return s
+	}
+	cut := limit
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	sum := sha256.Sum256([]byte(s))
+	return s[:cut] + "...#" + hex.EncodeToString(sum[:])[:12]
+}
+
+// boundExprText bounds call-expression text (MaxRenderedTextBytes).
+func boundExprText(s string) string { return boundText(s, MaxRenderedTextBytes) }
+
+// boundName bounds a qualified name or name-like text (MaxQualifiedNameBytes).
+func boundName(s string) string { return boundText(s, MaxQualifiedNameBytes) }
 
 // RouteDetectionCapability — CapabilitiesOut.routeDetection sabiti; TS
 // adapter testleri bu dizgiyi birebir doğrular.
@@ -142,6 +186,47 @@ func widenSpan(current, next *NodeSpan) *NodeSpan {
 type Ambiguity struct {
 	Candidates []string `json:"candidates"`
 	Reason     string   `json:"reason"`
+	// CandidatesTruncated and CandidateCount are set only when the list was
+	// capped at MaxAmbiguityCandidates (omitted otherwise, so an uncapped list
+	// keeps its exact wire form); CandidateCount is the full candidate count.
+	CandidatesTruncated bool `json:"candidatesTruncated,omitempty"`
+	CandidateCount      int  `json:"candidateCount,omitempty"`
+}
+
+// candidateList — a sorted candidate label list capped at
+// MaxAmbiguityCandidates. It is built once per lookup key and shared,
+// read-only, by every edge that uses it.
+type candidateList struct {
+	labels []string // the first sorted candidates (at most MaxAmbiguityCandidates)
+	total  int      // the number of candidates before the cap
+}
+
+// capCandidates keeps the first MaxAmbiguityCandidates entries of an already
+// ordered list.
+func capCandidates(ordered []string) candidateList {
+	if len(ordered) <= MaxAmbiguityCandidates {
+		return candidateList{labels: ordered, total: len(ordered)}
+	}
+	kept := make([]string, MaxAmbiguityCandidates)
+	copy(kept, ordered)
+	return candidateList{labels: kept, total: len(ordered)}
+}
+
+// ambiguity returns the Ambiguity of the list; a capped list sets the
+// provenance fields and states the cap in its reason.
+func (c candidateList) ambiguity(reason string) *Ambiguity {
+	if c.total <= len(c.labels) {
+		return &Ambiguity{Candidates: c.labels, Reason: reason}
+	}
+	return &Ambiguity{
+		Candidates: c.labels,
+		Reason: reason + fmt.Sprintf(
+			" Only the first %d of %d sorted candidates are listed (candidates truncated).",
+			len(c.labels), c.total,
+		),
+		CandidatesTruncated: true,
+		CandidateCount:      c.total,
+	}
 }
 
 type Edge struct {
@@ -200,6 +285,27 @@ func evidenceKey(ev Evidence) string {
 		return ""
 	}
 	return string(bytes)
+}
+
+// keyedEvidence — an evidence record with its canonical key, computed once.
+type keyedEvidence struct {
+	key      string
+	evidence Evidence
+}
+
+// sortedEvidence orders evidence by canonical key. The keys are unique after
+// de-duplication, so the order is total and deterministic; each key is
+// computed once instead of on every comparison.
+func sortedEvidence(keyed []keyedEvidence) []Evidence {
+	if len(keyed) == 0 {
+		return nil
+	}
+	sort.Slice(keyed, func(i, j int) bool { return keyed[i].key < keyed[j].key })
+	evidence := make([]Evidence, len(keyed))
+	for i := range keyed {
+		evidence[i] = keyed[i].evidence
+	}
+	return evidence
 }
 
 func sortStrings(values []string) {

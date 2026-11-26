@@ -80,6 +80,16 @@ MAX_AST_DEPTH = max(100, min(500, sys.getrecursionlimit() // 2))
 # content digest so distinct expressions stay distinct.
 MAX_RENDERED_EXPRESSION_CHARS = 200
 
+# Upper bound for declared qualified names and literal route paths (import-
+# derived UnknownExternal names use the expression bound above). Without it
+# one long identifier is copied into every edge endpoint, rationale and key
+# that quotes it.
+MAX_QUALIFIED_NAME_CHARS = 512
+
+# Upper bound for the distinct entries of a route decorator's methods list;
+# each entry becomes one Endpoint carrying the route path.
+MAX_ROUTE_METHODS = 16
+
 # TŞ §8 katalogları — worker liste dışı tür üretemez (çıkışta sert doğrulama).
 NODE_KINDS = frozenset(
     {
@@ -148,7 +158,9 @@ def _force_utf8_stderr() -> None:
     reconfigure = getattr(sys.stderr, "reconfigure", None)
     if callable(reconfigure):
         try:
-            reconfigure(encoding="utf-8")
+            # backslashreplace: a lone surrogate in a log line is escaped
+            # instead of raising (reconfigure would otherwise reset to strict).
+            reconfigure(encoding="utf-8", errors="backslashreplace")
         except (OSError, ValueError):
             pass  # reconfigure desteklenmiyorsa binary stdout disiplini yine sağlamdır
 
@@ -166,12 +178,39 @@ def sha256_hex(content: str) -> str:
     return hashlib.sha256(content.encode("utf-8")).hexdigest()
 
 
-def bounded_text(text: str) -> str:
-    """Caps rendered text at MAX_RENDERED_EXPRESSION_CHARS (plus a digest suffix)."""
-    if len(text) <= MAX_RENDERED_EXPRESSION_CHARS:
+def bounded_text(text: str, limit: int = MAX_RENDERED_EXPRESSION_CHARS) -> str:
+    """Caps text at `limit` characters (default MAX_RENDERED_EXPRESSION_CHARS)
+    plus a digest suffix, so distinct texts stay distinct."""
+    if len(text) <= limit:
         return text
     digest = hashlib.sha256(text.encode("utf-8", "surrogatepass")).hexdigest()[:12]
-    return f"{text[:MAX_RENDERED_EXPRESSION_CHARS]}...#{digest}"
+    return f"{text[:limit]}...#{digest}"
+
+
+def bounded_name(text: str) -> str:
+    """Caps a qualified name or name-like text at MAX_QUALIFIED_NAME_CHARS."""
+    return bounded_text(text, MAX_QUALIFIED_NAME_CHARS)
+
+
+def is_utf8_text(text: str) -> bool:
+    """False when `text` holds a lone surrogate (it cannot be encoded as UTF-8)."""
+    try:
+        text.encode("utf-8")
+    except UnicodeEncodeError:
+        return False
+    return True
+
+
+def escape_lone_surrogates(text: str) -> str:
+    """Replaces each lone surrogate with its `\\uXXXX` escape text.
+
+    Python accepts `"\\ud800"` in a str literal; such a character cannot be
+    encoded as UTF-8, so it must never reach the response. The escape is
+    deterministic; text without lone surrogates is returned unchanged.
+    """
+    if is_utf8_text(text):
+        return text
+    return text.encode("utf-8", "backslashreplace").decode("utf-8")
 
 
 def render_expression(node: ast.AST, source: str) -> str:
@@ -240,6 +279,9 @@ def validate_relative_path(raw: Any) -> Tuple[Optional[str], Optional[str]]:
     """POSIX workspace-relative yol sözleşmesi. (path, hata_mesajı) döner."""
     if not isinstance(raw, str) or len(raw) == 0:
         return None, "files[].path must not be empty"
+    if not is_utf8_text(raw):
+        # The path is not quoted: a lone surrogate cannot be written to stdout.
+        return None, "files[].path must be valid Unicode text (it contains a lone surrogate)"
     if "\\" in raw:
         return None, f"files[].path must be a POSIX path (backslashes are not accepted): {raw}"
     if raw.startswith("/"):
@@ -275,6 +317,11 @@ def validate_request(payload: Any) -> Tuple[Optional[Dict[str, Any]], Optional[D
     if "id" not in payload or not valid_id(raw_id):
         return None, error_response(
             None, "INVALID_ARGUMENT", "id is required and must be a string or a number"
+        )
+    if isinstance(raw_id, str) and not is_utf8_text(raw_id):
+        # The id cannot be echoed: a lone surrogate cannot be written to stdout.
+        return None, error_response(
+            None, "INVALID_ARGUMENT", "id must be valid Unicode text (it contains a lone surrogate)"
         )
 
     if payload.get("type") != "analyze":
@@ -339,7 +386,14 @@ def validate_request(payload: Any) -> Tuple[Optional[Dict[str, Any]], Optional[D
             return None, error_response(
                 echoed_id, "INVALID_ARGUMENT", f"files[{index}].content must be a string"
             )
-        content_bytes = len(content.encode("utf-8"))
+        try:
+            content_bytes = len(content.encode("utf-8"))
+        except UnicodeEncodeError:
+            return None, error_response(
+                echoed_id,
+                "INVALID_ARGUMENT",
+                f"files[{index}].content must be valid Unicode text (it contains a lone surrogate)",
+            )
         if content_bytes > MAX_FILE_CONTENT_BYTES:
             return None, error_response(
                 echoed_id,
@@ -461,7 +515,9 @@ class FileAnalyzer:
         if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef)):
             name = statement.name
             kind = "Method" if in_class else "Function"
-            qualified = f"{prefix}.{name}"
+            # Bounded once here (CPython has no identifier length limit); the
+            # name tables below keep the raw name as the lookup key.
+            qualified = bounded_name(f"{prefix}.{name}")
             self.collector.add_node(kind, qualified, self.path, span=declaration_span(statement))
             self.collector.add_contains(
                 parent, self.ref(kind, qualified),
@@ -487,7 +543,7 @@ class FileAnalyzer:
 
         if isinstance(statement, ast.ClassDef):
             name = statement.name
-            qualified = f"{prefix}.{name}"
+            qualified = bounded_name(f"{prefix}.{name}")
             self.collector.add_node("Class", qualified, self.path, span=declaration_span(statement))
             self.collector.add_contains(
                 parent, self.ref("Class", qualified),
@@ -545,12 +601,23 @@ class FileAnalyzer:
             else:
                 continue
 
+            decorator_label = bounded_text(f"{carrier}.{attr}")
             if path is None:
                 self.collector.add_warning(
-                    f"{self.path}: the route path of decorator '{carrier}.{attr}' is not a "
+                    f"{self.path}: the route path of decorator '{decorator_label}' is not a "
                     f"literal string; no endpoint was produced for {handler_qn}"
                 )
                 continue
+            # The literal path is copied into every Endpoint of the decorator:
+            # escape lone surrogates (they cannot be written as UTF-8) and bound it.
+            path = bounded_name(escape_lone_surrogates(path))
+            if len(verbs) > MAX_ROUTE_METHODS:
+                self.collector.add_warning(
+                    f"{self.path}: the methods list of decorator '{decorator_label}' on "
+                    f"{handler_qn} has {len(verbs)} distinct entries; only the first "
+                    f"{MAX_ROUTE_METHODS} were used"
+                )
+                verbs = verbs[:MAX_ROUTE_METHODS]
 
             for verb in verbs:
                 endpoint_qn = f"{verb} {path}"
@@ -577,13 +644,17 @@ class FileAnalyzer:
         return None
 
     def _methods_kwarg(self, call: ast.Call) -> List[str]:
+        """Distinct methods of a `methods=[...]` list, in source order (each one
+        escaped and bounded like the path)."""
         for keyword in call.keywords:
             if keyword.arg == "methods" and isinstance(keyword.value, ast.List):
-                verbs = []
+                verbs: List[str] = []
+                seen: set = set()
                 for element in keyword.value.elts:
                     if isinstance(element, ast.Constant) and isinstance(element.value, str):
-                        verb = element.value.strip().upper()
-                        if verb:
+                        verb = bounded_text(escape_lone_surrogates(element.value.strip().upper()))
+                        if verb and verb not in seen:
+                            seen.add(verb)
                             verbs.append(verb)
                 if verbs:
                     return verbs
@@ -692,7 +763,7 @@ class FileAnalyzer:
             else:
                 finish(
                     "unresolved", self.external_ref(name),
-                    f"CALLS: {owner_qn} → {name} could not be resolved (unresolved); "
+                    f"CALLS: {owner_qn} → {bounded_text(name)} could not be resolved (unresolved); "
                     "no fabricated target was produced.",
                 )
             return
@@ -716,7 +787,7 @@ class FileAnalyzer:
                 if member is not None:
                     finish(
                         "verified", self.ref(member[0], member[1]),
-                        f"CALLS: {owner_qn} → {member[1]} resolved 'self.{rest[0]}' via the "
+                        f"CALLS: {owner_qn} → {member[1]} resolved 'self.{bounded_text(rest[0])}' via the "
                         f"member table of the enclosing class {owner_class_qn} (verified).",
                     )
                 else:
@@ -827,20 +898,24 @@ class FileAnalyzer:
                         },
                     )
                 else:
+                    # The import name is written once but quoted by every call:
+                    # the rationale and candidate use the bounded node name.
+                    external = self.external_ref(target_qn)
+                    shown = external["qualifiedName"]
                     finish(
                         "heuristic",
-                        self.external_ref(target_qn),
-                        f"CALLS: {owner_qn} → {target_qn} matched as an external symbol "
+                        external,
+                        f"CALLS: {owner_qn} → {shown} matched as an external symbol "
                         "based on the import statement (heuristic; no semantic verification).",
                         {
-                            "candidates": [target_qn],
+                            "candidates": [shown],
                             "reason": "import outside the analysis set; no semantic verification",
                         },
                     )
             else:
                 finish(
                     "unresolved", self.external_ref(binding_name),
-                    f"CALLS: {owner_qn} → {binding_name} could not be resolved (unresolved); "
+                    f"CALLS: {owner_qn} → {bounded_text(binding_name)} could not be resolved (unresolved); "
                     "no fabricated target was produced.",
                 )
             return
@@ -886,13 +961,15 @@ class FileAnalyzer:
 
         # Analiz seti dışı import sembolü: import bildirimi metinsel dayanaktır.
         external_qn = f"{symbol_qn}.{'.'.join(rest)}" if rest else symbol_qn
+        external = self.external_ref(external_qn)
+        shown = external["qualifiedName"]
         finish(
             "heuristic",
-            self.external_ref(external_qn),
-            f"CALLS: {owner_qn} → {external_qn} matched as an external symbol "
+            external,
+            f"CALLS: {owner_qn} → {shown} matched as an external symbol "
             "based on the import statement (heuristic; no semantic verification).",
             {
-                "candidates": [external_qn],
+                "candidates": [shown],
                 "reason": "import outside the analysis set; no semantic verification",
             },
         )
@@ -905,7 +982,9 @@ class RequestCollector:
         self._nodes: Dict[Tuple[str, str, str], Dict[str, Any]] = {}
         self._edges: Dict[Tuple[str, str, str, str], Dict[str, Any]] = {}
         self._edge_order: List[Tuple[str, str, str, str]] = []
-        self._evidence_keys: set = set()
+        # Canonical keys of each edge's evidence: merging is a set lookup
+        # instead of re-serializing the edge's whole evidence list per call.
+        self._edge_evidence_keys: Dict[Tuple[str, str, str, str], set] = {}
         self.warnings: List[str] = []
         self.diagnostics: List[Dict[str, Any]] = []
         self.module_set: set = set()
@@ -995,10 +1074,12 @@ class RequestCollector:
                 edge["ambiguity"] = ambiguity
             self._edges[key] = edge
             self._edge_order.append(key)
+            self._edge_evidence_keys[key] = set()
+        seen = self._edge_evidence_keys[key]
         for item in evidence_items:
             evidence_key = canonical(item)
-            self._evidence_keys.add(evidence_key)
-            if all(canonical(existing) != evidence_key for existing in edge["evidence"]):
+            if evidence_key not in seen:
+                seen.add(evidence_key)
                 edge["evidence"].append(item)
 
     # -- çıktı ---------------------------------------------------------------------
@@ -1189,9 +1270,33 @@ def handle_line(line: str) -> Dict[str, Any]:
         )
 
 
-def write_response(stdout_buf: Any, response: Dict[str, Any]) -> None:
+def encode_response(response: Dict[str, Any]) -> bytes:
+    """One protocol line as UTF-8 bytes.
+
+    A response holding a lone surrogate cannot be encoded as UTF-8. Instead of
+    letting UnicodeEncodeError end the process (which would drop the analysis
+    of the whole batch), an INTERNAL_ERROR line is returned, with the request
+    id when the id itself can be encoded.
+    """
     line = json.dumps(response, ensure_ascii=False, separators=(",", ":")) + "\n"
-    stdout_buf.write(line.encode("utf-8"))
+    try:
+        return line.encode("utf-8")
+    except UnicodeEncodeError:
+        pass
+    log("the response could not be encoded as UTF-8 (lone surrogate); an INTERNAL_ERROR line is written instead")
+    request_id = response.get("id")
+    if isinstance(request_id, str) and not is_utf8_text(request_id):
+        request_id = None
+    fallback = error_response(
+        request_id,
+        "INTERNAL_ERROR",
+        "the response could not be encoded as UTF-8 (it contains a lone surrogate)",
+    )
+    return (json.dumps(fallback, ensure_ascii=False, separators=(",", ":")) + "\n").encode("utf-8")
+
+
+def write_response(stdout_buf: Any, response: Dict[str, Any]) -> None:
+    stdout_buf.write(encode_response(response))
     stdout_buf.flush()
 
 

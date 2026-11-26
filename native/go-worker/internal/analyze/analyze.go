@@ -62,9 +62,31 @@ type pkgKey struct {
 }
 
 type importSpec struct {
+	id         int    // unique per registered import (deterministic; cache key)
 	localName  string // yerel ad (alias veya son yol segmenti)
 	importPath string // tırnaksız tam import yolu
 	aliased    bool   // açık alias verilmişse true
+	// Computed once per import, not once per call (the import path is written
+	// once in the file but quoted by every call through it).
+	pathText   string // boundName(importPath)
+	modDir     string // directory the import path resolves to through go.mod
+	modMatched bool   // the import path matched a go.mod module path
+	modDirText string // boundName(modDir)
+}
+
+// newImportSpec resolves an import through the go.mod roots once.
+func newImportSpec(id int, localName, importPath string, aliased bool, modRoots []goModRoot) importSpec {
+	modDir, modMatched := resolveImportDirByGoMod(modRoots, importPath)
+	return importSpec{
+		id:         id,
+		localName:  localName,
+		importPath: importPath,
+		aliased:    aliased,
+		pathText:   boundName(importPath),
+		modDir:     modDir,
+		modMatched: modMatched,
+		modDirText: boundName(modDir),
+	}
 }
 
 type goModRoot struct {
@@ -78,6 +100,7 @@ type fileCtx struct {
 	content      string
 	hash         string
 	pkgName      string
+	pkgNameText  string // boundName(pkgName), quoted by every verified call of the file
 	pkgKey       pkgKey
 	imports      map[string]importSpec // import local adı → importSpec ("_"/"." hariç)
 	importList   []importSpec
@@ -318,6 +341,7 @@ func AnalyzeWithModules(files []SourceFile, moduleFiles []ModuleFile, maxNodes i
 	var fileCtxs []*fileCtx
 	var funcs []*funcInfo
 	var types []*typeInfo
+	importCount := 0
 
 	// 1) Parse + declaration toplama (dosya sıralı, belge sıralı).
 	for _, sf := range files {
@@ -358,6 +382,7 @@ func AnalyzeWithModules(files []SourceFile, moduleFiles []ModuleFile, maxNodes i
 		}
 		ctx.f = parsed
 		ctx.pkgName = parsed.Name.Name
+		ctx.pkgNameText = boundName(ctx.pkgName)
 		ctx.pkgKey = pkgKey{dir: ctx.dir, name: ctx.pkgName}
 		for _, imp := range parsed.Imports {
 			pathValue, uerr := strconv.Unquote(imp.Path.Value)
@@ -377,11 +402,8 @@ func AnalyzeWithModules(files []SourceFile, moduleFiles []ModuleFile, maxNodes i
 				}
 			}
 			if local != "_" && local != "." && local != "" {
-				spec := importSpec{
-					localName:  local,
-					importPath: pathValue,
-					aliased:    aliased,
-				}
+				importCount++
+				spec := newImportSpec(importCount, local, pathValue, aliased, modRoots)
 				ctx.imports[local] = spec
 				ctx.importList = append(ctx.importList, spec)
 			}
@@ -391,10 +413,11 @@ func AnalyzeWithModules(files []SourceFile, moduleFiles []ModuleFile, maxNodes i
 			case *ast.FuncDecl:
 				recv := receiverTypeName(d)
 				fi := &funcInfo{file: ctx, decl: d, pkg: ctx.pkgName, pkgKey: ctx.pkgKey, name: d.Name.Name, recv: recv}
+				// Qualified names are bounded once here; lookups use the raw names.
 				if recv != "" {
-					fi.qname = ctx.pkgName + "." + recv + "." + d.Name.Name
+					fi.qname = boundName(ctx.pkgName + "." + recv + "." + d.Name.Name)
 				} else {
-					fi.qname = ctx.pkgName + "." + d.Name.Name
+					fi.qname = boundName(ctx.pkgName + "." + d.Name.Name)
 				}
 				funcs = append(funcs, fi)
 			case *ast.GenDecl:
@@ -406,7 +429,7 @@ func AnalyzeWithModules(files []SourceFile, moduleFiles []ModuleFile, maxNodes i
 					if !ok {
 						continue
 					}
-					ti := &typeInfo{file: ctx, spec: ts, pkg: ctx.pkgName, pkgKey: ctx.pkgKey, name: ts.Name.Name, qname: ctx.pkgName + "." + ts.Name.Name}
+					ti := &typeInfo{file: ctx, spec: ts, pkg: ctx.pkgName, pkgKey: ctx.pkgKey, name: ts.Name.Name, qname: boundName(ctx.pkgName + "." + ts.Name.Name)}
 					switch ts.Type.(type) {
 					case *ast.StructType:
 						ti.kind = "Class"
@@ -484,16 +507,13 @@ func AnalyzeWithModules(files []SourceFile, moduleFiles []ModuleFile, maxNodes i
 			if spec.aliased {
 				continue
 			}
-			if targetDir, ok := resolveImportDirByGoMod(modRoots, spec.importPath); ok {
-				if dirPkgs := pkgsByDir[targetDir]; len(dirPkgs) == 1 {
+			if spec.modMatched {
+				if dirPkgs := pkgsByDir[spec.modDir]; len(dirPkgs) == 1 {
 					declared := dirPkgs[0].name
 					if declared != "" && declared != "_" && declared != "." {
 						if _, exists := ctx.imports[declared]; !exists {
-							ctx.imports[declared] = importSpec{
-								localName:  declared,
-								importPath: spec.importPath,
-								aliased:    false,
-							}
+							importCount++
+							ctx.imports[declared] = newImportSpec(importCount, declared, spec.importPath, false, modRoots)
 						}
 					}
 				}
@@ -587,23 +607,35 @@ func AnalyzeWithModules(files []SourceFile, moduleFiles []ModuleFile, maxNodes i
 		}
 	}
 
-	// 4) Kenar toplayıcı (dedupe + evidence birleştirme).
+	// 4) Kenar toplayıcı (dedupe + evidence birleştirme). Each edge keeps the
+	//    set of its evidence keys, so merging is linear: every evidence record
+	//    is marshalled once instead of re-marshalling the edge's whole list.
 	edgeSet := map[string]int{}
 	var edges []Edge
+	var edgeEvidenceKeys []map[string]struct{}
 	addEdge := func(e Edge) {
 		ensureNodeRef(e.From)
 		ensureNodeRef(e.To)
 		key := edgeKey(e)
 		if idx, ok := edgeSet[key]; ok {
-			merged := edges[idx].Evidence
+			seen := edgeEvidenceKeys[idx]
 			for _, ev := range e.Evidence {
-				merged = appendEvidenceUnique(merged, ev)
+				evKey := evidenceKey(ev)
+				if _, duplicate := seen[evKey]; duplicate {
+					continue
+				}
+				seen[evKey] = struct{}{}
+				edges[idx].Evidence = append(edges[idx].Evidence, ev)
 			}
-			edges[idx].Evidence = merged
 			return
+		}
+		seen := make(map[string]struct{}, len(e.Evidence))
+		for _, ev := range e.Evidence {
+			seen[evidenceKey(ev)] = struct{}{}
 		}
 		edgeSet[key] = len(edges)
 		edges = append(edges, e)
+		edgeEvidenceKeys = append(edgeEvidenceKeys, seen)
 	}
 
 	// 5) CONTAINS — File → üst-düzey bildirimler; Class/Interface/Type → metotları.
@@ -749,17 +781,17 @@ func AnalyzeWithModules(files []SourceFile, moduleFiles []ModuleFile, maxNodes i
 	sortEdges(edges)
 
 	evidenceSet := map[string]bool{}
-	var evidence []Evidence
+	var keyed []keyedEvidence
 	for _, e := range edges {
 		for _, ev := range e.Evidence {
 			key := evidenceKey(ev)
 			if !evidenceSet[key] {
 				evidenceSet[key] = true
-				evidence = append(evidence, ev)
+				keyed = append(keyed, keyedEvidence{key: key, evidence: ev})
 			}
 		}
 	}
-	sortEvidence(evidence)
+	evidence := sortedEvidence(keyed)
 
 	verified := 0
 	for _, e := range edges {
@@ -848,100 +880,55 @@ func formatCandidateLabels(candidates []*funcInfo) []string {
 	return labels
 }
 
-func resolveImportedSelectorCall(
-	actx *analysisContext,
-	fi *funcInfo,
-	imp importSpec,
-	selName string,
-	text string,
-) *callTarget {
-	// 1) go.mod tam modül yolu eşleşmesi → verified!
-	if targetDir, matchedMod := resolveImportDirByGoMod(actx.modRoots, imp.importPath); matchedMod {
-		dirPkgs := actx.pkgsByDir[targetDir]
-		if len(dirPkgs) == 1 {
-			targetPkg := dirPkgs[0]
-			if callee, ok := actx.pkgFuncs[targetPkg][selName]; ok && callee.recv == "" {
-				return &callTarget{
-					ref:        NodeRef{Kind: "Function", QualifiedName: callee.qname, RelativePath: callee.file.relativePath},
-					resolution: ResolutionVerified,
-					rationale: fmt.Sprintf(
-						"CALLS: %s → %s; import path '%s' resolved exactly to directory '%s' via go.mod (verified).",
-						fi.qname, callee.qname, imp.importPath, targetDir,
-					),
-				}
-			}
-			return &callTarget{
-				ref:        NodeRef{Kind: "UnknownExternal", QualifiedName: text},
-				resolution: ResolutionUnresolved,
-				rationale: fmt.Sprintf(
-					"CALLS: '%s' is not defined in package '%s' (%s) resolved via go.mod; no fabricated target was produced (unresolved).",
-					text, targetPkg.name, targetDir,
-				),
-			}
-		}
-		if len(dirPkgs) > 1 {
-			var callees []*funcInfo
-			for _, pk := range dirPkgs {
-				if callee, ok := actx.pkgFuncs[pk][selName]; ok && callee.recv == "" {
-					callees = append(callees, callee)
-				}
-			}
-			if len(callees) > 1 {
-				labels := formatCandidateLabels(callees)
-				return &callTarget{
-					ref:        NodeRef{Kind: "UnknownExternal", QualifiedName: text},
-					resolution: ResolutionUnresolved,
-					ambiguity: &Ambiguity{
-						Candidates: labels,
-						Reason:     fmt.Sprintf("multiple package declarations found in directory '%s'; the ambiguity could not be resolved (unresolved).", targetDir),
-					},
-					rationale: fmt.Sprintf(
-						"CALLS: '%s' has multiple candidate packages in directory '%s' (unresolved).",
-						text, targetDir,
-					),
-				}
-			}
-		}
-		// go.mod eşleşti ama hedef dizin analiz setinde yok (analiz dışı modül alt paketi).
-		return &callTarget{
-			ref:        NodeRef{Kind: "UnknownExternal", QualifiedName: text},
-			resolution: ResolutionHeuristic,
-			ambiguity: &Ambiguity{
-				Candidates: []string{text},
-				Reason: fmt.Sprintf(
-					"import path '%s' resolves to directory '%s' outside the analysis set (heuristic).",
-					imp.importPath, targetDir,
-				),
-			},
-			rationale: fmt.Sprintf(
-				"CALLS: %s → %s; import path outside the analysis set, represented on UnknownExternal (heuristic).",
-				fi.qname, text,
-			),
-		}
+// methodCandidateList — the capped label list of every method named name. It
+// is built once per name (methodsByName is fixed during the call pass) and
+// shared by every call of that name.
+func (actx *analysisContext) methodCandidateList(name string) candidateList {
+	if list, ok := actx.methodCandidates[name]; ok {
+		return list
 	}
-
-	// Caller dosyası bir go.mod kapsamındaysa ve import hiçbir go.mod modülüne
-	// uymuyorsa dış (stdlib/third-party) pakettir — yerel dizin basename'iyle
-	// yanlış eşleştirme yapılmaz.
-	if fileHasGoverningGoMod(actx.modRoots, fi.file.dir) {
-		return &callTarget{
-			ref:        NodeRef{Kind: "UnknownExternal", QualifiedName: text},
-			resolution: ResolutionHeuristic,
-			ambiguity: &Ambiguity{
-				Candidates: []string{text},
-				Reason: fmt.Sprintf(
-					"package call outside the analysis set ('%s'); it does not match the go.mod module path, so it is represented on UnknownExternal (heuristic).",
-					imp.importPath,
-				),
-			},
-			rationale: fmt.Sprintf(
-				"CALLS: %s → %s; package call outside the analysis set, the call text is represented on UnknownExternal (heuristic).",
-				fi.qname, text,
-			),
-		}
+	list := capCandidates(formatCandidateLabels(actx.methodsByName[name]))
+	if actx.methodCandidates == nil {
+		actx.methodCandidates = map[string]candidateList{}
 	}
+	actx.methodCandidates[name] = list
+	return list
+}
 
-	// 2) go.mod olmadan workspace paket eşleştirmesi — ASLA verified üretilmez!
+// ifaceCandidateList — the capped "<Interface>.<method>" list of every
+// interface that declares a method named name, built once per name. The
+// interface names are sorted before the method suffix is added.
+func (actx *analysisContext) ifaceCandidateList(name string) candidateList {
+	if list, ok := actx.ifaceCandidates[name]; ok {
+		return list
+	}
+	sorted := append([]string(nil), actx.ifaceMethods[name]...)
+	sortStrings(sorted)
+	member := "." + boundName(name)
+	candidates := make([]string, 0, len(sorted))
+	for _, ifaceQname := range sorted {
+		candidates = append(candidates, ifaceQname+member)
+	}
+	list := capCandidates(candidates)
+	if actx.ifaceCandidates == nil {
+		actx.ifaceCandidates = map[string]candidateList{}
+	}
+	actx.ifaceCandidates[name] = list
+	return list
+}
+
+// importMatch — the workspace packages an import matches without go.mod:
+// directory suffix first, then package name / basename.
+type importMatch struct {
+	pkgs     []pkgKey
+	bySuffix bool
+}
+
+// matchImport computes the no-go.mod package match of an import once.
+func (actx *analysisContext) matchImport(imp importSpec) importMatch {
+	if match, ok := actx.importMatches[imp.id]; ok {
+		return match
+	}
 	//    (a) Önce dizin yolu son-ek eşleşmesi (".../a/util" → "a/util").
 	var suffixPkgs []pkgKey
 	cleanedImport := strings.TrimRight(imp.importPath, "/")
@@ -985,11 +972,177 @@ func resolveImportedSelectorCall(
 		})
 	}
 
+	match := importMatch{pkgs: matchedPkgs, bySuffix: matchedBySuffix}
+	if actx.importMatches == nil {
+		actx.importMatches = map[int]importMatch{}
+	}
+	actx.importMatches[imp.id] = match
+	return match
+}
+
+// pkgCallees — the packages of a match that define a top-level func.
+type pkgCallees struct {
+	count     int           // packages that define the func
+	only      *funcInfo     // the callee when count == 1
+	labels    candidateList // callee labels when count > 1
+	dirLabels candidateList // "<pkg>.<func> (<dir>)" of every package when count == 1
+}
+
+// calleeKey — cache key of pkgCallees: the import (by id) whose packages are
+// searched (its go.mod directory, or its no-go.mod match), plus the selector.
+type calleeKey struct {
+	goMod    bool
+	importID int
+	sel      string
+}
+
+// calleesIn finds the packages among pkgs that define sel, once per key.
+func (actx *analysisContext) calleesIn(key calleeKey, pkgs []pkgKey) pkgCallees {
+	if callees, ok := actx.pkgCallees[key]; ok {
+		return callees
+	}
+	var found []*funcInfo
+	for _, pk := range pkgs {
+		if callee, ok := actx.pkgFuncs[pk][key.sel]; ok && callee.recv == "" {
+			found = append(found, callee)
+		}
+	}
+	callees := pkgCallees{count: len(found)}
+	switch {
+	case len(found) > 1:
+		callees.labels = capCandidates(formatCandidateLabels(found))
+	case len(found) == 1:
+		callees.only = found[0]
+		dirCandidates := make([]string, 0, len(pkgs))
+		for _, pk := range pkgs {
+			dirCandidates = append(dirCandidates, boundName(fmt.Sprintf("%s.%s (%s)", pk.name, key.sel, pk.dir)))
+		}
+		sortStrings(dirCandidates)
+		callees.dirLabels = capCandidates(dirCandidates)
+	}
+	if actx.pkgCallees == nil {
+		actx.pkgCallees = map[calleeKey]pkgCallees{}
+	}
+	actx.pkgCallees[key] = callees
+	return callees
+}
+
+// pkgLabel — the bounded name and directory of a package, for rationales.
+type pkgLabel struct {
+	name string
+	dir  string
+}
+
+func (actx *analysisContext) pkgText(pk pkgKey) pkgLabel {
+	if label, ok := actx.pkgTexts[pk]; ok {
+		return label
+	}
+	label := pkgLabel{name: boundName(pk.name), dir: boundName(pk.dir)}
+	if actx.pkgTexts == nil {
+		actx.pkgTexts = map[pkgKey]pkgLabel{}
+	}
+	actx.pkgTexts[pk] = label
+	return label
+}
+
+func resolveImportedSelectorCall(
+	actx *analysisContext,
+	fi *funcInfo,
+	imp importSpec,
+	selName string,
+	text string,
+) *callTarget {
+	// 1) go.mod tam modül yolu eşleşmesi → verified!
+	if imp.modMatched {
+		targetDir := imp.modDir
+		dirPkgs := actx.pkgsByDir[targetDir]
+		if len(dirPkgs) == 1 {
+			targetPkg := dirPkgs[0]
+			if callee, ok := actx.pkgFuncs[targetPkg][selName]; ok && callee.recv == "" {
+				return &callTarget{
+					ref:        NodeRef{Kind: "Function", QualifiedName: callee.qname, RelativePath: callee.file.relativePath},
+					resolution: ResolutionVerified,
+					rationale: fmt.Sprintf(
+						"CALLS: %s → %s; import path '%s' resolved exactly to directory '%s' via go.mod (verified).",
+						fi.qname, callee.qname, imp.pathText, imp.modDirText,
+					),
+				}
+			}
+			return &callTarget{
+				ref:        NodeRef{Kind: "UnknownExternal", QualifiedName: text},
+				resolution: ResolutionUnresolved,
+				rationale: fmt.Sprintf(
+					"CALLS: '%s' is not defined in package '%s' (%s) resolved via go.mod; no fabricated target was produced (unresolved).",
+					text, actx.pkgText(targetPkg).name, imp.modDirText,
+				),
+			}
+		}
+		if len(dirPkgs) > 1 {
+			callees := actx.calleesIn(calleeKey{goMod: true, importID: imp.id, sel: selName}, dirPkgs)
+			if callees.count > 1 {
+				return &callTarget{
+					ref:        NodeRef{Kind: "UnknownExternal", QualifiedName: text},
+					resolution: ResolutionUnresolved,
+					ambiguity: callees.labels.ambiguity(fmt.Sprintf(
+						"multiple package declarations found in directory '%s'; the ambiguity could not be resolved (unresolved).",
+						imp.modDirText,
+					)),
+					rationale: fmt.Sprintf(
+						"CALLS: '%s' has multiple candidate packages in directory '%s' (unresolved).",
+						text, imp.modDirText,
+					),
+				}
+			}
+		}
+		// go.mod eşleşti ama hedef dizin analiz setinde yok (analiz dışı modül alt paketi).
+		return &callTarget{
+			ref:        NodeRef{Kind: "UnknownExternal", QualifiedName: text},
+			resolution: ResolutionHeuristic,
+			ambiguity: &Ambiguity{
+				Candidates: []string{text},
+				Reason: fmt.Sprintf(
+					"import path '%s' resolves to directory '%s' outside the analysis set (heuristic).",
+					imp.pathText, imp.modDirText,
+				),
+			},
+			rationale: fmt.Sprintf(
+				"CALLS: %s → %s; import path outside the analysis set, represented on UnknownExternal (heuristic).",
+				fi.qname, text,
+			),
+		}
+	}
+
+	// Caller dosyası bir go.mod kapsamındaysa ve import hiçbir go.mod modülüne
+	// uymuyorsa dış (stdlib/third-party) pakettir — yerel dizin basename'iyle
+	// yanlış eşleştirme yapılmaz.
+	if fileHasGoverningGoMod(actx.modRoots, fi.file.dir) {
+		return &callTarget{
+			ref:        NodeRef{Kind: "UnknownExternal", QualifiedName: text},
+			resolution: ResolutionHeuristic,
+			ambiguity: &Ambiguity{
+				Candidates: []string{text},
+				Reason: fmt.Sprintf(
+					"package call outside the analysis set ('%s'); it does not match the go.mod module path, so it is represented on UnknownExternal (heuristic).",
+					imp.pathText,
+				),
+			},
+			rationale: fmt.Sprintf(
+				"CALLS: %s → %s; package call outside the analysis set, the call text is represented on UnknownExternal (heuristic).",
+				fi.qname, text,
+			),
+		}
+	}
+
+	// 2) go.mod olmadan workspace paket eşleştirmesi — ASLA verified üretilmez!
+	match := actx.matchImport(imp)
+	matchedPkgs := match.pkgs
+
 	if len(matchedPkgs) == 1 {
 		pk := matchedPkgs[0]
+		label := actx.pkgText(pk)
 		if callee, ok := actx.pkgFuncs[pk][selName]; ok && callee.recv == "" {
 			matchKind := "package name"
-			if matchedBySuffix {
+			if match.bySuffix {
 				matchKind = "directory suffix"
 			}
 			return &callTarget{
@@ -999,12 +1152,12 @@ func resolveImportedSelectorCall(
 					Candidates: []string{callee.qname},
 					Reason: fmt.Sprintf(
 						"package-qualified call matched by the %s rule without go.mod to package '%s' (%s); no go/types or go.mod verification (heuristic).",
-						matchKind, pk.name, pk.dir,
+						matchKind, label.name, label.dir,
 					),
 				},
 				rationale: fmt.Sprintf(
 					"CALLS: %s → %s; package-qualified call matched by the %s rule without go.mod to package '%s' (%s) in the analysis set (heuristic).",
-					fi.qname, callee.qname, matchKind, pk.name, pk.dir,
+					fi.qname, callee.qname, matchKind, label.name, label.dir,
 				),
 			}
 		}
@@ -1013,56 +1166,39 @@ func resolveImportedSelectorCall(
 			resolution: ResolutionUnresolved,
 			rationale: fmt.Sprintf(
 				"CALLS: '%s' is not defined in package '%s' (%s) in the analysis set; no fabricated target was produced (unresolved).",
-				text, pk.name, pk.dir,
+				text, label.name, label.dir,
 			),
 		}
 	}
 
 	if len(matchedPkgs) > 1 {
-		var callees []*funcInfo
-		for _, pk := range matchedPkgs {
-			if callee, ok := actx.pkgFuncs[pk][selName]; ok && callee.recv == "" {
-				callees = append(callees, callee)
-			}
-		}
-		if len(callees) > 1 {
-			labels := formatCandidateLabels(callees)
+		callees := actx.calleesIn(calleeKey{importID: imp.id, sel: selName}, matchedPkgs)
+		if callees.count > 1 {
 			return &callTarget{
 				ref:        NodeRef{Kind: "UnknownExternal", QualifiedName: text},
 				resolution: ResolutionUnresolved,
-				ambiguity: &Ambiguity{
-					Candidates: labels,
-					Reason: fmt.Sprintf(
-						"import path '%s' matched multiple workspace directories without go.mod; the ambiguity could not be resolved (unresolved).",
-						imp.importPath,
-					),
-				},
+				ambiguity: callees.labels.ambiguity(fmt.Sprintf(
+					"import path '%s' matched multiple workspace directories without go.mod; the ambiguity could not be resolved (unresolved).",
+					imp.pathText,
+				)),
 				rationale: fmt.Sprintf(
 					"CALLS: '%s' matched multiple candidate packages without go.mod (%d candidates); no fabricated target was produced (unresolved).",
-					text, len(labels),
+					text, callees.labels.total,
 				),
 			}
 		}
-		if len(callees) == 1 {
-			only := callees[0]
-			dirCandidates := make([]string, 0, len(matchedPkgs))
-			for _, pk := range matchedPkgs {
-				dirCandidates = append(dirCandidates, fmt.Sprintf("%s.%s (%s)", pk.name, selName, pk.dir))
-			}
-			sortStrings(dirCandidates)
+		if callees.count == 1 {
+			only := callees.only
 			return &callTarget{
 				ref:        NodeRef{Kind: "Function", QualifiedName: only.qname, RelativePath: only.file.relativePath},
 				resolution: ResolutionHeuristic,
-				ambiguity: &Ambiguity{
-					Candidates: dirCandidates,
-					Reason: fmt.Sprintf(
-						"import path '%s' matched multiple directories without go.mod; '%s' is defined in only one of them, so it was linked heuristically.",
-						imp.importPath, selName,
-					),
-				},
+				ambiguity: callees.dirLabels.ambiguity(fmt.Sprintf(
+					"import path '%s' matched multiple directories without go.mod; '%s' is defined in only one of them, so it was linked heuristically.",
+					imp.pathText, boundName(selName),
+				)),
 				rationale: fmt.Sprintf(
 					"CALLS: %s → %s; import path '%s' matched a single symbol candidate across multiple directories without go.mod (heuristic).",
-					fi.qname, only.qname, imp.importPath,
+					fi.qname, only.qname, imp.pathText,
 				),
 			}
 		}
@@ -1084,7 +1220,7 @@ func resolveImportedSelectorCall(
 			Candidates: []string{text},
 			Reason: fmt.Sprintf(
 				"package call outside the analysis set ('%s'); the call text is represented on UnknownExternal (heuristic).",
-				imp.localName,
+				boundName(imp.localName),
 			),
 		},
 		rationale: fmt.Sprintf(
@@ -1111,21 +1247,23 @@ func classifyExpr(
 				resolution: ResolutionVerified,
 				rationale: fmt.Sprintf(
 					"CALLS: %s → %s; resolved with go/ast to a function defined in package '%s' in the same directory (verified).",
-					fi.qname, samePkg.qname, fi.pkg,
+					fi.qname, samePkg.qname, fi.file.pkgNameText,
 				),
 			}
 		}
+		name := boundExprText(fun.Name)
 		return &callTarget{
-			ref:        NodeRef{Kind: "UnknownExternal", QualifiedName: fun.Name},
+			ref:        NodeRef{Kind: "UnknownExternal", QualifiedName: name},
 			resolution: ResolutionUnresolved,
 			rationale: fmt.Sprintf(
 				"CALLS: '%s' did not match any defined symbol; no fabricated target was produced (unresolved).",
-				fun.Name,
+				name,
 			),
 		}
 	case *ast.SelectorExpr:
 		selName := fun.Sel.Name
-		text := exprText(actx.fset, fi.file.content, expr)
+		// Call text is bounded before it is used as a name or quoted anywhere.
+		text := boundExprText(exprText(actx.fset, fi.file.content, expr))
 		// (a) Doğrudan paket nitelikli çağrı (pkgAlias.Func): import tablosundan çöz.
 		if directX, isDirect := fun.X.(*ast.Ident); isDirect {
 			if imp, ok := fi.file.imports[directX.Name]; ok {
@@ -1161,7 +1299,7 @@ func classifyExpr(
 						Candidates: []string{text},
 						Reason: fmt.Sprintf(
 							"package call outside the analysis set ('%s'); the call text is represented on UnknownExternal (heuristic).",
-							x.Name,
+							boundName(x.Name),
 						),
 					},
 					rationale: fmt.Sprintf(
@@ -1186,35 +1324,24 @@ func classifyExpr(
 					),
 				}
 			} else if len(candidates) > 1 {
-				names := formatCandidateLabels(candidates)
+				names := actx.methodCandidateList(selName)
 				return &callTarget{
 					ref:        NodeRef{Kind: "UnknownExternal", QualifiedName: text},
 					resolution: ResolutionUnresolved,
-					ambiguity: &Ambiguity{
-						Candidates: names,
-						Reason:     "the method name was found on multiple types in the analysis set; the ambiguity could not be resolved (unresolved).",
-					},
+					ambiguity:  names.ambiguity("the method name was found on multiple types in the analysis set; the ambiguity could not be resolved (unresolved)."),
 					rationale: fmt.Sprintf(
 						"CALLS: '%s' matched multiple candidate methods (%d candidates); no fabricated target was produced (unresolved).",
-						text, len(names),
+						text, names.total,
 					),
 				}
 			}
 			// (e) Arayüz metodu adı → heuristic + UnknownExternal.
-			if ifaceNames := actx.ifaceMethods[selName]; len(ifaceNames) > 0 {
-				sorted := append([]string(nil), ifaceNames...)
-				sortStrings(sorted)
-				candidates := make([]string, 0, len(sorted))
-				for _, ifaceQname := range sorted {
-					candidates = append(candidates, ifaceQname+"."+selName)
-				}
+			if len(actx.ifaceMethods[selName]) > 0 {
+				candidates := actx.ifaceCandidateList(selName)
 				return &callTarget{
 					ref:        NodeRef{Kind: "UnknownExternal", QualifiedName: text},
 					resolution: ResolutionHeuristic,
-					ambiguity: &Ambiguity{
-						Candidates: candidates,
-						Reason:     "the interface method name was found in the analysis set; the concrete implementation cannot be resolved without go/types (heuristic).",
-					},
+					ambiguity:  candidates.ambiguity("the interface method name was found in the analysis set; the concrete implementation cannot be resolved without go/types (heuristic)."),
 					rationale: fmt.Sprintf(
 						"CALLS: %s → %s; the interface method name was found in the analysis set, the concrete implementation cannot be resolved (heuristic).",
 						fi.qname, text,
@@ -1242,7 +1369,7 @@ func classifyExpr(
 		}
 	default:
 		// FuncLit çağrısı, generic instantiation vb.
-		text := exprText(actx.fset, fi.file.content, expr)
+		text := boundExprText(exprText(actx.fset, fi.file.content, expr))
 		return &callTarget{
 			ref:        NodeRef{Kind: "UnknownExternal", QualifiedName: text},
 			resolution: ResolutionUnresolved,
@@ -1296,20 +1423,4 @@ func sortEdges(edges []Edge) {
 	sort.Slice(edges, func(i, j int) bool {
 		return edgeSortKey(edges[i]) < edgeSortKey(edges[j])
 	})
-}
-
-func sortEvidence(evidence []Evidence) {
-	sort.Slice(evidence, func(i, j int) bool {
-		return evidenceKey(evidence[i]) < evidenceKey(evidence[j])
-	})
-}
-
-func appendEvidenceUnique(base []Evidence, ev Evidence) []Evidence {
-	key := evidenceKey(ev)
-	for _, existing := range base {
-		if evidenceKey(existing) == key {
-			return base
-		}
-	}
-	return append(base, ev)
 }
