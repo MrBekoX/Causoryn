@@ -12,9 +12,11 @@
  *    ZERO localized `*.resources.dll` files exist under `native/roslyn-worker`, and binary scan
  *    of `Causoryn.RoslynWorker.dll` finds ZERO leaked user paths (`Users\`, `/Users/`, `/home/`)
  *    or `.pdb` references.
- * 4. `package.json#mcpName === "io.github.mrbekox/causoryn"`.
- * 5. Published entry scripts (`causoryn.mjs`, `plugin-mcp-launcher.mjs`, `lib/node-version-guard.mjs`)
- *    contain ZERO `\r` (0x0d) bytes (pure LF).
+ * 4. `package.json#mcpName === "io.github.mrbekox/causoryn"` and `package.json#bin.causoryn`
+ *    is the launcher `scripts/causoryn.cmd` (F20).
+ * 5. Published entry scripts (`scripts/causoryn.cmd`, `lib/cmd-argv-check.mjs`, `causoryn.mjs`,
+ *    `plugin-mcp-launcher.mjs`, `lib/node-version-guard.mjs`, `lib/asset-root.mjs`)
+ *    exist and contain ZERO `\r` (0x0d) bytes (pure LF).
  */
 import { createHash } from "node:crypto";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
@@ -25,6 +27,7 @@ const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
 const DEFAULT_PKG_DIR = path.dirname(SCRIPT_DIR);
 
 const EXPECTED_MCP_NAME = "io.github.mrbekox/causoryn";
+const EXPECTED_BIN = "scripts/causoryn.cmd";
 
 const REQUIRED_NOTICE_STRINGS = [
   "Apache License",
@@ -43,6 +46,10 @@ const REQUIRED_LICENSE_FILES = [
 ];
 
 const PURE_LF_SCRIPTS = [
+  // The npm bin (F20): one file read by POSIX sh and by cmd.exe; a CR would
+  // end up in sh's last argument.
+  path.join("scripts", "causoryn.cmd"),
+  path.join("scripts", "lib", "cmd-argv-check.mjs"),
   path.join("scripts", "causoryn.mjs"),
   path.join("scripts", "plugin-mcp-launcher.mjs"),
   path.join("scripts", "lib", "node-version-guard.mjs"),
@@ -101,6 +108,13 @@ export function verifyPackageReady(pkgDir = DEFAULT_PKG_DIR) {
   if (pkgJson?.mcpName !== EXPECTED_MCP_NAME) {
     throw new Error(
       `[verify-package-ready] package.json#mcpName mismatch: expected "${EXPECTED_MCP_NAME}", found "${String(pkgJson?.mcpName)}"`,
+    );
+  }
+  // F20: the npm bin is the launcher that starts the CLI with npm's own node,
+  // not a `#!/usr/bin/env node` script that looks node up on PATH.
+  if (pkgJson?.bin?.causoryn !== EXPECTED_BIN) {
+    throw new Error(
+      `[verify-package-ready] package.json#bin.causoryn mismatch: expected "${EXPECTED_BIN}", found "${String(pkgJson?.bin?.causoryn)}"`,
     );
   }
 

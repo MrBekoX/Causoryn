@@ -29,6 +29,13 @@
           "value": "--prefix=~/"
         }
       ],
+      "environmentVariables": [
+        {
+          "name": "NoDefaultCurrentDirectoryInExePath",
+          "value": "1",
+          "description": "Windows: keeps cmd.exe from searching the current directory (the analyzed project) for node or causoryn before PATH. No effect elsewhere."
+        }
+      ],
       "packageArguments": [
         {
           "type": "positional",

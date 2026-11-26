@@ -1436,6 +1436,7 @@ describe(
             mcpName: "io.github.mrbekox/causoryn",
             version: "0.2.0",
             type: "module",
+            bin: { causoryn: "scripts/causoryn.cmd" },
           },
           null,
           2,
@@ -1545,6 +1546,8 @@ describe(
         "export function resolveAssetRootOverride() {}\n",
         "utf8",
       );
+      writeFileSync(path.join(pkgDir, "scripts", "causoryn.cmd"), ":; exit 0 #\n@exit /b 0\n", "utf8");
+      writeFileSync(path.join(pkgDir, "scripts", "lib", "cmd-argv-check.mjs"), '"use strict";\n', "utf8");
       return pkgDir;
     };
 
@@ -1601,8 +1604,24 @@ describe(
     );
     expect(() => verifyMod.verifyPackageReady(badCrlfDir)).toThrow(/CRLF|\\r|LF/i);
 
+    // Negative 6b (F20): CRLF in the npm launcher, which POSIX sh also reads
+    const badLauncherCrlfDir = buildReadyPkg("bad-launcher-crlf");
+    writeFileSync(path.join(badLauncherCrlfDir, "scripts", "causoryn.cmd"), ":; exit 0 #\r\n@exit /b 0\r\n", "utf8");
+    expect(() => verifyMod.verifyPackageReady(badLauncherCrlfDir)).toThrow(/causoryn\.cmd contains CRLF/);
+
+    // Negative 6c (F20): the npm bin is still the #!/usr/bin/env node script
+    const badBinDir = buildReadyPkg("bad-bin");
+    writeFileSync(
+      path.join(badBinDir, "package.json"),
+      JSON.stringify({ name: "causoryn", mcpName: "io.github.mrbekox/causoryn", version: "0.2.0", bin: { causoryn: "scripts/causoryn.mjs" } }),
+      "utf8",
+    );
+    expect(() => verifyMod.verifyPackageReady(badBinDir)).toThrow(/bin\.causoryn mismatch/);
+
     // Negative 7: missing package root LICENSE, dist/index.js, mcp-server.mjs.LEGAL.txt, or Roslyn deps.json
     for (const relMissing of [
+      path.join("scripts", "causoryn.cmd"),
+      path.join("scripts", "lib", "cmd-argv-check.mjs"),
       "LICENSE",
       path.join("dist", "index.js"),
       path.join("dist", "mcp-server.mjs.LEGAL.txt"),
