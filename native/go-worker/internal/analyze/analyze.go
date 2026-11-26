@@ -18,11 +18,13 @@
 package analyze
 
 import (
+	"crypto/sha256"
 	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/scanner"
 	"go/token"
+	"io"
 	"path"
 	"sort"
 	"strconv"
@@ -106,6 +108,104 @@ type fileCtx struct {
 	importList   []importSpec
 	f            *ast.File
 	depthFlagged bool
+	// spanDigests — digests of the call-expression texts of this file that
+	// exceed MaxRenderedTextBytes, keyed by byte range (see prepareSpanDigests).
+	spanDigests map[spanKey]string
+}
+
+// spanKey — the byte range [start, end) of a source text in its file.
+type spanKey struct {
+	start int
+	end   int
+}
+
+// exprSpan — the byte range of e in content.
+func exprSpan(fset *token.FileSet, content string, e ast.Expr) (spanKey, bool) {
+	start := fset.Position(e.Pos())
+	end := fset.Position(e.End())
+	if !start.IsValid() || !end.IsValid() || end.Offset < start.Offset || end.Offset > len(content) {
+		return spanKey{}, false
+	}
+	return spanKey{start: start.Offset, end: end.Offset}, true
+}
+
+// prepareSpanDigests computes the digests of the given long texts. Texts that
+// share a start offset — a call chain a(x)()() or a(x).b().c(), whose callee
+// texts are successive prefixes of one span — are hashed in one pass of a
+// running SHA-256 instead of once each from the start, so the cost is linear
+// in the span instead of quadratic. A text longer than MaxHashedTextBytes gets
+// a digest of its file and byte range instead.
+func (f *fileCtx) prepareSpanDigests(spans []spanKey) {
+	endsByStart := map[int][]int{}
+	for _, s := range spans {
+		if s.end-s.start <= MaxRenderedTextBytes {
+			continue
+		}
+		if _, done := f.spanDigests[s]; done {
+			continue
+		}
+		endsByStart[s.start] = append(endsByStart[s.start], s.end)
+	}
+	for start, ends := range endsByStart {
+		sort.Ints(ends)
+		f.hashSpans(start, ends)
+	}
+}
+
+// hashSpans records the digests of [start, end) for ascending ends.
+func (f *fileCtx) hashSpans(start int, ends []int) {
+	if f.spanDigests == nil {
+		f.spanDigests = map[spanKey]string{}
+	}
+	h := sha256.New()
+	written := start
+	for _, end := range ends {
+		key := spanKey{start: start, end: end}
+		if _, done := f.spanDigests[key]; done {
+			continue
+		}
+		if end-start > MaxHashedTextBytes {
+			f.spanDigests[key] = rangeDigest(f, key)
+			continue
+		}
+		_, _ = io.WriteString(h, f.content[written:end])
+		written = end
+		f.spanDigests[key] = digestHex12(h.Sum(nil))
+	}
+}
+
+// rangeDigest — the digest of a text too long to hash, taken over its file
+// (path and content hash) and byte range, which identify it exactly.
+func rangeDigest(f *fileCtx, key spanKey) string {
+	sum := sha256.Sum256([]byte(fmt.Sprintf(
+		"go-worker source range\x00%s\x00%s\x00%d\x00%d", f.relativePath, f.hash, key.start, key.end,
+	)))
+	return digestHex12(sum[:])
+}
+
+// spanDigest — the digest of a long text (computed on demand when it was not
+// prepared).
+func (f *fileCtx) spanDigest(key spanKey) string {
+	if digest, ok := f.spanDigests[key]; ok {
+		return digest
+	}
+	f.hashSpans(key.start, []int{key.end})
+	return f.spanDigests[key]
+}
+
+// sourceText — the source text of e bounded at MaxRenderedTextBytes: a
+// longer text becomes its prefix, "...#" and the first 12 hex digits of the
+// SHA-256 of the full text (the same form as boundText).
+func sourceText(fset *token.FileSet, f *fileCtx, e ast.Expr) string {
+	key, ok := exprSpan(fset, f.content, e)
+	if !ok {
+		return ""
+	}
+	text := f.content[key.start:key.end]
+	if len(text) <= MaxRenderedTextBytes {
+		return text
+	}
+	return cutPrefix(text, MaxRenderedTextBytes) + "...#" + f.spanDigest(key)
 }
 
 type funcInfo struct {
@@ -361,10 +461,11 @@ func AnalyzeWithModules(files []SourceFile, moduleFiles []ModuleFile, maxNodes i
 					if e.Pos.IsValid() {
 						line = e.Pos.Line
 					}
+					// A parser message can quote a token literal of any length.
 					diagnostics = append(diagnostics, Diagnostic{
 						RelativePath: sf.RelativePath,
 						Code:         "GOPARSE",
-						Message:      e.Msg,
+						Message:      boundExprText(e.Msg),
 						Line:         line,
 					})
 				}
@@ -372,7 +473,7 @@ func AnalyzeWithModules(files []SourceFile, moduleFiles []ModuleFile, maxNodes i
 				diagnostics = append(diagnostics, Diagnostic{
 					RelativePath: sf.RelativePath,
 					Code:         "GOPARSE",
-					Message:      err.Error(),
+					Message:      boundExprText(err.Error()),
 					Line:         0,
 				})
 			}
@@ -552,12 +653,22 @@ func AnalyzeWithModules(files []SourceFile, moduleFiles []ModuleFile, maxNodes i
 		}
 	}
 
-	// 3) Node kümeleri.
+	// 3) Node kümeleri. Every admitted node, edge, evidence record and warning
+	//    is charged at its serialized size against MaxResponseBytes; once the
+	//    budget is spent nothing more is admitted (edges never dangle).
+	sizeBudget := &responseBudget{}
 	nodeSet := map[string]Node{}
 	addNode := func(n Node) NodeRef {
 		ref := NodeRef{Kind: n.Kind, QualifiedName: n.QualifiedName, RelativePath: n.RelativePath}
 		key := nodeKey(ref)
 		if existing, exists := nodeSet[key]; !exists {
+			cost := jsonSize(n) + 1
+			if n.Kind == "File" {
+				// One File node per file (bounded by MaxFileCount): always admitted.
+				sizeBudget.used += cost
+			} else if !sizeBudget.charge(cost) {
+				return ref
+			}
 			nodeSet[key] = n
 		} else if n.Span != nil {
 			existing.Span = widenSpan(existing.Span, n.Span)
@@ -614,8 +725,6 @@ func AnalyzeWithModules(files []SourceFile, moduleFiles []ModuleFile, maxNodes i
 	var edges []Edge
 	var edgeEvidenceKeys []map[string]struct{}
 	addEdge := func(e Edge) {
-		ensureNodeRef(e.From)
-		ensureNodeRef(e.To)
 		key := edgeKey(e)
 		if idx, ok := edgeSet[key]; ok {
 			seen := edgeEvidenceKeys[idx]
@@ -624,18 +733,49 @@ func AnalyzeWithModules(files []SourceFile, moduleFiles []ModuleFile, maxNodes i
 				if _, duplicate := seen[evKey]; duplicate {
 					continue
 				}
+				if !sizeBudget.charge(evidenceCost(evKey)) {
+					return // the edge keeps the evidence it already has
+				}
 				seen[evKey] = struct{}{}
 				edges[idx].Evidence = append(edges[idx].Evidence, ev)
 			}
 			return
 		}
+		if sizeBudget.exceeded {
+			return
+		}
+		ensureNodeRef(e.From)
+		ensureNodeRef(e.To)
+		if _, ok := nodeSet[nodeKey(e.From)]; !ok {
+			return // endpoint not admitted: no dangling edge
+		}
+		if _, ok := nodeSet[nodeKey(e.To)]; !ok {
+			return
+		}
+		cost := jsonSize(Edge{Kind: e.Kind, From: e.From, To: e.To, Resolution: e.Resolution, Ambiguity: e.Ambiguity}) + 1
 		seen := make(map[string]struct{}, len(e.Evidence))
 		for _, ev := range e.Evidence {
-			seen[evidenceKey(ev)] = struct{}{}
+			evKey := evidenceKey(ev)
+			seen[evKey] = struct{}{}
+			cost += evidenceCost(evKey)
+		}
+		if !sizeBudget.charge(cost) {
+			return
 		}
 		edgeSet[key] = len(edges)
 		edges = append(edges, e)
 		edgeEvidenceKeys = append(edgeEvidenceKeys, seen)
+	}
+	warningsSuppressed := false
+	addWarning := func(message string) {
+		if !sizeBudget.charge(jsonSize(message) + 1) {
+			if !warningsSuppressed {
+				warningsSuppressed = true
+				warnings = append(warnings, "further warnings were not emitted: the response size budget was reached")
+			}
+			return
+		}
+		warnings = append(warnings, message)
 	}
 
 	// 5) CONTAINS — File → üst-düzey bildirimler; Class/Interface/Type → metotları.
@@ -710,7 +850,7 @@ func AnalyzeWithModules(files []SourceFile, moduleFiles []ModuleFile, maxNodes i
 			Line:         0,
 		}
 		diagnostics = append(diagnostics, diagnostic)
-		warnings = append(warnings, fmt.Sprintf("%s: bodies exceeding the AST depth limit were skipped (%s)", AnalyzerID, fctx.relativePath))
+		addWarning(fmt.Sprintf("%s: bodies exceeding the AST depth limit were skipped (%s)", AnalyzerID, fctx.relativePath))
 	}
 	actx := &analysisContext{
 		fset:                 fset,
@@ -723,10 +863,13 @@ func AnalyzeWithModules(files []SourceFile, moduleFiles []ModuleFile, maxNodes i
 		ifaceMethods:         ifaceMethods,
 		addNode:              addNode,
 		addEdge:              addEdge,
-		warnings:             &warnings,
+		addWarning:           addWarning,
 		declSpan:             declSpan,
 	}
 	for _, fi := range funcs {
+		if sizeBudget.exceeded {
+			break // nothing more can be admitted
+		}
 		if fi.decl.Body == nil {
 			continue
 		}
@@ -737,13 +880,36 @@ func AnalyzeWithModules(files []SourceFile, moduleFiles []ModuleFile, maxNodes i
 			continue
 		}
 		calls := collectCallExprs(fi.decl.Body)
-		for _, call := range calls {
-			if match := matchRoute(call); match != nil {
-				handleRoute(actx, fi, match, call)
+		matches := make([]*routeMatch, len(calls))
+		spans := make([]spanKey, 0, len(calls))
+		for i, call := range calls {
+			matches[i] = matchRoute(call)
+			if key, ok := quotedTextSpan(fset, fi.file.content, call, matches[i]); ok {
+				spans = append(spans, key)
+			}
+		}
+		fi.file.prepareSpanDigests(spans)
+		for i, call := range calls {
+			if sizeBudget.exceeded {
+				break
+			}
+			if matches[i] != nil {
+				handleRoute(actx, fi, matches[i], call)
 				continue
 			}
 			resolveAndAddCallEdge(actx, fi, call)
 		}
+	}
+	if sizeBudget.exceeded {
+		diagnostics = append(diagnostics, Diagnostic{
+			RelativePath: "",
+			Code:         "RESPONSE_TRUNCATED",
+			Message: fmt.Sprintf(
+				"response size budget exceeded (%d bytes of nodes, edges, evidence and warnings); further nodes, edges, evidence and warnings were not emitted (no dangling edges)",
+				MaxResponseBytes,
+			),
+			Line: 0,
+		})
 	}
 
 	// 7) Kanonik sıralama + node bütçesi + evidence birleşimi.
@@ -1263,7 +1429,7 @@ func classifyExpr(
 	case *ast.SelectorExpr:
 		selName := fun.Sel.Name
 		// Call text is bounded before it is used as a name or quoted anywhere.
-		text := boundExprText(exprText(actx.fset, fi.file.content, expr))
+		text := sourceText(actx.fset, fi.file, expr)
 		// (a) Doğrudan paket nitelikli çağrı (pkgAlias.Func): import tablosundan çöz.
 		if directX, isDirect := fun.X.(*ast.Ident); isDirect {
 			if imp, ok := fi.file.imports[directX.Name]; ok {
@@ -1369,7 +1535,7 @@ func classifyExpr(
 		}
 	default:
 		// FuncLit çağrısı, generic instantiation vb.
-		text := boundExprText(exprText(actx.fset, fi.file.content, expr))
+		text := sourceText(actx.fset, fi.file, expr)
 		return &callTarget{
 			ref:        NodeRef{Kind: "UnknownExternal", QualifiedName: text},
 			resolution: ResolutionUnresolved,
@@ -1381,13 +1547,21 @@ func classifyExpr(
 	}
 }
 
-func exprText(fset *token.FileSet, content string, e ast.Expr) string {
-	start := fset.Position(e.Pos())
-	end := fset.Position(e.End())
-	if !start.IsValid() || !end.IsValid() || end.Offset < start.Offset || end.Offset > len(content) {
-		return ""
+// quotedTextSpan — the byte range of the source text that resolving the call
+// can quote: the callee expression, or for a route registration its handler
+// expression (identifiers and inline func literal handlers quote none).
+func quotedTextSpan(fset *token.FileSet, content string, call *ast.CallExpr, match *routeMatch) (spanKey, bool) {
+	target := call.Fun
+	if match != nil {
+		if _, isLit := match.handler.(*ast.FuncLit); isLit {
+			return spanKey{}, false
+		}
+		target = match.handler
 	}
-	return content[start.Offset:end.Offset]
+	if _, isIdent := target.(*ast.Ident); isIdent {
+		return spanKey{}, false
+	}
+	return exprSpan(fset, content, target)
 }
 
 func collectCallExprs(body *ast.BlockStmt) []*ast.CallExpr {

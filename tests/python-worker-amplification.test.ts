@@ -263,6 +263,100 @@ describe.skipIf(!pythonAvailable)("python worker output amplification", () => {
     expect(responseLines(runWorker(request("surrogate", files)).stdout)[0]).toBe(lines[0]);
   });
 
+  it("the response stays under a size budget and says so (RESPONSE_TRUNCATED, partial, deterministic)", () => {
+    // Every call quotes the bounded 512+16-character caller name twice
+    // (edge evidence + top-level evidence), so one 5-byte line yields ~1.5 KB.
+    const content = [`def ${"A".repeat(600)}():`, ...Array.from({ length: 40_000 }, () => " a()"), ""].join("\n");
+    const files = [{ path: "big.py", content }];
+
+    const { response, raw } = analyze(files);
+
+    expect(raw.length).toBeLessThan(41_000_000);
+    expect(response.status).toBe("partial");
+    expect(response.diagnostics).toContainEqual(
+      expect.objectContaining({ relativePath: "", code: "RESPONSE_TRUNCATED", line: 0 }),
+    );
+    const nodeKeys = new Set((response.nodes ?? []).map((node) => `${node.kind}\u0000${node.qualifiedName}\u0000${node.relativePath ?? ""}`));
+    for (const edge of response.edges ?? []) {
+      expect(nodeKeys.has(`${edge.from.kind}\u0000${edge.from.qualifiedName}\u0000${edge.from.relativePath ?? ""}`)).toBe(true);
+      expect(nodeKeys.has(`${edge.to.kind}\u0000${edge.to.qualifiedName}\u0000${edge.to.relativePath ?? ""}`)).toBe(true);
+    }
+    const call = (response.edges ?? []).find((edge) => edge.kind === "CALLS" && edge.to.qualifiedName === "a");
+    expect(call?.evidence[0]?.span?.startLine).toBe(2);
+    expect(analyze(files).raw).toBe(raw);
+  }, 120_000);
+
+  it("a serialization failure is answered with a fixed INTERNAL_ERROR line, no traceback, and the loop continues", () => {
+    // Fault injection: the response of an analysis cannot be serialized (MemoryError).
+    const harness = [
+      "import importlib.util, json, sys",
+      "spec = importlib.util.spec_from_file_location('causoryn_python_worker', sys.argv[1])",
+      "worker = importlib.util.module_from_spec(spec)",
+      "spec.loader.exec_module(worker)",
+      "real_dumps = json.dumps",
+      "def failing_dumps(value, *args, **kwargs):",
+      "    if isinstance(value, dict) and value.get('status') in ('ready', 'partial'):",
+      "        raise MemoryError()",
+      "    return real_dumps(value, *args, **kwargs)",
+      "json.dumps = failing_dumps",
+      "sys.exit(worker.main())",
+    ].join("\n");
+    const input = `${request("first", [{ path: "ok.py", content: "def a():\n    return 1\n" }])}not json\n`;
+
+    const result = spawnSync("python", ["-I", "-B", "-c", harness, WORKER_SCRIPT], { input, encoding: "utf8", shell: false, timeout: 60_000 });
+
+    expect(result.status).toBe(0);
+    expect(result.stderr).not.toContain("Traceback");
+    expect(result.stderr).not.toContain("worker.py");
+    const responses = responseLines(result.stdout).map((line) => JSON.parse(line) as WorkerResponse);
+    expect(responses).toHaveLength(2);
+    expect(responses[0]).toEqual({
+      id: "first",
+      protocolVersion: "1",
+      status: "error",
+      error: { code: "INTERNAL_ERROR", message: "the response could not be serialized" },
+    });
+    expect(responses[1]).toMatchObject({ id: null, status: "error", error: { code: "INVALID_ARGUMENT" } });
+  });
+
+  it("an error outside request handling ends the worker without a traceback", () => {
+    const harness = [
+      "import importlib.util, sys",
+      "spec = importlib.util.spec_from_file_location('causoryn_python_worker', sys.argv[1])",
+      "worker = importlib.util.module_from_spec(spec)",
+      "spec.loader.exec_module(worker)",
+      "def broken_read_line(stream):",
+      "    raise RuntimeError('read failed at /opt/private-install-marker/worker')",
+      "worker.read_line = broken_read_line",
+      "sys.exit(worker.main())",
+    ].join("\n");
+
+    const result = spawnSync("python", ["-I", "-B", "-c", harness, WORKER_SCRIPT], { input: "", encoding: "utf8", shell: false, timeout: 60_000 });
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).not.toContain("Traceback");
+    expect(result.stderr).not.toContain("private-install-marker");
+    expect(result.stderr).toContain("RuntimeError");
+  });
+
+  it("an oversized response line is replaced by a LIMIT_EXCEEDED error line", () => {
+    const harness = [
+      "import importlib.util, json, sys",
+      "spec = importlib.util.spec_from_file_location('causoryn_python_worker', sys.argv[1])",
+      "worker = importlib.util.module_from_spec(spec)",
+      "spec.loader.exec_module(worker)",
+      "line = worker.encode_response({'id': 'big', 'protocolVersion': '1', 'status': 'partial', 'warnings': ['w' * 61_000_000]})",
+      "sys.stdout.write(str(len(line)) + '\\n' + line.decode('utf-8'))",
+    ].join("\n");
+
+    const result = spawnSync("python", ["-I", "-B", "-c", harness, WORKER_SCRIPT], { encoding: "utf8", shell: false, timeout: 60_000, maxBuffer: 256 * 1024 * 1024 });
+
+    expect(result.status).toBe(0);
+    const [length, line] = result.stdout.split("\n");
+    expect(Number(length)).toBeLessThan(1_000);
+    expect(JSON.parse(line ?? "{}")).toMatchObject({ id: "big", status: "error", error: { code: "LIMIT_EXCEEDED" } });
+  });
+
   it("lone surrogates in request fields are answered with an error line and the loop keeps running", () => {
     const healthy = { path: "ok.py", content: "def a():\n    return 1\n" };
     // JSON escapes keep the request lines valid UTF-8; json.loads turns them into lone surrogates.

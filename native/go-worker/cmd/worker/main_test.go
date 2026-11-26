@@ -5,6 +5,8 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	"causoryn/go-worker/internal/analyze"
 )
 
 func TestParseRequestModuleFiles(t *testing.T) {
@@ -86,6 +88,23 @@ func TestFileCountLimitMessages(t *testing.T) {
 	}
 	if errResp.Error.Code != "LIMIT_EXCEEDED" || errResp.Error.Message != "module file count limit exceeded: 5001 > 5000" {
 		t.Fatalf("expected the module file count limit message, got %+v", errResp.Error)
+	}
+}
+
+// A response line the adapter would reject (its default line cap is 64 MiB)
+// is replaced by a short LIMIT_EXCEEDED error that echoes the id.
+func TestOversizedResponseIsReplacedByLimitExceeded(t *testing.T) {
+	result := analyze.Result{State: "partial", Warnings: []string{strings.Repeat("w", 61_000_000)}}
+	payload := buildResponse(json.RawMessage(`"big"`), result)
+	if len(payload) > 1_000 {
+		t.Fatalf("expected a short error line, got %d bytes", len(payload))
+	}
+	var errResp errorResponse
+	if err := json.Unmarshal(payload, &errResp); err != nil {
+		t.Fatalf("failed to unmarshal error response: %v", err)
+	}
+	if errResp.Status != "error" || errResp.Error.Code != "LIMIT_EXCEEDED" || string(errResp.ID) != `"big"` {
+		t.Fatalf("expected LIMIT_EXCEEDED for id big, got %+v", errResp)
 	}
 }
 

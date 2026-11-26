@@ -64,7 +64,42 @@ const (
 	// listed; a longer list carries candidatesTruncated + candidateCount and
 	// says so in its reason.
 	MaxAmbiguityCandidates = 64
+	// MaxAmbiguityLabelBytes — the listed candidates of one ambiguity take at
+	// most this many label bytes (at least one candidate is always listed);
+	// every edge of an ambiguous call repeats its list.
+	MaxAmbiguityLabelBytes = 4096
+	// MaxHashedTextBytes — a call-expression text longer than this is not
+	// hashed: its digest is taken over its file and byte range instead (the
+	// text is still identified exactly). Real call texts stay far below it.
+	MaxHashedTextBytes = 65_536
+	// MaxResponseBytes — serialized bytes of the nodes, edges, evidence and
+	// warnings of one response. Once spent, nothing more is admitted and the
+	// response gets a RESPONSE_TRUNCATED diagnostic (status partial). It stays
+	// below the adapters' default response line cap (64 MiB characters).
+	MaxResponseBytes = 40_000_000
+	// MaxResponseLineBytes — a response line longer than this (only reachable
+	// through diagnostics on top of a spent budget) is replaced by a
+	// LIMIT_EXCEEDED error, which the adapters still accept.
+	MaxResponseLineBytes = 60_000_000
 )
+
+// cutPrefix returns the longest prefix of s of at most limit bytes that ends
+// on a UTF-8 rune boundary.
+func cutPrefix(s string, limit int) string {
+	if len(s) <= limit {
+		return s
+	}
+	cut := limit
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut]
+}
+
+// digestHex12 — the first 12 hex digits of a SHA-256 sum.
+func digestHex12(sum []byte) string {
+	return hex.EncodeToString(sum)[:12]
+}
 
 // boundText returns s when it fits in limit bytes. Otherwise it returns the
 // longest prefix that fits (cut on a UTF-8 rune boundary), "...#" and the
@@ -74,12 +109,40 @@ func boundText(s string, limit int) string {
 	if len(s) <= limit {
 		return s
 	}
-	cut := limit
-	for cut > 0 && !utf8.RuneStart(s[cut]) {
-		cut--
-	}
 	sum := sha256.Sum256([]byte(s))
-	return s[:cut] + "...#" + hex.EncodeToString(sum[:])[:12]
+	return cutPrefix(s, limit) + "...#" + digestHex12(sum[:])
+}
+
+// responseBudget — serialized bytes admitted into a response so far.
+type responseBudget struct {
+	used     int
+	exceeded bool
+}
+
+// charge admits n more bytes. Once a charge fails nothing more is admitted
+// (sticky), so the cut does not depend on the size of later records.
+func (b *responseBudget) charge(n int) bool {
+	if b.exceeded || b.used+n > MaxResponseBytes {
+		b.exceeded = true
+		return false
+	}
+	b.used += n
+	return true
+}
+
+// jsonSize — the serialized size of v (the same encoder as the response).
+func jsonSize(v any) int {
+	raw, err := json.Marshal(v)
+	if err != nil {
+		return 0
+	}
+	return len(raw)
+}
+
+// evidenceCost — an evidence record appears in its edge and in the top-level
+// evidence list.
+func evidenceCost(key string) int {
+	return 2 * (len(key) + 1)
 }
 
 // boundExprText bounds call-expression text (MaxRenderedTextBytes).
@@ -201,15 +264,25 @@ type candidateList struct {
 	total  int      // the number of candidates before the cap
 }
 
-// capCandidates keeps the first MaxAmbiguityCandidates entries of an already
-// ordered list.
+// capCandidates keeps the first entries of an already ordered list: at most
+// MaxAmbiguityCandidates entries and MaxAmbiguityLabelBytes label bytes (the
+// first entry is always kept).
 func capCandidates(ordered []string) candidateList {
-	if len(ordered) <= MaxAmbiguityCandidates {
+	kept, size := 0, 0
+	for kept < len(ordered) && kept < MaxAmbiguityCandidates {
+		next := size + len(ordered[kept])
+		if kept > 0 && next > MaxAmbiguityLabelBytes {
+			break
+		}
+		size = next
+		kept++
+	}
+	if kept == len(ordered) {
 		return candidateList{labels: ordered, total: len(ordered)}
 	}
-	kept := make([]string, MaxAmbiguityCandidates)
-	copy(kept, ordered)
-	return candidateList{labels: kept, total: len(ordered)}
+	labels := make([]string, kept)
+	copy(labels, ordered[:kept])
+	return candidateList{labels: labels, total: len(ordered)}
 }
 
 // ambiguity returns the Ambiguity of the list; a capped list sets the

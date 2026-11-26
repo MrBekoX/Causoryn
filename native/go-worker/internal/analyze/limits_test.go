@@ -1,6 +1,8 @@
 package analyze
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"reflect"
@@ -301,6 +303,171 @@ func TestEdgeEvidenceMergeIsLinear(t *testing.T) {
 	for i, ev := range e.Evidence {
 		if want := 6 + i; ev.Span == nil || ev.Span.StartLine != want {
 			t.Fatalf("evidence %d is on line %v, want %d (first-seen order)", i, ev.Span, want)
+		}
+	}
+}
+
+// responseJSONBytes — serialized size of the nodes, edges, evidence and warnings.
+func responseJSONBytes(t *testing.T, res Result) int {
+	t.Helper()
+	total := 0
+	for _, part := range []any{res.Nodes, res.Edges, res.Evidence, res.Warnings} {
+		raw, err := json.Marshal(part)
+		if err != nil {
+			t.Fatalf("result could not be marshalled: %v", err)
+		}
+		total += len(raw)
+	}
+	return total
+}
+
+func assertNoDanglingEdges(t *testing.T, res Result) {
+	t.Helper()
+	nodes := map[string]bool{}
+	for _, n := range res.Nodes {
+		nodes[nodeKey(NodeRef{Kind: n.Kind, QualifiedName: n.QualifiedName, RelativePath: n.RelativePath})] = true
+	}
+	for _, e := range res.Edges {
+		if !nodes[nodeKey(e.From)] || !nodes[nodeKey(e.To)] {
+			t.Fatalf("dangling edge %s %s -> %s", e.Kind, e.From.QualifiedName, e.To.QualifiedName)
+		}
+	}
+}
+
+// Total output: every call quotes two bounded 512+16-byte names and a bounded
+// package name, so one short line still yields kilobytes of JSON. The response
+// stays under a fixed size budget (below the adapter's 64 MiB line limit) and
+// says so: a RESPONSE_TRUNCATED diagnostic, status partial, no dangling edges,
+// the same result on every run.
+func TestResponseSizeBudgetTruncatesDeterministically(t *testing.T) {
+	var body strings.Builder
+	body.WriteString("package " + strings.Repeat("p", 600) + "\n\nfunc a() {}\n\nfunc " + strings.Repeat("F", 600) + "() {\n")
+	for i := 0; i < 15_000; i++ {
+		body.WriteString("\ta()\n")
+	}
+	body.WriteString("}\n")
+	files := []SourceFile{{RelativePath: "p/f.go", SourceHash: "h", Content: body.String()}}
+
+	res := Analyze(files, 0)
+
+	if size := responseJSONBytes(t, res); size > 40_000_000 {
+		t.Fatalf("nodes, edges, evidence and warnings take %d bytes; the response size budget is 40000000", size)
+	}
+	truncated := false
+	for _, d := range res.Diagnostics {
+		if d.Code == "RESPONSE_TRUNCATED" && d.RelativePath == "" && d.Line == 0 && strings.Contains(d.Message, "size budget") {
+			truncated = true
+		}
+	}
+	if !truncated || res.State != "partial" {
+		t.Fatalf("expected a RESPONSE_TRUNCATED size-budget diagnostic and status partial, got state=%s diagnostics=%+v", res.State, res.Diagnostics)
+	}
+	assertNoDanglingEdges(t, res)
+	var call *Edge
+	for i := range res.Edges {
+		if res.Edges[i].Kind == EdgeCalls && res.Edges[i].To.Kind == "Function" {
+			call = &res.Edges[i]
+		}
+	}
+	if call == nil || len(call.Evidence) == 0 || call.Evidence[0].Span.StartLine != 6 {
+		t.Fatalf("expected the CALLS edge to keep its first evidence records, got %+v", call)
+	}
+	again := Analyze([]SourceFile{{RelativePath: "p/f.go", SourceHash: "h", Content: body.String()}}, 0)
+	if !reflect.DeepEqual(res, again) {
+		t.Fatalf("a truncated result must be deterministic")
+	}
+}
+
+// F16 label size: 64 candidate types with long names would put 64 bounded
+// labels (~34 KB) on every caller edge. An ambiguity lists candidates only up
+// to 4096 label bytes, with the provenance fields set.
+func TestAmbiguityLabelBytesAreBounded(t *testing.T) {
+	var types, callers strings.Builder
+	types.WriteString("package p\n")
+	callers.WriteString("package p\n")
+	long := strings.Repeat("t", 600)
+	for i := 0; i < 64; i++ {
+		fmt.Fprintf(&types, "type T%02d%s struct{}\nfunc (T%02d%s) M() {}\n", i, long, i, long)
+	}
+	for i := 0; i < 20; i++ {
+		fmt.Fprintf(&callers, "func g%d(x int) { x.M() }\n", i)
+	}
+	res := Analyze([]SourceFile{
+		{RelativePath: "p/t.go", SourceHash: "h1", Content: types.String()},
+		{RelativePath: "p/c.go", SourceHash: "h2", Content: callers.String()},
+	}, 0)
+
+	all := make([]string, 0, 64)
+	for _, n := range res.Nodes {
+		if n.Kind == "Method" {
+			all = append(all, n.QualifiedName)
+		}
+	}
+	sort.Strings(all)
+	if len(all) != 64 {
+		t.Fatalf("expected 64 methods, got %d", len(all))
+	}
+	for i := 0; i < 20; i++ {
+		wire := ambiguityJSON(t, findEdgeTo(res.Edges, EdgeCalls, fmt.Sprintf("p.g%d", i), "x.M"))
+		candidates, _ := wire["candidates"].([]any)
+		total := 0
+		for j, candidate := range candidates {
+			label, _ := candidate.(string)
+			if label != all[j] {
+				t.Fatalf("candidate %d = %q, want the sorted label %q", j, label, all[j])
+			}
+			total += len(label)
+		}
+		if len(candidates) == 0 || total > 4096 {
+			t.Fatalf("expected 1..4096 bytes of candidate labels, got %d candidates with %d bytes", len(candidates), total)
+		}
+		if wire["candidatesTruncated"] != true || wire["candidateCount"] != float64(64) {
+			t.Fatalf("expected candidatesTruncated=true and candidateCount=64, got %v", wire)
+		}
+	}
+}
+
+// boundText cost: in a call chain a("<2 MB>")()()...() every callee text is a
+// distinct prefix of the same source span; hashing each in full is quadratic
+// (about 2 GB of SHA-256 per file). Texts that share a start are hashed in one
+// pass, so the chains below finish quickly; digests stay the SHA-256 of the
+// full text (checked on a chain within the hashing bound).
+func TestLongCallChainTextIsHashedLinearly(t *testing.T) {
+	const chain = 980
+	var files []SourceFile
+	for i := 0; i < 3; i++ {
+		content := fmt.Sprintf("package p\n\nfunc f%d() { a(\"%s\")%s }\n", i, strings.Repeat("x", 1_990_000), strings.Repeat("()", chain))
+		files = append(files, SourceFile{RelativePath: fmt.Sprintf("p/f%d.go", i), SourceHash: fmt.Sprintf("h%d", i), Content: content})
+	}
+	moderate := "package q\n\nfunc g() { b(\"" + strings.Repeat("y", 1_000) + "\")()()() }\n"
+	files = append(files, SourceFile{RelativePath: "q/g.go", SourceHash: "hq", Content: moderate})
+
+	done := make(chan Result, 1)
+	go func() { done <- Analyze(files, 0) }()
+	var res Result
+	select {
+	case res = <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("three 2 MB call chains were not analyzed within 5s (callee texts hashed in full, quadratic)")
+	}
+
+	truncated := map[string]bool{}
+	for _, n := range res.Nodes {
+		if n.Kind == "UnknownExternal" && truncatedName.MatchString(n.QualifiedName) {
+			truncated[n.QualifiedName] = true
+		}
+	}
+	if want := 3*chain + 3; len(truncated) != want {
+		t.Fatalf("expected %d distinct truncated callee names, got %d", want, len(truncated))
+	}
+	// Within the hashing bound the digest is the SHA-256 of the full text.
+	start := strings.Index(moderate, "b(")
+	for _, end := range []int{strings.Index(moderate, "\")") + 2, strings.Index(moderate, "\")") + 4, strings.Index(moderate, "\")") + 6} {
+		text := moderate[start:end]
+		sum := sha256.Sum256([]byte(text))
+		want := text[:200] + "...#" + hex.EncodeToString(sum[:])[:12]
+		if findNode(res.Nodes, "UnknownExternal", want) == nil {
+			t.Fatalf("expected the callee %q... to be named with the SHA-256 of its full text (%s)", text[:20], want[200:])
 		}
 	}
 }

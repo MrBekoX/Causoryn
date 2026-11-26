@@ -90,6 +90,17 @@ MAX_QUALIFIED_NAME_CHARS = 512
 # each entry becomes one Endpoint carrying the route path.
 MAX_ROUTE_METHODS = 16
 
+# Response size budget: UTF-8 bytes of the serialized nodes, edges, evidence
+# (counted twice: in its edge and in the top-level list) and warnings. Once it
+# is spent nothing more is admitted, edges never dangle, and the response gets
+# a RESPONSE_TRUNCATED diagnostic (status "partial"). It stays below the
+# adapter's default response line cap (64 MiB characters).
+MAX_RESPONSE_BYTES = 40_000_000
+
+# A response line longer than this (only reachable through diagnostics on top
+# of a spent budget) is replaced by a LIMIT_EXCEEDED error line.
+MAX_RESPONSE_LINE_BYTES = 60_000_000
+
 # TŞ §8 katalogları — worker liste dışı tür üretemez (çıkışta sert doğrulama).
 NODE_KINDS = frozenset(
     {
@@ -171,6 +182,11 @@ _force_utf8_stderr()
 def canonical(value: Any) -> str:
     """Kanonik JSON dizesi — deterministik sıralama/dedupe anahtarı."""
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def utf8_size(text: str) -> int:
+    """UTF-8 byte length of serialized text (the length the response line has)."""
+    return len(text.encode("utf-8", "surrogatepass"))
 
 
 def sha256_hex(content: str) -> str:
@@ -703,6 +719,8 @@ class FileAnalyzer:
 
     def resolve_calls(self) -> None:
         for node, kind, qualified, class_qn in self.callables:
+            if self.collector.budget_exceeded:
+                return  # nothing more can be admitted
             try:
                 for statement in node.body:
                     self._walk_calls(statement, (kind, qualified, class_qn), depth=1)
@@ -719,6 +737,8 @@ class FileAnalyzer:
         if depth > MAX_AST_DEPTH:
             self.depth_exceeded = True
             return
+        if self.collector.budget_exceeded:
+            return  # nothing more can be admitted
 
         if isinstance(statement, ast.Call):
             self._resolve_call(statement, owner)
@@ -992,6 +1012,19 @@ class RequestCollector:
         self.symbol_registry: Dict[str, Tuple[str, str]] = {}
         # class_qualified_name → {üye adı → (kind, qn, relative_path)}
         self.class_member_registry: Dict[str, Dict[str, Tuple[str, str, str]]] = {}
+        # Response size budget (MAX_RESPONSE_BYTES): serialized bytes admitted so far.
+        self._budget_used = 0
+        self.budget_exceeded = False
+        self._warnings_suppressed = False
+
+    def _charge(self, size: int) -> bool:
+        """Admits `size` more bytes. Once a charge fails nothing more is
+        admitted (sticky), so the cut does not depend on later record sizes."""
+        if self.budget_exceeded or self._budget_used + size > MAX_RESPONSE_BYTES:
+            self.budget_exceeded = True
+            return False
+        self._budget_used += size
+        return True
 
     def add_file_node(self, relative_path: str, source_hash: str) -> None:
         self.add_node("File", relative_path, relative_path,
@@ -1015,6 +1048,12 @@ class RequestCollector:
             node["relativePath"] = relative_path
         widen_node_span(node, span)
         node["attributes"] = attributes if attributes is not None else {}
+        size = utf8_size(canonical(node)) + 1
+        if kind == "File":
+            # One File node per file (bounded by MAX_FILE_COUNT): always admitted.
+            self._budget_used += size
+        elif not self._charge(size):
+            return
         self._nodes[key] = node
         if kind == "File" and relative_path is not None:
             self.module_set.add(module_name_from_path(relative_path))
@@ -1045,6 +1084,11 @@ class RequestCollector:
         self.class_member_registry.setdefault(class_qn, {}).update(members)
 
     def add_warning(self, message: str) -> None:
+        if not self._charge(utf8_size(canonical(message)) + 1):
+            if not self._warnings_suppressed:
+                self._warnings_suppressed = True
+                self.warnings.append("further warnings were not emitted: the response size budget was reached")
+            return
         self.warnings.append(message)
 
     def add_diagnostic(self, relative_path: str, code: str, message: str, line: int) -> None:
@@ -1062,25 +1106,47 @@ class RequestCollector:
         ambiguity: Optional[Dict[str, Any]],
     ) -> None:
         key = (kind, canonical(from_ref), canonical(to_ref), resolution)
+        edge = self._edges.get(key)
+        if edge is not None:
+            seen = self._edge_evidence_keys[key]
+            for item in evidence_items:
+                evidence_key = canonical(item)
+                if evidence_key in seen:
+                    continue
+                # Charged twice: the edge's list and the top-level evidence list.
+                if not self._charge(2 * (utf8_size(evidence_key) + 1)):
+                    return  # the edge keeps the evidence it already has
+                seen.add(evidence_key)
+                edge["evidence"].append(item)
+            return
+        if self.budget_exceeded:
+            return
         # TŞ §8 invariant (ii): dangling edge yok — dış kaynaklar AÇIK node.
         # UnknownExternal hedef ilk referans alındığında node kümesine girer.
         if to_ref.get("kind") == "UnknownExternal":
             self.add_node("UnknownExternal", to_ref["qualifiedName"], None)
-        edge = self._edges.get(key)
-        if edge is None:
-            edge = {"kind": kind, "from": from_ref, "to": to_ref, "resolution": resolution}
-            edge["evidence"] = []
-            if ambiguity is not None:
-                edge["ambiguity"] = ambiguity
-            self._edges[key] = edge
-            self._edge_order.append(key)
-            self._edge_evidence_keys[key] = set()
-        seen = self._edge_evidence_keys[key]
+        for ref in (from_ref, to_ref):
+            if (ref["kind"], ref["qualifiedName"], ref.get("relativePath") or "") not in self._nodes:
+                return  # endpoint not admitted (size budget): no dangling edge
+        edge = {"kind": kind, "from": from_ref, "to": to_ref, "resolution": resolution}
+        edge["evidence"] = []
+        if ambiguity is not None:
+            edge["ambiguity"] = ambiguity
+        size = utf8_size(canonical(edge)) + 1
+        seen: set = set()
+        admitted: List[Dict[str, Any]] = []
         for item in evidence_items:
             evidence_key = canonical(item)
             if evidence_key not in seen:
                 seen.add(evidence_key)
-                edge["evidence"].append(item)
+                admitted.append(item)
+                size += 2 * (utf8_size(evidence_key) + 1)
+        if not self._charge(size):
+            return
+        edge["evidence"].extend(admitted)
+        self._edges[key] = edge
+        self._edge_order.append(key)
+        self._edge_evidence_keys[key] = seen
 
     # -- çıktı ---------------------------------------------------------------------
 
@@ -1105,6 +1171,17 @@ class RequestCollector:
         )
 
         diagnostics = list(self.diagnostics)
+        if self.budget_exceeded:
+            diagnostics.append(
+                {
+                    "relativePath": "",
+                    "code": "RESPONSE_TRUNCATED",
+                    "message": f"response size budget exceeded ({MAX_RESPONSE_BYTES} bytes of nodes, "
+                               "edges, evidence and warnings); further nodes, edges, evidence and "
+                               "warnings were not emitted (no dangling edges)",
+                    "line": 0,
+                }
+            )
 
         if max_nodes is not None and len(nodes) > max_nodes:
             kept = nodes[:max_nodes]
@@ -1194,10 +1271,11 @@ def analyze_request(request: Dict[str, Any]) -> Dict[str, Any]:
         try:
             tree = ast.parse(content, filename=relative_path)
         except SyntaxError as error:
+            # A parser message can quote an identifier of any length.
             collector.add_diagnostic(
                 relative_path,
                 "SyntaxError",
-                str(error.msg or "syntax error"),
+                bounded_text(str(error.msg or "syntax error")),
                 error.lineno or 0,
             )
             collector.add_file_node(relative_path, sha256_hex(content))
@@ -1206,7 +1284,7 @@ def analyze_request(request: Dict[str, Any]) -> Dict[str, Any]:
             collector.add_diagnostic(
                 relative_path,
                 "ADAPTER_INTERNAL",
-                f"AST parsing could not be completed: {error}",
+                f"AST parsing could not be completed: {bounded_text(str(error))}",
                 0,
             )
             collector.add_file_node(relative_path, sha256_hex(content))
@@ -1270,34 +1348,96 @@ def handle_line(line: str) -> Dict[str, Any]:
         )
 
 
-def encode_response(response: Dict[str, Any]) -> bytes:
-    """One protocol line as UTF-8 bytes.
+# Last-resort protocol line: pure ASCII and built without json at runtime.
+_FALLBACK_ERROR_LINE = (
+    b'{"id":null,"protocolVersion":"1","status":"error","error":'
+    b'{"code":"INTERNAL_ERROR","message":"the response could not be serialized"}}\n'
+)
 
-    A response holding a lone surrogate cannot be encoded as UTF-8. Instead of
-    letting UnicodeEncodeError end the process (which would drop the analysis
-    of the whole batch), an INTERNAL_ERROR line is returned, with the request
-    id when the id itself can be encoded.
-    """
-    line = json.dumps(response, ensure_ascii=False, separators=(",", ":")) + "\n"
+
+def _echoable_id(value: Any) -> Any:
+    """`value` when it can be echoed in an error line, otherwise None."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str) and is_utf8_text(value):
+        return value
+    return None
+
+
+def error_line(request_id: Any, code: str, message: str) -> bytes:
+    """An error response line; the fixed ASCII line if even that fails."""
     try:
-        return line.encode("utf-8")
+        response = error_response(_echoable_id(request_id), code, message)
+        return (json.dumps(response, ensure_ascii=False, separators=(",", ":")) + "\n").encode("utf-8")
+    except Exception:  # noqa: BLE001 — the process must still answer
+        return _FALLBACK_ERROR_LINE
+
+
+def encode_response(response: Dict[str, Any]) -> bytes:
+    """One protocol line as UTF-8 bytes. Never raises.
+
+    A response that cannot be serialized (a lone surrogate cannot be encoded
+    as UTF-8; MemoryError, RecursionError, ...) is replaced by an
+    INTERNAL_ERROR line with a fixed message, and a line longer than
+    MAX_RESPONSE_LINE_BYTES by a LIMIT_EXCEEDED line; both echo the request id
+    when it can be encoded. Nothing is raised, so no traceback reaches stderr.
+    """
+    try:
+        encoded = (json.dumps(response, ensure_ascii=False, separators=(",", ":")) + "\n").encode("utf-8")
     except UnicodeEncodeError:
+        log("the response could not be encoded as UTF-8 (lone surrogate); an INTERNAL_ERROR line is written instead")
+        return error_line(
+            response.get("id"),
+            "INTERNAL_ERROR",
+            "the response could not be encoded as UTF-8 (it contains a lone surrogate)",
+        )
+    except Exception as error:  # noqa: BLE001 — MemoryError, RecursionError, ...
+        log(f"the response could not be serialized ({type(error).__name__}); an INTERNAL_ERROR line is written instead")
+        return error_line(response.get("id"), "INTERNAL_ERROR", "the response could not be serialized")
+    if len(encoded) > MAX_RESPONSE_LINE_BYTES:
+        log(f"the response line of {len(encoded)} bytes exceeds the {MAX_RESPONSE_LINE_BYTES} byte limit")
+        return error_line(
+            response.get("id"),
+            "LIMIT_EXCEEDED",
+            f"response line exceeded the {MAX_RESPONSE_LINE_BYTES} byte limit",
+        )
+    return encoded
+
+
+def answer_request(line: bytes) -> Tuple[bytes, Any, Any]:
+    """The response line for one request line, plus its id and status for the
+    log. Never raises: an unexpected failure becomes an INTERNAL_ERROR line
+    with a fixed message (no traceback)."""
+    request_id: Any = None
+    try:
+        try:
+            text = line.decode("utf-8")
+        except UnicodeDecodeError as error:
+            return (
+                encode_response(error_response(None, "INVALID_ARGUMENT", f"line is not valid UTF-8: {error}")),
+                None,
+                "error",
+            )
+        response = handle_line(text)
+        request_id = response.get("id")
+        return encode_response(response), request_id, response.get("status")
+    except Exception as error:  # noqa: BLE001 — the loop keeps running
+        log(f"the request could not be answered ({type(error).__name__}); an INTERNAL_ERROR line is written instead")
+        return error_line(request_id, "INTERNAL_ERROR", "the request could not be answered"), request_id, "error"
+
+
+def _quiet_excepthook(exc_type: Any, exc_value: Any, exc_traceback: Any) -> None:
+    """An uncaught error ends the worker with one log line naming its type.
+
+    No traceback is printed: its file paths (install directory, user name)
+    would reach tool warnings through the adapters' stderr excerpts.
+    """
+    try:
+        log(f"worker stopped by an unexpected error ({exc_type.__name__})")
+    except Exception:  # noqa: BLE001 — stderr itself may be gone
         pass
-    log("the response could not be encoded as UTF-8 (lone surrogate); an INTERNAL_ERROR line is written instead")
-    request_id = response.get("id")
-    if isinstance(request_id, str) and not is_utf8_text(request_id):
-        request_id = None
-    fallback = error_response(
-        request_id,
-        "INTERNAL_ERROR",
-        "the response could not be encoded as UTF-8 (it contains a lone surrogate)",
-    )
-    return (json.dumps(fallback, ensure_ascii=False, separators=(",", ":")) + "\n").encode("utf-8")
-
-
-def write_response(stdout_buf: Any, response: Dict[str, Any]) -> None:
-    stdout_buf.write(encode_response(response))
-    stdout_buf.flush()
 
 
 def read_line(stream: Any) -> Tuple[Optional[bytes], bool, bool]:
@@ -1318,6 +1458,7 @@ def read_line(stream: Any) -> Tuple[Optional[bytes], bool, bool]:
 
 
 def main() -> int:
+    sys.excepthook = _quiet_excepthook
     stdin_buf = sys.stdin.buffer
     stdout_buf = sys.stdout.buffer
 
@@ -1327,14 +1468,14 @@ def main() -> int:
         while True:
             line, exceeded, eof = read_line(stdin_buf)
             if exceeded:
-                write_response(
-                    stdout_buf,
-                    error_response(
+                stdout_buf.write(
+                    error_line(
                         None,
                         "LIMIT_EXCEEDED",
                         f"request line exceeded the {MAX_REQUEST_LINE_BYTES} byte limit; line skipped",
-                    ),
+                    )
                 )
+                stdout_buf.flush()
                 log("request line limit exceeded — line skipped")
                 continue
             if line is None or eof:
@@ -1342,18 +1483,10 @@ def main() -> int:
             if not line.strip():
                 continue  # boş satır sessizce atlanır (mesaj tek satır JSON)
 
-            try:
-                text = line.decode("utf-8")
-            except UnicodeDecodeError as error:
-                write_response(
-                    stdout_buf,
-                    error_response(None, "INVALID_ARGUMENT", f"line is not valid UTF-8: {error}"),
-                )
-                continue
-
-            response = handle_line(text)
-            write_response(stdout_buf, response)
-            log(f"request processed: id={describe_id(response.get('id'))} status={response.get('status')}")
+            payload, request_id, status = answer_request(line)
+            stdout_buf.write(payload)
+            stdout_buf.flush()
+            log(f"request processed: id={describe_id(request_id)} status={status}")
     except (BrokenPipeError, OSError) as error:
         log(f"stdio pipe error, worker exiting: {error}")
         return 1
