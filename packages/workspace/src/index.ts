@@ -42,6 +42,18 @@ export type {
 
 export { findMatchingIgnorePattern, matchesIgnorePattern } from "./ignore-matcher.js";
 
+// Descriptor-based bounded reader shared by inventory, contract discovery and
+// MCP optional reads (CAU-02 / CAU-05: top-down path verification, the
+// authorization decision bound to the opened descriptor's identity).
+export { readBoundedTextFile, readBoundedTextFileSync } from "./bounded-file-read.js";
+export type {
+  BoundedFileReadOptions,
+  BoundedFileReadRejection,
+  BoundedFileReadResult,
+  FileIdentity,
+  OpenedFileInfo,
+} from "./bounded-file-read.js";
+
 export {
   assertNotUncOrDevicePath,
   describeLinkInspectionFailure,

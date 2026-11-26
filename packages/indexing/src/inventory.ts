@@ -1,17 +1,8 @@
-import { Buffer } from "node:buffer";
-import {
-  closeSync,
-  constants as fsConstants,
-  fstatSync,
-  openSync,
-  readdirSync,
-  readSync,
-  statSync,
-} from "node:fs";
+import { readdirSync, statSync } from "node:fs";
 import path from "node:path";
 
 import { sha256Hex, utf8Encode } from "@causoryn/domain";
-import type { WorkspaceAccessPolicy } from "@causoryn/workspace";
+import { readBoundedTextFileSync, type WorkspaceAccessPolicy } from "@causoryn/workspace";
 
 import { IndexingError } from "./errors.js";
 
@@ -22,12 +13,15 @@ import { IndexingError } from "./errors.js";
  * Yürüme sırası deterministiktir: dizin girdileri ada göre sıralanır,
  * sonuç envanteri göreli POSIX yola göre sıralanır (TŞ §8 invariant vi).
  *
- * Güvenlik sözleşmesi (TŞ §19, SEC-07, WorkspaceAccessPolicy TOCTOU sözleşmesi):
- * her dosya için (1) açılıştan ÖNCE `checkFile` kararı, (2) `O_RDONLY | O_NOFOLLOW`
- * ile fd açılıp `fstatSync` (`isFile()`, `size <= maxFileBytes`) + sınırlı
- * `readSync` (≤ `maxFileBytes + 1`) ile FIFO/dev-dosya/OOM/symlink takasına
- * karşı korumalı okuma, (3) okuma sonrası gerçek boyutla YENİDEN `checkFile`
- * denetimi yapılır; ikinci karar reddederse dosya envantere girmez.
+ * Güvenlik sözleşmesi (TŞ §19, SEC-07, WorkspaceAccessPolicy TOCTOU sözleşmesi;
+ * CAU-02): her dosya için (1) açılıştan ÖNCE `checkFile` kararı, (2) paylaşılan
+ * `readBoundedTextFileSync` ile okuma: kökten aşağı (top-down) lstat yürüyüşü
+ * (ara bileşen symlink/junction ise reddedilir), `O_RDONLY | O_NOFOLLOW |
+ * O_NONBLOCK | O_NOCTTY` ile tek fd, fstat kimliği (dev, ino) ön-lstat ile aynı,
+ * `maxFileBytes + 1` ile sınırlı okuma, (3) fd AÇIKKEN, fd ile doğrulanmış
+ * boyutla YENİDEN `checkFile` kararı, (4) yolun açma sonrası yeniden
+ * doğrulanması (kimlik yine fd ile aynı olmalı). Herhangi bir uyuşmazlıkta
+ * içerik kullanılmaz; dosya envantere girmez.
  */
 
 /** Envanter girdisi: politika-izinli, okunmuş tek kaynak dosya. */
@@ -39,8 +33,6 @@ export interface InventoryEntry {
   readonly contentHash: string;
   readonly content: string;
 }
-
-const READ_CHUNK_BYTES = 64 * 1024;
 
 /**
  * Maximum directory nesting below the workspace root the inventory descends into.
@@ -74,8 +66,9 @@ function assertCanonicalRootIsDirectory(canonicalRoot: string): void {
 }
 
 /**
- * Tek dosyayı TOCTOU-güvenli fd tabanlı sınırlı okumayla envanter girdisine
- * dönüştürür; politika reddederse veya dosya okunamaz/sınırı aşarsa undefined döner.
+ * Tek dosyayı fd'ye bağlı sınırlı okumayla envanter girdisine dönüştürür;
+ * politika reddederse, dosya okunamaz/sınırı aşarsa veya açılan fd doğrulanan
+ * dosya değilse undefined döner.
  */
 function readAllowedFileEntry(
   policy: WorkspaceAccessPolicy,
@@ -89,64 +82,23 @@ function readAllowedFileEntry(
     return undefined;
   }
 
-  const maxBytes = policy.config.maxFileBytes;
-  const openFlags = fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0);
-  let fd: number;
-  try {
-    fd = openSync(path.join(canonicalRoot, childRelative), openFlags);
-  } catch {
-    return undefined; // okunamayan/symlink dosya envantere girmez
-  }
-
-  let content: string;
-  let sizeBytes: number;
-  try {
-    const fdStat = fstatSync(fd);
-    if (!fdStat.isFile() || fdStat.size > maxBytes) {
-      return undefined;
-    }
-    const chunks: Buffer[] = [];
-    let totalRead = 0;
-    const hardCap = maxBytes + 1;
-    while (totalRead < hardCap) {
-      const toRead = Math.min(READ_CHUNK_BYTES, hardCap - totalRead);
-      const chunk = Buffer.allocUnsafe(toRead);
-      const bytesRead = readSync(fd, chunk, 0, toRead, null);
-      if (bytesRead <= 0) break;
-      chunks.push(bytesRead === toRead ? chunk : chunk.subarray(0, bytesRead));
-      totalRead += bytesRead;
-    }
-    if (totalRead > maxBytes) {
-      return undefined;
-    }
-    const buffer =
-      chunks.length === 0
-        ? Buffer.alloc(0)
-        : chunks.length === 1
-          ? (chunks[0] as Buffer)
-          : Buffer.concat(chunks, totalRead);
-    content = buffer.toString("utf8");
-    sizeBytes = Buffer.byteLength(content, "utf8");
-  } catch {
-    return undefined;
-  } finally {
-    try {
-      closeSync(fd);
-    } catch {
-      // Kapatma hatası yutulur.
-    }
-  }
-
-  // 2) Açma sonrası yeniden denetim (TOCTOU sözleşmesi; TŞ §19).
-  const postDecision = policy.checkFile(canonicalRoot, childPosix, sizeBytes);
-  if (!postDecision.allowed) {
+  // 2) fd'ye bağlı okuma; yeniden denetim fd açıkken, fd ile doğrulanmış boyutla
+  //    yapılır ve aynı kanonik yolu vermelidir (TOCTOU sözleşmesi; TŞ §19, CAU-02).
+  const read = readBoundedTextFileSync(path.join(canonicalRoot, childRelative), policy.config.maxFileBytes, {
+    root: canonicalRoot,
+    authorize: (opened) => {
+      const postDecision = policy.checkFile(canonicalRoot, childPosix, opened.bytes);
+      return postDecision.allowed && postDecision.relativePath === preDecision.relativePath;
+    },
+  });
+  if (read.status !== "ok") {
     return undefined;
   }
   return {
     relativePath: childPosix,
-    sizeBytes,
-    contentHash: sha256Hex(utf8Encode(content)),
-    content,
+    sizeBytes: read.bytes,
+    contentHash: sha256Hex(utf8Encode(read.text)),
+    content: read.text,
   };
 }
 

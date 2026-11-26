@@ -1,9 +1,7 @@
-import { readFile } from "node:fs/promises";
-import { realpathSync } from "node:fs";
 import path from "node:path";
 
 import { parseDocument } from "yaml";
-import { WorkspaceAccessPolicy } from "@causoryn/workspace";
+import { readBoundedTextFile, WorkspaceAccessPolicy, type PolicyDecision } from "@causoryn/workspace";
 
 import { discoverAsyncApiContracts } from "./asyncapi-discovery.js";
 import { ContractDiscoveryError, type ContractErrorCode } from "./errors.js";
@@ -39,10 +37,15 @@ import type {
  * - `readContractFiles`: tek fs dokunan katman. Her aday önce
  *   WorkspaceAccessPolicy.checkFile'dan geçer (yetki → traversal → ignore →
  *   symlink → uzantı → boyut); policy reddi ContractDiscoveryError olarak
- *   yüzeye taşınır. Ek savunma katmanları (TŞ §19 sözleşmesi):
+ *   yüzeye taşınır. Ek savunma katmanları (TŞ §19 sözleşmesi; CAU-02):
  *   (a) resolve edilmiş hedef, okuma ÖNCESİ kök sarmalamasına tabi tutulur;
- *   (b) dosya AÇILDIKTAN SONRA gerçek yol (realpath) YENİDEN denetlenir
- *   (TOCTOU penceresi) ve okuma kanonik gerçek yoldan yapılır.
+ *   (b) okuma paylaşılan `readBoundedTextFile` ile tek fd üzerinden yapılır:
+ *   kökten aşağı lstat yürüyüşü, yalnızca düzenli dosya, fstat kimliği
+ *   (dev, ino) ön-lstat ve açma sonrası yeniden doğrulama ile aynı,
+ *   `maxFileBytes + 1` ile sınırlı okuma; (c) fd AÇIKKEN policy kararı, fd
+ *   ile doğrulanmış boyutla YENİDEN alınır ve aynı kanonik yolu vermelidir.
+ *   Kimlik/tip uyuşmazlığı → contracts/file-not-authorized; bayt taşması →
+ *   contracts/limit-exceeded.
  */
 
 function sniffsAsJsonSchema(root: Record<string, unknown>): boolean {
@@ -185,17 +188,6 @@ export function discoverContractsFromTexts(
   };
 }
 
-/** Kök sarmalama denetimi (resolve edilmiş yol için; TŞ §19 re-check 1). */
-function isInsideRoot(root: string, target: string): boolean {
-  const normalize = (value: string): string =>
-    process.platform === "win32" ? value.toLowerCase() : value;
-  const r = normalize(root);
-  const t = normalize(target);
-  if (t === r) return true;
-  const boundary = r.endsWith(path.sep) ? r : r + path.sep;
-  return t.startsWith(boundary);
-}
-
 export async function readContractFiles(
   root: string,
   policy: WorkspaceAccessPolicy,
@@ -225,24 +217,33 @@ export async function readContractFiles(
       );
     }
 
-    // (b) açma sonrası gerçek yol re-check + kanonik yoldan okuma
-    let real: string;
-    try {
-      real = realpathSync(target);
-    } catch {
+    // (b)+(c) fd'ye bağlı okuma; policy kararı fd açıkken yeniden alınır.
+    const maxBytes = policy.config.maxFileBytes;
+    const post: { decision?: PolicyDecision } = {};
+    const read = await readBoundedTextFile(target, maxBytes, {
+      root: decision.canonicalRoot,
+      authorize: (opened) => {
+        const postDecision = policy.checkFile(root, candidate, opened.bytes);
+        post.decision = postDecision;
+        return postDecision.allowed && postDecision.relativePath === decision.relativePath;
+      },
+    });
+    if (read.status === "too-large") {
       throw new ContractDiscoveryError(
-        "contracts/file-not-authorized",
-        "Could not resolve the real path of the spec file to open: " + candidate,
+        "contracts/limit-exceeded",
+        "Spec file exceeds the maxFileBytes limit (" + String(read.bytes) + " > " + String(maxBytes) +
+          " bytes): " + candidate,
       );
     }
-    if (!isInsideRoot(decision.canonicalRoot, real)) {
+    if (read.status === "rejected") {
+      const postDecision = post.decision;
+      const overLimit = postDecision?.allowed === false && postDecision.code === "workspace/limit-exceeded";
       throw new ContractDiscoveryError(
-        "contracts/file-not-authorized",
-        "Real path of the opened spec file is outside the root (TOCTOU re-check): " + candidate,
+        overLimit ? "contracts/limit-exceeded" : "contracts/file-not-authorized",
+        "Spec file could not be read through a verified descriptor (" + read.reason + "): " + candidate,
       );
     }
-    const text = await readFile(real, "utf8");
-    files.push({ relativePath: decision.relativePath, text });
+    files.push({ relativePath: decision.relativePath, text: read.text });
   }
   return files;
 }
