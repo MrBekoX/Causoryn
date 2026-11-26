@@ -26,7 +26,8 @@
  *   does not resolve inside the analyzed root, the git directory or the
  *   common directory: another object store on the machine is never read,
  * - a metadata file that is not a regular file (FIFO, socket, device): it is
- *   never opened, so it cannot block the read before git's timeout starts.
+ *   judged on its descriptor after a non-blocking open and never read, so it
+ *   cannot block the read before git's timeout starts.
  *
  * Upward discovery is blocked separately by git-read (GIT_CEILING_DIRECTORIES
  * set to the parent of the root); a root without a `.git` entry is reported
@@ -50,8 +51,8 @@
  * there, also at the end of a directory name).
  *
  * The work is bounded per call: at most MAX_LAYOUT_FS_OPERATIONS file system
- * operations (lstat, readlink, realpath), and an identically spelled path is
- * resolved once; metadata that would need more is refused.
+ * operations (lstat, readlink, realpath, open), and an identically spelled
+ * path is resolved once; metadata that would need more is refused.
  *
  * Refusal messages name the metadata text as written and paths inside the
  * analyzed root, never a resolved location outside it.
@@ -88,11 +89,11 @@ const MAX_ALTERNATE_DEPTH = 5;
 const MAX_INCLUDE_DEPTH = 10;
 const MAX_SCANNED_FILES = 64;
 /**
- * Upper bound on the file system operations (lstat, readlink, realpath) of
- * one validateRepositoryLayout call. A checkout, linked worktree or submodule
- * with a few config includes and alternates needs well under a hundred;
- * 64 scanned files whose paths are each walked both ways stay in the low
- * thousands. Metadata that would need more (thousands of include or
+ * Upper bound on the file system operations (lstat, readlink, realpath, open)
+ * of one validateRepositoryLayout call. A checkout, linked worktree or
+ * submodule with a few config includes and alternates needs well under a
+ * hundred; 64 scanned files whose paths are each walked both ways stay in the
+ * low thousands. Metadata that would need more (thousands of include or
  * alternates entries, a path text with thousands of components) is refused:
  * this check runs before git starts, so the git timeout does not bound it.
  */
@@ -263,8 +264,8 @@ interface LayoutCheck {
 }
 
 /**
- * Counts one lstat, readlink or realpath against the call's budget, before it
- * is made: past the budget the check fails closed instead of going on.
+ * Counts one lstat, readlink, realpath or open against the call's budget,
+ * before it is made: past the budget the check fails closed instead of going on.
  */
 function spend(check: LayoutCheck): void {
   check.fsOperations += 1;
@@ -448,12 +449,17 @@ async function canonical(
 }
 
 /**
- * O_NONBLOCK: an open() of a FIFO that replaced the file after lstat returns
- * at once instead of waiting for a writer; the identity check then refuses
- * it. Both flags are undefined (0) on Windows.
+ * O_NONBLOCK: an open() of a FIFO returns at once instead of waiting for a
+ * writer; the descriptor check then refuses it. O_NOFOLLOW: a symbolic link at
+ * the last component fails the open (ELOOP). O_NOCTTY: a terminal device never
+ * becomes the controlling terminal. All three are undefined (0) on Windows,
+ * where the post-open lstat refuses a link instead.
  */
 const METADATA_OPEN_FLAGS =
-  fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0) | (fsConstants.O_NONBLOCK ?? 0);
+  fsConstants.O_RDONLY |
+  (fsConstants.O_NOFOLLOW ?? 0) |
+  (fsConstants.O_NONBLOCK ?? 0) |
+  (fsConstants.O_NOCTTY ?? 0);
 
 function isMissingEntryError(error: unknown): boolean {
   const code = (error as NodeJS.ErrnoException | undefined)?.code;
@@ -462,12 +468,19 @@ function isMissingEntryError(error: unknown): boolean {
 
 /**
  * Bounded read of a small metadata file at an already link-checked path.
- * lstat comes first and only a regular file is opened, so a FIFO, socket or
- * device never blocks the read (the git subprocess timeout does not cover
- * this step). The opened handle must be the file the lstat saw (dev, ino).
- * A missing entry (ENOENT/ENOTDIR) or a directory reads as absent; any other
- * lstat failure (EACCES, EPERM, ...) is a refusal: git may still read a file
- * this check could not look at.
+ * The path is opened first and every decision is made on the descriptor, not
+ * on a check of the path made before the open (the git subprocess timeout
+ * does not cover this step):
+ * - the open is non-blocking (METADATA_OPEN_FLAGS), so a FIFO cannot hold it;
+ *   a missing entry (ENOENT/ENOTDIR) or a directory (EISDIR) reads as absent,
+ *   a link at the last component (ELOOP) is refused, and any other failure
+ *   (EACCES, EPERM, ...) is a refusal: git may still read a file this check
+ *   could not open;
+ * - a descriptor that is a directory reads as absent, one that is not a
+ *   regular file (FIFO, socket, device) is refused and never read;
+ * - an lstat after the open must show that the path still names the opened
+ *   file (dev, ino) and is no link (Windows has no O_NOFOLLOW): a file swapped
+ *   in before or after the open is refused.
  */
 async function readBounded(
   check: LayoutCheck,
@@ -477,29 +490,32 @@ async function readBounded(
 ): Promise<string | undefined> {
   const { root } = check;
   const shown = `${label}${located(root, file)}`;
-  let before;
-  spend(check);
-  try {
-    before = await lstat(file, { bigint: true });
-  } catch (error) {
-    if (isMissingEntryError(error)) return undefined;
-    throw refusal(root, `${shown} could not be checked (${errorCode(error)})`);
-  }
-  if (before.isDirectory()) return undefined;
-  if (!before.isFile()) {
-    throw refusal(root, `${shown} is not a regular file`);
-  }
   let handle;
+  spend(check);
   try {
     handle = await open(file, METADATA_OPEN_FLAGS);
   } catch (error) {
-    if (isMissingEntryError(error)) return undefined;
-    throw refusal(root, `${shown} could not be opened as a regular file`);
+    const code = errorCode(error);
+    if (isMissingEntryError(error) || code === "EISDIR") return undefined;
+    if (code === "ELOOP") throw refusal(root, `${shown} is not a regular file`);
+    throw refusal(root, `${shown} could not be opened as a regular file (${code})`);
   }
   try {
     const info = await handle.stat({ bigint: true });
-    const sameInode = info.ino === 0n || before.ino === 0n || info.ino === before.ino;
-    if (!info.isFile() || info.dev !== before.dev || !sameInode) {
+    if (info.isDirectory()) return undefined;
+    if (!info.isFile()) {
+      throw refusal(root, `${shown} is not a regular file`);
+    }
+    let after;
+    spend(check);
+    try {
+      after = await lstat(file, { bigint: true });
+    } catch (error) {
+      if (isMissingEntryError(error)) throw refusal(root, `${shown} changed while it was read`);
+      throw refusal(root, `${shown} could not be checked (${errorCode(error)})`);
+    }
+    const sameInode = info.ino === 0n || after.ino === 0n || info.ino === after.ino;
+    if (after.isSymbolicLink() || !after.isFile() || after.dev !== info.dev || !sameInode) {
       throw refusal(root, `${shown} changed while it was read`);
     }
     const chunks: Buffer[] = [];

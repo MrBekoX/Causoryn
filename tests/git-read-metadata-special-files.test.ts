@@ -1,14 +1,19 @@
 /**
  * CAU-09 (CWE-400): the git metadata reader in git-repository-layout.ts must
- * never block on a special file. Each metadata file is checked with lstat
- * first (regular files only), opened with O_RDONLY|O_NOFOLLOW|O_NONBLOCK where
- * the platform defines them, and the opened handle must be the same file
- * (dev, ino) the lstat saw. This all happens before git is started, so the git
- * subprocess timeout cannot cover a blocked open.
+ * never block on a special file and never read one. It decides on the opened
+ * descriptor, not on a path-based check made before the open (CodeQL
+ * js/file-system-race): each metadata file is opened first with
+ * O_RDONLY|O_NOFOLLOW|O_NONBLOCK|O_NOCTTY where the platform defines them (a
+ * FIFO open returns at once), the handle must be a regular file (a directory
+ * reads as absent), and a post-open lstat must show that the path still names
+ * that file and is no link (Windows has no O_NOFOLLOW). This all happens
+ * before git is started, so the git subprocess timeout cannot cover a blocked
+ * open.
  *
- * The fs-level ordering tests run on every platform through a pass-through
- * mock of node:fs/promises; the real FIFO tests are POSIX-only and guarded by
- * a timeout (and a writer that unblocks a stuck reader) so they cannot hang CI.
+ * The fs-level tests run on every platform through a pass-through mock of
+ * node:fs/promises (and node:fs constants that define the POSIX-only O_* bits
+ * everywhere); the real FIFO tests are POSIX-only and guarded by a timeout
+ * (and a writer that unblocks a stuck reader) so they cannot hang CI.
  */
 import { execFile as execFileCallback } from "node:child_process";
 import {
@@ -44,8 +49,10 @@ const execFile = promisify(execFileCallback);
 type AnyStats = Stats | BigIntStats;
 
 const fsHooks = vi.hoisted(() => ({
+  /** O_* bits the mocked node:fs constants add because this platform does not define them. */
+  fakeBits: 0,
   /** Replaces the lstat result for one path (pass-through when undefined). */
-  lstat: undefined as undefined | ((file: string, real: unknown) => unknown),
+  lstat: undefined as undefined | ((file: string, real: unknown, options?: import("node:fs").StatOptions) => unknown),
   /**
    * Runs before the real lstat: a returned value is the result (no real lstat),
    * a thrown error is the failure, undefined passes through.
@@ -58,16 +65,51 @@ const fsHooks = vi.hoisted(() => ({
    * error is the failure, undefined passes through.
    */
   beforeRealpath: undefined as undefined | ((file: string) => string | undefined),
+  /** Runs before the real open: a thrown error is the failure, otherwise the real open runs. */
+  beforeOpen: undefined as undefined | ((file: string) => void),
+  /** Replaces what FileHandle.stat() reports for a file opened at `file`. */
+  handleStat: undefined as undefined | ((file: string, real: unknown) => unknown),
   opened: [] as Array<{ readonly file: string; readonly flags: unknown }>,
+  /** Files whose opened handle was read from. */
+  read: [] as string[],
+  /** Files whose opened handle was closed. */
+  closed: [] as string[],
+  /** Path operations in call order ("open" or "lstat" / "lstat-bigint"). */
+  events: [] as Array<{ readonly op: "open" | "lstat" | "lstat-bigint"; readonly file: string }>,
 }));
+
+// Defines O_NOFOLLOW, O_NONBLOCK and O_NOCTTY on every platform (Windows has
+// none of them), so the open flags are checked everywhere; the mocked open
+// strips the made-up bits again before the real open.
+vi.mock("node:fs", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:fs")>();
+  const extra: Record<string, number> = {};
+  let fake = 0;
+  // Bits unused by any O_*/UV_FS_O_* constant Node defines on Windows.
+  const candidates: ReadonlyArray<readonly [string, number]> = [
+    ["O_NOFOLLOW", 0x0100_0000],
+    ["O_NONBLOCK", 0x0200_0000],
+    ["O_NOCTTY", 0x0400_0000],
+  ];
+  for (const [name, bit] of candidates) {
+    if ((actual.constants as unknown as Record<string, number | undefined>)[name] === undefined) {
+      extra[name] = bit;
+      fake |= bit;
+    }
+  }
+  fsHooks.fakeBits = fake;
+  const constants = { ...actual.constants, ...extra };
+  return { ...actual, constants, default: { ...actual, constants } };
+});
 
 vi.mock("node:fs/promises", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:fs/promises")>();
   const lstat = async (file: import("node:fs").PathLike, options?: import("node:fs").StatOptions) => {
+    fsHooks.events.push({ op: options?.bigint === true ? "lstat-bigint" : "lstat", file: String(file) });
     const replaced = fsHooks.beforeLstat?.(String(file), options);
     if (replaced !== undefined) return replaced;
     const real = await actual.lstat(file, options);
-    return fsHooks.lstat === undefined ? real : (fsHooks.lstat(String(file), real) ?? real);
+    return fsHooks.lstat === undefined ? real : (fsHooks.lstat(String(file), real, options) ?? real);
   };
   const readlink = async (file: import("node:fs").PathLike, options?: unknown) => {
     const text = fsHooks.readlink?.(String(file));
@@ -84,8 +126,33 @@ vi.mock("node:fs/promises", async (importOriginal) => {
     flags?: string | number,
     mode?: import("node:fs").Mode,
   ) => {
-    fsHooks.opened.push({ file: String(file), flags });
-    return actual.open(file, flags, mode);
+    const name = String(file);
+    fsHooks.opened.push({ file: name, flags });
+    fsHooks.events.push({ op: "open", file: name });
+    fsHooks.beforeOpen?.(name);
+    const handle = await actual.open(file, typeof flags === "number" ? flags & ~fsHooks.fakeBits : flags, mode);
+    const realStat = handle.stat.bind(handle);
+    const realRead = handle.read.bind(handle) as (...args: unknown[]) => Promise<unknown>;
+    const realClose = handle.close.bind(handle);
+    Object.defineProperty(handle, "stat", {
+      value: async (options?: import("node:fs").StatOptions) => {
+        const real = await realStat(options as never);
+        return fsHooks.handleStat === undefined ? real : (fsHooks.handleStat(name, real) ?? real);
+      },
+    });
+    Object.defineProperty(handle, "read", {
+      value: async (...args: unknown[]) => {
+        fsHooks.read.push(name);
+        return realRead(...args);
+      },
+    });
+    Object.defineProperty(handle, "close", {
+      value: async () => {
+        fsHooks.closed.push(name);
+        return realClose();
+      },
+    });
+    return handle;
   };
   return { ...actual, lstat, readlink, realpath, open };
 });
@@ -99,7 +166,12 @@ afterEach(() => {
   fsHooks.beforeLstat = undefined;
   fsHooks.readlink = undefined;
   fsHooks.beforeRealpath = undefined;
+  fsHooks.beforeOpen = undefined;
+  fsHooks.handleStat = undefined;
   fsHooks.opened.length = 0;
+  fsHooks.read.length = 0;
+  fsHooks.closed.length = 0;
+  fsHooks.events.length = 0;
   setGitProcessRunnerForTesting(undefined);
   resetGitRuntimeCachesForTesting();
 });
@@ -206,36 +278,67 @@ function gitDirectoryAt(dir: string): void {
   writeFileSync(path.join(dir, "HEAD"), "ref: refs/heads/main\n", "utf8");
 }
 
-describe("git metadata reader: lstat before open (CAU-09, every platform)", () => {
-  it("never opens a metadata file that lstat does not report as a regular file", async () => {
-    const { root, gitDir } = fakeRepository("causoryn-meta-fifo-mock-");
-    const commondir = path.join(gitDir, "commondir");
-    writeFileSync(commondir, ".\n", "utf8");
-    fsHooks.lstat = (file, real) => (samePath(file, commondir) ? asFifo(real as AnyStats) : undefined);
+/** True once `file` has been opened in this test: a change made "after the open". */
+function openedAlready(file: string): boolean {
+  return fsHooks.opened.some((entry) => samePath(entry.file, file));
+}
 
-    const error = await rejection(() => validateRepositoryLayout(root, "rev-parse"));
+/** Copy of `real` that answers like a directory. */
+function asDirectory(real: AnyStats): AnyStats {
+  return Object.assign(Object.create(Object.getPrototypeOf(real) as object) as AnyStats, real, {
+    isFile: () => false,
+    isDirectory: () => true,
+    isSymbolicLink: () => false,
+    isFIFO: () => false,
+  });
+}
 
-    expect(error.code).toBe("compare/repository-refused");
-    expect(error.message).toContain("not a regular file");
-    expect(fsHooks.opened.filter((entry) => samePath(entry.file, commondir))).toEqual([]);
+function only(files: readonly string[], file: string): string[] {
+  return files.filter((entry) => samePath(entry, file));
+}
+
+interface CommondirRepository {
+  readonly root: string;
+  readonly gitDir: string;
+  readonly commondir: string;
+}
+
+/** A `.git/commondir` file with `content` (".\n": the git directory itself). */
+function repositoryWithCommondir(prefix: string, content: string): CommondirRepository {
+  const { root, gitDir } = fakeRepository(prefix);
+  const commondir = path.join(gitDir, "commondir");
+  writeFileSync(commondir, content, "utf8");
+  return { root, gitDir, commondir };
+}
+
+/**
+ * The reader opens first and decides on the descriptor (CodeQL
+ * js/file-system-race: no path-based check before a path-based open). Tests
+ * written for the former order (lstat, then open, then compare) are rewritten
+ * below to assert the same security properties under the new order; each
+ * rewritten test says what it replaces.
+ */
+describe("git metadata reader: decides on the opened descriptor (CAU-09, every platform)", () => {
+  // New: the order itself. The bounded reader makes no lstat of the path
+  // before it opens it; its own (bigint) lstat follows the open and only
+  // re-verifies the opened file. The walk's plain lstat of each component
+  // ("lstat" events) is the link check of the path and is not the reader's.
+  it("opens a metadata file before its own lstat of that path", async () => {
+    const { root, commondir } = repositoryWithCommondir("causoryn-meta-order-", ".\n");
+
+    await validateRepositoryLayout(root, "rev-parse");
+
+    const own = fsHooks.events.filter((event) => event.op !== "lstat" && samePath(event.file, commondir));
+    expect(own.map((event) => event.op)).toEqual(["open", "lstat-bigint"]);
   });
 
-  it("refuses a metadata file whose opened handle is not the file lstat saw", async () => {
-    const { root, gitDir } = fakeRepository("causoryn-meta-swap-mock-");
-    const commondir = path.join(gitDir, "commondir");
-    writeFileSync(commondir, ".\n", "utf8");
-    fsHooks.lstat = (file, real) => (samePath(file, commondir) ? withOtherInode(real as AnyStats) : undefined);
-
-    const error = await rejection(() => validateRepositoryLayout(root, "rev-parse"));
-
-    expect(error.code).toBe("compare/repository-refused");
-    expect(error.message).toContain("changed while it was read");
-  });
-
-  it("opens metadata files read-only with O_NOFOLLOW and O_NONBLOCK where the platform defines them", async () => {
-    const { root, gitDir } = fakeRepository("causoryn-meta-flags-");
-    const commondir = path.join(gitDir, "commondir");
-    writeFileSync(commondir, ".\n", "utf8");
+  // Replaces "opens metadata files read-only with O_NOFOLLOW and O_NONBLOCK
+  // where the platform defines them": O_NOCTTY is added (a terminal device
+  // never becomes the controlling terminal), and the mocked constants define
+  // all three bits on every platform, so a dropped flag fails here on Windows
+  // too, not only on POSIX CI.
+  it("opens metadata files read-only with O_NOFOLLOW, O_NONBLOCK and O_NOCTTY where the platform defines them", async () => {
+    const { root, gitDir, commondir } = repositoryWithCommondir("causoryn-meta-flags-", ".\n");
 
     const layout = await validateRepositoryLayout(root, "rev-parse");
 
@@ -244,19 +347,149 @@ describe("git metadata reader: lstat before open (CAU-09, every platform)", () =
     expect(opens).toHaveLength(1);
     const flags = opens[0]!.flags;
     expect(typeof flags).toBe("number");
-    const required = fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0) | (fsConstants.O_NONBLOCK ?? 0);
+    expect(fsConstants.O_NOFOLLOW).toBeDefined();
+    expect(fsConstants.O_NONBLOCK).toBeDefined();
+    expect(fsConstants.O_NOCTTY).toBeDefined();
+    const required =
+      fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0) | (fsConstants.O_NONBLOCK ?? 0) | (fsConstants.O_NOCTTY ?? 0);
     expect((flags as number) & required).toBe(required);
     expect((flags as number) & (fsConstants.O_WRONLY | fsConstants.O_RDWR)).toBe(0);
+    expect(only(fsHooks.closed, commondir)).toHaveLength(1);
   });
 
+  // Replaces "never opens a metadata file that lstat does not report as a
+  // regular file": the file is now opened first, non-blocking (flags test
+  // above; the real FIFO tests below show the open returns at once), so the
+  // property asserted is that a descriptor that is not a regular file is
+  // refused, never read, and closed.
+  it("refuses, never reads and closes a metadata file whose opened descriptor is a FIFO", async () => {
+    const { root, commondir } = repositoryWithCommondir("causoryn-meta-fifo-mock-", ".\n");
+    fsHooks.handleStat = (file, real) => (samePath(file, commondir) ? asFifo(real as AnyStats) : undefined);
+
+    const error = await rejection(() => validateRepositoryLayout(root, "rev-parse"));
+
+    expect(error.code).toBe("compare/repository-refused");
+    expect(error.message).toContain("commondir");
+    expect(error.message).toContain("is not a regular file");
+    expect(only(fsHooks.read, commondir)).toEqual([]);
+    expect(only(fsHooks.closed, commondir)).toHaveLength(1);
+  });
+
+  // Replaces "refuses a metadata file whose opened handle is not the file
+  // lstat saw": the identity is now checked after the open, by an lstat of the
+  // path against the descriptor (dev, ino), which also refuses a link or a
+  // special file at the path (Windows has no O_NOFOLLOW, so its open follows a
+  // final link). Each change below happens only once the file is open, where a
+  // check made before the open cannot see it.
+  const afterOpen: ReadonlyArray<readonly [string, (real: AnyStats, options?: StatOptions) => AnyStats]> = [
+    ["another file (other inode)", (real) => withOtherInode(real)],
+    ["a symbolic link", (_real, options) => symlinkStats(options)],
+    ["a FIFO", (real) => asFifo(real)],
+  ];
+  for (const [what, swapped] of afterOpen) {
+    it(`refuses, never reads and closes a metadata file whose path names ${what} once it is open`, async () => {
+      const { root, commondir } = repositoryWithCommondir("causoryn-meta-swap-mock-", ".\n");
+      fsHooks.lstat = (file, real, options) =>
+        samePath(file, commondir) && openedAlready(commondir) ? swapped(real as AnyStats, options) : undefined;
+
+      const error = await rejection(() => validateRepositoryLayout(root, "rev-parse"));
+
+      expect(error.code).toBe("compare/repository-refused");
+      expect(error.message).toContain("commondir");
+      expect(error.message).toContain("changed while it was read");
+      expect(only(fsHooks.read, commondir)).toEqual([]);
+      expect(only(fsHooks.closed, commondir)).toHaveLength(1);
+    });
+  }
+
+  it("refuses a metadata file whose path is gone once it is open", async () => {
+    const { root, commondir } = repositoryWithCommondir("causoryn-meta-gone-mock-", ".\n");
+    fsHooks.beforeLstat = (file) => {
+      if (samePath(file, commondir) && openedAlready(commondir)) throw errnoError("ENOENT");
+      return undefined;
+    };
+
+    const error = await rejection(() => validateRepositoryLayout(root, "rev-parse"));
+
+    expect(error.code).toBe("compare/repository-refused");
+    expect(error.message).toContain("commondir");
+    expect(error.message).toContain("changed while it was read");
+    expect(only(fsHooks.read, commondir)).toEqual([]);
+    expect(only(fsHooks.closed, commondir)).toHaveLength(1);
+  });
+
+  // Replaces the "never opened" half of "a directory where a metadata file is
+  // expected is still treated as absent": a directory is now opened read-only
+  // (it cannot block) and judged by its descriptor, so the test asserts that
+  // it reads as absent and is never read.
   it("a directory where a metadata file is expected is still treated as absent", async () => {
     const { root, gitDir } = fakeRepository("causoryn-meta-dir-");
-    mkdirSync(path.join(gitDir, "commondir"));
+    const commondir = path.join(gitDir, "commondir");
+    mkdirSync(commondir);
 
     const layout = await validateRepositoryLayout(root, "rev-parse");
 
     expect(samePath(layout.commonDir, gitDir)).toBe(true);
-    expect(fsHooks.opened.filter((entry) => samePath(entry.file, path.join(gitDir, "commondir")))).toEqual([]);
+    expect(only(fsHooks.read, commondir)).toEqual([]);
+  });
+
+  // The commondir below names a directory that does not exist: had it been
+  // read, the layout would be refused; read as absent, it is accepted.
+  it("a metadata file whose opened descriptor is a directory reads as absent and is never read", async () => {
+    const { root, gitDir, commondir } = repositoryWithCommondir("causoryn-meta-dir-handle-", "missing-common\n");
+    fsHooks.handleStat = (file, real) => (samePath(file, commondir) ? asDirectory(real as AnyStats) : undefined);
+
+    const layout = await validateRepositoryLayout(root, "rev-parse");
+
+    expect(samePath(layout.commonDir, gitDir)).toBe(true);
+    expect(only(fsHooks.read, commondir)).toEqual([]);
+    expect(only(fsHooks.closed, commondir)).toHaveLength(1);
+  });
+
+  for (const code of ["ENOENT", "ENOTDIR", "EISDIR"]) {
+    it(`reads a metadata file as absent when its open fails with ${code}`, async () => {
+      const { root, gitDir, commondir } = repositoryWithCommondir(
+        `causoryn-meta-open-${code.toLowerCase()}-`,
+        "missing-common\n",
+      );
+      fsHooks.beforeOpen = (file) => {
+        if (samePath(file, commondir)) throw errnoError(code);
+      };
+
+      const layout = await validateRepositoryLayout(root, "rev-parse");
+
+      expect(samePath(layout.commonDir, gitDir)).toBe(true);
+    });
+  }
+
+  // O_NOFOLLOW makes the open of a final-component link fail with ELOOP.
+  it("refuses a metadata file whose open fails with ELOOP (a link at the path) as not a regular file", async () => {
+    const { root, commondir } = repositoryWithCommondir("causoryn-meta-open-eloop-", ".\n");
+    fsHooks.beforeOpen = (file) => {
+      if (samePath(file, commondir)) throw errnoError("ELOOP");
+    };
+
+    const error = await rejection(() => validateRepositoryLayout(root, "rev-parse"));
+
+    expect(error.code).toBe("compare/repository-refused");
+    expect(error.message).toContain("commondir");
+    expect(error.message).toContain("is not a regular file");
+  });
+
+  // Only a missing entry or a directory reads as absent: git may still read a
+  // file this check could not open.
+  it("refuses a metadata file whose open fails with EACCES and names the error code", async () => {
+    const { root, commondir } = repositoryWithCommondir("causoryn-meta-open-eacces-", ".\n");
+    fsHooks.beforeOpen = (file) => {
+      if (samePath(file, commondir)) throw errnoError("EACCES");
+    };
+
+    const error = await rejection(() => validateRepositoryLayout(root, "rev-parse"));
+
+    expect(error.code).toBe("compare/repository-refused");
+    expect(error.message).toContain("commondir");
+    expect(error.message).toContain("could not be opened as a regular file");
+    expect(error.message).toContain("EACCES");
   });
 });
 
@@ -425,7 +658,10 @@ describe("git metadata reader: only a missing entry reads as absent (every platf
     expect(error.message).toContain("EACCES");
   });
 
-  it("refuses when the bounded reader's own lstat of a metadata file fails with EPERM", async () => {
+  // The bounded reader's own (bigint) lstat now follows its open (see the
+  // descriptor tests above); a failure there other than "missing" is still a
+  // refusal that names the error code.
+  it("refuses when the bounded reader's own post-open lstat of a metadata file fails with EPERM", async () => {
     const { root, gitDir } = fakeRepository("causoryn-meta-eperm-read-");
     const commondir = path.join(gitDir, "commondir");
     writeFileSync(commondir, ".\n", "utf8");
@@ -538,6 +774,9 @@ describe("git metadata refusals do not name resolved locations outside the works
     expect(error.message).not.toContain("causoryn-unused-share");
   });
 
+  // The included file is made a FIFO through its opened descriptor (formerly
+  // through lstat): the reader now decides "not a regular file" on the
+  // descriptor, and the refusal must still not name the outside location.
   it("names an included config outside the root by its include text, not its resolved path", async () => {
     const { root, gitDir } = fakeRepository("causoryn-meta-msg-include-");
     const outside = tempDir("causoryn-meta-msg-include-outside-");
@@ -545,7 +784,7 @@ describe("git metadata refusals do not name resolved locations outside the works
     writeFileSync(included, "[user]\n\tname = x\n", "utf8");
     symlinkSync(outside, path.join(gitDir, "linked"), process.platform === "win32" ? "junction" : "dir");
     writeFileSync(path.join(gitDir, "config"), "[include]\n\tpath = linked/x.cfg\n", "utf8");
-    fsHooks.lstat = (file, real) => (samePath(file, included) ? asFifo(real as AnyStats) : undefined);
+    fsHooks.handleStat = (file, real) => (samePath(file, included) ? asFifo(real as AnyStats) : undefined);
 
     const error = await rejection(() => validateRepositoryLayout(root, "rev-parse"));
 
