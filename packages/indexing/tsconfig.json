@@ -12,6 +12,7 @@
     { "path": "../domain" },
     { "path": "../workspace" },
     { "path": "../graph" },
+    { "path": "../sidecar-ipc" },
     { "path": "../../adapters/typescript" }
   ]
 }

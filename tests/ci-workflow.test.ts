@@ -248,17 +248,27 @@ function collectAllSteps(doc: WorkflowDoc): WorkflowStep[] {
   return steps;
 }
 
+/** The publish step that checks the downloaded bundle against the build-and-pack job outputs. */
+function isPublishVerifyStep(step: WorkflowStep): boolean {
+  return step.env?.["EXPECTED_TGZ_SHA256"] === "${{ needs.build-and-pack.outputs.tarball_sha256 }}";
+}
+
 /**
  * Release steps cannot run outside a real tag push, so the security-relevant
  * `run:` scripts of release.yml are executed here against fixture artifacts.
- * They need bash with GNU coreutils/findutils (`sha256sum`, `find -printf`):
+ * They need bash with GNU coreutils/findutils/diffutils (`sha256sum`, `find -printf`, `cmp`):
  * present on Linux runners and in Git Bash; the behavioral cases are skipped
  * where they are missing (e.g. BSD userland on macOS).
  */
 const GNU_BASH_AVAILABLE = ((): boolean => {
   const probe = spawnSync(
     "bash",
-    ["--noprofile", "--norc", "-c", "command -v sha256sum >/dev/null && find . -maxdepth 0 -printf '' && grep -Fxq x <<< x"],
+    [
+      "--noprofile",
+      "--norc",
+      "-c",
+      "command -v sha256sum >/dev/null && command -v cmp >/dev/null && find . -maxdepth 0 -printf '' && grep -Fxq x <<< x",
+    ],
     { encoding: "utf8", shell: false, timeout: 15_000 },
   );
   return probe.status === 0;
@@ -862,8 +872,9 @@ describe(".github/workflows/release.yml — üç-job hermetik OIDC Trusted Publi
     const pDownloadIdx = findIdx(publishSteps, (s) =>
       usesPinnedAction(s, "actions/download-artifact"),
     );
-    const pChecksumIdx = findIdx(publishSteps, (s) =>
-      (s.run ?? "").includes("sha256sum -c SHA256SUMS.txt"),
+    const pChecksumIdx = findIdx(
+      publishSteps,
+      (s) => isPublishVerifyStep(s) && (s.run ?? "").includes('sha256sum --strict -c "$EXPECTED_SUMS"'),
     );
     const pAttestIdx = findIdx(
       publishSteps,
@@ -942,9 +953,9 @@ describe(".github/workflows/release.yml — üç-job hermetik OIDC Trusted Publi
     const digestsRun = digestsStep?.run ?? "";
     for (const fragment of [
       "sha256sum",
-      'grep -Fxq "$TGZ_SHA256  $TGZ_NAME" release-artifacts/SHA256SUMS.txt',
-      'grep -Fxq "$SBOM_SHA256  causoryn-sbom.cdx.json" release-artifacts/SHA256SUMS.txt',
-      "wc -l < release-artifacts/SHA256SUMS.txt",
+      // SHA256SUMS.txt must be byte-for-byte the two records generate-sbom.mjs writes (CAU-11).
+      `printf '%s  %s\\n%s  %s\\n' "$TGZ_SHA256" "$TGZ_NAME" "$SBOM_SHA256" "causoryn-sbom.cdx.json"`,
+      "| cmp -s - release-artifacts/SHA256SUMS.txt",
       'echo "tarball_name=$TGZ_NAME"',
       'echo "tarball_sha256=$TGZ_SHA256"',
       'echo "sbom_sha256=$SBOM_SHA256"',
@@ -965,10 +976,10 @@ describe(".github/workflows/release.yml — üç-job hermetik OIDC Trusted Publi
     expect(steps[reverifyIdx]?.run ?? "").toContain("find release-artifacts -mindepth 1 -printf");
   });
 
-  it("publish recomputes the downloaded digests against the build-and-pack job outputs and requires SHA256SUMS.txt to list both expected files (fail-closed)", () => {
+  it("publish recomputes the downloaded digests against the build-and-pack job outputs and requires SHA256SUMS.txt to be byte-for-byte the expected two-record list (fail-closed, CAU-11)", () => {
     const { doc } = loadWorkflow(RELEASE_WORKFLOW_PATH, ".github/workflows/release.yml");
     const publishSteps = doc.jobs?.["publish"]?.steps ?? [];
-    const verifyStep = publishSteps.find((s) => (s.run ?? "").includes("sha256sum -c SHA256SUMS.txt"));
+    const verifyStep = publishSteps.find(isPublishVerifyStep);
     expect(verifyStep, "publish checksum step must exist").toBeDefined();
     expect(verifyStep?.env).toEqual({
       RELEASE_TAG: "${{ github.ref_name }}",
@@ -977,17 +988,47 @@ describe(".github/workflows/release.yml — üç-job hermetik OIDC Trusted Publi
       EXPECTED_SBOM_SHA256: "${{ needs.build-and-pack.outputs.sbom_sha256 }}",
     });
     const run = verifyStep?.run ?? "";
+    const buildList = `printf '%s  %s\\n%s  %s\\n' "$EXPECTED_TGZ_SHA256" "$EXPECTED_TGZ" "$EXPECTED_SBOM_SHA256" "causoryn-sbom.cdx.json" > "$EXPECTED_SUMS"`;
+    const byteCompare = 'cmp -s "$EXPECTED_SUMS" release-artifacts/SHA256SUMS.txt';
+    const localCheck = 'sha256sum --strict -c "$EXPECTED_SUMS"';
     for (const fragment of [
       "^[0-9a-f]{64}$",
       'EXPECTED_TGZ="causoryn-${RELEASE_TAG#v}.tgz"',
       '"$EXPECTED_TGZ_NAME" != "$EXPECTED_TGZ"',
       '"$ACTUAL_TGZ_SHA256" != "$EXPECTED_TGZ_SHA256"',
       '"$ACTUAL_SBOM_SHA256" != "$EXPECTED_SBOM_SHA256"',
-      'grep -Fxq "$EXPECTED_TGZ_SHA256  $EXPECTED_TGZ" release-artifacts/SHA256SUMS.txt',
-      'grep -Fxq "$EXPECTED_SBOM_SHA256  causoryn-sbom.cdx.json" release-artifacts/SHA256SUMS.txt',
+      'EXPECTED_SUMS="$RUNNER_TEMP/',
+      buildList,
+      byteCompare,
+      localCheck,
       "find release-artifacts -mindepth 1 -printf",
     ]) {
       expect(run, `publish checksum step must contain: ${fragment}`).toContain(fragment);
+    }
+    // The expected list is generated from the job outputs, then compared with the downloaded
+    // file, and only then handed to sha256sum.
+    expect(run.indexOf(buildList)).toBeLessThan(run.indexOf(byteCompare));
+    expect(run.indexOf(byteCompare)).toBeLessThan(run.indexOf(localCheck));
+  });
+
+  it("no sha256sum check in release.yml reads its file list from SHA256SUMS.txt; every check list is generated locally from the exported digests (CAU-11)", () => {
+    const { raw, doc } = loadWorkflow(RELEASE_WORKFLOW_PATH, ".github/workflows/release.yml");
+    const checkLines = raw
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter((line) => /\bsha256sum\b/.test(line) && /(?:^|\s)(?:-[a-z]*c[a-z]*|--check)(?:\s|$)/.test(line));
+    // build-and-pack re-verify + publish verification.
+    expect(checkLines).toHaveLength(2);
+    for (const line of checkLines) {
+      expect(line, "sha256sum must check only the locally generated list").toContain('sha256sum --strict -c "$EXPECTED_SUMS"');
+      expect(line).not.toContain("SHA256SUMS.txt");
+    }
+    for (const step of collectAllSteps(doc)) {
+      const run = step.run ?? "";
+      if (!run.includes("sha256sum --strict -c")) continue;
+      expect(run, `${step.name ?? "step"} must write its check list outside release-artifacts/`).toContain(
+        'EXPECTED_SUMS="$RUNNER_TEMP/expected-sha256sums.txt"',
+      );
     }
   });
 
@@ -1002,10 +1043,7 @@ describe(".github/workflows/release.yml — üç-job hermetik OIDC Trusted Publi
         buildPackSteps.find(
           (s, idx) => idx > smokeIdx && JSON.stringify(s.env ?? {}).includes("steps.digests.outputs."),
         )?.run ?? "";
-      const publishRun =
-        (doc.jobs?.["publish"]?.steps ?? []).find((s) =>
-          (s.run ?? "").includes("sha256sum -c SHA256SUMS.txt"),
-        )?.run ?? "";
+      const publishRun = (doc.jobs?.["publish"]?.steps ?? []).find(isPublishVerifyStep)?.run ?? "";
       expect(digestsRun.length).toBeGreaterThan(0);
       expect(reverifyRun.length).toBeGreaterThan(0);
       expect(publishRun.length).toBeGreaterThan(0);
@@ -1022,6 +1060,7 @@ describe(".github/workflows/release.yml — üç-job hermetik OIDC Trusted Publi
         EXPECTED_TGZ_NAME: fx.tgzName,
         EXPECTED_TGZ_SHA256: fx.tgzSha256,
         EXPECTED_SBOM_SHA256: fx.sbomSha256,
+        RUNNER_TEMP: fx.root,
       });
       try {
         // 1. digests step writes the three outputs for consistent artifacts.
@@ -1111,6 +1150,88 @@ describe(".github/workflows/release.yml — üç-job hermetik OIDC Trusted Publi
           runBashStep(publishRun, wrongTag.root, { ...publishEnv(wrongTag), RELEASE_TAG: "v9.8.8" }),
           /Tarball identity mismatch/,
         );
+      } finally {
+        for (const fx of fixtures) rmSync(fx.root, { recursive: true, force: true });
+      }
+    },
+    120_000,
+  );
+
+  it.runIf(GNU_BASH_AVAILABLE)(
+    "CAU-11: the digests and publish steps reject a SHA256SUMS.txt that is not byte-for-byte the two expected records, and sha256sum never reads a path the list names",
+    () => {
+      const { doc } = loadWorkflow(RELEASE_WORKFLOW_PATH, ".github/workflows/release.yml");
+      const digestsRun = (doc.jobs?.["build-and-pack"]?.steps ?? []).find((s) => s.id === "digests")?.run ?? "";
+      const publishRun = (doc.jobs?.["publish"]?.steps ?? []).find(isPublishVerifyStep)?.run ?? "";
+      expect(digestsRun.length).toBeGreaterThan(0);
+      expect(publishRun.length).toBeGreaterThan(0);
+
+      const fixtures: ReleaseArtifactFixture[] = [];
+      const fresh = (): ReleaseArtifactFixture => {
+        const fx = makeReleaseArtifactFixture("9.8.7");
+        fixtures.push(fx);
+        return fx;
+      };
+      const sumsPath = (fx: ReleaseArtifactFixture): string => path.join(fx.root, "release-artifacts", "SHA256SUMS.txt");
+      const expectedRecords = (fx: ReleaseArtifactFixture): string =>
+        `${fx.tgzSha256}  ${fx.tgzName}\n${fx.sbomSha256}  causoryn-sbom.cdx.json\n`;
+      const publishEnv = (fx: ReleaseArtifactFixture): Record<string, string> => ({
+        RELEASE_TAG: "v9.8.7",
+        EXPECTED_TGZ_NAME: fx.tgzName,
+        EXPECTED_TGZ_SHA256: fx.tgzSha256,
+        EXPECTED_SBOM_SHA256: fx.sbomSha256,
+        RUNNER_TEMP: fx.root,
+      });
+      /**
+       * Both expected records plus a third one with no trailing newline: `wc -l` still
+       * counts 2 and both expected lines are present, so only a byte-exact comparison
+       * catches it. The third record names a file outside release-artifacts/ that a
+       * `sha256sum -c` over this list would open.
+       */
+      const withUnterminatedExtraRecord = (fx: ReleaseArtifactFixture): void => {
+        const outsideBody = "outside release-artifacts\n";
+        writeFileSync(path.join(fx.root, "outside.txt"), outsideBody, "utf8");
+        writeFileSync(sumsPath(fx), `${expectedRecords(fx)}${sha256Hex(outsideBody)}  ../outside.txt`, "utf8");
+      };
+      try {
+        // Publish: the exact build output passes, and sha256sum reports only the two artifacts.
+        const good = fresh();
+        const ok = runBashStep(publishRun, good.root, publishEnv(good));
+        expect(ok.status, ok.stderr).toBe(0);
+        expect(ok.stdout.split(/\r?\n/).filter(Boolean)).toEqual([
+          "causoryn-9.8.7.tgz: OK",
+          "causoryn-sbom.cdx.json: OK",
+        ]);
+
+        // Publish: an unterminated extra record is rejected before any checksum list is read.
+        const extraRecord = fresh();
+        withUnterminatedExtraRecord(extraRecord);
+        const extraResult = runBashStep(publishRun, extraRecord.root, publishEnv(extraRecord));
+        expectRejected(extraResult, /SHA256SUMS\.txt does not list exactly/);
+        expect(`${extraResult.stdout}\n${extraResult.stderr}`).not.toContain("outside.txt");
+
+        // Publish: the right records in the wrong order, or with CRLF line ends, are not the build output.
+        const reordered = fresh();
+        writeFileSync(
+          sumsPath(reordered),
+          `${reordered.sbomSha256}  causoryn-sbom.cdx.json\n${reordered.tgzSha256}  ${reordered.tgzName}\n`,
+          "utf8",
+        );
+        expectRejected(runBashStep(publishRun, reordered.root, publishEnv(reordered)), /SHA256SUMS\.txt does not list exactly/);
+        const crlf = fresh();
+        writeFileSync(sumsPath(crlf), expectedRecords(crlf).replace(/\n/g, "\r\n"), "utf8");
+        expectRejected(runBashStep(publishRun, crlf.root, publishEnv(crlf)), /SHA256SUMS\.txt does not list exactly/);
+
+        // build-and-pack digests step: the same unterminated extra record exports no digests.
+        const built = fresh();
+        withUnterminatedExtraRecord(built);
+        const outputFile = path.join(built.root, "github-output.txt");
+        writeFileSync(outputFile, "", "utf8");
+        expectRejected(
+          runBashStep(digestsRun, built.root, { RELEASE_TAG: "v9.8.7", GITHUB_OUTPUT: outputFile }),
+          /SHA256SUMS\.txt does not list exactly/,
+        );
+        expect(readFileSync(outputFile, "utf8")).toBe("");
       } finally {
         for (const fx of fixtures) rmSync(fx.root, { recursive: true, force: true });
       }

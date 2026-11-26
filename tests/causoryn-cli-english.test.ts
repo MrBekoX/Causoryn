@@ -109,8 +109,14 @@ describe("causoryn CLI package runtime strings are English", () => {
 
 describe("causoryn TOML patch errors are English", () => {
   it("reports a non-array Codex `args` value in English (no Turkish letters needed to be Turkish)", () => {
-    expect(() =>
-      readCodexMcpServer('[mcp_servers.causoryn]\ncommand = "node"\nargs = "not-an-array"\n'),
-    ).toThrow(/^Expected a TOML array: "not-an-array"$/);
+    // CAU-12: the message names the location and key, never the raw value.
+    let message = "";
+    try {
+      readCodexMcpServer('[mcp_servers.causoryn]\ncommand = "node"\nargs = "not-an-array"\n');
+    } catch (error) {
+      message = error instanceof Error ? error.message : String(error);
+    }
+    expect(message).toMatch(/^Malformed TOML \(line 3\): mcp_servers\.causoryn\.args must be an array of TOML strings$/);
+    expect(message).not.toContain("not-an-array");
   });
 });

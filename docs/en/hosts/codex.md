@@ -25,7 +25,7 @@ Automated coverage of the 0.3.0 code paths used on this page: `tests/causoryn-se
 | Path | Who it is for | What runs |
 |---|---|---|
 | **A. `npx causoryn@0.3.2 setup`** (recommended) | End users | Packaged entrypoint `scripts/causoryn.mjs mcp --allow-cwd --auto-data-dir --client codex`, registered in `config.toml` with the absolute Node binary |
-| **B. Codex plugin marketplace** | End users who prefer plugins | `npx -y --ignore-scripts --package causoryn@0.3.2 causoryn mcp …` from `.codex-plugin/mcp.json` |
+| **B. Codex plugin marketplace** | End users who prefer plugins | `node --input-type=module --eval <bootstrap> -- --expected-version 0.3.2 --allow-cwd …` from `.codex-plugin/mcp.json`; the bootstrap loads the launcher from Codex's plugin cache under `CODEX_HOME` |
 | **C. Manual registration** (`codex mcp add` or `config.toml`) | Contributors working from a source checkout | Monorepo bundle `packages/mcp-server/dist/mcp-server.mjs` (configured only through `CAUSORYN_CONFIG`) |
 
 ---
@@ -62,7 +62,7 @@ startup_timeout_sec = 30
 - **`startup_timeout_sec = 30`** gives cold Node.js + SQLite start-up enough headroom. A value of `30` or more that you set is kept as written; a lower or unusable value is raised to `30`, and the setup output says so.
 - **Absolute Node binary:** `command` is the `process.execPath` of the Node.js that ran `setup` (Node.js ≥ 24 is required).
 - **Persistent runtime:** when `setup` runs from an `_npx` cache or the OS temp directory, it first copies the package to `~/.causoryn/runtime` and points `args[0]` there, so the registration survives `npx` cache eviction.
-- **Skills:** the five canonical skills `causoryn`, `map-system`, `preflight-change`, `verify-change`, and `architecture-blueprint` are written to `~/.agents/skills/<name>/SKILL.md` (in your home directory, not under `CODEX_HOME`). Pass `--no-skill` to skip them. `architecture-blueprint` guides Codex in drafting optional `annotations` from MCP evidence; to export without annotations, call `causoryn_export_documentation` directly ([architecture export contract](../tool-contracts.md)). Skills are guidance text for the host model: a tool a skill mentions can only be called if the active tool profile registers it.
+- **Skills:** the five canonical skills `causoryn`, `map-system`, `preflight-change`, `verify-change`, and `architecture-blueprint` are written to `~/.agents/skills/<name>/SKILL.md` (in your home directory, not under `CODEX_HOME`). Pass `--no-skill` to skip them. `architecture-blueprint` guides Codex in drafting optional `annotations` from MCP evidence; to export without annotations, call `causoryn_export_documentation` directly ([architecture export contract](../tool-contracts.md)). Skills are guidance text for the host model: a tool a skill mentions can only be called if the active tool profile registers it. An existing `SKILL.md` that setup cannot prove Causoryn installed (your own skill with the same name, or a Causoryn skill you edited) is kept and reported as `skipped skill …`; the install record is `~/.causoryn/installed-skills.json` ([CLI & Configuration](../cli-and-configuration.md)).
 
 ### How `setup` behaves (all hosts)
 
@@ -72,7 +72,7 @@ startup_timeout_sec = 30
 - **Atomic, idempotent writes:** temporary file + rename, existing file mode kept (new files `0600`); an identical second run reports `noop`.
 - **Fail-closed parsing:** malformed TOML (unclosed strings, arrays, or tables, a line without `=`, an empty table header, or a duplicated table header such as two `[mcp_servers.causoryn]` tables) stops the run with `cli/malformed-toml` before anything is written. Symbolic-link targets are refused.
 - **Exit codes:** `setup` exits `0` on success, `1` when no host was detected and none was named, and `2` on any error.
-- **Uninstall:** removes `[mcp_servers.causoryn]` and every `[mcp_servers.causoryn.*]` sub-table, the five skill directories, and `~/.causoryn/runtime` when no other host config still references it.
+- **Uninstall:** removes `[mcp_servers.causoryn]` and every `[mcp_servers.causoryn.*]` sub-table, the Causoryn skills whose ownership is proven (an edited or foreign `SKILL.md` is kept and reported), and `~/.causoryn/runtime` when no other host config still references it.
 
 ### `doctor` checks
 
@@ -91,18 +91,21 @@ The installed package's `.codex-plugin/plugin.json` ships the skills (`"skills":
 {
   "mcpServers": {
     "causoryn": {
-      "command": "npx",
+      "command": "node",
       "args": [
-        "-y",
-        "--ignore-scripts",
-        "--package",
-        "causoryn@0.3.2",
-        "causoryn",
-        "mcp",
+        "--input-type=module",
+        "--eval",
+        "<bootstrap: see below>",
+        "--",
+        "--expected-version",
+        "0.3.2",
         "--allow-cwd",
         "--auto-data-dir",
         "--client",
         "codex"
+      ],
+      "env_vars": [
+        "CODEX_HOME"
       ],
       "startup_timeout_sec": 30
     }
@@ -110,7 +113,7 @@ The installed package's `.codex-plugin/plugin.json` ships the skills (`"skills":
 }
 ```
 
-The Codex plugin starts the server through `npx` with an exact version, so the first start needs the npm registry or a warm `npx` cache. (The Claude Code and ZCode plugins use `plugin-mcp-launcher.mjs` instead.)
+The manifest has no `cwd`, so Codex starts the server in the session (project) directory and `--allow-cwd` binds the project after its usual safety check. The bare `node` is resolved by Codex from `PATH` only (it does not search the current directory for a command name without a separator), and Node reads no `node.config.json`, `.env` or `package.json` for `--eval` without explicit flags. The inline bootstrap (the full text is in `.codex-plugin/mcp.json`) imports only `node:` built-ins and loads the launcher by its absolute real path in Codex's plugin cache, `<CODEX_HOME or ~/.codex>/plugins/cache/causoryn/causoryn/<version>/scripts/plugin-mcp-launcher.mjs` (`env_vars` passes `CODEX_HOME` through). It stops with exit code `2` and a `[causoryn-codex] …` line on `stderr` when `--expected-version` is missing or invalid, `CODEX_HOME` is not absolute, the cache path passes through a link, no plugin of that version is installed, or the install lies inside the workspace; the launcher then checks the package version again. No npm process runs and no project file is loaded. **Residual:** a relative or empty `PATH` entry, or a `node` that resolves first to a `.cmd` / `.bat` shim on Windows, can still select a `node` from the project; Option A is not affected because it registers the absolute Node binary. A different marketplace name, a remote executor or a changed Codex cache layout makes the bootstrap stop with exit code `2` instead of loading anything else.
 
 ## 3. Tool profiles in Codex
 
@@ -252,9 +255,13 @@ Every Causoryn entrypoint writes **only MCP JSON-RPC 2.0 frames** to `stdout`; a
 | `setup` stops with `cli/malformed-toml` | `config.toml` has a syntax problem or a duplicated table header. Fix it or restore `config.toml.causoryn.backup`; nothing was written. |
 | Codex reports a start-up timeout | Cold start exceeded the configured timeout. Keep `startup_timeout_sec = 30` (or higher) on the entry. |
 | `doctor` shows `ERROR` for the entry script | `~/.causoryn/runtime` or the original install was removed. Re-run `npx causoryn@0.3.2 setup --client codex --yes`. |
+| `setup` reports `skipped skill <name>: … was not created by Causoryn` (or `… was changed after Causoryn installed it`) | A `SKILL.md` with a Causoryn skill name exists that setup cannot prove it installed: your own skill, or a Causoryn skill you edited. It was kept. Leave it, or move it away and re-run setup to install Causoryn's version. |
+| `setup` stops with `Refusing to use <dir>: it is writable by other users` or `… it is owned by another user` | On POSIX an existing `~/.causoryn` must belong to you and must not be writable by group or others, because it holds the staged runtime and the skill install record. Run `chmod go-w ~/.causoryn`, or remove the directory or give it to your user, then re-run setup; nothing was changed. |
+| `setup` stops with `<file> changed while setup was running, so it was left as it is` | A skill file that setup planned to replace or remove changed during the run (for example while the confirmation prompt was open), and it was left as it is. Run setup again. |
 | Server exits at start with "Unsupported Node.js version" | Node.js < 24. Install Node.js 24+ and re-run `setup`. |
 | Extra `args` disappeared | Re-running `setup` regenerates the argument list and keeps only your `--tool-profile` and `--output-schema` arguments (plus `[mcp_servers.causoryn.env]` and other keys of the table). Re-apply other arguments, or use `setup --tool-profile <list>` for the profile. |
 | Workspace tools return `WORKSPACE_NOT_AUTHORIZED` | The start directory was refused by `--allow-cwd` and no usable root was reported, or the bare bundle has no `allowRoots`. See section 4 or 5.1. |
+| The Codex plugin server exits at start with `[causoryn-codex] …` (exit `2`) | The bootstrap could not prove where the installed plugin is: `CODEX_HOME` is relative, no Causoryn plugin of that version is in `<CODEX_HOME or ~/.codex>/plugins/cache/causoryn/causoryn/`, a link lies on that path, or the install is inside the workspace. Reinstall the plugin, fix `CODEX_HOME`, or use Option A (`npx causoryn@0.3.2 setup --client codex --yes`). |
 | Wiki or history tools are missing from `tools/list` | Default `core` profile. See section 3. |
 
 ## Related pages

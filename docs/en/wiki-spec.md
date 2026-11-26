@@ -359,7 +359,7 @@ Multiple edges of the same kind between the same page pair collapse into one lin
 
 ## 7. Storage Schema (`wiki_*`, `wiki_fts`)
 
-Defined in `packages/storage-sqlite/src/wiki-schema.ts` and applied with the main schema (`user_version = 5`). All DDL and DML are static SQL with bound parameters.
+Defined in `packages/storage-sqlite/src/wiki-schema.ts` and applied with the main schema (`user_version = 6`). All DDL and DML are static SQL with bound parameters.
 
 | Table | Key | Notes |
 |---|---|---|
@@ -690,7 +690,7 @@ The design reserves a resource URI template `causoryn://wiki/{workspaceId}/{page
 `exportWikiOffline` (`packages/wiki/src/export.ts`) writes a self-contained wiki (`index.html`, `markdown/index.md`, one `.md` per page) and is separate from the data root:
 
 - Target directories are authorized by `OutputAccessPolicy` (`output.allowedOutputDirs`); a rejected target gets no files and no subdirectories.
-- Each file is written atomically (`.tmp` + rename, stale `.tmp` removed first). The file set as a whole is not transactional: if a later file fails, earlier files remain.
+- Each file is written atomically through `OutputAccessPolicy.publishFile`: a temp file with a random name that the export creates itself in the target directory (`flag: "wx"`; mode `0666` narrowed by the umask), then a rename onto the target. The directory must stay the authorized, link-free directory up to the rename, and before writing and again before the rename the entry at the temp path must be the file of the export's open descriptor (otherwise `wiki/output-path-denied`, nothing published). Only that temp file is ever removed; an existing file at any other temp-like path, such as `<target>.tmp`, is never followed, removed or reused. The file set as a whole is not transactional: if a later file fails, earlier files remain.
 - HTML: every dynamic value is escaped; CSP `default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'`; no scripts, external resources, CDN or telemetry; navigation only through same-document anchors; source paths shown as text, no `file://` links; raw `http(s)://` strings in body text are defanged.
 - Markdown: table cells and headings are escaped; inline HTML and image embeds in section bodies are neutralized.
 - File names: sanitized slugs with deterministic ID suffixes on collisions and for Windows reserved device names (`con`, `nul`, `com1`–`com9`, `lpt1`–`lpt9`, …); remaining collisions are rejected, never overwritten.

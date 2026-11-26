@@ -107,8 +107,19 @@ export type {
   IndexWorkerMessage,
   IndexWorkerResultSummary,
   IndexWorkerTaskInput,
+  InventoryAnalysisResult,
+  InventoryAnalysisTask,
   SqliteRepositoryConstructor,
 } from "./index-worker-core.js";
+export {
+  InventoryAnalysisWorkerError,
+  runInventoryAnalysisInWorker,
+} from "./index-worker-analysis.js";
+export type {
+  InventoryAnalysisWorkerFailure,
+  InventoryAnalysisWorkerInput,
+  InventoryAnalysisWorkerOptions,
+} from "./index-worker-analysis.js";
 export {
   DEFAULT_MAX_PENDING_INDEX_JOBS,
   IndexJobManager,

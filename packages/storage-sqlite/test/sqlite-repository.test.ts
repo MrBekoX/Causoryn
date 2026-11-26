@@ -224,7 +224,11 @@ describe("SqliteGraphRepository — şema ve bağlantı", () => {
         expect(tables, `tablo yok: ${table}`).toContain(table);
       }
       expect(probe.pragma("page_size", { simple: true })).toBe(4096);
-      expect(probe.pragma("user_version", { simple: true })).toBe(5);
+      expect(probe.pragma("user_version", { simple: true })).toBe(6);
+      const workspaceColumns = (
+        probe.prepare("SELECT name FROM pragma_table_info('workspaces')").all() as Array<{ name: string }>
+      ).map((row) => row.name);
+      expect(workspaceColumns).toEqual(["id", "root_path", "created_at", "root_canonical"]);
       probe.close();
     } finally {
       repo.close();
@@ -1265,6 +1269,183 @@ describe("SqliteGraphRepository.getLatestWorkspaceSummaryMeta — zero-hydration
     } finally {
       reader.close();
       writer.close();
+    }
+  });
+});
+
+describe("SqliteGraphRepository.getWorkspace — CAU-03 root binding", () => {
+  it("reads the persisted workspace record back after the file is reopened", () => {
+    const file = dbPath("workspace-record.sqlite");
+    const first = new SqliteGraphRepository(file);
+    first.registerWorkspace({
+      id: WS,
+      rootPath: "D:/fixture/orders",
+      createdAt: CREATED_AT,
+    });
+    first.close();
+
+    const second = new SqliteGraphRepository(file);
+    try {
+      expect(second.getWorkspace(WS)).toEqual({
+        id: WS,
+        rootPath: "D:/fixture/orders",
+        createdAt: CREATED_AT,
+      });
+      expect(second.getWorkspace("ws_never_registered")).toBeUndefined();
+    } finally {
+      second.close();
+    }
+  });
+
+  it("persists the canonical-root mark of a record registered with it; a record registered without it carries none", () => {
+    const file = dbPath("workspace-record-canonical.sqlite");
+    const first = new SqliteGraphRepository(file);
+    first.registerWorkspace({
+      id: WS,
+      rootPath: "D:/fixture/orders",
+      createdAt: CREATED_AT,
+      rootCanonical: true,
+    });
+    first.registerWorkspace({ id: "ws_verbatim", rootPath: "D:/fixture/verbatim/", createdAt: CREATED_AT });
+    first.close();
+
+    const second = new SqliteGraphRepository(file);
+    try {
+      expect(second.getWorkspace(WS)).toEqual({
+        id: WS,
+        rootPath: "D:/fixture/orders",
+        createdAt: CREATED_AT,
+        rootCanonical: true,
+      });
+      const verbatim = second.getWorkspace("ws_verbatim");
+      expect(verbatim).toEqual({ id: "ws_verbatim", rootPath: "D:/fixture/verbatim/", createdAt: CREATED_AT });
+      expect(verbatim !== undefined && Object.hasOwn(verbatim, "rootCanonical")).toBe(false);
+    } finally {
+      second.close();
+    }
+    const probe = new Database(file, { readonly: true });
+    try {
+      const rows = probe
+        .prepare("SELECT id, root_canonical FROM workspaces ORDER BY id")
+        .all() as Array<{ id: string; root_canonical: number }>;
+      expect(rows).toEqual([
+        { id: WS, root_canonical: 1 },
+        { id: "ws_verbatim", root_canonical: 0 },
+      ]);
+    } finally {
+      probe.close();
+    }
+  });
+
+  it("a v5 database (workspaces without root_canonical, as 0.3.2 wrote it) migrates to v6 and its rows stay unmarked", () => {
+    const file = dbPath("workspace-record-v5.sqlite");
+    const writer = new SqliteGraphRepository(file);
+    writer.registerWorkspace({ id: WS, rootPath: "D:/fixture/orders/", createdAt: CREATED_AT });
+    writer.close();
+    const raw = new Database(file);
+    raw.exec("ALTER TABLE workspaces DROP COLUMN root_canonical; PRAGMA user_version = 5;");
+    raw.close();
+
+    const reopened = new SqliteGraphRepository(file);
+    try {
+      expect(reopened.getWorkspace(WS)).toEqual({ id: WS, rootPath: "D:/fixture/orders/", createdAt: CREATED_AT });
+      expect(reopened.updateWorkspaceRootPath(WS, "D:/fixture/orders/", "D:/fixture/orders")).toBe(true);
+      expect(reopened.getWorkspace(WS)?.rootCanonical).toBe(true);
+    } finally {
+      reopened.close();
+    }
+    const probe = new Database(file, { readonly: true });
+    try {
+      expect(probe.pragma("user_version", { simple: true })).toBe(6);
+      const column = (
+        probe.prepare("SELECT name, \"notnull\" AS not_null, dflt_value FROM pragma_table_info('workspaces')").all() as Array<{
+          name: string;
+          not_null: number;
+          dflt_value: string | null;
+        }>
+      ).find((info) => info.name === "root_canonical");
+      expect(column).toEqual({ name: "root_canonical", not_null: 1, dflt_value: "0" });
+    } finally {
+      probe.close();
+    }
+  });
+
+  it("binds the id as a parameter: an injection-looking id is only an unknown id; an empty id is rejected", () => {
+    const repo = new SqliteGraphRepository(dbPath("workspace-record-inject.sqlite"));
+    try {
+      repo.registerWorkspace({ id: WS, rootPath: "D:/fixture/orders", createdAt: CREATED_AT });
+      expect(repo.getWorkspace("x' OR '1'='1")).toBeUndefined();
+      expect(() => repo.getWorkspace("")).toThrowError(GraphRepositoryError);
+    } finally {
+      repo.close();
+    }
+  });
+});
+
+describe("SqliteGraphRepository.updateWorkspaceRootPath — CAU-03 legacy root upgrade", () => {
+  it("replaces the persisted root only while it still holds the expected value, and keeps the other columns", () => {
+    const file = dbPath("workspace-root-upgrade.sqlite");
+    const first = new SqliteGraphRepository(file);
+    try {
+      first.registerWorkspace({ id: WS, rootPath: "D:/fixture/orders/", createdAt: CREATED_AT });
+      expect(first.updateWorkspaceRootPath(WS, "D:/fixture/orders/", "D:/fixture/orders")).toBe(true);
+      // A stale expectation (another process already changed the row) changes nothing.
+      expect(first.updateWorkspaceRootPath(WS, "D:/fixture/orders/", "D:/elsewhere")).toBe(false);
+    } finally {
+      first.close();
+    }
+
+    const second = new SqliteGraphRepository(file);
+    try {
+      // The upgrade also marks the record as holding a canonical root.
+      expect(second.getWorkspace(WS)).toEqual({
+        id: WS,
+        rootPath: "D:/fixture/orders",
+        createdAt: CREATED_AT,
+        rootCanonical: true,
+      });
+    } finally {
+      second.close();
+    }
+  });
+
+  it("upgrades a record once: a record already marked canonical is never rewritten, even when its root matches", () => {
+    const repo = new SqliteGraphRepository(dbPath("workspace-root-upgrade-once.sqlite"));
+    try {
+      repo.registerWorkspace({ id: WS, rootPath: "D:/fixture/orders", createdAt: CREATED_AT });
+      expect(repo.updateWorkspaceRootPath(WS, "D:/fixture/orders", "D:/fixture/orders")).toBe(true);
+      expect(repo.getWorkspace(WS)?.rootCanonical).toBe(true);
+      expect(repo.updateWorkspaceRootPath(WS, "D:/fixture/orders", "D:/elsewhere")).toBe(false);
+      expect(repo.getWorkspace(WS)?.rootPath).toBe("D:/fixture/orders");
+
+      repo.registerWorkspace({
+        id: "ws_marked",
+        rootPath: "D:/fixture/marked",
+        createdAt: CREATED_AT,
+        rootCanonical: true,
+      });
+      expect(repo.updateWorkspaceRootPath("ws_marked", "D:/fixture/marked", "D:/elsewhere")).toBe(false);
+      expect(repo.getWorkspace("ws_marked")?.rootPath).toBe("D:/fixture/marked");
+    } finally {
+      repo.close();
+    }
+  });
+
+  it("binds every value as a parameter: injection-looking values update nothing or are stored literally", () => {
+    const repo = new SqliteGraphRepository(dbPath("workspace-root-upgrade-inject.sqlite"));
+    try {
+      repo.registerWorkspace({ id: WS, rootPath: "D:/fixture/orders", createdAt: CREATED_AT });
+      repo.registerWorkspace({ id: "ws_other", rootPath: "D:/fixture/other", createdAt: CREATED_AT });
+      expect(repo.updateWorkspaceRootPath("x' OR '1'='1", "D:/fixture/orders", "D:/x")).toBe(false);
+      expect(repo.updateWorkspaceRootPath(WS, "x' OR '1'='1", "D:/x")).toBe(false);
+      expect(repo.getWorkspace(WS)?.rootPath).toBe("D:/fixture/orders");
+      expect(repo.updateWorkspaceRootPath(WS, "D:/fixture/orders", "D:/a'; DROP TABLE workspaces; --")).toBe(true);
+      expect(repo.getWorkspace(WS)?.rootPath).toBe("D:/a'; DROP TABLE workspaces; --");
+      expect(repo.getWorkspace("ws_other")?.rootPath).toBe("D:/fixture/other");
+      expect(() => repo.updateWorkspaceRootPath("", "D:/fixture/orders", "D:/x")).toThrowError(GraphRepositoryError);
+      expect(() => repo.updateWorkspaceRootPath(WS, "D:/fixture/orders", "")).toThrowError(GraphRepositoryError);
+    } finally {
+      repo.close();
     }
   });
 });

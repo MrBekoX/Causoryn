@@ -1,4 +1,16 @@
-import { realpathSync, statSync } from "node:fs";
+import { randomBytes } from "node:crypto";
+import {
+  closeSync,
+  fstatSync,
+  lstatSync,
+  openSync,
+  realpathSync,
+  renameSync,
+  statSync,
+  unlinkSync,
+  writeFileSync,
+  type BigIntStats,
+} from "node:fs";
 import path from "node:path";
 
 import {
@@ -122,6 +134,64 @@ function isLexicalEscape(nativeRelative: string): boolean {
 
 function deny(code: OutputPolicyErrorCode, reason: string, rule?: string): OutputDeny {
   return rule === undefined ? { allowed: false, code, reason } : { allowed: false, code, reason, rule };
+}
+
+/**
+ * Mode of a publication temp file, and so of the published file (the mode
+ * survives the rename): Node's default 0o666, narrowed by the process umask
+ * (0o644 under the usual 022), as for the exports before CAU-08. The security
+ * property is the exclusive create of an owned, random-named temp file; an
+ * owner-only mode would make shared or served export directories unreadable
+ * and tighten an existing export on every re-export.
+ */
+const PUBLISH_FILE_MODE = 0o666;
+
+/** Filesystem identity of a directory or file (bigint: exact on Windows file ids). */
+interface FileIdentity {
+  readonly dev: bigint;
+  readonly ino: bigint;
+}
+
+function identityOf(stats: BigIntStats): FileIdentity {
+  return { dev: stats.dev, ino: stats.ino };
+}
+
+function sameIdentity(stats: BigIntStats, identity: FileIdentity): boolean {
+  return stats.dev === identity.dev && stats.ino === identity.ino;
+}
+
+function directoryChanged(dir: string): OutputPolicyError {
+  return new OutputPolicyError(
+    "workspace/output-path-denied",
+    `the output directory changed after authorization (replaced, moved or reached through a link); nothing was published: ${dir}`,
+  );
+}
+
+/**
+ * Identity of `dir` when it is a real directory reached without links: lstat
+ * (the last component is not a link or junction) and realpath (no component
+ * is) agree that `dir` is itself.
+ */
+function boundDirectoryIdentity(dir: string): FileIdentity | undefined {
+  const stats = lstatSync(dir, { bigint: true, throwIfNoEntry: false });
+  if (stats === undefined || stats.isSymbolicLink() || !stats.isDirectory()) return undefined;
+  let real: string;
+  try {
+    real = realpathSync(dir);
+  } catch {
+    return undefined;
+  }
+  return comparablePath(real) === comparablePath(dir) ? identityOf(stats) : undefined;
+}
+
+/** Removes the temp file only while it is still the file this process created. */
+function removeOwnTempFile(tmpPath: string, identity: FileIdentity): void {
+  try {
+    const current = lstatSync(tmpPath, { bigint: true, throwIfNoEntry: false });
+    if (current !== undefined && current.isFile() && sameIdentity(current, identity)) unlinkSync(tmpPath);
+  } catch {
+    // Best effort: the caller reports the original error.
+  }
 }
 
 /**
@@ -369,6 +439,103 @@ export class OutputAccessPolicy {
       canonicalDir: dirDecision.canonicalDir,
       canonicalPath: resolved,
     };
+  }
+
+  /**
+   * Publishes `content` at a target authorized by {@link authorizeFile}
+   * (CAU-08). Call it right after the authorization:
+   * 1. the target's directory is bound: its identity (dev, ino) is taken,
+   *    and it must be a real directory reached without links;
+   * 2. the content goes to a temp file this call creates itself in that
+   *    directory: crypto-random name, `wx` (O_CREAT|O_EXCL, an existing entry
+   *    is never followed or reused), mode 0o666 narrowed by the umask (the
+   *    published file's mode, as for any file the process writes);
+   * 3. right after the temp file is created (before any content is written)
+   *    and again just before the atomic rename, the directory must still be
+   *    the bound one and the entry at the temp path in it must be the file
+   *    the descriptor from step 2 refers to (fstat identity). Otherwise the
+   *    publication is refused.
+   * On failure only that temp file is removed, and only while it is still the
+   * file this call created; a file it did not create is never removed.
+   *
+   * The bind is taken here rather than inside authorizeFile: callers invoke
+   * this right after authorizeFile, and a directory replaced before the bind
+   * must still be a real, link-free directory at the authorized canonical
+   * path, so it cannot lead outside the declared output roots.
+   *
+   * Throws OutputPolicyError (`workspace/output-not-authorized` for a
+   * decision outside this policy, `workspace/output-path-denied` when the
+   * directory or temp file changed); filesystem errors are passed through.
+   * Residuals: Node has no openat(2)/renameat(2)/unlinkat(2), so a swap in
+   * the few instructions between a check and the open, rename or cleanup is
+   * not detectable here; a temp file created through a directory swapped for
+   * a link and back stays (empty) where the link pointed, since removing it
+   * by a path outside the bound directory is not safe. Identity is (dev, ino),
+   * so a file that replaces a deleted temp file and reuses its inode number
+   * looks like the temp file.
+   */
+  publishFile(decision: OutputAllow, content: string): void {
+    const targetPath = decision.canonicalPath;
+    const targetDir = path.dirname(targetPath);
+    if (
+      !decision.allowed ||
+      !isInside(decision.canonicalDir, targetDir) ||
+      !this.canonicalDirs.some((canonicalDir) => isInside(canonicalDir, targetDir))
+    ) {
+      throw new OutputPolicyError(
+        "workspace/output-not-authorized",
+        "the write target was not authorized by this output policy (explicit authorization required)",
+      );
+    }
+    const directory = boundDirectoryIdentity(targetDir);
+    if (directory === undefined) throw directoryChanged(targetDir);
+
+    const tmpPath = path.join(targetDir, `.${path.basename(targetPath)}.${randomBytes(12).toString("hex")}.tmp`);
+    const fd = openSync(tmpPath, "wx", PUBLISH_FILE_MODE);
+    let temp: FileIdentity | undefined;
+    let closed = false;
+    const assertDirectoryUnchanged = (): void => {
+      const current = boundDirectoryIdentity(targetDir);
+      if (current === undefined || current.dev !== directory.dev || current.ino !== directory.ino) {
+        throw directoryChanged(targetDir);
+      }
+    };
+    const assertTempInPlace = (created: FileIdentity): void => {
+      const tempNow = lstatSync(tmpPath, { bigint: true, throwIfNoEntry: false });
+      if (tempNow === undefined || !tempNow.isFile() || !sameIdentity(tempNow, created)) {
+        throw new OutputPolicyError(
+          "workspace/output-path-denied",
+          `the temporary export file is not the one this export created in the output directory (replaced, or created through a replaced directory); nothing was published: ${targetPath}`,
+        );
+      }
+    };
+    try {
+      temp = identityOf(fstatSync(fd, { bigint: true }));
+      // A swap between the bind and the open would have created the temp file
+      // elsewhere: refuse before any content is written there. The directory
+      // check alone misses a swap that was undone again; the entry at the temp
+      // path in the bound directory must also be the opened descriptor's file.
+      assertDirectoryUnchanged();
+      assertTempInPlace(temp);
+      writeFileSync(fd, content, "utf8");
+      closed = true;
+      closeSync(fd);
+      assertDirectoryUnchanged();
+      assertTempInPlace(temp);
+      renameSync(tmpPath, targetPath);
+    } catch (error) {
+      if (!closed) {
+        try {
+          closeSync(fd);
+        } catch {
+          // The original error is reported below.
+        }
+      }
+      // Without a known identity the temp file cannot be told apart from a
+      // replacement, so it is left in place rather than risk removing one.
+      if (temp !== undefined) removeOwnTempFile(tmpPath, temp);
+      throw error;
+    }
   }
 
   /**

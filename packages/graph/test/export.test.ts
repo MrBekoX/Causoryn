@@ -603,7 +603,7 @@ describe("writeDocumentation (izinli output dizinine atomik yazma)", () => {
     expect(existsSync(result.path)).toBe(true);
   });
 
-  it("önceden konmuş <hedef>.tmp sembolik bağı İZLENMEZ; bağ kırılır, bağın dışarıdaki hedefi değişmez", async () => {
+  it("önceden konmuş <hedef>.tmp sembolik bağı İZLENMEZ ve SİLİNMEZ (CAU-08); bağın dışarıdaki hedefi değişmez", async () => {
     // Güvenlik bulgusu (düşük, savunma derinliği): hedef authorizeFile ile
     // doğrulanır ama türetilen .tmp yeniden doğrulanmaz; output dizininde
     // önceden var olan .tmp sembolik bağı yazmayı İZİNİ takip ederek beyanlı
@@ -634,8 +634,13 @@ describe("writeDocumentation (izinli output dizinine atomik yazma)", () => {
     expect(existsSync(target)).toBe(true);
     expect(lstatSync(target).isSymbolicLink()).toBe(false);
     expect(readFileSync(target, "utf8")).toBe(serializeDocumentation(snapshot, "json"));
-    // Atomik yazma sonrası tmp kalıntısı yok.
-    expect(readdirSync(outputDir)).toEqual([EXPORT_DEFAULT_FILE_NAMES.json]);
+    // CAU-08: the planted entry is not this export's temp file, so it is
+    // left in place (formerly the export removed it); the export leaves
+    // no temp file of its own.
+    expect(lstatSync(`${target}.tmp`).isSymbolicLink()).toBe(true);
+    expect(readdirSync(outputDir).sort()).toEqual(
+      [EXPORT_DEFAULT_FILE_NAMES.json, `${EXPORT_DEFAULT_FILE_NAMES.json}.tmp`].sort(),
+    );
   });
 });
 

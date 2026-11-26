@@ -49,14 +49,14 @@ npx causoryn@0.3.2 setup --client antigravity --uninstall --yes
 - **Algılama:** Antigravity yalnızca `~/.gemini/antigravity` veya `~/.gemini/config/mcp_config.json` mevcutsa algılanmış sayılır. Tek başına bir `~/.gemini` dizini (örneğin Gemini CLI'dan kalan) Antigravity olarak değerlendirilmez (`detectInstalledClients`; `tests/causoryn-setup.test.ts` kapsamında).
 - **Mutlak Node binary'si:** `command`, `setup` komutunu çalıştıran Node.js'in `process.execPath` değeridir (Node.js ≥ 24 gerekir).
 - **Kalıcı runtime:** `setup` bir `_npx` önbelleğinden veya işletim sisteminin geçici dizininden çalıştığında, paketi önce `~/.causoryn/runtime` altına kopyalar ve `args[0]` değerini oraya yönlendirir; böylece kayıt, `npx` önbelleği temizlendikten sonra da geçerli kalır.
-- **Skill'ler:** `causoryn`, `map-system`, `preflight-change`, `verify-change` ve `architecture-blueprint`, `~/.gemini/config/skills/<name>/SKILL.md` altına yazılır (`--no-skill` bunları atlar). `architecture-blueprint`, seçili Antigravity modelinin MCP kanıtlarından isteğe bağlı `annotations` taslağı hazırlamasına rehberlik eder; sunucu, aynı snapshot ve export girdilerinden tekrarlanabilir çıktı üretir. Anotasyonsuz export için doğrudan `causoryn_export_documentation` çağırın ([mimari export sözleşmesi](../tool-contracts.md)). Skill'ler host modeli için rehber metinlerdir: bir skill'in andığı araç ancak etkin araç profili o aracı kaydediyorsa çağrılabilir.
+- **Skill'ler:** `causoryn`, `map-system`, `preflight-change`, `verify-change` ve `architecture-blueprint`, `~/.gemini/config/skills/<name>/SKILL.md` altına yazılır (`--no-skill` bunları atlar). `architecture-blueprint`, seçili Antigravity modelinin MCP kanıtlarından isteğe bağlı `annotations` taslağı hazırlamasına rehberlik eder; sunucu, aynı snapshot ve export girdilerinden tekrarlanabilir çıktı üretir. Anotasyonsuz export için doğrudan `causoryn_export_documentation` çağırın ([mimari export sözleşmesi](../tool-contracts.md)). Skill'ler host modeli için rehber metinlerdir: bir skill'in andığı araç ancak etkin araç profili o aracı kaydediyorsa çağrılabilir. Setup'ın Causoryn'in kurduğunu kanıtlayamadığı mevcut bir `SKILL.md` (aynı adlı kendi skill'iniz ya da düzenlediğiniz bir Causoryn skill'i) korunur ve `skipped skill …` olarak raporlanır; kurulum kaydı `~/.causoryn/installed-skills.json` dosyasıdır ([CLI ve Konfigürasyon](../cli-and-configuration.md)).
 
 ### `setup` ve `doctor` nasıl davranır
 
 - **Onay:** `--yes` (ve `--dry-run`) olmadan etkileşimli bir terminal planı gösterir ve `Continue? [y/N]` diye sorar; etkileşimsiz bir kabuk ise "confirmation required" hatasıyla durur ve hiçbir şey yazmaz.
 - **Yedekler:** Mevcut bir config ilk kez değiştirilmeden önce özgün dosya, yanına `mcp_config.json.causoryn.backup` olarak kopyalanır. Bu dosyanın üzerine hiçbir zaman yazılmaz; sonraki değişiklikler ek `mcp_config.json.causoryn.<timestamp>-<nonce>.backup` kopyaları oluşturur.
 - **Atomik, idempotent, fail-closed:** geçici dosya + rename, mevcut dosya modu korunarak (yeni dosyalar `0600`); aynı ikinci koşum `noop` raporlar; geçersiz JSON veya nesne olmayan bir `mcpServers`, koşumu `cli/malformed-json` ile durdurur; sembolik bağlantı hedefleri reddedilir. `setup` başarıda `0`, hiçbir host algılanmadığında ve hiçbiri adlandırılmadığında `1`, hatada `2` ile çıkar.
-- **Kaldırma:** `mcpServers.causoryn` girdisini her iki dosyadan siler (boş bir `mcpServers` nesnesi kalır), beş skill dizinini kaldırır ve başka hiçbir host config'i hâlâ referans vermiyorsa `~/.causoryn/runtime` dizinini de siler.
+- **Kaldırma:** `mcpServers.causoryn` girdisini her iki dosyadan siler (boş bir `mcpServers` nesnesi kalır), sahipliği kanıtlanan Causoryn skill'lerini (düzenlenmiş veya yabancı bir `SKILL.md` korunur ve raporlanır) kaldırır ve başka hiçbir host config'i hâlâ referans vermiyorsa `~/.causoryn/runtime` dizinini de siler.
 - **`doctor`** (salt okunur) Antigravity hostunu `OK`, `WARN`, `NOT-CONFIGURED` veya `ERROR` olarak raporlar. MCP girdisi birincil dosyada aranır; ikincil dosya varsa yalnızca geçerli JSON olup olmadığı ve kullanılabilir bir `causoryn.command` içerip içermediği denetlenir. Ayrıca Node.js ≥ 24, runtime dosyaları ve `dotnet` / `python` / `go` / `cargo` araç zincirleri kontrol edilir (eksik olanlar `l0-l1-fallback` olarak raporlanır; bu, o dil için dosya düzeyinde analiz anlamına gelir). Genel sonuç `HEALTHY`, `DEGRADED`, `NOT CONFIGURED` veya `UNHEALTHY` olur; çıkış kodu yalnızca `HEALTHY` için `0`'dır.
 
 ## 2. Depo kökünden veya npm paket dizininden kurulum
@@ -65,14 +65,14 @@ Son kullanıcılar Antigravity'nin eklenti yükleyicisini depo köküne (`https:
 
 | Konum | `plugin.json` | `mcp_config.json` sunucu başlatma |
 |---|---|---|
-| Depo kökü | `name`, `displayName`, `version` `0.3.2`, `description`, `author`, `homepage`, `repository`, `suggestedPrompts` | `npx -y --ignore-scripts causoryn@0.3.2 mcp --allow-cwd --auto-data-dir --client antigravity` |
-| `packages/causoryn` (yayımlanan npm paketi) | Aynı alanlar | `node ${PLUGIN_ROOT}/scripts/plugin-mcp-launcher.mjs --expected-version 0.3.2 --allow-cwd --auto-data-dir --client antigravity` |
+| Depo kökü | `name`, `displayName`, `version` `0.3.2`, `description`, `author`, `homepage`, `repository`, `suggestedPrompts` | `cwd: ${PLUGIN_ROOT}` ile `npx -y --ignore-scripts --prefix ${PLUGIN_DATA} causoryn@0.3.2 mcp --allow-cwd --auto-data-dir --client antigravity` |
+| `packages/causoryn` (yayımlanan npm paketi) | Aynı alanlar | `cwd: ${PLUGIN_ROOT}` ile `node ${PLUGIN_ROOT}/scripts/plugin-mcp-launcher.mjs --expected-version 0.3.2 --allow-cwd --auto-data-dir --client antigravity` |
 
 Paket dizini varyantı `plugin-mcp-launcher.mjs` kullanır: kurulu `package.json` dosyasının tam olarak `--expected-version` sürümündeki `causoryn` olduğunu (ve tanımlıysa `CAUSORYN_EXPECTED_VERSION` ile uyuştuğunu) denetler; herhangi bir uyuşmazlıkta `stderr` üzerine `[causoryn-launcher]` mesajı yazarak `2` ile çıkar; aksi halde iç içe bir `npx` süreci açmadan `dist/mcp-server.mjs` modülünü doğrudan import eder. Başlatıcı yolu `${PLUGIN_ROOT}` ile eklenti köküne bağlanır; Antigravity bu token'ı bir eklentinin `mcp_config.json` dosyasında eklenti dizinine genişletir (yerleşik `mcp-app-development` skill dokümanı). Çıplak göreli bir yol, `node` tarafından host'un sunucuyu başlattığı çalışma dizinine göre çözülürdü.
 
-`npx` manifestleri `--ignore-scripts` geçirir: yayımlanan `causoryn` paketinin bağımlılığı ve kurulum betiği yoktur (SQLite native eklentisi `dist/` içinde önceden derlenmiş gelir), bu yüzden kurulum sırasında hiçbir şeyin çalışması gerekmez.
+`npx` manifestleri `--ignore-scripts` geçirir: yayımlanan `causoryn` paketinin bağımlılığı ve kurulum betiği yoktur (SQLite native eklentisi `dist/` içinde önceden derlenmiş gelir), bu yüzden kurulum sırasında hiçbir şeyin çalışması gerekmez. Her Antigravity manifesti sunucuyu `cwd: ${PLUGIN_ROOT}` ile başlatır; `npx` manifestleri ayrıca npm prefix'ini eklentinin veri dizinine sabitler (`--prefix ${PLUGIN_DATA}`). Böylece analiz edilen projenin npm yapılandırması, `node_modules` ve `node_modules/.bin` dizini sunucunun çözümlenmesine katılmaz. `--allow-cwd` eklenti dizinini reddettiği için workspace MCP `roots/list` üzerinden bağlanır.
 
-İki kök manifest daha diğer MCP istemcilerine hizmet eder: `mcp.json` (`type: "stdio"` ve `npx -y --ignore-scripts causoryn@0.3.2 mcp --allow-cwd --auto-data-dir` içeren taşınabilir `mcpServers.causoryn`) ve `server.json` (MCP Registry girdisi `io.github.mrbekox/causoryn`, npm paketi `causoryn`, `stdio` taşıması, argümanlar `mcp --allow-cwd --auto-data-dir`).
+İki kök manifest daha diğer MCP istemcilerine hizmet eder: `mcp.json` (`type: "stdio"`, `cwd: ${PLUGIN_ROOT}` ve `npx -y --ignore-scripts --prefix ${PLUGIN_DATA} causoryn@0.3.2 mcp --allow-cwd --auto-data-dir` içeren taşınabilir `mcpServers.causoryn`) ve `server.json` (MCP Registry girdisi `io.github.mrbekox/causoryn`, npm paketi `causoryn`, `stdio` taşıması, runtime argümanı `--ignore-scripts`, paket argümanları `mcp --allow-cwd --auto-data-dir`). Registry biçiminde çalışma dizini veya eklenti kökü alanı yoktur; bu yüzden `npx`'i proje dizininde çalıştıran bir registry istemcisi paketi yine o projenin npm bağlamında çözer. Bu belgelenmiş bir artık sınırdır; `causoryn setup` mutlak runtime yolunu kaydederek bundan kaçınır.
 
 ---
 
@@ -154,6 +154,7 @@ Uygulanan kural: `agy` CLI yoksa CLI adımlarının çalıştırılmadığı aç
       "args": [
         "${PLUGIN_ROOT}/scripts/mcp-server.mjs"
       ],
+      "cwd": "${PLUGIN_ROOT}",
       "env": {
         "CAUSORYN_CONFIG": "{\"allowRoots\":[]}"
       }
@@ -172,6 +173,7 @@ Uygulanan kural: `agy` CLI yoksa CLI adımlarının çalıştırılmadığı aç
       "args": [
         "${PLUGIN_ROOT}/scripts/mcp-server.mjs"
       ],
+      "cwd": "${PLUGIN_ROOT}",
       "env": {
         "CAUSORYN_CONFIG": "{\"allowRoots\":[]}"
       }
@@ -185,6 +187,7 @@ Uygulanan kural: `agy` CLI yoksa CLI adımlarının çalıştırılmadığı aç
 | `mcpServers.causoryn` | Sunucu anahtarı `causoryn` | Paylaşılan sunucu ad alanında çakışmaları önler |
 | `command` | `node` | Yerel `stdio` süreci; LLM veya harici API çağrısı yok |
 | `args[0]` | Hem `mcp_config.json` hem `mcp.json` içinde `"${PLUGIN_ROOT}/scripts/mcp-server.mjs"` | Sahnelenmiş, derlenmiş esbuild çıktısı; ham `.ts` giriş noktaları, çıplak göreli veya mutlak yollar ve üst dizin kaçışları fikstür testi tarafından reddedilir |
+| `cwd` | Her iki manifestte `"${PLUGIN_ROOT}"` | Sunucu analiz edilen bir projede değil, eklenti dizininde başlar; fikstür testi proje dizini olan bir `cwd` değerini reddeder |
 | `env.CAUSORYN_CONFIG` | `{"allowRoots":[]}` | **Default deny**; `parseCausorynServerConfig` ile doğrulanır (katı nesne, mutlak `allowRoots`); bir kök yetkilendirilene kadar workspace araçları `WORKSPACE_NOT_AUTHORIZED` döner |
 
 ### Çıplak `stdio.ts` ve paketlenmiş `cli-stdio.ts`
@@ -251,6 +254,9 @@ CAUSORYN_CONFIG='{"allowRoots":["/path/to/your-project"],"storage":{"dataDbPath"
 | `setup` desteklenen bir host algılanmadığını söylüyor | Ne `~/.gemini/antigravity` ne de `~/.gemini/config/mcp_config.json` mevcut (tek başına `~/.gemini` sayılmaz). `--client antigravity` değerini açıkça geçin. |
 | `setup`, `cli/malformed-json` ile duruyor | `mcp_config.json` dosyalarından biri geçerli JSON değil veya `mcpServers` bir nesne değil. Dosyayı düzeltin veya `.causoryn.backup` yedeğini geri yükleyin; hiçbir şey yazılmadı. |
 | `doctor`, giriş script'i için `ERROR` gösteriyor | `~/.causoryn/runtime` veya özgün kurulum silinmiş. `npx causoryn@0.3.2 setup --client antigravity --yes` komutunu yeniden çalıştırın. |
+| `setup`, `skipped skill <name>: … was not created by Causoryn` (veya `… was changed after Causoryn installed it`) raporluyor | Causoryn skill adına sahip, setup'ın kendisinin kurduğunu kanıtlayamadığı bir `SKILL.md` var: kendi skill'iniz ya da düzenlediğiniz bir Causoryn skill'i. Dosya korundu. Olduğu gibi bırakın ya da başka yere taşıyıp Causoryn'in sürümünü kurmak için setup'ı yeniden çalıştırın. |
+| `setup`, `Refusing to use <dir>: it is writable by other users` veya `… it is owned by another user` ile duruyor | POSIX'te mevcut bir `~/.causoryn`, sahnelenen runtime'ı ve skill kurulum kaydını tuttuğu için size ait olmalı ve grup veya diğerleri tarafından yazılabilir olmamalıdır. `chmod go-w ~/.causoryn` çalıştırın ya da dizini silin veya kullanıcınıza verin, ardından setup'ı yeniden çalıştırın; hiçbir şey değiştirilmedi. |
+| `setup`, `<file> changed while setup was running, so it was left as it is` ile duruyor | Setup'ın değiştirmeyi veya kaldırmayı planladığı bir skill dosyası koşum sırasında değişti (örneğin onay istemi açıkken) ve olduğu gibi bırakıldı. Setup'ı yeniden çalıştırın. |
 | `[causoryn-launcher]` sürüm uyuşmazlığı (çıkış `2`) | Paket dizini `--expected-version` ile eşleşmiyor. Eşleşen paket sürümünü yeniden kurun. |
 | Workspace araçları `WORKSPACE_NOT_AUTHORIZED` döndürüyor | `--allow-cwd` başlangıç dizinini reddetti ve `roots/list` üzerinden güvenli bir kök gelmedi ya da fikstürde hâlâ `allowRoots: []` var. Proje klasörünü açın veya kökü beyan edin (bölüm 7). |
 | Wiki veya history araçları `tools/list` içinde yok | Varsayılan `core` profili. Yukarıdaki araç profili notlarına bakın. |

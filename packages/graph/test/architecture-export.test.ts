@@ -653,7 +653,7 @@ describe("writeDocumentation — view & annotations entegrasyonu", () => {
     expect(path.basename(fullHtml.path)).toBe("causoryn-architecture.html");
   });
 
-  it("SEC-12: atomik geçici dosya yazımı exclusive flag='wx' kullanır ve mevcut hedef dosyayı artık .tmp bırakmadan temizce üzerine yazar", () => {
+  it("SEC-12: atomik geçici dosya yazımı exclusive flag='wx' kullanır ve mevcut hedef dosyayı kendi .tmp kalıntısını bırakmadan temizce üzerine yazar; önceden var olan <hedef>.tmp korunur (CAU-08)", () => {
     const snap = richFixture();
     const outDir = makeTmp("atomic-wx");
     const policy = OutputAccessPolicy.create([outDir]);
@@ -669,6 +669,7 @@ describe("writeDocumentation — view & annotations entegrasyonu", () => {
     expect(readFileSync(first.path, "utf8")).not.toContain("Layered Modular Monolith");
 
     // 2. Artık .tmp dosyası varken ikinci yazma mevcut hedefi atomik ve temizce üzerine yazar
+    //    (CAU-08: o dosyayı bu yazma oluşturmadı, bu yüzden silinmez — eskiden siliniyordu)
     writeFileSync(`${first.path}.tmp`, "STALE-TMP-RESIDUE", "utf8");
     const second = writeDocumentation(
       {
@@ -686,14 +687,20 @@ describe("writeDocumentation — view & annotations entegrasyonu", () => {
     expect(updatedContent).toContain("causoryn-portal-data");
     expect(updatedContent).toContain("Layered Modular Monolith");
     expect(updatedContent).not.toContain("STALE-TMP-RESIDUE");
-    expect(readdirSync(outDir)).toEqual([EXPORT_INTERACTIVE_HTML_FILE_NAME]);
+    expect(readFileSync(`${first.path}.tmp`, "utf8")).toBe("STALE-TMP-RESIDUE");
+    expect(readdirSync(outDir).sort()).toEqual(
+      [EXPORT_INTERACTIVE_HTML_FILE_NAME, `${EXPORT_INTERACTIVE_HTML_FILE_NAME}.tmp`].sort(),
+    );
 
-    // 3. SEC-12 TOCTOU koruması: export.ts geçici dosyayı { encoding: "utf8", flag: "wx" } ile açar
+    // 3. SEC-12 TOCTOU koruması: export.ts yazmayı OutputAccessPolicy.publishFile'a
+    //    devreder; o da geçici dosyayı exclusive "wx" ile (umask'ın daralttığı
+    //    varsayılan 0o666 moduyla) açar (CAU-08).
     const exportSourcePath = fileURLToPath(new URL("../src/export.ts", import.meta.url));
     const exportSource = readFileSync(exportSourcePath, "utf8");
-    expect(exportSource).toMatch(
-      /writeFileSync\(\s*tmpPath\s*,\s*content\s*,\s*\{\s*encoding:\s*"utf8"\s*,\s*flag:\s*"wx"\s*\}\s*\)/,
-    );
+    expect(exportSource).toMatch(/policy\.publishFile\(\s*decision\s*,\s*content\s*\)/);
+    const policySourcePath = fileURLToPath(new URL("../../workspace/src/output-policy.ts", import.meta.url));
+    const policySource = readFileSync(policySourcePath, "utf8");
+    expect(policySource).toMatch(/openSync\(\s*tmpPath\s*,\s*"wx"\s*,\s*PUBLISH_FILE_MODE\s*\)/);
   });
 });
 

@@ -61,9 +61,9 @@ npx causoryn@0.3.2 setup --client zcode --uninstall --yes
    ```
 
    `command`, `setup` komutunu çalıştıran Node.js'in (≥ 24) mutlak `process.execPath` değeridir.
-3. **`~/.agents/mcp.json` fallback'inin korunması.** ZCode, yalnızca `~/.zcode/cli/config.json` içinde `mcp.servers` bulunmadığı sürece `~/.agents/mcp.json` (`mcpServers`) dosyasına fallback yapar; dolayısıyla `mcp.servers` oluşturulması bu sunucuları gizler. `setup`, `mcp.servers` nesnesini ilk kez oluşturduğunda ve `~/.agents/mcp.json` mevcutsa, `causoryn` dışındaki her girdiyi `mcp.servers` altına kopyalar; `command` alanı olup `type` alanı olmayan girdilere `type: "stdio"` ekler. Hatalı biçimli bir `~/.agents/mcp.json`, herhangi bir şey yazılmadan önce koşumu `cli/malformed-json` ile durdurur.
-4. **Beş kanonik skill.** `causoryn`, `map-system`, `preflight-change`, `verify-change` ve `architecture-blueprint`, `~/.zcode/skills/<name>/SKILL.md` altına yazılır (`--no-skill` bunları atlar). `architecture-blueprint`, ZCode'un MCP kanıtlarından isteğe bağlı `annotations` taslağı hazırlamasına rehberlik eder; anotasyonsuz export için doğrudan `causoryn_export_documentation` çağırın ([mimari export sözleşmesi](../tool-contracts.md)). Skill'ler host modeli için rehber metinlerdir: bir skill'in andığı araç ancak etkin araç profili o aracı kaydediyorsa çağrılabilir.
-5. **Temiz kaldırma.** `--uninstall`, `mcp.servers.causoryn` girdisini siler, boşalan `mcp.servers` nesnesini ve ardından boşalan `mcp` nesnesini kaldırır, beş skill dizinini siler ve başka hiçbir host config'i referans vermiyorsa `~/.causoryn/runtime` dizinini kaldırır. `~/.agents/mcp.json` dosyasından kopyalanan sunucular `mcp.servers` içinde kalır.
+3. **`~/.agents/mcp.json` fallback'inin korunması.** ZCode, yalnızca `~/.zcode/cli/config.json` içinde `mcp.servers` bulunmadığı sürece `~/.agents/mcp.json` (`mcpServers`) dosyasına fallback yapar; dolayısıyla `mcp.servers` oluşturulması bu sunucuları gizler. `setup`, `mcp.servers` nesnesini ilk kez oluşturduğunda ve `~/.agents/mcp.json` mevcutsa, `causoryn` dışındaki her girdiyi `mcp.servers` altına kopyalar; `command` alanı olup `type` alanı olmayan girdilere `type: "stdio"` ekler. Hatalı biçimli bir `~/.agents/mcp.json`, herhangi bir şey yazılmadan önce koşumu `cli/malformed-json` ile durdurur. Dosya link izlenmeden okunur: sembolik bir bağlantı (veya ev dizininin altında yolundaki link olan bir dizin), normal dosya olmayan ya da 1 MiB'tan büyük bir dosya, herhangi bir şey yazılmadan önce koşumu `cli/io-error` ile durdurur. Yalnızca dosyanın kendi sunucu adları kopyalanır; ayrılmış `__proto__`, `constructor` ve `prototype` adları (sunucu adı olarak da bir girdinin içindeki anahtar olarak da) asla kopyalanmaz ve atlanan sunucu adları setup çıktısında listelenir.
+4. **Beş kanonik skill.** `causoryn`, `map-system`, `preflight-change`, `verify-change` ve `architecture-blueprint`, `~/.zcode/skills/<name>/SKILL.md` altına yazılır (`--no-skill` bunları atlar). `architecture-blueprint`, ZCode'un MCP kanıtlarından isteğe bağlı `annotations` taslağı hazırlamasına rehberlik eder; anotasyonsuz export için doğrudan `causoryn_export_documentation` çağırın ([mimari export sözleşmesi](../tool-contracts.md)). Skill'ler host modeli için rehber metinlerdir: bir skill'in andığı araç ancak etkin araç profili o aracı kaydediyorsa çağrılabilir. Setup'ın Causoryn'in kurduğunu kanıtlayamadığı mevcut bir `SKILL.md` (aynı adlı kendi skill'iniz ya da düzenlediğiniz bir Causoryn skill'i) korunur ve `skipped skill …` olarak raporlanır; kurulum kaydı `~/.causoryn/installed-skills.json` dosyasıdır ([CLI ve Konfigürasyon](../cli-and-configuration.md)).
+5. **Temiz kaldırma.** `--uninstall`, `mcp.servers.causoryn` girdisini siler, boşalan `mcp.servers` nesnesini ve ardından boşalan `mcp` nesnesini kaldırır, sahipliği kanıtlanan Causoryn skill'lerini (düzenlenmiş veya yabancı bir `SKILL.md` korunur ve raporlanır) siler ve başka hiçbir host config'i referans vermiyorsa `~/.causoryn/runtime` dizinini kaldırır. `~/.agents/mcp.json` dosyasından kopyalanan sunucular `mcp.servers` içinde kalır.
 
 Ortak davranış: ZCode, `~/.zcode` veya `~/.zcode/cli/config.json` mevcutsa algılanmış sayılır; `--yes` (ve `--dry-run`) olmadan etkileşimli bir terminal `Continue? [y/N]` diye sorar, etkileşimsiz bir kabuk ise "confirmation required" hatasıyla durur; aynı ikinci koşum `noop` raporlar; geçersiz JSON veya nesne olmayan `mcp` / `mcp.servers` değerleri koşumu `cli/malformed-json` ile durdurur; sembolik bağlantı hedefleri reddedilir; `setup` başarıda `0`, hiçbir host algılanmadığında ve hiçbiri adlandırılmadığında `1`, hatada `2` ile çıkar.
 
@@ -89,23 +89,25 @@ Paketlenmiş `packages/causoryn/.zcode-plugin/plugin.json`, skill'leri taşır (
         "${ZCODE_PLUGIN_ROOT}/scripts/plugin-mcp-launcher.mjs",
         "--expected-version",
         "0.3.2",
+        "--project-dir",
+        "${ZCODE_PROJECT_DIR}",
         "--allow-cwd",
         "--auto-data-dir",
         "--client",
         "zcode"
       ],
-      "cwd": "${ZCODE_PROJECT_DIR}"
+      "cwd": "${ZCODE_PLUGIN_ROOT}"
     }
   }
 }
 ```
 
-`plugin-mcp-launcher.mjs`, iç içe bir `npx` süreci başlatmadan kurulu `package.json` dosyasının tam olarak `--expected-version` sürümündeki `causoryn` olduğunu (ve tanımlıysa `CAUSORYN_EXPECTED_VERSION` ile uyuştuğunu) denetler; herhangi bir uyuşmazlıkta veya bundle eksikse `stderr` üzerine `[causoryn-launcher]` mesajı yazarak `2` ile çıkar; aksi halde `dist/mcp-server.mjs` modülünü doğrudan import eder.
+`plugin-mcp-launcher.mjs`, iç içe bir `npx` süreci başlatmadan kurulu `package.json` dosyasının tam olarak `--expected-version` sürümündeki `causoryn` olduğunu (ve tanımlıysa `CAUSORYN_EXPECTED_VERSION` ile uyuştuğunu) denetler; herhangi bir uyuşmazlıkta veya bundle eksikse `stderr` üzerine `[causoryn-launcher]` mesajı yazarak `2` ile çıkar; aksi halde `dist/mcp-server.mjs` modülünü doğrudan import eder. `node` analiz edilen projede değil, plugin kökünde başlar (`cwd: ${ZCODE_PLUGIN_ROOT}`); proje `--project-dir ${ZCODE_PROJECT_DIR}` olarak gelir. Başlatıcı bu değeri yalnızca var olan bir dizine giden tam nitelikli yerel bir yol olarak kabul eder (UNC/aygıt yolu, NUL ve genişletilmemiş `${…}` yok), bundle yüklenmeden hemen önce o dizine geçer ve bayrağı sunucuya iletmez; böylece `--allow-cwd` proje kökü güvenlik denetimini uygulamaya devam eder. Başka her değer `stderr` üzerinde bir `[causoryn-launcher] --project-dir ignored (…)` notuyla yok sayılır; sunucu bu durumda `--allow-cwd`'nin reddettiği plugin kökünde başlar ve MCP `roots/list` bekler.
 
 ### ZCode ortam değişkenleri ve güvenlik sınırları
 
 - **`ZCODE_PLUGIN_ROOT`:** eklentinin salt okunur kurulum kökü. `deriveForbiddenPluginDirs` (`packages/mcp-server/src/runtime-cli.ts`), `ZCODE_PLUGIN_ROOT` veya `~/.zcode/plugins` dizinlerinin analiz edilen bir proje kökü olarak yetkilendirilmesine hiçbir zaman izin vermez.
-- **`ZCODE_PROJECT_DIR`:** `cwd` olarak geçirilen etkin proje dizini. `--allow-cwd`, bu dizini yetkilendirmeden önce `inspectProjectRootSafety` ile denetler. Reddedilen adaylar arasında UNC ve aygıt yolları, dosya sistemi kökleri, `$HOME` ve üst dizinleri, işletim sistemi dizinleri, hassas dizinler (`~/.ssh`, `~/.aws`, `~/.gnupg`, `~/.kube`, `~/.claude`, `~/.codex`, `~/.zcode`), eklenti kurulum dizinleri ve Causoryn veri dizinleri bulunur. Dizin reddedildiğinde sunucu yetkili bir kök olmadan başlar ve istemcinin MCP `roots/list` üzerinden bildirdiği ilk güvenli `file://` köke bağlanır (`notifications/roots/list_changed` bildiriminde de); o zamana kadar workspace araçları `WORKSPACE_NOT_AUTHORIZED` döner.
+- **`ZCODE_PROJECT_DIR`:** `--project-dir` olarak geçirilen etkin proje dizini (başlatıcı, sunucu başlamadan önce bu dizine geçer). `--allow-cwd`, bu dizini yetkilendirmeden önce `inspectProjectRootSafety` ile denetler. Reddedilen adaylar arasında UNC ve aygıt yolları, dosya sistemi kökleri, `$HOME` ve üst dizinleri, işletim sistemi dizinleri, hassas dizinler (`~/.ssh`, `~/.aws`, `~/.gnupg`, `~/.kube`, `~/.claude`, `~/.codex`, `~/.zcode`), eklenti kurulum dizinleri ve Causoryn veri dizinleri bulunur. Dizin reddedildiğinde sunucu yetkili bir kök olmadan başlar ve istemcinin MCP `roots/list` üzerinden bildirdiği ilk güvenli `file://` köke bağlanır (`notifications/roots/list_changed` bildiriminde de); o zamana kadar workspace araçları `WORKSPACE_NOT_AUTHORIZED` döner.
 - **`ZCODE_PLUGIN_DATA`:** ZCode diğer tüm host'larla aynı taban veri dizinini (`--data-dir` > `~/.causoryn`) kullanır; böylece tüm host'lar workspace başına tek bir indeksi paylaşır. `ZCODE_PLUGIN_DATA` yalnızca `~/.causoryn` oluşturulamadığında veya yazılamadığında yedek olarak kullanılır; ayarlandığında mutlak bir yol olmalıdır (UNC/aygıt yolları reddedilir) ve kullanılmasa bile doğrulanır. İndeksi `ZCODE_PLUGIN_DATA` altında bulunan mevcut ZCode kullanıcıları bir kez yeniden indeksler. Causoryn herhangi bir şey oluşturmadan önce veri dizininin yetkili tüm workspace'lerin kesinlikle dışında olduğunu doğrular; analiz edilen kaynak ağaca hiçbir zaman yazılmaz.
 
 ---
@@ -159,7 +161,7 @@ Fikstür manifesti derlenmiş monorepo bundle'ını başlatır ve kullanıcı ko
       "args": [
         "${CLAUDE_PLUGIN_ROOT}/../../../packages/mcp-server/dist/mcp-server.mjs"
       ],
-      "cwd": "${CLAUDE_PROJECT_DIR}",
+      "cwd": "${CLAUDE_PLUGIN_ROOT}",
       "env": {
         "CAUSORYN_CONFIG": "${user_config.config_json}"
       }
@@ -183,9 +185,13 @@ Fikstür manifesti derlenmiş monorepo bundle'ını başlatır ve kullanıcı ko
 | `~/.agents/mcp.json` içindeki sunucular ZCode'da kullanılamıyor | ZCode, `~/.agents/mcp.json` dosyasını yalnızca `mcp.servers` yokken okur. `setup` bu girdileri yalnızca `mcp.servers` nesnesini kendisi oluşturduğunda kopyalar; `mcp.servers` zaten varsa girdileri elle içine kopyalayın. |
 | `setup`, `cli/malformed-json` ile duruyor | `~/.zcode/cli/config.json` veya `~/.agents/mcp.json` geçerli JSON değil ya da `mcp` / `mcp.servers` bir nesne değil. Dosyayı düzeltin veya `.causoryn.backup` yedeğini geri yükleyin; hiçbir şey yazılmadı. |
 | `doctor`, giriş script'i için `ERROR` gösteriyor | `~/.causoryn/runtime` veya özgün kurulum silinmiş. `npx causoryn@0.3.2 setup --client zcode --yes` komutunu yeniden çalıştırın. |
+| `setup`, `skipped skill <name>: … was not created by Causoryn` (veya `… was changed after Causoryn installed it`) raporluyor | Causoryn skill adına sahip, setup'ın kendisinin kurduğunu kanıtlayamadığı bir `SKILL.md` var: kendi skill'iniz ya da düzenlediğiniz bir Causoryn skill'i. Dosya korundu. Olduğu gibi bırakın ya da başka yere taşıyıp Causoryn'in sürümünü kurmak için setup'ı yeniden çalıştırın. |
+| `setup`, `Refusing to use <dir>: it is writable by other users` veya `… it is owned by another user` ile duruyor | POSIX'te mevcut bir `~/.causoryn`, sahnelenen runtime'ı ve skill kurulum kaydını tuttuğu için size ait olmalı ve grup veya diğerleri tarafından yazılabilir olmamalıdır. `chmod go-w ~/.causoryn` çalıştırın ya da dizini silin veya kullanıcınıza verin, ardından setup'ı yeniden çalıştırın; hiçbir şey değiştirilmedi. |
+| `setup`, `<file> changed while setup was running, so it was left as it is` ile duruyor | Setup'ın değiştirmeyi veya kaldırmayı planladığı bir skill dosyası koşum sırasında değişti (örneğin onay istemi açıkken) ve olduğu gibi bırakıldı. Setup'ı yeniden çalıştırın. |
+| `setup`, `Refusing to read the ZCode fallback config …` ile duruyor | `~/.agents/mcp.json` sembolik bağlantı, normal bir dosya değil veya 1 MiB'tan büyük (yolundaki link olan bir dizin `Refusing to read through a symbolic link or junction …` olarak raporlanır). Normal bir dosyayla değiştirin ya da sunucularını `~/.zcode/cli/config.json` içindeki `mcp.servers` altına elle ekleyin, ardından setup'ı yeniden çalıştırın. |
 | `[causoryn-launcher]` sürüm uyuşmazlığı (çıkış `2`) | Kurulu eklenti paketi `--expected-version` ile eşleşmiyor. Eklentiyi güncelleyin veya yeniden kurun. |
 | Sunucu başlangıçta "Unsupported Node.js version" ile çıkıyor | Node.js < 24. Node.js 24+ kurun ve `setup` komutunu yeniden çalıştırın. |
-| Workspace araçları `WORKSPACE_NOT_AUTHORIZED` döndürüyor | `ZCODE_PROJECT_DIR` reddedildi ve `roots/list` üzerinden güvenli bir kök gelmedi ya da fikstürde `allowRoots` yok. Proje klasörünün kendisini ZCode'da açın veya kökü beyan edin. |
+| Workspace araçları `WORKSPACE_NOT_AUTHORIZED` döndürüyor | `ZCODE_PROJECT_DIR` reddedildi (ya da başlatıcı `--project-dir` değerini yok saydı; `stderr` üzerindeki `[causoryn-launcher]` satırına bakın) ve `roots/list` üzerinden güvenli bir kök gelmedi ya da fikstürde `allowRoots` yok. Proje klasörünün kendisini ZCode'da açın veya kökü beyan edin. |
 | Wiki veya history araçları `tools/list` içinde yok | Varsayılan `core` profili. Bkz. bölüm 3. |
 
 ## İlgili sayfalar

@@ -1,9 +1,7 @@
-import { renameSync, unlinkSync, writeFileSync } from "node:fs";
-
 import { z } from "zod";
 
 import { escapeMermaidLabel, snapshotCanonicalJson, type SnapshotGraph } from "@causoryn/domain";
-import { OutputAccessPolicy } from "@causoryn/workspace";
+import { OutputAccessPolicy, OutputPolicyError } from "@causoryn/workspace";
 
 import { GraphRepositoryError } from "./errors.js";
 import { serializeSnapshotContentSet } from "./timeline.js";
@@ -39,8 +37,11 @@ import type { ArchitectureProjectionOptions } from "./architecture-projection.js
  * - YAZMA KATMANI: writeDocumentation — hedef, @causoryn/workspace
  *   OutputAccessPolicy (sprint-3 C6'da eklenen explicit-beyanlı output
  *   dizin yetkilendirmesi) ile denetlenir; reddedilen hedefe hiçbir dosya
- *   yazılmaz. Yazma atomiktir: önce aynı dizinde `.tmp` dosyasına yazılır,
- *   sonra rename ile hedefe taşınır (yarım dosya görünmez).
+ *   yazılmaz. Yazma atomiktir: OutputAccessPolicy.publishFile önce aynı
+ *   dizinde bu yazmanın kendi oluşturduğu rastgele adlı geçici dosyaya
+ *   (`wx`, umask uygulanan 0o666) yazar, sonra rename ile hedefe taşır (yarım dosya
+ *   görünmez); dizin kimliği yetkilendirmeden rename'e kadar bağlıdır ve
+ *   önceden var olan hiçbir dosya silinmez (CAU-08).
  *
  * HTML güvenliği (TŞ §16 + §16A.9): TÜM dinamik değerler escapeHtml'den
  * geçer; belgede <script>, harici kaynak, CDN URL'si YOKTUR. CSP meta
@@ -503,7 +504,7 @@ export interface WriteDocumentationResult {
   readonly format: ExportDocumentationFormat;
   /** UTF-8 bayt uzunluğu. */
   readonly bytes: number;
-  /** Yazma daima atomiktir: `.tmp` + rename. */
+  /** Yazma daima atomiktir: kendi geçici dosyası + rename (OutputAccessPolicy.publishFile). */
   readonly atomic: true;
   /** Uygulanan görünüm (belirtildiyse veya architecture/interactive seçildiyse). */
   readonly view?: ExportDocumentationView;
@@ -514,7 +515,7 @@ export interface WriteDocumentationResult {
 /**
  * Yetkilendirilmiş atomik yazma: format/view/options/annotations doğrulanır →
  * içerik SAF serializer ile üretilir → hedef OutputAccessPolicy ile denetlenir
- * (reddedilen hedefe HİÇBİR dosya yazılmaz) → `.tmp` + rename ile atomik yazılır.
+ * (reddedilen hedefe HİÇBİR dosya yazılmaz) → OutputAccessPolicy.publishFile ile atomik yazılır.
  *
  * Yetkilendirme reddi GraphRepositoryError ile SABİT graph sözleşme koduyla
  * fırlatılır (graph paketi kendi `export/...` ad alanını kullanır; MCP
@@ -642,24 +643,17 @@ export function writeDocumentation(
     );
   }
   const targetPath = decision.canonicalPath;
-  const tmpPath = `${targetPath}.tmp`;
+  // CAU-08: owned exclusive temp file (random name, `wx`, 0o666 under the umask) in the
+  // target directory, directory identity bound from here to the rename; a
+  // file this export did not create is never removed.
   try {
-    try {
-      unlinkSync(tmpPath);
-    } catch {
-      // tmp yok: temizlik gereksiz; asıl yazma aşağıda.
-    }
-    writeFileSync(tmpPath, content, { encoding: "utf8", flag: "wx" });
-    renameSync(tmpPath, targetPath);
+    policy.publishFile(decision, content);
   } catch (error) {
-    const isEexist =
-      error instanceof Error && "code" in error && error.code === "EEXIST";
-    if (!isEexist) {
-      try {
-        unlinkSync(tmpPath);
-      } catch {
-        // tmp oluşmadıysa temizlik gereksiz; asıl hata aşağıda raporlanır.
-      }
+    if (error instanceof OutputPolicyError) {
+      throw new GraphRepositoryError(
+        error.code === "workspace/output-not-authorized" ? "export/output-not-authorized" : "export/output-path-denied",
+        `Output authorization denied (${error.code}): ${error.message}`,
+      );
     }
     throw new GraphRepositoryError(
       "export/write-failed",

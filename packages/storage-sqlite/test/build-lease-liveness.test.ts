@@ -95,12 +95,12 @@ describe("build lease identity and schema v5", () => {
     }
   });
 
-  it("new databases are stamped user_version 5 with hostname/owner_instance lease columns", () => {
+  it("new databases are stamped user_version 6 with hostname/owner_instance lease columns", () => {
     const file = path.join(tempDir, "fresh.sqlite");
     new SqliteGraphRepository(file).close();
     const probe = new Database(file, { readonly: true });
     try {
-      expect(probe.pragma("user_version", { simple: true })).toBe(5);
+      expect(probe.pragma("user_version", { simple: true })).toBe(6);
       const columns = (
         probe.prepare("SELECT name FROM pragma_table_info('build_leases')").all() as Array<{
           name: string;
@@ -113,13 +113,14 @@ describe("build lease identity and schema v5", () => {
     }
   });
 
-  it("migrates a v4 database (no lease identity columns) to v5 and keeps old lease rows readable", () => {
+  it("migrates a v4 database (no lease identity columns) to v6 and keeps old lease rows readable", () => {
     const file = path.join(tempDir, "legacy-v4.sqlite");
     new SqliteGraphRepository(file).close();
     const raw = new Database(file);
     raw.exec(`
       ALTER TABLE build_leases DROP COLUMN hostname;
       ALTER TABLE build_leases DROP COLUMN owner_instance;
+      ALTER TABLE workspaces DROP COLUMN root_canonical;
       INSERT INTO workspaces (id, root_path, created_at) VALUES ('${WS}', '/tmp/ws', '${T0}');
       INSERT INTO build_leases (workspace_id, build_id, lease_id, owner_pid, host_label, acquired_at, heartbeat_at, expires_at)
       VALUES ('${WS}', 'pending:old', 'lease-v4', 4242, 'codex', '${T0}', '${T0}', '2026-11-24T10:00:30.000Z');
@@ -141,7 +142,7 @@ describe("build lease identity and schema v5", () => {
     }
     const probe = new Database(file, { readonly: true });
     try {
-      expect(probe.pragma("user_version", { simple: true })).toBe(5);
+      expect(probe.pragma("user_version", { simple: true })).toBe(6);
     } finally {
       probe.close();
     }
@@ -160,7 +161,7 @@ describe("build lease identity and schema v5", () => {
       }
       expect(thrown).toBeInstanceOf(Error);
       expect((thrown as { code?: unknown }).code).toBe("storage/schema-too-new");
-      expect((thrown as Error).message).toMatch(/schema v99 is newer than this Causoryn build supports \(v5\)/);
+      expect((thrown as Error).message).toMatch(/schema v99 is newer than this Causoryn build supports \(v6\)/);
       expect(db.pragma("user_version", { simple: true })).toBe(99);
       const tables = db
         .prepare("SELECT name FROM sqlite_master WHERE type = 'table'")
@@ -476,6 +477,7 @@ describe("legacy graph-<client>.sqlite migration", () => {
     raw.exec(`
       ALTER TABLE build_leases DROP COLUMN hostname;
       ALTER TABLE build_leases DROP COLUMN owner_instance;
+      ALTER TABLE workspaces DROP COLUMN root_canonical;
       PRAGMA user_version = 4;
     `);
     raw.close();
@@ -483,7 +485,7 @@ describe("legacy graph-<client>.sqlite migration", () => {
     return file;
   }
 
-  it("copies the newest VALID legacy DB once via online backup, keeps the legacy files, then migrates to v5", async () => {
+  it("copies the newest VALID legacy DB once via online backup, keeps the legacy files, then migrates to v6", async () => {
     const migrate = (storage as unknown as {
       migrateLegacyWorkspaceDatabase?: (target: string) => Promise<Record<string, unknown>>;
     }).migrateLegacyWorkspaceDatabase;
@@ -522,7 +524,7 @@ describe("legacy graph-<client>.sqlite migration", () => {
     }
     const probe = new Database(target, { readonly: true });
     try {
-      expect(probe.pragma("user_version", { simple: true })).toBe(5);
+      expect(probe.pragma("user_version", { simple: true })).toBe(6);
     } finally {
       probe.close();
     }

@@ -39,7 +39,7 @@ Expected health summary from `npx causoryn doctor`:
 
 ## Step 2: Connect MCP & Inspect (`causoryn_status` -> `causoryn_map_system`)
 
-Open [`examples/fixture-ts-orders`](../../examples/fixture-ts-orders/README.md) in your coding agent host (or start the MCP server directly inside that directory with `npx causoryn mcp --allow-cwd --auto-data-dir`).
+Open [`examples/fixture-ts-orders`](../../examples/fixture-ts-orders/README.md) in your coding agent host; the entry that `causoryn setup` registered binds the opened folder. To start the server by hand, run `npx` from a directory outside the project with npm's prefix pinned to a directory you own, and name the project with `--root`: `cd ~ && npx -y --ignore-scripts --prefix ~/.npx-causoryn causoryn@0.3.2 mcp --root /path/to/examples/fixture-ts-orders --auto-data-dir`.
 
 Causoryn boots with the **11-tool default `core` profile** (`tools/list <= 15,000` chars) and stores its shared SQLite WAL graph index (`graph.sqlite`) outside your repository under `~/.causoryn/workspaces/<slug>-<hash12>/` so your source tree remains strictly read-only.
 
@@ -177,17 +177,23 @@ You can inspect exact file/line/SHA-256 provenance for any returned node, edge, 
 The default **`core`** profile registers **11 consolidated tools** to keep agent context windows small and tool selection accurate. When you need Living Wiki queries, Git architecture history, or backward-compatible legacy tool names, enable additional profiles via `--tool-profile` or the `CAUSORYN_TOOL_PROFILE` environment variable:
 
 ```bash
+# Preferred: let setup write the profile into your host entries
+npx causoryn@0.3.2 setup --tool-profile wiki,history --yes
+
+# Manual start: run npx outside the project with a pinned npm prefix, and name the project with --root
+cd ~
+
 # Default lean surface (11 consolidated core tools)
-npx causoryn mcp --allow-cwd --auto-data-dir
+npx -y --ignore-scripts --prefix ~/.npx-causoryn causoryn@0.3.2 mcp --root /path/to/your-project --auto-data-dir
 
 # Add Living Wiki (7 tools) and Git architecture history (2 tools) alongside core (20 tools total)
-npx causoryn mcp --allow-cwd --auto-data-dir --tool-profile wiki,history
+npx -y --ignore-scripts --prefix ~/.npx-causoryn causoryn@0.3.2 mcp --root /path/to/your-project --auto-data-dir --tool-profile wiki,history
 
 # Expose all 29 legacy tool names + 3 consolidated core aliases (32 tools total, backward compatible)
-npx causoryn mcp --allow-cwd --auto-data-dir --tool-profile full
+npx -y --ignore-scripts --prefix ~/.npx-causoryn causoryn@0.3.2 mcp --root /path/to/your-project --auto-data-dir --tool-profile full
 
 # Or select via environment variable in any host MCP config
-CAUSORYN_TOOL_PROFILE=wiki,history npx causoryn mcp --allow-cwd --auto-data-dir
+CAUSORYN_TOOL_PROFILE=wiki,history npx -y --ignore-scripts --prefix ~/.npx-causoryn causoryn@0.3.2 mcp --root /path/to/your-project --auto-data-dir
 ```
 
 | Profile Value | Registered Tools | Best For |

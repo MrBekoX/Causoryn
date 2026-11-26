@@ -147,6 +147,17 @@ const NON_BLOCKING_BOOT_TOOLS: ReadonlySet<string> = new Set([
   "causoryn_refresh_index",
 ]);
 
+/**
+ * History tools whose handler raises INDEX_NOT_READY for a history analysis
+ * outcome (`analysis-busy`: the process-wide fresh analysis slot is taken),
+ * not for a missing index: that error reaches the client as is, even while an
+ * index job runs, instead of the indexing-in-progress answer.
+ */
+const HISTORY_ANALYSIS_TOOLS: ReadonlySet<string> = new Set([
+  "causoryn_compare_architecture",
+  "causoryn_architecture_timeline",
+]);
+
 const TOOL_PROFILE_SET: ReadonlySet<string> = new Set<string>(TOOL_PROFILES);
 
 const StatusInspectDataSchema = z.strictObject({
@@ -689,10 +700,11 @@ function buildAllRegistrations(
       name: "causoryn_compare_architecture",
       title: "Architecture Diff",
       description:
-        "Compare two git refs or working-tree architecture snapshots read-only for added, removed, changed, renamed symbols and API surface changes.",
+        "Compare two git refs or working-tree architecture snapshots for added, removed, changed, renamed symbols and API surface changes. Never modifies the workspace or git state; commits analyzed from their git objects are cached under the data root.",
       inputSchema: CompareArchitectureToolInputSchema,
       outputSchema: envelopeOutputSchema(CompareArchitectureDataSchema),
-      annotations: READ_ONLY_TOOL_ANNOTATIONS,
+      // Writes its commit-analysis cache under the data root (never the workspace).
+      annotations: WRITE_TOOL_ANNOTATIONS,
       handler: async (requestId, args) =>
         compareArchitecture(
           context,
@@ -965,10 +977,11 @@ function buildAllRegistrations(
       name: "causoryn_architecture_timeline",
       title: "Architecture Timeline",
       description:
-        "Build a sampled architecture evolution timeline and per-metric rule violation trends across explicit git refs or a bounded history range read-only.",
+        "Build a sampled architecture evolution timeline and per-metric rule violation trends across explicit git refs or a bounded history range. Never modifies the workspace or git state; commits analyzed from their git objects are cached under the data root.",
       inputSchema: ArchitectureTimelineToolInputSchema,
       outputSchema: envelopeOutputSchema(ArchitectureTimelineDataSchema),
-      annotations: READ_ONLY_TOOL_ANNOTATIONS,
+      // Writes its commit-analysis cache under the data root (never the workspace).
+      annotations: WRITE_TOOL_ANNOTATIONS,
       handler: async (requestId, args) =>
         architectureTimeline(
           context,
@@ -1153,6 +1166,8 @@ export function createCausorynMcpServer(
             }
           },
         };
+        // Whether the error below came from the tool's own handler (not the index wait before it).
+        let handlerStarted = false;
 
         try {
           if (options.beforeToolCall !== undefined) {
@@ -1178,6 +1193,7 @@ export function createCausorynMcpServer(
           }
 
           const runHandler = async (): Promise<Envelope> => {
+            handlerStarted = true;
             let envelope = await registration.handler(requestId, args);
 
             if (envelope.status !== "error") {
@@ -1215,9 +1231,12 @@ export function createCausorynMcpServer(
           return envelopeResult(envelope);
         } catch (error) {
           if (error instanceof CausorynToolError) {
+            // A history tool's own INDEX_NOT_READY (analysis-busy) is not an indexing wait.
+            const historyOutcome = handlerStarted && HISTORY_ANALYSIS_TOOLS.has(registration.name);
             if (
               error.code === "INDEX_NOT_READY" &&
-              !registration.name.startsWith("causoryn_wiki_")
+              !registration.name.startsWith("causoryn_wiki_") &&
+              !historyOutcome
             ) {
               const activeJob = activeIndexingJobOf(context);
               if (activeJob !== null) {

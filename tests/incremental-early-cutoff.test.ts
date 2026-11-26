@@ -90,13 +90,13 @@ const MATH_V3_SIGNATURE_CHANGE = [
 
 describe("Task 2.6 — Schema v4 & True Per-File Incremental Indexing with Early Cutoff", { timeout: 45_000 }, () => {
   it("bumps SCHEMA_VERSION to 4, creates file_facts table, and migrates v3 DB cleanly to v4", () => {
-    expect(SCHEMA_VERSION).toBe(5);
+    expect(SCHEMA_VERSION).toBe(6);
     const dbFile = path.join(tempRoot, "v4-fresh.sqlite");
     const repo = new SqliteGraphRepository(dbFile);
     try {
       const probe = new Database(dbFile, { readonly: true });
       try {
-        expect(probe.pragma("user_version", { simple: true })).toBe(5);
+        expect(probe.pragma("user_version", { simple: true })).toBe(6);
         const tables = (
           probe
             .prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")

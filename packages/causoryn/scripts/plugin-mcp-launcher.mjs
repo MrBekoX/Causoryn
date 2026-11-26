@@ -11,8 +11,18 @@
  * miras alınan bir değer (geliştirme override'ı) yalnızca mutlak, var olan ve
  * aynı doğrulanmış sürümdeki `causoryn` paketini (`native/` ile) gösteriyorsa
  * kabul edilir, aksi halde başlatıcı `2` ile fail-closed çıkar.
+ *
+ * `--project-dir <dir>`: hosts start this launcher with the plugin root as the
+ * working directory, so the bare `node` command is never resolved against the
+ * analyzed repository (Windows searches the cwd before PATH). The project
+ * directory arrives as this argument instead. A usable value (fully qualified,
+ * not UNC/device, an existing directory) becomes the server's working directory
+ * just before the bundle loads, so `--allow-cwd` applies its usual project-root
+ * safety check to it. Any other value is ignored with a stderr note; the server
+ * then starts in the plugin root, which `--allow-cwd` refuses, and waits for MCP
+ * `roots/list`. The flag is never forwarded to the server.
  */
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
@@ -27,10 +37,27 @@ const MCP_BUNDLE_PATH = path.join(PKG_ROOT, "dist", "mcp-server.mjs");
 
 function parseLauncherArgs(argv) {
   let cliExpectedVersion;
+  /** undefined: flag absent; { value: undefined }: flag without a value. */
+  let projectDirArg;
   const forwardedArgs = [];
 
   for (let i = 0; i < argv.length; i += 1) {
     const token = argv[i];
+    if (token === "--project-dir") {
+      const next = argv[i + 1];
+      // A host that drops an empty substitution leaves the next flag here.
+      if (next === undefined || next.startsWith("-")) {
+        projectDirArg = { value: undefined };
+      } else {
+        projectDirArg = { value: next };
+        i += 1;
+      }
+      continue;
+    }
+    if (token.startsWith("--project-dir=")) {
+      projectDirArg = { value: token.slice("--project-dir=".length) };
+      continue;
+    }
     if (token === "--expected-version") {
       const next = argv[i + 1];
       if (next === undefined || next.trim().length === 0 || next.startsWith("-")) {
@@ -53,7 +80,52 @@ function parseLauncherArgs(argv) {
     forwardedArgs.push(token);
   }
 
-  return { cliExpectedVersion, forwardedArgs };
+  return { cliExpectedVersion, projectDirArg, forwardedArgs };
+}
+
+/** `C:\...` / `C:/...` on win32, `/...` elsewhere; never UNC (`\\host`, `//host`) or device paths. */
+function isFullyQualifiedLocalPath(value) {
+  if (/^(?:\\\\|\/\/|\\\/|\/\\)/.test(value)) return false;
+  if (process.platform === "win32") return /^[A-Za-z]:[\\/]/.test(value);
+  return value.startsWith("/");
+}
+
+/**
+ * Checks a `--project-dir` value lexically first (so a UNC value never reaches
+ * the filesystem, which would open an SMB connection), then on disk.
+ */
+function checkProjectDir(value) {
+  if (value === undefined) return { ok: false, reason: "no value" };
+  if (value.trim().length === 0) return { ok: false, reason: "empty value" };
+  if (value.includes("\0")) return { ok: false, reason: "NUL byte" };
+  if (value.includes("${")) return { ok: false, reason: "unexpanded host variable" };
+  if (!isFullyQualifiedLocalPath(value)) {
+    return { ok: false, reason: "not a fully qualified local path" };
+  }
+  try {
+    if (!statSync(value).isDirectory()) return { ok: false, reason: "not a directory" };
+  } catch {
+    return { ok: false, reason: "directory not found" };
+  }
+  return { ok: true, dir: value };
+}
+
+function enterProjectDir(projectDirArg) {
+  if (projectDirArg === undefined) return;
+  const check = checkProjectDir(projectDirArg.value);
+  let reason = check.ok ? undefined : check.reason;
+  if (check.ok) {
+    try {
+      process.chdir(check.dir);
+    } catch (error) {
+      reason = `cannot enter it: ${error instanceof Error ? error.message : String(error)}`;
+    }
+  }
+  if (reason !== undefined) {
+    console.error(
+      `[causoryn-launcher] --project-dir ignored (${reason}); the server starts in ${process.cwd()}`,
+    );
+  }
 }
 
 /**
@@ -70,7 +142,9 @@ function resolveAssetRoot(rawValue, verifiedVersion) {
   return result.root;
 }
 
-const { cliExpectedVersion, forwardedArgs } = parseLauncherArgs(process.argv.slice(2));
+const { cliExpectedVersion, projectDirArg, forwardedArgs } = parseLauncherArgs(
+  process.argv.slice(2),
+);
 
 let verifiedVersion;
 try {
@@ -133,5 +207,9 @@ const mcpArgs =
     ? forwardedArgs
     : ["mcp", ...forwardedArgs];
 process.argv = [process.argv[0] ?? process.execPath, MCP_BUNDLE_PATH, ...mcpArgs];
+
+// Last step before the bundle loads: every path above is absolute or derived
+// from this file's location, so the directory change affects only the server.
+enterProjectDir(projectDirArg);
 
 await import(pathToFileURL(MCP_BUNDLE_PATH).href);

@@ -359,7 +359,7 @@ Aynı sayfa çifti arasındaki aynı türden birden çok edge tek bir bağlantı
 
 ## 7. Depolama şeması (`wiki_*`, `wiki_fts`)
 
-`packages/storage-sqlite/src/wiki-schema.ts` içinde tanımlanır ve ana şemayla birlikte uygulanır (`user_version = 5`). Tüm DDL ve DML, bağlı parametreli statik SQL'dir.
+`packages/storage-sqlite/src/wiki-schema.ts` içinde tanımlanır ve ana şemayla birlikte uygulanır (`user_version = 6`). Tüm DDL ve DML, bağlı parametreli statik SQL'dir.
 
 | Tablo | Anahtar | Notlar |
 |---|---|---|
@@ -690,7 +690,7 @@ Tasarım, `causoryn://wiki/{workspaceId}/{pageId}?snapshot={wikiSnapshotId}` res
 `exportWikiOffline` (`packages/wiki/src/export.ts`) kendi kendine yeten bir wiki yazar (`index.html`, `markdown/index.md`, sayfa başına bir `.md`) ve veri kökünden ayrıdır:
 
 - Hedef dizinler `OutputAccessPolicy` (`output.allowedOutputDirs`) ile yetkilendirilir; reddedilen bir hedefe hiçbir dosya ve alt dizin yazılmaz.
-- Her dosya atomik olarak yazılır (`.tmp` + rename; bayat `.tmp` önce kaldırılır). Dosya kümesi bir bütün olarak transaction'lı değildir: sonraki bir dosya başarısız olursa önceki dosyalar yerinde kalır.
+- Her dosya `OutputAccessPolicy.publishFile` üzerinden atomik olarak yazılır: export'un hedef dizinde kendisinin oluşturduğu rastgele adlı bir geçici dosya (`flag: "wx"`; mod `0666`, umask ile daraltılır), ardından hedefin üzerine rename. Dizin, rename'e kadar yetkili ve link'siz dizin olarak kalmalıdır; yazmadan önce ve rename'den önce geçici yoldaki girdi, export'un açık descriptor'ının dosyası olmalıdır (aksi hâlde `wiki/output-path-denied`, hiçbir şey yayımlanmaz). Yalnızca o geçici dosya silinir; `<target>.tmp` gibi başka bir geçici-benzeri yoldaki mevcut bir dosya asla izlenmez, silinmez veya yeniden kullanılmaz. Dosya kümesi bir bütün olarak transaction'lı değildir: sonraki bir dosya başarısız olursa önceki dosyalar yerinde kalır.
 - HTML: her dinamik değer escape edilir; CSP `default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'`; script, harici kaynak, CDN veya telemetri yoktur; gezinme yalnızca aynı doküman içindeki anchor'larla yapılır; kaynak yollar metin olarak gösterilir, `file://` bağlantısı yoktur; gövde metnindeki ham `http(s)://` dizgeleri etkisizleştirilir (defang).
 - Markdown: tablo hücreleri ve başlıklar escape edilir; bölüm gövdelerindeki satır içi HTML ve görsel gömmeleri etkisizleştirilir.
 - Dosya adları: çakışmalarda ve Windows'un ayrılmış aygıt adları (`con`, `nul`, `com1`–`com9`, `lpt1`–`lpt9`, …) için deterministik kimlik sonekleri taşıyan, temizlenmiş slug'lar; kalan çakışmalar reddedilir, asla üzerine yazılmaz.

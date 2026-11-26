@@ -31,12 +31,14 @@
         "${ZCODE_PLUGIN_ROOT}/scripts/plugin-mcp-launcher.mjs",
         "--expected-version",
         "0.3.2",
+        "--project-dir",
+        "${ZCODE_PROJECT_DIR}",
         "--allow-cwd",
         "--auto-data-dir",
         "--client",
         "zcode"
       ],
-      "cwd": "${ZCODE_PROJECT_DIR}"
+      "cwd": "${ZCODE_PLUGIN_ROOT}"
     }
   }
 }

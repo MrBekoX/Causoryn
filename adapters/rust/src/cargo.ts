@@ -33,11 +33,13 @@ import { basename, delimiter, dirname, isAbsolute, join, resolve } from "node:pa
 import {
   isFullyQualifiedPath,
   isWithinUntrustedRoots,
+  registerSidecarProcess,
   resolveExecutable,
   resolveWindowsSystemExecutable,
   sanitizePathValue,
   terminateChildProcess,
   trustedWorkingDirectory,
+  watchSidecarProcessExit,
   withoutCwdExecutableSearch,
 } from "@causoryn/sidecar-ipc";
 import {
@@ -410,9 +412,11 @@ export function runCargoBuild(input: {
     let child: ChildProcess | null = null;
 
     /** win32: taskkill /T first (rustc/codegen torun süreçleri), then the direct kill. */
+    const treeKill = (running: ChildProcess): Promise<void> | undefined =>
+      killBuildTree(spawnFn, running, childEnv);
     const terminate = (): void => {
       if (child === null) return;
-      terminateChildProcess(child, (running) => killBuildTree(spawnFn, running, childEnv));
+      terminateChildProcess(child, treeKill);
     };
 
     const finish = (outcome: CargoBuildOutcome): void => {
@@ -423,6 +427,8 @@ export function runCargoBuild(input: {
       child?.stdout?.removeAllListeners();
       child?.stderr?.removeAllListeners();
       child?.on("error", () => {}); // temizlik sonrası olaylar yutulur
+      // The sidecar registry keeps tracking cargo until it has really exited.
+      if (child !== null) watchSidecarProcessExit(child);
       resolveBuild(outcome);
     };
 
@@ -456,6 +462,8 @@ export function runCargoBuild(input: {
       });
       return;
     }
+    // Recorded with its tree-kill hook, so the thread can stop it (and rustc) at once.
+    registerSidecarProcess(child, treeKill);
 
     child.on("error", (error: Error) => {
       const detail = error instanceof Error ? error.message : String(error);

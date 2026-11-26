@@ -14,7 +14,7 @@ import {
 } from "node:fs";
 import path from "node:path";
 
-import { CausorynCliError } from "./types.js";
+import { CausorynCliError, type CausorynCliErrorCode, type DirectoryOwnershipProbe } from "./types.js";
 
 /**
  * CWE-59 guards for `causoryn setup` and the persistent runtime stage.
@@ -64,13 +64,14 @@ export function findTrustedBase(targetPath: string, bases: readonly string[]): s
 export function assertNoLinkedComponents(
   targetPath: string,
   baseDir: string,
-  options: { readonly includeTarget?: boolean } = {},
+  options: { readonly includeTarget?: boolean; readonly purpose?: "write" | "read" } = {},
 ): void {
+  const verb = options.purpose ?? "write";
   const segments = relativeSegments(baseDir, targetPath);
   if (segments === null) {
     throw new CausorynCliError(
       "cli/io-error",
-      `Refusing to write outside the home directory or a configured host directory: ${targetPath}`,
+      `Refusing to ${verb} outside the home directory or a configured host directory: ${targetPath}`,
     );
   }
   const checkCount = options.includeTarget === true ? segments.length : segments.length - 1;
@@ -90,7 +91,7 @@ export function assertNoLinkedComponents(
     if (st.isSymbolicLink()) {
       throw new CausorynCliError(
         "cli/io-error",
-        `Refusing to write through a symbolic link or junction for security reasons (CWE-59): ${current}. ` +
+        `Refusing to ${verb} through a symbolic link or junction for security reasons (CWE-59): ${current}. ` +
           "Point the host configuration (for example CLAUDE_CONFIG_DIR or CODEX_HOME) at the real directory instead.",
       );
     }
@@ -104,16 +105,72 @@ export function assertNoLinkedComponents(
 export function assertSafeWritePath(
   targetPath: string,
   bases: readonly string[],
-  options: { readonly includeTarget?: boolean } = {},
+  options: { readonly includeTarget?: boolean; readonly purpose?: "write" | "read" } = {},
 ): void {
   const base = findTrustedBase(targetPath, bases);
   if (base === null) {
     throw new CausorynCliError(
       "cli/io-error",
-      `Refusing to write outside the home directory or a configured host directory: ${targetPath}`,
+      `Refusing to ${options.purpose ?? "write"} outside the home directory or a configured host directory: ${targetPath}`,
     );
   }
   assertNoLinkedComponents(targetPath, base, options);
+}
+
+/** The real process and file system (POSIX uid; none on Windows). */
+export function defaultDirectoryOwnershipProbe(): DirectoryOwnershipProbe {
+  return {
+    platform: process.platform,
+    uid: process.platform === "win32" ? undefined : process.getuid?.(),
+    lstat: (dirPath) => lstatSync(dirPath),
+  };
+}
+
+/**
+ * CWE-732: throws `code` unless `dir` is a real directory (not a symbolic
+ * link or junction) that, on POSIX, is owned by the current user and not
+ * writable by group or other users, so no other local user can plant,
+ * rename or replace entries in it. Windows ACLs are not inspected (there is
+ * no uid / mode); only the link and type checks apply there.
+ */
+export function assertPrivateDirectory(
+  dir: string,
+  code: CausorynCliErrorCode,
+  probe: DirectoryOwnershipProbe = defaultDirectoryOwnershipProbe(),
+): void {
+  let st;
+  try {
+    st = probe.lstat(dir);
+  } catch (err) {
+    throw new CausorynCliError(
+      code,
+      `Could not read the directory status (${dir}): ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+  if (st.isSymbolicLink()) {
+    throw new CausorynCliError(
+      code,
+      `Refusing to use a directory that is a symbolic link or junction for security reasons (CWE-59): ${dir}`,
+    );
+  }
+  if (!st.isDirectory()) {
+    throw new CausorynCliError(code, `Refusing to use ${dir}: it is not a directory`);
+  }
+  if (probe.platform === "win32" || probe.uid === undefined) return;
+  if (st.uid !== probe.uid) {
+    throw new CausorynCliError(
+      code,
+      `Refusing to use ${dir}: it is owned by another user (uid ${String(st.uid)}, current uid ${String(probe.uid)}). ` +
+        "Remove it or give it to the current user, then run setup again.",
+    );
+  }
+  if ((st.mode & 0o022) !== 0) {
+    throw new CausorynCliError(
+      code,
+      `Refusing to use ${dir}: it is writable by other users (mode ${(st.mode & 0o777).toString(8).padStart(3, "0")}). ` +
+        `Restrict it with \`chmod go-w ${dir}\` and run setup again.`,
+    );
+  }
 }
 
 /** Non-throwing variant for removals: true when no component below a base is a link. */
@@ -181,6 +238,23 @@ export function publishFileNoClobber(tmpPath: string, destPath: string): boolean
       throw err;
     }
   }
+  try {
+    copyFileSync(tmpPath, destPath, fsConstants.COPYFILE_EXCL);
+    return true;
+  } catch (err) {
+    if (errnoCode(err) === "EEXIST") return false;
+    throw err;
+  }
+}
+
+/**
+ * Publishes a fully written temporary file at `destPath` with an exclusive
+ * copy (`COPYFILE_EXCL`): an existing entry is never replaced. Unlike
+ * {@link publishFileNoClobber} no hard link is made, so the file can later be
+ * replaced by a rename again (on Windows a freshly hard-linked file briefly
+ * makes such a rename fail with EPERM). Returns false when `destPath` exists.
+ */
+export function copyFileNoClobber(tmpPath: string, destPath: string): boolean {
   try {
     copyFileSync(tmpPath, destPath, fsConstants.COPYFILE_EXCL);
     return true;

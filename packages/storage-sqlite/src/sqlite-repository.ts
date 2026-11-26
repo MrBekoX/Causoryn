@@ -645,10 +645,50 @@ export class SqliteGraphRepository
       );
     }
     this.runWrite(
-      "INSERT INTO workspaces (id, root_path, created_at) VALUES (?, ?, ?)",
+      "INSERT INTO workspaces (id, root_path, created_at, root_canonical) VALUES (?, ?, ?, ?)",
       record.id,
       record.rootPath,
       record.createdAt,
+      record.rootCanonical === true ? 1 : 0,
+    );
+  }
+
+  /**
+   * CAU-03: the persisted workspace row for `workspaceId`, or undefined when
+   * absent. `rootCanonical: true` is present only on a row marked canonical.
+   */
+  getWorkspace(workspaceId: string): WorkspaceRecord | undefined {
+    requireNonEmptyField("workspaceId", workspaceId);
+    const row = this.stmt(
+      "SELECT id, root_path, created_at, root_canonical FROM workspaces WHERE id = ? LIMIT 1",
+    ).get(workspaceId) as (WorkspaceRow & { root_canonical: number }) | undefined;
+    if (row === undefined) return undefined;
+    return {
+      id: row.id,
+      rootPath: row.root_path,
+      createdAt: row.created_at,
+      ...(row.root_canonical === 1 ? { rootCanonical: true } : {}),
+    };
+  }
+
+  /**
+   * CAU-03: compare-and-set upgrade of a verbatim root (one parameterized
+   * UPDATE in an IMMEDIATE transaction): stores `toRootPath` and marks the row
+   * canonical. False when the id is unknown, the row no longer holds
+   * `fromRootPath` (another connection changed it meanwhile) or the row is
+   * already marked canonical (a marked root is never rewritten).
+   */
+  updateWorkspaceRootPath(workspaceId: string, fromRootPath: string, toRootPath: string): boolean {
+    requireNonEmptyField("workspaceId", workspaceId);
+    requireNonEmptyField("workspace.rootPath", toRootPath);
+    return this.runInTransaction(
+      () =>
+        this.runWrite(
+          "UPDATE workspaces SET root_path = ?, root_canonical = 1 WHERE id = ? AND root_path = ? AND root_canonical = 0",
+          toRootPath,
+          workspaceId,
+          fromRootPath,
+        ).changes === 1,
     );
   }
 

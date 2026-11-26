@@ -49,14 +49,14 @@ npx causoryn@0.3.2 setup --client antigravity --uninstall --yes
 - **Detection:** Antigravity counts as detected only when `~/.gemini/antigravity` or `~/.gemini/config/mcp_config.json` exists. A bare `~/.gemini` directory (for example from Gemini CLI) is not treated as Antigravity (`detectInstalledClients`, covered by `tests/causoryn-setup.test.ts`).
 - **Absolute Node binary:** `command` is the `process.execPath` of the Node.js that ran `setup` (Node.js ≥ 24 is required).
 - **Persistent runtime:** when `setup` runs from an `_npx` cache or the OS temp directory, it first copies the package to `~/.causoryn/runtime` and points `args[0]` there, so the registration survives `npx` cache eviction.
-- **Skills:** `causoryn`, `map-system`, `preflight-change`, `verify-change`, and `architecture-blueprint` are written to `~/.gemini/config/skills/<name>/SKILL.md` (`--no-skill` skips them). `architecture-blueprint` guides the selected Antigravity model in drafting optional `annotations` from MCP evidence; the server renders repeatable output from the same snapshot and export inputs. To export without annotations, call `causoryn_export_documentation` directly ([architecture export contract](../tool-contracts.md)). Skills are guidance text for the host model: a tool a skill mentions can only be called if the active tool profile registers it.
+- **Skills:** `causoryn`, `map-system`, `preflight-change`, `verify-change`, and `architecture-blueprint` are written to `~/.gemini/config/skills/<name>/SKILL.md` (`--no-skill` skips them). `architecture-blueprint` guides the selected Antigravity model in drafting optional `annotations` from MCP evidence; the server renders repeatable output from the same snapshot and export inputs. To export without annotations, call `causoryn_export_documentation` directly ([architecture export contract](../tool-contracts.md)). Skills are guidance text for the host model: a tool a skill mentions can only be called if the active tool profile registers it. An existing `SKILL.md` that setup cannot prove Causoryn installed (your own skill with the same name, or a Causoryn skill you edited) is kept and reported as `skipped skill …`; the install record is `~/.causoryn/installed-skills.json` ([CLI & Configuration](../cli-and-configuration.md)).
 
 ### How `setup` and `doctor` behave
 
 - **Confirmation:** without `--yes` (and without `--dry-run`), an interactive terminal shows the plan and asks `Continue? [y/N]`; a non-interactive shell stops with a "confirmation required" error and writes nothing.
 - **Backups:** before an existing config is modified for the first time, the original is copied to `mcp_config.json.causoryn.backup` next to it. That file is never overwritten; later modifications create additional `mcp_config.json.causoryn.<timestamp>-<nonce>.backup` copies.
 - **Atomic, idempotent, fail-closed:** temporary file + rename with the existing file mode kept (new files `0600`); an identical second run reports `noop`; invalid JSON or a non-object `mcpServers` stops the run with `cli/malformed-json`; symbolic-link targets are refused. `setup` exits `0` on success, `1` when no host was detected and none was named, and `2` on error.
-- **Uninstall:** removes `mcpServers.causoryn` from both files (an empty `mcpServers` object remains), the five skill directories, and `~/.causoryn/runtime` when no other host config still references it.
+- **Uninstall:** removes `mcpServers.causoryn` from both files (an empty `mcpServers` object remains), the Causoryn skills whose ownership is proven (an edited or foreign `SKILL.md` is kept and reported), and `~/.causoryn/runtime` when no other host config still references it.
 - **`doctor`** (read-only) reports the Antigravity host as `OK`, `WARN`, `NOT-CONFIGURED`, or `ERROR`. The MCP entry is looked up in the primary file; the secondary file, when present, is only checked for being valid JSON with a usable `causoryn.command`. It also checks Node.js ≥ 24, runtime files, and the `dotnet` / `python` / `go` / `cargo` toolchains (missing ones are reported as `l0-l1-fallback`, meaning file-level analysis for that language). The overall result is `HEALTHY`, `DEGRADED`, `NOT CONFIGURED`, or `UNHEALTHY`; the exit code is `0` only for `HEALTHY`.
 
 ## 2. Installing from the repository root or the npm package directory
@@ -65,14 +65,14 @@ End users can also point Antigravity's plugin loader at the repository root (`ht
 
 | Location | `plugin.json` | `mcp_config.json` server launch |
 |---|---|---|
-| Repository root | `name`, `displayName`, `version` `0.3.2`, `description`, `author`, `homepage`, `repository`, `suggestedPrompts` | `npx -y --ignore-scripts causoryn@0.3.2 mcp --allow-cwd --auto-data-dir --client antigravity` |
-| `packages/causoryn` (published npm package) | Same fields | `node ${PLUGIN_ROOT}/scripts/plugin-mcp-launcher.mjs --expected-version 0.3.2 --allow-cwd --auto-data-dir --client antigravity` |
+| Repository root | `name`, `displayName`, `version` `0.3.2`, `description`, `author`, `homepage`, `repository`, `suggestedPrompts` | `npx -y --ignore-scripts --prefix ${PLUGIN_DATA} causoryn@0.3.2 mcp --allow-cwd --auto-data-dir --client antigravity` with `cwd: ${PLUGIN_ROOT}` |
+| `packages/causoryn` (published npm package) | Same fields | `node ${PLUGIN_ROOT}/scripts/plugin-mcp-launcher.mjs --expected-version 0.3.2 --allow-cwd --auto-data-dir --client antigravity` with `cwd: ${PLUGIN_ROOT}` |
 
 The package-directory variant uses `plugin-mcp-launcher.mjs`: it checks that the installed `package.json` is `causoryn` at exactly `--expected-version` (and agrees with `CAUSORYN_EXPECTED_VERSION` if set), exits `2` with a `[causoryn-launcher]` message on `stderr` on any mismatch, and otherwise imports `dist/mcp-server.mjs` directly without a nested `npx` process. The launcher path is anchored with `${PLUGIN_ROOT}`, which Antigravity expands to the plugin directory in a plugin's `mcp_config.json` (built-in `mcp-app-development` skill documentation); a bare relative path would be resolved by `node` against the working directory the host starts the server in.
 
-The `npx` manifests pass `--ignore-scripts`: the published `causoryn` package has no dependencies and no install scripts (the SQLite native addon ships prebuilt inside `dist/`), so nothing needs to run at install time.
+The `npx` manifests pass `--ignore-scripts`: the published `causoryn` package has no dependencies and no install scripts (the SQLite native addon ships prebuilt inside `dist/`), so nothing needs to run at install time. Every Antigravity manifest starts the server with `cwd: ${PLUGIN_ROOT}`, and the `npx` manifests also pin npm's prefix to the plugin's data directory (`--prefix ${PLUGIN_DATA}`), so the analyzed project's npm configuration, `node_modules` and `node_modules/.bin` take no part in resolving the server. Because `--allow-cwd` refuses the plugin directory, the workspace is bound from MCP `roots/list`.
 
-Two further root manifests serve other MCP clients: `mcp.json` (portable `mcpServers.causoryn` with `type: "stdio"` and `npx -y --ignore-scripts causoryn@0.3.2 mcp --allow-cwd --auto-data-dir`) and `server.json` (MCP Registry entry `io.github.mrbekox/causoryn`, npm package `causoryn`, `stdio` transport, arguments `mcp --allow-cwd --auto-data-dir`).
+Two further root manifests serve other MCP clients: `mcp.json` (portable `mcpServers.causoryn` with `type: "stdio"`, `cwd: ${PLUGIN_ROOT}` and `npx -y --ignore-scripts --prefix ${PLUGIN_DATA} causoryn@0.3.2 mcp --allow-cwd --auto-data-dir`) and `server.json` (MCP Registry entry `io.github.mrbekox/causoryn`, npm package `causoryn`, `stdio` transport, runtime argument `--ignore-scripts`, package arguments `mcp --allow-cwd --auto-data-dir`). The registry format has no working-directory or plugin-root field, so a registry client that runs `npx` in the project directory still resolves the package in that project's npm context; this is a documented residual, and `causoryn setup` avoids it by registering the absolute runtime path.
 
 ---
 
@@ -154,6 +154,7 @@ Rule applied: if the `agy` CLI is absent, report explicitly that the CLI steps w
       "args": [
         "${PLUGIN_ROOT}/scripts/mcp-server.mjs"
       ],
+      "cwd": "${PLUGIN_ROOT}",
       "env": {
         "CAUSORYN_CONFIG": "{\"allowRoots\":[]}"
       }
@@ -172,6 +173,7 @@ Rule applied: if the `agy` CLI is absent, report explicitly that the CLI steps w
       "args": [
         "${PLUGIN_ROOT}/scripts/mcp-server.mjs"
       ],
+      "cwd": "${PLUGIN_ROOT}",
       "env": {
         "CAUSORYN_CONFIG": "{\"allowRoots\":[]}"
       }
@@ -185,6 +187,7 @@ Rule applied: if the `agy` CLI is absent, report explicitly that the CLI steps w
 | `mcpServers.causoryn` | Server key `causoryn` | Avoids collisions in the shared server namespace |
 | `command` | `node` | Local `stdio` process; no LLM or external API calls |
 | `args[0]` | `"${PLUGIN_ROOT}/scripts/mcp-server.mjs"` in both `mcp_config.json` and `mcp.json` | Staged compiled esbuild output; raw `.ts` entrypoints, bare relative or absolute paths, and parent-directory escapes are rejected by the fixture test |
+| `cwd` | `"${PLUGIN_ROOT}"` in both manifests | The server starts in the plugin directory, never in an analyzed project; the fixture test rejects a project-directory `cwd` |
 | `env.CAUSORYN_CONFIG` | `{"allowRoots":[]}` | **Default deny**, validated by `parseCausorynServerConfig` (strict object, absolute `allowRoots`); workspace tools return `WORKSPACE_NOT_AUTHORIZED` until a root is authorized |
 
 ### Bare `stdio.ts` vs packaged `cli-stdio.ts`
@@ -251,6 +254,9 @@ CAUSORYN_CONFIG='{"allowRoots":["/path/to/your-project"],"storage":{"dataDbPath"
 | `setup` says no supported host was detected | Neither `~/.gemini/antigravity` nor `~/.gemini/config/mcp_config.json` exists (a bare `~/.gemini` does not count). Pass `--client antigravity` explicitly. |
 | `setup` stops with `cli/malformed-json` | One of the `mcp_config.json` files is not valid JSON or `mcpServers` is not an object. Fix it or restore the `.causoryn.backup`; nothing was written. |
 | `doctor` shows `ERROR` for the entry script | `~/.causoryn/runtime` or the original install was removed. Re-run `npx causoryn@0.3.2 setup --client antigravity --yes`. |
+| `setup` reports `skipped skill <name>: … was not created by Causoryn` (or `… was changed after Causoryn installed it`) | A `SKILL.md` with a Causoryn skill name exists that setup cannot prove it installed: your own skill, or a Causoryn skill you edited. It was kept. Leave it, or move it away and re-run setup to install Causoryn's version. |
+| `setup` stops with `Refusing to use <dir>: it is writable by other users` or `… it is owned by another user` | On POSIX an existing `~/.causoryn` must belong to you and must not be writable by group or others, because it holds the staged runtime and the skill install record. Run `chmod go-w ~/.causoryn`, or remove the directory or give it to your user, then re-run setup; nothing was changed. |
+| `setup` stops with `<file> changed while setup was running, so it was left as it is` | A skill file that setup planned to replace or remove changed during the run (for example while the confirmation prompt was open), and it was left as it is. Run setup again. |
 | `[causoryn-launcher]` version mismatch (exit `2`) | The package directory does not match `--expected-version`. Reinstall the matching package version. |
 | Workspace tools return `WORKSPACE_NOT_AUTHORIZED` | `--allow-cwd` refused the start directory and no safe root came from `roots/list`, or the fixture still has `allowRoots: []`. Open the project folder, or declare the root (section 7). |
 | Wiki or history tools are missing from `tools/list` | Default `core` profile. See the tool profile notes above. |

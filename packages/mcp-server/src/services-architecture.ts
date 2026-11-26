@@ -27,7 +27,7 @@ import {
 } from "@causoryn/graph";
 import { z } from "zod";
 
-import { CausorynToolError } from "./errors.js";
+import { CausorynToolError, type CausorynToolErrorCode } from "./errors.js";
 import { buildEnvelope, type Envelope } from "./envelope.js";
 import {
   readOptionalBoundedTextFile,
@@ -46,7 +46,11 @@ import {
   DEFAULT_TIMELINE_FRESH_ANALYSES,
   resolveHistoryAnalysisBudget,
 } from "./history-commit-analysis.js";
-import { createTrustedHistorySources } from "./trusted-history.js";
+import {
+  createTrustedHistorySources,
+  type HistoryPointLimitCode,
+  type TrustedHistorySources,
+} from "./trusted-history.js";
 
 /**
  * Faz C uygulama servisleri (sprint-3 C8 — C1–C7 çekirdek modüllerinin MCP
@@ -670,6 +674,42 @@ function untrustedSnapshotWarning(
 }
 
 /**
+ * Tool code of a compare side that a history limit left unanalyzed: the
+ * byte budgets, deadlines, fresh analysis budget and worker heap limit are
+ * LIMIT_EXCEEDED; a busy analysis slot is the retryable INDEX_NOT_READY (a
+ * scratch index of another commit is running); a worker that crashed or
+ * exited is the retryable INTERNAL_ERROR. The message names the reason code.
+ */
+const HISTORY_LIMIT_TOOL_CODES: Readonly<Record<HistoryPointLimitCode, CausorynToolErrorCode>> = {
+  "analysis-budget-exceeded": "LIMIT_EXCEEDED",
+  "commit-byte-budget-exceeded": "LIMIT_EXCEEDED",
+  "request-byte-budget-exceeded": "LIMIT_EXCEEDED",
+  "analysis-deadline-exceeded": "LIMIT_EXCEEDED",
+  "request-deadline-exceeded": "LIMIT_EXCEEDED",
+  "analysis-memory-exceeded": "LIMIT_EXCEEDED",
+  "analysis-busy": "INDEX_NOT_READY",
+  "analysis-worker-failed": "INTERNAL_ERROR",
+};
+
+/**
+ * Error of a compare side that could not be analyzed: the mapped history
+ * limit when one stopped it, otherwise INVALID_REVISION (no analyzable
+ * content at that ref).
+ */
+function unanalyzedCompareSideError(
+  trusted: TrustedHistorySources,
+  side: "baseRef" | "targetRef",
+  ref: string,
+  reason: string,
+): Error {
+  const message = `${side} '${ref}' could not be analyzed: ${reason}`;
+  const limit = trusted.limitCodeOf(ref);
+  return limit === undefined
+    ? new GraphRepositoryError("compare/blob-not-found", message)
+    : new CausorynToolError(HISTORY_LIMIT_TOOL_CODES[limit], message);
+}
+
+/**
  * causoryn_compare_architecture (TŞ §13 Architecture Diff; C3): iki git
  * ref'inin `.causoryn/architecture-snapshot.json` blob'ları salt-okunur
  * cat-file ile okunur (checkout/reset/clean YOK) ve içerik kümeleri
@@ -684,7 +724,9 @@ function untrustedSnapshotWarning(
  * cache or a fresh analysis, at most DEFAULT_COMPARE_FRESH_ANALYSES per call
  * unless CAUSORYN_HISTORY_MAX_ANALYSES says otherwise); otherwise the
  * snapshot file, reported in `warnings` with
- * `snapshot-loaded-from-committed-git-blob`.
+ * `snapshot-loaded-from-committed-git-blob`. A side that a history limit
+ * left unanalyzed is reported with that limit's tool code
+ * (HISTORY_LIMIT_TOOL_CODES) instead of INVALID_REVISION.
  */
 export async function compareArchitecture(
   deps: ServiceDeps,
@@ -705,10 +747,7 @@ export async function compareArchitecture(
   const diff = await runGraphAsync(deps.logger, async () => {
     const basePoint = await readTimelinePointFromGit(canonicalRoot, input.baseRef, pointOptions);
     if (basePoint.status !== "analyzed") {
-      throw new GraphRepositoryError(
-        "compare/blob-not-found",
-        `baseRef '${input.baseRef}' could not be analyzed: ${basePoint.reason}`,
-      );
+      throw unanalyzedCompareSideError(trusted, "baseRef", input.baseRef, basePoint.reason);
     }
     if (basePoint.trustWarning !== undefined) {
       trustWarnings.push(untrustedSnapshotWarning(basePoint.trustWarning, "baseRef", input.baseRef));
@@ -719,10 +758,7 @@ export async function compareArchitecture(
       pointOptions,
     );
     if (targetPoint.status !== "analyzed") {
-      throw new GraphRepositoryError(
-        "compare/blob-not-found",
-        `targetRef '${input.targetRef}' could not be analyzed: ${targetPoint.reason}`,
-      );
+      throw unanalyzedCompareSideError(trusted, "targetRef", input.targetRef, targetPoint.reason);
     }
     if (targetPoint.trustWarning !== undefined) {
       trustWarnings.push(

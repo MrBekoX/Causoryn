@@ -1,5 +1,4 @@
-import { randomBytes } from "node:crypto";
-import { mkdirSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync } from "node:fs";
 import path from "node:path";
 
 import {
@@ -7,7 +6,7 @@ import {
   escapeMarkdownInline,
   escapeMarkdownTableCell,
 } from "@causoryn/domain";
-import { OutputAccessPolicy } from "@causoryn/workspace";
+import { OutputAccessPolicy, OutputPolicyError } from "@causoryn/workspace";
 
 import { WikiProjectionError } from "./errors.js";
 import { WikiProjectionSchema, type EvidenceRef, type WikiPage, type WikiPageSection, type WikiProjection } from "./schema.js";
@@ -35,10 +34,13 @@ import { WikiProjectionSchema, type EvidenceRef, type WikiPage, type WikiPageSec
  *   data-root'u ile KARIŞTIRILMAZ: export kullanıcı beyanlı output dizinine
  *   yazılır (wiki/mcp-tools.md yazma izin matrisi). Reddedilen hedefe hiçbir
  *   dosya HİÇBİR alt dizin oluşturulmadan yazılmaz. Each file is written
- *   atomically: content goes to a unique, unpredictable temp name in the
- *   target directory opened with O_CREAT|O_EXCL (`wx`), then renamed over
- *   the target. A pre-existing entry (file, directory or symlink) at any
- *   temp-like path is never followed, removed or reused.
+ *   atomically (OutputAccessPolicy.publishFile): content goes to a unique,
+ *   unpredictable temp name in the target directory opened with
+ *   O_CREAT|O_EXCL (`wx`) and mode 0o666 under the umask, then renamed over the target; the
+ *   directory's identity is bound from authorization to the rename (a
+ *   replaced or linked directory is refused). A pre-existing entry (file,
+ *   directory or symlink) at any temp-like path is never followed, removed
+ *   or reused.
  *
  * HTML güvenliği (TŞ §16 + §16A.9): TÜM dinamik değerler escapeHtmlText'ten
  * geçer; belgede <script>, <link>, <iframe>, harici kaynak, CDN URL'si,
@@ -733,26 +735,17 @@ export function exportWikiOffline(
       );
     }
     const targetPath = decision.canonicalPath;
-    // Unique temp name next to the target (same directory, so rename stays
-    // atomic). `wx` = O_CREAT|O_EXCL: the open fails instead of following or
-    // reusing any entry that already exists at that path.
-    const tmpPath = path.join(
-      path.dirname(targetPath),
-      `.${path.basename(targetPath)}.${randomBytes(12).toString("hex")}.tmp`,
-    );
-    let tmpCreated = false;
+    // CAU-08: unique temp file this export creates itself next to the target
+    // (`wx` = O_CREAT|O_EXCL, mode 0o666 under the umask), the directory identity bound from
+    // here to the rename; only that temp file is ever removed.
     try {
-      writeFileSync(tmpPath, file.content, { encoding: "utf8", flag: "wx" });
-      tmpCreated = true;
-      renameSync(tmpPath, targetPath);
-      tmpCreated = false;
+      policy.publishFile(decision, file.content);
     } catch (error) {
-      if (tmpCreated) {
-        try {
-          unlinkSync(tmpPath);
-        } catch {
-          // Best-effort cleanup of our own temp file; the write error is reported below.
-        }
+      if (error instanceof OutputPolicyError) {
+        throw new WikiProjectionError(
+          contractCodeFor(error.code),
+          `Output authorization denied (${error.code}): ${error.message}`,
+        );
       }
       throw new WikiProjectionError(
         "wiki/export-write-failed",

@@ -1,16 +1,11 @@
 import { Buffer } from "node:buffer";
 
-import {
-  isMap,
-  isScalar,
-  isSeq,
-  parseDocument,
-  type Document,
-  type YAMLMap,
-  type YAMLSeq,
-} from "yaml";
+import { isMap, isSeq, type Document, type YAMLSeq } from "yaml";
 
 import { ContractDiscoveryError } from "./errors.js";
+import type { ProjectionOptions } from "./projection-budget.js";
+import { createLineLocator, YamlKeyIndex } from "./spec-index.js";
+import { parseYamlDocument } from "./yaml-document.js";
 
 /**
  * Syntax error of a spec text as its error code and position only. The yaml
@@ -51,7 +46,8 @@ export function describeSpecParserFailure(error: unknown): string {
  *  3. YAML alias ref sayım kotası (billion-laughs genişlemesi parser'a
  *     girmeden kesilir)
  *  4. `yaml` paketi parseDocument (kütüphanenin kendi alias/limit
- *     korumalarıyla; hatalar toplanır → spec-yaml/spec-json-invalid)
+ *     korumalarıyla; hatalar toplanır → spec-yaml/spec-json-invalid),
+ *     linear duplicate-key check via parseYamlDocument (CAU-04)
  *  5. çözümlenmiş yapı üzerinde iterative (stack tabanlı) derinlik + node
  *     kotası turu — recursion yok, stack overflow ile çökme yüzeyi yok
  *
@@ -192,18 +188,16 @@ export function isPlainObject(value: unknown): value is Record<string, unknown> 
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function offsetToLine(text: string, offset: number): number {
-  let line = 1;
-  for (let i = 0; i < offset && i < text.length; i += 1) {
-    if (text[i] === "\n") line += 1;
-  }
-  return line;
-}
-
+/**
+ * Line of the key node at `segments` (CAU-04): map keys are found through the
+ * document's YamlKeyIndex and the offset is turned into a line by the
+ * document's line locator, so a lookup no longer scans the map or the text.
+ */
 function keyNodeLine(
   node: unknown,
   segments: readonly (string | number)[],
-  text: string,
+  keys: YamlKeyIndex,
+  lineAt: (offset: number) => number,
 ): number | undefined {
   let current: unknown = node;
   let keyNode: unknown;
@@ -211,8 +205,7 @@ function keyNodeLine(
     const segment = segments[i];
     if (segment === undefined) return undefined;
     if (isMap(current)) {
-      const map = current as YAMLMap;
-      const item = map.items.find((entry) => isScalar(entry.key) && entry.key.value === segment);
+      const item = keys.find(current, segment);
       if (item === undefined) return undefined;
       keyNode = item.key;
       current = item.value;
@@ -237,7 +230,7 @@ function keyNodeLine(
   ) {
     const range = (keyNode as { range?: readonly number[] }).range;
     if (range !== undefined && range.length > 0) {
-      return offsetToLine(text, range[0] ?? 0);
+      return lineAt(range[0] ?? 0);
     }
   }
   return undefined;
@@ -251,6 +244,9 @@ export interface ParsedSpec {
    * Verilen anahtar yolunun (örn. ["paths", "/orders"]) KAYNAK METİNDEKİ
    * satırı (1 tabanlı); yol bulunamazsa undefined. YAML ve JSON belgelerinde
    * çalışır (`yaml` parseDocument konum aralıkları her ikisinde de vardır).
+   * Lookups use per-document key and line indexes (CAU-04); with a projection
+   * budget, each segment costs 1 work unit and each map's first index build
+   * costs 1 unit per entry.
    */
   lineOf(...segments: Array<string | number>): number | undefined;
 }
@@ -266,8 +262,13 @@ function syntaxErrorCode(relativePath: string): "contracts/spec-json-invalid" | 
  * Spec metnini güvenlik katmanlarından geçirip çözümler. Söz dizimi hatası
  * → contracts/spec-json-invalid (.json) / contracts/spec-yaml-invalid
  * (diğer); kök eşleme değilse → contracts/spec-invalid.
+ * `options.budget` (optional) meters the lineOf lookups (CAU-04).
  */
-export function parseStructuredSpec(relativePath: string, text: string): ParsedSpec {
+export function parseStructuredSpec(
+  relativePath: string,
+  text: string,
+  options: ProjectionOptions = {},
+): ParsedSpec {
   if (typeof relativePath !== "string" || relativePath.trim().length === 0) {
     throw new ContractDiscoveryError("contracts/invalid-input", "relativePath must not be empty");
   }
@@ -279,7 +280,9 @@ export function parseStructuredSpec(relativePath: string, text: string): ParsedS
   let document: Document.Parsed;
   let root: unknown;
   try {
-    document = parseDocument(text);
+    // Same document and errors as yaml's parseDocument(text), with a linear
+    // duplicate-key check (CAU-04; see yaml-document.ts).
+    document = parseYamlDocument(text);
     if (document.errors.length > 0) {
       const first = document.errors[0];
       throw new ContractDiscoveryError(
@@ -309,10 +312,21 @@ export function parseStructuredSpec(relativePath: string, text: string): ParsedS
     );
   }
 
+  const budget = options.budget;
+  const keys = new YamlKeyIndex(budget === undefined ? undefined : (entries) => { budget.charge(entries); });
+  let lineLocator: ((offset: number) => number) | undefined;
+  const lineAt = (offset: number): number => {
+    lineLocator ??= createLineLocator(text);
+    return lineLocator(offset);
+  };
+
   return {
     root,
     text,
-    lineOf: (...segments: Array<string | number>) =>
-      segments.length === 0 ? undefined : keyNodeLine(document.contents, segments, text),
+    lineOf: (...segments: Array<string | number>) => {
+      if (segments.length === 0) return undefined;
+      budget?.charge(segments.length);
+      return keyNodeLine(document.contents, segments, keys, lineAt);
+    },
   };
 }

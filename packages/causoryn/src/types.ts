@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { readFileSync, type Stats } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -125,9 +125,23 @@ export interface ParsedCodexMcpServer {
   readonly env: Readonly<Record<string, string>>;
 }
 
+/**
+ * How Causoryn inspects its own directory (`~/.causoryn`) before reusing it
+ * (CWE-732): the platform, the current user id (undefined where the platform
+ * has none) and an `lstat` that does not follow links. The default reads the
+ * real process and file system; tests inject a POSIX view on Windows.
+ */
+export interface DirectoryOwnershipProbe {
+  readonly platform: NodeJS.Platform;
+  readonly uid: number | undefined;
+  readonly lstat: (dirPath: string) => Stats;
+}
+
 export interface StagePersistentRuntimeOptions {
   readonly homeDir: string;
   readonly sourcePackageDir: string;
+  /** Inspection of an existing `~/.causoryn` (default: this process and file system). */
+  readonly directoryProbe?: DirectoryOwnershipProbe | undefined;
 }
 
 export interface StagePersistentRuntimeResult {

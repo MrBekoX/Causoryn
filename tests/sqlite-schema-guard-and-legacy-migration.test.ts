@@ -61,10 +61,13 @@ function stampVersion(file: string, version: number): void {
   db.close();
 }
 
-function makeLegacyDb(file: string, marker: string): void {
+// A real pre-0.3.3 install records allowRoots[0] as the workspace root in the
+// root-hashed data dir, so the legacy fixture records the workspace it belongs
+// to (CAU-03: a DB recorded for another root is refused at open).
+function makeLegacyDb(file: string, marker: string, rootPath: string): void {
   const repo = new SqliteGraphRepository(file);
   try {
-    repo.registerWorkspace({ id: "project", rootPath: "/legacy", createdAt: "2026-11-01T00:00:00.000Z" });
+    repo.registerWorkspace({ id: "project", rootPath, createdAt: "2026-11-01T00:00:00.000Z" });
     repo.upsertFile({
       workspaceId: "project",
       relativePath: marker,
@@ -79,6 +82,7 @@ function makeLegacyDb(file: string, marker: string): void {
   raw.exec(`
     ALTER TABLE build_leases DROP COLUMN hostname;
     ALTER TABLE build_leases DROP COLUMN owner_instance;
+    ALTER TABLE workspaces DROP COLUMN root_canonical;
     PRAGMA user_version = 4;
   `);
   raw.close();
@@ -125,12 +129,12 @@ describe("schema version guard", { timeout: 60_000 }, () => {
       dataDir: baseDataDir,
       logger: (message: string) => warnings.push(message),
     } as Parameters<typeof runtimeCli.buildWorkspaceAutoConfig>[0]);
-    const fallback = path.join(path.dirname(sharedPath), "graph.schema-5.sqlite");
+    const fallback = path.join(path.dirname(sharedPath), "graph.schema-6.sqlite");
     expect(second.storage.dataDbPath).toBe(fallback);
     expect(second.wiki.dataDbPath).toBe(fallback);
     expect(warnings).toHaveLength(1);
-    expect(warnings[0]).toMatch(/schema v99, newer than this Causoryn build supports \(v5\)/);
-    expect(warnings[0]).toContain("graph.schema-5.sqlite");
+    expect(warnings[0]).toMatch(/schema v99, newer than this Causoryn build supports \(v6\)/);
+    expect(warnings[0]).toContain("graph.schema-6.sqlite");
 
     const context = createCausorynContext(second, { logger: () => {}, deferAutoIndex: true });
     context.close();
@@ -156,7 +160,7 @@ describe("legacy graph-<client>.sqlite migration", { timeout: 120_000 }, () => {
     });
     const sharedPath = config.storage.dataDbPath as string;
     const dataDir = path.dirname(sharedPath);
-    makeLegacyDb(path.join(dataDir, "graph-claude-code.sqlite"), "legacy/marker.ts");
+    makeLegacyDb(path.join(dataDir, "graph-claude-code.sqlite"), "legacy/marker.ts", workspaceDir);
 
     const prepare = (runtimeCli as unknown as {
       prepareWorkspaceDatabase?: (
@@ -196,7 +200,7 @@ describe("legacy graph-<client>.sqlite migration", { timeout: 120_000 }, () => {
     });
     const sharedPath = config.storage.dataDbPath as string;
     const dataDir = path.dirname(sharedPath);
-    makeLegacyDb(path.join(dataDir, "graph-codex.sqlite"), "legacy/from-codex.ts");
+    makeLegacyDb(path.join(dataDir, "graph-codex.sqlite"), "legacy/from-codex.ts", workspaceDir);
     expect(existsSync(sharedPath)).toBe(false);
 
     const child = spawn(

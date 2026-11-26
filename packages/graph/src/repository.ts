@@ -33,6 +33,14 @@ export interface WorkspaceRecord {
   readonly id: string;
   readonly rootPath: string;
   readonly createdAt: string;
+  /**
+   * CAU-03: true when `rootPath` was recorded in canonical form by the
+   * workspace-root binder; such a root is compared as recorded, never
+   * re-resolved. Read back only on such records (absent otherwise): any other
+   * root is a verbatim spelling (0.3.2, or another writer) that is resolved
+   * once and then upgraded with {@link GraphRepository.updateWorkspaceRootPath}.
+   */
+  readonly rootCanonical?: boolean;
 }
 
 /** Dosya envanteri kaydı (TŞ §9 files tablosu). */
@@ -158,6 +166,21 @@ export interface SymbolSearchHit {
  */
 export interface GraphRepository {
   registerWorkspace(record: WorkspaceRecord): void;
+  /**
+   * CAU-03: the registered record for `workspaceId`, or undefined when the id was
+   * never registered. Callers that reopen persisted data compare its `rootPath`
+   * with the authorized root before trusting rows recorded under the same id.
+   */
+  getWorkspace?(workspaceId: string): WorkspaceRecord | undefined;
+  /**
+   * CAU-03: upgrades a verbatim record to its canonical root: replaces the
+   * recorded `rootPath` of `workspaceId` with `toRootPath` and marks it
+   * `rootCanonical`, only while the record still holds `fromRootPath` and is
+   * not marked yet (compare-and-set, one statement). Returns false when the id
+   * is unknown, the record changed in between, or it is already marked (a
+   * marked root is never rewritten).
+   */
+  updateWorkspaceRootPath?(workspaceId: string, fromRootPath: string, toRootPath: string): boolean;
   upsertFile(record: FileRecord): void;
   listFiles(workspaceId: string): readonly FileRecord[];
   /**

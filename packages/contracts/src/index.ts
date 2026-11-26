@@ -40,6 +40,10 @@ export {
 } from "./parse-safety.js";
 export type { ParsedSpec } from "./parse-safety.js";
 
+// Linear duplicate-key YAML parse (CAU-04, CWE-407), also used for the
+// architecture guard's policy and baseline files (@causoryn/graph).
+export { parseYamlDocument } from "./yaml-document.js";
+
 export type {
   ContractCandidate,
   ContractCertainty,

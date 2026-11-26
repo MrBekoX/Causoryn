@@ -221,11 +221,11 @@ jobs:
           fi
           TGZ_SHA256="$(sha256sum "release-artifacts/$TGZ_NAME" | cut -d ' ' -f 1)"
           SBOM_SHA256="$(sha256sum release-artifacts/causoryn-sbom.cdx.json | cut -d ' ' -f 1)"
-          # SHA256SUMS.txt must list exactly the tarball and the SBOM with these digests.
-          if [[ "$(wc -l < release-artifacts/SHA256SUMS.txt)" -ne 2 ]] \
-            || ! grep -Fxq "$TGZ_SHA256  $TGZ_NAME" release-artifacts/SHA256SUMS.txt \
-            || ! grep -Fxq "$SBOM_SHA256  causoryn-sbom.cdx.json" release-artifacts/SHA256SUMS.txt; then
-            echo "SHA256SUMS.txt does not list exactly ${TGZ_NAME} and causoryn-sbom.cdx.json with their digests" >&2
+          # SHA256SUMS.txt must be byte-for-byte the two records for these digests
+          # (generate-sbom.mjs format: tarball, then SBOM, LF-terminated).
+          if ! printf '%s  %s\n%s  %s\n' "$TGZ_SHA256" "$TGZ_NAME" "$SBOM_SHA256" "causoryn-sbom.cdx.json" \
+            | cmp -s - release-artifacts/SHA256SUMS.txt; then
+            echo "SHA256SUMS.txt does not list exactly ${TGZ_NAME} and causoryn-sbom.cdx.json with their digests (byte-for-byte)" >&2
             exit 1
           fi
           {
@@ -405,14 +405,16 @@ jobs:
             echo "SBOM digest mismatch: build-and-pack ${EXPECTED_SBOM_SHA256}, downloaded ${ACTUAL_SBOM_SHA256}" >&2
             exit 1
           fi
-          # SHA256SUMS.txt must list exactly both expected files with the expected digests.
-          if [[ "$(wc -l < release-artifacts/SHA256SUMS.txt)" -ne 2 ]] \
-            || ! grep -Fxq "$EXPECTED_TGZ_SHA256  $EXPECTED_TGZ" release-artifacts/SHA256SUMS.txt \
-            || ! grep -Fxq "$EXPECTED_SBOM_SHA256  causoryn-sbom.cdx.json" release-artifacts/SHA256SUMS.txt; then
-            echo "SHA256SUMS.txt does not list exactly ${EXPECTED_TGZ} and causoryn-sbom.cdx.json with the build-and-pack digests" >&2
+          # SHA256SUMS.txt must be byte-for-byte the two records build-and-pack wrote
+          # (generate-sbom.mjs format: tarball, then SBOM, LF-terminated). sha256sum only
+          # reads the list generated here from the job outputs, never the downloaded one.
+          EXPECTED_SUMS="$RUNNER_TEMP/expected-sha256sums.txt"
+          printf '%s  %s\n%s  %s\n' "$EXPECTED_TGZ_SHA256" "$EXPECTED_TGZ" "$EXPECTED_SBOM_SHA256" "causoryn-sbom.cdx.json" > "$EXPECTED_SUMS"
+          if ! cmp -s "$EXPECTED_SUMS" release-artifacts/SHA256SUMS.txt; then
+            echo "SHA256SUMS.txt does not list exactly ${EXPECTED_TGZ} and causoryn-sbom.cdx.json with the build-and-pack digests (byte-for-byte)" >&2
             exit 1
           fi
-          (cd release-artifacts && sha256sum -c SHA256SUMS.txt)
+          (cd release-artifacts && sha256sum --strict -c "$EXPECTED_SUMS")
 
       - name: Setup Node.js
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0

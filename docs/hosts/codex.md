@@ -25,7 +25,7 @@ Bu sayfada kullanılan 0.3.0 kod yollarının otomatik kapsamı: `tests/causoryn
 | Yol | Kimin için | Ne çalışır |
 |---|---|---|
 | **A. `npx causoryn@0.3.2 setup`** (önerilen) | Son kullanıcılar | Paketli giriş noktası `scripts/causoryn.mjs mcp --allow-cwd --auto-data-dir --client codex`; mutlak Node binary'siyle `config.toml` içine kaydedilir |
-| **B. Codex plugin pazaryeri** | Plugin'leri tercih eden son kullanıcılar | `.codex-plugin/mcp.json` içinden `npx -y --ignore-scripts --package causoryn@0.3.2 causoryn mcp …` |
+| **B. Codex plugin pazaryeri** | Plugin'leri tercih eden son kullanıcılar | `.codex-plugin/mcp.json` içinden `node --input-type=module --eval <bootstrap> -- --expected-version 0.3.2 --allow-cwd …`; bootstrap başlatıcıyı `CODEX_HOME` altındaki Codex plugin önbelleğinden yükler |
 | **C. Elle kayıt** (`codex mcp add` veya `config.toml`) | Kaynak checkout üzerinde çalışan katkıcılar | Monorepo bundle `packages/mcp-server/dist/mcp-server.mjs` (yalnızca `CAUSORYN_CONFIG` ile yapılandırılır) |
 
 ---
@@ -62,7 +62,7 @@ startup_timeout_sec = 30
 - **`startup_timeout_sec = 30`**, soğuk Node.js + SQLite açılışına yeterli pay bırakır. Sizin ayarladığınız `30` veya daha yüksek bir değer olduğu gibi korunur; daha düşük veya kullanılamaz bir değer `30`'a yükseltilir ve setup çıktısı bunu belirtir.
 - **Mutlak Node binary'si:** `command`, `setup`'ı çalıştıran Node.js'in `process.execPath` değeridir (Node.js ≥ 24 gerekir).
 - **Kalıcı runtime:** `setup` bir `_npx` önbelleğinden ya da işletim sisteminin temp dizininden çalıştırıldığında paketi önce `~/.causoryn/runtime` altına kopyalar ve `args[0]`'ı oraya yönlendirir; böylece kayıt `npx` önbelleği temizlendiğinde de çalışmaya devam eder.
-- **Skill'ler:** beş kanonik skill — `causoryn`, `map-system`, `preflight-change`, `verify-change` ve `architecture-blueprint` — `~/.agents/skills/<name>/SKILL.md` altına yazılır (`CODEX_HOME` altına değil, ev dizininize). Atlamak için `--no-skill` verin. `architecture-blueprint`, Codex'in MCP kanıtlarından isteğe bağlı `annotations` taslağı hazırlamasına rehberlik eder; annotation'sız export için doğrudan `causoryn_export_documentation` çağırın ([mimari export sözleşmesi](../tool-contracts.md)). Skill'ler host modeli için yönlendirme metnidir: bir skill'in andığı araç ancak etkin araç profili onu kaydediyorsa çağrılabilir.
+- **Skill'ler:** beş kanonik skill — `causoryn`, `map-system`, `preflight-change`, `verify-change` ve `architecture-blueprint` — `~/.agents/skills/<name>/SKILL.md` altına yazılır (`CODEX_HOME` altına değil, ev dizininize). Atlamak için `--no-skill` verin. `architecture-blueprint`, Codex'in MCP kanıtlarından isteğe bağlı `annotations` taslağı hazırlamasına rehberlik eder; annotation'sız export için doğrudan `causoryn_export_documentation` çağırın ([mimari export sözleşmesi](../tool-contracts.md)). Skill'ler host modeli için yönlendirme metnidir: bir skill'in andığı araç ancak etkin araç profili onu kaydediyorsa çağrılabilir. Setup'ın Causoryn'in kurduğunu kanıtlayamadığı mevcut bir `SKILL.md` (aynı adlı kendi skill'iniz ya da düzenlediğiniz bir Causoryn skill'i) korunur ve `skipped skill …` olarak raporlanır; kurulum kaydı `~/.causoryn/installed-skills.json` dosyasıdır ([CLI ve Konfigürasyon](../cli-and-configuration.md)).
 
 ### `setup` nasıl davranır (tüm host'lar)
 
@@ -72,7 +72,7 @@ startup_timeout_sec = 30
 - **Atomik, idempotent yazımlar:** geçici dosya + rename; mevcut dosya kipi korunur (yeni dosyalar `0600`); aynı ikinci koşu `noop` raporlar.
 - **Fail-closed ayrıştırma:** bozuk TOML (kapanmamış string, dizi veya tablolar, `=` içermeyen bir satır, boş bir tablo başlığı ya da iki `[mcp_servers.causoryn]` tablosu gibi tekrarlanan bir tablo başlığı), hiçbir şey yazılmadan koşuyu `cli/malformed-toml` ile durdurur. Sembolik link hedefleri reddedilir.
 - **Çıkış kodları:** `setup` başarıda `0`, hiçbir host algılanmadığında ve hiçbiri adlandırılmadığında `1`, herhangi bir hatada `2` ile çıkar.
-- **Kaldırma:** `[mcp_servers.causoryn]` tablosunu ve tüm `[mcp_servers.causoryn.*]` alt tablolarını, beş skill dizinini ve — başka hiçbir host config'i ona hâlâ başvurmuyorsa — `~/.causoryn/runtime` dizinini kaldırır.
+- **Kaldırma:** `[mcp_servers.causoryn]` tablosunu ve tüm `[mcp_servers.causoryn.*]` alt tablolarını, sahipliği kanıtlanan Causoryn skill'lerini (düzenlenmiş veya yabancı bir `SKILL.md` korunur ve raporlanır) ve — başka hiçbir host config'i ona hâlâ başvurmuyorsa — `~/.causoryn/runtime` dizinini kaldırır.
 
 ### `doctor` denetimleri
 
@@ -91,18 +91,21 @@ Kurulu paketin `.codex-plugin/plugin.json` dosyası skill'leri taşır (`"skills
 {
   "mcpServers": {
     "causoryn": {
-      "command": "npx",
+      "command": "node",
       "args": [
-        "-y",
-        "--ignore-scripts",
-        "--package",
-        "causoryn@0.3.2",
-        "causoryn",
-        "mcp",
+        "--input-type=module",
+        "--eval",
+        "<bootstrap: see below>",
+        "--",
+        "--expected-version",
+        "0.3.2",
         "--allow-cwd",
         "--auto-data-dir",
         "--client",
         "codex"
+      ],
+      "env_vars": [
+        "CODEX_HOME"
       ],
       "startup_timeout_sec": 30
     }
@@ -110,7 +113,7 @@ Kurulu paketin `.codex-plugin/plugin.json` dosyası skill'leri taşır (`"skills
 }
 ```
 
-Codex plugin'i sunucuyu tam sürüm pini ile `npx` üzerinden başlatır; bu yüzden ilk açılış npm registry'ye ya da önceden doldurulmuş bir `npx` önbelleğine ihtiyaç duyar. (Claude Code ve ZCode plugin'leri bunun yerine `plugin-mcp-launcher.mjs` kullanır.)
+Manifestte `cwd` yoktur; bu yüzden Codex sunucuyu oturum (proje) dizininde başlatır ve `--allow-cwd` olağan güvenlik denetiminden sonra projeyi bağlar. Çıplak `node`, Codex tarafından yalnızca `PATH` üzerinden çözülür (ayırıcı içermeyen bir komut adı için geçerli dizinde arama yapılmaz) ve Node, `--eval` için açık bayraklar olmadan `node.config.json`, `.env` veya `package.json` okumaz. Satır içi bootstrap (tam metni `.codex-plugin/mcp.json` içindedir) yalnızca `node:` yerleşik modüllerini import eder ve başlatıcıyı Codex'in plugin önbelleğindeki mutlak gerçek yoluyla yükler: `<CODEX_HOME veya ~/.codex>/plugins/cache/causoryn/causoryn/<version>/scripts/plugin-mcp-launcher.mjs` (`env_vars`, `CODEX_HOME`'u geçirir). `--expected-version` eksik veya geçersizse, `CODEX_HOME` mutlak değilse, önbellek yolu bir link'ten geçiyorsa, o sürümde kurulu bir plugin yoksa ya da kurulum workspace'in içindeyse çıkış kodu `2` ve `stderr` üzerinde bir `[causoryn-codex] …` satırıyla durur; başlatıcı ardından paket sürümünü yeniden denetler. Hiçbir npm süreci çalışmaz ve hiçbir proje dosyası yüklenmez. **Artık risk:** göreli veya boş bir `PATH` girdisi ya da Windows'ta önce bir `.cmd` / `.bat` shim'ine çözülen bir `node`, yine projeden bir `node` seçebilir; Seçenek A mutlak Node binary'sini kaydettiği için bundan etkilenmez. Farklı bir pazaryeri adı, uzak bir yürütücü veya değişmiş bir Codex önbellek düzeni, bootstrap'in başka bir şey yüklemek yerine `2` ile durmasına yol açar.
 
 ## 3. Codex'te araç profilleri
 
@@ -252,9 +255,13 @@ Her Causoryn giriş noktası `stdout`'a **yalnızca MCP JSON-RPC 2.0 çerçevele
 | `setup`, `cli/malformed-toml` ile duruyor | `config.toml` dosyasında bir sözdizimi sorunu ya da tekrarlanan bir tablo başlığı var. Düzeltin veya `config.toml.causoryn.backup` yedeğini geri yükleyin; hiçbir şey yazılmadı. |
 | Codex bir başlangıç zaman aşımı bildiriyor | Soğuk açılış yapılandırılmış zaman aşımını aştı. Girdide `startup_timeout_sec = 30` (veya daha yüksek) değerini koruyun. |
 | `doctor` giriş betiği için `ERROR` gösteriyor | `~/.causoryn/runtime` ya da orijinal kurulum kaldırılmış. `npx causoryn@0.3.2 setup --client codex --yes` komutunu yeniden çalıştırın. |
+| `setup`, `skipped skill <name>: … was not created by Causoryn` (veya `… was changed after Causoryn installed it`) raporluyor | Causoryn skill adına sahip, setup'ın kendisinin kurduğunu kanıtlayamadığı bir `SKILL.md` var: kendi skill'iniz ya da düzenlediğiniz bir Causoryn skill'i. Dosya korundu. Olduğu gibi bırakın ya da başka yere taşıyıp Causoryn'in sürümünü kurmak için setup'ı yeniden çalıştırın. |
+| `setup`, `Refusing to use <dir>: it is writable by other users` veya `… it is owned by another user` ile duruyor | POSIX'te mevcut bir `~/.causoryn`, sahnelenen runtime'ı ve skill kurulum kaydını tuttuğu için size ait olmalı ve grup veya diğerleri tarafından yazılabilir olmamalıdır. `chmod go-w ~/.causoryn` çalıştırın ya da dizini silin veya kullanıcınıza verin, ardından setup'ı yeniden çalıştırın; hiçbir şey değiştirilmedi. |
+| `setup`, `<file> changed while setup was running, so it was left as it is` ile duruyor | Setup'ın değiştirmeyi veya kaldırmayı planladığı bir skill dosyası koşum sırasında değişti (örneğin onay istemi açıkken) ve olduğu gibi bırakıldı. Setup'ı yeniden çalıştırın. |
 | Sunucu açılışta "Unsupported Node.js version" ile çıkıyor | Node.js < 24. Node.js 24+ kurun ve `setup`'ı yeniden çalıştırın. |
 | Ek `args` kayboldu | `setup`'ı yeniden çalıştırmak argüman listesini yeniden üretir ve yalnızca `--tool-profile` ile `--output-schema` argümanlarınızı (ayrıca `[mcp_servers.causoryn.env]` tablosunu ve tablonun diğer anahtarlarını) korur. Diğer argümanları yeniden uygulayın veya profil için `setup --tool-profile <list>` kullanın. |
 | Workspace araçları `WORKSPACE_NOT_AUTHORIZED` döndürüyor | Başlangıç dizini `--allow-cwd` tarafından reddedildi ve kullanılabilir bir kök bildirilmedi ya da çıplak bundle'da `allowRoots` yok. Bkz. bölüm 4 veya 5.1. |
+| Codex plugin sunucusu açılışta `[causoryn-codex] …` ile çıkıyor (çıkış `2`) | Bootstrap kurulu plugin'in yerini kanıtlayamadı: `CODEX_HOME` göreli, `<CODEX_HOME veya ~/.codex>/plugins/cache/causoryn/causoryn/` altında o sürümde bir Causoryn plugin'i yok, bu yolda bir link var ya da kurulum workspace'in içinde. Plugin'i yeniden kurun, `CODEX_HOME`'u düzeltin veya Seçenek A'yı (`npx causoryn@0.3.2 setup --client codex --yes`) kullanın. |
 | Wiki veya history araçları `tools/list` içinde yok | Varsayılan `core` profili etkin. Bkz. bölüm 3. |
 
 ## İlgili sayfalar

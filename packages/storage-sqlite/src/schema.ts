@@ -51,6 +51,14 @@ import { applyWikiSchema } from "./wiki-schema.js";
  *   PID reuse and stale same-process leases). Added with `ALTER TABLE ... ADD
  *   COLUMN` (nullable), so v3/v4 lease rows stay readable; rows written by an
  *   older build carry NULL and are treated as "unknown host" (TTL only).
+ * - CAU-03 follow-up: SCHEMA_VERSION 6 — `workspaces` gains `root_canonical`
+ *   (INTEGER NOT NULL DEFAULT 0). 1 marks a row whose `root_path` the
+ *   workspace-root binder recorded in canonical form; such a root is compared
+ *   as recorded and never re-resolved, so a recorded path (or a parent) that
+ *   later becomes a link cannot carry the row to another directory. Rows
+ *   written before v6 (0.3.2 stored `allowRoots[0]` verbatim) or by other
+ *   writers keep 0 and are resolved once, then upgraded and marked. Added with
+ *   `ALTER TABLE ... ADD COLUMN`, so v1..v5 rows stay readable.
  * - Forward guard: a database stamped with a NEWER `user_version` than this build
  *   understands is refused with `SchemaTooNewError` (code
  *   `storage/schema-too-new`) instead of being silently used, so two different
@@ -64,7 +72,7 @@ import { applyWikiSchema } from "./wiki-schema.js";
  *   files: Causoryn only opens databases inside its own data directory.
  */
 
-export const SCHEMA_VERSION = 5;
+export const SCHEMA_VERSION = 6;
 
 /**
  * Per-connection hardening applied to every SQLite connection Causoryn opens
@@ -175,7 +183,8 @@ export function applySchema(db: Database.Database): void {
       CREATE TABLE IF NOT EXISTS workspaces (
         id TEXT PRIMARY KEY,
         root_path TEXT NOT NULL,
-        created_at TEXT NOT NULL
+        created_at TEXT NOT NULL,
+        root_canonical INTEGER NOT NULL DEFAULT 0
       );
       CREATE TABLE IF NOT EXISTS files (
         workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
@@ -353,7 +362,20 @@ export function applySchema(db: Database.Database): void {
       db.exec("ALTER TABLE build_leases ADD COLUMN owner_instance TEXT;");
     }
 
+    // v1..v5 -> v6: existing workspaces tables gain the canonical-root mark;
+    // their rows keep 0 (a verbatim root that is resolved once, then upgraded).
+    const workspaceColumns = new Set(
+      (
+        db.prepare("SELECT name FROM pragma_table_info('workspaces')").all() as Array<{
+          name: string;
+        }>
+      ).map((column) => column.name),
+    );
+    if (!workspaceColumns.has("root_canonical")) {
+      db.exec("ALTER TABLE workspaces ADD COLUMN root_canonical INTEGER NOT NULL DEFAULT 0;");
+    }
+
     applyWikiSchema(db);
-    db.exec("PRAGMA user_version = 5;");
+    db.exec("PRAGMA user_version = 6;");
   })();
 }

@@ -1,12 +1,18 @@
 import { isMainThread, parentPort, workerData } from "node:worker_threads";
 
-import type { GraphRepository, PublishableState } from "@causoryn/graph";
+import {
+  InMemoryGraphRepository,
+  serializeSnapshotContentSet,
+  type GraphRepository,
+  type PublishableState,
+} from "@causoryn/graph";
 import {
   WorkspaceAccessPolicy,
   type WorkspacePolicyConfig,
 } from "@causoryn/workspace";
 
 import { IndexingError } from "./errors.js";
+import type { InventoryEntry } from "./inventory.js";
 import {
   IndexService,
   type BuildLeaseEvent,
@@ -22,6 +28,7 @@ import {
   type PythonIndexOptions,
   type RustIndexOptions,
 } from "./index-service.js";
+import { serveInventoryAnalysisRequests } from "./index-worker-serve.js";
 
 /**
  * Pure dependency-injected indexing worker core (Task 2.5 — Node.js `worker_threads` + SQLite WAL).
@@ -80,6 +87,95 @@ export interface IndexWorkerResultSummary {
   readonly reused?: boolean;
   readonly peerLease?: BuildLeaseInfo;
 }
+
+/**
+ * Inventory analysis mode of the index worker. A worker started with this
+ * workerData serves `analyze` requests one at a time: for each it runs a
+ * scratch `IndexService` over an in-memory repository on the request's
+ * inventory entries (e.g. the files of a git commit read from its objects)
+ * and answers with the serialized content set of the snapshot it built.
+ * Nothing is published to a data store; the mode needs no SQLite connection.
+ * The worker stays alive between requests, so a caller can reuse it.
+ */
+export interface InventoryAnalysisWorkerData {
+  readonly kind: "inventory-analysis";
+}
+
+/** One analysis of the inventory analysis mode. */
+export interface InventoryAnalysisTask {
+  readonly workspaceId: string;
+  /** Canonical workspace root the entries are relative to. */
+  readonly rootPath: string;
+  readonly policyConfig: WorkspacePolicyConfig;
+  readonly limits: IndexLimits;
+  /** Inventory contract of `IndexServiceOptions.inventorySource`. */
+  readonly entries: readonly InventoryEntry[];
+  /** Clock of the scratch index (the caller's time, so results stay deterministic). */
+  readonly fixedClockIso: string;
+}
+
+export interface InventoryAnalysisResult {
+  /** `serializeSnapshotContentSet` of the built snapshot. */
+  readonly contentSetJson: string;
+  readonly state: PublishableState;
+  readonly analyzerFingerprint: string;
+  readonly fileCount: number;
+  readonly warningCount: number;
+}
+
+/** Main thread → inventory analysis worker. */
+export interface InventoryAnalysisRequest {
+  readonly type: "analyze";
+  readonly taskId: number;
+  readonly task: InventoryAnalysisTask;
+}
+
+/**
+ * Main thread → inventory analysis worker: stop the sidecar processes of the
+ * running analysis (the worker is terminated afterwards; see
+ * index-worker-serve.ts).
+ */
+export interface InventoryAnalysisCancelRequest {
+  readonly type: "cancel";
+  readonly taskId: number;
+}
+
+/**
+ * Inventory analysis worker → main thread (every message names its request;
+ * a `sidecar` message names the request that was running, or -1).
+ */
+export type InventoryAnalysisWorkerMessage =
+  | {
+      /** A sidecar process of the worker started or exited (its pid, for the main thread's cleanup). */
+      readonly type: "sidecar";
+      readonly taskId: number;
+      readonly event: "spawned" | "exited";
+      readonly pid: number;
+    }
+  | {
+      /** Answer to a `cancel` request: the worker's sidecar processes were stopped. */
+      readonly type: "cancelled";
+      readonly taskId: number;
+    }
+  | {
+      readonly type: "progress";
+      readonly taskId: number;
+      readonly phase: IndexProgressPhase;
+      readonly completed: number;
+      readonly total: number;
+      readonly message: string;
+    }
+  | {
+      readonly type: "analysis-done";
+      readonly taskId: number;
+      readonly result: InventoryAnalysisResult;
+    }
+  | {
+      readonly type: "error";
+      readonly taskId: number;
+      readonly code: string;
+      readonly message: string;
+    };
 
 export type IndexWorkerMessage =
   | {
@@ -206,6 +302,41 @@ export async function runIndexWorkerTask(
   }
 }
 
+/** Runs one inventory analysis (in the analysis worker, or in-process for tests). */
+export async function runInventoryAnalysisTask(
+  task: InventoryAnalysisTask,
+  onProgress?: IndexProgressCallback,
+): Promise<InventoryAnalysisResult> {
+  const service = new IndexService({
+    workspaceId: task.workspaceId,
+    policy: WorkspaceAccessPolicy.create(task.policyConfig),
+    repository: new InMemoryGraphRepository(),
+    clock: () => task.fixedClockIso,
+    limits: task.limits,
+    inventorySource: () => Promise.resolve(task.entries),
+  });
+  const run = await service.runIndexAsync(
+    task.rootPath,
+    onProgress === undefined ? {} : { onProgress },
+  );
+  return {
+    contentSetJson: serializeSnapshotContentSet(run.snapshot),
+    state: run.state,
+    analyzerFingerprint: run.snapshot.meta.analyzerFingerprint,
+    fileCount: run.fileCount,
+    warningCount: run.warnings.length,
+  };
+}
+
+/** workerData of the inventory analysis mode. */
+export function isInventoryAnalysisWorkerData(value: unknown): value is InventoryAnalysisWorkerData {
+  return (
+    value !== null &&
+    typeof value === "object" &&
+    (value as Partial<InventoryAnalysisWorkerData>).kind === "inventory-analysis"
+  );
+}
+
 export function isWorkerTaskPayload(value: unknown): value is IndexWorkerTaskInput {
   if (value === null || typeof value !== "object") return false;
   const record = value as Partial<IndexWorkerTaskInput>;
@@ -228,12 +359,32 @@ export function markIndexWorkerStarted(): void {
 }
 
 /**
+ * Serves the inventory analysis mode in this worker thread (workerData is
+ * InventoryAnalysisWorkerData) with runInventoryAnalysisTask: see
+ * serveInventoryAnalysisRequests (index-worker-serve.ts) for the protocol,
+ * the sidecar process reports and the `cancel` request. Idempotent per
+ * worker thread.
+ */
+export function startInventoryAnalysisWorker(): void {
+  if (workerStarted) return;
+  if (isMainThread || parentPort === null) return;
+  workerStarted = true;
+  serveInventoryAnalysisRequests(parentPort, runInventoryAnalysisTask);
+}
+
+/**
  * Starts the `worker_threads` indexing loop using a statically injected
- * `SqliteGraphRepository` constructor. Idempotent per worker thread.
+ * `SqliteGraphRepository` constructor. Idempotent per worker thread. A
+ * worker started with InventoryAnalysisWorkerData serves the inventory
+ * analysis mode instead (it uses no SQLite connection).
  */
 export function startIndexWorker(SqliteRepoCtor: SqliteRepositoryConstructor): void {
   if (workerStarted) return;
   if (isMainThread || parentPort === null) return;
+  if (isInventoryAnalysisWorkerData(workerData)) {
+    startInventoryAnalysisWorker();
+    return;
+  }
   workerStarted = true;
   const port = parentPort;
   if (!isWorkerTaskPayload(workerData)) {

@@ -2,6 +2,7 @@ import { spawnSync } from "node:child_process";
 import { existsSync, readdirSync, readFileSync, statSync, type Dirent } from "node:fs";
 import path from "node:path";
 
+import { describeJsonSyntaxError } from "./diagnostics.js";
 import {
   collectUntrustedRoots,
   resolveExecutable,
@@ -23,6 +24,7 @@ import { readCodexMcpServer, validateTomlStructure } from "./toml-patch.js";
 import {
   CANONICAL_SKILL_NAMES,
   CAUSORYN_PACKAGE_VERSION,
+  CausorynCliError,
   HOST_CLIENT_IDS,
   SIDECAR_TOOLCHAIN_IDS,
   pythonCommandCandidates,
@@ -689,7 +691,10 @@ function inspectSingleHost(
         }
       } catch (error) {
         configValid = false;
-        parseDetail = error instanceof Error ? error.message : String(error);
+        // CWE-209: Causoryn's TOML errors name the line and key, never the value;
+        // any other error text is not carried over.
+        parseDetail =
+          error instanceof CausorynCliError ? error.message : "the Codex config.toml could not be read as TOML";
       }
     } else {
       try {
@@ -750,7 +755,8 @@ function inspectSingleHost(
         }
       } catch (error) {
         configValid = false;
-        parseDetail = error instanceof Error ? error.message : String(error);
+        // CWE-209: the JSON parser's message quotes the file's text.
+        parseDetail = describeJsonSyntaxError(error);
       }
     }
   }
@@ -786,7 +792,7 @@ function inspectSingleHost(
         }
       } catch (error) {
         configValid = false;
-        parseDetail = error instanceof Error ? error.message : String(error);
+        parseDetail = `${describeJsonSyntaxError(error)} in the secondary Antigravity config (${secondary})`;
       }
     }
   }

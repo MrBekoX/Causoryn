@@ -77,7 +77,7 @@ Sert bağımlılık omurgası: **Temel → Derin eşleme → Mimari zekâ → S�
 | 9 | **Living Wiki yüzeyi** | **Partial** — FTS5 arama, CAS overlay ve incremental sayfa seçimi etkin; `wiki_search` `kinds` / `scope` / `language` / `revision` / `resolution` filtrelerini bildirir ancak reddeder | Bu filtreleri kabul etmek, onaylı bir not yazma akışıyla birlikte `WIKI_NOTE_CONFLICT` kodunu MCP hata rehberliğine eklemek ve incremental link/FTS yeniden yazımlarını daraltmak |
 | 10 | **Etkileşimli portal ve visualizer tarayıcı kabulü** | **Partial** — DOM ve güvenlik testleri ile SHA-256 CSP doğrulandı | Çevrimdışı etkileşimlerin gerçek tarayıcıda kabulü |
 | 11 | **Çıplak monorepo bundle'ında default-lib kapsamı** | **Partial** — `packages/causoryn` `dist/typescript-lib/lib*.d.ts` dosyalarını paketler ve `state: "ready"` durumuna ulaşır; `packages/mcp-server/dist/` ulaşmaz | Default-lib `.d.ts` dosyalarını çıplak bundle'a sahnelemek ya da bu sınırı kalıcı olarak belgelemek |
-| 12 | **Rate-limit / eşzamanlılık bütçesi** | **Open** — boyut, derinlik ve timeout tavanları uygulanıyor; istek eşzamanlılık sınırlayıcısı yok | MCP istekleri genelinde eşzamanlı çağrı ve kaynak bütçesi uygulamasını eklemek |
+| 12 | **Rate-limit / eşzamanlılık bütçesi** | **Open** — boyut, derinlik ve timeout tavanları uygulanıyor; genel bir istek eşzamanlılık sınırlayıcısı yok (history araçlarının taze commit analizlerinin kendi eşzamanlılık sınırı ve bayt/süre bütçeleri var) | MCP istekleri genelinde eşzamanlı çağrı ve kaynak bütçesi uygulamasını eklemek |
 
 ### Kapı listesi dışındaki bilinen 0.3.0 sınırları
 

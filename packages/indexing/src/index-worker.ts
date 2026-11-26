@@ -6,10 +6,12 @@ import { IndexingError } from "./errors.js";
 import type { BuildLeaseEvent, IndexProgressCallback } from "./index-service.js";
 import {
   hasIndexWorkerStarted,
+  isInventoryAnalysisWorkerData,
   isWorkerTaskPayload,
   markIndexWorkerStarted,
   runIndexWorkerTask as runIndexWorkerTaskCore,
   startIndexWorker,
+  startInventoryAnalysisWorker,
   type CloseableGraphRepository,
   type IndexWorkerMessage,
   type IndexWorkerResultSummary,
@@ -79,10 +81,14 @@ interface DirectBootstrapWorkerData {
 }
 
 function shouldAutoStartDirectWorker(): boolean {
-  if (isMainThread || parentPort === null || !isWorkerTaskPayload(workerData)) {
+  if (
+    isMainThread ||
+    parentPort === null ||
+    (!isWorkerTaskPayload(workerData) && !isInventoryAnalysisWorkerData(workerData))
+  ) {
     return false;
   }
-  const raw = workerData as IndexWorkerTaskInput & DirectBootstrapWorkerData;
+  const raw = workerData as DirectBootstrapWorkerData;
   if (raw.__causorynBootstrap === true) {
     return (
       typeof raw.__workerEntryUrl === "string" &&
@@ -96,6 +102,11 @@ if (shouldAutoStartDirectWorker()) {
   const port = parentPort;
   queueMicrotask(() => {
     if (hasIndexWorkerStarted() || port === null) return;
+    // The inventory analysis mode uses an in-memory repository: no SQLite.
+    if (isInventoryAnalysisWorkerData(workerData)) {
+      startInventoryAnalysisWorker();
+      return;
+    }
     void (async () => {
       try {
         const SqliteRepoCtor = await loadDefaultSqliteRepositoryCtor();
