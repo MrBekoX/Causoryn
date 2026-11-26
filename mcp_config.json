@@ -5,13 +5,16 @@
       "args": [
         "-y",
         "--ignore-scripts",
+        "--prefix",
+        "${PLUGIN_DATA}",
         "causoryn@0.3.2",
         "mcp",
         "--allow-cwd",
         "--auto-data-dir",
         "--client",
         "antigravity"
-      ]
+      ],
+      "cwd": "${PLUGIN_ROOT}"
     }
   }
 }

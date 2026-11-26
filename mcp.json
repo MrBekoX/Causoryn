@@ -6,11 +6,14 @@
       "args": [
         "-y",
         "--ignore-scripts",
+        "--prefix",
+        "${PLUGIN_DATA}",
         "causoryn@0.3.2",
         "mcp",
         "--allow-cwd",
         "--auto-data-dir"
-      ]
+      ],
+      "cwd": "${PLUGIN_ROOT}"
     }
   }
 }

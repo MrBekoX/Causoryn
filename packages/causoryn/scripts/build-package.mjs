@@ -255,12 +255,11 @@ export function verifyManifestVersionParity(repoRoot, pkgDir) {
   );
 
   const codexPkgMcp = readJson(path.join(pkgDir, ".codex-plugin", "mcp.json"));
-  const codexArgs = codexPkgMcp.mcpServers?.causoryn?.args ?? [];
-  if (!Array.isArray(codexArgs) || !codexArgs.includes(expectedPinnedSpec)) {
-    throw new Error(
-      `[build:package] packages/causoryn/.codex-plugin/mcp.json does not contain "${expectedPinnedSpec}"`,
-    );
-  }
+  assertLauncherExpectedVersion(
+    codexPkgMcp.mcpServers?.causoryn?.args,
+    expectedVersion,
+    "packages/causoryn/.codex-plugin/mcp.json#mcpServers.causoryn.args",
+  );
 
   return expectedVersion;
 }

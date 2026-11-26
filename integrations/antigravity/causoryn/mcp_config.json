@@ -5,6 +5,7 @@
       "args": [
         "${PLUGIN_ROOT}/scripts/mcp-server.mjs"
       ],
+      "cwd": "${PLUGIN_ROOT}",
       "env": {
         "CAUSORYN_CONFIG": "{\"allowRoots\":[]}"
       }

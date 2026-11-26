@@ -19,6 +19,12 @@
       "transport": {
         "type": "stdio"
       },
+      "runtimeArguments": [
+        {
+          "type": "positional",
+          "value": "--ignore-scripts"
+        }
+      ],
       "packageArguments": [
         {
           "type": "positional",

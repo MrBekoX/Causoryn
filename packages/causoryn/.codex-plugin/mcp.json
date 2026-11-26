@@ -1,19 +1,17 @@
 {
   "mcpServers": {
     "causoryn": {
-      "command": "npx",
+      "command": "node",
       "args": [
-        "-y",
-        "--ignore-scripts",
-        "--package",
-        "causoryn@0.3.2",
-        "causoryn",
-        "mcp",
+        "./scripts/plugin-mcp-launcher.mjs",
+        "--expected-version",
+        "0.3.2",
         "--allow-cwd",
         "--auto-data-dir",
         "--client",
         "codex"
       ],
+      "cwd": ".",
       "startup_timeout_sec": 30
     }
   }
