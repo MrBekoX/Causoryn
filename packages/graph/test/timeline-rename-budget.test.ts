@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { RENAME_MATCHING_BUDGET, type CompareContentSet, type CompareNode } from "../src/compare.js";
-import { buildArchitectureTimeline } from "../src/timeline.js";
+import { buildArchitectureTimeline, TIMELINE_RENAME_MATCHING_BUDGET } from "../src/timeline.js";
 
 /**
  * A timeline interval whose rename matching is above its work budget
@@ -32,5 +32,33 @@ describe("buildArchitectureTimeline — rename matching above its budget", () =>
     expect(skipped).toHaveLength(1);
     expect(skipped[0]).toContain("'v1'");
     expect(skipped[0]).toContain("'v2'");
+  });
+
+  it("shares one cumulative rename budget across the intervals of one call", () => {
+    // Each interval: 1300 removed × 1300 added = 1,690,000 pairs, under the
+    // per-diff budget. Two intervals fit the call's cumulative budget; the
+    // third would exceed it and is skipped with the same warning code, so a
+    // long timeline cannot run dozens of budget-sized diffs back to back.
+    const side = 1300;
+    const timeline = buildArchitectureTimeline({
+      points: ["s1", "s2", "s3", "s4"].map((prefix, i) => ({
+        ref: `v${String(i + 1)}`,
+        content: { status: "analyzed" as const, contentSet: functions(prefix, side) },
+      })),
+    });
+
+    const renamedPerInterval = timeline.intervals.map((interval) =>
+      interval.kind === "diff" ? interval.changes.renamed : -1,
+    );
+    expect(renamedPerInterval).toEqual([side, side, 0]);
+    const skipped = timeline.warnings.filter((line) => line.includes("rename-matching-skipped"));
+    expect(skipped).toHaveLength(1);
+    expect(skipped[0]).toMatch(/^interval 'v3'\.\.'v4': rename-matching-skipped: 1690000 same-kind /);
+    expect(skipped[0]).toContain("cumulative rename matching budget");
+
+    const pairs = side * side;
+    expect(pairs).toBeLessThanOrEqual(RENAME_MATCHING_BUDGET.maxCandidatePairs);
+    expect(2 * pairs).toBeLessThanOrEqual(TIMELINE_RENAME_MATCHING_BUDGET.maxCandidatePairs);
+    expect(3 * pairs).toBeGreaterThan(TIMELINE_RENAME_MATCHING_BUDGET.maxCandidatePairs);
   });
 });

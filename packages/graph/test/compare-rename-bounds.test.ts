@@ -261,6 +261,65 @@ describe("rename matching budget (F5: bounded, controlled fallback)", () => {
     expect(needed).toBeGreaterThan(RENAME_MATCHING_BUDGET.maxTokenComparisons);
   });
 
+  it("skips rename matching once a shared pair budget across diffs is spent", () => {
+    // One call (e.g. a timeline) runs several diffs against one shared budget.
+    const shared = {
+      maxCandidatePairs: 6,
+      maxTokenComparisons: 1_000_000,
+      usedCandidatePairs: 0,
+      usedTokenComparisons: 0,
+    };
+    const warnings: string[] = [];
+    const onWarning = (warning: string): void => {
+      warnings.push(warning);
+    };
+    const base = contentSet([fn("pkg.alphaItem1"), fn("pkg.alphaItem2")]);
+    const target = contentSet([fn("pkg.alphaItem1Moved"), fn("pkg.alphaItem2Moved")]);
+
+    // 2 × 2 = 4 pairs per diff: the first fits (4 of 6), the second does not (2 left).
+    const first = diffContentSets(base, target, { onWarning, sharedBudget: shared });
+    const second = diffContentSets(base, target, { onWarning, sharedBudget: shared });
+
+    expect(first.renamed).toHaveLength(2);
+    expect(second.renamed).toEqual([]);
+    expect(second.removed).toHaveLength(2);
+    expect(second.added).toHaveLength(2);
+    expect(warnings).toEqual([
+      "rename-matching-skipped: 4 same-kind removed/added candidate pairs exceed the 2 pairs left of " +
+        "this call's cumulative rename matching budget of 6 pairs; renames were not detected, so removed " +
+        "and added nodes are reported as they are",
+    ]);
+    expect(shared.usedCandidatePairs).toBe(4);
+  });
+
+  it("skips rename matching once a shared token-comparison budget across diffs is spent", () => {
+    const shared = {
+      maxCandidatePairs: 1_000_000,
+      maxTokenComparisons: 20,
+      usedCandidatePairs: 0,
+      usedTokenComparisons: 0,
+    };
+    const warnings: string[] = [];
+    const onWarning = (warning: string): void => {
+      warnings.push(warning);
+    };
+    const base = contentSet([fn("pkg.alphaItem1"), fn("pkg.alphaItem2")]);
+    const target = contentSet([fn("pkg.alphaItem1Moved"), fn("pkg.alphaItem2Moved")]);
+
+    // Per diff: 4 pairs + min(2 · (2 + 2), 2 · (3 + 3)) = 12 token comparisons.
+    const first = diffContentSets(base, target, { onWarning, sharedBudget: shared });
+    const second = diffContentSets(base, target, { onWarning, sharedBudget: shared });
+
+    expect(first.renamed).toHaveLength(2);
+    expect(second.renamed).toEqual([]);
+    expect(warnings).toEqual([
+      "rename-matching-skipped: 4 same-kind removed/added candidate pairs need up to 12 token comparisons, " +
+        "over the 8 left of this call's cumulative rename matching budget of 20; renames were not detected, " +
+        "so removed and added nodes are reported as they are",
+    ]);
+    expect(shared.usedTokenComparisons).toBe(12);
+  });
+
   it("keeps different-kind nodes out of the pair count", () => {
     // 1500 removed Functions × 1500 added Classes: no pair is a rename
     // candidate (kinds differ), so nothing exceeds the budget.

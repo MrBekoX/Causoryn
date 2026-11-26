@@ -474,6 +474,38 @@ export const RENAME_MATCHING_BUDGET: Readonly<{
 /** Warning code (prefix of the warning text) when rename matching is skipped. */
 export const COMPARE_WARNING_RENAME_MATCHING_SKIPPED = "rename-matching-skipped";
 
+/**
+ * A rename matching budget shared by every diff of one call that runs several
+ * (security scan F5: a timeline runs up to TIMELINE_CEILINGS.maxRevisions − 1
+ * = 59 diffs on the MCP main thread, each one allowed RENAME_MATCHING_BUDGET;
+ * see TIMELINE_RENAME_MATCHING_BUDGET). The per-diff
+ * budget still applies to each diff; on top of it, a diff whose pair count or
+ * token-comparison bound exceeds what is left here skips rename matching
+ * with the same `rename-matching-skipped` warning. A diff that runs rename
+ * matching adds its two pre-computed counts to the `used*` fields; a skipped
+ * diff adds nothing. Diffs are charged in call order, so the outcome is
+ * deterministic.
+ */
+export interface SharedRenameMatchingBudget {
+  readonly maxCandidatePairs: number;
+  readonly maxTokenComparisons: number;
+  usedCandidatePairs: number;
+  usedTokenComparisons: number;
+}
+
+/** A fresh shared budget with nothing used yet. */
+export function createSharedRenameMatchingBudget(limits: {
+  readonly maxCandidatePairs: number;
+  readonly maxTokenComparisons: number;
+}): SharedRenameMatchingBudget {
+  return {
+    maxCandidatePairs: limits.maxCandidatePairs,
+    maxTokenComparisons: limits.maxTokenComparisons,
+    usedCandidatePairs: 0,
+    usedTokenComparisons: 0,
+  };
+}
+
 /** Options of {@link diffContentSets}. */
 export interface DiffContentSetsOptions {
   /**
@@ -482,6 +514,11 @@ export interface DiffContentSetsOptions {
    * RENAME_MATCHING_BUDGET). The diff itself keeps its shape.
    */
   readonly onWarning?: (warning: string) => void;
+  /**
+   * Cumulative rename matching budget of the calling tool call (see
+   * SharedRenameMatchingBudget); absent = only the per-diff budget applies.
+   */
+  readonly sharedBudget?: SharedRenameMatchingBudget;
 }
 
 /**
@@ -717,16 +754,18 @@ const RENAME_SKIPPED_OUTCOME =
   "renames were not detected, so removed and added nodes are reported as they are";
 
 /**
- * Applies RENAME_MATCHING_BUDGET before any pair is scored: buckets the
- * candidates by kind, checks the pair count, then interns the candidates'
- * text and checks the token-comparison bound. Returns the buckets to match,
- * or null (with one warning) when rename matching is skipped.
+ * Applies RENAME_MATCHING_BUDGET (and the caller's shared budget, if any)
+ * before any pair is scored: buckets the candidates by kind, checks the pair
+ * count, then interns the candidates' text and checks the token-comparison
+ * bound. Returns the buckets to match (charging the shared budget), or null
+ * (with one warning) when rename matching is skipped.
  */
 function planRenameMatching(
   removedCandidates: readonly ValidatedNode[],
   addedCandidates: readonly ValidatedNode[],
-  onWarning: ((warning: string) => void) | undefined,
+  options: DiffContentSetsOptions,
 ): readonly PreparedRenameBucket[] | null {
+  const { onWarning, sharedBudget } = options;
   const buckets = new Map<NodeKind, RenameKindBucket>();
   const bucketOf = (kind: NodeKind): RenameKindBucket => {
     let bucket = buckets.get(kind);
@@ -752,6 +791,17 @@ function planRenameMatching(
     );
     return null;
   }
+  if (sharedBudget !== undefined) {
+    const pairsLeft = Math.max(0, sharedBudget.maxCandidatePairs - sharedBudget.usedCandidatePairs);
+    if (candidatePairs > pairsLeft) {
+      onWarning?.(
+        `${COMPARE_WARNING_RENAME_MATCHING_SKIPPED}: ${String(candidatePairs)} same-kind removed/added ` +
+          `candidate pairs exceed the ${String(pairsLeft)} pairs left of this call's cumulative rename ` +
+          `matching budget of ${String(sharedBudget.maxCandidatePairs)} pairs; ${RENAME_SKIPPED_OUTCOME}`,
+      );
+      return null;
+    }
+  }
 
   const intern = createInterner();
   const prepared: PreparedRenameBucket[] = [];
@@ -773,6 +823,23 @@ function planRenameMatching(
         `matching budget of ${String(RENAME_MATCHING_BUDGET.maxTokenComparisons)}; ${RENAME_SKIPPED_OUTCOME}`,
     );
     return null;
+  }
+  if (sharedBudget !== undefined) {
+    const tokensLeft = Math.max(
+      0,
+      sharedBudget.maxTokenComparisons - sharedBudget.usedTokenComparisons,
+    );
+    if (tokenComparisons > tokensLeft) {
+      onWarning?.(
+        `${COMPARE_WARNING_RENAME_MATCHING_SKIPPED}: ${String(candidatePairs)} same-kind removed/added ` +
+          `candidate pairs need up to ${String(tokenComparisons)} token comparisons, over the ` +
+          `${String(tokensLeft)} left of this call's cumulative rename matching budget of ` +
+          `${String(sharedBudget.maxTokenComparisons)}; ${RENAME_SKIPPED_OUTCOME}`,
+      );
+      return null;
+    }
+    sharedBudget.usedCandidatePairs += candidatePairs;
+    sharedBudget.usedTokenComparisons += tokenComparisons;
   }
   return prepared;
 }
@@ -849,7 +916,7 @@ export function diffContentSets(
   // is the smallest key among equal scores (the former tie-break). Skipped
   // over budget → no buckets: every node stays removed/added (see
   // RENAME_MATCHING_BUDGET).
-  const buckets = planRenameMatching(removedCandidates, addedCandidates, options.onWarning) ?? [];
+  const buckets = planRenameMatching(removedCandidates, addedCandidates, options) ?? [];
   for (const bucket of buckets) {
     const consumed = new Uint8Array(bucket.added.length);
     for (const removedCandidate of bucket.removed) {
