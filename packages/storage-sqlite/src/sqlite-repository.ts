@@ -662,6 +662,25 @@ export class SqliteGraphRepository
     return { id: row.id, rootPath: row.root_path, createdAt: row.created_at };
   }
 
+  /**
+   * CAU-03: compare-and-set of the persisted root (one parameterized UPDATE in
+   * an IMMEDIATE transaction). False when the id is unknown or the row no
+   * longer holds `fromRootPath` (another connection changed it meanwhile).
+   */
+  updateWorkspaceRootPath(workspaceId: string, fromRootPath: string, toRootPath: string): boolean {
+    requireNonEmptyField("workspaceId", workspaceId);
+    requireNonEmptyField("workspace.rootPath", toRootPath);
+    return this.runInTransaction(
+      () =>
+        this.runWrite(
+          "UPDATE workspaces SET root_path = ? WHERE id = ? AND root_path = ?",
+          toRootPath,
+          workspaceId,
+          fromRootPath,
+        ).changes === 1,
+    );
+  }
+
   private requireWorkspace(workspaceId: string): WorkspaceRow {
     const row = this.stmt(
       "SELECT id, root_path, created_at FROM workspaces WHERE id = ? LIMIT 1",

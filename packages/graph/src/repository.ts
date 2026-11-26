@@ -164,6 +164,13 @@ export interface GraphRepository {
    * with the authorized root before trusting rows recorded under the same id.
    */
   getWorkspace?(workspaceId: string): WorkspaceRecord | undefined;
+  /**
+   * CAU-03: replaces the recorded `rootPath` of `workspaceId` with `toRootPath`,
+   * only while the record still holds `fromRootPath` (compare-and-set, one
+   * statement). Returns false when the id is unknown or the record changed in
+   * between. Used to upgrade a legacy verbatim root to its canonical form.
+   */
+  updateWorkspaceRootPath?(workspaceId: string, fromRootPath: string, toRootPath: string): boolean;
   upsertFile(record: FileRecord): void;
   listFiles(workspaceId: string): readonly FileRecord[];
   /**

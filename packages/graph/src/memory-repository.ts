@@ -123,6 +123,15 @@ export class InMemoryGraphRepository implements GraphRepository {
     return record === undefined ? undefined : { ...record };
   }
 
+  updateWorkspaceRootPath(workspaceId: string, fromRootPath: string, toRootPath: string): boolean {
+    requireNonEmptyField("workspaceId", workspaceId);
+    requireNonEmptyField("workspace.rootPath", toRootPath);
+    const record = this.workspaces.get(workspaceId);
+    if (record === undefined || record.rootPath !== fromRootPath) return false;
+    this.workspaces.set(workspaceId, { ...record, rootPath: toRootPath });
+    return true;
+  }
+
   upsertFile(record: FileRecord): void {
     if (!this.workspaces.has(record.workspaceId)) {
       throw new GraphRepositoryError(

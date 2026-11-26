@@ -792,15 +792,19 @@ function canonicalWorkspaceRoot(root: string): string {
   return stripWin32DevicePrefix(resolved);
 }
 
-/** Comparison key of a root: canonical form, no trailing separator, case-folded on win32. */
-function comparableWorkspaceRoot(root: string): string {
-  const canonical = canonicalWorkspaceRoot(root);
+/** Comparison key of an already canonical root: no trailing separator, case-folded on win32. */
+function comparisonKey(canonical: string): string {
   const fsRoot = path.parse(canonical).root;
   const trimmed =
     canonical.length > fsRoot.length && canonical.endsWith(path.sep)
       ? canonical.slice(0, -1)
       : canonical;
   return process.platform === "win32" ? trimmed.toLowerCase() : trimmed;
+}
+
+/** Comparison key of a root: canonical form, no trailing separator, case-folded on win32. */
+function comparableWorkspaceRoot(root: string): string {
+  return comparisonKey(canonicalWorkspaceRoot(root));
 }
 
 /**
@@ -812,6 +816,12 @@ function comparableWorkspaceRoot(root: string): string {
  * `allowRoots[0]` verbatim) must name the same directory canonically, or the
  * database is refused before any of its rows are read. The refusal does not
  * repeat the recorded root, and the database is left unchanged.
+ *
+ * A matching record that does not hold the canonical root yet (a 0.3.2
+ * verbatim spelling: trailing separator, letter case, a link) is rewritten to
+ * the canonical root it matched. Kept verbatim, a link spelling would be
+ * re-resolved on every open and follow the link to whatever directory it
+ * names later, so the old data would be served for that directory.
  */
 function bindWorkspaceRecord(
   repository: SqliteGraphRepository,
@@ -820,12 +830,19 @@ function bindWorkspaceRecord(
   declaredRoot: string,
   clock: () => string,
 ): void {
+  // Resolved once: the root that is compared is the root that is recorded.
+  const canonicalRoot = canonicalWorkspaceRoot(declaredRoot);
+  const declaredKey = comparisonKey(canonicalRoot);
+  const mismatch = (): CausorynConfigError =>
+    new CausorynConfigError([
+      `${fieldName} holds workspace "${workspaceId}" recorded for a different root than allowRoots[0]; refusing to open it so data indexed for another directory is not served. Use a separate ${fieldName} for this root, or a different workspaceId.`,
+    ]);
   let existing = repository.getWorkspace(workspaceId);
   if (existing === undefined) {
     try {
       repository.registerWorkspace({
         id: workspaceId,
-        rootPath: canonicalWorkspaceRoot(declaredRoot),
+        rootPath: canonicalRoot,
         createdAt: clock(),
       });
       return;
@@ -839,11 +856,13 @@ function bindWorkspaceRecord(
       if (existing === undefined) throw error;
     }
   }
-  if (comparableWorkspaceRoot(existing.rootPath) !== comparableWorkspaceRoot(declaredRoot)) {
-    throw new CausorynConfigError([
-      `${fieldName} holds workspace "${workspaceId}" recorded for a different root than allowRoots[0]; refusing to open it so data indexed for another directory is not served. Use a separate ${fieldName} for this root, or a different workspaceId.`,
-    ]);
-  }
+  if (comparableWorkspaceRoot(existing.rootPath) !== declaredKey) throw mismatch();
+  if (existing.rootPath === canonicalRoot) return;
+  if (repository.updateWorkspaceRootPath(workspaceId, existing.rootPath, canonicalRoot)) return;
+  // The row changed between the read and the update (another process): check
+  // the root it holds now like any existing record.
+  const current = repository.getWorkspace(workspaceId);
+  if (current === undefined || comparableWorkspaceRoot(current.rootPath) !== declaredKey) throw mismatch();
 }
 
 function openStorageRepository(

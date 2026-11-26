@@ -1304,3 +1304,43 @@ describe("SqliteGraphRepository.getWorkspace — CAU-03 root binding", () => {
     }
   });
 });
+
+describe("SqliteGraphRepository.updateWorkspaceRootPath — CAU-03 legacy root upgrade", () => {
+  it("replaces the persisted root only while it still holds the expected value, and keeps the other columns", () => {
+    const file = dbPath("workspace-root-upgrade.sqlite");
+    const first = new SqliteGraphRepository(file);
+    try {
+      first.registerWorkspace({ id: WS, rootPath: "D:/fixture/orders/", createdAt: CREATED_AT });
+      expect(first.updateWorkspaceRootPath(WS, "D:/fixture/orders/", "D:/fixture/orders")).toBe(true);
+      // A stale expectation (another process already changed the row) changes nothing.
+      expect(first.updateWorkspaceRootPath(WS, "D:/fixture/orders/", "D:/elsewhere")).toBe(false);
+    } finally {
+      first.close();
+    }
+
+    const second = new SqliteGraphRepository(file);
+    try {
+      expect(second.getWorkspace(WS)).toEqual({ id: WS, rootPath: "D:/fixture/orders", createdAt: CREATED_AT });
+    } finally {
+      second.close();
+    }
+  });
+
+  it("binds every value as a parameter: injection-looking values update nothing or are stored literally", () => {
+    const repo = new SqliteGraphRepository(dbPath("workspace-root-upgrade-inject.sqlite"));
+    try {
+      repo.registerWorkspace({ id: WS, rootPath: "D:/fixture/orders", createdAt: CREATED_AT });
+      repo.registerWorkspace({ id: "ws_other", rootPath: "D:/fixture/other", createdAt: CREATED_AT });
+      expect(repo.updateWorkspaceRootPath("x' OR '1'='1", "D:/fixture/orders", "D:/x")).toBe(false);
+      expect(repo.updateWorkspaceRootPath(WS, "x' OR '1'='1", "D:/x")).toBe(false);
+      expect(repo.getWorkspace(WS)?.rootPath).toBe("D:/fixture/orders");
+      expect(repo.updateWorkspaceRootPath(WS, "D:/fixture/orders", "D:/a'; DROP TABLE workspaces; --")).toBe(true);
+      expect(repo.getWorkspace(WS)?.rootPath).toBe("D:/a'; DROP TABLE workspaces; --");
+      expect(repo.getWorkspace("ws_other")?.rootPath).toBe("D:/fixture/other");
+      expect(() => repo.updateWorkspaceRootPath("", "D:/fixture/orders", "D:/x")).toThrowError(GraphRepositoryError);
+      expect(() => repo.updateWorkspaceRootPath(WS, "D:/fixture/orders", "")).toThrowError(GraphRepositoryError);
+    } finally {
+      repo.close();
+    }
+  });
+});

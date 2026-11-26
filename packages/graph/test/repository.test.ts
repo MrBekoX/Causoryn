@@ -620,3 +620,23 @@ describe("InMemoryGraphRepository.getWorkspace — CAU-03 root binding", () => {
     expect(() => repo.getWorkspace("  ")).toThrowError(GraphRepositoryError);
   });
 });
+
+describe("InMemoryGraphRepository.updateWorkspaceRootPath — CAU-03 legacy root upgrade", () => {
+  it("replaces the recorded root only while it still holds the expected value", () => {
+    const repo = makeRepo();
+    expect(repo.updateWorkspaceRootPath(WS, "D:/fixture/orders", "D:/real/orders")).toBe(true);
+    expect(repo.getWorkspace(WS)).toEqual({ id: WS, rootPath: "D:/real/orders", createdAt: CREATED_AT });
+    // A stale expectation (another writer changed the row) changes nothing.
+    expect(repo.updateWorkspaceRootPath(WS, "D:/fixture/orders", "D:/elsewhere")).toBe(false);
+    expect(repo.getWorkspace(WS)?.rootPath).toBe("D:/real/orders");
+  });
+
+  it("reports an unknown id as not updated and rejects empty fields", () => {
+    const repo = makeRepo();
+    expect(repo.updateWorkspaceRootPath("ws_never_registered", "D:/fixture/orders", "D:/x")).toBe(false);
+    expect(repo.getWorkspace("ws_never_registered")).toBeUndefined();
+    expect(() => repo.updateWorkspaceRootPath(" ", "D:/fixture/orders", "D:/x")).toThrowError(GraphRepositoryError);
+    expect(() => repo.updateWorkspaceRootPath(WS, "D:/fixture/orders", "")).toThrowError(GraphRepositoryError);
+    expect(repo.getWorkspace(WS)?.rootPath).toBe("D:/fixture/orders");
+  });
+});

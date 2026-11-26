@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
@@ -20,7 +20,9 @@ import type { CausorynContext } from "../src/index.js";
  * pages and annotations recorded for the previous root are served. The same root
  * spelled differently (trailing separator, letter case on Windows, a link to the
  * same directory) keeps warm-starting, and databases written by 0.3.2 (which
- * stored `allowRoots[0]` verbatim) keep opening when the root is canonically equal.
+ * stored `allowRoots[0]` verbatim) keep opening when the root is canonically equal;
+ * that open replaces the verbatim spelling with the canonical root, so a legacy
+ * link spelling cannot follow the link to another directory later.
  *
  * Every database and workspace lives in a fresh os.tmpdir() directory.
  */
@@ -167,6 +169,11 @@ function sameDirectorySpellings(): string[] {
   return spellings;
 }
 
+/** The canonical form a record stores for `root` (native realpath). */
+function canonicalRoot(root: string): string {
+  return realpathSync.native(root);
+}
+
 function storedRootPath(dbFile: string): string | undefined {
   const db = new Database(dbFile, { readonly: true });
   try {
@@ -261,7 +268,7 @@ describe("CAU-03 — graph DB bound to the canonical workspace root", { timeout:
     }
   });
 
-  it("a 0.3.2 database (allowRoots[0] stored verbatim, non-canonical spelling) keeps opening for the canonically equal root and is not rewritten", () => {
+  it("a 0.3.2 database (allowRoots[0] stored verbatim, non-canonical spelling) keeps opening for the canonically equal root and its record is upgraded to the canonical root", () => {
     const legacySpelling = IS_WIN ? `${rootA.toUpperCase()}${path.sep}` : `${rootA}${path.sep}`;
     // 0.3.2 wrote the workspace row exactly like this at open time.
     const legacy = new SqliteGraphRepository(graphDbPath());
@@ -289,7 +296,49 @@ describe("CAU-03 — graph DB bound to the canonical workspace root", { timeout:
     } finally {
       again.close();
     }
-    expect(storedRootPath(graphDbPath())).toBe(legacySpelling);
+    // The verbatim spelling is replaced by the canonical root on the first
+    // matching open: a link spelling kept verbatim would follow the link to
+    // wherever it points later (see the retarget test below).
+    expect(storedRootPath(graphDbPath())).toBe(canonicalRoot(rootA));
+  });
+
+  it("a 0.3.2 record holding a link spelling is bound to the directory it resolved to on first open; retargeting the link later is refused", () => {
+    const link = path.join(tempRoot, "legacy-link");
+    symlinkSync(rootA, link, IS_WIN ? "junction" : "dir");
+    // 0.3.2 stored allowRoots[0] verbatim: here the link itself.
+    const legacy = new SqliteGraphRepository(graphDbPath());
+    try {
+      legacy.registerWorkspace({ id: WS, rootPath: link, createdAt: LEGACY_CREATED_AT });
+    } finally {
+      legacy.close();
+    }
+
+    const first = open(graphConfig(link));
+    try {
+      expect(JSON.stringify(first.repository.getLatestPublished(WS)?.snapshot.nodes)).toContain("only-in-a.ts");
+    } finally {
+      first.close();
+    }
+    expect(storedRootPath(graphDbPath())).toBe(canonicalRoot(rootA));
+
+    rmSync(link, { force: true });
+    symlinkSync(rootB, link, IS_WIN ? "junction" : "dir");
+
+    const outcome = tryOpen(graphConfig(link));
+    expect(outcome.served?.graphNodes ?? "").not.toContain("only-in-a.ts");
+    expectRootMismatchRefusal(outcome, "storage.dataDbPath");
+    expect(storedRootPath(graphDbPath())).toBe(canonicalRoot(rootA));
+  });
+
+  it("a record that already holds the canonical root is left as it is", () => {
+    const legacy = new SqliteGraphRepository(graphDbPath());
+    try {
+      legacy.registerWorkspace({ id: WS, rootPath: canonicalRoot(rootA), createdAt: LEGACY_CREATED_AT });
+    } finally {
+      legacy.close();
+    }
+    open(graphConfig(`${rootA}${path.sep}`)).close();
+    expect(storedRootPath(graphDbPath())).toBe(canonicalRoot(rootA));
   });
 
   it("a 0.3.2 database recorded for another root is refused", () => {
@@ -382,6 +431,32 @@ describe("CAU-03 — wiki DB bound to the canonical workspace root", { timeout: 
     const other = tryOpen(wikiConfig(rootB));
     expect(other.served?.annotationIds ?? []).not.toContain("annot-a");
     expectRootMismatchRefusal(other, "wiki.dataDbPath");
-    expect(storedRootPath(wikiDbPath())).toBe(legacySpelling);
+    // Upgraded to the canonical root by the first matching open (not by the refusal).
+    expect(storedRootPath(wikiDbPath())).toBe(canonicalRoot(rootA));
+  });
+
+  it("a 0.3.2 wiki record holding a link spelling is bound on first open; retargeting the link later is refused", () => {
+    const link = path.join(tempRoot, "legacy-wiki-link");
+    symlinkSync(rootA, link, IS_WIN ? "junction" : "dir");
+    const legacy = new SqliteGraphRepository(wikiDbPath());
+    try {
+      legacy.registerWorkspace({ id: WS, rootPath: link, createdAt: LEGACY_CREATED_AT });
+    } finally {
+      legacy.close();
+    }
+    const first = open(wikiConfig(link));
+    try {
+      publishWikiWithAnnotation(first.wikiStore as SqliteWikiStore);
+    } finally {
+      first.close();
+    }
+    expect(storedRootPath(wikiDbPath())).toBe(canonicalRoot(rootA));
+
+    rmSync(link, { force: true });
+    symlinkSync(rootB, link, IS_WIN ? "junction" : "dir");
+
+    const outcome = tryOpen(wikiConfig(link));
+    expect(outcome.served?.annotationIds ?? []).not.toContain("annot-a");
+    expectRootMismatchRefusal(outcome, "wiki.dataDbPath");
   });
 });
