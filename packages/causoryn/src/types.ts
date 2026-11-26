@@ -137,11 +137,21 @@ export interface DirectoryOwnershipProbe {
   readonly lstat: (dirPath: string) => Stats;
 }
 
+/** File system calls that make a staged tree private (injectable so tests can emulate a umask). */
+export interface StagedModeFs {
+  readonly platform: NodeJS.Platform;
+  readonly lstat: (entryPath: string) => Stats;
+  readonly readdir: (dirPath: string) => string[];
+  readonly chmod: (entryPath: string, mode: number) => void;
+}
+
 export interface StagePersistentRuntimeOptions {
   readonly homeDir: string;
   readonly sourcePackageDir: string;
   /** Inspection of an existing `~/.causoryn` (default: this process and file system). */
   readonly directoryProbe?: DirectoryOwnershipProbe | undefined;
+  /** File system calls that clear group/other write bits in the staged tree (default: node:fs). */
+  readonly stagedModeFs?: StagedModeFs | undefined;
 }
 
 export interface StagePersistentRuntimeResult {

@@ -3,7 +3,12 @@ import { cpSync, existsSync, lstatSync, mkdirSync, realpathSync, renameSync } fr
 import os from "node:os";
 import path from "node:path";
 
-import { assertNoLinkedComponents, assertPrivateDirectory, removeTreeNoFollow } from "./fs-guard.js";
+import {
+  assertNoLinkedComponents,
+  assertPrivateDirectory,
+  removeTreeNoFollow,
+  restrictTreeToOwner,
+} from "./fs-guard.js";
 import {
   CausorynCliError,
   type StagePersistentRuntimeOptions,
@@ -194,6 +199,12 @@ export function stagePersistentRuntime(
       if (!existsSync(srcEntry)) continue;
       cpSync(srcEntry, path.join(stagingDir, entry), { recursive: true });
     }
+    // cpSync keeps the source's modes, which follow the umask the package was
+    // unpacked with (0775 directories under umask 002). Uninstall removes only
+    // a private tree (F39), and no other user may change the runtime every
+    // host config runs, so the staged tree is made private before it is
+    // published; the staging name is unpredictable and ~/.causoryn private.
+    restrictTreeToOwner(stagingDir, options.stagedModeFs);
 
     const hadPrevious = pathExists(targetDir);
     if (hadPrevious) {

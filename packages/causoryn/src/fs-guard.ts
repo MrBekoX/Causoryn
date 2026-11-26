@@ -1,4 +1,5 @@
 import {
+  chmodSync,
   closeSync,
   constants as fsConstants,
   copyFileSync,
@@ -15,7 +16,14 @@ import {
 } from "node:fs";
 import path from "node:path";
 
-import { CausorynCliError, type CausorynCliErrorCode, type DirectoryOwnershipProbe } from "./types.js";
+import {
+  CausorynCliError,
+  type CausorynCliErrorCode,
+  type DirectoryOwnershipProbe,
+  type StagedModeFs,
+} from "./types.js";
+
+export type { StagedModeFs } from "./types.js";
 
 /**
  * CWE-59 guards for `causoryn setup` and the persistent runtime stage.
@@ -171,6 +179,45 @@ export function assertPrivateDirectory(
       `Refusing to use ${dir}: it is writable by other users (mode ${(st.mode & 0o777).toString(8).padStart(3, "0")}). ` +
         `Restrict it with \`chmod go-w ${dir}\` and run setup again.`,
     );
+  }
+}
+
+/** The real process and file system for {@link restrictTreeToOwner}. */
+export function defaultStagedModeFs(): StagedModeFs {
+  return {
+    platform: process.platform,
+    lstat: (entryPath) => lstatSync(entryPath),
+    readdir: (dirPath) => readdirSync(dirPath),
+    chmod: (entryPath, mode) => {
+      chmodSync(entryPath, mode);
+    },
+  };
+}
+
+/** Group/other write bits, plus setuid/setgid/sticky, which a staged runtime never needs. */
+const NOT_PRIVATE_BITS = 0o7022;
+
+/**
+ * CWE-732: clears the group/other write bits (and setuid/setgid/sticky) of
+ * `root` and every directory and file below it, whatever the umask the
+ * copied package was unpacked with (under umask 002 its directories are
+ * 0775). Links are neither changed nor entered (chmod would follow them).
+ * Only for a tree no other user can reach yet: the staging directory, which
+ * has an unpredictable name inside a private ~/.causoryn. Windows has no
+ * POSIX modes, so nothing is done there.
+ */
+export function restrictTreeToOwner(root: string, fs: StagedModeFs = defaultStagedModeFs()): void {
+  if (fs.platform === "win32") return;
+  const pending: string[] = [path.resolve(root)];
+  while (pending.length > 0) {
+    const entry = pending.pop() as string;
+    const st = fs.lstat(entry);
+    if (st.isSymbolicLink()) continue;
+    const mode = st.mode & 0o7777;
+    if ((mode & NOT_PRIVATE_BITS) !== 0) fs.chmod(entry, mode & ~NOT_PRIVATE_BITS);
+    if (st.isDirectory()) {
+      for (const name of fs.readdir(entry)) pending.push(path.join(entry, name));
+    }
   }
 }
 
