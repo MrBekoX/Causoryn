@@ -136,8 +136,15 @@ function deny(code: OutputPolicyErrorCode, reason: string, rule?: string): Outpu
   return rule === undefined ? { allowed: false, code, reason } : { allowed: false, code, reason, rule };
 }
 
-/** Mode of a publication temp file, and so of the published file: owner read/write only. */
-const PUBLISH_FILE_MODE = 0o600;
+/**
+ * Mode of a publication temp file, and so of the published file (the mode
+ * survives the rename): Node's default 0o666, narrowed by the process umask
+ * (0o644 under the usual 022), as for the exports before CAU-08. The security
+ * property is the exclusive create of an owned, random-named temp file; an
+ * owner-only mode would make shared or served export directories unreadable
+ * and tighten an existing export on every re-export.
+ */
+const PUBLISH_FILE_MODE = 0o666;
 
 /** Filesystem identity of a directory or file (bigint: exact on Windows file ids). */
 interface FileIdentity {
@@ -441,11 +448,13 @@ export class OutputAccessPolicy {
    *    and it must be a real directory reached without links;
    * 2. the content goes to a temp file this call creates itself in that
    *    directory: crypto-random name, `wx` (O_CREAT|O_EXCL, an existing entry
-   *    is never followed or reused), mode 0o600;
+   *    is never followed or reused), mode 0o666 narrowed by the umask (the
+   *    published file's mode, as for any file the process writes);
    * 3. right after the temp file is created (before any content is written)
    *    and again just before the atomic rename, the directory must still be
-   *    the bound one; before the rename the temp file must also still be the
-   *    one created in step 2. Otherwise the publication is refused.
+   *    the bound one and the entry at the temp path in it must be the file
+   *    the descriptor from step 2 refers to (fstat identity). Otherwise the
+   *    publication is refused.
    * On failure only that temp file is removed, and only while it is still the
    * file this call created; a file it did not create is never removed.
    *
@@ -457,10 +466,13 @@ export class OutputAccessPolicy {
    * Throws OutputPolicyError (`workspace/output-not-authorized` for a
    * decision outside this policy, `workspace/output-path-denied` when the
    * directory or temp file changed); filesystem errors are passed through.
-   * Residuals: Node has no renameat(2)/unlinkat(2), so a swap in the few
-   * instructions between the final check and the rename (or cleanup) is not
-   * detectable here; identity is (dev, ino), so a file that replaces a
-   * deleted temp file and reuses its inode number looks like the temp file.
+   * Residuals: Node has no openat(2)/renameat(2)/unlinkat(2), so a swap in
+   * the few instructions between a check and the open, rename or cleanup is
+   * not detectable here; a temp file created through a directory swapped for
+   * a link and back stays (empty) where the link pointed, since removing it
+   * by a path outside the bound directory is not safe. Identity is (dev, ino),
+   * so a file that replaces a deleted temp file and reuses its inode number
+   * looks like the temp file.
    */
   publishFile(decision: OutputAllow, content: string): void {
     const targetPath = decision.canonicalPath;
@@ -488,22 +500,28 @@ export class OutputAccessPolicy {
         throw directoryChanged(targetDir);
       }
     };
+    const assertTempInPlace = (created: FileIdentity): void => {
+      const tempNow = lstatSync(tmpPath, { bigint: true, throwIfNoEntry: false });
+      if (tempNow === undefined || !tempNow.isFile() || !sameIdentity(tempNow, created)) {
+        throw new OutputPolicyError(
+          "workspace/output-path-denied",
+          `the temporary export file is not the one this export created in the output directory (replaced, or created through a replaced directory); nothing was published: ${targetPath}`,
+        );
+      }
+    };
     try {
       temp = identityOf(fstatSync(fd, { bigint: true }));
       // A swap between the bind and the open would have created the temp file
-      // elsewhere: refuse before any content is written there.
+      // elsewhere: refuse before any content is written there. The directory
+      // check alone misses a swap that was undone again; the entry at the temp
+      // path in the bound directory must also be the opened descriptor's file.
       assertDirectoryUnchanged();
+      assertTempInPlace(temp);
       writeFileSync(fd, content, "utf8");
       closed = true;
       closeSync(fd);
       assertDirectoryUnchanged();
-      const tempNow = lstatSync(tmpPath, { bigint: true, throwIfNoEntry: false });
-      if (tempNow === undefined || !tempNow.isFile() || !sameIdentity(tempNow, temp)) {
-        throw new OutputPolicyError(
-          "workspace/output-path-denied",
-          `the temporary export file was replaced before publication; nothing was published: ${targetPath}`,
-        );
-      }
+      assertTempInPlace(temp);
       renameSync(tmpPath, targetPath);
     } catch (error) {
       if (!closed) {

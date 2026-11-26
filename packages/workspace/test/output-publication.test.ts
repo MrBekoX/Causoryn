@@ -2,8 +2,9 @@
  * CAU-08 (CWE-367 / CWE-459): publishing an authorized export file.
  *
  * OutputAccessPolicy.publishFile writes through a temp file it creates itself
- * (crypto-random name in the target directory, O_CREAT|O_EXCL `wx`, mode
- * 0o600), never removes a file it did not create, and binds the authorized
+ * (crypto-random name in the target directory, O_CREAT|O_EXCL `wx`, default
+ * mode 0o666 narrowed by the umask), never removes a file it did not create,
+ * and binds the authorized
  * directory's identity (dev, ino; no link; same real path) to the rename:
  * a directory replaced between authorization and publication is refused.
  *
@@ -22,6 +23,7 @@ import {
   renameSync,
   rmSync,
   symlinkSync,
+  unlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -37,6 +39,8 @@ const fsHooks = vi.hoisted(() => ({
   fdWrites: 0,
   /** One-shot: runs before the next openSync. */
   beforeOpen: undefined as undefined | (() => void),
+  /** One-shot: runs after the next openSync returned its descriptor. */
+  afterOpen: undefined as undefined | (() => void),
   /** One-shot: runs after the next closeSync. */
   afterClose: undefined as undefined | (() => void),
   /** One-shot: runs before the next renameSync. */
@@ -50,7 +54,11 @@ vi.mock("node:fs", async (importOriginal) => {
     fsHooks.beforeOpen = undefined;
     hook?.();
     fsHooks.opened.push({ file: String(file), flags, mode });
-    return actual.openSync(file, flags ?? "r", mode);
+    const fd = actual.openSync(file, flags ?? "r", mode);
+    const after = fsHooks.afterOpen;
+    fsHooks.afterOpen = undefined;
+    after?.();
+    return fd;
   };
   const writeFileSync = (...args: Parameters<typeof actual.writeFileSync>) => {
     if (typeof args[0] === "number") fsHooks.fdWrites += 1;
@@ -76,6 +84,7 @@ afterEach(() => {
   fsHooks.opened.length = 0;
   fsHooks.fdWrites = 0;
   fsHooks.beforeOpen = undefined;
+  fsHooks.afterOpen = undefined;
   fsHooks.afterClose = undefined;
   fsHooks.beforeRename = undefined;
   for (const dir of created.splice(0).reverse()) {
@@ -128,7 +137,7 @@ function policyError(action: () => unknown): OutputPolicyError {
 }
 
 describe("OutputAccessPolicy.publishFile (CAU-08)", () => {
-  it("publishes through one unique temp file created exclusively and owner-only", () => {
+  it("publishes through one unique temp file created exclusively, with the default 0o666 mode the umask narrows", () => {
     const dir = makeTempDir("basic");
     const policy = OutputAccessPolicy.create([dir]);
     const decision = allow(policy, dir, "out.json");
@@ -139,10 +148,37 @@ describe("OutputAccessPolicy.publishFile (CAU-08)", () => {
     const opens = tempOpens(dir);
     expect(opens).toHaveLength(1);
     expect(opens[0]!.flags).toBe("wx");
-    expect(opens[0]!.mode).toBe(0o600);
+    // The temp file's mode survives the rename, so it is the published file's
+    // mode: 0o666 minus the umask, as for any file the process writes (0o644
+    // under the usual 022). The exclusive, owned, random-named create is the
+    // security property; an owner-only mode would make shared or served
+    // export directories unreadable and tighten a re-exported file.
+    expect(opens[0]!.mode).toBe(0o666);
     expect(path.basename(opens[0]!.file)).toMatch(/^\.out\.json\.[0-9a-f]{24}\.tmp$/);
     expect(readdirSync(dir)).toEqual(["out.json"]);
   });
+
+  // Windows keeps only the read-only attribute of a mode, so the bits are POSIX-only.
+  it.skipIf(process.platform === "win32")(
+    "the published file gets the umask-derived default mode, also when it replaces an existing export",
+    () => {
+      const dir = makeTempDir("mode");
+      // A file created with Node's default mode: 0o666 minus this process's umask.
+      const reference = path.join(makeTempDir("mode-reference"), "reference.txt");
+      writeFileSync(reference, "", "utf8");
+      const defaultMode = lstatSync(reference).mode & 0o777;
+      const policy = OutputAccessPolicy.create([dir]);
+      const target = path.join(dir, "out.json");
+
+      policy.publishFile(allow(policy, dir, "out.json"), "FIRST");
+      expect(lstatSync(target).mode & 0o777).toBe(defaultMode);
+
+      // Re-exporting over an existing export does not tighten it.
+      policy.publishFile(allow(policy, dir, "out.json"), "SECOND");
+      expect(lstatSync(target).mode & 0o777).toBe(defaultMode);
+      expect(readFileSync(target, "utf8")).toBe("SECOND");
+    },
+  );
 
   it("uses a different temp name for every publication", () => {
     const dir = makeTempDir("names");
@@ -222,6 +258,38 @@ describe("OutputAccessPolicy.publishFile (CAU-08)", () => {
     // content is written, and removed again (it is still this call's file).
     expect(fsHooks.fdWrites).toBe(0);
     expect(readdirSync(outside)).toEqual([]);
+  });
+
+  it("writes no content when the directory is swapped for a link around the temp file's creation and swapped back", () => {
+    const dir = makeTempDir("swap-and-back");
+    const outside = makeTempDir("swap-and-back-outside");
+    const policy = OutputAccessPolicy.create([dir]);
+    const decision = allow(policy, dir, "out.json");
+    let moved: string | undefined;
+    fsHooks.beforeOpen = () => {
+      moved = swapForLink(dir, outside);
+    };
+    // The temp file now exists in `outside`; the original directory is put
+    // back before the checks, so the directory identity alone matches again.
+    fsHooks.afterOpen = () => {
+      unlinkSync(dir);
+      renameSync(moved!, dir);
+    };
+
+    const error = policyError(() => policy.publishFile(decision, "CONTENT"));
+
+    expect(error.code).toBe("workspace/output-path-denied");
+    expect(error.message).toContain("temporary export file");
+    // The descriptor is not the entry at the temp path in the bound
+    // directory: refused before any content is written through it.
+    expect(fsHooks.fdWrites).toBe(0);
+    expect(readdirSync(dir)).toEqual([]);
+    // Residual (no openat in Node): the empty temp created through the link
+    // stays where the link pointed; it is not removed by path, since that
+    // path is outside the bound directory.
+    const strays = readdirSync(outside);
+    expect(strays).toHaveLength(1);
+    expect(readFileSync(path.join(outside, strays[0]!), "utf8")).toBe("");
   });
 
   it("refuses when the directory is replaced by another directory after authorization", () => {

@@ -125,7 +125,7 @@ describe("writeDocumentation publication (CAU-08)", () => {
     expect(readdirSync(outputDir).sort()).toEqual([JSON_NAME, `${JSON_NAME}.tmp`].sort());
   });
 
-  it("creates its temp file exclusively, owner-only, under an unpredictable name", () => {
+  it("creates its temp file exclusively, with the umask-narrowed default mode, under an unpredictable name", () => {
     const outputDir = makeTempDir("temp-file");
     const policy = OutputAccessPolicy.create([outputDir]);
 
@@ -134,7 +134,10 @@ describe("writeDocumentation publication (CAU-08)", () => {
     const temps = fsHooks.opened.filter((entry) => path.relative(outputDir, path.dirname(entry.file)) === "");
     expect(temps).toHaveLength(1);
     expect(temps[0]!.flags).toBe("wx");
-    expect(temps[0]!.mode).toBe(0o600);
+    // 0o666 minus the umask (0o644 under 022), like any file the process
+    // writes: the temp's mode becomes the published export's mode, and an
+    // owner-only export would be unreadable in a shared or served directory.
+    expect(temps[0]!.mode).toBe(0o666);
     expect(path.basename(temps[0]!.file)).not.toBe(`${JSON_NAME}.tmp`);
     expect(readdirSync(outputDir)).toEqual([JSON_NAME]);
   });

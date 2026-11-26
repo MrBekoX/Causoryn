@@ -1,7 +1,7 @@
 /**
  * CAU-08 (CWE-367 / CWE-459) for the offline wiki export: every file is
- * published through a temp file the export creates itself (`wx`, mode 0o600,
- * unpredictable name), and the authorized output directory is bound to each
+ * published through a temp file the export creates itself (`wx`, default mode
+ * 0o666 narrowed by the umask, unpredictable name), and the authorized output directory is bound to each
  * publication — replaced between authorization and rename → refused,
  * nothing written outside. Two exports to one directory do not interfere.
  *
@@ -96,7 +96,7 @@ function listTree(dir: string): string[] {
 }
 
 describe("exportWikiOffline publication (CAU-08)", () => {
-  it("creates every temp file exclusively and owner-only", () => {
+  it("creates every temp file exclusively, with the umask-narrowed default mode", () => {
     const outputDir = makeTempDir("temp-files");
     const policy = OutputAccessPolicy.create([outputDir]);
     const input = projection("rev-temp");
@@ -107,7 +107,9 @@ describe("exportWikiOffline publication (CAU-08)", () => {
     expect(temps).toHaveLength(result.files.length);
     for (const temp of temps) {
       expect(temp.flags).toBe("wx");
-      expect(temp.mode).toBe(0o600);
+      // 0o666 minus the umask: the temp's mode becomes the published page's
+      // mode, so a served wiki directory stays readable (0o644 under 022).
+      expect(temp.mode).toBe(0o666);
     }
     expect(listTree(outputDir)).toEqual(
       [...buildWikiExportFileSet(input).map((file) => file.relativePath), WIKI_EXPORT_MARKDOWN_DIR_NAME].sort(),

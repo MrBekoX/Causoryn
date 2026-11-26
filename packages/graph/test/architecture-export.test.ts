@@ -693,7 +693,8 @@ describe("writeDocumentation — view & annotations entegrasyonu", () => {
     );
 
     // 3. SEC-12 TOCTOU koruması: export.ts yazmayı OutputAccessPolicy.publishFile'a
-    //    devreder; o da geçici dosyayı exclusive "wx" (ve 0o600) ile açar (CAU-08).
+    //    devreder; o da geçici dosyayı exclusive "wx" ile (umask'ın daralttığı
+    //    varsayılan 0o666 moduyla) açar (CAU-08).
     const exportSourcePath = fileURLToPath(new URL("../src/export.ts", import.meta.url));
     const exportSource = readFileSync(exportSourcePath, "utf8");
     expect(exportSource).toMatch(/policy\.publishFile\(\s*decision\s*,\s*content\s*\)/);
