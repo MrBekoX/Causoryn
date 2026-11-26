@@ -64,8 +64,12 @@ import { inspectLinkTargets, isUncOrDevicePath, LINK_TARGET_INSPECTION_ENABLED }
  * Windows; other reparse points look like plain directories. Identity checks
  * assume the filesystem reports real inodes; a filesystem reporting inode 0
  * for every file makes the descriptor comparison vacuous (the alias slow path
- * never matches on it). On a case-insensitive Linux filesystem, a path
- * spelled in another letter case than on disk fails step 5 and is refused.
+ * never matches on it). On a case-insensitive Linux filesystem (9p/drvfs,
+ * casefold ext4) a path spelled in another letter case than on disk is not
+ * reliably refused here: the kernel may report the looked-up spelling for the
+ * descriptor, so step 5 can pass. The workspace policy folds look-alike
+ * spellings for the secret / VCS deny rules on every platform; other ignore
+ * patterns keep the platform's case rule.
  */
 
 /** (dev, ino) of the opened file. */
