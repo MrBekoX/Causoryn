@@ -94,6 +94,71 @@ describe("CAU-14: an existing staging parent must be private", () => {
     }
   });
 
+  it.each([
+    ["the staged runtime itself (~/.causoryn/runtime)", "runtime"],
+    ["another package below ~/.causoryn", "pkg"],
+  ])(
+    "setup run from %s without skills refuses a non-private ~/.causoryn, since host configs would point into it",
+    async (_label, dirName) => {
+      const sb = createSetupSandbox("setup-from-home");
+      const causorynDir = path.join(sb.home, ".causoryn");
+      mkdirSync(causorynDir, { recursive: true, mode: 0o700 });
+      const pkg = writeFakePackage(path.join(causorynDir, dirName), causorynSkillBody("v1"));
+      for (const dryRun of [true, false]) {
+        await expect(
+          runSetup({
+            homeDir: sb.home,
+            codexHomeDir: sb.codexHome,
+            packageRoot: pkg,
+            ephemeralTmpDir: sb.notTmp,
+            clients: ["claude-code"],
+            installSkills: false,
+            yes: true,
+            dryRun,
+            directoryProbe: posixProbe(CURRENT_UID, 0o777),
+          }),
+        ).rejects.toThrow(/writable by other users/);
+        expect(existsSync(path.join(sb.home, ".claude.json"))).toBe(false);
+      }
+    },
+  );
+
+  it("setup run from ~/.causoryn/runtime without skills uses a private ~/.causoryn and points the host config into it", async () => {
+    const sb = createSetupSandbox("setup-from-runtime-ok");
+    const causorynDir = path.join(sb.home, ".causoryn");
+    mkdirSync(causorynDir, { recursive: true, mode: 0o700 });
+    const runtime = writeFakePackage(path.join(causorynDir, "runtime"), causorynSkillBody("v1"));
+    const res = await runSetup({
+      homeDir: sb.home,
+      codexHomeDir: sb.codexHome,
+      packageRoot: runtime,
+      ephemeralTmpDir: sb.notTmp,
+      clients: ["claude-code"],
+      installSkills: false,
+      yes: true,
+      directoryProbe: posixProbe(CURRENT_UID, 0o700),
+    });
+    expect(res.applied).toBe(true);
+    expect(res.stagedRuntimeDir).toBeNull();
+    expect(readFileSync(path.join(sb.home, ".claude.json"), "utf8")).toContain(
+      JSON.stringify(path.join(runtime, "scripts", "causoryn.mjs")).slice(1, -1),
+    );
+
+    // Uninstall writes no reference into ~/.causoryn, so it is not refused.
+    const uninstall = await runSetup({
+      homeDir: sb.home,
+      codexHomeDir: sb.codexHome,
+      packageRoot: runtime,
+      ephemeralTmpDir: sb.notTmp,
+      clients: ["claude-code"],
+      installSkills: false,
+      uninstall: true,
+      yes: true,
+      directoryProbe: posixProbe(CURRENT_UID, 0o777),
+    });
+    expect(uninstall.applied).toBe(true);
+  });
+
   it("uninstall still works with a non-private ~/.causoryn: the install record there is neither trusted nor rewritten", async () => {
     const { sb, pkg, causorynDir } = stageSandbox("uninstall-loose");
     const options = {

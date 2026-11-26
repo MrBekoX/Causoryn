@@ -1,4 +1,5 @@
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -33,6 +34,10 @@ const LEGACY_PREFLIGHT_0_3_2 = readFileSync(
   path.join(TEST_DIR, "fixtures", "legacy-skills", "preflight-change-v0.3.2.md.txt"),
   "utf8",
 );
+
+function sha256OfText(text: string): string {
+  return createHash("sha256").update(text, "utf8").digest("hex");
+}
 
 function zcodeSkillFile(sb: SetupSandbox, skillName: string): string {
   return path.join(sb.home, ".zcode", "skills", skillName, "SKILL.md");
@@ -70,6 +75,88 @@ describe("CAU-10: setup only upgrades skills Causoryn owns", () => {
       expect(readFileSync(zcodeSkillFile(sb, skillName), "utf8")).toBe(causorynSkillBody("v2")(skillName));
       expect(skillAction(res.actions, skillName).operation).toBe("update");
     }
+  });
+
+  it("records an already up-to-date skill when the install record was lost, so a later upgrade still updates it", async () => {
+    const sb = createSetupSandbox("record-lost");
+    const v1 = writeFakePackage(path.join(sb.root, "pkg-v1"), causorynSkillBody("v1"));
+    const v2 = writeFakePackage(path.join(sb.root, "pkg-v2"), causorynSkillBody("v2"));
+    const recordPath = path.join(sb.home, ".causoryn", "installed-skills.json");
+
+    await runSetup({ ...baseOptions(sb, v1), clients: ["zcode"] });
+    rmSync(recordPath);
+
+    // Every skill is unchanged (exactly the shipped v1 content): setup records them again.
+    const rerun = await runSetup({ ...baseOptions(sb, v1), clients: ["zcode"] });
+    for (const skillName of CANONICAL_SKILL_NAMES) {
+      expect(skillAction(rerun.actions, skillName).operation).toBe("noop");
+    }
+    expect(existsSync(recordPath)).toBe(true);
+    const recorded = (JSON.parse(readFileSync(recordPath, "utf8")) as { skills: Array<{ path: string; sha256: string }> })
+      .skills;
+    for (const skillName of CANONICAL_SKILL_NAMES) {
+      const skillFile = zcodeSkillFile(sb, skillName);
+      expect(recorded).toContainEqual({ path: path.resolve(skillFile), sha256: sha256OfText(readFileSync(skillFile, "utf8")) });
+    }
+
+    // v1 is not a shipped version, so only the record proves it is Causoryn's.
+    const upgrade = await runSetup({ ...baseOptions(sb, v2), clients: ["zcode"] });
+    for (const skillName of CANONICAL_SKILL_NAMES) {
+      expect(skillAction(upgrade.actions, skillName).operation).toBe("update");
+      expect(readFileSync(zcodeSkillFile(sb, skillName), "utf8")).toBe(causorynSkillBody("v2")(skillName));
+    }
+  });
+
+  it("an up-to-date rerun stays a no-op when ~/.causoryn is a link (a record there proves nothing and is not written)", async () => {
+    const sb = createSetupSandbox("record-linked");
+    const v1 = writeFakePackage(path.join(sb.root, "pkg-v1"), causorynSkillBody("v1"));
+    await runSetup({ ...baseOptions(sb, v1), clients: ["zcode"] });
+    const causorynDir = path.join(sb.home, ".causoryn");
+    const realDir = path.join(sb.root, "real-causoryn");
+    renameSync(causorynDir, realDir);
+    rmSync(path.join(realDir, "installed-skills.json"));
+    symlinkSync(realDir, causorynDir, "junction");
+
+    const rerun = await runSetup({ ...baseOptions(sb, v1), clients: ["zcode"] });
+    expect(rerun.applied).toBe(false);
+    expect(existsSync(path.join(realDir, "installed-skills.json"))).toBe(false);
+  });
+
+  it("does not record an up-to-date skill below a linked directory; a later upgrade keeps it instead of failing", async () => {
+    const sb = createSetupSandbox("skill-linked");
+    const v1 = writeFakePackage(path.join(sb.root, "pkg-v1"), causorynSkillBody("v1"));
+    const v2 = writeFakePackage(path.join(sb.root, "pkg-v2"), causorynSkillBody("v2"));
+    const recordPath = path.join(sb.home, ".causoryn", "installed-skills.json");
+    await runSetup({ ...baseOptions(sb, v1), clients: ["zcode"] });
+    const linkedDir = path.dirname(zcodeSkillFile(sb, "map-system"));
+    const realDir = path.join(sb.root, "dotfiles-map-system");
+    renameSync(linkedDir, realDir);
+    symlinkSync(realDir, linkedDir, "junction");
+    rmSync(recordPath);
+
+    await runSetup({ ...baseOptions(sb, v1), clients: ["zcode"] });
+    const recordedPaths = (JSON.parse(readFileSync(recordPath, "utf8")) as { skills: Array<{ path: string }> }).skills.map(
+      (entry) => entry.path,
+    );
+    expect(recordedPaths).toContain(path.resolve(zcodeSkillFile(sb, "causoryn")));
+    expect(recordedPaths).not.toContain(path.resolve(zcodeSkillFile(sb, "map-system")));
+
+    const upgrade = await runSetup({ ...baseOptions(sb, v2), clients: ["zcode"] });
+    expect(skillAction(upgrade.actions, "map-system").operation).toBe("noop");
+    expect(readFileSync(path.join(realDir, "SKILL.md"), "utf8")).toBe(causorynSkillBody("v1")("map-system"));
+    expect(readFileSync(zcodeSkillFile(sb, "causoryn"), "utf8")).toBe(causorynSkillBody("v2")("causoryn"));
+  });
+
+  it("an up-to-date rerun with an intact install record changes nothing", async () => {
+    const sb = createSetupSandbox("record-intact");
+    const v1 = writeFakePackage(path.join(sb.root, "pkg-v1"), causorynSkillBody("v1"));
+    const recordPath = path.join(sb.home, ".causoryn", "installed-skills.json");
+    await runSetup({ ...baseOptions(sb, v1), clients: ["zcode"] });
+    const before = readFileSync(recordPath, "utf8");
+
+    const rerun = await runSetup({ ...baseOptions(sb, v1), clients: ["zcode"] });
+    expect(rerun.applied).toBe(false);
+    expect(readFileSync(recordPath, "utf8")).toBe(before);
   });
 
   it("keeps a foreign SKILL.md with a canonical name byte-identical on setup and on uninstall, and says so", async () => {

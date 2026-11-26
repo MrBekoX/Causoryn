@@ -41,6 +41,7 @@ import {
 } from "./skill-ownership.js";
 import {
   getPersistentRuntimeDir,
+  isAtOrBelowDir,
   isEphemeralRuntimeDir,
   isSameRuntimeDir,
   stagePersistentRuntime,
@@ -1229,6 +1230,8 @@ function planSkillsForClient(params: {
   readonly removals: FileRemoveInstruction[];
   readonly trustedBases: readonly string[];
   readonly record: SkillInstallRecord;
+  /** Whether the install record may be written (its path has no link below a trusted base). */
+  readonly recordTrusted: boolean;
 }): void {
   const {
     homeDir,
@@ -1241,6 +1244,7 @@ function planSkillsForClient(params: {
     removals,
     trustedBases,
     record,
+    recordTrusted,
   } = params;
   const hostSkillsRoot = getHostSkillsDir(homeDir, client, claudeConfigDir);
 
@@ -1319,6 +1323,13 @@ function planSkillsForClient(params: {
       current = read.text;
     }
     if (current === content) {
+      // Exactly the shipped content, so provably Causoryn's: record it again
+      // in case the install record was lost, so that a later release still
+      // recognizes it. Not where the record cannot be written, and not below
+      // a link (setup never writes there, so it never claims such a file).
+      if (recordTrusted && isFreeOfLinkedComponents(destSkillFile, trustedBases)) {
+        record.set(destSkillFile, sha256OfText(content));
+      }
       actions.push({
         client,
         kind: "skill",
@@ -1832,6 +1843,7 @@ function buildExecutionPlan(options: ExtendedSetupOptions): {
         removals,
         trustedBases,
         record,
+        recordTrusted,
       });
     }
   }
@@ -1851,10 +1863,16 @@ function buildExecutionPlan(options: ExtendedSetupOptions): {
     assertRegularOrAbsentTarget(recordPath);
   }
   // CAU-14 (CWE-732): ~/.causoryn holds the staged runtime every host config
-  // points at and the install record; an existing one must be private.
-  if (needsRuntimeStage || recordUpdate !== null) {
+  // points at and the install record; an existing one must be private. This
+  // also applies when nothing is staged because setup runs from a package
+  // already below ~/.causoryn (such as ~/.causoryn/runtime itself): the host
+  // configs then point into it as well.
+  const causorynDir = path.dirname(targetRuntimeDir);
+  const configsPointIntoCausorynDir =
+    !uninstall && selectedClients.length > 0 && isAtOrBelowDir(effectiveRuntimePkg, causorynDir);
+  if (needsRuntimeStage || configsPointIntoCausorynDir || recordUpdate !== null) {
     assertPrivateIfPresent(
-      path.dirname(targetRuntimeDir),
+      causorynDir,
       needsRuntimeStage ? "cli/runtime-stage-failed" : "cli/io-error",
       options.directoryProbe,
     );

@@ -63,6 +63,21 @@ function isWithinDir(candidatePath: string, parentDir: string): boolean {
   return cand.startsWith(boundary);
 }
 
+/**
+ * True when `candidatePath` is `dir` or lies below it, compared as given and
+ * with links resolved (case-insensitive on Windows).
+ */
+export function isAtOrBelowDir(candidatePath: string, dir: string): boolean {
+  if (isWithinDir(candidatePath, dir)) return true;
+  const realCandidate = safeRealpath(candidatePath);
+  const realDir = safeRealpath(dir);
+  return (
+    (realCandidate !== null && isWithinDir(realCandidate, dir)) ||
+    (realDir !== null && isWithinDir(candidatePath, realDir)) ||
+    (realCandidate !== null && realDir !== null && isWithinDir(realCandidate, realDir))
+  );
+}
+
 export function getPersistentRuntimeDir(homeDir: string): string {
   return path.join(homeDir, ".causoryn", "runtime");
 }
