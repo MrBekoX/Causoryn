@@ -3,12 +3,15 @@ import { nodeId } from "@causoryn/domain";
 import { ContractDiscoveryError } from "./errors.js";
 import { isPlainObject, parseStructuredSpec } from "./parse-safety.js";
 import { compareStrings, sortUnique } from "./order.js";
-import type {
-  ContractCandidate,
-  ContractDiagnostic,
-  ContractProperty,
-  DiscoveryOutput,
-} from "./types.js";
+import { ProjectionBudget, textUnits, type ProjectionOptions } from "./projection-budget.js";
+import {
+  EMPTY_SCHEMA_SHAPE,
+  lastRefSegment,
+  RefCache,
+  SchemaShapeCache,
+  type SchemaShape,
+} from "./schema-shape.js";
+import type { ContractCandidate, ContractDiagnostic, DiscoveryOutput } from "./types.js";
 
 /**
  * OpenAPI 3.x keşfi — TŞ §11: "OpenAPI (path, method, request/response)".
@@ -26,16 +29,20 @@ import type {
  * - parameters (path/query/header) alanları bu dilimde adaya taşınmaz.
  * - $ref ile gösterilmemiş (inline) pathItem/response yapıları için kanıt
  *   satırı path anahtar satırıdır.
+ * - Cost (CAU-04): line evidence comes from per-document indexes, each `$ref`
+ *   string is resolved once and each schema object expanded once; the whole
+ *   projection is metered by a ProjectionBudget (default
+ *   MAX_PROJECTION_WORK_UNITS) and stops with contracts/limit-exceeded.
  */
 
 const HTTP_METHODS = ["get", "put", "post", "delete", "options", "head", "patch", "trace"] as const;
 
 type HttpMethod = (typeof HTTP_METHODS)[number];
 
-function lastRefSegment(ref: string): string {
-  const segments = ref.split("/");
-  const last = segments[segments.length - 1];
-  return last === undefined || last.length === 0 ? ref : last;
+/** A `$ref` string resolved once per document: its schema id and its local target, if any. */
+interface ResolvedSchemaRef {
+  readonly id: string;
+  readonly target: Record<string, unknown> | undefined;
 }
 
 function resolveLocalComponentsSchema(
@@ -50,53 +57,6 @@ function resolveLocalComponentsSchema(
   if (!Object.hasOwn(schemas, key)) return undefined;
   const found = schemas[key];
   return isPlainObject(found) ? found : undefined;
-}
-
-interface SchemaShape {
-  readonly required: readonly string[];
-  readonly properties: readonly ContractProperty[];
-  /** Yerel $ref gerçekten dosya içinde çözümlendiyse ham işaretçi. */
-  readonly resolvedPointer?: string;
-}
-
-/** Şema gövdesinden required/properties çıkarır (yerel $ref çözümlemesiyle). */
-function readSchemaShape(
-  schema: Record<string, unknown>,
-  schemas: Record<string, unknown> | undefined,
-): SchemaShape {
-  let target: Record<string, unknown> = schema;
-  let resolvedPointer: string | undefined;
-  const ref = schema["$ref"];
-  if (typeof ref === "string") {
-    const resolved = resolveLocalComponentsSchema(ref, schemas);
-    if (resolved !== undefined) {
-      target = resolved;
-      resolvedPointer = ref;
-    }
-  }
-  const requiredRaw = target["required"];
-  const required = Array.isArray(requiredRaw)
-    ? requiredRaw.filter((entry): entry is string => typeof entry === "string")
-    : [];
-
-  const propertiesRaw = target["properties"];
-  const properties: ContractProperty[] = [];
-  if (isPlainObject(propertiesRaw)) {
-    for (const [name, propRaw] of Object.entries(propertiesRaw)) {
-      if (!isPlainObject(propRaw)) continue;
-      const typeRaw = propRaw["type"];
-      const refRaw = propRaw["$ref"];
-      const type =
-        typeof typeRaw === "string"
-          ? typeRaw
-          : typeof refRaw === "string"
-            ? "ref"
-            : "unknown";
-      properties.push({ name, type, required: required.includes(name) });
-    }
-  }
-  properties.sort((a, b) => compareStrings(a.name, b.name));
-  return { required, properties, ...(resolvedPointer === undefined ? {} : { resolvedPointer }) };
 }
 
 /** content eşlemesinden alfabetik ilk anahtarın şemasını alır. */
@@ -116,12 +76,10 @@ function firstContentSchema(
   return undefined;
 }
 
-function schemaIdOf(schema: Record<string, unknown>): string | undefined {
-  const ref = schema["$ref"];
-  return typeof ref === "string" ? lastRefSegment(ref) : undefined;
-}
-
-function responseSchemaIds(op: Record<string, unknown>): string[] {
+function responseSchemaIds(
+  op: Record<string, unknown>,
+  refs: RefCache<ResolvedSchemaRef>,
+): string[] {
   const responses = op["responses"];
   if (!isPlainObject(responses)) return [];
   const codes = Object.keys(responses).sort((a, b) => {
@@ -136,8 +94,8 @@ function responseSchemaIds(op: Record<string, unknown>): string[] {
     if (!isPlainObject(response)) continue;
     const schema = firstContentSchema(response);
     if (schema === undefined) continue;
-    const id = schemaIdOf(schema);
-    if (id !== undefined) ids.push(id);
+    const ref = schema["$ref"];
+    if (typeof ref === "string") ids.push(refs.get(ref).id);
   }
   return sortUnique(ids, compareStrings);
 }
@@ -146,11 +104,13 @@ export function discoverOpenApiContracts(
   workspaceId: string,
   relativePath: string,
   text: string,
+  options: ProjectionOptions = {},
 ): DiscoveryOutput {
   if (typeof workspaceId !== "string" || workspaceId.trim().length === 0) {
     throw new ContractDiscoveryError("contracts/invalid-input", "workspaceId must not be empty");
   }
-  const spec = parseStructuredSpec(relativePath, text);
+  const budget = options.budget ?? new ProjectionBudget();
+  const spec = parseStructuredSpec(relativePath, text, { budget });
   const root = spec.root;
 
   const version = root["openapi"];
@@ -184,14 +144,24 @@ export function discoverOpenApiContracts(
     components !== undefined && isPlainObject(components["schemas"])
       ? (components["schemas"] as Record<string, unknown>)
       : undefined;
+  const refs = new RefCache<ResolvedSchemaRef>(budget, (ref) => ({
+    id: lastRefSegment(ref),
+    target: resolveLocalComponentsSchema(ref, schemas),
+  }));
+  const shapes = new SchemaShapeCache(budget);
 
   const contracts: ContractCandidate[] = [];
   const diagnostics: ContractDiagnostic[] = [];
+  /** Diagnostics are emitted output too: 1 unit each plus their text (messages quote routes/refs). */
+  const report = (diagnostic: ContractDiagnostic): void => {
+    budget.charge(1 + textUnits(diagnostic.message, diagnostic.relativePath));
+    diagnostics.push(diagnostic);
+  };
 
   for (const [route, itemRaw] of Object.entries(paths)) {
     const pathLine = spec.lineOf("paths", route) ?? 1;
     if (!isPlainObject(itemRaw)) {
-      diagnostics.push({
+      report({
         relativePath,
         code: "contracts/openapi-path-item-invalid",
         message: `paths["${route}"] is not a mapping; pathItem ignored`,
@@ -217,23 +187,26 @@ export function discoverOpenApiContracts(
       const requestSchema = firstContentSchema(
         isPlainObject(opRaw["requestBody"]) ? (opRaw["requestBody"] as Record<string, unknown>) : undefined,
       );
-      const requestSchemaId = requestSchema === undefined ? undefined : schemaIdOf(requestSchema);
+      let requestSchemaId: string | undefined;
       const resolvedRefs: string[] = [];
       let certainty: ContractCandidate["certainty"] = "full";
       const opDiagnostics: string[] = [];
 
-      let shape: SchemaShape = { required: [], properties: [] };
+      let shape: SchemaShape = EMPTY_SCHEMA_SHAPE;
       if (requestSchema !== undefined) {
-        const read = readSchemaShape(requestSchema, schemas);
-        shape = { required: read.required, properties: read.properties };
         const refRaw = requestSchema["$ref"];
+        const resolved = typeof refRaw === "string" ? refs.get(refRaw) : undefined;
+        requestSchemaId = resolved?.id;
+        // A resolved local $ref reads the component's shape (expanded once per
+        // document); otherwise the request schema object itself is read.
+        shape = shapes.shapeOf(resolved?.target ?? requestSchema);
         if (typeof refRaw === "string") {
-          if (read.resolvedPointer !== undefined) {
+          if (resolved?.target !== undefined) {
             // Çözümlenen yerel ref kanıt olarak yazılır (json-schema keşfiyle
             // tutarlı kanıt taşıma — takım denetimi bulgusu 5).
-            resolvedRefs.push(read.resolvedPointer);
+            resolvedRefs.push(refRaw);
           } else if (refRaw.startsWith("#/")) {
-            diagnostics.push({
+            report({
               relativePath,
               code: "contracts/openapi-ref-unresolved",
               message: `requestBody $ref could not be resolved within the file: ${refRaw}`,
@@ -247,6 +220,16 @@ export function discoverOpenApiContracts(
         }
       }
 
+      const responseIds = responseSchemaIds(opRaw, refs);
+      // Emitted representation is charged per candidate, even when the shape is
+      // shared: elements plus text by length (name and qualifiedName both carry it).
+      let emitUnits =
+        1 +
+        shape.emitUnits +
+        responseIds.length +
+        textUnits(qualifiedName, qualifiedName, route, relativePath, requestSchemaId, ...resolvedRefs, ...opDiagnostics);
+      for (const id of responseIds) emitUnits += textUnits(id);
+      budget.charge(emitUnits);
       const contract: ContractCandidate = {
         contractId: nodeId({
           workspaceId,
@@ -260,8 +243,8 @@ export function discoverOpenApiContracts(
         qualifiedName,
         method: upperMethod,
         route,
-        responseSchemaIds: responseSchemaIds(opRaw),
-        properties: shape.properties,
+        responseSchemaIds: responseIds,
+        properties: [...shape.properties],
         requiredPropertyNames: [...shape.required],
         resolvedRefs: sortUnique(resolvedRefs, compareStrings),
         certainty,
@@ -273,7 +256,7 @@ export function discoverOpenApiContracts(
     }
 
     if (!recognizedMethod) {
-      diagnostics.push({
+      report({
         relativePath,
         code: "contracts/openapi-path-no-operations",
         message: `paths["${route}"] has no recognized HTTP method (parameters-only or $ref pathItems are not discovered by this parser)`,
