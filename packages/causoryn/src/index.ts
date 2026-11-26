@@ -17,6 +17,7 @@ export {
   type CausorynCliErrorCode,
   type CliIo,
   type CodexMcpServerSpec,
+  type DirectoryOwnershipProbe,
   type DoctorHostStatus,
   type DoctorLegacyIndexCheck,
   type DoctorLegacyIndexFile,

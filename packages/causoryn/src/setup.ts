@@ -20,8 +20,11 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { describeJsonSyntaxError } from "./diagnostics.js";
 import {
+  assertPrivateDirectory,
   assertSafeWritePath,
+  copyFileNoClobber,
   isFreeOfLinkedComponents,
   publishFileNoClobber,
   readRegularFileText,
@@ -29,6 +32,13 @@ import {
   writeExclusiveFile,
 } from "./fs-guard.js";
 import { insertMissingOwnedKeys } from "./owned-keys.js";
+import {
+  classifySkillOwnership,
+  sha256OfText,
+  SKILL_FILE_MAX_BYTES,
+  SKILL_INSTALL_RECORD_FILE,
+  SkillInstallRecord,
+} from "./skill-ownership.js";
 import {
   getPersistentRuntimeDir,
   isEphemeralRuntimeDir,
@@ -45,6 +55,9 @@ import {
   CausorynCliError,
   HOST_CLIENT_IDS,
   SETUP_TOOL_PROFILES,
+  type CanonicalSkillName,
+  type CausorynCliErrorCode,
+  type DirectoryOwnershipProbe,
   type HostClientId,
   type ParsedCodexMcpServer,
   type SetupAction,
@@ -62,6 +75,13 @@ interface FileWriteInstruction {
   readonly content: string;
   readonly createBackup: boolean;
   readonly defaultMode?: number;
+  /** Mode of the parent directories setup creates (default: the process umask). */
+  readonly dirMode?: number;
+  /**
+   * Skill files: SHA-256 of the file setup decided to replace, or null when
+   * it was absent. The write is refused when the file changed since then.
+   */
+  readonly expectedCurrentSha256?: string | null;
 }
 
 function assertRegularOrAbsentTarget(filePath: string): boolean {
@@ -106,8 +126,14 @@ function assertConfigAndBackupTargetsSafe(targetPath: string): boolean {
 interface FileRemoveInstruction {
   readonly targetPath: string;
   readonly mode: "skill-dir" | "skill-file";
-  readonly skillName: string;
-  readonly expectedContent: string | null;
+  /** SHA-256 of the SKILL.md that was proven Causoryn's while planning; anything else is kept. */
+  readonly expectedSha256: string;
+}
+
+/** New content of Causoryn's skill install record (null: remove the file). */
+interface RecordUpdate {
+  readonly path: string;
+  readonly content: string | null;
 }
 
 interface PlannedExecution {
@@ -118,6 +144,7 @@ interface PlannedExecution {
   readonly actions: readonly SetupAction[];
   readonly writes: readonly FileWriteInstruction[];
   readonly removals: readonly FileRemoveInstruction[];
+  readonly recordUpdate: RecordUpdate | null;
   readonly projectedConfigs: ReadonlyMap<string, string>;
   /** Home and explicitly configured host directories (CWE-59 trust bases). */
   readonly trustedBases: readonly string[];
@@ -125,32 +152,17 @@ interface PlannedExecution {
 
 type InstalledSkillState =
   | { readonly state: "absent" }
-  | { readonly state: "owned"; readonly onlySkillFile: boolean }
+  | { readonly state: "owned"; readonly onlySkillFile: boolean; readonly sha256: string }
+  | { readonly state: "modified" }
   | { readonly state: "foreign"; readonly reason: string };
 
-/**
- * True when an installed SKILL.md was written by Causoryn: it equals the
- * packaged skill, or its front matter names this skill and it refers to
- * Causoryn (an older Causoryn version).
- */
-function isCausorynSkillContent(
-  content: string,
-  skillName: string,
-  expectedContent: string | null,
-): boolean {
-  if (expectedContent !== null && content === expectedContent) return true;
-  const frontMatter = /^---\r?\n([\s\S]*?)\r?\n---/.exec(content);
-  if (frontMatter === null) return false;
-  const nameLine = /^name:[ \t]*["']?([A-Za-z0-9_.-]+)["']?[ \t]*$/m.exec(frontMatter[1] ?? "");
-  return nameLine?.[1] === skillName && /causoryn/i.test(content);
-}
-
-/** Classifies an installed skill directory without following links. */
+/** Classifies an installed skill directory without following links (see skill-ownership.ts). */
 function classifyInstalledSkill(
   skillDir: string,
-  skillName: string,
-  expectedContent: string | null,
+  skillName: CanonicalSkillName,
+  shippedContent: string | null,
   trustedBases: readonly string[],
+  record: SkillInstallRecord,
 ): InstalledSkillState {
   let dirStat;
   try {
@@ -168,31 +180,81 @@ function classifyInstalledSkill(
   if (!dirStat.isDirectory()) {
     return { state: "foreign", reason: "is not a directory" };
   }
-  const skillRead = readRegularFileText(path.join(skillDir, "SKILL.md"));
+  const skillFile = path.join(skillDir, "SKILL.md");
+  const skillRead = readRegularFileText(skillFile, SKILL_FILE_MAX_BYTES);
   if (skillRead.kind === "missing") {
     return { state: "foreign", reason: "has no SKILL.md" };
   }
   if (skillRead.kind !== "ok") {
-    return { state: "foreign", reason: "has a SKILL.md that is not a regular file" };
+    return { state: "foreign", reason: "has a SKILL.md that is not a regular file of at most 1 MiB" };
   }
-  if (!isCausorynSkillContent(skillRead.text, skillName, expectedContent)) {
+  const ownership = classifySkillOwnership({
+    skillName,
+    filePath: skillFile,
+    text: skillRead.text,
+    shippedContent,
+    record,
+  });
+  if (ownership === "modified") return { state: "modified" };
+  if (ownership === "foreign") {
     return { state: "foreign", reason: "has a SKILL.md that does not belong to Causoryn" };
   }
   const entries = readdirSync(skillDir);
-  return { state: "owned", onlySkillFile: entries.length === 1 && entries[0] === "SKILL.md" };
+  return {
+    state: "owned",
+    onlySkillFile: entries.length === 1 && entries[0] === "SKILL.md",
+    sha256: sha256OfText(skillRead.text),
+  };
+}
+
+/** SHA-256 of the regular file at `filePath` ("absent" / "other" when it is missing / not a readable regular file). */
+function currentFileSha256(filePath: string): string {
+  const read = readRegularFileText(filePath, SKILL_FILE_MAX_BYTES);
+  if (read.kind === "missing") return "absent";
+  return read.kind === "ok" ? sha256OfText(read.text) : "other";
+}
+
+function changedWhileRunningError(filePath: string): CausorynCliError {
+  return new CausorynCliError(
+    "cli/io-error",
+    `${filePath} changed while setup was running, so it was left as it is. Run setup again.`,
+  );
+}
+
+/**
+ * Before the first mutation: every skill file setup will replace or remove
+ * must still be exactly what it was while planning (for example the user may
+ * have edited it during the confirmation prompt). Nothing is changed otherwise.
+ */
+function assertPlannedSkillFilesUnchanged(plan: PlannedExecution): void {
+  for (const writeOp of plan.writes) {
+    if (writeOp.expectedCurrentSha256 === undefined) continue;
+    if (currentFileSha256(writeOp.targetPath) !== (writeOp.expectedCurrentSha256 ?? "absent")) {
+      throw changedWhileRunningError(writeOp.targetPath);
+    }
+  }
+  for (const removal of plan.removals) {
+    const skillFile = removal.mode === "skill-dir" ? path.join(removal.targetPath, "SKILL.md") : removal.targetPath;
+    if (currentFileSha256(skillFile) !== removal.expectedSha256) {
+      throw changedWhileRunningError(skillFile);
+    }
+  }
 }
 
 /** Executes one planned skill removal, re-validating it first (no link is followed). */
 function removeInstalledSkill(removal: FileRemoveInstruction, trustedBases: readonly string[]): void {
   const skillDir = removal.mode === "skill-dir" ? removal.targetPath : path.dirname(removal.targetPath);
-  const current = classifyInstalledSkill(
-    skillDir,
-    removal.skillName,
-    removal.expectedContent,
-    trustedBases,
-  );
-  if (current.state !== "owned") return;
-  unlinkSync(path.join(skillDir, "SKILL.md"));
+  const skillFile = path.join(skillDir, "SKILL.md");
+  let dirStat;
+  try {
+    dirStat = lstatSync(skillDir);
+  } catch {
+    return;
+  }
+  if (!dirStat.isDirectory() || !isFreeOfLinkedComponents(skillDir, trustedBases, { includeTarget: true })) return;
+  // Only the exact bytes proven Causoryn's while planning are removed.
+  if (currentFileSha256(skillFile) !== removal.expectedSha256) return;
+  unlinkSync(skillFile);
   if (removal.mode === "skill-dir") {
     try {
       rmdirSync(skillDir);
@@ -354,14 +416,36 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+/** Own property `key` of `obj` (never an inherited one), or undefined. */
+function ownValue(obj: Record<string, unknown>, key: string): unknown {
+  return Object.hasOwn(obj, key) ? obj[key] : undefined;
+}
+
+/**
+ * Copy of `source`'s own enumerable properties into an object without a
+ * prototype: a lookup such as `servers["causoryn"]` then never finds an
+ * inherited value, and an own `__proto__` key stays a plain key.
+ */
+function nullPrototypeCopy(source: Record<string, unknown>): Record<string, unknown> {
+  const copy = Object.create(null) as Record<string, unknown>;
+  for (const key of Object.keys(source)) {
+    copy[key] = source[key];
+  }
+  return copy;
+}
+
+/** Keys never copied from a migrated JSON object (CWE-1321). */
+const RESERVED_OBJECT_KEYS: ReadonlySet<string> = new Set(["__proto__", "constructor", "prototype"]);
+
 function parseJsonObjectStrict(raw: string, filePath: string): Record<string, unknown> {
   let parsed: unknown;
   try {
     parsed = JSON.parse(raw) as unknown;
   } catch (error) {
+    // CWE-209: the parser's message quotes the file's text, which may hold credentials.
     throw new CausorynCliError(
       "cli/malformed-json",
-      `Malformed JSON configuration file (${filePath}): ${error instanceof Error ? error.message : String(error)}`,
+      `Malformed JSON configuration file (${filePath}): ${describeJsonSyntaxError(error)}`,
     );
   }
   if (!isPlainObject(parsed)) {
@@ -531,7 +615,7 @@ function assertExistingJsonEntryEnv(
   fieldPath: string,
   targetPath: string,
 ): void {
-  const env = existingEntry["env"];
+  const env = ownValue(existingEntry, "env");
   if (env !== undefined && !isPlainObject(env)) {
     throw new CausorynCliError(
       "cli/malformed-json",
@@ -564,7 +648,7 @@ function buildJsonCausorynEntry(params: {
       "args",
       buildMcpArgs(params.cliScriptPath, params.client, {
         toolProfile: params.toolProfile,
-        preserved: extractPreservedMcpArgs(existing?.["args"]),
+        preserved: extractPreservedMcpArgs(existing !== undefined ? ownValue(existing, "args") : undefined),
       }),
     ],
   ]);
@@ -614,19 +698,17 @@ function planMcpServersJsonFile(params: {
     doc = parseJsonObjectStrict(existingRaw, targetPath);
   }
 
-  const existingServersRaw = doc["mcpServers"];
+  const existingServersRaw = ownValue(doc, "mcpServers");
   if (existingServersRaw !== undefined && !isPlainObject(existingServersRaw)) {
     throw new CausorynCliError(
       "cli/malformed-json",
       `The "mcpServers" field must be a JSON object (${targetPath})`,
     );
   }
-  const servers: Record<string, unknown> = existingServersRaw
-    ? { ...existingServersRaw }
-    : {};
+  const servers = nullPrototypeCopy(isPlainObject(existingServersRaw) ? existingServersRaw : {});
 
   if (uninstall) {
-    if (!existed || !("causoryn" in servers)) {
+    if (!existed || !Object.hasOwn(servers, "causoryn")) {
       actions.push({
         client,
         kind: "mcp-config",
@@ -707,6 +789,63 @@ function planMcpServersJsonFile(params: {
   });
 }
 
+/** Largest `~/.agents/mcp.json` setup reads for the ZCode migration (bytes). */
+const ZCODE_FALLBACK_MAX_BYTES = 1024 * 1024;
+
+/**
+ * Reads the ZCode fallback config `~/.agents/mcp.json` with the protection
+ * of the configs setup writes (CWE-59): no symbolic link or junction below
+ * the home directory, a regular file (never a link, FIFO or device) of at most
+ * {@link ZCODE_FALLBACK_MAX_BYTES}. Returns null when it does not exist; any
+ * other unusable file fails setup before a change (its servers would
+ * otherwise silently disappear from ZCode once `mcp.servers` exists).
+ */
+function readZcodeFallbackDoc(
+  fallbackPath: string,
+  trustedBases: readonly string[],
+): Record<string, unknown> | null {
+  try {
+    lstatSync(fallbackPath);
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === "ENOENT" || code === "ENOTDIR") return null;
+    throw new CausorynCliError(
+      "cli/io-error",
+      `Could not read the ZCode fallback config status (${fallbackPath}): ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+  assertSafeWritePath(fallbackPath, trustedBases, { purpose: "read" });
+  const read = readRegularFileText(fallbackPath, ZCODE_FALLBACK_MAX_BYTES);
+  if (read.kind === "missing") return null;
+  if (read.kind !== "ok") {
+    let reason = "it is not a regular file";
+    try {
+      const st = lstatSync(fallbackPath);
+      if (st.isSymbolicLink()) {
+        reason = "it is a symbolic link (CWE-59)";
+      } else if (st.isFile() && st.size > ZCODE_FALLBACK_MAX_BYTES) {
+        reason = "it is larger than 1 MiB";
+      }
+    } catch {
+      // Keep the generic reason.
+    }
+    throw new CausorynCliError(
+      "cli/io-error",
+      `Refusing to read the ZCode fallback config ${fallbackPath}: ${reason}. ` +
+        'Replace it with a regular file, or add its servers to "mcp.servers" in ~/.zcode/cli/config.json by hand, then run setup again.',
+    );
+  }
+  return parseJsonObjectStrict(read.text, fallbackPath);
+}
+
+/** A migrated fallback server entry: own keys only, reserved keys dropped, `type` added for stdio commands. */
+function normalizeFallbackServerEntry(entry: Record<string, unknown>): Record<string, unknown> {
+  const kept = Object.entries(entry).filter(([key]) => !RESERVED_OBJECT_KEYS.has(key));
+  const needsType = typeof ownValue(entry, "command") === "string" && !Object.hasOwn(entry, "type");
+  // Object.fromEntries defines own properties: no key can reach a prototype.
+  return Object.fromEntries(needsType ? [["type", "stdio"], ...kept] : kept);
+}
+
 function planZcodeMcpConfig(params: {
   readonly homeDir: string;
   readonly nodeExecutable: string;
@@ -716,6 +855,7 @@ function planZcodeMcpConfig(params: {
   readonly actions: SetupAction[];
   readonly writes: FileWriteInstruction[];
   readonly projectedConfigs: Map<string, string>;
+  readonly trustedBases: readonly string[];
 }): void {
   const {
     homeDir,
@@ -726,6 +866,7 @@ function planZcodeMcpConfig(params: {
     actions,
     writes,
     projectedConfigs,
+    trustedBases,
   } = params;
   const targetPath = path.join(homeDir, ".zcode", "cli", "config.json");
   const fallbackPath = path.join(homeDir, ".agents", "mcp.json");
@@ -738,16 +879,16 @@ function planZcodeMcpConfig(params: {
     doc = parseJsonObjectStrict(existingRaw, targetPath);
   }
 
-  const mcpRaw = doc["mcp"];
+  const mcpRaw = ownValue(doc, "mcp");
   if (mcpRaw !== undefined && !isPlainObject(mcpRaw)) {
     throw new CausorynCliError(
       "cli/malformed-json",
       `The "mcp" field must be a JSON object (${targetPath})`,
     );
   }
-  const mcpObj: Record<string, unknown> = mcpRaw ? { ...mcpRaw } : {};
+  const mcpObj: Record<string, unknown> = isPlainObject(mcpRaw) ? { ...mcpRaw } : {};
 
-  const serversRaw = mcpObj["servers"];
+  const serversRaw = ownValue(mcpObj, "servers");
   if (serversRaw !== undefined && !isPlainObject(serversRaw)) {
     throw new CausorynCliError(
       "cli/malformed-json",
@@ -755,10 +896,10 @@ function planZcodeMcpConfig(params: {
     );
   }
   const hadServersDefined = isPlainObject(serversRaw);
-  const servers: Record<string, unknown> = hadServersDefined ? { ...serversRaw } : {};
+  const servers = nullPrototypeCopy(isPlainObject(serversRaw) ? serversRaw : {});
 
   if (uninstall) {
-    if (!existed || !("causoryn" in servers)) {
+    if (!existed || !Object.hasOwn(servers, "causoryn")) {
       actions.push({
         client: "zcode",
         kind: "mcp-config",
@@ -811,9 +952,11 @@ function planZcodeMcpConfig(params: {
 
   // ZCode fallback kuralı: mcp.servers ilk kez oluşturuluyorsa ~/.agents/mcp.json
   // altındaki mevcut mcpServers kayıtlarını ezmeden taşı!
-  if (!hadServersDefined && existsSync(fallbackPath)) {
-    const fallbackDoc = parseJsonObjectStrict(readFileSync(fallbackPath, "utf8"), fallbackPath);
-    const fallbackServers = fallbackDoc["mcpServers"];
+  // Only the fallback's own server names are copied; reserved names never are (CWE-1321).
+  const fallbackDoc = hadServersDefined ? null : readZcodeFallbackDoc(fallbackPath, trustedBases);
+  const skippedFallbackNames: string[] = [];
+  if (fallbackDoc !== null) {
+    const fallbackServers = ownValue(fallbackDoc, "mcpServers");
     if (fallbackServers !== undefined && !isPlainObject(fallbackServers)) {
       throw new CausorynCliError(
         "cli/malformed-json",
@@ -821,17 +964,14 @@ function planZcodeMcpConfig(params: {
       );
     }
     if (isPlainObject(fallbackServers)) {
-      for (const [name, entry] of Object.entries(fallbackServers)) {
+      for (const name of Object.keys(fallbackServers)) {
         if (name === "causoryn") continue;
-        if (isPlainObject(entry)) {
-          const normalized =
-            typeof entry["command"] === "string" && entry["type"] === undefined
-              ? { type: "stdio", ...entry }
-              : { ...entry };
-          servers[name] = normalized;
-        } else {
-          servers[name] = entry;
+        if (RESERVED_OBJECT_KEYS.has(name)) {
+          skippedFallbackNames.push(name);
+          continue;
         }
+        const entry = fallbackServers[name];
+        servers[name] = isPlainObject(entry) ? normalizeFallbackServerEntry(entry) : entry;
       }
     }
   }
@@ -842,7 +982,7 @@ function planZcodeMcpConfig(params: {
     cliScriptPath,
     client: "zcode",
     toolProfile,
-    existingEntry: servers["causoryn"],
+    existingEntry: ownValue(servers, "causoryn"),
     fieldPath: "mcp.servers.causoryn",
     targetPath,
   });
@@ -875,9 +1015,14 @@ function planZcodeMcpConfig(params: {
     operation: existed ? "update" : "create",
     targetPath,
     backupPath: existed ? `${targetPath}.causoryn.backup` : null,
-    detail: !hadServersDefined && existsSync(fallbackPath)
-      ? "configured mcp.servers.causoryn (kept the fallback servers from ~/.agents/mcp.json)"
-      : "configured mcp.servers.causoryn",
+    detail:
+      fallbackDoc !== null
+        ? `configured mcp.servers.causoryn (kept the fallback servers from ~/.agents/mcp.json${
+            skippedFallbackNames.length > 0
+              ? `; did not import the reserved server names ${skippedFallbackNames.join(", ")}`
+              : ""
+          })`
+        : "configured mcp.servers.causoryn",
   });
 }
 
@@ -891,8 +1036,33 @@ function planCodexMcpConfig(params: {
   readonly writes: FileWriteInstruction[];
   readonly projectedConfigs: Map<string, string>;
 }): void {
+  const targetPath = path.join(params.codexHomeDir, "config.toml");
+  const existed = assertConfigAndBackupTargetsSafe(targetPath);
+  const existingRaw = existed ? readFileSync(targetPath, "utf8") : "";
+  try {
+    planCodexMcpConfigFromText({ ...params, targetPath, existed, existingRaw });
+  } catch (error) {
+    // TOML errors name the line and key (never the value); add the file.
+    if (error instanceof CausorynCliError && error.code === "cli/malformed-toml") {
+      throw new CausorynCliError("cli/malformed-toml", `${error.message} (${targetPath})`);
+    }
+    throw error;
+  }
+}
+
+function planCodexMcpConfigFromText(params: {
+  readonly nodeExecutable: string;
+  readonly cliScriptPath: string;
+  readonly toolProfile: string | undefined;
+  readonly uninstall: boolean;
+  readonly actions: SetupAction[];
+  readonly writes: FileWriteInstruction[];
+  readonly projectedConfigs: Map<string, string>;
+  readonly targetPath: string;
+  readonly existed: boolean;
+  readonly existingRaw: string;
+}): void {
   const {
-    codexHomeDir,
     nodeExecutable,
     cliScriptPath,
     toolProfile,
@@ -900,10 +1070,10 @@ function planCodexMcpConfig(params: {
     actions,
     writes,
     projectedConfigs,
+    targetPath,
+    existed,
+    existingRaw,
   } = params;
-  const targetPath = path.join(codexHomeDir, "config.toml");
-  const existed = assertConfigAndBackupTargetsSafe(targetPath);
-  const existingRaw = existed ? readFileSync(targetPath, "utf8") : "";
 
   if (uninstall) {
     if (!existed) {
@@ -992,21 +1162,22 @@ function resolveCodexStartupTimeout(existingEntry: ParsedCodexMcpServer | null):
   readonly note: string;
 } {
   const minimum = CODEX_MIN_STARTUP_TIMEOUT_SEC;
-  const raw = existingEntry?.startupTimeoutSecRaw;
+  // CWE-209: only the parsed number is reported, never the raw TOML text of the value.
+  const present = existingEntry?.startupTimeoutSecRaw !== undefined;
   const userValue = existingEntry?.startupTimeoutSec ?? null;
   if (userValue !== null && userValue >= minimum) {
-    return { seconds: userValue, note: `kept startup_timeout_sec = ${raw ?? String(userValue)}` };
+    return { seconds: userValue, note: `kept startup_timeout_sec = ${String(userValue)}` };
   }
   if (userValue !== null) {
     return {
       seconds: minimum,
-      note: `raised startup_timeout_sec from ${raw ?? String(userValue)} to the required minimum of ${String(minimum)}`,
+      note: `raised startup_timeout_sec from ${String(userValue)} to the required minimum of ${String(minimum)}`,
     };
   }
-  if (raw !== undefined) {
+  if (present) {
     return {
       seconds: minimum,
-      note: `replaced the unusable startup_timeout_sec value ${raw} with ${String(minimum)}`,
+      note: `replaced the unusable startup_timeout_sec value with ${String(minimum)}`,
     };
   }
   return { seconds: minimum, note: `startup_timeout_sec = ${String(minimum)}` };
@@ -1057,6 +1228,7 @@ function planSkillsForClient(params: {
   readonly writes: FileWriteInstruction[];
   readonly removals: FileRemoveInstruction[];
   readonly trustedBases: readonly string[];
+  readonly record: SkillInstallRecord;
 }): void {
   const {
     homeDir,
@@ -1068,6 +1240,7 @@ function planSkillsForClient(params: {
     writes,
     removals,
     trustedBases,
+    record,
   } = params;
   const hostSkillsRoot = getHostSkillsDir(homeDir, client, claudeConfigDir);
 
@@ -1076,21 +1249,33 @@ function planSkillsForClient(params: {
     const destSkillFile = path.join(destSkillDir, "SKILL.md");
 
     if (uninstall) {
-      // Remove only what Causoryn installed; never follow links.
-      let expectedContent: string | null = null;
+      // Remove only what is proven Causoryn's (install record or a shipped
+      // version); never follow links.
+      let shippedContent: string | null = null;
       try {
-        expectedContent = readSourceSkillFileSync(path.join(skillsSourceDir, skillName, "SKILL.md"));
+        shippedContent = readSourceSkillFileSync(path.join(skillsSourceDir, skillName, "SKILL.md"));
       } catch {
-        expectedContent = null;
+        shippedContent = null;
       }
-      const installed = classifyInstalledSkill(destSkillDir, skillName, expectedContent, trustedBases);
-      if (installed.state === "owned") {
+      const installed = classifyInstalledSkill(destSkillDir, skillName, shippedContent, trustedBases, record);
+      if (installed.state === "absent") {
+        record.delete(destSkillFile);
+      } else if (installed.state === "modified") {
+        actions.push({
+          client,
+          kind: "skill",
+          operation: "noop",
+          targetPath: destSkillFile,
+          backupPath: null,
+          detail: `kept ${destSkillDir}: its SKILL.md was changed after Causoryn installed it (the current content was not created by Causoryn)`,
+        });
+      } else if (installed.state === "owned") {
         removals.push({
           targetPath: installed.onlySkillFile ? destSkillDir : destSkillFile,
           mode: installed.onlySkillFile ? "skill-dir" : "skill-file",
-          skillName,
-          expectedContent,
+          expectedSha256: installed.sha256,
         });
+        record.delete(destSkillFile);
         actions.push({
           client,
           kind: "skill",
@@ -1117,7 +1302,23 @@ function planSkillsForClient(params: {
     const srcSkillFile = path.join(skillsSourceDir, skillName, "SKILL.md");
     const content = readSourceSkillFileSync(srcSkillFile);
     const existed = assertRegularOrAbsentTarget(destSkillFile);
-    if (existed && readFileSync(destSkillFile, "utf8") === content) {
+    let current: string | null = null;
+    if (existed) {
+      const read = readRegularFileText(destSkillFile, SKILL_FILE_MAX_BYTES);
+      if (read.kind !== "ok") {
+        actions.push({
+          client,
+          kind: "skill",
+          operation: "noop",
+          targetPath: destSkillFile,
+          backupPath: null,
+          detail: `skipped skill ${skillName}: ${destSkillFile} was not created by Causoryn (not a regular file of at most 1 MiB), so it was kept and Causoryn's skill was not installed`,
+        });
+        continue;
+      }
+      current = read.text;
+    }
+    if (current === content) {
       actions.push({
         client,
         kind: "skill",
@@ -1128,7 +1329,38 @@ function planSkillsForClient(params: {
       });
       continue;
     }
-    writes.push({ targetPath: destSkillFile, content, createBackup: false, defaultMode: 0o644 });
+    if (current !== null) {
+      // CAU-10: never replace a SKILL.md Causoryn cannot prove it wrote.
+      const ownership = classifySkillOwnership({
+        skillName,
+        filePath: destSkillFile,
+        text: current,
+        shippedContent: content,
+        record,
+      });
+      if (ownership !== "owned") {
+        actions.push({
+          client,
+          kind: "skill",
+          operation: "noop",
+          targetPath: destSkillFile,
+          backupPath: null,
+          detail:
+            ownership === "modified"
+              ? `skipped skill ${skillName}: ${destSkillFile} was changed after Causoryn installed it (the current content was not created by Causoryn), so it was kept and not updated (move it away and run setup again to install the current version)`
+              : `skipped skill ${skillName}: ${destSkillFile} was not created by Causoryn, so it was kept and Causoryn's skill was not installed (move it away and run setup again to install it)`,
+        });
+        continue;
+      }
+    }
+    writes.push({
+      targetPath: destSkillFile,
+      content,
+      createBackup: false,
+      defaultMode: 0o644,
+      expectedCurrentSha256: current === null ? null : sha256OfText(current),
+    });
+    record.set(destSkillFile, sha256OfText(content));
     actions.push({
       client,
       kind: "skill",
@@ -1248,23 +1480,26 @@ function atomicWriteFile(
 }
 
 /**
- * Writes a backup that never replaces an existing file: the bytes go to an
- * exclusive temporary file first and are then published without clobbering.
- * Returns false when `backupPath` already exists (nothing is written).
+ * Writes a file that never replaces an existing file: the bytes go to an
+ * exclusive temporary file first and are then published without clobbering
+ * (`publish`: a hard link for backups, which are never replaced later; an
+ * exclusive copy for a new skill file, which a later setup run replaces).
+ * Returns false when `destPath` already exists (nothing is written).
  */
-function writeBackupNoClobber(
-  backupPath: string,
+function writeFileNoClobber(
+  destPath: string,
   data: Buffer,
   mode: number,
   suffix: string,
+  publish: (tmpPath: string, destPath: string) => boolean = publishFileNoClobber,
 ): boolean {
-  const tmpPath = `${backupPath}.${suffix}.tmp`;
+  const tmpPath = `${destPath}.${suffix}.tmp`;
   try {
     writeExclusiveFile(tmpPath, data, mode);
     if (process.platform !== "win32") {
       chmodSync(tmpPath, mode);
     }
-    return publishFileNoClobber(tmpPath, backupPath);
+    return publish(tmpPath, destPath);
   } finally {
     try {
       rmSync(tmpPath, { force: true });
@@ -1279,24 +1514,41 @@ function writeFileAtomicWithBackup(
   trustedBases: readonly string[],
   renameFn: typeof renameSync = renameSync,
 ): void {
-  const { targetPath, content, createBackup, defaultMode = 0o600 } = instruction;
+  const { targetPath, content, createBackup, defaultMode = 0o600, dirMode, expectedCurrentSha256 } = instruction;
   const parentDir = path.dirname(targetPath);
   // CWE-59: no component below the home / configured host directory may be a
   // link; checked before and after creating missing parent directories.
   assertSafeWritePath(targetPath, trustedBases);
-  mkdirSync(parentDir, { recursive: true });
+  mkdirSync(parentDir, dirMode !== undefined ? { recursive: true, mode: dirMode } : { recursive: true });
   assertSafeWritePath(targetPath, trustedBases);
 
   const existed = assertRegularOrAbsentTarget(targetPath);
   const originalBytes = existed ? readFileSync(targetPath) : null;
   if (originalBytes !== null && originalBytes.equals(Buffer.from(content, "utf8"))) {
-    // Defense-in-depth idempotency: never write or touch backups when bytes match.
+    // Defense-in-depth idempotency: never write or touch backups when bytes match
+    // (also when two hosts share one skills directory and the first wrote it).
     return;
+  }
+  if (
+    expectedCurrentSha256 !== undefined &&
+    (originalBytes === null ? expectedCurrentSha256 !== null : sha256OfText(originalBytes.toString("utf8")) !== expectedCurrentSha256)
+  ) {
+    // CAU-10: the file is no longer the one setup decided to replace.
+    throw changedWhileRunningError(targetPath);
   }
 
   const effectiveMode = existed ? (statSync(targetPath).mode & 0o777) || defaultMode : defaultMode;
   const nonce = randomBytes(4).toString("hex");
   const suffix = `${String(process.pid)}-${String(Date.now())}-${nonce}`;
+
+  if (expectedCurrentSha256 === null && originalBytes === null) {
+    // CAU-10: a skill file planned as absent is published without ever
+    // replacing a file that appears meanwhile (no rename over it).
+    if (!writeFileNoClobber(targetPath, Buffer.from(content, "utf8"), effectiveMode, `new-${suffix}`, copyFileNoClobber)) {
+      throw changedWhileRunningError(targetPath);
+    }
+    return;
+  }
 
   if (createBackup && existed && originalBytes !== null) {
     const primaryBackupPath = `${targetPath}.causoryn.backup`;
@@ -1305,13 +1557,13 @@ function writeFileAtomicWithBackup(
     // it is published without clobbering, so a concurrent writer cannot replace it.
     const wrotePrimary =
       !primaryBackupExisted &&
-      writeBackupNoClobber(primaryBackupPath, originalBytes, effectiveMode, `bk-${suffix}`);
+      writeFileNoClobber(primaryBackupPath, originalBytes, effectiveMode, `bk-${suffix}`);
     if (!wrotePrimary) {
       // NEVER overwrite the original .causoryn.backup; write a secondary timestamped backup instead.
       const stamp = new Date().toISOString().replace(/[:.]/g, "-");
       const secondaryBackupPath = `${targetPath}.causoryn.${stamp}-${nonce}.backup`;
       assertRegularOrAbsentTarget(secondaryBackupPath);
-      if (!writeBackupNoClobber(secondaryBackupPath, originalBytes, effectiveMode, `bk2-${suffix}`)) {
+      if (!writeFileNoClobber(secondaryBackupPath, originalBytes, effectiveMode, `bk2-${suffix}`)) {
         throw new CausorynCliError(
           "cli/io-error",
           `Refusing to overwrite an existing backup file: ${secondaryBackupPath}`,
@@ -1329,7 +1581,55 @@ export type ExtendedSetupOptions = SetupOptions & {
   readonly all?: boolean | undefined;
   readonly nodeExecutable?: string | undefined;
   readonly renameFile?: typeof renameSync | undefined;
+  /** Inspection of an existing `~/.causoryn` (default: this process and file system). */
+  readonly directoryProbe?: DirectoryOwnershipProbe | undefined;
 };
+
+/** Causoryn's skill install record (CAU-10). */
+function getSkillInstallRecordPath(homeDir: string): string {
+  return path.join(homeDir, ".causoryn", SKILL_INSTALL_RECORD_FILE);
+}
+
+/** Non-throwing {@link assertPrivateDirectory}: true when `dir` is absent or private. */
+function isPrivateOrAbsentDirectory(dir: string, probe: DirectoryOwnershipProbe | undefined): boolean {
+  try {
+    lstatSync(dir);
+  } catch (err) {
+    return (err as NodeJS.ErrnoException).code === "ENOENT";
+  }
+  try {
+    assertPrivateDirectory(dir, "cli/io-error", probe);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Throws unless an existing `dir` is private (see {@link assertPrivateDirectory}); absent is fine. */
+function assertPrivateIfPresent(dir: string, code: CausorynCliErrorCode, probe: DirectoryOwnershipProbe | undefined): void {
+  try {
+    lstatSync(dir);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return;
+    throw err;
+  }
+  assertPrivateDirectory(dir, code, probe);
+}
+
+/** Removes the install record file without following a link (absent: nothing to do). */
+function removeRecordFile(recordPath: string): void {
+  let st;
+  try {
+    st = lstatSync(recordPath);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return;
+    throw err;
+  }
+  if (!st.isFile()) {
+    throw new CausorynCliError("cli/io-error", `The skill install record is not a regular file: ${recordPath}`);
+  }
+  unlinkSync(recordPath);
+}
 
 export type ExtendedSetupResult = SetupResult & {
   readonly message?: string | undefined;
@@ -1363,6 +1663,13 @@ function buildExecutionPlan(options: ExtendedSetupOptions): {
     options.nodeExecutable !== undefined && options.nodeExecutable.trim().length > 0
       ? options.nodeExecutable.trim()
       : process.execPath;
+  // CAU-14: hosts must not resolve the command through their own PATH or working directory.
+  if (!uninstall && !path.isAbsolute(nodeExecutable)) {
+    throw new CausorynCliError(
+      "cli/invalid-arguments",
+      "nodeExecutable must be an absolute path to the Node.js executable: a bare or relative command would be resolved by each host through its own PATH and working directory",
+    );
+  }
 
   let toolProfile: string | undefined;
   if (options.toolProfile !== undefined) {
@@ -1409,6 +1716,20 @@ function buildExecutionPlan(options: ExtendedSetupOptions): {
   const writes: FileWriteInstruction[] = [];
   const removals: FileRemoveInstruction[] = [];
   const projectedConfigs = new Map<string, string>();
+
+  // CAU-10: the install record proves which skill files Causoryn wrote. One
+  // below a link proves nothing (and writing it fails below). On uninstall a
+  // record in a non-private ~/.causoryn is not trusted either and is left
+  // alone, so uninstall still removes the configs and the skills that are
+  // exactly shipped content; setup itself refuses such a directory below.
+  const recordPath = getSkillInstallRecordPath(homeDir);
+  const recordTrusted =
+    isFreeOfLinkedComponents(recordPath, trustedBases) &&
+    (!uninstall || isPrivateOrAbsentDirectory(path.dirname(recordPath), options.directoryProbe));
+  const record =
+    installSkills && selectedClients.length > 0 && recordTrusted
+      ? SkillInstallRecord.load(recordPath)
+      : SkillInstallRecord.empty();
 
   for (const client of selectedClients) {
     switch (client) {
@@ -1493,6 +1814,7 @@ function buildExecutionPlan(options: ExtendedSetupOptions): {
           actions,
           writes,
           projectedConfigs,
+          trustedBases,
         });
         break;
       }
@@ -1509,14 +1831,33 @@ function buildExecutionPlan(options: ExtendedSetupOptions): {
         writes,
         removals,
         trustedBases,
+        record,
       });
     }
   }
+
+  const recordUpdate: RecordUpdate | null =
+    record.changed && (recordTrusted || !uninstall)
+      ? { path: recordPath, content: record.serialize() }
+      : null;
 
   // Fail before any mutation (and in --dry-run) when a planned write would go
   // through a link below the home directory or a configured host directory.
   for (const writeOp of writes) {
     assertSafeWritePath(writeOp.targetPath, trustedBases);
+  }
+  if (recordUpdate !== null) {
+    assertSafeWritePath(recordPath, trustedBases);
+    assertRegularOrAbsentTarget(recordPath);
+  }
+  // CAU-14 (CWE-732): ~/.causoryn holds the staged runtime every host config
+  // points at and the install record; an existing one must be private.
+  if (needsRuntimeStage || recordUpdate !== null) {
+    assertPrivateIfPresent(
+      path.dirname(targetRuntimeDir),
+      needsRuntimeStage ? "cli/runtime-stage-failed" : "cli/io-error",
+      options.directoryProbe,
+    );
   }
 
   return {
@@ -1532,6 +1873,7 @@ function buildExecutionPlan(options: ExtendedSetupOptions): {
       actions,
       writes,
       removals,
+      recordUpdate,
       projectedConfigs,
       trustedBases,
     },
@@ -1563,7 +1905,10 @@ export async function runSetup(options: ExtendedSetupOptions = {}): Promise<Exte
   }
 
   const hasMutations =
-    plan.needsRuntimeStage || plan.writes.length > 0 || plan.removals.length > 0;
+    plan.needsRuntimeStage ||
+    plan.writes.length > 0 ||
+    plan.removals.length > 0 ||
+    plan.recordUpdate !== null;
 
   if (!hasMutations) {
     return {
@@ -1600,11 +1945,16 @@ export async function runSetup(options: ExtendedSetupOptions = {}): Promise<Exte
     }
   }
 
+  // CAU-10: a skill file that changed since planning (for example during the
+  // confirmation prompt) stops the run before anything is changed.
+  assertPlannedSkillFilesUnchanged(plan);
+
   let stagedRuntimeDir: string | null = null;
   if (plan.needsRuntimeStage) {
     const staged = stagePersistentRuntime({
       homeDir,
       sourcePackageDir: packageRoot,
+      directoryProbe: options.directoryProbe,
     });
     stagedRuntimeDir = staged.runtimeDir;
   }
@@ -1616,6 +1966,27 @@ export async function runSetup(options: ExtendedSetupOptions = {}): Promise<Exte
 
   for (const removeOp of plan.removals) {
     removeInstalledSkill(removeOp, plan.trustedBases);
+  }
+
+  // The install record is updated last: a record entry is only ever written
+  // for a skill file that is already on disk.
+  if (plan.recordUpdate !== null) {
+    assertPrivateIfPresent(path.dirname(plan.recordUpdate.path), "cli/io-error", options.directoryProbe);
+    if (plan.recordUpdate.content === null) {
+      removeRecordFile(plan.recordUpdate.path);
+    } else {
+      writeFileAtomicWithBackup(
+        {
+          targetPath: plan.recordUpdate.path,
+          content: plan.recordUpdate.content,
+          createBackup: false,
+          defaultMode: 0o600,
+          dirMode: 0o700,
+        },
+        plan.trustedBases,
+        renameFn,
+      );
+    }
   }
 
   let runtimeCleanedUp = false;

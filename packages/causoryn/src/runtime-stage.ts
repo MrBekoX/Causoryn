@@ -3,7 +3,7 @@ import { cpSync, existsSync, lstatSync, mkdirSync, realpathSync, renameSync } fr
 import os from "node:os";
 import path from "node:path";
 
-import { assertNoLinkedComponents, removeTreeNoFollow } from "./fs-guard.js";
+import { assertNoLinkedComponents, assertPrivateDirectory, removeTreeNoFollow } from "./fs-guard.js";
 import {
   CausorynCliError,
   type StagePersistentRuntimeOptions,
@@ -153,6 +153,10 @@ export function stagePersistentRuntime(
   assertNoLinkedComponents(targetDir, homeDir, { includeTarget: true });
   mkdirSync(baseCausorynDir, { recursive: true, mode: 0o700 });
   assertNoLinkedComponents(targetDir, homeDir, { includeTarget: true });
+  // CWE-732: mkdir applies 0700 only to a directory it creates. An existing
+  // ~/.causoryn that another user owns or may write to would let that user
+  // swap the staged runtime every host config points at, so it is refused.
+  assertPrivateDirectory(baseCausorynDir, "cli/runtime-stage-failed", options.directoryProbe);
 
   const stamp = `${String(process.pid)}-${String(Date.now())}-${randomBytes(6).toString("hex")}`;
   const stagingDir = path.join(baseCausorynDir, `.runtime-stage-${stamp}`);

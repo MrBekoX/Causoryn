@@ -24,6 +24,8 @@ interface TomlSection {
   readonly leadingComments: readonly string[];
   /** Başlık satırı + gövde satırları. */
   readonly lines: readonly string[];
+  /** 1-based line of `lines[0]` in the parsed document (absent for rendered sections). */
+  readonly startLine?: number;
 }
 
 interface ParsedTomlDocument {
@@ -64,13 +66,31 @@ export function formatTomlBasicString(value: string): string {
   return out;
 }
 
-function unescapeTomlString(raw: string): string {
+/**
+ * Where a TOML value sits: the key path and its line. Value errors name these
+ * and never quote the value (CWE-209): env values and args are often
+ * credentials, and the messages reach the setup / doctor output.
+ */
+interface TomlValueSite {
+  readonly field: string;
+  readonly line: number | null;
+}
+
+/** Site for parses whose errors are caught and never reported. */
+const UNREPORTED_SITE: TomlValueSite = { field: "value", line: null };
+
+function tomlValueError(site: TomlValueSite, problem: string): CausorynCliError {
+  const where = site.line !== null ? ` (line ${String(site.line)})` : "";
+  return new CausorynCliError("cli/malformed-toml", `Malformed TOML${where}: ${site.field} ${problem}`);
+}
+
+function unescapeTomlString(raw: string, site: TomlValueSite): string {
   const trimmed = raw.trim();
   if (trimmed.startsWith("'") && trimmed.endsWith("'") && trimmed.length >= 2) {
     return trimmed.slice(1, -1);
   }
   if (!trimmed.startsWith('"') || !trimmed.endsWith('"') || trimmed.length < 2) {
-    throw new CausorynCliError("cli/malformed-toml", `Invalid TOML string value: ${raw}`);
+    throw tomlValueError(site, "is not a valid TOML string");
   }
   const body = trimmed.slice(1, -1);
   let result = "";
@@ -82,7 +102,7 @@ function unescapeTomlString(raw: string): string {
     }
     i += 1;
     if (i >= body.length) {
-      throw new CausorynCliError("cli/malformed-toml", "Unterminated TOML escape sequence");
+      throw tomlValueError(site, "has an unterminated escape sequence");
     }
     const esc = body[i] ?? "";
     switch (esc) {
@@ -110,7 +130,7 @@ function unescapeTomlString(raw: string): string {
       case "u": {
         const hex = body.slice(i + 1, i + 5);
         if (!/^[0-9a-fA-F]{4}$/.test(hex)) {
-          throw new CausorynCliError("cli/malformed-toml", `Invalid \\u escape: ${hex}`);
+          throw tomlValueError(site, "has an invalid \\u escape sequence");
         }
         result += String.fromCharCode(Number.parseInt(hex, 16));
         i += 4;
@@ -331,9 +351,10 @@ function parseTomlDocument(rawToml: string): ParsedTomlDocument {
   interface RawSectionBuilder {
     header: string | null;
     lines: string[];
+    startLine: number;
   }
 
-  const builders: RawSectionBuilder[] = [{ header: null, lines: [] }];
+  const builders: RawSectionBuilder[] = [{ header: null, lines: [], startLine: 1 }];
   const seenStandardTables = new Set<string>();
 
   for (let idx = 0; idx < rawLines.length; idx += 1) {
@@ -374,7 +395,7 @@ function parseTomlDocument(rawToml: string): ParsedTomlDocument {
         }
         seenStandardTables.add(header);
       }
-      builders.push({ header, lines: [line] });
+      builders.push({ header, lines: [line], startLine: lineNumber });
       continue;
     }
 
@@ -452,6 +473,7 @@ function parseTomlDocument(rawToml: string): ParsedTomlDocument {
       header: builder.header,
       leadingComments: myLeading,
       lines: bodyLines,
+      startLine: builder.startLine,
     });
   }
 
@@ -504,9 +526,9 @@ function ownedTableValueUnchanged(
   try {
     switch (key) {
       case "command":
-        return unescapeTomlString(rawValue) === spec.command;
+        return unescapeTomlString(rawValue, UNREPORTED_SITE) === spec.command;
       case "args": {
-        const existing = parseTomlStringArray(rawValue);
+        const existing = parseTomlStringArray(rawValue, UNREPORTED_SITE);
         return existing.length === spec.args.length && existing.every((arg, i) => arg === spec.args[i]);
       }
       case "startup_timeout_sec":
@@ -723,11 +745,18 @@ export function removeCodexMcpServer(existingToml: string): {
   return { content: serializeSections(kept, parsed.eol), removed: true };
 }
 
-function parseTomlStringArray(rawValue: string): string[] {
+function parseTomlStringArray(rawValue: string, site: TomlValueSite): string[] {
   const trimmed = rawValue.trim();
   if (!trimmed.startsWith("[") || !trimmed.endsWith("]")) {
-    throw new CausorynCliError("cli/malformed-toml", `Expected a TOML array: ${rawValue}`);
+    throw tomlValueError(site, "must be an array of TOML strings");
   }
+  const item = (piece: string): string => {
+    try {
+      return unescapeTomlString(piece, site);
+    } catch {
+      throw tomlValueError(site, "must be an array of TOML strings");
+    }
+  };
   const inner = trimmed.slice(1, -1).trim();
   if (inner.length === 0) return [];
 
@@ -766,7 +795,7 @@ function parseTomlStringArray(rawValue: string): string[] {
     if (ch === ",") {
       const piece = current.trim();
       if (piece.length > 0) {
-        items.push(unescapeTomlString(piece));
+        items.push(item(piece));
       }
       current = "";
       continue;
@@ -776,7 +805,7 @@ function parseTomlStringArray(rawValue: string): string[] {
 
   const tail = current.trim();
   if (tail.length > 0) {
-    items.push(unescapeTomlString(tail));
+    items.push(item(tail));
   }
   return items;
 }
@@ -790,6 +819,8 @@ interface SectionUnit {
   readonly lines: readonly string[];
   readonly key: string | null;
   readonly value: string | null;
+  /** 1-based document line of the unit's first line. */
+  readonly line: number;
 }
 
 /** Splits a section body (header line skipped) into assignments and blank / comment lines. */
@@ -801,11 +832,13 @@ function splitSectionUnits(section: TomlSection): SectionUnit[] {
     braceDepth: 0,
   };
   const units: SectionUnit[] = [];
-  let pending: { lines: string[]; code: string } | null = null;
+  let pending: { lines: string[]; code: string; line: number } | null = null;
+  const firstLine = section.startLine ?? 1;
 
   for (let i = 1; i < section.lines.length; i += 1) {
     const line = section.lines[i] ?? "";
-    const { effectiveCode } = scanTomlLine(line, i + 1, state);
+    const lineNumber = firstLine + i;
+    const { effectiveCode } = scanTomlLine(line, lineNumber, state);
     const open =
       state.inMultilineBasic ||
       state.inMultilineLiteral ||
@@ -813,10 +846,10 @@ function splitSectionUnits(section: TomlSection): SectionUnit[] {
       state.braceDepth > 0;
     if (pending === null) {
       if (effectiveCode.length === 0 && !open) {
-        units.push({ lines: [line], key: null, value: null });
+        units.push({ lines: [line], key: null, value: null, line: lineNumber });
         continue;
       }
-      pending = { lines: [line], code: effectiveCode };
+      pending = { lines: [line], code: effectiveCode, line: lineNumber };
     } else {
       pending.lines.push(line);
       if (effectiveCode.length > 0) {
@@ -830,23 +863,27 @@ function splitSectionUnits(section: TomlSection): SectionUnit[] {
       lines: pending.lines,
       key: eqIdx > 0 ? pending.code.slice(0, eqIdx).trim() : null,
       value: eqIdx > 0 ? pending.code.slice(eqIdx + 1).trim() : null,
+      line: pending.line,
     });
     pending = null;
   }
   if (pending !== null) {
-    units.push({ lines: pending.lines, key: null, value: null });
+    units.push({ lines: pending.lines, key: null, value: null, line: pending.line });
   }
   return units;
 }
 
-/** Calls `onAssignment` for every top-level `key = value` of a section body (header line skipped). */
+/**
+ * Calls `onAssignment` for every top-level `key = value` of a section body
+ * (header line skipped) with the document line where the assignment starts.
+ */
 function forEachSectionAssignment(
   section: TomlSection,
-  onAssignment: (key: string, value: string) => void,
+  onAssignment: (key: string, value: string, line: number) => void,
 ): void {
   for (const unit of splitSectionUnits(section)) {
     if (unit.key !== null && unit.value !== null) {
-      onAssignment(unit.key, unit.value);
+      onAssignment(unit.key, unit.value, unit.line);
     }
   }
 }
@@ -861,7 +898,7 @@ function splitTomlKeyPath(rawKey: string): string[] | null {
     const trimmed = piece.trim();
     if (trimmed.startsWith('"') || trimmed.startsWith("'")) {
       try {
-        parts.push(unescapeTomlString(trimmed));
+        parts.push(unescapeTomlString(trimmed, UNREPORTED_SITE));
       } catch {
         return null;
       }
@@ -887,30 +924,34 @@ function parseTomlNumber(rawValue: string): number | null {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
-/** Parses a single (bare or quoted) TOML key; dotted keys are rejected. */
-function parseTomlSimpleKey(rawKey: string, context: string): string {
+/**
+ * Parses a single (bare or quoted) TOML key of `table`; dotted keys are
+ * rejected. A key that cannot be read is reported by its line only: its text
+ * may not be a key at all (a misplaced value).
+ */
+function parseTomlSimpleKey(rawKey: string, table: string, line: number | null): string {
   const trimmed = rawKey.trim();
+  const site: TomlValueSite = { field: `a key of ${table}`, line };
   if (trimmed.startsWith('"') || trimmed.startsWith("'")) {
-    return unescapeTomlString(trimmed);
+    return unescapeTomlString(trimmed, site);
   }
   if (!/^[A-Za-z0-9_-]+$/.test(trimmed)) {
-    throw new CausorynCliError(
-      "cli/malformed-toml",
-      `Unsupported TOML key in ${context}: ${rawKey.trim()}`,
-    );
+    throw tomlValueError(site, "is not supported (use a bare key such as API_KEY or a quoted key)");
   }
   return trimmed;
 }
 
-function parseTomlEnvValue(rawValue: string, key: string): string {
+/** Report name of the env key `key` (bare, or TOML-quoted with control characters escaped). */
+function envField(key: string): string {
+  return `${CAUSORYN_ENV_TABLE}.${formatTomlKey(key)}`;
+}
+
+function parseTomlEnvValue(rawValue: string, site: TomlValueSite): string {
   const trimmed = rawValue.trim();
   if (!trimmed.startsWith('"') && !trimmed.startsWith("'")) {
-    throw new CausorynCliError(
-      "cli/malformed-toml",
-      `Unsupported value for ${CAUSORYN_ENV_TABLE}.${key}: env values must be TOML strings (${trimmed})`,
-    );
+    throw tomlValueError(site, "is not a TOML string (env values must be TOML strings)");
   }
-  return unescapeTomlString(trimmed);
+  return unescapeTomlString(trimmed, site);
 }
 
 /** Splits `text` on top-level `separator` characters (outside strings, arrays and inline tables). */
@@ -961,26 +1002,23 @@ function setEnvEntry(env: Record<string, string>, key: string, value: string): v
   Object.defineProperty(env, key, { value, enumerable: true, writable: true, configurable: true });
 }
 
-/** Parses an inline `{ KEY = "value", ... }` env table. */
-function parseTomlInlineEnvTable(rawValue: string, into: Record<string, string>): void {
+/** Parses an inline `{ KEY = "value", ... }` env table that starts on document line `line`. */
+function parseTomlInlineEnvTable(rawValue: string, into: Record<string, string>, line: number): void {
   const trimmed = rawValue.trim();
+  const tableSite: TomlValueSite = { field: `${CAUSORYN_TABLE}.env`, line };
   if (!trimmed.startsWith("{") || !trimmed.endsWith("}")) {
-    throw new CausorynCliError(
-      "cli/malformed-toml",
-      `Expected an inline table for ${CAUSORYN_TABLE}.env: ${trimmed}`,
-    );
+    throw tomlValueError(tableSite, 'must be an inline table of TOML strings (env = { KEY = "value" })');
   }
+  let entryNumber = 0;
   for (const piece of splitTopLevel(trimmed.slice(1, -1), ",")) {
     if (piece.trim().length === 0) continue;
+    entryNumber += 1;
     const eqIdx = findTopLevelEquals(piece);
     if (eqIdx <= 0) {
-      throw new CausorynCliError(
-        "cli/malformed-toml",
-        `Malformed entry in ${CAUSORYN_TABLE}.env: ${piece.trim()}`,
-      );
+      throw tomlValueError(tableSite, `entry ${String(entryNumber)} is not a KEY = "value" pair`);
     }
-    const key = parseTomlSimpleKey(piece.slice(0, eqIdx), `${CAUSORYN_TABLE}.env`);
-    setEnvEntry(into, key, parseTomlEnvValue(piece.slice(eqIdx + 1), key));
+    const key = parseTomlSimpleKey(piece.slice(0, eqIdx), `${CAUSORYN_TABLE}.env`, line);
+    setEnvEntry(into, key, parseTomlEnvValue(piece.slice(eqIdx + 1), { field: envField(key), line }));
   }
 }
 
@@ -1004,30 +1042,30 @@ export function readCodexMcpServer(rawToml: string): ParsedCodexMcpServer | null
   };
   const env: Record<string, string> = {};
 
-  forEachSectionAssignment(target, (key, val) => {
+  forEachSectionAssignment(target, (key, val, line) => {
     const keyPath = splitTomlKeyPath(key);
     if (keyPath === null) return;
     const [first] = keyPath;
     if (first === "env") {
       if (keyPath.length === 1) {
-        parseTomlInlineEnvTable(val, env);
+        parseTomlInlineEnvTable(val, env, line);
         return;
       }
       if (keyPath.length > 2) {
-        throw new CausorynCliError(
-          "cli/malformed-toml",
-          `Unsupported TOML key in ${CAUSORYN_ENV_TABLE}: ${key.trim()}`,
+        throw tomlValueError(
+          { field: `${CAUSORYN_TABLE}.${keyPath.map(formatTomlKey).join(".")}`, line },
+          `is not supported (env keys take one level: env.KEY or the [${CAUSORYN_ENV_TABLE}] table)`,
         );
       }
       const envKey = keyPath[1] as string;
-      setEnvEntry(env, envKey, parseTomlEnvValue(val, envKey));
+      setEnvEntry(env, envKey, parseTomlEnvValue(val, { field: envField(envKey), line }));
       return;
     }
     if (keyPath.length !== 1) return;
     if (first === "command") {
-      found.command = unescapeTomlString(val);
+      found.command = unescapeTomlString(val, { field: `${CAUSORYN_TABLE}.command`, line });
     } else if (first === "args") {
-      found.args = parseTomlStringArray(val);
+      found.args = parseTomlStringArray(val, { field: `${CAUSORYN_TABLE}.args`, line });
     } else if (first === "startup_timeout_sec") {
       found.startupTimeoutSec = parseTomlNumber(val);
       found.startupTimeoutSecRaw = val;
@@ -1036,9 +1074,9 @@ export function readCodexMcpServer(rawToml: string): ParsedCodexMcpServer | null
 
   const envSection = parsed.sections.find((s) => s.header === CAUSORYN_ENV_TABLE);
   if (envSection !== undefined) {
-    forEachSectionAssignment(envSection, (key, val) => {
-      const envKey = parseTomlSimpleKey(key, CAUSORYN_ENV_TABLE);
-      setEnvEntry(env, envKey, parseTomlEnvValue(val, envKey));
+    forEachSectionAssignment(envSection, (key, val, line) => {
+      const envKey = parseTomlSimpleKey(key, `[${CAUSORYN_ENV_TABLE}]`, line);
+      setEnvEntry(env, envKey, parseTomlEnvValue(val, { field: envField(envKey), line }));
     });
   }
 
