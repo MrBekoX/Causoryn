@@ -39,7 +39,13 @@ vi.mock("yaml", async (importOriginal) => {
   };
 });
 
-import { discoverAsyncApiContracts, discoverOpenApiContracts, parseStructuredSpec } from "../src/index.js";
+import {
+  discoverAsyncApiContracts,
+  discoverContractsFromTexts,
+  discoverJsonSchemaContracts,
+  discoverOpenApiContracts,
+  parseStructuredSpec,
+} from "../src/index.js";
 
 import { generateAsyncApi, generateOpenApi, routeName } from "./large-spec-fixtures.js";
 
@@ -104,5 +110,47 @@ describe("ParsedSpec.lineOf index reuse", () => {
     const out = discoverAsyncApiContracts("ws", "big/asyncapi.yaml", channels.text);
     expect(out.contracts).toHaveLength(ROUTES);
     expect(counters.isScalar).toBeLessThanOrEqual(2 * keysIn(channels.text));
+  });
+
+  // The MCP handler goes through discoverContractsFromTexts, which first
+  // sniffs the YAML root to pick a discoverer; that parse must not fall back
+  // to the library's O(k²) duplicate-key scan either.
+  it("the discoverContractsFromTexts orchestration path never parses with the default duplicate-key scan", () => {
+    counters.defaultKeyCheckParses = 0;
+    counters.keyComparisons = 0;
+    const out = discoverContractsFromTexts("ws", [{ relativePath: "big/openapi.yaml", text: spec.text }]);
+    expect(out.contracts).toHaveLength(ROUTES);
+    expect(counters.defaultKeyCheckParses).toBe(0);
+    expect(counters.keyComparisons).toBeLessThanOrEqual(2 * keysIn(spec.text));
+  });
+});
+
+describe("JSON Schema required-property projection", () => {
+  // A required list is matched against the properties through a set, not by
+  // scanning the whole list once per property (O(P×R)).
+  it("marks required properties without scanning the required list per property", () => {
+    const PROPERTIES = 3000;
+    const names = Array.from({ length: PROPERTIES }, (_, i) => `p${String(i).padStart(5, "0")}`);
+    const schema = {
+      $schema: "https://json-schema.org/draft/2020-12/schema",
+      $id: "https://example.test/big.schema.json",
+      type: "object",
+      properties: Object.fromEntries(names.map((name) => [name, { type: "string" }])),
+      required: names.filter((_, i) => i % 2 === 0),
+    };
+    const includesSpy = vi.spyOn(Array.prototype, "includes");
+    let calls = 0;
+    try {
+      const out = discoverJsonSchemaContracts("ws", "schemas/big.schema.json", JSON.stringify(schema));
+      calls = includesSpy.mock.calls.length;
+      const props = out.contracts[0]?.properties ?? [];
+      expect(props).toHaveLength(PROPERTIES);
+      expect(props.filter((prop) => prop.required)).toHaveLength(PROPERTIES / 2);
+      expect(props.find((prop) => prop.name === "p00000")?.required).toBe(true);
+      expect(props.find((prop) => prop.name === "p00001")?.required).toBe(false);
+    } finally {
+      includesSpy.mockRestore();
+    }
+    expect(calls).toBeLessThan(PROPERTIES);
   });
 });

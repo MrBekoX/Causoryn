@@ -158,6 +158,9 @@ export function discoverJsonSchemaContracts(
   const required = Array.isArray(requiredRaw)
     ? requiredRaw.filter((entry): entry is string => typeof entry === "string")
     : [];
+  // A set keeps the required check constant per property (CAU-04: no
+  // per-property scan of the required list).
+  const requiredNames = new Set(required);
 
   const properties: ContractProperty[] = [];
   const propsRoot = root["properties"];
@@ -167,7 +170,7 @@ export function discoverJsonSchemaContracts(
       properties.push({
         name: propName,
         type: propertyType(propRaw),
-        required: required.includes(propName),
+        required: requiredNames.has(propName),
       });
     }
   }

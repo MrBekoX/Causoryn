@@ -1,6 +1,5 @@
 import path from "node:path";
 
-import { parseDocument } from "yaml";
 import { readBoundedTextFile, WorkspaceAccessPolicy, type PolicyDecision } from "@causoryn/workspace";
 
 import { discoverAsyncApiContracts } from "./asyncapi-discovery.js";
@@ -9,6 +8,7 @@ import { discoverJsonSchemaContracts } from "./json-schema-discovery.js";
 import { discoverOpenApiContracts } from "./openapi-discovery.js";
 import { discoverProtobufContracts } from "./protobuf-discovery.js";
 import { discoverSqlContracts } from "./sql-discovery.js";
+import { parseYamlDocument } from "./yaml-document.js";
 import {
   assertSpecTextPrechecks,
   describeSpecParserFailure,
@@ -85,7 +85,9 @@ function sniffYamlRoot(text: string): SniffResult {
     throw error;
   }
   try {
-    const document = parseDocument(text);
+    // Same tree and errors as parseDocument(text), with linear duplicate-key
+    // checking (CAU-04): the sniff parse runs on every YAML spec the handler sees.
+    const document = parseYamlDocument(text);
     if (document.errors.length > 0) {
       const first = document.errors[0];
       return {
