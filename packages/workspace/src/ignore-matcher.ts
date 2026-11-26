@@ -303,6 +303,51 @@ export function lookAlikeFold(segment: string): string {
 }
 
 /**
+ * Default secret / VCS deny rules (TŞ §20) that are matched again, when they are
+ * configured, with each segment folded by {@link lookAlikeFold} on every platform
+ * (Claude Security F44). On a case-insensitive volume (WSL drvfs, ext4/f2fs
+ * casefold, NTFS) `.GIT/config` opens `.git/config`, and so does `.gıt/config`
+ * on NTFS, which upper-cases U+0131 to "I"; neither `fs.realpathSync` nor
+ * `realpathSync.native` reports the on-disk spelling on drvfs. Other patterns keep
+ * the platform's case rule.
+ */
+export const LOOK_ALIKE_DENY_PATTERNS: ReadonlySet<string> = new Set(["**/.git/**", "**/.env*", "**/*.pem"]);
+
+/** One ignore decision over a fixed pattern list; see {@link compileIgnoreRuleSet}. */
+export interface IgnoreRuleSet {
+  /**
+   * First rule matching `posixRelative` or any of its ancestors (shallowest first,
+   * then pattern order); the last segment counts as a directory when
+   * `lastIsDirectory`. Every step is charged to `budget`; `budget-exhausted` means
+   * the caller must treat the path as ignored (fail closed).
+   */
+  match(posixRelative: string, lastIsDirectory: boolean, budget: IgnoreMatchBudget): AncestorIgnoreMatch;
+}
+
+/**
+ * The ignore decision shared by WorkspaceAccessPolicy and every other path filter
+ * that must agree with it (the history inventory): the patterns with the
+ * platform's case rule, then the configured {@link LOOK_ALIKE_DENY_PATTERNS} again
+ * with look-alike folding, both under the same budget.
+ */
+export function compileIgnoreRuleSet(patterns: readonly string[]): IgnoreRuleSet {
+  const exactPatterns = [...patterns];
+  const foldedPatterns = exactPatterns.filter((pattern) => LOOK_ALIKE_DENY_PATTERNS.has(pattern));
+  return {
+    match(posixRelative, lastIsDirectory, budget) {
+      const exact = findFirstAncestorIgnoreMatch(posixRelative, lastIsDirectory, exactPatterns, { budget });
+      if (exact.kind !== "none" || foldedPatterns.length === 0) {
+        return exact;
+      }
+      return findFirstAncestorIgnoreMatch(posixRelative, lastIsDirectory, foldedPatterns, {
+        budget,
+        foldSegment: lookAlikeFold,
+      });
+    },
+  };
+}
+
+/**
  * Matches `posixRelative` AND each of its ancestors against `patterns` in one pass
  * per pattern (Claude Security F32). The result is exactly that of calling
  * {@link findMatchingIgnorePattern} on every `/` prefix from the shallowest to the

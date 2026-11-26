@@ -2,10 +2,10 @@ import { lstatSync, realpathSync, statSync } from "node:fs";
 import path from "node:path";
 
 import {
-  findFirstAncestorIgnoreMatch,
-  lookAlikeFold,
+  compileIgnoreRuleSet,
   IGNORE_MATCH_WORK_BUDGET,
   type IgnoreMatchBudget,
+  type IgnoreRuleSet,
 } from "./ignore-matcher.js";
 import {
   describeLinkInspectionFailure,
@@ -57,17 +57,6 @@ const CHECK_NATIVE_NAME_ALIASES = IS_WIN || process.platform === "darwin";
 
 /** Upper bound for the per-instance root caches (roots are few in practice). */
 const ROOT_CACHE_CAP = 256;
-
-/**
- * Default secret / VCS deny rules (TŞ §20) that are matched again, when they are
- * configured, with each segment folded by {@link lookAlikeFold} on every platform
- * (Claude Security F44). On a case-insensitive volume (WSL drvfs, ext4/f2fs
- * casefold, NTFS) `.GIT/config` opens `.git/config`, and so does `.gıt/config`
- * on NTFS, which upper-cases U+0131 to "I"; neither `fs.realpathSync` nor
- * `realpathSync.native` reports the on-disk spelling on drvfs. Other patterns keep
- * the platform's case rule.
- */
-const CASE_FOLDED_DENY_PATTERNS: ReadonlySet<string> = new Set(["**/.git/**", "**/.env*", "**/*.pem"]);
 
 /**
  * True when an existing component of `lexicalRoot` below `trustedStart` is a
@@ -200,8 +189,8 @@ function windowsSegmentDeny(code: PolicyErrorCode, rawPath: string, label: strin
 export class WorkspaceAccessPolicy {
   private readonly canonicalRoots: readonly string[];
   private readonly ignorePatterns: readonly string[];
-  /** Configured patterns from {@link CASE_FOLDED_DENY_PATTERNS} (empty where all matching folds case). */
-  private readonly caseFoldedPatterns: readonly string[];
+  /** The ignore decision (exact rules, then look-alike folded secret / VCS rules). */
+  private readonly ignoreRules: IgnoreRuleSet;
   /**
    * Lexical forms of the declared allowRoots. Their components were inspected for
    * UNC/device link targets once, in the constructor (they are the user's own
@@ -238,7 +227,7 @@ export class WorkspaceAccessPolicy {
     });
     this.declaredRoots = config.allowRoots.map((root) => path.resolve(root));
     this.ignorePatterns = effectiveIgnorePatterns(config);
-    this.caseFoldedPatterns = this.ignorePatterns.filter((pattern) => CASE_FOLDED_DENY_PATTERNS.has(pattern));
+    this.ignoreRules = compileIgnoreRuleSet(this.ignorePatterns);
   }
 
   /** Şemayı doğrulayıp politikayı kurar; geçersiz config → POLICY_INVALID hatası. */
@@ -547,14 +536,7 @@ export class WorkspaceAccessPolicy {
     budget: IgnoreMatchBudget,
   ): IgnoreRuleOutcome {
     const lastIsDirectory = !this.existsAsFile(absoluteForFileCheck);
-    const exact = findFirstAncestorIgnoreMatch(posixRelative, lastIsDirectory, this.ignorePatterns, { budget });
-    if (exact.kind !== "none" || this.caseFoldedPatterns.length === 0) {
-      return exact;
-    }
-    return findFirstAncestorIgnoreMatch(posixRelative, lastIsDirectory, this.caseFoldedPatterns, {
-      budget,
-      foldSegment: lookAlikeFold,
-    });
+    return this.ignoreRules.match(posixRelative, lastIsDirectory, budget);
   }
 
   /**

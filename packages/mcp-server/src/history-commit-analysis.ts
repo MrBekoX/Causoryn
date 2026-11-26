@@ -34,8 +34,9 @@ import {
 } from "@causoryn/indexing";
 
 import {
+  compileIgnoreRuleSet,
   effectiveIgnorePatterns,
-  findMatchingIgnorePattern,
+  IGNORE_MATCH_WORK_BUDGET,
   isUncOrDevicePath,
   type WorkspacePolicyConfig,
 } from "@causoryn/workspace";
@@ -610,17 +611,16 @@ function yieldToEventLoop(): Promise<void> {
 /**
  * Path-only part of the workspace policy for a file path: true when an ignore
  * rule matches the file or one of its directories, or the extension filter
- * excludes it (same rules and matcher as WorkspaceAccessPolicy.checkFile).
+ * excludes it. The ignore decision is the policy's own (compileIgnoreRuleSet:
+ * look-alike folded secret / VCS rules, a work budget per decision); a decision
+ * that runs out of budget excludes the file. Exported for tests.
  */
-function pathRuleFilter(config: WorkspacePolicyConfig): (relativePath: string) => boolean {
-  const patterns = effectiveIgnorePatterns(config);
+export function pathRuleFilter(config: WorkspacePolicyConfig): (relativePath: string) => boolean {
+  const ignoreRules = compileIgnoreRuleSet(effectiveIgnorePatterns(config));
   return (relativePath) => {
-    const segments = relativePath.split("/");
-    for (let depth = 1; depth <= segments.length; depth += 1) {
-      const prefix = segments.slice(0, depth).join("/");
-      if (findMatchingIgnorePattern(prefix, depth < segments.length, patterns) !== undefined) {
-        return true;
-      }
+    const outcome = ignoreRules.match(relativePath, false, { remaining: IGNORE_MATCH_WORK_BUDGET });
+    if (outcome.kind !== "none") {
+      return true;
     }
     const extension = path.posix.extname(relativePath).toLowerCase();
     if (config.extensionFilterMode === "blacklist") {
