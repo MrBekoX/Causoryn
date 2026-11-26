@@ -795,7 +795,21 @@ export async function validateRepositoryLayout(
   const state: ScanState = { scannedFiles: 0 };
   await checkConfigFile(root, path.join(commonDir, "config"), "the repository config", gitDir, 0, allBases, state);
   await checkConfigFile(root, path.join(gitDir, "config.worktree"), "the worktree config", gitDir, 0, allBases, state);
-  await checkAlternates(root, path.join(commonDir, "objects"), 0, allBases, allBases, state);
+  // git reads objects (and resolves relative alternates entries) at the real
+  // location of the objects directory, so both checks use its realpath: an
+  // objects link that leaves the repository is refused, and a relative entry
+  // is judged where git will resolve it, not by its lexical spelling (CAU-06).
+  const objectsDir = await canonical(root, "the objects directory", path.join(commonDir, "objects"), allBases);
+  if (objectsDir !== undefined) {
+    if (!allBases.some((dir) => isSameOrInside(objectsDir, dir))) {
+      throw refusal(
+        root,
+        `the objects directory points outside the repository (${objectsDir}); only object directories inside the ` +
+          "analyzed root, its git directory or its common directory are used",
+      );
+    }
+    await checkAlternates(root, objectsDir, 0, allBases, allBases, state);
+  }
 
   return { kind, root, gitDir, commonDir };
 }

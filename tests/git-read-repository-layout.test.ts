@@ -443,6 +443,52 @@ describe("git-read: alternates stay inside the repository (CAU-06)", () => {
     await expectAlternatesRefused(root);
   }, 60_000);
 
+  // git resolves a relative alternates entry against the real objects
+  // directory. When objects is a link to a shallower directory inside the
+  // root, the lexical spelling stays inside the root while git's resolution
+  // climbs out of it; the check must judge the location git will use.
+  it("resolves a relative alternates entry against the real objects directory, as git does", async () => {
+    const holder = tempDir("causoryn-git-alt-reallink-");
+    const reference = path.join(holder, "reference");
+    await initRepo(reference, "ref.txt", "ref\n");
+    const root = path.join(holder, "root");
+    await initRepo(root, "a.txt", "a\n");
+    const store = path.join(root, "objstore");
+    cpSync(path.join(root, ".git", "objects"), store, { recursive: true });
+    rmSync(path.join(root, ".git", "objects"), { recursive: true, force: true });
+    linkDirectory(store, path.join(root, ".git", "objects"));
+    // Lexically <root>/.git/objects/../../reference = <root>/reference (inside);
+    // git uses <root>/objstore/../../reference = <holder>/reference (outside).
+    writeAlternates(store, ["../../reference/.git/objects"]);
+    await expectAlternatesRefused(root);
+  }, 60_000);
+
+  it("refuses an objects directory that is a link to an object store outside the repository", async () => {
+    const holder = tempDir("causoryn-git-objects-link-");
+    const root = path.join(holder, "root");
+    await initRepo(root, "a.txt", "a\n");
+    const outsideStore = path.join(holder, "outside-objects");
+    cpSync(path.join(root, ".git", "objects"), outsideStore, { recursive: true });
+    rmSync(path.join(root, ".git", "objects"), { recursive: true, force: true });
+    linkDirectory(outsideStore, path.join(root, ".git", "objects"));
+    const calls = blockRepositoryBoundGit();
+    const error = await rejection(() => resolveGitCommitRef(root, "HEAD"));
+    expect(error.code).toBe("compare/repository-refused");
+    expect(error.message).toContain("objects directory");
+    expect(error.message).toContain("outside the repository");
+    expect(calls).toEqual([]);
+  }, 60_000);
+
+  it("still reads a repository whose objects directory is a link inside its git directory", async () => {
+    const root = tempDir("causoryn-git-objects-inner-link-");
+    await initRepo(root, "a.txt", "a\n");
+    const store = path.join(root, ".git", "objects-store");
+    cpSync(path.join(root, ".git", "objects"), store, { recursive: true });
+    rmSync(path.join(root, ".git", "objects"), { recursive: true, force: true });
+    linkDirectory(store, path.join(root, ".git", "objects"));
+    expect(await readGitBlob(root, "HEAD", "a.txt")).toBe("a\n");
+  }, 60_000);
+
   it("still reads objects reachable only through an alternate inside the git directory", async () => {
     const reference = await referenceRepo("causoryn-git-alt-inside-ref-");
     const root = tempDir("causoryn-git-alt-inside-root-");
