@@ -406,7 +406,9 @@ describe("causoryn setup keeps the keys Causoryn does not own (Codex TOML)", () 
     ]);
     const res = await runCliIn(sb, ["setup", "--client", "codex", "--no-skill", "--yes"]);
     expect(res.exitCode).toBe(0);
-    expect(res.stdout).toMatch(/replaced the unusable startup_timeout_sec value "soon" with 30/);
+    // CAU-12: the note names the key, not the raw config value.
+    expect(res.stdout).toMatch(/replaced the unusable startup_timeout_sec value with 30/);
+    expect(res.stdout).not.toContain("soon");
     expect(readCodexMcpServer(readFileSync(target, "utf8"))?.startupTimeoutSec).toBe(30);
     expect(readFileSync(target, "utf8")).toContain('command = ' + q(process.execPath) + '\nstartup_timeout_sec = 30\nargs = [');
 
