@@ -11,6 +11,10 @@
  * - Per-request timeout + responseMaxChars + stderrMaxChars karakter bütçeleri.
  * - stdin EPIPE yutma (erken çöken worker motoru düşürmez) ve onKillChild
  *   kancası (örn. Go `go run` modunda ağaç-kill).
+ * - Per-thread registry of the running sidecar processes with their
+ *   tree-kill hooks (registerSidecarProcess / terminateSidecarProcesses /
+ *   onSidecarProcessEvent), so a thread can stop all of them at once and
+ *   report their pids.
  */
 import { spawn as defaultSpawn, type ChildProcess } from "node:child_process";
 import { existsSync } from "node:fs";
@@ -114,6 +118,133 @@ export function terminateChildProcess(
   const fallbackTimer = setTimeout(afterTreeKill, fallbackMs);
   fallbackTimer.unref();
   Promise.resolve(pending).then(afterTreeKill, afterTreeKill);
+}
+
+/* ------------------------------------------------------------------ */
+/* Running sidecar processes of this thread                            */
+/* ------------------------------------------------------------------ */
+
+/** A sidecar process of this thread was started, or has exited. */
+export interface SidecarProcessEvent {
+  readonly type: "spawned" | "exited";
+  readonly pid: number;
+}
+
+export type SidecarProcessListener = (event: SidecarProcessEvent) => void;
+
+interface RegisteredSidecarProcess {
+  readonly child: ChildProcess;
+  readonly pid: number;
+  readonly treeKill: ProcessTreeKill | undefined;
+  readonly killFallbackMs: number;
+  readonly exited: Promise<void>;
+  readonly markExited: () => void;
+}
+
+/**
+ * Sidecar processes started on this thread that have not exited yet (module
+ * state, so one registry per thread: a worker thread has its own).
+ */
+const runningSidecarProcesses = new Map<ChildProcess, RegisteredSidecarProcess>();
+const sidecarProcessListeners = new Set<SidecarProcessListener>();
+
+function hasChildExited(child: ChildProcess): boolean {
+  return child.exitCode !== null || child.signalCode !== null;
+}
+
+function notifySidecarProcessListeners(event: SidecarProcessEvent): void {
+  for (const listener of [...sidecarProcessListeners]) {
+    try {
+      listener(event);
+    } catch {
+      // A listener never breaks process management.
+    }
+  }
+}
+
+/**
+ * Records a started sidecar process together with the tree-kill hook its
+ * runner terminates it with, so terminateSidecarProcesses can stop it the
+ * same way and the thread's listeners learn its pid. It is forgotten once it
+ * exits. A runner that removes all listeners of `child` (for example after its
+ * answer) calls watchSidecarProcessExit again. A child without a pid (its
+ * spawn failed) is not recorded. Never throws.
+ */
+export function registerSidecarProcess(
+  child: ChildProcess,
+  treeKill?: ProcessTreeKill,
+  killFallbackMs: number = DEFAULT_KILL_FALLBACK_MS,
+): void {
+  try {
+    const pid = child.pid;
+    if (pid === undefined || runningSidecarProcesses.has(child) || hasChildExited(child)) return;
+    let markExited!: () => void;
+    const exited = new Promise<void>((resolve) => {
+      markExited = (): void => {
+        if (runningSidecarProcesses.get(child)?.pid !== pid) return;
+        runningSidecarProcesses.delete(child);
+        resolve();
+        notifySidecarProcessListeners({ type: "exited", pid });
+      };
+    });
+    runningSidecarProcesses.set(child, { child, pid, treeKill, killFallbackMs, exited, markExited });
+    notifySidecarProcessListeners({ type: "spawned", pid });
+    watchSidecarProcessExit(child);
+  } catch {
+    // An unusual child object (a test double) is simply not recorded.
+  }
+}
+
+/**
+ * (Re)attaches the registry's exit listener to a recorded sidecar process: a
+ * runner calls it after `removeAllListeners()` on the child. Never throws.
+ */
+export function watchSidecarProcessExit(child: ChildProcess): void {
+  const entry = runningSidecarProcesses.get(child);
+  if (entry === undefined) return;
+  try {
+    if (hasChildExited(child)) {
+      entry.markExited();
+      return;
+    }
+    child.once("exit", entry.markExited);
+  } catch {
+    // An unusual child object (a test double) is simply not watched.
+  }
+}
+
+/** Subscribes to this thread's sidecar process events; returns the unsubscribe function. */
+export function onSidecarProcessEvent(listener: SidecarProcessListener): () => void {
+  sidecarProcessListeners.add(listener);
+  return () => {
+    sidecarProcessListeners.delete(listener);
+  };
+}
+
+/** Pids of the sidecar processes of this thread that have not exited yet. */
+export function runningSidecarProcessIds(): number[] {
+  return [...runningSidecarProcesses.values()].map((entry) => entry.pid);
+}
+
+/**
+ * Terminates every running sidecar process of this thread with the tree-kill
+ * hook its runner registered (terminateChildProcess: the hook first, then the
+ * direct kill) and resolves once all of them have exited, or after `waitMs`.
+ * Never rejects.
+ */
+export function terminateSidecarProcesses(waitMs: number): Promise<void> {
+  const entries = [...runningSidecarProcesses.values()];
+  if (entries.length === 0) return Promise.resolve();
+  for (const entry of entries) {
+    terminateChildProcess(entry.child, entry.treeKill, entry.killFallbackMs);
+  }
+  return new Promise<void>((resolve) => {
+    const timer = setTimeout(resolve, waitMs);
+    void Promise.all(entries.map((entry) => entry.exited)).then(() => {
+      clearTimeout(timer);
+      resolve();
+    });
+  });
 }
 
 /** Worker spawn seçenekleri; shell her zaman kapalıdır, cwd yalnızca tanımlıyken eklenir. */
@@ -335,6 +466,8 @@ export function runLineJsonWorker(
       closing?.stdout?.removeAllListeners();
       closing?.stderr?.removeAllListeners();
       closing?.on("error", () => {});
+      // The registry keeps tracking the process until it has really exited.
+      if (closing !== null) watchSidecarProcessExit(closing);
       resolveOutcome(outcome);
     };
 
@@ -368,6 +501,7 @@ export function runLineJsonWorker(
       });
       return;
     }
+    registerSidecarProcess(child, input.onKillChild, input.killFallbackMs);
 
     const timer = setTimeout(() => {
       finish(

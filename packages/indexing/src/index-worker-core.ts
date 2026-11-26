@@ -28,6 +28,7 @@ import {
   type PythonIndexOptions,
   type RustIndexOptions,
 } from "./index-service.js";
+import { serveInventoryAnalysisRequests } from "./index-worker-serve.js";
 
 /**
  * Pure dependency-injected indexing worker core (Task 2.5 — Node.js `worker_threads` + SQLite WAL).
@@ -129,8 +130,33 @@ export interface InventoryAnalysisRequest {
   readonly task: InventoryAnalysisTask;
 }
 
-/** Inventory analysis worker → main thread (every message names its request). */
+/**
+ * Main thread → inventory analysis worker: stop the sidecar processes of the
+ * running analysis (the worker is terminated afterwards; see
+ * index-worker-serve.ts).
+ */
+export interface InventoryAnalysisCancelRequest {
+  readonly type: "cancel";
+  readonly taskId: number;
+}
+
+/**
+ * Inventory analysis worker → main thread (every message names its request;
+ * a `sidecar` message names the request that was running, or -1).
+ */
 export type InventoryAnalysisWorkerMessage =
+  | {
+      /** A sidecar process of the worker started or exited (its pid, for the main thread's cleanup). */
+      readonly type: "sidecar";
+      readonly taskId: number;
+      readonly event: "spawned" | "exited";
+      readonly pid: number;
+    }
+  | {
+      /** Answer to a `cancel` request: the worker's sidecar processes were stopped. */
+      readonly type: "cancelled";
+      readonly taskId: number;
+    }
   | {
       readonly type: "progress";
       readonly taskId: number;
@@ -311,26 +337,6 @@ export function isInventoryAnalysisWorkerData(value: unknown): value is Inventor
   );
 }
 
-function isInventoryAnalysisRequest(value: unknown): value is InventoryAnalysisRequest {
-  if (value === null || typeof value !== "object") return false;
-  const record = value as Partial<InventoryAnalysisRequest>;
-  const task = record.task as Partial<InventoryAnalysisTask> | undefined;
-  return (
-    record.type === "analyze" &&
-    typeof record.taskId === "number" &&
-    task !== null &&
-    typeof task === "object" &&
-    typeof task.workspaceId === "string" &&
-    typeof task.rootPath === "string" &&
-    typeof task.fixedClockIso === "string" &&
-    task.policyConfig !== null &&
-    typeof task.policyConfig === "object" &&
-    task.limits !== null &&
-    typeof task.limits === "object" &&
-    Array.isArray(task.entries)
-  );
-}
-
 export function isWorkerTaskPayload(value: unknown): value is IndexWorkerTaskInput {
   if (value === null || typeof value !== "object") return false;
   const record = value as Partial<IndexWorkerTaskInput>;
@@ -354,56 +360,16 @@ export function markIndexWorkerStarted(): void {
 
 /**
  * Serves the inventory analysis mode in this worker thread (workerData is
- * InventoryAnalysisWorkerData): every `analyze` request is answered with
- * `progress` messages and then one `analysis-done` or `error` message, all
- * carrying the request's taskId; requests run one after another. Idempotent
- * per worker thread.
+ * InventoryAnalysisWorkerData) with runInventoryAnalysisTask: see
+ * serveInventoryAnalysisRequests (index-worker-serve.ts) for the protocol,
+ * the sidecar process reports and the `cancel` request. Idempotent per
+ * worker thread.
  */
 export function startInventoryAnalysisWorker(): void {
   if (workerStarted) return;
   if (isMainThread || parentPort === null) return;
   workerStarted = true;
-  const port = parentPort;
-  let queue: Promise<void> = Promise.resolve();
-  const post = (message: InventoryAnalysisWorkerMessage): void => {
-    port.postMessage(message);
-  };
-  const serve = async (request: InventoryAnalysisRequest): Promise<void> => {
-    const { taskId } = request;
-    try {
-      const result = await runInventoryAnalysisTask(request.task, (event) => {
-        post({
-          type: "progress",
-          taskId,
-          phase: event.phase,
-          completed: event.completed,
-          total: event.total,
-          message: event.message,
-        });
-      });
-      post({ type: "analysis-done", taskId, result });
-    } catch (error) {
-      post({
-        type: "error",
-        taskId,
-        code: error instanceof IndexingError ? error.code : "indexing/internal",
-        message: error instanceof Error ? error.message : String(error),
-      });
-    }
-  };
-  port.on("message", (raw: unknown) => {
-    if (!isInventoryAnalysisRequest(raw)) {
-      const taskId = (raw as { taskId?: unknown } | null)?.taskId;
-      post({
-        type: "error",
-        taskId: typeof taskId === "number" ? taskId : -1,
-        code: "indexing/internal",
-        message: "Invalid inventory analysis request",
-      });
-      return;
-    }
-    queue = queue.then(() => serve(raw));
-  });
+  serveInventoryAnalysisRequests(parentPort, runInventoryAnalysisTask);
 }
 
 /**

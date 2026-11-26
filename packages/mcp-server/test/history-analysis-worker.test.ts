@@ -14,6 +14,7 @@ import { runInventoryAnalysisInWorker } from "@causoryn/indexing";
 import {
   acquireHistoryAnalysisSlot,
   DEFAULT_HISTORY_RESOURCE_LIMITS,
+  HISTORY_ANALYSIS_WORKER_MAX_HEAP_MB,
   historyAnalysisWorkerHeapMb,
   setHistoryAnalysisWorkerEntryForTesting,
 } from "../src/history-commit-analysis.js";
@@ -229,6 +230,20 @@ const CRASHING_WORKER = 'throw new Error("injected analysis worker crash");\n';
 const EXITING_WORKER = "process.exit(7);\n";
 /** Allocates until the worker's heap limit is reached. */
 const ALLOCATING_WORKER = "const keep = [];\nfor (;;) keep.push(new Array(100000).fill(Math.random()));\n";
+/**
+ * Blocks in a synchronous child process call for 8 s when asked to analyze
+ * (like `spawnSync cargo --version`): neither its message loop nor
+ * `worker.terminate()` can stop it before the call returns.
+ */
+const BLOCKED_WORKER = [
+  'import { spawnSync } from "node:child_process";',
+  'import { parentPort } from "node:worker_threads";',
+  'parentPort.on("message", (request) => {',
+  '  if (request.type !== "analyze") return;',
+  '  spawnSync(process.execPath, ["-e", "setTimeout(() => {}, 8000);"], { stdio: "ignore" });',
+  "});",
+  "",
+].join("\n");
 
 /** The process-wide analysis slot is free: it can be taken without waiting. */
 async function expectSlotFree(): Promise<void> {
@@ -254,6 +269,20 @@ describe("history fresh analysis in a worker thread (CAU-01)", { timeout: 180_00
     expect(historyAnalysisWorkerHeapMb(DEFAULT_HISTORY_RESOURCE_LIMITS.maxCommitBytes)).toBe(1024);
     expect(historyAnalysisWorkerHeapMb(1)).toBe(280);
     expect(historyAnalysisWorkerHeapMb(1024 * 1024 + 1)).toBe(304);
+  });
+
+  it("clamps the worker heap limit to half of the machine's memory and to a hard ceiling, never below the analyzers' base heap", () => {
+    const MiB = 1024 * 1024;
+    const GiB = 1024 * MiB;
+    // Enough memory: the per-commit formula applies.
+    expect(historyAnalysisWorkerHeapMb(32 * MiB, 64 * GiB)).toBe(1024);
+    // A 1 GiB machine: at most half of its memory.
+    expect(historyAnalysisWorkerHeapMb(32 * MiB, 1 * GiB)).toBe(512);
+    // A huge per-commit budget: the hard ceiling, whatever the machine has.
+    expect(HISTORY_ANALYSIS_WORKER_MAX_HEAP_MB).toBe(8192);
+    expect(historyAnalysisWorkerHeapMb(1024 * MiB, 1024 * GiB)).toBe(HISTORY_ANALYSIS_WORKER_MAX_HEAP_MB);
+    // A tiny machine: not below the 256 MiB the analyzers need without any source text.
+    expect(historyAnalysisWorkerHeapMb(32 * MiB, 256 * MiB)).toBe(256);
   });
 
   it("a large synthetic commit is analyzed in the worker while causoryn_status is answered", async () => {
@@ -347,6 +376,36 @@ describe("history fresh analysis in a worker thread (CAU-01)", { timeout: 180_00
       expect(logs.some((line) => line.includes(detail)), `${name}: ${JSON.stringify(logs)}`).toBe(true);
       await expectSlotFree();
     }
+  });
+
+  it("a worker that cannot be stopped at the deadline does not hold the result back, but keeps the analysis slot until its thread has exited", async () => {
+    const repo = makeRepo();
+    const logs: string[] = [];
+    const context = directContext(repo.root, (message) => logs.push(message));
+    setHistoryAnalysisWorkerEntryForTesting(workerScript("blocked", BLOCKED_WORKER));
+    const sources = createTrustedHistorySources(context, "history-worker", repo.root, {
+      maxFreshAnalyses: 4,
+      limits: { ...DEFAULT_HISTORY_RESOURCE_LIMITS, maxAnalysisMs: 1000 },
+    });
+    const startedAt = performance.now();
+    const result = await sources.reconstructFromGitTree(repo.root, "t1", repo.sha("t1"));
+    const answeredAfterMs = performance.now() - startedAt;
+    expect(result).toEqual({
+      status: "unanalyzed",
+      reason: expect.stringMatching(/^analysis-deadline-exceeded: /) as unknown as string,
+    });
+    // The deadline (1 s) plus the bounded settle time, not the 8 s blocking call.
+    expect(answeredAfterMs, JSON.stringify(logs)).toBeLessThan(6_000);
+    // The thread is still blocked: the slot is still counted.
+    const premature = await acquireHistoryAnalysisSlot(1, 0);
+    premature?.();
+    expect(premature, "the slot was released before the worker exited").toBeUndefined();
+    // Once the blocking call has returned the thread exits and the slot comes free (no double release).
+    const release = await acquireHistoryAnalysisSlot(1, 30_000);
+    expect(release, "the analysis slot was not released").toBeDefined();
+    expect(performance.now() - startedAt).toBeGreaterThan(answeredAfterMs);
+    release?.();
+    await expectSlotFree();
   });
 
   it("an analysis worker that runs out of its heap limit yields analysis-memory-exceeded", async () => {
@@ -444,6 +503,54 @@ describe("compare maps history limits to accurate tool errors (CAU-01)", { timeo
     // Once the slot is free the same comparison works.
     const envelope = await session.call("causoryn_compare_architecture", { baseRef: "t1", targetRef: "t2" });
     expect(envelope.status).not.toBe("error");
+  });
+
+  it("analysis-busy reaches the client as INDEX_NOT_READY even while an index job runs (it is not turned into the indexing-in-progress answer)", async () => {
+    const repo = makeRepo();
+    const base = createCausorynContext(
+      { workspaceId: "history-worker", allowRoots: [repo.root], autoIndex: false },
+      { logger: () => {} },
+    );
+    cleanups.push(() => base.close());
+    // A background index job is running in this workspace.
+    const context: CausorynContext = {
+      ...base,
+      getActiveIndexJob: () => ({ jobId: "job-busy", status: "running", progressPercent: 40, phase: "analyzing" }),
+    };
+    const server = createCausorynMcpServer(context, { toolProfile: "full" });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: "history-busy-while-indexing", version: "0.0.0" });
+    await server.connect(serverTransport);
+    await client.connect(clientTransport);
+    cleanups.push(() => {
+      void client.close();
+      void server.close();
+    });
+    const callRaw = async (name: string, args: Record<string, unknown>): Promise<Record<string, unknown>> => {
+      const result = (await client.callTool({ name, arguments: args })) as CallToolResult;
+      const parsed = EnvelopeSchema.safeParse(result.structuredContent);
+      expect(parsed.success, JSON.stringify(parsed.error?.issues ?? result.content)).toBe(true);
+      return (parsed as { success: true; data: Record<string, unknown> }).data;
+    };
+
+    process.env["CAUSORYN_HISTORY_BUSY_WAIT_MS"] = "0";
+    const release = await acquireHistoryAnalysisSlot(1, 0);
+    expect(release).toBeDefined();
+    try {
+      const error = errorOf(await callRaw("causoryn_compare_architecture", { baseRef: "t1", targetRef: "t2" }));
+      expect(error.code).toBe("INDEX_NOT_READY");
+      expect(error.retryable).toBe(true);
+      expect(String(error.message)).toContain("analysis-busy");
+      expect(String(error.message)).toContain("another fresh commit analysis is running");
+
+      // A tool whose INDEX_NOT_READY means "no index yet" still gets the indexing-in-progress answer.
+      const pending = await callRaw("causoryn_find_symbols", { query: "alpha" });
+      expect(pending.status).toBe("partial");
+      expect((pending.data as Record<string, unknown>).indexing).toBe(true);
+      expect((pending.data as Record<string, unknown>).jobId).toBe("job-busy");
+    } finally {
+      release?.();
+    }
   });
 
   it("a failed analysis worker is the retryable INTERNAL_ERROR with an explicit message", async () => {

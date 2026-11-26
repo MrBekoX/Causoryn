@@ -448,6 +448,9 @@ export function createTrustedHistorySources(
       freshAnalyses -= 1;
       return limited(historyBusyError(limits));
     }
+    // The slot stays taken until the analysis worker thread is released,
+    // which for a stopped worker can be after the point's outcome.
+    const slot: { heldUntil?: Promise<void> } = {};
     try {
       let meter: CommitAnalysisMeter;
       let analysis: CommitContentAnalysis;
@@ -460,7 +463,9 @@ export function createTrustedHistorySources(
         throw error;
       }
       try {
-        analysis = await analyzeCommitContentSet(deps, workspaceId, canonicalRoot, commitSha, meter);
+        analysis = await analyzeCommitContentSet(deps, workspaceId, canonicalRoot, commitSha, meter, (threadReleased) => {
+          slot.heldUntil = threadReleased;
+        });
       } catch (error) {
         if (error instanceof HistoryBudgetError) return limited(error);
         // A failure after the deadline (a git process killed by its timeout,
@@ -484,7 +489,8 @@ export function createTrustedHistorySources(
             notCachedReason: "the history cache could not be written (see the server log)",
           };
     } finally {
-      release();
+      if (slot.heldUntil === undefined) release();
+      else void slot.heldUntil.then(release);
     }
   };
 

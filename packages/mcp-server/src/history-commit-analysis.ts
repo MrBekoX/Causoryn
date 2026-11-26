@@ -11,6 +11,7 @@ import {
   writeFile,
   type FileHandle,
 } from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 
 import { canonicalJson, sha256Hex, utf8Encode, type JsonValue } from "@causoryn/domain";
@@ -73,7 +74,8 @@ import { SERVER_VERSION } from "./version.js";
  * analysis stops at its wall-clock deadline (`maxAnalysisMs`, bounded by the
  * call's `maxRequestMs`), checked between tree entries and blob reads (each
  * git process also gets the time left as its timeout), at each progress
- * message of the worker, and by a timer that terminates the worker; and at
+ * message of the worker, and by a timer that stops the worker together with
+ * its sidecar processes (runInventoryAnalysisInWorker); and at
  * most `maxConcurrentAnalyses` fresh analyses run in the process at a time (a
  * call waits at most `busyWaitMs` for a slot). A limit that is hit, or a
  * worker that runs out of memory, crashes or exits, raises
@@ -376,16 +378,38 @@ export type HistoryLimitCode =
 const WORKER_BASE_HEAP_MB = 256;
 /** Additional worker heap per MiB of the per-commit source text budget. */
 const WORKER_HEAP_MB_PER_SOURCE_MIB = 24;
+/**
+ * Hard ceiling of the analysis worker heap (MiB), whatever the per-commit
+ * budget: 8 GiB is far above what the default budget needs (1024 MiB) and
+ * keeps a mistyped CAUSORYN_HISTORY_MAX_COMMIT_BYTES from asking V8 for an
+ * absurd heap.
+ */
+export const HISTORY_ANALYSIS_WORKER_MAX_HEAP_MB = 8192;
+/**
+ * Share of the machine's memory (`os.totalmem()`) the analysis worker heap
+ * may take at most: the rest is left for the MCP server's main thread (which
+ * holds the accepted source text too) and the rest of the machine.
+ */
+const WORKER_MAX_HEAP_SHARE_OF_TOTAL_MEMORY = 0.5;
 const MIB = 1024 * 1024;
 
 /**
  * V8 old-generation heap limit (MiB) of the analysis worker for a per-commit
  * budget of `maxCommitBytes`: 256 MiB plus 24 MiB per started MiB of source
- * text (1024 MiB for the default 32 MiB). A worker above it is stopped by
- * V8 and the point becomes `analysis-memory-exceeded`.
+ * text (1024 MiB for the default 32 MiB), at most half of the machine's
+ * memory (`totalMemoryBytes`, default `os.totalmem()`) and at most
+ * HISTORY_ANALYSIS_WORKER_MAX_HEAP_MB, but never below the 256 MiB base. A
+ * worker above it is stopped by V8 and the point becomes
+ * `analysis-memory-exceeded`.
  */
-export function historyAnalysisWorkerHeapMb(maxCommitBytes: number): number {
-  return WORKER_BASE_HEAP_MB + WORKER_HEAP_MB_PER_SOURCE_MIB * Math.max(1, Math.ceil(maxCommitBytes / MIB));
+export function historyAnalysisWorkerHeapMb(
+  maxCommitBytes: number,
+  totalMemoryBytes: number = os.totalmem(),
+): number {
+  const fromBudget =
+    WORKER_BASE_HEAP_MB + WORKER_HEAP_MB_PER_SOURCE_MIB * Math.max(1, Math.ceil(maxCommitBytes / MIB));
+  const machineShare = Math.floor((totalMemoryBytes / MIB) * WORKER_MAX_HEAP_SHARE_OF_TOTAL_MEMORY);
+  return Math.max(WORKER_BASE_HEAP_MB, Math.min(fromBudget, machineShare, HISTORY_ANALYSIS_WORKER_MAX_HEAP_MB));
 }
 
 /** A resource limit stopped (or prevented) a fresh analysis; reported as the point's reason. */
@@ -749,15 +773,32 @@ function workerFailureError(
 }
 
 /**
+ * A fresh analysis slot is given back at the latest this long after its
+ * analysis ended, even when the worker thread of a failed analysis has not
+ * exited yet (logged); a thread blocked in a synchronous call normally exits
+ * well within it (a cargo probe times out after 15 s).
+ */
+const WORKER_RELEASE_MAX_WAIT_MS = 60_000;
+
+/**
  * Analyzes `commitSha` from its git objects (see the module comment) within
  * the budget of `meter`: the inventory is read on this thread, the scratch
  * index runs in the index worker's inventory analysis mode
  * (runInventoryAnalysisInWorker) with `meter.workerHeapMb` as its heap
- * limit. The worker is terminated at the deadline (a timer, and a check at
- * each of its progress messages). Throws GraphRepositoryError (git reads),
- * IndexingError (analysis), CommitAnalysisLimitError or HistoryBudgetError
- * (a byte budget, the deadline, or a worker that ran out of memory, crashed
- * or exited); the caller decides how a failure is reported.
+ * limit. The worker is stopped at the deadline (a timer, and a check at
+ * each of its progress messages), its sidecar processes included. Throws
+ * GraphRepositoryError (git reads), IndexingError (analysis),
+ * CommitAnalysisLimitError or HistoryBudgetError (a byte budget, the
+ * deadline, or a worker that ran out of memory, crashed or exited); the
+ * caller decides how a failure is reported.
+ *
+ * `holdSlotUntil` is called (before the worker starts) with a promise that
+ * resolves once the analysis no longer occupies a worker thread: right away
+ * for a worker that answered, but for a failed or stopped one only when its
+ * thread has exited, which can be after this function has thrown (a thread
+ * blocked in a synchronous call cannot be stopped before it returns), at
+ * the latest WORKER_RELEASE_MAX_WAIT_MS after. The caller keeps its analysis
+ * slot until then.
  */
 export async function analyzeCommitContentSet(
   deps: ServiceDeps,
@@ -765,6 +806,7 @@ export async function analyzeCommitContentSet(
   canonicalRoot: string,
   commitSha: string,
   meter: CommitAnalysisMeter,
+  holdSlotUntil?: (threadReleased: Promise<void>) => void,
 ): Promise<CommitContentAnalysis> {
   if (!COMMIT_SHA_PATTERN.test(commitSha)) {
     throw new GraphRepositoryError("compare/invalid-ref", `not a canonical commit SHA: ${commitSha}`);
@@ -784,6 +826,15 @@ export async function analyzeCommitContentSet(
   deps.logger(
     `history: analyzing commit ${commitSha} in a worker thread (${String(fileCount)} file(s), heap limit ${String(heapMb)} MiB)`,
   );
+  let threadReleased = false;
+  let markThreadReleased!: () => void;
+  const released = new Promise<void>((resolve) => {
+    markThreadReleased = (): void => {
+      threadReleased = true;
+      resolve();
+    };
+  });
+  holdSlotUntil?.(released);
   let result: Awaited<ReturnType<typeof runInventoryAnalysisInWorker>>;
   try {
     result = await runInventoryAnalysisInWorker(
@@ -804,6 +855,14 @@ export async function analyzeCommitContentSet(
           if (error !== undefined) stop(error);
         },
         ...(analysisWorkerEntryOverride === undefined ? {} : { workerEntryPath: analysisWorkerEntryOverride }),
+        onWorkerReleased: ({ orphanedSidecarPids }) => {
+          if (orphanedSidecarPids.length > 0) {
+            deps.logger(
+              `history: the analysis worker of commit ${commitSha} left ${String(orphanedSidecarPids.length)} sidecar process(es) running; they were killed (pid ${orphanedSidecarPids.join(", ")})`,
+            );
+          }
+          markThreadReleased();
+        },
       },
     );
   } catch (error) {
@@ -811,6 +870,18 @@ export async function analyzeCommitContentSet(
     throw error;
   } finally {
     clearTimeout(timer);
+    if (!threadReleased) {
+      const bound = setTimeout(() => {
+        deps.logger(
+          `history: the analysis worker of commit ${commitSha} has not exited ${String(WORKER_RELEASE_MAX_WAIT_MS)} ms after its analysis ended; its analysis slot is released anyway`,
+        );
+        markThreadReleased();
+      }, WORKER_RELEASE_MAX_WAIT_MS);
+      bound.unref();
+      void released.then(() => {
+        clearTimeout(bound);
+      });
+    }
   }
   const contentSet = JSON.parse(result.contentSetJson) as CompareContentSet;
   const degradedWorkers = degradedWorkersOf(result.analyzerFingerprint);
