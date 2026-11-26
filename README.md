@@ -84,7 +84,7 @@ npx causoryn@latest setup --client claude-code --uninstall --yes
 - **ZCode (GLM):**
   Open **Settings -> Plugin Management / Marketplace -> Discover -> + (New)**, enter `https://github.com/MrBekoX/Causoryn` (reads root `marketplace.json` + `.zcode-plugin/plugin.json`), and install `causoryn`.
 - **Codex:**
-  Register the repository marketplace (`.agents/plugins/marketplace.json` + `.codex-plugin/plugin.json`) or run `npx causoryn@latest setup --client codex --yes`.
+  Run `npx causoryn@latest setup --client codex --yes` (recommended: it binds the project Codex starts in). The repository marketplace (`.agents/plugins/marketplace.json` + `.codex-plugin/plugin.json`) installs a plugin server that starts from the plugin root; Codex passes it no project directory or MCP roots, so it does not bind a workspace.
 - **Antigravity:**
   Install from `https://github.com/MrBekoX/Causoryn` (`plugin.json` + `mcp_config.json`) or run `npx causoryn@latest setup --client antigravity --yes`.
 - **Standalone Skills (`skills.sh`):**
