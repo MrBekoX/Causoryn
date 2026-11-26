@@ -272,6 +272,15 @@ export interface IndexServiceOptions {
    * service with an injected source, and `getWorkerConfig()` returns undefined.
    */
   readonly inventorySource?: InventorySource;
+  /**
+   * Cancellation check of the job this service runs (an index job worker: its
+   * job manager's shared cancel flag). It is read synchronously right before
+   * file facts are persisted and inside the write transaction that publishes,
+   * so a job cancelled before that point fails its build and never writes or
+   * publishes them, even when it is inside a synchronous segment that cannot
+   * read the cancel request (security finding F33).
+   */
+  readonly isCancelled?: () => boolean;
 }
 
 /** Injected inventory (see `IndexServiceOptions.inventorySource`). */
@@ -1868,6 +1877,7 @@ export class IndexService {
   private readonly onLeaseEvent: ((event: BuildLeaseEvent) => void) | undefined;
   /** Injected inventory of the async pipeline (undefined: walk the root on disk). */
   private readonly inventorySource: InventorySource | undefined;
+  private readonly isCancelled: (() => boolean) | undefined;
   /** Leases currently held by runs of this service (renewed at phase boundaries). */
   private readonly heldLeases = new Set<ActiveBuildLeaseHandle>();
   private workspaceRegistered = false;
@@ -1918,6 +1928,7 @@ export class IndexService {
     this.leaseStaleCeilingMs = ceiling > 0 ? ceiling : undefined;
     this.onLeaseEvent = options.onLeaseEvent;
     this.inventorySource = options.inventorySource;
+    this.isCancelled = options.isCancelled;
     const policyConfig = options.policy.config;
     const hashInput: JsonValue = {
       workspaceId: this.workspaceId,
@@ -2738,6 +2749,7 @@ export class IndexService {
     diagnosticPaths: ReadonlySet<string>,
   ): void {
     if (!isFileFactStore(this.repository)) return;
+    this.throwIfCancelled("persisting file facts");
     const store = this.repository;
     const toUpsert: FileFactRecord[] = [];
     for (const map of factMaps) {
@@ -3989,6 +4001,43 @@ export class IndexService {
     }
   }
 
+  /** Throws when the job this service runs was cancelled (IndexServiceOptions.isCancelled). */
+  private throwIfCancelled(step: string): void {
+    if (this.isCancelled?.() === true) {
+      throw new IndexingError(
+        "indexing/internal",
+        `Indexing job cancelled before ${step}; nothing was written`,
+      );
+    }
+  }
+
+  /**
+   * Publishes `buildId`. With a cancellation check (an index job worker) the
+   * check and the publish run in ONE `BEGIN IMMEDIATE` transaction (the
+   * repository's publish becomes a savepoint in it): the job manager sets the
+   * cancel flag before it releases the build lease, and that release needs the
+   * write lock, so a job cancelled before the transaction never publishes, and
+   * one whose transaction already holds the lock commits before the lease is
+   * released (the single-writer rule holds either way).
+   */
+  private publishUnlessCancelled(
+    buildId: string,
+    state: PublishableState,
+    publishedAt: string,
+  ): SnapshotGraph {
+    if (this.isCancelled === undefined) {
+      return this.repository.publish(buildId, state, publishedAt);
+    }
+    const publish = (): SnapshotGraph => {
+      this.throwIfCancelled("publishing");
+      return this.repository.publish(buildId, state, publishedAt);
+    };
+    const store = this.repository as GraphRepository & Partial<BuildLeaseStore>;
+    return typeof store.withImmediateTransaction === "function"
+      ? store.withImmediateTransaction(publish)
+      : publish();
+  }
+
   /**
    * Build'i yayımlar; tolerateConcurrentPublishRace aktifken graph/publish-failed
    * yarışında önce kaybeden build satırını failBuild ile temizler, ardından
@@ -4011,7 +4060,7 @@ export class IndexService {
     const publishedAt = this.clock();
     let snapshot: SnapshotGraph;
     try {
-      snapshot = this.repository.publish(buildId, state, publishedAt);
+      snapshot = this.publishUnlessCancelled(buildId, state, publishedAt);
     } catch (error) {
       if (
         this.tolerateConcurrentPublishRace &&

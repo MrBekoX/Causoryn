@@ -695,9 +695,12 @@ export class IndexJobManager {
    * - prevents new jobs and post-close repository mutations,
    * - cancels all queued and in-flight jobs and settles pending waiters cleanly,
    * - clears progress listeners,
-   * - gives any active off-thread indexing `Worker` up: it is asked to stop
-   *   (it closes the job's data store, so the job publishes nothing more, and
-   *   stops its sidecar processes) and terminated once it answered or after
+   * - gives any active off-thread indexing `Worker` up: its shared cancel flag
+   *   is set before its lease is released (the job checks it before it
+   *   persists file facts and inside its publish transaction, so it never
+   *   publishes, even from a synchronous segment), it is asked to stop
+   *   (it closes the job's data store and stops its sidecar processes) and
+   *   terminated once it answered or after
    *   SIDECAR_CANCEL_GRACE_MS; sidecar processes it still reports as running
    *   then are killed from this thread (see runInWorkerThread).
    */
@@ -707,12 +710,14 @@ export class IndexJobManager {
 
     const cancelWorker = this.activeWorkerCancel;
     this.activeWorkerCancel = undefined;
+    // Cancel first: the worker's shared cancel flag must be set before its
+    // lease is released (a cancelled job then never publishes).
+    cancelWorker?.();
     // Release the worker's lease from the main thread so the next context
     // (e.g. after a roots rebind) never waits for a terminated build.
     const leaseCleanup = this.activeWorkerLeaseCleanup;
     this.activeWorkerLeaseCleanup = undefined;
     leaseCleanup?.(true);
-    cancelWorker?.();
 
     const cancelledMessage = "Indexing job cancelled: job manager closed";
     const cancelJob = (jobId: string): void => {
@@ -935,6 +940,9 @@ export class IndexJobManager {
       );
     }
 
+    // Shared with the worker (workerData shares a SharedArrayBuffer, it does
+    // not copy it): set by cancel() without waiting for the worker's event loop.
+    const cancelFlag = new SharedArrayBuffer(4);
     const payload: IndexWorkerTaskInput = {
       dbPath,
       rootPath,
@@ -963,6 +971,7 @@ export class IndexJobManager {
       ...(this.workerFixedClockIso === undefined
         ? {}
         : { fixedClockIso: this.workerFixedClockIso }),
+      cancelFlag,
     };
 
     return new Promise<IndexWorkerResultSummary>((resolve, reject) => {
@@ -1065,7 +1074,10 @@ export class IndexJobManager {
       };
 
       /**
-       * Gives the job up because the job manager closed: the job settles now,
+       * Gives the job up because the job manager closed: the shared cancel
+       * flag is set first (the job checks it before it persists file facts
+       * and inside its publish transaction, so it never publishes, even from
+       * a synchronous segment that cannot read messages), the job settles now,
        * and the worker is asked to stop (`cancel`: it closes the job's data
        * store, so the job publishes nothing more, and stops its sidecar
        * processes with the adapters' own tree kills). It is terminated once
@@ -1077,6 +1089,9 @@ export class IndexJobManager {
       const cancel = (): void => {
         if (cancelling) return;
         cancelling = true;
+        // Before the lease is released: from here on the job never persists
+        // file facts or publishes, even inside a synchronous segment.
+        Atomics.store(new Int32Array(cancelFlag), 0, 1);
         if (!settled) {
           settled = true;
           stopLeaseTracking(true);

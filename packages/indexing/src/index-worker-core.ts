@@ -65,6 +65,14 @@ export interface IndexWorkerTaskInput {
   readonly leaseStaleCeilingMs?: number;
   /** Optional fixed ISO timestamp for deterministic clock injection in tests. */
   readonly fixedClockIso?: string;
+  /**
+   * Shared cancel flag of the job (an Int32 at index 0; non-zero = cancelled).
+   * The job manager sets it synchronously before it releases the job's build
+   * lease; the job reads it without its event loop (Atomics.load) before it
+   * persists file facts and inside its publish transaction, so it holds even
+   * while the job is in a synchronous segment that cannot read `cancel`.
+   */
+  readonly cancelFlag?: SharedArrayBuffer;
 }
 
 export interface IndexWorkerResultSummary {
@@ -266,8 +274,10 @@ function summarizeRunResult(result: IndexRunResult): IndexWorkerResultSummary {
  * Aborting `signal` cancels the task: its connection is closed at once, so the run
  * writes and publishes nothing more (it fails at its next data store access) while
  * its sidecar processes are being stopped; the job manager that aborts it has
- * already released its build lease and settled the job. A task whose signal is
- * already aborted does not start.
+ * already released its build lease and settled the job. `payload.cancelFlag` covers
+ * the time before the abort can be seen: the run checks it (and the signal) before
+ * it persists file facts and inside its publish transaction (IndexServiceOptions.
+ * isCancelled). A task that is already cancelled does not start.
  */
 export async function runIndexWorkerTask(
   payload: IndexWorkerTaskInput,
@@ -276,7 +286,13 @@ export async function runIndexWorkerTask(
   onLeaseEvent?: (event: BuildLeaseEvent) => void,
   signal?: AbortSignal,
 ): Promise<IndexWorkerResultSummary> {
-  if (signal?.aborted === true) {
+  const cancelFlag =
+    payload.cancelFlag instanceof SharedArrayBuffer && payload.cancelFlag.byteLength >= 4
+      ? new Int32Array(payload.cancelFlag, 0, 1)
+      : undefined;
+  const isCancelled = (): boolean =>
+    signal?.aborted === true || (cancelFlag !== undefined && Atomics.load(cancelFlag, 0) !== 0);
+  if (isCancelled()) {
     throw new IndexingError("indexing/internal", "Indexing job cancelled before it started");
   }
   const repository = new SqliteRepoCtor(payload.dbPath);
@@ -328,6 +344,7 @@ export async function runIndexWorkerTask(
         ? {}
         : { leaseStaleCeilingMs: payload.leaseStaleCeilingMs }),
       ...(onLeaseEvent === undefined ? {} : { onLeaseEvent }),
+      ...(signal === undefined && cancelFlag === undefined ? {} : { isCancelled }),
     });
 
     const runOptions = onProgress === undefined ? {} : { onProgress };
