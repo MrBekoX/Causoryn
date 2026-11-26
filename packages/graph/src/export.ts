@@ -39,7 +39,7 @@ import type { ArchitectureProjectionOptions } from "./architecture-projection.js
  *   dizin yetkilendirmesi) ile denetlenir; reddedilen hedefe hiçbir dosya
  *   yazılmaz. Yazma atomiktir: OutputAccessPolicy.publishFile önce aynı
  *   dizinde bu yazmanın kendi oluşturduğu rastgele adlı geçici dosyaya
- *   (`wx`, 0o600) yazar, sonra rename ile hedefe taşır (yarım dosya
+ *   (`wx`, umask uygulanan 0o666) yazar, sonra rename ile hedefe taşır (yarım dosya
  *   görünmez); dizin kimliği yetkilendirmeden rename'e kadar bağlıdır ve
  *   önceden var olan hiçbir dosya silinmez (CAU-08).
  *
@@ -643,7 +643,7 @@ export function writeDocumentation(
     );
   }
   const targetPath = decision.canonicalPath;
-  // CAU-08: owned exclusive temp file (random name, `wx`, 0o600) in the
+  // CAU-08: owned exclusive temp file (random name, `wx`, 0o666 under the umask) in the
   // target directory, directory identity bound from here to the rename; a
   // file this export did not create is never removed.
   try {

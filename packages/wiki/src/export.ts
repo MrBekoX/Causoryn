@@ -36,7 +36,7 @@ import { WikiProjectionSchema, type EvidenceRef, type WikiPage, type WikiPageSec
  *   dosya HİÇBİR alt dizin oluşturulmadan yazılmaz. Each file is written
  *   atomically (OutputAccessPolicy.publishFile): content goes to a unique,
  *   unpredictable temp name in the target directory opened with
- *   O_CREAT|O_EXCL (`wx`) and mode 0o600, then renamed over the target; the
+ *   O_CREAT|O_EXCL (`wx`) and mode 0o666 under the umask, then renamed over the target; the
  *   directory's identity is bound from authorization to the rename (a
  *   replaced or linked directory is refused). A pre-existing entry (file,
  *   directory or symlink) at any temp-like path is never followed, removed
@@ -736,7 +736,7 @@ export function exportWikiOffline(
     }
     const targetPath = decision.canonicalPath;
     // CAU-08: unique temp file this export creates itself next to the target
-    // (`wx` = O_CREAT|O_EXCL, mode 0o600), the directory identity bound from
+    // (`wx` = O_CREAT|O_EXCL, mode 0o666 under the umask), the directory identity bound from
     // here to the rename; only that temp file is ever removed.
     try {
       policy.publishFile(decision, file.content);
