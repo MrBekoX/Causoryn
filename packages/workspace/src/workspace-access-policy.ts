@@ -76,7 +76,8 @@ const CASE_FOLDED_DENY_PATTERNS: ReadonlySet<string> = new Set(["**/.git/**", "*
  */
 function crossesLink(lexicalRoot: string, trustedStart: string): boolean {
   const relative = path.relative(trustedStart, lexicalRoot);
-  if (relative === "" || relative.startsWith("..") || path.isAbsolute(relative)) {
+  // Segment-aware: a directory named "..x" is inside trustedStart.
+  if (relative === "" || isLexicalEscape(relative)) {
     return false;
   }
   let current = trustedStart;

@@ -124,6 +124,21 @@ describe("WorkspaceAccessPolicy.authorizeRoot — no existence oracle through a 
     }
   });
 
+  // A directory whose name merely starts with ".." is inside the allowRoot; the
+  // link check must still run below it.
+  it("gives the not-declared reason below a dangling link in a directory named '..x'", () => {
+    const holder = tempDir("causoryn-dangling-dotdot-");
+    const root = path.join(holder, "root");
+    mkdirSync(path.join(root, "..x"), { recursive: true });
+    linkDirectory(path.join(holder, "outside", "missing"), path.join(root, "..x", "gone"));
+    const policy = WorkspaceAccessPolicy.create({ allowRoots: [root] });
+
+    const decision = policy.authorizeRoot(path.join(root, "..x", "gone", "sub"));
+
+    expect(decision.allowed).toBe(false);
+    if (!decision.allowed) expect(decision.reason).toBe(ROOT_NOT_DECLARED);
+  });
+
   it("keeps the detailed reason for a missing root inside the allowRoot", () => {
     const root = tempDir("causoryn-missing-inside-");
     const policy = WorkspaceAccessPolicy.create({ allowRoots: [root] });
