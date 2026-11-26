@@ -217,7 +217,7 @@ describe("describeLinkInspectionFailure — no readlink targets in client messag
   const uncFailure = {
     ok: false,
     reason: "unc-or-device-link-target",
-    linkPath: "C:\\Users\\victim\\Links\\share",
+    linkPath: "D:\\outside-victim\\Links\\share",
     target: "\\\\fileserver\\finance$",
   } as const;
 
