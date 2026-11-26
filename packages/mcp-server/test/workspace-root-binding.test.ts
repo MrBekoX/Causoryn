@@ -1,0 +1,387 @@
+import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import os from "node:os";
+import path from "node:path";
+
+import Database from "better-sqlite3";
+import { SqliteGraphRepository } from "@causoryn/storage-sqlite";
+import type { SqliteWikiStore } from "@causoryn/storage-sqlite";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+
+import { CausorynConfigError, createCausorynContext } from "../src/index.js";
+import type { CausorynContext } from "../src/index.js";
+
+/**
+ * CAU-03 (CWE-863): a persisted graph/wiki database is bound to the CANONICAL
+ * workspace root it was recorded for, not only to the workspace id.
+ *
+ * Reusing an explicit `storage.dataDbPath` / `wiki.dataDbPath` with a different
+ * root under the same `workspaceId` must refuse at open (CausorynConfigError):
+ * otherwise tool authorization passes for the new root while the snapshot, wiki
+ * pages and annotations recorded for the previous root are served. The same root
+ * spelled differently (trailing separator, letter case on Windows, a link to the
+ * same directory) keeps warm-starting, and databases written by 0.3.2 (which
+ * stored `allowRoots[0]` verbatim) keep opening when the root is canonically equal.
+ *
+ * Every database and workspace lives in a fresh os.tmpdir() directory.
+ */
+
+const WS = "shared-ws";
+const FIXED_NOW = "2026-11-26T10:00:00.000Z";
+const LEGACY_CREATED_AT = "2026-11-20T08:00:00.000Z";
+const IS_WIN = process.platform === "win32";
+
+let tempRoot: string;
+let rootA: string;
+let rootB: string;
+let dataDir: string;
+
+function writeWorkspace(root: string, fileName: string, body: string): void {
+  mkdirSync(path.join(root, "src"), { recursive: true });
+  writeFileSync(path.join(root, "src", fileName), body);
+}
+
+beforeEach(() => {
+  tempRoot = mkdtempSync(path.join(os.tmpdir(), "causoryn-root-binding-"));
+  rootA = path.join(tempRoot, "ws-a");
+  rootB = path.join(tempRoot, "ws-b");
+  dataDir = path.join(tempRoot, "data");
+  writeWorkspace(rootA, "only-in-a.ts", "export function onlyInA(): number {\n  return 1;\n}\n");
+  writeWorkspace(rootB, "only-in-b.ts", "export function onlyInB(): number {\n  return 2;\n}\n");
+  mkdirSync(dataDir);
+});
+
+afterEach(() => {
+  rmSync(tempRoot, { recursive: true, force: true });
+});
+
+function graphDbPath(): string {
+  return path.join(dataDir, "graph.sqlite");
+}
+
+function wikiDbPath(): string {
+  return path.join(dataDir, "wiki.sqlite");
+}
+
+function graphConfig(root: string): Record<string, unknown> {
+  return {
+    workspaceId: WS,
+    allowRoots: [root],
+    autoIndex: true,
+    storage: { dataDbPath: graphDbPath() },
+  };
+}
+
+function wikiConfig(root: string): Record<string, unknown> {
+  return {
+    workspaceId: WS,
+    allowRoots: [root],
+    autoIndex: false,
+    wiki: { dataDbPath: wikiDbPath() },
+  };
+}
+
+function open(rawConfig: Record<string, unknown>, logs: string[] = []): CausorynContext {
+  return createCausorynContext(rawConfig, {
+    clock: () => FIXED_NOW,
+    logger: (message: string): void => {
+      logs.push(message);
+    },
+  });
+}
+
+/** What a context opened for `rawConfig` would serve for WS (undefined when it refuses). */
+interface OpenOutcome {
+  readonly error?: unknown;
+  readonly served?: {
+    readonly graphNodes: string;
+    readonly wikiSnapshotId: string | undefined;
+    readonly annotationIds: readonly string[];
+  };
+}
+
+function tryOpen(rawConfig: Record<string, unknown>): OpenOutcome {
+  let context: CausorynContext;
+  try {
+    context = open(rawConfig);
+  } catch (error) {
+    return { error };
+  }
+  try {
+    const graph = context.repository.getLatestPublished(WS);
+    const wiki = context.wikiStore;
+    return {
+      served: {
+        graphNodes: JSON.stringify(graph?.snapshot.nodes ?? []),
+        wikiSnapshotId: wiki?.getLatestPublishedWiki(WS)?.snapshot.id,
+        annotationIds: (wiki?.listAnnotations(WS) ?? []).map((annotation) => annotation.id),
+      },
+    };
+  } finally {
+    context.close();
+  }
+}
+
+/** Publishes a one-page WikiSnapshot plus a human annotation for WS. */
+function publishWikiWithAnnotation(store: SqliteWikiStore): string {
+  const sid = store.beginWikiBuild({
+    workspaceId: WS,
+    graphSnapshotId: "snapshot:recorded-for-a",
+    revisionRef: "rev-a",
+    templateVersion: "tpl-test",
+    createdAt: FIXED_NOW,
+  });
+  store.addWikiPage(sid, {
+    id: "page_root_overview",
+    kind: "overview",
+    parentId: null,
+    title: "Overview of A",
+    slug: "overview",
+    route: "/wiki/overview",
+    contentHash: "hash-a",
+    freshness: "fresh",
+    coverage: { status: "complete" },
+  });
+  const published = store.publishWiki(sid, "wiki:recorded-for-a", "ready", FIXED_NOW);
+  store.writeAnnotation(WS, {
+    id: "annot-a",
+    stablePageId: "page_root_overview",
+    sectionKey: "dependencies",
+    authorKind: "human",
+    origin: "human_note",
+    body: "note written while the root was A",
+    annotationVersion: 0,
+    updatedAt: FIXED_NOW,
+  });
+  return published.snapshot.id;
+}
+
+/** Other spellings of rootA that name the same directory. */
+function sameDirectorySpellings(): string[] {
+  const spellings = [`${rootA}${path.sep}`];
+  if (IS_WIN) {
+    spellings.push(rootA.toUpperCase(), rootA.toLowerCase());
+  }
+  const link = path.join(tempRoot, "link-to-a");
+  symlinkSync(rootA, link, IS_WIN ? "junction" : "dir");
+  spellings.push(link);
+  return spellings;
+}
+
+function storedRootPath(dbFile: string): string | undefined {
+  const db = new Database(dbFile, { readonly: true });
+  try {
+    const row = db.prepare("SELECT root_path FROM workspaces WHERE id = ?").get(WS) as
+      | { root_path: string }
+      | undefined;
+    return row?.root_path;
+  } finally {
+    db.close();
+  }
+}
+
+function expectRootMismatchRefusal(
+  outcome: OpenOutcome,
+  fieldName: "storage.dataDbPath" | "wiki.dataDbPath",
+): void {
+  expect(outcome.error).toBeInstanceOf(CausorynConfigError);
+  const message = (outcome.error as Error).message;
+  expect(message).toContain(fieldName);
+  expect(message).toContain(WS);
+  expect(message).toMatch(/different (workspace )?root/);
+  // The refusal does not repeat the root the database was recorded for.
+  expect(message.toLowerCase()).not.toContain(rootA.toLowerCase());
+}
+
+describe("CAU-03 — graph DB bound to the canonical workspace root", { timeout: 60_000 }, () => {
+  it("same workspaceId + a different root refuses at open; the snapshot indexed for root A is never served", () => {
+    let snapshotA: string;
+    const first = open(graphConfig(rootA));
+    try {
+      const read = first.repository.getLatestPublished(WS);
+      expect(read).toBeDefined();
+      expect(JSON.stringify(read?.snapshot.nodes)).toContain("only-in-a.ts");
+      snapshotA = read?.snapshot.meta.id as string;
+    } finally {
+      first.close();
+    }
+
+    const outcome = tryOpen(graphConfig(rootB));
+    expect(outcome.served?.graphNodes ?? "").not.toContain("only-in-a.ts");
+    expectRootMismatchRefusal(outcome, "storage.dataDbPath");
+
+    // The refusal changed nothing: root A still warm-starts its own snapshot.
+    const logs: string[] = [];
+    const again = open(graphConfig(rootA), logs);
+    try {
+      expect(again.repository.getLatestPublished(WS)?.snapshot.meta.id).toBe(snapshotA);
+      expect(logs.some((line) => line.includes(`persistent index loaded: workspace=${WS} snapshot=${snapshotA}`))).toBe(true);
+    } finally {
+      again.close();
+    }
+  });
+
+  it("the record binds to the directory the root resolved to: a link retargeted to another directory is refused", () => {
+    const link = path.join(tempRoot, "moving-link");
+    symlinkSync(rootA, link, IS_WIN ? "junction" : "dir");
+    const first = open(graphConfig(link));
+    first.close();
+
+    rmSync(link, { force: true });
+    // Removing the link left the directory it pointed to intact.
+    expect(existsSync(path.join(rootA, "src", "only-in-a.ts"))).toBe(true);
+    symlinkSync(rootB, link, IS_WIN ? "junction" : "dir");
+
+    const outcome = tryOpen(graphConfig(link));
+    expect(outcome.served?.graphNodes ?? "").not.toContain("only-in-a.ts");
+    expectRootMismatchRefusal(outcome, "storage.dataDbPath");
+  });
+
+  it("the same root spelled differently (trailing separator, letter case on Windows, a link to it) warm-starts the stored snapshot", () => {
+    let snapshotA: string;
+    const first = open(graphConfig(rootA));
+    try {
+      snapshotA = first.repository.getLatestPublished(WS)?.snapshot.meta.id as string;
+      expect(snapshotA).toMatch(/^snapshot:/);
+    } finally {
+      first.close();
+    }
+
+    for (const spelling of sameDirectorySpellings()) {
+      const logs: string[] = [];
+      const context = open(graphConfig(spelling), logs);
+      try {
+        expect(context.repository.getLatestPublished(WS)?.snapshot.meta.id, spelling).toBe(snapshotA);
+        expect(
+          logs.some((line) => line.includes(`persistent index loaded: workspace=${WS} snapshot=${snapshotA}`)),
+          spelling,
+        ).toBe(true);
+      } finally {
+        context.close();
+      }
+    }
+  });
+
+  it("a 0.3.2 database (allowRoots[0] stored verbatim, non-canonical spelling) keeps opening for the canonically equal root and is not rewritten", () => {
+    const legacySpelling = IS_WIN ? `${rootA.toUpperCase()}${path.sep}` : `${rootA}${path.sep}`;
+    // 0.3.2 wrote the workspace row exactly like this at open time.
+    const legacy = new SqliteGraphRepository(graphDbPath());
+    try {
+      legacy.registerWorkspace({ id: WS, rootPath: legacySpelling, createdAt: LEGACY_CREATED_AT });
+    } finally {
+      legacy.close();
+    }
+
+    let snapshotA: string;
+    const first = open(graphConfig(rootA));
+    try {
+      const read = first.repository.getLatestPublished(WS);
+      expect(JSON.stringify(read?.snapshot.nodes)).toContain("only-in-a.ts");
+      snapshotA = read?.snapshot.meta.id as string;
+    } finally {
+      first.close();
+    }
+
+    const logs: string[] = [];
+    const again = open(graphConfig(rootA), logs);
+    try {
+      expect(again.repository.getLatestPublished(WS)?.snapshot.meta.id).toBe(snapshotA);
+      expect(logs.some((line) => line.includes("persistent index loaded"))).toBe(true);
+    } finally {
+      again.close();
+    }
+    expect(storedRootPath(graphDbPath())).toBe(legacySpelling);
+  });
+
+  it("a 0.3.2 database recorded for another root is refused", () => {
+    const legacy = new SqliteGraphRepository(graphDbPath());
+    try {
+      legacy.registerWorkspace({ id: WS, rootPath: rootA, createdAt: LEGACY_CREATED_AT });
+    } finally {
+      legacy.close();
+    }
+    expectRootMismatchRefusal(tryOpen(graphConfig(rootB)), "storage.dataDbPath");
+    expect(storedRootPath(graphDbPath())).toBe(rootA);
+  });
+
+  it("a record whose root no longer exists, or names a network/device path, is refused for the authorized root", () => {
+    const recordedRoots = [
+      path.join(tempRoot, "deleted-root"),
+      IS_WIN ? "\\\\server.invalid\\share\\ws-a" : "//server.invalid/share/ws-a",
+    ];
+    for (const recordedRoot of recordedRoots) {
+      for (const suffix of ["", "-wal", "-shm", "-journal"]) {
+        rmSync(`${graphDbPath()}${suffix}`, { force: true });
+      }
+      const legacy = new SqliteGraphRepository(graphDbPath());
+      try {
+        legacy.registerWorkspace({ id: WS, rootPath: recordedRoot, createdAt: LEGACY_CREATED_AT });
+      } finally {
+        legacy.close();
+      }
+      const outcome = tryOpen(graphConfig(rootA));
+      expect(outcome.error, recordedRoot).toBeInstanceOf(CausorynConfigError);
+      expect((outcome.error as Error).message, recordedRoot).toMatch(/different root/);
+      expect((outcome.error as Error).message, recordedRoot).not.toContain(recordedRoot);
+    }
+  });
+});
+
+describe("CAU-03 — wiki DB bound to the canonical workspace root", { timeout: 60_000 }, () => {
+  it("same workspaceId + a different root refuses at open; root A's wiki pages and annotations are never served", () => {
+    let wikiSnapshotA: string;
+    const first = open(wikiConfig(rootA));
+    try {
+      wikiSnapshotA = publishWikiWithAnnotation(first.wikiStore as SqliteWikiStore);
+    } finally {
+      first.close();
+    }
+
+    const outcome = tryOpen(wikiConfig(rootB));
+    expect(outcome.served?.wikiSnapshotId).not.toBe(wikiSnapshotA);
+    expect(outcome.served?.annotationIds ?? []).not.toContain("annot-a");
+    expectRootMismatchRefusal(outcome, "wiki.dataDbPath");
+  });
+
+  it("the same root spelled differently keeps serving its wiki pages and annotations", () => {
+    let wikiSnapshotA: string;
+    const first = open(wikiConfig(rootA));
+    try {
+      wikiSnapshotA = publishWikiWithAnnotation(first.wikiStore as SqliteWikiStore);
+    } finally {
+      first.close();
+    }
+
+    for (const spelling of sameDirectorySpellings()) {
+      const outcome = tryOpen(wikiConfig(spelling));
+      expect(outcome.error, spelling).toBeUndefined();
+      expect(outcome.served?.wikiSnapshotId, spelling).toBe(wikiSnapshotA);
+      expect(outcome.served?.annotationIds, spelling).toEqual(["annot-a"]);
+    }
+  });
+
+  it("a 0.3.2 wiki database keeps opening for the canonically equal root and is refused for another root", () => {
+    const legacySpelling = `${rootA}${path.sep}`;
+    const legacy = new SqliteGraphRepository(wikiDbPath());
+    try {
+      legacy.registerWorkspace({ id: WS, rootPath: legacySpelling, createdAt: LEGACY_CREATED_AT });
+    } finally {
+      legacy.close();
+    }
+
+    let wikiSnapshotA: string;
+    const first = open(wikiConfig(rootA));
+    try {
+      wikiSnapshotA = publishWikiWithAnnotation(first.wikiStore as SqliteWikiStore);
+    } finally {
+      first.close();
+    }
+    const reopened = tryOpen(wikiConfig(rootA));
+    expect(reopened.error).toBeUndefined();
+    expect(reopened.served?.wikiSnapshotId).toBe(wikiSnapshotA);
+
+    const other = tryOpen(wikiConfig(rootB));
+    expect(other.served?.annotationIds ?? []).not.toContain("annot-a");
+    expectRootMismatchRefusal(other, "wiki.dataDbPath");
+    expect(storedRootPath(wikiDbPath())).toBe(legacySpelling);
+  });
+});

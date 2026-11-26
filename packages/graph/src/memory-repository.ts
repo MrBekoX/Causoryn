@@ -117,6 +117,12 @@ export class InMemoryGraphRepository implements GraphRepository {
     this.workspaces.set(record.id, { ...record });
   }
 
+  getWorkspace(workspaceId: string): WorkspaceRecord | undefined {
+    requireNonEmptyField("workspaceId", workspaceId);
+    const record = this.workspaces.get(workspaceId);
+    return record === undefined ? undefined : { ...record };
+  }
+
   upsertFile(record: FileRecord): void {
     if (!this.workspaces.has(record.workspaceId)) {
       throw new GraphRepositoryError(

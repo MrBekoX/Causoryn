@@ -592,3 +592,31 @@ describe("InMemoryGraphRepository.deleteFile — güvenlik bulgusu 3", () => {
     );
   });
 });
+
+/* ------------------------------------------------------------------ */
+/* CAU-03: kayıtlı workspace kaydı kimlikle geri okunur                */
+/* ------------------------------------------------------------------ */
+
+describe("InMemoryGraphRepository.getWorkspace — CAU-03 root binding", () => {
+  it("returns the registered record by id, and undefined for an id that was never registered", () => {
+    const repo = makeRepo();
+    expect(repo.getWorkspace(WS)).toEqual({
+      id: WS,
+      rootPath: "D:/fixture/orders",
+      createdAt: CREATED_AT,
+    });
+    expect(repo.getWorkspace("ws_never_registered")).toBeUndefined();
+  });
+
+  it("returns a copy: changing the returned object does not change the stored record", () => {
+    const repo = makeRepo();
+    const record = repo.getWorkspace(WS) as { rootPath: string };
+    record.rootPath = "D:/somewhere/else";
+    expect(repo.getWorkspace(WS)?.rootPath).toBe("D:/fixture/orders");
+  });
+
+  it("rejects an empty workspace id like the other read paths", () => {
+    const repo = makeRepo();
+    expect(() => repo.getWorkspace("  ")).toThrowError(GraphRepositoryError);
+  });
+});

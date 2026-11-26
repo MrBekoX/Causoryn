@@ -1268,3 +1268,39 @@ describe("SqliteGraphRepository.getLatestWorkspaceSummaryMeta — zero-hydration
     }
   });
 });
+
+describe("SqliteGraphRepository.getWorkspace — CAU-03 root binding", () => {
+  it("reads the persisted workspace record back after the file is reopened", () => {
+    const file = dbPath("workspace-record.sqlite");
+    const first = new SqliteGraphRepository(file);
+    first.registerWorkspace({
+      id: WS,
+      rootPath: "D:/fixture/orders",
+      createdAt: CREATED_AT,
+    });
+    first.close();
+
+    const second = new SqliteGraphRepository(file);
+    try {
+      expect(second.getWorkspace(WS)).toEqual({
+        id: WS,
+        rootPath: "D:/fixture/orders",
+        createdAt: CREATED_AT,
+      });
+      expect(second.getWorkspace("ws_never_registered")).toBeUndefined();
+    } finally {
+      second.close();
+    }
+  });
+
+  it("binds the id as a parameter: an injection-looking id is only an unknown id; an empty id is rejected", () => {
+    const repo = new SqliteGraphRepository(dbPath("workspace-record-inject.sqlite"));
+    try {
+      repo.registerWorkspace({ id: WS, rootPath: "D:/fixture/orders", createdAt: CREATED_AT });
+      expect(repo.getWorkspace("x' OR '1'='1")).toBeUndefined();
+      expect(() => repo.getWorkspace("")).toThrowError(GraphRepositoryError);
+    } finally {
+      repo.close();
+    }
+  });
+});

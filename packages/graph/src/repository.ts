@@ -158,6 +158,12 @@ export interface SymbolSearchHit {
  */
 export interface GraphRepository {
   registerWorkspace(record: WorkspaceRecord): void;
+  /**
+   * CAU-03: the registered record for `workspaceId`, or undefined when the id was
+   * never registered. Callers that reopen persisted data compare its `rootPath`
+   * with the authorized root before trusting rows recorded under the same id.
+   */
+  getWorkspace?(workspaceId: string): WorkspaceRecord | undefined;
   upsertFile(record: FileRecord): void;
   listFiles(workspaceId: string): readonly FileRecord[];
   /**

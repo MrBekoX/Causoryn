@@ -748,6 +748,104 @@ function extractSymbolSearch(repository: GraphRepository): SymbolSearchStore | n
   return null;
 }
 
+function stripWin32DevicePrefix(value: string): string {
+  if (process.platform !== "win32") return value;
+  if (value.startsWith("\\\\?\\UNC\\")) return `\\\\${value.slice(8)}`;
+  if (value.startsWith("\\\\?\\")) return value.slice(4);
+  return value;
+}
+
+/**
+ * Whether `root` may be resolved on disk. A recorded root is read back from a
+ * database, so it gets the same pre-filesystem checks as a declared allowRoot:
+ * resolving a UNC/device path, or a link whose target is one, would open an
+ * outbound SMB session on Windows.
+ */
+function isResolvableRoot(root: string): boolean {
+  if (!path.isAbsolute(root) || root.includes("\0") || isUncOrDevicePath(root)) return false;
+  if (process.platform === "win32" && findWindowsUnsafePathSegment(root) !== undefined) return false;
+  return !LINK_TARGET_INSPECTION_ENABLED || inspectLinkTargets(root).ok;
+}
+
+/**
+ * Canonical form of a workspace root (CAU-03): the real path when it resolves
+ * (native realpath first, so Windows 8.3 short names and letter case resolve to
+ * the on-disk name), otherwise the lexically resolved path. A root that is not
+ * absolute stays as given, so it never equals an authorized root.
+ */
+function canonicalWorkspaceRoot(root: string): string {
+  if (!path.isAbsolute(root)) return root;
+  const resolved = path.resolve(root);
+  if (isResolvableRoot(root)) {
+    const resolvers: ReadonlyArray<(target: string) => string> = [
+      (target) => realpathSync.native(target),
+      (target) => realpathSync(target),
+    ];
+    for (const resolve of resolvers) {
+      try {
+        return stripWin32DevicePrefix(resolve(resolved));
+      } catch {
+        // Missing root, or a native call the platform does not support: try the next form.
+      }
+    }
+  }
+  return stripWin32DevicePrefix(resolved);
+}
+
+/** Comparison key of a root: canonical form, no trailing separator, case-folded on win32. */
+function comparableWorkspaceRoot(root: string): string {
+  const canonical = canonicalWorkspaceRoot(root);
+  const fsRoot = path.parse(canonical).root;
+  const trimmed =
+    canonical.length > fsRoot.length && canonical.endsWith(path.sep)
+      ? canonical.slice(0, -1)
+      : canonical;
+  return process.platform === "win32" ? trimmed.toLowerCase() : trimmed;
+}
+
+/**
+ * CAU-03 (CWE-863): binds the persisted workspace record to the authorized
+ * primary root. Data in a graph/wiki database is keyed by workspace id only, so
+ * a database recorded for another root under the same id would otherwise be
+ * served once tool authorization passes for the new root. A new record stores
+ * the canonical root; an existing record (including a 0.3.2 record, which holds
+ * `allowRoots[0]` verbatim) must name the same directory canonically, or the
+ * database is refused before any of its rows are read. The refusal does not
+ * repeat the recorded root, and the database is left unchanged.
+ */
+function bindWorkspaceRecord(
+  repository: SqliteGraphRepository,
+  fieldName: "storage.dataDbPath" | "wiki.dataDbPath",
+  workspaceId: string,
+  declaredRoot: string,
+  clock: () => string,
+): void {
+  let existing = repository.getWorkspace(workspaceId);
+  if (existing === undefined) {
+    try {
+      repository.registerWorkspace({
+        id: workspaceId,
+        rootPath: canonicalWorkspaceRoot(declaredRoot),
+        createdAt: clock(),
+      });
+      return;
+    } catch (error) {
+      if (!(error instanceof GraphRepositoryError && error.code === "graph/duplicate-workspace")) {
+        throw error;
+      }
+      // Another process registered the id between the read and the insert:
+      // check the root it recorded like any existing record.
+      existing = repository.getWorkspace(workspaceId);
+      if (existing === undefined) throw error;
+    }
+  }
+  if (comparableWorkspaceRoot(existing.rootPath) !== comparableWorkspaceRoot(declaredRoot)) {
+    throw new CausorynConfigError([
+      `${fieldName} holds workspace "${workspaceId}" recorded for a different root than allowRoots[0]; refusing to open it so data indexed for another directory is not served. Use a separate ${fieldName} for this root, or a different workspaceId.`,
+    ]);
+  }
+}
+
 function openStorageRepository(
   config: CausorynServerConfig,
   overrides: ContextOverrides,
@@ -789,23 +887,13 @@ function openStorageRepository(
   const declaredRoot = config.allowRoots[0];
   if (declaredRoot !== undefined) {
     try {
-      sqliteRepo.registerWorkspace({
-        id: config.workspaceId,
-        rootPath: declaredRoot,
-        createdAt: clock(),
-      });
+      bindWorkspaceRecord(sqliteRepo, "storage.dataDbPath", config.workspaceId, declaredRoot, clock);
     } catch (error) {
-      if (
-        error instanceof GraphRepositoryError &&
-        error.code === "graph/duplicate-workspace"
-      ) {
-        // Zaten kayıtlı — idempotent.
-      } else {
-        sqliteRepo.close();
-        throw new CausorynConfigError([
-          `storage.dataDbPath workspace record could not be written: ${errorText(error)}`,
-        ]);
-      }
+      sqliteRepo.close();
+      if (error instanceof CausorynConfigError) throw error;
+      throw new CausorynConfigError([
+        `storage.dataDbPath workspace record could not be written: ${errorText(error)}`,
+      ]);
     }
   }
   logger(`storage data root ready: ${resolvedStoragePath}`);
@@ -861,31 +949,21 @@ function openWikiStores(
   }
 
   // SqliteWikiStore FK sözleşmesi workspace satırı ister; tek workspace
-  // modeli gereği config.workspaceId kaydı yoksa açılışta yazılır.
+  // modeli gereği config.workspaceId kaydı yoksa açılışta yazılır. Kayıt
+  // varsa kanonik kökü yetkili köke eşit olmalıdır (CAU-03).
   const declaredRoot = config.allowRoots[0];
   if (declaredRoot !== undefined) {
     let graphStore: SqliteGraphRepository | undefined;
     try {
       graphStore = new SqliteGraphRepository(declaredResolved);
-      graphStore.registerWorkspace({
-        id: config.workspaceId,
-        rootPath: declaredRoot,
-        createdAt: clock(),
-      });
+      bindWorkspaceRecord(graphStore, "wiki.dataDbPath", config.workspaceId, declaredRoot, clock);
     } catch (error) {
-      if (
-        error instanceof GraphRepositoryError &&
-        error.code === "graph/duplicate-workspace"
-      ) {
-        // Zaten kayıtlı — tek workspace modeli tamam.
-      } else {
-        store.close();
-        graphStore?.close();
-        const detail = error instanceof Error ? error.message : String(error);
-        throw new CausorynConfigError([
-          `wiki.dataDbPath workspace record could not be written: ${detail}`,
-        ]);
-      }
+      store.close();
+      if (error instanceof CausorynConfigError) throw error;
+      const detail = error instanceof Error ? error.message : String(error);
+      throw new CausorynConfigError([
+        `wiki.dataDbPath workspace record could not be written: ${detail}`,
+      ]);
     } finally {
       graphStore?.close();
     }

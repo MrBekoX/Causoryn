@@ -652,6 +652,16 @@ export class SqliteGraphRepository
     );
   }
 
+  /** CAU-03: the persisted workspace row for `workspaceId`, or undefined when absent. */
+  getWorkspace(workspaceId: string): WorkspaceRecord | undefined {
+    requireNonEmptyField("workspaceId", workspaceId);
+    const row = this.stmt(
+      "SELECT id, root_path, created_at FROM workspaces WHERE id = ? LIMIT 1",
+    ).get(workspaceId) as WorkspaceRow | undefined;
+    if (row === undefined) return undefined;
+    return { id: row.id, rootPath: row.root_path, createdAt: row.created_at };
+  }
+
   private requireWorkspace(workspaceId: string): WorkspaceRow {
     const row = this.stmt(
       "SELECT id, root_path, created_at FROM workspaces WHERE id = ? LIMIT 1",
