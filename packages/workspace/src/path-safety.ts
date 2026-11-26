@@ -149,6 +149,15 @@ export interface LinkInspectionOptions {
   readonly pathApi?: PathApi;
   /** Maximum number of links followed before failing closed (default 40). */
   readonly maxLinks?: number;
+  /**
+   * Authorized directories. A local link whose target lies outside all of them is
+   * not followed: the walk stops with `link-leaves-area`, so nothing outside the
+   * authorized area is lstat'ed or read through a link planted inside it. A UNC /
+   * device target is still reported as such first. When the walk is redirected
+   * inside the area it continues from the containing directory (trusted, like
+   * `startDir`).
+   */
+  readonly confineTo?: readonly string[];
 }
 
 export type LinkInspectionResult =
@@ -161,7 +170,7 @@ export type LinkInspectionResult =
     }
   | {
       readonly ok: false;
-      readonly reason: "link-target-unreadable" | "too-many-links";
+      readonly reason: "link-target-unreadable" | "too-many-links" | "link-leaves-area";
       readonly linkPath: string;
     };
 
@@ -205,7 +214,8 @@ export function inspectLinkTargets(
   const pathApi = options.pathApi ?? path;
   const fsImpl = options.fs ?? NODE_LINK_FS;
   const maxLinks = options.maxLinks ?? DEFAULT_MAX_LINKS;
-  const trusted = options.startDir === undefined ? undefined : pathApi.resolve(options.startDir);
+  let trusted = options.startDir === undefined ? undefined : pathApi.resolve(options.startDir);
+  const areas = options.confineTo?.map((area) => pathApi.resolve(area));
   if (isUncOrDevicePath(absolutePath)) {
     return { ok: false, reason: "unc-or-device-link-target", linkPath: absolutePath, target: absolutePath };
   }
@@ -252,6 +262,13 @@ export function inspectLinkTargets(
         return { ok: false, reason: "unc-or-device-link-target", linkPath: next, target: linkTarget };
       }
       target = pathApi.join(resolvedTarget, ...remaining.slice(index + 1));
+      if (areas !== undefined) {
+        const area = areas.find((candidate) => isSameOrInside(pathApi, candidate, target));
+        if (area === undefined) {
+          return { ok: false, reason: "link-leaves-area", linkPath: next };
+        }
+        trusted = area;
+      }
       redirected = true;
       break;
     }
@@ -304,5 +321,42 @@ export function describeLinkInspectionFailure(
       return `a link target could not be read (refusing to follow it)${where}`;
     case "too-many-links":
       return `too many links while resolving the path (refusing to follow further)${where}`;
+    case "link-leaves-area":
+      return `a link leads outside the authorized directory (not followed)${where}`;
   }
+}
+
+/**
+ * True when an existing component of `lexicalPath` strictly below `trustedStart`
+ * is a symbolic link or junction. Purely lstat-based; it stops at the first
+ * missing component (nothing below it exists to be a link). Used to give a path
+ * that cannot be resolved because it lies below a (dangling) link the same answer
+ * as a path outside the authorized area.
+ */
+export function pathCrossesLink(lexicalPath: string, trustedStart: string, pathApi: PathApi = path): boolean {
+  const relative = pathApi.relative(trustedStart, lexicalPath);
+  // Segment-aware: a directory named "..x" is inside trustedStart.
+  if (
+    relative === "" ||
+    relative === ".." ||
+    relative.startsWith(`..${pathApi.sep}`) ||
+    pathApi.isAbsolute(relative)
+  ) {
+    return false;
+  }
+  let current = trustedStart;
+  for (const part of relative.split(pathApi.sep)) {
+    if (part.length === 0) continue;
+    current = pathApi.join(current, part);
+    let isLink: boolean;
+    try {
+      isLink = lstatSync(current).isSymbolicLink();
+    } catch {
+      return false;
+    }
+    if (isLink) {
+      return true;
+    }
+  }
+  return false;
 }

@@ -10,7 +10,9 @@
  */
 
 export type {
+  IgnoreWorkMeter,
   PolicyAllow,
+  PolicyCheckOptions,
   PolicyDecision,
   PolicyDeny,
 } from "./workspace-access-policy.js";

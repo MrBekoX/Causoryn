@@ -41,11 +41,15 @@ export interface IgnoreMatchBudget {
 }
 
 /**
- * Steps one policy decision may spend on ignore matching (Claude Security F32).
+ * Steps one ignore pass may spend (Claude Security F32): one match of a path and
+ * its ancestors against the rule set. WorkspaceAccessPolicy gives each pass of a
+ * decision (lexical spelling, canonical real path, native long name) its own
+ * budget, so a path reached through a link is not denied for needing two passes.
  * An ordinary configuration (the default list, or 1000 typical .gitignore lines
- * on a path 30 directories deep) needs well under a quarter of it; a crafted
- * pattern set against a deep directory chain exhausts it in a few milliseconds
- * and the decision fails closed.
+ * on a path 30 directories deep) needs well under half of it; a crafted pattern
+ * set against a deep directory chain exhausts it in a few milliseconds and the
+ * decision fails closed. Callers that run many decisions (the inventory) bound
+ * their total separately.
  */
 export const IGNORE_MATCH_WORK_BUDGET = 1_000_000;
 
@@ -285,18 +289,25 @@ export interface AncestorIgnoreMatchOptions {
 }
 
 /**
+ * Code points {@link lookAlikeFold} drops: combining marks, and default-ignorable
+ * code points (zero-width joiner/space, soft hyphen, word joiner, BOM, variation
+ * selectors...), which Linux casefold before 6.12 ignores when it compares names.
+ */
+const DROPPED_BY_LOOK_ALIKE_FOLD = /[\p{M}\p{Default_Ignorable_Code_Point}]/u;
+
+/**
  * Folds a path segment to the spelling a case-insensitive filesystem may treat it
- * as: compatibility decomposition (NFKD), combining marks dropped, and each
- * character upper-cased then lower-cased. NTFS compares names by upper-casing, so
- * U+0131 (dotless i) and U+017F (long s) match "i" and "s" there; JavaScript
- * lower-casing alone keeps them apart. Used only for the secret / VCS deny rules,
- * where folding too much denies a look-alike name (fail closed) and folding too
- * little would allow one.
+ * as: compatibility decomposition (NFKD), combining marks and default-ignorable
+ * code points dropped, and each character upper-cased then lower-cased. NTFS
+ * compares names by upper-casing, so U+0131 (dotless i) and U+017F (long s) match
+ * "i" and "s" there; JavaScript lower-casing alone keeps them apart. Used only for
+ * the secret / VCS deny rules, where folding too much denies a look-alike name
+ * (fail closed) and folding too little would allow one.
  */
 export function lookAlikeFold(segment: string): string {
   let folded = "";
   for (const ch of segment.normalize("NFKD")) {
-    if (/\p{M}/u.test(ch)) continue;
+    if (DROPPED_BY_LOOK_ALIKE_FOLD.test(ch)) continue;
     folded += ch.toUpperCase().toLowerCase();
   }
   return folded;

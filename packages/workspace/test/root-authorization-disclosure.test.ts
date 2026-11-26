@@ -65,8 +65,8 @@ vi.mock("node:fs", async (importOriginal) => {
   return { ...actual, ...overrides, default: { ...actual, ...overrides } };
 });
 
-import { describeLinkInspectionFailure, WorkspaceAccessPolicy } from "../src/index.js";
-import type { PolicyDecision } from "../src/index.js";
+import { describeLinkInspectionFailure, OutputAccessPolicy, WorkspaceAccessPolicy } from "../src/index.js";
+import type { OutputDecision, PolicyDecision } from "../src/index.js";
 
 const IS_WIN = process.platform === "win32";
 
@@ -290,5 +290,114 @@ describe("WorkspaceAccessPolicy — link denials do not echo targets (F42)", () 
     expect(denial.rule).toBe("unc-or-device-link-target");
     expect(denial.reason).not.toContain(outside);
     expect(denial.reason).not.toContain("fileserver");
+  });
+});
+
+const ROOT_NOT_DECLARED = "root is not inside a user-declared allowRoot (explicit authorization required)";
+
+function linkDirectory(target: string, linkPath: string): void {
+  symlinkSync(target, linkPath, IS_WIN ? "junction" : "dir");
+}
+
+function outputDenyOf(decision: OutputDecision): { code: string; reason: string; rule?: string } {
+  if (decision.allowed) {
+    throw new Error(`expected a deny decision, got allowed: ${decision.canonicalPath}`);
+  }
+  return decision.rule === undefined
+    ? { code: decision.code, reason: decision.reason }
+    : { code: decision.code, reason: decision.reason, rule: decision.rule };
+}
+
+/** Recorded calls that touched `dir` or anything below it (case-folded on Windows). */
+function callsUnder(calls: readonly string[], dir: string): string[] {
+  const needle = IS_WIN ? dir.toLowerCase() : dir;
+  return calls.filter((call) => (IS_WIN ? call.toLowerCase() : call).includes(needle));
+}
+
+describe("OutputAccessPolicy.authorizeDirectory — lexical authorization first (F21 / F73)", () => {
+  it("denies a directory outside the declared output dirs without filesystem access and with one reason", () => {
+    const declared = makeDir("causoryn-outauth-declared-");
+    const outside = makeDir("causoryn-outauth-outside-");
+    mkdirSync(path.join(outside, "dir"));
+    writeFileSync(path.join(outside, "file.txt"), "x");
+    const policy = OutputAccessPolicy.create([declared]);
+
+    const denials = [path.join(outside, "dir"), path.join(outside, "file.txt"), path.join(outside, "missing")].map(
+      (probe) => {
+        const { result, calls } = recordFsCalls(() => policy.authorizeDirectory(probe));
+        expect(calls, `filesystem calls for ${probe}`).toEqual([]);
+        return outputDenyOf(result);
+      },
+    );
+    for (const denial of denials) {
+      expect(denial.code).toBe("workspace/output-not-authorized");
+      expect(denial).toEqual(denials[0]);
+      expect(denial.reason).not.toContain(outside);
+    }
+  });
+
+  it("gives a dangling link inside a declared dir the same answer as a link to an existing outside dir", () => {
+    const holder = makeDir("causoryn-outauth-dangling-");
+    const declared = path.join(holder, "exports");
+    mkdirSync(declared);
+    mkdirSync(path.join(holder, "outside-existing"));
+    linkDirectory(path.join(holder, "outside", "missing"), path.join(declared, "gone"));
+    linkDirectory(path.join(holder, "outside-existing"), path.join(declared, "there"));
+    const policy = OutputAccessPolicy.create([declared]);
+
+    const toMissing = outputDenyOf(policy.authorizeDirectory(path.join(declared, "gone")));
+    const toExisting = outputDenyOf(policy.authorizeDirectory(path.join(declared, "there")));
+    expect(toMissing).toEqual(toExisting);
+    expect(toMissing.code).toBe("workspace/output-not-authorized");
+  });
+
+  it("keeps authorizing declared dirs and their subdirectories, and the detailed reason for a missing one", () => {
+    const declared = makeDir("causoryn-outauth-declared-");
+    mkdirSync(path.join(declared, "sub"));
+    const policy = OutputAccessPolicy.create([declared]);
+    expect(policy.authorizeDirectory(declared).allowed).toBe(true);
+    expect(policy.authorizeDirectory(path.join(declared, "sub")).allowed).toBe(true);
+    expect(outputDenyOf(policy.authorizeDirectory(path.join(declared, "not-yet"))).reason).toMatch(
+      /missing or inaccessible/,
+    );
+  });
+});
+
+describe("link chains that leave the authorized area are not followed (F21 / F73, Windows)", () => {
+  it.skipIf(!IS_WIN)("authorizeRoot: a repository link chain leaving the allowRoot gets the not-declared reason", () => {
+    const root = makeDir("causoryn-rootauth-root-");
+    const outside = makeDir("causoryn-rootauth-outside-");
+    const hop = path.join(outside, "hop");
+    fakeLink(path.join(root, "out"), hop);
+    fakeLink(hop, "\\\\fileserver.example\\share");
+    const policy = WorkspaceAccessPolicy.create({ allowRoots: [root] });
+
+    const { result, calls } = recordFsCalls(() => policy.authorizeRoot(path.join(root, "out", "sub")));
+    expect(denyOf(result)).toEqual({ code: "workspace/root-not-authorized", reason: ROOT_NOT_DECLARED });
+    expect(callsUnder(calls, outside)).toEqual([]);
+  });
+
+  it.skipIf(!IS_WIN)("authorizeDirectory: a link chain leaving the declared dir gets the not-declared reason", () => {
+    const declared = makeDir("causoryn-outauth-declared-");
+    const outside = makeDir("causoryn-outauth-outside-");
+    const hop = path.join(outside, "hop");
+    fakeLink(path.join(declared, "out"), hop);
+    fakeLink(hop, "\\\\fileserver.example\\share");
+    const policy = OutputAccessPolicy.create([declared]);
+    const notDeclared = outputDenyOf(policy.authorizeDirectory(path.join(outside, "elsewhere")));
+
+    const { result, calls } = recordFsCalls(() => policy.authorizeDirectory(path.join(declared, "out", "x")));
+    expect(outputDenyOf(result)).toEqual(notDeclared);
+    expect(callsUnder(calls, outside)).toEqual([]);
+  });
+
+  it.skipIf(!IS_WIN)("still names an in-area link to a UNC target as such, without the target", () => {
+    const declared = makeDir("causoryn-outauth-declared-");
+    fakeLink(path.join(declared, "share"), "\\\\fileserver.example\\share");
+    const policy = OutputAccessPolicy.create([declared]);
+    const denial = outputDenyOf(policy.authorizeDirectory(path.join(declared, "share")));
+    expect(denial.rule).toBe("unc-or-device-link-target");
+    expect(denial.reason).not.toContain("fileserver");
+    expect(denial.reason).not.toContain(declared);
   });
 });

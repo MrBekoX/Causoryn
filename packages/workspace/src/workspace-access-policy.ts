@@ -1,4 +1,4 @@
-import { lstatSync, realpathSync, statSync } from "node:fs";
+import { realpathSync, statSync } from "node:fs";
 import path from "node:path";
 
 import {
@@ -14,6 +14,7 @@ import {
   inspectLinkTargets,
   isUncOrDevicePath,
   LINK_TARGET_INSPECTION_ENABLED,
+  pathCrossesLink,
 } from "./path-safety.js";
 import {
   effectiveIgnorePatterns,
@@ -31,7 +32,7 @@ import { WorkspacePolicyError, type PolicyErrorCode } from "./policy-error.js";
  *   1. kök yetkilendirmesi (önce leksik allowlist, sonra realpath canonicalization + allowlist)
  *   2. null byte reddi
  *   3. leksik `..`/mutlak yol sarmalama kontrolü (OWASP normalize)
- *   4. ignore kuralları (atalar dahil; karar başına iş bütçesi, aşımda red)
+ *   4. ignore kuralları (atalar dahil; geçiş başına iş bütçesi, aşımda red)
  *   5. realpath (symlink/junction) sarmalama kontrolü (CWE-59; TŞ §19)
  *   5b. kanonik gerçek yola ignore kurallarının YENİDEN uygulanması
  *       (kök-içi symlink'in secret-deny listini bypass etmesi engellenir)
@@ -57,34 +58,6 @@ const CHECK_NATIVE_NAME_ALIASES = IS_WIN || process.platform === "darwin";
 
 /** Upper bound for the per-instance root caches (roots are few in practice). */
 const ROOT_CACHE_CAP = 256;
-
-/**
- * True when an existing component of `lexicalRoot` below `trustedStart` is a
- * symbolic link or junction. Purely lstat-based and stops at the first missing
- * component (nothing below it exists to be a link).
- */
-function crossesLink(lexicalRoot: string, trustedStart: string): boolean {
-  const relative = path.relative(trustedStart, lexicalRoot);
-  // Segment-aware: a directory named "..x" is inside trustedStart.
-  if (relative === "" || isLexicalEscape(relative)) {
-    return false;
-  }
-  let current = trustedStart;
-  for (const part of relative.split(path.sep)) {
-    if (part.length === 0) continue;
-    current = path.join(current, part);
-    let entry;
-    try {
-      entry = lstatSync(current);
-    } catch {
-      return false;
-    }
-    if (entry.isSymbolicLink()) {
-      return true;
-    }
-  }
-  return false;
-}
 
 /**
  * The one reason given for every root outside the declared allowRoots, whatever the
@@ -132,6 +105,23 @@ export type PolicyDeny = {
 };
 
 export type PolicyDecision = PolicyAllow | PolicyDeny;
+
+/**
+ * Accumulates the ignore-matching work of the decisions it is handed to, so a
+ * caller that runs many decisions (the inventory) can bound their total
+ * (Claude Security F32). The policy only adds to it.
+ */
+export interface IgnoreWorkMeter {
+  /** Matcher steps spent, summed over every ignore pass of every decision. */
+  steps: number;
+  /** Decisions denied because one of their ignore passes ran out of its budget. */
+  budgetDenials: number;
+}
+
+export interface PolicyCheckOptions {
+  /** Receives the ignore-matching work of this decision. */
+  readonly ignoreWork?: IgnoreWorkMeter;
+}
 
 function deny(code: PolicyErrorCode, reason: string, rule?: string): PolicyDeny {
   return rule === undefined ? { allowed: false, code, reason } : { allowed: false, code, reason, rule };
@@ -290,7 +280,7 @@ export class WorkspaceAccessPolicy {
       // A root below a link that cannot be resolved (a dangling link planted in
       // the repository) gets the same answer as any root outside the allowRoots,
       // so the reason never tells whether a link target outside them exists.
-      if (crossesLink(lexicalRoot, trustedStart)) {
+      if (pathCrossesLink(lexicalRoot, trustedStart)) {
         return deny("workspace/root-not-authorized", ROOT_NOT_DECLARED_REASON);
       }
       return deny(
@@ -330,7 +320,8 @@ export class WorkspaceAccessPolicy {
   }
 
   /** Yol erişim kararı: yetki → null byte → traversal → ignore → symlink escape. */
-  checkPath(rootPath: string, candidatePath: string): PolicyDecision {
+  checkPath(rootPath: string, candidatePath: string, options: PolicyCheckOptions = {}): PolicyDecision {
+    const meter = options.ignoreWork;
     const rootDecision = this.authorizeRoot(rootPath);
     if (!rootDecision.allowed) {
       return rootDecision;
@@ -396,11 +387,10 @@ export class WorkspaceAccessPolicy {
     }
 
     // 4) Ignore kuralları: dosyanın kendisi VE ata dizinleri değerlendirilir.
-    //    One work budget covers every ignore pass of this decision (F32).
-    const ignoreBudget: IgnoreMatchBudget = { remaining: IGNORE_MATCH_WORK_BUDGET };
+    //    Each ignore pass has its own work budget (F32).
     const lexicalPosix = toPosixRelative(relative);
     if (lexicalPosix !== ".") {
-      const outcome = this.matchIgnoreRules(lexicalPosix, absolute, ignoreBudget);
+      const outcome = this.matchIgnoreRules(lexicalPosix, absolute, meter);
       if (outcome.kind === "budget-exhausted") {
         return deny("workspace/path-denied", IGNORE_BUDGET_DENY_REASON, "ignore-match-budget");
       }
@@ -428,7 +418,7 @@ export class WorkspaceAccessPolicy {
     const canonicalRelative = path.relative(rootDecision.canonicalRoot, resolved);
     const canonicalPosix = toPosixRelative(canonicalRelative);
     if (canonicalPosix !== "." && canonicalPosix !== lexicalPosix) {
-      const outcome = this.matchIgnoreRules(canonicalPosix, resolved, ignoreBudget);
+      const outcome = this.matchIgnoreRules(canonicalPosix, resolved, meter);
       if (outcome.kind === "budget-exhausted") {
         return deny("workspace/path-denied", IGNORE_BUDGET_DENY_REASON, "ignore-match-budget");
       }
@@ -449,7 +439,7 @@ export class WorkspaceAccessPolicy {
         rootDecision.canonicalRoot,
         absolute,
         canonicalPosix,
-        ignoreBudget,
+        meter,
       );
       if (nativeDeny !== undefined) {
         return nativeDeny;
@@ -469,7 +459,12 @@ export class WorkspaceAccessPolicy {
    * `sizeBytes` verilmezse mevcut dosyanın gerçek boyutu okunur; dosya yoksa
    * boyut adımı atlanır (planlanan dosya yalnızca yol kurallarına tabidir).
    */
-  checkFile(rootPath: string, candidatePath: string, sizeBytes?: number): PolicyDecision {
+  checkFile(
+    rootPath: string,
+    candidatePath: string,
+    sizeBytes?: number,
+    options: PolicyCheckOptions = {},
+  ): PolicyDecision {
     // Girdi doğrulaması (config'in aksine bu bir runtime argümanıdır):
     // NaN/Infinity, `NaN > maxFileBytes === false` olduğundan boyut limitini
     // SESSİZCE geçebilirdi — deterministik red zorunludur.
@@ -480,7 +475,7 @@ export class WorkspaceAccessPolicy {
         "sizeBytes",
       );
     }
-    const decision = this.checkPath(rootPath, candidatePath);
+    const decision = this.checkPath(rootPath, candidatePath, options);
     if (!decision.allowed) {
       return decision;
     }
@@ -527,16 +522,25 @@ export class WorkspaceAccessPolicy {
    * First ignore rule matching `posixRelative` or any of its ancestors (shallowest
    * ancestor first, then pattern order); the last segment is treated as a directory
    * unless `absoluteForFileCheck` is a file. All ancestors are matched in one pass
-   * under `budget` (F32). Where matching is case-sensitive, the configured secret /
-   * VCS deny rules are then matched again with letter case folded (F44).
+   * under a budget of its own (F32), whose spending is added to `meter`. The
+   * configured secret / VCS deny rules are then matched again with look-alike
+   * folding (F44).
    */
   private matchIgnoreRules(
     posixRelative: string,
     absoluteForFileCheck: string,
-    budget: IgnoreMatchBudget,
+    meter: IgnoreWorkMeter | undefined,
   ): IgnoreRuleOutcome {
     const lastIsDirectory = !this.existsAsFile(absoluteForFileCheck);
-    return this.ignoreRules.match(posixRelative, lastIsDirectory, budget);
+    const budget: IgnoreMatchBudget = { remaining: IGNORE_MATCH_WORK_BUDGET };
+    const outcome = this.ignoreRules.match(posixRelative, lastIsDirectory, budget);
+    if (meter !== undefined) {
+      meter.steps += IGNORE_MATCH_WORK_BUDGET - budget.remaining;
+      if (outcome.kind === "budget-exhausted") {
+        meter.budgetDenials += 1;
+      }
+    }
+    return outcome;
   }
 
   /**
@@ -544,14 +548,22 @@ export class WorkspaceAccessPolicy {
    * first realpath/stat. Nothing is cached: a component below a declared allowRoot
    * may change between calls, so it is inspected on every call. The walk starts at
    * `trustedStart`, the allowRoot form that lexically contains the root (roots
-   * spelled outside every allowRoot never get here). The denial names a link path
-   * only inside `trustedStart`, never a link target (F42).
+   * spelled outside every allowRoot never get here), and never follows a link out
+   * of the allowRoots: such a root gets the same answer as any root outside them,
+   * whatever the chain leads to (F21). The denial names a link path only inside
+   * `trustedStart`, never a link target (F42).
    */
   private inspectRootLinks(lexicalRoot: string, trustedStart: string): PolicyDeny | undefined {
     if (!LINK_TARGET_INSPECTION_ENABLED) {
       return undefined;
     }
-    const inspection = inspectLinkTargets(lexicalRoot, { startDir: trustedStart });
+    const inspection = inspectLinkTargets(lexicalRoot, {
+      startDir: trustedStart,
+      confineTo: [...this.declaredRoots, ...this.canonicalRoots],
+    });
+    if (!inspection.ok && inspection.reason === "link-leaves-area") {
+      return deny("workspace/root-not-authorized", ROOT_NOT_DECLARED_REASON);
+    }
     if (!inspection.ok) {
       return deny(
         "workspace/root-not-authorized",
@@ -582,7 +594,7 @@ export class WorkspaceAccessPolicy {
     canonicalRoot: string,
     absolute: string,
     canonicalPosix: string,
-    budget: IgnoreMatchBudget,
+    meter: IgnoreWorkMeter | undefined,
   ): PolicyDeny | undefined {
     const nativeRoot = this.nativeRootOf(canonicalRoot);
     const nativeResolved = this.resolveRealpath(absolute, nativeRealpath);
@@ -604,7 +616,7 @@ export class WorkspaceAccessPolicy {
     if (nativePosix === "." || comparablePath(nativePosix) === comparablePath(canonicalPosix)) {
       return undefined;
     }
-    const outcome = this.matchIgnoreRules(nativePosix, nativeResolved, budget);
+    const outcome = this.matchIgnoreRules(nativePosix, nativeResolved, meter);
     if (outcome.kind === "budget-exhausted") {
       return deny("workspace/path-denied", IGNORE_BUDGET_DENY_REASON, "ignore-match-budget");
     }

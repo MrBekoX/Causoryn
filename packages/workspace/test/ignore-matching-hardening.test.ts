@@ -1,16 +1,17 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { findFirstAncestorIgnoreMatch } from "../src/ignore-matcher.js";
+import { findFirstAncestorIgnoreMatch, lookAlikeFold } from "../src/ignore-matcher.js";
 import {
   DEFAULT_IGNORE_PATTERNS,
   findMatchingIgnorePattern,
+  IGNORE_MATCH_WORK_BUDGET,
   WorkspaceAccessPolicy,
 } from "../src/index.js";
-import type { PolicyDecision } from "../src/index.js";
+import type { IgnoreWorkMeter, PolicyDecision } from "../src/index.js";
 
 /**
  * Ignore matching hardening:
@@ -233,5 +234,81 @@ describe("WorkspaceAccessPolicy — letter-case aliases of secret deny rules (F4
       if (!decision.allowed) expect(decision.rule, candidate).toBe(rule);
     }
     expect(policy.checkFile(root, "src/app.ts").allowed).toBe(true);
+  });
+});
+
+// Linux casefold before 6.12 ignores default-ignorable code points when it
+// compares names, so `.g<U+200D>it` can open `.git` there.
+const DEFAULT_IGNORABLE_ALIASES: ReadonlyArray<readonly [string, string]> = [
+  [".g‍it/config", "**/.git/**"], // ZERO WIDTH JOINER
+  ["src/.​git/HEAD", "**/.git/**"], // ZERO WIDTH SPACE
+  [".e­nv.local", "**/.env*"], // SOFT HYPHEN
+  ["key.p⁠em", "**/*.pem"], // WORD JOINER
+  ["key.pem﻿", "**/*.pem"], // ZERO WIDTH NO-BREAK SPACE
+];
+
+describe("lookAlikeFold — default-ignorable code points (F44)", () => {
+  it("drops default-ignorable code points, as pre-6.12 Linux casefold does", () => {
+    expect(lookAlikeFold(".g‍it")).toBe(".git");
+    expect(lookAlikeFold(".e­nv͏")).toBe(".env");
+    expect(lookAlikeFold("a᠋b️c")).toBe("abc");
+    // Ordinary characters are kept.
+    expect(lookAlikeFold("Src-Dir_1.ts")).toBe("src-dir_1.ts");
+  });
+
+  for (const platform of ["linux", "win32"] as const) {
+    it(`denies .git / .env* / *.pem names padded with default-ignorable code points (${platform} simulated)`, async () => {
+      const ws = await importWorkspaceAs(platform);
+      const root = makeRoot();
+      seedSecrets(root);
+      const policy = ws.WorkspaceAccessPolicy.create({ allowRoots: [root] });
+      for (const [candidate, rule] of DEFAULT_IGNORABLE_ALIASES) {
+        const decision = policy.checkFile(root, candidate);
+        expect(decision.allowed, JSON.stringify(candidate)).toBe(false);
+        if (!decision.allowed) expect(decision.rule, JSON.stringify(candidate)).toBe(rule);
+      }
+      expect(policy.checkFile(root, "src/app.ts").allowed).toBe(true);
+    });
+  }
+});
+
+describe("WorkspaceAccessPolicy — ignore work budget per pass (F32)", () => {
+  it("does not drop a path reached through an in-root link when each pass fits the budget", () => {
+    const root = makeRoot();
+    // About 650k steps for one pass over this path: two passes (lexical spelling
+    // through the link, then the canonical real path) exceed one 1M budget.
+    const extraIgnore = Array.from({ length: 3_500 }, (_, i) => `*.ext${String(i)}`);
+    const dirs = Array.from({ length: 12 }, (_, i) => `dir-${String(i).padStart(2, "0")}-abcde`);
+    mkdirSync(path.join(root, "real", ...dirs), { recursive: true });
+    writeFileSync(path.join(root, "real", ...dirs, "module.ts"), "export const m = 1;\n");
+    symlinkSync(path.join(root, "real"), path.join(root, "link"), IS_WIN ? "junction" : "dir");
+    const policy = WorkspaceAccessPolicy.create({ allowRoots: [root], extraIgnore });
+
+    const direct = policy.checkFile(root, ["real", ...dirs, "module.ts"].join("/"));
+    expect(direct.allowed).toBe(true);
+    const viaLink = policy.checkFile(root, ["link", ...dirs, "module.ts"].join("/"));
+    expect(viaLink.allowed, viaLink.allowed ? "" : `${viaLink.rule ?? ""}: ${viaLink.reason}`).toBe(true);
+    if (viaLink.allowed) expect(viaLink.relativePath).toBe(["real", ...dirs, "module.ts"].join("/"));
+  });
+
+  it("reports the ignore work of each decision and counts budget denials on a meter", () => {
+    const root = makeRoot();
+    mkdirSync(path.join(root, "src"));
+    writeFileSync(path.join(root, "src", "app.ts"), "export const a = 1;\n");
+    const chain = Array.from({ length: 32 }, () => "a").join("/");
+    const crafted = Array.from({ length: 200 }, (_, i) => `**/${chain}/b${String(i).padStart(4, "0")}`);
+    const policy = WorkspaceAccessPolicy.create({ allowRoots: [root], extraIgnore: crafted });
+    const meter: IgnoreWorkMeter = { steps: 0, budgetDenials: 0 };
+
+    expect(policy.checkFile(root, "src/app.ts", undefined, { ignoreWork: meter }).allowed).toBe(true);
+    expect(meter.steps).toBeGreaterThan(0);
+    expect(meter.budgetDenials).toBe(0);
+    const afterOrdinary = meter.steps;
+
+    const deep = `${Array.from({ length: 128 }, () => "a").join("/")}/file.txt`;
+    const denial = denyOf(policy.checkPath(root, deep, { ignoreWork: meter }));
+    expect(denial.rule).toBe("ignore-match-budget");
+    expect(meter.budgetDenials).toBe(1);
+    expect(meter.steps - afterOrdinary).toBeGreaterThanOrEqual(IGNORE_MATCH_WORK_BUDGET);
   });
 });
