@@ -359,7 +359,7 @@ Multiple edges of the same kind between the same page pair collapse into one lin
 
 ## 7. Storage Schema (`wiki_*`, `wiki_fts`)
 
-Defined in `packages/storage-sqlite/src/wiki-schema.ts` and applied with the main schema (`user_version = 5`). All DDL and DML are static SQL with bound parameters.
+Defined in `packages/storage-sqlite/src/wiki-schema.ts` and applied with the main schema (`user_version = 6`). All DDL and DML are static SQL with bound parameters.
 
 | Table | Key | Notes |
 |---|---|---|

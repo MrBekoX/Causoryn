@@ -63,7 +63,7 @@ flowchart TD
         PYA["adapters/python<br/>↔ native/python-worker (python -I -B -X utf8, stdlib ast)"]
         GOA["adapters/go<br/>↔ native/go-worker (GOTOOLCHAIN=local, directory + go.mod keying)"]
         RSA["adapters/rust<br/>↔ native/rust-worker (syn 3, trusted Cargo cwd + SHA-256 pin)"]
-        SQL["packages/storage-sqlite<br/>SQLite WAL schema v5 (build_leases, file_facts, symbol_fts, wiki_*)"]
+        SQL["packages/storage-sqlite<br/>SQLite WAL schema v6 (build_leases, file_facts, symbol_fts, wiki_*)"]
         CON["packages/contracts<br/>OpenAPI / AsyncAPI / SQL / JSON Schema / Protobuf discovery & drift"]
     end
 
@@ -83,7 +83,7 @@ flowchart TD
     end
 
     DOM --> TSA & CSA & PYA & GOA & RSA & SQL & CON & GR & PRE & VER & WIK
-    IPC --> CSA & PYA & GOA & RSA
+    IPC --> CSA & PYA & GOA & RSA & IDX
     WS --> IDX & MCP
     TSA & CSA & PYA & GOA & RSA --> IDX
     SQL --> MCP
@@ -109,11 +109,11 @@ flowchart TD
 | Package / Directory | Role | Status |
 |---|---|---|
 | `packages/domain` | Graph and evidence contracts, Zod schemas, canonical JSON, deterministic SHA-256 IDs, streaming snapshot hash (`computeStreamingSnapshotId`), deep-frozen snapshots; 27 node kinds and 20 edge kinds (`graph-kinds.ts`) | Done |
-| `packages/sidecar-ipc` | Shared sidecar IPC core (zero external npm dependencies): line-delimited NDJSON framing, per-request timeout, `responseMaxChars`/`stderrMaxChars` budgets (64 MiB each by default), `stdin` EPIPE suppression, `shell: false` + `windowsHide: true` on every spawn, rejection of an empty or NUL-containing `cwd`, `buildAllowlistedWorkerEnv`, `resolveCausorynAssetRoot` | Done |
+| `packages/sidecar-ipc` | Shared sidecar IPC core (zero external npm dependencies): line-delimited NDJSON framing, per-request timeout, `responseMaxChars`/`stderrMaxChars` budgets (64 MiB each by default), `stdin` EPIPE suppression, `shell: false` + `windowsHide: true` on every spawn, rejection of an empty or NUL-containing `cwd`, `buildAllowlistedWorkerEnv`, `resolveCausorynAssetRoot`, and a per-thread registry of running sidecar processes (`registerSidecarProcess`, `terminateSidecarProcesses`) that `packages/indexing` uses to stop the history analysis worker's sidecars with it | Done |
 | `packages/workspace` | Workspace Gateway: lexical `assertNotUncOrDevicePath` (`path-safety.ts`), trusted `allowRoots`, file inventory filters, zero-RegExp polynomial-time `ignore-matcher.ts`, symlink-escape rejection, binary/size filters (`DEFAULT_MAX_FILE_BYTES = 2_000_000`), `OutputAccessPolicy` | Done |
 | `packages/indexing` | 5-language pipeline orchestration (`INDEXED_ADAPTERS`, 5 entries), `collectInventoryAsync`, `IndexJobManager` with `worker_threads` execution and in-process fallback, `file_facts` incremental planner with early cutoff, build-lease acquisition/heartbeat and orphan recovery, `fp3` analyzer fingerprint, `tsconfig`/`jsconfig`/`go.mod`/workspace `package.json` change detection, `symbol_fts` population | Partial: the in-process `WorkspaceWatcher` exists but is not exposed as an MCP tool; re-indexing is triggered through `causoryn_status` `action: "refresh"` |
 | `packages/graph` | Snapshot queries, bounded traversal and cursor pagination, reverse-BFS impact (excludes `CONTAINS` by default, includes `INHERITS`/`IMPLEMENTS`), architecture guard (YAML policy DSL parsed with the linear duplicate-key check `parseYamlDocument` from `@causoryn/contracts`, Tarjan SCC), read-only `git-read.ts` (compare/timeline, `HEAD~N`/`HEAD^`), agent context with identifier/path tokenization over FTS5, evidence chains, multi-format export (`json`/`markdown`/`mermaid`/`html`/`snapshot`; `view: architecture\|interactive\|full`) | Done |
-| `packages/storage-sqlite` | SQLite WAL + FTS5 persistence: `SqliteGraphRepository` (schema `user_version = 5`; `build_leases` with host/instance liveness, `file_facts`, `symbol_fts` ranked with `bm25`), `PRAGMA data_version`-guarded published-snapshot cache (`MAX_PUBLISHED_CACHE_ENTRIES = 1`), `getLatestSnapshotMeta`, `pruneOldSnapshots`, O(1) position counters for batched writes, and `SqliteWikiStore` (`wiki_*` tables, `wiki_fts`, annotation CAS) | Done |
+| `packages/storage-sqlite` | SQLite WAL + FTS5 persistence: `SqliteGraphRepository` (schema `user_version = 6`; `build_leases` with host/instance liveness, `file_facts`, `symbol_fts` ranked with `bm25`), `PRAGMA data_version`-guarded published-snapshot cache (`MAX_PUBLISHED_CACHE_ENTRIES = 1`), `getLatestSnapshotMeta`, `pruneOldSnapshots`, O(1) position counters for batched writes, and `SqliteWikiStore` (`wiki_*` tables, `wiki_fts`, annotation CAS) | Done |
 | `packages/contracts` | Read-only contract discovery (OpenAPI, AsyncAPI, SQL DDL, JSON Schema, Protobuf) with parser quotas (1 MiB, depth, YAML alias cap), a projection work budget per spec document (`MAX_PROJECTION_WORK_UNITS`, linear duplicate-key YAML parsing) and static compatibility/drift classification | Partial: OpenAPI response schemas are discovered but response-schema drift is not classified; event-version rules are open |
 | `packages/preflight` | Candidate-only Preflight Manifest (`candidateOnly: true`, never edits sources) + `derive_test_plan` (`direct` / `call-site` / `naming` signals; `preflightId` lookup) | Done for TS/JS `TESTS` edges; sidecar `TESTS` edges are not extracted yet |
 | `packages/verification` | Pure `verify_change` engine: 4 checks (`architecture`, `graph-diff`, `test-plan`, optional `contracts`), 8-rule deterministic verdict chain, architecture rules read from the trusted Git `baseRef` (default `HEAD`; working-tree fallback emits `trustWarning`), caller-supplied test results recorded as `state: "host_asserted"` with `engineVerified: false` | Done (a `passed` test status relies on the caller's assertion, not on Causoryn running tests) |
@@ -159,7 +159,7 @@ SQLite + FTS5 via `better-sqlite3` 13.2.0 (bundled SQLite 3.54.1). Connection se
 - **Graph tables:** `workspaces`, `files`, `file_facts`, `snapshots`, `build_leases`, `nodes`, `edges`, `evidence`, and the FTS5 table `symbol_fts` (`symbol`, `search_text`, `node_id`, `snapshot_sid`; default `detail=full`). Edge→evidence links are stored in `edges.evidence_ids_json` and checked at publish.
 - **Wiki tables:** `wiki_snapshots`, `wiki_pages`, `wiki_page_sections`, `wiki_links`, `wiki_page_versions`, `wiki_annotations`, `wiki_aliases`, and FTS5 `wiki_fts` (`wiki-schema.ts`).
 - **Indexes** cover `(snapshot_sid, kind)`, `(snapshot_sid, from_id)`, `(snapshot_sid, to_id)`, and `(snapshot_sid, relative_path)`; a partial unique index allows only one `building` row per workspace revision.
-- **Migrations:** v1–v4 databases upgrade to v5 in one transaction (`symbol_fts` is rebuilt with the path + identifier tokenization; v5 adds the nullable `build_leases.hostname` and `owner_instance` columns, and lease rows written by older builds are judged by their TTL only). A database with a newer `user_version` is refused (`storage/schema-too-new`) and never written.
+- **Migrations:** v1–v5 databases upgrade to v6 in one transaction (`symbol_fts` is rebuilt with the path + identifier tokenization; v5 added the nullable `build_leases.hostname` and `owner_instance` columns, and lease rows written by older builds are judged by their TTL only; v6 adds `workspaces.root_canonical`, and rows written before it are resolved once and then marked). A database with a newer `user_version` is refused (`storage/schema-too-new`) and never written.
 - **Write boundaries:** Causoryn never writes into the analyzed workspace. Persistent graph and wiki database paths are validated outside authorized roots; automatic configuration also places `exports/` outside the workspace. An explicitly configured `output.allowedOutputDirs` is governed by its own allowlist. See [CLI & Configuration](cli-and-configuration.md).
 - **SQL safety:** all external inputs are bound as prepared-statement parameters (`?`); DDL is static literal text.
 

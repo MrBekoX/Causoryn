@@ -359,7 +359,7 @@ Aynı sayfa çifti arasındaki aynı türden birden çok edge tek bir bağlantı
 
 ## 7. Depolama şeması (`wiki_*`, `wiki_fts`)
 
-`packages/storage-sqlite/src/wiki-schema.ts` içinde tanımlanır ve ana şemayla birlikte uygulanır (`user_version = 5`). Tüm DDL ve DML, bağlı parametreli statik SQL'dir.
+`packages/storage-sqlite/src/wiki-schema.ts` içinde tanımlanır ve ana şemayla birlikte uygulanır (`user_version = 6`). Tüm DDL ve DML, bağlı parametreli statik SQL'dir.
 
 | Tablo | Anahtar | Notlar |
 |---|---|---|
