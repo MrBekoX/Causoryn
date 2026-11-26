@@ -211,6 +211,12 @@ const ENTRY_READ_CHUNK_BYTES = 64 * 1024;
 const BLOB_READ_CONCURRENCY = 6;
 /** The synchronous policy checks yield to the event loop after this many tree entries. */
 const POLICY_YIELD_EVERY = 64;
+
+/**
+ * Ignore-matching steps after which the commit inventory walk yields as well
+ * (about 40-50 ms of matching on current hardware).
+ */
+const POLICY_YIELD_WORK = 2_000_000;
 /** Timeout of one git process when the deadline is further away (the git helpers' default). */
 const GIT_PROCESS_TIMEOUT_MS = 15_000;
 /** Calls that may wait for an analysis slot at the same time; more are busy at once. */
@@ -231,9 +237,10 @@ export interface CommitContentAnalysis {
   /** Files of the commit that were analyzed. */
   readonly fileCount: number;
   /**
-   * Files the ignore/extension rules allow that were not analyzed: above
-   * maxFileBytes, an unusable git path, or refused by the working-tree part of
-   * the policy (a link on the path, a Windows name alias).
+   * Files the ignore/extension rules allow (or could not decide within their
+   * work budget) that were not analyzed: above maxFileBytes, an unusable git
+   * path, refused by the working-tree part of the policy (a link on the path,
+   * a Windows name alias), or a path the ignore rules could not decide.
    */
   readonly skippedFiles: number;
   /**
@@ -608,25 +615,39 @@ function yieldToEventLoop(): Promise<void> {
   });
 }
 
+/** How the path-only rules rule on a committed path (see {@link pathRuleFilter}). */
+export type PathRuling = "included" | "excluded" | "undecided";
+
 /**
- * Path-only part of the workspace policy for a file path: true when an ignore
- * rule matches the file or one of its directories, or the extension filter
- * excludes it. The ignore decision is the policy's own (compileIgnoreRuleSet:
- * look-alike folded secret / VCS rules, a work budget per decision); a decision
- * that runs out of budget excludes the file. Exported for tests.
+ * Path-only part of the workspace policy for a file path: "excluded" when an
+ * ignore rule matches the file or one of its directories, or the extension
+ * filter excludes it; "undecided" when the ignore decision runs out of its work
+ * budget (the caller reports the path as not analyzed, never drops it silently);
+ * "included" otherwise. The ignore decision is the policy's own
+ * (compileIgnoreRuleSet: look-alike folded secret / VCS rules, a work budget per
+ * decision). Matcher steps are added to `work.steps` when given. Exported for
+ * tests.
  */
-export function pathRuleFilter(config: WorkspacePolicyConfig): (relativePath: string) => boolean {
+export function pathRuleFilter(
+  config: WorkspacePolicyConfig,
+  work?: { steps: number },
+): (relativePath: string) => PathRuling {
   const ignoreRules = compileIgnoreRuleSet(effectiveIgnorePatterns(config));
   return (relativePath) => {
-    const outcome = ignoreRules.match(relativePath, false, { remaining: IGNORE_MATCH_WORK_BUDGET });
-    if (outcome.kind !== "none") {
-      return true;
+    const budget = { remaining: IGNORE_MATCH_WORK_BUDGET };
+    const outcome = ignoreRules.match(relativePath, false, budget);
+    if (work !== undefined) work.steps += IGNORE_MATCH_WORK_BUDGET - Math.max(0, budget.remaining);
+    if (outcome.kind === "budget-exhausted") {
+      return "undecided";
+    }
+    if (outcome.kind === "matched") {
+      return "excluded";
     }
     const extension = path.posix.extname(relativePath).toLowerCase();
     if (config.extensionFilterMode === "blacklist") {
-      return extension !== "" && config.binaryExtensions.includes(extension);
+      return extension !== "" && config.binaryExtensions.includes(extension) ? "excluded" : "included";
     }
-    return !config.allowedExtensions.includes(extension);
+    return config.allowedExtensions.includes(extension) ? "included" : "excluded";
   };
 }
 
@@ -654,13 +675,19 @@ async function collectCommitInventory(
     throw error;
   }
   const maxFileBytes = deps.policy.config.maxFileBytes;
-  const excludedByRules = pathRuleFilter(deps.policy.config);
+  // Ignore-matching work of this walk: besides every POLICY_YIELD_EVERY entries,
+  // the walk also yields once POLICY_YIELD_WORK matcher steps were spent, so a
+  // crafted ignore configuration cannot hold the event loop for seconds.
+  const ignoreWork = { steps: 0, budgetDenials: 0 };
+  const ruleOf = pathRuleFilter(deps.policy.config, ignoreWork);
   const candidates: string[] = [];
   let skippedFiles = 0;
   let visited = 0;
+  let stepsAtYield = 0;
   for (const entry of tree) {
     visited += 1;
-    if (visited % POLICY_YIELD_EVERY === 0) {
+    if (visited % POLICY_YIELD_EVERY === 0 || ignoreWork.steps - stepsAtYield >= POLICY_YIELD_WORK) {
+      stepsAtYield = ignoreWork.steps;
       await yieldToEventLoop();
       meter.checkDeadline();
     }
@@ -677,10 +704,18 @@ async function collectCommitInventory(
     }
     // Ignore rules and extension filter on the commit's own path: such a file
     // is not part of the inventory in any checkout, so it is left out silently.
-    if (excludedByRules(entry.path)) continue;
+    // A path the ignore rules cannot decide within their budget is reported.
+    const ruling = ruleOf(entry.path);
+    if (ruling === "excluded") continue;
+    if (ruling === "undecided") {
+      skippedFiles += 1;
+      continue;
+    }
     // The full policy decision also depends on the working tree (a link on the
     // path, a Windows name alias): a file it refuses is reported as skipped.
-    const decision = deps.policy.checkFile(canonicalRoot, path.resolve(canonicalRoot, entry.path), 0);
+    const decision = deps.policy.checkFile(canonicalRoot, path.resolve(canonicalRoot, entry.path), 0, {
+      ignoreWork,
+    });
     if (!decision.allowed) {
       skippedFiles += 1;
       continue;

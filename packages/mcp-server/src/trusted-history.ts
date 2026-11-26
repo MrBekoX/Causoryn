@@ -226,7 +226,7 @@ function analyzedPointNote(
   }
   if (result.analysis.skippedFiles > 0) {
     details.push(
-      `${String(result.analysis.skippedFiles)} file(s) of the commit were not analyzed (above maxFileBytes, an unusable git path, or a path the working tree leads through a link or a refused name)`,
+      `${String(result.analysis.skippedFiles)} file(s) of the commit were not analyzed (above maxFileBytes, an unusable git path, a path the working tree leads through a link or a refused name, or a path the ignore rules could not decide within their work budget)`,
     );
   }
   if (result.notCachedReason !== undefined) details.push(`not cached: ${result.notCachedReason}`);
