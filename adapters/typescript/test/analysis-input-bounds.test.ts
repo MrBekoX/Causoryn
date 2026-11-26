@@ -152,6 +152,93 @@ describe("syntax nesting limit (TypeScript parser/binder recursion)", { timeout:
   });
 });
 
+/**
+ * TypeScript (5.9.3) parses `,` and the other left-associative operators in a
+ * loop, parses `=`/`**` chains with one cheap self-call per link, and binds and
+ * checks every binary operator on a trampoline — except `&&`, `||`, `??` (and
+ * their assignment forms), which the binder handles recursively. Generated code
+ * with long comma or assignment chains must therefore stay fully analysed.
+ */
+describe("binary operator chains the TypeScript binder walks iteratively", { timeout: 120_000 }, () => {
+  const CHAIN = 5_000;
+
+  function fileDiagnostics(result: TypeScriptAdapterResult, relativePath: string) {
+    return result.diagnostics.filter((d) => d.relativePath === relativePath);
+  }
+
+  it("keeps a 5000-term comma chain (minified/generated JavaScript) fully analysed", () => {
+    const result = analyze([
+      {
+        relativePath: "src/bundle.js",
+        content: [
+          "function f() { return 1; }",
+          "export function run() {",
+          `  ${Array.from({ length: CHAIN }, () => "f()").join(",\n  ")};`,
+          "}",
+          "",
+        ].join("\n"),
+      },
+    ]);
+
+    expect(fileDiagnostics(result, "src/bundle.js")).toEqual([]);
+    const calls = result.edges.find(
+      (edge) => edge.kind === "CALLS" && edge.from.qualifiedName === "run" && edge.to.qualifiedName === "f",
+    );
+    expect(calls?.resolution).toBe("verified");
+    expect(calls?.evidence).toHaveLength(CHAIN);
+  });
+
+  it("keeps a 5000-link CommonJS export assignment chain (tsc/Babel output) fully analysed", () => {
+    const result = analyze([
+      {
+        relativePath: "src/exports.js",
+        content: [
+          '"use strict";',
+          'Object.defineProperty(exports, "__esModule", { value: true });',
+          `${Array.from({ length: CHAIN }, (_, i) => `exports.e${String(i)} = `).join("")}void 0;`,
+          "function helper() { return 1; }",
+          "function e0() { return helper(); }",
+          "exports.e0 = e0;",
+          "",
+        ].join("\n"),
+      },
+    ]);
+
+    expect(fileDiagnostics(result, "src/exports.js")).toEqual([]);
+    expect(result.nodes.some((n) => n.kind === "Function" && n.qualifiedName === "e0")).toBe(true);
+    const calls = result.edges.find(
+      (edge) => edge.kind === "CALLS" && edge.from.qualifiedName === "e0" && edge.to.qualifiedName === "helper",
+    );
+    expect(calls?.resolution).toBe("verified");
+  });
+
+  it("still indexes logical-operator chains past the nesting limit at file level only", () => {
+    const result = analyze([
+      {
+        relativePath: "src/logical.ts",
+        content: `declare const c: boolean;\nexport const v = c${" || c".repeat(MAX_SYNTAX_NESTING_DEPTH + 10)};\n`,
+      },
+      { relativePath: "src/healthy.ts", content: HEALTHY_TS },
+    ]);
+
+    expect(limitDiagnostics(result, "src/logical.ts")).toHaveLength(1);
+    expectHealthyFileAnalyzed(result);
+  });
+
+  it("still indexes member/call chains past the nesting limit at file level only", () => {
+    const result = analyze([
+      {
+        relativePath: "src/builder.ts",
+        content: `const m = new Map<number, number>();\nexport const r = m${".set(1, 1)".repeat(MAX_SYNTAX_NESTING_DEPTH)};\n`,
+      },
+      { relativePath: "src/healthy.ts", content: HEALTHY_TS },
+    ]);
+
+    expect(limitDiagnostics(result, "src/builder.ts")).toHaveLength(1);
+    expectHealthyFileAnalyzed(result);
+  });
+});
+
 describe("framework detection on deeply nested expressions", { timeout: 120_000 }, () => {
   it("survives a left-deep binary chain deeper than the call stack in a file without imports", () => {
     const chain = `export const n = 1${"+1".repeat(8_000)};\n`;

@@ -4,11 +4,17 @@ import path from "node:path";
 import ts from "typescript";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { analyzeTypeScriptProgram, loadWorkspacePackages } from "../src/index.js";
+import {
+  analyzeTypeScriptProgram,
+  analyzeTypeScriptProgramIncremental,
+  loadWorkspacePackages,
+  type TypeScriptAdapterResult,
+} from "../src/index.js";
 import { memoizeModuleResolver } from "../src/analyzer.js";
 import {
   createVirtualAliasResolutionState,
   loadWorkspaceTsConfigs,
+  MAX_VIRTUAL_ALIAS_PROBES_PER_RUN,
   MAX_VIRTUAL_ALIAS_PROBES_PER_SPECIFIER,
   MAX_WORKSPACE_DIR_LISTINGS,
   MAX_WORKSPACE_PATTERNS,
@@ -204,6 +210,54 @@ describe("tsconfig paths virtual alias fallback work budget", { timeout: 120_000
         (edge) => edge.kind === "CALLS" && edge.from.qualifiedName === "main" && edge.to.qualifiedName === "util",
       ),
     ).toBe(true);
+  });
+});
+
+describe("alias probe budget on incremental runs", { timeout: 300_000 }, () => {
+  it("spends the run budget in the same order on full and incremental runs", () => {
+    const root = path.resolve(tmpdir(), "causoryn-alias-budget-order-virtual-root");
+    // Five crafted patterns give every `aaaaa...` specifier 80 missing targets:
+    // each such import spends the whole per-specifier cap of 64 probes.
+    const paths: Record<string, string[]> = { "lib*": ["missing/*"], "l*": ["src/*"] };
+    for (let i = 1; i <= 5; i += 1) {
+      paths[`${"a".repeat(i)}*`] = Array.from({ length: 16 }, (_, j) => `missing-${String(j)}/*`);
+    }
+    const exhaustingImports = Math.ceil(MAX_VIRTUAL_ALIAS_PROBES_PER_RUN / MAX_VIRTUAL_ALIAS_PROBES_PER_SPECIFIER) + 20;
+    const sources = (aValue: number) => [
+      // a.ts is processed first and pulls c.ts in before b.ts: c.ts spends the budget.
+      { relativePath: "src/a.ts", content: `import "./c";\nexport const a = ${String(aValue)};\n` },
+      // "libx" resolves only through the alias fallback ("lib*" misses, "l*" -> src/ibx).
+      {
+        relativePath: "src/b.ts",
+        content: 'import { x } from "libx";\nexport function useX(): number {\n  return x();\n}\n',
+      },
+      {
+        relativePath: "src/c.ts",
+        content: Array.from({ length: exhaustingImports }, (_, i) => `import "aaaaa${String(i)}";`).join("\n"),
+      },
+      { relativePath: "src/ibx.ts", content: "export function x(): number {\n  return 1;\n}\n" },
+    ];
+    const input = (aValue: number) => ({
+      workspaceId: "ws_alias_budget_order",
+      rootDir: root,
+      configFiles: [
+        { relativePath: "tsconfig.json", content: JSON.stringify({ compilerOptions: { baseUrl: ".", paths } }) },
+      ],
+      sources: sources(aValue),
+    });
+
+    const first = analyzeTypeScriptProgramIncremental(input(1));
+    const incremental = analyzeTypeScriptProgramIncremental({
+      ...input(2),
+      incrementalState: first.nextIncrementalState,
+    }).result;
+    const full = analyzeTypeScriptProgram(input(2));
+
+    const importOfB = (result: TypeScriptAdapterResult) =>
+      result.edges.find((edge) => edge.kind === "IMPORTS" && edge.from.qualifiedName === "src/b.ts");
+    expect(full.warnings.some((w) => w.includes("probe budget"))).toBe(true);
+    expect(importOfB(incremental)).toEqual(importOfB(full));
+    expect(JSON.stringify(incremental)).toBe(JSON.stringify(full));
   });
 });
 

@@ -1366,7 +1366,9 @@ function extractCallsAndRoutes(
   entry: SourceEntry,
   sourceFile: ts.SourceFile,
 ): void {
-  const visit = (node: ts.Node, caller: NodeRecord | undefined): void => {
+  // Pre-order walk on an explicit stack (expression chains may nest deeper
+  // than the call stack); each node hands its caller on to its children.
+  walkPreOrder<NodeRecord | undefined>(sourceFile, undefined, (node, caller) => {
     let currentCaller = caller;
 
     const testCaller = context.testCallbacks.get(node);
@@ -1392,10 +1394,8 @@ function extractCallsAndRoutes(
       emitCallEdge(context, entry, sourceFile, node, currentCaller);
     }
 
-    ts.forEachChild(node, (child) => visit(child, currentCaller));
-  };
-
-  visit(sourceFile, undefined);
+    return currentCaller;
+  });
 }
 
 /** Caller NodeRecord çözer; anonymous arrow değişkene bağlıysa Handler olur. */
@@ -2131,7 +2131,7 @@ function collectExpressInstanceVars(
     return instanceVars;
   }
 
-  const visit = (node: ts.Node): void => {
+  walkPreOrder(sourceFile, undefined, (node) => {
     if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name)) {
       const initializer = node.initializer;
       if (initializer !== undefined && ts.isCallExpression(initializer)) {
@@ -2157,9 +2157,8 @@ function collectExpressInstanceVars(
         }
       }
     }
-    ts.forEachChild(node, visit);
-  };
-  visit(sourceFile);
+    return undefined;
+  });
   return instanceVars;
 }
 
@@ -2178,7 +2177,7 @@ function collectExpressRoutes(
 ): void {
   const expressInstanceVars = collectExpressInstanceVars(sourceFile);
   if (expressInstanceVars.size === 0) return;
-  const visit = (node: ts.Node): void => {
+  walkPreOrder(sourceFile, undefined, (node) => {
     if (ts.isCallExpression(node)) {
       const callee = node.expression;
       if (
@@ -2189,9 +2188,8 @@ function collectExpressRoutes(
         tryRoutePattern(context, entry, sourceFile, node, "express");
       }
     }
-    ts.forEachChild(node, visit);
-  };
-  visit(sourceFile);
+    return undefined;
+  });
 }
 
 /** Next.js linker geçişi: kural dosyasına göre route/page çıkarımı. */
@@ -3572,6 +3570,11 @@ function createProgramWithIncrementalReuse(params: {
       previousSourceHashes,
       resolvedLibDir,
     );
+    // Reuse the old ASTs but never its module resolutions: they are replayed
+    // from this run's memo, and the alias probe budget must be spent in program
+    // order exactly as on a full run (an old resolution of an unchanged file
+    // may have been made before or after the budget ran out).
+    host.hasInvalidatedResolutions = () => true;
   }
   // Outermost wrapper: it also sees SourceFiles the reuse wrapper hands back.
   const depthLimitedKeys = new Set<string>();
@@ -3863,7 +3866,7 @@ function extractHeritageClauses(
     );
   };
 
-  const walk = (node: ts.Node): void => {
+  walkPreOrder(sourceFile, undefined, (node) => {
     if (
       ts.isClassDeclaration(node) ||
       ts.isClassExpression(node) ||
@@ -3883,10 +3886,8 @@ function extractHeritageClauses(
         }
       }
     }
-    ts.forEachChild(node, walk);
-  };
-
-  walk(sourceFile);
+    return undefined;
+  });
 }
 
 /* ------------------------------------------------------------------ */
@@ -4027,8 +4028,8 @@ function boundedDeclarationName(
  * `program.getTypeChecker()` would throw for the whole program. A file nested
  * deeper is replaced by an empty module and indexed at file level only — as a
  * fixed bound, independent of the stack size of the hosting thread. Chains of
- * arithmetic, bitwise and comparison operators do not count: TypeScript walks
- * them iteratively.
+ * the binary operators TypeScript binds and checks iteratively do not count
+ * (see `isIterativelyBoundBinary`).
  */
 export const MAX_SYNTAX_NESTING_DEPTH = 500;
 
@@ -4039,18 +4040,32 @@ const SYNTAX_DEPTH_LIMIT_MESSAGE =
 const depthLimitedSubstitutes = new WeakSet<ts.SourceFile>();
 const syntaxDepthVerdicts = new WeakMap<ts.SourceFile, boolean>();
 
-/** Binary operators whose operand chains TypeScript binds and checks without recursion per link. */
+/**
+ * Binary expressions whose operand chains TypeScript 5.9 handles without one
+ * recursion per link. The parser builds left-associative chains (`,` and `||`
+ * included) in a loop and right-associative `=`/`**` chains with one cheap
+ * self-call per link; the binder (`createBindBinaryExpressionFlow`) and the
+ * checker (`createCheckBinaryExpression`) walk every binary operator on a
+ * trampoline. The exceptions are the logical operators `&&`, `||`, `??` and
+ * their assignment forms, which the binder binds through the recursive
+ * `bindLogicalLikeExpression`, and destructuring assignments, which the binder
+ * and the checker hand back to their recursive `bind`/`checkExpression`.
+ */
 function isIterativelyBoundBinary(node: ts.Node): boolean {
   if (!ts.isBinaryExpression(node)) return false;
-  const operator = node.operatorToken.kind;
-  return !(
-    operator === ts.SyntaxKind.AmpersandAmpersandToken ||
-    operator === ts.SyntaxKind.BarBarToken ||
-    operator === ts.SyntaxKind.QuestionQuestionToken ||
-    operator === ts.SyntaxKind.CommaToken ||
-    operator === ts.SyntaxKind.AsteriskAsteriskToken ||
-    (operator >= ts.SyntaxKind.FirstAssignment && operator <= ts.SyntaxKind.LastAssignment)
-  );
+  switch (node.operatorToken.kind) {
+    case ts.SyntaxKind.AmpersandAmpersandToken:
+    case ts.SyntaxKind.BarBarToken:
+    case ts.SyntaxKind.QuestionQuestionToken:
+    case ts.SyntaxKind.AmpersandAmpersandEqualsToken:
+    case ts.SyntaxKind.BarBarEqualsToken:
+    case ts.SyntaxKind.QuestionQuestionEqualsToken:
+      return false;
+    case ts.SyntaxKind.EqualsToken:
+      return !ts.isObjectLiteralExpression(node.left) && !ts.isArrayLiteralExpression(node.left);
+    default:
+      return true;
+  }
 }
 
 /** Iterative (explicit stack) nesting check, JSDoc included; memoized per SourceFile. */
@@ -4202,6 +4217,23 @@ function pushChildrenInReverse(stack: ts.Node[], node: ts.Node): void {
     const swapped = stack[low] as ts.Node;
     stack[low] = stack[high] as ts.Node;
     stack[high] = swapped;
+  }
+}
+
+/**
+ * Visits `root` and its descendants in pre-order (the order of a recursive
+ * `ts.forEachChild` walk) on an explicit stack, so chains the TypeScript
+ * binder accepts (thousands of `,` or `=` links) cannot overflow an analysis
+ * phase. `visit` returns the context handed to the node's children.
+ */
+function walkPreOrder<C>(root: ts.Node, rootContext: C, visit: (node: ts.Node, context: C) => C): void {
+  const nodes: ts.Node[] = [root];
+  const contexts: C[] = [rootContext];
+  for (let node = nodes.pop(); node !== undefined; node = nodes.pop()) {
+    const childContext = visit(node, contexts.pop() as C);
+    const firstChild = nodes.length;
+    pushChildrenInReverse(nodes, node);
+    for (let index = firstChild; index < nodes.length; index += 1) contexts.push(childContext);
   }
 }
 
