@@ -19,12 +19,26 @@
  * both captures are identical and contain no `%~`, `%#` or `%]`; otherwise,
  * or when a capture is missing, malformed or not UTF-8, the start is refused
  * (exit 2). Nothing in the text is ever run.
+ *
+ * The captures live in a new directory under `%LOCALAPPDATA%\causoryn\argv`
+ * (not `%TEMP%`, which other accounts may be able to write): whoever can write
+ * there can choose the CLI's arguments, and can already change the launcher in
+ * npm's cache under `%LOCALAPPDATA%`. Before it changes the console code page
+ * the launcher runs `node windows-argv.mjs --lock <root>`, which takes the
+ * lock directory `<root>\lock` (the launcher removes it after restoring the
+ * code page), so starts that share a console do not switch the code page
+ * under each other, and removes capture directories that earlier starts left
+ * behind.
  */
-import { readFileSync, rmdirSync, unlinkSync } from "node:fs";
+import { lstatSync, mkdirSync, readdirSync, readFileSync, rmdirSync, statSync, unlinkSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
-export const CAPTURE_FILES = Object.freeze(["argv-hash.txt", "argv-bracket.txt"]);
+/** Files the launcher writes into a capture directory (the two captures and its code page reading). */
+export const CAPTURE_FILES = Object.freeze(["argv-hash.txt", "argv-bracket.txt", "cp.txt"]);
+/** Capture directory names (`c-<random>-<attempt>`) under the capture root. */
+export const CAPTURE_DIR_PATTERN = /^c-\d+-\d+$/;
+const LOCK_NAME = "lock";
 
 const PREFIX = "\r\n#rem CAUSORYN-ARGV: ";
 const SUFFIX = ":CAUSORYN-ARGV \r\n";
@@ -98,7 +112,7 @@ function readCapture(dir, name) {
 
 /** The launcher's arguments from the two captures in `dir`, or why they cannot be used. */
 export function argumentsFromCaptures(dir) {
-  const tails = CAPTURE_FILES.map((name) => {
+  const tails = CAPTURE_FILES.slice(0, 2).map((name) => {
     const text = readCapture(dir, name);
     return text === null ? null : capturedTail(text);
   });
@@ -107,16 +121,16 @@ export function argumentsFromCaptures(dir) {
   }
   const [first, second] = tails;
   const reference = forReferenceIn(first) ?? forReferenceIn(second);
-  if (first !== second || reference !== null) {
-    return {
-      ok: false,
-      message: `${REFUSED} an argument contains ${reference ?? "a FOR variable reference"}, which cmd.exe would expand in the launcher.`,
-    };
+  if (reference !== null) {
+    return { ok: false, message: `${REFUSED} an argument contains ${reference}, which cmd.exe would expand in the launcher.` };
+  }
+  if (first !== second) {
+    return { ok: false, message: `${REFUSED} the two captures of the arguments differ (the console code page changed while they were written).` };
   }
   return { ok: true, args: parseWindowsArguments(first) };
 }
 
-/** Removes the launcher's capture files and their directory (only those). */
+/** Removes the launcher's capture files and then their directory; true when the directory is gone. */
 function removeCaptures(dir) {
   for (const name of CAPTURE_FILES) {
     try {
@@ -127,8 +141,83 @@ function removeCaptures(dir) {
   }
   try {
     rmdirSync(dir);
+    return true;
   } catch {
-    // not empty or already gone: left for the launcher
+    // Not empty (a file the launcher does not write) or held open: a later start's
+    // --lock removes it once it is old, if it then holds only capture files.
+    return false;
+  }
+}
+
+/**
+ * Removes capture directories under `root` that a start left behind (it never
+ * reached `--launch`, node crashed, or removal failed): real directories named
+ * like a capture directory, unchanged for `maxAgeMs`, that hold nothing but
+ * capture files. Returns the names removed.
+ */
+export function removeStaleCaptures(root, { maxAgeMs = 10 * 60_000 } = {}) {
+  const removed = [];
+  let names;
+  try {
+    names = readdirSync(root);
+  } catch {
+    return removed;
+  }
+  const now = Date.now();
+  for (const name of names) {
+    if (!CAPTURE_DIR_PATTERN.test(name)) continue;
+    const dir = path.join(root, name);
+    try {
+      const info = lstatSync(dir);
+      if (!info.isDirectory() || now - info.mtimeMs < maxAgeMs) continue;
+      if (readdirSync(dir).some((entry) => !CAPTURE_FILES.includes(entry))) continue;
+    } catch {
+      continue;
+    }
+    if (removeCaptures(dir)) removed.push(name);
+  }
+  return removed;
+}
+
+const sleep = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+
+/**
+ * Takes the lock directory `<root>\lock`: true once this call created it.
+ * Waits while another start holds it, breaks a lock unchanged for `staleMs`
+ * (a start killed inside its code page window), and gives up after
+ * `timeoutMs` or when `root` cannot hold it.
+ */
+export function acquireLock(root, { timeoutMs = 15_000, staleMs = 15_000 } = {}) {
+  const lock = path.join(root, LOCK_NAME);
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    try {
+      mkdirSync(lock);
+      return true;
+    } catch (error) {
+      if (error?.code !== "EEXIST") return false;
+    }
+    try {
+      const info = statSync(lock);
+      if (info.isDirectory() && Date.now() - info.mtimeMs > staleMs) {
+        rmdirSync(lock);
+        continue;
+      }
+    } catch {
+      continue;
+    }
+    if (Date.now() >= deadline) return false;
+    sleep(10 + Math.floor(Math.random() * 20));
+  }
+}
+
+if (process.argv[2] === "--lock" && process.argv.length === 4) {
+  const root = path.resolve(process.argv[3]);
+  if (!acquireLock(root)) {
+    process.stderr.write(`${REFUSED} another start kept the launcher's console lock (${path.join(root, LOCK_NAME)}).\n`);
+    process.exitCode = 2;
+  } else {
+    removeStaleCaptures(root);
   }
 }
 

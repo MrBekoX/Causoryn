@@ -85,6 +85,13 @@ describe("launcher: node options", () => {
     expect(run.stdout, run.stderr).toContain('CLI ["--flag"]');
   });
 
+  // Review round 5 (B3): `for /f ... in ('command')` runs the command through %COMSPEC% /c without /d, so the
+  // user's cmd.exe AutoRun would run on every start (npm and cmd-shim pass /d on purpose).
+  it("the Windows branch starts no cmd.exe of its own (no for /f over a command)", () => {
+    expect(LINES.filter((line) => /\bfor\s+\/f\b[^\n]*\bin\s*\(\s*'/i.test(line))).toEqual([]);
+    expect(LINES.filter((line) => /%COMSPEC%\s*\/c|\bcmd(\.exe)?\s+\/c/i.test(line))).toEqual([]);
+  });
+
   it("the Windows branch passes node no option and never puts %* on a command line", () => {
     // %* only in the REM lines of the captures (a parse probe of each, then each capture).
     const withArgs = LINES.filter((line) => line.includes("%*"));
@@ -94,7 +101,8 @@ describe("launcher: node options", () => {
     const nodeLines = LINES.filter((line) => line.includes('"%CAUSORYN_NODE%"'));
     expect(nodeLines.length).toBeGreaterThan(0);
     for (const line of nodeLines) {
-      expect(line).toMatch(/"%CAUSORYN_NODE%" "%~dp0lib\\windows-argv\.mjs" --launch "%CAUSORYN_ARGV_DIR%"$/);
+      expect(line).toMatch(/"%CAUSORYN_NODE%" "%~dp0lib\\windows-argv\.mjs" --(lock "%CAUSORYN_ARGV_ROOT%"|launch "%CAUSORYN_ARGV_DIR%")( \|\| \(|$)/);
     }
+    expect(nodeLines.at(-1)).toMatch(/--launch "%CAUSORYN_ARGV_DIR%"$/);
   });
 });

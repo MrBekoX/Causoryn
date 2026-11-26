@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -29,6 +29,8 @@ const mod = (await import(pathToFileURL(SCRIPT).href)) as {
   forReferenceIn(tail: string): string | null;
   parseWindowsArguments(tail: string): string[];
   argumentsFromCaptures(dir: string): { ok: true; args: string[] } | { ok: false; message: string };
+  acquireLock(root: string, options?: { timeoutMs?: number; staleMs?: number }): boolean;
+  removeStaleCaptures(root: string, options?: { maxAgeMs?: number }): string[];
 };
 
 const dirs: string[] = [];
@@ -74,14 +76,19 @@ describe("windows-argv: reading the captures", () => {
   });
 
   it.each([
-    ["captures that differ (a FOR reference was expanded in one)", capture("1"), capture("%#")],
-    ["a %~ reference", capture("%~$X&echo,INJECTED&:a"), undefined],
-    ["a missing capture line", "Records comments (remarks)\r\n", undefined],
-  ])("refuses %s", (_label, first, second) => {
+    ["captures that differ (a FOR reference was expanded in one)", capture("1"), capture("%#"), /contains %#/],
+    ["a %~ reference", capture("%~$X&echo,INJECTED&:a"), undefined, /contains %~/],
+    // Review round 5: captures that differ without a reference (written in different code pages) are not called a FOR reference.
+    ["captures that differ without a reference", capture("日本語"), capture("???"), /captures of the arguments differ/],
+    ["a missing capture line", "Records comments (remarks)\r\n", undefined, /could not read back/],
+  ])("refuses %s", (_label, first, second, message) => {
     const dir = captureDir(first, second);
     const result = mod.argumentsFromCaptures(dir);
     expect(result.ok).toBe(false);
-    if (!result.ok) expect(result.message).toMatch(/^causoryn: refusing to start/);
+    if (!result.ok) {
+      expect(result.message).toMatch(/^causoryn: refusing to start/);
+      expect(result.message).toMatch(message);
+    }
   });
 
   it("refuses when a capture file is missing", () => {
@@ -126,6 +133,57 @@ describe("windows-argv: splitting like the C runtime", () => {
   });
 });
 
+/**
+ * Review round 5: the launcher serializes its code page window with a lock
+ * directory (`<root>\lock`, taken by `--lock`), and removes capture
+ * directories that a start which never reached `--launch` left behind.
+ */
+describe("windows-argv: the console lock and stale captures", () => {
+  function argvRoot(): string {
+    const root = mkdtempSync(path.join(os.tmpdir(), "causoryn-winargv-root-"));
+    dirs.push(root);
+    return root;
+  }
+  const age = (target: string, ms: number): void => {
+    const then = new Date(Date.now() - ms);
+    utimesSync(target, then, then);
+  };
+
+  it("takes a free lock, waits for a held one and breaks a stale one", () => {
+    const root = argvRoot();
+    expect(mod.acquireLock(root, { timeoutMs: 200 })).toBe(true);
+    expect(statSync(path.join(root, "lock")).isDirectory()).toBe(true);
+    const started = Date.now();
+    expect(mod.acquireLock(root, { timeoutMs: 300, staleMs: 60_000 })).toBe(false);
+    expect(Date.now() - started).toBeGreaterThanOrEqual(250);
+    age(path.join(root, "lock"), 120_000);
+    expect(mod.acquireLock(root, { timeoutMs: 300, staleMs: 60_000 })).toBe(true);
+  });
+
+  it("refuses a lock root that does not exist", () => {
+    expect(mod.acquireLock(path.join(argvRoot(), "missing"), { timeoutMs: 100 })).toBe(false);
+  });
+
+  it("removes only old capture directories holding only capture files", () => {
+    const root = argvRoot();
+    const make = (name: string, files: readonly string[], ageMs: number): string => {
+      const dir = path.join(root, name);
+      mkdirSync(dir);
+      for (const file of files) writeFileSync(path.join(dir, file), "x");
+      age(dir, ageMs);
+      return dir;
+    };
+    const stale = make("c-123-1", ["argv-hash.txt", "argv-bracket.txt", "cp.txt"], 3_600_000);
+    const staleEmpty = make("c-456-2", [], 3_600_000);
+    const fresh = make("c-789-3", ["argv-hash.txt"], 0);
+    const foreign = make("c-111-4", ["argv-hash.txt", "other.txt"], 3_600_000);
+    const otherName = make("keep-me", [], 3_600_000);
+    expect(mod.removeStaleCaptures(root, { maxAgeMs: 600_000 }).sort()).toEqual(["c-123-1", "c-456-2"]);
+    for (const gone of [stale, staleEmpty]) expect(existsSync(gone)).toBe(false);
+    for (const kept of [fresh, foreign, otherName]) expect(existsSync(kept)).toBe(true);
+  });
+});
+
 describe("windows-argv: --launch", () => {
   it("starts causoryn.mjs next to it with the captured arguments, and refuses without captures", () => {
     const pkg = mkdtempSync(path.join(os.tmpdir(), "causoryn-winargv-launch-"));
@@ -140,6 +198,8 @@ describe("windows-argv: --launch", () => {
         "process.exitCode = 4;\n",
     );
     const dir = captureDir(capture('mcp "a b"'));
+    // The launcher's code page reading lives in the same directory and goes with it.
+    writeFileSync(path.join(dir, "cp.txt"), "Active code page: 65001\r\n");
     const run = spawnSync(process.execPath, [path.join(pkg, "scripts", "lib", "windows-argv.mjs"), "--launch", dir], { encoding: "utf8" });
     expect(run.stdout).toContain('CLI ["mcp","a b"] self=true');
     expect(run.status).toBe(4);

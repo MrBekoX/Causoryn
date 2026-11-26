@@ -1,5 +1,16 @@
 import { spawnSync } from "node:child_process";
-import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  utimesSync,
+  writeFileSync,
+} from "node:fs";
 import { createRequire } from "node:module";
 import os from "node:os";
 import path from "node:path";
@@ -253,7 +264,7 @@ function plantedProject(plant: Plant | null): Sandbox & { readonly root: string 
   const cache = path.join(root, "npm-cache");
   const project = path.join(root, "project");
   const binDir = path.join(project, "node_modules", ".bin");
-  for (const dir of [home, cache, binDir, path.join(root, "tmp")]) mkdirSync(dir, { recursive: true });
+  for (const dir of [home, cache, binDir, path.join(root, "tmp"), path.join(root, "localappdata")]) mkdirSync(dir, { recursive: true });
   writeFileSync(path.join(project, "package.json"), JSON.stringify({ name: "planted-project", version: "1.0.0" }));
   const marker = `HIJACK-${String(plant).toUpperCase()}`;
   const winScript = `@echo ${marker}\r\n@exit /b 7\r\n`;
@@ -303,9 +314,11 @@ function probeEnvironment(sandbox: Sandbox, registryEnv: boolean): NodeJS.Proces
   Object.assign(env, {
     HOME: sandbox.home,
     USERPROFILE: sandbox.home,
-    // The sandbox's own temporary directory (plantedProject), where the Windows launcher writes its captures.
+    // The sandbox's own temporary and local application data directories (plantedProject): the
+    // Windows launcher writes its captures under %LOCALAPPDATA%\causoryn\argv, never under %TEMP%.
     TEMP: path.join(path.dirname(sandbox.home), "tmp"),
     TMP: path.join(path.dirname(sandbox.home), "tmp"),
+    LOCALAPPDATA: path.join(path.dirname(sandbox.home), "localappdata"),
     npm_config_cache: sandbox.cache,
     npm_config_update_notifier: "false",
     npm_config_fund: "false",
@@ -316,9 +329,16 @@ function probeEnvironment(sandbox: Sandbox, registryEnv: boolean): NodeJS.Proces
   return env;
 }
 
-/** The launcher's capture directories left in a sandbox's temporary directory. */
+/** The launcher's capture root in a sandbox (%LOCALAPPDATA%\causoryn\argv). */
+function captureRoot(sandbox: { readonly root: string }): string {
+  return path.join(sandbox.root, "localappdata", "causoryn", "argv");
+}
+
+/** Capture directories (and a held lock) the launcher left in a sandbox, under %TEMP% or its capture root. */
 function leftoverCaptures(sandbox: { readonly root: string }): string[] {
-  return readdirSync(path.join(sandbox.root, "tmp")).filter((name) => name.startsWith("causoryn-argv-"));
+  const inTemp = readdirSync(path.join(sandbox.root, "tmp")).filter((name) => name.startsWith("causoryn-argv-"));
+  const root = captureRoot(sandbox);
+  return [...inTemp, ...(existsSync(root) ? readdirSync(root) : [])];
 }
 
 function probeNpmArguments(pkg: string, args: readonly string[]): string[] {
@@ -498,7 +518,78 @@ describe.skipIf(NPM_CLI === undefined)("F20 round 3: the server starts with npm'
     expect(tooLong.status).not.toBe(0);
     expect(leftoverCaptures(sandbox)).toEqual([]);
   });
+
+  /**
+   * Review round 5 (B1): whoever can write the capture directory between the
+   * batch writing the captures and node reading them chooses the CLI's
+   * arguments. %TEMP% can be shared (inherited Modify for other accounts or
+   * groups), so the captures live under %LOCALAPPDATA%\causoryn\argv: a
+   * principal that can write there can already change the launcher in npm's
+   * cache under %LOCALAPPDATA%. The launcher refuses to start without an
+   * absolute LOCALAPPDATA.
+   */
+  it.runIf(IS_WINDOWS)("B1: hands node a capture directory under %LOCALAPPDATA%\\causoryn\\argv, never under %TEMP%", () => {
+    const sandbox = plantedProject(null);
+    const pkg = probePackage(sandbox.root, "launcher");
+    writeFileSync(
+      path.join(pkg, "scripts", "lib", "windows-argv.mjs"),
+      'if (process.argv[2] === "--launch") console.log("CAPTURE-DIR " + process.argv[3]);\n',
+    );
+    const run = runLauncherDirectly(sandbox, pkg, "mcp", probeEnvironment(sandbox, true));
+    const line = run.stdout.split(/\r?\n/).find((entry) => entry.startsWith("CAPTURE-DIR "));
+    expect(line, `${run.stdout}\n${run.stderr}`).toBeDefined();
+    const dir = (line as string).slice("CAPTURE-DIR ".length);
+    expect(path.dirname(dir).toLowerCase()).toBe(captureRoot(sandbox).toLowerCase());
+    expect(readdirSync(path.join(sandbox.root, "tmp"))).toEqual([]);
+  });
+
+  it.runIf(IS_WINDOWS)("B1: refuses to start without an absolute LOCALAPPDATA", () => {
+    for (const value of [undefined, "relative\\appdata"]) {
+      const sandbox = plantedProject(null);
+      const pkg = probePackage(sandbox.root, "launcher");
+      const env = probeEnvironment(sandbox, true);
+      for (const key of Object.keys(env)) if (/^LOCALAPPDATA$/i.test(key)) delete env[key];
+      if (value !== undefined) env["LOCALAPPDATA"] = value;
+      const run = runLauncherDirectly(sandbox, pkg, "mcp", env);
+      expect(run.status, `${run.stdout}\n${run.stderr}`).toBe(2);
+      expect(run.stdout).not.toContain("CAUSORYN-PROBE");
+      expect(run.stderr).toMatch(/refusing to start: LOCALAPPDATA/);
+      expect(readdirSync(path.join(sandbox.root, "tmp"))).toEqual([]);
+      expect(existsSync(path.join(sandbox.project, "relative"))).toBe(false);
+    }
+  });
+
+  /** Review round 5 (B5): a start that never reached node (or a crashed node) leaves its capture directory; later starts remove it. */
+  it.runIf(IS_WINDOWS)("B5: a start removes capture directories an earlier start left behind, and only those", () => {
+    const sandbox = plantedProject(null);
+    const root = captureRoot(sandbox);
+    const old = new Date(Date.now() - 3_600_000);
+    const stale = path.join(root, "c-12345-1");
+    const foreign = path.join(root, "c-12345-2");
+    mkdirSync(stale, { recursive: true });
+    mkdirSync(foreign);
+    for (const file of ["argv-hash.txt", "argv-bracket.txt", "cp.txt"]) writeFileSync(path.join(stale, file), "x");
+    writeFileSync(path.join(foreign, "not-a-capture.txt"), "x");
+    for (const dir of [stale, foreign]) utimesSync(dir, old, old);
+    expectServerRan(runProbe(sandbox, "launcher", ["mcp"], { registryEnv: true }), ["mcp"]);
+    expect(leftoverCaptures(sandbox)).toEqual(["c-12345-2"]);
+  });
 });
+
+/** Runs a probe package's launcher through cmd.exe as npm would, with npm's node, without npm. */
+function runLauncherDirectly(
+  sandbox: Sandbox & { readonly root: string },
+  pkg: string,
+  args: string,
+  env: NodeJS.ProcessEnv,
+): { status: number | null; stdout: string; stderr: string } {
+  return spawnSync(process.env["ComSpec"] ?? "cmd.exe", ["/d", "/s", "/c", `""${path.join(pkg, "scripts", "causoryn.cmd")}" ${args}"`], {
+    cwd: sandbox.project,
+    env: { ...env, npm_node_execpath: process.execPath },
+    encoding: "utf8",
+    windowsVerbatimArguments: true,
+  });
+}
 
 /* ------------------------------------------------------------------ */
 /* F20 round 4: Windows console code pages                             */
@@ -511,12 +602,15 @@ const POWERSHELL = path.join(process.env["SystemRoot"] ?? "C:\\Windows", "System
  * Runs `npm exec … causoryn <args>` (as runProbe) in a new, hidden console
  * whose code page is first set to `codePage` (PowerShell Start-Process opens
  * the console; the console of the test runner is never changed). Reports the
- * console's code page before and after the run.
+ * console's code page before and after the run. With `parallel` > 1 the
+ * starts run at the same time in that one console (after one warm-up start,
+ * so npm's cache is not filled concurrently).
  */
 function runProbeInConsole(
   codePage: number,
   args: readonly string[],
-): ProbeRun & { readonly before: number | null; readonly after: number | null } {
+  parallel = 1,
+): ProbeRun & { readonly before: number | null; readonly after: number | null; readonly runs: readonly ProbeRun[] } {
   const sandbox = plantedProject(null);
   const pkg = probePackage(sandbox.root, "launcher");
   const driver = path.join(sandbox.root, "console-driver.cjs");
@@ -525,21 +619,41 @@ function runProbeInConsole(
   writeFileSync(
     driver,
     [
-      'const { spawnSync } = require("node:child_process");',
+      'const { spawn, spawnSync } = require("node:child_process");',
       'const fs = require("node:fs");',
       'const job = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));',
       'const cp = () => { const r = spawnSync(job.chcp, [], { encoding: "latin1" }); const m = /(\\d+)\\D*$/.exec(String(r.stdout).trim()); return m ? Number(m[1]) : null; };',
-      'spawnSync(job.chcp, [String(job.codePage)], { stdio: ["ignore", "ignore", "ignore"] });',
-      "const before = cp();",
-      'const run = spawnSync(process.execPath, job.argv, { cwd: job.cwd, env: job.env, encoding: "utf8", timeout: 120000 });',
-      "const after = cp();",
-      "fs.writeFileSync(job.out, JSON.stringify({ before, after, status: run.status, stdout: String(run.stdout), stderr: String(run.stderr) }));",
+      "const runOne = (argv) => new Promise((resolve) => {",
+      "  const child = spawn(process.execPath, argv, { cwd: job.cwd, env: job.env });",
+      '  let stdout = ""; let stderr = "";',
+      '  child.stdout.setEncoding("utf8"); child.stderr.setEncoding("utf8");',
+      '  child.stdout.on("data", (d) => { stdout += d; }); child.stderr.on("data", (d) => { stderr += d; });',
+      '  child.on("close", (status) => resolve({ status, stdout, stderr }));',
+      "  child.stdin.end();",
+      "});",
+      "(async () => {",
+      '  spawnSync(job.chcp, [String(job.codePage)], { stdio: ["ignore", "ignore", "ignore"] });',
+      "  const before = cp();",
+      "  if (job.parallel > 1) await runOne(job.warmup);",
+      "  const runs = await Promise.all(Array.from({ length: job.parallel }, () => runOne(job.argv)));",
+      "  const after = cp();",
+      "  fs.writeFileSync(job.out, JSON.stringify({ before, after, runs }));",
+      "})();",
       "",
     ].join("\n"),
   );
   writeFileSync(
     job,
-    JSON.stringify({ chcp: CHCP, codePage, argv: probeNpmArguments(pkg, args), cwd: sandbox.project, env: probeEnvironment(sandbox, true), out }),
+    JSON.stringify({
+      chcp: CHCP,
+      codePage,
+      parallel,
+      argv: probeNpmArguments(pkg, args),
+      warmup: probeNpmArguments(pkg, ["warm-up"]),
+      cwd: sandbox.project,
+      env: probeEnvironment(sandbox, true),
+      out,
+    }),
   );
   const quote = (text: string): string => `'"${text.replace(/'/g, "''")}"'`;
   const started = spawnSync(
@@ -553,8 +667,13 @@ function runProbeInConsole(
     { encoding: "utf8", timeout: 180_000 },
   );
   expect(existsSync(out), `${started.stdout}\n${started.stderr}`).toBe(true);
-  const result = JSON.parse(readFileSync(out, "utf8")) as { before: number | null; after: number | null; status: number | null; stdout: string; stderr: string };
-  return { ...probeRun(result), before: result.before, after: result.after };
+  const result = JSON.parse(readFileSync(out, "utf8")) as {
+    before: number | null;
+    after: number | null;
+    runs: Array<{ status: number | null; stdout: string; stderr: string }>;
+  };
+  const runs = result.runs.map((run) => probeRun(run));
+  return { ...(runs[0] as ProbeRun), before: result.before, after: result.after, runs };
 }
 
 /** Characters whose cp932 (Shift-JIS) trail byte is 0x5E (`^`) or 0x7C (`|`). */
@@ -602,6 +721,25 @@ describe.skipIf(NPM_CLI === undefined || !IS_WINDOWS)(
       expect(run.status).toBe(2);
       expect(run.after).toBe(857);
     });
+
+    /**
+     * Review round 5 (B2): starts that share a console race on its code page
+     * (one restores 857 while another captures), which gave refusals and,
+     * worse, exit 0 with `["mcp","???","x","--root","C:\\proj\\?_?"]`. The
+     * launcher now serializes its code page window with a lock under
+     * %LOCALAPPDATA%\causoryn\argv and checks the code page after capturing.
+     */
+    it("B2: eight starts at once in one console all get their exact arguments", () => {
+      const args = ["mcp", "日本語", "＂x＂", "--root", "C:\\proj\\データ"];
+      const result = runProbeInConsole(857, args, 8);
+      expect(result.before).toBe(857);
+      expect(result.runs).toHaveLength(8);
+      for (const run of result.runs) {
+        expect(`${run.stdout}${run.stderr}`).not.toMatch(/^INJECTED/m);
+        expectServerRan(run, args);
+      }
+      expect(result.after).toBe(857);
+    }, 120_000);
   },
 );
 
@@ -669,6 +807,29 @@ describe.skipIf(NPM_CLI === undefined || !IS_WINDOWS)("F20 round 4: a global ins
       windowsVerbatimArguments: true,
     });
     expectProbe(run.stdout, run.stderr, ["mcp", "a b"]);
+  });
+
+  /**
+   * Review round 5 (B4): `%~$PATH:` searches the current directory for an
+   * empty or `.` PATH entry, so a directory's node.exe was picked before the
+   * real one. The launcher refuses a node.exe found in the current directory.
+   */
+  it.each([
+    ["an empty", ""],
+    ["a .", "."],
+  ])("B4: refuses the current directory's node.exe found through %s PATH entry", (_label, entry) => {
+    const { prefix, cwd, env } = globalInstall();
+    const pathKey = Object.keys(env).find((key) => /^path$/i.test(key)) ?? "PATH";
+    env[pathKey] = `${entry};${path.dirname(process.execPath)};${env[pathKey] ?? ""}`;
+    const run = spawnSync(process.env["ComSpec"] ?? "cmd.exe", ["/d", "/s", "/c", `""${path.join(prefix, "causoryn.cmd")}" mcp"`], {
+      cwd,
+      env,
+      encoding: "utf8",
+      windowsVerbatimArguments: true,
+    });
+    expect(run.stdout, run.stderr).not.toMatch(/HIJACK-|\(c\) Microsoft Corporation|CAUSORYN-PROBE/);
+    expect(run.status).toBe(2);
+    expect(run.stderr).toMatch(/refusing to start: the node\.exe found on PATH is in the current directory/);
   });
 
   it("from PowerShell (causoryn.ps1)", () => {
