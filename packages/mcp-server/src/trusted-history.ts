@@ -18,13 +18,21 @@ import {
 import type { PolicyDecision } from "@causoryn/workspace";
 
 import {
+  acquireHistoryAnalysisSlot,
   analyzeCommitContentSet,
   COMMIT_ANALYSIS_NOTE,
   describeCommitAnalysisFailure,
   HISTORY_ANALYSIS_BUDGET_ENV,
   HISTORY_CACHE_NOTE,
+  HistoryBudgetError,
+  historyBusyError,
+  HistoryRequestBudget,
   openHistoryCache,
+  resolveHistoryResourceLimits,
+  type CommitAnalysisMeter,
   type CommitContentAnalysis,
+  type HistoryCacheOptions,
+  type HistoryResourceLimits,
 } from "./history-commit-analysis.js";
 import type { ServiceDeps } from "./services.js";
 
@@ -49,9 +57,14 @@ import type { ServiceDeps } from "./services.js";
  *      from its git objects by a scratch index (history-commit-analysis.ts),
  *      so these points have the same granularity as (1) and the index. With a
  *      data root the result is cached; a cached point is free, fresh analyses
- *      are limited per call (`maxFreshAnalyses`). A point beyond the budget or
- *      whose analysis failed falls through to (3) and, without a committed
- *      snapshot, stays unanalyzed with that reason.
+ *      are limited per call (`maxFreshAnalyses`) and by the resource limits
+ *      (`limits`: byte budgets per commit and per call, deadlines per
+ *      analysis and per call, process-wide running analyses). A point beyond
+ *      a budget, stopped by a limit or whose analysis failed falls through to
+ *      (3) and, without a committed snapshot, stays unanalyzed with that
+ *      reason (`analysis-budget-exceeded`, `commit-byte-budget-exceeded`,
+ *      `request-byte-budget-exceeded`, `analysis-deadline-exceeded`,
+ *      `request-deadline-exceeded`, `analysis-busy`, `commit-analysis-failed`).
  * 3. Otherwise the timeline core falls back to the repo-committed (or
  *    working-tree) snapshot file and marks the point with
  *    `snapshot-loaded-from-committed-git-blob`.
@@ -71,6 +84,12 @@ export interface TrustedHistorySources {
 export interface TrustedHistoryOptions {
   /** Fresh commit analyses this call may run (cache hits are free; 0 disables them). */
   readonly maxFreshAnalyses: number;
+  /** Resource limits of the fresh analyses; default resolveHistoryResourceLimits (environment). */
+  readonly limits?: HistoryResourceLimits;
+  /** Monotonic clock in milliseconds for the deadlines (default performance.now). */
+  readonly now?: () => number;
+  /** History cache options (retention quota, file system view). */
+  readonly cache?: HistoryCacheOptions;
 }
 
 type CommitPointResult =
@@ -82,6 +101,8 @@ type CommitPointResult =
     }
   | { readonly kind: "disabled" }
   | { readonly kind: "budget-exceeded" }
+  /** A resource limit stopped or prevented the analysis; `reason` is `<code>: <detail>`. */
+  | { readonly kind: "limited"; readonly reason: string }
   | { readonly kind: "failed"; readonly reason: string };
 
 interface LoadedIndex {
@@ -370,7 +391,9 @@ export function createTrustedHistorySources(
 
   // Commit points analyzed from git objects. One result per commit SHA and
   // call: the same commit named twice is analyzed (and budgeted) once.
-  const cache = openHistoryCache(deps, workspaceId, canonicalRoot);
+  const cache = openHistoryCache(deps, workspaceId, canonicalRoot, options.cache);
+  const limits = options.limits ?? resolveHistoryResourceLimits(deps.logger);
+  const requestBudget = new HistoryRequestBudget(limits, options.now ?? (() => performance.now()));
   const commitPoints = new Map<string, Promise<CommitPointResult>>();
   let freshAnalyses = 0;
   const budgetSkippedRefs: string[] = [];
@@ -391,27 +414,65 @@ export function createTrustedHistorySources(
       cached === undefined ? undefined : { kind: "analyzed", analysis: cached.analysis, fromCache: true };
     if (options.maxFreshAnalyses === 0) return servedStale() ?? { kind: "disabled" };
     if (freshAnalyses >= options.maxFreshAnalyses) return servedStale() ?? { kind: "budget-exceeded" };
-    freshAnalyses += 1;
-    let analysis: CommitContentAnalysis;
+    const limited = (error: HistoryBudgetError): CommitPointResult => {
+      deps.logger(`history: commit ${commitSha} was not analyzed from its git objects: ${error.reason}`);
+      return servedStale() ?? { kind: "limited", reason: error.reason };
+    };
+    // The call's own byte and time budget, before waiting for a slot.
     try {
-      analysis = await analyzeCommitContentSet(deps, workspaceId, canonicalRoot, commitSha);
+      requestBudget.assertCanStart();
     } catch (error) {
-      if (isRepositoryLevelGitError(error)) throw error;
-      deps.logger(
-        `history: commit ${commitSha} could not be analyzed from its git objects: ${error instanceof Error ? error.message : String(error)}`,
-      );
-      return servedStale() ?? { kind: "failed", reason: describeCommitAnalysisFailure(error) };
+      if (error instanceof HistoryBudgetError) return limited(error);
+      throw error;
     }
-    if (cache === null) return { kind: "analyzed", analysis, fromCache: false };
-    const stored = await cache.store(commitSha, analysis);
-    return stored
-      ? { kind: "analyzed", analysis, fromCache: false }
-      : {
-          kind: "analyzed",
-          analysis,
-          fromCache: false,
-          notCachedReason: "the history cache could not be written (see the server log)",
-        };
+    // The count is taken before waiting, so a slot that never comes is given back.
+    freshAnalyses += 1;
+    const release = await acquireHistoryAnalysisSlot(
+      limits.maxConcurrentAnalyses,
+      Math.min(limits.busyWaitMs, requestBudget.remainingMs()),
+    );
+    if (release === undefined) {
+      freshAnalyses -= 1;
+      return limited(historyBusyError(limits));
+    }
+    try {
+      let meter: CommitAnalysisMeter;
+      let analysis: CommitContentAnalysis;
+      try {
+        meter = requestBudget.startAnalysis();
+      } catch (error) {
+        // The wait used up the call's time: no analysis ran.
+        freshAnalyses -= 1;
+        if (error instanceof HistoryBudgetError) return limited(error);
+        throw error;
+      }
+      try {
+        analysis = await analyzeCommitContentSet(deps, workspaceId, canonicalRoot, commitSha, meter);
+      } catch (error) {
+        if (error instanceof HistoryBudgetError) return limited(error);
+        // A failure after the deadline (a git process killed by its timeout,
+        // or a wrapped error from the scratch index) is the deadline.
+        const deadline = meter.deadlineError();
+        if (deadline !== undefined) return limited(deadline);
+        if (isRepositoryLevelGitError(error)) throw error;
+        deps.logger(
+          `history: commit ${commitSha} could not be analyzed from its git objects: ${error instanceof Error ? error.message : String(error)}`,
+        );
+        return servedStale() ?? { kind: "failed", reason: describeCommitAnalysisFailure(error) };
+      }
+      if (cache === null) return { kind: "analyzed", analysis, fromCache: false };
+      const stored = await cache.store(commitSha, analysis);
+      return stored
+        ? { kind: "analyzed", analysis, fromCache: false }
+        : {
+            kind: "analyzed",
+            analysis,
+            fromCache: false,
+            notCachedReason: "the history cache could not be written (see the server log)",
+          };
+    } finally {
+      release();
+    }
   };
 
   const reconstructFromGitTree: TimelineReconstructFromGitTree = async (_repoRoot, ref, commitSha) => {
@@ -432,6 +493,9 @@ export function createTrustedHistorySources(
       case "budget-exceeded":
         if (!budgetSkippedRefs.includes(ref)) budgetSkippedRefs.push(ref);
         return { status: "unanalyzed", reason: budgetReason };
+      case "limited":
+        addNote(`'${ref}' (commit ${sha.slice(0, 12)}) was not analyzed from its git objects: ${result.reason}`);
+        return { status: "unanalyzed", reason: result.reason };
       case "failed":
         addNote(
           `'${ref}' (commit ${sha.slice(0, 12)}) could not be analyzed from its git objects: ${result.reason}`,

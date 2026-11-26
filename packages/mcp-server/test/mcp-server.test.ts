@@ -1733,7 +1733,7 @@ describe(
   "MCP server — yapısal annotations, dürüst açıklamalar ve çok-dil workspace_summary / coverageOf",
   { timeout: 30_000 },
   () => {
-    it("tools/list: 29 aracın tamamı yapısal annotations taşır (3 yazma aracı readOnlyHint=false, 26 araç readOnlyHint=true)", async () => {
+    it("tools/list: 32 aracın tamamı yapısal annotations taşır (data root'a / izinli çıktıya yazabilen 6 araç readOnlyHint=false, 26 araç readOnlyHint=true)", async () => {
       const pair = await connectClient(makeContext({ autoIndex: false }));
       try {
         const { tools } = await pair.client.listTools();
@@ -1750,7 +1750,10 @@ describe(
           .filter((t) => t.annotations?.readOnlyHint === false)
           .map((t) => t.name)
           .sort();
+        // The history tools write their commit-analysis cache under the data root.
         expect(writeTools).toEqual([
+          "causoryn_architecture_timeline",
+          "causoryn_compare_architecture",
           "causoryn_export_documentation",
           "causoryn_refresh_index",
           "causoryn_status",
@@ -1759,7 +1762,7 @@ describe(
         const readOnlyTools = tools
           .filter((t) => t.annotations?.readOnlyHint === true)
           .map((t) => t.name);
-        expect(readOnlyTools.length).toBe(28);
+        expect(readOnlyTools.length).toBe(26);
       } finally {
         await pair.close();
       }

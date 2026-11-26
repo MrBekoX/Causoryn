@@ -1,5 +1,16 @@
 import { randomBytes } from "node:crypto";
-import { lstat, mkdir, realpath, rename, unlink, writeFile } from "node:fs/promises";
+import { constants as fsConstants } from "node:fs";
+import {
+  lstat,
+  mkdir,
+  open,
+  readdir,
+  realpath,
+  rename,
+  unlink,
+  writeFile,
+  type FileHandle,
+} from "node:fs/promises";
 import path from "node:path";
 
 import { canonicalJson, sha256Hex, utf8Encode, type JsonValue } from "@causoryn/domain";
@@ -28,7 +39,6 @@ import {
   type WorkspacePolicyConfig,
 } from "@causoryn/workspace";
 
-import { readOptionalBoundedTextFile } from "./safe-file-read.js";
 import type { ServiceDeps } from "./services.js";
 import { SERVER_VERSION } from "./version.js";
 
@@ -51,20 +61,65 @@ import { SERVER_VERSION } from "./version.js";
  * the workspace rules themselves come from the current working tree and
  * configuration.
  *
+ * Resource budgets (the analysis runs inside the MCP server process): besides
+ * the per-file (`maxFileBytes`) and file-count (`index.maxFiles`) limits, one
+ * analysis accepts at most `maxCommitBytes` of source text and one tool call
+ * at most `maxRequestBytes` across its fresh analyses; an analysis stops at
+ * its wall-clock deadline (`maxAnalysisMs`, bounded by the call's
+ * `maxRequestMs`), checked between tree entries and blob reads (each git
+ * process also gets the time left as its timeout) and at the scratch index's
+ * phase boundaries; and at most `maxConcurrentAnalyses` fresh analyses run in
+ * the process at a time (a call waits at most `busyWaitMs` for a slot). A
+ * limit that is hit raises HistoryBudgetError, whose code becomes the point's
+ * unanalyzed reason (see trusted-history.ts). Defaults and the
+ * `CAUSORYN_HISTORY_*` overrides: resolveHistoryResourceLimits.
+ *
  * Cache: with a data root (`storage.dataDbPath`), a result is stored at
  * `<dir of dataDbPath>/history/<commitSha>-<cacheKey>.json`, written through a
  * unique temporary file (flag "wx", owner-only mode) and a rename, never
  * inside an authorized workspace root. The key covers the Causoryn and
- * indexing versions, the analyzer fingerprint schema and the policy
- * configuration, so analyzer or rule changes start a new entry. An analysis
- * that ran without an available language worker records that worker; its
- * entry is analyzed again once the latest published index ran the worker
- * (the toolchain is available now). A corrupt entry is removed and the
- * commit is analyzed again.
+ * indexing versions, the analyzer fingerprint schema, the policy
+ * configuration and the analyzed workspace (id and canonical root), so
+ * analyzer or rule changes start a new entry. An analysis that ran without an
+ * available language worker records that worker; its entry is analyzed again
+ * once the latest published index ran the worker (the toolchain is available
+ * now). A corrupt entry is removed and the commit is analyzed again.
+ *
+ * Cache trust (a manually chosen data root may be shared): the cache
+ * directory is used only when it is a real directory (not a symlink or
+ * junction) directly inside the data directory and, on POSIX, owned by the
+ * server's uid and not writable by group or others; an entry is read only
+ * when it is a regular file with the same owner and mode rules, checked on
+ * the path and again on the opened descriptor (same file, so a later swap is
+ * not read), and is used only when its recorded source identity (workspace id
+ * and canonical root) matches. Anything else is ignored with a log line,
+ * never served. Windows ACLs are not inspected (no uid there): the private
+ * default data root is the protection on that platform.
+ *
+ * Retention: after a store, entries beyond `maxEntries` or `maxTotalBytes`
+ * (all entries of the directory, whatever their key) are evicted oldest
+ * modification time first, ties by file name; temporary files of writes that
+ * never finished (older than an hour) are removed.
  */
 
 /** Environment override of the fresh analyses one history tool call may run. */
 export const HISTORY_ANALYSIS_BUDGET_ENV = "CAUSORYN_HISTORY_MAX_ANALYSES";
+/** Source text (UTF-8 bytes) one fresh commit analysis may accept. */
+export const HISTORY_MAX_COMMIT_BYTES_ENV = "CAUSORYN_HISTORY_MAX_COMMIT_BYTES";
+/** Source text (UTF-8 bytes) the fresh analyses of one tool call may accept together. */
+export const HISTORY_MAX_REQUEST_BYTES_ENV = "CAUSORYN_HISTORY_MAX_REQUEST_BYTES";
+/** Wall-clock milliseconds one fresh commit analysis may take. */
+export const HISTORY_MAX_ANALYSIS_MS_ENV = "CAUSORYN_HISTORY_MAX_ANALYSIS_MS";
+/** Wall-clock milliseconds the fresh analyses of one tool call may take together. */
+export const HISTORY_MAX_REQUEST_MS_ENV = "CAUSORYN_HISTORY_MAX_REQUEST_MS";
+/** Fresh commit analyses that may run at the same time in this server process. */
+export const HISTORY_MAX_CONCURRENT_ENV = "CAUSORYN_HISTORY_MAX_CONCURRENT";
+/** Milliseconds a call waits for a free analysis slot (0: do not wait). */
+export const HISTORY_BUSY_WAIT_MS_ENV = "CAUSORYN_HISTORY_BUSY_WAIT_MS";
+/** Total bytes of the history cache directory's entries. */
+export const HISTORY_CACHE_MAX_BYTES_ENV = "CAUSORYN_HISTORY_CACHE_MAX_BYTES";
+/** Entries kept in the history cache directory. */
+export const HISTORY_CACHE_MAX_ENTRIES_ENV = "CAUSORYN_HISTORY_CACHE_MAX_ENTRIES";
 /** Default fresh analyses per `causoryn_compare_architecture` call (one per side). */
 export const DEFAULT_COMPARE_FRESH_ANALYSES = 2;
 /** Default fresh analyses per `causoryn_architecture_timeline` call. */
@@ -75,17 +130,71 @@ export const COMMIT_ANALYSIS_NOTE =
   "was analyzed from its git objects (source files from the commit; project files and installed packages from the working tree)";
 export const HISTORY_CACHE_NOTE = "served from the history cache";
 
+/** Resource limits of the fresh commit analyses (see the module comment). */
+export interface HistoryResourceLimits {
+  /** Source text (UTF-8 bytes) one analysis may accept. */
+  readonly maxCommitBytes: number;
+  /** Source text (UTF-8 bytes) the fresh analyses of one call may accept together. */
+  readonly maxRequestBytes: number;
+  /** Wall-clock milliseconds of one analysis. */
+  readonly maxAnalysisMs: number;
+  /** Wall-clock milliseconds of all fresh analyses of one call, waiting for a slot included. */
+  readonly maxRequestMs: number;
+  /** Fresh analyses running at the same time in this process. */
+  readonly maxConcurrentAnalyses: number;
+  /** Milliseconds a call waits for a free analysis slot (0: no waiting). */
+  readonly busyWaitMs: number;
+}
+
+export const DEFAULT_HISTORY_RESOURCE_LIMITS: HistoryResourceLimits = Object.freeze({
+  maxCommitBytes: 128 * 1024 * 1024,
+  maxRequestBytes: 256 * 1024 * 1024,
+  maxAnalysisMs: 120_000,
+  maxRequestMs: 300_000,
+  maxConcurrentAnalyses: 1,
+  busyWaitMs: 30_000,
+});
+
+/** Total retention of the history cache directory. */
+export interface HistoryCacheQuota {
+  readonly maxEntries: number;
+  readonly maxTotalBytes: number;
+}
+
+export const DEFAULT_HISTORY_CACHE_QUOTA: HistoryCacheQuota = Object.freeze({
+  maxEntries: 256,
+  maxTotalBytes: 1024 * 1024 * 1024,
+});
+
 const HISTORY_CACHE_FORMAT = "causoryn-history-commit-analysis";
-const HISTORY_CACHE_FORMAT_VERSION = 1;
+/** 2: entries carry `sourceIdentity`; the key covers the workspace root. */
+const HISTORY_CACHE_FORMAT_VERSION = 2;
 const HISTORY_DIR_NAME = "history";
 /** Upper bound for one cache entry (read and write). */
 const MAX_HISTORY_CACHE_ENTRY_BYTES = 256 * 1024 * 1024;
+const HISTORY_ENTRY_FILE_PATTERN = /^(?:[0-9a-f]{40}|[0-9a-f]{64})-[0-9a-f]{16}\.json$/;
+/** Temporary file of a store (`.<entry>.<pid>.<random>.tmp`). */
+const HISTORY_TEMPORARY_FILE_PATTERN = /^\.(?:[0-9a-f]{40}|[0-9a-f]{64})-[0-9a-f]{16}\.json\.[0-9]+\.[0-9a-f]{16}\.tmp$/;
+/** A temporary file older than this was left by a write that never finished. */
+const ORPHANED_TEMPORARY_FILE_AGE_MS = 60 * 60 * 1000;
+/** Read-only open that refuses a final symlink and never blocks on a FIFO (POSIX flags). */
+const ENTRY_OPEN_FLAGS = fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0) | (fsConstants.O_NONBLOCK ?? 0);
+const ENTRY_READ_CHUNK_BYTES = 64 * 1024;
 const BLOB_READ_CONCURRENCY = 6;
 /** The synchronous policy checks yield to the event loop after this many tree entries. */
 const POLICY_YIELD_EVERY = 64;
+/** Timeout of one git process when the deadline is further away (the git helpers' default). */
+const GIT_PROCESS_TIMEOUT_MS = 15_000;
+/** Calls that may wait for an analysis slot at the same time; more are busy at once. */
+const MAX_WAITING_ANALYSES = 16;
+/** setTimeout's largest delay. */
+const MAX_TIMER_MS = 2_147_483_647;
+/** Permission bits for group and others write. */
+const GROUP_OR_OTHER_WRITE = 0o022;
 const SYMLINK_MODE = "120000";
 const COMMIT_SHA_PATTERN = /^[0-9a-f]{40}$|^[0-9a-f]{64}$/;
 const POSITIVE_INTEGER_PATTERN = /^[1-9][0-9]*$/;
+const NON_NEGATIVE_INTEGER_PATTERN = /^(?:0|[1-9][0-9]*)$/;
 
 /** Result of one commit analysis (fresh or from the cache). */
 export interface CommitContentAnalysis {
@@ -156,16 +265,259 @@ export function resolveHistoryAnalysisBudget(
   env: NodeJS.ProcessEnv = process.env,
 ): number {
   if (deps.historyMaxFreshAnalyses !== undefined) return deps.historyMaxFreshAnalyses;
-  const raw = env[HISTORY_ANALYSIS_BUDGET_ENV]?.trim();
-  if (raw === undefined || raw.length === 0) return toolDefault;
-  const parsed = POSITIVE_INTEGER_PATTERN.test(raw) ? Number(raw) : Number.NaN;
+  return readIntegerEnv(env, HISTORY_ANALYSIS_BUDGET_ENV, toolDefault, "positive", deps.logger);
+}
+
+/**
+ * An integer setting from the environment; unset or empty keeps `fallback`,
+ * an invalid value is logged and ignored (the same handling for every
+ * `CAUSORYN_HISTORY_*` setting).
+ */
+function readIntegerEnv(
+  env: NodeJS.ProcessEnv,
+  name: string,
+  fallback: number,
+  kind: "positive" | "non-negative",
+  logger: (message: string) => void,
+): number {
+  const raw = env[name]?.trim();
+  if (raw === undefined || raw.length === 0) return fallback;
+  const pattern = kind === "positive" ? POSITIVE_INTEGER_PATTERN : NON_NEGATIVE_INTEGER_PATTERN;
+  const parsed = pattern.test(raw) ? Number(raw) : Number.NaN;
   if (!Number.isSafeInteger(parsed)) {
-    deps.logger(
-      `history: ${HISTORY_ANALYSIS_BUDGET_ENV} must be a positive integer; ignoring ${JSON.stringify(raw)} and using ${String(toolDefault)}`,
-    );
-    return toolDefault;
+    logger(`history: ${name} must be a ${kind} integer; ignoring ${JSON.stringify(raw)} and using ${String(fallback)}`);
+    return fallback;
   }
   return parsed;
+}
+
+/** Resource limits from the `CAUSORYN_HISTORY_*` settings over the defaults. */
+export function resolveHistoryResourceLimits(
+  logger: (message: string) => void,
+  env: NodeJS.ProcessEnv = process.env,
+): HistoryResourceLimits {
+  const defaults = DEFAULT_HISTORY_RESOURCE_LIMITS;
+  const positive = (name: string, fallback: number): number =>
+    readIntegerEnv(env, name, fallback, "positive", logger);
+  return {
+    maxCommitBytes: positive(HISTORY_MAX_COMMIT_BYTES_ENV, defaults.maxCommitBytes),
+    maxRequestBytes: positive(HISTORY_MAX_REQUEST_BYTES_ENV, defaults.maxRequestBytes),
+    maxAnalysisMs: positive(HISTORY_MAX_ANALYSIS_MS_ENV, defaults.maxAnalysisMs),
+    maxRequestMs: positive(HISTORY_MAX_REQUEST_MS_ENV, defaults.maxRequestMs),
+    maxConcurrentAnalyses: positive(HISTORY_MAX_CONCURRENT_ENV, defaults.maxConcurrentAnalyses),
+    busyWaitMs: readIntegerEnv(env, HISTORY_BUSY_WAIT_MS_ENV, defaults.busyWaitMs, "non-negative", logger),
+  };
+}
+
+/** History cache retention from the `CAUSORYN_HISTORY_CACHE_*` settings over the defaults. */
+export function resolveHistoryCacheQuota(
+  logger: (message: string) => void,
+  env: NodeJS.ProcessEnv = process.env,
+): HistoryCacheQuota {
+  return {
+    maxEntries: readIntegerEnv(
+      env,
+      HISTORY_CACHE_MAX_ENTRIES_ENV,
+      DEFAULT_HISTORY_CACHE_QUOTA.maxEntries,
+      "positive",
+      logger,
+    ),
+    maxTotalBytes: readIntegerEnv(
+      env,
+      HISTORY_CACHE_MAX_BYTES_ENV,
+      DEFAULT_HISTORY_CACHE_QUOTA.maxTotalBytes,
+      "positive",
+      logger,
+    ),
+  };
+}
+
+/* ------------------------------------------------------------------ */
+/* Budgets of the fresh analyses                                       */
+/* ------------------------------------------------------------------ */
+
+/** Reason codes of a point that a resource limit kept from being analyzed. */
+export type HistoryLimitCode =
+  | "commit-byte-budget-exceeded"
+  | "request-byte-budget-exceeded"
+  | "analysis-deadline-exceeded"
+  | "request-deadline-exceeded"
+  | "analysis-busy";
+
+/** A resource limit stopped (or prevented) a fresh analysis; reported as the point's reason. */
+export class HistoryBudgetError extends Error {
+  readonly code: HistoryLimitCode;
+
+  constructor(code: HistoryLimitCode, message: string) {
+    super(message);
+    this.name = "HistoryBudgetError";
+    this.code = code;
+  }
+
+  /** The unanalyzed reason of the point: `<code>: <detail>`. */
+  get reason(): string {
+    return `${this.code}: ${this.message}`;
+  }
+}
+
+/** Budget of one running analysis (bytes and deadline), handed to analyzeCommitContentSet. */
+export interface CommitAnalysisMeter {
+  /** Throws HistoryBudgetError once the analysis or call deadline has passed. */
+  readonly checkDeadline: () => void;
+  /** The deadline error once the deadline has passed, otherwise undefined. */
+  readonly deadlineError: () => HistoryBudgetError | undefined;
+  /** Counts source text accepted into the analysis; throws HistoryBudgetError above a byte budget. */
+  readonly acceptBytes: (bytes: number) => void;
+  /** Timeout for the next git process: the time left, at most the git default. */
+  readonly gitTimeoutMs: () => number;
+}
+
+export function historyBusyError(limits: HistoryResourceLimits): HistoryBudgetError {
+  return new HistoryBudgetError(
+    "analysis-busy",
+    `another fresh commit analysis is running in this server process (at most ${String(limits.maxConcurrentAnalyses)} at a time, ${HISTORY_MAX_CONCURRENT_ENV}); run the tool again`,
+  );
+}
+
+/**
+ * Byte and time budget of one tool call, shared by its fresh analyses. The
+ * call's clock starts when the budget is created.
+ */
+export class HistoryRequestBudget {
+  readonly limits: HistoryResourceLimits;
+  private readonly now: () => number;
+  private readonly deadline: number;
+  private bytesAccepted = 0;
+
+  constructor(limits: HistoryResourceLimits, now: () => number) {
+    this.limits = limits;
+    this.now = now;
+    this.deadline = now() + limits.maxRequestMs;
+  }
+
+  /** Milliseconds left for this call's analyses (0 once the deadline has passed). */
+  remainingMs(): number {
+    return Math.max(0, this.deadline - this.now());
+  }
+
+  /** Throws HistoryBudgetError when this call may not start another fresh analysis. */
+  assertCanStart(): void {
+    if (this.now() >= this.deadline) throw this.requestDeadlineError();
+    if (this.bytesAccepted >= this.limits.maxRequestBytes) throw this.requestBytesError();
+  }
+
+  /** Budget of an analysis that starts now (throws like assertCanStart). */
+  startAnalysis(): CommitAnalysisMeter {
+    this.assertCanStart();
+    const analysisDeadline = this.now() + this.limits.maxAnalysisMs;
+    const deadline = Math.min(analysisDeadline, this.deadline);
+    const analysisLimitFirst = analysisDeadline <= this.deadline;
+    let commitBytes = 0;
+    const deadlineError = (): HistoryBudgetError | undefined => {
+      if (this.now() < deadline) return undefined;
+      return analysisLimitFirst
+        ? new HistoryBudgetError(
+            "analysis-deadline-exceeded",
+            `the analysis took longer than ${HISTORY_MAX_ANALYSIS_MS_ENV} (${String(this.limits.maxAnalysisMs)} ms); raise ${HISTORY_MAX_ANALYSIS_MS_ENV} to analyze this commit`,
+          )
+        : this.requestDeadlineError();
+    };
+    const checkDeadline = (): void => {
+      const error = deadlineError();
+      if (error !== undefined) throw error;
+    };
+    return {
+      checkDeadline,
+      deadlineError,
+      acceptBytes: (bytes) => {
+        commitBytes += bytes;
+        this.bytesAccepted += bytes;
+        if (commitBytes > this.limits.maxCommitBytes) {
+          throw new HistoryBudgetError(
+            "commit-byte-budget-exceeded",
+            `the commit's analyzable files hold more than ${HISTORY_MAX_COMMIT_BYTES_ENV} (${String(this.limits.maxCommitBytes)} bytes) of source text; raise ${HISTORY_MAX_COMMIT_BYTES_ENV} to analyze it`,
+          );
+        }
+        if (this.bytesAccepted > this.limits.maxRequestBytes) throw this.requestBytesError();
+        checkDeadline();
+      },
+      gitTimeoutMs: () => Math.max(1, Math.min(GIT_PROCESS_TIMEOUT_MS, Math.ceil(deadline - this.now()))),
+    };
+  }
+
+  private requestDeadlineError(): HistoryBudgetError {
+    return new HistoryBudgetError(
+      "request-deadline-exceeded",
+      `this call's fresh commit analyses took longer than ${HISTORY_MAX_REQUEST_MS_ENV} (${String(this.limits.maxRequestMs)} ms); run the tool again or raise ${HISTORY_MAX_REQUEST_MS_ENV}`,
+    );
+  }
+
+  private requestBytesError(): HistoryBudgetError {
+    return new HistoryBudgetError(
+      "request-byte-budget-exceeded",
+      `this call's fresh commit analyses read more than ${HISTORY_MAX_REQUEST_BYTES_ENV} (${String(this.limits.maxRequestBytes)} bytes) of source text; run the tool again (analyzed commits are cached with a data root) or raise ${HISTORY_MAX_REQUEST_BYTES_ENV}`,
+    );
+  }
+}
+
+/* Process-wide limit of running fresh analyses (FIFO, bounded waiting). */
+
+interface SlotWaiter {
+  readonly maxRunning: number;
+  readonly grant: (release: () => void) => void;
+  timer?: NodeJS.Timeout;
+}
+
+let runningAnalyses = 0;
+const slotWaiters: SlotWaiter[] = [];
+
+function slotRelease(): () => void {
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    runningAnalyses -= 1;
+    grantWaitingSlots();
+  };
+}
+
+function grantWaitingSlots(): void {
+  for (;;) {
+    const next = slotWaiters[0];
+    if (next === undefined || runningAnalyses >= next.maxRunning) return;
+    slotWaiters.shift();
+    clearTimeout(next.timer);
+    runningAnalyses += 1;
+    next.grant(slotRelease());
+  }
+}
+
+/**
+ * Takes one of the process-wide fresh analysis slots (at most `maxRunning`
+ * analyses run at a time), waiting at most `waitMs` behind earlier callers.
+ * Resolves to the release function, or undefined when no slot became free in
+ * time or too many calls are already waiting.
+ */
+export function acquireHistoryAnalysisSlot(
+  maxRunning: number,
+  waitMs: number,
+): Promise<(() => void) | undefined> {
+  if (slotWaiters.length === 0 && runningAnalyses < maxRunning) {
+    runningAnalyses += 1;
+    return Promise.resolve(slotRelease());
+  }
+  if (!(waitMs > 0) || slotWaiters.length >= MAX_WAITING_ANALYSES) return Promise.resolve(undefined);
+  return new Promise((resolve) => {
+    const waiter: SlotWaiter = { maxRunning, grant: resolve };
+    waiter.timer = setTimeout(() => {
+      const index = slotWaiters.indexOf(waiter);
+      if (index >= 0) slotWaiters.splice(index, 1);
+      resolve(undefined);
+      grantWaitingSlots();
+    }, Math.min(waitMs, MAX_TIMER_MS));
+    waiter.timer.unref();
+    slotWaiters.push(waiter);
+  });
 }
 
 function yieldToEventLoop(): Promise<void> {
@@ -200,15 +552,26 @@ function pathRuleFilter(config: WorkspacePolicyConfig): (relativePath: string) =
 /**
  * Policy-allowed files of `commitSha`, read from git objects into inventory
  * entries (same hash as the on-disk inventory: sha256 of the UTF-8 re-encoded
- * text). Throws CommitAnalysisLimitError above `maxFiles`.
+ * text). Throws CommitAnalysisLimitError above `maxFiles` and
+ * HistoryBudgetError when `meter` stops the analysis (a byte budget, or the
+ * deadline: checked between tree entries and blob reads; a git process
+ * killed by its deadline-bounded timeout is reported as the deadline).
  */
 async function collectCommitInventory(
   deps: ServiceDeps,
   canonicalRoot: string,
   commitSha: string,
   maxFiles: number,
+  meter: CommitAnalysisMeter,
 ): Promise<{ readonly entries: InventoryEntry[]; readonly skippedFiles: number }> {
-  const tree = await readGitTree(canonicalRoot, commitSha);
+  meter.checkDeadline();
+  let tree: Awaited<ReturnType<typeof readGitTree>>;
+  try {
+    tree = await readGitTree(canonicalRoot, commitSha, { timeoutMs: meter.gitTimeoutMs() });
+  } catch (error) {
+    meter.checkDeadline();
+    throw error;
+  }
   const maxFileBytes = deps.policy.config.maxFileBytes;
   const excludedByRules = pathRuleFilter(deps.policy.config);
   const candidates: string[] = [];
@@ -216,7 +579,10 @@ async function collectCommitInventory(
   let visited = 0;
   for (const entry of tree) {
     visited += 1;
-    if (visited % POLICY_YIELD_EVERY === 0) await yieldToEventLoop();
+    if (visited % POLICY_YIELD_EVERY === 0) {
+      await yieldToEventLoop();
+      meter.checkDeadline();
+    }
     // Submodules (gitlinks) are "commit" entries; symlinks are blobs with mode 120000.
     if (entry.type !== "blob" || entry.mode === SYMLINK_MODE) continue;
     if (entry.path === TIMELINE_SNAPSHOT_BLOB_PATH) continue;
@@ -248,31 +614,40 @@ async function collectCommitInventory(
 
   const read: Array<InventoryEntry | undefined> = new Array<InventoryEntry | undefined>(candidates.length);
   let next = 0;
-  let failed = false;
+  // The first failure stops every reader at its next file; it is rethrown
+  // once all readers have returned, so no read outlives the analysis.
+  const state: { failure?: { readonly error: unknown } } = {};
   const readNext = async (): Promise<void> => {
-    while (!failed) {
+    while (state.failure === undefined) {
       const index = next;
       next += 1;
       const relativePath = candidates[index];
       if (relativePath === undefined) return;
       let content: string;
       try {
+        meter.checkDeadline();
         content = await readGitBlob(canonicalRoot, commitSha, relativePath, {
           maxBufferBytes: maxFileBytes,
+          timeoutMs: meter.gitTimeoutMs(),
         });
       } catch (error) {
         if (error instanceof GraphRepositoryError && /maxBuffer/i.test(error.message)) {
           skippedFiles += 1;
           continue;
         }
-        // The other readers stop at their next file instead of reading the rest.
-        failed = true;
-        throw error;
+        state.failure ??= { error: meter.deadlineError() ?? error };
+        return;
       }
       const sizeBytes = Buffer.byteLength(content, "utf8");
       if (sizeBytes > maxFileBytes) {
         skippedFiles += 1;
         continue;
+      }
+      try {
+        meter.acceptBytes(sizeBytes);
+      } catch (error) {
+        state.failure ??= { error };
+        return;
       }
       read[index] = { relativePath, sizeBytes, contentHash: sha256Hex(utf8Encode(content)), content };
     }
@@ -280,6 +655,7 @@ async function collectCommitInventory(
   await Promise.all(
     Array.from({ length: Math.min(BLOB_READ_CONCURRENCY, candidates.length) }, () => readNext()),
   );
+  if (state.failure !== undefined) throw state.failure.error;
   return {
     entries: read.filter((entry): entry is InventoryEntry => entry !== undefined),
     skippedFiles,
@@ -287,21 +663,25 @@ async function collectCommitInventory(
 }
 
 /**
- * Analyzes `commitSha` from its git objects (see the module comment). Throws
- * GraphRepositoryError (git reads), IndexingError (analysis) or
- * CommitAnalysisLimitError; the caller decides how a failure is reported.
+ * Analyzes `commitSha` from its git objects (see the module comment) within
+ * the budget of `meter`. Throws GraphRepositoryError (git reads),
+ * IndexingError (analysis), CommitAnalysisLimitError or HistoryBudgetError
+ * (a byte budget or the deadline; the scratch index is stopped at its next
+ * phase boundary); the caller decides how a failure is reported.
  */
 export async function analyzeCommitContentSet(
   deps: ServiceDeps,
   workspaceId: string,
   canonicalRoot: string,
   commitSha: string,
+  meter: CommitAnalysisMeter,
 ): Promise<CommitContentAnalysis> {
   if (!COMMIT_SHA_PATTERN.test(commitSha)) {
     throw new GraphRepositoryError("compare/invalid-ref", `not a canonical commit SHA: ${commitSha}`);
   }
   const maxFiles = deps.config.index.maxFiles;
-  const inventory = await collectCommitInventory(deps, canonicalRoot, commitSha, maxFiles);
+  const inventory = await collectCommitInventory(deps, canonicalRoot, commitSha, maxFiles, meter);
+  meter.checkDeadline();
   const scratch = new IndexService({
     workspaceId,
     policy: deps.policy,
@@ -310,7 +690,14 @@ export async function analyzeCommitContentSet(
     limits: { maxFiles },
     inventorySource: () => Promise.resolve(inventory.entries),
   });
-  const run = await scratch.runIndexAsync(canonicalRoot);
+  // The index has no cancellation input; its progress callback runs at every
+  // phase boundary (inventory, each language, building, publishing), and a
+  // throw there ends the run.
+  const run = await scratch.runIndexAsync(canonicalRoot, {
+    onProgress: () => {
+      meter.checkDeadline();
+    },
+  });
   const contentSet = JSON.parse(serializeSnapshotContentSet(run.snapshot)) as CompareContentSet;
   const degradedWorkers = degradedWorkersOf(run.snapshot.meta.analyzerFingerprint);
   deps.logger(
@@ -350,11 +737,42 @@ interface HistoryCacheEntry {
   readonly formatVersion: typeof HISTORY_CACHE_FORMAT_VERSION;
   readonly commitSha: string;
   readonly cacheKey: string;
+  /** The workspace the commit was analyzed in (historySourceIdentity). */
+  readonly sourceIdentity: string;
   readonly state: "ready" | "partial";
   readonly fileCount: number;
   readonly skippedFiles: number;
   readonly degradedWorkers: readonly string[];
   readonly contentSet: CompareContentSet;
+}
+
+/** What the cache needs to know about a file system entry (a subset of fs.Stats). */
+export interface HistoryCacheStat {
+  readonly uid: number;
+  readonly mode: number;
+  readonly size: number;
+  readonly mtimeMs: number;
+  readonly dev: number;
+  readonly ino: number;
+  isFile(): boolean;
+  isDirectory(): boolean;
+  isSymbolicLink(): boolean;
+}
+
+/** File system view of the cache (injectable, e.g. to emulate POSIX owners on Windows). */
+export interface HistoryCacheFileSystem {
+  /** The server's uid; undefined where there is none (Windows): owner and mode are not checked. */
+  readonly getuid?: () => number | undefined;
+  /** lstat (never follows a final link). */
+  readonly lstat?: (target: string) => Promise<HistoryCacheStat>;
+  /** Stat of an opened entry (`target` is the path it was opened by). */
+  readonly fstat?: (handle: FileHandle, target: string) => Promise<HistoryCacheStat>;
+}
+
+export interface HistoryCacheOptions {
+  /** Retention; default resolveHistoryCacheQuota (environment over the defaults). */
+  readonly quota?: HistoryCacheQuota;
+  readonly fileSystem?: HistoryCacheFileSystem;
 }
 
 /** A cache hit; `stale` marks an analysis the current toolchain could improve. */
@@ -383,8 +801,22 @@ function isSameOrInside(target: string, root: string): boolean {
   return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
 }
 
-/** Cache key: versions, analyzer fingerprint schema and the rules that shape the inventory. */
-function historyCacheKey(deps: ServiceDeps, workspaceId: string): string {
+/**
+ * Identity of the analyzed source: the workspace id and its canonical root.
+ * Recorded in every entry and part of the key, so an entry is only used for
+ * the repository it was analyzed from.
+ */
+function historySourceIdentity(workspaceId: string, canonicalRoot: string): string {
+  const input: JsonValue = {
+    format: HISTORY_CACHE_FORMAT,
+    workspaceId,
+    root: comparable(path.resolve(canonicalRoot)),
+  };
+  return sha256Hex(utf8Encode(canonicalJson(input)));
+}
+
+/** Cache key: versions, analyzer fingerprint schema, source identity and the rules that shape the inventory. */
+function historyCacheKey(deps: ServiceDeps, workspaceId: string, sourceIdentity: string): string {
   const policy = deps.policy.config;
   const input: JsonValue = {
     format: HISTORY_CACHE_FORMAT,
@@ -393,6 +825,7 @@ function historyCacheKey(deps: ServiceDeps, workspaceId: string): string {
     indexingVersion: INDEXING_VERSION,
     analyzerFingerprintSchema: ANALYZER_FINGERPRINT_SCHEMA_VERSION,
     workspaceId,
+    sourceIdentity,
     maxFiles: deps.config.index.maxFiles,
     ignore: [...policy.ignore],
     extraIgnore: [...policy.extraIgnore],
@@ -413,6 +846,7 @@ function parseHistoryCacheEntry(
   text: string,
   commitSha: string,
   cacheKey: string,
+  sourceIdentity: string,
 ): CommitContentAnalysis | string {
   let parsed: unknown;
   try {
@@ -429,6 +863,9 @@ function parseHistoryCacheEntry(
   }
   if (entry.commitSha !== commitSha || entry.cacheKey !== cacheKey) {
     return "commit or cache key mismatch";
+  }
+  if (entry.sourceIdentity !== sourceIdentity) {
+    return "source identity mismatch: not analyzed from this workspace root";
   }
   if (entry.state !== "ready" && entry.state !== "partial") return "invalid state";
   if (!isNonNegativeInteger(entry.fileCount) || !isNonNegativeInteger(entry.skippedFiles)) {
@@ -452,6 +889,24 @@ function parseHistoryCacheEntry(
   };
 }
 
+function defaultGetuid(): number | undefined {
+  return typeof process.getuid === "function" ? process.getuid() : undefined;
+}
+
+/**
+ * Why a cache directory or entry is not trusted on POSIX (another owner, or
+ * group/other write permission), or undefined. Without a uid (Windows)
+ * nothing is checked.
+ */
+function ownershipProblem(stat: HistoryCacheStat, uid: number | undefined): string | undefined {
+  if (uid === undefined) return undefined;
+  if (stat.uid !== uid) return `owned by uid ${String(stat.uid)}, not the server's uid ${String(uid)}`;
+  if ((stat.mode & GROUP_OR_OTHER_WRITE) !== 0) {
+    return `writable by group or others (mode ${(stat.mode & 0o777).toString(8).padStart(3, "0")})`;
+  }
+  return undefined;
+}
+
 /**
  * History cache of this workspace, or null without a data root
  * (`storage.dataDbPath`): then commits are analyzed without caching.
@@ -460,36 +915,66 @@ export function openHistoryCache(
   deps: ServiceDeps,
   workspaceId: string,
   canonicalRoot: string,
+  options: HistoryCacheOptions = {},
 ): HistoryCache | null {
   const dataDbPath = deps.config.storage.dataDbPath;
   if (dataDbPath === undefined) return null;
+  const fileSystemLstat = options.fileSystem?.lstat ?? ((target: string) => lstat(target));
+  const fileSystemFstat = options.fileSystem?.fstat ?? ((handle: FileHandle) => handle.stat());
+  const getuid = options.fileSystem?.getuid ?? defaultGetuid;
+  const quota = options.quota ?? resolveHistoryCacheQuota(deps.logger);
   const dataDir = path.dirname(path.resolve(dataDbPath));
   const dir = path.join(dataDir, HISTORY_DIR_NAME);
-  const cacheKey = historyCacheKey(deps, workspaceId);
+  const sourceIdentity = historySourceIdentity(workspaceId, canonicalRoot);
+  const cacheKey = historyCacheKey(deps, workspaceId, sourceIdentity);
   const fileFor = (commitSha: string): string => path.join(dir, `${commitSha}-${cacheKey}.json`);
+
+  // One line per distinct problem and cache handle (a call looks up several points).
+  const logged = new Set<string>();
+  const logOnce = (message: string): void => {
+    if (logged.has(message)) return;
+    logged.add(message);
+    deps.logger(message);
+  };
 
   /**
    * `target` must be a real directory (not a link) whose lexical and real
-   * paths are outside every authorized workspace root.
+   * paths are outside every authorized workspace root. For the cache
+   * directory itself (`trusted`) it must also be the `history` directory of
+   * the real data directory and pass the POSIX owner and mode checks.
    */
-  const isUsableDir = async (target: string): Promise<boolean> => {
+  const isUsableDir = async (target: string, trusted: boolean): Promise<boolean> => {
     try {
-      const stat = await lstat(target);
-      if (stat.isSymbolicLink() || !stat.isDirectory()) return false;
+      const stat = await fileSystemLstat(target);
+      if (stat.isSymbolicLink() || !stat.isDirectory()) {
+        logOnce(`history: the history cache path is a link or not a directory and is not used: ${target}`);
+        return false;
+      }
       const realTarget = await realpath(target);
       for (const root of [canonicalRoot, ...deps.config.allowRoots]) {
         const realRoot = await realpath(root).catch(() => path.resolve(root));
         if (isSameOrInside(realTarget, realRoot) || isSameOrInside(target, path.resolve(root))) {
-          deps.logger(`history: the history cache directory is inside a workspace root and is not used: ${target}`);
+          logOnce(`history: the history cache directory is inside a workspace root and is not used: ${target}`);
           return false;
         }
+      }
+      if (!trusted) return true;
+      const expected = path.join(await realpath(dataDir), HISTORY_DIR_NAME);
+      if (comparable(realTarget) !== comparable(expected)) {
+        logOnce(`history: the history cache directory does not resolve inside the data directory and is not used: ${target}`);
+        return false;
+      }
+      const problem = ownershipProblem(stat, getuid());
+      if (problem !== undefined) {
+        logOnce(`history: the history cache directory is ${problem} and is not trusted: ${target}`);
+        return false;
       }
       return true;
     } catch {
       return false;
     }
   };
-  const verifyDir = (): Promise<boolean> => isUsableDir(dir);
+  const verifyDir = (): Promise<boolean> => isUsableDir(dir, true);
 
   /** Worker run states of the latest published index (read once per cache handle). */
   let indexWorkerStates: Map<string, boolean> | undefined;
@@ -509,12 +994,114 @@ export function openHistoryCache(
     return indexWorkerStates;
   };
 
-  const remove = async (file: string): Promise<void> => {
-    await unlink(file).catch((error: unknown) => {
-      if ((error as NodeJS.ErrnoException | undefined)?.code !== "ENOENT") {
-        deps.logger(`history: could not remove ${file}: ${error instanceof Error ? error.message : String(error)}`);
+  /** Removes `file`; true when it is gone afterwards. */
+  const remove = async (file: string): Promise<boolean> => {
+    try {
+      await unlink(file);
+      return true;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException | undefined)?.code === "ENOENT") return true;
+      deps.logger(`history: could not remove ${file}: ${error instanceof Error ? error.message : String(error)}`);
+      return false;
+    }
+  };
+
+  /**
+   * Evicts entries (every entry file of the directory, whatever its key),
+   * oldest modification time first and ties by name, until at most
+   * `maxEntries` entries and `maxTotalBytes` bytes remain; `keep` (the entry
+   * just written) is never evicted. Temporary files older than an hour (a
+   * write that never finished) are removed as well.
+   */
+  const enforceQuota = async (keep: string): Promise<void> => {
+    let names: string[];
+    try {
+      names = await readdir(dir);
+    } catch {
+      return;
+    }
+    const entries: Array<{ readonly name: string; readonly size: number; readonly mtimeMs: number }> = [];
+    for (const name of names) {
+      const isEntry = HISTORY_ENTRY_FILE_PATTERN.test(name);
+      if (!isEntry && !HISTORY_TEMPORARY_FILE_PATTERN.test(name)) continue;
+      try {
+        const stat = await fileSystemLstat(path.join(dir, name));
+        if (!stat.isFile()) continue;
+        if (isEntry) {
+          entries.push({ name, size: stat.size, mtimeMs: stat.mtimeMs });
+        } else if (Date.now() - stat.mtimeMs > ORPHANED_TEMPORARY_FILE_AGE_MS) {
+          await remove(path.join(dir, name));
+        }
+      } catch {
+        // Gone in the meantime.
       }
-    });
+    }
+    let count = entries.length;
+    let totalBytes = entries.reduce((sum, entry) => sum + entry.size, 0);
+    const withinQuota = (): boolean => count <= quota.maxEntries && totalBytes <= quota.maxTotalBytes;
+    if (withinQuota()) return;
+    entries.sort((a, b) => a.mtimeMs - b.mtimeMs || (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+    let evicted = 0;
+    for (const entry of entries) {
+      if (withinQuota()) break;
+      if (entry.name === keep) continue;
+      if (await remove(path.join(dir, entry.name))) {
+        count -= 1;
+        totalBytes -= entry.size;
+        evicted += 1;
+      }
+    }
+    deps.logger(
+      `history: evicted ${String(evicted)} history cache entr${evicted === 1 ? "y" : "ies"} (oldest first) to keep at most ${String(quota.maxEntries)} entries (${HISTORY_CACHE_MAX_ENTRIES_ENV}) and ${String(quota.maxTotalBytes)} bytes (${HISTORY_CACHE_MAX_BYTES_ENV})`,
+    );
+  };
+
+  /**
+   * Reads an entry through one descriptor: the opened file must be the one
+   * `checked` describes (same device and inode, so a link or a swapped file
+   * is refused) and pass the owner and mode checks itself, so a swap of the
+   * entry or of a directory above it after the path checks is never read.
+   */
+  const readEntry = async (
+    file: string,
+    checked: HistoryCacheStat,
+  ): Promise<
+    | { readonly status: "ok"; readonly text: string }
+    | { readonly status: "missing" }
+    | { readonly status: "untrusted"; readonly problem: string }
+    | { readonly status: "too-large" }
+  > => {
+    let handle: FileHandle;
+    try {
+      handle = await open(file, ENTRY_OPEN_FLAGS);
+    } catch {
+      return { status: "missing" };
+    }
+    try {
+      const opened = await fileSystemFstat(handle, file);
+      if (!opened.isFile() || opened.dev !== checked.dev || opened.ino !== checked.ino) {
+        return { status: "untrusted", problem: "the opened file is not the checked entry" };
+      }
+      const problem = ownershipProblem(opened, getuid());
+      if (problem !== undefined) return { status: "untrusted", problem };
+      if (opened.size > MAX_HISTORY_CACHE_ENTRY_BYTES) return { status: "too-large" };
+      const limit = MAX_HISTORY_CACHE_ENTRY_BYTES + 1;
+      const chunks: Buffer[] = [];
+      let total = 0;
+      while (total < limit) {
+        const buffer = Buffer.allocUnsafe(Math.min(ENTRY_READ_CHUNK_BYTES, limit - total));
+        const { bytesRead } = await handle.read(buffer, 0, buffer.length, null);
+        if (bytesRead === 0) break;
+        chunks.push(bytesRead === buffer.length ? buffer : buffer.subarray(0, bytesRead));
+        total += bytesRead;
+      }
+      if (total > MAX_HISTORY_CACHE_ENTRY_BYTES) return { status: "too-large" };
+      return { status: "ok", text: Buffer.concat(chunks, total).toString("utf8") };
+    } catch {
+      return { status: "missing" };
+    } finally {
+      await handle.close().catch(() => undefined);
+    }
   };
 
   const lookup = async (commitSha: string): Promise<CachedCommitAnalysis | undefined> => {
@@ -522,16 +1109,35 @@ export function openHistoryCache(
     if (!COMMIT_SHA_PATTERN.test(commitSha)) return undefined;
     if (!(await verifyDir())) return undefined;
     const file = fileFor(commitSha);
-    const read = await readOptionalBoundedTextFile(file, MAX_HISTORY_CACHE_ENTRY_BYTES, { root: dir });
+    let entryStat: HistoryCacheStat;
+    try {
+      entryStat = await fileSystemLstat(file);
+    } catch {
+      return undefined;
+    }
+    if (!entryStat.isFile()) {
+      logOnce(`history: ignoring a history cache entry that is not a regular file: ${file}`);
+      return undefined;
+    }
+    const problem = ownershipProblem(entryStat, getuid());
+    if (problem !== undefined) {
+      logOnce(`history: ignoring an untrusted history cache entry (${problem}): ${file}`);
+      return undefined;
+    }
+    const read = await readEntry(file, entryStat);
     if (read.status === "missing") return undefined;
+    if (read.status === "untrusted") {
+      logOnce(`history: ignoring an untrusted history cache entry (${read.problem}): ${file}`);
+      return undefined;
+    }
     if (read.status === "too-large") {
       deps.logger(`history: ignoring and removing an oversized history cache entry: ${file}`);
       await remove(file);
       return undefined;
     }
-    const parsed = parseHistoryCacheEntry(read.text, commitSha, cacheKey);
+    const parsed = parseHistoryCacheEntry(read.text, commitSha, cacheKey, sourceIdentity);
     if (typeof parsed === "string") {
-      deps.logger(`history: ignoring and removing a corrupt history cache entry (${parsed}): ${file}`);
+      deps.logger(`history: ignoring and removing a corrupt or foreign history cache entry (${parsed}): ${file}`);
       await remove(file);
       return undefined;
     }
@@ -554,7 +1160,7 @@ export function openHistoryCache(
       return false;
     }
     // The data directory is checked before anything is created in it.
-    if (!(await isUsableDir(dataDir))) {
+    if (!(await isUsableDir(dataDir, false))) {
       deps.logger(`history: the data directory is not usable for the history cache: ${dataDir}`);
       return false;
     }
@@ -575,6 +1181,7 @@ export function openHistoryCache(
       formatVersion: HISTORY_CACHE_FORMAT_VERSION,
       commitSha,
       cacheKey,
+      sourceIdentity,
       state: analysis.state,
       fileCount: analysis.fileCount,
       skippedFiles: analysis.skippedFiles,
@@ -582,8 +1189,11 @@ export function openHistoryCache(
       contentSet: analysis.contentSet,
     };
     const json = JSON.stringify(entry);
-    if (Buffer.byteLength(json, "utf8") > MAX_HISTORY_CACHE_ENTRY_BYTES) {
-      deps.logger(`history: the analysis of commit ${commitSha} is too large to cache`);
+    const entryBytes = Buffer.byteLength(json, "utf8");
+    if (entryBytes > MAX_HISTORY_CACHE_ENTRY_BYTES || entryBytes > quota.maxTotalBytes) {
+      deps.logger(
+        `history: the analysis of commit ${commitSha} is too large to cache (${String(entryBytes)} bytes; ${HISTORY_CACHE_MAX_BYTES_ENV} is ${String(quota.maxTotalBytes)})`,
+      );
       return false;
     }
     const file = fileFor(commitSha);
@@ -594,7 +1204,6 @@ export function openHistoryCache(
     try {
       await writeFile(temporary, json, { encoding: "utf8", flag: "wx", mode: 0o600 });
       await rename(temporary, file);
-      return true;
     } catch (error) {
       await remove(temporary);
       deps.logger(
@@ -602,6 +1211,8 @@ export function openHistoryCache(
       );
       return false;
     }
+    await enforceQuota(path.basename(file));
+    return true;
   };
 
   return { lookup, store };

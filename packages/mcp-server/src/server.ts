@@ -692,7 +692,8 @@ function buildAllRegistrations(
         "Compare two git refs or working-tree architecture snapshots read-only for added, removed, changed, renamed symbols and API surface changes.",
       inputSchema: CompareArchitectureToolInputSchema,
       outputSchema: envelopeOutputSchema(CompareArchitectureDataSchema),
-      annotations: READ_ONLY_TOOL_ANNOTATIONS,
+      // Writes its commit-analysis cache under the data root (never the workspace).
+      annotations: WRITE_TOOL_ANNOTATIONS,
       handler: async (requestId, args) =>
         compareArchitecture(
           context,
@@ -968,7 +969,8 @@ function buildAllRegistrations(
         "Build a sampled architecture evolution timeline and per-metric rule violation trends across explicit git refs or a bounded history range read-only.",
       inputSchema: ArchitectureTimelineToolInputSchema,
       outputSchema: envelopeOutputSchema(ArchitectureTimelineDataSchema),
-      annotations: READ_ONLY_TOOL_ANNOTATIONS,
+      // Writes its commit-analysis cache under the data root (never the workspace).
+      annotations: WRITE_TOOL_ANNOTATIONS,
       handler: async (requestId, args) =>
         architectureTimeline(
           context,
