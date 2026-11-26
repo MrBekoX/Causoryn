@@ -802,7 +802,8 @@ export async function verifyChangeTool(
 
   // 7) Envelope: anchor to base snapshot + honesty & trust warnings.
   const warnings = staleWarningOf(baseRead);
-  warnings.push(...projection.warnings);
+  // One by one: a projection can carry more warnings than V8 accepts as call arguments (F47).
+  for (const warning of projection.warnings) warnings.push(warning);
   if (guard.warning !== undefined) warnings.push(guard.warning);
   if (report.trustWarning !== undefined) {
     const reason =
