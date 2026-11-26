@@ -298,11 +298,12 @@ describe("history fresh analysis resource budgets (CAU-01)", { timeout: 120_000 
     expect(blobReads).toBe(readsAfterFirst);
   });
 
-  it("the deadline also stops the scratch index at its next phase boundary", async () => {
+  it("the deadline also stops the scratch index in its worker at the next progress message", async () => {
     const repo = makeRepo();
     let now = 0;
-    // The scratch index reads the context clock (ISO time) while it builds;
-    // the first read moves the injected monotonic clock past the deadline.
+    // The scratch index runs in a worker thread (with a fixed clock taken from
+    // the context clock right before the worker starts); that single read
+    // moves the injected monotonic clock past the deadline.
     let mode: "count" | "jump" | "off" = "off";
     let clockReads = 0;
     const context = directContext(repo.root, () => {
@@ -322,14 +323,12 @@ describe("history fresh analysis resource budgets (CAU-01)", { timeout: 120_000 
         now: () => now,
       });
 
-    // A complete scratch index run of t3, for reference.
+    // A complete analysis of t3, for reference: the main thread reads the clock once.
     mode = "count";
     expect(isContentSet(await open().reconstructFromGitTree(repo.root, "t3", repo.sha("t3")))).toBe(true);
-    const completeRunReads = clockReads;
-    expect(completeRunReads).toBeGreaterThan(2);
+    expect(clockReads).toBe(1);
 
     mode = "jump";
-    clockReads = 0;
     blobReads = 0;
     const result = await open().reconstructFromGitTree(repo.root, "t3", repo.sha("t3"));
     mode = "off";
@@ -337,10 +336,13 @@ describe("history fresh analysis resource budgets (CAU-01)", { timeout: 120_000 
       status: "unanalyzed",
       reason: expect.stringMatching(/^analysis-deadline-exceeded: /) as unknown as string,
     });
-    // The inventory was read completely: the deadline passed inside the scratch index ...
+    // The inventory was read completely: the deadline passed once the worker
+    // had started, and its first progress message stopped it.
     expect(blobReads).toBe(3);
-    // ... which stopped at its next phase boundary instead of building and publishing.
-    expect(clockReads).toBeLessThan(completeRunReads - 1);
+    // The analysis slot was released with the terminated worker.
+    const slot = await acquireHistoryAnalysisSlot(1, 0);
+    expect(slot).toBeDefined();
+    slot?.();
   });
 
   it("with CAUSORYN_HISTORY_MAX_CONCURRENT=1 a second simultaneous fresh analysis gets analysis-busy, or waits a bounded time", async () => {

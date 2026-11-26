@@ -32,6 +32,7 @@ import {
   type CommitAnalysisMeter,
   type CommitContentAnalysis,
   type HistoryCacheOptions,
+  type HistoryLimitCode,
   type HistoryResourceLimits,
 } from "./history-commit-analysis.js";
 import type { ServiceDeps } from "./services.js";
@@ -59,12 +60,16 @@ import type { ServiceDeps } from "./services.js";
  *      data root the result is cached; a cached point is free, fresh analyses
  *      are limited per call (`maxFreshAnalyses`) and by the resource limits
  *      (`limits`: byte budgets per commit and per call, deadlines per
- *      analysis and per call, process-wide running analyses). A point beyond
- *      a budget, stopped by a limit or whose analysis failed falls through to
- *      (3) and, without a committed snapshot, stays unanalyzed with that
- *      reason (`analysis-budget-exceeded`, `commit-byte-budget-exceeded`,
+ *      analysis and per call, process-wide running analyses); the scratch
+ *      index runs in a worker thread with a heap limit, so the MCP thread
+ *      keeps answering. A point beyond a budget, stopped by a limit, whose
+ *      worker failed or whose analysis failed falls through to (3) and,
+ *      without a committed snapshot, stays unanalyzed with that reason
+ *      (`analysis-budget-exceeded`, `commit-byte-budget-exceeded`,
  *      `request-byte-budget-exceeded`, `analysis-deadline-exceeded`,
- *      `request-deadline-exceeded`, `analysis-busy`, `commit-analysis-failed`).
+ *      `request-deadline-exceeded`, `analysis-busy`,
+ *      `analysis-memory-exceeded`, `analysis-worker-failed`,
+ *      `commit-analysis-failed`); `limitCodeOf` tells which limit it was.
  * 3. Otherwise the timeline core falls back to the repo-committed (or
  *    working-tree) snapshot file and marks the point with
  *    `snapshot-loaded-from-committed-git-blob`.
@@ -79,7 +84,15 @@ export interface TrustedHistorySources {
   readonly reconstructFromGitTree: TimelineReconstructFromGitTree;
   /** Lines for the envelope warnings: refs served from the index or analyzed from git objects. */
   readonly notes: () => readonly string[];
+  /**
+   * The limit that left `ref` unanalyzed in this call (a resource limit, the
+   * call's fresh analysis budget, or the analysis worker), or undefined.
+   */
+  readonly limitCodeOf: (ref: string) => HistoryPointLimitCode | undefined;
 }
+
+/** Why a commit point was not analyzed from its git objects although it could have been. */
+export type HistoryPointLimitCode = HistoryLimitCode | "analysis-budget-exceeded";
 
 export interface TrustedHistoryOptions {
   /** Fresh commit analyses this call may run (cache hits are free; 0 disables them). */
@@ -102,7 +115,7 @@ type CommitPointResult =
   | { readonly kind: "disabled" }
   | { readonly kind: "budget-exceeded" }
   /** A resource limit stopped or prevented the analysis; `reason` is `<code>: <detail>`. */
-  | { readonly kind: "limited"; readonly reason: string }
+  | { readonly kind: "limited"; readonly code: HistoryLimitCode; readonly reason: string }
   | { readonly kind: "failed"; readonly reason: string };
 
 interface LoadedIndex {
@@ -416,7 +429,7 @@ export function createTrustedHistorySources(
     if (freshAnalyses >= options.maxFreshAnalyses) return servedStale() ?? { kind: "budget-exceeded" };
     const limited = (error: HistoryBudgetError): CommitPointResult => {
       deps.logger(`history: commit ${commitSha} was not analyzed from its git objects: ${error.reason}`);
-      return servedStale() ?? { kind: "limited", reason: error.reason };
+      return servedStale() ?? { kind: "limited", code: error.code, reason: error.reason };
     };
     // The call's own byte and time budget, before waiting for a slot.
     try {
@@ -475,6 +488,8 @@ export function createTrustedHistorySources(
     }
   };
 
+  const limitCodes = new Map<string, HistoryPointLimitCode>();
+
   const reconstructFromGitTree: TimelineReconstructFromGitTree = async (_repoRoot, ref, commitSha) => {
     if (ref === WORKING_TREE_REF) return workingTreePoint();
     const sha = commitSha ?? (await resolveGitCommitRef(canonicalRoot, ref));
@@ -492,9 +507,11 @@ export function createTrustedHistorySources(
         return undefined;
       case "budget-exceeded":
         if (!budgetSkippedRefs.includes(ref)) budgetSkippedRefs.push(ref);
+        limitCodes.set(ref, "analysis-budget-exceeded");
         return { status: "unanalyzed", reason: budgetReason };
       case "limited":
         addNote(`'${ref}' (commit ${sha.slice(0, 12)}) was not analyzed from its git objects: ${result.reason}`);
+        limitCodes.set(ref, result.code);
         return { status: "unanalyzed", reason: result.reason };
       case "failed":
         addNote(
@@ -512,5 +529,10 @@ export function createTrustedHistorySources(
     ];
   };
 
-  return { snapshotLookup, reconstructFromGitTree, notes: allNotes };
+  return {
+    snapshotLookup,
+    reconstructFromGitTree,
+    notes: allNotes,
+    limitCodeOf: (ref) => limitCodes.get(ref),
+  };
 }

@@ -18,10 +18,8 @@ import {
   assertValidBlobPath,
   describeManifestShapeError,
   GraphRepositoryError,
-  InMemoryGraphRepository,
   readGitBlob,
   readGitTree,
-  serializeSnapshotContentSet,
   TIMELINE_SNAPSHOT_BLOB_PATH,
   type CompareContentSet,
 } from "@causoryn/graph";
@@ -29,7 +27,8 @@ import {
   ANALYZER_FINGERPRINT_SCHEMA_VERSION,
   INDEXING_VERSION,
   IndexingError,
-  IndexService,
+  InventoryAnalysisWorkerError,
+  runInventoryAnalysisInWorker,
   type InventoryEntry,
 } from "@causoryn/indexing";
 
@@ -53,7 +52,12 @@ import { SERVER_VERSION } from "./version.js";
  * size rules; symlinks, submodules and the committed architecture snapshot
  * are never read). The files are analyzed by a scratch `IndexService` over an
  * `InMemoryGraphRepository` with the same policy and limits as the real index,
- * so a commit point has the same granularity as an index point.
+ * so a commit point has the same granularity as an index point. The scratch
+ * index runs off the MCP thread, in the index worker's inventory analysis
+ * mode (`runInventoryAnalysisInWorker`, the same worker entry and bundle as
+ * background index jobs; an idle worker is reused for the next analysis), so
+ * its synchronous analyzer phases never block other tool calls and its
+ * memory lives in the worker's capped heap.
  *
  * Known approximation: source files come from the commit, while project and
  * build inputs outside the inventory (C# `.csproj` / `Directory.Build.props`
@@ -64,15 +68,19 @@ import { SERVER_VERSION } from "./version.js";
  * Resource budgets (the analysis runs inside the MCP server process): besides
  * the per-file (`maxFileBytes`) and file-count (`index.maxFiles`) limits, one
  * analysis accepts at most `maxCommitBytes` of source text and one tool call
- * at most `maxRequestBytes` across its fresh analyses; an analysis stops at
- * its wall-clock deadline (`maxAnalysisMs`, bounded by the call's
- * `maxRequestMs`), checked between tree entries and blob reads (each git
- * process also gets the time left as its timeout) and at the scratch index's
- * phase boundaries; and at most `maxConcurrentAnalyses` fresh analyses run in
- * the process at a time (a call waits at most `busyWaitMs` for a slot). A
- * limit that is hit raises HistoryBudgetError, whose code becomes the point's
- * unanalyzed reason (see trusted-history.ts). Defaults and the
- * `CAUSORYN_HISTORY_*` overrides: resolveHistoryResourceLimits.
+ * at most `maxRequestBytes` across its fresh analyses; the analysis worker's
+ * V8 heap is capped by historyAnalysisWorkerHeapMb(`maxCommitBytes`); an
+ * analysis stops at its wall-clock deadline (`maxAnalysisMs`, bounded by the
+ * call's `maxRequestMs`), checked between tree entries and blob reads (each
+ * git process also gets the time left as its timeout), at each progress
+ * message of the worker, and by a timer that terminates the worker; and at
+ * most `maxConcurrentAnalyses` fresh analyses run in the process at a time (a
+ * call waits at most `busyWaitMs` for a slot). A limit that is hit, or a
+ * worker that runs out of memory, crashes or exits, raises
+ * HistoryBudgetError, whose code becomes the point's unanalyzed reason (see
+ * trusted-history.ts); the slot is released once the worker has exited.
+ * Defaults (DEFAULT_HISTORY_RESOURCE_LIMITS) and the `CAUSORYN_HISTORY_*`
+ * overrides: resolveHistoryResourceLimits.
  *
  * Cache: with a data root (`storage.dataDbPath`), a result is stored at
  * `<dir of dataDbPath>/history/<commitSha>-<cacheKey>.json`, written through a
@@ -93,8 +101,11 @@ import { SERVER_VERSION } from "./version.js";
  * the path and again on the opened descriptor (same file, so a later swap is
  * not read), and is used only when its recorded source identity (workspace id
  * and canonical root) matches. Anything else is ignored with a log line,
- * never served. Windows ACLs are not inspected (no uid there): the private
- * default data root is the protection on that platform.
+ * never served. The device and inode the directory check saw are checked
+ * again (lstat: not a link, same identity) right before each temporary file
+ * create, rename and unlink; a directory that changed in between is not
+ * written to or removed from. Windows ACLs are not inspected (no uid there):
+ * the private default data root is the protection on that platform.
  *
  * Retention: after a store, entries beyond `maxEntries` or `maxTotalBytes`
  * (all entries of the directory, whatever their key) are evicted oldest
@@ -146,9 +157,19 @@ export interface HistoryResourceLimits {
   readonly busyWaitMs: number;
 }
 
+/**
+ * Defaults. The byte budgets bound the memory of a fresh analysis: the
+ * accepted source text is held on the main thread (as strings) and copied
+ * once into the analysis worker, whose heap limit grows with the per-commit
+ * budget (historyAnalysisWorkerHeapMb: 1024 MiB for 32 MiB). 32 MiB of
+ * analyzable source text is already a very large commit (about a million
+ * lines); 64 MiB per call covers both sides of a compare. Larger
+ * repositories raise them with `CAUSORYN_HISTORY_MAX_COMMIT_BYTES` /
+ * `CAUSORYN_HISTORY_MAX_REQUEST_BYTES`.
+ */
 export const DEFAULT_HISTORY_RESOURCE_LIMITS: HistoryResourceLimits = Object.freeze({
-  maxCommitBytes: 128 * 1024 * 1024,
-  maxRequestBytes: 256 * 1024 * 1024,
+  maxCommitBytes: 32 * 1024 * 1024,
+  maxRequestBytes: 64 * 1024 * 1024,
   maxAnalysisMs: 120_000,
   maxRequestMs: 300_000,
   maxConcurrentAnalyses: 1,
@@ -336,13 +357,36 @@ export function resolveHistoryCacheQuota(
 /* Budgets of the fresh analyses                                       */
 /* ------------------------------------------------------------------ */
 
-/** Reason codes of a point that a resource limit kept from being analyzed. */
+/**
+ * Reason codes of a point that a resource limit (or the analysis worker)
+ * kept from being analyzed.
+ */
 export type HistoryLimitCode =
   | "commit-byte-budget-exceeded"
   | "request-byte-budget-exceeded"
   | "analysis-deadline-exceeded"
   | "request-deadline-exceeded"
-  | "analysis-busy";
+  | "analysis-busy"
+  /** The analysis worker reached its heap limit (historyAnalysisWorkerHeapMb). */
+  | "analysis-memory-exceeded"
+  /** The analysis worker could not start, crashed or exited without a result. */
+  | "analysis-worker-failed";
+
+/** Heap of the analysis worker without any source text (the analyzers and their libraries). */
+const WORKER_BASE_HEAP_MB = 256;
+/** Additional worker heap per MiB of the per-commit source text budget. */
+const WORKER_HEAP_MB_PER_SOURCE_MIB = 24;
+const MIB = 1024 * 1024;
+
+/**
+ * V8 old-generation heap limit (MiB) of the analysis worker for a per-commit
+ * budget of `maxCommitBytes`: 256 MiB plus 24 MiB per started MiB of source
+ * text (1024 MiB for the default 32 MiB). A worker above it is stopped by
+ * V8 and the point becomes `analysis-memory-exceeded`.
+ */
+export function historyAnalysisWorkerHeapMb(maxCommitBytes: number): number {
+  return WORKER_BASE_HEAP_MB + WORKER_HEAP_MB_PER_SOURCE_MIB * Math.max(1, Math.ceil(maxCommitBytes / MIB));
+}
 
 /** A resource limit stopped (or prevented) a fresh analysis; reported as the point's reason. */
 export class HistoryBudgetError extends Error {
@@ -370,6 +414,12 @@ export interface CommitAnalysisMeter {
   readonly acceptBytes: (bytes: number) => void;
   /** Timeout for the next git process: the time left, at most the git default. */
   readonly gitTimeoutMs: () => number;
+  /** Milliseconds until the deadline (0 once it has passed). */
+  readonly remainingMs: () => number;
+  /** The error that reports this analysis' deadline (whichever of analysis and call deadline comes first). */
+  readonly expiredError: () => HistoryBudgetError;
+  /** Heap limit of the analysis worker (historyAnalysisWorkerHeapMb of the per-commit budget). */
+  readonly workerHeapMb: number;
 }
 
 export function historyBusyError(limits: HistoryResourceLimits): HistoryBudgetError {
@@ -413,15 +463,15 @@ export class HistoryRequestBudget {
     const deadline = Math.min(analysisDeadline, this.deadline);
     const analysisLimitFirst = analysisDeadline <= this.deadline;
     let commitBytes = 0;
-    const deadlineError = (): HistoryBudgetError | undefined => {
-      if (this.now() < deadline) return undefined;
-      return analysisLimitFirst
+    const expiredError = (): HistoryBudgetError =>
+      analysisLimitFirst
         ? new HistoryBudgetError(
             "analysis-deadline-exceeded",
             `the analysis took longer than ${HISTORY_MAX_ANALYSIS_MS_ENV} (${String(this.limits.maxAnalysisMs)} ms); raise ${HISTORY_MAX_ANALYSIS_MS_ENV} to analyze this commit`,
           )
         : this.requestDeadlineError();
-    };
+    const deadlineError = (): HistoryBudgetError | undefined =>
+      this.now() < deadline ? undefined : expiredError();
     const checkDeadline = (): void => {
       const error = deadlineError();
       if (error !== undefined) throw error;
@@ -442,6 +492,9 @@ export class HistoryRequestBudget {
         checkDeadline();
       },
       gitTimeoutMs: () => Math.max(1, Math.min(GIT_PROCESS_TIMEOUT_MS, Math.ceil(deadline - this.now()))),
+      remainingMs: () => Math.max(0, deadline - this.now()),
+      expiredError,
+      workerHeapMb: historyAnalysisWorkerHeapMb(this.limits.maxCommitBytes),
     };
   }
 
@@ -662,12 +715,49 @@ async function collectCommitInventory(
   };
 }
 
+/** Worker entry replacing the index worker of fresh analyses (test seam). */
+let analysisWorkerEntryOverride: string | undefined;
+
+/**
+ * Replaces the worker entry that fresh commit analyses run in (a test seam,
+ * like setGitProcessRunnerForTesting); undefined restores the index worker.
+ */
+export function setHistoryAnalysisWorkerEntryForTesting(entryPath: string | undefined): void {
+  analysisWorkerEntryOverride = entryPath;
+}
+
+/** The point's limit error for a worker that produced no result (details go to the log). */
+function workerFailureError(
+  deps: ServiceDeps,
+  commitSha: string,
+  error: InventoryAnalysisWorkerError,
+  heapMb: number,
+): HistoryBudgetError {
+  deps.logger(`history: the analysis worker of commit ${commitSha} produced no result (${error.failure}): ${error.message}`);
+  if (error.failure === "out-of-memory") {
+    return new HistoryBudgetError(
+      "analysis-memory-exceeded",
+      `the analysis worker reached its heap limit of ${String(heapMb)} MiB, derived from ${HISTORY_MAX_COMMIT_BYTES_ENV}; raise ${HISTORY_MAX_COMMIT_BYTES_ENV} to give the analysis more memory`,
+    );
+  }
+  return new HistoryBudgetError(
+    "analysis-worker-failed",
+    error.failure === "unavailable"
+      ? "the analysis worker could not be started (see the server log)"
+      : "the analysis worker stopped without a result (see the server log); run the tool again",
+  );
+}
+
 /**
  * Analyzes `commitSha` from its git objects (see the module comment) within
- * the budget of `meter`. Throws GraphRepositoryError (git reads),
+ * the budget of `meter`: the inventory is read on this thread, the scratch
+ * index runs in the index worker's inventory analysis mode
+ * (runInventoryAnalysisInWorker) with `meter.workerHeapMb` as its heap
+ * limit. The worker is terminated at the deadline (a timer, and a check at
+ * each of its progress messages). Throws GraphRepositoryError (git reads),
  * IndexingError (analysis), CommitAnalysisLimitError or HistoryBudgetError
- * (a byte budget or the deadline; the scratch index is stopped at its next
- * phase boundary); the caller decides how a failure is reported.
+ * (a byte budget, the deadline, or a worker that ran out of memory, crashed
+ * or exited); the caller decides how a failure is reported.
  */
 export async function analyzeCommitContentSet(
   deps: ServiceDeps,
@@ -682,31 +772,55 @@ export async function analyzeCommitContentSet(
   const maxFiles = deps.config.index.maxFiles;
   const inventory = await collectCommitInventory(deps, canonicalRoot, commitSha, maxFiles, meter);
   meter.checkDeadline();
-  const scratch = new IndexService({
-    workspaceId,
-    policy: deps.policy,
-    repository: new InMemoryGraphRepository(),
-    clock: deps.clock,
-    limits: { maxFiles },
-    inventorySource: () => Promise.resolve(inventory.entries),
-  });
-  // The index has no cancellation input; its progress callback runs at every
-  // phase boundary (inventory, each language, building, publishing), and a
-  // throw there ends the run.
-  const run = await scratch.runIndexAsync(canonicalRoot, {
-    onProgress: () => {
-      meter.checkDeadline();
-    },
-  });
-  const contentSet = JSON.parse(serializeSnapshotContentSet(run.snapshot)) as CompareContentSet;
-  const degradedWorkers = degradedWorkersOf(run.snapshot.meta.analyzerFingerprint);
+  const fileCount = inventory.entries.length;
+  const heapMb = meter.workerHeapMb;
+  const controller = new AbortController();
+  const stop = (error: HistoryBudgetError): void => {
+    if (!controller.signal.aborted) controller.abort(error);
+  };
+  const timer = setTimeout(() => {
+    stop(meter.expiredError());
+  }, Math.min(MAX_TIMER_MS, Math.ceil(meter.remainingMs())));
   deps.logger(
-    `history: commit ${commitSha} analyzed from git objects: ${String(inventory.entries.length)} file(s), state ${run.state}, ${String(run.warnings.length)} warning(s)${degradedWorkers.length === 0 ? "" : `, worker(s) that could not run: ${degradedWorkers.join(", ")}`}`,
+    `history: analyzing commit ${commitSha} in a worker thread (${String(fileCount)} file(s), heap limit ${String(heapMb)} MiB)`,
+  );
+  let result: Awaited<ReturnType<typeof runInventoryAnalysisInWorker>>;
+  try {
+    result = await runInventoryAnalysisInWorker(
+      {
+        workspaceId,
+        rootPath: canonicalRoot,
+        policyConfig: deps.policy.config,
+        limits: { maxFiles },
+        entries: inventory.entries,
+        fixedClockIso: deps.clock(),
+      },
+      {
+        maxHeapMb: heapMb,
+        signal: controller.signal,
+        // Phase boundaries of the scratch index (also an injected clock's deadline).
+        onProgress: () => {
+          const error = meter.deadlineError();
+          if (error !== undefined) stop(error);
+        },
+        ...(analysisWorkerEntryOverride === undefined ? {} : { workerEntryPath: analysisWorkerEntryOverride }),
+      },
+    );
+  } catch (error) {
+    if (error instanceof InventoryAnalysisWorkerError) throw workerFailureError(deps, commitSha, error, heapMb);
+    throw error;
+  } finally {
+    clearTimeout(timer);
+  }
+  const contentSet = JSON.parse(result.contentSetJson) as CompareContentSet;
+  const degradedWorkers = degradedWorkersOf(result.analyzerFingerprint);
+  deps.logger(
+    `history: commit ${commitSha} analyzed from git objects: ${String(fileCount)} file(s), state ${result.state}, ${String(result.warningCount)} warning(s)${degradedWorkers.length === 0 ? "" : `, worker(s) that could not run: ${degradedWorkers.join(", ")}`}`,
   );
   return {
     contentSet,
-    state: run.state,
-    fileCount: inventory.entries.length,
+    state: result.state,
+    fileCount,
     skippedFiles: inventory.skippedFiles,
     degradedWorkers,
   };
@@ -757,6 +871,12 @@ export interface HistoryCacheStat {
   isFile(): boolean;
   isDirectory(): boolean;
   isSymbolicLink(): boolean;
+}
+
+/** Device and inode of the cache directory as its trust check saw it. */
+interface DirIdentity {
+  readonly dev: number;
+  readonly ino: number;
 }
 
 /** File system view of the cache (injectable, e.g. to emulate POSIX owners on Windows). */
@@ -942,39 +1062,70 @@ export function openHistoryCache(
    * paths are outside every authorized workspace root. For the cache
    * directory itself (`trusted`) it must also be the `history` directory of
    * the real data directory and pass the POSIX owner and mode checks.
+   * Returns the identity (device and inode) it checked, or undefined.
    */
-  const isUsableDir = async (target: string, trusted: boolean): Promise<boolean> => {
+  const usableDirIdentity = async (target: string, trusted: boolean): Promise<DirIdentity | undefined> => {
     try {
       const stat = await fileSystemLstat(target);
       if (stat.isSymbolicLink() || !stat.isDirectory()) {
         logOnce(`history: the history cache path is a link or not a directory and is not used: ${target}`);
-        return false;
+        return undefined;
       }
       const realTarget = await realpath(target);
       for (const root of [canonicalRoot, ...deps.config.allowRoots]) {
         const realRoot = await realpath(root).catch(() => path.resolve(root));
         if (isSameOrInside(realTarget, realRoot) || isSameOrInside(target, path.resolve(root))) {
           logOnce(`history: the history cache directory is inside a workspace root and is not used: ${target}`);
-          return false;
+          return undefined;
         }
       }
-      if (!trusted) return true;
+      const identity: DirIdentity = { dev: stat.dev, ino: stat.ino };
+      if (!trusted) return identity;
       const expected = path.join(await realpath(dataDir), HISTORY_DIR_NAME);
       if (comparable(realTarget) !== comparable(expected)) {
         logOnce(`history: the history cache directory does not resolve inside the data directory and is not used: ${target}`);
-        return false;
+        return undefined;
       }
       const problem = ownershipProblem(stat, getuid());
       if (problem !== undefined) {
         logOnce(`history: the history cache directory is ${problem} and is not trusted: ${target}`);
-        return false;
+        return undefined;
       }
-      return true;
+      return identity;
     } catch {
-      return false;
+      return undefined;
     }
   };
-  const verifyDir = (): Promise<boolean> => isUsableDir(dir, true);
+  /** Trust check of the cache directory; its identity binds every later write, rename and unlink. */
+  const verifyDir = (): Promise<DirIdentity | undefined> => usableDirIdentity(dir, true);
+
+  /**
+   * True when the cache directory is still the one `verified` describes: not
+   * a link, a directory, same device and inode. Checked with lstat right
+   * before each temporary file create, rename and unlink, so a directory
+   * swapped for a link or another directory after its trust check is never
+   * written through (the operations are path-based; this narrows the window
+   * to the single file system call).
+   */
+  const dirUnchanged = async (verified: DirIdentity, operation: string): Promise<boolean> => {
+    let current: HistoryCacheStat;
+    try {
+      current = await fileSystemLstat(dir);
+    } catch {
+      logOnce(`history: the history cache directory disappeared after its trust check; skipping ${operation}: ${dir}`);
+      return false;
+    }
+    if (
+      current.isSymbolicLink() ||
+      !current.isDirectory() ||
+      current.dev !== verified.dev ||
+      current.ino !== verified.ino
+    ) {
+      logOnce(`history: the history cache directory changed after its trust check (a link or another directory); skipping ${operation}: ${dir}`);
+      return false;
+    }
+    return true;
+  };
 
   /** Worker run states of the latest published index (read once per cache handle). */
   let indexWorkerStates: Map<string, boolean> | undefined;
@@ -994,8 +1145,8 @@ export function openHistoryCache(
     return indexWorkerStates;
   };
 
-  /** Removes `file`; true when it is gone afterwards. */
-  const remove = async (file: string): Promise<boolean> => {
+  /** Unlinks `file`; true when it is gone afterwards. Callers check the directory first. */
+  const unlinkFile = async (file: string): Promise<boolean> => {
     try {
       await unlink(file);
       return true;
@@ -1007,13 +1158,21 @@ export function openHistoryCache(
   };
 
   /**
+   * Removes `file` of the cache directory checked as `verified`; true when it
+   * is gone afterwards. Nothing is removed once the directory has changed.
+   */
+  const remove = async (file: string, verified: DirIdentity): Promise<boolean> =>
+    (await dirUnchanged(verified, "a removal")) && (await unlinkFile(file));
+
+  /**
    * Evicts entries (every entry file of the directory, whatever its key),
    * oldest modification time first and ties by name, until at most
    * `maxEntries` entries and `maxTotalBytes` bytes remain; `keep` (the entry
    * just written) is never evicted. Temporary files older than an hour (a
-   * write that never finished) are removed as well.
+   * write that never finished) are removed as well. Every removal requires
+   * the directory to still be the one checked as `verified`.
    */
-  const enforceQuota = async (keep: string): Promise<void> => {
+  const enforceQuota = async (keep: string, verified: DirIdentity): Promise<void> => {
     let names: string[];
     try {
       names = await readdir(dir);
@@ -1030,7 +1189,7 @@ export function openHistoryCache(
         if (isEntry) {
           entries.push({ name, size: stat.size, mtimeMs: stat.mtimeMs });
         } else if (Date.now() - stat.mtimeMs > ORPHANED_TEMPORARY_FILE_AGE_MS) {
-          await remove(path.join(dir, name));
+          await remove(path.join(dir, name), verified);
         }
       } catch {
         // Gone in the meantime.
@@ -1045,7 +1204,8 @@ export function openHistoryCache(
     for (const entry of entries) {
       if (withinQuota()) break;
       if (entry.name === keep) continue;
-      if (await remove(path.join(dir, entry.name))) {
+      if (!(await dirUnchanged(verified, "eviction"))) break;
+      if (await unlinkFile(path.join(dir, entry.name))) {
         count -= 1;
         totalBytes -= entry.size;
         evicted += 1;
@@ -1107,7 +1267,8 @@ export function openHistoryCache(
   const lookup = async (commitSha: string): Promise<CachedCommitAnalysis | undefined> => {
     // The SHA becomes a file name: only canonical commit SHAs are looked up.
     if (!COMMIT_SHA_PATTERN.test(commitSha)) return undefined;
-    if (!(await verifyDir())) return undefined;
+    const verified = await verifyDir();
+    if (verified === undefined) return undefined;
     const file = fileFor(commitSha);
     let entryStat: HistoryCacheStat;
     try {
@@ -1132,13 +1293,13 @@ export function openHistoryCache(
     }
     if (read.status === "too-large") {
       deps.logger(`history: ignoring and removing an oversized history cache entry: ${file}`);
-      await remove(file);
+      await remove(file, verified);
       return undefined;
     }
     const parsed = parseHistoryCacheEntry(read.text, commitSha, cacheKey, sourceIdentity);
     if (typeof parsed === "string") {
       deps.logger(`history: ignoring and removing a corrupt or foreign history cache entry (${parsed}): ${file}`);
-      await remove(file);
+      await remove(file, verified);
       return undefined;
     }
     // An entry analyzed without a worker is stale once an index build ran that
@@ -1160,7 +1321,7 @@ export function openHistoryCache(
       return false;
     }
     // The data directory is checked before anything is created in it.
-    if (!(await isUsableDir(dataDir, false))) {
+    if ((await usableDirIdentity(dataDir, false)) === undefined) {
       deps.logger(`history: the data directory is not usable for the history cache: ${dataDir}`);
       return false;
     }
@@ -1172,7 +1333,8 @@ export function openHistoryCache(
         return false;
       }
     }
-    if (!(await verifyDir())) {
+    const verified = await verifyDir();
+    if (verified === undefined) {
       deps.logger(`history: the history cache directory is not usable: ${dir}`);
       return false;
     }
@@ -1201,17 +1363,29 @@ export function openHistoryCache(
       dir,
       `.${path.basename(file)}.${String(process.pid)}.${randomBytes(8).toString("hex")}.tmp`,
     );
-    try {
-      await writeFile(temporary, json, { encoding: "utf8", flag: "wx", mode: 0o600 });
-      await rename(temporary, file);
-    } catch (error) {
-      await remove(temporary);
+    const writeFailed = async (error: unknown): Promise<false> => {
+      await remove(temporary, verified);
       deps.logger(
         `history: could not write the history cache entry ${file}: ${error instanceof Error ? error.message : String(error)}`,
       );
       return false;
+    };
+    // The temporary file and the rename go into the directory the trust check saw, or nowhere.
+    if (!(await dirUnchanged(verified, "the entry write"))) return false;
+    try {
+      await writeFile(temporary, json, { encoding: "utf8", flag: "wx", mode: 0o600 });
+    } catch (error) {
+      return writeFailed(error);
     }
-    await enforceQuota(path.basename(file));
+    // After a change the temporary file is left where it is: it is neither
+    // renamed nor removed through the changed path.
+    if (!(await dirUnchanged(verified, "the entry rename"))) return false;
+    try {
+      await rename(temporary, file);
+    } catch (error) {
+      return writeFailed(error);
+    }
+    await enforceQuota(path.basename(file), verified);
     return true;
   };
 

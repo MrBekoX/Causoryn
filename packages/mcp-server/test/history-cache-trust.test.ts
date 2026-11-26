@@ -345,6 +345,95 @@ describe("history cache trust checks (CAU-07)", () => {
     expect(await cache!.lookup(SHA_A)).toBeDefined();
   });
 
+  it("a cache directory swapped for a link to another directory after its trust check is not written through", async () => {
+    const fixture = makeFixture();
+    const outside = makeTempDir("causoryn-hct-outside-");
+    const cache = openHistoryCache(fixture.deps, "ws", fixture.root);
+    expect(await cache!.store(SHA_A, ANALYSIS)).toBe(true);
+    const { renameSync, symlinkSync } = await import("node:fs");
+    // The owner check is the last step of the directory trust check: the
+    // injected getuid swaps the verified directory for a link right then.
+    let armed = true;
+    const swapping = openHistoryCache(fixture.deps, "ws", fixture.root, {
+      fileSystem: {
+        getuid: () => {
+          if (armed) {
+            armed = false;
+            renameSync(fixture.historyDir, `${fixture.historyDir}.moved`);
+            symlinkSync(outside, fixture.historyDir, process.platform === "win32" ? "junction" : "dir");
+          }
+          return undefined;
+        },
+      },
+    });
+    expect(await swapping!.store(SHA_B, ANALYSIS)).toBe(false);
+    expect(armed).toBe(false);
+    expect(readdirSync(outside)).toEqual([]);
+    expect(fixture.logs.some((line) => line.includes("changed after its trust check"))).toBe(true);
+  });
+
+  it("a cache directory replaced by another directory after its trust check is not written to", async () => {
+    const fixture = makeFixture();
+    const cache = openHistoryCache(fixture.deps, "ws", fixture.root);
+    expect(await cache!.store(SHA_A, ANALYSIS)).toBe(true);
+    const { renameSync } = await import("node:fs");
+    let armed = true;
+    const swapping = openHistoryCache(fixture.deps, "ws", fixture.root, {
+      fileSystem: {
+        getuid: () => {
+          if (armed) {
+            armed = false;
+            renameSync(fixture.historyDir, `${fixture.historyDir}.moved`);
+            mkdirSync(fixture.historyDir, { mode: 0o700 });
+          }
+          return undefined;
+        },
+      },
+    });
+    expect(await swapping!.store(SHA_B, ANALYSIS)).toBe(false);
+    expect(armed).toBe(false);
+    // Same path, another directory (another device/inode): nothing was created in it.
+    expect(readdirSync(fixture.historyDir)).toEqual([]);
+  });
+
+  it("eviction does not unlink through a cache directory swapped for a link while it was listing", async () => {
+    const fixture = makeFixture();
+    const outside = makeTempDir("causoryn-hct-outside-");
+    const quota = { maxEntries: 1, maxTotalBytes: 64 * 1024 * 1024 };
+    const first = openHistoryCache(fixture.deps, "ws", fixture.root, { quota: { ...quota, maxEntries: 10 } });
+    expect(await first!.store(SHA_A, ANALYSIS)).toBe(true);
+    const entryA = path.basename(entryFile(fixture.historyDir, SHA_A));
+    setMtime(path.join(fixture.historyDir, entryA), "2020-01-01T00:00:00Z");
+    // A file of the same name outside the data root: what an unlink through the link would remove.
+    const victim = path.join(outside, entryA);
+    writeFileSync(victim, "keep me", "utf8");
+    const { renameSync, symlinkSync } = await import("node:fs");
+    let entryStats = 0;
+    let swapped = false;
+    const swapping = openHistoryCache(fixture.deps, "ws", fixture.root, {
+      quota,
+      fileSystem: {
+        lstat: async (target) => {
+          const stat = await lstat(target);
+          // Both entries are listed from the real directory; then it becomes a link.
+          if (path.dirname(target) === fixture.historyDir && target.endsWith(".json")) {
+            entryStats += 1;
+            if (entryStats === 2 && !swapped) {
+              swapped = true;
+              renameSync(fixture.historyDir, `${fixture.historyDir}.moved`);
+              symlinkSync(outside, fixture.historyDir, process.platform === "win32" ? "junction" : "dir");
+            }
+          }
+          return stat;
+        },
+      },
+    });
+    await swapping!.store(SHA_B, ANALYSIS);
+    expect(swapped).toBe(true);
+    expect(existsSync(victim)).toBe(true);
+    expect(readFileSync(victim, "utf8")).toBe("keep me");
+  });
+
   it("a cache directory that is a link (symlink or junction) is not used", async () => {
     const fixture = makeFixture();
     const elsewhere = makeTempDir("causoryn-hct-elsewhere-");

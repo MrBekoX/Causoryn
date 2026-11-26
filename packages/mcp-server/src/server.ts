@@ -689,7 +689,7 @@ function buildAllRegistrations(
       name: "causoryn_compare_architecture",
       title: "Architecture Diff",
       description:
-        "Compare two git refs or working-tree architecture snapshots read-only for added, removed, changed, renamed symbols and API surface changes.",
+        "Compare two git refs or working-tree architecture snapshots for added, removed, changed, renamed symbols and API surface changes. Never modifies the workspace or git state; commits analyzed from their git objects are cached under the data root.",
       inputSchema: CompareArchitectureToolInputSchema,
       outputSchema: envelopeOutputSchema(CompareArchitectureDataSchema),
       // Writes its commit-analysis cache under the data root (never the workspace).
@@ -966,7 +966,7 @@ function buildAllRegistrations(
       name: "causoryn_architecture_timeline",
       title: "Architecture Timeline",
       description:
-        "Build a sampled architecture evolution timeline and per-metric rule violation trends across explicit git refs or a bounded history range read-only.",
+        "Build a sampled architecture evolution timeline and per-metric rule violation trends across explicit git refs or a bounded history range. Never modifies the workspace or git state; commits analyzed from their git objects are cached under the data root.",
       inputSchema: ArchitectureTimelineToolInputSchema,
       outputSchema: envelopeOutputSchema(ArchitectureTimelineDataSchema),
       // Writes its commit-analysis cache under the data root (never the workspace).
