@@ -754,7 +754,11 @@ export function generateAgentContext(
     evidenceByEdgeId.set(edge.id, edge.evidenceIds);
     for (const endpointId of [edge.from, edge.to]) {
       const list = incidentEvidence.get(endpointId) ?? [];
-      list.push(...edge.evidenceIds);
+      // Appended one by one, never spread into push(...): the analysed
+      // repository sets how many evidence ids one edge carries (one per merged
+      // call site), and a spread over V8's argument limit throws RangeError
+      // for every query on the workspace (security scan F47).
+      for (const evidenceId of edge.evidenceIds) list.push(evidenceId);
       incidentEvidence.set(endpointId, list);
     }
     if (edge.kind === "CONTAINS") {

@@ -992,3 +992,50 @@ describe("generateAgentContext — Wave 2 LocAgent localization & proximity clea
     );
   });
 });
+
+describe("agent context — very large per-edge evidence lists (security scan F47)", () => {
+  it("collects incident evidence without spreading an edge's evidenceIds into call arguments", () => {
+    // One CALLS edge merging many call sites carries one evidence id per
+    // site, set by the analysed repository. Spreading 500k ids into
+    // Array.prototype.push exceeds V8's argument limit (RangeError) and used
+    // to break get_agent_context for the whole workspace.
+    const graph = createSnapshot({
+      workspaceId: WORKSPACE_ID,
+      revision: { id: "rev-f47", sequence: 1 },
+      configHash: "cfg",
+      analyzerFingerprint: "fp",
+      state: "ready",
+      createdAt: "2026-11-05T00:00:00Z",
+      nodes: [
+        { kind: "Class", qualifiedName: "app.OrdersService", relativePath: "src/orders/OrdersService.ts" },
+        { kind: "Class", qualifiedName: "app.Billing", relativePath: "src/billing/Billing.ts" },
+      ],
+      edges: [
+        {
+          kind: "CALLS",
+          from: { kind: "Class", qualifiedName: "app.OrdersService", relativePath: "src/orders/OrdersService.ts" },
+          to: { kind: "Class", qualifiedName: "app.Billing", relativePath: "src/billing/Billing.ts" },
+          resolution: "heuristic",
+        },
+      ],
+    });
+    const count = 500_000;
+    // Reverse order: the item must still carry the 8 smallest ids, sorted.
+    const evidenceIds = Array.from(
+      { length: count },
+      (_, i) => `evidence:${String(count - 1 - i).padStart(7, "0")}`,
+    );
+    const snapshot: SnapshotGraph = {
+      ...graph,
+      edges: graph.edges.map((edge) => ({ ...edge, evidenceIds })),
+    };
+
+    const result = generateAgentContext(snapshot, { task: "OrdersService" });
+
+    const item = result.contextItems.find((entry) => entry.qualifiedName === "app.OrdersService");
+    expect(item).toBeDefined();
+    expect(item?.evidenceIds).toEqual(
+      Array.from({ length: 8 }, (_, i) => `evidence:${String(i).padStart(7, "0")}`),
+    );
+  });
+});

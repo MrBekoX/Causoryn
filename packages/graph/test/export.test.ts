@@ -342,8 +342,9 @@ describe("Markdown serializer", () => {
     expect(output).not.toContain("![a](https://evil/x)");
     // Ham inline HTML yok: <script> backslash kaçışlı görünür.
     expect(output).not.toContain("<script>");
-    // Kaçış biçimi deterministiktir ve içerik okunur kalır:
-    expect(output).toContain("\\!\\[a\\]\\(https://evil/x\\).ts");
+    // Kaçış biçimi deterministiktir ve içerik okunur kalır; çıplak URL de
+    // GFM autolink'i oluşturmaz (security scan F50: `https\://`):
+    expect(output).toContain("\\!\\[a\\]\\(https\\://evil/x\\).ts");
     expect(output).toContain('app::x::\\<script\\>alert\\("xss"\\)\\</script\\>');
   });
 });
@@ -785,5 +786,71 @@ describe("determinizm (aynı girdi → aynı çıktı)", () => {
       expect(error).toBeInstanceOf(GraphRepositoryError);
       expect((error as GraphRepositoryError).code).toBe("export/output-not-authorized");
     }
+  });
+});
+
+describe("Markdown serializer — GFM autolinks in repository text (security scan F50)", () => {
+  it("defangs bare URL, www. and email autolinks in full-view table cells and meta lines", () => {
+    // qualifiedName, relativePath and evidence rationale are repository text
+    // (TŞ §19). A GFM viewer turns bare `https://…`, `www.…` and `user@host.tld`
+    // (also behind `mailto:` / `xmpp:`) into clickable links unless defanged.
+    const routes = nodeInput("Function", "app::routes::https://evil.test/login", "www.evil.test/routes.ts", 1, 2);
+    const notify = nodeInput("Function", "app::notify::ops@evil.test", "node_modules/@scope/pkg/index.ts", 3, 4);
+    const snapshot = createSnapshot({
+      workspaceId: WS,
+      revision: { id: "www.evil.test", sequence: 1 },
+      configHash: "confighash-autolink",
+      analyzerFingerprint: "typescript-adapter@0.1.0",
+      state: "ready",
+      createdAt: CREATED_AT,
+      nodes: [routes, notify],
+      edges: [
+        {
+          kind: "CALLS",
+          from: routes,
+          to: notify,
+          resolution: "verified",
+          evidence: [
+            {
+              ...EV_DEPENDS,
+              rationale:
+                "ROUTES_TO http://evil.test/a ftp://evil.test/b mailto:sec@evil.test xmpp:bot@evil.test/r",
+            },
+          ],
+        },
+      ],
+    });
+
+    const output = serializeDocumentationMarkdown(snapshot);
+
+    expect(output).not.toMatch(/(?:https?|ftp):\/\//i);
+    expect(output).not.toMatch(/www\./i);
+    expect(output).not.toMatch(/[A-Za-z0-9.+_-]@[A-Za-z0-9_-]/);
+    expect(output).toContain("app::routes::https\\://evil.test/login");
+    expect(output).toContain("www\\.evil.test/routes.ts");
+    expect(output).toContain("app::notify::ops\\@evil.test");
+    expect(output).toContain(
+      "ROUTES_TO http\\://evil.test/a ftp\\://evil.test/b mailto:sec\\@evil.test xmpp:bot\\@evil.test/r",
+    );
+    expect(output).toContain("- revision: www\\.evil.test (sequence 1)");
+    expect(output).toContain("- analyzerFingerprint: typescript-adapter\\@0.1.0");
+    // An `@` that cannot start an email autolink is left as it is.
+    expect(output).toContain("node_modules/@scope/pkg/index.ts");
+  });
+
+  it("escapes code-span and strikethrough markers and replaces control characters like the other Markdown exports", () => {
+    const snapshot = createSnapshot({
+      workspaceId: WS,
+      revision: { id: "rev-md-ctl", sequence: 1 },
+      configHash: "confighash-md-ctl",
+      analyzerFingerprint: "typescript-adapter@0.1.0",
+      state: "ready",
+      createdAt: CREATED_AT,
+      nodes: [nodeInput("Function", "app::x::`run`~~gone~~\u001b[31m", "src/x.ts", 1, 2)],
+      edges: [],
+    });
+    const output = serializeDocumentationMarkdown(snapshot);
+    expect(output).toContain("app::x::\\`run\\`\\~\\~gone\\~\\~�\\[31m");
+    expect(output).not.toContain("\u001b");
   });
 });

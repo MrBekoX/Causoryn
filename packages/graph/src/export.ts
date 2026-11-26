@@ -1,6 +1,12 @@
 import { z } from "zod";
 
-import { escapeMermaidLabel, snapshotCanonicalJson, type SnapshotGraph } from "@causoryn/domain";
+import {
+  escapeMarkdownInline,
+  escapeMarkdownTableCell,
+  escapeMermaidLabel,
+  snapshotCanonicalJson,
+  type SnapshotGraph,
+} from "@causoryn/domain";
 import { OutputAccessPolicy, OutputPolicyError } from "@causoryn/workspace";
 
 import { GraphRepositoryError } from "./errors.js";
@@ -118,25 +124,36 @@ function escapeHtml(value: string): string {
 }
 
 /**
- * Markdown tablo hücresi kaçışı: GFM hücre ayracı, satır sonları ve
- * link/HTML metakarakterleri. Hücre değerleri (dosya yolları, sembol adları,
- * rationale) güvenilmez depo verisidir (TŞ §19): kaçırılmayan
- * `![x](https://...)` dizgisi ağa erişimli GFM görüntüleyicide beacon/link,
- * kaçırılmayan `<...>` ham inline HTML olarak işlenir. Backslash escape
- * GFM'in ASCII noktalama kaçışıdır; içerik okunur kalır, sözdizimi bozulur.
+ * GFM extended email autolink (`user@host.tld`, also the email inside a
+ * `mailto:` or `xmpp:` autolink): an `@` between a local-part character and a
+ * domain character. The domain Markdown helpers defang URL and `www.`
+ * autolinks but not this one. A backslash escape is valid before any ASCII
+ * punctuation, so the text renders unchanged while no link forms. Single-
+ * character lookarounds, no quantifier: linear on any input.
  */
-function escapeMarkdownCell(value: string): string {
-  return value
-    .replace(/\\/g, "\\\\")
-    .replace(/\|/g, "\\|")
-    .replace(/!/g, "\\!")
-    .replace(/\[/g, "\\[")
-    .replace(/\]/g, "\\]")
-    .replace(/\(/g, "\\(")
-    .replace(/\)/g, "\\)")
-    .replace(/</g, "\\<")
-    .replace(/>/g, "\\>")
-    .replace(/[\r\n\t]+/g, " ");
+const EMAIL_AUTOLINK_AT = /(?<=[A-Za-z0-9.+_-])@(?=[A-Za-z0-9_-])/g;
+
+function defangEmailAutolinks(escaped: string): string {
+  return escaped.replace(EMAIL_AUTOLINK_AT, "\\@");
+}
+
+/**
+ * Full-view Markdown escaping (security scan F50). Cell values (file paths,
+ * symbol names, rationale) and snapshot meta are untrusted repository text
+ * (TŞ §19). They go through the same @causoryn/domain helpers as the
+ * architecture brief and wiki exports: backslash escapes for link, image,
+ * HTML, code-span, strikethrough, heading and table syntax, line endings and
+ * tabs collapsed to one space, control characters replaced with U+FFFD, and
+ * bare `https://`, `http://`, `ftp://` and `www.` autolinks defanged; email
+ * autolinks are defanged on top (defangEmailAutolinks).
+ */
+function markdownTableCell(value: string): string {
+  return defangEmailAutolinks(escapeMarkdownTableCell(value));
+}
+
+/** One single-line meta value of the full view (see markdownTableCell). */
+function markdownInline(value: string): string {
+  return defangEmailAutolinks(escapeMarkdownInline(value));
 }
 
 function byId<T extends { readonly id: string }>(a: T, b: T): number {
@@ -197,8 +214,8 @@ export function serializeDocumentationJson(snapshot: SnapshotGraph): string {
 /* ------------------------------------------------------------------ */
 
 /**
- * Deterministik Markdown dokümanı: sabit şablon, id sıralı tablolar,
- * hücre değerleri escapeMarkdownCell ile kaçırılır.
+ * Deterministik Markdown dokümanı: sabit şablon, id sıralı tablolar; hücre
+ * değerleri markdownTableCell, meta satırları markdownInline ile kaçırılır.
  */
 export function serializeDocumentationMarkdown(snapshot: SnapshotGraph): string {
   const ordered = canonicallyOrdered(snapshot);
@@ -208,15 +225,15 @@ export function serializeDocumentationMarkdown(snapshot: SnapshotGraph): string 
   lines.push("");
   lines.push("## Snapshot");
   lines.push("");
-  lines.push(`- id: ${escapeMarkdownCell(ordered.meta.id)}`);
-  lines.push(`- workspaceId: ${escapeMarkdownCell(ordered.meta.workspaceId)}`);
+  lines.push(`- id: ${markdownInline(ordered.meta.id)}`);
+  lines.push(`- workspaceId: ${markdownInline(ordered.meta.workspaceId)}`);
   lines.push(
-    `- revision: ${escapeMarkdownCell(ordered.meta.revision.id)} (sequence ${String(ordered.meta.revision.sequence)})`,
+    `- revision: ${markdownInline(ordered.meta.revision.id)} (sequence ${String(ordered.meta.revision.sequence)})`,
   );
-  lines.push(`- configHash: ${escapeMarkdownCell(ordered.meta.configHash)}`);
-  lines.push(`- analyzerFingerprint: ${escapeMarkdownCell(ordered.meta.analyzerFingerprint)}`);
-  lines.push(`- state: ${escapeMarkdownCell(ordered.meta.state)}`);
-  lines.push(`- createdAt: ${escapeMarkdownCell(ordered.meta.createdAt)}`);
+  lines.push(`- configHash: ${markdownInline(ordered.meta.configHash)}`);
+  lines.push(`- analyzerFingerprint: ${markdownInline(ordered.meta.analyzerFingerprint)}`);
+  lines.push(`- state: ${markdownInline(ordered.meta.state)}`);
+  lines.push(`- createdAt: ${markdownInline(ordered.meta.createdAt)}`);
   lines.push("");
   lines.push(`## Nodes (${String(ordered.nodes.length)})`);
   lines.push("");
@@ -224,7 +241,7 @@ export function serializeDocumentationMarkdown(snapshot: SnapshotGraph): string 
   lines.push("| --- | --- | --- | --- | --- |");
   for (const node of ordered.nodes) {
     lines.push(
-      `| ${escapeMarkdownCell(node.id)} | ${escapeMarkdownCell(node.kind)} | ${escapeMarkdownCell(node.qualifiedName)} | ${escapeMarkdownCell(node.language ?? "")} | ${escapeMarkdownCell(formatLocation(node.location))} |`,
+      `| ${markdownTableCell(node.id)} | ${markdownTableCell(node.kind)} | ${markdownTableCell(node.qualifiedName)} | ${markdownTableCell(node.language ?? "")} | ${markdownTableCell(formatLocation(node.location))} |`,
     );
   }
   lines.push("");
@@ -234,7 +251,7 @@ export function serializeDocumentationMarkdown(snapshot: SnapshotGraph): string 
   lines.push("| --- | --- | --- | --- | --- | --- |");
   for (const edge of ordered.edges) {
     lines.push(
-      `| ${escapeMarkdownCell(edge.id)} | ${escapeMarkdownCell(edge.kind)} | ${escapeMarkdownCell(edge.from)} | ${escapeMarkdownCell(edge.to)} | ${escapeMarkdownCell(edge.resolution)} | ${escapeMarkdownCell(edge.evidenceIds.join(","))} |`,
+      `| ${markdownTableCell(edge.id)} | ${markdownTableCell(edge.kind)} | ${markdownTableCell(edge.from)} | ${markdownTableCell(edge.to)} | ${markdownTableCell(edge.resolution)} | ${markdownTableCell(edge.evidenceIds.join(","))} |`,
     );
   }
   lines.push("");
@@ -244,7 +261,7 @@ export function serializeDocumentationMarkdown(snapshot: SnapshotGraph): string 
   lines.push("| --- | --- | --- | --- | --- | --- |");
   for (const evidence of ordered.evidence) {
     lines.push(
-      `| ${escapeMarkdownCell(evidence.id)} | ${escapeMarkdownCell(evidence.kind)} | ${escapeMarkdownCell(evidence.analyzerId)} | ${escapeMarkdownCell(evidence.analyzerVersion)} | ${escapeMarkdownCell(formatLocation(evidence.span))} | ${escapeMarkdownCell(evidence.rationale)} |`,
+      `| ${markdownTableCell(evidence.id)} | ${markdownTableCell(evidence.kind)} | ${markdownTableCell(evidence.analyzerId)} | ${markdownTableCell(evidence.analyzerVersion)} | ${markdownTableCell(formatLocation(evidence.span))} | ${markdownTableCell(evidence.rationale)} |`,
     );
   }
   lines.push("");
