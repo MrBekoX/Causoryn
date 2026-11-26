@@ -281,6 +281,7 @@ async function runStdioSequence(
   cwd: string,
   env: NodeJS.ProcessEnv,
   requests: ReadonlyArray<Record<string, unknown>>,
+  responseTimeoutMs = 30_000,
 ): Promise<{
   readonly stdoutLines: readonly string[];
   readonly responses: ReadonlyMap<number, JsonRpcLine>;
@@ -345,7 +346,7 @@ async function runStdioSequence(
             `JSON-RPC id=${String(id)} zaman aşımı. stderr=${stderrChunks.join("")}`,
           ),
         );
-      }, 30_000);
+      }, responseTimeoutMs);
       waiters.set(id, (msg) => {
         clearTimeout(timer);
         resolve(msg);
@@ -1168,6 +1169,8 @@ describe("4. build-package.mjs + isolated npm pack end-to-end verification", () 
           { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "causoryn_find_symbols", arguments: { query: "launcherIndexProbe" } } },
           { jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "causoryn_status", arguments: {} } },
         ],
+        // find_symbols waits for the first index; on a loaded CI runner that can exceed 30 s.
+        120_000,
       );
       const npxInit = viaNpx.responses.get(1)?.result as { serverInfo?: { name?: string; version?: string } };
       expect(npxInit.serverInfo?.name).toBe(SERVER_NAME);
