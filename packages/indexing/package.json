@@ -16,6 +16,7 @@
     "@causoryn/adapter-typescript": "0.3.2",
     "@causoryn/domain": "0.3.2",
     "@causoryn/graph": "0.3.2",
+    "@causoryn/sidecar-ipc": "0.3.2",
     "@causoryn/workspace": "0.3.2"
   }
 }
