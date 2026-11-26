@@ -1379,14 +1379,24 @@ function planSkillsForClient(params: {
       defaultMode: 0o644,
       expectedCurrentSha256: current === null ? null : sha256OfText(current),
     });
-    record.set(destSkillFile, sha256OfText(content));
+    // Same rule as the up-to-date branch: a record that could not be read in
+    // full is never replaced by the selected hosts' entries only (other hosts'
+    // entries would be lost). The skill is still written; it stays
+    // recognizable as Causoryn's by its shipped content.
+    const unusableRecordForWrite = describeUnusableRecord(homeDir, record, recordTrusted);
+    if (unusableRecordForWrite === null) {
+      record.set(destSkillFile, sha256OfText(content));
+    }
     actions.push({
       client,
       kind: "skill",
       operation: existed ? "update" : "create",
       targetPath: destSkillFile,
       backupPath: null,
-      detail: `installed skill ${skillName}`,
+      detail:
+        unusableRecordForWrite === null
+          ? `installed skill ${skillName}`
+          : `installed skill ${skillName} (not recorded: ${unusableRecordForWrite}, so it was left as it is)`,
     });
   }
 }

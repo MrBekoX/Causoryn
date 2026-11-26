@@ -244,6 +244,34 @@ describe("CAU-10: setup only upgrades skills Causoryn owns", () => {
     expect(readFileSync(recordPath).equals(before)).toBe(true);
   });
 
+  it("installing a missing skill keeps an oversized install record byte-identical, so other hosts' entries are not lost", async () => {
+    const sb = createSetupSandbox("record-oversized-write");
+    const v1 = writeFakePackage(path.join(sb.root, "pkg-v1"), causorynSkillBody("v1"));
+    const recordPath = path.join(sb.home, ".causoryn", "installed-skills.json");
+    const first = await runSetup({ ...baseOptions(sb, v1), clients: ["zcode"] });
+    const mapSystem = skillAction(first.actions, "map-system").targetPath;
+    const parsed = JSON.parse(readFileSync(recordPath, "utf8")) as {
+      description: string;
+      skills: Array<{ path: string; sha256: string }>;
+    };
+    parsed.skills.push({
+      path: path.resolve(path.join(sb.home, ".claude", "skills", "map-system", "SKILL.md")),
+      sha256: "a".repeat(64),
+    });
+    parsed.description = "x".repeat(1024 * 1024 + 1);
+    writeFileSync(recordPath, JSON.stringify(parsed), "utf8");
+    const before = readFileSync(recordPath);
+    rmSync(mapSystem);
+
+    // The missing skill is written again, but the record that could not be
+    // read is not replaced by the selected hosts' entries only.
+    const rerun = await runSetup({ ...baseOptions(sb, v1), clients: ["zcode"] });
+    expect(rerun.applied).toBe(true);
+    expect(existsSync(mapSystem)).toBe(true);
+    expect(skillAction(rerun.actions, "map-system").detail).toMatch(/not recorded: .*install record .* could not be read/);
+    expect(readFileSync(recordPath).equals(before)).toBe(true);
+  });
+
   it("an up-to-date rerun leaves an install record in a format it does not understand (a newer schemaVersion) byte-identical", async () => {
     const sb = createSetupSandbox("record-newer-format");
     const v1 = writeFakePackage(path.join(sb.root, "pkg-v1"), causorynSkillBody("v1"));
