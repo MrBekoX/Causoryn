@@ -398,10 +398,19 @@ function unwrapSingleChild(node: DirTreeNode): DirTreeNode {
   return cur;
 }
 
+/**
+ * Every file under `node`, sorted. Walks the subtree with an explicit stack and
+ * appends one by one: a directory can hold more files than V8 accepts as
+ * spread call arguments (`push(...files)` threw RangeError, security scan F47
+ * variant), and the repository sets the tree's depth. One final sort gives
+ * the same order the former per-level sorts produced (the paths are unique).
+ */
 function collectFiles(node: DirTreeNode): string[] {
-  const out: string[] = [...node.directFiles];
-  for (const child of node.children.values()) {
-    out.push(...collectFiles(child));
+  const out: string[] = [];
+  const pending: DirTreeNode[] = [node];
+  for (let current = pending.pop(); current !== undefined; current = pending.pop()) {
+    for (const file of current.directFiles) out.push(file);
+    for (const child of current.children.values()) pending.push(child);
   }
   return out.sort(cmpStr);
 }

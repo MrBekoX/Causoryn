@@ -659,7 +659,10 @@ async function readProtectedSafeDirectories(runtime: GitRuntime): Promise<readon
       );
       const parts = stdout.split("\0");
       if (parts.length > 0 && parts[parts.length - 1] === "") parts.pop();
-      values.push(...parts);
+      // One by one: 1 MiB of output can hold ~500k values, more than V8
+      // accepts as spread call arguments (`push(...parts)` threw RangeError,
+      // which the catch below swallowed, so no value of the scope was kept).
+      for (const part of parts) values.push(part);
     } catch {
       // Exit status 1 = key not set; any other failure forwards nothing.
     }
