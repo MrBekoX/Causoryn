@@ -1132,10 +1132,15 @@ async function readWorkingTreeBlob(
     );
   }
 
+  // O_NONBLOCK: a FIFO swapped in after the lstat opens at once instead of
+  // tying up a threadpool thread until a writer appears; the handle check
+  // below then refuses it. O_NOCTTY: a terminal device never becomes the
+  // controlling terminal. Neither is defined on Windows (?? 0).
   const openFlags =
-    process.platform === "win32"
-      ? fsConstants.O_RDONLY
-      : fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0);
+    fsConstants.O_RDONLY |
+    (fsConstants.O_NOFOLLOW ?? 0) |
+    (fsConstants.O_NONBLOCK ?? 0) |
+    (fsConstants.O_NOCTTY ?? 0);
 
   let handle;
   try {

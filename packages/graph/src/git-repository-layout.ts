@@ -35,6 +35,19 @@
  * Only metadata is read here (bounded, no writes, no commands). Paths are
  * resolved component by component with lstat/readlink, so a link that points
  * to a network path is detected from its text and never opened.
+ *
+ * A path text from the metadata is joined onto the directory git resolves it
+ * against without normalising it, and then read the two ways git builds read
+ * it: with ".." applied to the directory a link resolved to (git on POSIX:
+ * abspath.c strbuf_realpath and the kernel's open/chdir), and with ".."
+ * folded lexically before links are followed (Git for Windows: Win32 path
+ * normalisation). A path whose two readings name different locations is
+ * refused, so the location validated here is the one git uses on either
+ * platform. Separators are the ones git uses: `/` and `\` on Windows, only
+ * `/` on POSIX (a backslash is an ordinary file-name character there).
+ *
+ * Refusal messages name the metadata text as written and paths inside the
+ * analyzed root, never a resolved location outside it.
  */
 import { constants as fsConstants } from "node:fs";
 import { lstat, open, readlink, realpath } from "node:fs/promises";
@@ -115,11 +128,20 @@ function refusal(root: string, reason: string): GraphRepositoryError {
   );
 }
 
-function networkRefusal(root: string, where: string, value: string): GraphRepositoryError {
-  return refusal(
-    root,
-    `${where} names a network or device path (${JSON.stringify(value)}); such paths are never accessed`,
-  );
+/** `value` is shown only when it is metadata text or a link inside the analyzed root. */
+function networkRefusal(root: string, where: string, value?: string): GraphRepositoryError {
+  const shown = value === undefined ? "" : ` (${JSON.stringify(value)})`;
+  return refusal(root, `${where} names a network or device path${shown}; such paths are never accessed`);
+}
+
+/** " (<path>)" for a path inside the analyzed root; nothing for one outside it. */
+function located(root: string, file: string): string {
+  return isSameOrInside(file, root) ? ` (${file})` : "";
+}
+
+function errorCode(error: unknown): string {
+  const code = (error as NodeJS.ErrnoException | undefined)?.code;
+  return typeof code === "string" && /^[A-Z0-9_]+$/.test(code) ? code : "unknown error";
 }
 
 /** Lexical containment (both sides absolute; case-insensitive on win32 via path.relative). */
@@ -134,14 +156,74 @@ function sameLocation(a: string, b: string): boolean {
   return path.relative(a, b) === "";
 }
 
-function splitAbsolute(value: string): { readonly root: string; readonly parts: string[] } {
-  const resolved = path.resolve(value);
-  const root = path.parse(resolved).root;
-  const parts = resolved
-    .slice(root.length)
-    .split(/[\\/]+/)
-    .filter((part) => part.length > 0);
-  return { root, parts };
+/** Path separators as git splits them on this platform (see module header). */
+const SEPARATORS = process.platform === "win32" ? /[\\/]+/ : /\/+/;
+
+/** Components of a path text, split as git splits them; empty and "." parts dropped, ".." kept. */
+function components(text: string): string[] {
+  return text.split(SEPARATORS).filter((part) => part.length > 0 && part !== ".");
+}
+
+interface SplitPath {
+  /** Filesystem root ("/", "C:\"). */
+  readonly root: string;
+  readonly parts: string[];
+}
+
+/** Splits an absolute, already normalised path. */
+function splitAbsolute(value: string): SplitPath {
+  const root = path.parse(value).root;
+  return { root, parts: components(value.slice(root.length)) };
+}
+
+/**
+ * Splits an absolute path text without normalising it, so its ".." parts stay
+ * where they are. Only the filesystem root comes from path.resolve: on Windows
+ * a rooted text without a drive (`\x`) takes the drive of `driveOf`.
+ */
+function splitRaw(driveOf: string, text: string): SplitPath {
+  return {
+    root: path.parse(path.resolve(driveOf, text)).root,
+    parts: components(text.slice(path.parse(text).root.length)),
+  };
+}
+
+/**
+ * Joins metadata text onto the directory git resolves it against, as git
+ * does: `<base>/<text>` without normalisation, an absolute text as is.
+ */
+function joinRaw(base: string, text: string): string {
+  if (path.isAbsolute(text)) return text;
+  return /[\\/]$/.test(base) ? `${base}${text}` : `${base}${path.sep}${text}`;
+}
+
+/** The directory part of a path as git spelled it (config.c: up to the last separator). */
+function spelledDirectory(spelled: string): string {
+  const index =
+    process.platform === "win32"
+      ? Math.max(spelled.lastIndexOf("/"), spelled.lastIndexOf("\\"))
+      : spelled.lastIndexOf("/");
+  return index < 0 ? spelled : spelled.slice(0, index + 1);
+}
+
+/**
+ * Where a walk over `split` may start: the longest base whose components are
+ * a leading run of `split.parts` (a run without ".." parts). Bases are
+ * canonical directories without links, so walking that run would end in the
+ * base itself.
+ */
+function startingPoint(split: SplitPath, bases: readonly string[]): { current: string; queue: string[] } {
+  let current = split.root;
+  let skipped = 0;
+  for (const base of bases) {
+    const own = splitAbsolute(base);
+    if (own.root !== split.root || own.parts.length <= skipped || own.parts.length > split.parts.length) continue;
+    if (own.parts.every((part, index) => part === split.parts[index])) {
+      current = base;
+      skipped = own.parts.length;
+    }
+  }
+  return { current, queue: split.parts.slice(skipped) };
 }
 
 interface LocalResolution {
@@ -150,37 +232,40 @@ interface LocalResolution {
 }
 
 /**
- * Resolves an absolute path component by component, following only links
- * whose target text is a local path. `bases` are canonical directories known
- * to contain no links; when the target lies inside one, only the components
- * below it are walked. A missing component ends the walk (exists=false).
+ * - "physical": ".." applies to the directory reached so far, after links
+ *   (git on POSIX); link text is joined onto the link's directory unnormalised.
+ * - "lexical": ".." is folded before links are followed, also in link text
+ *   (Win32 path normalisation, Git for Windows).
  */
-async function resolveLocal(
+type Reading = "physical" | "lexical";
+
+interface Walk extends LocalResolution {
+  readonly linksFollowed: number;
+  /** The walk stopped at a missing component with a ".." still ahead of it. */
+  readonly parentAfterMissing: boolean;
+}
+
+/**
+ * Walks `spelled` component by component, following only links whose target
+ * text is a local path. A missing component (ENOENT/ENOTDIR) ends the walk
+ * with exists=false and the path the entry would have; any other lstat or
+ * readlink failure is a refusal, since git may still be able to read there.
+ */
+async function walkPath(
   root: string,
   where: string,
-  target: string,
+  spelled: string,
   bases: readonly string[],
-): Promise<LocalResolution> {
-  const absolute = path.resolve(target);
-  const base = bases.find((candidate) => isSameOrInside(absolute, candidate));
-  let current: string;
-  let queue: string[];
-  if (base !== undefined) {
-    current = base;
-    queue = path
-      .relative(base, absolute)
-      .split(/[\\/]+/)
-      .filter((part) => part.length > 0);
-  } else {
-    const split = splitAbsolute(absolute);
-    if (isNetworkOrDevicePath(split.root)) throw networkRefusal(root, where, absolute);
-    current = split.root;
-    queue = split.parts;
-  }
+  reading: Reading,
+): Promise<Walk> {
+  const start = reading === "physical" ? splitRaw(root, spelled) : splitAbsolute(path.resolve(root, spelled));
+  let { current, queue } = startingPoint(start, bases);
+  // Below a base (the analyzed root, the git or common directory) the walk
+  // never starts at a filesystem root, wherever that base lives.
+  if (current === start.root && isNetworkOrDevicePath(current)) throw networkRefusal(root, where);
   let hops = 0;
   while (queue.length > 0) {
     const part = queue.shift()!;
-    if (part === ".") continue;
     if (part === "..") {
       current = path.dirname(current);
       continue;
@@ -189,8 +274,16 @@ async function resolveLocal(
     let entry;
     try {
       entry = await lstat(next);
-    } catch {
-      return { path: path.join(next, ...queue), exists: false };
+    } catch (error) {
+      if (!isMissingEntryError(error)) {
+        throw refusal(root, `${where} could not be checked (${errorCode(error)})`);
+      }
+      return {
+        path: path.join(next, ...queue),
+        exists: false,
+        linksFollowed: hops,
+        parentAfterMissing: queue.includes(".."),
+      };
     }
     if (!entry.isSymbolicLink()) {
       current = next;
@@ -200,18 +293,69 @@ async function resolveLocal(
     if (hops > MAX_LINK_HOPS) {
       throw refusal(root, `${where} passes through too many symbolic links`);
     }
-    const linkText = await readlink(next);
-    if (isNetworkOrDevicePath(linkText)) {
-      throw networkRefusal(root, `a symbolic link on the way to ${where} (${next})`, linkText);
+    const linkWhere = `a symbolic link on the way to ${where}${located(root, next)}`;
+    let linkText: string;
+    try {
+      linkText = await readlink(next);
+    } catch (error) {
+      throw refusal(root, `${linkWhere} could not be read (${errorCode(error)})`);
     }
-    const split = splitAbsolute(path.resolve(current, linkText));
-    if (isNetworkOrDevicePath(split.root)) {
-      throw networkRefusal(root, `a symbolic link on the way to ${where} (${next})`, linkText);
+    // The text of a link outside the analyzed root is not shown.
+    const shownText = isSameOrInside(next, root) ? linkText : undefined;
+    if (isNetworkOrDevicePath(linkText)) throw networkRefusal(root, linkWhere, shownText);
+    if (isDriveRelative(linkText)) throw refusal(root, `${linkWhere} has a drive-relative target`);
+    let target: SplitPath;
+    if (reading === "lexical") {
+      target = splitAbsolute(path.resolve(current, linkText));
+    } else if (path.isAbsolute(linkText)) {
+      target = splitRaw(current, linkText);
+    } else {
+      // Relative text continues from the link's own directory.
+      target = { root: current, parts: components(linkText) };
     }
-    current = split.root;
-    queue = [...split.parts, ...queue];
+    if (target.root !== current && isNetworkOrDevicePath(target.root)) {
+      throw networkRefusal(root, linkWhere, shownText);
+    }
+    current = target.root;
+    queue = [...target.parts, ...queue];
   }
-  return { path: current, exists: true };
+  return { path: current, exists: true, linksFollowed: hops, parentAfterMissing: false };
+}
+
+async function sameResolution(a: LocalResolution, b: LocalResolution): Promise<boolean> {
+  if (a.exists !== b.exists) return false;
+  if (sameLocation(a.path, b.path)) return true;
+  if (!a.exists) return false;
+  const [realA, realB] = await Promise.all([realpath(a.path).catch(() => a.path), realpath(b.path).catch(() => b.path)]);
+  return sameLocation(realA, realB);
+}
+
+/**
+ * Resolves `spelled` (an absolute path text, see joinRaw) both ways git
+ * reads it and refuses it when the two readings name different locations.
+ * `bases` are canonical directories known to contain no links; components
+ * leading to one of them are not walked again.
+ */
+async function resolveLocal(
+  root: string,
+  where: string,
+  spelled: string,
+  bases: readonly string[],
+): Promise<LocalResolution> {
+  const physical = await walkPath(root, where, spelled, bases, "physical");
+  // Without links every ".." removed a real directory, so both readings agree.
+  if (physical.linksFollowed === 0 && !physical.parentAfterMissing) {
+    return { path: physical.path, exists: physical.exists };
+  }
+  const lexical = await walkPath(root, where, spelled, bases, "lexical");
+  if (!(await sameResolution(physical, lexical))) {
+    throw refusal(
+      root,
+      `${where} names a different location depending on whether ".." is applied after symbolic links ` +
+        "(git on POSIX) or before them (Git for Windows)",
+    );
+  }
+  return { path: physical.path, exists: physical.exists };
 }
 
 async function canonical(
@@ -247,7 +391,9 @@ function isMissingEntryError(error: unknown): boolean {
  * lstat comes first and only a regular file is opened, so a FIFO, socket or
  * device never blocks the read (the git subprocess timeout does not cover
  * this step). The opened handle must be the file the lstat saw (dev, ino).
- * A missing entry or a directory reads as absent.
+ * A missing entry (ENOENT/ENOTDIR) or a directory reads as absent; any other
+ * lstat failure (EACCES, EPERM, ...) is a refusal: git may still read a file
+ * this check could not look at.
  */
 async function readBounded(
   root: string,
@@ -255,28 +401,30 @@ async function readBounded(
   label: string,
   maxBytes: number,
 ): Promise<string | undefined> {
+  const shown = `${label}${located(root, file)}`;
   let before;
   try {
     before = await lstat(file, { bigint: true });
-  } catch {
-    return undefined;
+  } catch (error) {
+    if (isMissingEntryError(error)) return undefined;
+    throw refusal(root, `${shown} could not be checked (${errorCode(error)})`);
   }
   if (before.isDirectory()) return undefined;
   if (!before.isFile()) {
-    throw refusal(root, `${label} (${file}) is not a regular file`);
+    throw refusal(root, `${shown} is not a regular file`);
   }
   let handle;
   try {
     handle = await open(file, METADATA_OPEN_FLAGS);
   } catch (error) {
     if (isMissingEntryError(error)) return undefined;
-    throw refusal(root, `${label} (${file}) could not be opened as a regular file`);
+    throw refusal(root, `${shown} could not be opened as a regular file`);
   }
   try {
     const info = await handle.stat({ bigint: true });
     const sameInode = info.ino === 0n || before.ino === 0n || info.ino === before.ino;
     if (!info.isFile() || info.dev !== before.dev || !sameInode) {
-      throw refusal(root, `${label} (${file}) changed while it was read`);
+      throw refusal(root, `${shown} changed while it was read`);
     }
     const chunks: Buffer[] = [];
     let total = 0;
@@ -564,13 +712,15 @@ async function checkAlternates(
     if (entry === null) throw refusal(root, `objects/info/alternates has a malformed quoted entry`);
     const where = "an objects/info/alternates entry";
     assertLocalPathText(root, where, entry);
-    const target = path.resolve(objectsDir, entry);
-    const resolved = await resolveLocal(root, where, target, bases);
+    const named = `${where} (${JSON.stringify(entry)})`;
+    // git: realpath(<objects dir>) + "/" + entry, resolved component by
+    // component (odb.c link_alt_odb_entry, strbuf_realpath).
+    const resolved = await resolveLocal(root, named, joinRaw(objectsDir, entry), bases);
     const location = resolved.exists ? await realpath(resolved.path).catch(() => resolved.path) : resolved.path;
     if (!scope.some((dir) => isSameOrInside(location, dir))) {
       throw refusal(
         root,
-        `${where} points outside the repository (${location}); only object directories inside the analyzed ` +
+        `${named} points outside the repository; only object directories inside the analyzed ` +
           "root, its git directory or its common directory are used",
       );
     }
@@ -580,21 +730,22 @@ async function checkAlternates(
   }
 }
 
+/** Reads the config file at `spelled` (a path as git spells it, see joinRaw). */
 async function readConfigEntries(
   root: string,
-  file: string,
+  spelled: string,
   label: string,
   bases: readonly string[],
-): Promise<{ readonly file: string; readonly entries: GitConfigEntry[] } | undefined> {
-  const resolved = await resolveLocal(root, label, file, bases);
+): Promise<GitConfigEntry[] | undefined> {
+  const resolved = await resolveLocal(root, label, spelled, bases);
   if (!resolved.exists) return undefined;
   const text = await readBounded(root, resolved.path, label, MAX_CONFIG_BYTES);
   if (text === undefined) return undefined;
   const entries = parseGitConfig(text);
   if (entries === null) {
-    throw refusal(root, `${label} (${resolved.path}) could not be parsed as git config`);
+    throw refusal(root, `${label}${located(root, resolved.path)} could not be parsed as git config`);
   }
-  return { file: resolved.path, entries };
+  return entries;
 }
 
 function isIncludePath(entry: GitConfigEntry): boolean {
@@ -611,11 +762,14 @@ function isCoreWorktree(entry: GitConfigEntry): boolean {
 
 /**
  * Checks include paths (recursively) and core.worktree in one config file.
- * `gitDir` is the directory relative paths of core.worktree resolve against.
+ * `spelled` is the file's path as git spells it: a relative include resolves
+ * against its directory part (config.c handle_path_include), not against the
+ * target of a linked config file. `gitDir` is the directory relative paths of
+ * core.worktree resolve against.
  */
 async function checkConfigFile(
   root: string,
-  file: string,
+  spelled: string,
   label: string,
   gitDir: string,
   depth: number,
@@ -625,12 +779,13 @@ async function checkConfigFile(
   // git itself stops with an error beyond MAX_INCLUDE_DEPTH.
   if (depth > MAX_INCLUDE_DEPTH) return;
   countScannedFile(root, state);
-  const parsed = await readConfigEntries(root, file, label, bases);
-  if (parsed === undefined) return;
-  for (const entry of parsed.entries) {
+  const entries = await readConfigEntries(root, spelled, label, bases);
+  if (entries === undefined) return;
+  for (const entry of entries) {
     if (isCoreWorktree(entry) && entry.value !== null) {
-      assertLocalPathText(root, `core.worktree in ${label}`, entry.value);
-      await resolveLocal(root, `core.worktree in ${label}`, path.resolve(gitDir, entry.value), bases);
+      const where = `core.worktree in ${label}`;
+      assertLocalPathText(root, where, entry.value);
+      await resolveLocal(root, `${where} (${JSON.stringify(entry.value)})`, joinRaw(gitDir, entry.value), bases);
       continue;
     }
     if (!isIncludePath(entry)) continue;
@@ -639,10 +794,10 @@ async function checkConfigFile(
     assertLocalPathText(root, where, value);
     // Home- and prefix-relative includes name the user's own files.
     if (value.startsWith("~") || value.startsWith("%(prefix)/")) continue;
-    const target = path.resolve(path.dirname(parsed.file), value);
-    const resolved = await canonical(root, where, target, bases);
-    if (resolved !== undefined) {
-      await checkConfigFile(root, resolved, `included config ${resolved}`, gitDir, depth + 1, bases, state);
+    const include = joinRaw(spelledDirectory(spelled), value);
+    const resolved = await resolveLocal(root, `${where} (${JSON.stringify(value)})`, include, bases);
+    if (resolved.exists) {
+      await checkConfigFile(root, include, `included config ${JSON.stringify(value)}`, gitDir, depth + 1, bases, state);
     }
   }
 }
@@ -674,7 +829,8 @@ async function isLinkedWorktreeOf(
   const backPointer = await readPointer(root, path.join(gitDir, "gitdir"), "the worktree gitdir file", bases);
   if (backPointer === undefined) return false;
   assertLocalPathText(root, "the worktree gitdir file", backPointer);
-  const target = await canonical(root, "the worktree gitdir file", path.resolve(gitDir, backPointer), bases);
+  const named = `the worktree gitdir file (${JSON.stringify(backPointer)})`;
+  const target = await canonical(root, named, joinRaw(gitDir, backPointer), bases);
   return target !== undefined && sameLocation(target, dotGit);
 }
 
@@ -684,15 +840,17 @@ async function isSubmoduleOf(
   gitDir: string,
   bases: readonly string[],
 ): Promise<boolean> {
-  const parsed = await readConfigEntries(root, path.join(gitDir, "config"), "the submodule config", bases);
-  if (parsed === undefined) return false;
+  const entries = await readConfigEntries(root, path.join(gitDir, "config"), "the submodule config", bases);
+  if (entries === undefined) return false;
   let worktree: string | null | undefined;
-  for (const entry of parsed.entries) {
+  for (const entry of entries) {
     if (isCoreWorktree(entry)) worktree = entry.value;
   }
   if (worktree === undefined || worktree === null) return false;
-  assertLocalPathText(root, "core.worktree in the submodule config", worktree);
-  const target = await canonical(root, "core.worktree in the submodule config", path.resolve(gitDir, worktree), bases);
+  const where = "core.worktree in the submodule config";
+  assertLocalPathText(root, where, worktree);
+  // git: chdir(<git dir>), then chdir(<core.worktree>) (setup.c).
+  const target = await canonical(root, `${where} (${JSON.stringify(worktree)})`, joinRaw(gitDir, worktree), bases);
   return target !== undefined && sameLocation(target, root);
 }
 
@@ -739,7 +897,9 @@ export async function validateRepositoryLayout(
       throw refusal(root, "the .git file is not a valid 'gitdir: <path>' pointer");
     }
     assertLocalPathText(root, "the gitdir pointer in the .git file", pointer);
-    const target = await canonical(root, "the gitdir pointer in the .git file", path.resolve(root, pointer), [root]);
+    // git (setup.c read_gitfile_gently): <dir of .git>/<pointer>, then realpath.
+    const named = `the gitdir pointer in the .git file (${JSON.stringify(pointer)})`;
+    const target = await canonical(root, named, joinRaw(root, pointer), [root]);
     if (target === undefined) {
       throw refusal(root, `the .git file points to a directory that does not exist (${JSON.stringify(pointer)})`);
     }
@@ -753,8 +913,8 @@ export async function validateRepositoryLayout(
     } else {
       throw refusal(
         root,
-        `the .git file points to a git directory outside the analyzed root (${target}) that is not a linked ` +
-          "worktree or submodule git directory of this root",
+        `the .git file points to a git directory outside the analyzed root (${JSON.stringify(pointer)}) that is ` +
+          "not a linked worktree or submodule git directory of this root",
       );
     }
   } else {
@@ -766,7 +926,9 @@ export async function validateRepositoryLayout(
   const commonPointer = await readPointer(root, path.join(gitDir, "commondir"), "the commondir file", bases);
   if (commonPointer !== undefined) {
     assertLocalPathText(root, "the commondir file", commonPointer);
-    const resolved = await canonical(root, "the commondir file", path.resolve(gitDir, commonPointer), bases);
+    // git (setup.c get_common_dir_noenv): <git dir>/<commondir>, then realpath.
+    const named = `the commondir file (${JSON.stringify(commonPointer)})`;
+    const resolved = await canonical(root, named, joinRaw(gitDir, commonPointer), bases);
     if (resolved === undefined) {
       throw refusal(root, `the commondir file points to a directory that does not exist`);
     }
@@ -777,7 +939,7 @@ export async function validateRepositoryLayout(
         ? expectedCommon !== undefined && sameLocation(resolved, expectedCommon)
         : isSameOrInside(resolved, root);
     if (!accepted) {
-      throw refusal(root, `the commondir file points outside the repository layout (${resolved})`);
+      throw refusal(root, `${named} points outside the repository layout`);
     }
     commonDir = resolved;
   } else if (kind === "linked-worktree") {
@@ -804,7 +966,7 @@ export async function validateRepositoryLayout(
     if (!allBases.some((dir) => isSameOrInside(objectsDir, dir))) {
       throw refusal(
         root,
-        `the objects directory points outside the repository (${objectsDir}); only object directories inside the ` +
+        "the objects directory points outside the repository; only object directories inside the " +
           "analyzed root, its git directory or its common directory are used",
       );
     }
