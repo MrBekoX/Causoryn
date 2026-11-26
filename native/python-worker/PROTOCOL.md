@@ -86,6 +86,8 @@ stderr ← [python-worker] ...                   (loglar; protokolün parçası 
 | `MAX_FILE_COUNT` | 5.000 dosya/istek | İstek reddedilir: `LIMIT_EXCEEDED`. |
 | `MAX_FILE_CONTENT_BYTES` | 2.000.000 bayt/dosya (TŞ §20 `maxFileBytes` ile uyumlu) | İstek reddedilir: `LIMIT_EXCEEDED`. |
 | `MAX_RESPONSE_NODES` | 250.000 node/yanıt | Sert tavan ya da istek bütçesi dolunca aşan node'lar YAYINLANMAZ; uçları yayınlanmayan kenarlar da düşer (dangling yok). Yanıta `RESPONSE_TRUNCATED` tanısı düşer ve `status: "partial"` olur — sessiz kesim yoktur. |
+| `MAX_RESPONSE_BYTES` | 40.000.000 bayt/yanıt | Node, kenar, evidence ve uyarılar serileştirilmiş boyutlarıyla bütçeye yazılır. Bütçe bitince başka hiçbir şey kabul edilmez (File node'ları hariç, her dosya için bir tane; kenarlar sarkmaz), çağrı yürüyüşü durur ve yanıta `RESPONSE_TRUNCATED` tanısı (`relativePath ""`, line 0, `response size budget exceeded (40000000 bytes of nodes, edges, evidence and warnings); …`) ve `status: "partial"` düşer. Bütçe adapter'ların varsayılan 64 MiB yanıt satırı sınırının altında kalır. |
+| `MAX_RESPONSE_LINE_BYTES` | 60.000.000 bayt/yanıt satırı | Daha uzun bir satır yerine istek `id`'sini (kodlanabiliyorsa) echo eden bir `LIMIT_EXCEEDED` satırı (`response line exceeded the 60000000 byte limit`) yazılır. |
 
 Sınırlar sabittir (protokol v1'de istekte yapılandırılamaz) ve aynı
 girdiye deterministik davranışı korur.
@@ -156,7 +158,9 @@ Analiz tamamlandığında:
   (TŞ §7: "Parser başarısızsa yalnızca kanıtlanabilen bilgi sunulur").
   Tanı kaynakları: dosya başına `SyntaxError` (satır 1 tabanlı; bilinmiyorsa
   0), `ADAPTER_INTERNAL` (derinlik/parse savunması, line 0),
-  `RESPONSE_TRUNCATED` (node bütçesi, line 0, relativePath "").
+  `RESPONSE_TRUNCATED` (node veya yanıt boyutu bütçesi, line 0, relativePath "").
+  Parser mesajları (`SyntaxError` ve `AST parsing could not be completed: …`)
+  200 karakterde aynı `...#<12 hex>` işaretiyle sınırlanır.
 - `coverageRatio` = verified kenar / toplam kenar (4 ondalık; TS adapter
   kuralı). Kenar yoksa 1.0.
 - `evidence` = yayımlanan kenarların taşıdığı kanıtların küme içinde tekil
@@ -331,6 +335,13 @@ verified) → `services.orders_service.create_order` (heuristic; import) →
   `INTERNAL_ERROR` line (`the response could not be encoded as UTF-8 (it
   contains a lone surrogate)`) that echoes the request `id` when the id itself
   can be encoded; the process keeps running.
+- Decoding, analysis and serialization of each request are guarded: any other
+  failure (`MemoryError`, `RecursionError`, …) becomes an `INTERNAL_ERROR`
+  line with a fixed message (`the request could not be answered`, or `the
+  response could not be serialized`), and stderr gets one log line naming only
+  the error type. An uncaught error ends the worker with one log line
+  (`worker stopped by an unexpected error (<type>)`); no traceback is printed,
+  so no install path or user name reaches the adapters' stderr excerpts.
 - Kodlar yalnızca TŞ §10.1 + K-008 kümesinden: `INVALID_ARGUMENT`,
   `INTERNAL_ERROR`, `LIMIT_EXCEEDED` (kaynak sınırları — yukarıdaki
   tablo). Worker kendi hata kodu icat etmez.

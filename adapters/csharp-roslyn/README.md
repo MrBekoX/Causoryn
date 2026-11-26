@@ -128,7 +128,15 @@ strictly read-only and sends the worker a `projects` field
   the other items in evaluation order, and the rest is dropped with a warning
   (`<project>: <n> global usings exceed the limit of 512 per project; ...`), so
   the worker does not reject the whole request and drop every C# file to
-  file-level facts.
+  file-level facts. A `Using` item that cannot be a global using is skipped
+  with a warning (`… is not a dotted C# name; skipped`, `… has an alias that
+  is not a C# identifier (…); skipped`, `… is both static and aliased, which
+  the .NET SDK rejects; skipped`). Names are checked the way the worker and
+  Roslyn check them, on UTF-16 code units: a character outside the Basic
+  Multilingual Plane (for example U+1D49C) is a surrogate pair, not an
+  identifier character, so such a name is skipped too. The worker applies the
+  same rules and drops an invalid entry with a warning instead of rejecting
+  the request.
 - **ProjectReference:** resolved to owning projects of the analysis set; the
   worker references the transitive closure. At most 512 references per project
   are sent (`MAX_PROJECT_REFERENCES_PER_PROJECT`); the last ones in ordinal
@@ -152,8 +160,15 @@ assets file can cause is bounded:
   discovery stops with the warning `NuGet reference discovery stopped after
   20000 file system probes; the remaining project.assets.json entries were not
   inspected`;
+- each assets file may spend at most 10,000 of them
+  (`MAX_NUGET_PROBES_PER_ASSETS_FILE`), so one crafted file cannot starve the
+  assets files after it;
 - each package folder / package directory pair is resolved once and the
   result is reused;
+- a `packageFolders` entry with more than 256 path components
+  (`MAX_PACKAGE_FOLDER_COMPONENTS`) is ignored before any probe, with the
+  warning `<assets file>: ignored <n> NuGet packageFolders entries with more
+  than 256 path components`;
 - at most 8 usable `packageFolders` entries are inspected per assets file
   (`MAX_NUGET_PACKAGE_FOLDERS`); the remaining ones are skipped with a warning
   (`<assets file>: only the first 8 usable NuGet packageFolders entries were

@@ -81,7 +81,10 @@ weaker no-`go.mod` rules described below.
 | `MaxResponseNodes` | 250,000 nodes per response | When the hard ceiling or the request budget is reached, the extra nodes are NOT emitted and edges whose endpoints were not emitted are dropped too (no dangling edges). The response gets a `RESPONSE_TRUNCATED` diagnostic and `status: "partial"` — truncation is never silent. |
 | `MaxRenderedTextBytes` | 200 bytes per call-expression text | Call-expression text (UnknownExternal names, including bare identifiers and route handler texts, and the rationales that quote it) is cut to its longest prefix of at most 200 bytes, on a UTF-8 rune boundary, followed by `...#` and the first 12 hex digits of the SHA-256 of the full text. Deterministic, and distinct texts stay distinct. Texts within the bound are unchanged; bounding adds no diagnostic. |
 | `MaxQualifiedNameBytes` | 512 bytes per name | Declared qualified names (Function, Method, Class, Interface and Type nodes) and the import paths, package names and directories quoted in rationales, ambiguity reasons and candidate labels are bounded the same way (`...#<12 hex>` marker). |
-| `MaxAmbiguityCandidates` | 64 candidates per ambiguity | Method, interface-method and package candidate lists are sorted and capped at the first 64 entries. A capped list sets `candidatesTruncated: true` and `candidateCount` (the full count) on the `ambiguity`, and its `reason` ends with `Only the first 64 of <n> sorted candidates are listed (candidates truncated).`; a rationale that states the candidate count keeps the full count. |
+| `MaxAmbiguityCandidates` / `MaxAmbiguityLabelBytes` | 64 candidates and 4,096 label bytes per ambiguity | Method, interface-method and package candidate lists are sorted and capped at the first 64 entries, and the listed labels together take at most 4,096 bytes (the first candidate is always listed), because every edge of an ambiguous call repeats the list. A capped list sets `candidatesTruncated: true` and `candidateCount` (the full count) on the `ambiguity`, and its `reason` ends with `Only the first <k> of <n> sorted candidates are listed (candidates truncated).`; a rationale that states the candidate count keeps the full count. |
+| `MaxHashedTextBytes` | 65,536 bytes per call-expression text | Callee texts that share a start (call chains such as `a(x)()()` or `a(x).b().c()`) are hashed in one running SHA-256 pass. A text longer than this is not hashed: its digest is taken over its file and byte range instead, so it is still identified exactly. Digests of shorter texts are unchanged. |
+| `MaxResponseBytes` | 40,000,000 bytes per response | Nodes, edges, evidence (counted twice) and warnings are charged at their serialized size. Once the budget is spent nothing more is admitted (File nodes excepted; edges never dangle; an edge keeps the evidence it has), call extraction stops, further warnings are replaced by one `further warnings were not emitted: the response size budget was reached`, and the response gets a `RESPONSE_TRUNCATED` diagnostic (`relativePath: ""`, `line: 0`, `response size budget exceeded (40000000 bytes of nodes, edges, evidence and warnings); …`) and `status: "partial"`. The budget stays below the adapters' default 64 MiB response cap. |
+| `MaxResponseLineBytes` | 60,000,000 bytes per response line | A longer line (only reachable through diagnostics on top of a spent budget) is replaced by a `LIMIT_EXCEEDED` error (`response line exceeded the 60000000 byte limit`), which the adapters still accept. |
 
 The limits are fixed (not configurable per request in protocol v1) and keep the behavior
 deterministic for identical input. Function bodies whose AST walk depth exceeds 1000 are
@@ -115,7 +118,9 @@ file and the result becomes `partial`.
 
 - `status: "ready"` → no diagnostics and no warnings; `"partial"` → at least one diagnostic or
   warning (when a parser fails, only what can be proven is reported). Diagnostics come from the
-  `go/parser` `scanner.ErrorList` (code `GOPARSE`, 1-based line, `0` if unknown) and from
+  `go/parser` `scanner.ErrorList` (code `GOPARSE`, 1-based line, `0` if unknown; the message
+  is bounded at 200 bytes like call text, since a parser message can quote a token literal of
+  any length) and from
   `RESPONSE_TRUNCATED` / `GO_AST_DEPTH`.
 - `coverageRatio` = verified edges / all edges (4 decimals; `1.0` when there are no edges).
 - `evidence` = de-duplicated list of the evidence carried by the EMITTED edges; each edge also
