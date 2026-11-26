@@ -53,6 +53,7 @@ interface WorkerResponse {
   status: string;
   diagnostics?: Array<{ relativePath: string; code: string; message: string; line: number }>;
   edges?: WorkerEdge[];
+  nodes?: Array<{ kind: string; qualifiedName: string }>;
   warnings?: string[];
   error?: { code: string; message: string };
 }
