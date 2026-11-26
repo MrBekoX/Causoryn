@@ -146,11 +146,12 @@ const COMMON_DIR_ENTRIES = [
 
 /**
  * Directories below the git and common directory whose whole tree git reads
- * from (loose refs, grafts, reftable tables); links anywhere below them must
- * stay in scope. Object directories are scanned the same way, at their real
+ * from (loose refs, grafts, reftable tables, the worktrees/<id>/ pseudo-refs
+ * every worktree can name, and reflogs); links anywhere below them must stay
+ * in scope. Object directories are scanned the same way, at their real
  * location.
  */
-const LINK_SCANNED_TREES = ["refs", "info", "reftable"] as const;
+const LINK_SCANNED_TREES = ["refs", "info", "reftable", "worktrees", "logs"] as const;
 
 /** git's `%(prefix)/` include prefix (path.c interpolate_path). */
 const PREFIX_INCLUDE = "%(prefix)/";
@@ -336,8 +337,13 @@ interface LayoutCheck {
   scannedFiles: number;
   /** Resolutions by spelled path: an identically spelled path is walked once. */
   readonly resolved: Map<string, LocalResolution>;
-  /** Canonical directories whose links were scanned (scanLinks): each is listed once. */
-  readonly scannedDirs: Set<string>;
+  /**
+   * Canonical directories whose links were scanned (scanLinks), with whether
+   * the scan went down the whole tree: each is listed once per depth, so a
+   * directory first listed one level deep is still scanned recursively when a
+   * recursive scan (such as a ref-tree link back to the git directory) reaches it.
+   */
+  readonly scannedDirs: Map<string, boolean>;
 }
 
 /**
@@ -572,8 +578,9 @@ async function scanLinks(
   bases: readonly string[],
   scope: readonly string[],
 ): Promise<void> {
-  if (check.scannedDirs.has(canonicalDir)) return;
-  check.scannedDirs.add(canonicalDir);
+  const scannedRecursively = check.scannedDirs.get(canonicalDir);
+  if (scannedRecursively === true || (scannedRecursively === false && !recursive)) return;
+  check.scannedDirs.set(canonicalDir, recursive);
   let entries: Array<Dirent<Buffer>>;
   spend(check);
   try {
@@ -1250,7 +1257,7 @@ export async function validateRepositoryLayout(
     );
   }
   // fsOperations: the realpath above.
-  const check: LayoutCheck = { root, fsOperations: 1, scannedFiles: 0, resolved: new Map(), scannedDirs: new Set() };
+  const check: LayoutCheck = { root, fsOperations: 1, scannedFiles: 0, resolved: new Map(), scannedDirs: new Map() };
   const dotGit = path.join(root, ".git");
   let entry;
   spend(check);
@@ -1366,7 +1373,7 @@ export async function validateRepositoryLayout(
  * every entry directly in each git directory (git reads them as metadata:
  * packed-refs, shallow, ...; and any of them as a ref when a ref names it:
  * HEAD, ORIG_HEAD, and lower-case names too, by git's first ref lookup rule), and
- * the whole refs/, info/ and reftable/ trees. A tree root that is a link was
+ * the whole refs/, info/, reftable/, worktrees/ and logs/ trees. A tree root that is a link was
  * resolved, and held to the scope, by the listing of its git directory before.
  */
 async function checkMetadataLinks(check: LayoutCheck, gitDirs: readonly string[], scope: readonly string[]): Promise<void> {

@@ -527,6 +527,44 @@ describe("F7: links at or below the git directory entries git reads stay inside 
     expect(await resolveGitCommitRef(root, "alias")).toBe(head);
   }, 60_000);
 
+  // A ref-tree link back to the git directory itself is in scope, but it lets
+  // git read refs/x/<anything> from the git directory's whole tree. The git
+  // directory was first listed only one level deep; the recursive scan through
+  // the link must not be skipped as "already listed".
+  it("scans the git directory recursively when a ref-tree link leads back to it", async () => {
+    const { root } = await repositoryPair("causoryn-parse-link-refs-gitdir-");
+    const outside = await outsideSecret(path.dirname(root));
+    const gitDir = path.join(root, ".git");
+    // hooks/ is not a ref tree; only a ref path through refs/x reaches it.
+    mkdirSync(path.join(gitDir, "hooks", "deep"), { recursive: true });
+    linkDirectory(outside, path.join(gitDir, "hooks", "deep", "leak"));
+    linkDirectory(gitDir, path.join(gitDir, "refs", "x"));
+
+    await expectLinkRefused(root, "HEAD", outside);
+  }, 60_000);
+
+  // git resolves worktrees/<id>/HEAD (and logs for reflog lookups) from any
+  // worktree, so those trees are held to the scope like refs/.
+  it("refuses a link below worktrees/ that leaves the repository", async () => {
+    const { root } = await repositoryPair("causoryn-parse-link-worktrees-");
+    const outside = await outsideSecret(path.dirname(root));
+    const worktree = path.join(root, ".git", "worktrees", "wt1");
+    mkdirSync(worktree, { recursive: true });
+    linkDirectory(outside, path.join(worktree, "refs"));
+
+    await expectLinkRefused(root, "HEAD", outside);
+  }, 60_000);
+
+  it("refuses a link below logs/ that leaves the repository", async () => {
+    const { root } = await repositoryPair("causoryn-parse-link-logs-");
+    const outside = await outsideSecret(path.dirname(root));
+    const logs = path.join(root, ".git", "logs", "refs");
+    mkdirSync(logs, { recursive: true });
+    linkDirectory(outside, path.join(logs, "remotes"));
+
+    await expectLinkRefused(root, "HEAD", outside);
+  }, 60_000);
+
   it("still reads a repository whose info directory is a link inside the analyzed root", async () => {
     const root = tempDir("causoryn-parse-link-inner-info-");
     const head = await initRepo(root, "a.txt", "a\n");
