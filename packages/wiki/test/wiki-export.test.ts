@@ -844,3 +844,32 @@ describe("exportWikiOffline (atomic write temp files)", () => {
 function httpUrlMatches(text: string): string[] {
   return [...text.matchAll(/https?:\/\/[^\s"'<>)]*/g)].map((match) => match[0]);
 }
+
+describe("serializeWikiPageMarkdown — email autolinks, @-mentions and character references", () => {
+  it("renders repository @ and & text so GitHub forms no mailto or mention link", () => {
+    // Forms checked with GitHub's renderer (`gh api -X POST /markdown -f
+    // mode=gfm`, 2026-11-26): `ops&#8203;@&#8203;evil.test` and
+    // `&#8203;@&#8203;github` render as plain text, `\&commat;` literally.
+    const base = buildFixtureProjection();
+    const target = page({ id: "page:66666666", kind: "module", title: "Owner ops@evil.test", slug: "owner" });
+    const projection: WikiProjection = {
+      ...base,
+      pages: [...base.pages, target],
+      sections: [
+        ...base.sections,
+        section({
+          id: "section:ffff0001",
+          pageId: "page:66666666",
+          generatedMarkdown: "- Contact: mailto:sec@evil.test, ping @github\n- Package: node_modules/@scope/pkg R&D ops&commat;evil.test",
+        }),
+      ],
+    };
+
+    const md = serializeWikiPageMarkdown(projection, target);
+
+    expect(md).toContain("# Owner ops&#8203;@&#8203;evil.test");
+    expect(md).toContain("- Contact: mailto:sec&#8203;@&#8203;evil.test, ping &#8203;@&#8203;github");
+    expect(md).toContain("- Package: node_modules/&#8203;@&#8203;scope/pkg R\\&D ops\\&commat;evil.test");
+    expect(md.split("&#8203;@&#8203;").join("")).not.toContain("@");
+  });
+});

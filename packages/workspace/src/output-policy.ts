@@ -20,6 +20,10 @@ import {
   inspectLinkTargets,
   isUncOrDevicePath,
   LINK_TARGET_INSPECTION_ENABLED,
+  normalizeRootLevelAlias,
+  pathCrossesLink,
+  readRootLevelLinks,
+  type PolicyEnvironment,
 } from "./path-safety.js";
 
 /**
@@ -36,6 +40,8 @@ import {
  *
  * Karar sırası her aday için sabittir (determinizm, TŞ §6):
  *   1. girdi biçimi reddi (boş yol / null byte)
+ *   1b. leksik beyan üyeliği: beyanlı dizin dışında yazılmış yol dosya
+ *      sistemine dokunulmadan tek sabit gerekçeyle reddedilir (F21 / F73)
  *   2. dizin realpath çözümlemesi (dizin var olmak zorundadır; MCP isteği
  *      tek başına output kökü EKLEYEMEZ — TŞ §9/§20 explicit authorization)
  *   3. beyanlı output dizin listesi üyeliği (comparable, win32 büyük/küçük
@@ -137,6 +143,18 @@ function deny(code: OutputPolicyErrorCode, reason: string, rule?: string): Outpu
 }
 
 /**
+ * The one answer for every output directory outside the declared ones, whatever
+ * the filesystem holds there (Claude Security F21 / F73: no existence oracle
+ * through the export tools' `outputDir`).
+ */
+function outputNotDeclared(): OutputDeny {
+  return deny(
+    "workspace/output-not-authorized",
+    "output directory is not in the user-declared output list (explicit authorization required)",
+  );
+}
+
+/**
  * Mode of a publication temp file, and so of the published file (the mode
  * survives the rename): Node's default 0o666, narrowed by the process umask
  * (0o644 under the usual 022), as for the exports before CAU-08. The security
@@ -202,7 +220,12 @@ function removeOwnTempFile(tmpPath: string, identity: FileIdentity): void {
 function windowsOutputPathDeny(
   rawPath: string,
   label: string,
-  inspectFrom?: { readonly absolute: string; readonly startDir?: string },
+  inspectFrom?: {
+    readonly absolute: string;
+    readonly startDir?: string;
+    /** Authorized directories: a link leading out of them is not followed (see inspectLinkTargets). */
+    readonly confineTo?: readonly string[];
+  },
 ): OutputDeny | undefined {
   if (IS_WIN) {
     const finding = findWindowsUnsafePathSegment(rawPath);
@@ -215,14 +238,20 @@ function windowsOutputPathDeny(
     }
   }
   if (LINK_TARGET_INSPECTION_ENABLED && inspectFrom !== undefined) {
-    const inspection = inspectLinkTargets(
-      inspectFrom.absolute,
-      inspectFrom.startDir === undefined ? {} : { startDir: inspectFrom.startDir },
-    );
+    const inspection = inspectLinkTargets(inspectFrom.absolute, {
+      ...(inspectFrom.startDir === undefined ? {} : { startDir: inspectFrom.startDir }),
+      ...(inspectFrom.confineTo === undefined ? {} : { confineTo: inspectFrom.confineTo }),
+    });
+    if (!inspection.ok && inspection.reason === "link-leaves-area") {
+      return outputNotDeclared();
+    }
     if (!inspection.ok) {
       return deny(
         "workspace/output-path-denied",
-        `${label}: ${describeLinkInspectionFailure(inspection)}`,
+        `${label}: ${describeLinkInspectionFailure(
+          inspection,
+          inspectFrom.startDir === undefined ? {} : { within: inspectFrom.startDir },
+        )}`,
         inspection.reason,
       );
     }
@@ -233,9 +262,34 @@ function windowsOutputPathDeny(
 export class OutputAccessPolicy {
   /** Beyanlı output kökleri; kanonik + leksik sıralı (deterministik dizi). */
   private readonly canonicalDirs: readonly string[];
+  /**
+   * The authorized area for the lexical gate and the link walk: every declared
+   * directory in its declared spelling (inspected in `create`) and in its canonical
+   * real path, and both again with a leading root-level link alias normalized
+   * (macOS `/var` -> `/private/var`).
+   */
+  private readonly areaDirs: readonly string[];
+  /** The filesystem root's own links (see {@link readRootLevelLinks}); empty on Windows. */
+  private readonly rootLinks: ReadonlyMap<string, string>;
 
-  private constructor(canonicalDirs: readonly string[]) {
+  private constructor(
+    canonicalDirs: readonly string[],
+    declaredDirs: readonly string[],
+    rootLinks: ReadonlyMap<string, string>,
+  ) {
     this.canonicalDirs = canonicalDirs;
+    this.rootLinks = rootLinks;
+    const seen = new Set<string>();
+    this.areaDirs = [
+      ...declaredDirs,
+      ...canonicalDirs,
+      ...[...declaredDirs, ...canonicalDirs].map((dir) => normalizeRootLevelAlias(dir, rootLinks)),
+    ].filter((dir) => {
+      const key = comparablePath(dir);
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
   }
 
   /**
@@ -243,8 +297,10 @@ export class OutputAccessPolicy {
    * (default deny). Her beyan: boş olmayan, null byte içermeyen, diskte VAR
    * OLAN bir dizin olmalı ve realpath'e çözümlenmelidir — çözümlenemeyen kök
    * güven kaynağı olamaz. Beyansız dizin kesinlikle reddedilir.
+   * `environment.rootLinks` replaces the filesystem root's links read at creation
+   * (tests simulate another platform's layout with it).
    */
-  static create(allowedOutputDirs: readonly string[]): OutputAccessPolicy {
+  static create(allowedOutputDirs: readonly string[], environment: PolicyEnvironment = {}): OutputAccessPolicy {
     if (allowedOutputDirs.length === 0) {
       throw new OutputPolicyError(
         "workspace/output-policy-invalid",
@@ -313,7 +369,14 @@ export class OutputAccessPolicy {
     const canonicalDirs = [...displayByComparable.values()].sort((a, b) =>
       comparablePath(a) < comparablePath(b) ? -1 : comparablePath(a) > comparablePath(b) ? 1 : 0,
     );
-    return new OutputAccessPolicy(canonicalDirs);
+    // Read once, after the declarations were validated: public system
+    // configuration, never anything derived from a caller's path.
+    const rootLinks = environment.rootLinks ?? (IS_WIN ? new Map<string, string>() : readRootLevelLinks());
+    return new OutputAccessPolicy(
+      canonicalDirs,
+      allowedOutputDirs.map((declared) => path.resolve(declared)),
+      rootLinks,
+    );
   }
 
   /** Beyanlı kanonik output kökleri (leksik sıralı, deterministik). */
@@ -324,6 +387,13 @@ export class OutputAccessPolicy {
   /**
    * Dizin yetkilendirmesi: istenen dizin realpath'e çözümlenir ve beyanlı
    * output köklerinden biri içinde (veya kökle aynı) olmalıdır.
+   *
+   * The decision is lexical first (Claude Security F21 / F73): a directory not
+   * spelled inside a declared output directory (declared or canonical form) gets
+   * one fixed answer before any lstat/readlink/realpath. Inside, links are not
+   * followed out of the declared directories, and a directory below a link that
+   * cannot be resolved gets that same answer, so the export tools' `outputDir`
+   * tells nothing about what exists outside the declared directories.
    */
   authorizeDirectory(dirPath: string): OutputDecision {
     if (dirPath.length === 0) {
@@ -339,16 +409,41 @@ export class OutputAccessPolicy {
         "unc-or-device-path",
       );
     }
-    const hardeningDeny = windowsOutputPathDeny(dirPath, "output directory path is not usable", {
-      absolute: path.resolve(dirPath),
+    const label = "output directory path is not usable";
+    // Lexical name checks first (no filesystem access).
+    const segmentDeny = windowsOutputPathDeny(dirPath, label);
+    if (segmentDeny !== undefined) {
+      return segmentDeny;
+    }
+    // Tried as spelled, then with a leading root-level link alias normalized
+    // (`/tmp/out` against a declared `/private/tmp/out`); the spelling that matched
+    // names the same directory through the system's own root link.
+    const resolved = path.resolve(dirPath);
+    const normalized = normalizeRootLevelAlias(resolved, this.rootLinks);
+    let lexical = resolved;
+    let area = this.areaDirs.find((areaDir) => isInside(areaDir, resolved));
+    if (area === undefined && normalized !== resolved) {
+      lexical = normalized;
+      area = this.areaDirs.find((areaDir) => isInside(areaDir, normalized));
+    }
+    if (area === undefined) {
+      return outputNotDeclared();
+    }
+    const linkDeny = windowsOutputPathDeny(dirPath, label, {
+      absolute: lexical,
+      startDir: area,
+      confineTo: this.areaDirs,
     });
-    if (hardeningDeny !== undefined) {
-      return hardeningDeny;
+    if (linkDeny !== undefined) {
+      return linkDeny;
     }
     let canonical: string;
     try {
-      canonical = realpathSync(dirPath);
+      canonical = realpathSync(lexical);
     } catch {
+      if (pathCrossesLink(lexical, area)) {
+        return outputNotDeclared();
+      }
       return deny(
         "workspace/output-not-authorized",
         "output directory could not be resolved to a real path (missing or inaccessible); an unverifiable directory cannot be a write target",
@@ -356,10 +451,7 @@ export class OutputAccessPolicy {
     }
     const declared = this.canonicalDirs.find((canonicalDir) => isInside(canonicalDir, canonical));
     if (declared === undefined) {
-      return deny(
-        "workspace/output-not-authorized",
-        "output directory is not in the user-declared output list (explicit authorization required)",
-      );
+      return outputNotDeclared();
     }
     return { allowed: true, canonicalDir: canonical, canonicalPath: canonical };
   }

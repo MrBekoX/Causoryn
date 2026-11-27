@@ -122,14 +122,61 @@ strictly read-only and sends the worker a `projects` field
   (https://learn.microsoft.com/dotnet/core/project-sdk/overview#implicit-using-directives);
   `System.Net.Http` is omitted for .NET Framework targets. `<Using Include/Remove>`
   with `Alias` / `Static` metadata is honored in MSBuild import order
-  (`Directory.Build.props` → SDK defaults → project file).
+  (`Directory.Build.props` → SDK defaults → project file). At most 512
+  directives per project are sent (`MAX_GLOBAL_USINGS_PER_PROJECT`, the
+  worker's `MaxGlobalUsingsPerProject`): the SDK defaults are kept first, then
+  the other items in evaluation order, and the rest is dropped with a warning
+  (`<project>: <n> global usings exceed the limit of 512 per project; ...`), so
+  the worker does not reject the whole request and drop every C# file to
+  file-level facts. A `Using` item that cannot be a global using is skipped
+  with a warning (`… is not a dotted C# name; skipped`, `… has an alias that
+  is not a C# identifier (…); skipped`, `… is both static and aliased, which
+  the .NET SDK rejects; skipped`). Names are checked the way the worker and
+  Roslyn check them, on UTF-16 code units: a character outside the Basic
+  Multilingual Plane (for example U+1D49C) is a surrogate pair, not an
+  identifier character, so such a name is skipped too. The worker applies the
+  same rules and drops an invalid entry with a warning instead of rejecting
+  the request.
 - **ProjectReference:** resolved to owning projects of the analysis set; the
-  worker references the transitive closure.
+  worker references the transitive closure. At most 512 references per project
+  are sent (`MAX_PROJECT_REFERENCES_PER_PROJECT`); the last ones in ordinal
+  order are dropped with a warning (`<project>: <n> project references exceed
+  the limit of 512 per project; ...`).
 - **Not evaluated (explicit warning when they touch a modeled setting):** MSBuild
   conditions other than `'$(P)' == 'v'` / `!=` on a modeled property, property
   functions/`$(...)` values, `<Choose>`, `<Import>`ed files, `Using Update`,
   `Directory.Build.targets`, SDKs outside the documented table (for example
   `Microsoft.NET.Sdk.Razor`, `MSTest.Sdk`).
+
+## NuGet reference discovery bounds
+
+When `rootDir` is given, `discoverNugetReferenceDirs` (`src/analyzer.ts`) reads
+`obj/project.assets.json` files inside `rootDir` read-only and sends the
+compile-time DLL directories it finds as `referenceDirs`. The work an untrusted
+assets file can cause is bounded:
+
+- one discovery spends at most 20,000 file system probes (`MAX_NUGET_PROBES`;
+  lstat / realpath / readlink) across every assets file; when they are spent,
+  discovery stops with the warning `NuGet reference discovery stopped after
+  20000 file system probes; the remaining project.assets.json entries were not
+  inspected`;
+- the probes are split fairly: each assets file may spend what is left of the
+  global budget divided by the assets files still to be read, at most 10,000
+  (`MAX_NUGET_PROBES_PER_ASSETS_FILE`), so crafted files that sort first cannot
+  spend the probes of the legitimate files after them; a file that uses up its
+  share stops with the warning `<assets file>: NuGet reference discovery
+  stopped after <share> file system probes for this assets file; its remaining
+  entries were not inspected`;
+- each package folder / package directory pair is resolved once and the
+  result is reused;
+- a `packageFolders` entry with more than 256 path components
+  (`MAX_PACKAGE_FOLDER_COMPONENTS`) is ignored before any probe, with the
+  warning `<assets file>: ignored <n> NuGet packageFolders entries with more
+  than 256 path components`;
+- at most 8 usable `packageFolders` entries are inspected per assets file
+  (`MAX_NUGET_PACKAGE_FOLDERS`); the remaining ones are skipped with a warning
+  (`<assets file>: only the first 8 usable NuGet packageFolders entries were
+  inspected; <n> further entries were skipped`).
 
 ## Testler
 
@@ -152,12 +199,18 @@ packages/indexing B9 diliminde **fp3 şemasıyla kapatıldı**
 
 fp3 analyzerFingerprint sözleşmesi — "|" ile ayrılmış konumsal segmentler:
 
-    fp3|<ts-adapter>@<ver>|roslyn-worker@<ver>|refpack=<pack>@<sürüm>@<tfmDir>;...|refsrc=<kaynak>|opts=<sha256-16>
+    fp3|<ts-adapter>@<ver>|roslyn-worker@<ver>|refpack=<pack>@<sürüm>@<tfm>;...|refsrc=<kaynak>|opts=<sha256-16>
 
 - **adapter versiyonu**: koşuma katılan her adapter'ın id@versiyonu.
 - **refpack**: worker'ın GERÇEKTEN yüklediği ref pack sürümleri — worker
-  healthy yanıt warnings'inden türetilir (ReferenceResolver.cs:248 canonical
-  satırı `reference pack loaded: <pack> <version> (<tfmDir>)`). Pack hiç
+  healthy yanıt warnings'inden türetilir (ReferenceResolver.cs:351 canonical
+  satırı `reference pack loaded: <pack> <version> (<tfmDir>)`). `<tfm>`,
+  `tfmDir`'in yalnızca son bileşenidir (ör. `net8.0`): mutlak ref-pack dizini
+  kullanıcı-yerel bir .NET kurulumunda OS kullanıcı adını taşır ve
+  fingerprint doküman export'larında yazdırılır, bu yüzden fingerprint'e
+  girmez (`tfmDirName`, `packages/indexing/src/fingerprint.ts`); yalnızca
+  bellekte refsrc tespiti için kullanılır. Pack, sürüm ve TFM değişimi
+  fingerprint'i yine değiştirir. Pack hiç
   bulunamadıysa (`Microsoft.NETCore.App.Ref pack not found; ...` uyarısı)
   `fallback-corelib` (System.Private.CoreLib runtime ref);
   keşif bilgisi yoksa `unavailable` — hiçbir koşulda uydurma sürüm yazılmaz.
@@ -177,8 +230,10 @@ fp3 analyzerFingerprint sözleşmesi — "|" ile ayrılmış konumsal segmentler
   hash'te "etkin ayar" gibi gösterilmez (bayat kopya riski — denetim
   bulgusu).
 
-Sonuç: farklı ref-pack sürümü/kurulumu/ayarı → FARKLI fingerprint →
-makineler arası Graph JSON eşitliği artık yanlış taahhüt edilmez; aynı
+Sonuç: farklı ref-pack kümesi/sürümü/TFM'i, keşif kaynağı (refsrc) veya
+ayarı → FARKLI fingerprint → makineler arası Graph JSON eşitliği artık
+yanlış taahhüt edilmez (aynı pack/sürüm/TFM'in yalnızca kurulum dizini
+farklıysa refpack segmenti aynı kalır — referans derlemeleri aynıdır); aynı
 makinede aynı girdi → aynı fingerprint (determinizm korunur, TŞ §8
 invariant vi). Yüzey: `IndexService.runIndexAsync` (tam pipeline),
 `IndexJobManager` refresh işleri (B9 denetim düzeltmesiyle TAM pipeline'ı

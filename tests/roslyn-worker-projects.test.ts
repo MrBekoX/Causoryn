@@ -53,6 +53,7 @@ interface WorkerResponse {
   status: string;
   diagnostics?: Array<{ relativePath: string; code: string; message: string; line: number }>;
   edges?: WorkerEdge[];
+  nodes?: Array<{ kind: string; qualifiedName: string }>;
   warnings?: string[];
   error?: { code: string; message: string };
 }
@@ -158,6 +159,12 @@ const LIB_CONSOLE_SOURCE = [
 ].join("\n");
 
 const TOP_LEVEL_TOOL = "System.Console.WriteLine(\"tool\");\n";
+
+/** References `Injected`, the class an injected global using name would declare. */
+const INJECTION_PROBE = {
+  path: "App/Probe.cs",
+  content: ["namespace App;", "", "public static class Probe", "{", "    public static object Make() => new Injected();", "}", ""].join("\n"),
+};
 
 const MAIN_PROGRAM = [
   "namespace Svc;",
@@ -416,17 +423,27 @@ describe.skipIf(!dotnetAvailable)("roslyn-worker projects: request validation", 
   beforeAll(() => {
     const requests = [
       analyze("bad-unknown-project-field", [file], [{ path: "App/App.csproj", extra: 1 }]),
-      analyze("bad-using-injection", [file], [
-        { path: "App/App.csproj", globalUsings: [{ name: "System; class Injected { }" }] },
+      // The probe references the class the dropped "name" would declare if its
+      // text reached the generated global usings tree (`global using global::System;
+      // class Injected { };` sorts last and would compile cleanly).
+      analyze("bad-using-injection", [file, INJECTION_PROBE], [
+        { path: "App/App.csproj", globalUsings: [...SDK_DEFAULT_USINGS, { name: "System; class Injected { }" }] },
       ]),
       analyze("bad-using-unknown-field", [file], [
         { path: "App/App.csproj", globalUsings: [{ name: "System", global: true }] },
       ]),
       analyze("bad-static-alias", [file], [
-        { path: "App/App.csproj", globalUsings: [{ name: "System.Math", static: true, alias: "M" }] },
+        { path: "App/App.csproj", globalUsings: [...SDK_DEFAULT_USINGS, { name: "System.Math", static: true, alias: "M" }] },
       ]),
       analyze("bad-alias", [file], [
-        { path: "App/App.csproj", globalUsings: [{ name: "System.Math", alias: "A.B" }] },
+        { path: "App/App.csproj", globalUsings: [...SDK_DEFAULT_USINGS, { name: "System.Math", alias: "A.B" }] },
+      ]),
+      // U+1D49C is a letter, but a surrogate pair in UTF-16: no C# identifier character.
+      analyze("bad-using-supplementary-name", [file], [
+        { path: "App/App.csproj", globalUsings: [...SDK_DEFAULT_USINGS, { name: "System.\u{1D49C}Lib" }] },
+      ]),
+      analyze("bad-using-supplementary-alias", [file], [
+        { path: "App/App.csproj", globalUsings: [...SDK_DEFAULT_USINGS, { name: "System.Text", alias: "\u{1D49C}" }] },
       ]),
       analyze("bad-project-escape", [file], [{ path: "../App.csproj" }]),
       analyze("bad-project-absolute", [file], [{ path: "C:/App/App.csproj" }]),
@@ -437,7 +454,15 @@ describe.skipIf(!dotnetAvailable)("roslyn-worker projects: request validation", 
       ]),
       analyze("bad-assembly-name", [file], [{ path: "App/App.csproj", assemblyName: "bad/name" }]),
       analyze("bad-assembly-name-newline", [file], [{ path: "App/App.csproj", assemblyName: "App\n" }]),
-      analyze("bad-using-newline", [file], [{ path: "App/App.csproj", globalUsings: [{ name: "System\n" }] }]),
+      analyze("bad-usings-many", [file], [
+        {
+          path: "App/App.csproj",
+          globalUsings: [...SDK_DEFAULT_USINGS, { name: "Bad Name" }, { name: "A.B", alias: "X.Y" }, { name: "System.Math", static: true, alias: "M" }],
+        },
+      ]),
+      analyze("bad-using-newline", [file], [
+        { path: "App/App.csproj", globalUsings: [...SDK_DEFAULT_USINGS, { name: "System\n" }] },
+      ]),
     ];
     for (const response of runWorker(requests)) {
       responses.set(String(response.id), response);
@@ -446,10 +471,7 @@ describe.skipIf(!dotnetAvailable)("roslyn-worker projects: request validation", 
 
   it.each([
     "bad-unknown-project-field",
-    "bad-using-injection",
     "bad-using-unknown-field",
-    "bad-static-alias",
-    "bad-alias",
     "bad-project-escape",
     "bad-project-absolute",
     "bad-project-extension",
@@ -457,11 +479,68 @@ describe.skipIf(!dotnetAvailable)("roslyn-worker projects: request validation", 
     "bad-project-reference",
     "bad-assembly-name",
     "bad-assembly-name-newline",
-    "bad-using-newline",
   ])("%s is rejected with INVALID_ARGUMENT and an English message", (id) => {
     const response = responses.get(id);
     expect(response?.status).toBe("error");
     expect(response?.error?.code).toBe("INVALID_ARGUMENT");
     expect(response?.error?.message ?? "").not.toMatch(/[çğıöşüÇĞİÖŞÜ]/);
+  });
+
+  // A global using the worker cannot accept (not a dotted C# name, an alias that is
+  // not one identifier, static together with alias) is dropped with a warning; the
+  // request is analyzed and its other usings apply (security finding F22: one bad
+  // entry must not drop every C# file of the workspace to file-level facts). The
+  // dropped text never reaches the generated global usings tree.
+  it.each([
+    ["bad-using-injection", "is not a dotted C# name"],
+    ["bad-static-alias", "is both static and aliased"],
+    ["bad-alias", "has an alias that is not a C# identifier"],
+    ["bad-using-newline", "is not a dotted C# name"],
+    ["bad-using-supplementary-name", "is not a dotted C# name"],
+    ["bad-using-supplementary-alias", "has an alias that is not a C# identifier"],
+  ])("%s: the invalid global using is dropped with a warning and the request is analyzed", (id, reason) => {
+    const response = responses.get(id);
+    expect(response?.status).not.toBe("error");
+    expect(response?.error).toBeUndefined();
+    const skipped = (response?.warnings ?? []).filter((warning) => warning.includes("global using") && warning.includes("skipped"));
+    expect(skipped).toHaveLength(1);
+    expect(skipped[0]).toContain("App/App.csproj");
+    expect(skipped[0]).toContain(reason);
+    expect(skipped[0]).not.toMatch(/[\u0000-\u001f]/);
+    expect(skipped[0]).not.toMatch(/[çğıöşüÇĞİÖŞÜ]/);
+    // The valid using of the same project still applies (Console resolves).
+    expect(callEdge(response, "App.Runner.Run", "System.Console.WriteLine")?.resolution).toBe("verified");
+  });
+
+  it("bad-using-injection: the dropped text never reaches the compilation (the class it would declare stays unknown)", () => {
+    const response = responses.get("bad-using-injection");
+    expect(response?.status).not.toBe("error");
+    // `new Injected()` in the probe does not bind: CS0246 is reported for it ...
+    const probeDiagnostics = (response?.diagnostics ?? []).filter((diag) => diag.relativePath === INJECTION_PROBE.path);
+    expect(probeDiagnostics.map((diag) => diag.code)).toContain("CS0246");
+    expect(probeDiagnostics.find((diag) => diag.code === "CS0246")?.message).toContain("Injected");
+    // ... the creation stays an unresolved call, never a verified edge to an `Injected` symbol ...
+    const creations = (response?.edges ?? []).filter(
+      (edge) => edge.kind === "CALLS" && edge.from.qualifiedName === "App.Probe.Make",
+    );
+    expect(creations.length).toBeGreaterThan(0);
+    for (const edge of creations) {
+      expect(edge.resolution).toBe("unresolved");
+      expect(edge.to.kind).toBe("UnknownExternal");
+    }
+    expect((response?.nodes ?? []).some((node) => node.kind !== "UnknownExternal" && node.qualifiedName === "Injected")).toBe(false);
+    // ... and the generated global usings tree compiles without any diagnostic.
+    expect((response?.warnings ?? []).filter((warning) => warning.startsWith("generated global using"))).toEqual([]);
+  });
+
+  it("several invalid global usings of one project give one detailed warning plus a count (bounded warnings)", () => {
+    const response = responses.get("bad-usings-many");
+    expect(response?.status).not.toBe("error");
+    const warnings = (response?.warnings ?? []).filter((warning) => warning.includes("App/App.csproj") && warning.includes("skipped"));
+    expect(warnings).toEqual([
+      "global using 'Bad Name' of project 'App/App.csproj' was skipped: it is not a dotted C# name",
+      "2 further global usings of project 'App/App.csproj' were skipped for the same kinds of reasons",
+    ]);
+    expect(callEdge(response, "App.Runner.Run", "System.Console.WriteLine")?.resolution).toBe("verified");
   });
 });

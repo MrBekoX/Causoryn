@@ -29,8 +29,8 @@ import {
   type TsAdapterSourceFile,
 } from "./types.js";
 import {
-  buildProgramCompilerOptions, expandCandidatePaths, loadPackageModuleScopes,
-  loadWorkspacePackages, loadWorkspaceTsConfigs, type PackageModuleScope,
+  buildProgramCompilerOptions, createVirtualAliasResolutionState, expandCandidatePaths,
+  loadPackageModuleScopes, loadWorkspacePackages, loadWorkspaceTsConfigs, type PackageModuleScope,
   resolveScopedModuleName, type ScopedTsConfig, type WorkspacePackageManifest,
 } from "./tsconfig-loader.js";
 
@@ -296,12 +296,13 @@ class GraphAssembler {
     attributes?: Record<string, unknown>;
     location?: SnapshotNodeInput["location"];
   }): NodeRecord {
-    const key = this.nodeKey(input.kind, input.qualifiedName, input.relativePath);
+    const qualifiedName = input.kind === "File" ? input.qualifiedName : boundName(input.qualifiedName);
+    const key = this.nodeKey(input.kind, qualifiedName, input.relativePath);
     const existing = this.nodes.get(key);
     if (existing !== undefined) return withLocation(existing, input.location);
     const ref: NodeRef = {
       kind: input.kind,
-      qualifiedName: input.qualifiedName,
+      qualifiedName,
       ...(input.relativePath === undefined
         ? {}
         : { relativePath: input.relativePath }),
@@ -479,10 +480,8 @@ function runAnalysis(input: TypeScriptAdapterInput): AnalysisRun {
     moduleFormat.projections,
     { addWarning: (message) => hostWarnings.push(message) },
   );
-  const resolveOne = (
-    moduleName: string,
-    containingFile: string,
-  ): ts.ResolvedModuleFull | undefined => resolveScopedModuleName({
+  const virtualAliasState = createVirtualAliasResolutionState(); // alias work budget of this run
+  const resolveOne = memoizeModuleResolver((moduleName, containingFile) => resolveScopedModuleName({
     moduleName,
     containingFile,
     rootPosix,
@@ -492,7 +491,8 @@ function runAnalysis(input: TypeScriptAdapterInput): AnalysisRun {
     workspacePackages: loadedPackages.packages,
     resolutionHost,
     entries,
-  });
+    virtualAliasState,
+  }));
   const resolveModuleNamesHook: ts.CompilerHost["resolveModuleNames"] = (
     moduleNames,
     containingFile,
@@ -508,11 +508,11 @@ function runAnalysis(input: TypeScriptAdapterInput): AnalysisRun {
   host.resolveModuleNameLiterals = resolveModuleNameLiteralsHook;
 
   // 3) Program + TypeChecker (TŞ §7: TypeScript Compiler API) + incremental oldProgram.
-  const { program, optionsSignature } = createProgramWithIncrementalReuse({
+  const { program, optionsSignature, depthLimitedKeys } = createProgramWithIncrementalReuse({
     input, rootPosix, compilerOptions, loadedConfigs: loadedConfigs.configs, moduleScopes: moduleFormat.scopes,
     workspacePackages: loadedPackages.packages, host, entries, sortedEntries, resolvedLibDir,
   });
-  const checker = program.getTypeChecker();
+  const { checker, failure: checkerFailure } = createTypeCheckerWithinBoundary(program);
   for (const sourceFile of program.getSourceFiles()) {
     const hit = entries.get(canonicalPath(sourceFile.fileName));
     if (hit !== undefined) hit.sourceFile = sourceFile;
@@ -520,6 +520,30 @@ function runAnalysis(input: TypeScriptAdapterInput): AnalysisRun {
 
   const assembler = new GraphAssembler(input.workspaceId);
   for (const warning of [...loadedConfigs.warnings, ...loadedPackages.warnings, ...moduleFormat.warnings, ...hostWarnings]) assembler.addWarning(warning);
+  const diagnostics: TypeScriptAdapterDiagnostic[] = reportSyntaxDepthLimits(assembler, sortedEntries, depthLimitedKeys, rootPosix);
+
+  // File node'ları (deterministik: sıralı girdi, dosya uzantısına göre dil).
+  for (const entry of sortedEntries) {
+    assembler.ensureNode({
+      kind: "File",
+      qualifiedName: entry.relativePath,
+      relativePath: entry.relativePath,
+      language: entry.language,
+      attributes: { sourceHash: entry.sourceHash },
+    });
+  }
+
+  const capabilities: TypeScriptAdapterCapabilities = {
+    astParse: true,
+    symbolResolution: true,
+    containsEdges: true,
+    importEdges: true,
+    callEdges: true,
+    routeDetection: "http-verb-call-pattern",
+    frameworkLinkers: TS_ADAPTER_FRAMEWORK_LINKERS,
+  };
+
+  if (checker === undefined) return buildFileLevelOnlyRun({ assembler, diagnostics, capabilities, program, sortedEntries, optionsSignature, failure: checkerFailure ?? "unknown error", aliasWarnings: virtualAliasState.warnings });
   const context: AnalysisContext = {
     workspaceId: input.workspaceId,
     compilerOptions,
@@ -540,19 +564,6 @@ function runAnalysis(input: TypeScriptAdapterInput): AnalysisRun {
       diagnostics: [],
     },
   };
-
-  const diagnostics: TypeScriptAdapterDiagnostic[] = [];
-
-  // File node'ları (deterministik: sıralı girdi, dosya uzantısına göre dil).
-  for (const entry of sortedEntries) {
-    assembler.ensureNode({
-      kind: "File",
-      qualifiedName: entry.relativePath,
-      relativePath: entry.relativePath,
-      language: entry.language,
-      attributes: { sourceHash: entry.sourceHash },
-    });
-  }
 
   /* Geçiş fazları: her faz dosya başına try/catch ile izole edilir — tek
    * dosyanın sorunu motoru düşürmez, tanı olarak toplanır (TŞ §5.1). */
@@ -639,7 +650,7 @@ function runAnalysis(input: TypeScriptAdapterInput): AnalysisRun {
    * (kind, from, to) kenarını kanıt birleştirmeyle (aynı evidence ID)
    * paylaşır. Framework olmayan projelerde bu faz sessizdir — Faz A
    * davranışı bit-bit korunur. */
-  const expressDetection = detectExpressFramework(sortedEntries);
+  const expressDetection = detectExpressFramework(sortedEntries, (entry, error) => diagnostics.push(internalDiagnostic(entry, error)));
   const nextDetection = detectNextAppRouterFramework(sortedEntries);
   if (expressDetection !== undefined) {
     context.framework.detections.push(expressDetection);
@@ -666,6 +677,7 @@ function runAnalysis(input: TypeScriptAdapterInput): AnalysisRun {
       extractCallsAndRoutes(context, entry, sourceFile),
     );
   }
+  for (const warning of virtualAliasState.warnings) assembler.addWarning(warning);
 
   // 4) Kanonik düzende çıktı (TŞ §8 invariant iv/vi).
   const byEdgeKey = (a: EdgeRecord, b: EdgeRecord): number => {
@@ -697,16 +709,6 @@ function runAnalysis(input: TypeScriptAdapterInput): AnalysisRun {
       ? 0
       : Math.round((verifiedEdges / totalEdges) * 10000) / 10000;
 
-  const capabilities: TypeScriptAdapterCapabilities = {
-    astParse: true,
-    symbolResolution: true,
-    containsEdges: true,
-    importEdges: true,
-    callEdges: true,
-    routeDetection: "http-verb-call-pattern",
-    frameworkLinkers: TS_ADAPTER_FRAMEWORK_LINKERS,
-  };
-
   return buildAnalysisRunWithIncrementalState({
     diagnostics,
     capabilities,
@@ -714,7 +716,7 @@ function runAnalysis(input: TypeScriptAdapterInput): AnalysisRun {
     assembler,
     nodeInputs,
     edgeInputs,
-    context,
+    framework: context.framework,
     frameworkNodes,
     byEdgeKey,
     program,
@@ -886,7 +888,7 @@ function extractDeclarations(
         ownerRecord,
         memberRecord,
         member,
-        `CONTAINS: member ${memberName} of the ${ownerRecord.node.qualifiedName} ${ownerKind.toLowerCase()} declaration, matched by AST span evidence.`,
+        `CONTAINS: member ${boundName(memberName)} of the ${ownerRecord.node.qualifiedName} ${ownerKind.toLowerCase()} declaration, matched by AST span evidence.`,
       );
     }
   };
@@ -908,7 +910,7 @@ function extractDeclarations(
         fileNode,
         record,
         statement,
-        `CONTAINS: ${kind.toLowerCase()} declaration ${name} in ${entry.relativePath}, matched by AST span evidence.`,
+        `CONTAINS: ${kind.toLowerCase()} declaration ${record.node.qualifiedName} in ${entry.relativePath}, matched by AST span evidence.`,
       );
       registerMembers(statement, record, kind);
       continue;
@@ -928,7 +930,7 @@ function extractDeclarations(
         fileNode,
         record,
         statement,
-        `CONTAINS: function declaration ${name} in ${entry.relativePath}, matched by AST span evidence.`,
+        `CONTAINS: function declaration ${record.node.qualifiedName} in ${entry.relativePath}, matched by AST span evidence.`,
       );
       continue;
     }
@@ -958,7 +960,7 @@ function extractDeclarations(
           fileNode,
           record,
           statement,
-          `CONTAINS: handler binding ${declaration.name.text} in ${entry.relativePath}, matched by AST span evidence.`,
+          `CONTAINS: handler binding ${record.node.qualifiedName} in ${entry.relativePath}, matched by AST span evidence.`,
         );
       }
       continue;
@@ -1110,33 +1112,41 @@ function extractTestDefinitions(
 ): void {
   const { assembler, testCallbacks, testBlockCalls } = context;
 
-  const walk = (node: ts.Node, suiteChain: readonly string[]): void => {
+  // One bounded "outer > inner" suite path: every test copies it into its name.
+  const testPath = (suitePath: string | undefined, title: string): string => boundName(suitePath === undefined ? title : `${suitePath} > ${title}`);
+  // A suite or test call descends into its callee, then into its arguments with
+  // the callback replaced by its body (which gets `bodyPath`); nothing else.
+  const callChildren = (
+    call: ts.CallExpression,
+    match: BddBlockMatch,
+    suitePath: string | undefined,
+    bodyPath: string | undefined,
+  ): ChosenChildren<string | undefined> =>
+    new ChosenChildren<string | undefined>([
+      [call.expression, suitePath],
+      ...call.arguments.map((arg): readonly [ts.Node, string | undefined] =>
+        arg === match.callback ? [match.callback.body, bodyPath] : [arg, suitePath],
+      ),
+    ]);
+
+  // Pre-order walk on an explicit stack (see walkPreOrder): chains the nesting
+  // screen admits (thousands of `,` or `=` links) cannot overflow this phase,
+  // so a test file yields the same Test nodes whatever the thread's stack size
+  // (the IndexService also runs the adapter in-process, on its main thread).
+  walkPreOrder<string | undefined>(sourceFile, undefined, (node, suitePath) => {
     if (ts.isCallExpression(node)) {
       const suiteMatch = matchSuiteCall(node);
       if (suiteMatch !== undefined) {
         testBlockCalls.add(node);
-        const nextSuiteChain = [...suiteChain, suiteMatch.title];
-        walk(node.expression, suiteChain);
-        for (const arg of node.arguments) {
-          if (arg === suiteMatch.callback) {
-            walk(suiteMatch.callback.body, nextSuiteChain);
-          } else {
-            walk(arg, suiteChain);
-          }
-        }
-        return;
+        return callChildren(node, suiteMatch, suitePath, testPath(suitePath, suiteMatch.title));
       }
 
       const testMatch = matchTestCall(node);
       if (testMatch !== undefined) {
         testBlockCalls.add(node);
-        const qualifiedName =
-          suiteChain.length > 0
-            ? `${suiteChain.join(" > ")} > ${testMatch.title}`
-            : testMatch.title;
         const testRecord = assembler.ensureNode({
           kind: "Test",
-          qualifiedName,
+          qualifiedName: testPath(suitePath, testMatch.title),
           relativePath: entry.relativePath,
           language: entry.language,
         });
@@ -1144,24 +1154,14 @@ function extractTestDefinitions(
           fileNode,
           testRecord,
           node,
-          `CONTAINS: test definition '${qualifiedName}' in ${entry.relativePath}, matched by AST span evidence.`,
+          `CONTAINS: test definition '${testRecord.node.qualifiedName}' in ${entry.relativePath}, matched by AST span evidence.`,
         );
         testCallbacks.set(testMatch.callback, testRecord);
-        walk(node.expression, suiteChain);
-        for (const arg of node.arguments) {
-          if (arg === testMatch.callback) {
-            walk(testMatch.callback.body, suiteChain);
-          } else {
-            walk(arg, suiteChain);
-          }
-        }
-        return;
+        return callChildren(node, testMatch, suitePath, suitePath);
       }
     }
-    ts.forEachChild(node, (child) => walk(child, suiteChain));
-  };
-
-  walk(sourceFile, []);
+    return suitePath;
+  });
 }
 
 /* ------------------------------------------------------------------ */
@@ -1191,18 +1191,18 @@ function classifyModuleSpecifier(
 /** ESM import/export-from ve statik CommonJS `require("...")` specifier'larını toplar. */
 function collectModuleSpecifiers(sourceFile: ts.SourceFile): Array<{ node: ts.StringLiteralLike; text: string }> {
   const specifiers: Array<{ node: ts.StringLiteralLike; text: string }> = [];
-  const visit = (node: ts.Node): void => {
+  const pending: ts.Node[] = [sourceFile]; // explicit-stack pre-order walk (see pushChildrenInReverse)
+  for (let node = pending.pop(); node !== undefined; node = pending.pop()) {
     if (ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) {
       if (node.moduleSpecifier !== undefined && ts.isStringLiteralLike(node.moduleSpecifier)) {
         specifiers.push({ node: node.moduleSpecifier, text: node.moduleSpecifier.text });
       }
-      return;
+      continue;
     }
     const reqArg = isStaticRequireCall(node);
     if (reqArg !== undefined) specifiers.push({ node: reqArg, text: reqArg.text });
-    ts.forEachChild(node, visit);
-  };
-  visit(sourceFile);
+    pushChildrenInReverse(pending, node);
+  }
   return specifiers;
 }
 
@@ -1239,7 +1239,7 @@ function extractImports(
           sourceFile,
           specifier.node,
           "ast-span",
-          `IMPORTS: '${specifier.text}' in ${entry.relativePath} was resolved by the TypeChecker to ${record.targetRelativePath}.`,
+          `IMPORTS: '${boundName(specifier.text)}' in ${entry.relativePath} was resolved by the TypeChecker to ${record.targetRelativePath}.`,
         ),
       });
       continue;
@@ -1262,7 +1262,7 @@ function extractImports(
             sourceFile,
             specifier.node,
             "ast-span",
-            `IMPORTS: '${specifier.text}' was classified as a Node.js core module by a known rule (heuristic); the external source is represented as an explicit UnknownExternal node.`,
+            `IMPORTS: '${boundName(specifier.text)}' was classified as a Node.js core module by a known rule (heuristic); the external source is represented as an explicit UnknownExternal node.`,
           ),
           ambiguity: {
             candidates: [specifier.text],
@@ -1281,7 +1281,7 @@ function extractImports(
           sourceFile,
           specifier.node,
           "ast-span",
-          `IMPORTS: '${specifier.text}' in ${entry.relativePath} resolved to a module outside the analysis set; the external source is represented as an explicit UnknownExternal node.`,
+          `IMPORTS: '${boundName(specifier.text)}' in ${entry.relativePath} resolved to a module outside the analysis set; the external source is represented as an explicit UnknownExternal node.`,
         ),
       });
       continue;
@@ -1309,7 +1309,7 @@ function extractImports(
           sourceFile,
           specifier.node,
           "ast-span",
-          `IMPORTS: '${specifier.text}' was not resolved by the TypeChecker; the relative candidate path ${candidate} matched inside the analysis set (heuristic).`,
+          `IMPORTS: '${boundName(specifier.text)}' was not resolved by the TypeChecker; the relative candidate path ${candidate} matched inside the analysis set (heuristic).`,
         ),
         ambiguity: {
           candidates: [candidate],
@@ -1333,11 +1333,11 @@ function extractImports(
         sourceFile,
         specifier.node,
         "ast-span",
-        `IMPORTS: '${specifier.text}' could not be resolved; marked unresolved on an explicit UnknownExternal node instead of inventing a target.`,
+        `IMPORTS: '${boundName(specifier.text)}' could not be resolved; marked unresolved on an explicit UnknownExternal node instead of inventing a target.`,
       ),
     });
     assembler.addWarning(
-      `IMPORTS unresolved: ${entry.relativePath} -> '${specifier.text}' (unresolved, UnknownExternal node created)`,
+      `IMPORTS unresolved: ${entry.relativePath} -> '${boundName(specifier.text)}' (unresolved, UnknownExternal node created)`,
     );
   }
 }
@@ -1366,7 +1366,9 @@ function extractCallsAndRoutes(
   entry: SourceEntry,
   sourceFile: ts.SourceFile,
 ): void {
-  const visit = (node: ts.Node, caller: NodeRecord | undefined): void => {
+  // Pre-order walk on an explicit stack (expression chains may nest deeper
+  // than the call stack); each node hands its caller on to its children.
+  walkPreOrder<NodeRecord | undefined>(sourceFile, undefined, (node, caller) => {
     let currentCaller = caller;
 
     const testCaller = context.testCallbacks.get(node);
@@ -1392,10 +1394,8 @@ function extractCallsAndRoutes(
       emitCallEdge(context, entry, sourceFile, node, currentCaller);
     }
 
-    ts.forEachChild(node, (child) => visit(child, currentCaller));
-  };
-
-  visit(sourceFile, undefined);
+    return currentCaller;
+  });
 }
 
 /** Caller NodeRecord çözer; anonymous arrow değişkene bağlıysa Handler olur. */
@@ -1412,7 +1412,7 @@ function callerRecordForFunctionLike(
     const owner = node.parent;
     const ownerName =
       (ts.isClassDeclaration(owner) || ts.isInterfaceDeclaration(owner))
-        ? owner.name?.text
+        ? boundedDeclarationName(owner)
         : resolveClassExpressionOwnerName(context, owner);
     const qualifiedName =
       ownerName === undefined ? name.text : `${ownerName}.${name.text}`;
@@ -1508,7 +1508,7 @@ function deriveNodeRecord(
 
   if (ts.isConstructorDeclaration(declaration)) {
     const owner = declaration.parent;
-    const ownerName = ts.isClassDeclaration(owner) ? owner.name?.text : undefined;
+    const ownerName = ts.isClassDeclaration(owner) ? boundedDeclarationName(owner) : undefined;
     if (ownerName === undefined) return undefined;
     kind = "Method";
     qualifiedName = `${ownerName}.constructor`;
@@ -1519,7 +1519,7 @@ function deriveNodeRecord(
     const ownerName =
       (ts.isClassDeclaration(owner) ||
         ts.isInterfaceDeclaration(owner))
-        ? owner.name?.text
+        ? boundedDeclarationName(owner)
         : undefined;
     qualifiedName = ownerName === undefined ? ownName : `${ownerName}.${ownName}`;
     kind = inferNodeKind(declaration);
@@ -1607,7 +1607,7 @@ function tryRoutePattern(
   if (handlerArg === undefined) return true;
   if (!ts.isIdentifier(handlerArg) && !ts.isPropertyAccessExpression(handlerArg)) {
     assembler.addWarning(
-      `Route handler not modeled: ${entry.relativePath} '${verb} ${pathText}' (inline/anonymous handlers are listed in unsupportedConstructs)`,
+      `Route handler not modeled: ${entry.relativePath} '${endpoint.node.qualifiedName}' (inline/anonymous handlers are listed in unsupportedConstructs)`,
     );
     return true;
   }
@@ -1643,7 +1643,7 @@ function tryRoutePattern(
         sourceFile,
         call,
         "route-attribute",
-        `ROUTES_TO: route registration '${verb} ${pathText}' was resolved by the TypeChecker to handler ${handlerRecord.node.qualifiedName}.`,
+        `ROUTES_TO: route registration '${endpoint.node.qualifiedName}' was resolved by the TypeChecker to handler ${handlerRecord.node.qualifiedName}.`,
       ),
     );
     return true;
@@ -1662,14 +1662,14 @@ function tryRoutePattern(
         sourceFile,
         call,
         "route-attribute",
-        `ROUTES_TO: the handler of route registration '${verb} ${pathText}' resolved to symbol ${handlerSymbol.getName()} outside the analysis set; an explicit UnknownExternal node was used.`,
+        `ROUTES_TO: the handler of route registration '${endpoint.node.qualifiedName}' resolved to symbol ${externalHandler.node.qualifiedName} outside the analysis set; an explicit UnknownExternal node was used.`,
       ),
     );
     return true;
   }
 
   assembler.addWarning(
-    `ROUTES_TO unresolved: ${entry.relativePath} '${verb} ${pathText}' -> handler symbol not found (Endpoint node kept, no edge created)`,
+    `ROUTES_TO unresolved: ${entry.relativePath} '${endpoint.node.qualifiedName}' -> handler symbol not found (Endpoint node kept, no edge created)`,
   );
   return true;
 }
@@ -1771,7 +1771,7 @@ function emitCallEdge(
         sourceFile,
         call,
         "semantic-symbol",
-        `CALLS: call in ${caller.node.qualifiedName} resolved to symbol ${externalName} outside the analysis set; the external source is represented as an explicit UnknownExternal node.`,
+        `CALLS: call in ${caller.node.qualifiedName} resolved to symbol ${externalNode.node.qualifiedName} outside the analysis set; the external source is represented as an explicit UnknownExternal node.`,
       ),
     });
     return;
@@ -1838,7 +1838,7 @@ function resolveInternalCallableRecord(
     const owner = decl.parent;
     const ownerName =
       ts.isClassDeclaration(owner) || ts.isInterfaceDeclaration(owner)
-        ? owner.name?.text
+        ? boundedDeclarationName(owner)
         : resolveClassExpressionOwnerName(context, owner);
     if (ownerName !== undefined) {
       const record = context.assembler.ensureNode({
@@ -1950,9 +1950,9 @@ function externalQualifiedName(
       ts.isClassExpression(owner)) &&
     owner.name !== undefined
   ) {
-    return `${owner.name.text}.${symbol.getName()}`;
+    return `${boundNameOf(owner, owner.name.text)}.${boundNameOf(symbol, symbol.getName())}`;
   }
-  return symbol.getName();
+  return boundNameOf(symbol, symbol.getName());
 }
 
 /* ------------------------------------------------------------------ */
@@ -1972,16 +1972,22 @@ function externalQualifiedName(
 /** Express framework tespiti: herhangi bir dosyada tam "express" importu. */
 function detectExpressFramework(
   entries: readonly SourceEntry[],
+  onFileError: (entry: SourceEntry, error: unknown) => void,
 ): FrameworkDetection | undefined {
   const basis: string[] = [];
   for (const entry of entries) {
     const sourceFile = entry.sourceFile;
     if (sourceFile === undefined) continue;
-    for (const specifier of collectModuleSpecifiers(sourceFile)) {
-      if (specifier.text === "express") {
-        basis.push(`import:express@${entry.relativePath}`);
-        break;
+    // Per-file error boundary, as for every other analysis phase.
+    try {
+      for (const specifier of collectModuleSpecifiers(sourceFile)) {
+        if (specifier.text === "express") {
+          basis.push(`import:express@${entry.relativePath}`);
+          break;
+        }
       }
+    } catch (error) {
+      onFileError(entry, error);
     }
   }
   if (basis.length === 0) return undefined;
@@ -2125,7 +2131,7 @@ function collectExpressInstanceVars(
     return instanceVars;
   }
 
-  const visit = (node: ts.Node): void => {
+  walkPreOrder(sourceFile, undefined, (node) => {
     if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name)) {
       const initializer = node.initializer;
       if (initializer !== undefined && ts.isCallExpression(initializer)) {
@@ -2151,9 +2157,8 @@ function collectExpressInstanceVars(
         }
       }
     }
-    ts.forEachChild(node, visit);
-  };
-  visit(sourceFile);
+    return undefined;
+  });
   return instanceVars;
 }
 
@@ -2172,7 +2177,7 @@ function collectExpressRoutes(
 ): void {
   const expressInstanceVars = collectExpressInstanceVars(sourceFile);
   if (expressInstanceVars.size === 0) return;
-  const visit = (node: ts.Node): void => {
+  walkPreOrder(sourceFile, undefined, (node) => {
     if (ts.isCallExpression(node)) {
       const callee = node.expression;
       if (
@@ -2183,9 +2188,8 @@ function collectExpressRoutes(
         tryRoutePattern(context, entry, sourceFile, node, "express");
       }
     }
-    ts.forEachChild(node, visit);
-  };
-  visit(sourceFile);
+    return undefined;
+  });
 }
 
 /** Next.js linker geçişi: kural dosyasına göre route/page çıkarımı. */
@@ -2247,7 +2251,7 @@ function emitNextRouteEdge(
       sourceFile,
       anchor,
       "route-attribute",
-      `ROUTES_TO: Next.js App Router convention export '${method} ${routePath}' (${entry.relativePath}) was resolved by the TypeChecker to symbol ${handlerRecord.node.qualifiedName}.`,
+      `ROUTES_TO: Next.js App Router convention export '${endpoint.node.qualifiedName}' (${entry.relativePath}) was resolved by the TypeChecker to symbol ${handlerRecord.node.qualifiedName}.`,
     ),
   });
   context.framework.edges.push(edge);
@@ -3261,7 +3265,7 @@ function extractCjsExportStatement(
     fileNode,
     record,
     statement,
-    `CONTAINS: CommonJS export ${match.exportName} in ${entry.relativePath}, matched by AST span evidence.`,
+    `CONTAINS: CommonJS export ${record.node.qualifiedName} in ${entry.relativePath}, matched by AST span evidence.`,
   );
 }
 
@@ -3516,7 +3520,12 @@ function createProgramWithIncrementalReuse(params: {
   readonly entries: ReadonlyMap<string, SourceEntry>;
   readonly sortedEntries: readonly SourceEntry[];
   readonly resolvedLibDir: string | undefined;
-}): { readonly program: ts.Program; readonly optionsSignature: string } {
+}): {
+  readonly program: ts.Program;
+  readonly optionsSignature: string;
+  /** Canonical keys of the files the syntax nesting screen replaced by empty modules. */
+  readonly depthLimitedKeys: ReadonlySet<string>;
+} {
   const {
     input,
     rootPosix,
@@ -3561,7 +3570,15 @@ function createProgramWithIncrementalReuse(params: {
       previousSourceHashes,
       resolvedLibDir,
     );
+    // Reuse the old ASTs but never its module resolutions: they are replayed
+    // from this run's memo, and the alias probe budget must be spent in program
+    // order exactly as on a full run (an old resolution of an unchanged file
+    // may have been made before or after the budget ran out).
+    host.hasInvalidatedResolutions = () => true;
   }
+  // Outermost wrapper: it also sees SourceFiles the reuse wrapper hands back.
+  const depthLimitedKeys = new Set<string>();
+  configureSyntaxDepthScreen(host, resolvedLibDir, (fileName) => depthLimitedKeys.add(canonicalPath(fileName)));
   const rootNames = sortedEntries.map((entry) => entry.absolutePath);
   const program = ts.createProgram({
     rootNames,
@@ -3569,7 +3586,7 @@ function createProgramWithIncrementalReuse(params: {
     host,
     ...(oldProgram === undefined ? {} : { oldProgram }),
   });
-  return { program, optionsSignature };
+  return { program, optionsSignature, depthLimitedKeys };
 }
 
 function attachNonEnumerableIncrementalState<T extends object>(
@@ -3592,7 +3609,7 @@ function buildAnalysisRunWithIncrementalState(params: {
   readonly assembler: GraphAssembler;
   readonly nodeInputs: SnapshotNodeInput[];
   readonly edgeInputs: SnapshotEdgeInput[];
-  readonly context: AnalysisContext;
+  readonly framework: FrameworkCollection;
   readonly frameworkNodes: SnapshotNodeInput[];
   readonly byEdgeKey: (a: EdgeRecord, b: EdgeRecord) => number;
   readonly program: ts.Program;
@@ -3606,7 +3623,7 @@ function buildAnalysisRunWithIncrementalState(params: {
     assembler,
     nodeInputs,
     edgeInputs,
-    context,
+    framework: frameworkCollection,
     frameworkNodes,
     byEdgeKey,
     program,
@@ -3641,12 +3658,12 @@ function buildAnalysisRunWithIncrementalState(params: {
   );
 
   const framework: FrameworkEdgesResult = {
-    detections: [...context.framework.detections].sort((a, b) =>
+    detections: [...frameworkCollection.detections].sort((a, b) =>
       a.framework < b.framework ? -1 : 1,
     ),
     nodes: frameworkNodes,
-    edges: [...context.framework.edges].sort(byEdgeKey).map(edgeRecordToInput),
-    diagnostics: [...context.framework.diagnostics].sort((a, b) => {
+    edges: [...frameworkCollection.edges].sort(byEdgeKey).map(edgeRecordToInput),
+    diagnostics: [...frameworkCollection.diagnostics].sort((a, b) => {
       if (a.relativePath !== b.relativePath) {
         return a.relativePath < b.relativePath ? -1 : 1;
       }
@@ -3706,7 +3723,7 @@ function tryRegisterClassExpression(
     fileNode,
     classRecord,
     statement,
-    `CONTAINS: class expression ${declaration.name.text} in ${entry.relativePath}, matched by AST span evidence.`,
+    `CONTAINS: class expression ${classRecord.node.qualifiedName} in ${entry.relativePath}, matched by AST span evidence.`,
   );
   registerMembers(unwrappedInit, classRecord, "Class");
   return true;
@@ -3717,7 +3734,7 @@ function resolveClassExpressionOwnerName(
   owner: ts.Node,
 ): string | undefined {
   if (!ts.isClassExpression(owner)) return undefined;
-  return context.declarationNodes.get(owner)?.node.qualifiedName ?? owner.name?.text;
+  return context.declarationNodes.get(owner)?.node.qualifiedName ?? boundedDeclarationName(owner);
 }
 
 function unwrapAliasSymbol(
@@ -3819,7 +3836,7 @@ function extractHeritageClauses(
           sourceFile,
           heritageType,
           "semantic-symbol",
-          `${edgeKind}: declaration ${ownerRecord.node.qualifiedName} resolved to symbol ${externalName} outside the analysis set; the external source is represented as an explicit UnknownExternal node.`,
+          `${edgeKind}: declaration ${ownerRecord.node.qualifiedName} resolved to symbol ${externalNode.node.qualifiedName} outside the analysis set; the external source is represented as an explicit UnknownExternal node.`,
         ),
       });
       return;
@@ -3841,15 +3858,15 @@ function extractHeritageClauses(
         sourceFile,
         heritageType,
         "ast-span",
-        `${edgeKind}: heritage target '${rawText}' of ${ownerRecord.node.qualifiedName} could not be resolved; marked unresolved on an explicit UnknownExternal node.`,
+        `${edgeKind}: heritage target '${unresolvedNode.node.qualifiedName}' of ${ownerRecord.node.qualifiedName} could not be resolved; marked unresolved on an explicit UnknownExternal node.`,
       ),
     });
     assembler.addWarning(
-      `${edgeKind} unresolved: ${entry.relativePath} '${ownerRecord.node.qualifiedName}' -> '${rawText}' (unresolved, UnknownExternal node created)`,
+      `${edgeKind} unresolved: ${entry.relativePath} '${ownerRecord.node.qualifiedName}' -> '${unresolvedNode.node.qualifiedName}' (unresolved, UnknownExternal node created)`,
     );
   };
 
-  const walk = (node: ts.Node): void => {
+  walkPreOrder(sourceFile, undefined, (node) => {
     if (
       ts.isClassDeclaration(node) ||
       ts.isClassExpression(node) ||
@@ -3869,10 +3886,8 @@ function extractHeritageClauses(
         }
       }
     }
-    ts.forEachChild(node, walk);
-  };
-
-  walk(sourceFile);
+    return undefined;
+  });
 }
 
 /* ------------------------------------------------------------------ */
@@ -3957,4 +3972,371 @@ function loadModuleFormatScopes(
     warnings: loaded.warnings,
     projections: buildPackageJsonProjections(rootPosix, loaded.scopes),
   };
+}
+
+/* ------------------------------------------------------------------ */
+/* Input-size bounds: bounded names, syntax nesting screen, resolution */
+/* memo and the file-level fallback of an unavailable type checker     */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Longest qualifiedName kept verbatim. A longer identifier, test title, route
+ * path or composed name is cut to a head plus a marker with its full length and
+ * a SHA-256 prefix of the full text, so one huge name cannot be copied into
+ * every node key and per-call-site evidence rationale.
+ */
+export const MAX_QUALIFIED_NAME_CHARS = 512;
+const TRUNCATED_NAME_HEAD_CHARS = 200;
+
+/** Bounds one name; names up to `MAX_QUALIFIED_NAME_CHARS` are returned unchanged. */
+function boundName(raw: string): string {
+  if (raw.length <= MAX_QUALIFIED_NAME_CHARS) return raw;
+  let head = raw.slice(0, TRUNCATED_NAME_HEAD_CHARS);
+  const last = head.charCodeAt(head.length - 1);
+  if (last >= 0xd800 && last <= 0xdbff) head = head.slice(0, -1);
+  const digest = sha256Hex(utf8Encode(raw)).slice(0, 16);
+  return `${head}...<${String(raw.length)} chars, sha256 ${digest}>`;
+}
+
+const boundedNamesByOwner = new WeakMap<object, { readonly raw: string; readonly bounded: string }>();
+
+/**
+ * `boundName` memoized on the AST node or symbol the name belongs to: an owner
+ * name is composed into the name of every member, so it is hashed only once.
+ */
+function boundNameOf(owner: object, raw: string): string {
+  if (raw.length <= MAX_QUALIFIED_NAME_CHARS) return raw;
+  const known = boundedNamesByOwner.get(owner);
+  if (known !== undefined && known.raw === raw) return known.bounded;
+  const bounded = boundName(raw);
+  boundedNamesByOwner.set(owner, { raw, bounded });
+  return bounded;
+}
+
+/** Bounded name of a named class/interface declaration (the owner part of member names). */
+function boundedDeclarationName(
+  declaration: ts.ClassLikeDeclaration | ts.InterfaceDeclaration,
+): string | undefined {
+  const raw = declaration.name?.text;
+  return raw === undefined ? undefined : boundNameOf(declaration, raw);
+}
+
+/**
+ * Deepest syntax nesting handed to the TypeScript parser, binder and checker.
+ * They recurse at least one stack frame per level and overflow the call stack
+ * after a few thousand levels (logical-operator chains after about 1000), which
+ * `program.getTypeChecker()` would throw for the whole program. A file nested
+ * deeper is replaced by an empty module and indexed at file level only — as a
+ * fixed bound, independent of the stack size of the hosting thread. Chains of
+ * the binary operators TypeScript binds and checks iteratively do not count
+ * (see `isIterativelyBoundBinary`).
+ */
+export const MAX_SYNTAX_NESTING_DEPTH = 500;
+
+const SYNTAX_DEPTH_LIMIT_MESSAGE =
+  `syntax nesting exceeds the analysis limit (${String(MAX_SYNTAX_NESTING_DEPTH)} levels); the file is indexed at file level only`;
+
+/** Empty modules standing in for depth-limited files (recognized again when an incremental run reuses them). */
+const depthLimitedSubstitutes = new WeakSet<ts.SourceFile>();
+const syntaxDepthVerdicts = new WeakMap<ts.SourceFile, boolean>();
+
+/**
+ * Binary expressions whose operand chains TypeScript 5.9 handles without one
+ * recursion per link. The parser builds left-associative chains (`,` and `||`
+ * included) in a loop and right-associative `=`/`**` chains with one cheap
+ * self-call per link; the binder (`createBindBinaryExpressionFlow`) and the
+ * checker (`createCheckBinaryExpression`) walk every binary operator on a
+ * trampoline. The exceptions are the logical operators `&&`, `||`, `??` and
+ * their assignment forms, which the binder binds through the recursive
+ * `bindLogicalLikeExpression`, and destructuring assignments, which the binder
+ * and the checker hand back to their recursive `bind`/`checkExpression`.
+ */
+function isIterativelyBoundBinary(node: ts.Node): boolean {
+  if (!ts.isBinaryExpression(node)) return false;
+  switch (node.operatorToken.kind) {
+    case ts.SyntaxKind.AmpersandAmpersandToken:
+    case ts.SyntaxKind.BarBarToken:
+    case ts.SyntaxKind.QuestionQuestionToken:
+    case ts.SyntaxKind.AmpersandAmpersandEqualsToken:
+    case ts.SyntaxKind.BarBarEqualsToken:
+    case ts.SyntaxKind.QuestionQuestionEqualsToken:
+      return false;
+    case ts.SyntaxKind.EqualsToken:
+      return !ts.isObjectLiteralExpression(node.left) && !ts.isArrayLiteralExpression(node.left);
+    default:
+      return true;
+  }
+}
+
+/** Iterative (explicit stack) nesting check, JSDoc included; memoized per SourceFile. */
+function exceedsSyntaxNestingDepth(sourceFile: ts.SourceFile): boolean {
+  const known = syntaxDepthVerdicts.get(sourceFile);
+  if (known !== undefined) return known;
+  let exceeds = false;
+  const nodes: ts.Node[] = [sourceFile];
+  const depths: number[] = [0];
+  while (nodes.length > 0) {
+    const node = nodes.pop() as ts.Node;
+    const depth = depths.pop() as number;
+    if (depth > MAX_SYNTAX_NESTING_DEPTH) {
+      exceeds = true;
+      break;
+    }
+    const nodeIsIterativeBinary = isIterativelyBoundBinary(node);
+    const push = (child: ts.Node): undefined => {
+      nodes.push(child);
+      depths.push(nodeIsIterativeBinary && isIterativelyBoundBinary(child) ? depth : depth + 1);
+      return undefined;
+    };
+    ts.forEachChild(node, push);
+    const jsDoc = (node as { readonly jsDoc?: readonly ts.Node[] }).jsDoc;
+    if (jsDoc !== undefined) for (const doc of jsDoc) push(doc);
+  }
+  syntaxDepthVerdicts.set(sourceFile, exceeds);
+  return exceeds;
+}
+
+/**
+ * Screens every SourceFile the program obtains from `host` (TypeScript lib
+ * files excepted): a file nested deeper than `MAX_SYNTAX_NESTING_DEPTH`, or one
+ * whose parse overflows the stack, is replaced by an empty module and reported
+ * through `onLimited`.
+ */
+function configureSyntaxDepthScreen(
+  host: ts.CompilerHost,
+  resolvedLibDir: string | undefined,
+  onLimited: (fileName: string) => void,
+): void {
+  const libDirKey = resolvedLibDir === undefined ? undefined : canonicalPath(resolvedLibDir);
+  const libDirKeyWithSlash =
+    libDirKey === undefined ? undefined : libDirKey.endsWith("/") ? libDirKey : `${libDirKey}/`;
+
+  const screen = (
+    fileName: string,
+    languageVersionOrOptions: ts.ScriptTarget | ts.CreateSourceFileOptions,
+    obtain: () => ts.SourceFile | undefined,
+  ): ts.SourceFile | undefined => {
+    if (libDirKeyWithSlash !== undefined && canonicalPath(fileName).startsWith(libDirKeyWithSlash)) {
+      return obtain();
+    }
+    let sourceFile: ts.SourceFile | undefined;
+    let parseOverflowed = false;
+    try {
+      sourceFile = obtain();
+    } catch (error) {
+      // The TypeScript parser recurses per nesting level too.
+      if (!(error instanceof RangeError)) throw error;
+      parseOverflowed = true;
+    }
+    if (sourceFile !== undefined) {
+      if (depthLimitedSubstitutes.has(sourceFile)) {
+        onLimited(fileName);
+        return sourceFile;
+      }
+      if (!exceedsSyntaxNestingDepth(sourceFile)) return sourceFile;
+    } else if (!parseOverflowed) {
+      return undefined;
+    }
+    onLimited(fileName);
+    const substitute = ts.createSourceFile(fileName, "", languageVersionOrOptions, true);
+    depthLimitedSubstitutes.add(substitute);
+    syntaxDepthVerdicts.set(substitute, false);
+    return substitute;
+  };
+
+  const baseGetSourceFile = host.getSourceFile.bind(host);
+  host.getSourceFile = (fileName, languageVersionOrOptions, onError, shouldCreateNewSourceFile) =>
+    screen(fileName, languageVersionOrOptions, () =>
+      baseGetSourceFile(fileName, languageVersionOrOptions, onError, shouldCreateNewSourceFile),
+    );
+  if (host.getSourceFileByPath !== undefined) {
+    const baseGetSourceFileByPath = host.getSourceFileByPath.bind(host);
+    host.getSourceFileByPath = (fileName, pathArg, languageVersionOrOptions, onError, shouldCreateNewSourceFile) =>
+      screen(fileName, languageVersionOrOptions, () =>
+        baseGetSourceFileByPath(fileName, pathArg, languageVersionOrOptions, onError, shouldCreateNewSourceFile),
+      );
+  }
+}
+
+/** `program.getTypeChecker()` inside an error boundary: binding every file may still throw. */
+export function createTypeCheckerWithinBoundary(
+  program: ts.Program,
+): { readonly checker?: ts.TypeChecker; readonly failure?: string } {
+  try {
+    return { checker: program.getTypeChecker() };
+  } catch (error) {
+    return { failure: error instanceof Error ? error.message : String(error) };
+  }
+}
+
+type ModuleResolver = (moduleName: string, containingFile: string) => ts.ResolvedModuleFull | undefined;
+
+/** Longer specifiers are resolved without memoization, so memo keys stay small. */
+const MAX_MEMOIZED_SPECIFIER_CHARS = 4096;
+
+/**
+ * Memoizes one analysis run's module resolution per (containing file,
+ * specifier): the outcome is a pure function of both for a fixed source set,
+ * and the program hook plus the IMPORTS phase ask for every pair again.
+ */
+export function memoizeModuleResolver(resolve: ModuleResolver): ModuleResolver {
+  const outcomes = new Map<string, ts.ResolvedModuleFull | null>();
+  return (moduleName, containingFile) => {
+    if (moduleName.length > MAX_MEMOIZED_SPECIFIER_CHARS) return resolve(moduleName, containingFile);
+    const key = `${containingFile}\0${moduleName}`;
+    const known = outcomes.get(key);
+    if (known !== undefined) return known ?? undefined;
+    const resolved = resolve(moduleName, containingFile);
+    outcomes.set(key, resolved ?? null);
+    return resolved;
+  };
+}
+
+/** ADAPTER_INTERNAL diagnostic of a per-file error boundary. */
+function internalDiagnostic(entry: SourceEntry, error: unknown): TypeScriptAdapterDiagnostic {
+  return {
+    relativePath: entry.relativePath,
+    code: "ADAPTER_INTERNAL",
+    message: error instanceof Error ? error.message : String(error),
+    line: 0,
+  };
+}
+
+/**
+ * Pushes the children of `node` onto an explicit traversal stack in reverse, so
+ * they pop in source order: a pre-order walk that never recurses, for passes
+ * that run over every file (expression chains may nest past the call stack).
+ */
+function pushChildrenInReverse(stack: ts.Node[], node: ts.Node): void {
+  const firstChild = stack.length;
+  ts.forEachChild(node, (child) => {
+    stack.push(child);
+    return undefined;
+  });
+  for (let low = firstChild, high = stack.length - 1; low < high; low += 1, high -= 1) {
+    const swapped = stack[low] as ts.Node;
+    stack[low] = stack[high] as ts.Node;
+    stack[high] = swapped;
+  }
+}
+
+/**
+ * A `walkPreOrder` visitor's choice of the nodes to descend into instead of the
+ * node's own children, each with its context, in the order to visit them.
+ */
+class ChosenChildren<C> {
+  constructor(readonly entries: readonly (readonly [ts.Node, C])[]) {}
+}
+
+/**
+ * Visits `root` and its descendants in pre-order (the order of a recursive
+ * `ts.forEachChild` walk) on an explicit stack, so chains the TypeScript
+ * binder accepts (thousands of `,` or `=` links) cannot overflow an analysis
+ * phase. `visit` returns the context handed to the node's children, or the
+ * `ChosenChildren` to descend into instead.
+ */
+function walkPreOrder<C>(
+  root: ts.Node,
+  rootContext: C,
+  visit: (node: ts.Node, context: C) => C | ChosenChildren<C>,
+): void {
+  const nodes: ts.Node[] = [root];
+  const contexts: C[] = [rootContext];
+  for (let node = nodes.pop(); node !== undefined; node = nodes.pop()) {
+    const outcome = visit(node, contexts.pop() as C);
+    if (outcome instanceof ChosenChildren) {
+      for (let index = outcome.entries.length - 1; index >= 0; index -= 1) {
+        const [child, childContext] = outcome.entries[index] as readonly [ts.Node, C];
+        nodes.push(child);
+        contexts.push(childContext);
+      }
+      continue;
+    }
+    const firstChild = nodes.length;
+    pushChildrenInReverse(nodes, node);
+    for (let index = firstChild; index < nodes.length; index += 1) contexts.push(outcome);
+  }
+}
+
+/**
+ * Reports the files the syntax nesting screen replaced: an ADAPTER_LIMIT
+ * diagnostic per analyzed source (returned, in source order) and one warning per
+ * other program file (for example a node_modules declaration file).
+ */
+function reportSyntaxDepthLimits(
+  assembler: GraphAssembler,
+  sortedEntries: readonly SourceEntry[],
+  depthLimitedKeys: ReadonlySet<string>,
+  rootPosix: string,
+): TypeScriptAdapterDiagnostic[] {
+  const entryKeys = new Set(sortedEntries.map((entry) => entry.absoluteKey));
+  for (const key of [...depthLimitedKeys].sort()) {
+    if (entryKeys.has(key)) continue;
+    assembler.addWarning(
+      `declaration file ignored: ${displayPathUnderRoot(key, rootPosix)} (${SYNTAX_DEPTH_LIMIT_MESSAGE})`,
+    );
+  }
+  return sortedEntries
+    .filter((entry) => depthLimitedKeys.has(entry.absoluteKey))
+    .map((entry) => ({
+      relativePath: entry.relativePath,
+      code: "ADAPTER_LIMIT",
+      message: SYNTAX_DEPTH_LIMIT_MESSAGE,
+      line: 0,
+    }));
+}
+
+/** Workspace-relative path of a program file for warnings, or its base name outside the root. */
+function displayPathUnderRoot(fileKey: string, rootPosix: string): string {
+  const rootKey = canonicalPath(rootPosix);
+  const rootKeyWithSlash = rootKey.endsWith("/") ? rootKey : `${rootKey}/`;
+  if (fileKey.startsWith(rootKeyWithSlash)) return fileKey.slice(rootKeyWithSlash.length);
+  return fileKey.slice(fileKey.lastIndexOf("/") + 1);
+}
+
+/**
+ * Controlled outcome when the type checker cannot be created (binding threw):
+ * every source stays indexed at file level only (its File node, already added,
+ * plus a diagnostic); no symbol, edge or framework fact is claimed, and the
+ * program is never reused by the next incremental run.
+ */
+function buildFileLevelOnlyRun(params: {
+  readonly assembler: GraphAssembler;
+  readonly diagnostics: readonly TypeScriptAdapterDiagnostic[];
+  readonly capabilities: TypeScriptAdapterCapabilities;
+  readonly program: ts.Program;
+  readonly sortedEntries: readonly SourceEntry[];
+  readonly optionsSignature: string;
+  readonly failure: string;
+  readonly aliasWarnings: readonly string[];
+}): AnalysisRun {
+  const { assembler, capabilities, program, sortedEntries, optionsSignature, failure } = params;
+  for (const warning of params.aliasWarnings) assembler.addWarning(warning);
+  const diagnostics = [...params.diagnostics];
+  for (const entry of sortedEntries) {
+    diagnostics.push({
+      relativePath: entry.relativePath,
+      code: "ADAPTER_INTERNAL",
+      message: `the TypeScript type checker could not be created (${failure}); the file is indexed at file level only`,
+      line: 0,
+    });
+  }
+  const nodeInputs = [...assembler.nodes.values()]
+    .sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0))
+    .map((record) => record.node);
+  return buildAnalysisRunWithIncrementalState({
+    diagnostics,
+    capabilities,
+    coverageRatio: 0,
+    assembler,
+    nodeInputs,
+    edgeInputs: [],
+    framework: { detections: [], nodeKeys: new Set<string>(), edges: [], diagnostics: [] },
+    frameworkNodes: [],
+    // No edges are produced, so the edge order is never consulted.
+    byEdgeKey: () => 0,
+    program,
+    sortedEntries,
+    optionsSignature: `${optionsSignature}:type-checker-unavailable`,
+  });
 }

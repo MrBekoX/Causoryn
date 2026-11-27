@@ -41,6 +41,20 @@ export const MAX_PACKAGE_JSON_BYTES = 256 * 1024;
 const MAX_PATH_TARGETS_PER_PATTERN = 16;
 const MAX_DISK_SCAN_DIRS = 64;
 const MAX_WORKSPACE_DIR_VISITS = 512;
+/** Upper bound on distinct root `package.json` workspaces include (and exclude) patterns. */
+export const MAX_WORKSPACE_PATTERNS = 256;
+/** Upper bound on distinct directory listings of one workspace manifest discovery run. */
+export const MAX_WORKSPACE_DIR_LISTINGS = 2048;
+/**
+ * Upper bound on in-memory alias targets probed for one module specifier (each
+ * target checks at most 19 candidate paths). TypeScript itself only tries the
+ * targets of the single best-matching `paths` pattern (at most 16).
+ */
+export const MAX_VIRTUAL_ALIAS_PROBES_PER_SPECIFIER = 64;
+/** Upper bound on in-memory alias targets probed in one analysis run. */
+export const MAX_VIRTUAL_ALIAS_PROBES_PER_RUN = 50_000;
+/** Longer specifiers cannot name a file on any supported platform and are never probed. */
+const MAX_VIRTUAL_ALIAS_SPECIFIER_CHARS = 4096;
 const MAX_EXPORTS_RECURSION_DEPTH = 6;
 const MAX_EXPORTS_CANDIDATES = 16;
 
@@ -1537,13 +1551,96 @@ function probeEntryInMemory(
   return undefined;
 }
 
+/**
+ * Work state of the in-memory alias fallback for ONE analysis run (it assumes a
+ * fixed source set): memoized outcomes per (scoped config, specifier), the
+ * alias targets probed so far against the run budget, and the warnings the
+ * budgets produced (deduplicated, in first-occurrence order).
+ */
+export interface VirtualAliasResolutionState {
+  readonly maxProbes: number;
+  probes: number;
+  readonly warnings: string[];
+  readonly outcomes: WeakMap<ScopedTsConfig, Map<string, ts.ResolvedModuleFull | null>>;
+}
+
+/** Creates the alias fallback work state of one analysis run. */
+export function createVirtualAliasResolutionState(
+  maxProbes: number = MAX_VIRTUAL_ALIAS_PROBES_PER_RUN,
+): VirtualAliasResolutionState {
+  return { maxProbes, probes: 0, warnings: [], outcomes: new WeakMap() };
+}
+
+function addVirtualAliasWarning(state: VirtualAliasResolutionState, message: string): void {
+  if (!state.warnings.includes(message)) state.warnings.push(message);
+}
+
 function resolveViaVirtualAlias(
   moduleName: string,
   scopedConfig: ScopedTsConfig,
   entries: ReadonlyMap<string, { readonly relativePath: string; readonly absolutePath: string }>,
   rootKeyWithSlash: string,
+  state: VirtualAliasResolutionState | undefined,
 ): ts.ResolvedModuleFull | undefined {
   if (moduleName.includes("\0")) return undefined;
+  if (moduleName.length > MAX_VIRTUAL_ALIAS_SPECIFIER_CHARS) return undefined;
+
+  let outcomes: Map<string, ts.ResolvedModuleFull | null> | undefined;
+  if (state !== undefined) {
+    outcomes = state.outcomes.get(scopedConfig);
+    if (outcomes === undefined) {
+      outcomes = new Map<string, ts.ResolvedModuleFull | null>();
+      state.outcomes.set(scopedConfig, outcomes);
+    }
+    const known = outcomes.get(moduleName);
+    if (known !== undefined) return known ?? undefined;
+  }
+  const resolved = probeVirtualAliasTargets(
+    moduleName,
+    scopedConfig,
+    entries,
+    rootKeyWithSlash,
+    state,
+  );
+  outcomes?.set(moduleName, resolved ?? null);
+  return resolved;
+}
+
+function probeVirtualAliasTargets(
+  moduleName: string,
+  scopedConfig: ScopedTsConfig,
+  entries: ReadonlyMap<string, { readonly relativePath: string; readonly absolutePath: string }>,
+  rootKeyWithSlash: string,
+  state: VirtualAliasResolutionState | undefined,
+): ts.ResolvedModuleFull | undefined {
+  // Every alias target probe (up to 19 candidate lookups) is charged to the
+  // per-specifier cap and to the run budget; a spent budget ends the fallback
+  // with a controlled "unresolved" outcome and a warning.
+  let probesLeft = MAX_VIRTUAL_ALIAS_PROBES_PER_SPECIFIER;
+  let stopped = false;
+  const probe = (candidateBaseAbs: string): ts.ResolvedModuleFull | undefined => {
+    if (state !== undefined && state.probes >= state.maxProbes) {
+      addVirtualAliasWarning(
+        state,
+        `tsconfig paths alias probe budget (${String(state.maxProbes)}) exhausted; remaining alias imports were not probed and stay unresolved`,
+      );
+      stopped = true;
+      return undefined;
+    }
+    if (probesLeft <= 0) {
+      if (state !== undefined) {
+        addVirtualAliasWarning(
+          state,
+          `tsconfig paths alias probing stopped after ${String(MAX_VIRTUAL_ALIAS_PROBES_PER_SPECIFIER)} targets for one import; its remaining targets were not probed: ${scopedConfig.configRelativePath}`,
+        );
+      }
+      stopped = true;
+      return undefined;
+    }
+    probesLeft -= 1;
+    if (state !== undefined) state.probes += 1;
+    return probeEntryInMemory(candidateBaseAbs, rootKeyWithSlash, entries);
+  };
 
   if (scopedConfig.paths !== undefined) {
     const baseDir = scopedConfig.baseUrl ?? scopedConfig.pathsBasePath;
@@ -1560,14 +1657,13 @@ function resolveViaVirtualAlias(
           if (targetPosix.startsWith("/") || /^[a-zA-Z]:/.test(targetPosix)) {
             continue;
           }
-          const resolved = probeEntryInMemory(
+          const resolved = probe(
             baseDir.endsWith("/")
               ? `${baseDir}${targetPosix}`
               : `${baseDir}/${targetPosix}`,
-            rootKeyWithSlash,
-            entries,
           );
           if (resolved !== undefined) return resolved;
+          if (stopped) return undefined;
         }
       }
     }
@@ -1580,12 +1676,10 @@ function resolveViaVirtualAlias(
     !moduleName.startsWith("/") &&
     !/^[a-zA-Z]:/.test(moduleName)
   ) {
-    return probeEntryInMemory(
+    return probe(
       scopedConfig.baseUrl.endsWith("/")
         ? `${scopedConfig.baseUrl}${toPosix(moduleName)}`
         : `${scopedConfig.baseUrl}/${toPosix(moduleName)}`,
-      rootKeyWithSlash,
-      entries,
     );
   }
 
@@ -1637,7 +1731,10 @@ function trimSlashes(str: string): string {
   return str.slice(start, end);
 }
 
-function extractRootWorkspacePatterns(rootPkg: Record<string, unknown>): {
+function extractRootWorkspacePatterns(
+  rootPkg: Record<string, unknown>,
+  addWarning: (message: string) => void,
+): {
   readonly includes: readonly string[];
   readonly excludes: readonly string[];
 } {
@@ -1652,8 +1749,22 @@ function extractRootWorkspacePatterns(rootPkg: Record<string, unknown>): {
     }
   }
 
+  // Duplicates are dropped and each list is capped: every include pattern costs
+  // directory scans and every exclude is matched against every candidate.
   const includes: string[] = [];
   const excludes: string[] = [];
+  const seenIncludes = new Set<string>();
+  const seenExcludes = new Set<string>();
+  let capped = false;
+  const addPattern = (list: string[], seen: Set<string>, pattern: string): void => {
+    if (seen.has(pattern)) return;
+    if (list.length >= MAX_WORKSPACE_PATTERNS) {
+      capped = true;
+      return;
+    }
+    seen.add(pattern);
+    list.push(pattern);
+  };
   for (const item of rawList) {
     if (typeof item !== "string") continue;
     const trimmed = toPosix(item.trim());
@@ -1661,14 +1772,19 @@ function extractRootWorkspacePatterns(rootPkg: Record<string, unknown>): {
     if (trimmed.startsWith("!")) {
       const cleaned = trimSlashes(trimmed.slice(1));
       if (cleaned.length > 0 && !cleaned.split("/").includes("..")) {
-        excludes.push(cleaned);
+        addPattern(excludes, seenExcludes, cleaned);
       }
     } else {
       const cleaned = trimSlashes(trimmed.replace(/^\.\/+/, ""));
       if (cleaned.length > 0 && !cleaned.split("/").includes("..")) {
-        includes.push(cleaned);
+        addPattern(includes, seenIncludes, cleaned);
       }
     }
+  }
+  if (capped) {
+    addWarning(
+      `package.json workspaces pattern limit (${String(MAX_WORKSPACE_PATTERNS)}) exceeded; remaining patterns were ignored: package.json`,
+    );
   }
   return { includes, excludes };
 }
@@ -1713,10 +1829,17 @@ function isExcludedByWorkspacePatterns(
   return false;
 }
 
+/**
+ * Root-confined directory scanner of one discovery run. Each directory is
+ * listed at most once (results are memoized) and at most
+ * `MAX_WORKSPACE_DIR_LISTINGS` distinct directories are listed; past that
+ * budget a listing returns no children and one warning is recorded.
+ */
 function createConfinedDirScanner(
   rootDirOnDisk: string,
+  addWarning: (message: string) => void,
 ): {
-  readonly listSafeChildDirs: (dirRel: string) => string[];
+  readonly listSafeChildDirs: (dirRel: string) => readonly string[];
 } | undefined {
   if (isUncOrDevicePath(rootDirOnDisk) || rootDirOnDisk.includes("\0")) {
     return undefined;
@@ -1756,45 +1879,60 @@ function createConfinedDirScanner(
     toPosix(stripWindowsExtendedPrefix(rootDirOnDisk)),
   );
   const readdirSync = nodeFs.readdirSync.bind(nodeFs);
+  const listings = new Map<string, readonly string[]>();
+
+  const listSafeChildDirsUncached = (dirRel: string): string[] => {
+    const absDir =
+      dirRel === ""
+        ? cleanRootNative
+        : cleanRootNative.endsWith("/")
+          ? `${cleanRootNative}${dirRel}`
+          : `${cleanRootNative}/${dirRel}`;
+    let names: string[];
+    try {
+      names = readdirSync(absDir);
+    } catch {
+      return [];
+    }
+    names.sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+    const safeChildren: string[] = [];
+    for (const name of names) {
+      if (name.includes("\0") || name === "." || name === "..") continue;
+      if (isSkippedWorkspaceScanDir(name)) continue;
+      const childAbs = absDir.endsWith("/") ? `${absDir}${name}` : `${absDir}/${name}`;
+      let stat: NodeFsStatMinimal;
+      try {
+        stat = nodeFs.lstatSync(childAbs);
+      } catch {
+        continue;
+      }
+      if (stat.isSymbolicLink() || !stat.isDirectory()) continue;
+      let realChild: string;
+      try {
+        realChild = nodeFs.realpathSync(childAbs);
+      } catch {
+        continue;
+      }
+      if (!canonicalKey(realChild).startsWith(realRootPrefixWithSlash)) {
+        continue;
+      }
+      safeChildren.push(name);
+    }
+    return safeChildren;
+  };
 
   return {
-    listSafeChildDirs(dirRel: string): string[] {
-      const absDir =
-        dirRel === ""
-          ? cleanRootNative
-          : cleanRootNative.endsWith("/")
-            ? `${cleanRootNative}${dirRel}`
-            : `${cleanRootNative}/${dirRel}`;
-      let names: string[];
-      try {
-        names = readdirSync(absDir);
-      } catch {
+    listSafeChildDirs(dirRel: string): readonly string[] {
+      const listed = listings.get(dirRel);
+      if (listed !== undefined) return listed;
+      if (listings.size >= MAX_WORKSPACE_DIR_LISTINGS) {
+        addWarning(
+          `workspace package scan stopped after ${String(MAX_WORKSPACE_DIR_LISTINGS)} directory listings; remaining directories were not scanned`,
+        );
         return [];
       }
-      names.sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
-      const safeChildren: string[] = [];
-      for (const name of names) {
-        if (name.includes("\0") || name === "." || name === "..") continue;
-        if (isSkippedWorkspaceScanDir(name)) continue;
-        const childAbs = absDir.endsWith("/") ? `${absDir}${name}` : `${absDir}/${name}`;
-        let stat: NodeFsStatMinimal;
-        try {
-          stat = nodeFs.lstatSync(childAbs);
-        } catch {
-          continue;
-        }
-        if (stat.isSymbolicLink() || !stat.isDirectory()) continue;
-        let realChild: string;
-        try {
-          realChild = nodeFs.realpathSync(childAbs);
-        } catch {
-          continue;
-        }
-        if (!canonicalKey(realChild).startsWith(realRootPrefixWithSlash)) {
-          continue;
-        }
-        safeChildren.push(name);
-      }
+      const safeChildren = listSafeChildDirsUncached(dirRel);
+      listings.set(dirRel, safeChildren);
       return safeChildren;
     },
   };
@@ -1802,7 +1940,7 @@ function createConfinedDirScanner(
 
 function expandWorkspacePatternDirs(
   pattern: string,
-  scanner: { readonly listSafeChildDirs: (dirRel: string) => string[] },
+  scanner: { readonly listSafeChildDirs: (dirRel: string) => readonly string[] },
   excludes: readonly string[],
 ): string[] {
   const segments = pattern.split("/").filter((s) => s.length > 0 && s !== ".");
@@ -1982,7 +2120,7 @@ export function loadWorkspacePackages(
         candidateDirs.add(dirRel);
       };
 
-      const scanner = createConfinedDirScanner(rootDirOnDisk);
+      const scanner = createConfinedDirScanner(rootDirOnDisk, addWarning);
       const rootContent = readDiskJson("package.json");
       let excludes: readonly string[] = [];
       if (rootContent !== undefined) {
@@ -1992,9 +2130,11 @@ export function loadWorkspacePackages(
         });
         const rootParsed = parseSafePackageManifest("package.json", rootContent, addWarning);
         if (rootParsed.rawRecord !== undefined && scanner !== undefined) {
-          const patterns = extractRootWorkspacePatterns(rootParsed.rawRecord);
+          const patterns = extractRootWorkspacePatterns(rootParsed.rawRecord, addWarning);
           excludes = patterns.excludes;
           for (const pat of patterns.includes) {
+            // A full candidate set cannot grow: further patterns would only scan.
+            if (candidateDirs.size >= MAX_WORKSPACE_MANIFESTS) break;
             for (const matchedDir of expandWorkspacePatternDirs(pat, scanner, excludes)) {
               addCandidateDir(matchedDir);
             }
@@ -2569,6 +2709,11 @@ export function resolveScopedModuleName(params: {
     string,
     { readonly relativePath: string; readonly absolutePath: string }
   >;
+  /**
+   * Alias fallback work state shared by every resolution of one analysis run
+   * (memo + probe budget). Without it each call is still capped per specifier.
+   */
+  readonly virtualAliasState?: VirtualAliasResolutionState;
 }): ts.ResolvedModuleFull | undefined {
   const {
     moduleName,
@@ -2580,6 +2725,7 @@ export function resolveScopedModuleName(params: {
     workspacePackages,
     resolutionHost,
     entries,
+    virtualAliasState,
   } = params;
   // SEC-10: Null-byte enjeksiyonuna karşı erken red.
   if (moduleName.includes("\0")) return undefined;
@@ -2697,6 +2843,7 @@ export function resolveScopedModuleName(params: {
       scopedConfig,
       entries,
       rootKeyWithSlash,
+      virtualAliasState,
     );
     if (virtualAlias !== undefined) return virtualAlias;
   }

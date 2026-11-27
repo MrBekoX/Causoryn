@@ -28,7 +28,8 @@ analiz tamamen bellek-içindedir).
 - **stdout disiplini (kırmızı çizgi):** stdout'ta YALNIZCA protokol
   satırları taşınır; tüm loglar `stderr`'e yazılır (`[python-worker] `
   öneki ile). **Log kanalı UTF-8'dir:** worker kendi stderr'ini
-  `reconfigure(encoding="utf-8")` ile sabitler ve adapter spawn env'inde
+  `reconfigure(encoding="utf-8", errors="backslashreplace")` ile sabitler
+  (a lone surrogate in a log line is escaped instead of raising) ve adapter spawn env'inde
   `PYTHONIOENCODING=utf-8` değerini parent'tan bağımsız sabitler — piped
   stderr locale kod sayfasına (Windows ANSI) düşemez (takım denetimi
   bulgusu; kabul testi: "stderr UTF-8 kodlanır — PYTHONIOENCODING olmasa
@@ -85,6 +86,8 @@ stderr ← [python-worker] ...                   (loglar; protokolün parçası 
 | `MAX_FILE_COUNT` | 5.000 dosya/istek | İstek reddedilir: `LIMIT_EXCEEDED`. |
 | `MAX_FILE_CONTENT_BYTES` | 2.000.000 bayt/dosya (TŞ §20 `maxFileBytes` ile uyumlu) | İstek reddedilir: `LIMIT_EXCEEDED`. |
 | `MAX_RESPONSE_NODES` | 250.000 node/yanıt | Sert tavan ya da istek bütçesi dolunca aşan node'lar YAYINLANMAZ; uçları yayınlanmayan kenarlar da düşer (dangling yok). Yanıta `RESPONSE_TRUNCATED` tanısı düşer ve `status: "partial"` olur — sessiz kesim yoktur. |
+| `MAX_RESPONSE_BYTES` | 40.000.000 bayt/yanıt | Node, kenar, evidence ve uyarılar serileştirilmiş boyutlarıyla bütçeye yazılır. Bütçe bitince başka hiçbir şey kabul edilmez (File node'ları hariç, her dosya için bir tane; kenarlar sarkmaz), çağrı yürüyüşü durur ve yanıta `RESPONSE_TRUNCATED` tanısı (`relativePath ""`, line 0, `response size budget exceeded (40000000 bytes of nodes, edges, evidence and warnings); …`) ve `status: "partial"` düşer. Bütçe adapter'ların varsayılan 64 MiB yanıt satırı sınırının altında kalır. |
+| `MAX_RESPONSE_LINE_BYTES` | 60.000.000 bayt/yanıt satırı | Daha uzun bir satır yerine istek `id`'sini (kodlanabiliyorsa) echo eden bir `LIMIT_EXCEEDED` satırı (`response line exceeded the 60000000 byte limit`) yazılır. |
 
 Sınırlar sabittir (protokol v1'de istekte yapılandırılamaz) ve aynı
 girdiye deterministik davranışı korur.
@@ -109,7 +112,27 @@ Rendered expression text (`ast.unparse` of call targets and decorators in
 UnknownExternal names, rationales and warnings) is capped at 200
 characters; a longer rendering is cut and suffixed with `...#<12 hex
 digits of its SHA-256>`. An expression too deep for `ast.unparse` is
-rendered from its source segment instead.
+rendered from its source segment instead; that fallback splits the file into
+lines once per pass (the same splitting and slicing as
+`ast.get_source_segment`), and an `ast.unparse` attempt that must hit the
+recursion limit (at least three frames per call / attribute / subscript level
+on top of the call walk's frames) is skipped, with the same output.
+
+Rendering an expression whose source is longer than 200 bytes is charged at
+its source size against two budgets: `MAX_RENDER_SOURCE_BYTES_PER_FILE`
+(256,000 bytes) and `MAX_RENDER_SOURCE_BYTES_PER_REQUEST` (1,000,000 bytes).
+Past either, such an expression is named by its source range instead,
+`<expression at path:line:col..end_line:end_col>` (distinct per expression,
+bounded like any rendering); the cut is sticky for the file, and for the
+request once its budget is spent, so it is deterministic. Real code stays far
+below both budgets (CPython's Lib renders at most 8.6 KB in one file), so its
+output is unchanged.
+
+Declared qualified names (Function, Method and Class nodes) and literal route
+paths are bounded the same way at 512 characters (`MAX_QUALIFIED_NAME_CHARS`).
+Import-derived UnknownExternal names use the 200-character bound; rationales
+and ambiguity candidates quote the bounded node name. Texts within a bound are
+emitted unchanged, and bounding adds no diagnostic.
 
 **Süreç yaşamlılığının gerçek mekanizması (takım denetimi tur-2
 netleştirmesi):** bildirim/çağrı gezinmesi REKÜRSİFTİR (`_declare` /
@@ -149,7 +172,9 @@ Analiz tamamlandığında:
   (TŞ §7: "Parser başarısızsa yalnızca kanıtlanabilen bilgi sunulur").
   Tanı kaynakları: dosya başına `SyntaxError` (satır 1 tabanlı; bilinmiyorsa
   0), `ADAPTER_INTERNAL` (derinlik/parse savunması, line 0),
-  `RESPONSE_TRUNCATED` (node bütçesi, line 0, relativePath "").
+  `RESPONSE_TRUNCATED` (node veya yanıt boyutu bütçesi, line 0, relativePath "").
+  Parser mesajları (`SyntaxError` ve `AST parsing could not be completed: …`)
+  200 karakterde aynı `...#<12 hex>` işaretiyle sınırlanır.
 - `coverageRatio` = verified kenar / toplam kenar (4 ondalık; TS adapter
   kuralı). Kenar yoksa 1.0.
 - `evidence` = yayımlanan kenarların taşıdığı kanıtların küme içinde tekil
@@ -271,7 +296,11 @@ verified) → `services.orders_service.create_order` (heuristic; import) →
   fiilen rota kaydı içindir (bilinen-ad kuralı).
 - `@carrier.route("/path")` / `@carrier.api_route("/path")` → Flask tarzı:
   `methods=["GET","POST"]` kwarg'ındaki her method için bir Endpoint;
-  belirtilmezse Flask varsayılanı **GET**.
+  belirtilmezse Flask varsayılanı **GET**. The methods list is de-duplicated
+  in source order; each entry is bounded at 200 characters. More than 16
+  distinct entries (`MAX_ROUTE_METHODS`) → only the first 16 are used and a
+  warning says so (`<file>: the methods list of decorator '<carrier>.<attr>'
+  on <handler> has <n> distinct entries; only the first 16 were used`).
 - **Taşıyıcı basit ad DEĞİLSE** (ör. `@routers["main"].get("/x")`,
   subscript/nitelik zincirli taşıyıcı): endpoint ÜRETİLMEZ ve `warnings`'e
   açık not yazılır — "sessiz kesim yoktur" disiplini (takım denetimi
@@ -280,6 +309,10 @@ verified) → `services.orders_service.create_order` (heuristic; import) →
 - Endpoint yolu LİTERAL string sabiti OLMALIDIR (`ast.Constant`); değişken
   / ifadesel yol → endpoint ÜRETİLMEZ + `warnings`'e açık not (sessiz kesim
   yoktur).
+- A lone surrogate in a route literal (path or `methods` entry, for example
+  `"\ud800"`) cannot be written as UTF-8: it is replaced by its `\uXXXX`
+  escape text (`\ud800`), deterministically, before the path is bounded at
+  512 characters; the rest of the batch is analyzed as usual.
 - Modül düzeyi çağrılar (`app = FastAPI()` vb.) caller'sızdır → CALLS
   üretilmez (`unsupportedConstructs: "module-level-calls"`).
 
@@ -308,6 +341,21 @@ verified) → `services.orders_service.create_order` (heuristic; import) →
   tüm isteği reddeder; döngü DEVAM EDER — sonraki satır işlenir.
 - `id`, satır ayrıştırılabilirse istemcinin gönderdiği değerle echo
   edilir; ayrıştırılamazsa/geçersizse `null`. Bozuk satır döngüyü düşürmez.
+- A string `id`, a `files[].path` or a `files[].content` that holds a lone
+  surrogate (for example from a `\ud800` JSON escape) is rejected with
+  `INVALID_ARGUMENT` (`... must be valid Unicode text (it contains a lone
+  surrogate)`); such an `id` is answered with `id: null`.
+- A response that still cannot be encoded as UTF-8 is replaced by an
+  `INTERNAL_ERROR` line (`the response could not be encoded as UTF-8 (it
+  contains a lone surrogate)`) that echoes the request `id` when the id itself
+  can be encoded; the process keeps running.
+- Decoding, analysis and serialization of each request are guarded: any other
+  failure (`MemoryError`, `RecursionError`, …) becomes an `INTERNAL_ERROR`
+  line with a fixed message (`the request could not be answered`, or `the
+  response could not be serialized`), and stderr gets one log line naming only
+  the error type. An uncaught error ends the worker with one log line
+  (`worker stopped by an unexpected error (<type>)`); no traceback is printed,
+  so no install path or user name reaches the adapters' stderr excerpts.
 - Kodlar yalnızca TŞ §10.1 + K-008 kümesinden: `INVALID_ARGUMENT`,
   `INTERNAL_ERROR`, `LIMIT_EXCEEDED` (kaynak sınırları — yukarıdaki
   tablo). Worker kendi hata kodu icat etmez.

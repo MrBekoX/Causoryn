@@ -323,6 +323,73 @@ describe("markdownCodeSpan", () => {
   });
 });
 
+/**
+ * Email autolinks, GitHub @-mentions and character references (security scan
+ * F50 follow-up). Every expected form below was rendered with GitHub's
+ * renderer on 2026-11-26 (`gh api -X POST /markdown -f mode=gfm`, synthetic
+ * strings, in a paragraph, list item, blockquote, heading and table cell) and
+ * came out as plain text: no `<a href="mailto:…">`, no user-mention link.
+ * The raw forms (`ops@evil.test`, `@github`) are linked there; `ops\@…`,
+ * `react&#8203;@latest` (zero-width space before the `@` only: GitHub links
+ * `@latest` as a mention) and `&#64;` / `&commat;` (decoded to an `@`) are
+ * linked too. The zero-width space before the `@` also stops markdown-it's
+ * linkify (its email local part is ASCII-only); the one after it stops
+ * GitHub's email and mention links.
+ */
+const ZWSP_AT = "&#8203;@&#8203;";
+
+describe("email autolinks, @-mentions and character references", () => {
+  it("surrounds every @ with a zero-width space character reference", () => {
+    expect(escapeMarkdownInline("ops@evil.test")).toBe(`ops${ZWSP_AT}evil.test`);
+    expect(escapeMarkdownInline("mailto:sec@evil.test xmpp:bot@evil.test/r")).toBe(
+      `mailto:sec${ZWSP_AT}evil.test xmpp:bot${ZWSP_AT}evil.test/r`,
+    );
+    expect(escapeMarkdownInline("react@latest cc @github")).toBe(`react${ZWSP_AT}latest cc ${ZWSP_AT}github`);
+    expect(escapeMarkdownInline("ops@.evil.test a+b@x.example x_@y.example")).toBe(
+      `ops${ZWSP_AT}.evil.test a+b${ZWSP_AT}x.example x_${ZWSP_AT}y.example`,
+    );
+    expect(escapeMarkdownInline("node_modules/@scope/pkg")).toBe(`node_modules/${ZWSP_AT}scope/pkg`);
+    expect(escapeMarkdownTableCell("ops@evil.test|x")).toBe(`ops${ZWSP_AT}evil.test\\|x`);
+    expect(escapeMarkdownBlock("line ops@evil.test\n@github")).toBe(
+      `line ops${ZWSP_AT}evil.test\n${ZWSP_AT}github`,
+    );
+  });
+
+  it("backslash-escapes & so character references in the text render literally", () => {
+    expect(escapeMarkdownInline("R&D a&amp;b")).toBe("R\\&D a\\&amp;b");
+    expect(escapeMarkdownInline("ops&commat;evil.test ops&#64;evil.test")).toBe(
+      "ops\\&commat;evil.test ops\\&\\#64;evil.test",
+    );
+    expect(escapeMarkdownBlock("x&lt;y")).toBe("x\\&lt;y");
+  });
+
+  it("keeps code spans literal (no reference inside a code span)", () => {
+    expect(markdownCodeSpan("ops@evil.test")).toBe("`ops@evil.test`");
+  });
+
+  it("property: no bare @ or unescaped & survives, and the text decodes to the value with zero-width spaces around each @", () => {
+    const fragments = [...HOSTILE_FRAGMENTS, "@", "a@b.c", "@user", "&commat;", "&#64;", "x&y", "mailto:", "@@"];
+    const next = prng(0x40);
+    const samples: string[] = [...fragments];
+    for (let i = 0; i < 400; i += 1) {
+      let value = "";
+      const parts = 1 + Math.floor(next() * 6);
+      for (let p = 0; p < parts; p += 1) value += fragments[Math.floor(next() * fragments.length)] ?? "";
+      samples.push(value);
+    }
+    const zwsp = String.fromCharCode(0x200b);
+    for (const sample of samples) {
+      for (const escaped of [escapeMarkdownInline(sample), escapeMarkdownTableCell(sample), escapeMarkdownBlock(sample)]) {
+        const withoutZwspAt = escaped.split(ZWSP_AT).join("");
+        expect(withoutZwspAt, JSON.stringify(sample)).not.toContain("@");
+        expect(withoutZwspAt, JSON.stringify(sample)).not.toMatch(/(?<!\\)(?:\\\\)*&/);
+      }
+      const decoded = unescapeMarkdown(escapeMarkdownInline(sample).split(ZWSP_AT).join(`${zwsp}@${zwsp}`));
+      expect(decoded, JSON.stringify(sample)).toBe(expectedInline(sample).split("@").join(`${zwsp}@${zwsp}`));
+    }
+  });
+});
+
 function decodeMermaidLabel(label: string): string {
   return label
     .replace(/#(\d+);/g, (_m, code: string) => String.fromCharCode(Number(code)))

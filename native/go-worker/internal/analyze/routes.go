@@ -44,8 +44,15 @@ type analysisContext struct {
 	ifaceMethods         map[string][]string
 	addNode              func(Node) NodeRef
 	addEdge              func(Edge)
-	warnings             *[]string
+	addWarning           func(string) // charged against the response size budget
 	declSpan             func(*fileCtx, token.Pos, token.Pos) *Span
+	// Candidate lists and package matches are computed once per key instead
+	// of once per call (lazily allocated; see analyze.go).
+	methodCandidates map[string]candidateList
+	ifaceCandidates  map[string]candidateList
+	importMatches    map[int]importMatch
+	pkgCallees       map[calleeKey]pkgCallees
+	pkgTexts         map[pkgKey]pkgLabel
 }
 
 // matchRoute — kayıt çağrısı kalıbını tanır; eşleşmezse nil.
@@ -104,7 +111,7 @@ func handleRoute(ctx *analysisContext, fi *funcInfo, match *routeMatch, call *as
 	})
 
 	if _, isLit := match.handler.(*ast.FuncLit); isLit {
-		*ctx.warnings = append(*ctx.warnings, fmt.Sprintf(
+		ctx.addWarning(fmt.Sprintf(
 			"%s: inline anonymous route handler '%s %s' (%s:%d) — the Endpoint is kept, no ROUTES_TO is produced",
 			AnalyzerID, match.verb, match.path, fi.file.relativePath, line,
 		))
@@ -113,7 +120,7 @@ func handleRoute(ctx *analysisContext, fi *funcInfo, match *routeMatch, call *as
 
 	target := classifyHandler(ctx, fi, match.handler)
 	if target == nil {
-		*ctx.warnings = append(*ctx.warnings, fmt.Sprintf(
+		ctx.addWarning(fmt.Sprintf(
 			"%s: the route handler for '%s %s' could not be resolved (%s:%d)",
 			AnalyzerID, match.verb, match.path, fi.file.relativePath, line,
 		))
@@ -156,20 +163,21 @@ func classifyHandler(ctx *analysisContext, fi *funcInfo, expr ast.Expr) *callTar
 				resolution: ResolutionVerified,
 				rationale: fmt.Sprintf(
 					"ROUTES_TO: %s is a handler function defined in package '%s' in the same directory (go/ast, verified).",
-					samePkg.qname, fi.pkg,
+					samePkg.qname, fi.file.pkgNameText,
 				),
 			}
 		}
+		name := boundExprText(h.Name)
 		return &callTarget{
-			ref:        NodeRef{Kind: "UnknownExternal", QualifiedName: h.Name},
+			ref:        NodeRef{Kind: "UnknownExternal", QualifiedName: name},
 			resolution: ResolutionUnresolved,
 			rationale: fmt.Sprintf(
 				"ROUTES_TO: handler name '%s' did not match any defined symbol (unresolved).",
-				h.Name,
+				name,
 			),
 		}
 	default:
-		text := exprText(ctx.fset, fi.file.content, expr)
+		text := sourceText(ctx.fset, fi.file, expr)
 		target := classifyExpr(ctx, fi, expr)
 		if target == nil {
 			return nil

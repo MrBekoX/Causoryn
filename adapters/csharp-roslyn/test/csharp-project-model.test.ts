@@ -483,6 +483,87 @@ describe("resolveCSharpProjects: ownership, references and safety", () => {
   });
 });
 
+/** U+1D49C MATHEMATICAL SCRIPT CAPITAL A: a letter (\p{L}) outside the BMP, a surrogate pair in UTF-16. */
+const SUPPLEMENTARY_LETTER = "\u{1D49C}";
+
+/** 600 distinct `Using` names in one item: more than the worker's 512 per project. */
+const MANY_USINGS = Array.from({ length: 600 }, (_, index) => `N${String(index).padStart(3, "0")}`).join(";");
+
+describe("resolveCSharpProjects: per-project limits of the worker protocol (security finding F22)", () => {
+  it("more than 512 global usings: the SDK defaults and the first Using items are kept, the excess is dropped with a warning", () => {
+    const root = workspace({
+      "App/App.csproj": project(`${props({ ImplicitUsings: "enable" })}\n  <ItemGroup>\n    <Using Include="${MANY_USINGS}" />\n  </ItemGroup>`),
+      "App/Program.cs": "class P { }",
+    });
+    const result = resolveCSharpProjects(root, ["App/Program.cs"]);
+    const usings = names(result.projects[0]);
+    expect(usings).toHaveLength(512);
+    for (const name of BASE) expect(usings).toContain(name);
+    expect(usings).toContain("N000");
+    expect(usings).toContain("N504");
+    expect(usings).not.toContain("N505");
+    expect(result.warnings).toEqual([
+      "C# project 'App/App.csproj': 607 global usings exceed the limit of 512 per project; 95 Using items were dropped (the .NET SDK defaults and the first items in evaluation order were kept)",
+    ]);
+  });
+
+  it("names and aliases with a supplementary-plane letter are skipped like the worker (C# identifiers are UTF-16 code units)", () => {
+    const root = workspace({
+      "Directory.Build.props": [
+        "<Project>",
+        "  <ItemGroup>",
+        `    <Using Include="System.${SUPPLEMENTARY_LETTER}Lib" />`,
+        `    <Using Include="System.Text" Alias="${SUPPLEMENTARY_LETTER}" />`,
+        "  </ItemGroup>",
+        "</Project>",
+        "",
+      ].join("\n"),
+      "App/App.csproj": project(props({ ImplicitUsings: "enable" })),
+      "App/Program.cs": "class P { }",
+    });
+    const result = resolveCSharpProjects(root, ["App/Program.cs"]);
+    expect(names(result.projects[0])).toEqual(BASE);
+    expect(result.warnings).toEqual([
+      `C# project 'App/App.csproj': Using item 'System.${SUPPLEMENTARY_LETTER}Lib' in Directory.Build.props is not a dotted C# name; skipped`,
+      `C# project 'App/App.csproj': Using item 'System.Text' in Directory.Build.props has an alias that is not a C# identifier (${SUPPLEMENTARY_LETTER}); skipped`,
+    ]);
+  });
+
+  it("the global using limit is applied after duplicates are merged", () => {
+    const duplicates = Array.from({ length: 700 }, () => "System.Text").join(";");
+    const root = workspace({
+      "App/App.csproj": project(`  <ItemGroup>\n    <Using Include="${duplicates}" />\n  </ItemGroup>`),
+      "App/Program.cs": "class P { }",
+    });
+    const result = resolveCSharpProjects(root, ["App/Program.cs"]);
+    expect(names(result.projects[0])).toEqual(["System.Text"]);
+    expect(result.warnings).toEqual([]);
+  });
+
+  it("more than 512 project references: the first 512 in ordinal order are kept, with a warning", () => {
+    const files: Record<string, string> = {};
+    const references: string[] = [];
+    for (let index = 0; index < 513; index += 1) {
+      const name = `P${String(index).padStart(3, "0")}`;
+      files[`${name}/${name}.csproj`] = project("");
+      files[`${name}/a.cs`] = "";
+      references.push(`    <ProjectReference Include="../${name}/${name}.csproj" />`);
+    }
+    files["Main/Main.csproj"] = project(`  <ItemGroup>\n${references.join("\n")}\n  </ItemGroup>`);
+    files["Main/m.cs"] = "";
+    const root = workspace(files);
+    const sources = Object.keys(files).filter((path) => path.endsWith(".cs"));
+    const result = resolveCSharpProjects(root, sources);
+    const main = result.projects.find((p) => p.path === "Main/Main.csproj");
+    expect(main?.projectReferences).toHaveLength(512);
+    expect(main?.projectReferences[0]).toBe("P000/P000.csproj");
+    expect(main?.projectReferences[511]).toBe("P511/P511.csproj");
+    expect(result.warnings).toEqual([
+      "C# project 'Main/Main.csproj': 513 project references exceed the limit of 512 per project; the last 1 in ordinal order were dropped",
+    ]);
+  }, 120_000); // 514 projects on disk: slow on a loaded runner
+});
+
 /* ------------------------------------------------------------------ */
 /* Live: real Roslyn worker through analyzeCSharpWorkspace              */
 /* ------------------------------------------------------------------ */
@@ -616,5 +697,57 @@ describe.skipIf(!dotnetAvailable)("analyzeCSharpWorkspace: SDK implicit global u
     expect(callTo(included, "App.Runner.Run", "System.Math.Sqrt")).toBe("verified");
     expect(callTo(included, "App.Runner.Run", "System.Text.StringBuilder")).toBe("verified");
     expect(callTo(included, "App.Runner.Run", "System.Console.WriteLine")).toBe("verified");
+  });
+});
+
+describe.skipIf(!dotnetAvailable)("analyzeCSharpWorkspace: a project with too many global usings stays analyzable (live worker, F22)", () => {
+  let crowded: RoslynAdapterResult | null = null;
+  let supplementary: RoslynAdapterResult | null = null;
+
+  beforeAll(async () => {
+    const build = buildRoslynWorkerBinary();
+    if (build.status !== 0 || !existsSync(WORKER_DLL)) {
+      throw new Error(`worker build failed (exit=${String(build.status)}); live tests are not run against a stale binary`);
+    }
+    const root = workspace({
+      "App/App.csproj": sdkProject("enable", `    <Using Include="${MANY_USINGS}" />`),
+      "App/Runner.cs": RUNNER_SOURCE,
+      "Other/Other.cs": "namespace Other; public static class Tool { public static int Twice(int x) => x * 2; }\n",
+    });
+    crowded = await analyzeCSharpWorkspace({
+      workspaceId: "csproj-model-crowded",
+      rootDir: root,
+      files: [
+        { path: "App/Runner.cs", content: RUNNER_SOURCE },
+        { path: "Other/Other.cs", content: "namespace Other; public static class Tool { public static int Twice(int x) => x * 2; }\n" },
+      ],
+      options: { workerDllPath: WORKER_DLL, requestTimeoutMs: 120_000 },
+    });
+    const supplementaryRoot = workspace({
+      "Directory.Build.props": `<Project>\n  <ItemGroup>\n    <Using Include="System.${SUPPLEMENTARY_LETTER}Lib" />\n  </ItemGroup>\n</Project>\n`,
+      "App/App.csproj": sdkProject("enable"),
+      "App/Runner.cs": RUNNER_SOURCE,
+    });
+    supplementary = await analyzeCSharpWorkspace({
+      workspaceId: "csproj-model-supplementary",
+      rootDir: supplementaryRoot,
+      files: [{ path: "App/Runner.cs", content: RUNNER_SOURCE }],
+      options: { workerDllPath: WORKER_DLL, requestTimeoutMs: 120_000 },
+    });
+  }, 300_000);
+
+  it("a Using name with a supplementary-plane letter does not make the worker reject the request", () => {
+    expect(supplementary?.workerAvailable).toBe(true);
+    expect(callTo(supplementary, "App.Runner.Run", "System.Console.WriteLine")).toBe("verified");
+    expect((supplementary?.warnings ?? []).some((warning) => warning.includes("is not a dotted C# name; skipped"))).toBe(true);
+  });
+
+  it("the worker accepts the request: symbols and verified BCL calls of the project are kept", () => {
+    expect(crowded?.workerAvailable).toBe(true);
+    expect(callTo(crowded, "App.Runner.Run", "System.Console.WriteLine")).toBe("verified");
+    expect((crowded?.nodes ?? []).some((node) => node.qualifiedName === "Other.Tool.Twice")).toBe(true);
+    expect(crowded?.warnings).toContain(
+      "C# project 'App/App.csproj': 607 global usings exceed the limit of 512 per project; 95 Using items were dropped (the .NET SDK defaults and the first items in evaluation order were kept)",
+    );
   });
 });

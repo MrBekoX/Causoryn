@@ -100,6 +100,16 @@ function sortedUnique(values: Iterable<string>): string[] {
   return [...new Set(values)].sort(compareStrings);
 }
 
+/**
+ * Appends `values` one by one. The analysed repository sets how many evidence
+ * ids one edge carries (one per merged call site); spreading them into
+ * `push(...values)` above V8's argument limit throws RangeError (security
+ * scan F47).
+ */
+function appendAll(target: string[], values: readonly string[]): void {
+  for (const value of values) target.push(value);
+}
+
 function normalizeSeparators(value: string): string {
   return value.includes("\\") ? value.replaceAll("\\", "/") : value;
 }
@@ -278,7 +288,7 @@ function cycleEvidenceIds(
   for (const edge of edges) {
     if (!edgeKinds.has(edge.kind)) continue;
     if (!members.has(edge.from) || !members.has(edge.to)) continue;
-    collected.push(...edge.evidenceIds);
+    appendAll(collected, edge.evidenceIds);
   }
   return sortedUnique(collected);
 }
@@ -418,7 +428,7 @@ function evaluateForbiddenDependency(
         evidence: [...edge.evidenceIds],
       });
     } else {
-      bucket.evidence.push(...edge.evidenceIds);
+      appendAll(bucket.evidence, edge.evidenceIds);
     }
   }
 

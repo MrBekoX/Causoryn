@@ -11,6 +11,7 @@ import { discoverSqlContracts } from "./sql-discovery.js";
 import { parseYamlDocument } from "./yaml-document.js";
 import {
   assertSpecTextPrechecks,
+  convertSpecDocument,
   describeSpecParserFailure,
   describeSpecSyntaxError,
   isPlainObject,
@@ -96,8 +97,12 @@ function sniffYamlRoot(text: string): SniffResult {
         error: "YAML syntax error: " + describeSpecSyntaxError(first),
       };
     }
-    return { ok: true, root: document.toJS() };
+    // F24: the sniff conversion is bounded like parseStructuredSpec's.
+    return { ok: true, root: convertSpecDocument(document) };
   } catch (error) {
+    if (error instanceof ContractDiscoveryError) {
+      return { ok: false, code: error.code, error: error.message };
+    }
     const message = error instanceof Error ? error.message : String(error);
     return {
       ok: false,

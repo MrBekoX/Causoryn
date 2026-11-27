@@ -272,6 +272,15 @@ export interface IndexServiceOptions {
    * service with an injected source, and `getWorkerConfig()` returns undefined.
    */
   readonly inventorySource?: InventorySource;
+  /**
+   * Cancellation check of the job this service runs (an index job worker: its
+   * job manager's shared cancel flag). It is read synchronously right before
+   * file facts are persisted and inside the write transaction that publishes,
+   * so a job cancelled before that point fails its build and never writes or
+   * publishes them, even when it is inside a synchronous segment that cannot
+   * read the cancel request (security finding F33).
+   */
+  readonly isCancelled?: () => boolean;
 }
 
 /** Injected inventory (see `IndexServiceOptions.inventorySource`). */
@@ -711,12 +720,24 @@ const JS_REGEX_PREFIX_TOKENS = new Set([
 ]);
 
 /**
- * Pure O(n) comment-stripping lexer for brace-delimited languages (TS/JS/Go/Rust/C#).
+ * Linear-time comment-stripping lexer for brace-delimited languages (TS/JS/Go/Rust/C#).
  * Zero backtracking regexes; handles single-line comments, block comments, string
  * literals, JS/TS regex literals (`/pattern/flags`), nested template literal
- * `${ ... }` expressions, and CRLF cleanly.
+ * `${ ... }` expressions, and CRLF cleanly. Exported for its tests.
+ *
+ * Regex literal candidates stay linear on hostile input (security finding F8):
+ * a candidate that does not close on its line yields a plain `/` token and the
+ * lexer goes on right after it, so later candidates on the same line would walk
+ * the same tail again (one line of `(/[` repeated cost about n^2/6 reads). A
+ * scan's next step depends only on its position and whether it is inside a
+ * character class, so every such (position, state) a scan passes is marked;
+ * a later scan that reaches a marked state has the same future and ends
+ * unclosed too. Marks of a scan that does close are never reached again: the
+ * lexer continues after that literal. Each (position, state) is thus walked
+ * at most once by unclosed scans, and the tokens are exactly those of the
+ * previous rescanning lexer.
  */
-function tokenizeBraceSource(
+export function tokenizeBraceSource(
   content: string,
   options: { readonly isJsTs?: boolean } = {},
 ): string[] {
@@ -725,6 +746,67 @@ function tokenizeBraceSource(
   const len = content.length;
   const templateBraceDepthStack: number[] = [];
   let i = 0;
+  /**
+   * Regex scan states already walked, per position: bit 1 outside a character
+   * class, bit 2 inside one (allocated on the first regex candidate).
+   */
+  let walkedRegexStates: Uint8Array | undefined;
+
+  /**
+   * Scans the JS/TS regex literal candidate whose `/` is at `start`: returns
+   * the index after its closing `/` and flags, or -1 when it does not close on
+   * its line (line break, backslash before a line break, or end of input).
+   */
+  const scanJsRegexLiteral = (start: number): number => {
+    walkedRegexStates ??= new Uint8Array(len);
+    const walked = walkedRegexStates;
+    let cur = start + 1;
+    let inCharClass = false;
+    while (cur < len) {
+      const state = inCharClass ? 2 : 1;
+      const seen = walked[cur] ?? 0;
+      if ((seen & state) !== 0) {
+        // An earlier scan walked on from this very state and did not close.
+        return -1;
+      }
+      walked[cur] = seen | state;
+      const code = content.charCodeAt(cur);
+      if (code === 10 || code === 13) {
+        // Regex literals cannot span unescaped line breaks
+        return -1;
+      }
+      if (code === 92) {
+        if (
+          cur + 1 < len &&
+          content.charCodeAt(cur + 1) !== 10 &&
+          content.charCodeAt(cur + 1) !== 13
+        ) {
+          cur += 2;
+          continue;
+        }
+        return -1;
+      }
+      if (code === 91) {
+        inCharClass = true;
+        cur += 1;
+        continue;
+      }
+      if (code === 93) {
+        inCharClass = false;
+        cur += 1;
+        continue;
+      }
+      if (code === 47 && !inCharClass) {
+        cur += 1;
+        while (cur < len && isAsciiAlphaCode(content.charCodeAt(cur))) {
+          cur += 1;
+        }
+        return cur;
+      }
+      cur += 1;
+    }
+    return -1;
+  };
 
   const scanJsTemplateChunk = (startIndex: number): void => {
     let cur = startIndex + 1;
@@ -782,51 +864,10 @@ function tokenizeBraceSource(
     if (isJsTs && ch === 47) {
       const prev = tokens[tokens.length - 1];
       if (prev === undefined || JS_REGEX_PREFIX_TOKENS.has(prev)) {
-        const start = i;
-        let cur = i + 1;
-        let inCharClass = false;
-        let closed = false;
-        while (cur < len) {
-          const code = content.charCodeAt(cur);
-          if (code === 10 || code === 13) {
-            // Regex literals cannot span unescaped line breaks
-            break;
-          }
-          if (code === 92) {
-            if (
-              cur + 1 < len &&
-              content.charCodeAt(cur + 1) !== 10 &&
-              content.charCodeAt(cur + 1) !== 13
-            ) {
-              cur += 2;
-            } else {
-              break;
-            }
-            continue;
-          }
-          if (code === 91) {
-            inCharClass = true;
-            cur += 1;
-            continue;
-          }
-          if (code === 93) {
-            inCharClass = false;
-            cur += 1;
-            continue;
-          }
-          if (code === 47 && !inCharClass) {
-            cur += 1;
-            while (cur < len && isAsciiAlphaCode(content.charCodeAt(cur))) {
-              cur += 1;
-            }
-            closed = true;
-            break;
-          }
-          cur += 1;
-        }
-        if (closed) {
-          tokens.push(content.slice(start, cur));
-          i = cur;
+        const end = scanJsRegexLiteral(i);
+        if (end >= 0) {
+          tokens.push(content.slice(i, end));
+          i = end;
           continue;
         }
       }
@@ -1687,6 +1728,69 @@ function toDiagnostic(diagnostic: RoslynAdapterDiagnostic): IndexDiagnostic {
 }
 
 /**
+ * Appends `items` one by one. A spread push (`target.push(...items)`) passes
+ * every item as a call argument and throws a RangeError beyond V8's argument
+ * limit (some 120k-150k on the main thread); worker warnings are bounded only
+ * by bytes, so one response can carry hundreds of thousands (F47).
+ */
+function appendAll<T>(target: T[], items: readonly T[]): void {
+  for (const item of items) target.push(item);
+}
+
+/** No diagnostic without a file was attributed to a language. */
+const NO_PATHLESS_DIAGNOSTICS: ReadonlyMap<string, number> = new Map();
+
+/**
+ * Counts a diagnostic that names no file (a worker's RESPONSE_TRUNCATED: its
+ * response or node budget was reached) against the language of the adapter
+ * that reported it (see factCacheExclusionsOf).
+ */
+function countPathlessDiagnostic(
+  counts: Map<string, number>,
+  language: string,
+  diagnostic: { readonly relativePath: string },
+): void {
+  if (diagnostic.relativePath !== "") return;
+  counts.set(language, (counts.get(language) ?? 0) + 1);
+}
+
+/** Which facts of a run stay out of the per-file cache (persistFileFacts). */
+interface FactCacheExclusions {
+  /** Files a diagnostic names. */
+  readonly paths: ReadonlySet<string>;
+  /** Languages whose adapter reported a diagnostic that names no file: none of their files is cached. */
+  readonly languages: ReadonlySet<string>;
+  /** A diagnostic that names no file and that no language was charged with: no file of the run is cached. */
+  readonly wholeRun: boolean;
+}
+
+/**
+ * A diagnostic that names no file means the facts of any file of the response
+ * that carried it may be incomplete. When the caller charged it to a language
+ * (`pathlessByLanguage`, counted per adapter) only that language's files are
+ * excluded; any such diagnostic left uncharged excludes the whole run.
+ */
+function factCacheExclusionsOf(
+  diagnostics: readonly IndexDiagnostic[],
+  pathlessByLanguage: ReadonlyMap<string, number>,
+): FactCacheExclusions {
+  const paths = new Set<string>();
+  let pathless = 0;
+  for (const diagnostic of diagnostics) {
+    if (diagnostic.relativePath === "") pathless += 1;
+    else paths.add(diagnostic.relativePath);
+  }
+  const languages = new Set<string>();
+  let charged = 0;
+  for (const [language, count] of pathlessByLanguage) {
+    if (count <= 0) continue;
+    languages.add(language);
+    charged += count;
+  }
+  return { paths, languages, wholeRun: pathless > charged };
+}
+
+/**
  * M2: senkron köprü L0 File node'larının analyzer provenance'ı — dilin
  * kayıtlı sidecar adapter kimliği (INDEXED_ADAPTERS ile aynı sabitler).
  */
@@ -1836,6 +1940,12 @@ export class IndexService {
   private readonly onLeaseEvent: ((event: BuildLeaseEvent) => void) | undefined;
   /** Injected inventory of the async pipeline (undefined: walk the root on disk). */
   private readonly inventorySource: InventorySource | undefined;
+  private readonly isCancelled: (() => boolean) | undefined;
+  /**
+   * Inventory to mirror into the files table when a build publishes (jobs with
+   * a cancel check; see syncInventoryRecordsForBuild), per build id.
+   */
+  private readonly deferredInventorySyncs = new Map<string, readonly InventoryEntry[]>();
   /** Leases currently held by runs of this service (renewed at phase boundaries). */
   private readonly heldLeases = new Set<ActiveBuildLeaseHandle>();
   private workspaceRegistered = false;
@@ -1886,6 +1996,7 @@ export class IndexService {
     this.leaseStaleCeilingMs = ceiling > 0 ? ceiling : undefined;
     this.onLeaseEvent = options.onLeaseEvent;
     this.inventorySource = options.inventorySource;
+    this.isCancelled = options.isCancelled;
     const policyConfig = options.policy.config;
     const hashInput: JsonValue = {
       workspaceId: this.workspaceId,
@@ -2703,32 +2814,57 @@ export class IndexService {
   private persistFileFacts(
     currentLanguagePaths: ReadonlySet<string>,
     factMaps: readonly ReadonlyMap<string, FileFactRecord>[],
-    diagnosticPaths: ReadonlySet<string>,
+    diagnostics: readonly IndexDiagnostic[],
+    pathlessByLanguage: ReadonlyMap<string, number> = NO_PATHLESS_DIAGNOSTICS,
   ): void {
     if (!isFileFactStore(this.repository)) return;
+    this.throwIfCancelled("persisting file facts");
     const store = this.repository;
+    // A diagnostic that names no file (a worker's RESPONSE_TRUNCATED: response
+    // or node budget reached) means any file of that response may have
+    // incomplete facts: none of them is cached, and their cached facts are
+    // dropped, so the next incremental run analyses them again instead of
+    // reporting a truncated analysis as complete. The files of the language
+    // whose adapter reported it are excluded; when the caller could not tell
+    // which adapter that was, the whole run is (factCacheExclusionsOf).
+    const exclusions = factCacheExclusionsOf(diagnostics, pathlessByLanguage);
+    const uncached = (fact: { readonly relativePath: string; readonly language: string }): boolean =>
+      exclusions.wholeRun || exclusions.languages.has(fact.language) || exclusions.paths.has(fact.relativePath);
     const toUpsert: FileFactRecord[] = [];
     for (const map of factMaps) {
-      for (const [relativePath, record] of map) {
-        if (!diagnosticPaths.has(relativePath)) {
+      for (const record of map.values()) {
+        if (!uncached(record)) {
           toUpsert.push(record);
         }
       }
     }
-    const existingFacts = store.listFileFacts(this.workspaceId);
-    this.withTransaction(() => {
-      if (toUpsert.length > 0) {
-        store.upsertFileFacts(toUpsert);
+    const write = (): void => {
+      // With a cancel check (an index job worker) this runs in a BEGIN IMMEDIATE
+      // transaction and checks again inside it, as publishUnlessCancelled does:
+      // the job manager sets the flag before it releases the build lease, and
+      // the release needs the write lock, so a job cancelled before it holds the
+      // lock writes nothing.
+      if (this.isCancelled !== undefined) {
+        this.throwIfCancelled("persisting file facts");
       }
-      for (const existing of existingFacts) {
-        if (
-          !currentLanguagePaths.has(existing.relativePath) ||
-          diagnosticPaths.has(existing.relativePath)
-        ) {
-          store.deleteFileFact(this.workspaceId, existing.relativePath);
+      const existingFacts = store.listFileFacts(this.workspaceId);
+      this.withTransaction(() => {
+        if (toUpsert.length > 0) {
+          store.upsertFileFacts(toUpsert);
         }
-      }
-    });
+        for (const existing of existingFacts) {
+          if (!currentLanguagePaths.has(existing.relativePath) || uncached(existing)) {
+            store.deleteFileFact(this.workspaceId, existing.relativePath);
+          }
+        }
+      });
+    };
+    const leaseStore = this.repository as GraphRepository & Partial<BuildLeaseStore>;
+    if (this.isCancelled !== undefined && typeof leaseStore.withImmediateTransaction === "function") {
+      leaseStore.withImmediateTransaction(write);
+      return;
+    }
+    write();
   }
 
   /**
@@ -2805,7 +2941,7 @@ export class IndexService {
           ? "ready"
           : "partial";
       try {
-        this.syncInventoryRecords(prepared.entries);
+        this.syncInventoryRecordsForBuild(opened.buildId, prepared.entries);
         const nodeByKey = new Map<string, GraphNode>();
         this.withTransaction(() => {
           this.addAdapterGraph(
@@ -2816,14 +2952,13 @@ export class IndexService {
             nodeByKey,
           );
         });
-        const diagnosticPaths = new Set(diagnostics.map((d) => d.relativePath));
         const currentLangPaths = new Set(
           prepared.tsEntries.map((entry) => entry.relativePath),
         );
         this.persistFileFacts(
           currentLangPaths,
           [tsOutcome.updatedFacts],
-          diagnosticPaths,
+          diagnostics,
         );
       } catch (error) {
         this.failBuild(opened.buildId, error);
@@ -2967,7 +3102,7 @@ export class IndexService {
           `diagnostic: ${converted.relativePath}:${String(converted.line)} ${converted.code} ${converted.message}`,
         );
       }
-      warnings.push(...adapterResult.warnings);
+      appendAll(warnings, adapterResult.warnings);
 
       const freshFacts = partitionAdapterOutputByFile({
         workspaceId: this.workspaceId,
@@ -3089,6 +3224,8 @@ export class IndexService {
 
     const warnings: string[] = [];
     const diagnostics: IndexDiagnostic[] = [];
+    /** Diagnostics without a file, per language of the adapter that reported them. */
+    const pathlessByLanguage = new Map<string, number>();
     const updatedAt = this.clock();
     const adapterOutputs: AdapterOutput[] = [];
     const factMapsToPersist: Array<ReadonlyMap<string, FileFactRecord>> = [];
@@ -3283,11 +3420,12 @@ export class IndexService {
         if (!res.workerAvailable) return undefined;
         for (const diag of res.diagnostics) {
           diagnostics.push(toDiagnostic(diag));
+          countPathlessDiagnostic(pathlessByLanguage, spec.lang, diag);
           warnings.push(
             `diagnostic: ${diag.relativePath}:${String(diag.line)} ${diag.code} ${diag.message}`,
           );
         }
-        warnings.push(...res.warnings);
+        appendAll(warnings, res.warnings);
         const freshMap = partitionAdapterOutputByFile({
           workspaceId: this.workspaceId,
           analyzerFingerprint: prevMeta.analyzerFingerprint,
@@ -3352,7 +3490,7 @@ export class IndexService {
     try {
       let finalState: PublishableState = "ready";
       try {
-        this.syncInventoryRecords(prepared.entries);
+        this.syncInventoryRecordsForBuild(opened.buildId, prepared.entries);
         const nodeByKey = new Map<string, GraphNode>();
         this.withTransaction(() => {
           for (const output of adapterOutputs) {
@@ -3368,7 +3506,6 @@ export class IndexService {
         });
         if (diagnostics.length > 0) finalState = "partial";
 
-        const diagnosticPaths = new Set(diagnostics.map((d) => d.relativePath));
         const currentLangPaths = new Set<string>([
           ...prepared.tsEntries.map((e) => e.relativePath),
           ...prepared.csEntries.map((e) => e.relativePath),
@@ -3376,7 +3513,7 @@ export class IndexService {
           ...prepared.goEntries.map((e) => e.relativePath),
           ...prepared.rsEntries.map((e) => e.relativePath),
         ]);
-        this.persistFileFacts(currentLangPaths, factMapsToPersist, diagnosticPaths);
+        this.persistFileFacts(currentLangPaths, factMapsToPersist, diagnostics, pathlessByLanguage);
       } catch (error) {
         this.failBuild(opened.buildId, error);
       }
@@ -3630,6 +3767,23 @@ export class IndexService {
 
   private withTransaction<T>(fn: () => T): T {
     return this.repository.runInTransaction ? this.repository.runInTransaction(fn) : fn();
+  }
+
+  /**
+   * Mirrors the run's inventory into the files table for build `buildId`, after
+   * the adapters ran. A job with a cancel check (an index job worker) does it
+   * in its publish transaction instead (publishUnlessCancelled): the next
+   * refresh decides "no change" from the files table alone (analyzeChanges),
+   * so a job that does not publish (cancelled, or failed after this point) must
+   * leave it as it was, or that refresh would keep serving the old snapshot.
+   * Other runs sync right away, as before.
+   */
+  private syncInventoryRecordsForBuild(buildId: string, entries: readonly InventoryEntry[]): void {
+    if (this.isCancelled === undefined) {
+      this.syncInventoryRecords(entries);
+      return;
+    }
+    this.deferredInventorySyncs.set(buildId, entries);
   }
 
   /**
@@ -3957,6 +4111,51 @@ export class IndexService {
     }
   }
 
+  /** Throws when the job this service runs was cancelled (IndexServiceOptions.isCancelled). */
+  private throwIfCancelled(step: string): void {
+    if (this.isCancelled?.() === true) {
+      throw new IndexingError(
+        "indexing/internal",
+        `Indexing job cancelled before ${step}; nothing was written`,
+      );
+    }
+  }
+
+  /**
+   * Publishes `buildId`. With a cancellation check (an index job worker) the
+   * check and the publish run in ONE `BEGIN IMMEDIATE` transaction (the
+   * repository's publish becomes a savepoint in it): the job manager sets the
+   * cancel flag before it releases the build lease, and that release needs the
+   * write lock, so a job cancelled before the transaction never publishes, and
+   * one whose transaction already holds the lock commits before the lease is
+   * released (the single-writer rule holds either way). The build's deferred
+   * files-table sync (syncInventoryRecordsForBuild) runs in the same
+   * transaction right before the publish, so it commits or rolls back with it.
+   */
+  private publishUnlessCancelled(
+    buildId: string,
+    state: PublishableState,
+    publishedAt: string,
+  ): SnapshotGraph {
+    if (this.isCancelled === undefined) {
+      return this.repository.publish(buildId, state, publishedAt);
+    }
+    const publish = (): SnapshotGraph => {
+      this.throwIfCancelled("publishing");
+      const inventory = this.deferredInventorySyncs.get(buildId);
+      if (inventory !== undefined) this.syncInventoryRecords(inventory);
+      return this.repository.publish(buildId, state, publishedAt);
+    };
+    const store = this.repository as GraphRepository & Partial<BuildLeaseStore>;
+    try {
+      return typeof store.withImmediateTransaction === "function"
+        ? store.withImmediateTransaction(publish)
+        : publish();
+    } finally {
+      this.deferredInventorySyncs.delete(buildId);
+    }
+  }
+
   /**
    * Build'i yayımlar; tolerateConcurrentPublishRace aktifken graph/publish-failed
    * yarışında önce kaybeden build satırını failBuild ile temizler, ardından
@@ -3979,7 +4178,7 @@ export class IndexService {
     const publishedAt = this.clock();
     let snapshot: SnapshotGraph;
     try {
-      snapshot = this.repository.publish(buildId, state, publishedAt);
+      snapshot = this.publishUnlessCancelled(buildId, state, publishedAt);
     } catch (error) {
       if (
         this.tolerateConcurrentPublishRace &&
@@ -4147,7 +4346,7 @@ export class IndexService {
           // Envanter mutabakatı: bu dalda adapter koşumu YOK, sıralama
           // tehlikesi yok — build'e girmeden mutabakat yapılır (async yol
           // sözleşmesiyle aynı mutabakat garantisi).
-          this.syncInventoryRecords(entries);
+          this.syncInventoryRecordsForBuild(opened.buildId, entries);
           warnings.push(
             "the workspace contains no analyzable TypeScript/TSX/C#/Python/Go/Rust sources; coverage is zero (published as partial)",
           );
@@ -4191,7 +4390,7 @@ export class IndexService {
               `diagnostic: ${converted.relativePath}:${String(converted.line)} ${converted.code} ${converted.message}`,
             );
           }
-          warnings.push(...adapterResult.warnings);
+          appendAll(warnings, adapterResult.warnings);
           this.withTransaction(() => {
             this.addAdapterGraph(
               opened.buildId,
@@ -4289,10 +4488,9 @@ export class IndexService {
         // dışı fırlatırsa files tablosu güncellenmez; aksi hâlde güncellenen
         // envanter sonraki incremental koşumu "değişiklik yok" no-op'una
         // itip bayat graph'ı korur.
-        this.syncInventoryRecords(entries);
+        this.syncInventoryRecordsForBuild(opened.buildId, entries);
 
         if (!syncHasL0Language && tsEntries.length > 0 && isFileFactStore(this.repository)) {
-          const diagnosticPaths = new Set(diagnostics.map((d) => d.relativePath));
           const tsFacts = partitionAdapterOutputByFile({
             workspaceId: this.workspaceId,
             analyzerFingerprint: fingerprint,
@@ -4306,7 +4504,7 @@ export class IndexService {
           this.persistFileFacts(
             new Set(tsEntries.map((e) => e.relativePath)),
             [tsFacts],
-            diagnosticPaths,
+            diagnostics,
           );
         }
 
@@ -4386,6 +4584,8 @@ export class IndexService {
     } = prepared;
     const warnings: string[] = [];
     const diagnostics: IndexDiagnostic[] = [];
+    /** Diagnostics without a file, per language of the adapter that reported them. */
+    const pathlessByLanguage = new Map<string, number>();
     const contentHashByPath = new Map<string, string>(
       entries.map((entry) => [entry.relativePath, entry.contentHash]),
     );
@@ -4435,11 +4635,12 @@ export class IndexService {
           line: diagnostic.line,
         };
         diagnostics.push(converted);
+        countPathlessDiagnostic(pathlessByLanguage, "typescript", converted);
         warnings.push(
           `diagnostic: ${converted.relativePath}:${String(converted.line)} ${converted.code} ${converted.message}`,
         );
       }
-      warnings.push(...adapterResult.warnings);
+      appendAll(warnings, adapterResult.warnings);
       completedLangFiles += tsEntries.length;
       options.onProgress?.({
         phase: "analyzing",
@@ -4468,11 +4669,12 @@ export class IndexService {
       });
       for (const diagnostic of csharpResult.diagnostics) {
         diagnostics.push(toDiagnostic(diagnostic));
+        countPathlessDiagnostic(pathlessByLanguage, "csharp", diagnostic);
         warnings.push(
           `diagnostic: ${diagnostic.relativePath}:${String(diagnostic.line)} ${diagnostic.code} ${diagnostic.message}`,
         );
       }
-      warnings.push(...csharpResult.warnings);
+      appendAll(warnings, csharpResult.warnings);
     }
 
     // M2: python/go/rust adapter koşumları (sıra sabittir: python, go,
@@ -4497,11 +4699,12 @@ export class IndexService {
       });
       for (const diagnostic of pythonResult.diagnostics) {
         diagnostics.push(toDiagnostic(diagnostic));
+        countPathlessDiagnostic(pathlessByLanguage, "python", diagnostic);
         warnings.push(
           `diagnostic: ${diagnostic.relativePath}:${String(diagnostic.line)} ${diagnostic.code} ${diagnostic.message}`,
         );
       }
-      warnings.push(...pythonResult.warnings);
+      appendAll(warnings, pythonResult.warnings);
     }
     let goResult: GoAdapterResult | undefined;
     if (goEntries.length > 0) {
@@ -4531,11 +4734,12 @@ export class IndexService {
       });
       for (const diagnostic of goResult.diagnostics) {
         diagnostics.push(toDiagnostic(diagnostic));
+        countPathlessDiagnostic(pathlessByLanguage, "go", diagnostic);
         warnings.push(
           `diagnostic: ${diagnostic.relativePath}:${String(diagnostic.line)} ${diagnostic.code} ${diagnostic.message}`,
         );
       }
-      warnings.push(...goResult.warnings);
+      appendAll(warnings, goResult.warnings);
     }
     let rustResult: RustAdapterResult | undefined;
     if (rsEntries.length > 0) {
@@ -4561,11 +4765,12 @@ export class IndexService {
       });
       for (const diagnostic of rustResult.diagnostics) {
         diagnostics.push(toDiagnostic(diagnostic));
+        countPathlessDiagnostic(pathlessByLanguage, "rust", diagnostic);
         warnings.push(
           `diagnostic: ${diagnostic.relativePath}:${String(diagnostic.line)} ${diagnostic.code} ${diagnostic.message}`,
         );
       }
-      warnings.push(...rustResult.warnings);
+      appendAll(warnings, rustResult.warnings);
     }
 
     // fp2 ref-pack keşfi: worker healthy koştuysa yanıt warnings'inden
@@ -4668,7 +4873,7 @@ export class IndexService {
         // Envanter mutabakatı ADAPTER KOŞUMULARINDAN ve build açılışından sonra:
         // başka sürecin aktif build'i nedeniyle önceki snapshot'a düşülürse
         // files tablosu yayımlanmamış karmalarla kirlenmez.
-        this.syncInventoryRecords(entries);
+        this.syncInventoryRecordsForBuild(opened.buildId, entries);
 
         // Erken çıkış: analiz edilebilir dil kaynağı yok — senkron yolun
         // aynı dürüstlük sözleşmesi (denetim bulgusu): coverage sıfırken
@@ -4753,7 +4958,6 @@ export class IndexService {
         finalState = state;
 
         if (isFileFactStore(this.repository)) {
-          const diagnosticPaths = new Set(diagnostics.map((d) => d.relativePath));
           const factMaps: Array<ReadonlyMap<string, FileFactRecord>> = [];
           if (tsEntries.length > 0) {
             factMaps.push(
@@ -4832,7 +5036,7 @@ export class IndexService {
             ...goEntries.map((e) => e.relativePath),
             ...rsEntries.map((e) => e.relativePath),
           ]);
-          this.persistFileFacts(currentLangPaths, factMaps, diagnosticPaths);
+          this.persistFileFacts(currentLangPaths, factMaps, diagnostics, pathlessByLanguage);
         }
         }
       } catch (error) {
@@ -5006,6 +5210,8 @@ export class IndexService {
 
   /** Build'i failed yapar ve hatayı sınıf sözleşmesine çevirip fırlatır. */
   private failBuild(buildId: string, error: unknown): never {
+    // A build that fails never publishes: its deferred files sync is dropped.
+    this.deferredInventorySyncs.delete(buildId);
     if (error instanceof IndexingError) {
       this.repository.failBuild(buildId, `${error.code}: ${error.message}`);
       throw error;

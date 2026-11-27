@@ -72,12 +72,19 @@ Zod strictObject disipliniyle aynı).
 | `MaxFileCount` | 5.000 dosya/istek | İstek reddedilir: `LIMIT_EXCEEDED`. |
 | `MaxFileContentBytes` | 2.000.000 bayt/dosya (TŞ §20 `maxFileBytes` ile uyumlu) | İstek reddedilir: `LIMIT_EXCEEDED`. |
 | `MaxResponseNodes` | 250.000 node/yanıt (güvenlik bulgusu 4; istek `maxNodes` ile altında seçilebilir) | Sert tavan ya da istek bütçesi dolunca aşan node'lar YAYINLANMAZ; uçları yayınlanmayan kenarlar da düşer (dangling yok). Yanıta `RESPONSE_TRUNCATED` tanısı düşer ve `status: "partial"` olur — sessiz kesim yoktur. |
+| `MaxEmittedTextLength` | 1024 char/metin | Every text the worker copies out of the source is capped: qualified names (namespace prefixes, types, members, symbol display names), call texts of unresolved calls, base-type texts, Endpoint route paths and `MapMethods` verbs, and ambiguity candidates. A longer text becomes its first characters + `~` + the first 16 lowercase hex digits of the SHA-256 (UTF-8) of the whole text, at most 1024 characters in total; the cut never splits a surrogate pair. Deterministic, and distinct long texts stay distinct. Texts within the cap are emitted unchanged; capping adds no diagnostic. |
+| `MaxAmbiguityCandidates` | 64 aday/belirsiz çağrı noktası | Only the first 64 `CandidateSymbols` of an overload or constructor overload ambiguity are listed (each capped as above); the `reason` then ends with `Only the first 64 of <n> candidates are listed.` |
+| `MaxResponseChars` / `MaxDiagnosticResponseChars` | 60.000.000 char/yanıt, en çok 16.000.000'i derleyici tanıları için | The serialized JSON length of every node, edge, evidence record (counted twice: in the edge and in the top-level `evidence` list), warning and compiler diagnostic, plus the envelope and a span reserve, is charged against this budget; compiler diagnostics may use at most `MaxDiagnosticResponseChars` of it. Once it is reached nothing more is admitted: further nodes, edges, evidence, warnings and diagnostics are NOT emitted (edges never dangle; an edge already emitted keeps the evidence it has), later analysis phases are skipped, one warning `further warnings were not emitted: the response size budget was reached` is added, and the response gets a `RESPONSE_TRUNCATED` diagnostic (`relativePath: ""`, `line: 0`, message `response size budget reached (60000000 serialized characters, at most 16000000 of them for compiler diagnostics); … were not emitted`) and `status: "partial"`. The budget stays below the C# adapter's default response line cap (`DEFAULT_RESPONSE_MAX_CHARS`, 64 × 1024 × 1024 characters) for short, medium and long names, so a truncated response is still accepted as partial; the indexer then keeps the C# files of that run out of its file-facts cache. Output for normal code is byte-identical. |
 
 Sınırlar sabittir (protokol v1'de istekte yapılandırılamaz) ve aynı girdiye
 deterministik davranışı korur. Çalışma zamanı ayrıca parser/gezinme için
 geniş stack'li thread kullanır; AST gezinme derinliği 1000'i aşan alt
 ağaçlar atlanır ve dosya başına bir kez `ADAPTER_INTERNAL` tanısı + uyarı
-verilir (analiz `partial` olur — süreç StackOverflow ile ölmez).
+verilir (analiz `partial` olur — süreç StackOverflow ile ölmez). The Phase-1
+declaration walk (namespaces, types and their members) has the same
+1000-level limit: deeper declarations are skipped, and the file gets its own
+`ADAPTER_INTERNAL` diagnostic (`declaration nesting depth exceeded the 1000
+limit; deeper declarations were skipped`) plus one warning, once per file.
 
 ### Referans keşfi (otomatik)
 
@@ -133,11 +140,24 @@ result; the worker never reads project files itself.
 |---|---|---|
 | `path` | string | **Required.** Workspace-relative POSIX path of a `.csproj` file; same path rules as `files[].path`. Paths are unique and at most one project per directory. |
 | `assemblyName` | string | Optional; `^[A-Za-z0-9_][A-Za-z0-9_.-]{0,255}$`. Default: the project file name without extension (duplicates get a `.2`, `.3` suffix and a warning). |
-| `globalUsings` | object[] | Optional, ≤ 512. `name`: dotted C# name (identifier segments only); `alias`: one identifier; `static`: boolean. `static` together with `alias` is rejected. |
+| `globalUsings` | object[] | Optional, ≤ 512. `name`: dotted C# name (identifier segments only); `alias`: one identifier; `static`: boolean. An entry whose `name` is not a dotted C# name, whose `alias` is not one identifier, or that is `static` together with an `alias` is dropped with a warning (it never reaches the generated tree); an unknown field, a missing `name` or more than 512 entries still reject the request. |
 | `projectReferences` | string[] | Optional, ≤ 512. Workspace-relative `.csproj` paths. |
 
-Unknown fields, invalid names or paths → `INVALID_ARGUMENT`; more than 1024
-projects or a list over its bound → `LIMIT_EXCEEDED`.
+Unknown fields, invalid project names or paths → `INVALID_ARGUMENT`; more than
+1024 projects or a list over its bound → `LIMIT_EXCEEDED`. Invalid global
+usings are dropped instead: the first one of a project gets a detailed warning
+(`global using '<name>' of project '<path>' was skipped: it is not a dotted C#
+name` / `… it has an alias that is not a C# identifier (…)` / `… it is both
+static and aliased`), the rest one count (`<n> further global usings of project
+'<path>' were skipped for the same kinds of reasons`). The identifier pattern
+classifies UTF-16 code units, so a character outside the Basic Multilingual
+Plane (a surrogate pair, which C# does not accept in identifiers either) makes
+a name invalid; the adapter refuses such names before sending. The C# adapter
+keeps every project within these bounds before sending: at most 512 global
+usings (the SDK defaults first, then the other items in evaluation order) and
+at most 512 ProjectReferences (the last ones in ordinal order are dropped),
+each cut reported with a warning, so one large project does not get the whole
+request rejected.
 
 Semantics:
 
@@ -248,6 +268,9 @@ Analiz tamamlandığında:
   - Top-level local function: `Program.<ad>` (sentetik Program sınıfı kuralı).
   - UnknownExternal: `AdAlani.Tip.Uye` (analiz seti dışı sembol) veya çağrı
     ifadesinin kaynak metni (hiç çözümlenemeyen çağrılar).
+  - Every `qualifiedName` except a File node's (its `relativePath`) and every
+    Endpoint `path` is at most 1024 characters (`MaxEmittedTextLength` in
+    the limits table).
 - `attributes` — File: `sourceHash` (UTF-8 SHA-256, 64 hex); Endpoint:
   `method` + `path` (önde `/` ile, ör. `"/api/Orders/{id}"`).
 

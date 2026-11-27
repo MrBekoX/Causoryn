@@ -80,6 +80,63 @@ MAX_AST_DEPTH = max(100, min(500, sys.getrecursionlimit() // 2))
 # content digest so distinct expressions stay distinct.
 MAX_RENDERED_EXPRESSION_CHARS = 200
 
+# Budgets for rendering long expressions: source bytes of every rendered
+# expression longer than MAX_RENDERED_EXPRESSION_CHARS (ast.unparse or its
+# source-segment fallback, and the digest of the result; ast.unparse visits at
+# most one node per source byte). Past either budget such an expression is
+# named by its source range instead, so nested or chained long expressions
+# cannot make rendering quadratic. Real code stays far below both: 35,460
+# files of CPython's Lib (site-packages included) render 222 KB in total,
+# at most 8.6 KB in one file.
+MAX_RENDER_SOURCE_BYTES_PER_FILE = 256_000
+MAX_RENDER_SOURCE_BYTES_PER_REQUEST = 1_000_000
+
+# Line splitting of ast.get_source_segment (ast._splitlines_no_ff): \r\n, \n
+# and \r end a line; form feeds and other characters do not.
+_SOURCE_LINE = re.compile(r"(.*?(?:\r\n|\n|\r|$))")
+
+# ast.unparse enters every child through _Unparser.traverse, NodeVisitor.visit
+# and the node's visit_<Kind> method: at least three frames per nesting level.
+_UNPARSE_FRAMES_PER_LEVEL = 3
+
+
+def _spine_depth(node: ast.AST, cap: int) -> int:
+    """Length of the call/attribute/subscript chain below `node` (following
+    Call.func, Attribute.value and Subscript.value), counted up to `cap`: a
+    lower bound of the node's nesting depth, found without recursion."""
+    depth = 1
+    current = node
+    while depth <= cap:
+        if isinstance(current, ast.Call):
+            current = current.func
+        elif isinstance(current, (ast.Attribute, ast.Subscript)):
+            current = current.value
+        else:
+            break
+        depth += 1
+    return depth
+
+# Upper bound for declared qualified names and literal route paths (import-
+# derived UnknownExternal names use the expression bound above). Without it
+# one long identifier is copied into every edge endpoint, rationale and key
+# that quotes it.
+MAX_QUALIFIED_NAME_CHARS = 512
+
+# Upper bound for the distinct entries of a route decorator's methods list;
+# each entry becomes one Endpoint carrying the route path.
+MAX_ROUTE_METHODS = 16
+
+# Response size budget: UTF-8 bytes of the serialized nodes, edges, evidence
+# (counted twice: in its edge and in the top-level list) and warnings. Once it
+# is spent nothing more is admitted, edges never dangle, and the response gets
+# a RESPONSE_TRUNCATED diagnostic (status "partial"). It stays below the
+# adapter's default response line cap (64 MiB characters).
+MAX_RESPONSE_BYTES = 40_000_000
+
+# A response line longer than this (only reachable through diagnostics on top
+# of a spent budget) is replaced by a LIMIT_EXCEEDED error line.
+MAX_RESPONSE_LINE_BYTES = 60_000_000
+
 # TŞ §8 katalogları — worker liste dışı tür üretemez (çıkışta sert doğrulama).
 NODE_KINDS = frozenset(
     {
@@ -148,7 +205,9 @@ def _force_utf8_stderr() -> None:
     reconfigure = getattr(sys.stderr, "reconfigure", None)
     if callable(reconfigure):
         try:
-            reconfigure(encoding="utf-8")
+            # backslashreplace: a lone surrogate in a log line is escaped
+            # instead of raising (reconfigure would otherwise reset to strict).
+            reconfigure(encoding="utf-8", errors="backslashreplace")
         except (OSError, ValueError):
             pass  # reconfigure desteklenmiyorsa binary stdout disiplini yine sağlamdır
 
@@ -161,38 +220,49 @@ def canonical(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
 
+def utf8_size(text: str) -> int:
+    """UTF-8 byte length of serialized text (the length the response line has)."""
+    return len(text.encode("utf-8", "surrogatepass"))
+
+
 def sha256_hex(content: str) -> str:
     """UTF-8 SHA-256 — domain sha256Hex(utf8Encode(content)) ile bit-bit aynı."""
     return hashlib.sha256(content.encode("utf-8")).hexdigest()
 
 
-def bounded_text(text: str) -> str:
-    """Caps rendered text at MAX_RENDERED_EXPRESSION_CHARS (plus a digest suffix)."""
-    if len(text) <= MAX_RENDERED_EXPRESSION_CHARS:
+def bounded_text(text: str, limit: int = MAX_RENDERED_EXPRESSION_CHARS) -> str:
+    """Caps text at `limit` characters (default MAX_RENDERED_EXPRESSION_CHARS)
+    plus a digest suffix, so distinct texts stay distinct."""
+    if len(text) <= limit:
         return text
     digest = hashlib.sha256(text.encode("utf-8", "surrogatepass")).hexdigest()[:12]
-    return f"{text[:MAX_RENDERED_EXPRESSION_CHARS]}...#{digest}"
+    return f"{text[:limit]}...#{digest}"
 
 
-def render_expression(node: ast.AST, source: str) -> str:
-    """Bounded `ast.unparse` rendering of an expression.
+def bounded_name(text: str) -> str:
+    """Caps a qualified name or name-like text at MAX_QUALIFIED_NAME_CHARS."""
+    return bounded_text(text, MAX_QUALIFIED_NAME_CHARS)
 
-    ast.unparse is recursive: an expression too deep to render falls back to
-    its (non-recursive) source segment, or to a positional placeholder.
-    """
+
+def is_utf8_text(text: str) -> bool:
+    """False when `text` holds a lone surrogate (it cannot be encoded as UTF-8)."""
     try:
-        return bounded_text(ast.unparse(node))
-    except (RecursionError, ValueError):
-        segment = None
-        try:
-            segment = ast.get_source_segment(source, node)
-        except (RecursionError, ValueError):
-            segment = None
-        if segment:
-            return bounded_text(segment)
-        line = getattr(node, "lineno", 0)
-        column = getattr(node, "col_offset", 0)
-        return f"<expression at {line}:{column}>"
+        text.encode("utf-8")
+    except UnicodeEncodeError:
+        return False
+    return True
+
+
+def escape_lone_surrogates(text: str) -> str:
+    """Replaces each lone surrogate with its `\\uXXXX` escape text.
+
+    Python accepts `"\\ud800"` in a str literal; such a character cannot be
+    encoded as UTF-8, so it must never reach the response. The escape is
+    deterministic; text without lone surrogates is returned unchanged.
+    """
+    if is_utf8_text(text):
+        return text
+    return text.encode("utf-8", "backslashreplace").decode("utf-8")
 
 
 def module_name_from_path(relative_path: str) -> str:
@@ -240,6 +310,9 @@ def validate_relative_path(raw: Any) -> Tuple[Optional[str], Optional[str]]:
     """POSIX workspace-relative yol sözleşmesi. (path, hata_mesajı) döner."""
     if not isinstance(raw, str) or len(raw) == 0:
         return None, "files[].path must not be empty"
+    if not is_utf8_text(raw):
+        # The path is not quoted: a lone surrogate cannot be written to stdout.
+        return None, "files[].path must be valid Unicode text (it contains a lone surrogate)"
     if "\\" in raw:
         return None, f"files[].path must be a POSIX path (backslashes are not accepted): {raw}"
     if raw.startswith("/"):
@@ -275,6 +348,11 @@ def validate_request(payload: Any) -> Tuple[Optional[Dict[str, Any]], Optional[D
     if "id" not in payload or not valid_id(raw_id):
         return None, error_response(
             None, "INVALID_ARGUMENT", "id is required and must be a string or a number"
+        )
+    if isinstance(raw_id, str) and not is_utf8_text(raw_id):
+        # The id cannot be echoed: a lone surrogate cannot be written to stdout.
+        return None, error_response(
+            None, "INVALID_ARGUMENT", "id must be valid Unicode text (it contains a lone surrogate)"
         )
 
     if payload.get("type") != "analyze":
@@ -339,7 +417,14 @@ def validate_request(payload: Any) -> Tuple[Optional[Dict[str, Any]], Optional[D
             return None, error_response(
                 echoed_id, "INVALID_ARGUMENT", f"files[{index}].content must be a string"
             )
-        content_bytes = len(content.encode("utf-8"))
+        try:
+            content_bytes = len(content.encode("utf-8"))
+        except UnicodeEncodeError:
+            return None, error_response(
+                echoed_id,
+                "INVALID_ARGUMENT",
+                f"files[{index}].content must be valid Unicode text (it contains a lone surrogate)",
+            )
         if content_bytes > MAX_FILE_CONTENT_BYTES:
             return None, error_response(
                 echoed_id,
@@ -387,6 +472,14 @@ class FileAnalyzer:
         self.callables: List[Tuple[ast.stmt, str, str, Optional[str]]] = []
         self.depth_exceeded = False
         self.recursion_exceeded = False
+        # Source lines, their UTF-8 forms and byte offsets: split once per file
+        # (on first use) instead of on every source-segment fallback.
+        self._source_lines: Optional[List[str]] = None
+        self._line_bytes: Dict[int, bytes] = {}
+        self._line_byte_starts: Optional[List[int]] = None
+        self._render_bytes_left = MAX_RENDER_SOURCE_BYTES_PER_FILE
+        # Call-walk depth of the call being resolved (0 outside the walk).
+        self._walk_depth = 0
 
     # -- yardımcılar ----------------------------------------------------------
 
@@ -401,8 +494,105 @@ class FileAnalyzer:
         return {"kind": "UnknownExternal", "qualifiedName": bounded_text(qualified_name)}
 
     def render(self, node: ast.AST) -> str:
-        """Bounded rendering of an expression of this file (see render_expression)."""
-        return render_expression(node, self.content)
+        """Bounded `ast.unparse` rendering of an expression of this file.
+
+        ast.unparse is recursive: an expression too deep to render falls back to
+        its source segment, or to a positional placeholder. An expression whose
+        source is longer than MAX_RENDERED_EXPRESSION_CHARS bytes is charged at
+        its source size against the file's and the request's render budgets;
+        once either is spent it is named by its source range (`<expression at
+        path:line:col..end_line:end_col>`, distinct per expression) instead.
+        """
+        size = self._source_size(node)
+        if size is not None and size > MAX_RENDERED_EXPRESSION_CHARS:
+            collector = self.collector
+            if size > self._render_bytes_left or size > collector.render_bytes_left:
+                # Sticky for the file (and for the request once it is spent),
+                # so the cut is deterministic.
+                self._render_bytes_left = 0
+                if size > collector.render_bytes_left:
+                    collector.render_bytes_left = 0
+                return bounded_text(
+                    f"<expression at {self.path}:{node.lineno}:{node.col_offset}"
+                    f"..{node.end_lineno}:{node.end_col_offset}>"
+                )
+            self._render_bytes_left -= size
+            collector.render_bytes_left -= size
+        try:
+            free_frames = sys.getrecursionlimit() - self._walk_depth
+            spine_cap = free_frames // _UNPARSE_FRAMES_PER_LEVEL + 1
+            if _UNPARSE_FRAMES_PER_LEVEL * _spine_depth(node, spine_cap) > free_frames:
+                # ast.unparse would certainly raise RecursionError here (it
+                # uses at least three frames per nesting level, and at least
+                # _walk_depth frames are in use); skip the doomed attempt,
+                # whose unwinding costs about a millisecond per call.
+                raise RecursionError
+            return bounded_text(ast.unparse(node))
+        except (RecursionError, ValueError):
+            segment = None
+            try:
+                segment = self.source_segment(node)
+            except (RecursionError, ValueError, IndexError):
+                segment = None
+            if segment:
+                return bounded_text(segment)
+            line = getattr(node, "lineno", 0)
+            column = getattr(node, "col_offset", 0)
+            return f"<expression at {line}:{column}>"
+
+    def _release_source_lines(self) -> None:
+        """Drops the line caches at the end of a pass (rebuilt on demand)."""
+        self._source_lines = None
+        self._line_bytes = {}
+        self._line_byte_starts = None
+
+    def _lines(self) -> List[str]:
+        if self._source_lines is None:
+            self._source_lines = [match[0] for match in _SOURCE_LINE.finditer(self.content)]
+        return self._source_lines
+
+    def _encoded_line(self, index: int) -> bytes:
+        encoded = self._line_bytes.get(index)
+        if encoded is None:
+            encoded = self._lines()[index].encode("utf-8")
+            self._line_bytes[index] = encoded
+        return encoded
+
+    def _source_size(self, node: ast.AST) -> Optional[int]:
+        """UTF-8 byte length of the source of `node`; None without positions."""
+        lineno = getattr(node, "lineno", None)
+        end_lineno = getattr(node, "end_lineno", None)
+        col_offset = getattr(node, "col_offset", None)
+        end_col_offset = getattr(node, "end_col_offset", None)
+        if None in (lineno, end_lineno, col_offset, end_col_offset):
+            return None
+        if self._line_byte_starts is None:
+            starts = [0]
+            for line in self._lines():
+                starts.append(starts[-1] + len(line.encode("utf-8")))
+            self._line_byte_starts = starts
+        starts = self._line_byte_starts
+        if not (1 <= lineno <= end_lineno < len(starts)):
+            return None
+        return (starts[end_lineno - 1] + end_col_offset) - (starts[lineno - 1] + col_offset)
+
+    def source_segment(self, node: ast.AST) -> Optional[str]:
+        """ast.get_source_segment(self.content, node) (padded=False), with the
+        file split into lines once instead of once per call."""
+        try:
+            if node.end_lineno is None or node.end_col_offset is None:
+                return None
+            lineno = node.lineno - 1
+            end_lineno = node.end_lineno - 1
+            col_offset = node.col_offset
+            end_col_offset = node.end_col_offset
+        except AttributeError:
+            return None
+        if end_lineno == lineno:
+            return self._encoded_line(lineno)[col_offset:end_col_offset].decode()
+        first = self._encoded_line(lineno)[col_offset:].decode()
+        last = self._encoded_line(end_lineno)[:end_col_offset].decode()
+        return "".join([first, *self._lines()[lineno + 1:end_lineno], last])
 
     def span(self, start_line: Optional[int], end_line: Optional[int]) -> Dict[str, Any]:
         start = start_line if isinstance(start_line, int) and start_line > 0 else 0
@@ -444,6 +634,7 @@ class FileAnalyzer:
                 {name: (member_kind, member_qn, self.path)
                  for name, (member_kind, member_qn) in members.items()},
             )
+        self._release_source_lines()
 
     def _declare(
         self,
@@ -461,7 +652,9 @@ class FileAnalyzer:
         if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef)):
             name = statement.name
             kind = "Method" if in_class else "Function"
-            qualified = f"{prefix}.{name}"
+            # Bounded once here (CPython has no identifier length limit); the
+            # name tables below keep the raw name as the lookup key.
+            qualified = bounded_name(f"{prefix}.{name}")
             self.collector.add_node(kind, qualified, self.path, span=declaration_span(statement))
             self.collector.add_contains(
                 parent, self.ref(kind, qualified),
@@ -487,7 +680,7 @@ class FileAnalyzer:
 
         if isinstance(statement, ast.ClassDef):
             name = statement.name
-            qualified = f"{prefix}.{name}"
+            qualified = bounded_name(f"{prefix}.{name}")
             self.collector.add_node("Class", qualified, self.path, span=declaration_span(statement))
             self.collector.add_contains(
                 parent, self.ref("Class", qualified),
@@ -545,12 +738,23 @@ class FileAnalyzer:
             else:
                 continue
 
+            decorator_label = bounded_text(f"{carrier}.{attr}")
             if path is None:
                 self.collector.add_warning(
-                    f"{self.path}: the route path of decorator '{carrier}.{attr}' is not a "
+                    f"{self.path}: the route path of decorator '{decorator_label}' is not a "
                     f"literal string; no endpoint was produced for {handler_qn}"
                 )
                 continue
+            # The literal path is copied into every Endpoint of the decorator:
+            # escape lone surrogates (they cannot be written as UTF-8) and bound it.
+            path = bounded_name(escape_lone_surrogates(path))
+            if len(verbs) > MAX_ROUTE_METHODS:
+                self.collector.add_warning(
+                    f"{self.path}: the methods list of decorator '{decorator_label}' on "
+                    f"{handler_qn} has {len(verbs)} distinct entries; only the first "
+                    f"{MAX_ROUTE_METHODS} were used"
+                )
+                verbs = verbs[:MAX_ROUTE_METHODS]
 
             for verb in verbs:
                 endpoint_qn = f"{verb} {path}"
@@ -577,13 +781,17 @@ class FileAnalyzer:
         return None
 
     def _methods_kwarg(self, call: ast.Call) -> List[str]:
+        """Distinct methods of a `methods=[...]` list, in source order (each one
+        escaped and bounded like the path)."""
         for keyword in call.keywords:
             if keyword.arg == "methods" and isinstance(keyword.value, ast.List):
-                verbs = []
+                verbs: List[str] = []
+                seen: set = set()
                 for element in keyword.value.elts:
                     if isinstance(element, ast.Constant) and isinstance(element.value, str):
-                        verb = element.value.strip().upper()
-                        if verb:
+                        verb = bounded_text(escape_lone_surrogates(element.value.strip().upper()))
+                        if verb and verb not in seen:
+                            seen.add(verb)
                             verbs.append(verb)
                 if verbs:
                     return verbs
@@ -631,13 +839,18 @@ class FileAnalyzer:
     # -- geçiş 2: çağrı çözümleme ---------------------------------------------------
 
     def resolve_calls(self) -> None:
-        for node, kind, qualified, class_qn in self.callables:
-            try:
-                for statement in node.body:
-                    self._walk_calls(statement, (kind, qualified, class_qn), depth=1)
-            except RecursionError:
-                # Isolated per callable: its remaining calls are skipped.
-                self.recursion_exceeded = True
+        try:
+            for node, kind, qualified, class_qn in self.callables:
+                if self.collector.budget_exceeded:
+                    return  # nothing more can be admitted
+                try:
+                    for statement in node.body:
+                        self._walk_calls(statement, (kind, qualified, class_qn), depth=1)
+                except RecursionError:
+                    # Isolated per callable: its remaining calls are skipped.
+                    self.recursion_exceeded = True
+        finally:
+            self._release_source_lines()
 
     def _walk_calls(
         self,
@@ -648,9 +861,15 @@ class FileAnalyzer:
         if depth > MAX_AST_DEPTH:
             self.depth_exceeded = True
             return
+        if self.collector.budget_exceeded:
+            return  # nothing more can be admitted
 
         if isinstance(statement, ast.Call):
+            # Each walk level is one Python frame: renders of this call know
+            # at least this many frames are in use (see render).
+            self._walk_depth = depth
             self._resolve_call(statement, owner)
+            self._walk_depth = 0
 
         # İç içe bildirimlere İNİLMEZ: kendi gövdeleri, bildirim geçişinde
         # kaydedildikleri kendi callables kaydıyla ayrı sahiplikle gezilir.
@@ -692,7 +911,7 @@ class FileAnalyzer:
             else:
                 finish(
                     "unresolved", self.external_ref(name),
-                    f"CALLS: {owner_qn} → {name} could not be resolved (unresolved); "
+                    f"CALLS: {owner_qn} → {bounded_text(name)} could not be resolved (unresolved); "
                     "no fabricated target was produced.",
                 )
             return
@@ -716,7 +935,7 @@ class FileAnalyzer:
                 if member is not None:
                     finish(
                         "verified", self.ref(member[0], member[1]),
-                        f"CALLS: {owner_qn} → {member[1]} resolved 'self.{rest[0]}' via the "
+                        f"CALLS: {owner_qn} → {member[1]} resolved 'self.{bounded_text(rest[0])}' via the "
                         f"member table of the enclosing class {owner_class_qn} (verified).",
                     )
                 else:
@@ -827,20 +1046,24 @@ class FileAnalyzer:
                         },
                     )
                 else:
+                    # The import name is written once but quoted by every call:
+                    # the rationale and candidate use the bounded node name.
+                    external = self.external_ref(target_qn)
+                    shown = external["qualifiedName"]
                     finish(
                         "heuristic",
-                        self.external_ref(target_qn),
-                        f"CALLS: {owner_qn} → {target_qn} matched as an external symbol "
+                        external,
+                        f"CALLS: {owner_qn} → {shown} matched as an external symbol "
                         "based on the import statement (heuristic; no semantic verification).",
                         {
-                            "candidates": [target_qn],
+                            "candidates": [shown],
                             "reason": "import outside the analysis set; no semantic verification",
                         },
                     )
             else:
                 finish(
                     "unresolved", self.external_ref(binding_name),
-                    f"CALLS: {owner_qn} → {binding_name} could not be resolved (unresolved); "
+                    f"CALLS: {owner_qn} → {bounded_text(binding_name)} could not be resolved (unresolved); "
                     "no fabricated target was produced.",
                 )
             return
@@ -886,13 +1109,15 @@ class FileAnalyzer:
 
         # Analiz seti dışı import sembolü: import bildirimi metinsel dayanaktır.
         external_qn = f"{symbol_qn}.{'.'.join(rest)}" if rest else symbol_qn
+        external = self.external_ref(external_qn)
+        shown = external["qualifiedName"]
         finish(
             "heuristic",
-            self.external_ref(external_qn),
-            f"CALLS: {owner_qn} → {external_qn} matched as an external symbol "
+            external,
+            f"CALLS: {owner_qn} → {shown} matched as an external symbol "
             "based on the import statement (heuristic; no semantic verification).",
             {
-                "candidates": [external_qn],
+                "candidates": [shown],
                 "reason": "import outside the analysis set; no semantic verification",
             },
         )
@@ -905,7 +1130,9 @@ class RequestCollector:
         self._nodes: Dict[Tuple[str, str, str], Dict[str, Any]] = {}
         self._edges: Dict[Tuple[str, str, str, str], Dict[str, Any]] = {}
         self._edge_order: List[Tuple[str, str, str, str]] = []
-        self._evidence_keys: set = set()
+        # Canonical keys of each edge's evidence: merging is a set lookup
+        # instead of re-serializing the edge's whole evidence list per call.
+        self._edge_evidence_keys: Dict[Tuple[str, str, str, str], set] = {}
         self.warnings: List[str] = []
         self.diagnostics: List[Dict[str, Any]] = []
         self.module_set: set = set()
@@ -913,6 +1140,21 @@ class RequestCollector:
         self.symbol_registry: Dict[str, Tuple[str, str]] = {}
         # class_qualified_name → {üye adı → (kind, qn, relative_path)}
         self.class_member_registry: Dict[str, Dict[str, Tuple[str, str, str]]] = {}
+        # Long-expression render budget of the request (FileAnalyzer.render).
+        self.render_bytes_left = MAX_RENDER_SOURCE_BYTES_PER_REQUEST
+        # Response size budget (MAX_RESPONSE_BYTES): serialized bytes admitted so far.
+        self._budget_used = 0
+        self.budget_exceeded = False
+        self._warnings_suppressed = False
+
+    def _charge(self, size: int) -> bool:
+        """Admits `size` more bytes. Once a charge fails nothing more is
+        admitted (sticky), so the cut does not depend on later record sizes."""
+        if self.budget_exceeded or self._budget_used + size > MAX_RESPONSE_BYTES:
+            self.budget_exceeded = True
+            return False
+        self._budget_used += size
+        return True
 
     def add_file_node(self, relative_path: str, source_hash: str) -> None:
         self.add_node("File", relative_path, relative_path,
@@ -936,6 +1178,12 @@ class RequestCollector:
             node["relativePath"] = relative_path
         widen_node_span(node, span)
         node["attributes"] = attributes if attributes is not None else {}
+        size = utf8_size(canonical(node)) + 1
+        if kind == "File":
+            # One File node per file (bounded by MAX_FILE_COUNT): always admitted.
+            self._budget_used += size
+        elif not self._charge(size):
+            return
         self._nodes[key] = node
         if kind == "File" and relative_path is not None:
             self.module_set.add(module_name_from_path(relative_path))
@@ -966,6 +1214,11 @@ class RequestCollector:
         self.class_member_registry.setdefault(class_qn, {}).update(members)
 
     def add_warning(self, message: str) -> None:
+        if not self._charge(utf8_size(canonical(message)) + 1):
+            if not self._warnings_suppressed:
+                self._warnings_suppressed = True
+                self.warnings.append("further warnings were not emitted: the response size budget was reached")
+            return
         self.warnings.append(message)
 
     def add_diagnostic(self, relative_path: str, code: str, message: str, line: int) -> None:
@@ -983,23 +1236,47 @@ class RequestCollector:
         ambiguity: Optional[Dict[str, Any]],
     ) -> None:
         key = (kind, canonical(from_ref), canonical(to_ref), resolution)
+        edge = self._edges.get(key)
+        if edge is not None:
+            seen = self._edge_evidence_keys[key]
+            for item in evidence_items:
+                evidence_key = canonical(item)
+                if evidence_key in seen:
+                    continue
+                # Charged twice: the edge's list and the top-level evidence list.
+                if not self._charge(2 * (utf8_size(evidence_key) + 1)):
+                    return  # the edge keeps the evidence it already has
+                seen.add(evidence_key)
+                edge["evidence"].append(item)
+            return
+        if self.budget_exceeded:
+            return
         # TŞ §8 invariant (ii): dangling edge yok — dış kaynaklar AÇIK node.
         # UnknownExternal hedef ilk referans alındığında node kümesine girer.
         if to_ref.get("kind") == "UnknownExternal":
             self.add_node("UnknownExternal", to_ref["qualifiedName"], None)
-        edge = self._edges.get(key)
-        if edge is None:
-            edge = {"kind": kind, "from": from_ref, "to": to_ref, "resolution": resolution}
-            edge["evidence"] = []
-            if ambiguity is not None:
-                edge["ambiguity"] = ambiguity
-            self._edges[key] = edge
-            self._edge_order.append(key)
+        for ref in (from_ref, to_ref):
+            if (ref["kind"], ref["qualifiedName"], ref.get("relativePath") or "") not in self._nodes:
+                return  # endpoint not admitted (size budget): no dangling edge
+        edge = {"kind": kind, "from": from_ref, "to": to_ref, "resolution": resolution}
+        edge["evidence"] = []
+        if ambiguity is not None:
+            edge["ambiguity"] = ambiguity
+        size = utf8_size(canonical(edge)) + 1
+        seen: set = set()
+        admitted: List[Dict[str, Any]] = []
         for item in evidence_items:
             evidence_key = canonical(item)
-            self._evidence_keys.add(evidence_key)
-            if all(canonical(existing) != evidence_key for existing in edge["evidence"]):
-                edge["evidence"].append(item)
+            if evidence_key not in seen:
+                seen.add(evidence_key)
+                admitted.append(item)
+                size += 2 * (utf8_size(evidence_key) + 1)
+        if not self._charge(size):
+            return
+        edge["evidence"].extend(admitted)
+        self._edges[key] = edge
+        self._edge_order.append(key)
+        self._edge_evidence_keys[key] = seen
 
     # -- çıktı ---------------------------------------------------------------------
 
@@ -1024,6 +1301,17 @@ class RequestCollector:
         )
 
         diagnostics = list(self.diagnostics)
+        if self.budget_exceeded:
+            diagnostics.append(
+                {
+                    "relativePath": "",
+                    "code": "RESPONSE_TRUNCATED",
+                    "message": f"response size budget exceeded ({MAX_RESPONSE_BYTES} bytes of nodes, "
+                               "edges, evidence and warnings); further nodes, edges, evidence and "
+                               "warnings were not emitted (no dangling edges)",
+                    "line": 0,
+                }
+            )
 
         if max_nodes is not None and len(nodes) > max_nodes:
             kept = nodes[:max_nodes]
@@ -1113,10 +1401,11 @@ def analyze_request(request: Dict[str, Any]) -> Dict[str, Any]:
         try:
             tree = ast.parse(content, filename=relative_path)
         except SyntaxError as error:
+            # A parser message can quote an identifier of any length.
             collector.add_diagnostic(
                 relative_path,
                 "SyntaxError",
-                str(error.msg or "syntax error"),
+                bounded_text(str(error.msg or "syntax error")),
                 error.lineno or 0,
             )
             collector.add_file_node(relative_path, sha256_hex(content))
@@ -1125,7 +1414,7 @@ def analyze_request(request: Dict[str, Any]) -> Dict[str, Any]:
             collector.add_diagnostic(
                 relative_path,
                 "ADAPTER_INTERNAL",
-                f"AST parsing could not be completed: {error}",
+                f"AST parsing could not be completed: {bounded_text(str(error))}",
                 0,
             )
             collector.add_file_node(relative_path, sha256_hex(content))
@@ -1189,10 +1478,96 @@ def handle_line(line: str) -> Dict[str, Any]:
         )
 
 
-def write_response(stdout_buf: Any, response: Dict[str, Any]) -> None:
-    line = json.dumps(response, ensure_ascii=False, separators=(",", ":")) + "\n"
-    stdout_buf.write(line.encode("utf-8"))
-    stdout_buf.flush()
+# Last-resort protocol line: pure ASCII and built without json at runtime.
+_FALLBACK_ERROR_LINE = (
+    b'{"id":null,"protocolVersion":"1","status":"error","error":'
+    b'{"code":"INTERNAL_ERROR","message":"the response could not be serialized"}}\n'
+)
+
+
+def _echoable_id(value: Any) -> Any:
+    """`value` when it can be echoed in an error line, otherwise None."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str) and is_utf8_text(value):
+        return value
+    return None
+
+
+def error_line(request_id: Any, code: str, message: str) -> bytes:
+    """An error response line; the fixed ASCII line if even that fails."""
+    try:
+        response = error_response(_echoable_id(request_id), code, message)
+        return (json.dumps(response, ensure_ascii=False, separators=(",", ":")) + "\n").encode("utf-8")
+    except Exception:  # noqa: BLE001 — the process must still answer
+        return _FALLBACK_ERROR_LINE
+
+
+def encode_response(response: Dict[str, Any]) -> bytes:
+    """One protocol line as UTF-8 bytes. Never raises.
+
+    A response that cannot be serialized (a lone surrogate cannot be encoded
+    as UTF-8; MemoryError, RecursionError, ...) is replaced by an
+    INTERNAL_ERROR line with a fixed message, and a line longer than
+    MAX_RESPONSE_LINE_BYTES by a LIMIT_EXCEEDED line; both echo the request id
+    when it can be encoded. Nothing is raised, so no traceback reaches stderr.
+    """
+    try:
+        encoded = (json.dumps(response, ensure_ascii=False, separators=(",", ":")) + "\n").encode("utf-8")
+    except UnicodeEncodeError:
+        log("the response could not be encoded as UTF-8 (lone surrogate); an INTERNAL_ERROR line is written instead")
+        return error_line(
+            response.get("id"),
+            "INTERNAL_ERROR",
+            "the response could not be encoded as UTF-8 (it contains a lone surrogate)",
+        )
+    except Exception as error:  # noqa: BLE001 — MemoryError, RecursionError, ...
+        log(f"the response could not be serialized ({type(error).__name__}); an INTERNAL_ERROR line is written instead")
+        return error_line(response.get("id"), "INTERNAL_ERROR", "the response could not be serialized")
+    if len(encoded) > MAX_RESPONSE_LINE_BYTES:
+        log(f"the response line of {len(encoded)} bytes exceeds the {MAX_RESPONSE_LINE_BYTES} byte limit")
+        return error_line(
+            response.get("id"),
+            "LIMIT_EXCEEDED",
+            f"response line exceeded the {MAX_RESPONSE_LINE_BYTES} byte limit",
+        )
+    return encoded
+
+
+def answer_request(line: bytes) -> Tuple[bytes, Any, Any]:
+    """The response line for one request line, plus its id and status for the
+    log. Never raises: an unexpected failure becomes an INTERNAL_ERROR line
+    with a fixed message (no traceback)."""
+    request_id: Any = None
+    try:
+        try:
+            text = line.decode("utf-8")
+        except UnicodeDecodeError as error:
+            return (
+                encode_response(error_response(None, "INVALID_ARGUMENT", f"line is not valid UTF-8: {error}")),
+                None,
+                "error",
+            )
+        response = handle_line(text)
+        request_id = response.get("id")
+        return encode_response(response), request_id, response.get("status")
+    except Exception as error:  # noqa: BLE001 — the loop keeps running
+        log(f"the request could not be answered ({type(error).__name__}); an INTERNAL_ERROR line is written instead")
+        return error_line(request_id, "INTERNAL_ERROR", "the request could not be answered"), request_id, "error"
+
+
+def _quiet_excepthook(exc_type: Any, exc_value: Any, exc_traceback: Any) -> None:
+    """An uncaught error ends the worker with one log line naming its type.
+
+    No traceback is printed: its file paths (install directory, user name)
+    would reach tool warnings through the adapters' stderr excerpts.
+    """
+    try:
+        log(f"worker stopped by an unexpected error ({exc_type.__name__})")
+    except Exception:  # noqa: BLE001 — stderr itself may be gone
+        pass
 
 
 def read_line(stream: Any) -> Tuple[Optional[bytes], bool, bool]:
@@ -1213,6 +1588,7 @@ def read_line(stream: Any) -> Tuple[Optional[bytes], bool, bool]:
 
 
 def main() -> int:
+    sys.excepthook = _quiet_excepthook
     stdin_buf = sys.stdin.buffer
     stdout_buf = sys.stdout.buffer
 
@@ -1222,14 +1598,14 @@ def main() -> int:
         while True:
             line, exceeded, eof = read_line(stdin_buf)
             if exceeded:
-                write_response(
-                    stdout_buf,
-                    error_response(
+                stdout_buf.write(
+                    error_line(
                         None,
                         "LIMIT_EXCEEDED",
                         f"request line exceeded the {MAX_REQUEST_LINE_BYTES} byte limit; line skipped",
-                    ),
+                    )
                 )
+                stdout_buf.flush()
                 log("request line limit exceeded — line skipped")
                 continue
             if line is None or eof:
@@ -1237,18 +1613,10 @@ def main() -> int:
             if not line.strip():
                 continue  # boş satır sessizce atlanır (mesaj tek satır JSON)
 
-            try:
-                text = line.decode("utf-8")
-            except UnicodeDecodeError as error:
-                write_response(
-                    stdout_buf,
-                    error_response(None, "INVALID_ARGUMENT", f"line is not valid UTF-8: {error}"),
-                )
-                continue
-
-            response = handle_line(text)
-            write_response(stdout_buf, response)
-            log(f"request processed: id={describe_id(response.get('id'))} status={response.get('status')}")
+            payload, request_id, status = answer_request(line)
+            stdout_buf.write(payload)
+            stdout_buf.flush()
+            log(f"request processed: id={describe_id(request_id)} status={status}")
     except (BrokenPipeError, OSError) as error:
         log(f"stdio pipe error, worker exiting: {error}")
         return 1

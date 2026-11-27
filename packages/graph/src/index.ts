@@ -85,10 +85,14 @@ export type {
 export {
   API_SURFACE_NODE_KINDS,
   compareIdentityKey,
+  createSharedRenameMatchingBudget,
   diffContentSets,
+  RENAME_MATCHING_BUDGET,
 } from "./compare.js";
 export type {
   ArchitectureDiff,
+  DiffContentSetsOptions,
+  SharedRenameMatchingBudget,
   CompareContentSet,
   CompareEdge,
   CompareNode,
@@ -305,6 +309,7 @@ export {
   TIMELINE_DEFAULTS,
   TIMELINE_MAX_REFS,
   TIMELINE_POLICY_BLOB_PATH,
+  TIMELINE_RENAME_MATCHING_BUDGET,
   TIMELINE_SNAPSHOT_BLOB_PATH,
   TIMELINE_TRUST_WARNING_COMMITTED_GIT_BLOB,
   buildArchitectureTimeline,

@@ -21,7 +21,9 @@ import type {
 import {
   API_SURFACE_NODE_KINDS,
   compareIdentityKey,
+  createSharedRenameMatchingBudget,
   diffContentSets,
+  RENAME_MATCHING_BUDGET,
 } from "./compare.js";
 import { GraphRepositoryError } from "./errors.js";
 import {
@@ -291,6 +293,24 @@ export const TIMELINE_CEILINGS: TimelineLimits = {
  * input schema enforces the same bound (defence in depth).
  */
 export const TIMELINE_MAX_REFS = 100;
+
+/**
+ * Rename matching budget of one whole timeline call (security scan F5). Each
+ * interval diff is bounded by RENAME_MATCHING_BUDGET, but a timeline runs up
+ * to TIMELINE_CEILINGS.maxRevisions − 1 diffs synchronously on the MCP main
+ * thread, so the intervals also share this cumulative budget: twice the
+ * per-diff budget, about two full-size rename matchings (≈ 2-3 s measured on
+ * a developer machine). An interval that would exceed what is left skips
+ * rename matching with the `rename-matching-skipped` warning; its counts
+ * still come from the diff (renames reported as removed + added).
+ */
+export const TIMELINE_RENAME_MATCHING_BUDGET: Readonly<{
+  readonly maxCandidatePairs: number;
+  readonly maxTokenComparisons: number;
+}> = Object.freeze({
+  maxCandidatePairs: 2 * RENAME_MATCHING_BUDGET.maxCandidatePairs,
+  maxTokenComparisons: 2 * RENAME_MATCHING_BUDGET.maxTokenComparisons,
+});
 
 const MIN_MAX_REVISIONS = 2;
 const MIN_MAX_RANGE_WALK = 2;
@@ -687,6 +707,8 @@ export function buildArchitectureTimeline(
   });
 
   const intervals: TimelineInterval[] = [];
+  // One cumulative rename budget for all intervals of this call (F5).
+  const renameBudget = createSharedRenameMatchingBudget(TIMELINE_RENAME_MATCHING_BUDGET);
   for (let step = 1; step < selection.length; step++) {
     const fromSource = selection[step - 1];
     const toSource = selection[step];
@@ -720,10 +742,13 @@ export function buildArchitectureTimeline(
     try {
       // TEK yeniden kullanım noktası: diff özetleri compare.ts çekirdeğinden
       // gelir; bu modül sayıları yeniden hesaplamaz/yorumlamaz.
-      const diff = diffContentSets(
-        fromContent.contentSet,
-        toContent.contentSet,
-      );
+      const diff = diffContentSets(fromContent.contentSet, toContent.contentSet, {
+        // Renames reported as removed + added must not go unnoticed (F5).
+        onWarning: (warning) => {
+          warnings.push(`interval '${fromPoint.ref}'..'${toPoint.ref}': ${warning}`);
+        },
+        sharedBudget: renameBudget,
+      });
       intervals.push({
         kind: "diff",
         ...base,

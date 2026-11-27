@@ -1,4 +1,5 @@
 import {
+  chmodSync,
   closeSync,
   constants as fsConstants,
   copyFileSync,
@@ -11,10 +12,18 @@ import {
   rmdirSync,
   unlinkSync,
   writeFileSync,
+  type BigIntStats,
 } from "node:fs";
 import path from "node:path";
 
-import { CausorynCliError, type CausorynCliErrorCode, type DirectoryOwnershipProbe } from "./types.js";
+import {
+  CausorynCliError,
+  type CausorynCliErrorCode,
+  type DirectoryOwnershipProbe,
+  type StagedModeFs,
+} from "./types.js";
+
+export type { StagedModeFs } from "./types.js";
 
 /**
  * CWE-59 guards for `causoryn setup` and the persistent runtime stage.
@@ -173,6 +182,45 @@ export function assertPrivateDirectory(
   }
 }
 
+/** The real process and file system for {@link restrictTreeToOwner}. */
+export function defaultStagedModeFs(): StagedModeFs {
+  return {
+    platform: process.platform,
+    lstat: (entryPath) => lstatSync(entryPath),
+    readdir: (dirPath) => readdirSync(dirPath),
+    chmod: (entryPath, mode) => {
+      chmodSync(entryPath, mode);
+    },
+  };
+}
+
+/** Group/other write bits, plus setuid/setgid/sticky, which a staged runtime never needs. */
+const NOT_PRIVATE_BITS = 0o7022;
+
+/**
+ * CWE-732: clears the group/other write bits (and setuid/setgid/sticky) of
+ * `root` and every directory and file below it, whatever the umask the
+ * copied package was unpacked with (under umask 002 its directories are
+ * 0775). Links are neither changed nor entered (chmod would follow them).
+ * Only for a tree no other user can reach yet: the staging directory, which
+ * has an unpredictable name inside a private ~/.causoryn. Windows has no
+ * POSIX modes, so nothing is done there.
+ */
+export function restrictTreeToOwner(root: string, fs: StagedModeFs = defaultStagedModeFs()): void {
+  if (fs.platform === "win32") return;
+  const pending: string[] = [path.resolve(root)];
+  while (pending.length > 0) {
+    const entry = pending.pop() as string;
+    const st = fs.lstat(entry);
+    if (st.isSymbolicLink()) continue;
+    const mode = st.mode & 0o7777;
+    if ((mode & NOT_PRIVATE_BITS) !== 0) fs.chmod(entry, mode & ~NOT_PRIVATE_BITS);
+    if (st.isDirectory()) {
+      for (const name of fs.readdir(entry)) pending.push(path.join(entry, name));
+    }
+  }
+}
+
 /** Non-throwing variant for removals: true when no component below a base is a link. */
 export function isFreeOfLinkedComponents(
   targetPath: string,
@@ -187,26 +235,181 @@ export function isFreeOfLinkedComponents(
   }
 }
 
+/** File system calls of a tree removal (injectable so tests can simulate a racing user). */
+export interface TreeRemovalFs {
+  readonly lstat: (entryPath: string) => BigIntStats;
+  readonly readdir: (dirPath: string) => string[];
+  readonly unlink: (entryPath: string) => void;
+  readonly rmdir: (dirPath: string) => void;
+}
+
+export const NODE_TREE_REMOVAL_FS: TreeRemovalFs = {
+  lstat: (entryPath) => lstatSync(entryPath, { bigint: true }),
+  readdir: (dirPath) => readdirSync(dirPath),
+  unlink: (entryPath) => {
+    unlinkSync(entryPath);
+  },
+  rmdir: (dirPath) => {
+    rmdirSync(dirPath);
+  },
+};
+
+/** A directory's identity (device + inode / Windows file index). */
+export interface TreeIdentity {
+  readonly dev: bigint;
+  readonly ino: bigint;
+}
+
+function identityOf(st: BigIntStats): TreeIdentity {
+  return { dev: st.dev, ino: st.ino };
+}
+
+function sameIdentity(a: TreeIdentity, b: TreeIdentity): boolean {
+  return a.dev === b.dev && a.ino === b.ino;
+}
+
+function changedDuringRemoval(dirPath: string): CausorynCliError {
+  return new CausorynCliError(
+    "cli/io-error",
+    `Stopped: ${dirPath} changed while it was being removed (it was replaced, possibly by a link to another ` +
+      "directory, CWE-367). Nothing was removed through it; check it and remove what is left yourself.",
+  );
+}
+
+/** Throws unless `dirPath` is still the real directory `expected` (not a link, same identity). */
+function assertSameDirectory(fs: TreeRemovalFs, dirPath: string, expected: TreeIdentity): void {
+  let st: BigIntStats;
+  try {
+    st = fs.lstat(dirPath);
+  } catch {
+    throw changedDuringRemoval(dirPath);
+  }
+  if (st.isSymbolicLink() || !st.isDirectory() || !sameIdentity(identityOf(st), expected)) {
+    throw changedDuringRemoval(dirPath);
+  }
+}
+
+/**
+ * CWE-367: before a tree is removed, checks that `root` and every directory
+ * below it are private ({@link assertPrivateDirectory}: real directories,
+ * and on POSIX owned by the current user and not writable by group or other
+ * users), so no other local user can rename, plant or replace entries in any
+ * of them while they are removed. Links are not followed (a link is removed
+ * itself). Returns each directory's identity, for {@link removeTreeNoFollow}.
+ */
+export function assertPrivateTree(
+  root: string,
+  code: CausorynCliErrorCode,
+  probe: DirectoryOwnershipProbe = defaultDirectoryOwnershipProbe(),
+  fs: TreeRemovalFs = NODE_TREE_REMOVAL_FS,
+): ReadonlyMap<string, TreeIdentity> {
+  const identities = new Map<string, TreeIdentity>();
+  const pending: string[] = [path.resolve(root)];
+  while (pending.length > 0) {
+    const dir = pending.pop() as string;
+    assertPrivateDirectory(dir, code, probe);
+    let st: BigIntStats;
+    let names: string[];
+    try {
+      st = fs.lstat(dir);
+      names = fs.readdir(dir);
+    } catch (err) {
+      throw new CausorynCliError(code, `Could not read ${dir}: ${err instanceof Error ? err.message : String(err)}`);
+    }
+    if (st.isSymbolicLink() || !st.isDirectory()) {
+      throw new CausorynCliError(code, `Refusing to remove ${dir}: it is not a real directory`);
+    }
+    identities.set(dir, identityOf(st));
+    for (const name of names) {
+      const child = path.join(dir, name);
+      let childSt: BigIntStats;
+      try {
+        childSt = fs.lstat(child);
+      } catch (err) {
+        if (errnoCode(err) === "ENOENT") continue;
+        throw new CausorynCliError(code, `Could not read ${child}: ${err instanceof Error ? err.message : String(err)}`);
+      }
+      if (childSt.isDirectory() && !childSt.isSymbolicLink()) pending.push(child);
+    }
+  }
+  return identities;
+}
+
+interface RemovalFrame {
+  readonly dir: string;
+  readonly identity: TreeIdentity;
+  names: string[] | null;
+  next: number;
+}
+
 /**
  * Removes a file or directory tree without following links: a symbolic
  * link or junction is unlinked itself, its target is never touched.
+ *
+ * CWE-367: path-based calls re-resolve every component, so each directory's
+ * identity (device + inode) is checked before it is listed, after it is
+ * listed, before each entry in it is removed and before it is removed
+ * itself. A directory replaced meanwhile (for example by a link to another
+ * directory) stops the removal with `cli/io-error`. With `expected` (from
+ * {@link assertPrivateTree}), every directory must also be one that was
+ * checked there, with the same identity.
  */
-export function removeTreeNoFollow(targetPath: string): void {
-  let st;
+export function removeTreeNoFollow(
+  targetPath: string,
+  options: { readonly expected?: ReadonlyMap<string, TreeIdentity>; readonly fs?: TreeRemovalFs } = {},
+): void {
+  const fs = options.fs ?? NODE_TREE_REMOVAL_FS;
+  const root = path.resolve(targetPath);
+  let st: BigIntStats;
   try {
-    st = lstatSync(targetPath);
+    st = fs.lstat(root);
   } catch (err) {
     if (errnoCode(err) === "ENOENT") return;
     throw err;
   }
   if (st.isSymbolicLink() || !st.isDirectory()) {
-    unlinkSync(targetPath);
+    if (options.expected !== undefined) throw changedDuringRemoval(root);
+    fs.unlink(root);
     return;
   }
-  for (const name of readdirSync(targetPath)) {
-    removeTreeNoFollow(path.join(targetPath, name));
+  const checkExpected = (dir: string, identity: TreeIdentity): void => {
+    if (options.expected === undefined) return;
+    const checked = options.expected.get(dir);
+    if (checked === undefined || !sameIdentity(checked, identity)) throw changedDuringRemoval(dir);
+  };
+  checkExpected(root, identityOf(st));
+  const stack: RemovalFrame[] = [{ dir: root, identity: identityOf(st), names: null, next: 0 }];
+  while (stack.length > 0) {
+    const frame = stack[stack.length - 1] as RemovalFrame;
+    if (frame.names === null) {
+      assertSameDirectory(fs, frame.dir, frame.identity);
+      frame.names = fs.readdir(frame.dir);
+      assertSameDirectory(fs, frame.dir, frame.identity);
+      continue;
+    }
+    if (frame.next < frame.names.length) {
+      const child = path.join(frame.dir, frame.names[frame.next] as string);
+      frame.next += 1;
+      let childSt: BigIntStats;
+      try {
+        childSt = fs.lstat(child);
+      } catch (err) {
+        if (errnoCode(err) === "ENOENT") continue;
+        throw err;
+      }
+      if (childSt.isDirectory() && !childSt.isSymbolicLink()) {
+        checkExpected(child, identityOf(childSt));
+        stack.push({ dir: child, identity: identityOf(childSt), names: null, next: 0 });
+      } else {
+        assertSameDirectory(fs, frame.dir, frame.identity);
+        fs.unlink(child);
+      }
+      continue;
+    }
+    stack.pop();
+    assertSameDirectory(fs, frame.dir, frame.identity);
+    fs.rmdir(frame.dir);
   }
-  rmdirSync(targetPath);
 }
 
 /**

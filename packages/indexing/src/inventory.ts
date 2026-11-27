@@ -2,7 +2,12 @@ import { readdirSync, statSync } from "node:fs";
 import path from "node:path";
 
 import { sha256Hex, utf8Encode } from "@causoryn/domain";
-import { readBoundedTextFileSync, type WorkspaceAccessPolicy } from "@causoryn/workspace";
+import {
+  IGNORE_MATCH_WORK_BUDGET,
+  readBoundedTextFileSync,
+  type IgnoreWorkMeter,
+  type WorkspaceAccessPolicy,
+} from "@causoryn/workspace";
 
 import { IndexingError } from "./errors.js";
 
@@ -42,6 +47,74 @@ export interface InventoryEntry {
  */
 export const MAX_INVENTORY_DEPTH = 256;
 
+/**
+ * Total ignore-matching work (matcher steps, summed over every policy decision)
+ * one inventory run may spend (Claude Security F32). The policy bounds each ignore
+ * pass by itself; this bounds the run, so a crafted .gitignore against many
+ * paths cannot keep indexing busy for hours. An ordinary repository spends a
+ * small fraction of it (the default rules cost a few thousand steps per
+ * decision); reaching it stops the run with `indexing/limit-exceeded`.
+ */
+export const MAX_INVENTORY_IGNORE_WORK = 10_000_000_000;
+
+/**
+ * Paths the policy may fail to decide within its per-pass budget before the run
+ * stops early. Such a path is never left out silently: the run always ends with
+ * `indexing/limit-exceeded` naming how many there were; this cap only keeps a
+ * crafted tree from spending the whole total budget first.
+ */
+const MAX_UNDECIDED_PATHS = 16;
+
+/** Ignore-work accounting of one inventory run. */
+class IgnoreWorkTally {
+  readonly meter: IgnoreWorkMeter = { steps: 0, budgetDenials: 0 };
+  private firstUndecided: string | undefined;
+
+  constructor(private readonly maxWork: number) {}
+
+  /** Called after each policy decision about `childPosix`; throws when the run must stop. */
+  afterDecision(childPosix: string, deniedByBudget: boolean): void {
+    if (deniedByBudget && this.firstUndecided === undefined) {
+      this.firstUndecided = childPosix;
+    }
+    if (this.meter.steps > this.maxWork) {
+      throw new IndexingError(
+        "indexing/limit-exceeded",
+        `ignore rule matching exceeded the total ignore matching work budget (${String(this.maxWork)} steps) of this inventory at ${childPosix}${this.undecidedNote()}; simplify the ignore patterns (.gitignore, extraIgnore) or the directory nesting`,
+      );
+    }
+    if (this.meter.budgetDenials >= MAX_UNDECIDED_PATHS) {
+      throw this.undecidedError();
+    }
+  }
+
+  /** Called when the walk is complete. */
+  finish(): void {
+    if (this.meter.budgetDenials > 0) {
+      throw this.undecidedError();
+    }
+  }
+
+  private undecidedNote(): string {
+    return this.meter.budgetDenials === 0
+      ? ""
+      : `; ${String(this.meter.budgetDenials)} path(s) could not be decided within the per-pass work budget`;
+  }
+
+  private undecidedError(): IndexingError {
+    const stopped = this.meter.budgetDenials >= MAX_UNDECIDED_PATHS ? " (the walk stopped there)" : "";
+    return new IndexingError(
+      "indexing/limit-exceeded",
+      `ignore rule matching could not decide ${String(this.meter.budgetDenials)} path(s)${stopped} within its per-pass work budget (${String(IGNORE_MATCH_WORK_BUDGET)} steps), first ${String(this.firstUndecided)}; the inventory stops instead of leaving them out silently; simplify the ignore patterns (.gitignore, extraIgnore) or the directory nesting`,
+    );
+  }
+}
+
+/** Whether a policy decision was a denial for running out of ignore work budget. */
+function deniedByIgnoreBudget(decision: { readonly allowed: boolean; readonly rule?: string }): boolean {
+  return !decision.allowed && decision.rule === "ignore-match-budget";
+}
+
 function assertWithinDepth(depth: number, maxDepth: number, childPosix: string): void {
   if (depth > maxDepth) {
     throw new IndexingError(
@@ -75,22 +148,30 @@ function readAllowedFileEntry(
   canonicalRoot: string,
   childRelative: string,
   childPosix: string,
+  tally: IgnoreWorkTally,
 ): InventoryEntry | undefined {
   // 1) Açılıştan önce: checkFile kendi içinde checkPath (ignore + symlink) + uzantı + boyut uygular.
-  const preDecision = policy.checkFile(canonicalRoot, childPosix);
+  const ignoreWork = tally.meter;
+  const preDecision = policy.checkFile(canonicalRoot, childPosix, undefined, { ignoreWork });
+  tally.afterDecision(childPosix, deniedByIgnoreBudget(preDecision));
   if (!preDecision.allowed) {
     return undefined;
   }
 
   // 2) fd'ye bağlı okuma; yeniden denetim fd açıkken, fd ile doğrulanmış boyutla
   //    yapılır ve aynı kanonik yolu vermelidir (TOCTOU sözleşmesi; TŞ §19, CAU-02).
+  let postDeniedByBudget = false;
   const read = readBoundedTextFileSync(path.join(canonicalRoot, childRelative), policy.config.maxFileBytes, {
     root: canonicalRoot,
     authorize: (opened) => {
-      const postDecision = policy.checkFile(canonicalRoot, childPosix, opened.bytes);
+      const postDecision = policy.checkFile(canonicalRoot, childPosix, opened.bytes, { ignoreWork });
+      postDeniedByBudget = deniedByIgnoreBudget(postDecision);
       return postDecision.allowed && postDecision.relativePath === preDecision.relativePath;
     },
   });
+  // Accounted after the read returns: the reader owns the descriptor while it
+  // runs the callback, so nothing is thrown from inside it.
+  tally.afterDecision(childPosix, postDeniedByBudget);
   if (read.status !== "ok") {
     return undefined;
   }
@@ -116,16 +197,20 @@ export function yieldToEventLoop(): Promise<void> {
  * Only regular files and real directories are visited: link entries (symbolic
  * links, junctions) and special files are skipped without a policy call, so
  * nothing stats or resolves a link target. Directory nesting deeper than
- * `maxDepth` fails with `indexing/limit-exceeded`.
+ * `maxDepth` fails with `indexing/limit-exceeded`, and so does ignore matching
+ * that passes `maxIgnoreWork` in total or cannot decide a path within its
+ * per-pass budget (see {@link MAX_INVENTORY_IGNORE_WORK}).
  */
 export function collectInventory(
   policy: WorkspaceAccessPolicy,
   canonicalRoot: string,
   maxFiles: number,
   maxDepth = MAX_INVENTORY_DEPTH,
+  maxIgnoreWork = MAX_INVENTORY_IGNORE_WORK,
 ): InventoryEntry[] {
   assertCanonicalRootIsDirectory(canonicalRoot);
   const entries: InventoryEntry[] = [];
+  const tally = new IgnoreWorkTally(maxIgnoreWork);
 
   const walk = (nativeRelative: string, depth: number): void => {
     const absolute =
@@ -138,7 +223,8 @@ export function collectInventory(
         nativeRelative === "" ? dirent.name : `${nativeRelative}${path.sep}${dirent.name}`;
       const childPosix = toPosixRelative(childRelative);
       if (dirent.isDirectory()) {
-        const dirDecision = policy.checkPath(canonicalRoot, childPosix);
+        const dirDecision = policy.checkPath(canonicalRoot, childPosix, { ignoreWork: tally.meter });
+        tally.afterDecision(childPosix, deniedByIgnoreBudget(dirDecision));
         if (!dirDecision.allowed) {
           continue;
         }
@@ -151,7 +237,7 @@ export function collectInventory(
         // skipped before any policy call stats or resolves them.
         continue;
       }
-      const entry = readAllowedFileEntry(policy, canonicalRoot, childRelative, childPosix);
+      const entry = readAllowedFileEntry(policy, canonicalRoot, childRelative, childPosix, tally);
       if (entry === undefined) continue;
       entries.push(entry);
       if (entries.length > maxFiles) {
@@ -164,6 +250,7 @@ export function collectInventory(
   };
 
   walk("", 0);
+  tally.finish();
   entries.sort((a, b) =>
     a.relativePath < b.relativePath ? -1 : a.relativePath > b.relativePath ? 1 : 0,
   );
@@ -182,11 +269,13 @@ export async function collectInventoryAsync(
   maxFiles: number,
   yieldEvery = 64,
   maxDepth = MAX_INVENTORY_DEPTH,
+  maxIgnoreWork = MAX_INVENTORY_IGNORE_WORK,
 ): Promise<InventoryEntry[]> {
   assertCanonicalRootIsDirectory(canonicalRoot);
 
   const stride = Math.max(1, Math.floor(Number.isFinite(yieldEvery) ? yieldEvery : 64));
   const entries: InventoryEntry[] = [];
+  const tally = new IgnoreWorkTally(maxIgnoreWork);
   let processed = 0;
 
   const maybeYield = async (): Promise<void> => {
@@ -208,7 +297,8 @@ export async function collectInventoryAsync(
         nativeRelative === "" ? dirent.name : `${nativeRelative}${path.sep}${dirent.name}`;
       const childPosix = toPosixRelative(childRelative);
       if (dirent.isDirectory()) {
-        const dirDecision = policy.checkPath(canonicalRoot, childPosix);
+        const dirDecision = policy.checkPath(canonicalRoot, childPosix, { ignoreWork: tally.meter });
+        tally.afterDecision(childPosix, deniedByIgnoreBudget(dirDecision));
         if (!dirDecision.allowed) {
           continue;
         }
@@ -221,7 +311,7 @@ export async function collectInventoryAsync(
         // skipped before any policy call stats or resolves them.
         continue;
       }
-      const entry = readAllowedFileEntry(policy, canonicalRoot, childRelative, childPosix);
+      const entry = readAllowedFileEntry(policy, canonicalRoot, childRelative, childPosix, tally);
       if (entry === undefined) continue;
       entries.push(entry);
       if (entries.length > maxFiles) {
@@ -234,6 +324,7 @@ export async function collectInventoryAsync(
   };
 
   await walk("", 0);
+  tally.finish();
   entries.sort((a, b) =>
     a.relativePath < b.relativePath ? -1 : a.relativePath > b.relativePath ? 1 : 0,
   );

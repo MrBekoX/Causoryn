@@ -23,6 +23,7 @@ import { fileURLToPath } from "node:url";
 import { describeJsonSyntaxError } from "./diagnostics.js";
 import {
   assertPrivateDirectory,
+  assertPrivateTree,
   assertSafeWritePath,
   copyFileNoClobber,
   isFreeOfLinkedComponents,
@@ -30,6 +31,9 @@ import {
   readRegularFileText,
   removeTreeNoFollow,
   writeExclusiveFile,
+  type StagedModeFs,
+  type TreeIdentity,
+  type TreeRemovalFs,
 } from "./fs-guard.js";
 import { insertMissingOwnedKeys } from "./owned-keys.js";
 import {
@@ -1612,6 +1616,10 @@ export type ExtendedSetupOptions = SetupOptions & {
   readonly renameFile?: typeof renameSync | undefined;
   /** Inspection of an existing `~/.causoryn` (default: this process and file system). */
   readonly directoryProbe?: DirectoryOwnershipProbe | undefined;
+  /** File system calls of the uninstall runtime removal (default: node:fs). */
+  readonly treeRemovalFs?: TreeRemovalFs | undefined;
+  /** File system calls that make the staged runtime private (default: node:fs). */
+  readonly stagedModeFs?: StagedModeFs | undefined;
 };
 
 /** Causoryn's skill install record (CAU-10). */
@@ -2009,6 +2017,7 @@ export async function runSetup(options: ExtendedSetupOptions = {}): Promise<Exte
       homeDir,
       sourcePackageDir: packageRoot,
       directoryProbe: options.directoryProbe,
+      stagedModeFs: options.stagedModeFs,
     });
     stagedRuntimeDir = staged.runtimeDir;
   }
@@ -2044,6 +2053,7 @@ export async function runSetup(options: ExtendedSetupOptions = {}): Promise<Exte
   }
 
   let runtimeCleanedUp = false;
+  let runtimeCleanupSkipped: string | undefined;
   // Only a real runtime directory staged by Causoryn is removed; a link (or
   // anything below a link) is left alone and nothing inside is followed.
   if (uninstall && isOwnedRuntimeDir(plan.targetRuntimeDir, plan.trustedBases)) {
@@ -2055,8 +2065,8 @@ export async function runSetup(options: ExtendedSetupOptions = {}): Promise<Exte
       projectedConfigs: plan.projectedConfigs,
     });
     if (!stillReferenced) {
-      removeTreeNoFollow(plan.targetRuntimeDir);
-      runtimeCleanedUp = true;
+      runtimeCleanupSkipped = removeStagedRuntime(plan.targetRuntimeDir, options);
+      runtimeCleanedUp = runtimeCleanupSkipped === undefined;
     }
   }
 
@@ -2068,5 +2078,53 @@ export async function runSetup(options: ExtendedSetupOptions = {}): Promise<Exte
     stagedRuntimeDir,
     runtimeCleanedUp,
     actions: plan.actions,
+    ...(runtimeCleanupSkipped === undefined ? {} : { message: runtimeCleanupSkipped }),
   };
+}
+
+/**
+ * F39 (CWE-367): removes the staged runtime only when ~/.causoryn and every
+ * directory of the runtime tree are private (CAU-14 rule: real directories,
+ * on POSIX owned by the current user and not writable by group or other
+ * users), so no other local user can swap a directory for a link while it is
+ * removed; the removal also checks each directory's identity as it goes.
+ * Uninstall itself stays possible with a non-private ~/.causoryn: the runtime
+ * is then left in place and the returned text says why (nothing is removed).
+ */
+function removeStagedRuntime(runtimeDir: string, options: ExtendedSetupOptions): string | undefined {
+  const causorynDir = path.dirname(runtimeDir);
+  let identities: ReadonlyMap<string, TreeIdentity>;
+  try {
+    assertPrivateDirectory(causorynDir, "cli/io-error", options.directoryProbe);
+  } catch (err) {
+    return runtimeCleanupSkipped(runtimeDir, err, `chmod go-w ${causorynDir}`);
+  }
+  try {
+    identities = assertPrivateTree(runtimeDir, "cli/io-error", options.directoryProbe, options.treeRemovalFs);
+  } catch (err) {
+    // Runtimes staged before staging cleared group/other write bits keep the
+    // umask's bits (0775 directories under umask 002).
+    return runtimeCleanupSkipped(runtimeDir, err, `chmod -R go-w ${runtimeDir}`);
+  }
+  removeTreeNoFollow(runtimeDir, {
+    expected: identities,
+    ...(options.treeRemovalFs === undefined ? {} : { fs: options.treeRemovalFs }),
+  });
+  return undefined;
+}
+
+/**
+ * The text uninstall returns when it leaves the runtime in place: the reason
+ * (without assertPrivateDirectory's setup advice) and what to do. A directory
+ * that is only writable by others can be fixed with `chmodCommand` and a
+ * second uninstall; anything else (another owner, a link, not a directory) is
+ * for the user to check and remove.
+ */
+function runtimeCleanupSkipped(runtimeDir: string, err: unknown, chmodCommand: string): string {
+  const message = err instanceof Error ? err.message : String(err);
+  const reason = message.replace(/\s*(?:Restrict it with|Remove it or give it to).*$/s, "");
+  const action = /writable by other users/.test(message)
+    ? `Run \`${chmodCommand}\` and then \`causoryn setup --uninstall\` again, or remove ${runtimeDir} yourself once you have checked it.`
+    : `Check it, then remove ${runtimeDir} yourself.`;
+  return `Staged Runtime Cleanup: skipped, the runtime at ${runtimeDir} was left in place. ${reason} ${action}`;
 }

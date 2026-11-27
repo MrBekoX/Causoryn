@@ -34,8 +34,10 @@ import {
 } from "@causoryn/indexing";
 
 import {
+  compileIgnoreRuleSet,
   effectiveIgnorePatterns,
-  findMatchingIgnorePattern,
+  IGNORE_MATCH_WORK_BUDGET,
+  isUncOrDevicePath,
   type WorkspacePolicyConfig,
 } from "@causoryn/workspace";
 
@@ -106,8 +108,11 @@ import { SERVER_VERSION } from "./version.js";
  * never served. The device and inode the directory check saw are checked
  * again (lstat: not a link, same identity) right before each temporary file
  * create, rename and unlink; a directory that changed in between is not
- * written to or removed from. Windows ACLs are not inspected (no uid there):
- * the private default data root is the protection on that platform.
+ * written to or removed from. Windows has no uid and Node cannot read a DACL
+ * without native code, so there the cache directory is trusted only when its
+ * real path lies inside the user's profile or %LOCALAPPDATA% (private to the
+ * user by default) and its path has no link or junction below them; a data
+ * root anywhere else gets fresh analyses, never a cache (windowsTrustProblem).
  *
  * Retention: after a store, entries beyond `maxEntries` or `maxTotalBytes`
  * (all entries of the directory, whatever their key) are evicted oldest
@@ -206,6 +211,12 @@ const ENTRY_READ_CHUNK_BYTES = 64 * 1024;
 const BLOB_READ_CONCURRENCY = 6;
 /** The synchronous policy checks yield to the event loop after this many tree entries. */
 const POLICY_YIELD_EVERY = 64;
+
+/**
+ * Ignore-matching steps after which the commit inventory walk yields as well
+ * (about 40-50 ms of matching on current hardware).
+ */
+const POLICY_YIELD_WORK = 2_000_000;
 /** Timeout of one git process when the deadline is further away (the git helpers' default). */
 const GIT_PROCESS_TIMEOUT_MS = 15_000;
 /** Calls that may wait for an analysis slot at the same time; more are busy at once. */
@@ -226,9 +237,10 @@ export interface CommitContentAnalysis {
   /** Files of the commit that were analyzed. */
   readonly fileCount: number;
   /**
-   * Files the ignore/extension rules allow that were not analyzed: above
-   * maxFileBytes, an unusable git path, or refused by the working-tree part of
-   * the policy (a link on the path, a Windows name alias).
+   * Files the ignore/extension rules allow (or could not decide within their
+   * work budget) that were not analyzed: above maxFileBytes, an unusable git
+   * path, refused by the working-tree part of the policy (a link on the path,
+   * a Windows name alias), or a path the ignore rules could not decide.
    */
   readonly skippedFiles: number;
   /**
@@ -603,26 +615,39 @@ function yieldToEventLoop(): Promise<void> {
   });
 }
 
+/** How the path-only rules rule on a committed path (see {@link pathRuleFilter}). */
+export type PathRuling = "included" | "excluded" | "undecided";
+
 /**
- * Path-only part of the workspace policy for a file path: true when an ignore
- * rule matches the file or one of its directories, or the extension filter
- * excludes it (same rules and matcher as WorkspaceAccessPolicy.checkFile).
+ * Path-only part of the workspace policy for a file path: "excluded" when an
+ * ignore rule matches the file or one of its directories, or the extension
+ * filter excludes it; "undecided" when the ignore decision runs out of its work
+ * budget (the caller reports the path as not analyzed, never drops it silently);
+ * "included" otherwise. The ignore decision is the policy's own
+ * (compileIgnoreRuleSet: look-alike folded secret / VCS rules, a work budget per
+ * decision). Matcher steps are added to `work.steps` when given. Exported for
+ * tests.
  */
-function pathRuleFilter(config: WorkspacePolicyConfig): (relativePath: string) => boolean {
-  const patterns = effectiveIgnorePatterns(config);
+export function pathRuleFilter(
+  config: WorkspacePolicyConfig,
+  work?: { steps: number },
+): (relativePath: string) => PathRuling {
+  const ignoreRules = compileIgnoreRuleSet(effectiveIgnorePatterns(config));
   return (relativePath) => {
-    const segments = relativePath.split("/");
-    for (let depth = 1; depth <= segments.length; depth += 1) {
-      const prefix = segments.slice(0, depth).join("/");
-      if (findMatchingIgnorePattern(prefix, depth < segments.length, patterns) !== undefined) {
-        return true;
-      }
+    const budget = { remaining: IGNORE_MATCH_WORK_BUDGET };
+    const outcome = ignoreRules.match(relativePath, false, budget);
+    if (work !== undefined) work.steps += IGNORE_MATCH_WORK_BUDGET - Math.max(0, budget.remaining);
+    if (outcome.kind === "budget-exhausted") {
+      return "undecided";
+    }
+    if (outcome.kind === "matched") {
+      return "excluded";
     }
     const extension = path.posix.extname(relativePath).toLowerCase();
     if (config.extensionFilterMode === "blacklist") {
-      return extension !== "" && config.binaryExtensions.includes(extension);
+      return extension !== "" && config.binaryExtensions.includes(extension) ? "excluded" : "included";
     }
-    return !config.allowedExtensions.includes(extension);
+    return config.allowedExtensions.includes(extension) ? "included" : "excluded";
   };
 }
 
@@ -650,13 +675,19 @@ async function collectCommitInventory(
     throw error;
   }
   const maxFileBytes = deps.policy.config.maxFileBytes;
-  const excludedByRules = pathRuleFilter(deps.policy.config);
+  // Ignore-matching work of this walk: besides every POLICY_YIELD_EVERY entries,
+  // the walk also yields once POLICY_YIELD_WORK matcher steps were spent, so a
+  // crafted ignore configuration cannot hold the event loop for seconds.
+  const ignoreWork = { steps: 0, budgetDenials: 0 };
+  const ruleOf = pathRuleFilter(deps.policy.config, ignoreWork);
   const candidates: string[] = [];
   let skippedFiles = 0;
   let visited = 0;
+  let stepsAtYield = 0;
   for (const entry of tree) {
     visited += 1;
-    if (visited % POLICY_YIELD_EVERY === 0) {
+    if (visited % POLICY_YIELD_EVERY === 0 || ignoreWork.steps - stepsAtYield >= POLICY_YIELD_WORK) {
+      stepsAtYield = ignoreWork.steps;
       await yieldToEventLoop();
       meter.checkDeadline();
     }
@@ -673,10 +704,18 @@ async function collectCommitInventory(
     }
     // Ignore rules and extension filter on the commit's own path: such a file
     // is not part of the inventory in any checkout, so it is left out silently.
-    if (excludedByRules(entry.path)) continue;
+    // A path the ignore rules cannot decide within their budget is reported.
+    const ruling = ruleOf(entry.path);
+    if (ruling === "excluded") continue;
+    if (ruling === "undecided") {
+      skippedFiles += 1;
+      continue;
+    }
     // The full policy decision also depends on the working tree (a link on the
     // path, a Windows name alias): a file it refuses is reported as skipped.
-    const decision = deps.policy.checkFile(canonicalRoot, path.resolve(canonicalRoot, entry.path), 0);
+    const decision = deps.policy.checkFile(canonicalRoot, path.resolve(canonicalRoot, entry.path), 0, {
+      ignoreWork,
+    });
     if (!decision.allowed) {
       skippedFiles += 1;
       continue;
@@ -954,6 +993,13 @@ interface DirIdentity {
 export interface HistoryCacheFileSystem {
   /** The server's uid; undefined where there is none (Windows): owner and mode are not checked. */
   readonly getuid?: () => number | undefined;
+  /** Platform whose trust rules apply (default process.platform). */
+  readonly platform?: NodeJS.Platform;
+  /**
+   * Windows: the per-user directories whose default ACL is private to the
+   * server's user (default: the profile, os.homedir(), and %LOCALAPPDATA%).
+   */
+  readonly privateProfileDirs?: () => readonly string[];
   /** lstat (never follows a final link). */
   readonly lstat?: (target: string) => Promise<HistoryCacheStat>;
   /** Stat of an opened entry (`target` is the path it was opened by). */
@@ -1084,6 +1130,58 @@ function defaultGetuid(): number | undefined {
   return typeof process.getuid === "function" ? process.getuid() : undefined;
 }
 
+/** The user's profile and %LOCALAPPDATA% (absolute, never a UNC/device path). */
+function defaultPrivateProfileDirs(): readonly string[] {
+  const candidates = [os.homedir(), process.env["LOCALAPPDATA"] ?? ""];
+  return candidates.filter((dir) => dir.trim().length > 0 && path.isAbsolute(dir) && !isUncOrDevicePath(dir));
+}
+
+/** Every prefix of an absolute path below its root, shortest first. */
+function pathPrefixes(target: string): string[] {
+  const resolved = path.resolve(target);
+  const root = path.parse(resolved).root;
+  const prefixes: string[] = [];
+  let current = root;
+  for (const segment of resolved.slice(root.length).split(/[\\/]/)) {
+    if (segment.length === 0) continue;
+    current = path.join(current, segment);
+    prefixes.push(current);
+  }
+  return prefixes;
+}
+
+/**
+ * F43 — why a cache directory is not trusted on Windows, or undefined. Node
+ * cannot read a DACL without native code and the server never spawns icacls,
+ * so ownership cannot be checked there. The cache is trusted only inside a
+ * per-user directory whose default ACL grants access to the user (and
+ * SYSTEM/Administrators) alone: its native real path must lie inside one of
+ * them, and no component of the path it is used by may be a link or junction
+ * (one could be retargeted after the check), except the private directory
+ * itself or a directory above it (a relocated profile). Anywhere else, such as
+ * a --data-dir in a new folder at a drive root (which inherits write access
+ * for every authenticated user), every commit is analyzed fresh instead.
+ */
+async function windowsTrustProblem(
+  target: string,
+  realTarget: string,
+  privateDirs: readonly string[],
+  lstatFn: (target: string) => Promise<HistoryCacheStat>,
+): Promise<string | undefined> {
+  const lexicalPrivate = privateDirs.map((dir) => path.resolve(dir));
+  for (const prefix of pathPrefixes(target)) {
+    const stat = await lstatFn(prefix);
+    if (!stat.isSymbolicLink()) continue;
+    if (lexicalPrivate.some((dir) => isSameOrInside(dir, prefix))) continue;
+    return `reached through a link or junction (${prefix}); Windows ACLs are not inspected, so only a path of real directories inside the user's profile is trusted`;
+  }
+  for (const dir of lexicalPrivate) {
+    const realPrivate = await realpath(dir).catch(() => undefined);
+    if (realPrivate !== undefined && isSameOrInside(realTarget, realPrivate)) return undefined;
+  }
+  return "outside the user's profile; Windows ACLs are not inspected, so only a data root inside the profile (the default ~/.causoryn) is trusted and every commit is analyzed fresh";
+}
+
 /**
  * Why a cache directory or entry is not trusted on POSIX (another owner, or
  * group/other write permission), or undefined. Without a uid (Windows)
@@ -1113,6 +1211,8 @@ export function openHistoryCache(
   const fileSystemLstat = options.fileSystem?.lstat ?? ((target: string) => lstat(target));
   const fileSystemFstat = options.fileSystem?.fstat ?? ((handle: FileHandle) => handle.stat());
   const getuid = options.fileSystem?.getuid ?? defaultGetuid;
+  const platform = options.fileSystem?.platform ?? process.platform;
+  const privateProfileDirs = options.fileSystem?.privateProfileDirs ?? defaultPrivateProfileDirs;
   const quota = options.quota ?? resolveHistoryCacheQuota(deps.logger);
   const dataDir = path.dirname(path.resolve(dataDbPath));
   const dir = path.join(dataDir, HISTORY_DIR_NAME);
@@ -1156,6 +1256,13 @@ export function openHistoryCache(
       if (comparable(realTarget) !== comparable(expected)) {
         logOnce(`history: the history cache directory does not resolve inside the data directory and is not used: ${target}`);
         return undefined;
+      }
+      if (platform === "win32") {
+        const windowsProblem = await windowsTrustProblem(target, realTarget, privateProfileDirs(), fileSystemLstat);
+        if (windowsProblem !== undefined) {
+          logOnce(`history: the history cache directory is ${windowsProblem}; it is not trusted: ${target}`);
+          return undefined;
+        }
       }
       const problem = ownershipProblem(stat, getuid());
       if (problem !== undefined) {

@@ -1,4 +1,4 @@
-import { lstatSync, readlinkSync } from "node:fs";
+import { lstatSync, readdirSync, readlinkSync } from "node:fs";
 import path from "node:path";
 
 /**
@@ -149,6 +149,15 @@ export interface LinkInspectionOptions {
   readonly pathApi?: PathApi;
   /** Maximum number of links followed before failing closed (default 40). */
   readonly maxLinks?: number;
+  /**
+   * Authorized directories. A local link whose target lies outside all of them is
+   * not followed: the walk stops with `link-leaves-area`, so nothing outside the
+   * authorized area is lstat'ed or read through a link planted inside it. A UNC /
+   * device target is still reported as such first. When the walk is redirected
+   * inside the area it continues from the containing directory (trusted, like
+   * `startDir`).
+   */
+  readonly confineTo?: readonly string[];
 }
 
 export type LinkInspectionResult =
@@ -161,7 +170,7 @@ export type LinkInspectionResult =
     }
   | {
       readonly ok: false;
-      readonly reason: "link-target-unreadable" | "too-many-links";
+      readonly reason: "link-target-unreadable" | "too-many-links" | "link-leaves-area";
       readonly linkPath: string;
     };
 
@@ -205,7 +214,8 @@ export function inspectLinkTargets(
   const pathApi = options.pathApi ?? path;
   const fsImpl = options.fs ?? NODE_LINK_FS;
   const maxLinks = options.maxLinks ?? DEFAULT_MAX_LINKS;
-  const trusted = options.startDir === undefined ? undefined : pathApi.resolve(options.startDir);
+  let trusted = options.startDir === undefined ? undefined : pathApi.resolve(options.startDir);
+  const areas = options.confineTo?.map((area) => pathApi.resolve(area));
   if (isUncOrDevicePath(absolutePath)) {
     return { ok: false, reason: "unc-or-device-link-target", linkPath: absolutePath, target: absolutePath };
   }
@@ -252,6 +262,13 @@ export function inspectLinkTargets(
         return { ok: false, reason: "unc-or-device-link-target", linkPath: next, target: linkTarget };
       }
       target = pathApi.join(resolvedTarget, ...remaining.slice(index + 1));
+      if (areas !== undefined) {
+        const area = areas.find((candidate) => isSameOrInside(pathApi, candidate, target));
+        if (area === undefined) {
+          return { ok: false, reason: "link-leaves-area", linkPath: next };
+        }
+        trusted = area;
+      }
       redirected = true;
       break;
     }
@@ -261,16 +278,194 @@ export function inspectLinkTargets(
   }
 }
 
-/** Human-readable explanation for a failed {@link inspectLinkTargets} result. */
+export interface LinkInspectionDescriptionOptions {
+  /**
+   * Directory the reader of the message is authorized for. A link path inside it
+   * is named relative to it; a link path outside it is left out.
+   */
+  readonly within?: string;
+  readonly pathApi?: PathApi;
+}
+
+/** `linkPath` relative to `within` (POSIX separators), or undefined when it lies outside. */
+function linkPathInside(linkPath: string, options: LinkInspectionDescriptionOptions): string | undefined {
+  if (options.within === undefined || isUncOrDevicePath(linkPath)) {
+    return undefined;
+  }
+  const pathApi = options.pathApi ?? path;
+  const within = pathApi.resolve(options.within);
+  const resolved = pathApi.resolve(linkPath);
+  if (!isSameOrInside(pathApi, within, resolved)) {
+    return undefined;
+  }
+  const relative = splitSegments(pathApi.relative(within, resolved)).join("/");
+  return relative.length === 0 ? "." : relative;
+}
+
+/**
+ * Human-readable explanation for a failed {@link inspectLinkTargets} result, safe to
+ * return to an MCP client (Claude Security F42): the readlink target is never
+ * included, and the link path only when it lies inside `options.within` (named
+ * relative to it). Without `within` the message names no path at all.
+ */
 export function describeLinkInspectionFailure(
   result: Exclude<LinkInspectionResult, { readonly ok: true }>,
+  options: LinkInspectionDescriptionOptions = {},
 ): string {
+  const inside = linkPathInside(result.linkPath, options);
+  const where = inside === undefined ? "" : `: ${inside}`;
   switch (result.reason) {
     case "unc-or-device-link-target":
-      return `a link resolves to a UNC or Win32 device target (rejected before the link is followed): ${result.linkPath} -> ${result.target}`;
+      return `a path component is a link to a UNC or Win32 device target (rejected before the link is followed)${where}`;
     case "link-target-unreadable":
-      return `a link target could not be read (refusing to follow it): ${result.linkPath}`;
+      return `a link target could not be read (refusing to follow it)${where}`;
     case "too-many-links":
-      return `too many links while resolving the path (refusing to follow further): ${result.linkPath}`;
+      return `too many links while resolving the path (refusing to follow further)${where}`;
+    case "link-leaves-area":
+      return `a link leads outside the authorized directory (not followed)${where}`;
   }
+}
+
+/**
+ * True when an existing component of `lexicalPath` strictly below `trustedStart`
+ * is a symbolic link or junction. Purely lstat-based; it stops at the first
+ * missing component (nothing below it exists to be a link). Used to give a path
+ * that cannot be resolved because it lies below a (dangling) link the same answer
+ * as a path outside the authorized area.
+ */
+export function pathCrossesLink(lexicalPath: string, trustedStart: string, pathApi: PathApi = path): boolean {
+  const relative = pathApi.relative(trustedStart, lexicalPath);
+  // Segment-aware: a directory named "..x" is inside trustedStart.
+  if (
+    relative === "" ||
+    relative === ".." ||
+    relative.startsWith(`..${pathApi.sep}`) ||
+    pathApi.isAbsolute(relative)
+  ) {
+    return false;
+  }
+  let current = trustedStart;
+  for (const part of relative.split(pathApi.sep)) {
+    if (part.length === 0) continue;
+    current = pathApi.join(current, part);
+    let isLink: boolean;
+    try {
+      isLink = lstatSync(current).isSymbolicLink();
+    } catch {
+      return false;
+    }
+    if (isLink) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/** Creation-time environment of WorkspaceAccessPolicy / OutputAccessPolicy. */
+export interface PolicyEnvironment {
+  /**
+   * Root-level link aliases (link path -> target) used to normalize spellings
+   * before the lexical containment check. Defaults to {@link readRootLevelLinks}
+   * of the filesystem root (none on Windows); tests inject a map to simulate
+   * another platform's layout.
+   */
+  readonly rootLinks?: ReadonlyMap<string, string>;
+}
+
+/** Minimal filesystem surface used by {@link readRootLevelLinks} (injectable for tests). */
+export interface RootLevelLinkFs {
+  readonly readdirSync: (dir: string) => ReadonlyArray<{ readonly name: string; isSymbolicLink(): boolean }>;
+  readonly readlinkSync: (target: string) => string;
+}
+
+const NODE_ROOT_LINK_FS: RootLevelLinkFs = {
+  readdirSync: (dir) => readdirSync(dir, { withFileTypes: true }),
+  readlinkSync: (target) => readlinkSync(target),
+};
+
+/** Bound on root-level link chains (`/a` -> `/b/x`, `/b` -> `/c`); longer chains or loops are dropped. */
+const MAX_ROOT_LINK_HOPS = 8;
+
+/**
+ * The filesystem root's own links (macOS `/var`, `/tmp`, `/etc` -> `/private/...`;
+ * merged-usr `/bin` -> `/usr/bin`), each mapped to its target resolved lexically
+ * against the root, root-level chains followed. Only the root directory is listed
+ * and only its link entries are read (readdir file types, then readlink): no
+ * candidate path is involved and nothing is followed, stat'ed or opened, so a
+ * target on an automounted or network path is not contacted. An entry whose target
+ * cannot be read, or whose chain loops, is left out (its spelling is then simply
+ * not normalized: a lexical denial, never a wider grant).
+ */
+export function readRootLevelLinks(
+  options: { readonly root?: string; readonly fs?: RootLevelLinkFs; readonly pathApi?: PathApi } = {},
+): ReadonlyMap<string, string> {
+  const pathApi = options.pathApi ?? path;
+  const fsImpl = options.fs ?? NODE_ROOT_LINK_FS;
+  const root = options.root ?? pathApi.sep;
+  const raw = new Map<string, string>();
+  let entries: ReadonlyArray<{ readonly name: string; isSymbolicLink(): boolean }>;
+  try {
+    entries = fsImpl.readdirSync(root);
+  } catch {
+    return raw;
+  }
+  for (const entry of entries) {
+    if (!entry.isSymbolicLink()) continue;
+    const linkPath = pathApi.join(root, entry.name);
+    try {
+      const target = fsImpl.readlinkSync(linkPath);
+      if (isUncOrDevicePath(target)) continue;
+      raw.set(linkPath, pathApi.resolve(root, target));
+    } catch {
+      // Unreadable link: left out.
+    }
+  }
+  const resolved = new Map<string, string>();
+  for (const [linkPath, target] of raw) {
+    let current = target;
+    let stable = false;
+    for (let hop = 0; hop < MAX_ROOT_LINK_HOPS; hop += 1) {
+      const next = normalizeRootLevelAlias(current, raw, pathApi, 1);
+      if (next === current) {
+        stable = true;
+        break;
+      }
+      current = next;
+    }
+    if (stable) {
+      resolved.set(linkPath, current);
+    }
+  }
+  return resolved;
+}
+
+/**
+ * Rewrites a leading `rootLinks` prefix of `absolutePath` (a whole component, e.g.
+ * `/tmp/proj` with `/tmp` -> `/private/tmp` becomes `/private/tmp/proj`). Purely
+ * lexical. Used before a lexical containment check, so a path spelled through a
+ * root-level link of the system compares with the real-path form of a declared
+ * directory; the real-path containment check that follows still decides.
+ */
+export function normalizeRootLevelAlias(
+  absolutePath: string,
+  rootLinks: ReadonlyMap<string, string>,
+  pathApi: PathApi = path,
+  maxRewrites = MAX_ROOT_LINK_HOPS,
+): string {
+  let current = absolutePath;
+  for (let rewrite = 0; rewrite < maxRewrites; rewrite += 1) {
+    let rewritten: string | undefined;
+    for (const [linkPath, target] of rootLinks) {
+      if (isSameOrInside(pathApi, linkPath, current)) {
+        const rest = pathApi.relative(linkPath, current);
+        rewritten = rest.length === 0 ? target : pathApi.join(target, rest);
+        break;
+      }
+    }
+    if (rewritten === undefined || rewritten === current) {
+      return current;
+    }
+    current = rewritten;
+  }
+  return current;
 }

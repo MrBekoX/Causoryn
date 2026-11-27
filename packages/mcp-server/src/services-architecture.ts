@@ -765,7 +765,10 @@ export async function compareArchitecture(
         untrustedSnapshotWarning(targetPoint.trustWarning, "targetRef", input.targetRef),
       );
     }
-    return diffContentSets(basePoint.contentSet, targetPoint.contentSet);
+    // Renames reported as removed + added must not go unnoticed (F5).
+    return diffContentSets(basePoint.contentSet, targetPoint.contentSet, {
+      onWarning: (warning) => trustWarnings.push(warning),
+    });
   });
 
   return buildEnvelope({

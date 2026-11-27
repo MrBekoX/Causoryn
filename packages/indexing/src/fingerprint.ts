@@ -21,7 +21,7 @@
  * fp2 şeması: fingerprint, koşumun GERÇEK analyzer bağlamını taşır —
  * "|" ile ayrılmış konumsal segmentler:
  *
- *   fp2|ts-adapter@0.1.0|roslyn-worker@0.1.0|refpack=<pack>@<sürüm>@<tfmDir>;...|refsrc=<kaynak>|opts=<sha256-16>
+ *   fp2|ts-adapter@0.1.0|roslyn-worker@0.1.0|refpack=<pack>@<sürüm>@<tfm>;...|refsrc=<kaynak>|opts=<sha256-16>
  *      [|python-worker@0.1.0|pystate=<durum>|pyopts=<sha256-16>
  *       |go-worker@0.1.0|gostate=<durum>|goopts=<sha256-16>
  *       |rust-worker@0.1.0|ruststate=<durum>|rustopts=<sha256-16>]  (M2)
@@ -36,8 +36,10 @@
  *   JSON sha256 özeti (ilk 16 hex) — csharp opts kuralının aynısı.
  * - refpack: worker'ın GERÇEKTEN yüklediği ref pack'leri (worker yanıt
  *   warnings'inden türetilir — ReferenceResolver.cs:144 canonical satırı
- *   "reference pack loaded: <pack> <version> (<tfmDir>)"); pack hiç
- *   bulunamadıysa "fallback-corelib" (System.Private.CoreLib runtime ref),
+ *   "reference pack loaded: <pack> <version> (<tfmDir>)"). <tfm>, tfmDir'in
+ *   yalnızca son bileşenidir (ör. net8.0): mutlak dizin kullanıcı adını ve
+ *   klasör düzenini taşıyabilir ve doküman export'larına girer (F30); pack
+ *   hiç bulunamadıysa "fallback-corelib" (System.Private.CoreLib runtime ref),
  *   keşif bilgisi yoksa "unavailable" — hiçbir koşulda uydurma sürüm
  *   yazılmaz.
  * - refsrc: discovery kaynağı — discovery="performed" iken tfmDir
@@ -80,7 +82,10 @@ export const ANALYZER_FINGERPRINT_SCHEMA_VERSION = "fp3";
 export interface RoslynRefPackEntry {
   readonly pack: string;
   readonly version: string;
-  /** Yükleme notundaki mutlak ref dizini (discovery sonucunun kendisi). */
+  /**
+   * Yükleme notundaki mutlak ref dizini (discovery sonucunun kendisi). Yalnızca
+   * bellekte kalır (refsrc tespiti); fingerprint'e son bileşeni yazılır.
+   */
   readonly tfmDir: string;
 }
 
@@ -329,6 +334,22 @@ function workerSettingsHash(payload: JsonValue): string {
 }
 
 /**
+ * Name of the target framework directory a reference pack was loaded from
+ * (the last component of tfmDir, e.g. `net8.0`): the refpack segment records
+ * only this, never the absolute directory (security finding F30). The
+ * directory sits under the discovered dotnet root, so for a user-local
+ * install (~/.dotnet, a DOTNET_ROOT in the profile, %LOCALAPPDATA%) it holds
+ * the OS user name and folder layout, and the fingerprint is printed by the
+ * documentation exports (snapshot.meta.analyzerFingerprint). Pack, version and
+ * target framework identify the reference assemblies; the install location
+ * does not change them (refsrc still tells an env-dotnet-root discovery apart).
+ */
+function tfmDirName(tfmDir: string): string {
+  const parts = tfmDir.split(/[\\/]/).filter((part) => part.length > 0);
+  return parts[parts.length - 1] ?? "";
+}
+
+/**
  * fp2 analyzerFingerprint üretir. Segment sırası sabittir: şema, TS, C#
  * (refpack, refsrc, opts), python (state, opts), go (state, opts), rust
  * (state, opts). Hiç adapter koşmadıysa yalnızca şema segmenti kalır
@@ -357,7 +378,7 @@ export function buildAnalyzerFingerprint(input: AnalyzerFingerprintInput): strin
           segments.push(`refsrc=${input.csharp.refPacks.source}`);
         } else {
           const joined = input.csharp.refPacks.packs
-            .map((entry) => `${entry.pack}@${entry.version}@${entry.tfmDir}`)
+            .map((entry) => `${entry.pack}@${entry.version}@${tfmDirName(entry.tfmDir)}`)
             .join(";");
           segments.push(`refpack=${joined}`);
           segments.push(`refsrc=${input.csharp.refPacks.source}`);

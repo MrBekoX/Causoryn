@@ -573,6 +573,22 @@ export function createCausorynContext(
 }
 
 /**
+ * Why a data directory or database file is not trusted on POSIX (another
+ * owner, or group/other write permission), or undefined. The same rule as the
+ * history cache and the automatic data directory (F41 / F48); without a uid
+ * (Windows) nothing is checked here.
+ */
+function dataFileOwnershipProblem(stat: Stats): string | undefined {
+  const uid = typeof process.getuid === "function" ? process.getuid() : undefined;
+  if (uid === undefined) return undefined;
+  if (stat.uid !== uid) return `owned by uid ${String(stat.uid)}, not the server's uid ${String(uid)}`;
+  if ((stat.mode & 0o022) !== 0) {
+    return `writable by group or others (mode ${(stat.mode & 0o777).toString(8).padStart(3, "0")})`;
+  }
+  return undefined;
+}
+
+/**
  * storage.dataDbPath ve wiki.dataDbPath için ORTAK fail-closed güvenlik
  * doğrulayıcısı (TŞ §9/§16A.8/§20 + ADR-008):
  * - mutlak yol olmalı,
@@ -581,7 +597,10 @@ export function createCausorynContext(
  * - sözcüksel olarak tüm allowRoots dışında olmalı,
  * - üst dizin diskte mevcut bir dizin olmalı,
  * - üst dizinin (ve dosya mevcutsa dosyanın kendisinin) realpath'i TÜM
- *   allowRoots realpath'lerinin kesinlikle dışında olmalı.
+ *   allowRoots realpath'lerinin kesinlikle dışında olmalı,
+ * - the database and its -wal/-shm/-journal side files must not be symbolic
+ *   links, and on POSIX they and the parent directory must be owned by the
+ *   server's uid and not writable by group or others (F48).
  */
 function validateDataDbPath(
   fieldName: "storage.dataDbPath" | "wiki.dataDbPath",
@@ -677,6 +696,12 @@ function validateDataDbPath(
       `${fieldName} parent path is not a directory: ${parentDir}`,
     ]);
   }
+  const parentProblem = dataFileOwnershipProblem(parentStat);
+  if (parentProblem !== undefined) {
+    throw new CausorynConfigError([
+      `${fieldName} parent directory is ${parentProblem} (another local user could read or replace the database): ${parentDir}`,
+    ]);
+  }
 
   const realTargets: string[] = [];
   try {
@@ -703,6 +728,18 @@ function validateDataDbPath(
       if (artifactLstat.isDirectory()) {
         throw new CausorynConfigError([
           `${fieldName} target/side path must not be a directory: ${artifactPath}`,
+        ]);
+      }
+      // F48: SQLite would follow a link and write the index into its target.
+      if (artifactLstat.isSymbolicLink()) {
+        throw new CausorynConfigError([
+          `${fieldName} target/side file must not be a symbolic link (CWE-59): ${artifactPath}`,
+        ]);
+      }
+      const artifactProblem = dataFileOwnershipProblem(artifactLstat);
+      if (artifactProblem !== undefined) {
+        throw new CausorynConfigError([
+          `${fieldName} target/side file is ${artifactProblem} (another local user could read or replace the database): ${artifactPath}`,
         ]);
       }
       try {

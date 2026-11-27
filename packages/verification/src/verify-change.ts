@@ -604,10 +604,11 @@ export function verifyChange(input: VerifyChangeInput): VerificationReport {
 
   // 6) graph-diff: base ↔ target içerik kümeleri (packages/graph compare
   //    çekirdeği; eşiği/skorlaması compare.ts'tedir).
-  const diff = diffContentSets(
-    toContentSet(input.baseSnapshot),
-    toContentSet(input.targetSnapshot),
-  );
+  const diffWarnings: string[] = [];
+  const diff = diffContentSets(toContentSet(input.baseSnapshot), toContentSet(input.targetSnapshot), {
+    // Renames reported as removed + added are a limitation of the graph-diff (F5).
+    onWarning: (warning) => diffWarnings.push(`graph-diff: ${warning}`),
+  });
 
   // Değişiklik kümesi dizgileri: tüm tarafların qualifiedName + yol birleşimi
   // (alignment ve graph-diff kanıt eşlemesi için); hedef taraflı sembol/yol
@@ -792,7 +793,7 @@ export function verifyChange(input: VerifyChangeInput): VerificationReport {
     limitations: requested.has("graph-diff")
       ? diffTotal === 0
         ? ["graph-diff: base and target content sets are identical (no node or edge changes)"]
-        : []
+        : diffWarnings
       : [`"graph-diff" check not requested (checks parameter)`],
   };
   limitations.push(...graphDiff.limitations);

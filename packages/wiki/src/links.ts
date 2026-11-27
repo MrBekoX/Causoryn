@@ -229,15 +229,25 @@ function parseDrafts(drafts: readonly WikiLinkDraft[]): WikiLinkDraft[] {
   });
 }
 
-/** Hedef kataloğu: id ve slug benzersiz olmalı (girdi invariant'ı). */
+/**
+ * Hedef kataloğu: page ids are unique (input invariant). Slugs are not: a
+ * child page's slug is unique only inside its category (its route is
+ * `/wiki/<category>/<slug>`), so repository content can give a child the slug
+ * of a root category or of a child in another category (F31). A bare slug
+ * resolves only to the one page that owns it: the page whose route is
+ * `/wiki/<slug>` (a root category owns its slug), or else the only page with
+ * that slug. A slug shared otherwise is ambiguous and is never guessed.
+ */
 interface TargetCatalog {
   readonly byId: ReadonlyMap<string, WikiPageTarget>;
   readonly bySlug: ReadonlyMap<string, WikiPageTarget>;
+  /** Slug → number of pages sharing it, for slugs no single page owns. */
+  readonly ambiguousSlugs: ReadonlyMap<string, number>;
 }
 
 function buildCatalog(pages: readonly WikiPageTarget[]): TargetCatalog {
   const byId = new Map<string, WikiPageTarget>();
-  const bySlug = new Map<string, WikiPageTarget>();
+  const pagesBySlug = new Map<string, WikiPageTarget[]>();
   for (const page of pages) {
     if (byId.has(page.id)) {
       throw new WikiProjectionError(
@@ -245,16 +255,21 @@ function buildCatalog(pages: readonly WikiPageTarget[]): TargetCatalog {
         `Target catalog contains the same page id twice: ${page.id}`,
       );
     }
-    if (bySlug.has(page.slug)) {
-      throw new WikiProjectionError(
-        "wiki/duplicate-catalog-page",
-        `Target catalog assigns the same slug to two pages: ${page.slug}`,
-      );
-    }
     byId.set(page.id, page);
-    bySlug.set(page.slug, page);
+    const sharing = pagesBySlug.get(page.slug);
+    if (sharing === undefined) pagesBySlug.set(page.slug, [page]);
+    else sharing.push(page);
   }
-  return { byId, bySlug };
+  const bySlug = new Map<string, WikiPageTarget>();
+  const ambiguousSlugs = new Map<string, number>();
+  for (const [slug, sharing] of pagesBySlug) {
+    const owners =
+      sharing.length === 1 ? sharing : sharing.filter((page) => page.route === `/wiki/${slug}`);
+    const owner = owners.length === 1 ? owners[0] : undefined;
+    if (owner === undefined) ambiguousSlugs.set(slug, sharing.length);
+    else bySlug.set(slug, owner);
+  }
+  return { byId, bySlug, ambiguousSlugs };
 }
 
 /**
@@ -422,12 +437,17 @@ export function resolveWikiLinks(
       evidenceRefs: [...draft.evidenceRefs],
     });
     if (resolved === undefined) {
+      const sharedBy = catalog.ambiguousSlugs.get(draft.toRef);
+      const cause =
+        sharedBy === undefined
+          ? "no matching pageId/slug/alias in the catalog"
+          : `${String(sharedBy)} pages share the slug and none owns it, so it is not guessed; no matching alias either`;
       diagnostics.push({
         linkId: draft.id,
         fromPageId: draft.fromPageId,
         toRef: draft.toRef,
         kind: draft.kind,
-        reason: `Wiki link target could not be resolved: source page '${draft.fromPageId}' target '${draft.toRef}' (kind=${draft.kind}) — no matching pageId/slug/alias in the catalog; the record is kept with toPageId=null`,
+        reason: `Wiki link target could not be resolved: source page '${draft.fromPageId}' target '${draft.toRef}' (kind=${draft.kind}) — ${cause}; the record is kept with toPageId=null`,
       });
     }
   }

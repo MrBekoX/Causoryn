@@ -39,7 +39,7 @@
     "node": ">=24"
   },
   "bin": {
-    "causoryn": "scripts/causoryn.mjs"
+    "causoryn": "scripts/causoryn.cmd"
   },
   "exports": {
     ".": {
@@ -50,6 +50,7 @@
   "files": [
     "dist/**",
     "!dist/**/*.map",
+    "scripts/causoryn.cmd",
     "scripts/causoryn.mjs",
     "scripts/plugin-mcp-launcher.mjs",
     "scripts/lib/**",

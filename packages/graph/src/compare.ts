@@ -42,6 +42,10 @@ import { GraphRepositoryError } from "./errors.js";
  *   SchemaContract, ContractVersion) — TŞ §11 sözleşme yüzeyiyle uyumlu.
  * - Sadece "low/medium/high" rename'ler edge uçlarını yeniden eşler
  *   (remap); `uncertain` çiftler bu varsayımı taşımaz.
+ * - Rename matching is bounded (RENAME_MATCHING_BUDGET, security scan F5):
+ *   above the pair or token-comparison budget it is skipped as a whole and
+ *   reported through `DiffContentSetsOptions.onWarning`
+ *   (`rename-matching-skipped`); the tokenizer is a linear scan (F25).
  *
  * Hata kodları (GraphRepositoryError.code, MCP eşlemesi mcp-server'da):
  * - compare/unknown-node-kind, compare/unknown-edge-kind,
@@ -346,34 +350,92 @@ function compareStrings(a: string, b: string): number {
   return 0;
 }
 
+function isAsciiUpper(code: number): boolean {
+  return code >= 0x41 && code <= 0x5a;
+}
+
+function isAsciiLower(code: number): boolean {
+  return code >= 0x61 && code <= 0x7a;
+}
+
+function isAsciiDigit(code: number): boolean {
+  return code >= 0x30 && code <= 0x39;
+}
+
 /**
- * CamelCase sınırını de ayracı sayan tokenleştirici: "createPurchaseOrder" →
- * [create, purchase, order]. Token sırası korunduğundan sonuç deterministiktir.
+ * Camel-case word boundary before index `i` (> 0): an ASCII uppercase letter
+ * that follows a lowercase letter or digit ("createPurchase" → create|Purchase),
+ * or that ends an uppercase run and is followed by a lowercase letter
+ * ("HTTPServer" → HTTP|Server). `charCodeAt` past the end is NaN (no match).
+ */
+function isCamelCaseBoundary(text: string, i: number): boolean {
+  if (!isAsciiUpper(text.charCodeAt(i))) return false;
+  const previous = text.charCodeAt(i - 1);
+  return (
+    isAsciiLower(previous) ||
+    isAsciiDigit(previous) ||
+    (isAsciiUpper(previous) && isAsciiLower(text.charCodeAt(i + 1)))
+  );
+}
+
+/** Appends the runs of ASCII lowercase letters and digits in `lowered`. */
+function collectAsciiWords(lowered: string, tokens: string[]): void {
+  let start = -1;
+  for (let i = 0; i < lowered.length; i += 1) {
+    const code = lowered.charCodeAt(i);
+    if (isAsciiLower(code) || isAsciiDigit(code)) {
+      if (start < 0) start = i;
+    } else if (start >= 0) {
+      tokens.push(lowered.slice(start, i));
+      start = -1;
+    }
+  }
+  if (start >= 0) tokens.push(lowered.slice(start));
+}
+
+/**
+ * Camel-case aware tokenizer: "createPurchaseOrder" → [create, purchase,
+ * order], "HTTPServer" → [http, server]. The text is split at camel-case
+ * boundaries, each piece is lowercased (full Unicode `toLowerCase`) and the
+ * runs of ASCII letters and digits become tokens, in order (deterministic).
+ *
+ * One linear scan, no regular expression (security scan F25, CWE-1333): the
+ * signature and qualifiedName come from the analysed repository with no
+ * length limit, and the former `/([A-Z]+)([A-Z][a-z])/g` pass backtracked
+ * quadratically on a long uppercase run. The tokens are identical to the
+ * former `replace(/([a-z0-9])([A-Z])/g, "$1 $2")` +
+ * `replace(/([A-Z]+)([A-Z][a-z])/g, "$1 $2")` + `toLowerCase()` +
+ * `match(/[a-z0-9]+/g)` pipeline: both put a separator at exactly these
+ * boundaries, and lowercasing per piece equals lowercasing the joined text
+ * because the only context-dependent lowercase mapping (Final_Sigma) does
+ * not look across a separator.
  */
 function tokenize(text: string): string[] {
-  const bounded = text
-    .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
-    .replace(/([A-Z]+)([A-Z][a-z])/g, "$1 $2")
-    .toLowerCase();
-  return bounded.match(/[a-z0-9]+/g) ?? [];
-}
-
-function tokenizeSet(text: string): Set<string> {
-  return new Set(tokenize(text));
-}
-
-/** Jaccard benzerliği; iki küme de boşsa 1 (sinyal yok → çakışma sayılır). */
-function jaccard(a: Set<string>, b: Set<string>): number {
-  if (a.size === 0 && b.size === 0) return 1;
-  const union = new Set<string>();
-  for (const token of a) union.add(token);
-  for (const token of b) union.add(token);
-  if (union.size === 0) return 1;
-  let intersection = 0;
-  for (const token of a) {
-    if (b.has(token)) intersection += 1;
+  const tokens: string[] = [];
+  let pieceStart = 0;
+  for (let i = 1; i <= text.length; i += 1) {
+    if (i < text.length && !isCamelCaseBoundary(text, i)) continue;
+    collectAsciiWords(text.slice(pieceStart, i).toLowerCase(), tokens);
+    pieceStart = i;
   }
-  return intersection / union.size;
+  return tokens;
+}
+
+/**
+ * Jaccard similarity of two interned token sets; 1 when both are empty (no
+ * signal → counted as agreement). The intersection loop runs over the smaller
+ * set, so one call costs min(|a|, |b|) lookups (the unit of the rename work
+ * budget). |a ∪ b| = |a| + |b| − |a ∩ b|, so the value equals the former
+ * union-set computation exactly.
+ */
+function jaccard(a: ReadonlySet<number>, b: ReadonlySet<number>): number {
+  if (a.size === 0 && b.size === 0) return 1;
+  const [smaller, larger] = a.size <= b.size ? [a, b] : [b, a];
+  let intersection = 0;
+  for (const token of smaller) {
+    if (larger.has(token)) intersection += 1;
+  }
+  return intersection / (a.size + b.size - intersection);
 }
 
 /** qualifiedName'in taban adı: son '/' ve son '.' sonrası bölüm. */
@@ -382,8 +444,154 @@ function baseNameOf(qualifiedName: string): string {
   return afterSlash.slice(afterSlash.lastIndexOf(".") + 1);
 }
 
-function pathSegmentSet(relativePath: string): Set<string> {
-  return new Set(relativePath.split("/"));
+/**
+ * Rename matching work budget (security scan F5, CWE-407). The node lists of a
+ * content set come from the analysed repository (a committed snapshot blob or
+ * the engine's analysis of its source) and diffContentSets runs synchronously
+ * on the MCP main thread, so rename matching must not grow without bound:
+ * - `maxCandidatePairs`: same-kind removed × added node pairs one diff may
+ *   score (Σ over kinds of |removed| · |added|; different kinds are never
+ *   rename candidates).
+ * - `maxTokenComparisons`: upper bound of the token-set lookups those pairs
+ *   need: one per pair plus, per kind, min(|added| · Σ cost(removed),
+ *   |removed| · Σ cost(added)), where cost(node) is its number of base-name
+ *   tokens + signature tokens + path segments.
+ * Both counts are computed before any pair is scored. Above either limit
+ * rename matching is skipped as a whole: no renamed/uncertain entries, every
+ * removed and added node is reported as removed or added, edges are compared
+ * without rename remapping, and a `rename-matching-skipped` warning goes to
+ * `DiffContentSetsOptions.onWarning`. Inputs under the limits produce exactly
+ * the diff an unbounded run would.
+ */
+export const RENAME_MATCHING_BUDGET: Readonly<{
+  readonly maxCandidatePairs: number;
+  readonly maxTokenComparisons: number;
+}> = Object.freeze({
+  maxCandidatePairs: 2_000_000,
+  maxTokenComparisons: 50_000_000,
+});
+
+/** Warning code (prefix of the warning text) when rename matching is skipped. */
+export const COMPARE_WARNING_RENAME_MATCHING_SKIPPED = "rename-matching-skipped";
+
+/**
+ * A rename matching budget shared by every diff of one call that runs several
+ * (security scan F5: a timeline runs up to TIMELINE_CEILINGS.maxRevisions − 1
+ * = 59 diffs on the MCP main thread, each one allowed RENAME_MATCHING_BUDGET;
+ * see TIMELINE_RENAME_MATCHING_BUDGET). The per-diff
+ * budget still applies to each diff; on top of it, a diff whose pair count or
+ * token-comparison bound exceeds what is left here skips rename matching
+ * with the same `rename-matching-skipped` warning. A diff that runs rename
+ * matching adds its two pre-computed counts to the `used*` fields; a skipped
+ * diff adds nothing. Diffs are charged in call order, so the outcome is
+ * deterministic.
+ */
+export interface SharedRenameMatchingBudget {
+  readonly maxCandidatePairs: number;
+  readonly maxTokenComparisons: number;
+  usedCandidatePairs: number;
+  usedTokenComparisons: number;
+}
+
+/** A fresh shared budget with nothing used yet. */
+export function createSharedRenameMatchingBudget(limits: {
+  readonly maxCandidatePairs: number;
+  readonly maxTokenComparisons: number;
+}): SharedRenameMatchingBudget {
+  return {
+    maxCandidatePairs: limits.maxCandidatePairs,
+    maxTokenComparisons: limits.maxTokenComparisons,
+    usedCandidatePairs: 0,
+    usedTokenComparisons: 0,
+  };
+}
+
+/** Options of {@link diffContentSets}. */
+export interface DiffContentSetsOptions {
+  /**
+   * Receives each warning as deterministic text `<code>: <explanation>`.
+   * Today the only code is `rename-matching-skipped` (see
+   * RENAME_MATCHING_BUDGET). The diff itself keeps its shape.
+   */
+  readonly onWarning?: (warning: string) => void;
+  /**
+   * Cumulative rename matching budget of the calling tool call (see
+   * SharedRenameMatchingBudget); absent = only the per-diff budget applies.
+   */
+  readonly sharedBudget?: SharedRenameMatchingBudget;
+}
+
+/**
+ * A rename candidate with its text interned once (security scan F5): equal
+ * strings get equal ids, so the equality shortcuts of the scoring cost O(1)
+ * and token-set lookups compare numbers instead of repository-sized strings.
+ */
+interface RenameCandidate {
+  readonly validated: ValidatedNode;
+  readonly baseNameId: number;
+  readonly baseNameTokens: ReadonlySet<number>;
+  readonly signatureId: number | null;
+  readonly signatureTokens: ReadonlySet<number> | null;
+  readonly pathId: number | null;
+  readonly pathSegments: ReadonlySet<number> | null;
+  /** Base-name tokens + signature tokens + path segments (work budget unit). */
+  readonly cost: number;
+}
+
+type Interner = (text: string) => number;
+
+function createInterner(): Interner {
+  const ids = new Map<string, number>();
+  return (text) => {
+    let id = ids.get(text);
+    if (id === undefined) {
+      id = ids.size;
+      ids.set(text, id);
+    }
+    return id;
+  };
+}
+
+function internSet(values: readonly string[], intern: Interner): Set<number> {
+  const set = new Set<number>();
+  for (const value of values) set.add(intern(value));
+  return set;
+}
+
+function prepareRenameCandidate(
+  validated: ValidatedNode,
+  intern: Interner,
+): RenameCandidate {
+  const { node } = validated;
+  const baseName = baseNameOf(node.qualifiedName);
+  const baseNameTokens = internSet(tokenize(baseName), intern);
+  const signatureTokens =
+    node.signature === undefined ? null : internSet(tokenize(node.signature), intern);
+  const pathSegments =
+    node.relativePath === undefined
+      ? null
+      : internSet(node.relativePath.split("/"), intern);
+  return {
+    validated,
+    baseNameId: intern(baseName),
+    baseNameTokens,
+    signatureId: node.signature === undefined ? null : intern(node.signature),
+    signatureTokens,
+    pathId: node.relativePath === undefined ? null : intern(node.relativePath),
+    pathSegments,
+    cost:
+      baseNameTokens.size + (signatureTokens?.size ?? 0) + (pathSegments?.size ?? 0),
+  };
+}
+
+/** Equal text → 1, otherwise the Jaccard similarity of its token sets. */
+function textSimilarity(
+  fromId: number,
+  fromTokens: ReadonlySet<number>,
+  toId: number,
+  toTokens: ReadonlySet<number>,
+): number {
+  return fromId === toId ? 1 : jaccard(fromTokens, toTokens);
 }
 
 interface RenameEvaluation {
@@ -393,39 +601,36 @@ interface RenameEvaluation {
 
 /**
  * Rename skorlaması (TŞ §13 heuristic): taban ad + imza parmak izi + yol
- * benzerliğinin ağırlıklı ortalaması. İki tarafın türü farklıysa aday değildir
- * (null). Eksik alanlar (signature/path yok) skora katılmaz; ağırlık, mevcut
- * alanlara göre yeniden normalize edilir.
+ * benzerliğinin ağırlıklı ortalaması. Adaylar aynı türdendir (tür kovası;
+ * farklı tür hiç aday değildir). Eksik alanlar (signature/path yok) skora
+ * katılmaz; ağırlık, mevcut alanlara göre yeniden normalize edilir.
  */
 function evaluateRename(
-  from: CompareNode,
-  to: CompareNode,
-): RenameEvaluation | null {
-  if (from.kind !== to.kind) return null;
-
-  const fromBase = baseNameOf(from.qualifiedName);
-  const toBase = baseNameOf(to.qualifiedName);
-  const baseName =
-    fromBase === toBase
-      ? 1
-      : jaccard(tokenizeSet(fromBase), tokenizeSet(toBase));
+  from: RenameCandidate,
+  to: RenameCandidate,
+): RenameEvaluation {
+  const baseName = textSimilarity(
+    from.baseNameId,
+    from.baseNameTokens,
+    to.baseNameId,
+    to.baseNameTokens,
+  );
 
   const signature =
-    from.signature === undefined || to.signature === undefined
+    from.signatureId === null ||
+    from.signatureTokens === null ||
+    to.signatureId === null ||
+    to.signatureTokens === null
       ? null
-      : from.signature === to.signature
-        ? 1
-        : jaccard(tokenizeSet(from.signature), tokenizeSet(to.signature));
+      : textSimilarity(from.signatureId, from.signatureTokens, to.signatureId, to.signatureTokens);
 
   const path =
-    from.relativePath === undefined || to.relativePath === undefined
+    from.pathId === null ||
+    from.pathSegments === null ||
+    to.pathId === null ||
+    to.pathSegments === null
       ? null
-      : from.relativePath === to.relativePath
-        ? 1
-        : jaccard(
-            pathSegmentSet(from.relativePath),
-            pathSegmentSet(to.relativePath),
-          );
+      : textSimilarity(from.pathId, from.pathSegments, to.pathId, to.pathSegments);
 
   let weighted = RENAME_WEIGHT_BASE_NAME * baseName;
   let weight = RENAME_WEIGHT_BASE_NAME;
@@ -534,13 +739,121 @@ function renameSortKey(match: RenameMatch | UncertainMatch): string {
   ]);
 }
 
+/** Same-kind rename candidates, each list in canonical (sorted key) order. */
+interface RenameKindBucket {
+  readonly removed: ValidatedNode[];
+  readonly added: ValidatedNode[];
+}
+
+interface PreparedRenameBucket {
+  readonly removed: readonly RenameCandidate[];
+  readonly added: readonly RenameCandidate[];
+}
+
+const RENAME_SKIPPED_OUTCOME =
+  "renames were not detected, so removed and added nodes are reported as they are";
+
+/**
+ * Applies RENAME_MATCHING_BUDGET (and the caller's shared budget, if any)
+ * before any pair is scored: buckets the candidates by kind, checks the pair
+ * count, then interns the candidates' text and checks the token-comparison
+ * bound. Returns the buckets to match (charging the shared budget), or null
+ * (with one warning) when rename matching is skipped.
+ */
+function planRenameMatching(
+  removedCandidates: readonly ValidatedNode[],
+  addedCandidates: readonly ValidatedNode[],
+  options: DiffContentSetsOptions,
+): readonly PreparedRenameBucket[] | null {
+  const { onWarning, sharedBudget } = options;
+  const buckets = new Map<NodeKind, RenameKindBucket>();
+  const bucketOf = (kind: NodeKind): RenameKindBucket => {
+    let bucket = buckets.get(kind);
+    if (bucket === undefined) {
+      bucket = { removed: [], added: [] };
+      buckets.set(kind, bucket);
+    }
+    return bucket;
+  };
+  for (const node of removedCandidates) bucketOf(node.node.kind).removed.push(node);
+  for (const node of addedCandidates) bucketOf(node.node.kind).added.push(node);
+
+  const paired = [...buckets.values()].filter(
+    (bucket) => bucket.removed.length > 0 && bucket.added.length > 0,
+  );
+  let candidatePairs = 0;
+  for (const bucket of paired) candidatePairs += bucket.removed.length * bucket.added.length;
+  if (candidatePairs > RENAME_MATCHING_BUDGET.maxCandidatePairs) {
+    onWarning?.(
+      `${COMPARE_WARNING_RENAME_MATCHING_SKIPPED}: ${String(candidatePairs)} same-kind removed/added ` +
+        `candidate pairs exceed the rename matching budget of ` +
+        `${String(RENAME_MATCHING_BUDGET.maxCandidatePairs)} pairs; ${RENAME_SKIPPED_OUTCOME}`,
+    );
+    return null;
+  }
+  if (sharedBudget !== undefined) {
+    const pairsLeft = Math.max(0, sharedBudget.maxCandidatePairs - sharedBudget.usedCandidatePairs);
+    if (candidatePairs > pairsLeft) {
+      onWarning?.(
+        `${COMPARE_WARNING_RENAME_MATCHING_SKIPPED}: ${String(candidatePairs)} same-kind removed/added ` +
+          `candidate pairs exceed the ${String(pairsLeft)} pairs left of this call's cumulative rename ` +
+          `matching budget of ${String(sharedBudget.maxCandidatePairs)} pairs; ${RENAME_SKIPPED_OUTCOME}`,
+      );
+      return null;
+    }
+  }
+
+  const intern = createInterner();
+  const prepared: PreparedRenameBucket[] = [];
+  let tokenComparisons = candidatePairs;
+  for (const bucket of paired) {
+    const removed = bucket.removed.map((node) => prepareRenameCandidate(node, intern));
+    const added = bucket.added.map((node) => prepareRenameCandidate(node, intern));
+    let removedCost = 0;
+    for (const candidate of removed) removedCost += candidate.cost;
+    let addedCost = 0;
+    for (const candidate of added) addedCost += candidate.cost;
+    tokenComparisons += Math.min(added.length * removedCost, removed.length * addedCost);
+    prepared.push({ removed, added });
+  }
+  if (tokenComparisons > RENAME_MATCHING_BUDGET.maxTokenComparisons) {
+    onWarning?.(
+      `${COMPARE_WARNING_RENAME_MATCHING_SKIPPED}: ${String(candidatePairs)} same-kind removed/added ` +
+        `candidate pairs need up to ${String(tokenComparisons)} token comparisons, over the rename ` +
+        `matching budget of ${String(RENAME_MATCHING_BUDGET.maxTokenComparisons)}; ${RENAME_SKIPPED_OUTCOME}`,
+    );
+    return null;
+  }
+  if (sharedBudget !== undefined) {
+    const tokensLeft = Math.max(
+      0,
+      sharedBudget.maxTokenComparisons - sharedBudget.usedTokenComparisons,
+    );
+    if (tokenComparisons > tokensLeft) {
+      onWarning?.(
+        `${COMPARE_WARNING_RENAME_MATCHING_SKIPPED}: ${String(candidatePairs)} same-kind removed/added ` +
+          `candidate pairs need up to ${String(tokenComparisons)} token comparisons, over the ` +
+          `${String(tokensLeft)} left of this call's cumulative rename matching budget of ` +
+          `${String(sharedBudget.maxTokenComparisons)}; ${RENAME_SKIPPED_OUTCOME}`,
+      );
+      return null;
+    }
+    sharedBudget.usedCandidatePairs += candidatePairs;
+    sharedBudget.usedTokenComparisons += tokenComparisons;
+  }
+  return prepared;
+}
+
 /**
  * Saf Architecture Diff çekirdeği: iki içerik kümesi → belgeli, deterministik
  * diff. Girdi sırasından bağımsızdır; sonuç derin dondurulur (ADR-005 geleneği).
+ * Rename matching is bounded by RENAME_MATCHING_BUDGET; when it is skipped the
+ * diff keeps its shape and `options.onWarning` receives the reason.
  */
 export function diffContentSets(
   base: CompareContentSet,
   target: CompareContentSet,
+  options: DiffContentSetsOptions = {},
 ): ArchitectureDiff {
   const baseSet = validateContentSet(base);
   const targetSet = validateContentSet(target);
@@ -597,52 +910,62 @@ export function diffContentSets(
   /** Yalnızca güvenli (low+) rename'ler kenar uçlarını yeniden eşler. */
   const renameMap = new Map<string, CompareNodeIdentity>();
 
-  for (const removed of removedCandidates) {
-    let best: { candidate: ValidatedNode; evaluation: RenameEvaluation } | undefined;
-    for (const candidate of addedCandidates) {
-      if (consumedTargetKeys.has(candidate.key)) continue;
-      const evaluation = evaluateRename(removed.node, candidate.node);
-      if (evaluation === null || evaluation.score < RENAME_THRESHOLD_UNCERTAIN) {
-        continue;
+  // Kinds are independent (a different kind is never a candidate), and each
+  // bucket keeps the canonical key order: removed nodes are matched in that
+  // order, and the first candidate with the strictly highest score wins, which
+  // is the smallest key among equal scores (the former tie-break). Skipped
+  // over budget → no buckets: every node stays removed/added (see
+  // RENAME_MATCHING_BUDGET).
+  const buckets = planRenameMatching(removedCandidates, addedCandidates, options) ?? [];
+  for (const bucket of buckets) {
+    const consumed = new Uint8Array(bucket.added.length);
+    for (const removedCandidate of bucket.removed) {
+      let bestIndex = -1;
+      let best: RenameEvaluation | undefined;
+      for (let index = 0; index < bucket.added.length; index += 1) {
+        const candidate = bucket.added[index];
+        if (candidate === undefined || consumed[index] === 1) continue;
+        const evaluation = evaluateRename(removedCandidate, candidate);
+        if (evaluation.score < RENAME_THRESHOLD_UNCERTAIN) continue;
+        if (best === undefined || evaluation.score > best.score) {
+          best = evaluation;
+          bestIndex = index;
+        }
       }
-      if (
-        best === undefined ||
-        evaluation.score > best.evaluation.score ||
-        (evaluation.score === best.evaluation.score &&
-          candidate.key < best.candidate.key)
-      ) {
-        best = { candidate, evaluation };
-      }
-    }
-    if (best === undefined) continue; // bağımsız çıkarma olarak kalır
+      const bestCandidate = bucket.added[bestIndex];
+      if (best === undefined || bestCandidate === undefined) continue; // bağımsız çıkarma olarak kalır
 
-    consumedTargetKeys.add(best.candidate.key);
-    consumedBaseKeys.add(removed.key);
-    const { score, components } = best.evaluation;
-    if (score >= RENAME_THRESHOLD_LOW) {
-      const confidence = confidenceOf(score);
-      renamed.push({
-        from: removed.identity,
-        to: best.candidate.identity,
-        confidence,
-        score,
-        components,
-        reason:
-          `rename-evidence baseName=${formatComponent(components.baseName)} ` +
-          `signature=${formatComponent(components.signature)} ` +
-          `path=${formatComponent(components.path)} ` +
-          `score=${score.toFixed(2)} confidence=${confidence}`,
-      });
-      renameMap.set(removed.key, best.candidate.identity);
-    } else {
-      uncertain.push({
-        from: removed.identity,
-        to: best.candidate.identity,
-        score,
-        reason:
-          `rename-candidate-below-threshold score=${score.toFixed(2)} ` +
-          `renameThreshold=${RENAME_THRESHOLD_LOW.toFixed(2)}`,
-      });
+      const removedNode = removedCandidate.validated;
+      const addedNode = bestCandidate.validated;
+      consumed[bestIndex] = 1;
+      consumedTargetKeys.add(addedNode.key);
+      consumedBaseKeys.add(removedNode.key);
+      const { score, components } = best;
+      if (score >= RENAME_THRESHOLD_LOW) {
+        const confidence = confidenceOf(score);
+        renamed.push({
+          from: removedNode.identity,
+          to: addedNode.identity,
+          confidence,
+          score,
+          components,
+          reason:
+            `rename-evidence baseName=${formatComponent(components.baseName)} ` +
+            `signature=${formatComponent(components.signature)} ` +
+            `path=${formatComponent(components.path)} ` +
+            `score=${score.toFixed(2)} confidence=${confidence}`,
+        });
+        renameMap.set(removedNode.key, addedNode.identity);
+      } else {
+        uncertain.push({
+          from: removedNode.identity,
+          to: addedNode.identity,
+          score,
+          reason:
+            `rename-candidate-below-threshold score=${score.toFixed(2)} ` +
+            `renameThreshold=${RENAME_THRESHOLD_LOW.toFixed(2)}`,
+        });
+      }
     }
   }
 

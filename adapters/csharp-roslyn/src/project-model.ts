@@ -43,7 +43,9 @@ import {
 } from "./safe-fs.js";
 import {
   MAX_CSHARP_PROJECTS,
+  MAX_GLOBAL_USINGS_PER_PROJECT,
   MAX_PROJECT_FILE_BYTES,
+  MAX_PROJECT_REFERENCES_PER_PROJECT,
   type CSharpGlobalUsing,
   type CSharpProjectDiscoveryResult,
   type CSharpProjectSpec,
@@ -425,9 +427,51 @@ function isNetFrameworkTarget(tfm: string | undefined): boolean {
 /* Global using list                                                   */
 /* ------------------------------------------------------------------ */
 
+/** A UTF-16 surrogate code unit (half of a character outside the Basic Multilingual Plane). */
+const SURROGATE_CODE_UNIT = /[\uD800-\uDFFF]/;
+
+/**
+ * One C# identifier exactly as the worker accepts it (security finding F22,
+ * round 2). The worker's .NET pattern classifies UTF-16 code units, and C#
+ * (Roslyn) does too: a letter outside the BMP such as U+1D49C is a surrogate
+ * pair (category Cs), no identifier character (CS1056). The `/u` pattern here
+ * classifies code points and would accept it, so surrogates are refused first.
+ */
+function isWorkerIdentifier(value: string): boolean {
+  return !SURROGATE_CODE_UNIT.test(value) && IDENTIFIER_PATTERN.test(value);
+}
+
 function isDottedName(name: string): boolean {
   if (name.length === 0 || name.length > MAX_DOTTED_NAME_LENGTH) return false;
-  return name.split(".").every((segment) => IDENTIFIER_PATTERN.test(segment));
+  return name.split(".").every((segment) => isWorkerIdentifier(segment));
+}
+
+/** `source` of the SDK's implicit Using items (also quoted in warnings). */
+const SDK_DEFAULTS_SOURCE = "the .NET SDK defaults";
+
+/**
+ * At most MAX_GLOBAL_USINGS_PER_PROJECT directives (security finding F22): the
+ * worker rejects a whole request when one project has more, which would drop
+ * every C# file of the workspace to file-level facts. The SDK defaults are kept
+ * first, then the other items in evaluation order; the rest is dropped with a
+ * warning, so the project stays analyzable.
+ */
+function keepWithinGlobalUsingLimit(
+  directives: readonly CSharpGlobalUsing[],
+  sdkDefaults: ReadonlySet<CSharpGlobalUsing>,
+  label: string,
+  warnings: string[],
+): CSharpGlobalUsing[] {
+  if (directives.length <= MAX_GLOBAL_USINGS_PER_PROJECT) return [...directives];
+  const prioritized = [
+    ...directives.filter((directive) => sdkDefaults.has(directive)),
+    ...directives.filter((directive) => !sdkDefaults.has(directive)),
+  ];
+  const dropped = directives.length - MAX_GLOBAL_USINGS_PER_PROJECT;
+  warnings.push(
+    `${label}: ${String(directives.length)} global usings exceed the limit of ${String(MAX_GLOBAL_USINGS_PER_PROJECT)} per project; ${String(dropped)} Using items were dropped (${SDK_DEFAULTS_SOURCE} and the first items in evaluation order were kept)`,
+  );
+  return prioritized.slice(0, MAX_GLOBAL_USINGS_PER_PROJECT);
 }
 
 function finalizeUsings(
@@ -449,12 +493,13 @@ function finalizeUsings(
 
   const seen = new Set<string>();
   const result: CSharpGlobalUsing[] = [];
+  const sdkDefaults = new Set<CSharpGlobalUsing>();
   for (const item of items) {
     if (!isDottedName(item.name)) {
       warnings.push(`${label}: Using item '${snippet(item.name)}' in ${item.source} is not a dotted C# name; skipped`);
       continue;
     }
-    if (item.alias !== undefined && !IDENTIFIER_PATTERN.test(item.alias)) {
+    if (item.alias !== undefined && !isWorkerIdentifier(item.alias)) {
       warnings.push(`${label}: Using item '${snippet(item.name)}' in ${item.source} has an alias that is not a C# identifier (${snippet(item.alias)}); skipped`);
       continue;
     }
@@ -465,15 +510,18 @@ function finalizeUsings(
     const key = `${item.name}\u0000${item.alias ?? ""}\u0000${item.isStatic ? "1" : "0"}`;
     if (seen.has(key)) continue;
     seen.add(key);
-    result.push({
+    const directive: CSharpGlobalUsing = {
       name: item.name,
       ...(item.alias !== undefined ? { alias: item.alias } : {}),
       ...(item.isStatic ? { static: true } : {}),
-    });
+    };
+    if (item.source === SDK_DEFAULTS_SOURCE) sdkDefaults.add(directive);
+    result.push(directive);
   }
 
+  const kept = keepWithinGlobalUsingLimit(result, sdkDefaults, label, warnings);
   const rank = (u: CSharpGlobalUsing): number => (u.alias !== undefined ? 2 : u.static === true ? 1 : 0);
-  return result.sort((a, b) => {
+  return kept.sort((a, b) => {
     const byRank = rank(a) - rank(b);
     if (byRank !== 0) return byRank;
     if (a.name !== b.name) return a.name < b.name ? -1 : 1;
@@ -725,10 +773,18 @@ export function resolveCSharpProjects(
     const assemblyName =
       assemblyNameValue !== undefined && ASSEMBLY_NAME_PATTERN.test(assemblyNameValue) ? assemblyNameValue : undefined;
 
+    let sortedReferences = [...projectReferences].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+    if (sortedReferences.length > MAX_PROJECT_REFERENCES_PER_PROJECT) {
+      // Same reason as the global using limit: the worker rejects the whole request above it.
+      warnings.push(
+        `${label}: ${String(sortedReferences.length)} project references exceed the limit of ${String(MAX_PROJECT_REFERENCES_PER_PROJECT)} per project; the last ${String(sortedReferences.length - MAX_PROJECT_REFERENCES_PER_PROJECT)} in ordinal order were dropped`,
+      );
+      sortedReferences = sortedReferences.slice(0, MAX_PROJECT_REFERENCES_PER_PROJECT);
+    }
     const spec = {
       path: projectPath,
       ...(assemblyName !== undefined ? { assemblyName } : {}),
-      projectReferences: [...projectReferences].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0)),
+      projectReferences: sortedReferences,
     };
 
     // SDK-style projects only: legacy projects have no implicit usings and no
@@ -761,7 +817,7 @@ export function resolveCSharpProjects(
     const operations: UsingOperation[] = [...(propsItems?.usingOperations ?? [])];
     const implicitUsings = (properties.get("implicitusings") ?? "").trim().toLowerCase();
     if (implicitUsings === "true" || implicitUsings === "enable") {
-      const sdkSource = "the .NET SDK defaults";
+      const sdkSource = SDK_DEFAULTS_SOURCE;
       const netFramework = isNetFrameworkTarget(preferredTargetFramework(properties));
       operations.push({
         kind: "include",

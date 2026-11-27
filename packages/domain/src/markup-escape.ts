@@ -4,7 +4,8 @@
  * Values that come from an analysed repository (file paths, symbol and module
  * names) or from host-supplied annotations are untrusted text. When they are
  * written into a generated document they must render as literal text and must
- * never introduce document structure: raw HTML, links, images, autolinks,
+ * never introduce document structure: raw HTML, links, images, autolinks
+ * (URL, `www.` and email), GitHub @-mentions, decoded character references,
  * code spans or fences, headings, blockquotes, table cells, extra lines, or
  * Mermaid statements and directives.
  *
@@ -37,12 +38,29 @@ const REPLACEMENT_CHARACTER = String.fromCharCode(0xfffd);
  * - `<` `>` raw HTML, angle-bracket autolinks, blockquote markers
  * - `#` ATX headings
  * - `|` GFM table cell delimiters
+ * - `&` character references: `&commat;` or `&#64;` would decode to an `@`
+ *   that forms an email autolink (`\&commat;` renders the literal text)
  */
-const MARKDOWN_SPECIAL_CHARACTERS = /[\\`~[\]()!<>#|]/g;
+const MARKDOWN_SPECIAL_CHARACTERS = /[\\`~[\]()!<>#|&]/g;
 
 /** GFM extended autolinks (`https://`, `http://`, `ftp://`, `www.`). */
 const AUTOLINK_SCHEME = /(https?|ftp)(?=:\/\/)/gi;
 const AUTOLINK_WWW = /(www)(?=\.)/gi;
+
+/**
+ * Every `@` gets a zero-width space (written as the character reference
+ * `&#8203;`) on both sides, which renders invisibly. The one after the `@`
+ * stops GitHub's email autolink (`user@host.tld`, also behind `mailto:` and
+ * `xmpp:`) and its `@user` / `@org/team` mention link; the one before it stops
+ * markdown-it's linkify, whose email local part is ASCII-only. Checked with
+ * GitHub's renderer (`gh api -X POST /markdown -f mode=gfm`, 2026-11-26) in a
+ * paragraph, list item, blockquote, heading and table cell. A backslash
+ * (`user\@host`) or a zero-width space before the `@` alone is not enough
+ * there: GitHub still links `user\@host` and turns `react&#8203;@latest`
+ * into a mention of `@latest`.
+ */
+const AT_SIGN = /@/g;
+const DEFANGED_AT_SIGN = "&#8203;@&#8203;";
 
 function isControlCharacter(code: number): boolean {
   return code < 0x20 || (code >= 0x7f && code <= 0x9f);
@@ -90,19 +108,26 @@ function normalizeText(
   return out;
 }
 
-/** Escapes one already-normalised line (no line endings inside). */
+/**
+ * Escapes one already-normalised line (no line endings inside). The `@`
+ * replacement runs last, so the `&` and `#` of the references it inserts are
+ * not escaped again.
+ */
 function escapeMarkdownLine(line: string): string {
   return line
     .replace(MARKDOWN_SPECIAL_CHARACTERS, "\\$&")
     .replace(AUTOLINK_SCHEME, "$1\\")
-    .replace(AUTOLINK_WWW, "$1\\");
+    .replace(AUTOLINK_WWW, "$1\\")
+    .replace(AT_SIGN, DEFANGED_AT_SIGN);
 }
 
 /**
  * Single-line Markdown text: line endings and tabs collapse to one space,
- * control characters become U+FFFD, structural characters are
- * backslash-escaped and bare autolinks are defanged (`https\://`, `www\.`).
- * The result also escapes `|`, so it is safe inside a table cell.
+ * control characters become U+FFFD, structural characters (and `&`) are
+ * backslash-escaped, bare autolinks are defanged (`https\://`, `www\.`) and
+ * every `@` is wrapped in zero-width spaces (`&#8203;@&#8203;`: no email
+ * autolink, no @-mention). The result also escapes `|`, so it is safe inside
+ * a table cell.
  */
 export function escapeMarkdownInline(value: string): string {
   return escapeMarkdownLine(normalizeText(value, " ", " ", true));

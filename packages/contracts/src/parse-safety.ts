@@ -1,6 +1,17 @@
 import { Buffer } from "node:buffer";
 
-import { isMap, isSeq, type Document, type YAMLSeq } from "yaml";
+import {
+  isAlias,
+  isCollection,
+  isMap,
+  isNode,
+  isPair,
+  isSeq,
+  Scalar,
+  type Document,
+  type Pair,
+  type YAMLSeq,
+} from "yaml";
 
 import { ContractDiscoveryError } from "./errors.js";
 import type { ProjectionOptions } from "./projection-budget.js";
@@ -48,6 +59,8 @@ export function describeSpecParserFailure(error: unknown): string {
  *  4. `yaml` paketi parseDocument (kütüphanenin kendi alias/limit
  *     korumalarıyla; hatalar toplanır → spec-yaml/spec-json-invalid),
  *     linear duplicate-key check via parseYamlDocument (CAU-04)
+ *  4b. toJS() work bound before conversion (F24,
+ *     assertSpecConversionWithinBudget → contracts/limit-exceeded)
  *  5. çözümlenmiş yapı üzerinde iterative (stack tabanlı) derinlik + node
  *     kotası turu — recursion yok, stack overflow ile çökme yüzeyi yok
  *
@@ -147,6 +160,374 @@ function maxTextNesting(text: string): number {
 function countAliasRefs(text: string): number {
   const matches = text.match(/\*[^\s#, [\]{}]+/g);
   return matches === null ? 0 : matches.length;
+}
+
+/* ------------------------------------------------------------------ */
+/* F24 (CWE-407): bounded yaml toJS() work                             */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Upper bound of the work the `yaml` library's `Document.toJS()` may do on one
+ * spec, in the units below. Calibrated with yaml 2.9.1 on Node 24 (Windows
+ * laptop): one unit took 25–55 ns, so the bound is about 1–1.5 s. The text
+ * prechecks bound the input (size, bracket nesting, alias tokens) but not
+ * this work: measured before this bound, a 1.2 KB spec took 2.3 s and a
+ * 300 KB spec 16 s.
+ */
+export const MAX_SPEC_CONVERSION_WORK = 30_000_000;
+
+/** Converting one node or pair. */
+const WORK_CONVERT = 2;
+/** One step of the library's getAliasCount() over an anchored subtree. */
+const WORK_COUNT_STEP = 1;
+/** One entry of a full-document visit() (each Alias.resolve without a context); measured ~220 ns. */
+const WORK_VISIT = 5;
+/** One entry of the alias/anchor list that Alias.resolve scans. */
+const WORK_SCAN = 1;
+/** One anchor name copied for a key that converts to an object. */
+const WORK_KEY_ANCHOR = 3;
+/** One key node stringified for a key that converts to an object. */
+const WORK_KEY_STRINGIFY = 4;
+
+const MERGE_TAG = "tag:yaml.org,2002:merge";
+
+/** Pairs and nodes of the document tree (what the library's visit() walks). */
+function isTreeItem(item: unknown): item is object {
+  return isNode(item) || isPair(item);
+}
+
+/**
+ * A scalar node: the node kinds are alias, scalar, map and sequence. (The
+ * walk does not call `isScalar`, which the CAU-04 tests count as key
+ * inspections made by lookups.)
+ */
+function isScalarNode(item: unknown): item is Scalar {
+  return isNode(item) && !isAlias(item) && !isCollection(item);
+}
+
+function childrenOf(item: unknown): readonly unknown[] {
+  if (isPair(item)) return [item.key, item.value];
+  if (isCollection(item)) return item.items;
+  return [];
+}
+
+/** The anchor of a scalar or collection (the library's `hasAnchor`), if any. */
+function anchorOf(item: unknown): string | undefined {
+  if (!isScalarNode(item) && !isCollection(item)) return undefined;
+  const anchor = item.anchor;
+  return typeof anchor === "string" && anchor.length > 0 ? anchor : undefined;
+}
+
+/**
+ * A pair the library handles as a merge (`<<`): a key node carrying its own
+ * merge handler (YAML 1.1 schema, or an explicit `!!merge` tag), or a plain
+ * `<<` scalar when the schema enables merge keys (addPairToJSMap, isMergeKey).
+ */
+function isMergePair(pair: Pair<unknown, unknown>, mergeByDefault: boolean): boolean {
+  const key = pair.key;
+  if (isNode(key) && typeof (key as { addToJSMap?: unknown }).addToJSMap === "function") return true;
+  if (!mergeByDefault || !isScalarNode(key)) return false;
+  if (key.type !== undefined && key.type !== Scalar.PLAIN) return false;
+  const value = key.value;
+  return value === "<<" || (typeof value === "symbol" && value.description === "<<");
+}
+
+/** A key whose converted value may be an object, so the library stringifies it (stringifyKey). */
+function mayConvertToObjectKey(key: unknown): boolean {
+  if (!isScalarNode(key)) return isTreeItem(key);
+  return typeof key.value === "object" && key.value !== null;
+}
+
+interface AnchorInfo {
+  /** getAliasCount() steps over the subtree (aliases are not followed). */
+  readonly size: number;
+  /** Aliases inside the subtree: each makes getAliasCount() walk the whole document. */
+  readonly aliasesIn: number;
+  /** getAliasCount() is at least 1, so the library computes it once per registration. */
+  readonly hasOne: boolean;
+}
+
+interface DocumentIndex {
+  /** Entries a full-document visit() touches. */
+  readonly visitEntries: number;
+  /** Length of the alias/anchor list Alias.resolve scans. */
+  readonly listLength: number;
+  readonly anchors: number;
+  readonly aliases: number;
+  readonly objectKeys: number;
+  readonly hasMerge: boolean;
+  /** Position of each alias and anchored node in that list (document pre-order). */
+  readonly order: ReadonlyMap<object, number>;
+  /** The anchored node each alias resolves to: the last one with its name before it. */
+  readonly target: ReadonlyMap<object, object | undefined>;
+}
+
+/** Pre-order walk in the library's visit() order. */
+function indexDocument(root: unknown, mergeByDefault: boolean): DocumentIndex {
+  const order = new Map<object, number>();
+  const target = new Map<object, object | undefined>();
+  const lastAnchor = new Map<string, object>();
+  let visitEntries = 1; // the document itself
+  let listLength = 0;
+  let anchors = 0;
+  let aliases = 0;
+  let objectKeys = 0;
+  let hasMerge = false;
+  const stack: unknown[] = [root];
+  while (stack.length > 0) {
+    const item = stack.pop();
+    visitEntries += 1;
+    if (!isTreeItem(item)) continue;
+    if (isAlias(item)) {
+      order.set(item, listLength);
+      listLength += 1;
+      aliases += 1;
+      target.set(item, lastAnchor.get(item.source));
+      continue;
+    }
+    const anchor = anchorOf(item);
+    if (anchor !== undefined) {
+      order.set(item, listLength);
+      listLength += 1;
+      anchors += 1;
+      lastAnchor.set(anchor, item);
+    }
+    if (isPair(item)) {
+      if (isCollection(item.key)) throw collectionKeyRefused();
+      if (isMergePair(item, mergeByDefault)) hasMerge = true;
+      else if (mayConvertToObjectKey(item.key)) objectKeys += 1;
+    }
+    const children = childrenOf(item);
+    for (let index = children.length - 1; index >= 0; index -= 1) stack.push(children[index]);
+  }
+  return { visitEntries, listLength, anchors, aliases, objectKeys, hasMerge, order, target };
+}
+
+interface PostOrderFrame {
+  readonly item: object;
+  readonly children: readonly unknown[];
+  next: number;
+  size: number;
+  aliasesIn: number;
+  hasOne: boolean;
+  fresh: number;
+  /** Pairs only: the key's subtree size and the value's fresh conversion work. */
+  keySize: number;
+  valueFresh: number;
+}
+
+/**
+ * Left-to-right post-order walk. `finish` sees each tree item after all of
+ * its children, and every item before it in pre-order that is not one of its
+ * ancestors has finished already.
+ */
+function walkPostOrder(
+  root: unknown,
+  leafFresh: number,
+  finish: (frame: PostOrderFrame) => void,
+): void {
+  const stack: PostOrderFrame[] = [];
+  const open = (item: object): void => {
+    stack.push({
+      item,
+      children: childrenOf(item),
+      next: 0,
+      size: 1,
+      aliasesIn: isAlias(item) ? 1 : 0,
+      hasOne: isScalarNode(item),
+      fresh: 0,
+      keySize: 0,
+      valueFresh: 0,
+    });
+  };
+  if (!isTreeItem(root)) return;
+  open(root);
+  while (stack.length > 0) {
+    const frame = stack[stack.length - 1] as PostOrderFrame;
+    if (frame.next < frame.children.length) {
+      const index = frame.next;
+      frame.next += 1;
+      const child = frame.children[index];
+      if (isTreeItem(child)) {
+        open(child);
+      } else {
+        // A missing key/value or a plain value: getAliasCount() returns 1, toJS() returns it.
+        frame.size += 1;
+        frame.hasOne = true;
+        frame.fresh += leafFresh;
+        if (index === 0) frame.keySize = 1;
+        else frame.valueFresh = leafFresh;
+      }
+      continue;
+    }
+    stack.pop();
+    finish(frame);
+    const parent = stack[stack.length - 1];
+    if (parent !== undefined) {
+      const index = parent.next - 1;
+      parent.size += frame.size;
+      parent.aliasesIn += frame.aliasesIn;
+      parent.hasOne ||= frame.hasOne;
+      parent.fresh += frame.fresh;
+      if (isPair(parent.item)) {
+        if (index === 0) parent.keySize = frame.size;
+        else parent.valueFresh = frame.fresh;
+      }
+    }
+  }
+}
+
+/**
+ * A collection used as a mapping key (`? [a, b]: x`, `{[0]: 0}`) is refused
+ * before conversion: the library stringifies such a key with key.toString(),
+ * and a key nested in a key is stringified again at every level with growing
+ * indentation, so a 20 KB spec took over 8 s. No OpenAPI, AsyncAPI or JSON
+ * Schema document has one (their keys are strings; JSON cannot express one).
+ * Aliases and scalars as keys stay allowed: an alias key prints as `*name`.
+ */
+function collectionKeyRefused(): ContractDiscoveryError {
+  return new ContractDiscoveryError(
+    "contracts/limit-exceeded",
+    "Spec uses a collection (sequence or mapping) as a mapping key; such keys are not supported in specs, " +
+      "because converting them costs more with every level they are nested",
+  );
+}
+
+function limitExceeded(work: number): ContractDiscoveryError {
+  return new ContractDiscoveryError(
+    "contracts/limit-exceeded",
+    `Spec conversion work quota exceeded (> ${String(MAX_SPEC_CONVERSION_WORK)}${Number.isFinite(work) ? "" : ", cyclic merge"}) — possible alias or anchor amplification`,
+  );
+}
+
+/**
+ * Throws `contracts/limit-exceeded` unless the `yaml` library's toJS() on
+ * `document` stays within {@link MAX_SPEC_CONVERSION_WORK}. The estimate
+ * follows the library's own control flow (yaml 2.9.1 Document.toJS with its
+ * default alias limit) and only ever over-counts:
+ * - every node and pair is converted once (aliases share the anchor's value);
+ * - each alias resolution scans the alias/anchor list up to the alias, and
+ *   the first one walks the whole document to build that list;
+ * - the alias-count check (getAliasCount) walks the anchored subtree, plus the
+ *   whole document once per alias inside it; it runs on the first use of an
+ *   anchor, and on every use while the count is 0 (an anchored subtree with
+ *   no scalar, such as `&e []`);
+ * - a collection used as a mapping key is refused outright
+ *   ({@link collectionKeyRefused}); any other key that converts to an object
+ *   (an alias, a date or binary scalar) copies every anchor name and is
+ *   stringified once;
+ * - a merge (`<<`) converts its source maps again (aliases inside charged in
+ *   full) and copies their entries; after one, every anchor is treated as
+ *   unchecked again, and the first alias to an anchored inline merge source
+ *   converts that source once more.
+ * Documents within the bound convert exactly as before: the conversion itself
+ * is still the library's toJS().
+ */
+export function assertSpecConversionWithinBudget(document: Document.Parsed): void {
+  const root = document.contents;
+  const mergeByDefault = document.schema.tags.some((tag) => tag.tag === MERGE_TAG && Boolean(tag.default));
+  const index = indexDocument(root, mergeByDefault);
+  const n = index.visitEntries;
+
+  if (index.aliases === 0 && !index.hasMerge) {
+    const work =
+      WORK_CONVERT * n + WORK_KEY_STRINGIFY * n + index.objectKeys * WORK_KEY_ANCHOR * index.anchors;
+    if (work > MAX_SPEC_CONVERSION_WORK) throw limitExceeded(work);
+    return;
+  }
+
+  // Alias-count cost of each anchored subtree (pure subtree data).
+  const anchorInfo = new Map<object, AnchorInfo>();
+  walkPostOrder(root, WORK_CONVERT, (frame) => {
+    if (anchorOf(frame.item) !== undefined) {
+      anchorInfo.set(frame.item, { size: frame.size, aliasesIn: frame.aliasesIn, hasOne: frame.hasOne });
+    }
+  });
+  const perNestedAlias = WORK_VISIT * n + WORK_SCAN * index.listLength;
+  const aliasCountWork = (anchored: object | undefined): number => {
+    const info = anchored === undefined ? undefined : anchorInfo.get(anchored);
+    return info === undefined ? 0 : WORK_COUNT_STEP * info.size + info.aliasesIn * perNestedAlias;
+  };
+  const scanWork = (alias: object): number => WORK_SCAN * ((index.order.get(alias) ?? index.listLength) + 1);
+
+  // Work of converting a subtree again (a merge source), every alias charged in full.
+  const mergeWork = new Map<object, number>();
+  const anchoredFresh = new Map<object, number>();
+  // Anchored inline merge sources: the merge converts them without registering
+  // their anchor, so the first alias to one converts it again (Alias.resolve).
+  const unregisteredSources = new Set<object>();
+  if (index.hasMerge) {
+    walkPostOrder(root, WORK_CONVERT, (frame) => {
+      const { item } = frame;
+      if (isAlias(item)) {
+        frame.fresh = WORK_CONVERT + scanWork(item) + aliasCountWork(index.target.get(item));
+      } else if (isPair(item) && isMergePair(item, mergeByDefault)) {
+        let sourcesWork = 0;
+        const value = item.value;
+        for (const inline of isSeq(value) ? value.items : [value]) {
+          if (isMap(inline) && anchorOf(inline) !== undefined) unregisteredSources.add(inline);
+        }
+        const aliasSources = isAlias(value) ? [value] : isSeq(value) ? value.items.filter((entry) => isAlias(entry)) : [];
+        for (const alias of aliasSources) {
+          const source = index.target.get(alias);
+          // A source that is still being converted (an ancestor) re-enters itself.
+          sourcesWork += 2 * (source === undefined ? 0 : (anchoredFresh.get(source) ?? Number.POSITIVE_INFINITY));
+        }
+        frame.fresh = WORK_CONVERT + 2 * frame.valueFresh + sourcesWork;
+        mergeWork.set(item, frame.fresh);
+      } else {
+        frame.fresh += WORK_CONVERT;
+        if (isPair(item) && mayConvertToObjectKey(item.key)) {
+          frame.fresh += WORK_KEY_ANCHOR * index.anchors + WORK_KEY_STRINGIFY * frame.keySize;
+        }
+      }
+      if (anchorOf(item) !== undefined) anchoredFresh.set(item, frame.fresh);
+    });
+  }
+
+  // The conversion itself, in the library's order.
+  let work = WORK_VISIT * n + WORK_KEY_STRINGIFY * n;
+  const countChecked = new Set<object>();
+  const stack: unknown[] = [root];
+  while (stack.length > 0) {
+    const item = stack.pop();
+    work += WORK_CONVERT;
+    if (isTreeItem(item)) {
+      if (isAlias(item)) {
+        work += scanWork(item);
+        const anchored = index.target.get(item);
+        const info = anchored === undefined ? undefined : anchorInfo.get(anchored);
+        if (anchored !== undefined && info !== undefined && !(info.hasOne && countChecked.has(anchored))) {
+          work += aliasCountWork(anchored);
+          if (info.hasOne) countChecked.add(anchored);
+        }
+        if (anchored !== undefined && unregisteredSources.delete(anchored)) {
+          work += anchoredFresh.get(anchored) ?? Number.POSITIVE_INFINITY;
+        }
+      } else if (isPair(item) && index.hasMerge && isMergePair(item, mergeByDefault)) {
+        work += mergeWork.get(item) ?? Number.POSITIVE_INFINITY;
+        // Re-converted sources register their anchors again (fresh counts).
+        countChecked.clear();
+      } else {
+        if (anchorOf(item) !== undefined) countChecked.delete(item);
+        if (isPair(item) && mayConvertToObjectKey(item.key)) work += WORK_KEY_ANCHOR * index.anchors;
+        const children = childrenOf(item);
+        for (let childIndex = children.length - 1; childIndex >= 0; childIndex -= 1) {
+          stack.push(children[childIndex]);
+        }
+      }
+    }
+    if (work > MAX_SPEC_CONVERSION_WORK) throw limitExceeded(work);
+  }
+}
+
+/**
+ * `document.toJS()` once its work is known to be bounded
+ * ({@link assertSpecConversionWithinBudget}); same result as toJS().
+ */
+export function convertSpecDocument(document: Document.Parsed): unknown {
+  assertSpecConversionWithinBudget(document);
+  return document.toJS();
 }
 
 /** Iterative DFS: derinlik ve node kotaları; recursion yok. */
@@ -291,8 +672,9 @@ export function parseStructuredSpec(
       );
     }
     // toJS() alias'ları genişletir; kütüphane alias bombası sınırını
-    // ReferenceError ile aşar — ContractDiscoveryError'a çevrilir.
-    root = document.toJS();
+    // ReferenceError ile aşar — ContractDiscoveryError'a çevrilir. F24: its
+    // work is bounded first (contracts/limit-exceeded).
+    root = convertSpecDocument(document);
   } catch (error) {
     if (error instanceof ContractDiscoveryError) throw error;
     const message = error instanceof Error ? error.message : String(error);

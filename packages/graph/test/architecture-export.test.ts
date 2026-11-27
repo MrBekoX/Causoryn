@@ -490,6 +490,37 @@ describe("serializeArchitectureMarkdown ve serializeArchitectureJson", () => {
     }
   });
 
+  it("brief prose cannot form an email autolink, a GitHub @-mention or a decoded character reference", () => {
+    // Forms checked with GitHub's renderer (`gh api -X POST /markdown -f
+    // mode=gfm`, 2026-11-26): `ops&#8203;@&#8203;evil.test` and
+    // `&#8203;@&#8203;github` render as plain text, `\&commat;` literally;
+    // the raw forms become mailto / mention links.
+    const snap = richFixture();
+    const mod = projectArchitecture(snap).modules[0];
+    if (mod === undefined) throw new Error("missing module");
+    const ann = {
+      title: "Owner ops@evil.test",
+      executiveSummary: "Mail mailto:sec@evil.test or xmpp:bot@evil.test/r, ping @github, see react@latest, R&D ops&commat;evil.test",
+      guidedTour: [{ step: 1, title: "Stop @github", targetModuleId: mod.id, explanation: "Ask ops@evil.test." }],
+    };
+
+    const md = serializeArchitectureMarkdown(snap, undefined, ann);
+
+    expect(md).toContain("Owner ops&#8203;@&#8203;evil.test");
+    expect(md).toContain(
+      "Mail mailto:sec&#8203;@&#8203;evil.test or xmpp:bot&#8203;@&#8203;evil.test/r, ping &#8203;@&#8203;github, " +
+        "see react&#8203;@&#8203;latest, R\\&D ops\\&commat;evil.test",
+    );
+    expect(md).toContain("Ask ops&#8203;@&#8203;evil.test.");
+    // Outside the Mermaid block and code spans (neither autolinks), no @ is bare.
+    const prose = md
+      .split("```mermaid")
+      .map((part, i) => (i === 0 ? part : part.slice(part.indexOf("```") + 3)))
+      .join("\n")
+      .replace(/(`+)[^`]*?\1/g, "");
+    expect(prose.split("&#8203;@&#8203;").join("")).not.toContain("@");
+  });
+
   it("JSON blueprint kanonik JSON'dur ve meta.id snapshot kimliğini korur", () => {
     const snap = richFixture();
     const ann = sampleAnnotations(snap);

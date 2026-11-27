@@ -356,6 +356,13 @@ func buildResponse(echo json.RawMessage, result analyze.Result) []byte {
 		logStderr("response could not be serialized: " + err.Error())
 		return errorPayload(json.RawMessage("null"), &apiError{code: "INTERNAL_ERROR", message: "response could not be serialized"})
 	}
+	if len(payload) > analyze.MaxResponseLineBytes {
+		// The analysis keeps its records under MaxResponseBytes; a longer line
+		// would be rejected by the adapter, so the request is answered with an
+		// error it still accepts.
+		logStderr(fmt.Sprintf("response line of %d bytes exceeds the %d byte limit", len(payload), analyze.MaxResponseLineBytes))
+		return errorPayload(echo, limitExceeded(fmt.Sprintf("response line exceeded the %d byte limit", analyze.MaxResponseLineBytes)))
+	}
 	return payload
 }
 

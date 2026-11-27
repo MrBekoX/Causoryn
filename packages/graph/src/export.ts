@@ -1,6 +1,12 @@
 import { z } from "zod";
 
-import { escapeMermaidLabel, snapshotCanonicalJson, type SnapshotGraph } from "@causoryn/domain";
+import {
+  escapeMarkdownInline,
+  escapeMarkdownTableCell,
+  escapeMermaidLabel,
+  snapshotCanonicalJson,
+  type SnapshotGraph,
+} from "@causoryn/domain";
 import { OutputAccessPolicy, OutputPolicyError } from "@causoryn/workspace";
 
 import { GraphRepositoryError } from "./errors.js";
@@ -117,28 +123,6 @@ function escapeHtml(value: string): string {
     .replace(/\|/g, "&#124;");
 }
 
-/**
- * Markdown tablo hücresi kaçışı: GFM hücre ayracı, satır sonları ve
- * link/HTML metakarakterleri. Hücre değerleri (dosya yolları, sembol adları,
- * rationale) güvenilmez depo verisidir (TŞ §19): kaçırılmayan
- * `![x](https://...)` dizgisi ağa erişimli GFM görüntüleyicide beacon/link,
- * kaçırılmayan `<...>` ham inline HTML olarak işlenir. Backslash escape
- * GFM'in ASCII noktalama kaçışıdır; içerik okunur kalır, sözdizimi bozulur.
- */
-function escapeMarkdownCell(value: string): string {
-  return value
-    .replace(/\\/g, "\\\\")
-    .replace(/\|/g, "\\|")
-    .replace(/!/g, "\\!")
-    .replace(/\[/g, "\\[")
-    .replace(/\]/g, "\\]")
-    .replace(/\(/g, "\\(")
-    .replace(/\)/g, "\\)")
-    .replace(/</g, "\\<")
-    .replace(/>/g, "\\>")
-    .replace(/[\r\n\t]+/g, " ");
-}
-
 function byId<T extends { readonly id: string }>(a: T, b: T): number {
   if (a.id < b.id) return -1;
   if (a.id > b.id) return 1;
@@ -197,8 +181,12 @@ export function serializeDocumentationJson(snapshot: SnapshotGraph): string {
 /* ------------------------------------------------------------------ */
 
 /**
- * Deterministik Markdown dokümanı: sabit şablon, id sıralı tablolar,
- * hücre değerleri escapeMarkdownCell ile kaçırılır.
+ * Deterministik Markdown dokümanı: sabit şablon, id sıralı tablolar; hücre
+ * değerleri escapeMarkdownTableCell, meta satırları escapeMarkdownInline ile
+ * kaçırılır (security scan F50): the same @causoryn/domain helpers as the
+ * architecture brief and wiki exports, so repository text cannot form a URL,
+ * `www.` or email autolink, a GitHub @-mention or a decoded character
+ * reference, nor any other Markdown structure.
  */
 export function serializeDocumentationMarkdown(snapshot: SnapshotGraph): string {
   const ordered = canonicallyOrdered(snapshot);
@@ -208,15 +196,15 @@ export function serializeDocumentationMarkdown(snapshot: SnapshotGraph): string 
   lines.push("");
   lines.push("## Snapshot");
   lines.push("");
-  lines.push(`- id: ${escapeMarkdownCell(ordered.meta.id)}`);
-  lines.push(`- workspaceId: ${escapeMarkdownCell(ordered.meta.workspaceId)}`);
+  lines.push(`- id: ${escapeMarkdownInline(ordered.meta.id)}`);
+  lines.push(`- workspaceId: ${escapeMarkdownInline(ordered.meta.workspaceId)}`);
   lines.push(
-    `- revision: ${escapeMarkdownCell(ordered.meta.revision.id)} (sequence ${String(ordered.meta.revision.sequence)})`,
+    `- revision: ${escapeMarkdownInline(ordered.meta.revision.id)} (sequence ${String(ordered.meta.revision.sequence)})`,
   );
-  lines.push(`- configHash: ${escapeMarkdownCell(ordered.meta.configHash)}`);
-  lines.push(`- analyzerFingerprint: ${escapeMarkdownCell(ordered.meta.analyzerFingerprint)}`);
-  lines.push(`- state: ${escapeMarkdownCell(ordered.meta.state)}`);
-  lines.push(`- createdAt: ${escapeMarkdownCell(ordered.meta.createdAt)}`);
+  lines.push(`- configHash: ${escapeMarkdownInline(ordered.meta.configHash)}`);
+  lines.push(`- analyzerFingerprint: ${escapeMarkdownInline(ordered.meta.analyzerFingerprint)}`);
+  lines.push(`- state: ${escapeMarkdownInline(ordered.meta.state)}`);
+  lines.push(`- createdAt: ${escapeMarkdownInline(ordered.meta.createdAt)}`);
   lines.push("");
   lines.push(`## Nodes (${String(ordered.nodes.length)})`);
   lines.push("");
@@ -224,7 +212,7 @@ export function serializeDocumentationMarkdown(snapshot: SnapshotGraph): string 
   lines.push("| --- | --- | --- | --- | --- |");
   for (const node of ordered.nodes) {
     lines.push(
-      `| ${escapeMarkdownCell(node.id)} | ${escapeMarkdownCell(node.kind)} | ${escapeMarkdownCell(node.qualifiedName)} | ${escapeMarkdownCell(node.language ?? "")} | ${escapeMarkdownCell(formatLocation(node.location))} |`,
+      `| ${escapeMarkdownTableCell(node.id)} | ${escapeMarkdownTableCell(node.kind)} | ${escapeMarkdownTableCell(node.qualifiedName)} | ${escapeMarkdownTableCell(node.language ?? "")} | ${escapeMarkdownTableCell(formatLocation(node.location))} |`,
     );
   }
   lines.push("");
@@ -234,7 +222,7 @@ export function serializeDocumentationMarkdown(snapshot: SnapshotGraph): string 
   lines.push("| --- | --- | --- | --- | --- | --- |");
   for (const edge of ordered.edges) {
     lines.push(
-      `| ${escapeMarkdownCell(edge.id)} | ${escapeMarkdownCell(edge.kind)} | ${escapeMarkdownCell(edge.from)} | ${escapeMarkdownCell(edge.to)} | ${escapeMarkdownCell(edge.resolution)} | ${escapeMarkdownCell(edge.evidenceIds.join(","))} |`,
+      `| ${escapeMarkdownTableCell(edge.id)} | ${escapeMarkdownTableCell(edge.kind)} | ${escapeMarkdownTableCell(edge.from)} | ${escapeMarkdownTableCell(edge.to)} | ${escapeMarkdownTableCell(edge.resolution)} | ${escapeMarkdownTableCell(edge.evidenceIds.join(","))} |`,
     );
   }
   lines.push("");
@@ -244,7 +232,7 @@ export function serializeDocumentationMarkdown(snapshot: SnapshotGraph): string 
   lines.push("| --- | --- | --- | --- | --- | --- |");
   for (const evidence of ordered.evidence) {
     lines.push(
-      `| ${escapeMarkdownCell(evidence.id)} | ${escapeMarkdownCell(evidence.kind)} | ${escapeMarkdownCell(evidence.analyzerId)} | ${escapeMarkdownCell(evidence.analyzerVersion)} | ${escapeMarkdownCell(formatLocation(evidence.span))} | ${escapeMarkdownCell(evidence.rationale)} |`,
+      `| ${escapeMarkdownTableCell(evidence.id)} | ${escapeMarkdownTableCell(evidence.kind)} | ${escapeMarkdownTableCell(evidence.analyzerId)} | ${escapeMarkdownTableCell(evidence.analyzerVersion)} | ${escapeMarkdownTableCell(formatLocation(evidence.span))} | ${escapeMarkdownTableCell(evidence.rationale)} |`,
     );
   }
   lines.push("");

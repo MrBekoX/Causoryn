@@ -1,4 +1,4 @@
-import { execFileSync, spawn, type ChildProcess } from "node:child_process";
+import { execFileSync, spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
   existsSync,
@@ -281,6 +281,7 @@ async function runStdioSequence(
   cwd: string,
   env: NodeJS.ProcessEnv,
   requests: ReadonlyArray<Record<string, unknown>>,
+  responseTimeoutMs = 30_000,
 ): Promise<{
   readonly stdoutLines: readonly string[];
   readonly responses: ReadonlyMap<number, JsonRpcLine>;
@@ -345,7 +346,7 @@ async function runStdioSequence(
             `JSON-RPC id=${String(id)} zaman aşımı. stderr=${stderrChunks.join("")}`,
           ),
         );
-      }, 30_000);
+      }, responseTimeoutMs);
       waiters.set(id, (msg) => {
         clearTimeout(timer);
         resolve(msg);
@@ -649,9 +650,18 @@ describe("2. Repo-root & packages/causoryn 4-host manifests (0.3.2 parity + zero
     expect(serverPackages).toHaveLength(1);
     expect(serverPackages[0]?.["version"]).toBe("0.3.2");
     expect(serverPackages[0]?.["registryBaseUrl"]).toBe("https://registry.npmjs.org");
+    // F20: npm's prefix is pinned to the home directory, so the project's
+    // .npmrc and node_modules are not read (tests/registry-npx-context.test.ts).
     expect(serverPackages[0]?.["runtimeArguments"]).toEqual([
       { type: "positional", value: "--ignore-scripts" },
+      { type: "positional", value: "--prefix=~/" },
     ]);
+    // F20: cmd.exe on Windows must not search the project directory for causoryn or node.
+    expect(
+      (serverPackages[0]?.["environmentVariables"] as Array<Record<string, unknown>> | undefined)?.map(
+        ({ name, value }) => ({ name, value }),
+      ),
+    ).toEqual([{ name: "NoDefaultCurrentDirectoryInExePath", value: "1" }]);
     const pkgArgs = serverPackages[0]?.["packageArguments"] as Array<Record<string, unknown>>;
     expect(pkgArgs).toEqual([
       { type: "positional", value: "mcp" },
@@ -957,6 +967,8 @@ describe("4. build-package.mjs + isolated npm pack end-to-end verification", () 
 
       // Pure LF line endings on executable scripts in the packed tarball
       for (const relScript of [
+        "scripts/causoryn.cmd",
+        "scripts/lib/windows-argv.mjs",
         "scripts/causoryn.mjs",
         "scripts/plugin-mcp-launcher.mjs",
         "scripts/lib/node-version-guard.mjs",
@@ -1072,6 +1084,134 @@ describe("4. build-package.mjs + isolated npm pack end-to-end verification", () 
       };
       expect(cliInitMsg.serverInfo?.name).toBe(SERVER_NAME);
       expect(cliInitMsg.serverInfo?.version).toBe(SERVER_VERSION);
+    },
+  );
+
+  /**
+   * F20: the packed bin is the launcher (scripts/causoryn.cmd). The MCP Registry
+   * entry, run as a client runs it (npx with its runtimeArguments,
+   * packageArguments and environmentVariables, in a project directory),
+   * starts a server that indexes the project: causoryn_find_symbols finds a
+   * symbol and causoryn_status reports a ready snapshot (review round 4: the
+   * index runs in worker threads, which inherit the launcher's node flags;
+   * a handshake alone did not show that they failed). A global install runs
+   * `causoryn --version` from a shell (cmd.exe on Windows, sh on POSIX).
+   */
+  it.runIf(bundlePresent)(
+    "F20: the packed launcher serves and indexes the registry entry over npx and runs from a global install",
+    { timeout: 180_000 },
+    async () => {
+      const sandbox = createTempDir("tgz-bin-e2e");
+      const unpackedPkg = packAndUnpackCausorynTarball(sandbox);
+      const packOut = path.join(sandbox, "pack-out");
+      const tgz = readdirSync(packOut)
+        .filter((name) => name.endsWith(".tgz"))
+        .map((name) => path.join(packOut, name))[0];
+      expect(tgz).toBeDefined();
+      const packedPkgJson = JSON.parse(readFileSync(path.join(unpackedPkg, "package.json"), "utf8")) as {
+        bin?: Record<string, string>;
+      };
+      expect(packedPkgJson.bin).toEqual({ causoryn: "scripts/causoryn.cmd" });
+      expect(existsSync(path.join(unpackedPkg, "scripts", "lib", "windows-argv.mjs"))).toBe(true);
+
+      const npmCli = path.join(path.dirname(process.execPath), "node_modules", "npm", "bin", "npm-cli.js");
+      const npmCliPosix = path.join(path.dirname(process.execPath), "..", "lib", "node_modules", "npm", "bin", "npm-cli.js");
+      const cli = existsSync(npmCli) ? npmCli : npmCliPosix;
+      expect(existsSync(cli), `npm-cli.js next to ${process.execPath}`).toBe(true);
+
+      const fakeHome = path.join(sandbox, "fake-home");
+      const project = path.join(sandbox, "project");
+      const prefix = path.join(sandbox, "global-prefix");
+      for (const dir of [fakeHome, project, prefix]) mkdirSync(dir, { recursive: true });
+      writeFileSync(path.join(project, "package.json"), JSON.stringify({ name: "f20-project", version: "1.0.0" }));
+      mkdirSync(path.join(project, "src"), { recursive: true });
+      writeFileSync(path.join(project, "src", "launcher-probe.ts"), "export function launcherIndexProbe(): number {\n  return 20;\n}\n");
+      const env: NodeJS.ProcessEnv = {};
+      for (const [key, value] of Object.entries(process.env)) {
+        if (/^npm_/i.test(key) || /^NoDefaultCurrentDirectoryInExePath$/i.test(key) || key === "CLAUDE_CONFIG_DIR") continue;
+        env[key] = value;
+      }
+      Object.assign(env, {
+        HOME: fakeHome,
+        USERPROFILE: fakeHome,
+        CODEX_HOME: path.join(fakeHome, ".codex"),
+        CAUSORYN_CONFIG: '{"allowRoots":[]}',
+        npm_config_cache: path.join(sandbox, "npm-cache"),
+        npm_config_update_notifier: "false",
+        npm_config_fund: "false",
+        npm_config_audit: "false",
+        npm_config_yes: "true",
+      });
+
+      const serverJson = readJsonObject(path.join(REPO_ROOT, "server.json"));
+      const pkgEntry = (serverJson["packages"] as Array<Record<string, unknown>>)[0] ?? {};
+      const values = (key: string): string[] =>
+        ((pkgEntry[key] as Array<{ value?: string }> | undefined) ?? []).map((arg) => arg.value ?? "");
+      const registryEnv: NodeJS.ProcessEnv = { ...env };
+      for (const variable of (pkgEntry["environmentVariables"] as Array<{ name: string; value?: string }> | undefined) ?? []) {
+        if (variable.value !== undefined) registryEnv[variable.name] = variable.value;
+      }
+
+      // 1. The registry entry: npx <runtimeArguments> causoryn@<tgz> <packageArguments>, in the project.
+      const viaNpx = await runStdioSequence(
+        process.execPath,
+        [cli, "exec", ...values("runtimeArguments"), "--offline", `--package=${tgz ?? ""}`, "--", "causoryn", ...values("packageArguments")],
+        project,
+        registryEnv,
+        [
+          {
+            jsonrpc: "2.0",
+            id: 1,
+            method: "initialize",
+            params: { protocolVersion: "2025-11-25", capabilities: {}, clientInfo: { name: "causoryn-dist-test", version: "0.1.0" } },
+          },
+          { jsonrpc: "2.0", method: "notifications/initialized" },
+          { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "causoryn_find_symbols", arguments: { query: "launcherIndexProbe" } } },
+          { jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "causoryn_status", arguments: {} } },
+        ],
+        // find_symbols waits for the first index; on a loaded CI runner that can exceed 30 s.
+        120_000,
+      );
+      const npxInit = viaNpx.responses.get(1)?.result as { serverInfo?: { name?: string; version?: string } };
+      expect(npxInit.serverInfo?.name).toBe(SERVER_NAME);
+      expect(npxInit.serverInfo?.version).toBe(SERVER_VERSION);
+      const found = viaNpx.responses.get(2)?.result as {
+        structuredContent?: { status?: string; data?: { hits?: Array<{ qualifiedName?: string; relativePath?: string }> } };
+      };
+      expect(found.structuredContent?.status, JSON.stringify(found)).toBe("ok");
+      expect(
+        found.structuredContent?.data?.hits?.some(
+          (hit) => hit.qualifiedName?.includes("launcherIndexProbe") === true && hit.relativePath === "src/launcher-probe.ts",
+        ),
+      ).toBe(true);
+      const status = viaNpx.responses.get(3)?.result as {
+        structuredContent?: { status?: string; data?: { summary?: { snapshotState?: string } } };
+      };
+      expect(status.structuredContent?.status, JSON.stringify(status)).toBe("ok");
+      expect(status.structuredContent?.data?.summary?.snapshotState).toBe("ready");
+
+      // 2. A global install, run from a shell (npm is not involved: node comes from PATH).
+      execFileSync(process.execPath, [cli, "install", "-g", "--offline", "--ignore-scripts", "--prefix", prefix, tgz ?? ""], {
+        cwd: project,
+        env,
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+      const globalRun =
+        process.platform === "win32"
+          ? spawnSync(process.env["ComSpec"] ?? "cmd.exe", ["/d", "/s", "/c", `""${path.join(prefix, "causoryn.cmd")}" --version"`], {
+              cwd: project,
+              env,
+              encoding: "utf8",
+              windowsVerbatimArguments: true,
+            })
+          : spawnSync("/bin/sh", ["-c", '"$0" --version', path.join(prefix, "bin", "causoryn")], {
+              cwd: project,
+              env,
+              encoding: "utf8",
+            });
+      expect(globalRun.status, globalRun.stderr).toBe(0);
+      expect(globalRun.stdout).toContain(SERVER_VERSION);
     },
   );
 
