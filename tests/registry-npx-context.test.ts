@@ -7,6 +7,7 @@ import {
   mkdtempSync,
   readdirSync,
   readFileSync,
+  realpathSync,
   rmSync,
   utimesSync,
   writeFileSync,
@@ -170,7 +171,10 @@ describe.skipIf(NPM_CLI === undefined)("F20: the registry npx entry keeps npm ou
     const sandbox = hostileProject();
     const run = npm(sandbox, ["exec", ...registryRuntimeArguments(), ...cwdProbe]);
     expect(run.status).toBe(0);
-    expect(run.stdout).toContain(`CWD=${sandbox.project}`);
+    // The process reports its cwd's real path (macOS: /var is a link to /private/var).
+    const reported = /^CWD=(.*)$/m.exec(run.stdout)?.[1]?.trim();
+    expect(reported, run.stdout).toBeDefined();
+    expect(realpathSync(reported ?? "")).toBe(realpathSync(sandbox.project));
   });
 
   it("documented residual: <cwd>/node_modules/.bin stays on PATH (npm runs in the cwd, not the prefix)", () => {
