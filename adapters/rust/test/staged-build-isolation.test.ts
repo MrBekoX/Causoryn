@@ -24,7 +24,7 @@
 import { spawnSync, type ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
 import { EventEmitter } from "node:events";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
@@ -153,6 +153,42 @@ describe("staged Rust worker build: the staged crate is its own workspace root (
     expect(staged!).toMatch(/^\[workspace\][ \t]*$/m);
     // The shipped manifest itself is never modified.
     expect(readFileSync(path.join(base, "crate", "Cargo.toml"), "utf8")).toBe(PACKAGE_MANIFEST);
+  });
+
+  // A package installed read-only (a global npm prefix owned by another account,
+  // or a locked-down image): the staged copies keep the read-only mode, and the
+  // [workspace] table must still be added to the private staged manifest.
+  it("adds the [workspace] table when the shipped crate files are read-only", async () => {
+    const base = tempDir("causoryn-rs-ws-readonly-");
+    const crate = path.join(base, "crate");
+    const manifest = stageCrate(crate);
+    for (const file of [manifest, path.join(crate, "Cargo.lock"), path.join(crate, "src", "main.rs")]) {
+      if (existsSync(file)) chmodSync(file, 0o444);
+    }
+    const cacheRoot = path.join(base, "cache");
+    let staged: string | null = null;
+    try {
+      const outcome = await buildRustWorkerFromStagedSource({
+        sourceManifestPath: manifest,
+        cacheRoot,
+        destinationBinaryPath: path.join(cacheRoot, "debug", WORKER_BINARY_NAME),
+        untrustedRoots: [],
+        timeoutMs: 5_000,
+        cargoExecutable: process.execPath,
+        trustedConfigRoot: base,
+        spawnFn: (_command, args) => {
+          staged = readFileSync(args[args.indexOf("--manifest-path") + 1]!, "utf8");
+          return exitingChild(1);
+        },
+      });
+      expect(staged, outcome.detail ?? "").not.toBeNull();
+      expect(staged!).toMatch(/^\[workspace\][ 	]*$/m);
+      expect(readFileSync(manifest, "utf8")).toBe(PACKAGE_MANIFEST);
+    } finally {
+      for (const file of [manifest, path.join(crate, "Cargo.lock"), path.join(crate, "src", "main.rs")]) {
+        if (existsSync(file)) chmodSync(file, 0o644);
+      }
+    }
   });
 
   it("a manifest that already declares [workspace] is staged unchanged", async () => {

@@ -578,6 +578,11 @@ function declareStagedWorkspaceRoot(stagedManifestPath: string): void {
   const manifest = readFileSync(stagedManifestPath, "utf8");
   if (WORKSPACE_TABLE_HEADER.test(manifest)) return;
   const separator = manifest.length === 0 || manifest.endsWith("\n") ? "" : "\n";
+  // The copy keeps the shipped file's mode, which is read-only in a package
+  // installed read-only (a global prefix owned by another account, a locked-down
+  // image; on Windows the read-only attribute). The staged copy is our own
+  // private file, so it is made writable before the table is added.
+  chmodSync(stagedManifestPath, 0o600);
   appendFileSync(
     stagedManifestPath,
     `${separator}\n# Added by Causoryn to the staged copy: this crate is its own workspace root.\n[workspace]\n`,
