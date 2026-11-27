@@ -576,6 +576,51 @@ describe.skipIf(NPM_CLI === undefined)("F20 round 3: the server starts with npm'
   });
 });
 
+describe.skipIf(NPM_CLI === undefined || !IS_WINDOWS)("F20 round 6: the launcher's console lock", () => {
+  // (3) A file named `lock` never went stale: every start waited 15 s and refused.
+  it("a file named lock refuses the start at once, naming it", () => {
+    const sandbox = plantedProject(null);
+    mkdirSync(captureRoot(sandbox), { recursive: true });
+    writeFileSync(path.join(captureRoot(sandbox), "lock"), "");
+    const started = Date.now();
+    const run = runProbe(sandbox, "launcher", ["mcp"], { registryEnv: true });
+    expect(Date.now() - started).toBeLessThan(10_000);
+    expect(run.probe).toBeNull();
+    expect(run.status).toBe(2);
+    expect(run.stderr).toMatch(/lock is not a directory/);
+    expect(run.stderr).toContain(path.join(captureRoot(sandbox), "lock"));
+    expect(leftoverCaptures(sandbox)).toEqual(["lock"]);
+  }, 60_000);
+
+  // (5) The launcher removed `lock` after its window whoever held it; it now releases only a lock with its own token.
+  it("releases only its own lock, never another start's", () => {
+    const sandbox = plantedProject(null);
+    const pkg = probePackage(sandbox.root, "launcher");
+    // A --lock that reports success without taking the lock: the lock below belongs to another start.
+    writeFileSync(path.join(pkg, "scripts", "lib", "windows-argv.mjs"), 'if (process.argv[2] === "--launch") console.log("LAUNCHED");\n');
+    const lock = path.join(captureRoot(sandbox), "lock");
+    mkdirSync(lock, { recursive: true });
+    const run = runLauncherDirectly(sandbox, pkg, "mcp", probeEnvironment(sandbox, true));
+    expect(run.stdout, run.stderr).toContain("LAUNCHED");
+    expect(existsSync(lock)).toBe(true);
+  });
+
+  it("takes the lock with its own token and leaves nothing behind", () => {
+    const sandbox = plantedProject(null);
+    const pkg = probePackage(sandbox.root, "launcher");
+    const real = readFileSync(path.join(pkg, "scripts", "lib", "windows-argv.mjs"), "utf8");
+    // The real module, which also reports what the lock holds when the launch starts (the lock is released by then).
+    writeFileSync(
+      path.join(pkg, "scripts", "lib", "windows-argv.mjs"),
+      `${real}\nif (process.argv[2] === "--lock") { const fs = await import("node:fs"); console.error("LOCK-HOLDS " + JSON.stringify(fs.readdirSync(process.argv[3] + "/lock"))); }\n`,
+    );
+    const run = runLauncherDirectly(sandbox, pkg, "mcp", probeEnvironment(sandbox, true));
+    expect(run.stdout, run.stderr).toContain("CAUSORYN-PROBE");
+    expect(run.stderr).toMatch(/LOCK-HOLDS \["owner-c-\d+-\d+"\]/);
+    expect(leftoverCaptures(sandbox)).toEqual([]);
+  });
+});
+
 /** Runs a probe package's launcher through cmd.exe as npm would, with npm's node, without npm. */
 function runLauncherDirectly(
   sandbox: Sandbox & { readonly root: string },
@@ -610,8 +655,10 @@ function runProbeInConsole(
   codePage: number,
   args: readonly string[],
   parallel = 1,
+  prepare?: (sandbox: Sandbox & { readonly root: string }) => void,
 ): ProbeRun & { readonly before: number | null; readonly after: number | null; readonly runs: readonly ProbeRun[] } {
   const sandbox = plantedProject(null);
+  prepare?.(sandbox);
   const pkg = probePackage(sandbox.root, "launcher");
   const driver = path.join(sandbox.root, "console-driver.cjs");
   const job = path.join(sandbox.root, "console-job.json");
@@ -740,6 +787,28 @@ describe.skipIf(NPM_CLI === undefined || !IS_WINDOWS)(
       }
       expect(result.after).toBe(857);
     }, 120_000);
+
+    /**
+     * Review round 6 (2): a start killed inside its 65001 window left the
+     * console at 65001 for good (the next start read 65001 and kept it). The
+     * lock records the console's code page (`lock\cp-<n>`), and the start that
+     * breaks a stale lock while the console is at 65001 restores it. The
+     * killed start is simulated by its stale lock.
+     */
+    it("round 6 (2): breaking the lock of a start killed at 65001 restores the code page it recorded", () => {
+      const args = ["mcp", "日本語", "＂x＂"];
+      const result = runProbeInConsole(65001, args, 1, (sandbox) => {
+        const lock = path.join(captureRoot(sandbox), "lock");
+        mkdirSync(lock, { recursive: true });
+        writeFileSync(path.join(lock, "owner-c-1-1"), "");
+        writeFileSync(path.join(lock, "cp-857"), "");
+        const old = new Date(Date.now() - 3_600_000);
+        utimesSync(lock, old, old);
+      });
+      expect(result.before).toBe(65001);
+      expectServerRan(result, args);
+      expect(result.after).toBe(857);
+    }, 150_000);
   },
 );
 
@@ -813,12 +882,19 @@ describe.skipIf(NPM_CLI === undefined || !IS_WINDOWS)("F20 round 4: a global ins
    * Review round 5 (B4): `%~$PATH:` searches the current directory for an
    * empty or `.` PATH entry, so a directory's node.exe was picked before the
    * real one. The launcher refuses a node.exe found in the current directory.
+   * Review round 6 (4): and below it, through any relative PATH entry
+   * (`sub`, `.\sub`, `node_modules\.bin;sub`), by a prefix check.
    */
   it.each([
     ["an empty", ""],
     ["a .", "."],
+    ["a relative sub", "sub"],
+    ["a relative .\\sub", ".\\sub"],
+    ["a node_modules\\.bin;sub", "node_modules\\.bin;sub"],
   ])("B4: refuses the current directory's node.exe found through %s PATH entry", (_label, entry) => {
     const { prefix, cwd, env } = globalInstall();
+    mkdirSync(path.join(cwd, "sub"));
+    copyFileSync(process.env["ComSpec"] ?? "C:\\Windows\\System32\\cmd.exe", path.join(cwd, "sub", "node.exe"));
     const pathKey = Object.keys(env).find((key) => /^path$/i.test(key)) ?? "PATH";
     env[pathKey] = `${entry};${path.dirname(process.execPath)};${env[pathKey] ?? ""}`;
     const run = spawnSync(process.env["ComSpec"] ?? "cmd.exe", ["/d", "/s", "/c", `""${path.join(prefix, "causoryn.cmd")}" mcp"`], {
@@ -829,7 +905,26 @@ describe.skipIf(NPM_CLI === undefined || !IS_WINDOWS)("F20 round 4: a global ins
     });
     expect(run.stdout, run.stderr).not.toMatch(/HIJACK-|\(c\) Microsoft Corporation|CAUSORYN-PROBE/);
     expect(run.status).toBe(2);
-    expect(run.stderr).toMatch(/refusing to start: the node\.exe found on PATH is in the current directory/);
+    expect(run.stderr).toMatch(/refusing to start: the node\.exe found on PATH is in the current directory or below it/);
+  });
+
+  // The prefix check compares whole directory names: <dir>\project2 is not below <dir>\project.
+  it("B4: a node.exe in a sibling directory whose name starts like the current one is not refused", () => {
+    const { prefix, cwd, env } = globalInstall();
+    const sibling = `${cwd}2`;
+    mkdirSync(sibling);
+    // A marker node.exe (a copy of cmd.exe, which prints its banner): the entry points outside the project.
+    copyFileSync(process.env["ComSpec"] ?? "C:\\Windows\\System32\\cmd.exe", path.join(sibling, "node.exe"));
+    const pathKey = Object.keys(env).find((key) => /^path$/i.test(key)) ?? "PATH";
+    env[pathKey] = `..\\${path.basename(sibling)};${path.dirname(process.execPath)};${env[pathKey] ?? ""}`;
+    const run = spawnSync(process.env["ComSpec"] ?? "cmd.exe", ["/d", "/s", "/c", `""${path.join(prefix, "causoryn.cmd")}" mcp"`], {
+      cwd,
+      env,
+      encoding: "utf8",
+      windowsVerbatimArguments: true,
+    });
+    expect(run.stderr).not.toMatch(/refusing to start/);
+    expect(run.stdout).toMatch(/\(c\) Microsoft Corporation/);
   });
 
   it("from PowerShell (causoryn.ps1)", () => {

@@ -101,7 +101,9 @@ describe("launcher: node options", () => {
     const nodeLines = LINES.filter((line) => line.includes('"%CAUSORYN_NODE%"'));
     expect(nodeLines.length).toBeGreaterThan(0);
     for (const line of nodeLines) {
-      expect(line).toMatch(/"%CAUSORYN_NODE%" "%~dp0lib\\windows-argv\.mjs" --(lock "%CAUSORYN_ARGV_ROOT%"|launch "%CAUSORYN_ARGV_DIR%")( \|\| \(|$)/);
+      expect(line).toMatch(
+        /"%CAUSORYN_NODE%" "%~dp0lib\\windows-argv\.mjs" --(lock "%CAUSORYN_ARGV_ROOT%" "%CAUSORYN_TOKEN%"|launch "%CAUSORYN_ARGV_DIR%")( \|\| \(|$)/,
+      );
     }
     expect(nodeLines.at(-1)).toMatch(/--launch "%CAUSORYN_ARGV_DIR%"$/);
   });

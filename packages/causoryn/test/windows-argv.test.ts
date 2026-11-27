@@ -1,5 +1,5 @@
-import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
+import { spawn, spawnSync } from "node:child_process";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -29,7 +29,6 @@ const mod = (await import(pathToFileURL(SCRIPT).href)) as {
   forReferenceIn(tail: string): string | null;
   parseWindowsArguments(tail: string): string[];
   argumentsFromCaptures(dir: string): { ok: true; args: string[] } | { ok: false; message: string };
-  acquireLock(root: string, options?: { timeoutMs?: number; staleMs?: number }): boolean;
   removeStaleCaptures(root: string, options?: { maxAgeMs?: number }): string[];
 };
 
@@ -149,19 +148,123 @@ describe("windows-argv: the console lock and stale captures", () => {
     utimesSync(target, then, then);
   };
 
-  it("takes a free lock, waits for a held one and breaks a stale one", () => {
+  /**
+   * Runs `acquireLock(root, options)` in a child process (a lock loop that
+   * spins would otherwise hang this test runner) with a 10 s limit; `setup`
+   * and `beforeBreak` are module source run there with `root` and `lock`.
+   */
+  function lockScenario(
+    root: string,
+    options: Record<string, unknown>,
+    code: { readonly setup?: string; readonly beforeBreak?: string; readonly restore?: boolean } = {},
+  ): { result: { acquired?: boolean; message?: string; restoredCodePage?: number } | null; elapsed: number; status: number | null; stderr: string } {
+    const program = [
+      'import fs from "node:fs";',
+      'import path from "node:path";',
+      `const mod = await import(${JSON.stringify(pathToFileURL(SCRIPT).href)});`,
+      "const root = process.argv[1];",
+      'const lock = path.join(root, "lock");',
+      code.setup ?? "",
+      `const options = ${JSON.stringify(options)};`,
+      code.beforeBreak === undefined ? "" : `options.beforeBreak = () => { ${code.beforeBreak} };`,
+      code.restore === true ? "options.restoreCodePage = (cp) => cp;" : "",
+      "const started = Date.now();",
+      "const result = mod.acquireLock(root, options);",
+      'process.stdout.write(JSON.stringify({ result, elapsed: Date.now() - started }));',
+    ].join("\n");
+    const run = spawnSync(process.execPath, ["--input-type=module", "-e", program, root], { encoding: "utf8", timeout: 10_000 });
+    const parsed = run.status === 0 ? (JSON.parse(run.stdout) as { result: { acquired?: boolean }; elapsed: number }) : null;
+    return { result: parsed?.result ?? null, elapsed: parsed?.elapsed ?? -1, status: run.status, stderr: run.stderr };
+  }
+  const OLD = 'const old = new Date(Date.now() - 3600000); fs.utimesSync(lock, old, old);';
+
+  it("takes a free lock and records its owner", () => {
     const root = argvRoot();
-    expect(mod.acquireLock(root, { timeoutMs: 200 })).toBe(true);
-    expect(statSync(path.join(root, "lock")).isDirectory()).toBe(true);
-    const started = Date.now();
-    expect(mod.acquireLock(root, { timeoutMs: 300, staleMs: 60_000 })).toBe(false);
-    expect(Date.now() - started).toBeGreaterThanOrEqual(250);
-    age(path.join(root, "lock"), 120_000);
-    expect(mod.acquireLock(root, { timeoutMs: 300, staleMs: 60_000 })).toBe(true);
+    const run = lockScenario(root, { token: "c-1-1", timeoutMs: 200 });
+    expect(run.result, run.stderr).toEqual({ acquired: true });
+    expect(readdirSync(path.join(root, "lock"))).toEqual(["owner-c-1-1"]);
+  });
+
+  it("waits for a held lock and then refuses, naming it", () => {
+    const root = argvRoot();
+    mkdirSync(path.join(root, "lock"));
+    writeFileSync(path.join(root, "lock", "owner-c-2-2"), "");
+    const run = lockScenario(root, { token: "c-3-3", timeoutMs: 300, staleMs: 60_000 });
+    expect(run.result?.acquired, run.stderr).toBe(false);
+    expect(run.result?.message).toMatch(/kept the launcher's console lock/);
+    expect(run.elapsed).toBeGreaterThanOrEqual(250);
+    expect(readdirSync(path.join(root, "lock"))).toEqual(["owner-c-2-2"]);
+  });
+
+  // Review round 6 (1): a stale lock that is not empty made rmdir throw, and the loop spun forever.
+  it("breaks a stale lock that is not empty, and reports the code page it recorded", () => {
+    const root = argvRoot();
+    const run = lockScenario(
+      root,
+      { token: "c-4-4", timeoutMs: 2_000, staleMs: 60_000 },
+      { setup: `fs.mkdirSync(lock); for (const f of ["owner-c-5-5", "cp-857", "unknown.txt"]) fs.writeFileSync(path.join(lock, f), ""); ${OLD}`, restore: true },
+    );
+    expect(run.status, run.stderr).toBe(0);
+    expect(run.result).toEqual({ acquired: true, restoredCodePage: 857 });
+    expect(readdirSync(path.join(root, "lock"))).toEqual(["owner-c-4-4"]);
+  });
+
+  // Review round 6 (1, 3): a `lock` that is a file or a link to a deleted directory: refused at once, never a spin.
+  it.each([
+    ["a file", 'fs.writeFileSync(lock, "");'],
+    ["a link to a deleted directory", 'const t = path.join(root, "gone"); fs.mkdirSync(t); fs.symlinkSync(t, lock, "junction"); fs.rmdirSync(t);'],
+  ])("refuses at once when the lock is %s", (_label, setup) => {
+    const root = argvRoot();
+    const run = lockScenario(root, { token: "c-6-6", timeoutMs: 3_000 }, { setup });
+    expect(run.status, run.stderr).toBe(0);
+    expect(run.result?.acquired).toBe(false);
+    expect(run.result?.message).toMatch(/lock is not a directory/);
+    expect(run.result?.message).toContain(path.join(root, "lock"));
+    expect(run.elapsed).toBeLessThan(1_000);
   });
 
   it("refuses a lock root that does not exist", () => {
-    expect(mod.acquireLock(path.join(argvRoot(), "missing"), { timeoutMs: 100 })).toBe(false);
+    const run = lockScenario(path.join(argvRoot(), "missing"), { token: "c-7-7", timeoutMs: 100 });
+    expect(run.status, run.stderr).toBe(0);
+    expect(run.result?.acquired).toBe(false);
+  });
+
+  // Review round 6 (1): a stale lock that cannot be moved (here a process's working directory) counts as held.
+  it.runIf(process.platform === "win32")("treats a stale lock it cannot move as held and refuses after the deadline", async () => {
+    const root = argvRoot();
+    const lock = path.join(root, "lock");
+    mkdirSync(lock);
+    age(lock, 3_600_000);
+    const holder = spawn(process.execPath, ["-e", "setTimeout(() => {}, 20000)"], { cwd: lock, stdio: "ignore" });
+    const exited = new Promise((resolve) => holder.once("exit", resolve));
+    try {
+      const run = lockScenario(root, { token: "c-8-8", timeoutMs: 500, staleMs: 60_000 });
+      expect(run.status, run.stderr).toBe(0);
+      expect(run.result?.acquired).toBe(false);
+      expect(run.elapsed).toBeGreaterThanOrEqual(450);
+      expect(run.elapsed).toBeLessThan(3_000);
+      expect(existsSync(lock)).toBe(true);
+    } finally {
+      holder.kill();
+      await exited;
+    }
+  });
+
+  // Review round 6 (5): two starts breaking one stale lock must not both hold it.
+  it("puts back a lock that another start took between seeing it stale and moving it", () => {
+    const root = argvRoot();
+    const run = lockScenario(
+      root,
+      { token: "c-9-9", timeoutMs: 400, staleMs: 60_000 },
+      {
+        setup: `fs.mkdirSync(lock); fs.writeFileSync(path.join(lock, "owner-c-10-10"), ""); ${OLD}`,
+        // The other start breaks the stale lock first and takes a fresh one.
+        beforeBreak: 'if (!fs.existsSync(path.join(root, "other-broke"))) { fs.renameSync(lock, path.join(root, "other-broke")); fs.mkdirSync(lock); fs.writeFileSync(path.join(lock, "owner-c-11-11"), ""); }',
+      },
+    );
+    expect(run.status, run.stderr).toBe(0);
+    expect(run.result?.acquired).toBe(false);
+    expect(readdirSync(path.join(root, "lock"))).toEqual(["owner-c-11-11"]);
   });
 
   it("removes only old capture directories holding only capture files", () => {
@@ -178,9 +281,12 @@ describe("windows-argv: the console lock and stale captures", () => {
     const fresh = make("c-789-3", ["argv-hash.txt"], 0);
     const foreign = make("c-111-4", ["argv-hash.txt", "other.txt"], 3_600_000);
     const otherName = make("keep-me", [], 3_600_000);
-    expect(mod.removeStaleCaptures(root, { maxAgeMs: 600_000 }).sort()).toEqual(["c-123-1", "c-456-2"]);
-    for (const gone of [stale, staleEmpty]) expect(existsSync(gone)).toBe(false);
-    for (const kept of [fresh, foreign, otherName]) expect(existsSync(kept)).toBe(true);
+    // A broken lock that could not be removed at once (round 6): only lock files in it.
+    const brokenLock = make("stale-c-222-5-1", ["owner-c-1-1", "cp-857"], 3_600_000);
+    const brokenForeign = make("stale-c-333-6-1", ["owner-c-1-1", "other.txt"], 3_600_000);
+    expect(mod.removeStaleCaptures(root, { maxAgeMs: 600_000 }).sort()).toEqual(["c-123-1", "c-456-2", "stale-c-222-5-1"]);
+    for (const gone of [stale, staleEmpty, brokenLock]) expect(existsSync(gone)).toBe(false);
+    for (const kept of [fresh, foreign, otherName, brokenForeign]) expect(existsSync(kept)).toBe(true);
   });
 });
 

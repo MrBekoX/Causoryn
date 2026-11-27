@@ -28,17 +28,25 @@
  * lock directory `<root>\lock` (the launcher removes it after restoring the
  * code page), so starts that share a console do not switch the code page
  * under each other, and removes capture directories that earlier starts left
- * behind.
+ * behind. The lock holds its owner's token (`owner-<capture directory name>`)
+ * and the console code page that owner recorded before switching
+ * (`cp-<n>`); see acquireLock.
  */
-import { lstatSync, mkdirSync, readdirSync, readFileSync, rmdirSync, statSync, unlinkSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { lstatSync, mkdirSync, readdirSync, readFileSync, renameSync, rmdirSync, unlinkSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 /** Files the launcher writes into a capture directory (the two captures and its code page reading). */
 export const CAPTURE_FILES = Object.freeze(["argv-hash.txt", "argv-bracket.txt", "cp.txt"]);
-/** Capture directory names (`c-<random>-<attempt>`) under the capture root. */
+/** Capture directory names (`c-<random>-<attempt>`) under the capture root; a start's name is also its lock token. */
 export const CAPTURE_DIR_PATTERN = /^c-\d+-\d+$/;
+const TOKEN_PATTERN = CAPTURE_DIR_PATTERN;
 const LOCK_NAME = "lock";
+/** A broken lock moved aside by the start that broke it (`stale-<its token>-<attempt>`). */
+const BROKEN_LOCK_PATTERN = /^stale-c-\d+-\d+-\d+$/;
+/** Files a lock holds: its owner's token and the console code page the owner recorded. */
+const LOCK_FILE_PATTERN = /^(owner-c-\d+-\d+|cp-\d+)$/;
 
 const PREFIX = "\r\n#rem CAUSORYN-ARGV: ";
 const SUFFIX = ":CAUSORYN-ARGV \r\n";
@@ -132,7 +140,12 @@ export function argumentsFromCaptures(dir) {
 
 /** Removes the launcher's capture files and then their directory; true when the directory is gone. */
 function removeCaptures(dir) {
-  for (const name of CAPTURE_FILES) {
+  return removeEntriesAndDir(dir, CAPTURE_FILES);
+}
+
+/** Unlinks `entries` in `dir`, then removes `dir`; true when it is gone (it is kept when anything else is in it or it is held open). */
+function removeEntriesAndDir(dir, entries) {
+  for (const name of entries) {
     try {
       unlinkSync(path.join(dir, name));
     } catch {
@@ -144,16 +157,16 @@ function removeCaptures(dir) {
     return true;
   } catch {
     // Not empty (a file the launcher does not write) or held open: a later start's
-    // --lock removes it once it is old, if it then holds only capture files.
+    // --lock removes it once it is old, if it then holds only the launcher's files.
     return false;
   }
 }
 
 /**
- * Removes capture directories under `root` that a start left behind (it never
- * reached `--launch`, node crashed, or removal failed): real directories named
- * like a capture directory, unchanged for `maxAgeMs`, that hold nothing but
- * capture files. Returns the names removed.
+ * Removes directories under `root` that starts left behind, once unchanged for
+ * `maxAgeMs`: capture directories (the start never reached `--launch`, node
+ * crashed, or removal failed) holding only capture files, and broken locks
+ * moved aside (`stale-…`) holding only lock files. Returns the names removed.
  */
 export function removeStaleCaptures(root, { maxAgeMs = 10 * 60_000 } = {}) {
   const removed = [];
@@ -165,56 +178,185 @@ export function removeStaleCaptures(root, { maxAgeMs = 10 * 60_000 } = {}) {
   }
   const now = Date.now();
   for (const name of names) {
-    if (!CAPTURE_DIR_PATTERN.test(name)) continue;
+    const allowed = CAPTURE_DIR_PATTERN.test(name)
+      ? (entry) => CAPTURE_FILES.includes(entry)
+      : BROKEN_LOCK_PATTERN.test(name)
+        ? (entry) => LOCK_FILE_PATTERN.test(entry)
+        : null;
+    if (allowed === null) continue;
     const dir = path.join(root, name);
+    let entries;
     try {
       const info = lstatSync(dir);
       if (!info.isDirectory() || now - info.mtimeMs < maxAgeMs) continue;
-      if (readdirSync(dir).some((entry) => !CAPTURE_FILES.includes(entry))) continue;
+      entries = readdirSync(dir);
     } catch {
       continue;
     }
-    if (removeCaptures(dir)) removed.push(name);
+    if (entries.some((entry) => !allowed(entry))) continue;
+    if (removeEntriesAndDir(dir, entries)) removed.push(name);
   }
   return removed;
 }
 
 const sleep = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 
-/**
- * Takes the lock directory `<root>\lock`: true once this call created it.
- * Waits while another start holds it, breaks a lock unchanged for `staleMs`
- * (a start killed inside its code page window), and gives up after
- * `timeoutMs` or when `root` cannot hold it.
- */
-export function acquireLock(root, { timeoutMs = 15_000, staleMs = 15_000 } = {}) {
-  const lock = path.join(root, LOCK_NAME);
-  const deadline = Date.now() + timeoutMs;
-  for (;;) {
+/** Creates `<lock>` with this start's owner file: true, false when it exists, or why it cannot be taken. */
+function tryTakeLock(lock, token) {
+  try {
+    mkdirSync(lock);
+  } catch (error) {
+    return error?.code === "EEXIST" ? false : `${REFUSED} could not create the launcher's lock ${lock} (${error?.code ?? error}).`;
+  }
+  try {
+    writeFileSync(path.join(lock, `owner-${token}`), "", { flag: "wx" });
+    return true;
+  } catch (error) {
     try {
-      mkdirSync(lock);
-      return true;
-    } catch (error) {
-      if (error?.code !== "EEXIST") return false;
-    }
-    try {
-      const info = statSync(lock);
-      if (info.isDirectory() && Date.now() - info.mtimeMs > staleMs) {
-        rmdirSync(lock);
-        continue;
-      }
+      rmdirSync(lock);
     } catch {
-      continue;
+      // left: it goes stale
     }
-    if (Date.now() >= deadline) return false;
-    sleep(10 + Math.floor(Math.random() * 20));
+    return `${REFUSED} could not write the owner of the launcher's lock ${lock} (${error?.code ?? error}).`;
   }
 }
 
-if (process.argv[2] === "--lock" && process.argv.length === 4) {
+/**
+ * Moves a stale lock aside (`<root>\stale-<token>-<n>`, a rename only one
+ * start can win) and removes it. If what was moved is not the lock that was
+ * seen stale (another start broke it and took a fresh one in between), it is
+ * put back and nothing is broken. Returns the code page the stale lock
+ * recorded (`cp-<n>`, undefined when none), or null when nothing was broken.
+ */
+function breakStaleLock(root, lock, token, attempt, staleMs, beforeBreak) {
+  let seen;
+  try {
+    seen = readdirSync(lock).sort();
+  } catch {
+    return null;
+  }
+  beforeBreak?.();
+  const moved = path.join(root, `stale-${token}-${attempt}`);
+  try {
+    renameSync(lock, moved);
+  } catch {
+    // Released, taken again, or held open (an open handle, antivirus): counts as held.
+    return null;
+  }
+  let same = false;
+  let names = [];
+  try {
+    const info = lstatSync(moved);
+    names = readdirSync(moved).sort();
+    same = info.isDirectory() && Date.now() - info.mtimeMs > staleMs && names.join("/") === seen.join("/");
+  } catch {
+    same = false;
+  }
+  if (!same) {
+    try {
+      renameSync(moved, lock);
+    } catch {
+      // The lock was taken again meanwhile; the moved one stays aside and its owner's token check keeps it from removing the new one.
+    }
+    return null;
+  }
+  const recorded = names.map((name) => /^cp-(\d+)$/.exec(name)?.[1]).find((value) => value !== undefined);
+  removeEntriesAndDir(
+    moved,
+    names.filter((name) => LOCK_FILE_PATTERN.test(name)),
+  );
+  return { codePage: recorded === undefined ? undefined : Number(recorded) };
+}
+
+/**
+ * Takes the lock directory `<root>\lock` for `token` (the start's capture
+ * directory name, written into it as `owner-<token>`; the launcher releases the
+ * lock only while that file is still in it). Waits while another start holds
+ * the lock; breaks one unchanged for `staleMs` (a start killed inside its code
+ * page window, or one slower than that) and hands the code page it recorded
+ * to `restoreCodePage`; treats a stale lock it cannot move as held. Every way
+ * round the loop checks the deadline and waits, so it ends after `timeoutMs`
+ * at the latest. A `lock` that is not a directory (a file, or a link) is
+ * refused at once. Returns `{ acquired: true, restoredCodePage? }` or
+ * `{ acquired: false, message }`.
+ */
+export function acquireLock(root, { token, timeoutMs = 15_000, staleMs = 15_000, beforeBreak, restoreCodePage } = {}) {
+  const lock = path.join(root, LOCK_NAME);
+  if (typeof token !== "string" || !TOKEN_PATTERN.test(token)) {
+    return { acquired: false, message: `${REFUSED} the launcher passed no valid lock token.` };
+  }
+  const deadline = Date.now() + timeoutMs;
+  let restoredCodePage;
+  for (let attempt = 1; ; attempt += 1) {
+    const taken = tryTakeLock(lock, token);
+    if (taken === true) return restoredCodePage === undefined ? { acquired: true } : { acquired: true, restoredCodePage };
+    if (typeof taken === "string") return { acquired: false, message: taken };
+    let info = null;
+    try {
+      info = lstatSync(lock);
+    } catch {
+      // released meanwhile: taken on the next round
+    }
+    if (info !== null && !info.isDirectory()) {
+      return { acquired: false, message: `${REFUSED} the launcher's lock is not a directory (a file or a link): ${lock}. Remove it to start.` };
+    }
+    if (info !== null && Date.now() - info.mtimeMs > staleMs) {
+      const broken = breakStaleLock(root, lock, token, attempt, staleMs, beforeBreak);
+      if (broken?.codePage !== undefined && restoreCodePage !== undefined) {
+        const restored = restoreCodePage(broken.codePage);
+        if (restored !== undefined) restoredCodePage = restored;
+      }
+    }
+    if (Date.now() >= deadline) {
+      return {
+        acquired: false,
+        message: `${REFUSED} another start kept the launcher's console lock ${lock} for ${Math.round(timeoutMs / 1000)} s (a stale lock that cannot be moved counts as held).`,
+      };
+    }
+    sleep(5 + Math.floor(Math.random() * 20));
+  }
+}
+
+/** The console's code page (chcp.com by absolute path, attached to this process's console), or null. */
+function consoleCodePage(chcp) {
+  try {
+    const out = execFileSync(chcp, [], { encoding: "latin1", stdio: ["ignore", "pipe", "ignore"] });
+    const match = /(\d+)\D*$/.exec(out.trim());
+    return match === null ? null : Number(match[1]);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * After breaking the stale lock of a start killed inside its UTF-8 window:
+ * switches this console back to the code page that start recorded, but only
+ * while the console is still at 65001 (otherwise the stale lock came from
+ * another console or the code page was restored already). Returns the code
+ * page set, or undefined.
+ */
+export function restoreConsoleCodePage(codePage) {
+  const systemRoot = process.env["SystemRoot"];
+  if (!Number.isInteger(codePage) || codePage <= 0 || codePage > 65535 || codePage === 65001) return undefined;
+  if (typeof systemRoot !== "string" || !path.win32.isAbsolute(systemRoot)) return undefined;
+  const chcp = path.win32.join(systemRoot, "System32", "chcp.com");
+  if (consoleCodePage(chcp) !== 65001) return undefined;
+  try {
+    execFileSync(chcp, [String(codePage)], { stdio: "ignore" });
+  } catch {
+    return undefined;
+  }
+  return consoleCodePage(chcp) === codePage ? codePage : undefined;
+}
+
+if (process.argv[2] === "--lock" && process.argv.length === 5) {
   const root = path.resolve(process.argv[3]);
-  if (!acquireLock(root)) {
-    process.stderr.write(`${REFUSED} another start kept the launcher's console lock (${path.join(root, LOCK_NAME)}).\n`);
+  const result = acquireLock(root, {
+    token: process.argv[4],
+    ...(process.platform === "win32" ? { restoreCodePage: restoreConsoleCodePage } : {}),
+  });
+  if (!result.acquired) {
+    process.stderr.write(`${result.message}\n`);
     process.exitCode = 2;
   } else {
     removeStaleCaptures(root);
