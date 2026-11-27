@@ -1,4 +1,4 @@
-import { lstatSync, readlinkSync } from "node:fs";
+import { lstatSync, readdirSync, readlinkSync } from "node:fs";
 import path from "node:path";
 
 /**
@@ -359,4 +359,113 @@ export function pathCrossesLink(lexicalPath: string, trustedStart: string, pathA
     }
   }
   return false;
+}
+
+/** Creation-time environment of WorkspaceAccessPolicy / OutputAccessPolicy. */
+export interface PolicyEnvironment {
+  /**
+   * Root-level link aliases (link path -> target) used to normalize spellings
+   * before the lexical containment check. Defaults to {@link readRootLevelLinks}
+   * of the filesystem root (none on Windows); tests inject a map to simulate
+   * another platform's layout.
+   */
+  readonly rootLinks?: ReadonlyMap<string, string>;
+}
+
+/** Minimal filesystem surface used by {@link readRootLevelLinks} (injectable for tests). */
+export interface RootLevelLinkFs {
+  readonly readdirSync: (dir: string) => ReadonlyArray<{ readonly name: string; isSymbolicLink(): boolean }>;
+  readonly readlinkSync: (target: string) => string;
+}
+
+const NODE_ROOT_LINK_FS: RootLevelLinkFs = {
+  readdirSync: (dir) => readdirSync(dir, { withFileTypes: true }),
+  readlinkSync: (target) => readlinkSync(target),
+};
+
+/** Bound on root-level link chains (`/a` -> `/b/x`, `/b` -> `/c`); longer chains or loops are dropped. */
+const MAX_ROOT_LINK_HOPS = 8;
+
+/**
+ * The filesystem root's own links (macOS `/var`, `/tmp`, `/etc` -> `/private/...`;
+ * merged-usr `/bin` -> `/usr/bin`), each mapped to its target resolved lexically
+ * against the root, root-level chains followed. Only the root directory is listed
+ * and only its link entries are read (readdir file types, then readlink): no
+ * candidate path is involved and nothing is followed, stat'ed or opened, so a
+ * target on an automounted or network path is not contacted. An entry whose target
+ * cannot be read, or whose chain loops, is left out (its spelling is then simply
+ * not normalized: a lexical denial, never a wider grant).
+ */
+export function readRootLevelLinks(
+  options: { readonly root?: string; readonly fs?: RootLevelLinkFs; readonly pathApi?: PathApi } = {},
+): ReadonlyMap<string, string> {
+  const pathApi = options.pathApi ?? path;
+  const fsImpl = options.fs ?? NODE_ROOT_LINK_FS;
+  const root = options.root ?? pathApi.sep;
+  const raw = new Map<string, string>();
+  let entries: ReadonlyArray<{ readonly name: string; isSymbolicLink(): boolean }>;
+  try {
+    entries = fsImpl.readdirSync(root);
+  } catch {
+    return raw;
+  }
+  for (const entry of entries) {
+    if (!entry.isSymbolicLink()) continue;
+    const linkPath = pathApi.join(root, entry.name);
+    try {
+      const target = fsImpl.readlinkSync(linkPath);
+      if (isUncOrDevicePath(target)) continue;
+      raw.set(linkPath, pathApi.resolve(root, target));
+    } catch {
+      // Unreadable link: left out.
+    }
+  }
+  const resolved = new Map<string, string>();
+  for (const [linkPath, target] of raw) {
+    let current = target;
+    let stable = false;
+    for (let hop = 0; hop < MAX_ROOT_LINK_HOPS; hop += 1) {
+      const next = normalizeRootLevelAlias(current, raw, pathApi, 1);
+      if (next === current) {
+        stable = true;
+        break;
+      }
+      current = next;
+    }
+    if (stable) {
+      resolved.set(linkPath, current);
+    }
+  }
+  return resolved;
+}
+
+/**
+ * Rewrites a leading `rootLinks` prefix of `absolutePath` (a whole component, e.g.
+ * `/tmp/proj` with `/tmp` -> `/private/tmp` becomes `/private/tmp/proj`). Purely
+ * lexical. Used before a lexical containment check, so a path spelled through a
+ * root-level link of the system compares with the real-path form of a declared
+ * directory; the real-path containment check that follows still decides.
+ */
+export function normalizeRootLevelAlias(
+  absolutePath: string,
+  rootLinks: ReadonlyMap<string, string>,
+  pathApi: PathApi = path,
+  maxRewrites = MAX_ROOT_LINK_HOPS,
+): string {
+  let current = absolutePath;
+  for (let rewrite = 0; rewrite < maxRewrites; rewrite += 1) {
+    let rewritten: string | undefined;
+    for (const [linkPath, target] of rootLinks) {
+      if (isSameOrInside(pathApi, linkPath, current)) {
+        const rest = pathApi.relative(linkPath, current);
+        rewritten = rest.length === 0 ? target : pathApi.join(target, rest);
+        break;
+      }
+    }
+    if (rewritten === undefined || rewritten === current) {
+      return current;
+    }
+    current = rewritten;
+  }
+  return current;
 }

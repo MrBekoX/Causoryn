@@ -20,7 +20,10 @@ import {
   inspectLinkTargets,
   isUncOrDevicePath,
   LINK_TARGET_INSPECTION_ENABLED,
+  normalizeRootLevelAlias,
   pathCrossesLink,
+  readRootLevelLinks,
+  type PolicyEnvironment,
 } from "./path-safety.js";
 
 /**
@@ -262,13 +265,31 @@ export class OutputAccessPolicy {
   /**
    * The authorized area for the lexical gate and the link walk: every declared
    * directory in its declared spelling (inspected in `create`) and in its canonical
-   * real path.
+   * real path, and both again with a leading root-level link alias normalized
+   * (macOS `/var` -> `/private/var`).
    */
   private readonly areaDirs: readonly string[];
+  /** The filesystem root's own links (see {@link readRootLevelLinks}); empty on Windows. */
+  private readonly rootLinks: ReadonlyMap<string, string>;
 
-  private constructor(canonicalDirs: readonly string[], declaredDirs: readonly string[]) {
+  private constructor(
+    canonicalDirs: readonly string[],
+    declaredDirs: readonly string[],
+    rootLinks: ReadonlyMap<string, string>,
+  ) {
     this.canonicalDirs = canonicalDirs;
-    this.areaDirs = [...declaredDirs, ...canonicalDirs];
+    this.rootLinks = rootLinks;
+    const seen = new Set<string>();
+    this.areaDirs = [
+      ...declaredDirs,
+      ...canonicalDirs,
+      ...[...declaredDirs, ...canonicalDirs].map((dir) => normalizeRootLevelAlias(dir, rootLinks)),
+    ].filter((dir) => {
+      const key = comparablePath(dir);
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
   }
 
   /**
@@ -276,8 +297,10 @@ export class OutputAccessPolicy {
    * (default deny). Her beyan: boş olmayan, null byte içermeyen, diskte VAR
    * OLAN bir dizin olmalı ve realpath'e çözümlenmelidir — çözümlenemeyen kök
    * güven kaynağı olamaz. Beyansız dizin kesinlikle reddedilir.
+   * `environment.rootLinks` replaces the filesystem root's links read at creation
+   * (tests simulate another platform's layout with it).
    */
-  static create(allowedOutputDirs: readonly string[]): OutputAccessPolicy {
+  static create(allowedOutputDirs: readonly string[], environment: PolicyEnvironment = {}): OutputAccessPolicy {
     if (allowedOutputDirs.length === 0) {
       throw new OutputPolicyError(
         "workspace/output-policy-invalid",
@@ -346,9 +369,13 @@ export class OutputAccessPolicy {
     const canonicalDirs = [...displayByComparable.values()].sort((a, b) =>
       comparablePath(a) < comparablePath(b) ? -1 : comparablePath(a) > comparablePath(b) ? 1 : 0,
     );
+    // Read once, after the declarations were validated: public system
+    // configuration, never anything derived from a caller's path.
+    const rootLinks = environment.rootLinks ?? (IS_WIN ? new Map<string, string>() : readRootLevelLinks());
     return new OutputAccessPolicy(
       canonicalDirs,
       allowedOutputDirs.map((declared) => path.resolve(declared)),
+      rootLinks,
     );
   }
 
@@ -388,8 +415,17 @@ export class OutputAccessPolicy {
     if (segmentDeny !== undefined) {
       return segmentDeny;
     }
-    const lexical = path.resolve(dirPath);
-    const area = this.areaDirs.find((areaDir) => isInside(areaDir, lexical));
+    // Tried as spelled, then with a leading root-level link alias normalized
+    // (`/tmp/out` against a declared `/private/tmp/out`); the spelling that matched
+    // names the same directory through the system's own root link.
+    const resolved = path.resolve(dirPath);
+    const normalized = normalizeRootLevelAlias(resolved, this.rootLinks);
+    let lexical = resolved;
+    let area = this.areaDirs.find((areaDir) => isInside(areaDir, resolved));
+    if (area === undefined && normalized !== resolved) {
+      lexical = normalized;
+      area = this.areaDirs.find((areaDir) => isInside(areaDir, normalized));
+    }
     if (area === undefined) {
       return outputNotDeclared();
     }

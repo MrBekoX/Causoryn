@@ -74,7 +74,9 @@ function seedLookAlikes(root: string): void {
 
 describe("WorkspaceAccessPolicy — look-alike spellings of the secret deny rules", () => {
   for (const platform of ["linux", "win32"] as const) {
-    it(`denies look-alike .git / .env* / *.pem names (${platform} simulated)`, async () => {
+    // A simulated win32 policy requires drive-letter allowRoots: only a Windows
+    // host has temp directories of that form.
+    it.skipIf(platform === "win32" && process.platform !== "win32")(`denies look-alike .git / .env* / *.pem names (${platform} simulated)`, async () => {
       const ws = await importWorkspaceAs(platform);
       const root = tempDir("causoryn-lookalike-");
       seedLookAlikes(root);

@@ -257,18 +257,23 @@ describe("lookAlikeFold — default-ignorable code points (F44)", () => {
   });
 
   for (const platform of ["linux", "win32"] as const) {
-    it(`denies .git / .env* / *.pem names padded with default-ignorable code points (${platform} simulated)`, async () => {
-      const ws = await importWorkspaceAs(platform);
-      const root = makeRoot();
-      seedSecrets(root);
-      const policy = ws.WorkspaceAccessPolicy.create({ allowRoots: [root] });
-      for (const [candidate, rule] of DEFAULT_IGNORABLE_ALIASES) {
-        const decision = policy.checkFile(root, candidate);
-        expect(decision.allowed, JSON.stringify(candidate)).toBe(false);
-        if (!decision.allowed) expect(decision.rule, JSON.stringify(candidate)).toBe(rule);
-      }
-      expect(policy.checkFile(root, "src/app.ts").allowed).toBe(true);
-    });
+    // A simulated win32 policy requires drive-letter allowRoots: only a Windows
+    // host has temp directories of that form.
+    it.skipIf(platform === "win32" && process.platform !== "win32")(
+      `denies .git / .env* / *.pem names padded with default-ignorable code points (${platform} simulated)`,
+      async () => {
+        const ws = await importWorkspaceAs(platform);
+        const root = makeRoot();
+        seedSecrets(root);
+        const policy = ws.WorkspaceAccessPolicy.create({ allowRoots: [root] });
+        for (const [candidate, rule] of DEFAULT_IGNORABLE_ALIASES) {
+          const decision = policy.checkFile(root, candidate);
+          expect(decision.allowed, JSON.stringify(candidate)).toBe(false);
+          if (!decision.allowed) expect(decision.rule, JSON.stringify(candidate)).toBe(rule);
+        }
+        expect(policy.checkFile(root, "src/app.ts").allowed).toBe(true);
+      },
+    );
   }
 });
 

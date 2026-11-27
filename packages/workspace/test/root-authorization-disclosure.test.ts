@@ -1,4 +1,13 @@
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import {
+  lstatSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
@@ -67,6 +76,8 @@ vi.mock("node:fs", async (importOriginal) => {
 
 import { describeLinkInspectionFailure, OutputAccessPolicy, WorkspaceAccessPolicy } from "../src/index.js";
 import type { OutputDecision, PolicyDecision } from "../src/index.js";
+import { normalizeRootLevelAlias, readRootLevelLinks } from "../src/path-safety.js";
+import type { RootLevelLinkFs } from "../src/path-safety.js";
 
 const IS_WIN = process.platform === "win32";
 
@@ -399,5 +410,165 @@ describe("link chains that leave the authorized area are not followed (F21 / F73
     expect(denial.rule).toBe("unc-or-device-link-target");
     expect(denial.reason).not.toContain("fileserver");
     expect(denial.reason).not.toContain(declared);
+  });
+});
+
+/* ------------------------------------------------------------------ */
+/* Root-level link aliases (macOS /var -> /private/var, /tmp, /etc)   */
+/* ------------------------------------------------------------------ */
+
+/** In-memory filesystem root for readRootLevelLinks: name -> link target, or null for a directory. */
+function fakeRoot(entries: Record<string, string | null>, unreadable: readonly string[] = []): RootLevelLinkFs {
+  return {
+    readdirSync: () =>
+      Object.entries(entries).map(([name, target]) => ({ name, isSymbolicLink: () => target !== null })),
+    readlinkSync: (linkPath) => {
+      const name = path.posix.basename(linkPath);
+      if (unreadable.includes(name)) throw new Error("EACCES");
+      const target = entries[name];
+      if (target === undefined || target === null) throw new Error("EINVAL");
+      return target;
+    },
+  };
+}
+
+describe("readRootLevelLinks / normalizeRootLevelAlias", () => {
+  it("maps each root-level link to its lexically resolved target, following root-level chains", () => {
+    const links = readRootLevelLinks({
+      root: "/",
+      pathApi: path.posix,
+      fs: fakeRoot(
+        {
+          var: "private/var",
+          tmp: "/private/tmp",
+          etc: "private/etc",
+          private: null,
+          Users: null,
+          a: "/b/x",
+          b: "/c",
+          loop1: "/loop2",
+          loop2: "/loop1/y",
+          secret: "ignored",
+        },
+        ["secret"],
+      ),
+    });
+    expect(Object.fromEntries(links)).toEqual({
+      "/var": "/private/var",
+      "/tmp": "/private/tmp",
+      "/etc": "/private/etc",
+      "/a": "/c/x",
+      "/b": "/c",
+    });
+  });
+
+  it("rewrites only a whole leading root-level component", () => {
+    const links = new Map([
+      ["/var", "/private/var"],
+      ["/tmp", "/private/tmp"],
+    ]);
+    expect(normalizeRootLevelAlias("/tmp/proj/src", links, path.posix)).toBe("/private/tmp/proj/src");
+    expect(normalizeRootLevelAlias("/var", links, path.posix)).toBe("/private/var");
+    expect(normalizeRootLevelAlias("/tmpx/proj", links, path.posix)).toBe("/tmpx/proj");
+    expect(normalizeRootLevelAlias("/private/tmp/proj", links, path.posix)).toBe("/private/tmp/proj");
+    expect(normalizeRootLevelAlias("/", links, path.posix)).toBe("/");
+    expect(normalizeRootLevelAlias("/srv/work/tmp/x", links, path.posix)).toBe("/srv/work/tmp/x");
+  });
+});
+
+/**
+ * A miniature macOS layout below a temporary directory: `<holder>/var` is a link to
+ * `<holder>/private/var`, and the policy is told so through an injected root-link
+ * map, so every host exercises what macOS CI sees with the real `/var`.
+ */
+function simulatedMacLayout(): { holder: string; rootLinks: Map<string, string>; varFolders: string; privateFolders: string } {
+  const holder = realpathSync(makeDir("causoryn-rootalias-"));
+  mkdirSync(path.join(holder, "private", "var", "folders"), { recursive: true });
+  linkDirectory(path.join(holder, "private", "var"), path.join(holder, "var"));
+  return {
+    holder,
+    rootLinks: new Map([[path.join(holder, "var"), path.join(holder, "private", "var")]]),
+    varFolders: path.join(holder, "var", "folders"),
+    privateFolders: path.join(holder, "private", "var", "folders"),
+  };
+}
+
+describe("WorkspaceAccessPolicy / OutputAccessPolicy — roots spelled through a root-level link (simulated macOS)", () => {
+  it("accepts the other spelling of an allowRoot and of a root reached through an alias of it", () => {
+    const { rootLinks, varFolders, privateFolders } = simulatedMacLayout();
+    const real = path.join(varFolders, "base", "real");
+    mkdirSync(path.join(real, "packages", "app"), { recursive: true });
+    const alias = path.join(varFolders, "base", "alias");
+    linkDirectory(real, alias);
+    const policy = WorkspaceAccessPolicy.create({ allowRoots: [alias] }, { rootLinks });
+
+    for (const accepted of [alias, real, path.join(real, "packages", "app"), path.join(privateFolders, "base", "real")]) {
+      expect(policy.authorizeRoot(accepted).allowed, accepted).toBe(true);
+    }
+
+    // `/private/tmp/proj` declared, `/tmp/proj` passed by the client.
+    mkdirSync(path.join(privateFolders, "proj", "src"), { recursive: true });
+    const declaredCanonical = WorkspaceAccessPolicy.create(
+      { allowRoots: [path.join(privateFolders, "proj")] },
+      { rootLinks },
+    );
+    expect(declaredCanonical.authorizeRoot(path.join(varFolders, "proj")).allowed).toBe(true);
+    expect(declaredCanonical.checkPath(path.join(varFolders, "proj"), "src").allowed).toBe(true);
+  });
+
+  it("still decides a root outside the normalized allowRoots without filesystem access", () => {
+    const { rootLinks, varFolders } = simulatedMacLayout();
+    const root = path.join(varFolders, "proj");
+    mkdirSync(root);
+    mkdirSync(path.join(varFolders, "elsewhere"));
+    const policy = WorkspaceAccessPolicy.create({ allowRoots: [root] }, { rootLinks });
+    for (const probe of [path.join(varFolders, "elsewhere"), path.join(varFolders, "missing")]) {
+      const { result, calls } = recordFsCalls(() => policy.authorizeRoot(probe));
+      expect(denyOf(result)).toEqual({ code: "workspace/root-not-authorized", reason: ROOT_NOT_DECLARED });
+      expect(calls, probe).toEqual([]);
+    }
+  });
+
+  it("OutputAccessPolicy accepts the other spelling of a declared output dir and gates the rest lexically", () => {
+    const { rootLinks, varFolders, privateFolders } = simulatedMacLayout();
+    mkdirSync(path.join(privateFolders, "exports", "sub"), { recursive: true });
+    mkdirSync(path.join(privateFolders, "elsewhere"));
+    const policy = OutputAccessPolicy.create([path.join(privateFolders, "exports")], { rootLinks });
+
+    expect(policy.authorizeDirectory(path.join(varFolders, "exports")).allowed).toBe(true);
+    expect(policy.authorizeDirectory(path.join(varFolders, "exports", "sub")).allowed).toBe(true);
+    const notDeclared = outputDenyOf(policy.authorizeDirectory(path.join(privateFolders, "missing")));
+    for (const probe of [path.join(varFolders, "elsewhere"), path.join(varFolders, "missing")]) {
+      const { result, calls } = recordFsCalls(() => policy.authorizeDirectory(probe));
+      expect(outputDenyOf(result)).toEqual(notDeclared);
+      expect(calls, probe).toEqual([]);
+    }
+  });
+});
+
+/** True when the first component of the temp directory is itself a root-level link (macOS `/var`). */
+const TMP_BELOW_ROOT_LEVEL_LINK: boolean = (() => {
+  if (IS_WIN) return false;
+  const first = path.resolve(tmpdir()).split(path.sep).filter((part) => part.length > 0)[0];
+  if (first === undefined) return false;
+  try {
+    return lstatSync(path.join(path.sep, first)).isSymbolicLink();
+  } catch {
+    return false;
+  }
+})();
+
+describe("roots spelled through the real filesystem root's links (macOS)", () => {
+  it.skipIf(!TMP_BELOW_ROOT_LEVEL_LINK)("accepts the tmpdir spelling of an allowRoot declared by its real path", () => {
+    const root = makeDir("causoryn-rootalias-real-");
+    const canonical = realpathSync(root);
+    expect(canonical).not.toBe(root);
+    const policy = WorkspaceAccessPolicy.create({ allowRoots: [canonical] });
+    expect(policy.authorizeRoot(root).allowed).toBe(true);
+    const outputs = OutputAccessPolicy.create([canonical]);
+    expect(outputs.authorizeDirectory(root).allowed).toBe(true);
+    const { result, calls } = recordFsCalls(() => policy.authorizeRoot(path.join(path.dirname(root), "causoryn-none")));
+    expect(denyOf(result).reason).toBe(ROOT_NOT_DECLARED);
+    expect(calls).toEqual([]);
   });
 });

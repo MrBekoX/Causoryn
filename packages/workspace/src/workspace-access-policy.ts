@@ -14,7 +14,10 @@ import {
   inspectLinkTargets,
   isUncOrDevicePath,
   LINK_TARGET_INSPECTION_ENABLED,
+  normalizeRootLevelAlias,
   pathCrossesLink,
+  readRootLevelLinks,
+  type PolicyEnvironment,
 } from "./path-safety.js";
 import {
   effectiveIgnorePatterns,
@@ -150,6 +153,17 @@ function isInside(root: string, target: string): boolean {
   return t.startsWith(boundary);
 }
 
+/** `paths` without repeats (compared like containment: case-folded on Windows), first spelling kept. */
+function uniquePaths(paths: readonly string[]): string[] {
+  const seen = new Set<string>();
+  return paths.filter((candidate) => {
+    const key = comparablePath(candidate);
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
 function toPosixRelative(nativeRelative: string): string {
   const posix = nativeRelative.split(path.sep).join("/");
   return posix.length === 0 ? "." : posix;
@@ -187,10 +201,18 @@ export class WorkspaceAccessPolicy {
    * configuration); paths below them are inspected again on every call.
    */
   private readonly declaredRoots: readonly string[];
+  /** The filesystem root's own links (see {@link readRootLevelLinks}); empty on Windows. */
+  private readonly rootLinks: ReadonlyMap<string, string>;
+  /**
+   * The authorized area for the lexical gate and the confined link walk: every
+   * allowRoot in its declared and canonical forms, and both again with a leading
+   * root-level link alias normalized (macOS `/var` -> `/private/var`).
+   */
+  private readonly areaRoots: readonly string[];
   /** canonicalRoot → native canonical (long-name, on-disk case) root. */
   private readonly nativeRoots = new Map<string, string>();
 
-  private constructor(readonly config: WorkspacePolicyConfig) {
+  private constructor(readonly config: WorkspacePolicyConfig, environment: PolicyEnvironment) {
     this.canonicalRoots = config.allowRoots.map((root) => {
       if (isUncOrDevicePath(root)) {
         throw new WorkspacePolicyError(
@@ -216,12 +238,24 @@ export class WorkspaceAccessPolicy {
       }
     });
     this.declaredRoots = config.allowRoots.map((root) => path.resolve(root));
+    // Read once, after the allowRoots were validated: public system configuration,
+    // never anything derived from a caller's path.
+    this.rootLinks = environment.rootLinks ?? (IS_WIN ? new Map<string, string>() : readRootLevelLinks());
+    this.areaRoots = uniquePaths([
+      ...this.declaredRoots,
+      ...this.canonicalRoots,
+      ...[...this.declaredRoots, ...this.canonicalRoots].map((root) => normalizeRootLevelAlias(root, this.rootLinks)),
+    ]);
     this.ignorePatterns = effectiveIgnorePatterns(config);
     this.ignoreRules = compileIgnoreRuleSet(this.ignorePatterns);
   }
 
-  /** Şemayı doğrulayıp politikayı kurar; geçersiz config → POLICY_INVALID hatası. */
-  static create(input: unknown): WorkspaceAccessPolicy {
+  /**
+   * Şemayı doğrulayıp politikayı kurar; geçersiz config → POLICY_INVALID hatası.
+   * `environment.rootLinks` replaces the filesystem root's links read at creation
+   * (tests simulate another platform's layout with it).
+   */
+  static create(input: unknown, environment: PolicyEnvironment = {}): WorkspaceAccessPolicy {
     const parsed = parseWorkspacePolicyConfig(input);
     if (!parsed.ok) {
       throw new WorkspacePolicyError(
@@ -229,7 +263,7 @@ export class WorkspaceAccessPolicy {
         `Invalid policy configuration (POLICY_INVALID): ${parsed.issues.join("; ")}`,
       );
     }
-    return new WorkspaceAccessPolicy(parsed.config);
+    return new WorkspaceAccessPolicy(parsed.config, environment);
   }
 
   /**
@@ -264,11 +298,11 @@ export class WorkspaceAccessPolicy {
     }
     // Lexical gate: nothing below touches the filesystem for a root spelled outside
     // the declared area.
-    const lexicalRoot = path.resolve(rootPath);
-    const trustedStart = this.declaredAreaOf(lexicalRoot);
-    if (trustedStart === undefined) {
+    const gate = this.lexicalAreaOf(path.resolve(rootPath));
+    if (gate === undefined) {
       return deny("workspace/root-not-authorized", ROOT_NOT_DECLARED_REASON);
     }
+    const { lexical: lexicalRoot, area: trustedStart } = gate;
     const linkDeny = this.inspectRootLinks(lexicalRoot, trustedStart);
     if (linkDeny !== undefined) {
       return linkDeny;
@@ -307,16 +341,25 @@ export class WorkspaceAccessPolicy {
   }
 
   /**
-   * The declared allowRoot (declared spelling first, then its canonical form) that
-   * lexically contains `lexicalRoot`, or undefined. Purely lexical. Both forms are
-   * trusted start points for link inspection: the declared form was inspected in
-   * the constructor, and the canonical form is that root's resolved real path.
+   * The allowRoot form (declared spelling first, then canonical, then both with a
+   * root-level link alias normalized) that lexically contains `resolvedRoot`, tried
+   * as spelled and then with its own leading root-level alias normalized (macOS
+   * `/tmp/proj` against a declared `/private/tmp/proj`); undefined when none does.
+   * Purely lexical: the root-link map was read at creation. `lexical` is the
+   * spelling that matched, used for the filesystem steps that follow (it names the
+   * same object, through the system's own root link). Every form is a trusted start
+   * point for link inspection: the declared form was inspected in the constructor,
+   * and the others are its resolved real-path forms.
    */
-  private declaredAreaOf(lexicalRoot: string): string | undefined {
-    return (
-      this.declaredRoots.find((declaredRoot) => isInside(declaredRoot, lexicalRoot)) ??
-      this.canonicalRoots.find((canonicalRoot) => isInside(canonicalRoot, lexicalRoot))
-    );
+  private lexicalAreaOf(resolvedRoot: string): { readonly lexical: string; readonly area: string } | undefined {
+    const normalized = normalizeRootLevelAlias(resolvedRoot, this.rootLinks);
+    for (const lexical of normalized === resolvedRoot ? [resolvedRoot] : [resolvedRoot, normalized]) {
+      const area = this.areaRoots.find((areaRoot) => isInside(areaRoot, lexical));
+      if (area !== undefined) {
+        return { lexical, area };
+      }
+    }
+    return undefined;
   }
 
   /** Yol erişim kararı: yetki → null byte → traversal → ignore → symlink escape. */
@@ -559,7 +602,7 @@ export class WorkspaceAccessPolicy {
     }
     const inspection = inspectLinkTargets(lexicalRoot, {
       startDir: trustedStart,
-      confineTo: [...this.declaredRoots, ...this.canonicalRoots],
+      confineTo: this.areaRoots,
     });
     if (!inspection.ok && inspection.reason === "link-leaves-area") {
       return deny("workspace/root-not-authorized", ROOT_NOT_DECLARED_REASON);
