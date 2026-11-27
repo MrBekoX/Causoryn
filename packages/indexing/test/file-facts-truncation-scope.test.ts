@@ -167,7 +167,9 @@ describe("file-facts cache with the real Python worker", () => {
         repository,
         clock: () => NOW,
         limits: { maxFiles: 1_000 },
-        python: { pythonCommand: "python" },
+        // The response budget is reached only after a long analysis; slow CI
+        // runners (macOS) need more than the default 30 s request timeout.
+        python: { pythonCommand: "python", requestTimeoutMs: 150_000 },
       });
       const result = await service.runIndexAsync(root);
       expect(result.published).toBe(true);

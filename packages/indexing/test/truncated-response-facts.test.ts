@@ -56,7 +56,9 @@ describe("IndexService — a truncated worker response is not cached per file", 
         repository,
         clock: () => "2026-11-26T00:00:00.000Z",
         limits: { maxFiles: 1_000 },
-        python: { pythonCommand: "python" },
+        // The response budget is reached only after a long analysis; slow CI
+        // runners (macOS) need more than the default 30 s request timeout.
+        python: { pythonCommand: "python", requestTimeoutMs: 150_000 },
       });
 
       const result = await service.runIndexAsync(root);

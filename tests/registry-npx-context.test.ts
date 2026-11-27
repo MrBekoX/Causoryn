@@ -73,9 +73,11 @@ function registryRuntimeArguments(): string[] {
 }
 
 const roots: string[] = [];
+// Removing the npm caches of every sandbox takes longer than the default
+// 10 s hook timeout on Windows CI runners.
 afterAll(() => {
-  for (const root of roots) rmSync(root, { recursive: true, force: true });
-});
+  for (const root of roots) rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+}, 120_000);
 
 interface Sandbox {
   readonly home: string;
